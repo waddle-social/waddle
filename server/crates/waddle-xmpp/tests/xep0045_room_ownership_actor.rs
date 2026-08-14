@@ -611,16 +611,20 @@ async fn second_restore_cannot_transplant_an_actor_to_a_successor_fence() {
         "the successor store must not receive a load from the old actor incarnation"
     );
     assert_eq!(original_store.take_observed_load_count(), 0);
-    assert_eq!(
-        actor
-            .ask(GetRoomSnapshot {
-                sender_jid: snapshot_sender,
-            })
-            .await
-            .expect("snapshot after transplant attempt")
-            .claim_fence,
-        Some(original_fence.clone()),
-        "a rejected successor restore must not replace the fence carried by old snapshots",
+    // The rejected transplant seals the actor, and sealed actors refuse
+    // dispatch snapshots outright — stronger than the earlier contract of
+    // serving the original fence: the successor's fence can never be
+    // observed through this actor at all.
+    assert!(
+        matches!(
+            actor
+                .ask(GetRoomSnapshot {
+                    sender_jid: snapshot_sender,
+                })
+                .await,
+            Err(SendError::HandlerError(RoomActorError::RoomSealed))
+        ),
+        "a sealed actor must fail dispatch snapshots closed after a rejected successor restore",
     );
 
     let mut attempted = original_config.clone();

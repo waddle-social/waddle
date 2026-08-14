@@ -193,6 +193,8 @@ pub enum AdminApplyError {
     OwnershipUnavailable,
     #[error("durable room mutation commit failed before the in-memory mutation")]
     PersistFailed,
+    #[error("durable room mutation commit outcome could not be reconciled")]
+    CommitOutcomeUnknown,
 }
 
 impl From<RoomMutationError> for AdminApplyError {
@@ -211,7 +213,7 @@ impl From<DurablePersistError> for AdminApplyError {
             DurablePersistError::NotOwner => AdminApplyError::NotOwner,
             DurablePersistError::OwnershipUnavailable => AdminApplyError::OwnershipUnavailable,
             DurablePersistError::PersistFailed => AdminApplyError::PersistFailed,
-            DurablePersistError::CommitOutcomeUnknown => AdminApplyError::NotOwner,
+            DurablePersistError::CommitOutcomeUnknown => AdminApplyError::CommitOutcomeUnknown,
         }
     }
 }

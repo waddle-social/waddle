@@ -46,6 +46,12 @@ struct PendingUnpublishedDestroyForTest {
     room_jid: BareJid,
 }
 
+struct RememberPendingUnpublishedDestroyForTest {
+    room_jid: BareJid,
+    claim_fence: crate::muc::RoomClaimFenceContext,
+    phase: UnpublishedDestroyPhase,
+}
+
 struct PendingRoomOwnershipResponsibilityCountForTest;
 
 struct RememberDestroyAttemptForTest {
@@ -150,6 +156,20 @@ impl kameo::message::Message<PendingUnpublishedDestroyForTest> for RoomRegistryA
         self.pending_unpublished_destroys
             .iter()
             .find_map(|((room_jid, fence), _)| (room_jid == &msg.room_jid).then(|| fence.clone()))
+    }
+}
+
+impl kameo::message::Message<RememberPendingUnpublishedDestroyForTest> for RoomRegistryActor {
+    type Reply = ();
+
+    async fn handle(
+        &mut self,
+        msg: RememberPendingUnpublishedDestroyForTest,
+        _ctx: &mut Context<Self, Self::Reply>,
+    ) -> Self::Reply {
+        self.poisoned_rooms.insert(msg.room_jid.clone());
+        self.pending_unpublished_destroys
+            .insert((msg.room_jid, msg.claim_fence), msg.phase);
     }
 }
 
@@ -2775,6 +2795,7 @@ mod ownership_claims_tests {
         fence_fail_on_call: AtomicUsize,
         fence_lose_claim_on_call: AtomicUsize,
         release_failures: AtomicUsize,
+        fail_release_exact_for: Mutex<Option<(Entity, usize)>>,
         exact_release_calls: AtomicUsize,
         release_delay_ms: AtomicU64,
         fence_delay_ms: AtomicU64,
@@ -2795,6 +2816,7 @@ mod ownership_claims_tests {
                 fence_fail_on_call: AtomicUsize::new(usize::MAX),
                 fence_lose_claim_on_call: AtomicUsize::new(usize::MAX),
                 release_failures: AtomicUsize::new(0),
+                fail_release_exact_for: Mutex::new(None),
                 exact_release_calls: AtomicUsize::new(0),
                 release_delay_ms: AtomicU64::new(0),
                 fence_delay_ms: AtomicU64::new(0),
@@ -2826,6 +2848,10 @@ mod ownership_claims_tests {
 
         fn fail_next_release(&self) {
             self.release_failures.store(1, Ordering::SeqCst);
+        }
+
+        fn fail_release_exact_for_times(&self, entity: Entity, times: usize) {
+            *self.fail_release_exact_for.lock().expect("lock") = Some((entity, times));
         }
 
         fn set_release_delay(&self, delay: std::time::Duration) {
@@ -3049,7 +3075,7 @@ mod ownership_claims_tests {
 
         async fn release_exact(
             &self,
-            _entity: &Entity,
+            entity: &Entity,
             me: &NodeIdentity,
             mine: ClaimEpoch,
         ) -> Result<crate::ownership::ExactReleaseOutcome, ClaimError> {
@@ -3057,6 +3083,21 @@ mod ownership_claims_tests {
             let delay_ms = self.release_delay_ms.load(Ordering::SeqCst);
             if delay_ms > 0 {
                 tokio::time::sleep(std::time::Duration::from_millis(delay_ms)).await;
+            }
+            {
+                let mut fail_release_exact_for = self.fail_release_exact_for.lock().expect("lock");
+                if let Some((failed_entity, remaining)) = fail_release_exact_for.as_mut() {
+                    if failed_entity == entity {
+                        if *remaining <= 1 {
+                            fail_release_exact_for.take();
+                        } else {
+                            *remaining -= 1;
+                        }
+                        return Err(ClaimError::Backend(
+                            "test exact release failure".to_string(),
+                        ));
+                    }
+                }
             }
             if self
                 .release_failures
@@ -3391,6 +3432,7 @@ mod ownership_claims_tests {
         destroy_not_owner: bool,
         destroy_state_missing: bool,
         dormancy_state_missing: bool,
+        skip_destroy_release_exact_claim: bool,
         local_identity: Option<SharedNodeIdentity>,
         authoritative_claim_store: Mutex<Option<Arc<dyn ClaimStore>>>,
         exact_claim_fences: Arc<Mutex<HashMap<BareJid, RoomClaimFenceContext>>>,
@@ -3499,6 +3541,7 @@ mod ownership_claims_tests {
             let destroy_not_owner = self.destroy_not_owner;
             let destroy_state_missing = self.destroy_state_missing;
             let dormancy_state_missing = self.dormancy_state_missing;
+            let skip_destroy_release_exact_claim = self.skip_destroy_release_exact_claim;
             let deleted_rooms = &self.deleted_rooms;
             let created_state = match &intent {
                 crate::muc::RoomDurableMutation::Create {
@@ -3627,7 +3670,7 @@ mod ownership_claims_tests {
                         .expect("preparing rooms")
                         .remove(room_jid);
                 }
-                if releases_claim {
+                if releases_claim && !skip_destroy_release_exact_claim {
                     let claim_store = store
                         .authoritative_claim_store
                         .lock()
@@ -4605,7 +4648,10 @@ mod ownership_claims_tests {
     async fn restart_recovers_a_stranded_preparing_room_before_recreation() {
         let registry = spawn_registry().await;
         let room_jid = test_room_jid("restart-stranded-preparing");
-        let store = Arc::new(RecordingDurableStore::default());
+        let store = Arc::new(RecordingDurableStore {
+            skip_destroy_release_exact_claim: true,
+            ..RecordingDurableStore::default()
+        });
         let claim_store = wire_recording_store(&registry, Arc::clone(&store)).await;
         let owner = this_identity();
         let entity = Entity::new(EntityType::RoomActor, room_jid.to_string());
@@ -4790,7 +4836,10 @@ mod ownership_claims_tests {
             .await
             .expect("seed creator claim");
         let old_fence = RoomClaimFenceContext::new(entity.clone(), old_owner.clone(), old_epoch);
-        let store = Arc::new(RecordingDurableStore::default());
+        let store = Arc::new(RecordingDurableStore {
+            skip_destroy_release_exact_claim: true,
+            ..RecordingDurableStore::default()
+        });
         wire_recording_store_with_claims(
             &registry,
             Arc::clone(&claim_store) as Arc<dyn ClaimStore>,
@@ -5303,6 +5352,60 @@ mod ownership_claims_tests {
         assert!(!registry.can_admit_new_room_ownership_responsibility());
     }
 
+    #[test]
+    fn unpublished_destroy_consumes_shared_ownership_capacity() {
+        let mut registry = RoomRegistryActor::new(
+            "muc.example.com".to_string(),
+            OccupantIdSecret::for_testing(b"test-secret".to_vec()),
+        );
+        for index in 0..MAX_PENDING_ROOM_RELEASES {
+            let room_jid = test_room_jid(&format!("unpublished-capacity-release-{index}"));
+            let claim_fence = room_claim_fence(&room_jid, ClaimEpoch(index as i64 + 1));
+            registry.pending_room_releases.insert(
+                (room_jid, claim_fence),
+                PendingRoomReleaseState {
+                    retry_order: index as u64,
+                    first_pending_at: std::time::Instant::now(),
+                },
+            );
+        }
+        for index in 0..(MAX_PENDING_RECLAIMED_ROOMS - 1) {
+            registry
+                .pending_reclaimed_reservations
+                .insert(test_room_jid(&format!(
+                    "unpublished-capacity-reservation-{index}"
+                )));
+        }
+        let existing_room_jid = test_room_jid("unpublished-capacity-existing");
+        let existing_claim_fence = room_claim_fence(&existing_room_jid, ClaimEpoch(999));
+        registry.pending_unpublished_destroys.insert(
+            (existing_room_jid.clone(), existing_claim_fence.clone()),
+            UnpublishedDestroyPhase::Destroy,
+        );
+
+        assert_eq!(
+            registry.pending_room_ownership_responsibility_count_for_test(),
+            MAX_PENDING_ROOM_OWNERSHIP_RESPONSIBILITIES,
+            "pending unpublished cleanup must consume a shared ownership-responsibility slot"
+        );
+        assert!(!registry.can_admit_new_room_ownership_responsibility());
+        assert!(registry.can_admit_room_ownership_responsibility(
+            PendingRoomOwnershipResponsibility::Exact {
+                room_jid: &existing_room_jid,
+                claim_fence: &existing_claim_fence,
+            }
+        ));
+
+        let novel_room_jid = test_room_jid("unpublished-capacity-novel");
+        let novel_claim_fence = room_claim_fence(&novel_room_jid, ClaimEpoch(1000));
+        assert!(!registry.can_admit_room_ownership_responsibility(
+            PendingRoomOwnershipResponsibility::Exact {
+                room_jid: &novel_room_jid,
+                claim_fence: &novel_claim_fence,
+            }
+        ));
+    }
+
     #[tokio::test]
     async fn preparation_and_release_responsibilities_share_one_bound() {
         let registry = spawn_registry().await;
@@ -5682,6 +5785,165 @@ mod ownership_claims_tests {
             .await
             .expect("claim lookup")
             .is_none());
+    }
+
+    #[tokio::test]
+    async fn terminal_drain_reconciles_pending_unpublished_cleanup_before_returning() {
+        let registry = spawn_registry().await;
+        let room_jid = test_room_jid("terminal-drain-pending-unpublished");
+        let entity = Entity::new(EntityType::RoomActor, room_jid.to_string());
+        let store = Arc::new(RecordingDurableStore {
+            skip_destroy_release_exact_claim: true,
+            ..RecordingDurableStore::default()
+        });
+        let claim_store = wire_recording_store(&registry, Arc::clone(&store)).await;
+        let owner = this_identity();
+        let epoch = claim_store
+            .acquire(&entity, &owner)
+            .await
+            .expect("seed exact claim");
+        let claim_fence = RoomClaimFenceContext::new(entity.clone(), owner, epoch);
+        store.establish_claim_fence(&room_jid, claim_fence.clone());
+        registry
+            .ask(RememberPendingUnpublishedDestroyForTest {
+                room_jid: room_jid.clone(),
+                claim_fence: claim_fence.clone(),
+                phase: UnpublishedDestroyPhase::Destroy,
+            })
+            .await
+            .expect("remember pending unpublished destroy");
+
+        let outcome = registry
+            .ask(DrainRoomOwnershipForShutdown {
+                pending_handoffs: Vec::new(),
+            })
+            .await
+            .expect("terminal drain");
+
+        assert_eq!(
+            outcome,
+            RoomOwnershipDrainOutcome {
+                released: 1,
+                preserved_live: 0,
+                retained: 0,
+            }
+        );
+        assert!(registry
+            .ask(PendingUnpublishedDestroyForTest {
+                room_jid: room_jid.clone(),
+            })
+            .await
+            .expect("pending unpublished after drain")
+            .is_none());
+        assert!(claim_store
+            .current_claim(&entity)
+            .await
+            .expect("claim lookup after drain")
+            .is_none());
+        assert_eq!(
+            store
+                .deleted_rooms
+                .lock()
+                .expect("deleted rooms")
+                .as_slice(),
+            &[room_jid.to_string()],
+            "terminal shutdown must finish the unpublished destroy instead of leaving it behind"
+        );
+    }
+
+    #[tokio::test]
+    async fn terminal_drain_retains_unpublished_destroy_as_exact_release_when_release_fails() {
+        let registry = spawn_registry().await;
+        let owner = this_identity();
+        let epoch = ClaimEpoch(1000);
+        let claim_store = Arc::new(DeadOwnerClaimStore::seeded(owner.clone(), epoch));
+        let store = Arc::new(RecordingDurableStore {
+            skip_destroy_release_exact_claim: true,
+            ..RecordingDurableStore::default()
+        });
+        wire_recording_store_with_claims(
+            &registry,
+            Arc::clone(&claim_store) as Arc<dyn ClaimStore>,
+            SharedNodeIdentity::new(owner.clone()),
+            Arc::clone(&store),
+        )
+        .await;
+        for index in 0..MAX_PENDING_ROOM_RELEASES {
+            let backlog_jid = test_room_jid(&format!("terminal-unpublished-retained-{index}"));
+            assert!(registry
+                .ask(RememberOrdinaryReleaseForTest {
+                    room_jid: backlog_jid.clone(),
+                    claim_fence: room_claim_fence(&backlog_jid, ClaimEpoch(index as i64 + 1)),
+                })
+                .await
+                .expect("fill release backlog"));
+        }
+
+        let room_jid = test_room_jid("terminal-unpublished-release-failure");
+        let entity = Entity::new(EntityType::RoomActor, room_jid.to_string());
+        claim_store.fail_release_exact_for_times(entity.clone(), 2);
+        let claim_fence = RoomClaimFenceContext::new(entity.clone(), owner, epoch);
+        store.establish_claim_fence(&room_jid, claim_fence.clone());
+        registry
+            .ask(RememberPendingUnpublishedDestroyForTest {
+                room_jid: room_jid.clone(),
+                claim_fence: claim_fence.clone(),
+                phase: UnpublishedDestroyPhase::Destroy,
+            })
+            .await
+            .expect("remember pending unpublished destroy");
+
+        let outcome = registry
+            .ask(DrainRoomOwnershipForShutdown {
+                pending_handoffs: Vec::new(),
+            })
+            .await
+            .expect("terminal drain");
+
+        assert_eq!(
+            outcome,
+            RoomOwnershipDrainOutcome {
+                released: MAX_PENDING_ROOM_RELEASES,
+                preserved_live: 0,
+                retained: 1,
+            }
+        );
+        assert!(registry
+            .ask(PendingUnpublishedDestroyForTest {
+                room_jid: room_jid.clone(),
+            })
+            .await
+            .expect("pending unpublished after failed release")
+            .is_none());
+        assert!(registry
+            .ask(IsPendingRoomReleaseOnly {
+                room_jid: room_jid.clone(),
+            })
+            .await
+            .expect("exact release retained after failed shutdown cleanup"));
+        assert_eq!(
+            registry
+                .ask(GetPendingRoomReleaseBacklog)
+                .await
+                .expect("retained release backlog")
+                .depth,
+            1,
+            "after terminal drain releases the saturated backlog, the unpublished room's failed exact release must remain retained as the lone pending exact responsibility"
+        );
+        assert!(claim_store
+            .current_claim(&entity)
+            .await
+            .expect("claim after failed shutdown release")
+            .is_some());
+        assert_eq!(
+            store
+                .deleted_rooms
+                .lock()
+                .expect("deleted rooms")
+                .as_slice(),
+            &[room_jid.to_string()],
+            "the durable destroy committed; only the exact claim release should remain pending"
+        );
     }
 
     #[tokio::test]

@@ -47,18 +47,18 @@ fn parse_destroy_request(iq: &xmpp_parsers::iq::Iq) -> Option<DestroyRequest> {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 struct PersistedDestroyCompletion {
     attempt: uuid::Uuid,
-    room_jid: String,
+    room_jid: BareJid,
     reason: Option<String>,
-    alternate_venue: Option<String>,
+    alternate_venue: Option<BareJid>,
     password: Option<String>,
-    members: Vec<String>,
+    members: Vec<BareJid>,
     recipients: Vec<PersistedDestroyRecipient>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 struct PersistedDestroyRecipient {
     nick: String,
-    sessions: Vec<String>,
+    sessions: Vec<FullJid>,
 }
 
 #[derive(Clone)]
@@ -96,20 +96,16 @@ impl TryFrom<&waddle_xmpp::muc::room_registry_actor::DestroyCompletion>
     ) -> Result<Self, Self::Error> {
         Ok(Self {
             attempt: completion.attempt.as_uuid(),
-            room_jid: completion.room_jid.to_string(),
+            room_jid: completion.room_jid.clone(),
             reason: completion.request.reason.clone(),
-            alternate_venue: completion
-                .request
-                .alternate_venue
-                .as_ref()
-                .map(ToString::to_string),
+            alternate_venue: completion.request.alternate_venue.clone(),
             password: completion.request.password.clone(),
             members: completion
                 .room
                 .get_all_affiliations()
                 .into_iter()
                 .filter(|entry| entry.affiliation >= waddle_xmpp::Affiliation::Member)
-                .map(|entry| entry.jid.to_string())
+                .map(|entry| entry.jid)
                 .collect(),
             recipients: completion
                 .room
@@ -121,7 +117,6 @@ impl TryFrom<&waddle_xmpp::muc::room_registry_actor::DestroyCompletion>
                         .room
                         .get_occupant_sessions(&occupant.nick)
                         .into_iter()
-                        .map(|session| session.to_string())
                         .collect(),
                 })
                 .collect(),
@@ -133,42 +128,21 @@ impl TryFrom<PersistedDestroyCompletion> for DestroyCompletionSnapshot {
     type Error = ();
 
     fn try_from(value: PersistedDestroyCompletion) -> Result<Self, Self::Error> {
-        let room_jid = value.room_jid.parse().map_err(|_| ())?;
-        let alternate_venue = value
-            .alternate_venue
-            .map(|jid| jid.parse())
-            .transpose()
-            .map_err(|_| ())?;
-        let members = value
-            .members
-            .into_iter()
-            .map(|jid| jid.parse())
-            .collect::<Result<Vec<_>, _>>()
-            .map_err(|_| ())?;
-        let recipients = value
-            .recipients
-            .into_iter()
-            .map(|recipient| {
-                recipient
-                    .sessions
-                    .into_iter()
-                    .map(|jid| jid.parse())
-                    .collect::<Result<Vec<_>, _>>()
-                    .map(|sessions| (recipient.nick, sessions))
-            })
-            .collect::<Result<Vec<_>, _>>()
-            .map_err(|_| ())?;
         Ok(Self {
             attempt: waddle_xmpp::muc::DestroyAttemptId::from_uuid(value.attempt),
-            room_jid,
+            room_jid: value.room_jid,
             lifecycle: None,
             request: DestroyRequest {
                 reason: value.reason,
-                alternate_venue,
+                alternate_venue: value.alternate_venue,
                 password: value.password,
             },
-            members,
-            recipients,
+            members: value.members,
+            recipients: value
+                .recipients
+                .into_iter()
+                .map(|recipient| (recipient.nick, recipient.sessions))
+                .collect(),
         })
     }
 }
@@ -1718,25 +1692,64 @@ mod destroy_completion_tests {
     fn persisted_snapshot_payload(snapshot: &DestroyCompletionSnapshot) -> String {
         serde_json::to_string(&PersistedDestroyCompletion {
             attempt: snapshot.attempt.as_uuid(),
-            room_jid: snapshot.room_jid.to_string(),
+            room_jid: snapshot.room_jid.clone(),
             reason: snapshot.request.reason.clone(),
-            alternate_venue: snapshot
-                .request
-                .alternate_venue
-                .as_ref()
-                .map(ToString::to_string),
+            alternate_venue: snapshot.request.alternate_venue.clone(),
             password: snapshot.request.password.clone(),
-            members: snapshot.members.iter().map(ToString::to_string).collect(),
+            members: snapshot.members.clone(),
             recipients: snapshot
                 .recipients
                 .iter()
                 .map(|(nick, sessions)| PersistedDestroyRecipient {
                     nick: nick.clone(),
-                    sessions: sessions.iter().map(ToString::to_string).collect(),
+                    sessions: sessions.clone(),
                 })
                 .collect(),
         })
         .expect("serialize persisted destroy snapshot")
+    }
+
+    #[test]
+    fn persisted_destroy_completion_round_trips_typed_jids() {
+        let attempt = waddle_xmpp::muc::DestroyAttemptId::generate();
+        let snapshot = DestroyCompletionSnapshot {
+            attempt,
+            room_jid: "destroy@muc.example.com".parse().expect("valid bare jid"),
+            lifecycle: None,
+            request: DestroyRequest {
+                reason: Some("cleanup".to_string()),
+                alternate_venue: Some("next@muc.example.com".parse().expect("valid bare jid")),
+                password: Some("secret".to_string()),
+            },
+            members: vec![
+                "member-a@example.com".parse().expect("valid member jid"),
+                "member-b@example.com".parse().expect("valid member jid"),
+            ],
+            recipients: vec![(
+                "nick".to_string(),
+                vec![
+                    "member-a@example.com/phone"
+                        .parse()
+                        .expect("valid full jid"),
+                    "member-b@example.com/laptop"
+                        .parse()
+                        .expect("valid full jid"),
+                ],
+            )],
+        };
+        let persisted: PersistedDestroyCompletion =
+            serde_json::from_str(&persisted_snapshot_payload(&snapshot))
+                .expect("deserialize persisted snapshot");
+        let recovered =
+            DestroyCompletionSnapshot::try_from(persisted).expect("recover typed snapshot");
+
+        assert_eq!(recovered.room_jid, snapshot.room_jid);
+        assert_eq!(
+            recovered.request.alternate_venue,
+            snapshot.request.alternate_venue
+        );
+        assert_eq!(recovered.members, snapshot.members);
+        assert_eq!(recovered.recipients, snapshot.recipients);
     }
 
     async fn insert_persisted_completion(

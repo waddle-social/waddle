@@ -574,6 +574,7 @@ impl RoomRegistryActor {
                 self.pending_room_preparations
                     .get(room_jid)
                     .is_some_and(|pending| pending.claim_fence == *claim_fence)
+                    || self.pending_unpublished_destroys.contains_key(&exact_key)
                     || self.pending_room_releases.contains_key(&exact_key)
                     || self.pending_reclaimed_rooms.contains_key(&exact_key)
                     || self.rooms.get(room_jid).is_some_and(|entry| {
@@ -605,6 +606,16 @@ impl RoomRegistryActor {
             )
             .chain(
                 self.pending_room_releases
+                    .keys()
+                    .map(
+                        |(room_jid, claim_fence)| PendingRoomOwnershipResponsibility::Exact {
+                            room_jid,
+                            claim_fence,
+                        },
+                    ),
+            )
+            .chain(
+                self.pending_unpublished_destroys
                     .keys()
                     .map(
                         |(room_jid, claim_fence)| PendingRoomOwnershipResponsibility::Exact {
@@ -2650,6 +2661,80 @@ impl RoomRegistryActor {
 }
 
 impl RoomRegistryActor {
+    async fn reconcile_unpublished_preparation_destroy_attempt(
+        store: Arc<dyn MucDurableStore>,
+        claim_store: Arc<dyn ClaimStore>,
+        room_jid: BareJid,
+        claim_fence: super::RoomClaimFenceContext,
+        phase: UnpublishedDestroyPhase,
+        completion_attempt: Option<super::DestroyAttemptId>,
+    ) -> UnpublishedPreparationDestroyOutcome {
+        match tokio::time::timeout(
+            ROOM_OWNERSHIP_CALL_TIMEOUT,
+            claim_store.current_claim_after_pending_writes(&claim_fence.entity),
+        )
+        .await
+        {
+            Ok(Ok(Some(snapshot)))
+                if snapshot.owner == claim_fence.owner()
+                    && snapshot.claim_epoch == claim_fence.epoch =>
+            {
+                let intent = match phase {
+                    UnpublishedDestroyPhase::MarkCleanup => {
+                        RoomDurableMutation::MarkUnpublishedCleanup
+                    }
+                    UnpublishedDestroyPhase::Destroy => {
+                        RoomDurableMutation::DestroyAndReleaseClaim {
+                            completion_attempt: None,
+                        }
+                    }
+                    UnpublishedDestroyPhase::RecoverPreparingDestroy => {
+                        RoomDurableMutation::DestroyAndReleaseClaim { completion_attempt }
+                    }
+                };
+                match store
+                    .commit_room_mutation(&room_jid, &claim_fence, intent)
+                    .await
+                {
+                    Ok(_) => match phase {
+                        UnpublishedDestroyPhase::MarkCleanup => {
+                            UnpublishedPreparationDestroyOutcome::CleanupMarked
+                        }
+                        UnpublishedDestroyPhase::Destroy
+                        | UnpublishedDestroyPhase::RecoverPreparingDestroy => {
+                            UnpublishedPreparationDestroyOutcome::Committed
+                        }
+                    },
+                    Err(RoomCommitError::CommitOutcomeUnknown) => {
+                        UnpublishedPreparationDestroyOutcome::CommitOutcomeUnknown
+                    }
+                    Err(_) => UnpublishedPreparationDestroyOutcome::Failed,
+                }
+            }
+            Ok(Ok(_))
+                if matches!(
+                    phase,
+                    UnpublishedDestroyPhase::Destroy
+                        | UnpublishedDestroyPhase::RecoverPreparingDestroy
+                ) =>
+            {
+                match tokio::time::timeout(
+                    ROOM_OWNERSHIP_CALL_TIMEOUT,
+                    store.find_preparing_room(&room_jid),
+                )
+                .await
+                {
+                    Ok(Ok(None)) => UnpublishedPreparationDestroyOutcome::Committed,
+                    Ok(Ok(Some(_))) | Ok(Err(_)) | Err(_) => {
+                        UnpublishedPreparationDestroyOutcome::Failed
+                    }
+                }
+            }
+            Ok(Ok(_)) => UnpublishedPreparationDestroyOutcome::Failed,
+            Ok(Err(_)) | Err(_) => UnpublishedPreparationDestroyOutcome::Failed,
+        }
+    }
+
     /// Retain a creator room whose publication/handoff may already be
     /// durable, then durably mark it non-serving before terminal deletion.
     /// This is shared by a definitely lost reply and a Publish acknowledgement
@@ -3132,81 +3217,15 @@ impl kameo::message::Message<RetryUnpublishedPreparationDestroy> for RoomRegistr
                 .map(|completion| completion.attempt)
         });
         tokio::spawn(async move {
-            // Observe exact ownership behind pending writes before any
-            // mutation. A missing/foreign fence never proves the room was
-            // deleted; only a previously confirmed cleanup marker followed
-            // by a durable absence proves terminal convergence.
-            let outcome = match tokio::time::timeout(
-                ROOM_OWNERSHIP_CALL_TIMEOUT,
-                claim_store.current_claim_after_pending_writes(&claim_fence.entity),
+            let outcome = RoomRegistryActor::reconcile_unpublished_preparation_destroy_attempt(
+                store,
+                claim_store,
+                room_jid.clone(),
+                claim_fence.clone(),
+                phase,
+                completion_attempt,
             )
-            .await
-            {
-                Ok(Ok(Some(snapshot)))
-                    if snapshot.owner == claim_fence.owner()
-                        && snapshot.claim_epoch == claim_fence.epoch =>
-                {
-                    let intent = match phase {
-                        UnpublishedDestroyPhase::MarkCleanup => {
-                            RoomDurableMutation::MarkUnpublishedCleanup
-                        }
-                        UnpublishedDestroyPhase::Destroy => {
-                            RoomDurableMutation::DestroyAndReleaseClaim {
-                                completion_attempt: None,
-                            }
-                        }
-                        UnpublishedDestroyPhase::RecoverPreparingDestroy => {
-                            RoomDurableMutation::DestroyAndReleaseClaim { completion_attempt }
-                        }
-                    };
-                    match store
-                        .commit_room_mutation(&room_jid, &claim_fence, intent)
-                        .await
-                    {
-                        Ok(_) => match phase {
-                            UnpublishedDestroyPhase::MarkCleanup => {
-                                UnpublishedPreparationDestroyOutcome::CleanupMarked
-                            }
-                            UnpublishedDestroyPhase::Destroy => {
-                                UnpublishedPreparationDestroyOutcome::Committed
-                            }
-                            UnpublishedDestroyPhase::RecoverPreparingDestroy => {
-                                UnpublishedPreparationDestroyOutcome::Committed
-                            }
-                        },
-                        Err(RoomCommitError::CommitOutcomeUnknown) => {
-                            UnpublishedPreparationDestroyOutcome::CommitOutcomeUnknown
-                        }
-                        Err(_) => UnpublishedPreparationDestroyOutcome::Failed,
-                    }
-                }
-                Ok(Ok(_))
-                    if matches!(
-                        phase,
-                        UnpublishedDestroyPhase::Destroy
-                            | UnpublishedDestroyPhase::RecoverPreparingDestroy
-                    ) =>
-                {
-                    match tokio::time::timeout(
-                        ROOM_OWNERSHIP_CALL_TIMEOUT,
-                        store.find_preparing_room(&room_jid),
-                    )
-                    .await
-                    {
-                        // A confirmed cleanup marker (or a never-published
-                        // preparation) can only lose Preparing once D&R or
-                        // successor recovery has terminally removed it.
-                        Ok(Ok(None)) => UnpublishedPreparationDestroyOutcome::Committed,
-                        Ok(Ok(Some(_))) | Ok(Err(_)) | Err(_) => {
-                            UnpublishedPreparationDestroyOutcome::Failed
-                        }
-                    }
-                }
-                // Losing an unmarked fence is never enough to clear poison:
-                // the active durable room may still exist under a successor.
-                Ok(Ok(_)) => UnpublishedPreparationDestroyOutcome::Failed,
-                Ok(Err(_)) | Err(_) => UnpublishedPreparationDestroyOutcome::Failed,
-            };
+            .await;
             let _ = registry_ref
                 .tell(CompleteUnpublishedPreparationDestroy {
                     room_jid,
@@ -3629,6 +3648,83 @@ impl RoomRegistryActor {
         }
     }
 
+    async fn reconcile_pending_unpublished_destroys_for_shutdown(&mut self) -> (usize, usize) {
+        let Some(store) = self.durable_store.clone() else {
+            return (0, self.pending_unpublished_destroys.len());
+        };
+        let claim_store = Arc::clone(&self.claim_store);
+        let mut released = 0usize;
+        let mut pending = self
+            .pending_unpublished_destroys
+            .keys()
+            .cloned()
+            .collect::<VecDeque<_>>();
+        while let Some((room_jid, claim_fence)) = pending.pop_front() {
+            let Some(phase) = self
+                .pending_unpublished_destroys
+                .get(&(room_jid.clone(), claim_fence.clone()))
+                .copied()
+            else {
+                continue;
+            };
+            let completion_attempt = self.destroy_attempts.get(&room_jid).and_then(|retained| {
+                retained
+                    .completion
+                    .as_ref()
+                    .map(|completion| completion.attempt)
+            });
+            match Self::reconcile_unpublished_preparation_destroy_attempt(
+                Arc::clone(&store),
+                Arc::clone(&claim_store),
+                room_jid.clone(),
+                claim_fence.clone(),
+                phase,
+                completion_attempt,
+            )
+            .await
+            {
+                UnpublishedPreparationDestroyOutcome::CleanupMarked => {
+                    if let Some(current_phase) = self
+                        .pending_unpublished_destroys
+                        .get_mut(&(room_jid.clone(), claim_fence.clone()))
+                    {
+                        *current_phase = UnpublishedDestroyPhase::Destroy;
+                        pending.push_front((room_jid, claim_fence));
+                    }
+                }
+                UnpublishedPreparationDestroyOutcome::Committed => {
+                    self.transfer_exact_responsibility_to_pending_release(
+                        room_jid.clone(),
+                        claim_fence.clone(),
+                    );
+                    let phase = self
+                        .pending_unpublished_destroys
+                        .remove(&(room_jid.clone(), claim_fence.clone()));
+                    if phase == Some(UnpublishedDestroyPhase::RecoverPreparingDestroy) {
+                        if let Some(RetainedDestroyAttempt {
+                            completion: Some(completion),
+                            ..
+                        }) = self.destroy_attempts.remove(&room_jid)
+                        {
+                            self.pending_destroy_completions.push_back(completion);
+                        }
+                    }
+                    self.poisoned_rooms.remove(&room_jid);
+                    self.release_room_claim(&room_jid, &claim_fence).await;
+                    if !self
+                        .pending_room_releases
+                        .contains_key(&(room_jid.clone(), claim_fence.clone()))
+                    {
+                        released += 1;
+                    }
+                }
+                UnpublishedPreparationDestroyOutcome::CommitOutcomeUnknown
+                | UnpublishedPreparationDestroyOutcome::Failed => {}
+            }
+        }
+        (released, self.pending_unpublished_destroys.len())
+    }
+
     /// Resolve demand-side claim CAS calls that may have committed after
     /// their response future timed out. Terminal shutdown cannot rely on the
     /// normal retry timer, so this waits behind already-issued writes and
@@ -3878,11 +3974,15 @@ impl kameo::message::Message<DrainRoomOwnershipForShutdown> for RoomRegistryActo
         let reservations = self
             .reconcile_reclaimed_room_reservations_for_shutdown()
             .await;
+        let (unpublished_released, unpublished_retained) = self
+            .reconcile_pending_unpublished_destroys_for_shutdown()
+            .await;
         let mut outcome = self
             .release_exact_room_ownership_for_shutdown(reservations.reservation_owned)
             .await;
+        outcome.released += unpublished_released;
         outcome.preserved_live += acquisition.preserved_live + reservations.preserved_live;
-        outcome.retained += acquisition.retained + reservations.retained;
+        outcome.retained += acquisition.retained + reservations.retained + unpublished_retained;
         outcome
     }
 }

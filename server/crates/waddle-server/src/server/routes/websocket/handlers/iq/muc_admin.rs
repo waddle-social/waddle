@@ -11,6 +11,7 @@ use crate::server::routes::websocket::handlers::iq::errors::resource_constraint_
 /// (internal-server-error reply). Magnitude matches the
 /// `REAPER_ASK_TIMEOUT` precedent in `session_janitors.rs`.
 const ADMIN_ROOM_ASK_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);
+const ADMIN_ROOM_RECOVERY_ATTEMPTS: usize = 2;
 
 fn admin_item_has_role_shape(item: &AdminItem) -> bool {
     item.role.is_some()
@@ -144,6 +145,42 @@ fn affiliation_updates_match_room(
         .all(|(jid, affiliation)| room.get_affiliation(jid) == *affiliation)
 }
 
+fn final_affiliation_updates(
+    before: &waddle_xmpp::muc::MucRoom,
+    items: &[AdminItem],
+) -> Vec<(BareJid, Affiliation)> {
+    let mut final_affiliations: std::collections::BTreeMap<BareJid, Affiliation> = before
+        .get_all_affiliations()
+        .into_iter()
+        .map(|entry| (entry.jid, entry.affiliation))
+        .collect();
+    let mut touched_jids = Vec::new();
+    for item in items {
+        let (Some(jid), Some(affiliation)) = (item.jid.as_ref(), item.affiliation) else {
+            continue;
+        };
+        if !touched_jids.contains(jid) {
+            touched_jids.push(jid.clone());
+        }
+        if affiliation == Affiliation::None {
+            final_affiliations.remove(jid);
+        } else {
+            final_affiliations.insert(jid.clone(), affiliation);
+        }
+    }
+    touched_jids
+        .into_iter()
+        .filter_map(|jid| {
+            let current = before.get_affiliation(&jid);
+            let final_affiliation = final_affiliations
+                .get(&jid)
+                .copied()
+                .unwrap_or(Affiliation::None);
+            (current != final_affiliation).then_some((jid, final_affiliation))
+        })
+        .collect()
+}
+
 fn role_updates_match_room(
     before: &waddle_xmpp::muc::MucRoom,
     after: &waddle_xmpp::muc::MucRoom,
@@ -177,12 +214,147 @@ fn admin_items_match_room(
     if is_role_change_query(items) {
         role_updates_match_room(before, after, items)
     } else {
-        let affiliation_updates: Vec<(BareJid, Affiliation)> = items
-            .iter()
-            .filter_map(|item| item.jid.clone().zip(item.affiliation))
-            .collect();
-        affiliation_updates_match_room(after, &affiliation_updates)
+        let affiliation_updates = final_affiliation_updates(before, items);
+        !affiliation_updates.is_empty()
+            && affiliation_updates_match_room(after, &affiliation_updates)
     }
+}
+
+enum AdminReconciliationOutcome {
+    Committed(waddle_xmpp::muc::room_actor::AdminItemsApplied),
+    NotCommitted,
+    Inconclusive,
+}
+
+fn reconcile_admin_result_from_rooms(
+    before: &waddle_xmpp::muc::MucRoom,
+    current_after: Option<&waddle_xmpp::muc::MucRoom>,
+    recovered_after: Option<&waddle_xmpp::muc::MucRoom>,
+    items: &[AdminItem],
+    sender_jid: &FullJid,
+    occupant_id_secret: &waddle_xmpp::xep::xep0421::OccupantIdSecret,
+) -> AdminReconciliationOutcome {
+    if current_after.is_some_and(|after| admin_items_match_room(before, after, items))
+        || recovered_after.is_some_and(|after| admin_items_match_room(before, after, items))
+    {
+        return AdminReconciliationOutcome::Committed(recover_committed_admin_effects(
+            before,
+            items,
+            sender_jid,
+            occupant_id_secret,
+        ));
+    }
+    if recovered_after.is_some() {
+        AdminReconciliationOutcome::NotCommitted
+    } else {
+        AdminReconciliationOutcome::Inconclusive
+    }
+}
+
+async fn reconcile_ambiguous_admin_result(
+    room_actor: &kameo::actor::ActorRef<waddle_xmpp::muc::room_actor::RoomActor>,
+    room_jid: &BareJid,
+    pre_apply_snapshot: Option<&waddle_xmpp::muc::room_actor::RoomSnapshot>,
+    items: &[AdminItem],
+    sender_jid: &FullJid,
+    occupant_id_secret: &waddle_xmpp::xep::xep0421::OccupantIdSecret,
+) -> (
+    Option<waddle_xmpp::muc::room_actor::AdminItemsApplied>,
+    bool,
+) {
+    match room_actor
+        .ask(GetSnapshot)
+        .reply_timeout(ADMIN_ROOM_ASK_TIMEOUT)
+        .await
+    {
+        Ok(snapshot) => match pre_apply_snapshot {
+            Some(snapshot_before_apply) => match reconcile_admin_result_from_rooms(
+                &snapshot_before_apply.room,
+                Some(&snapshot.room),
+                None,
+                items,
+                sender_jid,
+                occupant_id_secret,
+            ) {
+                AdminReconciliationOutcome::Committed(applied) => (Some(applied), false),
+                AdminReconciliationOutcome::NotCommitted
+                | AdminReconciliationOutcome::Inconclusive => (None, true),
+            },
+            None => (None, true),
+        },
+        Err(snapshot_error) => {
+            warn!(
+                room = %room_jid,
+                error = ?snapshot_error,
+                "Could not reconcile ambiguous MUC admin actor failure"
+            );
+            (None, false)
+        }
+    }
+}
+
+async fn recover_admin_result_after_actor_demote(
+    state: &WebSocketState,
+    room_jid: &BareJid,
+    pre_apply_snapshot: &waddle_xmpp::muc::room_actor::RoomSnapshot,
+    items: &[AdminItem],
+    sender_jid: &FullJid,
+) -> AdminReconciliationOutcome {
+    let room_registry =
+        waddle_xmpp::muc::RoomRegistry::wrap(state.deps.protocol.room_registry.clone());
+    for attempt in 0..ADMIN_ROOM_RECOVERY_ATTEMPTS {
+        if attempt > 0 {
+            let _ = room_registry.retry_pending_room_releases(8).await;
+        }
+        match room_registry
+            .get_or_create_room(
+                room_jid.clone(),
+                pre_apply_snapshot.room.waddle_id.clone(),
+                pre_apply_snapshot.room.channel_id.clone(),
+                pre_apply_snapshot.room.config.clone(),
+            )
+            .await
+        {
+            Ok(acquisition) => match acquisition
+                .actor_ref
+                .ask(GetSnapshot)
+                .reply_timeout(ADMIN_ROOM_ASK_TIMEOUT)
+                .await
+            {
+                Ok(snapshot) => {
+                    return reconcile_admin_result_from_rooms(
+                        &pre_apply_snapshot.room,
+                        None,
+                        Some(&snapshot.room),
+                        items,
+                        sender_jid,
+                        &state.deps.occupant_id_secret,
+                    );
+                }
+                Err(error) => {
+                    warn!(
+                        room = %room_jid,
+                        error = ?error,
+                        "Failed to snapshot recovered room actor after ambiguous MUC admin outcome"
+                    );
+                }
+            },
+            Err(
+                waddle_xmpp::muc::room_registry_actor::RoomRegistryError::OwnershipReconciliationPending(
+                    _,
+                ),
+            ) => {}
+            Err(error) => {
+                warn!(
+                    room = %room_jid,
+                    error = ?error,
+                    "Failed to reacquire room actor after ambiguous MUC admin outcome"
+                );
+                break;
+            }
+        }
+    }
+    AdminReconciliationOutcome::Inconclusive
 }
 
 fn all_room_sessions(room: &waddle_xmpp::muc::MucRoom) -> Vec<FullJid> {
@@ -922,6 +1094,68 @@ pub(super) async fn handle_muc_admin_iq(
             )];
         }
         Err(kameo::error::SendError::HandlerError(
+            waddle_xmpp::muc::room_actor::AdminApplyError::CommitOutcomeUnknown,
+        )) => {
+            let (recovered_applied, _) = reconcile_ambiguous_admin_result(
+                &room_actor,
+                &room_jid,
+                pre_apply_snapshot.as_ref(),
+                &query.items,
+                sender_jid,
+                &state.deps.occupant_id_secret,
+            )
+            .await;
+            let _ = state
+                .deps
+                .protocol
+                .room_registry
+                .ask(
+                    waddle_xmpp::muc::room_registry_actor::DemoteRoomIfExactActor {
+                        room_jid: room_jid.clone(),
+                        actor_ref: room_actor.clone(),
+                    },
+                )
+                .await;
+            let reconciliation = if let Some(applied) = recovered_applied {
+                AdminReconciliationOutcome::Committed(applied)
+            } else if let Some(snapshot_before_apply) = pre_apply_snapshot.as_ref() {
+                recover_admin_result_after_actor_demote(
+                    state,
+                    &room_jid,
+                    snapshot_before_apply,
+                    &query.items,
+                    sender_jid,
+                )
+                .await
+            } else {
+                AdminReconciliationOutcome::Inconclusive
+            };
+            match reconciliation {
+                AdminReconciliationOutcome::Committed(applied) => {
+                    warn!(room = %room_jid, "MUC admin commit outcome was ambiguous but the committed affiliation batch was reconciled");
+                    applied
+                }
+                AdminReconciliationOutcome::NotCommitted
+                | AdminReconciliationOutcome::Inconclusive => {
+                    rollback_admin_affiliations(
+                        state,
+                        managed_channel_id.as_deref(),
+                        &durable_previous_affiliations,
+                    )
+                    .await;
+                    warn!(room = %room_jid, "MUC admin commit outcome is ambiguous and the fresh actor could not prove the batch committed; restored previous managed-channel affiliations");
+                    return vec![build_iq_error_xml_typed(
+                        iq.id(),
+                        response_from,
+                        response_to,
+                        resource_constraint_iq_error(
+                            "This room's update outcome is being reconciled; please retry.",
+                        ),
+                    )];
+                }
+            }
+        }
+        Err(kameo::error::SendError::HandlerError(
             waddle_xmpp::muc::room_actor::AdminApplyError::NotOwner,
         )) => {
             warn!(room = %room_jid, "MUC admin set hit a deposed room actor");
@@ -1051,45 +1285,15 @@ pub(super) async fn handle_muc_admin_iq(
             // managed-channel tuples. If the snapshot proves the affiliation
             // batch committed, reconstruct the caller-owned outward effects so
             // bans, membership removals, and voice changes are not dropped.
-            let mut rollback_required = false;
-            let recovered_applied = match room_actor
-                .ask(GetSnapshot)
-                .reply_timeout(ADMIN_ROOM_ASK_TIMEOUT)
-                .await
-            {
-                Ok(snapshot)
-                    if pre_apply_snapshot
-                        .as_ref()
-                        .is_some_and(|snapshot_before_apply| {
-                            admin_items_match_room(
-                                &snapshot_before_apply.room,
-                                &snapshot.room,
-                                &query.items,
-                            )
-                        }) =>
-                {
-                    pre_apply_snapshot.as_ref().map(|snapshot_before_apply| {
-                        recover_committed_admin_effects(
-                            &snapshot_before_apply.room,
-                            &query.items,
-                            sender_jid,
-                            &state.deps.occupant_id_secret,
-                        )
-                    })
-                }
-                Ok(_) => {
-                    rollback_required = true;
-                    None
-                }
-                Err(snapshot_error) => {
-                    warn!(
-                        room = %room_jid,
-                        error = ?snapshot_error,
-                        "Could not reconcile ambiguous MUC admin actor failure"
-                    );
-                    None
-                }
-            };
+            let (recovered_applied, rollback_required) = reconcile_ambiguous_admin_result(
+                &room_actor,
+                &room_jid,
+                pre_apply_snapshot.as_ref(),
+                &query.items,
+                sender_jid,
+                &state.deps.occupant_id_secret,
+            )
+            .await;
             if let Some(applied) = recovered_applied {
                 warn!(room = %room_jid, error = ?error, "MUC admin actor reply was ambiguous but the committed affiliation batch was reconciled");
                 applied
@@ -1239,6 +1443,147 @@ mod tests {
             affiliation_updates_match_room(&room, &updates),
             "a mailbox-ordered snapshot preserves a projection that the actor committed"
         );
+    }
+
+    #[test]
+    fn duplicate_affiliation_targets_reconcile_against_the_final_per_jid_intent() {
+        let room_jid: BareJid = "admin-duplicate-reconciliation@muc.example.com"
+            .parse()
+            .expect("room JID");
+        let target: BareJid = "target@example.com".parse().expect("target JID");
+        let before = waddle_xmpp::muc::MucRoom::new(
+            room_jid.clone(),
+            "waddle".to_string(),
+            "channel".to_string(),
+            waddle_xmpp::muc::RoomConfig::default(),
+        );
+        let mut after = before.clone();
+        after.set_affiliation(target.clone(), Affiliation::Outcast);
+        let items = vec![
+            AdminItem {
+                jid: Some(target.clone()),
+                nick: None,
+                affiliation: Some(Affiliation::Member),
+                role: None,
+                reason: None,
+            },
+            AdminItem {
+                jid: Some(target.clone()),
+                nick: None,
+                affiliation: Some(Affiliation::Outcast),
+                role: None,
+                reason: Some("ban wins".to_string()),
+            },
+        ];
+
+        assert!(
+            admin_items_match_room(&before, &after, &items),
+            "reconciliation must collapse duplicate bare-JID writes to the final exact intent"
+        );
+
+        let net_noop_items = vec![
+            AdminItem {
+                jid: Some(target.clone()),
+                nick: None,
+                affiliation: Some(Affiliation::Member),
+                role: None,
+                reason: None,
+            },
+            AdminItem {
+                jid: Some(target),
+                nick: None,
+                affiliation: Some(Affiliation::None),
+                role: None,
+                reason: None,
+            },
+        ];
+        assert!(
+            !admin_items_match_room(&before, &before, &net_noop_items),
+            "an unchanged snapshot cannot prove a duplicate-target batch that netted back to the original state"
+        );
+    }
+
+    #[test]
+    fn recovered_room_snapshot_can_disprove_an_ambiguous_affiliation_batch() {
+        let room_jid: BareJid = "admin-recovered-failure@muc.example.com"
+            .parse()
+            .expect("room JID");
+        let target: BareJid = "target@example.com".parse().expect("target JID");
+        let before = waddle_xmpp::muc::MucRoom::new(
+            room_jid,
+            "waddle".to_string(),
+            "channel".to_string(),
+            waddle_xmpp::muc::RoomConfig::default(),
+        );
+        let items = vec![AdminItem {
+            jid: Some(target),
+            nick: None,
+            affiliation: Some(Affiliation::Member),
+            role: None,
+            reason: None,
+        }];
+
+        match reconcile_admin_result_from_rooms(
+            &before,
+            None,
+            Some(&before),
+            &items,
+            &"owner@example.com/web".parse().expect("owner full jid"),
+            &test_secret(),
+        ) {
+            AdminReconciliationOutcome::NotCommitted => {}
+            AdminReconciliationOutcome::Committed(_) => {
+                panic!("recovered durable state must not preserve stale optimistic tuples")
+            }
+            AdminReconciliationOutcome::Inconclusive => {
+                panic!("recovered durable state is a negative proof, not an unknown")
+            }
+        }
+    }
+
+    #[test]
+    fn recovered_room_snapshot_can_prove_an_ambiguous_affiliation_batch_committed() {
+        let room_jid: BareJid = "admin-recovered-success@muc.example.com"
+            .parse()
+            .expect("room JID");
+        let target: BareJid = "target@example.com".parse().expect("target JID");
+        let before = waddle_xmpp::muc::MucRoom::new(
+            room_jid,
+            "waddle".to_string(),
+            "channel".to_string(),
+            waddle_xmpp::muc::RoomConfig::default(),
+        );
+        let mut recovered = before.clone();
+        recovered.set_affiliation(target.clone(), Affiliation::Member);
+        let items = vec![AdminItem {
+            jid: Some(target),
+            nick: None,
+            affiliation: Some(Affiliation::Member),
+            role: None,
+            reason: None,
+        }];
+
+        match reconcile_admin_result_from_rooms(
+            &before,
+            None,
+            Some(&recovered),
+            &items,
+            &"owner@example.com/web".parse().expect("owner full jid"),
+            &test_secret(),
+        ) {
+            AdminReconciliationOutcome::Committed(applied) => {
+                assert!(
+                    applied.removed_by_moderation.is_empty(),
+                    "a committed non-removal affiliation batch should only preserve the tuple projection"
+                );
+            }
+            AdminReconciliationOutcome::NotCommitted => {
+                panic!("recovered durable state proved the final affiliation committed")
+            }
+            AdminReconciliationOutcome::Inconclusive => {
+                panic!("recovered durable state should settle the outcome")
+            }
+        }
     }
 
     #[test]

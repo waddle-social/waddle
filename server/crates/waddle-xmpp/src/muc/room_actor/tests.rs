@@ -4942,6 +4942,50 @@ async fn change_affiliation_surfaces_ambiguous_commit_outcome_without_compensati
 }
 
 #[tokio::test]
+async fn apply_admin_items_surfaces_ambiguous_commit_outcome_without_compensation_proof() {
+    let actor =
+        spawn_room_actor_with_store(FakeDurableStore::owned_but_commit_outcome_is_unknown()).await;
+    let jid: BareJid = "dana@example.com".parse().expect("valid jid");
+
+    let result = actor
+        .ask(ApplyAdminItems {
+            sender_jid: test_full_jid("owner"),
+            sender_affiliation: Affiliation::Owner,
+            sender_role: Role::Moderator,
+            items: vec![AdminItem {
+                jid: Some(jid.clone()),
+                nick: None,
+                affiliation: Some(Affiliation::Member),
+                role: None,
+                reason: None,
+            }],
+        })
+        .await;
+    assert!(
+        matches!(
+            result,
+            Err(SendError::HandlerError(
+                AdminApplyError::CommitOutcomeUnknown
+            ))
+        ),
+        "an ambiguous durable admin batch must stay ambiguous instead of masquerading as a clean rollback: {result:?}"
+    );
+    assert_eq!(
+        actor.ask(GetRoomSealState).await.expect("typed seal state"),
+        RoomSealState::OwnershipLost,
+        "the stale actor must still retire after the ambiguous admin batch"
+    );
+    assert_eq!(
+        actor
+            .ask(GetAffiliation { jid })
+            .await
+            .expect("affiliation query"),
+        Affiliation::None,
+        "the actor must not apply an in-memory affiliation after an ambiguous durable admin batch"
+    );
+}
+
+#[tokio::test]
 async fn no_op_affiliation_change_still_checks_ownership_when_deposed() {
     let actor = spawn_room_actor_with_store(FakeDurableStore::deposed()).await;
     let jid: BareJid = "carol@example.com".parse().expect("valid jid");
