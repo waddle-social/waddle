@@ -235,6 +235,18 @@ impl InMemorySmSessionRegistry {
             .and_then(|fences| fences.get(stream_id).cloned());
         fence.is_some_and(|fence| self.try_record_terminal_claim_fence(stream_id, fence))
     }
+
+    /// The exact SM claim fence currently published for this live session.
+    /// This is observability/test support only; claim-scoped work must use
+    /// the immutable fence it already carries.
+    pub fn current_sm_claim_fence(
+        &self,
+        stream_id: &str,
+    ) -> Option<super::super::persistence::SmClaimFence> {
+        let fences = self.claim_fences.read().ok()?;
+        fences.get(stream_id).cloned()
+    }
+
     /// Remove every expired session and return the detached state in full.
     ///
     /// Callers (notably the server-side janitor) need the JID and stream id

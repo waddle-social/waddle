@@ -51,6 +51,7 @@ fn fixture_session(stream_id: &str) -> PersistedSession {
         user_id: "alice".to_string(),
         jid: full("alice@example.com/web"),
         inbound_count: 7,
+        shadow_ordinal: waddle_xmpp::stream_management::ShadowOrdinal::from_storage(11),
         outbound_count: 12,
         last_acked: 10,
         replay_gap_through: Some(9),

@@ -108,18 +108,16 @@ fn allow_ungated() -> GateOutcome {
 
 /// Why the gate is running.
 ///
-/// A relayed Muji initiate (#1445) passes the gate twice: once on the
-/// replica the client is connected to (which decides whether to relay)
-/// and again on the room-owning replica (which decides authorization).
-/// Only the first is a distinct client signalling event — recording
-/// [`CallSignalEvent::MujiJoin`] on both would double-count every
-/// cross-node join and skew the very dashboards used to verify this
-/// fix.
+/// A relayed Muji initiate passes the gate twice: once on the replica the
+/// client is connected to and again on the room-owning replica. Only the first
+/// is a distinct client signalling event, so the replay must not double-count
+/// the associated call telemetry.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) enum GateInvocation {
     /// Directly from the client's connection.
     ClientOrigin,
     /// Re-run on the room owner for an IQ relayed by another node.
+    #[cfg(feature = "clustering")]
     RelayedReplay,
 }
 
@@ -234,13 +232,13 @@ pub(super) async fn verify_muji_jingle_request(
             // do unconditionally, now with a WARN rather than in
             // silence.
             //
-            // On the owner replaying a relayed terminate there is no
-            // further node to try, so stay permissive: a teardown must
-            // always run somewhere.
-            Err(_) => match invocation {
-                GateInvocation::ClientOrigin => GateOutcome::RoomNotLocal { room_jid },
-                GateInvocation::RelayedReplay => allow_ungated(),
-            },
+            Err(_) => {
+                #[cfg(feature = "clustering")]
+                if invocation == GateInvocation::RelayedReplay {
+                    return allow_ungated();
+                }
+                GateOutcome::RoomNotLocal { room_jid }
+            }
         };
     }
     verify_room_membership(state, full_jid, &room_jid, is_session_initiate).await

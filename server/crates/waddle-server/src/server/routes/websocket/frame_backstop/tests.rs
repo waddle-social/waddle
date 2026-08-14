@@ -161,6 +161,7 @@ async fn already_revoked_admission_never_starts_dispatch_and_preserves_sm_hole()
     let mut completion = crate::server::routes::interpret::SmInboundCompletionTracker::default();
     let sequence = completion.reserve(&sm_state);
     crate::server::routes::websocket::frame::settle_inbound_dispatch(
+        &crate::ingress_shadow::IngressShadowHandle::disabled(),
         disposition,
         false,
         Some(sequence),
@@ -218,6 +219,7 @@ async fn revoked_after_committed_dispatch_suppresses_frames_but_settles_sm() {
     let mut completion = crate::server::routes::interpret::SmInboundCompletionTracker::default();
     let sequence = completion.reserve(&sm_state);
     crate::server::routes::websocket::frame::settle_inbound_dispatch(
+        &crate::ingress_shadow::IngressShadowHandle::disabled(),
         disposition,
         false,
         Some(sequence),
@@ -254,6 +256,7 @@ async fn iq_get_timeout_yields_conformant_resource_constraint() {
     let mut completion = crate::server::routes::interpret::SmInboundCompletionTracker::default();
     let sequence = completion.reserve(&sm_state);
     crate::server::routes::websocket::frame::settle_inbound_dispatch(
+        &crate::ingress_shadow::IngressShadowHandle::disabled(),
         disposition,
         false,
         Some(sequence),

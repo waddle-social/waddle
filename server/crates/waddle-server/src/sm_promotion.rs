@@ -221,6 +221,7 @@ pub(crate) async fn promote_terminal_overflow_entry(
         user_id: source.user_id.clone(),
         jid: source.jid.clone(),
         inbound_count: source.inbound_count,
+        shadow_ordinal: source.shadow_ordinal,
         outbound_count: source.outbound_count,
         last_acked: source.last_acked,
         replay_gap_through: source.replay_gap_through,
@@ -449,12 +450,20 @@ pub struct DisplacedPromotionDeps<'a> {
 #[derive(Debug, Default)]
 pub(crate) struct DisplacedPromotionOutcome {
     retrying_stream_ids: HashSet<String>,
+    /// Streams whose promotion completed terminally (`confirm_drained`
+    /// removed the durable session). Callers must evict any per-stream
+    /// state keyed by these ids — nothing else will ever see them again.
+    completed_stream_ids: HashSet<String>,
     queued_pending_rows: bool,
 }
 
 impl DisplacedPromotionOutcome {
     pub(crate) fn is_retrying(&self, stream_id: &str) -> bool {
         self.retrying_stream_ids.contains(stream_id)
+    }
+
+    pub(crate) fn completed_stream_ids(&self) -> impl Iterator<Item = &str> {
+        self.completed_stream_ids.iter().map(String::as_str)
     }
 
     /// True when any session in the batch inserted `pending_delivery`
@@ -922,6 +931,9 @@ pub(crate) async fn promote_displaced_sessions(
             continue;
         }
         promotion_guard.complete();
+        outcome
+            .completed_stream_ids
+            .insert(session.stream_id.clone());
         let session_id = waddle_xmpp::pending_delivery::SmSessionId::new(session.stream_id.clone());
         if let Err(error) = deps.pending_storage.release_claim(&session_id).await {
             tracing::warn!(

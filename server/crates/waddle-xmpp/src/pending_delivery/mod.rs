@@ -65,6 +65,26 @@ impl std::fmt::Display for PendingRowId {
     }
 }
 
+/// Exact identities deleted by a pending-delivery tombstone scrub.
+///
+/// `removed_count` preserves the existing count-returning contract while
+/// `row_ids` lets callers capture the exact rows deleted when an
+/// implementation can provide them.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TombstoneScrubbedPendingRows {
+    pub removed_count: u64,
+    pub row_ids: Vec<PendingRowId>,
+}
+
+impl TombstoneScrubbedPendingRows {
+    pub fn count_only(removed_count: u64) -> Self {
+        Self {
+            removed_count,
+            row_ids: Vec::new(),
+        }
+    }
+}
+
 /// Wire length bound on [`SmSessionId`] (council-adjudicated FIX 7).
 /// Production stream ids are server-generated UUIDs (36 bytes); 128 bytes
 /// is a generous cap well above that, rejected only at

@@ -15,6 +15,8 @@ pub(super) use local::*;
 pub(super) use muc::reserved::{
     deliver_reserved_muc_proxy, muc_proxy_result_to_ordered_outcome, muc_proxy_result_to_outcome,
 };
+#[cfg(test)]
+pub(crate) use muc::MucProxyRouteAttempt;
 pub(crate) use muc::{MucProxyRouteDecision, OrderedRelayMucProxyOutcome};
 use receiver::*;
 pub(super) use remote_route_helpers::*;
@@ -29,6 +31,7 @@ pub(super) fn remote_resource_route_reply(
     RelayRouteRemoteResourceStanzaReply {
         outcome,
         replies: Vec::new(),
+        recipient_sm_append_streams: Vec::new(),
     }
 }
 
@@ -92,6 +95,8 @@ pub(super) fn no_client_reply_outcome_with_commit_state_and_join_repair(
         client_replies: Vec::new(),
         maybe_committed,
         join_repair_allowed,
+        relay_target: None,
+        target_claim: None,
     }
 }
 

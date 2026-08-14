@@ -313,6 +313,7 @@ impl PostgresFencedSmPersistence {
                 user_id TEXT NOT NULL,
                 full_jid TEXT NOT NULL,
                 inbound_count BIGINT NOT NULL,
+                shadow_ordinal TEXT NOT NULL DEFAULT '0',
                 outbound_count BIGINT NOT NULL,
                 last_acked BIGINT NOT NULL,
                 max_resume_secs BIGINT,
@@ -342,6 +343,12 @@ impl PostgresFencedSmPersistence {
         // ...). ADD COLUMN IF NOT EXISTS (not folded into CREATE TABLE alone)
         // so a table left by an earlier run of this impl gains the column —
         // matching the sibling column-group migration below.
+        conn.execute(
+            "ALTER TABLE sm_sessions ADD COLUMN IF NOT EXISTS shadow_ordinal TEXT NOT NULL DEFAULT '0'",
+            (),
+        )
+        .await
+        .map_err(|e| SmPersistenceError::Other(e.to_string()))?;
         conn.execute(
             "ALTER TABLE sm_sessions ADD COLUMN IF NOT EXISTS presence_payloads TEXT",
             (),
@@ -617,17 +624,18 @@ impl SmPersistenceStorage for PostgresFencedSmPersistence {
         tx.execute(
             r#"
             INSERT INTO sm_sessions (
-                stream_id, user_id, full_jid, inbound_count, outbound_count,
+                stream_id, user_id, full_jid, inbound_count, shadow_ordinal, outbound_count,
                 last_acked, max_resume_secs, detached_at_ms, max_resume_duration_ms,
                 carbons_enabled, roster_interested, blocklist_interested, presence_available,
                 presence_show, presence_status, presence_priority, replay_gap_through,
                 presence_payloads, bare_jid, auth_context_id, auth_context_version,
                 principal_auth_epoch
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, (EXTRACT(EPOCH FROM now()) * 1000)::bigint, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, (EXTRACT(EPOCH FROM now()) * 1000)::bigint, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             ON CONFLICT (stream_id) DO UPDATE SET
                 user_id = excluded.user_id,
                 full_jid = excluded.full_jid,
                 inbound_count = excluded.inbound_count,
+                shadow_ordinal = excluded.shadow_ordinal,
                 outbound_count = excluded.outbound_count,
                 last_acked = excluded.last_acked,
                 max_resume_secs = excluded.max_resume_secs,
@@ -652,6 +660,7 @@ impl SmPersistenceStorage for PostgresFencedSmPersistence {
                 session.user_id,
                 session.jid.to_string(),
                 i64::from(session.inbound_count),
+                session.shadow_ordinal.to_storage().to_string(),
                 i64::from(session.outbound_count),
                 i64::from(session.last_acked),
                 session.max_resume_time.map(i64::from),
@@ -689,7 +698,7 @@ impl SmPersistenceStorage for PostgresFencedSmPersistence {
         // order to decide whether to steal it — Slice 6).
         let mut rows = self
             .guard_query(
-                "SELECT stream_id, user_id, full_jid, inbound_count, outbound_count, \
+                "SELECT stream_id, user_id, full_jid, inbound_count, shadow_ordinal, outbound_count, \
                         last_acked, max_resume_secs, detached_at_ms, max_resume_duration_ms, \
                         carbons_enabled, roster_interested, blocklist_interested, presence_available, \
                         presence_show, presence_status, presence_priority, replay_gap_through, \
@@ -962,7 +971,7 @@ impl SmPersistenceStorage for PostgresFencedSmPersistence {
         let _ = now;
         let mut rows = self
             .guard_query(
-                "SELECT stream_id, user_id, full_jid, inbound_count, outbound_count, \
+                "SELECT stream_id, user_id, full_jid, inbound_count, shadow_ordinal, outbound_count, \
                         last_acked, max_resume_secs, detached_at_ms, max_resume_duration_ms, \
                         carbons_enabled, roster_interested, blocklist_interested, presence_available, \
                         presence_show, presence_status, presence_priority, replay_gap_through, \
@@ -986,7 +995,7 @@ impl SmPersistenceStorage for PostgresFencedSmPersistence {
     async fn list_all_sessions(&self) -> Result<Vec<PersistedSession>, SmPersistenceError> {
         let mut rows = self
             .guard_query(
-                "SELECT stream_id, user_id, full_jid, inbound_count, outbound_count, \
+                "SELECT stream_id, user_id, full_jid, inbound_count, shadow_ordinal, outbound_count, \
                         last_acked, max_resume_secs, detached_at_ms, max_resume_duration_ms, \
                         carbons_enabled, roster_interested, blocklist_interested, presence_available, \
                         presence_show, presence_status, presence_priority, replay_gap_through, \
@@ -1048,17 +1057,18 @@ impl SmPersistenceStorage for PostgresFencedSmPersistence {
         tx.execute(
             r#"
             INSERT INTO sm_sessions (
-                stream_id, user_id, full_jid, inbound_count, outbound_count,
+                stream_id, user_id, full_jid, inbound_count, shadow_ordinal, outbound_count,
                 last_acked, max_resume_secs, detached_at_ms, max_resume_duration_ms,
                 carbons_enabled, roster_interested, blocklist_interested, presence_available,
                 presence_show, presence_status, presence_priority, replay_gap_through,
                 presence_payloads, bare_jid, auth_context_id, auth_context_version,
                 principal_auth_epoch
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, (EXTRACT(EPOCH FROM now()) * 1000)::bigint, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, (EXTRACT(EPOCH FROM now()) * 1000)::bigint, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             ON CONFLICT (stream_id) DO UPDATE SET
                 user_id = excluded.user_id,
                 full_jid = excluded.full_jid,
                 inbound_count = excluded.inbound_count,
+                shadow_ordinal = excluded.shadow_ordinal,
                 outbound_count = excluded.outbound_count,
                 last_acked = excluded.last_acked,
                 max_resume_secs = excluded.max_resume_secs,
@@ -1083,6 +1093,7 @@ impl SmPersistenceStorage for PostgresFencedSmPersistence {
                 session.user_id.clone(),
                 session.jid.to_string(),
                 i64::from(session.inbound_count),
+                session.shadow_ordinal.to_storage().to_string(),
                 i64::from(session.outbound_count),
                 i64::from(session.last_acked),
                 session.max_resume_time.map(i64::from),
@@ -1158,17 +1169,18 @@ impl SmPersistenceStorage for PostgresFencedSmPersistence {
         tx.execute(
             r#"
             INSERT INTO sm_sessions (
-                stream_id, user_id, full_jid, inbound_count, outbound_count,
+                stream_id, user_id, full_jid, inbound_count, shadow_ordinal, outbound_count,
                 last_acked, max_resume_secs, detached_at_ms, max_resume_duration_ms,
                 carbons_enabled, roster_interested, blocklist_interested, presence_available,
                 presence_show, presence_status, presence_priority, replay_gap_through,
                 presence_payloads, bare_jid, auth_context_id, auth_context_version,
                 principal_auth_epoch
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, (EXTRACT(EPOCH FROM now()) * 1000)::bigint, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, (EXTRACT(EPOCH FROM now()) * 1000)::bigint, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             ON CONFLICT (stream_id) DO UPDATE SET
                 user_id = excluded.user_id,
                 full_jid = excluded.full_jid,
                 inbound_count = excluded.inbound_count,
+                shadow_ordinal = excluded.shadow_ordinal,
                 outbound_count = excluded.outbound_count,
                 last_acked = excluded.last_acked,
                 max_resume_secs = excluded.max_resume_secs,
@@ -1193,6 +1205,7 @@ impl SmPersistenceStorage for PostgresFencedSmPersistence {
                 session.user_id,
                 session.jid.to_string(),
                 i64::from(session.inbound_count),
+                session.shadow_ordinal.to_storage().to_string(),
                 i64::from(session.outbound_count),
                 i64::from(session.last_acked),
                 session.max_resume_time.map(i64::from),

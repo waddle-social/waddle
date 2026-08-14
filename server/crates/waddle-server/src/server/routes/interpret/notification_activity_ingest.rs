@@ -34,6 +34,7 @@ use xmpp_parsers::message::Message;
 
 use crate::notification_activity::{NotificationChatState, NotificationPresenceShow};
 use crate::server::routes::websocket::WebSocketState;
+use waddle_xmpp::ingress::{IngressEffectIntent, NotificationActivityMutation};
 use waddle_xmpp::xep::xep0085::{ChatState, ChatStateCarrier};
 use waddle_xmpp::xep::xep0203::has_delay;
 
@@ -48,6 +49,17 @@ fn activity_store<'a>(
 ) -> Option<&'a crate::notification_activity::NotificationActivityStore> {
     deps.web_socket_state
         .map(|state: &WebSocketState| state.deps.protocol.notification_activity.as_ref())
+}
+
+fn capture_notification_activity(
+    deps: &Deps<'_>,
+    owner: &BareJid,
+    mutation: NotificationActivityMutation,
+) {
+    deps.capture_intent(IngressEffectIntent::NotificationActivityPreview {
+        owner: owner.clone(),
+        mutation,
+    });
 }
 
 /// XEP-0085: when the typed `chat_state` is present on a routed
@@ -116,7 +128,16 @@ pub(super) async fn record_chat_state_activity(
                 conversation = %conversation,
                 %error,
                 "notification_activity: record_chat_state_gone failed; \
-                 projection write skipped (XMPP routing unaffected)",
+                projection write skipped (XMPP routing unaffected)",
+            );
+        } else {
+            capture_notification_activity(
+                deps,
+                sender,
+                NotificationActivityMutation::ChatStateGone {
+                    conversation: conversation.clone(),
+                    committed_at_ms: now_ms,
+                },
             );
         }
         return;
@@ -133,6 +154,16 @@ pub(super) async fn record_chat_state_activity(
             %error,
             "notification_activity: record_chat_state failed; \
              projection write skipped (XMPP routing unaffected)",
+        );
+    } else {
+        capture_notification_activity(
+            deps,
+            sender,
+            NotificationActivityMutation::ChatState {
+                conversation: conversation.clone(),
+                state,
+                committed_at_ms: now_ms,
+            },
         );
     }
 }
@@ -155,6 +186,15 @@ pub(super) async fn record_read_marker_activity(
             %error,
             "notification_activity: record_read_marker failed; \
              projection write skipped (XMPP routing unaffected)",
+        );
+    } else {
+        capture_notification_activity(
+            deps,
+            owner,
+            NotificationActivityMutation::ReadMarker {
+                conversation: conversation.clone(),
+                committed_at_ms: now_ms,
+            },
         );
     }
 }
@@ -204,6 +244,15 @@ pub(super) async fn record_outbound_message_activity(
             %error,
             "notification_activity: record_outbound_message failed; \
              projection write skipped (XMPP routing unaffected)",
+        );
+    } else {
+        capture_notification_activity(
+            deps,
+            sender,
+            NotificationActivityMutation::OutboundMessage {
+                conversation: conversation.clone(),
+                committed_at_ms: now_ms,
+            },
         );
     }
 }

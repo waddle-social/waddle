@@ -58,6 +58,24 @@ pub(super) struct SmEnableCommit {
     max: u32,
 }
 
+fn try_enqueue_shadow_stream_enrollment(
+    ingress_shadow: &crate::ingress_shadow::IngressShadowHandle,
+    stream_id: &waddle_xmpp::pending_delivery::SmSessionId,
+) {
+    try_enqueue_shadow_stream_enrollment_with(stream_id, |stream_id| {
+        ingress_shadow.ensure_stream_enrollment(stream_id)
+    });
+}
+
+fn try_enqueue_shadow_stream_enrollment_with(
+    stream_id: &waddle_xmpp::pending_delivery::SmSessionId,
+    mut ensure_enrollment: impl FnMut(
+        waddle_xmpp::pending_delivery::SmSessionId,
+    ) -> crate::ingress_shadow::IngressShadowDisposition,
+) {
+    let _ = ensure_enrollment(stream_id.clone());
+}
+
 impl SmEnableCommit {
     fn new(
         claim_guard: Option<SmEnableClaimGuard>,
@@ -97,6 +115,7 @@ impl SmEnableCommit {
         if let Some(guard) = self.claim_guard.take() {
             guard.commit();
         }
+        try_enqueue_shadow_stream_enrollment(&state.deps.protocol.ingress_shadow, &self.stream_id);
         if !registry_published {
             debug!(
                 stream_id = %self.stream_id,
@@ -231,6 +250,53 @@ mod enable_claim_guard_tests {
             .locally_owned_claim_ids()
             .expect("owned inventory")
             .is_empty());
+    }
+}
+
+#[cfg(test)]
+mod shadow_enrollment_tests {
+    use super::try_enqueue_shadow_stream_enrollment_with;
+    use crate::ingress_shadow::IngressShadowDisposition;
+    use std::sync::{
+        atomic::{AtomicUsize, Ordering},
+        Arc,
+    };
+
+    #[test]
+    fn every_fresh_sm_enable_attempts_shadow_enrollment_once() {
+        let stream_id = waddle_xmpp::pending_delivery::SmSessionId::new("sm-enable-stream");
+        let attempts = Arc::new(AtomicUsize::new(0));
+
+        try_enqueue_shadow_stream_enrollment_with(&stream_id, {
+            let attempts = attempts.clone();
+            move |_stream_id| {
+                attempts.fetch_add(1, Ordering::SeqCst);
+                IngressShadowDisposition::Enqueued
+            }
+        });
+
+        assert_eq!(attempts.load(Ordering::SeqCst), 1);
+    }
+
+    #[test]
+    fn shadow_enrollment_result_never_changes_enable_commit() {
+        let stream_id = waddle_xmpp::pending_delivery::SmSessionId::new("shadow-result-stream");
+        for disposition in [
+            IngressShadowDisposition::Disabled,
+            IngressShadowDisposition::QueueFull,
+            IngressShadowDisposition::Closed,
+            IngressShadowDisposition::Enqueued,
+        ] {
+            let attempts = Arc::new(AtomicUsize::new(0));
+            try_enqueue_shadow_stream_enrollment_with(&stream_id, {
+                let attempts = attempts.clone();
+                move |_stream_id| {
+                    attempts.fetch_add(1, Ordering::SeqCst);
+                    disposition
+                }
+            });
+            assert_eq!(attempts.load(Ordering::SeqCst), 1);
+        }
     }
 }
 

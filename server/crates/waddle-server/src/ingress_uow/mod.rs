@@ -7,17 +7,20 @@
 
 mod error;
 mod repositories;
+mod retry;
 
 pub use error::IngressUowError;
 pub use repositories::{
-    CanonicalMessageRepository, DeliveryEffectRepository, InboxRepository, MamArchiveRepository,
-    SmIngressRepository,
+    CanonicalMessageRepository, DeliveryEffectRepository, EffectIntentRepository,
+    EffectIntentWriteOutcome, InboxRepository, MamArchiveRepository, PrincipalAssertion,
+    PrincipalRepository, SmIngressRepository,
 };
 #[cfg(feature = "clustering")]
 pub use repositories::{
     ClaimRepository, HandledFrontierOutcome, HandledFrontierRepository, RoomClaimFence,
-    SmClaimFence,
+    ShadowFrontierOutcome, SmClaimFence, SmIngressStreamRepository,
 };
+pub use retry::{run_with_retry, DbRetryClass, RetryExhausted};
 
 use crate::{
     config::LineageConfig,
@@ -165,13 +168,41 @@ impl<'a> IngressUowTransaction<'a> {
         self.transaction
             .commit()
             .await
-            .map_err(IngressUowError::Database)
+            .map_err(IngressUowError::from)
     }
 
     /// Raw SQL remains confined to ingress repositories so callers cannot
     /// bypass the epoch, lineage, and claim-fencing invariants.
     fn transaction_mut(&mut self) -> &mut Transaction<'a> {
         &mut self.transaction
+    }
+
+    /// Install per-transaction PostgreSQL timeout bounds without exposing raw
+    /// SQL to ingress callers.
+    pub async fn set_local_timeouts(
+        &mut self,
+        lock_timeout_ms: u64,
+        statement_timeout_ms: u64,
+    ) -> Result<(), IngressUowError> {
+        let mut proof = self
+            .transaction
+            .query(
+                r#"
+                SELECT
+                    set_config('lock_timeout', ?, true),
+                    set_config('statement_timeout', ?, true)
+                "#,
+                crate::db_params![
+                    format!("{lock_timeout_ms}ms"),
+                    format!("{statement_timeout_ms}ms"),
+                ],
+            )
+            .await?;
+        proof
+            .next()
+            .await?
+            .ok_or(IngressUowError::EpochProofMissing)?;
+        Ok(())
     }
 
     #[cfg(feature = "clustering")]

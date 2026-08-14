@@ -77,6 +77,11 @@ pub struct OccupantInfo {
 #[derive(Debug, Clone)]
 pub struct RoomSnapshot {
     pub room: MucRoom,
+    /// Exact durable-ownership proof retained by this actor incarnation.
+    /// Callers that make room-authorized decisions from this snapshot must
+    /// retain this immutable context instead of consulting mutable registry
+    /// state after the actor read completes.
+    pub claim_fence: Option<super::durable::RoomClaimFenceContext>,
     pub config_revision: u64,
     pub admission_revision: u64,
 }
@@ -1614,6 +1619,7 @@ impl kameo::message::Message<UpdateGroupDmConfigByMember> for RoomActor {
         self.advance_room_admission_revision();
         Ok(RoomSnapshot {
             room: self.room.clone(),
+            claim_fence: self.durable_claim_fence.clone(),
             config_revision: self.config_revision,
             admission_revision: self.admission_revision,
         })
@@ -2167,6 +2173,7 @@ impl kameo::message::Message<GetSnapshot> for RoomActor {
     ) -> Self::Reply {
         Ok(RoomSnapshot {
             room: self.room.clone(),
+            claim_fence: self.durable_claim_fence.clone(),
             config_revision: self.config_revision,
             admission_revision: self.admission_revision,
         })

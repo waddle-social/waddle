@@ -1,13 +1,15 @@
 #[cfg(feature = "clustering")]
 use chrono::{TimeZone, Utc};
+#[cfg(feature = "clustering")]
 use sqlx::Connection;
 use uuid::Uuid;
+#[cfg(feature = "clustering")]
+use waddle_xmpp::ingress::{EffectMessageIdentity, InboxProjectionMutation, IngressEffectIntent};
+use waddle_xmpp::ingress::{MessageKey, ProtocolEpoch, SemanticDigest, SmIngressId};
+#[cfg(feature = "clustering")]
 use waddle_xmpp::{
     auth::{AuthContextId, AuthContextVersion, AuthenticatedPrincipalRef, PrincipalAuthEpoch},
-    ingress::{
-        AliasOutcome, AliasResolution, DeliveryKey, IngressOrdinal, MessageKey, NormalizedTarget,
-        ProtocolEpoch, SemanticDigest, SmIngressId,
-    },
+    ingress::{AliasOutcome, AliasResolution, DeliveryKey, IngressOrdinal, NormalizedTarget},
     ownership::{ClaimEpoch, ClaimStore, EntityType, NodeIdentity, SharedNodeIdentity},
     pending_delivery::SmSessionId,
 };
@@ -19,20 +21,20 @@ use waddle_xmpp::{
     },
     mam::{ArchivedMessage, MamTxStoreOutcome},
 };
+#[cfg(feature = "clustering")]
 use waddle_xmpp_core::xep0359::OriginId;
 #[cfg(feature = "clustering")]
 use waddle_xmpp_core::xep0359::StanzaId;
 #[cfg(feature = "clustering")]
 use xmpp_parsers::message::MessageType;
 
-use super::{
-    CanonicalMessageRepository, DeliveryEffectRepository, IngressUowError,
-    PostgresIngressUnitOfWork, SmIngressRepository,
-};
+use super::{CanonicalMessageRepository, IngressUowError, PostgresIngressUnitOfWork};
 #[cfg(feature = "clustering")]
 use super::{
-    ClaimRepository, HandledFrontierOutcome, HandledFrontierRepository, InboxRepository,
-    IngressUowTransaction, MamArchiveRepository,
+    ClaimRepository, DeliveryEffectRepository, EffectIntentRepository, EffectIntentWriteOutcome,
+    HandledFrontierOutcome, HandledFrontierRepository, InboxRepository, IngressUowTransaction,
+    MamArchiveRepository, PrincipalAssertion, PrincipalRepository, ShadowFrontierOutcome,
+    SmIngressRepository, SmIngressStreamRepository,
 };
 use crate::{
     config::LineageConfig,
@@ -140,9 +142,41 @@ async fn epoch_one_uow_write_succeeds_and_raw_write_is_rejected() {
     fixture.advance_epoch_to_one().await;
     let uow = fixture.uow();
     let mut transaction = uow.begin().await.expect("begin epoch-one uow");
-    CanonicalMessageRepository::record(&mut transaction, MessageKey::new(), &digest(1))
+    let message_key = MessageKey::new();
+    CanonicalMessageRepository::record(&mut transaction, message_key, &digest(1))
         .await
         .expect("UoW carries epoch proof");
+    #[cfg(feature = "clustering")]
+    SmIngressStreamRepository::mint(
+        &mut transaction,
+        &SmSessionId::new(format!("uow-guard-stream-{}", Uuid::new_v4().simple())),
+    )
+    .await
+    .expect("UoW can enroll a guarded SM stream");
+    #[cfg(feature = "clustering")]
+    assert_eq!(
+        EffectIntentRepository::record_all(
+            &mut transaction,
+            message_key,
+            &[IngressEffectIntent::InboxProject {
+                owner: "romeo@example.com".parse().expect("valid fixture JID"),
+                mutation: InboxProjectionMutation::Direct {
+                    entry: InboxEntry::new(
+                        "juliet@example.com".parse().expect("valid fixture JID"),
+                        ConversationKind::Direct,
+                        "stable-1",
+                        1_752_768_000,
+                    )
+                    .with_unread(3)
+                    .with_preview("important hello"),
+                    increment_unread: true,
+                },
+            }],
+        )
+        .await
+        .expect("UoW can record guarded effect intents"),
+        EffectIntentWriteOutcome::Recorded
+    );
     transaction.commit().await.expect("commit UoW write");
 
     let raw = fixture
@@ -152,6 +186,33 @@ async fn epoch_one_uow_write_succeeds_and_raw_write_is_rejected() {
         )
         .await;
     assert!(raw.is_err(), "the V1009 trigger rejects unproven writes");
+    let raw_stream = fixture
+        .execute(
+            "INSERT INTO ingress_sm_streams (sm_ingress_id, stream_id) VALUES (?::uuid, ?)",
+            crate::db_params![
+                SmIngressId::new().to_storage().to_string(),
+                "raw-guard-stream".to_string()
+            ],
+        )
+        .await;
+    assert!(
+        raw_stream.is_err(),
+        "the V1010 stream guard rejects unproven writes"
+    );
+    let raw_intent = fixture
+        .execute(
+            "INSERT INTO ingress_effect_intents (message_key, effect_ordinal, kind, semantic_identity_hash, payload_version, payload) VALUES (?::uuid, 0, 0, ?, 1, ?)",
+            crate::db_params![
+                message_key.to_storage().to_string(),
+                vec![0_u8; 32],
+                vec![1_u8]
+            ],
+        )
+        .await;
+    assert!(
+        raw_intent.is_err(),
+        "the V1010 effect-intent guard rejects unproven writes"
+    );
     fixture.close().await;
 }
 
@@ -643,6 +704,504 @@ async fn handled_frontier_uses_wrapping_single_step_cas() {
 }
 
 #[cfg(feature = "clustering")]
+#[tokio::test]
+async fn shadow_stream_mint_is_idempotent_per_stream_and_unique_across_streams() {
+    let Some(fixture) = Fixture::open("shadow_stream_mint").await else {
+        return;
+    };
+    let first_stream = SmSessionId::new(format!("mint-a-{}", Uuid::new_v4().simple()));
+    let second_stream = SmSessionId::new(format!("mint-b-{}", Uuid::new_v4().simple()));
+
+    let mut first = fixture.begin().await;
+    let first_id = SmIngressStreamRepository::mint(&mut first, &first_stream)
+        .await
+        .expect("mint first stream");
+    first.commit().await.expect("commit first mint");
+
+    let mut retry = fixture.begin().await;
+    let repeated_id = SmIngressStreamRepository::mint(&mut retry, &first_stream)
+        .await
+        .expect("idempotent mint");
+    let second_id = SmIngressStreamRepository::mint(&mut retry, &second_stream)
+        .await
+        .expect("mint distinct stream");
+    retry.commit().await.expect("commit repeated mints");
+
+    assert_eq!(repeated_id, first_id, "same stream keeps its ingress ID");
+    assert_ne!(
+        second_id, first_id,
+        "distinct streams have distinct ingress IDs"
+    );
+    fixture.close().await;
+}
+
+#[cfg(feature = "clustering")]
+#[tokio::test]
+async fn shadow_stream_lock_requires_the_current_transaction_fence() {
+    let Some(fixture) = Fixture::open("shadow_stream_lock").await else {
+        return;
+    };
+    let values = FixtureValues::new("shadow-stream-lock");
+    fixture.seed_claim(&values).await;
+
+    let mut transaction = fixture.begin().await;
+    let fence = ClaimRepository::assert_sm_claim(
+        &mut transaction,
+        &values.stream_id,
+        &values.owner,
+        values.claim_epoch,
+    )
+    .await
+    .expect("mint exact claim fence");
+    assert_eq!(
+        SmIngressStreamRepository::lock(&mut transaction, &fence, &values.stream_id)
+            .await
+            .expect("missing enrollment is not an error"),
+        None
+    );
+    let enrolled = SmIngressStreamRepository::mint(&mut transaction, &values.stream_id)
+        .await
+        .expect("enroll stream");
+    assert_eq!(
+        SmIngressStreamRepository::lock(&mut transaction, &fence, &values.stream_id)
+            .await
+            .expect("lock enrolled stream"),
+        Some((enrolled, 0))
+    );
+
+    let mut other = fixture.begin().await;
+    assert!(matches!(
+        SmIngressStreamRepository::lock(&mut other, &fence, &values.stream_id).await,
+        Err(IngressUowError::ClaimFenceMissing)
+    ));
+    drop(other);
+    transaction
+        .commit()
+        .await
+        .expect("commit stream enrollment");
+    fixture.close().await;
+}
+
+#[cfg(feature = "clustering")]
+#[tokio::test]
+async fn shadow_frontier_advances_idempotently_and_detects_gaps() {
+    let Some(fixture) = Fixture::open("shadow_frontier").await else {
+        return;
+    };
+    let values = FixtureValues::new("shadow-frontier");
+    fixture.seed_claim(&values).await;
+    let mut transaction = fixture.begin().await;
+    let fence = ClaimRepository::assert_sm_claim(
+        &mut transaction,
+        &values.stream_id,
+        &values.owner,
+        values.claim_epoch,
+    )
+    .await
+    .expect("mint exact claim fence");
+    let stream_id = SmIngressStreamRepository::mint(&mut transaction, &values.stream_id)
+        .await
+        .expect("enroll stream");
+    assert_eq!(
+        SmIngressStreamRepository::advance_frontier(
+            &mut transaction,
+            &fence,
+            stream_id,
+            IngressOrdinal::FIRST,
+        )
+        .await
+        .expect("advance 0 to 1"),
+        ShadowFrontierOutcome::Advanced
+    );
+    assert_eq!(
+        SmIngressStreamRepository::advance_frontier(
+            &mut transaction,
+            &fence,
+            stream_id,
+            IngressOrdinal::FIRST,
+        )
+        .await
+        .expect("replay is idempotent"),
+        ShadowFrontierOutcome::Idempotent
+    );
+    assert_eq!(
+        SmIngressStreamRepository::advance_frontier(
+            &mut transaction,
+            &fence,
+            stream_id,
+            IngressOrdinal::from_storage(3).expect("valid ordinal"),
+        )
+        .await
+        .expect("gap is observable"),
+        ShadowFrontierOutcome::Stale { stored: 1 }
+    );
+    assert_eq!(
+        SmIngressStreamRepository::advance_frontier(
+            &mut transaction,
+            &fence,
+            stream_id,
+            IngressOrdinal::from_storage(2).expect("valid ordinal"),
+        )
+        .await
+        .expect("advance 1 to 2"),
+        ShadowFrontierOutcome::Advanced
+    );
+    transaction.commit().await.expect("commit frontier updates");
+
+    let conn = fixture.db.guard().await.expect("read committed stream row");
+    let mut rows = conn
+        .query(
+            "SELECT handled_ordinal::text, row_revision::text FROM ingress_sm_streams WHERE sm_ingress_id = ?::uuid",
+            crate::db_params![stream_id.to_storage().to_string()],
+        )
+        .await
+        .expect("read shadow frontier");
+    let row = rows
+        .next()
+        .await
+        .expect("read stream row")
+        .expect("stream row exists");
+    assert_eq!(row.get::<String>(0).expect("decode frontier"), "2");
+    assert_eq!(row.get::<String>(1).expect("decode revision"), "2");
+    fixture.close().await;
+}
+
+#[cfg(feature = "clustering")]
+#[tokio::test]
+async fn every_effect_intent_kind_round_trips_through_postgres_storage() {
+    let Some(fixture) = Fixture::open("every_effect_intent_kind").await else {
+        return;
+    };
+    let message_key = MessageKey::new();
+    let intents = IngressEffectIntent::storage_round_trip_samples();
+    let expected_kinds = intents
+        .iter()
+        .map(|intent| {
+            intent
+                .with_encoded_v1(|kind, _| kind)
+                .expect("encode representative intent")
+        })
+        .collect::<std::collections::BTreeSet<_>>();
+    let mut transaction = fixture.begin().await;
+    CanonicalMessageRepository::record(&mut transaction, message_key, &digest(10))
+        .await
+        .expect("record effect parent message");
+    assert_eq!(
+        EffectIntentRepository::record_all(&mut transaction, message_key, &intents)
+            .await
+            .expect("persist every codec kind"),
+        EffectIntentWriteOutcome::Recorded
+    );
+    transaction.commit().await.expect("commit effect intents");
+
+    let conn = fixture.db.guard().await.expect("read stored effects");
+    let mut rows = conn
+        .query(
+            "SELECT kind::int, payload FROM ingress_effect_intents WHERE message_key = ?::uuid ORDER BY effect_ordinal",
+            crate::db_params![message_key.to_storage().to_string()],
+        )
+        .await
+        .expect("select stored effects");
+    let mut decoded_kinds = std::collections::BTreeSet::new();
+    while let Some(row) = rows.next().await.expect("read stored effect") {
+        let kind = i32::try_from(row.get::<i64>(0).expect("effect kind")).expect("i32 kind");
+        let payload = row.get::<Vec<u8>>(1).expect("effect payload");
+        IngressEffectIntent::decode_v1(kind, &payload).expect("decode persisted effect");
+        decoded_kinds.insert(kind);
+    }
+    assert_eq!(decoded_kinds, expected_kinds);
+    fixture.close().await;
+}
+
+#[cfg(feature = "clustering")]
+#[tokio::test]
+async fn effect_intents_are_keyed_by_semantic_identity_and_classify_existing_alias_divergence() {
+    let Some(fixture) = Fixture::open("effect_intents").await else {
+        return;
+    };
+    let message_key = MessageKey::new();
+    let intents = vec![
+        IngressEffectIntent::RouteDirect {
+            recipient: "juliet@example.com".parse().expect("valid recipient"),
+            fanout: vec!["juliet@example.com/phone".parse().expect("valid fanout")],
+            route_identity: EffectMessageIdentity::capture_ordinal(0),
+        },
+        IngressEffectIntent::InboxProject {
+            owner: "romeo@example.com".parse().expect("valid owner"),
+            mutation: InboxProjectionMutation::Direct {
+                entry: InboxEntry::new(
+                    "juliet@example.com".parse().expect("valid recipient"),
+                    ConversationKind::Direct,
+                    "stable-1",
+                    1_752_768_000,
+                )
+                .with_unread(3)
+                .with_preview("important hello"),
+                increment_unread: true,
+            },
+        },
+        IngressEffectIntent::RouteDirect {
+            recipient: "juliet@example.com".parse().expect("valid recipient"),
+            fanout: vec!["juliet@example.com/phone".parse().expect("valid fanout")],
+            route_identity: EffectMessageIdentity::capture_ordinal(0),
+        },
+    ];
+    let mut transaction = fixture.begin().await;
+    CanonicalMessageRepository::record(&mut transaction, message_key, &digest(9))
+        .await
+        .expect("record effect parent message");
+    assert_eq!(
+        EffectIntentRepository::record_all(&mut transaction, message_key, &intents)
+            .await
+            .expect("record effect intents"),
+        EffectIntentWriteOutcome::Recorded
+    );
+    transaction.commit().await.expect("commit intents");
+
+    let conn = fixture.db.guard().await.expect("read effect rows");
+    let mut rows = conn
+        .query(
+            "SELECT effect_ordinal::text, kind::int, octet_length(semantic_identity_hash) FROM ingress_effect_intents WHERE message_key = ?::uuid ORDER BY effect_ordinal",
+            crate::db_params![message_key.to_storage().to_string()],
+        )
+        .await
+        .expect("select ordered effects");
+    let mut stored = Vec::new();
+    while let Some(row) = rows.next().await.expect("read effect row") {
+        stored.push((
+            row.get::<String>(0).expect("ordinal"),
+            row.get::<i64>(1).expect("kind"),
+            row.get::<i32>(2).expect("semantic hash length"),
+        ));
+    }
+    assert_eq!(
+        stored,
+        vec![("0".to_string(), 1, 32), ("1".to_string(), 6, 32)]
+    );
+
+    let mut replay = fixture.begin().await;
+    assert_eq!(
+        EffectIntentRepository::record_all(&mut replay, message_key, &intents)
+            .await
+            .expect("byte-identical replay"),
+        EffectIntentWriteOutcome::AlreadyRecorded
+    );
+    replay.commit().await.expect("commit replay");
+
+    let differing = [IngressEffectIntent::RouteDirect {
+        recipient: "juliet@example.com".parse().expect("valid recipient"),
+        fanout: vec!["juliet@example.com/laptop".parse().expect("valid fanout")],
+        route_identity: EffectMessageIdentity::capture_ordinal(1),
+    }];
+    let mut existing_alias_divergence = fixture.begin().await;
+    assert_eq!(
+        EffectIntentRepository::record_all_existing_alias(
+            &mut existing_alias_divergence,
+            message_key,
+            &differing,
+        )
+        .await
+        .expect("existing-alias divergence should advance"),
+        EffectIntentWriteOutcome::IntentDivergence
+    );
+    existing_alias_divergence
+        .commit()
+        .await
+        .expect("commit existing-alias divergence");
+    assert_eq!(fixture.count("ingress_effect_intents").await, 2);
+
+    let subset = [IngressEffectIntent::RouteDirect {
+        recipient: "juliet@example.com".parse().expect("valid recipient"),
+        fanout: vec!["juliet@example.com/phone".parse().expect("valid fanout")],
+        route_identity: EffectMessageIdentity::capture_ordinal(0),
+    }];
+    let mut subset_divergence = fixture.begin().await;
+    assert_eq!(
+        EffectIntentRepository::record_all_existing_alias(
+            &mut subset_divergence,
+            message_key,
+            &subset,
+        )
+        .await
+        .expect("subset divergence should advance"),
+        EffectIntentWriteOutcome::IntentDivergence
+    );
+    subset_divergence
+        .commit()
+        .await
+        .expect("commit subset divergence");
+    assert_eq!(fixture.count("ingress_effect_intents").await, 2);
+
+    let mut conflict = fixture.begin().await;
+    assert!(matches!(
+        EffectIntentRepository::record_all(&mut conflict, message_key, &differing).await,
+        Err(IngressUowError::EffectIntentConflict)
+    ));
+    drop(conflict);
+
+    let empty_message_key = MessageKey::new();
+    let mut empty_original = fixture.begin().await;
+    CanonicalMessageRepository::record(&mut empty_original, empty_message_key, &digest(10))
+        .await
+        .expect("record parent with no effect intents");
+    empty_original
+        .commit()
+        .await
+        .expect("commit parent with no effect intents");
+    let mut empty_existing_alias = fixture.begin().await;
+    assert_eq!(
+        EffectIntentRepository::record_all_existing_alias(
+            &mut empty_existing_alias,
+            empty_message_key,
+            &subset,
+        )
+        .await
+        .expect("existing alias with new effects must not write"),
+        EffectIntentWriteOutcome::IntentDivergence
+    );
+    empty_existing_alias
+        .commit()
+        .await
+        .expect("commit empty existing-alias divergence");
+    assert_eq!(fixture.count("ingress_effect_intents").await, 2);
+
+    let mut missing = fixture.begin().await;
+    assert!(matches!(
+        EffectIntentRepository::record_all(&mut missing, MessageKey::new(), &intents,).await,
+        Err(IngressUowError::EffectIntentMessageMissing)
+    ));
+    drop(missing);
+    fixture.close().await;
+}
+
+#[cfg(feature = "clustering")]
+#[tokio::test]
+async fn principal_assertion_checks_each_persisted_identity_field_and_expiry() {
+    let Some(fixture) = Fixture::open("principal_assertion").await else {
+        return;
+    };
+    let values = FixtureValues::new("principal-assertion");
+    seed_principal_session(&fixture, &values.principal, None).await;
+
+    let mut happy = fixture.begin().await;
+    assert_eq!(
+        PrincipalRepository::assert_principal(&mut happy, &values.principal)
+            .await
+            .expect("assert matching principal"),
+        PrincipalAssertion::Asserted
+    );
+    happy.commit().await.expect("commit happy assertion");
+
+    for principal in [
+        AuthenticatedPrincipalRef::new(
+            "juliet@example.com"
+                .parse()
+                .expect("valid mismatched bare JID"),
+            values.principal.auth_context_id().clone(),
+            values.principal.auth_context_version(),
+            values.principal.auth_epoch(),
+        ),
+        AuthenticatedPrincipalRef::new(
+            values.principal.bare_jid().clone(),
+            AuthContextId::new(Uuid::new_v4()),
+            values.principal.auth_context_version(),
+            values.principal.auth_epoch(),
+        ),
+        AuthenticatedPrincipalRef::new(
+            values.principal.bare_jid().clone(),
+            values.principal.auth_context_id().clone(),
+            AuthContextVersion::new(values.principal.auth_context_version().get() + 1),
+            values.principal.auth_epoch(),
+        ),
+        AuthenticatedPrincipalRef::new(
+            values.principal.bare_jid().clone(),
+            values.principal.auth_context_id().clone(),
+            values.principal.auth_context_version(),
+            PrincipalAuthEpoch::new(values.principal.auth_epoch().get() + 1),
+        ),
+    ] {
+        let mut transaction = fixture.begin().await;
+        assert_eq!(
+            PrincipalRepository::assert_principal(&mut transaction, &principal)
+                .await
+                .expect("mismatched principal is an outcome"),
+            PrincipalAssertion::PrincipalAssertionFailed
+        );
+        transaction.commit().await.expect("commit failed assertion");
+    }
+
+    let expired = AuthenticatedPrincipalRef::new(
+        "mercutio@example.com".parse().expect("valid expired JID"),
+        AuthContextId::new(Uuid::new_v4()),
+        AuthContextVersion::new(1),
+        PrincipalAuthEpoch::new(1),
+    );
+    seed_principal_session(
+        &fixture,
+        &expired,
+        Some(Utc::now() - chrono::Duration::seconds(1)),
+    )
+    .await;
+    let mut transaction = fixture.begin().await;
+    assert_eq!(
+        PrincipalRepository::assert_principal(&mut transaction, &expired)
+            .await
+            .expect("expired principal is an outcome"),
+        PrincipalAssertion::PrincipalAssertionFailed
+    );
+    transaction
+        .commit()
+        .await
+        .expect("commit expired assertion");
+    fixture.close().await;
+}
+
+#[cfg(feature = "clustering")]
+#[tokio::test]
+async fn principal_assertion_observes_concurrent_session_revocation_after_lock_release() {
+    let Some(fixture) = Fixture::open("principal_revocation").await else {
+        return;
+    };
+    let values = FixtureValues::new("principal-revocation");
+    let session_id = seed_principal_session(&fixture, &values.principal, None).await;
+    let mut connection = sqlx::PgConnection::connect(&fixture.schema_url)
+        .await
+        .expect("open revocation connection");
+    let mut blocker = connection
+        .begin()
+        .await
+        .expect("begin revocation transaction");
+    sqlx::query("DELETE FROM sessions WHERE id = $1")
+        .bind(&session_id)
+        .execute(&mut *blocker)
+        .await
+        .expect("stage session revocation");
+
+    let uow = fixture.uow();
+    let principal = values.principal.clone();
+    let assertion = tokio::spawn(async move {
+        let mut transaction = uow.begin().await.expect("begin assertion transaction");
+        let outcome = PrincipalRepository::assert_principal(&mut transaction, &principal).await;
+        drop(transaction);
+        outcome
+    });
+    wait_for_lock_waiter(&fixture.admin, "SELECT expires_at FROM sessions").await;
+    assert!(
+        !assertion.is_finished(),
+        "share assertion waits for deletion lock"
+    );
+    blocker.commit().await.expect("commit revocation");
+    assert_eq!(
+        assertion
+            .await
+            .expect("join assertion task")
+            .expect("read revoked principal"),
+        PrincipalAssertion::PrincipalAssertionFailed
+    );
+    fixture.close().await;
+}
+
+#[cfg(feature = "clustering")]
 async fn write_spanning_rows(transaction: &mut IngressUowTransaction<'_>, values: &FixtureValues) {
     store_mam_message(transaction, values).await;
     upsert_inbox_entry(transaction, values).await;
@@ -811,12 +1370,14 @@ impl FixtureValues {
 struct Fixture {
     db: Database,
     uow: PostgresIngressUnitOfWork,
+    #[cfg(feature = "clustering")]
     lineage: LineageConfig,
     /// The canonical identity source bound into `uow` (clustering only).
     #[cfg(feature = "clustering")]
     node_identity: SharedNodeIdentity,
     admin: sqlx::PgPool,
     schema: String,
+    #[cfg(feature = "clustering")]
     schema_url: String,
 }
 
@@ -867,11 +1428,13 @@ impl Fixture {
         Some(Self {
             db,
             uow,
+            #[cfg(feature = "clustering")]
             lineage,
             #[cfg(feature = "clustering")]
             node_identity,
             admin,
             schema,
+            #[cfg(feature = "clustering")]
             schema_url,
         })
     }
@@ -1043,6 +1606,7 @@ impl Fixture {
         rows.next().await.expect("read committed row").is_some()
     }
 
+    #[cfg(feature = "clustering")]
     async fn count(&self, table: &str) -> i64 {
         let conn = self.db.guard().await.expect("database guard");
         let mut rows = conn
@@ -1098,6 +1662,8 @@ impl Fixture {
 }
 
 async fn initialize_existing_store_schemas(db: &Database, schema_url: &str) {
+    #[cfg(not(feature = "clustering"))]
+    let _ = db;
     #[cfg(feature = "clustering")]
     {
         let claims = crate::clustering::claims::PostgresClaimStore::new(db.clone());
@@ -1126,6 +1692,48 @@ fn fixture_lineage_config() -> LineageConfig {
         ),
         action: None,
     }
+}
+
+#[cfg(feature = "clustering")]
+async fn seed_principal_session(
+    fixture: &Fixture,
+    principal: &AuthenticatedPrincipalRef,
+    expires_at: Option<chrono::DateTime<Utc>>,
+) -> String {
+    let user_jid = principal.bare_jid().to_string();
+    let suffix = Uuid::new_v4().simple().to_string();
+    fixture
+        .execute(
+            "INSERT INTO users (jid, username, xmpp_localpart, created_at, updated_at) VALUES (?, ?, ?, ?, ?)",
+            crate::db_params![
+                user_jid.clone(),
+                format!("principal-{suffix}"),
+                format!("principal-{suffix}"),
+                Utc::now().to_rfc3339(),
+                Utc::now().to_rfc3339(),
+            ],
+        )
+        .await
+        .expect("seed principal user");
+    let session_id = format!("principal-session-{suffix}");
+    fixture
+        .execute(
+            "INSERT INTO sessions (id, user_jid, token_hash, auth_context_id, auth_context_version, principal_auth_epoch, expires_at, created_at, last_used_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            crate::db_params![
+                session_id.clone(),
+                user_jid,
+                format!("principal-token-{suffix}"),
+                principal.auth_context_id().as_uuid().to_string(),
+                i64::try_from(principal.auth_context_version().get()).expect("version fits i64"),
+                i64::try_from(principal.auth_epoch().get()).expect("epoch fits i64"),
+                expires_at.map(|value| value.to_rfc3339()),
+                Utc::now().to_rfc3339(),
+                Utc::now().to_rfc3339(),
+            ],
+        )
+        .await
+        .expect("seed principal session");
+    session_id
 }
 
 #[cfg(feature = "clustering")]

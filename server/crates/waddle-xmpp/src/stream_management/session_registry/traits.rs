@@ -2,6 +2,7 @@ use async_trait::async_trait;
 use thiserror::Error;
 
 use super::DetachedSession;
+use crate::pending_delivery::SmSessionId;
 
 /// Error type for SM session registry operations.
 #[derive(Debug, Error)]
@@ -17,6 +18,33 @@ pub enum SmRegistryError {
 
     #[error("Internal error: {0}")]
     Internal(String),
+}
+
+/// One exact SM replay entry deleted by a tombstone scrub.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct TombstoneScrubbedSmEntry {
+    pub stream_id: SmSessionId,
+    pub sequence: u32,
+}
+
+/// Exact identities deleted by an SM tombstone scrub.
+///
+/// `removed_count` preserves the existing count-returning contract while
+/// `entries` lets callers capture the exact replay rows removed when an
+/// implementation can provide them.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TombstoneScrubbedSmEntries {
+    pub removed_count: usize,
+    pub entries: Vec<TombstoneScrubbedSmEntry>,
+}
+
+impl TombstoneScrubbedSmEntries {
+    pub fn count_only(removed_count: usize) -> Self {
+        Self {
+            removed_count,
+            entries: Vec::new(),
+        }
+    }
 }
 /// Trait for SM session registries.
 ///
@@ -90,6 +118,22 @@ pub trait SmSessionRegistry: Send + Sync {
         _target: &crate::tombstone::TombstoneTarget,
     ) -> Result<usize, SmRegistryError> {
         Ok(0)
+    }
+
+    /// Typed sibling of [`Self::scrub_unacked_for_tombstone`] that returns
+    /// exact `(stream, sequence)` identities when the implementation can
+    /// provide them.
+    ///
+    /// Default impl preserves source compatibility for older backends by
+    /// delegating to the existing count-only method and returning no entry
+    /// identities.
+    async fn scrub_unacked_for_tombstone_with_entries(
+        &self,
+        target: &crate::tombstone::TombstoneTarget,
+    ) -> Result<TombstoneScrubbedSmEntries, SmRegistryError> {
+        Ok(TombstoneScrubbedSmEntries::count_only(
+            self.scrub_unacked_for_tombstone(target).await?,
+        ))
     }
 }
 

@@ -1,5 +1,6 @@
 use super::*;
 use std::sync::Arc;
+use waddle_xmpp::ingress::IngressEffectIntent;
 use waddle_xmpp::protocol::TimerId;
 
 /// Per-stanza origin provenance needed to build an ordered-relay envelope.
@@ -67,6 +68,11 @@ pub struct InterpretOutcome {
     /// wire stanza it extracts BEFORE interpreting, so live/MAM id
     /// parity holds under origin-id retries.
     pub(crate) archive_id_rewrites: Vec<ArchiveIdRewrite>,
+    /// Count of [`OutboundEvent::RouteToConnection`] events that reached the
+    /// final interpreter boundary for this batch. `dispatch_to_room` uses this
+    /// to capture room fanout only when routing actually survived later
+    /// archive/subject suppression.
+    pub(crate) route_to_connection_events: u32,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -181,12 +187,42 @@ pub struct Deps<'a> {
     /// failed delivery. `None` in unit tests that don't exercise the
     /// call bounce path and in deployments without an SFU.
     pub sfu: Option<&'a dyn waddle_sfu::SfuService>,
+    /// Typed, infallible capture handle for the shadow ingress seam.
+    /// `None` on paths that are intentionally outside the message-ingress
+    /// capture surface (tests, replay, IQ/presence).
+    pub ingress_effect_capture: Option<crate::ingress_shadow::IngressEffectCapture>,
 }
 
 impl<'a> Deps<'a> {
     pub fn with_ordered_relay_origin(mut self, origin: Option<OrderedRelayRouteOrigin>) -> Self {
         self.ordered_relay_origin = origin;
         self
+    }
+
+    pub fn with_ingress_effect_capture(
+        mut self,
+        capture: Option<crate::ingress_shadow::IngressEffectCapture>,
+    ) -> Self {
+        self.ingress_effect_capture = capture;
+        self
+    }
+
+    pub fn capture_intent(&self, intent: IngressEffectIntent) {
+        if let Some(capture) = self.ingress_effect_capture.as_ref() {
+            capture.record_intent(intent);
+        }
+    }
+
+    pub fn capture_recipient_sm_append(&self, stream: waddle_xmpp::pending_delivery::SmSessionId) {
+        if let Some(capture) = self.ingress_effect_capture.as_ref() {
+            capture.record_recipient_sm_append(stream);
+        }
+    }
+
+    pub fn capture_marker(&self, marker: crate::ingress_shadow::ShadowDecisionMarker) {
+        if let Some(capture) = self.ingress_effect_capture.as_ref() {
+            capture.record_marker(marker);
+        }
     }
 
     /// Build a minimal `Deps` with only the connection registry — a
@@ -212,6 +248,7 @@ impl<'a> Deps<'a> {
             pending_delivery_storage: None,
             ordered_relay_origin: None,
             sfu: None,
+            ingress_effect_capture: None,
         }
     }
 
@@ -242,6 +279,7 @@ impl<'a> Deps<'a> {
             pending_delivery_storage: None,
             ordered_relay_origin: None,
             sfu: None,
+            ingress_effect_capture: None,
         }
     }
 
@@ -270,6 +308,7 @@ impl<'a> Deps<'a> {
             pending_delivery_storage: None,
             ordered_relay_origin: None,
             sfu: None,
+            ingress_effect_capture: None,
         }
     }
 
@@ -296,6 +335,7 @@ impl<'a> Deps<'a> {
             pending_delivery_storage: None,
             ordered_relay_origin: None,
             sfu: None,
+            ingress_effect_capture: None,
         }
     }
 }

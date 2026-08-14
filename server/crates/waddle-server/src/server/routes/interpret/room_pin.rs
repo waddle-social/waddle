@@ -126,7 +126,7 @@ async fn apply_pin(deps: &Deps<'_>, room: BareJid, request: PinChangeRequest, re
 
     let applied = match room_actor
         .ask(ApplyPin {
-            change: PinStateChange::Pin(entry),
+            change: PinStateChange::Pin(entry.clone()),
         })
         .await
     {
@@ -143,6 +143,10 @@ async fn apply_pin(deps: &Deps<'_>, room: BareJid, request: PinChangeRequest, re
     if !applied {
         return;
     }
+    deps.capture_intent(IngressEffectIntent::Pin {
+        room: room.clone(),
+        mutation: waddle_xmpp::ingress::RoomPinMutation::Pin { entry },
+    });
 
     let system_message = build_pinned_system_message(
         &room,
@@ -201,6 +205,12 @@ async fn apply_unpin(
     if !applied {
         return;
     }
+    deps.capture_intent(IngressEffectIntent::Pin {
+        room: room.clone(),
+        mutation: waddle_xmpp::ingress::RoomPinMutation::Unpin {
+            target_stanza_id: target_stanza_id.clone(),
+        },
+    });
 
     let system_message = build_unpinned_system_message(
         &room,
@@ -371,4 +381,72 @@ pub(super) async fn cascade_retraction_to_pin_list(
         recursion_depth,
     )
     .await;
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::ingress_shadow::IngressEffectCapture;
+    use crate::server::routes::interpret::Deps;
+    use waddle_xmpp_core::xep0359::StanzaId;
+
+    #[tokio::test]
+    async fn missing_room_actor_does_not_capture_pin_intent() {
+        let registry = ConnectionRegistry::new();
+        let capture = IngressEffectCapture::new(None);
+        let mut deps = Deps::registry_only(&registry);
+        deps.ingress_effect_capture = Some(capture.clone());
+        let room: BareJid = "room@muc.example.com".parse().expect("room");
+
+        apply_pin_change_event(
+            &deps,
+            room.clone(),
+            PinChangeRequest::Pin {
+                target_stanza_id: StanzaId::new("pin-target", jid::Jid::from(room.clone())),
+                pinner_jid: "alice@example.com".parse().expect("pinner"),
+                pinner_nick: "alice".to_string(),
+                pinned_at: chrono::Utc::now(),
+            },
+            0,
+        )
+        .await;
+
+        assert!(
+            !capture.snapshot().intents.iter().any(|intent| matches!(
+                intent,
+                IngressEffectIntent::Pin { room: captured_room, .. } if captured_room == &room
+            )),
+            "pin capture must not survive a missing room actor",
+        );
+    }
+
+    #[tokio::test]
+    async fn missing_room_actor_does_not_capture_unpin_intent() {
+        let registry = ConnectionRegistry::new();
+        let capture = IngressEffectCapture::new(None);
+        let mut deps = Deps::registry_only(&registry);
+        deps.ingress_effect_capture = Some(capture.clone());
+        let room: BareJid = "room@muc.example.com".parse().expect("room");
+
+        apply_pin_change_event(
+            &deps,
+            room.clone(),
+            PinChangeRequest::Unpin {
+                target_stanza_id: StanzaId::new("pin-target", jid::Jid::from(room.clone())),
+                pinner_jid: "alice@example.com".parse().expect("pinner"),
+                pinner_nick: "alice".to_string(),
+                reason: Some("manual".to_string()),
+            },
+            0,
+        )
+        .await;
+
+        assert!(
+            !capture.snapshot().intents.iter().any(|intent| matches!(
+                intent,
+                IngressEffectIntent::Pin { room: captured_room, .. } if captured_room == &room
+            )),
+            "unpin capture must not survive a missing room actor",
+        );
+    }
 }

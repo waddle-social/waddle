@@ -79,6 +79,7 @@ fn detached_session_with_unacked(
         user_id: "alice".to_string(),
         jid,
         inbound_count: 0,
+        shadow_ordinal: waddle_xmpp::stream_management::ShadowOrdinal::ZERO,
         outbound_count: unacked_xml.len() as u32,
         last_acked: 0,
         replay_gap_through: None,
@@ -772,6 +773,7 @@ async fn promoted_pending_row_carries_per_stanza_original_receipt_at() {
         user_id: "alice".to_string(),
         jid: full("alice@example.com/laptop"),
         inbound_count: 0,
+        shadow_ordinal: waddle_xmpp::stream_management::ShadowOrdinal::ZERO,
         outbound_count: 1,
         last_acked: 0,
         replay_gap_through: None,
@@ -1002,6 +1004,7 @@ async fn restart_outlasting_resume_window_promotes_queue_into_pending_delivery()
             user_id: "alice".to_string(),
             jid: full("alice@example.com/laptop"),
             inbound_count: 0,
+            shadow_ordinal: waddle_xmpp::stream_management::ShadowOrdinal::ZERO,
             outbound_count: 1,
             last_acked: 0,
             replay_gap_through: None,
@@ -1111,7 +1114,7 @@ async fn displaced_sessions_are_promoted_and_confirmed() {
     let registry = ConnectionRegistry::new();
     let user_registry = test_user_registry();
     let blocking: Arc<dyn BlockingStorage> = Arc::new(InMemoryBlockingStorage::new());
-    promote_displaced_sessions(
+    let outcome = promote_displaced_sessions(
         displaced,
         DisplacedPromotionDeps {
             sm_registry: &sm_registry,
@@ -1124,6 +1127,13 @@ async fn displaced_sessions_are_promoted_and_confirmed() {
     )
     .await;
 
+    // Terminal completion is reported so callers evict per-stream state
+    // (the ingress-shadow enrollment gate) that nothing else will ever
+    // see again.
+    assert_eq!(
+        outcome.completed_stream_ids().collect::<Vec<_>>(),
+        vec!["stream-oldest"],
+    );
     // The displaced queue landed in pending delivery — no message lost.
     assert_eq!(pending.count(&bare("alice@example.com")).await.unwrap(), 1);
     // Confirmed: durable SM rows for the displaced session are gone.

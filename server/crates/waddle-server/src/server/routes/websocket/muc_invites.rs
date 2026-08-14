@@ -54,7 +54,9 @@ pub(crate) struct OutstandingInvite {
 /// delivery (and, for offline invitees, another pending-delivery row).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum RecordOutcome {
-    New,
+    New {
+        created_at: chrono::DateTime<chrono::Utc>,
+    },
     AlreadyOutstanding,
 }
 
@@ -87,6 +89,7 @@ pub(crate) async fn record_invite(
         })
         .await
         .map_err(|error| error.to_string())?;
+    let created_at = chrono::Utc::now();
     let affected = actor
         .ask(DbExecute {
             sql: "INSERT INTO muc_pending_invites (room_jid, invitee_jid, inviter_jid, \
@@ -98,14 +101,14 @@ pub(crate) async fn record_invite(
                 invite.room.to_string().into(),
                 invite.invitee.to_string().into(),
                 invite.inviter.to_string().into(),
-                chrono::Utc::now().to_rfc3339().into(),
+                created_at.to_rfc3339().into(),
                 expiry_cutoff().into(),
             ],
         })
         .await
         .map_err(|error| error.to_string())?;
     if affected > 0 {
-        Ok(RecordOutcome::New)
+        Ok(RecordOutcome::New { created_at })
     } else {
         Ok(RecordOutcome::AlreadyOutstanding)
     }

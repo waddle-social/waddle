@@ -1,4 +1,5 @@
 use super::*;
+use waddle_xmpp::ingress::RelayTargetIdentity;
 
 #[derive(Debug, Clone)]
 pub(crate) enum OrderedRelayMucProxyOutcome {
@@ -7,6 +8,18 @@ pub(crate) enum OrderedRelayMucProxyOutcome {
     Dropped,
     MaybeCommitted,
     JoinMaybeCommitted,
+}
+
+#[derive(Debug, Clone)]
+pub(crate) struct MucProxyRouteAttempt {
+    /// Absent only when a refreshed claim resolved locally and delivery was
+    /// already completed on this node, so no remote dispatch may be captured.
+    pub relay_target: Option<RelayTargetIdentity>,
+    /// Immutable room claim that authorized this proxy attempt's final
+    /// delivery.  Absent where a remote-resource origin owns the route and
+    /// the local bridge cannot observe the room claim.
+    pub room_fence: Option<waddle_xmpp::muc::RoomClaimFenceContext>,
+    pub outcome: OrderedRelayMucProxyOutcome,
 }
 
 /// Typed routing decision for a MUC proxy attempt (#1249). The old
@@ -23,7 +36,7 @@ pub(crate) enum OrderedRelayMucProxyOutcome {
 #[derive(Debug, Clone)]
 pub(crate) enum MucProxyRouteDecision {
     /// An ordered-relay send was attempted; the payload is its result.
-    Attempted(OrderedRelayMucProxyOutcome),
+    Attempted(MucProxyRouteAttempt),
     /// The room claim is owned by THIS node — the local room path is
     /// authoritative and handles the stanza. Benign for cleanup: the
     /// local `LeaveByRealJid` loop converges the occupancy.
@@ -51,7 +64,7 @@ impl MucProxyRouteDecision {
     /// variants), exactly matching the pre-#1249 `Option` contract.
     pub(super) fn into_attempted(self) -> Option<OrderedRelayMucProxyOutcome> {
         match self {
-            MucProxyRouteDecision::Attempted(outcome) => Some(outcome),
+            MucProxyRouteDecision::Attempted(attempt) => Some(attempt.outcome),
             MucProxyRouteDecision::LocalRoom
             | MucProxyRouteDecision::RoomUnclaimed
             | MucProxyRouteDecision::RoomClaimUnavailable

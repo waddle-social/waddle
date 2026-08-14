@@ -390,6 +390,7 @@ async fn cleanup_connection_shutdown_inner(
     // promotes this task's already accepted delivery and leaves those shared
     // resources alone.
     if superseded && !conn.sm_recovery_required {
+        forget_terminal_shadow_stream(state, &conn.sm_state);
         return ConnectionShutdownOutcome::NotPersisted;
     }
     // Note: we deliberately do NOT mirror `conn.phase` Closing into
@@ -423,6 +424,7 @@ async fn cleanup_connection_shutdown_inner(
         }
         let Some(owner) = conn.registry_owner.as_ref() else {
             debug!(jid = %jid, "Skipped SM detach for connection without registry ownership");
+            forget_terminal_shadow_stream(state, &conn.sm_state);
             return ConnectionShutdownOutcome::NotPersisted;
         };
         let presence_state = state
@@ -441,6 +443,7 @@ async fn cleanup_connection_shutdown_inner(
             }
             super::stream_management::defer_superseded_sm_claim(state, &conn.sm_state);
             debug!(jid = %jid, "Skipped SM detach for non-owned registry entry");
+            forget_terminal_shadow_stream(state, &conn.sm_state);
             return ConnectionShutdownOutcome::NotPersisted;
         };
 
@@ -495,6 +498,23 @@ async fn cleanup_connection_shutdown_inner(
                 .pending_subscribes_flushed
                 .load(std::sync::atomic::Ordering::Acquire),
         };
+        if let Some(stream_id) = conn.sm_state.stream_id.as_deref() {
+            let stream_id = waddle_xmpp::pending_delivery::SmSessionId::new(stream_id);
+            if !state
+                .deps
+                .protocol
+                .ingress_shadow
+                .wait_for_stream_idle(&stream_id, std::time::Duration::from_secs(30))
+                .await
+            {
+                warn!(
+                    jid = %jid,
+                    %stream_id,
+                    "refusing resumable SM handoff with unfinished ingress shadow work"
+                );
+                return promote_terminal_recovery(state, outbound_rx, &jid, conn).await;
+            }
+        }
         if let Some(detached) = conn.sm_state.to_detached_session(detached_snapshot.clone()) {
             if conn.sm_recovery_required {
                 // The batch writer stopped before accepting the unwritten
@@ -613,7 +633,7 @@ async fn cleanup_connection_shutdown_inner(
                             .await
                         {
                             Ok(Some(displaced)) => {
-                                crate::sm_promotion::promote_displaced_sessions(
+                                let outcome = crate::sm_promotion::promote_displaced_sessions(
                                     vec![displaced],
                                     crate::sm_promotion::DisplacedPromotionDeps {
                                         sm_registry: &state.deps.protocol.sm_session_registry,
@@ -635,6 +655,11 @@ async fn cleanup_connection_shutdown_inner(
                                     },
                                 )
                                 .await;
+                                for completed in outcome.completed_stream_ids() {
+                                    state.deps.protocol.ingress_shadow.forget_stream(
+                                        &waddle_xmpp::pending_delivery::SmSessionId::new(completed),
+                                    );
+                                }
                             }
                             Ok(None) => {}
                             Err(error) => {
@@ -783,6 +808,7 @@ async fn cleanup_connection_shutdown_inner(
                 }
                 Err(err) => {
                     warn!(jid = %jid, error = %err, "Failed to detach SM session; falling back to full cleanup");
+                    forget_terminal_shadow_stream(state, &conn.sm_state);
                     let detach_fail_removed = state
                         .deps
                         .protocol
@@ -863,7 +889,22 @@ async fn cleanup_connection_shutdown_inner(
     }
     // Every path reaching here is a non-detach (full-cleanup or no-op)
     // teardown — never a persisted resumable snapshot.
+    forget_terminal_shadow_stream(state, &conn.sm_state);
     ConnectionShutdownOutcome::NotPersisted
+}
+
+fn forget_terminal_shadow_stream(
+    state: &WebSocketState,
+    sm_state: &waddle_xmpp::stream_management::StreamManagementState,
+) {
+    let Some(stream_id) = sm_state.stream_id.as_deref() else {
+        return;
+    };
+    state
+        .deps
+        .protocol
+        .ingress_shadow
+        .forget_stream(&waddle_xmpp::pending_delivery::SmSessionId::new(stream_id));
 }
 
 /// Promote terminal recovery without creating a resumable snapshot. This is
@@ -1507,6 +1548,7 @@ async fn refuse_detach_without_principal(
     row_recovery: TerminalRowRecovery,
     terminal_route_removal: TerminalRouteRemoval,
 ) -> ConnectionShutdownOutcome {
+    forget_terminal_shadow_stream(state, &conn.sm_state);
     // A terminal session must disappear from the exact-FullJID routing table
     // before promotion. Otherwise `send_to` can successfully target this
     // closed channel and drop a <no-store/> stanza instead of taking the
@@ -1582,6 +1624,13 @@ async fn refuse_detach_without_principal(
             },
         )
         .await;
+        for completed in outcome.completed_stream_ids() {
+            state
+                .deps
+                .protocol
+                .ingress_shadow
+                .forget_stream(&waddle_xmpp::pending_delivery::SmSessionId::new(completed));
+        }
         (
             conn.sm_state
                 .stream_id
@@ -2011,17 +2060,19 @@ fn remote_muc_cleanup_disposition(
 ) -> RemoteMucCleanupDisposition {
     use crate::clustering::route_bridge::{MucProxyRouteDecision, OrderedRelayMucProxyOutcome};
     match decision {
-        MucProxyRouteDecision::Attempted(OrderedRelayMucProxyOutcome::Delivered(_)) => {
-            RemoteMucCleanupDisposition::Converged
+        MucProxyRouteDecision::Attempted(attempt) => match &attempt.outcome {
+            OrderedRelayMucProxyOutcome::Delivered(_) => RemoteMucCleanupDisposition::Converged,
+            OrderedRelayMucProxyOutcome::MaybeCommitted
+            | OrderedRelayMucProxyOutcome::JoinMaybeCommitted => {
+                RemoteMucCleanupDisposition::UncertainCommit
+            }
+            OrderedRelayMucProxyOutcome::Unavailable | OrderedRelayMucProxyOutcome::Dropped => {
+                RemoteMucCleanupDisposition::RetryableFailure
+            }
+        },
+        MucProxyRouteDecision::RoomClaimUnavailable | MucProxyRouteDecision::OriginUnavailable => {
+            RemoteMucCleanupDisposition::RetryableFailure
         }
-        MucProxyRouteDecision::Attempted(OrderedRelayMucProxyOutcome::MaybeCommitted)
-        | MucProxyRouteDecision::Attempted(OrderedRelayMucProxyOutcome::JoinMaybeCommitted) => {
-            RemoteMucCleanupDisposition::UncertainCommit
-        }
-        MucProxyRouteDecision::Attempted(OrderedRelayMucProxyOutcome::Unavailable)
-        | MucProxyRouteDecision::Attempted(OrderedRelayMucProxyOutcome::Dropped)
-        | MucProxyRouteDecision::RoomClaimUnavailable
-        | MucProxyRouteDecision::OriginUnavailable => RemoteMucCleanupDisposition::RetryableFailure,
         MucProxyRouteDecision::LocalRoom | MucProxyRouteDecision::RoomUnclaimed => {
             RemoteMucCleanupDisposition::NoRemoteOccupancy
         }
@@ -2181,6 +2232,12 @@ pub(super) async fn cleanup_invalidated_detached_session(
     detached: waddle_xmpp::stream_management::DetachedSession,
     replacement_owner: Option<&std::sync::Arc<std::sync::atomic::AtomicBool>>,
 ) {
+    // Terminal invalidation: this stream can never resume, so its ingress-
+    // shadow enrollment gate must not outlive it (a fresh bind mints a new
+    // stream id, and the expiry janitor never sees an invalidated session).
+    state.deps.protocol.ingress_shadow.forget_stream(
+        &waddle_xmpp::pending_delivery::SmSessionId::new(detached.stream_id.clone()),
+    );
     // `entry_if_owner` is a READ-ONLY ownership check — it does NOT remove the
     // DashMap entry. It gates whether we attempt cleanup at all: if the
     // replacement (the freshly-bound session that triggered this invalidation)
@@ -2775,8 +2832,9 @@ mod eviction_tests {
     #[test]
     fn remote_muc_cleanup_success_leaves_fresh_join_untouched() {
         use crate::clustering::route_bridge::{
-            MucProxyRouteDecision, OrderedRelayMucProxyOutcome::Delivered,
+            MucProxyRouteAttempt, MucProxyRouteDecision, OrderedRelayMucProxyOutcome::Delivered,
         };
+        use waddle_xmpp::ingress::RelayTargetIdentity;
 
         let memberships = crate::server::routes::websocket::state::RemoteMucMemberships::default();
         let occupant = full_jid("alice@example.com/web");
@@ -2791,7 +2849,11 @@ mod eviction_tests {
         memberships.record_join(&occupant, &room, "fresh-nick");
         assert_eq!(
             remote_muc_cleanup_disposition(&MucProxyRouteDecision::Attempted(
-                Delivered(Vec::new())
+                MucProxyRouteAttempt {
+                    relay_target: Some(RelayTargetIdentity::relay_node("relay-node")),
+                    room_fence: None,
+                    outcome: Delivered(Vec::new()),
+                }
             )),
             RemoteMucCleanupDisposition::Converged
         );
@@ -3004,7 +3066,18 @@ mod eviction_tests {
 #[cfg(all(test, feature = "clustering"))]
 mod remote_muc_cleanup_disposition_tests {
     use super::{remote_muc_cleanup_disposition, RemoteMucCleanupDisposition};
-    use crate::clustering::route_bridge::{MucProxyRouteDecision, OrderedRelayMucProxyOutcome};
+    use crate::clustering::route_bridge::{
+        MucProxyRouteAttempt, MucProxyRouteDecision, OrderedRelayMucProxyOutcome,
+    };
+    use waddle_xmpp::ingress::RelayTargetIdentity;
+
+    fn attempted(outcome: OrderedRelayMucProxyOutcome) -> MucProxyRouteDecision {
+        MucProxyRouteDecision::Attempted(MucProxyRouteAttempt {
+            relay_target: Some(RelayTargetIdentity::relay_node("relay-node")),
+            room_fence: None,
+            outcome,
+        })
+    }
 
     /// #1249: the benign "room claim locally owned" and definitive
     /// "room unclaimed anywhere" cases converge by FORGETTING the
@@ -3030,8 +3103,8 @@ mod remote_muc_cleanup_disposition_tests {
         for decision in [
             MucProxyRouteDecision::OriginUnavailable,
             MucProxyRouteDecision::RoomClaimUnavailable,
-            MucProxyRouteDecision::Attempted(OrderedRelayMucProxyOutcome::Unavailable),
-            MucProxyRouteDecision::Attempted(OrderedRelayMucProxyOutcome::Dropped),
+            attempted(OrderedRelayMucProxyOutcome::Unavailable),
+            attempted(OrderedRelayMucProxyOutcome::Dropped),
         ] {
             assert_eq!(
                 remote_muc_cleanup_disposition(&decision),
@@ -3044,9 +3117,9 @@ mod remote_muc_cleanup_disposition_tests {
     #[test]
     fn delivered_converges_and_uncertain_commit_retries_quietly() {
         assert_eq!(
-            remote_muc_cleanup_disposition(&MucProxyRouteDecision::Attempted(
-                OrderedRelayMucProxyOutcome::Delivered(Vec::new()),
-            )),
+            remote_muc_cleanup_disposition(&attempted(OrderedRelayMucProxyOutcome::Delivered(
+                Vec::new(),
+            ))),
             RemoteMucCleanupDisposition::Converged
         );
         for outcome in [
@@ -3054,7 +3127,7 @@ mod remote_muc_cleanup_disposition_tests {
             OrderedRelayMucProxyOutcome::JoinMaybeCommitted,
         ] {
             assert_eq!(
-                remote_muc_cleanup_disposition(&MucProxyRouteDecision::Attempted(outcome)),
+                remote_muc_cleanup_disposition(&attempted(outcome)),
                 RemoteMucCleanupDisposition::UncertainCommit
             );
         }

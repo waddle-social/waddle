@@ -1,5 +1,6 @@
 use super::*;
 use std::{future::Future, pin::Pin};
+use waddle_xmpp::ingress::IngressEffectIntent;
 use waddle_xmpp::telemetry::call::PendingCallSetupRoute;
 use xmpp_parsers::iq::Iq;
 
@@ -81,6 +82,46 @@ async fn select_bare_jid_live_targets(deps: &Deps<'_>, bare: &BareJid) -> Vec<ji
         .into_iter()
         .filter(|full| !negative.contains(full))
         .collect()
+}
+
+fn capture_route_direct_intent(
+    deps: &Deps<'_>,
+    recipient: &BareJid,
+    mut fanout: Vec<jid::FullJid>,
+) {
+    if fanout.is_empty() {
+        return;
+    }
+    fanout.sort_by_key(ToString::to_string);
+    fanout.dedup();
+    let Some(ref capture) = deps.ingress_effect_capture else {
+        return;
+    };
+    deps.capture_intent(IngressEffectIntent::RouteDirect {
+        recipient: recipient.clone(),
+        fanout,
+        route_identity: capture.next_route_identity(),
+    });
+}
+
+fn is_definitive_route_capture_outcome(outcome: FullJidDeliveryOutcome) -> bool {
+    matches!(
+        outcome,
+        FullJidDeliveryOutcome::Delivered | FullJidDeliveryOutcome::QueuedDetached
+    )
+}
+
+#[cfg(feature = "clustering")]
+fn capture_remote_recipient_sm_appends(
+    deps: &Deps<'_>,
+    streams: Vec<waddle_xmpp::pending_delivery::SmSessionId>,
+) {
+    let Some(capture) = deps.ingress_effect_capture.as_ref() else {
+        return;
+    };
+    for stream in streams {
+        capture.record_recipient_sm_append(stream);
+    }
 }
 
 pub(crate) async fn route_to_connection(
@@ -257,8 +298,8 @@ async fn route_to_full_jid(
     }
     // #1488 ticket ownership: the ordered-relay path owns and closes
     // the call-setup ticket whenever it handles the delivery
-    // (`Some`) — its deferred-handoff branch returns a synthetic
-    // `Delivered` immediately and only learns the real disposition in
+    // (`Some`) — its deferred-handoff branch returns synthetic
+    // `MaybeCommitted` immediately and only learns the real disposition in
     // a spawned completion task, so the close must happen there, not
     // here. When the relay declines (`None`), the local delivery path
     // closes the ticket from its own outcome via the shared
@@ -346,7 +387,12 @@ async fn route_dm_to_full_jid(
             // Confirmed offline on the owning node → §8.5.3.2.1
             // fallback below.
         }
-        Some(_) => return Vec::new(),
+        Some(outcome) => {
+            if is_definitive_route_capture_outcome(outcome) {
+                capture_route_direct_intent(deps, &full.to_bare(), vec![full.clone()]);
+            }
+            return Vec::new();
+        }
         None => {
             // Registered-remote-resource path (clustering): same
             // outcome contract as the ordered relay.
@@ -359,7 +405,12 @@ async fn route_dm_to_full_jid(
             .await
             {
                 Some(FullJidDeliveryOutcome::Unavailable) => {}
-                Some(_) => return Vec::new(),
+                Some(outcome) => {
+                    if is_definitive_route_capture_outcome(outcome) {
+                        capture_route_direct_intent(deps, &full.to_bare(), vec![full.clone()]);
+                    }
+                    return Vec::new();
+                }
                 None => {
                     // Local live-channel attempt with the detached
                     // fallback SUPPRESSED: a detached hit must go
@@ -378,6 +429,9 @@ async fn route_dm_to_full_jid(
                     let live_outcome =
                         deliver_peer_to_live_only(deps.user_registry, &full, stanza.as_ref()).await;
                     if live_outcome != FullJidDeliveryOutcome::Unavailable {
+                        if is_definitive_route_capture_outcome(live_outcome) {
+                            capture_route_direct_intent(deps, &full.to_bare(), vec![full.clone()]);
+                        }
                         return Vec::new();
                     }
                 }
@@ -422,14 +476,19 @@ async fn route_dm_to_full_jid(
                 side_routes,
             } => {
                 if let Some(processed) = processed {
-                    let not_queued = queue_processed_for_detached(
+                    let (queued_for_replay, not_queued) = queue_processed_for_detached(
                         deps.sm_session_registry,
+                        deps.ingress_effect_capture.as_ref(),
                         vec![full.clone()],
                         &std::collections::HashSet::new(),
                         &processed,
                     )
                     .await;
-                    retry_unqueued_detached_as_live(deps, not_queued, &processed).await;
+                    let mut captured_fanout = queued_for_replay;
+                    let retried_live =
+                        retry_unqueued_detached_as_live(deps, not_queued, &processed).await;
+                    captured_fanout.extend(retried_live);
+                    capture_route_direct_intent(deps, &bare, captured_fanout);
                 } else {
                     debug!(
                         jid = %full,
@@ -461,8 +520,21 @@ async fn route_dm_to_full_jid(
                 }
                 // Shared pass unavailable (no dispatcher in test
                 // fixtures): fall back to the legacy verbatim queueing
-                // so the message is not lost while resumable.
-                deliver_to_detached(deps.sm_session_registry, &full, stanza.as_ref()).await;
+                // so the message is not lost while resumable. Keep the
+                // successful replay append observable with its own identity.
+                let (queued_for_replay, not_queued) = queue_processed_for_detached(
+                    deps.sm_session_registry,
+                    deps.ingress_effect_capture.as_ref(),
+                    vec![full],
+                    &std::collections::HashSet::new(),
+                    stanza.as_ref(),
+                )
+                .await;
+                let mut captured_fanout = queued_for_replay;
+                let retried_live =
+                    retry_unqueued_detached_as_live(deps, not_queued, stanza.as_ref()).await;
+                captured_fanout.extend(retried_live);
+                capture_route_direct_intent(deps, &bare, captured_fanout);
                 return Vec::new();
             }
         }
@@ -665,6 +737,7 @@ async fn route_to_bare_jid(
                         side_routes,
                     } => {
                         if let Some(processed) = processed {
+                            let mut captured_fanout = Vec::new();
                             // Wire delivery of the ONE processed stanza
                             // per resource as a `DeliveryKind::DirectFrame`
                             // — the destination's main loop keeps XEP-0198
@@ -676,10 +749,13 @@ async fn route_to_bare_jid(
                             // (`TrySendDirect`, non-blocking) via
                             // `deliver_direct_to_full`.
                             for full in &live_targets {
-                                deliver_direct_to_full_with_registered_remote(
+                                let outcome = deliver_direct_to_full_with_registered_remote(
                                     deps, full, &processed,
                                 )
                                 .await;
+                                if is_definitive_route_capture_outcome(outcome) {
+                                    captured_fanout.push(full.clone());
+                                }
                             }
                             // Detached XEP-0198 targets get the
                             // PROCESSED stanza too, so resume
@@ -687,14 +763,19 @@ async fn route_to_bare_jid(
                             // <stanza-id/> (closes the
                             // stanza-id-parity gap documented on
                             // the legacy path).
-                            let not_queued = queue_processed_for_detached(
+                            let (queued_for_replay, not_queued) = queue_processed_for_detached(
                                 deps.sm_session_registry,
+                                deps.ingress_effect_capture.as_ref(),
                                 detached_targets,
                                 &live_set,
                                 &processed,
                             )
                             .await;
-                            retry_unqueued_detached_as_live(deps, not_queued, &processed).await;
+                            captured_fanout.extend(queued_for_replay);
+                            let retried_live =
+                                retry_unqueued_detached_as_live(deps, not_queued, &processed).await;
+                            captured_fanout.extend(retried_live);
+                            capture_route_direct_intent(deps, &bare, captured_fanout);
                         } else {
                             debug!(
                                 bare_jid = %bare,
@@ -743,11 +824,15 @@ async fn route_to_bare_jid(
             // recipient pass the "both empty at selection" branch
             // above already runs.
             let mut any_landed = false;
+            let mut captured_fanout = Vec::new();
             for full in live_targets {
                 let disposition =
                     deliver_peer_to_full_with_registered_remote(deps, &full, &stanza).await;
                 if disposition.suppresses_fallback() {
                     any_landed = true;
+                    if !is_dm_message && is_definitive_route_capture_outcome(disposition) {
+                        captured_fanout.push(full);
+                    }
                 }
             }
             if skip_raw_detached_queueing {
@@ -793,15 +878,19 @@ async fn route_to_bare_jid(
                     // PR #276).
                     let stanza_typed = (*stanza).clone();
                     match sm
-                        .record_stanza_for_detached_bound_resource(
+                        .record_stanza_for_detached_bound_resource_with_stream(
                             &full,
                             &stanza_typed,
                             chrono::Utc::now(),
                         )
                         .await
                     {
-                        Ok(true) => {
+                        Ok(Some(stream)) => {
                             any_landed = true;
+                            deps.capture_recipient_sm_append(stream);
+                            if !is_dm_message {
+                                captured_fanout.push(full.clone());
+                            }
                             debug!(
                                 jid = %full,
                                 message_id = stanza_message_id(stanza.as_ref()),
@@ -809,7 +898,7 @@ async fn route_to_bare_jid(
                                  for detached XEP-0198 replay"
                             );
                         }
-                        Ok(false) => {
+                        Ok(None) => {
                             debug!(
                                 jid = %full,
                                 message_id = stanza_message_id(stanza.as_ref()),
@@ -828,6 +917,9 @@ async fn route_to_bare_jid(
                         }
                     }
                 }
+            }
+            if !is_dm_message {
+                capture_route_direct_intent(deps, &bare, captured_fanout);
             }
             if !any_landed {
                 if bare.domain().as_str() != deps.local_domain {
@@ -959,8 +1051,18 @@ fn deliver_full_jid_via_ordered_relay<'a>(
                 .ordered_relay_delivery_bridge
                 .as_ref()?;
             bridge
-                .try_deliver_full_jid_remote(target, stanza, origin, call_setup)
+                .try_deliver_full_jid_remote_with_capture(
+                    target,
+                    stanza,
+                    origin,
+                    call_setup,
+                    deps.ingress_effect_capture.clone(),
+                )
                 .await
+                .map(|outcome| {
+                    capture_remote_recipient_sm_appends(deps, outcome.recipient_sm_append_streams);
+                    outcome.outcome
+                })
         }
         #[cfg(not(feature = "clustering"))]
         {
@@ -985,7 +1087,14 @@ async fn deliver_peer_to_full_with_registered_remote(
     {
         return outcome;
     }
-    deliver_peer_to_full(deps.user_registry, deps.sm_session_registry, target, stanza).await
+    deliver_peer_to_full_capturing_detached(
+        deps.user_registry,
+        deps.sm_session_registry,
+        deps.ingress_effect_capture.as_ref(),
+        target,
+        stanza,
+    )
+    .await
 }
 
 async fn deliver_direct_to_full_with_registered_remote(
@@ -1201,23 +1310,34 @@ fn jingle_action(payload: &minidom::Element) -> Option<xmpp_parsers::jingle::Act
 /// the retry is delivery-only and cannot duplicate rows).
 async fn queue_processed_for_detached(
     sm_session_registry: Option<&Arc<InMemorySmSessionRegistry>>,
+    ingress_effect_capture: Option<&crate::ingress_shadow::IngressEffectCapture>,
     detached_targets: Vec<jid::FullJid>,
     live_set: &std::collections::HashSet<jid::FullJid>,
     stanza: &Stanza,
-) -> Vec<jid::FullJid> {
+) -> (Vec<jid::FullJid>, Vec<jid::FullJid>) {
     let Some(sm) = sm_session_registry else {
-        return Vec::new();
+        return (Vec::new(), Vec::new());
     };
+    let mut queued = Vec::new();
     let mut not_queued = Vec::new();
     for full in detached_targets {
         if live_set.contains(&full) {
             continue;
         }
         match sm
-            .record_stanza_for_detached_bound_resource(&full, stanza, chrono::Utc::now())
+            .record_stanza_for_detached_bound_resource_with_stream(
+                &full,
+                stanza,
+                chrono::Utc::now(),
+            )
             .await
         {
-            Ok(true) => {
+            Ok(Some(stream)) => {
+                if let Some(capture) = ingress_effect_capture {
+                    capture.record_recipient_sm_append(stream);
+                }
+                let queued_full = full.clone();
+                queued.push(queued_full);
                 debug!(
                     jid = %full,
                     message_id = stanza_message_id(stanza),
@@ -1225,7 +1345,7 @@ async fn queue_processed_for_detached(
                      XEP-0198 replay"
                 );
             }
-            Ok(false) => {
+            Ok(None) => {
                 debug!(
                     jid = %full,
                     message_id = stanza_message_id(stanza),
@@ -1247,7 +1367,7 @@ async fn queue_processed_for_detached(
             }
         }
     }
-    not_queued
+    (queued, not_queued)
 }
 
 /// Second-chance delivery for detached targets whose replay-buffer
@@ -1259,9 +1379,16 @@ async fn retry_unqueued_detached_as_live(
     deps: &Deps<'_>,
     not_queued: Vec<jid::FullJid>,
     processed: &Stanza,
-) {
+) -> Vec<jid::FullJid> {
+    let mut landed = Vec::new();
     for full in not_queued {
         let outcome = deliver_direct_to_full_with_registered_remote(deps, &full, processed).await;
+        if matches!(
+            outcome,
+            FullJidDeliveryOutcome::Delivered | FullJidDeliveryOutcome::QueuedDetached
+        ) {
+            landed.push(full.clone());
+        }
         debug!(
             jid = %full,
             message_id = stanza_message_id(processed),
@@ -1270,6 +1397,7 @@ async fn retry_unqueued_detached_as_live(
              detached queueing"
         );
     }
+    landed
 }
 
 fn stanza_message_id(stanza: &Stanza) -> &str {

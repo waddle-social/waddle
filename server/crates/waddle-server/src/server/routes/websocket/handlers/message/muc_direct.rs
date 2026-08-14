@@ -1,10 +1,14 @@
 use waddle_xmpp::{
-    muc::room_registry_actor::GetRoom, parser::stanza_to_string,
-    protocol::handlers::errors::message_error_reply, Stanza,
+    ingress::{IngressEffectIntent, MucInviteLedgerAction, MucInviteLedgerMutation},
+    muc::room_registry_actor::GetRoom,
+    parser::stanza_to_string,
+    protocol::handlers::errors::message_error_reply,
+    Stanza,
 };
 use xmpp_parsers::message::{Message, MessageType};
 use xmpp_parsers::stanza_error::{DefinedCondition, ErrorType, StanzaError};
 
+use crate::ingress_shadow::{IngressEffectCapture, IngressShadowRoomFence};
 use crate::server::routes::websocket::WebSocketState;
 use tracing::warn;
 
@@ -12,17 +16,21 @@ pub(super) async fn handle_muc_direct_message(
     incoming: &Message,
     state: &WebSocketState,
     bound_jid: &jid::FullJid,
+    ingress_effect_capture: Option<&IngressEffectCapture>,
 ) -> Option<Vec<String>> {
-    if let Some(frames) = handle_muc_private_message(incoming, state, bound_jid).await {
+    if let Some(frames) =
+        handle_muc_private_message(incoming, state, bound_jid, ingress_effect_capture).await
+    {
         return Some(frames);
     }
-    handle_muc_mediated_decline(incoming, state, bound_jid).await
+    handle_muc_mediated_decline(incoming, state, bound_jid, ingress_effect_capture).await
 }
 
 async fn handle_muc_private_message(
     incoming: &Message,
     state: &WebSocketState,
     bound_jid: &jid::FullJid,
+    ingress_effect_capture: Option<&IngressEffectCapture>,
 ) -> Option<Vec<String>> {
     let target_occupant_jid = incoming.to.as_ref()?.clone().try_into_full().ok()?;
     let room_jid = target_occupant_jid.to_bare();
@@ -33,6 +41,7 @@ async fn handle_muc_private_message(
         return Some(vec![message_error_frame(
             incoming,
             bound_jid,
+            ingress_effect_capture,
             ErrorType::Modify,
             DefinedCondition::BadRequest,
             "Groupchat messages must be addressed to the room bare JID.",
@@ -57,6 +66,7 @@ async fn handle_muc_private_message(
         return Some(vec![message_error_frame(
             incoming,
             bound_jid,
+            ingress_effect_capture,
             ErrorType::Cancel,
             DefinedCondition::ItemNotFound,
             "Requested room not found.",
@@ -69,15 +79,22 @@ async fn handle_muc_private_message(
         return Some(vec![message_error_frame(
             incoming,
             bound_jid,
+            ingress_effect_capture,
             ErrorType::Wait,
             DefinedCondition::InternalServerError,
             "Internal server error.",
         )]);
     };
+    if let (Some(capture), Some(claim_fence)) =
+        (ingress_effect_capture, snapshot.claim_fence.as_ref())
+    {
+        capture.record_room_fence(IngressShadowRoomFence::from_context(&room_jid, claim_fence));
+    }
     let Some(sender_occupant) = snapshot.room.find_occupant_by_real_jid(bound_jid) else {
         return Some(vec![message_error_frame(
             incoming,
             bound_jid,
+            ingress_effect_capture,
             ErrorType::Cancel,
             DefinedCondition::NotAcceptable,
             "Only room occupants may send private messages.",
@@ -93,6 +110,7 @@ async fn handle_muc_private_message(
         return Some(vec![message_error_frame(
             incoming,
             bound_jid,
+            ingress_effect_capture,
             ErrorType::Auth,
             DefinedCondition::Forbidden,
             "Private messages are not allowed for your role in this room.",
@@ -102,6 +120,7 @@ async fn handle_muc_private_message(
         return Some(vec![message_error_frame(
             incoming,
             bound_jid,
+            ingress_effect_capture,
             ErrorType::Cancel,
             DefinedCondition::ItemNotFound,
             "Requested occupant not found.",
@@ -116,6 +135,7 @@ async fn handle_muc_private_message(
             return Some(vec![message_error_frame(
                 incoming,
                 bound_jid,
+                ingress_effect_capture,
                 ErrorType::Wait,
                 DefinedCondition::InternalServerError,
                 "Internal server error.",
@@ -224,7 +244,8 @@ async fn handle_muc_private_message(
             exclude,
         });
     }
-    let deps = crate::server::routes::websocket::interpret_loop::build_interpret_deps(state, None);
+    let deps = crate::server::routes::websocket::interpret_loop::build_interpret_deps(state, None)
+        .with_ingress_effect_capture(ingress_effect_capture.cloned());
     let nested = crate::server::routes::interpret::interpret(events, &deps).await;
     if !nested.archive_id_rewrites.is_empty() {
         crate::server::routes::interpret::rewrite_message_archive_ids(
@@ -241,26 +262,19 @@ async fn handle_muc_private_message(
     // clustered remote-resource relay for occupant sessions whose
     // socket lives on another node.
     let mut any_session_handled = false;
+    let mut definitive_recipients = Vec::new();
     for recipient in &recipient_sessions {
         let mut routed = relayed.clone();
         routed.to = Some(jid::Jid::from(recipient.clone()));
         let stanza = Stanza::Message(routed);
         let outcome = deliver_pm_to_session(state, &deps, recipient, &stanza).await;
-        // Explicit success set (codex review on PR #1277): Delivered /
-        // QueuedDetached are real deliveries; a clustered MaybeCommitted
-        // may have reached the target, so bouncing would risk a
-        // duplicate-visible error. Unavailable/Dropped never count.
-        let session_handled = match outcome {
-            crate::server::routes::interpret::FullJidDeliveryOutcome::Delivered
-            | crate::server::routes::interpret::FullJidDeliveryOutcome::QueuedDetached => true,
-            #[cfg(feature = "clustering")]
-            crate::server::routes::interpret::FullJidDeliveryOutcome::MaybeCommitted => true,
-            crate::server::routes::interpret::FullJidDeliveryOutcome::Unavailable
-            | crate::server::routes::interpret::FullJidDeliveryOutcome::Dropped => false,
-        };
-        if session_handled {
+        let capture = pm_delivery_capture(outcome);
+        if capture.any_session_handled {
             any_session_handled = true;
-        } else {
+        }
+        if capture.record_definitive_route {
+            definitive_recipients.push(recipient.clone());
+        } else if !capture.any_session_handled {
             warn!(
                 room = %room_jid,
                 recipient = %recipient,
@@ -269,6 +283,11 @@ async fn handle_muc_private_message(
             );
         }
     }
+    capture_muc_private_routes(
+        ingress_effect_capture,
+        &from_room_jid,
+        definitive_recipients,
+    );
     // XEP-0045 §7.5: the service is responsible for delivering the PM.
     // An ARCHIVED PM that reached no live/detached session is still
     // durable — the occupant sees it via MAM — so only an unarchivable
@@ -286,6 +305,7 @@ async fn handle_muc_private_message(
             return Some(vec![message_error_frame(
                 incoming,
                 bound_jid,
+                ingress_effect_capture,
                 ErrorType::Wait,
                 DefinedCondition::RecipientUnavailable,
                 "The occupant could not be reached; please retry.",
@@ -294,6 +314,38 @@ async fn handle_muc_private_message(
     }
 
     Some(nested.frames)
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct PmDeliveryCapture {
+    any_session_handled: bool,
+    record_definitive_route: bool,
+}
+
+fn pm_delivery_capture(
+    outcome: crate::server::routes::interpret::FullJidDeliveryOutcome,
+) -> PmDeliveryCapture {
+    match outcome {
+        crate::server::routes::interpret::FullJidDeliveryOutcome::Delivered
+        | crate::server::routes::interpret::FullJidDeliveryOutcome::QueuedDetached => {
+            PmDeliveryCapture {
+                any_session_handled: true,
+                record_definitive_route: true,
+            }
+        }
+        #[cfg(feature = "clustering")]
+        crate::server::routes::interpret::FullJidDeliveryOutcome::MaybeCommitted => {
+            PmDeliveryCapture {
+                any_session_handled: true,
+                record_definitive_route: false,
+            }
+        }
+        crate::server::routes::interpret::FullJidDeliveryOutcome::Unavailable
+        | crate::server::routes::interpret::FullJidDeliveryOutcome::Dropped => PmDeliveryCapture {
+            any_session_handled: false,
+            record_definitive_route: false,
+        },
+    }
 }
 
 /// Deliver one MUC private-message wire copy to one occupant session
@@ -360,6 +412,7 @@ async fn handle_muc_mediated_decline(
     incoming: &Message,
     state: &WebSocketState,
     bound_jid: &jid::FullJid,
+    ingress_effect_capture: Option<&IngressEffectCapture>,
 ) -> Option<Vec<String>> {
     if incoming.type_ != MessageType::Normal {
         return None;
@@ -369,6 +422,14 @@ async fn handle_muc_mediated_decline(
         return None;
     }
     let inbound_decline = mediated_decline(incoming)?;
+    // Declines are authorized exclusively against the durable outstanding
+    // invite ledger, not a live room actor. The frame-level MUC classifier
+    // has no actor-bound fence to contribute here, so retaining its
+    // provisional lookup would make the shadow assert authority that the
+    // live decision never used.
+    if let Some(capture) = ingress_effect_capture {
+        capture.clear_room_fence();
+    }
 
     let decliner = bound_jid.to_bare();
     let db_actor = state.deps.app_state.db_pool.global_actor().clone();
@@ -390,6 +451,7 @@ async fn handle_muc_mediated_decline(
             return Some(vec![message_error_frame(
                 incoming,
                 bound_jid,
+                ingress_effect_capture,
                 ErrorType::Wait,
                 DefinedCondition::InternalServerError,
                 "Internal server error.",
@@ -402,6 +464,7 @@ async fn handle_muc_mediated_decline(
         return Some(vec![message_error_frame(
             incoming,
             bound_jid,
+            ingress_effect_capture,
             ErrorType::Auth,
             DefinedCondition::Forbidden,
             "You have no outstanding invitation to this room.",
@@ -425,6 +488,7 @@ async fn handle_muc_mediated_decline(
             return Some(vec![message_error_frame(
                 incoming,
                 bound_jid,
+                ingress_effect_capture,
                 ErrorType::Modify,
                 DefinedCondition::BadRequest,
                 "Several invitations are outstanding; the decline must name its inviter.",
@@ -451,6 +515,7 @@ async fn handle_muc_mediated_decline(
             return Some(vec![message_error_frame(
                 incoming,
                 bound_jid,
+                ingress_effect_capture,
                 ErrorType::Wait,
                 DefinedCondition::InternalServerError,
                 "Internal server error.",
@@ -464,8 +529,13 @@ async fn handle_muc_mediated_decline(
     mediated.from = Some(jid::Jid::from(room_jid.clone()));
     mediated.type_ = MessageType::Normal;
     mediated.payloads.push(x);
-    if let Err(error) =
-        super::muc_invite::deliver_muc_user_message(state, &invite.inviter, mediated).await
+    if let Err(error) = super::muc_invite::deliver_muc_user_message(
+        state,
+        &invite.inviter,
+        mediated,
+        ingress_effect_capture,
+    )
+    .await
     {
         // Neither a live socket nor the durable queue took the decline
         // — put the claimed row back so the decliner can retry, and
@@ -490,13 +560,45 @@ async fn handle_muc_mediated_decline(
         return Some(vec![message_error_frame(
             incoming,
             bound_jid,
+            ingress_effect_capture,
             ErrorType::Wait,
             DefinedCondition::InternalServerError,
             "Internal server error.",
         )]);
     }
 
+    if let Some(capture) = ingress_effect_capture {
+        capture.record_intent(IngressEffectIntent::MucInviteLedger {
+            mutation: MucInviteLedgerMutation {
+                room: invite.room.clone(),
+                invitee: invite.invitee.clone(),
+                inviter: invite.inviter.clone(),
+                action: MucInviteLedgerAction::Claimed,
+                recorded_at: None,
+            },
+        });
+    }
+
     Some(Vec::new())
+}
+
+fn capture_muc_private_routes(
+    ingress_effect_capture: Option<&IngressEffectCapture>,
+    sender: &jid::FullJid,
+    recipients: Vec<jid::FullJid>,
+) {
+    let Some(capture) = ingress_effect_capture else {
+        return;
+    };
+    let mut recipients = recipients;
+    recipients.sort_by_key(ToString::to_string);
+    recipients.dedup();
+    for recipient in recipients {
+        capture.record_intent(IngressEffectIntent::RouteOccupantPm {
+            recipient,
+            sender: sender.clone(),
+        });
+    }
 }
 
 fn mediated_decline(message: &Message) -> Option<&minidom::Element> {
@@ -563,26 +665,47 @@ fn canonicalize_muc_private_payloads(
 fn message_error_frame(
     incoming: &Message,
     bound_jid: &jid::FullJid,
+    ingress_effect_capture: Option<&IngressEffectCapture>,
     error_type: ErrorType,
     condition: DefinedCondition,
     text: &'static str,
 ) -> String {
     let mut stamped = incoming.clone();
     stamped.from = Some(jid::Jid::from(bound_jid.clone()));
-    let reply = message_error_reply(
-        &stamped,
-        StanzaError::new(error_type, condition, "en", text),
-    );
-    stanza_to_string(reply).unwrap_or_default()
+    let error = StanzaError::new(error_type, condition, "en", text);
+    let frozen_error = waddle_xmpp::ingress::FrozenStanzaError::from_xmpp(&error)
+        .expect("server-built stanza error should freeze");
+    let reply = message_error_reply(&stamped, error);
+    match stanza_to_string(reply) {
+        Ok(xml) => {
+            if let Some(capture) = ingress_effect_capture {
+                capture.record_intent(IngressEffectIntent::ErrorReply {
+                    recipient: bound_jid.clone(),
+                    error: frozen_error,
+                });
+            }
+            xml
+        }
+        Err(_) => String::new(),
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::ingress_shadow::IngressEffectCapture;
+    use crate::server::routes::websocket::tests::{
+        create_test_websocket_state, register_test_connection,
+    };
+    use kameo::actor::ActorRef;
+    use waddle_xmpp::muc::room_actor::Join;
+    use waddle_xmpp::muc::room_registry_actor::CreateRoom;
+    use waddle_xmpp::muc::RoomConfig;
     use waddle_xmpp::xep::xep0421::{
         extract_occupant_id_from_message, generate_occupant_id, OccupantId, OccupantIdSecret,
         NS_OCCUPANT_ID, OCCUPANT_ID_SECRET_MIN_BYTES,
     };
+    use waddle_xmpp::{Affiliation, Role};
 
     fn secret() -> OccupantIdSecret {
         OccupantIdSecret::new(vec![3u8; OCCUPANT_ID_SECRET_MIN_BYTES]).expect("valid secret")
@@ -596,6 +719,24 @@ mod tests {
         m.bodies
             .insert(xmpp_parsers::message::Lang::new(), "psst".to_string());
         m
+    }
+
+    async fn create_test_room(
+        state: &WebSocketState,
+        room_jid: jid::BareJid,
+    ) -> ActorRef<waddle_xmpp::muc::room_actor::RoomActor> {
+        state
+            .deps
+            .protocol
+            .room_registry
+            .ask(CreateRoom {
+                room_jid,
+                waddle_id: "w-muc-direct".to_string(),
+                channel_id: "c-muc-direct".to_string(),
+                config: RoomConfig::default(),
+            })
+            .await
+            .expect("create room")
     }
 
     /// XEP-0421 Business Rules (#1268): MUC private messages MUST carry
@@ -721,5 +862,146 @@ mod tests {
         );
         assert_eq!(muc_user[0].name(), "x");
         assert_eq!(muc_user[0].children().count(), 0);
+    }
+
+    #[test]
+    fn capture_muc_private_routes_records_each_recipient_once() {
+        let capture = IngressEffectCapture::new(None);
+        let sender: jid::FullJid = "room@muc.example.com/alice".parse().expect("sender");
+        let bob_phone: jid::FullJid = "bob@example.com/phone".parse().expect("bob phone");
+        let bob_laptop: jid::FullJid = "bob@example.com/laptop".parse().expect("bob laptop");
+
+        capture_muc_private_routes(
+            Some(&capture),
+            &sender,
+            vec![bob_phone.clone(), bob_laptop.clone(), bob_phone.clone()],
+        );
+
+        let snapshot = capture.snapshot();
+        assert!(snapshot
+            .intents
+            .contains(&IngressEffectIntent::RouteOccupantPm {
+                recipient: bob_laptop,
+                sender: sender.clone(),
+            }));
+        assert!(snapshot
+            .intents
+            .contains(&IngressEffectIntent::RouteOccupantPm {
+                recipient: bob_phone.clone(),
+                sender,
+            }));
+        assert_eq!(
+            snapshot
+                .intents
+                .iter()
+                .filter(|intent| matches!(
+                    intent,
+                    IngressEffectIntent::RouteOccupantPm { recipient, .. }
+                        if recipient == &bob_phone
+                ))
+                .count(),
+            1
+        );
+    }
+
+    #[cfg(feature = "clustering")]
+    #[test]
+    fn maybe_committed_pm_delivery_is_not_a_definitive_route() {
+        let capture = pm_delivery_capture(
+            crate::server::routes::interpret::FullJidDeliveryOutcome::MaybeCommitted,
+        );
+
+        assert!(capture.any_session_handled);
+        assert!(!capture.record_definitive_route);
+    }
+
+    #[tokio::test]
+    async fn muc_private_rejection_records_error_reply_intent() {
+        let state = create_test_websocket_state().await;
+        let room: jid::BareJid = "pm@muc.example.com".parse().expect("room");
+        let _room_actor = create_test_room(state.as_ref(), room.clone()).await;
+        let sender: jid::FullJid = "mallory@example.com/web".parse().expect("sender");
+        let capture = IngressEffectCapture::new(None);
+        let mut incoming = Message::new(Some(
+            "pm@muc.example.com/bob"
+                .parse::<jid::Jid>()
+                .expect("target jid"),
+        ));
+        incoming.type_ = MessageType::Chat;
+        incoming.from = Some(jid::Jid::from(sender.clone()));
+
+        let frames = handle_muc_direct_message(&incoming, state.as_ref(), &sender, Some(&capture))
+            .await
+            .expect("handled");
+
+        assert_eq!(frames.len(), 1);
+        let expected_error = waddle_xmpp::ingress::FrozenStanzaError::from_xmpp(&StanzaError::new(
+            ErrorType::Cancel,
+            DefinedCondition::NotAcceptable,
+            "en",
+            "Only room occupants may send private messages.",
+        ))
+        .expect("server-built stanza error should freeze");
+        assert!(capture
+            .snapshot()
+            .intents
+            .contains(&IngressEffectIntent::ErrorReply {
+                recipient: sender,
+                error: expected_error,
+            }));
+    }
+
+    #[tokio::test]
+    async fn muc_private_unreachable_bodyless_pm_does_not_record_route_intent() {
+        let state = create_test_websocket_state().await;
+        let room: jid::BareJid = "pm-capture@muc.example.com".parse().expect("room");
+        let room_actor = create_test_room(state.as_ref(), room.clone()).await;
+        let sender: jid::FullJid = "alice@example.com/web".parse().expect("sender");
+        let recipient: jid::FullJid = "bob@example.com/phone".parse().expect("recipient");
+        room_actor
+            .ask(Join {
+                nick: "alice".to_string(),
+                real_jid: sender.clone(),
+                role: Role::Participant,
+                affiliation: Affiliation::Member,
+            })
+            .await
+            .expect("join alice");
+        room_actor
+            .ask(Join {
+                nick: "bob".to_string(),
+                real_jid: recipient.clone(),
+                role: Role::Participant,
+                affiliation: Affiliation::Member,
+            })
+            .await
+            .expect("join bob");
+
+        let (recipient_tx, recipient_rx) = tokio::sync::mpsc::channel(8);
+        let _owner = register_test_connection(state.as_ref(), &recipient, recipient_tx).await;
+        drop(recipient_rx);
+
+        let capture = IngressEffectCapture::new(None);
+        let mut incoming = Message::new(Some(
+            format!("{room}/bob")
+                .parse::<jid::Jid>()
+                .expect("target occupant jid"),
+        ));
+        incoming.from = Some(jid::Jid::from(sender.clone()));
+        incoming.type_ = MessageType::Chat;
+
+        let frames = handle_muc_direct_message(&incoming, state.as_ref(), &sender, Some(&capture))
+            .await
+            .expect("handled");
+
+        assert_eq!(frames.len(), 1, "bodyless unreachable PM returns one error");
+        assert!(
+            !capture
+                .snapshot()
+                .intents
+                .iter()
+                .any(|intent| { matches!(intent, IngressEffectIntent::RouteOccupantPm { .. }) }),
+            "failed PM delivery must not record RouteOccupantPm"
+        );
     }
 }

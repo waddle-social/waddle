@@ -1,5 +1,6 @@
 use tracing::warn;
 use waddle_xmpp::{
+    ingress::IngressEffectIntent,
     parser::stanza_to_string,
     protocol::handlers::errors::bad_request_reply,
     protocol::{frame::InboundFrame, InboundEvent, XmppStateMachine},
@@ -16,6 +17,9 @@ use super::super::{
     WebSocketState,
 };
 use crate::auth::Session;
+use crate::ingress_shadow::{
+    IngressEffectCapture, ShadowDecisionMarker, ShadowSemanticRejectedReason,
+};
 use crate::server::routes::websocket::ResolvedPrincipal;
 use waddle_xmpp::protocol::ConnectionPhase;
 
@@ -66,6 +70,7 @@ pub async fn handle_message(
     state_machine: Option<&mut XmppStateMachine>,
     authenticated_session: Option<&Session>,
     ordered_relay_origin: Option<crate::server::routes::interpret::OrderedRelayRouteOrigin>,
+    ingress_effect_capture: Option<crate::ingress_shadow::IngressEffectCapture>,
 ) -> Vec<String> {
     let Some(bound_jid) = phase.bound_jid().cloned() else {
         warn!("Message received without authenticated session");
@@ -80,6 +85,9 @@ pub async fn handle_message(
     };
 
     strip_client_authored_delay(&mut incoming);
+    if let Some(capture) = ingress_effect_capture.as_ref() {
+        capture.record_sanitized_message(&incoming);
+    }
     consume_link_preview_request(
         &mut incoming,
         &bound_jid,
@@ -89,22 +97,47 @@ pub async fn handle_message(
         &state.deps.link_preview,
     );
 
-    if let Some(frames) =
-        handle_group_dm_mediated_invite(&incoming, state, &bound_jid, authenticated_session).await
+    if let Some(frames) = handle_group_dm_mediated_invite(
+        &incoming,
+        state,
+        &bound_jid,
+        authenticated_session,
+        ingress_effect_capture.as_ref(),
+    )
+    .await
     {
         return frames;
     }
     // XEP-0045 §7.8 (#1248): mediated invitations for every non-group-DM
     // room — previously these fell through and were silently dropped.
-    if let Some(frames) =
-        handle_muc_mediated_invite(&incoming, state, &bound_jid, authenticated_session).await
+    if let Some(frames) = handle_muc_mediated_invite(
+        &incoming,
+        state,
+        &bound_jid,
+        authenticated_session,
+        ingress_effect_capture.as_ref(),
+    )
+    .await
     {
         return frames;
     }
-    if let Some(frames) = handle_dm_pin_message(&incoming, state, &bound_jid).await {
+    if let Some(frames) = handle_dm_pin_message(
+        &incoming,
+        state,
+        &bound_jid,
+        ingress_effect_capture.as_ref(),
+    )
+    .await
+    {
         return frames;
     }
-    handle_dm_pin_retraction_cascade(&incoming, state, &bound_jid).await;
+    handle_dm_pin_retraction_cascade(
+        &incoming,
+        state,
+        &bound_jid,
+        ingress_effect_capture.as_ref(),
+    )
+    .await;
 
     if incoming.type_ != xmpp_parsers::message::MessageType::Error
         && message_has_inbox_payload(&incoming)
@@ -113,6 +146,11 @@ pub async fn handle_message(
         stamped.from = Some(jid::Jid::from(bound_jid));
         strip_inbox_payloads(&mut stamped);
         let reply = bad_request_reply(&stamped, "Client-authored inbox payloads are not allowed.");
+        if let Some(capture) = ingress_effect_capture.as_ref() {
+            capture.record_marker(ShadowDecisionMarker::SemanticRejected {
+                reason: ShadowSemanticRejectedReason::ClientAuthoredInboxPayload,
+            });
+        }
         return match stanza_to_string(reply) {
             Ok(frame) => vec![frame],
             Err(error) => {
@@ -133,6 +171,11 @@ pub async fn handle_message(
             &stamped,
             "Client-authored Waddle extension envelopes are not allowed.",
         );
+        if let Some(capture) = ingress_effect_capture.as_ref() {
+            capture.record_marker(ShadowDecisionMarker::SemanticRejected {
+                reason: ShadowSemanticRejectedReason::ClientAuthoredFrameworkEnvelope,
+            });
+        }
         return match stanza_to_string(reply) {
             Ok(frame) => vec![frame],
             Err(error) => {
@@ -142,7 +185,14 @@ pub async fn handle_message(
         };
     }
     record_jmi_signal(&incoming, &bound_jid.to_bare());
-    if let Some(frames) = handle_muc_direct_message(&incoming, state, &bound_jid).await {
+    if let Some(frames) = handle_muc_direct_message(
+        &incoming,
+        state,
+        &bound_jid,
+        ingress_effect_capture.as_ref(),
+    )
+    .await
+    {
         return frames;
     }
 
@@ -150,12 +200,30 @@ pub async fn handle_message(
         Stanza::Message(incoming),
     ))));
     let principal = authenticated_session.map(ResolvedPrincipal::from_authenticated_session);
-    let deps =
-        build_interpret_deps(state, principal).with_ordered_relay_origin(ordered_relay_origin);
+    let deps = build_interpret_deps(state, principal)
+        .with_ordered_relay_origin(ordered_relay_origin)
+        .with_ingress_effect_capture(ingress_effect_capture);
     // Stanza dispatch never emits keepalive/timer effects (those come
     // only from TransportReady/Tick in the connection loop), and
     // `close` was already ignored on this path — only frames matter.
     drive_interpret_loop(events, sm, &deps).await.frames
+}
+
+pub(super) fn record_route_direct_intent(
+    capture: Option<&IngressEffectCapture>,
+    recipient: jid::BareJid,
+    mut fanout: Vec<jid::FullJid>,
+) {
+    let Some(capture) = capture else {
+        return;
+    };
+    fanout.sort_by_key(ToString::to_string);
+    fanout.dedup();
+    capture.record_intent(IngressEffectIntent::RouteDirect {
+        recipient,
+        fanout,
+        route_identity: capture.next_route_identity(),
+    });
 }
 
 fn record_jmi_signal(message: &xmpp_parsers::message::Message, user: &jid::BareJid) {
@@ -215,6 +283,11 @@ fn remove_framework_envelopes(message: &mut xmpp_parsers::message::Message) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::ingress_shadow::{
+        IngressEffectCapture, ShadowDecisionMarker, ShadowSemanticRejectedReason,
+    };
+    use crate::server::routes::websocket::tests::create_test_websocket_state;
+    use waddle_xmpp::protocol::XmppStateMachine;
     use xmpp_parsers::message::{Message, MessageType};
     use xmpp_parsers::minidom::Element;
 
@@ -283,5 +356,140 @@ mod tests {
         message.type_ = MessageType::Chat;
         message.payloads[0] = Element::builder("proceed", NS_JINGLE_MESSAGE).build();
         assert_eq!(classify_jmi_signal(&message), None);
+    }
+
+    #[tokio::test]
+    async fn fast_path_inbox_payload_rejection_records_semantic_marker() {
+        let state = create_test_websocket_state().await;
+        let bound: jid::FullJid = "alice@example.com/web".parse().expect("jid");
+        let phase = ConnectionPhase::ready(bound.clone(), false);
+        let capture = IngressEffectCapture::new(None);
+        let mut sm = XmppStateMachine::new("example.com", Default::default());
+        let mut incoming = Message::new(Some("bob@example.com".parse::<jid::Jid>().expect("jid")));
+        incoming.type_ = MessageType::Chat;
+        incoming.from = Some(jid::Jid::from(bound.clone()));
+        incoming
+            .payloads
+            .push(Element::builder("result", NS_INBOX).build());
+
+        let frames = handle_message(
+            incoming,
+            state.as_ref(),
+            &phase,
+            Some(&mut sm),
+            None,
+            None,
+            Some(capture.clone()),
+        )
+        .await;
+
+        assert_eq!(
+            capture.snapshot().markers,
+            vec![ShadowDecisionMarker::SemanticRejected {
+                reason: ShadowSemanticRejectedReason::ClientAuthoredInboxPayload,
+            }]
+        );
+        assert_eq!(frames.len(), 1);
+    }
+
+    #[tokio::test]
+    async fn fast_path_framework_envelope_rejection_records_semantic_marker() {
+        let state = create_test_websocket_state().await;
+        let bound: jid::FullJid = "alice@example.com/web".parse().expect("jid");
+        let phase = ConnectionPhase::ready(bound.clone(), false);
+        let capture = IngressEffectCapture::new(None);
+        let mut sm = XmppStateMachine::new("example.com", Default::default());
+        let mut incoming = Message::new(Some("bob@example.com".parse::<jid::Jid>().expect("jid")));
+        incoming.type_ = MessageType::Chat;
+        incoming.from = Some(jid::Jid::from(bound));
+        incoming
+            .payloads
+            .push(Element::builder("extensions", waddle_extensions::FRAMEWORK_NAMESPACE).build());
+
+        let frames = handle_message(
+            incoming,
+            state.as_ref(),
+            &phase,
+            Some(&mut sm),
+            None,
+            None,
+            Some(capture.clone()),
+        )
+        .await;
+
+        assert_eq!(
+            capture.snapshot().markers,
+            vec![ShadowDecisionMarker::SemanticRejected {
+                reason: ShadowSemanticRejectedReason::ClientAuthoredFrameworkEnvelope,
+            }]
+        );
+        assert_eq!(frames.len(), 1);
+    }
+
+    #[tokio::test]
+    async fn sanitized_snapshot_keeps_pre_enrichment_link_preview_request() {
+        let state = create_test_websocket_state().await;
+        let bound: jid::FullJid = "alice@example.com/web".parse().expect("jid");
+        let phase = ConnectionPhase::ready(bound.clone(), false);
+        let capture = IngressEffectCapture::new(None);
+        let mut sm = XmppStateMachine::new("example.com", Default::default());
+        let preview = waddle_xmpp::xep::LinkPreviewTokenData {
+            sender_jid: bound.to_bare(),
+            scope_jid: "bob@example.com".parse().expect("jid"),
+            original_url: url::Url::parse("https://the.link.example.com/what-was-linked-to")
+                .expect("url"),
+            normalized_url: url::Url::parse(
+                "https://example.com/canonical-url/for/what-was-linked-to",
+            )
+            .expect("url"),
+            title: Some("The Best Webpage".to_string()),
+            description: Some("This is a great webpage and you will really like it".to_string()),
+            image: None,
+            video: None,
+            player: None,
+            native_video: None,
+            expires_at_unix: 1_900_000_000,
+        };
+        let token = waddle_xmpp::xep::encode_link_preview_token(
+            &preview,
+            state.deps.occupant_id_secret.key(),
+        );
+        let mut incoming = Message::new(Some("bob@example.com".parse::<jid::Jid>().expect("jid")));
+        incoming.type_ = MessageType::Chat;
+        incoming.from = Some(jid::Jid::from(bound));
+        incoming.bodies.insert(
+            xmpp_parsers::message::Lang::new(),
+            "read https://the.link.example.com/what-was-linked-to".to_string(),
+        );
+        incoming
+            .payloads
+            .push(waddle_xmpp::xep::build_link_preview_request_element(&token));
+
+        let _ = handle_message(
+            incoming,
+            state.as_ref(),
+            &phase,
+            Some(&mut sm),
+            None,
+            None,
+            Some(capture.clone()),
+        )
+        .await;
+
+        let snapshot = capture.snapshot();
+        let sanitized = snapshot
+            .sanitized_message
+            .expect("capture should keep a sanitized message snapshot");
+        assert!(
+            waddle_xmpp::xep::extract_link_preview_request_from_message(&sanitized).is_some(),
+            "the shadow snapshot must retain the pre-enrichment request token"
+        );
+        assert!(
+            sanitized.payloads.iter().all(|payload| {
+                !waddle_xmpp::xep::xep0511::is_link_metadata_element(payload)
+                    && !waddle_xmpp::xep::xep0447::is_file_sharing_element(payload)
+            }),
+            "the shadow snapshot must not include server-stamped link preview metadata"
+        );
     }
 }

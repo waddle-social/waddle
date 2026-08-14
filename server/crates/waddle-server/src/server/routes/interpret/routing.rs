@@ -1,5 +1,11 @@
 use super::*;
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct DetachedDeliveryCapture {
+    pub(crate) outcome: FullJidDeliveryOutcome,
+    pub(crate) recipient_sm_append_stream: Option<waddle_xmpp::pending_delivery::SmSessionId>,
+}
+
 pub(super) async fn run_headless_recipient_pass(
     deps: &Deps<'_>,
     recipient_bare: &jid::BareJid,
@@ -111,6 +117,7 @@ pub(super) async fn run_headless_recipient_pass(
         // Headless pass emits no wire copy, so there is nothing to
         // rewrite.
         archive_id_rewrites: _,
+        route_to_connection_events: _,
     } = nested;
     debug!(
         bare_jid = %recipient_bare,
@@ -290,6 +297,7 @@ pub(super) async fn run_fanout_recipient_pass(
         // batch-local retry marker is not meaningful to the outer batch.
         retry_suppression: _,
         archive_id_rewrites,
+        route_to_connection_events: _,
     } = nested;
     debug!(
         bare_jid = %recipient_bare,
@@ -533,10 +541,31 @@ fn classify_send_error<M, E>(error: &kameo::error::SendError<M, E>) -> ActorSend
 async fn deliver_one_via_actor(
     user_registry: &kameo::actor::ActorRef<waddle_xmpp::registry::UserRegistryActor>,
     sm_session_registry: Option<&Arc<InMemorySmSessionRegistry>>,
+    ingress_effect_capture: Option<&crate::ingress_shadow::IngressEffectCapture>,
     target: &jid::FullJid,
     stanza: &Stanza,
     kind: ActorSendKind,
 ) -> FullJidDeliveryOutcome {
+    deliver_one_via_actor_capturing_detached(
+        user_registry,
+        sm_session_registry,
+        ingress_effect_capture,
+        target,
+        stanza,
+        kind,
+    )
+    .await
+    .outcome
+}
+
+async fn deliver_one_via_actor_capturing_detached(
+    user_registry: &kameo::actor::ActorRef<waddle_xmpp::registry::UserRegistryActor>,
+    sm_session_registry: Option<&Arc<InMemorySmSessionRegistry>>,
+    ingress_effect_capture: Option<&crate::ingress_shadow::IngressEffectCapture>,
+    target: &jid::FullJid,
+    stanza: &Stanza,
+    kind: ActorSendKind,
+) -> DetachedDeliveryCapture {
     let message_id = stanza_message_id(stanza);
     // FUTURE CLEANUP (ADR-0017; Greptile review on PR #1177, tracked in #1195):
     // for a bare-JID DM this is the SECOND `GetUser` for the same bare JID —
@@ -559,15 +588,24 @@ async fn deliver_one_via_actor(
         // No live actor for this bare JID — no delivery was attempted, so the
         // detached replay buffer is a safe (non-duplicating) fallback.
         Ok(None) => {
-            return deliver_to_detached(sm_session_registry, target, stanza)
-                .await
-                .into();
+            return deliver_to_detached_with_capture_details(
+                sm_session_registry,
+                ingress_effect_capture,
+                target,
+                stanza,
+            )
+            .await;
         }
         Err(error) => {
             warn!(jid = %target, message_id, %error, "actor delivery: GetUser failed; routing to detached");
-            return detached_after_routing_failure(
-                deliver_to_detached(sm_session_registry, target, stanza).await,
-            );
+            return deliver_to_detached_with_capture_details(
+                sm_session_registry,
+                ingress_effect_capture,
+                target,
+                stanza,
+            )
+            .await
+            .map_outcome(detached_after_routing_failure);
         }
     };
 
@@ -622,7 +660,7 @@ async fn deliver_one_via_actor(
     match outcome {
         Ok(waddle_xmpp::registry::BroadcastOutcome::Delivered) => {
             debug!(jid = %target, message_id, "actor delivery: queued for recipient");
-            FullJidDeliveryOutcome::Delivered
+            DetachedDeliveryCapture::from_outcome(FullJidDeliveryOutcome::Delivered)
         }
         // Still full after every retry — surface the loss instead of the
         // previous silent debug-level drop (#1263). The recipient stays
@@ -637,13 +675,17 @@ async fn deliver_one_via_actor(
                 retries = DROPPED_FULL_RETRY_DELAYS.len(),
                 "actor delivery: recipient channel still full after bounded retries; dropped"
             );
-            FullJidDeliveryOutcome::Dropped
+            DetachedDeliveryCapture::from_outcome(FullJidDeliveryOutcome::Dropped)
         }
         Ok(waddle_xmpp::registry::BroadcastOutcome::NotConnected)
         | Ok(waddle_xmpp::registry::BroadcastOutcome::DroppedClosed) => {
-            deliver_to_detached(sm_session_registry, target, stanza)
-                .await
-                .into()
+            deliver_to_detached_with_capture_details(
+                sm_session_registry,
+                ingress_effect_capture,
+                target,
+                stanza,
+            )
+            .await
         }
         // Provably never enqueued — no delivery was attempted, so the detached
         // replay buffer is a lossless, non-duplicating fallback.
@@ -654,9 +696,14 @@ async fn deliver_one_via_actor(
                 %error,
                 "actor delivery: TrySend ask failed before enqueue; routing to detached"
             );
-            detached_after_routing_failure(
-                deliver_to_detached(sm_session_registry, target, stanza).await,
+            deliver_to_detached_with_capture_details(
+                sm_session_registry,
+                ingress_effect_capture,
+                target,
+                stanza,
             )
+            .await
+            .map_outcome(detached_after_routing_failure)
         }
         // May have been enqueued — kameo does not cancel the enqueued handler,
         // so a post-timeout run plus a detached replay would double-deliver.
@@ -672,7 +719,7 @@ async fn deliver_one_via_actor(
                 "actor delivery: TrySend ask failed terminally (possibly enqueued); \
                  dropping to avoid double-delivery"
             );
-            FullJidDeliveryOutcome::Dropped
+            DetachedDeliveryCapture::from_outcome(FullJidDeliveryOutcome::Dropped)
         }
     }
 }
@@ -685,9 +732,29 @@ async fn deliver_one_via_actor(
 /// only delivery path. `None` — test fixtures without an actor tree — can no
 /// longer deliver live and falls back to the detached XEP-0198 buffer (the same
 /// "no live target" fallback used everywhere), never a DashMap send.
+#[cfg(feature = "clustering")]
 pub(crate) async fn deliver_peer_to_full(
     user_registry: Option<&kameo::actor::ActorRef<waddle_xmpp::registry::UserRegistryActor>>,
     sm_session_registry: Option<&Arc<InMemorySmSessionRegistry>>,
+    target: &jid::FullJid,
+    stanza: &Stanza,
+) -> FullJidDeliveryOutcome {
+    deliver_peer_to_full_capturing_detached(
+        user_registry,
+        sm_session_registry,
+        None,
+        target,
+        stanza,
+    )
+    .await
+}
+
+/// Variant of [`deliver_peer_to_full`] for ingress interpretation, where a
+/// successful detached fallback must identify the replay stream it mutated.
+pub(crate) async fn deliver_peer_to_full_capturing_detached(
+    user_registry: Option<&kameo::actor::ActorRef<waddle_xmpp::registry::UserRegistryActor>>,
+    sm_session_registry: Option<&Arc<InMemorySmSessionRegistry>>,
+    ingress_effect_capture: Option<&crate::ingress_shadow::IngressEffectCapture>,
     target: &jid::FullJid,
     stanza: &Stanza,
 ) -> FullJidDeliveryOutcome {
@@ -696,15 +763,47 @@ pub(crate) async fn deliver_peer_to_full(
             deliver_one_via_actor(
                 user_registry,
                 sm_session_registry,
+                ingress_effect_capture,
                 target,
                 stanza,
                 ActorSendKind::Peer,
             )
             .await
         }
-        None => deliver_to_detached(sm_session_registry, target, stanza)
+        None => deliver_to_detached_with_capture(
+            sm_session_registry,
+            ingress_effect_capture,
+            target,
+            stanza,
+        )
+        .await
+        .into(),
+    }
+}
+
+#[cfg(feature = "clustering")]
+pub(crate) async fn deliver_peer_to_full_with_detached_capture(
+    user_registry: Option<&kameo::actor::ActorRef<waddle_xmpp::registry::UserRegistryActor>>,
+    sm_session_registry: Option<&Arc<InMemorySmSessionRegistry>>,
+    target: &jid::FullJid,
+    stanza: &Stanza,
+) -> DetachedDeliveryCapture {
+    match user_registry {
+        Some(user_registry) => {
+            deliver_one_via_actor_capturing_detached(
+                user_registry,
+                sm_session_registry,
+                None,
+                target,
+                stanza,
+                ActorSendKind::Peer,
+            )
             .await
-            .into(),
+        }
+        None => {
+            deliver_to_detached_with_capture_details(sm_session_registry, None, target, stanza)
+                .await
+        }
     }
 }
 
@@ -726,13 +825,14 @@ pub(crate) async fn deliver_direct_to_full(
             deliver_one_via_actor(
                 user_registry,
                 sm_session_registry,
+                None,
                 target,
                 stanza,
                 ActorSendKind::Direct,
             )
             .await
         }
-        None => deliver_to_detached(sm_session_registry, target, stanza)
+        None => deliver_to_detached_with_capture(sm_session_registry, None, target, stanza)
             .await
             .into(),
     }
@@ -838,52 +938,58 @@ pub(super) async fn deliver_peer_to_live_only(
     }
 }
 
-/// Shared "live target unavailable" fallback. Queues the stanza
-/// into the recipient's detached XEP-0198 replay buffer if a
-/// resumable session exists, otherwise drops with a debug log.
-///
-/// Known limitation (Copilot review on PR #276) — applies to the
-/// LEGACY call sites only (full-JID targets, non-DM stanzas); the
-/// #1106 shared fan-out pass hands this function the PROCESSED
-/// stanza instead: the buffered XML here
-/// is the pre-recipient-pass form, so replay on resume sends it
-/// verbatim WITHOUT running the recipient-pass chain. The replayed
-/// message is missing the recipient-side `<stanza-id by='recipient'/>`
-/// (XEP-0359 §5) and recipient-side filtering / archive / inbox
-/// effects don't fire. Matches LEGACY behaviour (which had no
-/// recipient pass at all) and is therefore not a regression. Closing
-/// the gap properly requires running the headless recipient pass per
-/// detached target and queueing its `SendStanza` output — tracked as
-/// a follow-up to #229.
-pub(super) async fn deliver_to_detached(
+/// Queue a fallback replay stanza and record the *accepted* SM stream when
+/// this route belongs to an ingress capture. The registry resolves the stream
+/// under its own lock, so we never infer a stale stream from the full JID.
+pub(super) async fn deliver_to_detached_with_capture(
     sm_session_registry: Option<&Arc<InMemorySmSessionRegistry>>,
+    ingress_effect_capture: Option<&crate::ingress_shadow::IngressEffectCapture>,
     target: &jid::FullJid,
     stanza: &Stanza,
 ) -> DetachedDeliveryOutcome {
+    deliver_to_detached_with_capture_details(
+        sm_session_registry,
+        ingress_effect_capture,
+        target,
+        stanza,
+    )
+    .await
+    .detached_outcome()
+}
+
+async fn deliver_to_detached_with_capture_details(
+    sm_session_registry: Option<&Arc<InMemorySmSessionRegistry>>,
+    ingress_effect_capture: Option<&crate::ingress_shadow::IngressEffectCapture>,
+    target: &jid::FullJid,
+    stanza: &Stanza,
+) -> DetachedDeliveryCapture {
     let message_id = stanza_message_id(stanza);
     let Some(sm) = sm_session_registry else {
         debug!(jid = %target, message_id, "RouteToConnection: target offline, dropping");
-        return DetachedDeliveryOutcome::Unavailable;
+        return DetachedDeliveryCapture::from_detached(DetachedDeliveryOutcome::Unavailable, None);
     };
     match sm
-        .record_stanza_for_detached_bound_resource(target, stanza, chrono::Utc::now())
+        .record_stanza_for_detached_bound_resource_with_stream(target, stanza, chrono::Utc::now())
         .await
     {
-        Ok(true) => {
+        Ok(Some(stream)) => {
+            if let Some(capture) = ingress_effect_capture {
+                capture.record_recipient_sm_append(stream.clone());
+            }
             debug!(
                 jid = %target,
                 message_id,
                 "RouteToConnection: recipient detached, queued for XEP-0198 replay"
             );
-            DetachedDeliveryOutcome::Queued
+            DetachedDeliveryCapture::from_detached(DetachedDeliveryOutcome::Queued, Some(stream))
         }
-        Ok(false) => {
+        Ok(None) => {
             debug!(
                 jid = %target,
                 message_id,
                 "RouteToConnection: target offline and no detached session, dropping"
             );
-            DetachedDeliveryOutcome::Unavailable
+            DetachedDeliveryCapture::from_detached(DetachedDeliveryOutcome::Unavailable, None)
         }
         Err(error) => {
             warn!(
@@ -892,7 +998,47 @@ pub(super) async fn deliver_to_detached(
                 %error,
                 "RouteToConnection: failed to record stanza for detached resource"
             );
-            DetachedDeliveryOutcome::Failed
+            DetachedDeliveryCapture::from_detached(DetachedDeliveryOutcome::Failed, None)
+        }
+    }
+}
+
+impl DetachedDeliveryCapture {
+    pub(crate) fn from_outcome(outcome: FullJidDeliveryOutcome) -> Self {
+        Self {
+            outcome,
+            recipient_sm_append_stream: None,
+        }
+    }
+
+    fn from_detached(
+        outcome: DetachedDeliveryOutcome,
+        recipient_sm_append_stream: Option<waddle_xmpp::pending_delivery::SmSessionId>,
+    ) -> Self {
+        Self {
+            outcome: outcome.into(),
+            recipient_sm_append_stream,
+        }
+    }
+
+    fn map_outcome(
+        self,
+        map: impl FnOnce(DetachedDeliveryOutcome) -> FullJidDeliveryOutcome,
+    ) -> Self {
+        Self {
+            outcome: map(self.detached_outcome()),
+            recipient_sm_append_stream: self.recipient_sm_append_stream,
+        }
+    }
+
+    fn detached_outcome(&self) -> DetachedDeliveryOutcome {
+        match self.outcome {
+            FullJidDeliveryOutcome::QueuedDetached => DetachedDeliveryOutcome::Queued,
+            FullJidDeliveryOutcome::Unavailable => DetachedDeliveryOutcome::Unavailable,
+            FullJidDeliveryOutcome::Delivered => DetachedDeliveryOutcome::Unavailable,
+            FullJidDeliveryOutcome::Dropped => DetachedDeliveryOutcome::Failed,
+            #[cfg(feature = "clustering")]
+            FullJidDeliveryOutcome::MaybeCommitted => DetachedDeliveryOutcome::Failed,
         }
     }
 }
@@ -942,6 +1088,7 @@ mod tests {
             user_id: jid.to_bare().to_string(),
             jid: jid.clone(),
             inbound_count: 0,
+            shadow_ordinal: waddle_xmpp::stream_management::ShadowOrdinal::ZERO,
             outbound_count: 0,
             last_acked: 0,
             replay_gap_through: None,
@@ -1037,6 +1184,7 @@ mod tests {
         deliver_one_via_actor(
             &registry,
             Some(&sm),
+            None,
             &target,
             &sample_message(&target),
             ActorSendKind::Peer,
@@ -1063,6 +1211,7 @@ mod tests {
         deliver_one_via_actor(
             &registry,
             None,
+            None,
             &target,
             &sample_message(&target),
             ActorSendKind::Peer,
@@ -1077,6 +1226,7 @@ mod tests {
         deliver_one_via_actor(
             &registry,
             Some(&sm),
+            None,
             &target,
             &sample_message(&target),
             ActorSendKind::Peer,
@@ -1108,6 +1258,7 @@ mod tests {
         deliver_one_via_actor(
             &registry,
             Some(&sm),
+            None,
             &missing,
             &sample_message(&missing),
             ActorSendKind::Peer,
@@ -1136,6 +1287,7 @@ mod tests {
         deliver_one_via_actor(
             &registry,
             Some(&sm),
+            None,
             &target,
             &sample_message(&target),
             ActorSendKind::Peer,
@@ -1212,6 +1364,7 @@ mod tests {
         deliver_one_via_actor(
             &registry,
             Some(&sm),
+            None,
             &target,
             &sample_message(&target),
             ActorSendKind::Peer,

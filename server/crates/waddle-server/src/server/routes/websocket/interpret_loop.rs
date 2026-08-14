@@ -31,5 +31,6 @@ pub(crate) fn build_interpret_deps<'a>(
         pending_delivery_storage: Some(&state.deps.protocol.pending_delivery_storage),
         ordered_relay_origin: None,
         sfu: state.deps.protocol.sfu.as_deref(),
+        ingress_effect_capture: None,
     }
 }

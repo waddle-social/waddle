@@ -1,4 +1,5 @@
 use super::*;
+use crate::ingress_shadow::IngressEffectCapture;
 
 // #229 PR12 — RouteToConnection delivers as PeerStanza
 // -----------------------------------------------------------------
@@ -41,6 +42,36 @@ async fn route_to_connection_full_jid_queues_peer_stanza_kind() {
          loop runs the recipient pass; got {:?}",
         queued[0].kind
     );
+}
+
+#[tokio::test]
+async fn route_to_connection_full_jid_live_dm_records_route_direct_intent() {
+    use waddle_xmpp::registry::UserRegistryActor;
+
+    let registry = ConnectionRegistry::new();
+    let user_registry = UserRegistryActor::spawn(UserRegistryActor::new());
+    let bob: jid::FullJid = "bob@example.com/desk".parse().expect("jid");
+    let (bob_tx, mut bob_rx) = tokio::sync::mpsc::channel(8);
+    register_into_both_tiers(&registry, &user_registry, &bob, bob_tx).await;
+
+    let capture = IngressEffectCapture::new(None);
+    let deps = Deps::registry_with_user_registry(&registry, &user_registry)
+        .with_ingress_effect_capture(Some(capture.clone()));
+
+    let msg = chat_msg(jid("alice@example.com/web"), jid("bob@example.com"), "hi");
+    let _ = interpret(
+        vec![OutboundEvent::RouteToConnection {
+            jid: jid::Jid::from(bob.clone()),
+            stanza: Box::new(Stanza::Message(msg)),
+            call_setup: None,
+        }],
+        &deps,
+    )
+    .await;
+
+    let queued = drain_inbound(&mut bob_rx);
+    assert_eq!(queued.len(), 1, "delivered to bob's queue exactly once");
+    assert!(capture.snapshot().intents.iter().any(|intent| matches!(intent, IngressEffectIntent::RouteDirect { recipient, fanout, .. } if *recipient == "bob@example.com".parse::<jid::BareJid>().expect("bare") && *fanout == vec![bob.clone()])));
 }
 
 #[tokio::test]
@@ -146,6 +177,71 @@ async fn route_to_connection_bare_jid_falls_back_to_connected_resources_without_
         delivered.len(),
         1,
         "no presence -> still delivered to connected resource as a legacy fallback"
+    );
+}
+
+#[tokio::test]
+async fn route_to_connection_capture_skips_blocked_bare_jid_delivery() {
+    use crate::ingress_shadow::IngressEffectCapture;
+    use waddle_xmpp::inbox::storage::InMemoryInboxStorage;
+    use waddle_xmpp::mam::storage::InMemoryMamStorage;
+    use waddle_xmpp::registry::UserRegistryActor;
+    use waddle_xmpp::xep::xep0191::InMemoryBlockingStorage;
+
+    let registry = ConnectionRegistry::new();
+    let user_registry = UserRegistryActor::spawn(UserRegistryActor::new());
+    let bob_desk: jid::FullJid = "bob@example.com/desk".parse().expect("jid");
+    let (desk_tx, mut desk_rx) = tokio::sync::mpsc::channel(8);
+    register_into_both_tiers(&registry, &user_registry, &bob_desk, desk_tx).await;
+    registry.update_presence(&bob_desk, true, 5);
+
+    let mam: Arc<dyn MamStorage> = Arc::new(InMemoryMamStorage::new());
+    let inbox: Arc<dyn InboxStorage> = Arc::new(InMemoryInboxStorage::new());
+    let blocking_concrete = Arc::new(InMemoryBlockingStorage::new());
+    blocking_concrete.set_blocklist(
+        "bob@example.com".parse().expect("bob bare"),
+        vec!["alice@example.com".parse().expect("alice bare")],
+    );
+    let blocking: Arc<dyn BlockingStorage> = blocking_concrete;
+    let dispatcher = pipelined_dispatcher();
+    let capture = IngressEffectCapture::new(None);
+    let deps = offline_pass_deps_with_user_registry(
+        &registry,
+        &user_registry,
+        &mam,
+        &inbox,
+        &blocking,
+        &dispatcher,
+    )
+    .with_ingress_effect_capture(Some(capture.clone()));
+
+    let _ = interpret(
+        vec![OutboundEvent::RouteToConnection {
+            jid: "bob@example.com".parse::<jid::Jid>().expect("bare"),
+            stanza: Box::new(Stanza::Message(chat_msg(
+                jid("alice@example.com/web"),
+                jid("bob@example.com"),
+                "blocked",
+            ))),
+            call_setup: None,
+        }],
+        &deps,
+    )
+    .await;
+
+    assert!(
+        drain_inbound(&mut desk_rx).is_empty(),
+        "blocked fan-out must not deliver a live copy"
+    );
+    assert!(
+        !capture.snapshot().intents.iter().any(|intent| {
+            matches!(
+                intent,
+                IngressEffectIntent::RouteDirect { recipient, .. }
+                    if recipient == &"bob@example.com".parse::<jid::BareJid>().expect("bare")
+            )
+        }),
+        "blocked bare-JID delivery must not record RouteDirect"
     );
 }
 

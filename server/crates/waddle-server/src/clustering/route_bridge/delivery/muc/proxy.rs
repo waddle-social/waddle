@@ -1,5 +1,24 @@
-use super::types::{MucProxyRouteDecision, OrderedRelayMucProxyOutcome};
+use super::types::{MucProxyRouteAttempt, MucProxyRouteDecision, OrderedRelayMucProxyOutcome};
 use super::*;
+use waddle_xmpp::ingress::RelayTargetIdentity;
+
+fn relay_target_identity_from_owner(
+    owner: &waddle_xmpp::ownership::NodeIdentity,
+) -> RelayTargetIdentity {
+    RelayTargetIdentity::owner_node(owner.node_id.clone(), owner.node_epoch.clone())
+}
+
+fn room_fence_from_remote_delivery(
+    outcome: &RemoteDeliveryOutcome,
+) -> Option<waddle_xmpp::muc::RoomClaimFenceContext> {
+    let owner = outcome.relay_target.as_ref()?;
+    let target_claim = outcome.target_claim.as_ref()?;
+    Some(waddle_xmpp::muc::RoomClaimFenceContext::new(
+        target_claim.entity.clone(),
+        owner.clone(),
+        target_claim.epoch,
+    ))
+}
 
 impl OrderedRelayDeliveryBridge {
     /// Return `Some` only when this room is currently owned by a fresh
@@ -42,7 +61,7 @@ impl OrderedRelayDeliveryBridge {
                 )
                 .await
             {
-                Some(outcome) => MucProxyRouteDecision::Attempted(outcome),
+                Some(attempt) => MucProxyRouteDecision::Attempted(attempt),
                 // Only `services.get()` misses produce `None` on the
                 // remote-resource path — the bridge is not wired yet.
                 None => MucProxyRouteDecision::RoomClaimUnavailable,
@@ -52,19 +71,7 @@ impl OrderedRelayDeliveryBridge {
             .await
     }
 
-    pub(in super::super) async fn try_proxy_muc_remote_from_local_origin(
-        self: &Arc<Self>,
-        room_jid: &jid::BareJid,
-        stanza: &Stanza,
-        kind: OrderedRelayMucProxyKind,
-        origin: &OrderedRelayRouteOrigin,
-    ) -> Option<OrderedRelayMucProxyOutcome> {
-        self.try_proxy_muc_remote_from_local_origin_decision(room_jid, stanza, kind, origin)
-            .await
-            .into_attempted()
-    }
-
-    pub(super) async fn try_proxy_muc_remote_from_local_origin_decision(
+    pub(in super::super) async fn try_proxy_muc_remote_from_local_origin_decision(
         self: &Arc<Self>,
         room_jid: &jid::BareJid,
         stanza: &Stanza,
@@ -97,6 +104,12 @@ impl OrderedRelayDeliveryBridge {
         if target_snapshot.owner == me {
             return MucProxyRouteDecision::LocalRoom;
         }
+        let relay_target = relay_target_identity_from_owner(&target_snapshot.owner);
+        let initial_room_fence = waddle_xmpp::muc::RoomClaimFenceContext::new(
+            target_entity.clone(),
+            target_snapshot.owner.clone(),
+            target_snapshot.claim_epoch,
+        );
 
         let (origin_entity, channel_origin) = route_origin_claim(&origin.kind);
         let Some(origin_snapshot) = current_claim(&services, &origin_entity).await else {
@@ -195,9 +208,16 @@ impl OrderedRelayDeliveryBridge {
                     match retry.delivery {
                         FullJidDeliveryOutcome::Delivered
                         | FullJidDeliveryOutcome::QueuedDetached => {
-                            return MucProxyRouteDecision::Attempted(
-                                OrderedRelayMucProxyOutcome::Delivered(retry.client_replies),
-                            );
+                            return MucProxyRouteDecision::Attempted(MucProxyRouteAttempt {
+                                relay_target: retry
+                                    .relay_target
+                                    .as_ref()
+                                    .map(relay_target_identity_from_owner),
+                                room_fence: room_fence_from_remote_delivery(&retry),
+                                outcome: OrderedRelayMucProxyOutcome::Delivered(
+                                    retry.client_replies,
+                                ),
+                            });
                         }
                         FullJidDeliveryOutcome::Unavailable
                         | FullJidDeliveryOutcome::Dropped
@@ -212,9 +232,16 @@ impl OrderedRelayDeliveryBridge {
                         match repair.delivery {
                             FullJidDeliveryOutcome::Delivered
                             | FullJidDeliveryOutcome::QueuedDetached => {
-                                return MucProxyRouteDecision::Attempted(
-                                    OrderedRelayMucProxyOutcome::Delivered(repair.client_replies),
-                                );
+                                return MucProxyRouteDecision::Attempted(MucProxyRouteAttempt {
+                                    relay_target: repair
+                                        .relay_target
+                                        .as_ref()
+                                        .map(relay_target_identity_from_owner),
+                                    room_fence: room_fence_from_remote_delivery(&repair),
+                                    outcome: OrderedRelayMucProxyOutcome::Delivered(
+                                        repair.client_replies,
+                                    ),
+                                });
                             }
                             FullJidDeliveryOutcome::Unavailable
                             | FullJidDeliveryOutcome::Dropped
@@ -222,9 +249,11 @@ impl OrderedRelayDeliveryBridge {
                         }
                     }
                 }
-                return MucProxyRouteDecision::Attempted(
-                    OrderedRelayMucProxyOutcome::JoinMaybeCommitted,
-                );
+                return MucProxyRouteDecision::Attempted(MucProxyRouteAttempt {
+                    relay_target: Some(relay_target.clone()),
+                    room_fence: Some(initial_room_fence.clone()),
+                    outcome: OrderedRelayMucProxyOutcome::JoinMaybeCommitted,
+                });
             }
             // A `MujiJingleIq` maybe-committed deliberately gets the
             // same treatment as every other kind: the channel keeps
@@ -240,22 +269,35 @@ impl OrderedRelayDeliveryBridge {
             // to unrelated MUC traffic. Only the `JoinPresence` arm
             // above can forget safely, because it immediately re-sends
             // and has `try_proxy_muc_join_repair` as a backstop.
-            return MucProxyRouteDecision::Attempted(OrderedRelayMucProxyOutcome::MaybeCommitted);
+            return MucProxyRouteDecision::Attempted(MucProxyRouteAttempt {
+                relay_target: Some(relay_target.clone()),
+                room_fence: Some(initial_room_fence),
+                outcome: OrderedRelayMucProxyOutcome::MaybeCommitted,
+            });
         }
 
-        MucProxyRouteDecision::Attempted(match outcome.delivery {
-            FullJidDeliveryOutcome::Delivered | FullJidDeliveryOutcome::QueuedDetached => {
-                OrderedRelayMucProxyOutcome::Delivered(outcome.client_replies)
-            }
-            FullJidDeliveryOutcome::Unavailable => OrderedRelayMucProxyOutcome::Unavailable,
-            FullJidDeliveryOutcome::Dropped => OrderedRelayMucProxyOutcome::Dropped,
-            FullJidDeliveryOutcome::MaybeCommitted => {
-                if kind == OrderedRelayMucProxyKind::JoinPresence {
-                    OrderedRelayMucProxyOutcome::JoinMaybeCommitted
-                } else {
-                    OrderedRelayMucProxyOutcome::MaybeCommitted
+        let final_relay_target = outcome
+            .relay_target
+            .as_ref()
+            .map(relay_target_identity_from_owner);
+        let room_fence = room_fence_from_remote_delivery(&outcome);
+        MucProxyRouteDecision::Attempted(MucProxyRouteAttempt {
+            relay_target: final_relay_target,
+            room_fence,
+            outcome: match outcome.delivery {
+                FullJidDeliveryOutcome::Delivered | FullJidDeliveryOutcome::QueuedDetached => {
+                    OrderedRelayMucProxyOutcome::Delivered(outcome.client_replies)
                 }
-            }
+                FullJidDeliveryOutcome::Unavailable => OrderedRelayMucProxyOutcome::Unavailable,
+                FullJidDeliveryOutcome::Dropped => OrderedRelayMucProxyOutcome::Dropped,
+                FullJidDeliveryOutcome::MaybeCommitted => {
+                    if kind == OrderedRelayMucProxyKind::JoinPresence {
+                        OrderedRelayMucProxyOutcome::JoinMaybeCommitted
+                    } else {
+                        OrderedRelayMucProxyOutcome::MaybeCommitted
+                    }
+                }
+            },
         })
     }
 

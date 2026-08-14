@@ -5,7 +5,7 @@ use xmpp_parsers::presence::Show;
 use super::core::InMemorySmSessionRegistry;
 use super::session::DetachedSession;
 use super::SmRegistryError;
-use crate::Stanza;
+use crate::{pending_delivery::SmSessionId, Stanza};
 
 /// Outcome of probing whether a full JID still owns resumable XEP-0198 state.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -238,6 +238,35 @@ impl InMemorySmSessionRegistry {
             original_receipt_at,
         )
         .await
+    }
+
+    /// Record a typed stanza for an exact detached resource and return the
+    /// actual stream whose replay buffer accepted it. Callers that persist an
+    /// effect identity must use this rather than inferring a stream from the
+    /// target JID, which can be rebound while routing is in flight.
+    pub async fn record_stanza_for_detached_bound_resource_with_stream(
+        &self,
+        jid: &FullJid,
+        stanza: &Stanza,
+        original_receipt_at: DateTime<Utc>,
+    ) -> Result<Option<SmSessionId>, SmRegistryError> {
+        let stanza_xml = Self::stanza_to_replay_xml(stanza);
+        let Some(stream_id) =
+            self.find_session_id_matching(|session| !session.is_expired() && session.jid == *jid)?
+        else {
+            return Ok(None);
+        };
+        let recorded = self
+            .update_detached_session_snapshot(
+                &stream_id,
+                |session| !session.is_expired() && session.jid == *jid,
+                |session| {
+                    session.record_detached_outbound(stanza_xml, original_receipt_at);
+                    true
+                },
+            )
+            .await?;
+        Ok(recorded.then(|| SmSessionId::new(stream_id)))
     }
 
     /// Record a stanza directly against a detached stream id, regardless of

@@ -1,4 +1,5 @@
 use super::*;
+use crate::ingress_shadow::IngressEffectCapture;
 
 // ---------------------------------------------------------------------
 // XEP-0191 fail-closed: a blocklist load failure must never let the
@@ -146,6 +147,94 @@ async fn route_bare_jid_dm_to_detached_only_recipient_runs_recipient_pipeline() 
         waddle_xmpp_core::xep0359::extract_stanza_id_by(&queued, &by).is_some(),
         "detached-only replay copy must be the PROCESSED (stamped) stanza"
     );
+}
+
+#[tokio::test]
+async fn detached_dm_append_records_the_actual_sm_stream() {
+    use waddle_xmpp::inbox::storage::InMemoryInboxStorage;
+    use waddle_xmpp::mam::storage::InMemoryMamStorage;
+    use waddle_xmpp::stream_management::SmSessionRegistry;
+    use waddle_xmpp::xep::xep0191::InMemoryBlockingStorage;
+
+    let registry = ConnectionRegistry::new();
+    let bob_phone: jid::FullJid = "bob@example.com/phone".parse().expect("jid");
+    let sm = Arc::new(InMemorySmSessionRegistry::new());
+    sm.store_session(detached_dm_session("captured-dm-stream", &bob_phone))
+        .await
+        .expect("store detached session");
+    let mam: Arc<dyn MamStorage> = Arc::new(InMemoryMamStorage::new());
+    let inbox: Arc<dyn InboxStorage> = Arc::new(InMemoryInboxStorage::new());
+    let blocking: Arc<dyn BlockingStorage> = Arc::new(InMemoryBlockingStorage::new());
+    let dispatcher = pipelined_dispatcher();
+    let capture = IngressEffectCapture::new(None);
+    let deps = Deps {
+        sm_session_registry: Some(&sm),
+        ingress_effect_capture: Some(capture.clone()),
+        ..offline_pass_deps(&registry, &mam, &inbox, &blocking, &dispatcher)
+    };
+
+    let _ = interpret(
+        vec![OutboundEvent::RouteToConnection {
+            jid: jid::Jid::from(bob_phone),
+            stanza: Box::new(Stanza::Message(chat_msg(
+                jid("alice@example.com/web"),
+                jid("bob@example.com/phone"),
+                "detached",
+            ))),
+            call_setup: None,
+        }],
+        &deps,
+    )
+    .await;
+
+    assert!(capture.snapshot().intents.iter().any(|intent| {
+        matches!(
+            intent,
+            IngressEffectIntent::RecipientSmAppend { stream, .. }
+                if stream.as_str() == "captured-dm-stream"
+        )
+    }));
+    assert!(
+        capture.snapshot().intents.iter().any(|intent| matches!(intent, IngressEffectIntent::RouteDirect { recipient, fanout, .. } if *recipient == "bob@example.com".parse::<jid::BareJid>().expect("bare") && *fanout == vec!["bob@example.com/phone".parse::<jid::FullJid>().expect("full")])),
+        "detached full-JID DM must also record the accepted direct-route target"
+    );
+}
+
+#[tokio::test]
+async fn detached_non_dm_append_records_the_actual_sm_stream() {
+    use waddle_xmpp::stream_management::SmSessionRegistry;
+
+    let registry = ConnectionRegistry::new();
+    let bob_phone: jid::FullJid = "bob@example.com/phone".parse().expect("jid");
+    let sm = Arc::new(InMemorySmSessionRegistry::new());
+    sm.store_session(detached_dm_session("captured-presence-stream", &bob_phone))
+        .await
+        .expect("store detached session");
+    let capture = IngressEffectCapture::new(None);
+    let deps = Deps {
+        sm_session_registry: Some(&sm),
+        ingress_effect_capture: Some(capture.clone()),
+        ..Deps::registry_only(&registry)
+    };
+    let mut presence = xmpp_parsers::presence::Presence::new(xmpp_parsers::presence::Type::None);
+    presence.from = Some(jid("alice@example.com/web"));
+    presence.to = Some(jid::Jid::from(bob_phone));
+
+    let _ = interpret(
+        vec![OutboundEvent::RouteToConnection {
+            jid: "bob@example.com/phone".parse::<jid::Jid>().expect("full"),
+            stanza: Box::new(Stanza::Presence(presence)),
+            call_setup: None,
+        }],
+        &deps,
+    )
+    .await;
+
+    assert!(capture.snapshot().intents.iter().any(|intent| matches!(
+        intent,
+        IngressEffectIntent::RecipientSmAppend { stream, .. }
+            if stream.as_str() == "captured-presence-stream"
+    )));
 }
 
 #[tokio::test]

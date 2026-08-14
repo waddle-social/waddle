@@ -92,6 +92,7 @@ pub(crate) async fn create_test_websocket_state() -> Arc<WebSocketState> {
         None,
         None,
         None,
+        None,
     )
     .await
 }
@@ -104,6 +105,7 @@ pub(crate) async fn create_test_websocket_state_with_sm_registry(
         None,
         None,
         Some(sm_session_registry),
+        None,
         None,
         None,
     )
@@ -126,6 +128,7 @@ pub(crate) async fn create_test_websocket_state_with_sm_registry_and_pending_sto
         Some(sm_session_registry),
         None,
         Some(pending_delivery_storage),
+        None,
     )
     .await
 }
@@ -144,6 +147,7 @@ pub(crate) async fn create_test_websocket_state_with_sm_registry_pending_and_blo
         Some(sm_session_registry),
         Some(blocking_storage),
         Some(pending_delivery_storage),
+        None,
     )
     .await
 }
@@ -168,6 +172,24 @@ pub(crate) async fn create_test_websocket_state_with_clustering(
         Some(sm_session_registry),
         None,
         None,
+        None,
+    )
+    .await
+}
+
+#[cfg(all(test, feature = "clustering"))]
+pub(crate) async fn create_test_websocket_state_with_sm_registry_and_ingress_shadow(
+    sm_session_registry: Arc<InMemorySmSessionRegistry>,
+    ingress_shadow: crate::ingress_shadow::IngressShadowHandle,
+) -> Arc<WebSocketState> {
+    create_test_websocket_state_with_extension_manager(
+        empty_extension_manager().await,
+        None,
+        None,
+        Some(sm_session_registry),
+        None,
+        None,
+        Some(ingress_shadow),
     )
     .await
 }
@@ -229,6 +251,7 @@ pub(crate) async fn create_test_websocket_state_with_sfu(
         None,
         None,
         None,
+        None,
     )
     .await
 }
@@ -246,6 +269,7 @@ pub(crate) async fn create_test_websocket_state_with_sfu_and_clustering(
         empty_extension_manager().await,
         Some(sfu),
         Some(clustering),
+        None,
         None,
         None,
         None,
@@ -573,6 +597,7 @@ pub(crate) async fn create_test_websocket_state_with_calls() -> Arc<WebSocketSta
         None,
         None,
         None,
+        None,
     )
     .await
 }
@@ -601,6 +626,7 @@ async fn create_test_websocket_state_with_extension_manager(
     pending_delivery_storage_override: Option<
         Arc<dyn waddle_xmpp::pending_delivery::storage::PendingDeliveryStorage>,
     >,
+    ingress_shadow_override: Option<crate::ingress_shadow::IngressShadowHandle>,
 ) -> Arc<WebSocketState> {
     let config = DatabaseConfig::default();
     let pool_config = PoolConfig;
@@ -805,6 +831,8 @@ async fn create_test_websocket_state_with_extension_manager(
                             waddle_xmpp::stream_management::persistence::InMemorySmPersistence::new(),
                         )))
                     }),
+                    ingress_shadow: ingress_shadow_override
+                        .unwrap_or_else(crate::ingress_shadow::IngressShadowHandle::disabled),
                     link_preview_resolves:
                         crate::server::routes::websocket::default_link_preview_resolve_permits(),
                     caps_resolver: Arc::new(
@@ -1089,7 +1117,8 @@ async fn handle_message_for_test(
     sm.transition_to_ready(sender_jid.clone(), false);
     sm.set_blocklist(Blocklist::empty());
     let phase = ConnectionPhase::ready(sender_jid.clone(), false);
-    handlers::message::handle_message(message, state, &phase, Some(&mut sm), session, None).await
+    handlers::message::handle_message(message, state, &phase, Some(&mut sm), session, None, None)
+        .await
 }
 
 fn authenticated_phase_for_session(session: &Session, domain: &str) -> ConnectionPhase {

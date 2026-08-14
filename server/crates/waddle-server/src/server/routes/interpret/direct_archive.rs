@@ -1,5 +1,7 @@
 use super::*;
+use waddle_xmpp::ingress::{IngressEffectIntent, RetractionTombstoneMutation};
 use waddle_xmpp::mam::StoreOutcome;
+use waddle_xmpp_core::xep0359::{extract_stanza_id_by, StanzaId};
 
 const DM_CALL_PENDING_TTL_SECS: i64 = 30 * 60;
 const DM_CALL_ACTIVE_TTL_SECS: i64 = 12 * 60 * 60;
@@ -76,6 +78,17 @@ pub(super) async fn archive_direct(
                 archive_id,
                 "ArchiveDirect: persisted"
             );
+            // Capture at the successful storage boundary. A retry-deduped
+            // write can resolve to an existing authoritative archive id,
+            // which is the only id that may be bound into the shadow intent.
+            deps.capture_intent(IngressEffectIntent::ArchiveAuthoritative {
+                archive: archive_jid.clone(),
+                stanza_id: waddle_xmpp_core::xep0359::StanzaId::new(
+                    archive_id.clone(),
+                    jid::Jid::from(archive_jid.clone()),
+                ),
+                by: archive_jid.clone(),
+            });
             // Notification activity ingest (slice 2b): the sender's
             // own archive commit is the strongest "currently active"
             // signal in a DM. `ArchiveDirect` runs twice per DM —
@@ -555,7 +568,7 @@ async fn update_direct_link_preview_refs(
         .as_deref()
         .or_else(|| message.id.as_ref().map(|id| id.0.as_str()));
     let Some(message_id) = message_id else { return };
-    crate::server::routes::websocket::link_preview_refs::record_current_message_preview_refs(
+    for intent in crate::server::routes::websocket::link_preview_refs::record_current_message_preview_refs_with_effects(
         global_db_actor,
         state.deps.auth_state.base_url.as_str(),
         archive_jid,
@@ -563,7 +576,10 @@ async fn update_direct_link_preview_refs(
         archive_id,
         message,
     )
-    .await;
+    .await
+    {
+        deps.capture_intent(intent);
+    }
 }
 
 pub(super) async fn resolve_direct_correction_target_message_id(
@@ -608,25 +624,42 @@ async fn apply_direct_retraction_tombstone(
         waddle_xmpp::xep::xep0424::extract_retraction_from_message(message)
     {
         if let Some(mam_storage) = deps.mam_storage {
-            let tombstoned = apply_retraction_tombstone(
+            let target_stanza_id = apply_retraction_tombstone(
                 mam_storage,
                 deps.sm_session_registry,
                 deps.pending_delivery_storage,
                 archive_jid,
                 &retraction.retracts_id,
                 message,
+                deps.ingress_effect_capture.as_ref(),
             )
             .await;
-            if tombstoned {
+            if let Some(target_stanza_id) = target_stanza_id {
+                if let Some(retraction_stanza_id) = retraction_stanza_id(message, archive_jid) {
+                    deps.capture_intent(IngressEffectIntent::RetractionTombstone {
+                        mutation: RetractionTombstoneMutation {
+                            archive: archive_jid.clone(),
+                            target_stanza_id,
+                            retraction_stanza_id,
+                        },
+                    });
+                }
                 if let Some(state) = deps.web_socket_state {
-                    crate::server::routes::websocket::link_preview_refs::clear_current_message_preview_refs(
+                    for intent in crate::server::routes::websocket::link_preview_refs::clear_current_message_preview_refs(
                         state.deps.app_state.db_pool.global_actor(),
                         archive_jid,
                         &retraction.retracts_id,
                     )
-                    .await;
+                    .await {
+                        deps.capture_intent(intent);
+                    }
                 }
             }
         }
     }
+}
+
+fn retraction_stanza_id(message: &Message, archive: &BareJid) -> Option<StanzaId> {
+    let by = jid::Jid::from(archive.clone());
+    extract_stanza_id_by(message, &by).map(|id| StanzaId::new(id, by))
 }

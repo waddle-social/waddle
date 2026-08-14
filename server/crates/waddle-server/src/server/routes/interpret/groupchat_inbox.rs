@@ -43,9 +43,7 @@ pub(super) async fn project_groupchat_inbox_event(input: ProjectGroupchatInboxEv
         );
         return;
     };
-    let notification_recovery_key = notification_recovery
-        .as_ref()
-        .map(|recovery| recovery.key.clone());
+    let notification_recovery_for_capture = notification_recovery.clone();
     let outcome = project_groupchat_inbox(GroupchatInboxProjectionInputs {
         inbox_storage,
         connection_registry: deps.connection_registry,
@@ -59,6 +57,23 @@ pub(super) async fn project_groupchat_inbox_event(input: ProjectGroupchatInboxEv
         notification_recovery,
     })
     .await;
+    if let Some(mutation) = groupchat_inbox_mutation(&room, &thread, is_recipient, &outcome) {
+        deps.capture_intent(IngressEffectIntent::InboxProject {
+            owner: owner.clone(),
+            mutation,
+        });
+    }
+    capture_groupchat_inbox_pushes(deps, &owner, &outcome);
+    if outcome.notification_recovery_committed {
+        if let Some(recovery) = notification_recovery_for_capture.as_ref() {
+            deps.capture_intent(IngressEffectIntent::GroupchatNotificationRecovery {
+                mutation: groupchat_notification_recovery_mutation(
+                    recovery,
+                    waddle_xmpp::ingress::GroupchatNotificationRecoveryAction::Recorded,
+                ),
+            });
+        }
+    }
     maybe_enqueue_groupchat_notification_candidate(GroupchatNotificationProjection {
         deps,
         owner: &owner,
@@ -70,10 +85,36 @@ pub(super) async fn project_groupchat_inbox_event(input: ProjectGroupchatInboxEv
         room_members_only,
         sender_can_broadcast_channel_mention,
         thread: &thread,
-        outcome,
-        recovery_key: notification_recovery_key.as_ref(),
+        outcome: &outcome,
+        notification_recovery: notification_recovery_for_capture.as_ref(),
     })
     .await;
+}
+
+/// Freeze only resources whose XEP-0430 push was accepted by the live
+/// registry.  The server-built inbox stanza is distinct from the MUC message,
+/// so use capture-local route identities rather than borrowing the source
+/// message's stanza id.
+fn capture_groupchat_inbox_pushes(
+    deps: &Deps<'_>,
+    owner: &BareJid,
+    outcome: &GroupchatInboxProjectionOutcome,
+) {
+    let Some(capture) = deps.ingress_effect_capture.as_ref() else {
+        return;
+    };
+    for fanout in [
+        &outcome.channel_push_recipients,
+        &outcome.thread_push_recipients,
+    ] {
+        if !fanout.is_empty() {
+            capture.record_intent(IngressEffectIntent::RouteDirect {
+                recipient: owner.clone(),
+                fanout: fanout.clone(),
+                route_identity: capture.next_route_identity(),
+            });
+        }
+    }
 }
 
 struct GroupchatNotificationProjection<'a, 'deps> {
@@ -89,8 +130,29 @@ struct GroupchatNotificationProjection<'a, 'deps> {
     /// [`ProjectGroupchatInboxEvent::sender_can_broadcast_channel_mention`].
     sender_can_broadcast_channel_mention: bool,
     thread: &'a Option<GroupchatThreadProjection>,
-    outcome: GroupchatInboxProjectionOutcome,
-    recovery_key: Option<&'a waddle_xmpp::inbox::storage::GroupchatNotificationRecoveryKey>,
+    outcome: &'a GroupchatInboxProjectionOutcome,
+    notification_recovery: Option<&'a waddle_xmpp::inbox::storage::GroupchatNotificationRecovery>,
+}
+
+fn groupchat_notification_recovery_mutation(
+    recovery: &waddle_xmpp::inbox::storage::GroupchatNotificationRecovery,
+    action: waddle_xmpp::ingress::GroupchatNotificationRecoveryAction,
+) -> waddle_xmpp::ingress::GroupchatNotificationRecoveryMutation {
+    waddle_xmpp::ingress::GroupchatNotificationRecoveryMutation {
+        recipient: recovery.key.recipient.clone(),
+        room: recovery.key.room.clone(),
+        thread_id: recovery.key.thread_id.as_ref().map(|thread_id| {
+            waddle_xmpp_core::mam::ThreadId::new(thread_id.clone())
+                .expect("stored groupchat recovery thread id must be valid")
+        }),
+        archive_stanza_id: recovery.key.archive_stanza_id.clone(),
+        sender: recovery.sender_jid.clone(),
+        is_live_occupant: recovery.is_live_occupant,
+        room_members_only: recovery.room_members_only,
+        sender_can_broadcast_channel_mention: recovery.sender_can_broadcast_channel_mention,
+        created_at_ms: recovery.created_at_ms,
+        action,
+    }
 }
 
 fn groupchat_notification_recovery_item(
@@ -122,6 +184,40 @@ enum GroupchatNotificationCandidateQueueOutcome {
     RetryLater,
 }
 
+fn groupchat_inbox_mutation(
+    room: &BareJid,
+    thread: &Option<GroupchatThreadProjection>,
+    is_recipient: bool,
+    outcome: &GroupchatInboxProjectionOutcome,
+) -> Option<waddle_xmpp::ingress::InboxProjectionMutation> {
+    match (
+        outcome.channel_committed,
+        outcome.thread_committed,
+        thread.as_ref(),
+    ) {
+        (true, true, Some(thread)) => Some(
+            waddle_xmpp::ingress::InboxProjectionMutation::GroupchatChannelAndThread {
+                room: room.clone(),
+                thread_id: waddle_xmpp_core::mam::ThreadId::new(thread.thread_id.clone())?,
+                increment_unread: is_recipient,
+            },
+        ),
+        (true, false, _) => Some(
+            waddle_xmpp::ingress::InboxProjectionMutation::GroupchatChannel {
+                room: room.clone(),
+                increment_unread: is_recipient,
+            },
+        ),
+        (false, true, Some(thread)) => Some(
+            waddle_xmpp::ingress::InboxProjectionMutation::GroupchatThread {
+                room: room.clone(),
+                thread_id: waddle_xmpp_core::mam::ThreadId::new(thread.thread_id.clone())?,
+            },
+        ),
+        _ => None,
+    }
+}
+
 async fn maybe_enqueue_groupchat_notification_candidate(
     input: GroupchatNotificationProjection<'_, '_>,
 ) {
@@ -137,7 +233,7 @@ async fn maybe_enqueue_groupchat_notification_candidate(
         sender_can_broadcast_channel_mention,
         thread,
         outcome,
-        recovery_key,
+        notification_recovery,
     } = input;
     let queue_outcome = enqueue_groupchat_notification_candidate(GroupchatNotificationProjection {
         deps,
@@ -151,12 +247,12 @@ async fn maybe_enqueue_groupchat_notification_candidate(
         sender_can_broadcast_channel_mention,
         thread,
         outcome,
-        recovery_key,
+        notification_recovery,
     })
     .await;
     if queue_outcome == GroupchatNotificationCandidateQueueOutcome::Completed {
-        if let Some(key) = recovery_key {
-            mark_groupchat_notification_recovery_completed(deps, key).await;
+        if let Some(recovery) = notification_recovery {
+            mark_groupchat_notification_recovery_completed(deps, recovery).await;
         }
     }
 }
@@ -176,7 +272,7 @@ async fn enqueue_groupchat_notification_candidate(
         sender_can_broadcast_channel_mention,
         thread,
         outcome,
-        recovery_key: _,
+        notification_recovery: _,
     } = input;
     if !is_recipient || !is_durable_recipient {
         return GroupchatNotificationCandidateQueueOutcome::Completed;
@@ -232,6 +328,7 @@ async fn enqueue_groupchat_notification_candidate(
         })
         .unwrap_or_else(crate::notification_outbox::NotificationThreadId::root);
     insert_groupchat_notification_candidate(GroupchatNotificationCandidateSeed {
+        deps: Some(deps),
         state,
         owner,
         room,
@@ -251,6 +348,7 @@ async fn enqueue_groupchat_notification_candidate(
 /// (`enqueue_groupchat_notification_candidate`) or during restart
 /// recovery (`reconcile_groupchat_notification_candidates`).
 struct GroupchatNotificationCandidateSeed<'a> {
+    deps: Option<&'a Deps<'a>>,
     state: &'a WebSocketState,
     owner: &'a BareJid,
     room: &'a BareJid,
@@ -279,6 +377,7 @@ async fn insert_groupchat_notification_candidate(
     seed: GroupchatNotificationCandidateSeed<'_>,
 ) -> GroupchatNotificationCandidateQueueOutcome {
     let GroupchatNotificationCandidateSeed {
+        deps,
         state,
         owner,
         room,
@@ -356,7 +455,7 @@ async fn insert_groupchat_notification_candidate(
         room.clone(),
         sender_jid,
         thread_id,
-        archive_stanza_id,
+        archive_stanza_id.clone(),
         class,
         hints,
     ) {
@@ -489,6 +588,17 @@ async fn insert_groupchat_notification_candidate(
         .await
     {
         Ok(crate::notification_outbox::NotificationCandidateInsertOutcome::Inserted) => {
+            if let Some(deps) = deps {
+                deps.capture_intent(IngressEffectIntent::NotificationActivityPreview {
+                    owner: owner.clone(),
+                    mutation:
+                        waddle_xmpp::ingress::NotificationActivityMutation::NotificationCandidate {
+                            conversation: room.clone(),
+                            archive_stanza_id: archive_stanza_id.clone(),
+                            outcome: waddle_xmpp::ingress::NotificationCandidateOutcome::Inserted,
+                        },
+                });
+            }
             debug!(
                 recipient = %owner,
                 room = %room,
@@ -498,6 +608,17 @@ async fn insert_groupchat_notification_candidate(
             GroupchatNotificationCandidateQueueOutcome::Completed
         }
         Ok(crate::notification_outbox::NotificationCandidateInsertOutcome::Duplicate) => {
+            if let Some(deps) = deps {
+                deps.capture_intent(IngressEffectIntent::NotificationActivityPreview {
+                    owner: owner.clone(),
+                    mutation:
+                        waddle_xmpp::ingress::NotificationActivityMutation::NotificationCandidate {
+                            conversation: room.clone(),
+                            archive_stanza_id: archive_stanza_id.clone(),
+                            outcome: waddle_xmpp::ingress::NotificationCandidateOutcome::Duplicate,
+                        },
+                });
+            }
             debug!(
                 recipient = %owner,
                 room = %room,
@@ -520,22 +641,31 @@ async fn insert_groupchat_notification_candidate(
 
 async fn mark_groupchat_notification_recovery_completed(
     deps: &Deps<'_>,
-    key: &waddle_xmpp::inbox::storage::GroupchatNotificationRecoveryKey,
+    recovery: &waddle_xmpp::inbox::storage::GroupchatNotificationRecovery,
 ) {
     let Some(inbox_storage) = deps.inbox_storage else {
         return;
     };
-    if let Err(error) = inbox_storage
-        .mark_groupchat_notification_recovery_completed(key)
+    match inbox_storage
+        .mark_groupchat_notification_recovery_completed(&recovery.key)
         .await
     {
-        warn!(
-            recipient = %key.recipient,
-            room = %key.room,
-            stanza_id = %key.archive_stanza_id,
+        Ok(marked) if marked > 0 => {
+            deps.capture_intent(IngressEffectIntent::GroupchatNotificationRecovery {
+                mutation: groupchat_notification_recovery_mutation(
+                    recovery,
+                    waddle_xmpp::ingress::GroupchatNotificationRecoveryAction::Completed,
+                ),
+            })
+        }
+        Ok(_) => {}
+        Err(error) => warn!(
+            recipient = %recovery.key.recipient,
+            room = %recovery.key.room,
+            stanza_id = %recovery.key.archive_stanza_id,
             error = %error,
             "ProjectGroupchatInbox: groupchat notification recovery completion marker failed"
-        );
+        ),
     }
 }
 
@@ -626,6 +756,7 @@ pub(crate) async fn reconcile_groupchat_notification_candidates_for_sweep(
             })
             .unwrap_or_else(crate::notification_outbox::NotificationThreadId::root);
         let outcome = insert_groupchat_notification_candidate(GroupchatNotificationCandidateSeed {
+            deps: None,
             state,
             owner: &recovery.key.recipient,
             room: &recovery.key.room,

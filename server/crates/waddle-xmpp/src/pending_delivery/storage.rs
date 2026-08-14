@@ -13,7 +13,9 @@ use jid::BareJid;
 use crate::ownership::Entity;
 use crate::postgres_identity::ClusterColocationIdentities;
 
-use super::{InsertOutcome, PendingRow, PendingRowId, QuotaPolicy, SmSessionId};
+use super::{
+    InsertOutcome, PendingRow, PendingRowId, QuotaPolicy, SmSessionId, TombstoneScrubbedPendingRows,
+};
 
 /// Errors returned by [`PendingDeliveryStorage`] implementations.
 #[derive(Debug, thiserror::Error)]
@@ -322,7 +324,7 @@ pub trait PendingDeliveryStorage: Send + Sync {
             let released_count = match self.release_row_if_session(&row.id, session).await {
                 Ok(released_count) => released_count,
                 Err(error) => {
-                    return ReleaseRowsForOutboundSequencesOutcome::partial(released, error)
+                    return ReleaseRowsForOutboundSequencesOutcome::partial(released, error);
                 }
             };
             if released_count > 0 {
@@ -468,6 +470,20 @@ pub trait PendingDeliveryStorage: Send + Sync {
         &self,
         target: &crate::tombstone::TombstoneTarget,
     ) -> Result<u64, PendingStorageError>;
+
+    /// Typed sibling of [`Self::scrub_for_tombstone`] that returns exact row
+    /// identities when the implementation can provide them.
+    ///
+    /// Default impl preserves source compatibility for older backends by
+    /// delegating to the existing count-only method and returning no ids.
+    async fn scrub_for_tombstone_with_row_ids(
+        &self,
+        target: &crate::tombstone::TombstoneTarget,
+    ) -> Result<TombstoneScrubbedPendingRows, PendingStorageError> {
+        Ok(TombstoneScrubbedPendingRows::count_only(
+            self.scrub_for_tombstone(target).await?,
+        ))
+    }
 
     /// Periodically GC backend-internal bookkeeping that grows with
     /// distinct keys seen by the process — e.g. per-recipient
@@ -1120,18 +1136,26 @@ impl PendingDeliveryStorage for InMemoryPendingDeliveryStorage {
         &self,
         target: &crate::tombstone::TombstoneTarget,
     ) -> Result<u64, PendingStorageError> {
+        Ok(self
+            .scrub_for_tombstone_with_row_ids(target)
+            .await?
+            .removed_count)
+    }
+
+    async fn scrub_for_tombstone_with_row_ids(
+        &self,
+        target: &crate::tombstone::TombstoneTarget,
+    ) -> Result<TombstoneScrubbedPendingRows, PendingStorageError> {
         let mut guard = self
             .inner
             .lock()
             .map_err(|e| PendingStorageError::Other(e.to_string()))?;
-        let mut removed = 0u64;
         let mut removed_ids = Vec::new();
         for queue in guard.values_mut() {
             let mut kept = VecDeque::with_capacity(queue.len());
             for row in queue.drain(..) {
                 if pending_row_matches_tombstone(&row, target) {
                     removed_ids.push(row.id);
-                    removed += 1;
                 } else {
                     kept.push_back(row);
                 }
@@ -1142,7 +1166,10 @@ impl PendingDeliveryStorage for InMemoryPendingDeliveryStorage {
         drop(guard);
         self.clear_notification_outboxed_markers(&removed_ids)?;
         self.clear_claimed_at(&removed_ids)?;
-        Ok(removed)
+        Ok(TombstoneScrubbedPendingRows {
+            removed_count: removed_ids.len() as u64,
+            row_ids: removed_ids,
+        })
     }
 }
 

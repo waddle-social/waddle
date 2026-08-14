@@ -2,11 +2,17 @@ use jid::BareJid;
 use kameo::actor::ActorRef;
 use std::collections::HashSet;
 use tracing::warn;
+use waddle_xmpp::ingress::{
+    IngressEffectIntent, LinkPreviewMediaRefMutation,
+    LinkPreviewMediaRefState as IntentLinkPreviewMediaRefState,
+};
+use waddle_xmpp::mam::RichMessageId;
+use waddle_xmpp_core::xep0359::StanzaId;
 use xmpp_parsers::message::Message;
 
 use crate::db::{
-    actor::{DbActor, DbExecute},
-    Value,
+    actor::{DbActor, DbExecute, DbQuery},
+    row_value, Value, ValueExt,
 };
 use crate::server::routes::websocket::link_preview_telemetry::{
     record_link_preview_event, LinkPreviewTelemetryEvent,
@@ -27,23 +33,25 @@ impl LinkPreviewMediaRefState {
     }
 }
 
-pub(crate) async fn record_current_message_preview_refs(
+pub(crate) async fn record_current_message_preview_refs_with_effects(
     global_db_actor: &ActorRef<DbActor>,
     trusted_media_base_url: &str,
     archive_jid: &BareJid,
     message_id: &str,
     current_archive_id: &str,
     message: &Message,
-) {
-    clear_current_message_preview_refs(global_db_actor, archive_jid, message_id).await;
+) -> Vec<IngressEffectIntent> {
+    let stale_refs =
+        cleared_current_message_preview_refs(global_db_actor, archive_jid, message_id).await;
 
+    let mut current_slots = Vec::new();
     for upload_slot_id in cached_preview_upload_slot_ids(message, trusted_media_base_url) {
         let now = chrono::Utc::now().to_rfc3339();
         if let Err(error) = global_db_actor
             .ask(DbExecute {
                 sql: "INSERT INTO link_preview_media_refs (upload_slot_id, archive_jid, message_id, current_archive_id, state, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?) ON CONFLICT (upload_slot_id, archive_jid, message_id) DO UPDATE SET current_archive_id = excluded.current_archive_id, state = excluded.state, updated_at = excluded.updated_at".to_string(),
                 params: vec![
-                    Value::from(upload_slot_id),
+                    Value::from(upload_slot_id.clone()),
                     Value::from(archive_jid.to_string()),
                     Value::from(message_id.to_string()),
                     Value::from(current_archive_id.to_string()),
@@ -55,19 +63,43 @@ pub(crate) async fn record_current_message_preview_refs(
             .await
         {
             warn!(%error, archive = %archive_jid, message_id, "failed to record link preview media ref");
+        } else if let Ok(upload_slot_id) = uuid::Uuid::parse_str(&upload_slot_id) {
+            current_slots.push(upload_slot_id);
         }
     }
+
+    committed_link_preview_media_ref_effects(
+        archive_jid,
+        message_id,
+        current_archive_id,
+        stale_refs,
+        current_slots,
+    )
 }
 
 pub(crate) async fn clear_current_message_preview_refs(
     global_db_actor: &ActorRef<DbActor>,
     archive_jid: &BareJid,
     message_id: &str,
-) {
+) -> Vec<IngressEffectIntent> {
+    committed_link_preview_media_ref_effects(
+        archive_jid,
+        message_id,
+        "",
+        cleared_current_message_preview_refs(global_db_actor, archive_jid, message_id).await,
+        Vec::new(),
+    )
+}
+
+async fn cleared_current_message_preview_refs(
+    global_db_actor: &ActorRef<DbActor>,
+    archive_jid: &BareJid,
+    message_id: &str,
+) -> Vec<CurrentPreviewRefRow> {
     let now = chrono::Utc::now().to_rfc3339();
     match global_db_actor
-        .ask(DbExecute {
-            sql: "UPDATE link_preview_media_refs SET state = ?, updated_at = ? WHERE archive_jid = ? AND message_id = ? AND state = ?".to_string(),
+        .ask(DbQuery {
+            sql: "UPDATE link_preview_media_refs SET state = ?, updated_at = ? WHERE archive_jid = ? AND message_id = ? AND state = ? RETURNING upload_slot_id, current_archive_id".to_string(),
             params: vec![
                 Value::from(LinkPreviewMediaRefState::Unreferenced.as_str().to_string()),
                 Value::from(now),
@@ -78,13 +110,34 @@ pub(crate) async fn clear_current_message_preview_refs(
         })
         .await
     {
-        Ok(rows_affected) => {
-            for _ in 0..rows_affected {
+        Ok(rows) => {
+            let mut refs = Vec::new();
+            for row in rows {
                 record_link_preview_event(LinkPreviewTelemetryEvent::CleanupReference);
+                let Some(upload_slot_id) = row_value(&row, 0)
+                    .and_then(ValueExt::as_string)
+                    .map(|value| value.to_string())
+                    .ok()
+                    .and_then(|value| uuid::Uuid::parse_str(&value).ok())
+                else {
+                    continue;
+                };
+                let Ok(current_archive_id) = row_value(&row, 1)
+                    .and_then(ValueExt::as_string)
+                    .map(|value| value.to_string())
+                else {
+                    continue;
+                };
+                refs.push(CurrentPreviewRefRow {
+                    upload_slot_id,
+                    current_archive_id,
+                });
             }
+            refs
         }
         Err(error) => {
             warn!(%error, archive = %archive_jid, message_id, "failed to clear link preview media refs");
+            Vec::new()
         }
     }
 }
@@ -103,6 +156,55 @@ fn cached_preview_upload_slot_ids(message: &Message, trusted_media_base_url: &st
         .filter_map(|uri| cached_preview_upload_slot_id(uri, trusted_media_base_url))
         .filter(|slot_id| seen.insert(slot_id.clone()))
         .collect()
+}
+
+#[derive(Debug)]
+struct CurrentPreviewRefRow {
+    upload_slot_id: uuid::Uuid,
+    current_archive_id: String,
+}
+
+fn committed_link_preview_media_ref_effects(
+    archive_jid: &BareJid,
+    message_id: &str,
+    current_archive_id: &str,
+    stale_refs: Vec<CurrentPreviewRefRow>,
+    current_slots: Vec<uuid::Uuid>,
+) -> Vec<IngressEffectIntent> {
+    let Some(message_id) = RichMessageId::new(message_id.to_string()) else {
+        return Vec::new();
+    };
+    let archive = jid::Jid::from(archive_jid.clone());
+    let mut intents = Vec::new();
+
+    for stale in stale_refs {
+        intents.push(IngressEffectIntent::LinkPreviewMediaRef {
+            mutation: LinkPreviewMediaRefMutation {
+                upload_slot_id: stale.upload_slot_id,
+                archive: archive_jid.clone(),
+                message_id: message_id.clone(),
+                current_archive_stanza_id: StanzaId::new(stale.current_archive_id, archive.clone()),
+                state: IntentLinkPreviewMediaRefState::Unreferenced,
+            },
+        });
+    }
+
+    for upload_slot_id in current_slots {
+        intents.push(IngressEffectIntent::LinkPreviewMediaRef {
+            mutation: LinkPreviewMediaRefMutation {
+                upload_slot_id,
+                archive: archive_jid.clone(),
+                message_id: message_id.clone(),
+                current_archive_stanza_id: StanzaId::new(
+                    current_archive_id.to_string(),
+                    archive.clone(),
+                ),
+                state: IntentLinkPreviewMediaRefState::Current,
+            },
+        });
+    }
+
+    intents
 }
 
 fn cached_preview_upload_slot_id(uri: &str, trusted_media_base_url: &str) -> Option<String> {
@@ -241,7 +343,7 @@ mod tests {
         seed_uploaded_slot(&pool, &slot_id).await;
         let archive: BareJid = "alice@example.com".parse().expect("archive");
 
-        record_current_message_preview_refs(
+        let _ = record_current_message_preview_refs_with_effects(
             pool.global_actor(),
             "https://waddle.example",
             &archive,
@@ -254,7 +356,7 @@ mod tests {
 
         let corrected_to: BareJid = "bob@example.com".parse().expect("jid");
         let corrected_without_link = Message::new(Some(jid::Jid::from(corrected_to)));
-        record_current_message_preview_refs(
+        let _ = record_current_message_preview_refs_with_effects(
             pool.global_actor(),
             "https://waddle.example",
             &archive,
@@ -286,7 +388,7 @@ mod tests {
         );
 
         recorded_events::clear();
-        record_current_message_preview_refs(
+        let _ = record_current_message_preview_refs_with_effects(
             pool.global_actor(),
             "https://waddle.example",
             &archive,
@@ -318,7 +420,7 @@ mod tests {
         add_preview_ref(&mut message, &first_slot_id);
         add_preview_ref(&mut message, &second_slot_id);
 
-        record_current_message_preview_refs(
+        let _ = record_current_message_preview_refs_with_effects(
             pool.global_actor(),
             "https://waddle.example",
             &archive,
@@ -349,7 +451,7 @@ mod tests {
         seed_uploaded_slot(&pool, &slot_id).await;
         let archive: BareJid = "alice@example.com".parse().expect("archive");
 
-        record_current_message_preview_refs(
+        let _ = record_current_message_preview_refs_with_effects(
             pool.global_actor(),
             "https://waddle.example",
             &archive,
@@ -373,7 +475,7 @@ mod tests {
         seed_uploaded_slot(&pool, &slot_id).await;
         let archive: BareJid = "room@muc.example.com".parse().expect("archive");
 
-        record_current_message_preview_refs(
+        let _ = record_current_message_preview_refs_with_effects(
             pool.global_actor(),
             "https://waddle.example",
             &archive,
@@ -397,7 +499,7 @@ mod tests {
         seed_uploaded_slot(&pool, &slot_id).await;
         let archive: BareJid = "alice@example.com".parse().expect("archive");
 
-        record_current_message_preview_refs(
+        let _ = record_current_message_preview_refs_with_effects(
             pool.global_actor(),
             "https://waddle.example",
             &archive,
@@ -406,7 +508,7 @@ mod tests {
             &message_with_preview_ref(&slot_id),
         )
         .await;
-        record_current_message_preview_refs(
+        let _ = record_current_message_preview_refs_with_effects(
             pool.global_actor(),
             "https://waddle.example",
             &archive,
@@ -432,7 +534,7 @@ mod tests {
         seed_uploaded_slot(&pool, &new_slot_id).await;
         let archive: BareJid = "alice@example.com".parse().expect("archive");
 
-        record_current_message_preview_refs(
+        let _ = record_current_message_preview_refs_with_effects(
             pool.global_actor(),
             "https://waddle.example",
             &archive,
@@ -441,7 +543,7 @@ mod tests {
             &message_with_preview_ref(&old_slot_id),
         )
         .await;
-        record_current_message_preview_refs(
+        let _ = record_current_message_preview_refs_with_effects(
             pool.global_actor(),
             "https://waddle.example",
             &archive,

@@ -71,7 +71,7 @@ pub(super) async fn broadcast_room_system_message_event(
     };
     let snapshot = match room_actor
         .ask(GetRoomSnapshot {
-            sender_jid: synthetic_sender,
+            sender_jid: synthetic_sender.clone(),
         })
         .await
     {
@@ -111,11 +111,23 @@ pub(super) async fn broadcast_room_system_message_event(
         // Room-authored system messages have no occupant sender, so
         // there is no real-JID `<x xmlns='muc#user'/>` to disclose.
         match archive_groupchat_message(mam_storage, &room, &message, 0, &fence, None).await {
-            ArchiveGroupchatOutcome::Stored(result) => debug!(
-                room = %room,
-                stanza_id = %result.stored_id,
-                "BroadcastRoomSystemMessage: archived"
-            ),
+            ArchiveGroupchatOutcome::Stored(result) => {
+                deps.capture_intent(
+                    waddle_xmpp::ingress::IngressEffectIntent::ArchiveAuthoritative {
+                        archive: room.clone(),
+                        stanza_id: waddle_xmpp_core::xep0359::StanzaId::new(
+                            result.stored_id.clone(),
+                            jid::Jid::from(room.clone()),
+                        ),
+                        by: room.clone(),
+                    },
+                );
+                debug!(
+                    room = %room,
+                    stanza_id = %result.stored_id,
+                    "BroadcastRoomSystemMessage: archived"
+                );
+            }
             ArchiveGroupchatOutcome::Deduplicated(result) => {
                 debug!(
                     room = %room,
@@ -163,6 +175,30 @@ pub(super) async fn broadcast_room_system_message_event(
             None,
         )
         .await;
+    }
+    if !snapshot.occupants.is_empty() {
+        let room_generation = snapshot
+            .claim_fence
+            .as_ref()
+            .and_then(|fence| u64::try_from(fence.epoch.0).ok())
+            .map(waddle_xmpp::ingress::EntityGeneration::from_storage)
+            .unwrap_or(waddle_xmpp::ingress::EntityGeneration::INITIAL);
+        deps.capture_intent(
+            waddle_xmpp::ingress::IngressEffectIntent::RouteMucGroupchat {
+                room: room.clone(),
+                occupants: snapshot
+                    .occupants
+                    .iter()
+                    .map(|occupant| occupant.full_jid.clone())
+                    .collect(),
+                reflection: synthetic_sender,
+                room_generation,
+                route_identity: waddle_xmpp::ingress::EffectMessageIdentity::stanza(StanzaId::new(
+                    stanza_id.clone(),
+                    Jid::from(room.clone()),
+                )),
+            },
+        );
     }
     Some(stanza_id)
 }

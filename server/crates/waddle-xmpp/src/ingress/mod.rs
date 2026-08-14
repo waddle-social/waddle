@@ -3,6 +3,7 @@
 
 mod alias;
 pub mod digest;
+mod effect_intent;
 mod epoch;
 mod error;
 mod generation;
@@ -18,6 +19,18 @@ pub const MAX_ORIGIN_ID_BYTES: usize = 1024;
 
 pub use alias::{resolve_alias, AliasConflict, AliasOutcome, AliasResolution, StoredAlias};
 pub use digest::{DigestContext, DigestInput, DigestInputError, DigestVersion, SemanticDigest};
+pub use effect_intent::{
+    DmPinMutationAction, EffectIntentCodecError, EffectMessageIdentity, FrozenStanzaError,
+    FrozenStanzaErrorAddress, FrozenStanzaErrorConditionPayload, FrozenStanzaErrorText,
+    FrozenStanzaErrorTexts, FrozenStanzaErrorType, GroupDmHistoryVisibility,
+    GroupDmMembershipGrant, GroupchatNotificationRecoveryAction,
+    GroupchatNotificationRecoveryMutation, InboxProjectionMutation, IngressEffectIntent,
+    IngressEffectKey, LinkPreviewMediaRefMutation, LinkPreviewMediaRefState, MucInviteLedgerAction,
+    MucInviteLedgerMutation, MucInviteMembershipGrant, NotificationActivityMutation,
+    NotificationCandidateOutcome, PendingDeliveryMutation, RecipientSmAppendIdentity,
+    RelayNodeEpoch, RelayNodeId, RelayTargetIdentity, RetractionTombstoneMutation, RoomPinMutation,
+    TombstoneReplaySmEntry, TombstoneReplayTarget, MAX_EFFECT_INTENT_PAYLOAD_BYTES,
+};
 pub use epoch::ProtocolEpoch;
 pub use error::IngressTypeError;
 pub use generation::{ConnectionGeneration, EntityGeneration, RowRevision};

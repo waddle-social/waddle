@@ -1,5 +1,7 @@
 use super::*;
 use waddle_xmpp::ownership::ClaimEpoch;
+use waddle_xmpp::pending_delivery::SmSessionId;
+use waddle_xmpp::stream_management::{DetachedSession, SmSessionRegistry};
 use xmpp_parsers::message::Message;
 
 #[test]
@@ -111,6 +113,7 @@ async fn bare_presence_direct_drops_blocked_sender_before_detached_replay() {
             user_id: target_bare().to_string(),
             jid: target_full(),
             inbound_count: 0,
+            shadow_ordinal: waddle_xmpp::stream_management::ShadowOrdinal::ZERO,
             outbound_count: 0,
             last_acked: 0,
             replay_gap_through: None,
@@ -281,6 +284,211 @@ async fn stale_registered_remote_resource_cleans_mirror_and_allows_local_fallbac
             .entry_if_owner(&target, &owner)
             .is_none(),
         "stale remote connection mirror must be removed so local fallback can run"
+    );
+}
+
+#[tokio::test]
+async fn remote_full_jid_route_reply_returns_detached_stream_identity() {
+    let services = Arc::new(
+        services_with_claims(
+            origin_identity(),
+            receiver_identity(),
+            receiver_identity(),
+            test_peer_id(),
+        )
+        .await,
+    );
+    let bridge = Arc::new(OrderedRelayDeliveryBridge::new(
+        CancellationToken::new(),
+        &ClusteringMessagingConfig::default(),
+    ));
+    bridge.wire(Arc::clone(&services));
+
+    let source = sender_full();
+    let (source_tx, _source_rx) = mpsc::channel(1);
+    let source_entry = ConnectionEntry::new(source_tx);
+    let source_owner = source_entry.carbons_handle();
+    services
+        .connection_registry
+        .register_entry(source.clone(), source_entry.clone());
+    services
+        .user_registry
+        .ask(waddle_xmpp::registry::RegisterUserResource {
+            jid: source.clone(),
+            entry: source_entry,
+        })
+        .await
+        .expect("register source mirror");
+
+    let registration_id = RemoteResourceRegistrationId::fresh();
+    let socket_generation = RemoteResourceSocketGeneration::next(None);
+    bridge.remote_owner_resources.lock().await.insert(
+        source.clone(),
+        RemoteOwnerRegistration {
+            registration_id,
+            socket_node: NodeId::new("source-socket-node".to_string()),
+            socket_generation,
+            owner: Arc::clone(&source_owner),
+        },
+    );
+
+    services
+        .sm_session_registry
+        .store_session(DetachedSession {
+            stream_id: "remote-direct-detached-stream".to_string(),
+            user_id: target_bare().to_string(),
+            jid: target_full(),
+            inbound_count: 0,
+            shadow_ordinal: waddle_xmpp::stream_management::ShadowOrdinal::ZERO,
+            outbound_count: 0,
+            last_acked: 0,
+            replay_gap_through: None,
+            unacked_stanzas: Vec::new(),
+            max_resume_time: Some(300),
+            detached_at: std::time::Instant::now(),
+            carbons_enabled: false,
+            roster_interested: false,
+            blocklist_interested: false,
+            presence_available: false,
+            presence_show: None,
+            presence_status: None,
+            presence_priority: 0,
+            presence_payloads: Vec::new(),
+            pending_subscribes_flushed: false,
+        })
+        .await
+        .expect("store detached target");
+
+    let mut message = Message::new(Some(jid::Jid::from(target_full())));
+    message.from = Some(jid::Jid::from(source.clone()));
+    message.type_ = xmpp_parsers::message::MessageType::Chat;
+    message.bodies.insert(
+        xmpp_parsers::message::Lang::new(),
+        "remote detached".to_string(),
+    );
+
+    let reply = bridge
+        .route_remote_resource_stanza_on_owner(RelayRouteRemoteResourceStanza {
+            source_jid: source,
+            registration_id,
+            socket_generation,
+            target: RemoteResourceRouteTarget::FullJid {
+                target: target_full(),
+                stanza: RemoteStanza(Stanza::Message(message)),
+            },
+            trace: RelayTraceContext::default(),
+        })
+        .await;
+
+    assert_eq!(reply.outcome, RemoteResourceRouteOutcome::QueuedDetached);
+    assert_eq!(
+        reply.recipient_sm_append_streams,
+        vec![SmSessionId::new("remote-direct-detached-stream")],
+    );
+}
+
+#[tokio::test]
+async fn remote_carbons_reply_returns_detached_stream_identity() {
+    let services = Arc::new(
+        services_with_claims(
+            origin_identity(),
+            receiver_identity(),
+            receiver_identity(),
+            test_peer_id(),
+        )
+        .await,
+    );
+    let bridge = OrderedRelayDeliveryBridge::new(
+        CancellationToken::new(),
+        &ClusteringMessagingConfig::default(),
+    );
+    bridge.wire(Arc::clone(&services));
+
+    let source: jid::FullJid = "alice@example.com/web".parse().expect("source");
+    let detached_target: jid::FullJid = "alice@example.com/phone".parse().expect("target");
+    let owner = source.to_bare();
+    let (source_tx, _source_rx) = mpsc::channel(1);
+    let source_entry = ConnectionEntry::new(source_tx);
+    let source_owner = source_entry.carbons_handle();
+    services
+        .connection_registry
+        .register_entry(source.clone(), source_entry.clone());
+    services
+        .user_registry
+        .ask(waddle_xmpp::registry::RegisterUserResource {
+            jid: source.clone(),
+            entry: source_entry,
+        })
+        .await
+        .expect("register source mirror");
+
+    let registration_id = RemoteResourceRegistrationId::fresh();
+    let socket_generation = RemoteResourceSocketGeneration::next(None);
+    bridge.remote_owner_resources.lock().await.insert(
+        source.clone(),
+        RemoteOwnerRegistration {
+            registration_id,
+            socket_node: NodeId::new("carbon-socket-node".to_string()),
+            socket_generation,
+            owner: Arc::clone(&source_owner),
+        },
+    );
+
+    services
+        .sm_session_registry
+        .store_session(DetachedSession {
+            stream_id: "remote-carbon-detached-stream".to_string(),
+            user_id: owner.to_string(),
+            jid: detached_target.clone(),
+            inbound_count: 0,
+            shadow_ordinal: waddle_xmpp::stream_management::ShadowOrdinal::ZERO,
+            outbound_count: 0,
+            last_acked: 0,
+            replay_gap_through: None,
+            unacked_stanzas: Vec::new(),
+            max_resume_time: Some(300),
+            detached_at: std::time::Instant::now(),
+            carbons_enabled: true,
+            roster_interested: false,
+            blocklist_interested: false,
+            presence_available: false,
+            presence_show: None,
+            presence_status: None,
+            presence_priority: 0,
+            presence_payloads: Vec::new(),
+            pending_subscribes_flushed: false,
+        })
+        .await
+        .expect("store detached carbon target");
+
+    let mut message = Message::new(Some(jid::Jid::from(target_full())));
+    message.from = Some(jid::Jid::from(source.clone()));
+    message.type_ = xmpp_parsers::message::MessageType::Chat;
+    message.bodies.insert(
+        xmpp_parsers::message::Lang::new(),
+        "remote carbon".to_string(),
+    );
+
+    let reply = bridge
+        .apply_remote_user_side_effect_on_owner(RelayRemoteUserSideEffect {
+            source_jid: source,
+            registration_id,
+            socket_generation,
+            effect: RemoteUserSideEffect::Carbons {
+                owner: owner.clone(),
+                message: RemoteStanza(Stanza::Message(message)),
+                kind: RemoteCarbonKind::Sent,
+                exclude: vec!["alice@example.com/web".parse().expect("exclude")],
+            },
+            trace: RelayTraceContext::default(),
+        })
+        .await;
+
+    assert_eq!(reply.status, RelayRemoteUserSideEffectStatus::Applied);
+    assert_eq!(reply.carbon_recipients, vec![detached_target]);
+    assert_eq!(
+        reply.recipient_sm_append_streams,
+        vec![SmSessionId::new("remote-carbon-detached-stream")],
     );
 }
 #[tokio::test]

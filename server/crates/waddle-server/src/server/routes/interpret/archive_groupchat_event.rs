@@ -1,4 +1,5 @@
 use super::*;
+use waddle_xmpp::ingress::IngressEffectIntent;
 
 pub(super) enum ArchiveGroupchatEventOutcome {
     Stored(Option<ArchiveIdRewrite>),
@@ -9,6 +10,17 @@ pub(super) enum ArchiveGroupchatEventOutcome {
     TombstoneHit,
     Skipped,
     OwnershipLost(Box<Message>),
+}
+
+fn capture_archive_authoritative_intent(deps: &Deps<'_>, room: &BareJid, archive_id: &str) {
+    deps.capture_intent(IngressEffectIntent::ArchiveAuthoritative {
+        archive: room.clone(),
+        stanza_id: waddle_xmpp_core::xep0359::StanzaId::new(
+            archive_id.to_string(),
+            jid::Jid::from(room.clone()),
+        ),
+        by: room.clone(),
+    });
 }
 
 pub(super) async fn archive_groupchat_event(
@@ -54,6 +66,7 @@ pub(super) async fn archive_groupchat_event(
     {
         ArchiveGroupchatOutcome::Stored(result) => result,
         ArchiveGroupchatOutcome::Deduplicated(result) => {
+            capture_archive_authoritative_intent(deps, &room, &result.stored_id);
             return ArchiveGroupchatEventOutcome::Deduplicated {
                 rewrite: result.rewrite,
                 sender: sender.to_bare(),
@@ -78,6 +91,7 @@ pub(super) async fn archive_groupchat_event(
         archive_id = %archive_id.stored_id,
         "ArchiveGroupchat: persisted"
     );
+    capture_archive_authoritative_intent(deps, &room, &archive_id.stored_id);
     update_groupchat_link_preview_refs(deps, &room, &archive_id.stored_id, &message).await;
     // Notification activity ingest (slice 2b): committing the sender's
     // groupchat message into the room archive is the strongest
@@ -115,7 +129,7 @@ async fn update_groupchat_link_preview_refs(
         .as_deref()
         .or_else(|| message.id.as_ref().map(|id| id.0.as_str()));
     let Some(message_id) = message_id else { return };
-    crate::server::routes::websocket::link_preview_refs::record_current_message_preview_refs(
+    for intent in crate::server::routes::websocket::link_preview_refs::record_current_message_preview_refs_with_effects(
         global_db_actor,
         state.deps.auth_state.base_url.as_str(),
         room,
@@ -123,5 +137,8 @@ async fn update_groupchat_link_preview_refs(
         archive_id,
         message,
     )
-    .await;
+    .await
+    {
+        deps.capture_intent(intent);
+    }
 }

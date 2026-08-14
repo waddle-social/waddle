@@ -53,6 +53,7 @@ fn make_test_session_for_jid(stream_id: &str, jid: FullJid) -> DetachedSession {
         user_id: "user@example.com".to_string(),
         jid,
         inbound_count: 10,
+        shadow_ordinal: crate::stream_management::ShadowOrdinal::ZERO,
         outbound_count: 15,
         last_acked: 12,
         replay_gap_through: None,
@@ -925,7 +926,10 @@ async fn terminal_release_retry_clears_retained_exact_fence() {
         .expect("take session");
     assert_eq!(registry.pending_claim_release_count(), 1);
     assert!(
-        registry.live_session_ids().expect("live session snapshot").is_empty(),
+        registry
+            .live_session_ids()
+            .expect("live session snapshot")
+            .is_empty(),
         "a terminal exact-release retry is not a resumable session and must not shield pending-delivery claims"
     );
     assert_eq!(
@@ -2243,6 +2247,19 @@ fn active_fence_ambiguity_marker_does_not_double_charge_capacity() {
 }
 
 #[test]
+fn current_sm_claim_fence_reports_only_the_live_exact_fence() {
+    let registry = InMemorySmSessionRegistry::new();
+    let owner = crate::ownership::NodeIdentity::new("sm-node", "incarnation");
+    let fence =
+        super::super::persistence::SmClaimFence::new(owner, crate::ownership::ClaimEpoch(7));
+
+    assert_eq!(registry.current_sm_claim_fence("stream-a"), None);
+    assert!(registry.reserve_claim_fence_capacity("stream-a"));
+    assert!(registry.try_record_claim_fence("stream-a", fence.clone()));
+    assert_eq!(registry.current_sm_claim_fence("stream-a"), Some(fence));
+}
+
+#[test]
 fn timed_out_release_generations_cannot_outgrow_claim_capacity() {
     let registry = InMemorySmSessionRegistry::with_capacity(2);
     let owner = crate::ownership::NodeIdentity::new("sm-node", "incarnation");
@@ -2445,6 +2462,46 @@ async fn xep_0198_scrub_for_tombstone_removes_matching_1on1_message() {
             .iter()
             .any(|entry| entry.stanza_xml.contains("<iq")),
         "iq frame must remain (not a message)"
+    );
+}
+
+#[tokio::test]
+async fn xep_0198_scrub_for_tombstone_with_entries_returns_exact_identity() {
+    let registry = InMemorySmSessionRegistry::new();
+    registry
+        .store_session(make_test_session_with_unacked(
+            "stream-tomb-identities",
+            vec![
+                (
+                    11,
+                    "<message xmlns='jabber:client' from='alice@example.com/web' to='user@example.com/resource' id='target' type='chat'><body>secret</body></message>"
+                        .to_string(),
+                ),
+                (
+                    12,
+                    "<message xmlns='jabber:client' from='alice@example.com/web' to='user@example.com/resource' id='other' type='chat'><body>safe</body></message>"
+                        .to_string(),
+                ),
+            ],
+        ))
+        .await
+        .unwrap();
+
+    let scrubbed = registry
+        .scrub_unacked_for_tombstone_with_entries(&direct_target(
+            "target",
+            "alice@example.com",
+            "user@example.com",
+        ))
+        .await
+        .unwrap();
+    assert_eq!(scrubbed.removed_count, 1);
+    assert_eq!(
+        scrubbed.entries,
+        vec![TombstoneScrubbedSmEntry {
+            stream_id: crate::pending_delivery::SmSessionId::new("stream-tomb-identities"),
+            sequence: 11,
+        }]
     );
 }
 
@@ -3096,6 +3153,7 @@ fn realistic_test_session_for_jid(stream_id: &str, jid: FullJid) -> DetachedSess
         user_id: "user@example.com".to_string(),
         jid,
         inbound_count: 4,
+        shadow_ordinal: crate::stream_management::ShadowOrdinal::ZERO,
         outbound_count: 7,
         last_acked: 5,
         replay_gap_through: None,
@@ -3912,6 +3970,7 @@ async fn restore_hydrates_expired_sessions_for_promotion_and_preserves_rows() {
         user_id: "alice".to_string(),
         jid: "alice@example.com/web".parse().unwrap(),
         inbound_count: 0,
+        shadow_ordinal: crate::stream_management::ShadowOrdinal::ZERO,
         outbound_count: 1,
         last_acked: 0,
         replay_gap_through: None,
@@ -5960,6 +6019,7 @@ async fn hydrate_reclaimed_skips_when_stream_id_already_present_in_memory() {
             user_id: "user@example.com".to_string(),
             jid: make_test_jid(),
             inbound_count: 111,
+            shadow_ordinal: crate::stream_management::ShadowOrdinal::ZERO,
             outbound_count: 111,
             last_acked: 0,
             replay_gap_through: None,
@@ -6034,6 +6094,7 @@ async fn hydrate_reclaimed_rejects_work_from_a_superseded_epoch() {
             user_id: "user@example.com".to_string(),
             jid: make_test_jid(),
             inbound_count: 0,
+            shadow_ordinal: crate::stream_management::ShadowOrdinal::ZERO,
             outbound_count: 0,
             last_acked: 0,
             replay_gap_through: None,
@@ -6257,6 +6318,7 @@ async fn hydrate_reclaimed_quarantines_corrupt_persistence_before_terminal_outco
             user_id: "poison@example.com".to_string(),
             jid: make_test_jid(),
             inbound_count: 0,
+            shadow_ordinal: crate::stream_management::ShadowOrdinal::ZERO,
             outbound_count: 0,
             last_acked: 0,
             replay_gap_through: None,
@@ -6332,6 +6394,7 @@ async fn transient_reclaimed_hydration_is_retained_and_retried() {
             user_id: "retry@example.com".to_string(),
             jid: make_test_jid(),
             inbound_count: 0,
+            shadow_ordinal: crate::stream_management::ShadowOrdinal::ZERO,
             outbound_count: 0,
             last_acked: 0,
             replay_gap_through: None,
@@ -6488,6 +6551,7 @@ async fn hydrate_reclaimed_serializes_against_a_concurrent_live_mutator_for_the_
             user_id: "race@example.com".to_string(),
             jid: jid.clone(),
             inbound_count: 0,
+            shadow_ordinal: crate::stream_management::ShadowOrdinal::ZERO,
             outbound_count: 0,
             last_acked: 0,
             replay_gap_through: None,
@@ -6666,6 +6730,7 @@ async fn any_resumable_session_probe_covers_durable_rows_and_fails_closed() {
         user_id: jid.to_bare().to_string(),
         jid: jid.clone(),
         inbound_count: 0,
+        shadow_ordinal: crate::stream_management::ShadowOrdinal::ZERO,
         outbound_count: 0,
         last_acked: 0,
         replay_gap_through: None,

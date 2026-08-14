@@ -12,7 +12,7 @@
 use crate::Stanza;
 use std::str::FromStr;
 use thiserror::Error;
-use xmpp_parsers::minidom::Element;
+use xmpp_parsers::{message::Lang, minidom::Element};
 
 pub const CLIENT_STANZA_NS: &str = "jabber:client";
 pub const MAX_FRAME_SIZE: usize = 1024 * 1024;
@@ -46,6 +46,13 @@ pub enum InboundFrame {
     /// `InboundFrame` pays that cost on every move (clippy
     /// `large_enum_variant`).
     Stanza(Box<Stanza>),
+}
+
+/// Parsed-frame metadata preserved at the initial XML boundary.
+#[derive(Debug, Clone)]
+pub struct ParsedFrame {
+    pub frame: InboundFrame,
+    pub message_stanza_lang: Option<Lang>,
 }
 
 /// Reasons a raw WebSocket payload can fail to classify into an
@@ -98,6 +105,11 @@ pub enum ParseError {
 /// when missing so `xmpp_parsers` can convert the element into a typed
 /// stanza.
 pub fn parse_frame(frame: &str) -> Result<InboundFrame, ParseError> {
+    Ok(parse_frame_with_metadata(frame)?.frame)
+}
+
+/// Parse one inbound frame and preserve metadata the typed stanza models drop.
+pub fn parse_frame_with_metadata(frame: &str) -> Result<ParsedFrame, ParseError> {
     if frame.len() > MAX_FRAME_SIZE {
         return Err(ParseError::TooLarge);
     }
@@ -139,7 +151,7 @@ fn peek_root_name(xml: &str) -> Option<&str> {
     Some(&rest[..name_end])
 }
 
-fn parse_auth(frame: &str) -> Result<InboundFrame, ParseError> {
+fn parse_auth(frame: &str) -> Result<ParsedFrame, ParseError> {
     let element =
         Element::from_str(frame).map_err(|err| ParseError::InvalidXml(err.to_string()))?;
     require_namespace(&element, "auth", crate::ns::SASL)?;
@@ -148,36 +160,46 @@ fn parse_auth(frame: &str) -> Result<InboundFrame, ParseError> {
         .attr("mechanism")
         .ok_or(ParseError::MalformedSasl("missing mechanism attribute"))?
         .to_string();
-    Ok(InboundFrame::Auth {
-        mechanism,
-        data: element.text().trim().to_string(),
+    Ok(ParsedFrame {
+        frame: InboundFrame::Auth {
+            mechanism,
+            data: element.text().trim().to_string(),
+        },
+        message_stanza_lang: None,
     })
 }
 
-fn parse_response(frame: &str) -> Result<InboundFrame, ParseError> {
+fn parse_response(frame: &str) -> Result<ParsedFrame, ParseError> {
     let element =
         Element::from_str(frame).map_err(|err| ParseError::InvalidXml(err.to_string()))?;
     require_namespace(&element, "response", crate::ns::SASL)?;
     require_text_only_element(&element, "response")?;
-    Ok(InboundFrame::SaslResponse(
-        element.text().trim().to_string(),
-    ))
+    Ok(ParsedFrame {
+        frame: InboundFrame::SaslResponse(element.text().trim().to_string()),
+        message_stanza_lang: None,
+    })
 }
 
-fn parse_open(frame: &str) -> Result<InboundFrame, ParseError> {
+fn parse_open(frame: &str) -> Result<ParsedFrame, ParseError> {
     let element =
         Element::from_str(frame).map_err(|err| ParseError::InvalidXml(err.to_string()))?;
     require_namespace(&element, "open", "urn:ietf:params:xml:ns:xmpp-framing")?;
     require_empty_element(&element, "open")?;
-    Ok(InboundFrame::Open)
+    Ok(ParsedFrame {
+        frame: InboundFrame::Open,
+        message_stanza_lang: None,
+    })
 }
 
-fn parse_close(frame: &str) -> Result<InboundFrame, ParseError> {
+fn parse_close(frame: &str) -> Result<ParsedFrame, ParseError> {
     let element =
         Element::from_str(frame).map_err(|err| ParseError::InvalidXml(err.to_string()))?;
     require_namespace(&element, "close", "urn:ietf:params:xml:ns:xmpp-framing")?;
     require_empty_element(&element, "close")?;
-    Ok(InboundFrame::Close)
+    Ok(ParsedFrame {
+        frame: InboundFrame::Close,
+        message_stanza_lang: None,
+    })
 }
 
 fn require_namespace(
@@ -215,10 +237,11 @@ fn require_text_only_element(element: &Element, name: &'static str) -> Result<()
     Ok(())
 }
 
-fn parse_stanza(frame: &str, kind: &str) -> Result<InboundFrame, ParseError> {
+fn parse_stanza(frame: &str, kind: &str) -> Result<ParsedFrame, ParseError> {
     let patched = inject_client_ns_if_missing(frame);
     let element =
         Element::from_str(&patched).map_err(|err| ParseError::InvalidXml(err.to_string()))?;
+    let message_stanza_lang = message_stanza_lang(&element);
 
     let stanza = match kind {
         "iq" => Stanza::Iq(Box::new(xmpp_parsers::iq::Iq::try_from(element).map_err(
@@ -274,7 +297,19 @@ fn parse_stanza(frame: &str, kind: &str) -> Result<InboundFrame, ParseError> {
             return Err(ParseError::UnknownRoot(kind.to_string()));
         }
     };
-    Ok(InboundFrame::Stanza(Box::new(stanza)))
+    Ok(ParsedFrame {
+        frame: InboundFrame::Stanza(Box::new(stanza)),
+        message_stanza_lang,
+    })
+}
+
+fn message_stanza_lang(element: &Element) -> Option<Lang> {
+    if element.name() != "message" {
+        return None;
+    }
+    element
+        .attr_ns(&xmpp_parsers::minidom::rxml::Namespace::XML, "lang")
+        .map(Lang::from)
 }
 
 /// RFC 6121 §5.2.2 unknown-type normalization: rewrite a `type`

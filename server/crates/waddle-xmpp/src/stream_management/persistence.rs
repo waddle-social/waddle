@@ -38,6 +38,7 @@ use crate::auth::AuthenticatedPrincipalRef;
 use crate::ownership::{ClaimEpoch, CurrentNodeIdentityGuard, Entity, NodeIdentity};
 use crate::pending_delivery::SmSessionId;
 use crate::postgres_identity::ClusterColocationIdentities;
+use crate::stream_management::ShadowOrdinal;
 use crate::Stanza;
 
 /// Immutable ownership context authorizing one clustered SM persistence write.
@@ -156,6 +157,7 @@ pub struct PersistedSession {
     pub user_id: String,
     pub jid: FullJid,
     pub inbound_count: u32,
+    pub shadow_ordinal: ShadowOrdinal,
     pub outbound_count: u32,
     pub last_acked: u32,
     pub replay_gap_through: Option<u32>,

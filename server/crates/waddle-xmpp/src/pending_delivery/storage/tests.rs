@@ -741,6 +741,37 @@ async fn scrub_for_tombstone_removes_matching_archived_pointer_row() {
     );
 }
 
+#[tokio::test]
+async fn scrub_for_tombstone_with_row_ids_returns_exact_removed_ids() {
+    let store = InMemoryPendingDeliveryStorage::unlimited();
+    let removed_row = transient_dm_row(
+        "alice@example.com",
+        "bob@elsewhere/x",
+        "retract-me",
+        "secret",
+    );
+    let removed_row_id = removed_row.id.clone();
+    let kept_row = transient_dm_row("alice@example.com", "bob@elsewhere/x", "keep-me", "safe");
+    let kept_row_id = kept_row.id.clone();
+    store.insert(removed_row).await.unwrap();
+    store.insert(kept_row).await.unwrap();
+
+    let scrubbed = store
+        .scrub_for_tombstone_with_row_ids(&direct_target(
+            "retract-me",
+            "bob@elsewhere",
+            "alice@example.com",
+        ))
+        .await
+        .unwrap();
+    assert_eq!(scrubbed.removed_count, 1);
+    assert_eq!(scrubbed.row_ids, vec![removed_row_id]);
+
+    let remaining = store.list(&bare("alice@example.com")).await.unwrap();
+    assert_eq!(remaining.len(), 1);
+    assert_eq!(remaining[0].id, kept_row_id);
+}
+
 // --- claim_batch_for_session (issue #1220) -------------------------------
 
 fn archive_id(row: &PendingRow) -> &str {

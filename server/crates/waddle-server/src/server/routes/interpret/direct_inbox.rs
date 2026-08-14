@@ -25,20 +25,30 @@ pub(super) async fn project_direct_inbox(
     let timestamp = chrono::Utc::now().timestamp();
     let mut entry = direct_message_entry(peer.clone(), &message, timestamp);
     entry.last_stanza_id = archive_ref.as_str().to_string();
-    if let Err(error) = inbox_storage.upsert(&owner, entry, increment_unread).await {
-        warn!(
-            owner = %owner,
-            peer = %peer,
-            %error,
-            "ProjectInbox: inbox upsert failed; dropping projection"
-        );
-    } else {
-        debug!(
-            owner = %owner,
-            peer = %peer,
-            archive_ref = archive_ref.as_str(),
-            increment_unread,
-            "ProjectInbox: persisted"
-        );
+    match inbox_storage.upsert(&owner, entry, increment_unread).await {
+        Ok(entry) => {
+            deps.capture_intent(IngressEffectIntent::InboxProject {
+                owner: owner.clone(),
+                mutation: waddle_xmpp::ingress::InboxProjectionMutation::Direct {
+                    entry,
+                    increment_unread,
+                },
+            });
+            debug!(
+                owner = %owner,
+                peer = %peer,
+                archive_ref = archive_ref.as_str(),
+                increment_unread,
+                "ProjectInbox: persisted"
+            );
+        }
+        Err(error) => {
+            warn!(
+                owner = %owner,
+                peer = %peer,
+                %error,
+                "ProjectInbox: inbox upsert failed; dropping projection"
+            );
+        }
     }
 }

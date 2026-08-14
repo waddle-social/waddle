@@ -18,6 +18,10 @@ use super::{
     },
 };
 use crate::server::routes::auth_telemetry::AuthFailure;
+use crate::server::routes::interpret::ParkedIngressShadowSubmission;
+#[cfg(any(feature = "clustering", test))]
+use jid::BareJid;
+use xmpp_parsers::message::Lang;
 
 /// Handle an XMPP frame per RFC 7395
 #[cfg(test)]
@@ -58,6 +62,79 @@ async fn await_control_stage<T>(
         }
     }
     Ok(output)
+}
+
+fn ingress_effect_capture_for_stanza(
+    state: &WebSocketState,
+    stanza_lang: Option<Lang>,
+    stanza: &Stanza,
+) -> Option<crate::ingress_shadow::IngressEffectCapture> {
+    if !state.deps.protocol.ingress_shadow.is_enabled() {
+        return None;
+    }
+    let Stanza::Message(message) = stanza else {
+        return None;
+    };
+    let capture = crate::ingress_shadow::IngressEffectCapture::new(stanza_lang);
+    if let Some(room_fence) = shadow_room_fence_for_message(state, message) {
+        capture.record_room_fence(room_fence);
+    }
+    Some(capture)
+}
+
+#[cfg(not(feature = "clustering"))]
+fn shadow_room_fence_for_message(
+    state: &WebSocketState,
+    message: &xmpp_parsers::message::Message,
+) -> Option<crate::ingress_shadow::IngressShadowRoomFence> {
+    let _ = (state, message);
+    None
+}
+
+#[cfg(feature = "clustering")]
+fn shadow_room_fence_for_message(
+    state: &WebSocketState,
+    message: &xmpp_parsers::message::Message,
+) -> Option<crate::ingress_shadow::IngressShadowRoomFence> {
+    let room = shadow_room_scope(message, &state.deps.service_domains.muc)?;
+    let store = state
+        .deps
+        .app_state
+        .clustering_claims
+        .muc_durable_store
+        .as_ref()?;
+    let fence = store.current_claim_fence(&room)?;
+    Some(crate::ingress_shadow::IngressShadowRoomFence::from_context(
+        &room, &fence,
+    ))
+}
+
+#[cfg(any(feature = "clustering", test))]
+fn shadow_room_scope(
+    message: &xmpp_parsers::message::Message,
+    muc_domain: &str,
+) -> Option<BareJid> {
+    let to = message.to.as_ref()?;
+    let room = to.to_bare();
+    if room.domain().as_str() != muc_domain {
+        return None;
+    }
+    if to.resource().is_some() || message.type_ == xmpp_parsers::message::MessageType::Groupchat {
+        return Some(room);
+    }
+    message
+        .payloads
+        .iter()
+        .find(|payload| payload.is("x", waddle_xmpp::muc::presence::NS_MUC_USER))
+        .and_then(|payload| {
+            (payload
+                .get_child("invite", waddle_xmpp::muc::presence::NS_MUC_USER)
+                .is_some()
+                || payload
+                    .get_child("decline", waddle_xmpp::muc::presence::NS_MUC_USER)
+                    .is_some())
+            .then_some(room)
+        })
 }
 
 async fn handle_xmpp_frame_impl(
@@ -145,8 +222,8 @@ async fn handle_xmpp_frame_impl(
         }
     }
 
-    let inbound = match parse_frame(frame) {
-        Ok(f) => f,
+    let parsed = match waddle_xmpp::protocol::frame::parse_frame_with_metadata(frame) {
+        Ok(parsed) => parsed,
         Err(ParseError::Empty) => return vec![],
         Err(err) => {
             if let Some(responses) = parse_error_responses(frame, &err) {
@@ -166,8 +243,9 @@ async fn handle_xmpp_frame_impl(
             return vec![];
         }
     };
+    let stanza_lang = parsed.message_stanza_lang;
 
-    match inbound {
+    match parsed.frame {
         InboundFrame::Open => {
             info!("XMPP stream open requested");
             let open_element = websocket_stream_open_xml(domain);
@@ -305,6 +383,20 @@ async fn handle_xmpp_frame_impl(
             // an IQ get/set gets a conformant resource-constraint/wait error and
             // message/presence are dropped (logged + metered).
             let backstop = StanzaBackstop::capture(&stanza, phase.bound_jid());
+            let ingress_effect_capture =
+                ingress_effect_capture_for_stanza(state, stanza_lang, stanza.as_ref());
+            if let (Some(inbound_sequence), Some(shadow_submission)) = (
+                reserved_inbound_for_sm,
+                parked_shadow_submission(
+                    state,
+                    sm_state,
+                    authenticated_session.as_ref(),
+                    stanza.as_ref(),
+                    ingress_effect_capture.clone(),
+                ),
+            ) {
+                sm_inbound_completion.park_shadow_submission(inbound_sequence, shadow_submission);
+            }
             let dispatch = async {
                 match *stanza {
                     Stanza::Iq(iq) => {
@@ -352,6 +444,7 @@ async fn handle_xmpp_frame_impl(
                             state_machine.as_mut(),
                             authenticated_session.as_ref(),
                             ordered_relay_origin.clone(),
+                            ingress_effect_capture.clone(),
                         )
                         .await
                     }
@@ -380,6 +473,7 @@ async fn handle_xmpp_frame_impl(
                 }
             };
             settle_inbound_dispatch(
+                &state.deps.protocol.ingress_shadow,
                 disposition,
                 ordered_relay_origin_was_deferred(&ordered_relay_origin),
                 reserved_inbound_for_sm,
@@ -392,6 +486,7 @@ async fn handle_xmpp_frame_impl(
 }
 
 pub(super) fn settle_inbound_dispatch(
+    ingress_shadow: &crate::ingress_shadow::IngressShadowHandle,
     disposition: InboundDisposition,
     ordered_relay_deferred: bool,
     inbound_sequence: Option<crate::server::routes::interpret::OrderedRelayInboundSequence>,
@@ -404,7 +499,9 @@ pub(super) fn settle_inbound_dispatch(
     match disposition {
         InboundDisposition::Handled => {
             if !ordered_relay_deferred {
-                completion.complete(inbound_sequence, sm_state);
+                completion.complete(inbound_sequence, sm_state, |submission| {
+                    let _ = ingress_shadow.try_submit(submission);
+                });
             }
         }
         InboundDisposition::Unhandled => {
@@ -415,6 +512,59 @@ pub(super) fn settle_inbound_dispatch(
             completion.abandon(inbound_sequence);
         }
     }
+}
+
+fn parked_shadow_submission(
+    state: &WebSocketState,
+    sm_state: &waddle_xmpp::stream_management::StreamManagementState,
+    authenticated_session: Option<&crate::auth::Session>,
+    stanza: &Stanza,
+    capture: Option<crate::ingress_shadow::IngressEffectCapture>,
+) -> Option<ParkedIngressShadowSubmission> {
+    if !state.deps.protocol.ingress_shadow.is_enabled() {
+        return None;
+    }
+    let stream_id = sm_state.stream_id.as_deref()?;
+    if !sm_state.is_resumable() {
+        debug!(
+            stream_id,
+            "ingress shadow explicitly excludes non-resumable SM traffic until a connection-scoped fence exists"
+        );
+        return None;
+    }
+    let Some(fence) = state
+        .deps
+        .protocol
+        .sm_session_registry
+        .current_sm_claim_fence(stream_id)
+    else {
+        debug!(
+            stream_id,
+            "ingress shadow skipped SM traffic because no current claim fence was present"
+        );
+        return None;
+    };
+    let principal =
+        authenticated_session.and_then(|session| session.authenticated_principal_ref().ok())?;
+    let capture = capture?;
+    let Stanza::Message(message) = stanza else {
+        return None;
+    };
+    Some(ParkedIngressShadowSubmission {
+        stream_id: waddle_xmpp::pending_delivery::SmSessionId::new(stream_id),
+        owner: fence.owner().clone(),
+        claim_epoch: fence.epoch(),
+        principal,
+        target: match message.to.as_ref() {
+            None => waddle_xmpp::ingress::NormalizedTarget::Absent,
+            Some(jid) => match jid.try_as_full() {
+                Ok(full) => waddle_xmpp::ingress::NormalizedTarget::Full(full.clone()),
+                Err(bare) => waddle_xmpp::ingress::NormalizedTarget::Bare(bare.clone()),
+            },
+        },
+        message: message.clone(),
+        capture,
+    })
 }
 
 #[cfg(feature = "clustering")]
@@ -606,21 +756,27 @@ mod tests {
 #[cfg(test)]
 mod inbound_dispatch_tests {
     use super::*;
+    #[cfg(feature = "clustering")]
+    use crate::ingress_shadow::IngressShadowHandle;
+    #[cfg(feature = "clustering")]
+    use std::sync::Arc;
+    #[cfg(feature = "clustering")]
+    use waddle_xmpp::stream_management::InMemorySmSessionRegistry;
+    use xmpp_parsers::message::MessageType;
+    use xmpp_parsers::minidom::Element;
 
-    fn enabled_sm() -> waddle_xmpp::stream_management::StreamManagementState {
+    #[tokio::test]
+    async fn handled_dispatch_advances_h_unless_ordered_relay_owns_completion() {
+        let websocket_state =
+            crate::server::routes::websocket::tests::create_test_websocket_state().await;
         let mut state = waddle_xmpp::stream_management::StreamManagementState::new();
         state.enable("dispatch-test".to_string(), true, Some(300));
-        state
-    }
-
-    #[test]
-    fn handled_dispatch_advances_h_unless_ordered_relay_owns_completion() {
-        let mut state = enabled_sm();
         let mut completion =
             crate::server::routes::interpret::SmInboundCompletionTracker::default();
         let sequence = completion.reserve(&state);
 
         settle_inbound_dispatch(
+            &websocket_state.deps.protocol.ingress_shadow,
             InboundDisposition::Handled,
             false,
             Some(sequence),
@@ -632,6 +788,7 @@ mod inbound_dispatch_tests {
 
         let deferred = completion.reserve(&state);
         settle_inbound_dispatch(
+            &websocket_state.deps.protocol.ingress_shadow,
             InboundDisposition::Handled,
             true,
             Some(deferred),
@@ -640,5 +797,169 @@ mod inbound_dispatch_tests {
         );
         assert_eq!(state.get_inbound_count(), 1);
         assert!(completion.has_pending());
+    }
+
+    #[tokio::test]
+    async fn disabled_shadow_skips_capture_and_preserves_shadow_ordinal() {
+        let websocket_state =
+            crate::server::routes::websocket::tests::create_test_websocket_state().await;
+        let mut sm_state = waddle_xmpp::stream_management::StreamManagementState::new();
+        sm_state.enable("shadow-disabled".to_string(), true, Some(300));
+        let sequence = {
+            let mut completion =
+                crate::server::routes::interpret::SmInboundCompletionTracker::default();
+            let sequence = completion.reserve(&sm_state);
+            let message = xmpp_parsers::message::Message::new(Some(
+                "room@muc.example.com".parse::<jid::Jid>().expect("jid"),
+            ));
+            let stanza = Stanza::Message(message);
+            assert!(
+                ingress_effect_capture_for_stanza(websocket_state.as_ref(), None, &stanza,)
+                    .is_none()
+            );
+            assert!(parked_shadow_submission(
+                websocket_state.as_ref(),
+                &sm_state,
+                None,
+                &stanza,
+                None,
+            )
+            .is_none());
+            settle_inbound_dispatch(
+                &websocket_state.deps.protocol.ingress_shadow,
+                InboundDisposition::Handled,
+                false,
+                Some(sequence),
+                &mut completion,
+                &mut sm_state,
+            );
+            sequence
+        };
+
+        assert_eq!(sequence.0, 1);
+        assert_eq!(sm_state.shadow_ordinal.to_storage(), 0);
+        assert_eq!(sm_state.get_inbound_count(), 1);
+    }
+
+    #[cfg(feature = "clustering")]
+    #[tokio::test]
+    async fn non_resumable_sm_explicitly_skips_shadow_parking() {
+        let websocket_state =
+            crate::server::routes::websocket::tests::create_test_websocket_state_with_sm_registry_and_ingress_shadow(
+                Arc::new(InMemorySmSessionRegistry::new()),
+                IngressShadowHandle::spawn_test_worker(8, 1, |_kind, _stream_id| async move {}),
+            )
+            .await;
+        let mut sm_state = waddle_xmpp::stream_management::StreamManagementState::new();
+        sm_state.enable("shadow-non-resumable".to_string(), false, Some(300));
+        let session = crate::auth::Session::new("alice@example.com", "alice", "alice");
+        let message = xmpp_parsers::message::Message::new(Some(
+            "room@muc.example.com".parse::<jid::Jid>().expect("jid"),
+        ));
+        let stanza = Stanza::Message(message);
+        let capture = ingress_effect_capture_for_stanza(websocket_state.as_ref(), None, &stanza)
+            .expect("enabled shadow should allocate capture state");
+
+        assert!(parked_shadow_submission(
+            websocket_state.as_ref(),
+            &sm_state,
+            Some(&session),
+            &stanza,
+            Some(capture),
+        )
+        .is_none());
+        assert_eq!(sm_state.shadow_ordinal.to_storage(), 0);
+    }
+
+    #[test]
+    fn ingress_effect_capture_uses_stanza_lang_from_initial_parse_metadata() {
+        // The stanza language captured during the initial typed parse is the
+        // capture's single source — no raw-frame re-parse exists to fall
+        // back on, so the constructor must carry it verbatim.
+        let capture = crate::ingress_shadow::IngressEffectCapture::new(Some(Lang::from("fr")));
+        assert_eq!(capture.snapshot().stanza_lang, Some(Lang::from("fr")));
+
+        // With the shadow disabled (the default, and this fixture's state),
+        // the seam allocates nothing at all — the default-off gate.
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("runtime");
+        let websocket_state = runtime
+            .block_on(crate::server::routes::websocket::tests::create_test_websocket_state());
+        let mut message = xmpp_parsers::message::Message::new(Some(
+            "room@muc.example.com".parse::<jid::Jid>().expect("jid"),
+        ));
+        message.type_ = MessageType::Groupchat;
+        let stanza = Stanza::Message(message);
+        assert!(ingress_effect_capture_for_stanza(
+            websocket_state.as_ref(),
+            Some(Lang::from("fr")),
+            &stanza,
+        )
+        .is_none());
+    }
+
+    #[test]
+    fn shadow_room_scope_recognizes_groupchat_pm_and_mediated_invite_decline_forms() {
+        let groupchat = {
+            let mut message = xmpp_parsers::message::Message::new(Some(
+                "room@muc.example.com".parse::<jid::Jid>().expect("jid"),
+            ));
+            message.type_ = MessageType::Groupchat;
+            message
+        };
+        assert_eq!(
+            shadow_room_scope(&groupchat, "muc.example.com")
+                .expect("groupchat room scope")
+                .to_string(),
+            "room@muc.example.com"
+        );
+
+        let occupant_pm = xmpp_parsers::message::Message::new(Some(
+            "room@muc.example.com/alice"
+                .parse::<jid::Jid>()
+                .expect("jid"),
+        ));
+        assert_eq!(
+            shadow_room_scope(&occupant_pm, "muc.example.com")
+                .expect("occupant pm room scope")
+                .to_string(),
+            "room@muc.example.com"
+        );
+
+        let mut invite = xmpp_parsers::message::Message::new(Some(
+            "room@muc.example.com".parse::<jid::Jid>().expect("jid"),
+        ));
+        invite.type_ = MessageType::Normal;
+        invite.payloads.push(
+            Element::builder("x", waddle_xmpp::muc::presence::NS_MUC_USER)
+                .append(Element::builder("invite", waddle_xmpp::muc::presence::NS_MUC_USER).build())
+                .build(),
+        );
+        assert_eq!(
+            shadow_room_scope(&invite, "muc.example.com")
+                .expect("invite room scope")
+                .to_string(),
+            "room@muc.example.com"
+        );
+
+        let mut decline = xmpp_parsers::message::Message::new(Some(
+            "room@muc.example.com".parse::<jid::Jid>().expect("jid"),
+        ));
+        decline.type_ = MessageType::Normal;
+        decline.payloads.push(
+            Element::builder("x", waddle_xmpp::muc::presence::NS_MUC_USER)
+                .append(
+                    Element::builder("decline", waddle_xmpp::muc::presence::NS_MUC_USER).build(),
+                )
+                .build(),
+        );
+        assert_eq!(
+            shadow_room_scope(&decline, "muc.example.com")
+                .expect("decline room scope")
+                .to_string(),
+            "room@muc.example.com"
+        );
     }
 }

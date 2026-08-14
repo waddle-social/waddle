@@ -260,6 +260,7 @@ async fn handle_sans_io_iq_with_relay_override(
             pending_delivery_storage: Some(&state.deps.protocol.pending_delivery_storage),
             ordered_relay_origin: conn_state.ordered_relay_origin.clone(),
             sfu: state.deps.protocol.sfu.as_deref(),
+            ingress_effect_capture: None,
         };
         let outcome = crate::server::routes::interpret::interpret(events, &deps).await;
         if let Some(room_jid) = muji_clear_after {
@@ -714,26 +715,37 @@ async fn relay_muji_to_room_owner(
         )
         .await
     {
-        MucProxyRouteDecision::Attempted(OrderedRelayMucProxyOutcome::Delivered(replies))
-            if !replies.is_empty() =>
-        {
-            MujiRelayOutcome::Frames(
-                replies
-                    .iter()
-                    .map(crate::server::routes::websocket::transport_xml::stanza_to_xml)
-                    .collect(),
-            )
-        }
-        // A `Delivered` carrying no frames (e.g. `QueuedDetached`)
-        // would otherwise return `Some(vec![])`, which the caller
-        // treats as terminal — the client's IQ would get no result and
-        // no error, and the call would silently never start.
-        // `Delivered` with no frames (`QueuedDetached`) means the owner
-        // took it — outcome unknown to us, and its own.
-        MucProxyRouteDecision::Attempted(OrderedRelayMucProxyOutcome::Delivered(_)) => {
-            unrelayable_after_relay_failure("delivered_without_replies");
-            unrelayable(true, &|| relay_uncertain("delivered_without_replies"))
-        }
+        MucProxyRouteDecision::Attempted(attempt) => match attempt.outcome {
+            OrderedRelayMucProxyOutcome::Delivered(replies) if !replies.is_empty() => {
+                MujiRelayOutcome::Frames(
+                    replies
+                        .iter()
+                        .map(crate::server::routes::websocket::transport_xml::stanza_to_xml)
+                        .collect(),
+                )
+            }
+            // A `Delivered` carrying no frames (e.g. `QueuedDetached`)
+            // would otherwise return `Some(vec![])`, which the caller
+            // treats as terminal — the client's IQ would get no result and
+            // no error, and the call would silently never start.
+            // `Delivered` with no frames (`QueuedDetached`) means the owner
+            // took it — outcome unknown to us, and its own.
+            OrderedRelayMucProxyOutcome::Delivered(_) => {
+                unrelayable_after_relay_failure("delivered_without_replies");
+                unrelayable(true, &|| relay_uncertain("delivered_without_replies"))
+            }
+            // Definitely not delivered: the attempt ended here.
+            OrderedRelayMucProxyOutcome::Unavailable | OrderedRelayMucProxyOutcome::Dropped => {
+                unrelayable_after_relay_failure("relay_delivery_failed");
+                unrelayable(true, &relay_failed)
+            }
+            // Ambiguous by construction — the owner may have committed it.
+            OrderedRelayMucProxyOutcome::MaybeCommitted
+            | OrderedRelayMucProxyOutcome::JoinMaybeCommitted => {
+                unrelayable_after_relay_failure("relay_maybe_committed");
+                unrelayable(true, &|| relay_uncertain("relay_maybe_committed"))
+            }
+        },
         // No node owns the room (or this one does, with no actor): the
         // local fallback for a terminate genuinely IS a no-op, because
         // there is no owner holding a registration to strand.
@@ -748,21 +760,6 @@ async fn relay_muji_to_room_owner(
             // exactly the cost this limiter bounds.
             refund_terminate_charge();
             unrelayable(false, &deny)
-        }
-        // Definitely not delivered: the attempt ended here.
-        MucProxyRouteDecision::Attempted(
-            OrderedRelayMucProxyOutcome::Unavailable | OrderedRelayMucProxyOutcome::Dropped,
-        ) => {
-            unrelayable_after_relay_failure("relay_delivery_failed");
-            unrelayable(true, &relay_failed)
-        }
-        // Ambiguous by construction — the owner may have committed it.
-        MucProxyRouteDecision::Attempted(
-            OrderedRelayMucProxyOutcome::MaybeCommitted
-            | OrderedRelayMucProxyOutcome::JoinMaybeCommitted,
-        ) => {
-            unrelayable_after_relay_failure("relay_maybe_committed");
-            unrelayable(true, &|| relay_uncertain("relay_maybe_committed"))
         }
         MucProxyRouteDecision::RoomClaimUnavailable => {
             unrelayable_after_relay_failure("room_claim_unavailable");

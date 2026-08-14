@@ -22,6 +22,10 @@
 
 use tracing::warn;
 use waddle_xmpp::{
+    ingress::{
+        IngressEffectIntent, MucInviteLedgerAction, MucInviteLedgerMutation,
+        MucInviteMembershipGrant,
+    },
     muc::room_actor::{AffiliationMutationError, ChangeAffiliation, GetSnapshot},
     muc::room_registry_actor::{DemoteRoomIfExactActor, GetOrCreateRoom, GetRoom},
     parser::stanza_to_string,
@@ -33,6 +37,10 @@ use xmpp_parsers::message::{Message, MessageType};
 use xmpp_parsers::stanza_error::{DefinedCondition, ErrorType, StanzaError};
 
 use crate::auth::Session;
+use crate::ingress_shadow::{
+    IngressEffectCapture, IngressShadowRoomFence, ShadowAuthorizationDeniedReason,
+    ShadowDecisionMarker,
+};
 use crate::server::routes::websocket::muc_invites::{
     claim_invite, record_invite, OutstandingInvite, RecordOutcome,
 };
@@ -85,6 +93,7 @@ pub(super) async fn handle_muc_mediated_invite(
     state: &WebSocketState,
     bound_jid: &jid::FullJid,
     authenticated_session: Option<&Session>,
+    ingress_effect_capture: Option<&IngressEffectCapture>,
 ) -> Option<Vec<String>> {
     if incoming.type_ != MessageType::Normal {
         return None;
@@ -99,6 +108,7 @@ pub(super) async fn handle_muc_mediated_invite(
         return Some(vec![error_frame(
             incoming,
             bound_jid,
+            ingress_effect_capture,
             ErrorType::Auth,
             DefinedCondition::NotAuthorized,
             "Authentication required.",
@@ -119,6 +129,7 @@ pub(super) async fn handle_muc_mediated_invite(
         return Some(vec![error_frame(
             incoming,
             bound_jid,
+            ingress_effect_capture,
             ErrorType::Cancel,
             DefinedCondition::ItemNotFound,
             "Requested room not found.",
@@ -128,18 +139,24 @@ pub(super) async fn handle_muc_mediated_invite(
         return Some(vec![error_frame(
             incoming,
             bound_jid,
+            ingress_effect_capture,
             ErrorType::Wait,
             DefinedCondition::InternalServerError,
             "Internal server error.",
         )]);
     };
-
+    if let (Some(capture), Some(claim_fence)) =
+        (ingress_effect_capture, snapshot.claim_fence.as_ref())
+    {
+        capture.record_room_fence(IngressShadowRoomFence::from_context(&room_jid, claim_fence));
+    }
     // XEP-0045 §7.8: a mediated invitation is an occupant action ("a
     // room in which one is an occupant").
     if snapshot.room.find_nick_by_real_jid(bound_jid).is_none() {
         return Some(vec![error_frame(
             incoming,
             bound_jid,
+            ingress_effect_capture,
             ErrorType::Cancel,
             DefinedCondition::NotAcceptable,
             "Only room occupants may send invitations.",
@@ -155,6 +172,7 @@ pub(super) async fn handle_muc_mediated_invite(
         return Some(vec![error_frame(
             incoming,
             bound_jid,
+            ingress_effect_capture,
             ErrorType::Auth,
             DefinedCondition::Forbidden,
             "Only room admins may invite people to a members-only room.",
@@ -168,6 +186,7 @@ pub(super) async fn handle_muc_mediated_invite(
         return Some(vec![error_frame(
             incoming,
             bound_jid,
+            ingress_effect_capture,
             ErrorType::Cancel,
             DefinedCondition::ItemNotFound,
             "Invitee is not a local user.",
@@ -177,6 +196,7 @@ pub(super) async fn handle_muc_mediated_invite(
         return Some(vec![error_frame(
             incoming,
             bound_jid,
+            ingress_effect_capture,
             ErrorType::Modify,
             DefinedCondition::JidMalformed,
             "Invitee must be a user JID with a localpart.",
@@ -194,6 +214,7 @@ pub(super) async fn handle_muc_mediated_invite(
             return Some(vec![error_frame(
                 incoming,
                 bound_jid,
+                ingress_effect_capture,
                 ErrorType::Cancel,
                 DefinedCondition::ItemNotFound,
                 "Invitee does not exist.",
@@ -208,6 +229,7 @@ pub(super) async fn handle_muc_mediated_invite(
             return Some(vec![error_frame(
                 incoming,
                 bound_jid,
+                ingress_effect_capture,
                 ErrorType::Wait,
                 DefinedCondition::InternalServerError,
                 "Internal server error.",
@@ -236,6 +258,11 @@ pub(super) async fn handle_muc_mediated_invite(
         }
     };
     if invitee_blocklist.contains_jid(&jid::Jid::from(bound_jid.clone())) {
+        if let Some(capture) = ingress_effect_capture {
+            capture.record_marker(ShadowDecisionMarker::AuthorizationDenied {
+                reason: ShadowAuthorizationDeniedReason::BlockedSender,
+            });
+        }
         return Some(vec![]);
     }
 
@@ -315,6 +342,7 @@ pub(super) async fn handle_muc_mediated_invite(
                 return Some(vec![error_frame(
                     incoming,
                     bound_jid,
+                    ingress_effect_capture,
                     ErrorType::Wait,
                     DefinedCondition::InternalServerError,
                     "Internal server error.",
@@ -355,6 +383,7 @@ pub(super) async fn handle_muc_mediated_invite(
                 return Some(vec![error_frame(
                     incoming,
                     bound_jid,
+                    ingress_effect_capture,
                     ErrorType::Wait,
                     DefinedCondition::InternalServerError,
                     "Internal server error.",
@@ -369,7 +398,7 @@ pub(super) async fn handle_muc_mediated_invite(
     // identical unexpired re-invite is a silent success with NO second
     // delivery — repeated invites can neither flood the invitee nor
     // exhaust their offline pending-delivery quota.
-    match record_invite(
+    let recorded_at = match record_invite(
         state.deps.app_state.db_pool.global_actor().clone(),
         &OutstandingInvite {
             room: room_jid.clone(),
@@ -379,7 +408,7 @@ pub(super) async fn handle_muc_mediated_invite(
     )
     .await
     {
-        Ok(RecordOutcome::New) => {}
+        Ok(RecordOutcome::New { created_at }) => created_at,
         Ok(RecordOutcome::AlreadyOutstanding) => return Some(vec![]),
         Err(error) => {
             warn!(
@@ -400,12 +429,13 @@ pub(super) async fn handle_muc_mediated_invite(
             return Some(vec![error_frame(
                 incoming,
                 bound_jid,
+                ingress_effect_capture,
                 ErrorType::Wait,
                 DefinedCondition::InternalServerError,
                 "Internal server error.",
             )]);
         }
-    }
+    };
 
     // XEP-0045 §7.8.2: the room adds `from` (the inviter) to the
     // `<invite/>` and sends the invitation from its own bare JID.
@@ -418,7 +448,9 @@ pub(super) async fn handle_muc_mediated_invite(
         &inbound_invite,
     ));
 
-    if let Err(error) = deliver_muc_user_message(state, &invitee, invite).await {
+    if let Err(error) =
+        deliver_muc_user_message(state, &invitee, invite, ingress_effect_capture).await
+    {
         // Neither a live socket nor the durable queue accepted the
         // invitation — undo everything (ledger row, membership grant)
         // and tell the inviter, instead of reporting a success that
@@ -458,10 +490,32 @@ pub(super) async fn handle_muc_mediated_invite(
         return Some(vec![error_frame(
             incoming,
             bound_jid,
+            ingress_effect_capture,
             ErrorType::Wait,
             DefinedCondition::InternalServerError,
             "Internal server error.",
         )]);
+    }
+
+    if let Some(capture) = ingress_effect_capture {
+        if granted_membership {
+            capture.record_intent(IngressEffectIntent::MucInviteMembershipGrant {
+                grant: MucInviteMembershipGrant {
+                    room: room_jid.clone(),
+                    invitee: invitee.clone(),
+                    inviter: inviter_bare.clone(),
+                },
+            });
+        }
+        capture.record_intent(IngressEffectIntent::MucInviteLedger {
+            mutation: MucInviteLedgerMutation {
+                room: room_jid.clone(),
+                invitee: invitee.clone(),
+                inviter: inviter_bare.clone(),
+                action: MucInviteLedgerAction::Recorded,
+                recorded_at: Some(recorded_at),
+            },
+        });
     }
 
     Some(vec![])
@@ -546,6 +600,7 @@ pub(super) async fn deliver_muc_user_message(
     state: &WebSocketState,
     recipient: &jid::BareJid,
     message: Message,
+    ingress_effect_capture: Option<&IngressEffectCapture>,
 ) -> Result<(), MucUserDeliveryError> {
     let resources = waddle_xmpp::registry::get_resources_for_user(
         &state.deps.protocol.user_registry,
@@ -553,6 +608,7 @@ pub(super) async fn deliver_muc_user_message(
     )
     .await;
     let mut delivered = false;
+    let mut accepted_resources = Vec::new();
     for resource in &resources {
         if state
             .deps
@@ -563,16 +619,32 @@ pub(super) async fn deliver_muc_user_message(
             .is_sent()
         {
             delivered = true;
+            accepted_resources.push(resource.clone());
         }
     }
     if delivered {
+        super::record_route_direct_intent(
+            ingress_effect_capture,
+            recipient.clone(),
+            accepted_resources,
+        );
         return Ok(());
     }
     // Offline — or every registered session refused the write (a
     // half-closed socket is indistinguishable from offline here):
     // fall back to the durable queue rather than reporting success
     // for a message nobody received.
-    queue_offline_muc_user_message(state, recipient, &message).await
+    let row_id = queue_offline_muc_user_message(state, recipient, &message).await?;
+    if let Some(capture) = ingress_effect_capture {
+        capture.record_intent(IngressEffectIntent::PendingDelivery {
+            mutation: waddle_xmpp::ingress::PendingDeliveryMutation::Transient {
+                recipient: recipient.clone(),
+                row_id,
+            },
+        });
+    }
+    super::record_route_direct_intent(ingress_effect_capture, recipient.clone(), Vec::new());
+    Ok(())
 }
 
 /// Queue a room-authored invite/decline for an offline recipient in
@@ -583,9 +655,10 @@ async fn queue_offline_muc_user_message(
     state: &WebSocketState,
     recipient: &jid::BareJid,
     message: &Message,
-) -> Result<(), MucUserDeliveryError> {
+) -> Result<PendingRowId, MucUserDeliveryError> {
+    let row_id = PendingRowId::fresh();
     let row = PendingRow {
-        id: PendingRowId::fresh(),
+        id: row_id.clone(),
         recipient: recipient.clone(),
         original_receipt_at: chrono::Utc::now(),
         payload: PendingPayload::Transient(Box::new(message.clone())),
@@ -599,7 +672,7 @@ async fn queue_offline_muc_user_message(
         .insert(row)
         .await
     {
-        Ok(InsertOutcome::Inserted) => Ok(()),
+        Ok(InsertOutcome::Inserted) => Ok(row_id),
         Ok(InsertOutcome::QuotaExceeded) => Err(MucUserDeliveryError::QuotaExceeded),
         Err(error) => Err(MucUserDeliveryError::Storage(error.to_string())),
     }
@@ -639,21 +712,184 @@ fn build_mediated_invite_payload(
 fn error_frame(
     incoming: &Message,
     bound_jid: &jid::FullJid,
+    ingress_effect_capture: Option<&IngressEffectCapture>,
     error_type: ErrorType,
     condition: DefinedCondition,
     text: &'static str,
 ) -> String {
     let mut stamped = incoming.clone();
     stamped.from = Some(jid::Jid::from(bound_jid.clone()));
-    let reply = message_error_reply(
-        &stamped,
-        StanzaError::new(error_type, condition, "en", text),
-    );
-    stanza_to_string(reply).unwrap_or_default()
+    let error = StanzaError::new(error_type, condition, "en", text);
+    let frozen_error = waddle_xmpp::ingress::FrozenStanzaError::from_xmpp(&error)
+        .expect("server-built stanza error should freeze");
+    let reply = message_error_reply(&stamped, error);
+    match stanza_to_string(reply) {
+        Ok(xml) => {
+            if let Some(capture) = ingress_effect_capture {
+                capture.record_intent(IngressEffectIntent::ErrorReply {
+                    recipient: bound_jid.clone(),
+                    error: frozen_error,
+                });
+            }
+            xml
+        }
+        Err(_) => String::new(),
+    }
 }
 
 #[cfg(test)]
 mod tests {
+    use super::*;
+    use crate::server::routes::websocket::tests::{
+        create_test_websocket_state, register_test_connection,
+    };
+    use waddle_xmpp::ingress::IngressEffectIntent;
+
+    #[tokio::test]
+    async fn deliver_muc_user_message_records_live_direct_route_intent() {
+        let state = create_test_websocket_state().await;
+        let capture = IngressEffectCapture::new(None);
+        let recipient: jid::BareJid = "bob@example.com".parse().expect("recipient");
+        let bob_phone: jid::FullJid = "bob@example.com/phone".parse().expect("bob phone");
+        let (bob_tx, _bob_rx) = tokio::sync::mpsc::channel(4);
+        register_test_connection(state.as_ref(), &bob_phone, bob_tx).await;
+
+        let mut message = Message::new(Some(jid::Jid::from(recipient.clone())));
+        message.type_ = MessageType::Normal;
+
+        deliver_muc_user_message(state.as_ref(), &recipient, message, Some(&capture))
+            .await
+            .expect("delivery succeeds");
+
+        assert!(capture.snapshot().intents.iter().any(|intent| {
+            matches!(
+                intent,
+                IngressEffectIntent::RouteDirect {
+                    recipient: captured_recipient,
+                    fanout,
+                    ..
+                } if captured_recipient == &recipient && fanout == &vec![bob_phone.clone()]
+            )
+        }));
+    }
+
+    #[tokio::test]
+    async fn deliver_muc_user_message_records_offline_direct_route_intent() {
+        let state = create_test_websocket_state().await;
+        let capture = IngressEffectCapture::new(None);
+        let recipient: jid::BareJid = "offline@example.com".parse().expect("recipient");
+        let mut message = Message::new(Some(jid::Jid::from(recipient.clone())));
+        message.type_ = MessageType::Normal;
+
+        deliver_muc_user_message(state.as_ref(), &recipient, message, Some(&capture))
+            .await
+            .expect("offline queue succeeds");
+
+        assert!(capture.snapshot().intents.iter().any(|intent| {
+            matches!(
+                intent,
+                IngressEffectIntent::RouteDirect {
+                    recipient: captured_recipient,
+                    fanout,
+                    ..
+                } if captured_recipient == &recipient && fanout.is_empty()
+            )
+        }));
+        assert!(capture.snapshot().intents.iter().any(|intent| {
+            matches!(
+                intent,
+                IngressEffectIntent::PendingDelivery {
+                    mutation: waddle_xmpp::ingress::PendingDeliveryMutation::Transient {
+                        recipient: captured_recipient,
+                        ..
+                    }
+                } if captured_recipient == &recipient
+            )
+        }));
+    }
+
+    #[tokio::test]
+    async fn deliver_muc_user_message_excludes_rejected_live_resources_from_route_intent() {
+        let state = create_test_websocket_state().await;
+        let capture = IngressEffectCapture::new(None);
+        let recipient: jid::BareJid = "bob@example.com".parse().expect("recipient");
+        let bob_phone: jid::FullJid = "bob@example.com/phone".parse().expect("bob phone");
+        let bob_laptop: jid::FullJid = "bob@example.com/laptop".parse().expect("bob laptop");
+        let (bob_phone_tx, _bob_phone_rx) = tokio::sync::mpsc::channel(4);
+        let (bob_laptop_tx, bob_laptop_rx) = tokio::sync::mpsc::channel(4);
+        register_test_connection(state.as_ref(), &bob_phone, bob_phone_tx).await;
+        register_test_connection(state.as_ref(), &bob_laptop, bob_laptop_tx).await;
+        drop(bob_laptop_rx);
+
+        let mut message = Message::new(Some(jid::Jid::from(recipient.clone())));
+        message.type_ = MessageType::Normal;
+
+        deliver_muc_user_message(state.as_ref(), &recipient, message, Some(&capture))
+            .await
+            .expect("delivery succeeds");
+
+        assert!(capture.snapshot().intents.iter().any(|intent| {
+            matches!(
+                intent,
+                IngressEffectIntent::RouteDirect {
+                    recipient: captured_recipient,
+                    fanout,
+                    ..
+                } if captured_recipient == &recipient && fanout == &vec![bob_phone.clone()]
+            )
+        }));
+    }
+
+    #[tokio::test]
+    async fn mediated_invite_auth_rejection_records_error_reply_intent() {
+        let state = create_test_websocket_state().await;
+        let sender: jid::FullJid = "alice@example.com/web".parse().expect("sender");
+        let capture = IngressEffectCapture::new(None);
+        let mut message = Message::new(Some(
+            "room@muc.example.com"
+                .parse::<jid::Jid>()
+                .expect("room jid"),
+        ));
+        message.type_ = MessageType::Normal;
+        message.from = Some(jid::Jid::from(sender.clone()));
+        message.payloads.push(
+            minidom::Element::builder("x", waddle_xmpp::muc::presence::NS_MUC_USER)
+                .append(
+                    minidom::Element::builder("invite", waddle_xmpp::muc::presence::NS_MUC_USER)
+                        .attr(
+                            minidom::rxml::xml_ncname!("to").to_owned(),
+                            "bob@example.com",
+                        )
+                        .build(),
+                )
+                .build(),
+        );
+
+        let frames =
+            handle_muc_mediated_invite(&message, state.as_ref(), &sender, None, Some(&capture))
+                .await
+                .expect("handled");
+
+        assert_eq!(frames.len(), 1);
+        let expected_error = waddle_xmpp::ingress::FrozenStanzaError::from_xmpp(&StanzaError::new(
+            ErrorType::Auth,
+            DefinedCondition::NotAuthorized,
+            "en",
+            "Authentication required.",
+        ))
+        .expect("server-built stanza error should freeze");
+        assert!(capture
+            .snapshot()
+            .intents
+            .contains(&IngressEffectIntent::ErrorReply {
+                recipient: sender,
+                error: expected_error,
+            }));
+    }
+}
+
+#[cfg(test)]
+mod compensation_tests {
     use super::should_compensate_failed_affiliation_grant;
     use waddle_xmpp::muc::room_actor::ChangeAffiliation;
 

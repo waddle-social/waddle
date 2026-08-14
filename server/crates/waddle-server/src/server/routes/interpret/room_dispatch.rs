@@ -1,4 +1,11 @@
 use super::*;
+use crate::ingress_shadow::{
+    IngressShadowRoomFence, ShadowAuthorizationDeniedReason, ShadowDecisionMarker,
+    ShadowSemanticRejectedReason,
+};
+#[cfg(feature = "clustering")]
+use waddle_xmpp::ingress::RelayTargetIdentity;
+use waddle_xmpp::ingress::{EntityGeneration, IngressEffectIntent};
 
 /// Bind the subject mutation emitted from one frozen room snapshot to
 /// that actor incarnation's immutable ownership proof. This is mandatory
@@ -114,34 +121,74 @@ pub(super) async fn dispatch_to_room(
                 )
                 .await
             {
-                MucProxyRouteDecision::Attempted(OrderedRelayMucProxyOutcome::Delivered(
-                    replies,
-                )) => {
-                    for reply in replies {
-                        match reply.to_element_string() {
-                            Ok(xml) => outcome.frames.push(xml),
-                            Err(error) => {
-                                warn!(
-                                    room = %room_jid,
-                                    %error,
-                                    "DispatchToRoom: failed to serialize remote MUC reply"
-                                );
+                MucProxyRouteDecision::Attempted(attempt) => match attempt.outcome {
+                    OrderedRelayMucProxyOutcome::Delivered(replies) => {
+                        refresh_shadow_room_fence(deps, &room_jid, attempt.room_fence.as_ref());
+                        if let (Some(capture), Some(relay_target)) =
+                            (deps.ingress_effect_capture.as_ref(), attempt.relay_target)
+                        {
+                            capture_delivered_remote_room_route(capture, &room_jid, relay_target);
+                        }
+                        for reply in replies {
+                            match reply.to_element_string() {
+                                Ok(xml) => {
+                                    // A remote room's delivered response may be an
+                                    // authoritative typed message error.  Freeze it only
+                                    // after serialization succeeds, just like local
+                                    // `SendStanza` replies, so shadow reflects the reply the
+                                    // sender actually received.
+                                    super::capture_serialized_error_reply(deps, &reply);
+                                    outcome.frames.push(xml);
+                                }
+                                Err(error) => {
+                                    warn!(
+                                        room = %room_jid,
+                                        %error,
+                                        "DispatchToRoom: failed to serialize remote MUC reply"
+                                    );
+                                }
                             }
                         }
+                        return outcome;
                     }
-                    return outcome;
-                }
-                // Attempted-but-failed AND retryable routing states
-                // (claim lookup/lease trouble, origin claim held
-                // elsewhere) bounce a wait-class retry error. Falling
-                // through to the local registry here would misreport a
-                // healthy REMOTE room as `<item-not-found/>` (review P2
-                // on PR #1277).
-                MucProxyRouteDecision::Attempted(OrderedRelayMucProxyOutcome::Unavailable)
-                | MucProxyRouteDecision::Attempted(OrderedRelayMucProxyOutcome::Dropped)
-                | MucProxyRouteDecision::RoomClaimUnavailable
+                    // Attempted-but-failed AND retryable routing states
+                    // (claim lookup/lease trouble, origin claim held
+                    // elsewhere) bounce a wait-class retry error. Falling
+                    // through to the local registry here would misreport a
+                    // healthy REMOTE room as `<item-not-found/>` (review P2
+                    // on PR #1277).
+                    OrderedRelayMucProxyOutcome::Unavailable
+                    | OrderedRelayMucProxyOutcome::Dropped => {
+                        clear_provisional_shadow_room_fence(deps);
+                        push_sender_error_reply(
+                            deps,
+                            &mut outcome,
+                            &incoming,
+                            &room_jid,
+                            &sender_full,
+                            resource_constraint_error(
+                                "This room is temporarily unreachable; please retry.",
+                            ),
+                        );
+                        return outcome;
+                    }
+                    OrderedRelayMucProxyOutcome::MaybeCommitted
+                    | OrderedRelayMucProxyOutcome::JoinMaybeCommitted => {
+                        refresh_shadow_room_fence(deps, &room_jid, attempt.room_fence.as_ref());
+                        if let (Some(capture), Some(relay_target)) =
+                            (deps.ingress_effect_capture.as_ref(), attempt.relay_target)
+                        {
+                            capture_ambiguous_remote_room_route(capture, &room_jid, relay_target);
+                        }
+                        return outcome;
+                    }
+                },
+                MucProxyRouteDecision::RoomClaimUnavailable
                 | MucProxyRouteDecision::OriginUnavailable => {
-                    let reply = build_message_error_reply(
+                    clear_provisional_shadow_room_fence(deps);
+                    push_sender_error_reply(
+                        deps,
+                        &mut outcome,
                         &incoming,
                         &room_jid,
                         &sender_full,
@@ -149,22 +196,6 @@ pub(super) async fn dispatch_to_room(
                             "This room is temporarily unreachable; please retry.",
                         ),
                     );
-                    match Stanza::Message(reply).to_element_string() {
-                        Ok(xml) => outcome.frames.push(xml),
-                        Err(error) => {
-                            warn!(
-                                room = %room_jid,
-                                %error,
-                                "DispatchToRoom: failed to serialize remote MUC failure reply"
-                            );
-                        }
-                    }
-                    return outcome;
-                }
-                MucProxyRouteDecision::Attempted(OrderedRelayMucProxyOutcome::MaybeCommitted)
-                | MucProxyRouteDecision::Attempted(
-                    OrderedRelayMucProxyOutcome::JoinMaybeCommitted,
-                ) => {
                     return outcome;
                 }
                 // The local registry is authoritative: the room claim is
@@ -202,28 +233,35 @@ pub(super) async fn dispatch_to_room(
         // silently dropped. (A dormant/reaped room also has no live
         // occupancy, so the sender could not be an occupant of it.)
         Ok(None) => {
+            clear_provisional_shadow_room_fence(deps);
             debug!(
                 room = %room_jid,
                 "DispatchToRoom: room not registered; bouncing item-not-found"
             );
             push_sender_error_reply(
+                deps,
                 &mut outcome,
                 &incoming,
                 &room_jid,
                 &sender_full,
                 item_not_found_error("Requested room not found."),
             );
+            deps.capture_marker(ShadowDecisionMarker::SemanticRejected {
+                reason: ShadowSemanticRejectedReason::MalformedPayload,
+            });
             return outcome;
         }
         // Transient lookup failure (#1263): surface an error to the
         // sender instead of silently losing the message.
         Err(error) => {
+            clear_provisional_shadow_room_fence(deps);
             warn!(
                 room = %room_jid,
                 error = ?error,
                 "DispatchToRoom: room registry lookup failed; bouncing internal-server-error"
             );
             push_sender_error_reply(
+                deps,
                 &mut outcome,
                 &incoming,
                 &room_jid,
@@ -243,12 +281,14 @@ pub(super) async fn dispatch_to_room(
         // Snapshot failure (#1263): same rule — the sender must learn
         // their message did not reach the room.
         Err(error) => {
+            clear_provisional_shadow_room_fence(deps);
             warn!(
                 room = %room_jid,
                 error = ?error,
                 "DispatchToRoom: GetRoomSnapshot failed; bouncing internal-server-error"
             );
             push_sender_error_reply(
+                deps,
                 &mut outcome,
                 &incoming,
                 &room_jid,
@@ -258,6 +298,12 @@ pub(super) async fn dispatch_to_room(
             return outcome;
         }
     };
+    if let (Some(capture), Some(claim_fence)) = (
+        deps.ingress_effect_capture.as_ref(),
+        snapshot.claim_fence.as_ref(),
+    ) {
+        capture.record_room_fence(IngressShadowRoomFence::from_context(&room_jid, claim_fence));
+    }
 
     // ADR-0017 Phase 3 Slice 7: the two-part demotion protocol's
     // guaranteed backstop — a fenced `SELECT ... FOR SHARE` against this
@@ -299,7 +345,9 @@ pub(super) async fn dispatch_to_room(
                         "DispatchToRoom: failed to ask registry to evict non-serving local actor"
                     ),
                 }
-                let reply = build_message_error_reply(
+                push_sender_error_reply(
+                    deps,
+                    &mut outcome,
                     &incoming,
                     &room_jid,
                     &sender_full,
@@ -307,16 +355,7 @@ pub(super) async fn dispatch_to_room(
                         "This room is temporarily unavailable; please retry.",
                     ),
                 );
-                match Stanza::Message(reply).to_element_string() {
-                    Ok(xml) => outcome.frames.push(xml),
-                    Err(error) => {
-                        warn!(
-                            room = %room_jid,
-                            %error,
-                            "DispatchToRoom: failed to serialize ownership-gap bounce reply"
-                        );
-                    }
-                }
+                deps.capture_marker(ShadowDecisionMarker::OperationalFenceLoss);
                 return outcome;
             }
             Err(error) => {
@@ -392,6 +431,9 @@ pub(super) async fn dispatch_to_room(
         waddle_xmpp::protocol::room::occupancy_validation::OccupancyValidationHandler
             .handle(&mut gate_working, &gate_ctx);
     if let waddle_xmpp::protocol::room::RoomHandlerOutcome::Halt(gate_events) = gate_outcome {
+        deps.capture_marker(ShadowDecisionMarker::AuthorizationDenied {
+            reason: ShadowAuthorizationDeniedReason::Forbidden,
+        });
         // Fold the nested outcome's full state — frames, close
         // signal, and async-callback feedback — back into the outer
         // outcome (Copilot review on PR #279). Dropping `close` /
@@ -407,14 +449,30 @@ pub(super) async fn dispatch_to_room(
         return outcome;
     }
 
+    if message_has_framework_envelope(&prototype) {
+        let mut sanitized = incoming.clone();
+        remove_framework_envelopes(&mut sanitized);
+        push_sender_error_reply(
+            deps,
+            &mut outcome,
+            &sanitized,
+            &room_jid,
+            &sender_full,
+            bad_request_error("Client-authored Waddle extension envelopes are not allowed."),
+        );
+        deps.capture_marker(ShadowDecisionMarker::SemanticRejected {
+            reason: ShadowSemanticRejectedReason::ClientAuthoredFrameworkEnvelope,
+        });
+        return outcome;
+    }
+
     // Notification activity ingest (slice 2b): a XEP-0085 chat-state on
     // an inbound MUC stanza represents the sender being currently
     // active in the room. Record `(sender_bare, room)` only AFTER the
-    // occupancy / managed-room gate has admitted the sender — otherwise
-    // a non-occupant or managed-room-forbidden sender whose stanza is
-    // rejected could still bump their activity projection and appear
-    // "recently active" for the XEP-0513 `<active/>` filter (Codex
-    // review on PR #731).
+    // occupancy / managed-room gate AND the client-authored framework
+    // envelope rejection have both admitted the sender, otherwise a
+    // rejected stanza could still commit activity that shadow later
+    // discards as rowless.
     super::notification_activity_ingest::record_chat_state_activity(
         deps,
         &sender_full.to_bare(),
@@ -422,28 +480,6 @@ pub(super) async fn dispatch_to_room(
         &incoming,
     )
     .await;
-
-    if message_has_framework_envelope(&prototype) {
-        let mut sanitized = incoming.clone();
-        remove_framework_envelopes(&mut sanitized);
-        let reply = build_message_error_reply(
-            &sanitized,
-            &room_jid,
-            &sender_full,
-            bad_request_error("Client-authored Waddle extension envelopes are not allowed."),
-        );
-        match Stanza::Message(reply).to_element_string() {
-            Ok(xml) => outcome.frames.push(xml),
-            Err(error) => {
-                warn!(
-                    room = %room_jid,
-                    %error,
-                    "DispatchToRoom: failed to serialize framework-envelope rejection"
-                );
-            }
-        }
-        return outcome;
-    }
 
     // 5. Enrich the message before the post-gate chain sees it. The legacy
     //    bridge enriched on the prototype before
@@ -486,17 +522,25 @@ pub(super) async fn dispatch_to_room(
     )
     .await
     {
-        let reply = build_message_error_reply(&incoming, &room_jid, &sender_full, stanza_error);
-        match Stanza::Message(reply).to_element_string() {
-            Ok(xml) => outcome.frames.push(xml),
-            Err(error) => {
-                warn!(
-                    room = %room_jid,
-                    %error,
-                    "DispatchToRoom: failed to serialize rich-target error reply"
-                );
+        let marker = match stanza_error.defined_condition {
+            DefinedCondition::Forbidden | DefinedCondition::NotAcceptable => {
+                ShadowDecisionMarker::AuthorizationDenied {
+                    reason: ShadowAuthorizationDeniedReason::Forbidden,
+                }
             }
-        }
+            _ => ShadowDecisionMarker::SemanticRejected {
+                reason: ShadowSemanticRejectedReason::MalformedPayload,
+            },
+        };
+        deps.capture_marker(marker);
+        push_sender_error_reply(
+            deps,
+            &mut outcome,
+            &incoming,
+            &room_jid,
+            &sender_full,
+            stanza_error,
+        );
         return outcome;
     }
 
@@ -556,7 +600,6 @@ pub(super) async fn dispatch_to_room(
         .filter(|event| matches!(event, OutboundEvent::RouteToConnection { .. }))
         .count();
     fanout_span.record("recipients", recipients);
-
     // 6. Recursively interpret the chain's emitted events. Pass the
     //    depth through unchanged: `recursion_depth` is the headless
     //    offline-recipient pass guard, and the room handler chain
@@ -576,11 +619,33 @@ pub(super) async fn dispatch_to_room(
         fanout_started.elapsed().as_secs_f64() * 1000.0,
     );
     let retry_suppression = nested.retry_suppression;
+    let routed_connections = nested.route_to_connection_events;
     outcome.frames.extend(nested.frames);
     if nested.close {
         outcome.close = true;
     }
     outcome.feedback.extend(nested.feedback);
+
+    if retry_suppression.is_none() && routed_connections > 0 {
+        if let Some(capture) = deps.ingress_effect_capture.as_ref() {
+            let room_generation = snapshot
+                .claim_fence
+                .as_ref()
+                .and_then(|fence| u64::try_from(fence.epoch.0).ok())
+                .map(EntityGeneration::from_storage)
+                .unwrap_or(EntityGeneration::INITIAL);
+            capture.record_intent(IngressEffectIntent::RouteMucGroupchat {
+                room: room_jid.clone(),
+                occupants: occupants
+                    .iter()
+                    .map(|occupant| occupant.full_jid.clone())
+                    .collect(),
+                reflection: sender_full.clone(),
+                room_generation,
+                route_identity: capture.next_route_identity(),
+            });
+        }
+    }
 
     // The marker controls only this nested room batch. Consume it here rather
     // than folding it into the returned outcome, where it could leak into an
@@ -600,22 +665,14 @@ pub(super) async fn dispatch_to_room(
         for effect in observer_outcome.effects {
             if let ExtensionEffect::HostWarning(message) = effect {
                 warn!(warning = %message.as_str(), "extension message observer emitted host warning");
-                let reply = build_message_error_reply(
+                push_sender_error_reply(
+                    deps,
+                    &mut outcome,
                     &incoming,
                     &room_jid,
                     &sender_full,
                     service_unavailable_error(message.as_str()),
                 );
-                match Stanza::Message(reply).to_element_string() {
-                    Ok(xml) => outcome.frames.push(xml),
-                    Err(error) => {
-                        warn!(
-                            room = %room_jid,
-                            %error,
-                            "DispatchToRoom: failed to serialize extension warning error reply"
-                        );
-                    }
-                }
             }
         }
     }
@@ -636,20 +693,78 @@ fn room_lookup_internal_error() -> xmpp_parsers::stanza_error::StanzaError {
     )
 }
 
+fn clear_provisional_shadow_room_fence(deps: &Deps<'_>) {
+    if let Some(capture) = deps.ingress_effect_capture.as_ref() {
+        capture.clear_room_fence();
+    }
+}
+
+/// Replace parse-time room ownership with the immutable claim carried by the
+/// final proxy attempt. A local snapshot is never taken for a proxy delivery,
+/// so retaining the provisional frame fence can make shadow assert an
+/// owner/epoch the actual relay no longer used.
+#[cfg(feature = "clustering")]
+fn refresh_shadow_room_fence(
+    deps: &Deps<'_>,
+    room: &jid::BareJid,
+    claim_fence: Option<&waddle_xmpp::muc::RoomClaimFenceContext>,
+) {
+    let Some(claim_fence) = claim_fence else {
+        clear_provisional_shadow_room_fence(deps);
+        return;
+    };
+    if let Some(capture) = deps.ingress_effect_capture.as_ref() {
+        capture.record_room_fence(IngressShadowRoomFence::from_context(room, claim_fence));
+    }
+}
+
+#[cfg(feature = "clustering")]
+pub(super) fn capture_delivered_remote_room_route(
+    capture: &crate::ingress_shadow::IngressEffectCapture,
+    room: &jid::BareJid,
+    relay_target: RelayTargetIdentity,
+) {
+    capture.record_intent(IngressEffectIntent::DispatchToRoomRemote {
+        room: room.clone(),
+        relay_target,
+    });
+}
+
+#[cfg(feature = "clustering")]
+pub(super) fn capture_ambiguous_remote_room_route(
+    capture: &crate::ingress_shadow::IngressEffectCapture,
+    room: &jid::BareJid,
+    relay_target: RelayTargetIdentity,
+) {
+    capture.record_marker(ShadowDecisionMarker::AmbiguousDispatchToRoomRemote {
+        room: room.clone(),
+        relay_target,
+    });
+}
+
 /// Serialize a XEP-0045 message error reply from the room to the sender
 /// and push it onto the outcome's wire frames (#1263: every pre-dispatch
 /// failure must reach the sender instead of silently dropping the
 /// message).
-fn push_sender_error_reply(
+pub(crate) fn push_sender_error_reply(
+    deps: &Deps<'_>,
     outcome: &mut InterpretOutcome,
     incoming: &Message,
     room_jid: &jid::BareJid,
     sender_full: &jid::FullJid,
     error: xmpp_parsers::stanza_error::StanzaError,
 ) {
+    let frozen_error = waddle_xmpp::ingress::FrozenStanzaError::from_xmpp(&error)
+        .expect("server-built stanza error should freeze");
     let reply = build_message_error_reply(incoming, room_jid, sender_full, error);
     match Stanza::Message(reply).to_element_string() {
-        Ok(xml) => outcome.frames.push(xml),
+        Ok(xml) => {
+            deps.capture_intent(IngressEffectIntent::ErrorReply {
+                recipient: sender_full.clone(),
+                error: frozen_error,
+            });
+            outcome.frames.push(xml);
+        }
         Err(serialize_error) => {
             warn!(
                 room = %room_jid,

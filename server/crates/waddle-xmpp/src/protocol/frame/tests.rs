@@ -136,6 +136,22 @@ fn parses_message_stanza() {
 }
 
 #[test]
+fn parse_frame_with_metadata_preserves_message_xml_lang_from_initial_parse() {
+    let xml = r#"<message type="chat" xml:lang="fr" to="bob@waddle.social" id="m-lang"><body>salut</body></message>"#;
+
+    let parsed = parse_frame_with_metadata(xml).expect("message should parse");
+
+    assert_eq!(
+        parsed.message_stanza_lang,
+        Some(xmpp_parsers::message::Lang::from("fr"))
+    );
+    let InboundFrame::Stanza(stanza) = parsed.frame else {
+        panic!("expected Stanza");
+    };
+    assert!(matches!(*stanza, Stanza::Message(_)));
+}
+
+#[test]
 fn nested_message_element_does_not_truncate_the_outer_stanza() {
     const XML: &str = r#"<message type="chat" to="bob@waddle.social" id="outer">
         <body>outer body</body>

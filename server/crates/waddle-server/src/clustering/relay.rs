@@ -570,6 +570,12 @@ pub enum RelayRemoteUserSideEffectStatus {
 #[derive(Debug, Clone, Serialize, Deserialize, Reply)]
 pub struct RelayRemoteUserSideEffectReply {
     pub status: RelayRemoteUserSideEffectStatus,
+    /// Frozen XEP-0280 targets, returned to the ingress node for shadow
+    /// capture after the remote owner performs its authoritative enumeration.
+    #[serde(default)]
+    pub carbon_recipients: Vec<jid::FullJid>,
+    #[serde(default)]
+    pub recipient_sm_append_streams: Vec<waddle_xmpp::pending_delivery::SmSessionId>,
 }
 
 #[kameo::remote_message("waddle.clustering.relay.remote_user_side_effect.v1")]
@@ -607,6 +613,8 @@ pub struct RelayRouteRemoteResourceStanza {
 pub struct RelayRouteRemoteResourceStanzaReply {
     pub outcome: RemoteResourceRouteOutcome,
     pub replies: Vec<RemoteStanza>,
+    #[serde(default)]
+    pub recipient_sm_append_streams: Vec<waddle_xmpp::pending_delivery::SmSessionId>,
 }
 
 #[kameo::remote_message("waddle.clustering.relay.remote_resource_route.v1")]

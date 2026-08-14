@@ -9,6 +9,23 @@ pub(super) fn stanza_message_id(stanza: &Stanza) -> &str {
 
 pub(super) type RemoteDeliveryFuture<'a> =
     Pin<Box<dyn Future<Output = Option<FullJidDeliveryOutcome>> + Send + 'a>>;
+pub(super) type CapturedRemoteDeliveryFuture<'a> =
+    Pin<Box<dyn Future<Output = Option<CapturedRemoteDeliveryOutcome>> + Send + 'a>>;
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct CapturedRemoteDeliveryOutcome {
+    pub(crate) outcome: FullJidDeliveryOutcome,
+    pub(crate) recipient_sm_append_streams: Vec<waddle_xmpp::pending_delivery::SmSessionId>,
+}
+
+impl CapturedRemoteDeliveryOutcome {
+    pub(crate) fn from_outcome(outcome: FullJidDeliveryOutcome) -> Self {
+        Self {
+            outcome,
+            recipient_sm_append_streams: Vec::new(),
+        }
+    }
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
 #[serde(transparent)]
@@ -420,6 +437,13 @@ pub(super) struct RemoteDeliveryOutcome {
     pub(super) client_replies: Vec<Stanza>,
     pub(super) maybe_committed: bool,
     pub(super) join_repair_allowed: bool,
+    /// The owner that actually accepted this delivery.  A target-refresh can
+    /// change it from the owner used to construct the initial envelope.
+    pub(super) relay_target: Option<NodeIdentity>,
+    /// Exact target claim carried by the envelope accepted by a remote owner.
+    /// This is retained separately from the mutable room-claim cache so
+    /// callers can freeze the claim that authorized a delivered MUC stanza.
+    pub(super) target_claim: Option<OrderedRelayClaim>,
 }
 
 pub(super) fn caller_delivery_outcome(outcome: RemoteDeliveryOutcome) -> FullJidDeliveryOutcome {

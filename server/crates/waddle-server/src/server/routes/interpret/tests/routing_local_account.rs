@@ -1,4 +1,5 @@
 use super::*;
+use crate::ingress_shadow::IngressEffectCapture;
 
 // ---------------------------------------------------------------------
 // #1246 — RFC 6121 §8.5.1: message to a nonexistent local account is
@@ -17,8 +18,10 @@ async fn route_bare_jid_message_to_nonexistent_local_user_bounces() {
     let inbox: Arc<dyn InboxStorage> = Arc::new(InMemoryInboxStorage::new());
     let blocking: Arc<dyn BlockingStorage> = Arc::new(InMemoryBlockingStorage::new());
     let dispatcher = pipelined_dispatcher();
+    let capture = IngressEffectCapture::new(None);
     let deps = Deps {
         web_socket_state: Some(&state),
+        ingress_effect_capture: Some(capture.clone()),
         ..offline_pass_deps(&registry, &mam, &inbox, &blocking, &dispatcher)
     };
 
@@ -66,6 +69,19 @@ async fn route_bare_jid_message_to_nonexistent_local_user_bounces() {
         typo_archive.messages.is_empty(),
         "no MAM rows may be created for a nonexistent account"
     );
+    assert!(capture
+        .snapshot()
+        .intents
+        .contains(&IngressEffectIntent::ErrorReply {
+            recipient: "alice@example.com/web".parse().expect("sender full JID"),
+            error: waddle_xmpp::ingress::FrozenStanzaError::from_xmpp(&StanzaError::new(
+                ErrorType::Cancel,
+                DefinedCondition::ServiceUnavailable,
+                "en",
+                "Service unavailable at this address.",
+            ))
+            .expect("server error must freeze"),
+        }));
 }
 
 #[tokio::test]

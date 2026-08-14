@@ -92,6 +92,7 @@ use waddle_xmpp::carbons::{build_received_carbon, build_sent_carbon};
 use waddle_xmpp::inbox::runtime::{direct_message_entry, groupchat_entry, groupchat_thread_entry};
 use waddle_xmpp::inbox::storage::InboxStorage;
 use waddle_xmpp::inbox::InboxEntry;
+use waddle_xmpp::ingress::IngressEffectIntent;
 use waddle_xmpp::mam::projection::build_direct_archived_message;
 use waddle_xmpp::mam::storage::MamStorage;
 use waddle_xmpp::mam::{
@@ -106,6 +107,7 @@ use waddle_xmpp::muc::room_actor::{
 #[cfg(feature = "clustering")]
 use waddle_xmpp::muc::room_registry_actor::DemoteRoomIfExactActor;
 use waddle_xmpp::muc::room_registry_actor::{GetRoom, RoomRegistryActor};
+use waddle_xmpp::muc::SubjectState;
 use waddle_xmpp::parse_managed_room_jid;
 use waddle_xmpp::parser::{message_to_string, stanza_to_string};
 use waddle_xmpp::protocol::event::{
@@ -175,9 +177,12 @@ use direct_archive::archive_direct;
 use direct_inbox::project_direct_inbox;
 use direct_retraction::apply_retraction_tombstone;
 use displayed_marker::mark_inbox_read_from_displayed;
+#[cfg(test)]
+use groupchat_archive::apply_groupchat_retraction_tombstone;
 use groupchat_archive::{
-    apply_groupchat_retraction_tombstone, archive_groupchat_message, project_groupchat_inbox,
-    resolve_room_claim_fence, ArchiveGroupchatOutcome,
+    apply_groupchat_retraction_tombstone_outcome, archive_groupchat_message,
+    project_groupchat_inbox, resolve_room_claim_fence, ArchiveGroupchatOutcome,
+    GroupchatRetractionTombstoneOutcome,
 };
 #[cfg(test)]
 pub(crate) use groupchat_inbox::reconcile_groupchat_notification_candidates;
@@ -190,7 +195,8 @@ use groupchat_validation::{
 #[cfg(feature = "clustering")]
 pub use handoff::OrderedRelayHandoffHandle;
 pub use handoff::{
-    OrderedRelayHandoffCompletion, OrderedRelayInboundSequence, SmInboundCompletionTracker,
+    OrderedRelayHandoffCompletion, OrderedRelayInboundSequence, ParkedIngressShadowSubmission,
+    SmInboundCompletionTracker,
 };
 use offline_delivery::queue_offline_delivery;
 #[cfg(test)]
@@ -204,13 +210,17 @@ use room_subject::{
 pub(crate) use route_to_connection::{
     bounce_undeliverable_iq, route_to_connection, undeliverable_iq_reply,
 };
+#[cfg(feature = "clustering")]
+pub(crate) use routing::deliver_peer_to_full;
 pub(crate) use routing::{
-    close_call_setup_from_outcome, deliver_direct_to_full, deliver_peer_to_full,
+    close_call_setup_from_outcome, deliver_direct_to_full, deliver_peer_to_full_capturing_detached,
     FullJidDeliveryOutcome,
 };
+#[cfg(feature = "clustering")]
+pub(crate) use routing::{deliver_peer_to_full_with_detached_capture, DetachedDeliveryCapture};
 use routing::{
-    deliver_peer_to_live_only, deliver_to_detached, run_fanout_recipient_pass,
-    run_headless_recipient_pass, FanoutPassResult,
+    deliver_peer_to_live_only, run_fanout_recipient_pass, run_headless_recipient_pass,
+    FanoutPassResult,
 };
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
@@ -439,7 +449,10 @@ async fn interpret_with_depth(
         apply_archive_id_rewrites(&mut event, &archive_id_rewrites);
         match event {
             OutboundEvent::SendStanza(stanza) => match stanza.to_element_string() {
-                Ok(xml) => outcome.frames.push(xml),
+                Ok(xml) => {
+                    capture_serialized_error_reply(deps, &stanza);
+                    outcome.frames.push(xml);
+                }
                 Err(err) => {
                     error!(error = %err, "failed to serialize outbound stanza; dropping frame");
                 }
@@ -476,11 +489,15 @@ async fn interpret_with_depth(
                 stanza,
                 call_setup,
             } => {
+                outcome.route_to_connection_events += 1;
                 for stanza in
                     route_to_connection(deps, jid, stanza, recursion_depth, call_setup).await
                 {
                     match stanza.to_element_string() {
-                        Ok(xml) => outcome.frames.push(xml),
+                        Ok(xml) => {
+                            capture_serialized_error_reply(deps, &stanza);
+                            outcome.frames.push(xml);
+                        }
                         Err(err) => {
                             error!(
                                 error = %err,
@@ -515,6 +532,7 @@ async fn interpret_with_depth(
                     // cannot suppress unrelated siblings in this outer batch.
                     retry_suppression: _,
                     archive_id_rewrites: nested_rewrites,
+                    route_to_connection_events: _,
                 } = nested;
                 outcome.frames.extend(nested_frames);
                 if nested_close {
@@ -668,23 +686,42 @@ async fn interpret_with_depth(
                     );
                     continue;
                 };
-                let tombstoned = apply_groupchat_retraction_tombstone(
+                let tombstone_outcome = apply_groupchat_retraction_tombstone_outcome(
                     mam_storage,
                     deps.sm_session_registry,
                     deps.pending_delivery_storage,
                     &room,
                     &target_message_id,
                     &retraction_message,
+                    deps.ingress_effect_capture.as_ref(),
                 )
                 .await;
-                if tombstoned {
+                if tombstone_outcome == GroupchatRetractionTombstoneOutcome::Replaced {
+                    if let Some(retraction_stanza_id) =
+                        groupchat_retraction_stanza_id(&retraction_message, &room)
+                    {
+                        deps.capture_intent(IngressEffectIntent::RetractionTombstone {
+                            mutation: waddle_xmpp::ingress::RetractionTombstoneMutation {
+                                archive: room.clone(),
+                                target_stanza_id: waddle_xmpp_core::xep0359::StanzaId::new(
+                                    target_message_id.clone(),
+                                    jid::Jid::from(room.clone()),
+                                ),
+                                retraction_stanza_id,
+                            },
+                        });
+                    }
+                }
+                if tombstone_outcome.tombstoned() {
                     if let Some(state) = deps.web_socket_state {
-                        crate::server::routes::websocket::link_preview_refs::clear_current_message_preview_refs(
+                        for intent in crate::server::routes::websocket::link_preview_refs::clear_current_message_preview_refs(
                             state.deps.app_state.db_pool.global_actor(),
                             &room,
                             &target_message_id,
                         )
-                        .await;
+                        .await {
+                            deps.capture_intent(intent);
+                        }
                     }
                 }
                 // #414: cascade XEP-0424 retraction to the room's pin
@@ -710,6 +747,16 @@ async fn interpret_with_depth(
                 setter_nick,
                 set_at,
             } => {
+                let subject_intent = IngressEffectIntent::RoomSubjectMutation {
+                    room: room.clone(),
+                    state: SubjectState {
+                        texts: texts.clone(),
+                        setter: setter.clone(),
+                        setter_nick: setter_nick.clone(),
+                        set_at,
+                    },
+                };
+                let sender_for_error = sender.clone();
                 match persist_room_subject_event(
                     deps,
                     PersistRoomSubjectRequest {
@@ -725,10 +772,24 @@ async fn interpret_with_depth(
                 )
                 .await
                 {
-                    PersistRoomSubjectEventOutcome::Committed => {}
+                    PersistRoomSubjectEventOutcome::Committed => {
+                        deps.capture_intent(subject_intent);
+                    }
                     PersistRoomSubjectEventOutcome::BounceAndHalt(bounce) => {
+                        let bounce_error = waddle_xmpp::ingress::FrozenStanzaError::from_xmpp(
+                            &resource_constraint_error(
+                                "The room subject could not be saved; please retry.",
+                            ),
+                        )
+                        .expect("server-built stanza error should freeze");
                         match Stanza::Message(*bounce).to_element_string() {
-                            Ok(xml) => outcome.frames.push(xml),
+                            Ok(xml) => {
+                                deps.capture_intent(IngressEffectIntent::ErrorReply {
+                                    recipient: sender_for_error,
+                                    error: bounce_error,
+                                });
+                                outcome.frames.push(xml);
+                            }
                             Err(error) => warn!(
                                 %error,
                                 "PersistRoomSubject: failed to serialize retryable bounce reply"
@@ -845,6 +906,54 @@ async fn interpret_with_depth(
 
     outcome.archive_id_rewrites = archive_id_rewrites;
     outcome
+}
+
+fn groupchat_retraction_stanza_id(
+    message: &Message,
+    room: &BareJid,
+) -> Option<waddle_xmpp_core::xep0359::StanzaId> {
+    let by = jid::Jid::from(room.clone());
+    waddle_xmpp_core::xep0359::extract_stanza_id_by(message, &by)
+        .map(|id| waddle_xmpp_core::xep0359::StanzaId::new(id, by))
+}
+
+/// Capture a typed message error only after its exact stanza has serialized to
+/// the transport frame. Direct `SendStanza` errors include XEP-0191 sender
+/// blocks as well as route fallbacks, so derive the frozen error from the
+/// actual typed payload rather than reconstructing a particular error shape.
+fn capture_serialized_error_reply(deps: &Deps<'_>, stanza: &Stanza) {
+    let Stanza::Message(message) = stanza else {
+        return;
+    };
+    if message.type_ != XmppMessageType::Error {
+        return;
+    }
+    let Some(recipient) = message
+        .to
+        .as_ref()
+        .and_then(|recipient| recipient.try_as_full().ok())
+    else {
+        return;
+    };
+    let Some(error_payload) = message
+        .payloads
+        .iter()
+        .find(|payload| payload.name() == "error")
+    else {
+        return;
+    };
+    let Ok(error) = StanzaError::try_from(error_payload.clone()) else {
+        warn!("serialized message error carried an invalid stanza-error payload");
+        return;
+    };
+    let Ok(frozen_error) = waddle_xmpp::ingress::FrozenStanzaError::from_xmpp(&error) else {
+        warn!("serialized message error could not be frozen for ingress shadow");
+        return;
+    };
+    deps.capture_intent(IngressEffectIntent::ErrorReply {
+        recipient: recipient.clone(),
+        error: frozen_error,
+    });
 }
 
 async fn enrich_message_event(deps: &Deps<'_>, message: Message) -> Message {

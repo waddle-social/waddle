@@ -171,6 +171,8 @@ impl OrderedRelayDeliveryBridge {
                     .collect(),
                 maybe_committed: false,
                 join_repair_allowed: false,
+                relay_target: Some(prepared.previous_owner.clone()),
+                target_claim: Some(prepared.envelope.target_claim.clone()),
             }),
             Ok(OrderedRelayReply::Nack(nack)) => {
                 let (outcome, channel_action, maybe_committed) = outcome_for_nack(

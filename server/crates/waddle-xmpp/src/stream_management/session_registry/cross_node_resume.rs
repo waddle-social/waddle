@@ -411,7 +411,7 @@ impl InMemorySmSessionRegistry {
                     return self
                         .classify_window_expiry(&entity)
                         .await
-                        .map(CrossNodeResumeStage::Terminal)
+                        .map(CrossNodeResumeStage::Terminal);
                 }
             };
             if let Some(persisted) = persisted {
@@ -1383,6 +1383,7 @@ mod tests {
             user_id: jid.to_bare().to_string(),
             jid: jid.clone(),
             inbound_count: 1,
+            shadow_ordinal: crate::stream_management::ShadowOrdinal::ZERO,
             outbound_count: 1,
             last_acked: 1,
             replay_gap_through: None,
@@ -1410,6 +1411,7 @@ mod tests {
             user_id: jid.to_bare().to_string(),
             jid: jid.clone(),
             inbound_count: 0,
+            shadow_ordinal: crate::stream_management::ShadowOrdinal::ZERO,
             outbound_count: 0,
             last_acked: 0,
             replay_gap_through: None,

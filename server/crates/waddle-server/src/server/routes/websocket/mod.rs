@@ -36,9 +36,7 @@ use waddle_xmpp::{
         RoomConfig,
     },
     protocol::{
-        frame::{
-            inject_client_ns_if_missing, parse_frame, InboundFrame, ParseError, MAX_FRAME_SIZE,
-        },
+        frame::{inject_client_ns_if_missing, InboundFrame, ParseError, MAX_FRAME_SIZE},
         Blocklist, ConnectionPhase, InboundEvent, OutboundEvent, ScramPendingState,
         StanzaDispatcher, XmppStateMachine,
     },
@@ -123,5 +121,7 @@ pub(crate) use transport_xml::{
     build_iq_error_xml_typed, build_iq_error_xml_with_payload, build_iq_result_xml, element_to_xml,
     iq_to_xml, stanza_to_xml,
 };
+#[cfg(test)]
+pub(crate) use waddle_xmpp::protocol::frame::parse_frame;
 #[cfg(test)]
 pub(crate) mod tests;

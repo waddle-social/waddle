@@ -6,7 +6,7 @@ pub(super) async fn list_all_sessions_with_unacked(
     let mut rows = storage
         .query(
             "SELECT s.stream_id, s.user_id, s.full_jid, s.inbound_count, \
-                    s.outbound_count, s.last_acked, s.max_resume_secs, \
+                    s.shadow_ordinal, s.outbound_count, s.last_acked, s.max_resume_secs, \
                     s.detached_at_ms, s.max_resume_duration_ms, \
                     s.carbons_enabled, s.roster_interested, s.blocklist_interested, s.presence_available, \
                     s.presence_show, s.presence_status, s.presence_priority, \
@@ -53,8 +53,8 @@ pub(super) async fn list_all_sessions_with_unacked(
         };
         let starts_new_group = current_stream_id.as_deref() != Some(row_stream_id.as_str());
         if starts_new_group {
-            // Decode the session columns (0..=17, 18 columns;
-            // presence_payloads added at 17 for #1206)
+            // Decode the session columns (0..=18, 19 columns;
+            // `shadow_ordinal` added at 4, `presence_payloads` at 18)
             // exactly once per stream_id group. On decode
             // failure, skip the entire group's rows so a single
             // poison-pill session can't brick cold startup
@@ -86,12 +86,12 @@ pub(super) async fn list_all_sessions_with_unacked(
             // session; drop this unacked row too.
             continue;
         }
-        // Unacked columns: sequence (18), stanza_xml (19),
-        // original_receipt_at_ms (20) — shifted +1 by the
-        // presence_payloads session column (17) added for #1206.
+        // Unacked columns: sequence (19), stanza_xml (20),
+        // original_receipt_at_ms (21) — shifted by `shadow_ordinal`
+        // (session column 4) and `presence_payloads` (session column 18).
         // NULL when LEFT JOIN had no match. Per-row decode failure
         // skips that row but keeps the rest of the session's queue.
-        let sequence_opt: Option<i64> = match row.get(18) {
+        let sequence_opt: Option<i64> = match row.get(19) {
             Ok(v) => v,
             Err(error) => {
                 tracing::debug!(

@@ -19,6 +19,7 @@ fn fixture_session(stream_id: &str) -> PersistedSession {
         user_id: "alice".to_string(),
         jid: full("alice@example.com/web"),
         inbound_count: 7,
+        shadow_ordinal: waddle_xmpp::stream_management::ShadowOrdinal::from_storage(11),
         outbound_count: 12,
         last_acked: 10,
         replay_gap_through: Some(9),
@@ -85,6 +86,7 @@ async fn round_trip_session_preserves_every_field() {
     assert_eq!(loaded.user_id, s.user_id);
     assert_eq!(loaded.jid, s.jid);
     assert_eq!(loaded.inbound_count, s.inbound_count);
+    assert_eq!(loaded.shadow_ordinal, s.shadow_ordinal);
     assert_eq!(loaded.outbound_count, s.outbound_count);
     assert_eq!(loaded.last_acked, s.last_acked);
     assert_eq!(loaded.replay_gap_through, s.replay_gap_through);
@@ -485,6 +487,7 @@ async fn detached_snapshot_refresh_preserves_principal_through_registry() {
         user_id: "u1".to_string(),
         jid: full("alice@example.com/phone"),
         inbound_count: 0,
+        shadow_ordinal: waddle_xmpp::stream_management::ShadowOrdinal::ZERO,
         outbound_count: 0,
         last_acked: 0,
         replay_gap_through: None,

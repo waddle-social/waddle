@@ -36,6 +36,7 @@ pub(super) async fn initialize(storage: &DatabaseSmPersistence) -> Result<(), Sm
                 user_id TEXT NOT NULL,
                 full_jid TEXT NOT NULL,
                 inbound_count {bigint} NOT NULL,
+                shadow_ordinal TEXT NOT NULL DEFAULT '0',
                 outbound_count {bigint} NOT NULL,
                 last_acked {bigint} NOT NULL,
                 max_resume_secs {bigint},
@@ -77,6 +78,12 @@ pub(super) async fn initialize(storage: &DatabaseSmPersistence) -> Result<(), Sm
             (),
         )
         .await?;
+    add_column_if_missing(
+        storage,
+        "sm_sessions",
+        "shadow_ordinal TEXT NOT NULL DEFAULT '0'",
+    )
+    .await?;
     add_column_if_missing(
         storage,
         "sm_sessions",

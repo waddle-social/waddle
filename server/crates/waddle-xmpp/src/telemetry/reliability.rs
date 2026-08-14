@@ -10,7 +10,8 @@
 //! scrape during the dual-emit release.
 
 use super::attributes::{
-    Janitor, PushRetryReason, PushSuppressReason, SmEvictionPath, SweepOutcome,
+    IngressAliasOutcome, IngressDecisionClass, IngressRetryOutcome, IngressSkipReason, Janitor,
+    PushRetryReason, PushSuppressReason, SmEvictionPath, SweepOutcome,
 };
 
 /// One table entry: a private `mod <helper> { fn add(count) }` holding
@@ -206,6 +207,18 @@ pub fn register_reliability_counters() {
     for path in SmEvictionPath::ALL {
         add_sm_unacked_evicted(0, path);
     }
+    for class in IngressDecisionClass::ALL {
+        add_ingress_shadow_decisions(0, class);
+    }
+    for outcome in IngressAliasOutcome::ALL {
+        add_ingress_shadow_alias_outcomes(0, outcome);
+    }
+    for outcome in IngressRetryOutcome::ALL {
+        add_ingress_shadow_tx_retries(0, outcome);
+    }
+    for reason in IngressSkipReason::ALL {
+        add_ingress_shadow_skips(0, reason);
+    }
     add_push_candidate_created(0);
     add_push_candidate_coalesced(0);
     add_push_outbox_published(0);
@@ -323,6 +336,62 @@ pub fn increment_push_suppressed(reason: PushSuppressReason) {
     super::push_pipeline::increment_suppressed();
 }
 
+fn add_ingress_shadow_decisions(count: u64, class: IngressDecisionClass) {
+    crate::counter_add!(
+        "ingress.shadow.decisions",
+        "{decision}",
+        "Shadow-ingress submission decisions by closed class.",
+        count,
+        class,
+    );
+}
+
+pub fn increment_ingress_shadow_decision(class: IngressDecisionClass) {
+    add_ingress_shadow_decisions(1, class);
+}
+
+fn add_ingress_shadow_alias_outcomes(count: u64, outcome: IngressAliasOutcome) {
+    crate::counter_add!(
+        "ingress.shadow.alias.outcomes",
+        "{alias}",
+        "Shadow-ingress alias-resolution outcomes by closed outcome.",
+        count,
+        outcome,
+    );
+}
+
+pub fn increment_ingress_shadow_alias_outcome(outcome: IngressAliasOutcome) {
+    add_ingress_shadow_alias_outcomes(1, outcome);
+}
+
+fn add_ingress_shadow_tx_retries(count: u64, outcome: IngressRetryOutcome) {
+    crate::counter_add!(
+        "ingress.shadow.tx.retries",
+        "{transaction}",
+        "Whole shadow-ingress transactions that retried or exhausted their retry budget.",
+        count,
+        outcome,
+    );
+}
+
+pub fn increment_ingress_shadow_tx_retry(outcome: IngressRetryOutcome) {
+    add_ingress_shadow_tx_retries(1, outcome);
+}
+
+fn add_ingress_shadow_skips(count: u64, reason: IngressSkipReason) {
+    crate::counter_add!(
+        "ingress.shadow.skips",
+        "{submission}",
+        "Shadow-ingress submissions skipped or dropped by closed reason.",
+        count,
+        reason,
+    );
+}
+
+pub fn increment_ingress_shadow_skip(reason: IngressSkipReason) {
+    add_ingress_shadow_skips(1, reason);
+}
+
 // The legacy unknown-reason catch-all family is gone with the text
 // renderer: the sealed `PushSuppressReason` enum makes an unmapped
 // reason a compile error, so it was structurally unreachable and
@@ -371,6 +440,31 @@ mod tests {
         );
         assert_eq!(
             guard.counter_sum("waddle.push.pipeline", &[("stage", "suppressed")]),
+            Some(1)
+        );
+    }
+
+    #[tokio::test]
+    async fn ingress_shadow_helpers_emit_with_typed_labels() {
+        let guard = setup().await;
+        increment_ingress_shadow_decision(IngressDecisionClass::Storage);
+        increment_ingress_shadow_alias_outcome(IngressAliasOutcome::Conflict);
+        increment_ingress_shadow_tx_retry(IngressRetryOutcome::Exhausted);
+        increment_ingress_shadow_skip(IngressSkipReason::Unenrolled);
+        assert_eq!(
+            guard.counter_sum("ingress.shadow.decisions", &[("class", "storage")]),
+            Some(1)
+        );
+        assert_eq!(
+            guard.counter_sum("ingress.shadow.alias.outcomes", &[("outcome", "conflict")]),
+            Some(1)
+        );
+        assert_eq!(
+            guard.counter_sum("ingress.shadow.tx.retries", &[("outcome", "exhausted")]),
+            Some(1)
+        );
+        assert_eq!(
+            guard.counter_sum("ingress.shadow.skips", &[("reason", "unenrolled")]),
             Some(1)
         );
     }
@@ -454,12 +548,20 @@ mod tests {
         "xmpp.push.outbox_dead_lettered",
     ];
 
+    const REGISTERED_INGRESS_SHADOW_COUNTERS: &[&str] = &[
+        "ingress.shadow.decisions",
+        "ingress.shadow.alias.outcomes",
+        "ingress.shadow.tx.retries",
+        "ingress.shadow.skips",
+    ];
+
     /// Every metric name startup registration is expected to export.
     fn registered_counter_names() -> Vec<&'static str> {
         TABLE_COUNTER_NAMES
             .iter()
             .copied()
             .chain(REGISTERED_SM_COUNTERS.iter().copied())
+            .chain(REGISTERED_INGRESS_SHADOW_COUNTERS.iter().copied())
             .chain(REGISTERED_PUSH_COUNTERS.iter().copied())
             .chain(["xmpp.push.outbox_retry_scheduled", "xmpp.push.suppressed"])
             .chain([
@@ -500,6 +602,41 @@ mod tests {
                 Some(0),
                 "sm eviction path {} not registered",
                 path.value()
+            );
+        }
+        for class in IngressDecisionClass::ALL {
+            assert_eq!(
+                guard.counter_sum("ingress.shadow.decisions", &[("class", class.value())]),
+                Some(0),
+                "ingress decision class {} not registered",
+                class.value()
+            );
+        }
+        for outcome in IngressAliasOutcome::ALL {
+            assert_eq!(
+                guard.counter_sum(
+                    "ingress.shadow.alias.outcomes",
+                    &[("outcome", outcome.value())]
+                ),
+                Some(0),
+                "ingress alias outcome {} not registered",
+                outcome.value()
+            );
+        }
+        for outcome in IngressRetryOutcome::ALL {
+            assert_eq!(
+                guard.counter_sum("ingress.shadow.tx.retries", &[("outcome", outcome.value())]),
+                Some(0),
+                "ingress retry outcome {} not registered",
+                outcome.value()
+            );
+        }
+        for reason in IngressSkipReason::ALL {
+            assert_eq!(
+                guard.counter_sum("ingress.shadow.skips", &[("reason", reason.value())]),
+                Some(0),
+                "ingress skip reason {} not registered",
+                reason.value()
             );
         }
         for reason in PushRetryReason::ALL {

@@ -203,6 +203,7 @@ fn detached_session(stream_id: &str, jid: &FullJid) -> DetachedSession {
         user_id: jid.to_bare().to_string(),
         jid: jid.clone(),
         inbound_count: 3,
+        shadow_ordinal: waddle_xmpp::stream_management::ShadowOrdinal::ZERO,
         outbound_count: 7,
         last_acked: 5,
         replay_gap_through: None,

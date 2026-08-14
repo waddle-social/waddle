@@ -3,12 +3,22 @@
 //! This covers the app-facing `waddle-server` WebSocket path, which is
 //! the only supported XMPP C2S transport.
 
+#[cfg(feature = "clustering")]
+use base64::Engine;
+#[cfg(feature = "clustering")]
+use sqlx::PgPool;
+#[cfg(feature = "clustering")]
+use std::net::TcpListener;
+#[cfg(feature = "clustering")]
+use tokio::sync::Mutex;
 use waddle_ws_test_support as ws_common;
 
 use ws_common::{TestServer, WsXmppClient};
 
 const DOMAIN: &str = "localhost";
 const USERNAME: &str = "admin";
+#[cfg(feature = "clustering")]
+static POSTGRES_SERIAL: Mutex<()> = Mutex::const_new(());
 
 async fn enable_carbons(client: &mut WsXmppClient, id: &str) -> Result<(), String> {
     client
@@ -40,6 +50,304 @@ fn attr_value(frame: &str, attr: &str) -> Option<String> {
     let start = frame.find(&single).map(|start| start + single.len())?;
     let end = frame[start..].find('\'')?;
     Some(frame[start..start + end].to_string())
+}
+
+#[cfg(feature = "clustering")]
+struct ShadowWsFixture {
+    server: TestServer,
+    admin: PgPool,
+    schema: String,
+}
+
+#[cfg(feature = "clustering")]
+impl ShadowWsFixture {
+    async fn open(test_name: &str, shadow_enabled: bool) -> Option<Self> {
+        let Ok(database_url) = std::env::var("WADDLE_TEST_POSTGRES_URL") else {
+            eprintln!("skipping: WADDLE_TEST_POSTGRES_URL not set (xep0280 shadow parity)");
+            return None;
+        };
+        let schema = format!(
+            "waddle_test_x0280_shadow_{test_name}_{}",
+            uuid::Uuid::new_v4().simple()
+        );
+        let admin = PgPool::connect(&database_url)
+            .await
+            .expect("connect postgres admin pool");
+        sqlx::query(&format!("CREATE SCHEMA {schema}"))
+            .execute(&admin)
+            .await
+            .expect("create isolated postgres schema");
+
+        let schema_url = postgres_url_with_search_path(&database_url, &schema);
+        let swarm_port = reserve_swarm_port();
+        let listen_addr = format!("/ip4/127.0.0.1/tcp/{swarm_port}");
+        let (pool_env, pool_peer_id) = generate_keypair_pool();
+
+        // A clustered server refuses to boot unless its keypair-pool peer is
+        // enrolled in the allowlist (the e2e harness does the same through
+        // `reset_and_enroll`). Provision the control-plane tables through the
+        // production ensure_schema paths inside this fixture's schema, then
+        // enroll the pool peer, all before the server process starts.
+        {
+            use waddle_server::clustering::allowlist::AllowlistStore as _;
+            use waddle_server::clustering::lease::KeypairSlotLease as _;
+            use waddle_server::db::{Database, DatabaseConfig, DatabaseDriver};
+            let control_db = Database::from_config(
+                "xep0280-shadow-fixture",
+                &DatabaseConfig::new(DatabaseDriver::Postgres, schema_url.clone()),
+            )
+            .await
+            .expect("open fixture control db");
+            waddle_server::clustering::allowlist::PostgresAllowlistStore::new(control_db.clone())
+                .ensure_schema()
+                .await
+                .expect("allowlist schema");
+            waddle_server::clustering::lease::PostgresKeypairSlotLease::new(control_db.clone())
+                .ensure_schema()
+                .await
+                .expect("lease schema");
+            let conn = control_db.guard().await.expect("guard");
+            conn.execute(
+                "INSERT INTO clustering_peer_allowlist (peer_id) VALUES (?)",
+                waddle_server::db_params![pool_peer_id],
+            )
+            .await
+            .expect("enroll fixture pool peer");
+        }
+        let shadow_enabled_env = if shadow_enabled { "true" } else { "false" };
+        let envs: Vec<(String, String)> = vec![
+            ("WADDLE_DB_DRIVER".to_string(), "postgres".to_string()),
+            ("WADDLE_DATABASE_URL".to_string(), schema_url.clone()),
+            (
+                "WADDLE_XMPP_SM_DATABASE_URL".to_string(),
+                schema_url.clone(),
+            ),
+            (
+                "WADDLE_XMPP_MAM_DATABASE_URL".to_string(),
+                schema_url.clone(),
+            ),
+            (
+                "WADDLE_XMPP_INBOX_DATABASE_URL".to_string(),
+                schema_url.clone(),
+            ),
+            (
+                "WADDLE_XMPP_PENDING_DELIVERY_DATABASE_URL".to_string(),
+                schema_url.clone(),
+            ),
+            ("WADDLE_XMPP_PUBSUB_DATABASE_URL".to_string(), schema_url),
+            ("WADDLE_CLUSTERING_ENABLED".to_string(), "true".to_string()),
+            (
+                "WADDLE_DEPLOYMENT_UUID".to_string(),
+                "018f47b2-4b2e-7a3a-9a4c-52a5a6a90280".to_string(),
+            ),
+            ("WADDLE_DB_LINEAGE_ACTION".to_string(), "enroll".to_string()),
+            ("WADDLE_CLUSTERING_LISTEN_ADDRS".to_string(), listen_addr),
+            ("WADDLE_CLUSTERING_KEYPAIR_POOL".to_string(), pool_env),
+            (
+                "WADDLE_INGRESS_SHADOW_ENABLED".to_string(),
+                shadow_enabled_env.to_string(),
+            ),
+        ];
+        let env_refs: Vec<(&str, &str)> = envs
+            .iter()
+            .map(|(key, value)| (key.as_str(), value.as_str()))
+            .collect();
+        let server = TestServer::start_with_extra_envs(&[], &env_refs);
+        Some(Self {
+            server,
+            admin,
+            schema,
+        })
+    }
+
+    async fn poison_shadow_storage(&self) {
+        sqlx::query(&format!(
+            "DROP TABLE {}.ingress_effect_intents",
+            self.schema
+        ))
+        .execute(&self.admin)
+        .await
+        .expect("drop shadow effect-intent table");
+    }
+
+    async fn close(self) {
+        let Self {
+            server,
+            admin,
+            schema,
+        } = self;
+        drop(server);
+        sqlx::query(&format!("DROP SCHEMA {schema} CASCADE"))
+            .execute(&admin)
+            .await
+            .expect("drop isolated postgres schema");
+    }
+}
+
+#[cfg(feature = "clustering")]
+fn reserve_swarm_port() -> u16 {
+    TcpListener::bind("127.0.0.1:0")
+        .expect("bind temporary swarm port")
+        .local_addr()
+        .expect("temporary swarm port address")
+        .port()
+}
+
+#[cfg(feature = "clustering")]
+fn generate_keypair_pool() -> (String, String) {
+    let keypair = libp2p::identity::ed25519::Keypair::generate();
+    let peer_id = libp2p::identity::Keypair::from(keypair.clone())
+        .public()
+        .to_peer_id()
+        .to_string();
+    (
+        base64::engine::general_purpose::STANDARD.encode(keypair.secret().as_ref()),
+        peer_id,
+    )
+}
+
+#[cfg(feature = "clustering")]
+fn postgres_url_with_search_path(database_url: &str, schema: &str) -> String {
+    let mut url = url::Url::parse(database_url).expect("parse postgres URL");
+    let retained: Vec<(String, String)> = url
+        .query_pairs()
+        .filter(|(key, _)| key != "options")
+        .map(|(key, value)| (key.into_owned(), value.into_owned()))
+        .collect();
+    url.query_pairs_mut()
+        .clear()
+        .extend_pairs(retained.iter().map(|(key, value)| (key, value)))
+        .append_pair("options", &format!("-c search_path={schema}"));
+    url.to_string()
+}
+
+#[cfg(feature = "clustering")]
+fn normalize_sm_enabled_frame(frame: &str) -> String {
+    normalize_attr_value(frame, "id", "$stream-id")
+}
+
+/// Replaces only the `<stanza-id/>` element's `id` attribute — the message's
+/// own client-chosen `id` must stay byte-compared.
+#[cfg(feature = "clustering")]
+fn normalize_stanza_id_frame(frame: &str) -> String {
+    let Some(start) = frame.find("<stanza-id ") else {
+        return frame.to_string();
+    };
+    let Some(end_rel) = frame[start..].find("/>") else {
+        return frame.to_string();
+    };
+    let end = start + end_rel + 2;
+    let normalized_element = normalize_attr_value(&frame[start..end], "id", "$stanza-id");
+    format!("{}{}{}", &frame[..start], normalized_element, &frame[end..])
+}
+
+#[cfg(feature = "clustering")]
+fn normalize_attr_value(frame: &str, attr: &str, replacement: &str) -> String {
+    let double = format!(r#"{attr}=""#);
+    if let Some(start) = frame.find(&double) {
+        let value_start = start + double.len();
+        if let Some(value_end) = frame[value_start..].find('"') {
+            let value_end = value_start + value_end;
+            return format!(
+                "{}{}{}",
+                &frame[..value_start],
+                replacement,
+                &frame[value_end..]
+            );
+        }
+    }
+
+    let single = format!("{attr}='");
+    if let Some(start) = frame.find(&single) {
+        let value_start = start + single.len();
+        if let Some(value_end) = frame[value_start..].find('\'') {
+            let value_end = value_start + value_end;
+            return format!(
+                "{}{}{}",
+                &frame[..value_start],
+                replacement,
+                &frame[value_end..]
+            );
+        }
+    }
+
+    frame.to_string()
+}
+
+#[cfg(feature = "clustering")]
+async fn run_shadow_parity_exchange(server: &TestServer) -> Vec<String> {
+    let password = server.fixed_account_password().to_string();
+    let mut transcript = Vec::new();
+    let mut desktop = WsXmppClient::connect_and_auth(
+        &server.ws_url(),
+        DOMAIN,
+        USERNAME,
+        &password,
+        "shadow-desktop",
+    )
+    .await
+    .expect("desktop connection");
+    desktop
+        .send(
+            r#"<iq xmlns="jabber:client" type="set" id="shadow-enable-desktop"><enable xmlns="urn:xmpp:carbons:2"/></iq>"#,
+        )
+        .await
+        .expect("send carbons enable");
+    for frame in desktop
+        .recv_until(|frame| frame.contains("shadow-enable-desktop"))
+        .await
+        .expect("enable carbons on desktop")
+    {
+        transcript.push(format!("desktop:{frame}"));
+    }
+
+    let mut phone = WsXmppClient::connect_and_auth(
+        &server.ws_url(),
+        DOMAIN,
+        USERNAME,
+        &password,
+        "shadow-phone",
+    )
+    .await
+    .expect("phone connection");
+    phone
+        .send(r#"<enable xmlns="urn:xmpp:sm:3" resume="true"/>"#)
+        .await
+        .expect("send stream management enable");
+    for frame in phone
+        .recv_until(|frame| frame.contains("<enabled"))
+        .await
+        .expect("enable stream management")
+    {
+        transcript.push(format!("phone:{}", normalize_sm_enabled_frame(&frame)));
+    }
+
+    phone
+        .send(
+            r#"<message xmlns="jabber:client" to="ghost@localhost" type="chat" id="shadow-carbon-1"><body>shadow parity body</body></message>"#,
+        )
+        .await
+        .expect("send message");
+
+    for frame in desktop
+        .recv_until(|frame| {
+            frame.contains("urn:xmpp:carbons:2")
+                && frame.contains("<sent")
+                && frame.contains("shadow parity body")
+        })
+        .await
+        .expect("desktop receives sent carbon")
+    {
+        // The delay stamp and the server-minted archive stanza-id are
+        // run-unique by construction; parity is about everything else.
+        let frame = normalize_attr_value(&frame, "stamp", "$stamp");
+        let frame = normalize_stanza_id_frame(&frame);
+        transcript.push(format!("desktop:{frame}"));
+    }
+
+    let _ = phone.close().await;
+    let _ = desktop.close().await;
+    transcript
 }
 
 #[tokio::test]
@@ -178,4 +486,51 @@ async fn sent_carbon_replays_to_detached_resumable_sibling() {
     if let Some(resumed) = resumed {
         let _ = resumed.close().await;
     }
+}
+
+#[cfg(feature = "clustering")]
+#[tokio::test]
+async fn sent_carbon_wire_is_byte_identical_with_shadow_disabled_and_enabled() {
+    let _guard = POSTGRES_SERIAL.lock().await;
+
+    let Some(disabled) = ShadowWsFixture::open("wire_disabled", false).await else {
+        return;
+    };
+    let disabled_frame = run_shadow_parity_exchange(&disabled.server).await;
+    disabled.close().await;
+
+    let Some(enabled) = ShadowWsFixture::open("wire_enabled", true).await else {
+        return;
+    };
+    let enabled_frame = run_shadow_parity_exchange(&enabled.server).await;
+    enabled.close().await;
+
+    assert_eq!(
+        enabled_frame, disabled_frame,
+        "enabling ingress shadow must not change the deterministic sent-carbon transcript"
+    );
+}
+
+#[cfg(feature = "clustering")]
+#[tokio::test]
+async fn sent_carbon_wire_is_byte_identical_when_shadow_storage_is_poisoned() {
+    let _guard = POSTGRES_SERIAL.lock().await;
+
+    let Some(disabled) = ShadowWsFixture::open("wire_poison_baseline", false).await else {
+        return;
+    };
+    let disabled_frame = run_shadow_parity_exchange(&disabled.server).await;
+    disabled.close().await;
+
+    let Some(poisoned) = ShadowWsFixture::open("wire_poisoned", true).await else {
+        return;
+    };
+    poisoned.poison_shadow_storage().await;
+    let poisoned_frame = run_shadow_parity_exchange(&poisoned.server).await;
+    poisoned.close().await;
+
+    assert_eq!(
+        poisoned_frame, disabled_frame,
+        "poisoned shadow storage must not change the deterministic sent-carbon transcript"
+    );
 }
