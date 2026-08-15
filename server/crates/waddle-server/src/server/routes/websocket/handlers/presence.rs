@@ -48,6 +48,7 @@ pub use muc::{
     get_managed_channel_for_room, handle_muc_join_with_ordered_relay, handle_muc_leave,
     resolve_muc_room_archive_access, MucJoinRequest, RoomArchiveAccess,
 };
+pub(crate) use muc::{registered_remote_resource_delivery, RegisteredRemoteDelivery};
 #[cfg(feature = "clustering")]
 pub(crate) use muc_update::try_handle_muc_presence_update;
 use probe::handle_presence_probe;

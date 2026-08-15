@@ -37,6 +37,41 @@ pub enum DeliveryKind {
 /// deliver stanzas to connected clients. The [`DeliveryKind`] tells
 /// the destination's main loop whether the stanza should be fed
 /// through the recipient-pass pipeline before reaching the wire.
+/// One-shot notification that the destination connection has accepted an
+/// outbound frame into its write/recovery path.  It intentionally travels
+/// with the frame rather than the registry send result: enqueueing in the
+/// registry mpsc is not a durable delivery handoff.
+#[derive(Clone)]
+pub struct OutboundWriteAcceptance(
+    std::sync::Arc<std::sync::Mutex<Option<tokio::sync::oneshot::Sender<()>>>>,
+);
+
+impl std::fmt::Debug for OutboundWriteAcceptance {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str("OutboundWriteAcceptance(..)")
+    }
+}
+
+impl OutboundWriteAcceptance {
+    pub fn new() -> (Self, tokio::sync::oneshot::Receiver<()>) {
+        let (sender, receiver) = tokio::sync::oneshot::channel();
+        (
+            Self(std::sync::Arc::new(std::sync::Mutex::new(Some(sender)))),
+            receiver,
+        )
+    }
+
+    /// This is deliberately idempotent because a registry send may retry a
+    /// replacement connection while holding a clone of the same acceptance.
+    pub fn acknowledge(&self) {
+        if let Ok(mut sender) = self.0.lock() {
+            if let Some(sender) = sender.take() {
+                let _ = sender.send(());
+            }
+        }
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct OutboundStanza {
     /// The stanza to send.
@@ -65,6 +100,9 @@ pub struct OutboundStanza {
     /// XEP-0203 `<delay/>` advertises the real failed-delivery time.
     /// (Greptile/Copilot/Qodo P1 review on PR #361.)
     pub pending_row_original_receipt_at: Option<chrono::DateTime<chrono::Utc>>,
+    /// Optional acknowledgement for a durable producer waiting until this
+    /// frame reaches the connection's write/recovery-owning path.
+    pub write_acceptance: Option<OutboundWriteAcceptance>,
 }
 
 impl OutboundStanza {
@@ -81,6 +119,7 @@ impl OutboundStanza {
             kind: DeliveryKind::DirectFrame,
             pending_row_id: None,
             pending_row_original_receipt_at: None,
+            write_acceptance: None,
         }
     }
 
@@ -95,6 +134,7 @@ impl OutboundStanza {
             kind: DeliveryKind::PeerStanza,
             pending_row_id: None,
             pending_row_original_receipt_at: None,
+            write_acceptance: None,
         }
     }
 
@@ -118,6 +158,20 @@ impl OutboundStanza {
             kind: DeliveryKind::DirectFrame,
             pending_row_id: Some(row_id),
             pending_row_original_receipt_at: Some(original_receipt_at),
+            write_acceptance: None,
+        }
+    }
+
+    /// Attach a write-path acknowledgement to a server-generated direct
+    /// frame.  The receiver returned by [`OutboundWriteAcceptance::new`] is
+    /// resolved by the destination connection, never by registry enqueue.
+    pub fn with_write_acceptance(stanza: Stanza, acceptance: OutboundWriteAcceptance) -> Self {
+        Self {
+            stanza,
+            kind: DeliveryKind::DirectFrame,
+            pending_row_id: None,
+            pending_row_original_receipt_at: None,
+            write_acceptance: Some(acceptance),
         }
     }
 }

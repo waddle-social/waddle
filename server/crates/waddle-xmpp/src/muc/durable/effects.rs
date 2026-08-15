@@ -3,7 +3,7 @@
 use jid::{BareJid, FullJid};
 
 use crate::muc::MucConfigStatusCode;
-use crate::types::{Role, Voice};
+use crate::types::{Affiliation, Role, Voice};
 
 use super::{RoomEffectOrdinal, RoomLifecycleId, RoomRevision};
 
@@ -70,6 +70,11 @@ pub struct OccupantPresenceUpdate {
     pub recipient: FullJid,
     pub occupant: FullJid,
     pub nick: MucOccupantNick,
+    /// Identity snapshot needed to rebuild the exact MUC presence after the
+    /// affected occupant has already left the live room actor.
+    pub occupant_bare_jid: BareJid,
+    pub disclosed_real_jid: Option<FullJid>,
+    pub affiliation: Affiliation,
     pub kind: AdminPresenceKind,
     pub actor: Option<BareJid>,
     pub reason: Option<DestroyReason>,

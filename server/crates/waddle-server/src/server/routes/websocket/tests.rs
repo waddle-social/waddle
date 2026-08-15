@@ -744,6 +744,15 @@ async fn create_test_websocket_state_with_extension_manager(
             Arc::clone(&call_teardown_outbox),
             tokio::runtime::Handle::current(),
         );
+    let room_effect_outbox = Arc::new(
+        crate::room_effect_outbox::RoomEffectOutboxStore::new(app_state.db_pool.global().clone())
+            .await
+            .expect("room effect outbox"),
+    );
+    let room_effect_arm_supervisor = crate::room_effect_outbox::RoomEffectArmSupervisor::new(
+        Arc::clone(&room_effect_outbox),
+        tokio::runtime::Handle::current(),
+    );
 
     let test_inbox_storage: Arc<dyn waddle_xmpp::inbox::storage::InboxStorage> =
         Arc::new(waddle_xmpp::inbox::storage::InMemoryInboxStorage::new());
@@ -821,6 +830,8 @@ async fn create_test_websocket_state_with_extension_manager(
                     notification_outbox,
                     call_teardown_outbox,
                     call_teardown_persistence,
+                    room_effect_outbox,
+                    room_effect_arm_supervisor,
                     call_teardown_executor: None,
                     notification_settings_projection,
                     dnd_projection,

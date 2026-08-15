@@ -348,6 +348,32 @@ impl RoomEffectOutboxStore {
             RoomEffectReleaseOutcome::LostLease
         })
     }
+    /// Return a lease to the queue without turning an ownership miss into a
+    /// delivery attempt.  A room actor can move between nodes while its
+    /// durable FIFO backlog remains shared; the new owner must be able to
+    /// claim promptly without consuming retry budget.
+    pub async fn release_unattempted(
+        &self,
+        key: &RoomEffectKey,
+        token: &RoomEffectLeaseToken,
+        now_ms: i64,
+        delay_ms: i64,
+    ) -> Result<bool, RoomEffectOutboxError> {
+        let connection = self.db.guard().await?;
+        Ok(connection
+            .execute(
+                "UPDATE clustering_muc_room_effects SET available_at_ms = ?, lease_token = NULL, leased_at_ms = NULL WHERE lifecycle_id = ? AND revision = ? AND ordinal = ? AND lease_token = ?",
+                crate::db_params![
+                    now_ms.saturating_add(delay_ms),
+                    key.lifecycle.to_string(),
+                    key.revision.as_i64(),
+                    key.ordinal.as_i64(),
+                    token.as_str(),
+                ],
+            )
+            .await?
+            == 1)
+    }
     pub async fn reap_superseded(&self, now_ms: i64) -> Result<u64, RoomEffectOutboxError> {
         let c = self.db.guard().await?;
         Ok(c.execute("DELETE FROM clustering_muc_room_effects WHERE superseded AND (lease_token IS NULL OR leased_at_ms <= ?)",crate::db_params![now_ms.saturating_sub(CLAIM_TIMEOUT_MS)]).await?)
@@ -393,6 +419,29 @@ impl RoomEffectOutboxStore {
         }
         Ok(armed)
     }
+    /// Snapshot currently-live cluster node incarnations.  Epoch is part of
+    /// the identity, so a restarted node with the same node id still arms the
+    /// predecessor's inert committed rows.
+    pub async fn current_producing_nodes(
+        &self,
+    ) -> Result<Vec<RoomEffectProducingNode>, RoomEffectOutboxError> {
+        let connection = self.db.guard().await?;
+        let mut rows = connection
+            .query(
+                "SELECT node_id, node_epoch FROM clustering_nodes WHERE NOT expired",
+                (),
+            )
+            .await?;
+        let mut nodes = Vec::new();
+        while let Some(row) = rows.next().await? {
+            let node_id: String = row.get(0)?;
+            let node_epoch: String = row.get(1)?;
+            nodes.push(RoomEffectProducingNode::from_node_identity(
+                waddle_xmpp::ownership::NodeIdentity::new(node_id, node_epoch),
+            ));
+        }
+        Ok(nodes)
+    }
     pub async fn pending_rows_for_lifecycle(
         &self,
         lifecycle: waddle_xmpp::muc::RoomLifecycleId,
@@ -408,6 +457,53 @@ impl RoomEffectOutboxStore {
             .await?
             .ok_or(RoomEffectOutboxError::InvalidCoordinate)?
             .get(0)?)
+    }
+
+    /// Fence a drained effect to its exact room incarnation.  A matching
+    /// tombstone remains valid because terminal destroy effects deliberately
+    /// run after the durable room row is gone; any other row must still be the
+    /// room's currently live lifecycle.  This keeps stale rows from a reused
+    /// room JID from firing into its successor.
+    pub async fn lifecycle_is_executable(
+        &self,
+        row: &RoomEffectRow,
+    ) -> Result<bool, RoomEffectOutboxError> {
+        let connection = self.db.guard().await?;
+        let mut exact = connection
+            .query(
+                "SELECT state FROM clustering_muc_room_lifecycles WHERE room_jid = ? AND lifecycle_id = ?",
+                crate::db_params![row.room_jid.to_string(), row.key.lifecycle.to_string()],
+            )
+            .await?;
+        let Some(exact) = exact.next().await? else {
+            return Ok(false);
+        };
+        let state: String = exact.get(0)?;
+        if state == waddle_xmpp::muc::RoomLifecycleState::Tombstoned.as_db_str() {
+            return Ok(true);
+        }
+        let mut current = connection
+            .query(
+                "SELECT lifecycle_id FROM clustering_muc_room_lifecycles WHERE room_jid = ? AND state <> 'tombstoned' LIMIT 1",
+                crate::db_params![row.room_jid.to_string()],
+            )
+            .await?;
+        Ok(current.next().await?.is_some_and(|current| {
+            current
+                .get::<String>(0)
+                .is_ok_and(|id| id == row.key.lifecycle.to_string())
+        }))
+    }
+
+    pub async fn queue_depth(&self) -> Result<i64, RoomEffectOutboxError> {
+        let connection = self.db.guard().await?;
+        let mut rows = connection
+            .query("SELECT COUNT(*) FROM clustering_muc_room_effects", ())
+            .await?;
+        rows.next()
+            .await?
+            .ok_or(RoomEffectOutboxError::InvalidCoordinate)
+            .and_then(|row| row.get(0).map_err(RoomEffectOutboxError::from))
     }
     pub async fn has_pending_terminal_for_room_in_tx(
         &self,

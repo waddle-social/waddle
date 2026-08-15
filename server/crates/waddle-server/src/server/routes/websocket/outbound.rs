@@ -50,6 +50,7 @@ where
             let pending_row_id = outbound_stanza.pending_row_id.clone();
             let pending_row_receipt_at = outbound_stanza.pending_row_original_receipt_at;
             let mut request_ack_after = false;
+            let mut recovery_owned = false;
             if conn.sm_state.enabled && is_countable_stanza(&xml) {
                 let record_result = match pending_row_receipt_at {
                     Some(receipt_at) => conn.sm_state.record_outbound_with_receipt_at(
@@ -62,6 +63,7 @@ where
                         .record_outbound(xml.clone(), SmEvictionPath::DirectOutbound),
                 };
                 request_ack_after = record_result.request_ack;
+                recovery_owned = true;
                 // Locked Q7b SM-ack lifecycle: bind the just-assigned outbound
                 // counter back onto pending_delivery flush rows before the next
                 // queued SM ack can range-delete them.
@@ -136,6 +138,16 @@ where
                     return false;
                 }
             };
+            // With stream management enabled, `record_outbound` above placed
+            // the exact XML in the resumable recovery queue before this sink
+            // write.  Without SM, a successful sink write is the only
+            // available acceptance point.  Either way, registry enqueue alone
+            // is never enough to resolve this notification.
+            if sent && (recovery_owned || !conn.sm_state.enabled) {
+                if let Some(acceptance) = outbound_stanza.write_acceptance.as_ref() {
+                    acceptance.acknowledge();
+                }
+            }
             // SM cadence: when `record_outbound` flagged the threshold,
             // follow the just-written stanza with an `<r/>` so the
             // client knows to send `<a h='N'/>`. The wasm client never

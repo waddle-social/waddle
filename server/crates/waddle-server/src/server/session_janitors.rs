@@ -5782,6 +5782,102 @@ pub(crate) fn spawn_call_teardown_outbox_janitor(websocket_state: &Arc<WebSocket
     });
 }
 
+/// Backstop for committed room mutation effects.  Config-class rows are inert
+/// until their origin arms them; the same sweep also detects a dead origin
+/// incarnation and arms (never deletes) its truthful committed rows.
+pub(crate) fn spawn_room_effect_outbox_janitor(websocket_state: &Arc<WebSocketState>) {
+    let weak_state = Arc::downgrade(websocket_state);
+    let interval_secs = std::env::var("WADDLE_ROOM_EFFECT_JANITOR_INTERVAL")
+        .ok()
+        .and_then(|value| value.parse::<u64>().ok())
+        .map(|value| value.max(1))
+        .unwrap_or(5);
+    let batch_size = std::env::var("WADDLE_ROOM_EFFECT_JANITOR_BATCH")
+        .ok()
+        .and_then(|value| value.parse::<usize>().ok())
+        .map(|value| value.clamp(1, 1_000))
+        .unwrap_or(64);
+    tokio::spawn(async move {
+        let mut ticker = tokio::time::interval(Duration::from_secs(interval_secs));
+        ticker.tick().await;
+        loop {
+            ticker.tick().await;
+            let Some(state) = weak_state.upgrade() else {
+                break;
+            };
+            run_room_effect_outbox_sweep(&state, batch_size).await;
+        }
+    });
+}
+
+async fn run_room_effect_outbox_sweep(state: &WebSocketState, batch_size: usize) {
+    async {
+        let store = &state.deps.protocol.room_effect_outbox;
+        let mut failed = false;
+        match crate::room_effect_outbox::drain::drain_due_effects(
+            state,
+            crate::time::now_ms(),
+            batch_size,
+        )
+        .await
+        {
+            Ok(summary) => {
+                waddle_xmpp::counter_add!(
+                    "waddle.room_effect_outbox.drained",
+                    "1",
+                    "Completed room-effect outbox deliveries.",
+                    summary.drained,
+                    Janitor::RoomEffectOutbox,
+                );
+            }
+            Err(error) => {
+                failed = true;
+                warn!(%error, "room effect outbox drain failed; rows remain leased or retryable");
+            }
+        }
+        if let Err(error) = store.reap_superseded(crate::time::now_ms()).await {
+            failed = true;
+            warn!(%error, "room effect outbox superseded-row reaper failed");
+        }
+        #[cfg(feature = "clustering")]
+        match store.current_producing_nodes().await {
+            Ok(nodes) => {
+                if let Err(error) = store.arm_foreign_inert(&nodes, crate::time::now_ms()).await {
+                    failed = true;
+                    warn!(%error, "room effect outbox foreign inert arming failed");
+                }
+            }
+            Err(error) => {
+                failed = true;
+                warn!(%error, "room effect outbox live-node query failed");
+            }
+        }
+        match store.queue_depth().await {
+            Ok(depth) => waddle_xmpp::histogram_record!(
+                "waddle.room_effect_outbox.depth",
+                "1",
+                "Rows currently retained by the room-effect outbox at sweep time.",
+                depth as f64,
+                Janitor::RoomEffectOutbox,
+            ),
+            Err(error) => {
+                failed = true;
+                warn!(%error, "room effect outbox depth query failed");
+            }
+        }
+        waddle_xmpp::telemetry::reliability::record_janitor_sweep(
+            Janitor::RoomEffectOutbox,
+            if failed {
+                SweepOutcome::Failed
+            } else {
+                SweepOutcome::Completed
+            },
+        );
+    }
+    .instrument(janitor_sweep_span(Janitor::RoomEffectOutbox))
+    .await;
+}
+
 async fn run_call_teardown_outbox_sweep(state: &WebSocketState, batch_size: usize) {
     async {
         let store = &state.deps.protocol.call_teardown_outbox;

@@ -1267,6 +1267,14 @@ pub struct ProtocolServices {
     /// teardown insertion encounters a transient database failure.
     pub(crate) call_teardown_persistence:
         crate::call_teardown_outbox::CallTeardownPersistenceSupervisor,
+    /// Durable, per-room FIFO mutation-effect queue.  Producers own enqueueing
+    /// in their mutation transaction; this shared handle is exclusively the
+    /// consumer/janitor and arm-supervisor boundary.
+    pub room_effect_outbox: Arc<crate::room_effect_outbox::RoomEffectOutboxStore>,
+    /// Origin-owned retry path for committed staged config effects.  It has
+    /// only the truthful Arm disposition; rollback/supersession deletes rows
+    /// transactionally elsewhere.
+    pub room_effect_arm_supervisor: crate::room_effect_outbox::RoomEffectArmSupervisor,
     /// Async LiveKit admin view of the concrete SFU, retained separately
     /// from the synchronous protocol service for the teardown janitor.
     pub call_teardown_executor: Option<waddle_sfu::LiveKitTeardownExecutor>,

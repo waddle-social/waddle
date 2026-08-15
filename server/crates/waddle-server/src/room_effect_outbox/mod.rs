@@ -1,18 +1,23 @@
 //! Durable per-lifecycle FIFO outbox for MUC mutation effects.
+pub mod drain;
+pub mod render;
 mod schema;
 mod store;
 mod store_jobs;
+mod supervisor;
 mod types;
 pub use store::{
     retry_delay_ms, RoomEffectEnqueue, RoomEffectOutboxStore, BASE_RETRY_DELAY_MS,
     CLAIM_TIMEOUT_MS, MAX_ATTEMPTS, MAX_RETRY_DELAY_MS,
 };
+pub use supervisor::RoomEffectArmSupervisor;
 pub use types::{
     ClaimedRoomEffect, PersistedRoomEffect, RoomEffectKey, RoomEffectLastError,
     RoomEffectLeaseToken, RoomEffectOriginInstanceId, RoomEffectOutboxError,
     RoomEffectProducingNode, RoomEffectReleaseOutcome, RoomEffectRow,
 };
 
+#[cfg(feature = "clustering")]
 pub(crate) fn room_effect_origin_instance_id() -> RoomEffectOriginInstanceId {
     static INSTANCE_ID: std::sync::OnceLock<RoomEffectOriginInstanceId> =
         std::sync::OnceLock::new();
