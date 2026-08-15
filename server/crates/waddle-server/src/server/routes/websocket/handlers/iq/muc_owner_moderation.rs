@@ -374,7 +374,7 @@ async fn complete_destroy_snapshot(
     state: &WebSocketState,
     snapshot: DestroyCompletionSnapshot,
     inline_session: Option<&FullJid>,
-) -> Result<Vec<String>, ()> {
+) -> Result<ResponseBatch, ()> {
     let room_jid = snapshot.room_jid;
     let wipe_completed = match wipe_destroyed_room_durable_state(
         state,
@@ -398,7 +398,59 @@ async fn complete_destroy_snapshot(
     };
     if !wipe_completed {
         debug!(room = %room_jid, "Skipped stale destroy completion after room lifecycle replacement");
-        return Ok(Vec::new());
+        return Ok(ResponseBatch::default());
+    }
+    if let Some(lifecycle) = snapshot.lifecycle {
+        let reservation = state
+            .deps
+            .protocol
+            .room_effect_outbox
+            .terminal_reservation_for_lifecycle(lifecycle)
+            .await
+            .map_err(|error| {
+                warn!(room = %room_jid, %error, "Failed to recover terminal MUC destroy effect reservation");
+            })?
+            .ok_or_else(|| {
+                warn!(room = %room_jid, lifecycle = %lifecycle, "Committed destroy completion has no terminal MUC effect");
+            })?;
+        state
+            .deps
+            .protocol
+            .room_effect_outbox
+            .arm_reservation(&reservation, crate::time::now_ms())
+            .await
+            .map_err(|error| {
+                warn!(room = %room_jid, %error, "Failed to arm terminal MUC destroy effect after durable wipe");
+            })?;
+        let drained = crate::room_effect_outbox::drain::drain_reservation_inline(
+            state,
+            &reservation,
+            inline_session,
+        )
+        .await
+        .map_err(|error| {
+            warn!(room = %room_jid, %error, "Failed to drain armed terminal MUC destroy effect");
+        })?;
+        let batch = response_batch_from_inline_room_effect_frames(drained);
+        if inline_session.is_some() && batch.completions.is_empty() {
+            // A generic/janitor delivery cannot order a queued frame ahead
+            // of this connection's IQ result. Only an inline completion
+            // proves that the initiator's §10.9 presence is in the response
+            // batch before the result; otherwise let the requester time out
+            // while durable recovery finishes the committed broadcast.
+            return Err(());
+        }
+        for recipient in &snapshot.recipients {
+            for session_jid in &recipient.1 {
+                super::super::super::muc_call_sfu::unregister_participant_from_room(
+                    state,
+                    &room_jid,
+                    session_jid,
+                );
+            }
+        }
+        debug!(room = %room_jid, "Completed committed MUC room destroy through terminal effect outbox");
+        return Ok(batch);
     }
     let mut frames = Vec::new();
     for (nick, sessions) in snapshot.recipients {
@@ -462,7 +514,7 @@ async fn complete_destroy_snapshot(
         }
     }
     debug!(room = %room_jid, "Completed committed MUC room destroy");
-    Ok(frames)
+    Ok(ResponseBatch::from(frames))
 }
 
 fn delivery_outcome_warrants_retry(outcome: &waddle_xmpp::registry::BroadcastOutcome) -> bool {
@@ -844,7 +896,7 @@ pub(crate) async fn complete_leased_destroy_completion(
     state: &WebSocketState,
     completion: &LeasedDestroyCompletion,
     inline_session: Option<&FullJid>,
-) -> Result<Vec<String>, ()> {
+) -> Result<ResponseBatch, ()> {
     renew_persisted_destroy_completion_lease(state, completion).await?;
     let cleanup = complete_destroy_snapshot(state, completion.snapshot.clone(), inline_session);
     tokio::pin!(cleanup);
@@ -1388,16 +1440,23 @@ pub(super) async fn handle_muc_owner_and_moderation_iq(
                     .into();
                 }
             }
-            let mut frames =
-                drain_destroy_completion_attempt(state, attempt, Some(sender_jid)).await;
+            let Ok(mut batch) =
+                drain_destroy_completion_attempt(state, attempt, Some(sender_jid)).await
+            else {
+                // The destroy is already durable. Do not send an IQ result
+                // ahead of the required §10.9 presence if its inline drain
+                // cannot make progress; the leased completion and janitor
+                // retain the committed notification for retry.
+                return ResponseBatch::default();
+            };
             let room_jid_string = room_jid.to_string();
-            frames.push(build_iq_result_xml(
+            batch.frames.push(build_iq_result_xml(
                 id,
                 Some(room_jid_string.as_str()),
                 response_to,
                 None,
             ));
-            return frames.into();
+            return batch;
         }
 
         if matches!(iq, xmpp_parsers::iq::Iq::Get { .. }) {

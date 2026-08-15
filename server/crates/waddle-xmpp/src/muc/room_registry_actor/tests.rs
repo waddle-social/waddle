@@ -2216,6 +2216,65 @@ mod ownership_claims_tests {
     }
 
     #[tokio::test]
+    async fn plain_destroy_reuses_a_retained_completion_for_the_terminal_effect() {
+        let registry = spawn_registry().await;
+        let store = Arc::new(RecordingDurableStore::default());
+        wire_recording_store(&registry, Arc::clone(&store)).await;
+        let room_jid = test_room_jid("plain-destroy-retained-completion-effect");
+        let actor = registry
+            .ask(get_or_create(room_jid.clone()))
+            .await
+            .expect("create room")
+            .actor_ref;
+        let attempt = crate::muc::DestroyAttemptId::generate();
+        let room = actor
+            .ask(crate::muc::room_actor::GetSnapshot)
+            .await
+            .expect("snapshot")
+            .room;
+        registry
+            .ask(RegisterDestroyCompletion {
+                completion: DestroyCompletion {
+                    attempt,
+                    room_jid: room_jid.clone(),
+                    room,
+                    request: crate::muc::DestroyRequest::default(),
+                },
+            })
+            .await
+            .expect("register completion");
+        registry
+            .ask(RememberDestroyAttemptForTest {
+                room_jid: room_jid.clone(),
+                attempt,
+            })
+            .await
+            .expect("retain completion");
+
+        assert_eq!(
+            registry
+                .ask(DestroyRoom {
+                    room_jid,
+                    reason: DestroyRoomReason::Destroy,
+                })
+                .await
+                .expect("plain destroy"),
+            DestroyRoomOutcome::Destroyed,
+        );
+        assert_eq!(
+            *store.destroy_completion_attempts.lock().expect("lock"),
+            vec![Some(attempt)],
+        );
+        {
+            let effects = store.destroy_effects.lock().expect("lock");
+            assert!(matches!(
+                effects[0].effects(),
+                [crate::muc::RoomEffect::DestroyNotification { .. }]
+            ));
+        }
+    }
+
+    #[tokio::test]
     async fn reconcile_state_missing_destroy_attempt_releases_exact_claim() {
         let registry = spawn_registry().await;
         let claim_store: Arc<dyn ClaimStore> = Arc::new(InProcessClaimStore::new());
@@ -3537,6 +3596,7 @@ mod ownership_claims_tests {
         demote_notifications: Mutex<Vec<(String, String)>>,
         deleted_rooms: Mutex<Vec<String>>,
         destroy_completion_attempts: Mutex<Vec<Option<crate::muc::DestroyAttemptId>>>,
+        destroy_effects: Mutex<Vec<crate::muc::RoomMutationEffects>>,
         fail_deletes: bool,
         /// Simulates a transaction that committed terminal deletion but lost
         /// its acknowledgement and whose durable reconciliation failed.
@@ -3637,7 +3697,7 @@ mod ownership_claims_tests {
             room_jid: &'a BareJid,
             fence: &'a RoomClaimFenceContext,
             intent: crate::muc::RoomDurableMutation,
-            _effects: crate::muc::RoomMutationEffects,
+            effects: crate::muc::RoomMutationEffects,
         ) -> crate::muc::RoomCommitFuture<'a> {
             let store = self;
             let block = matches!(intent, crate::muc::RoomDurableMutation::Config { .. })
@@ -3712,6 +3772,7 @@ mod ownership_claims_tests {
                 _ => None,
             };
             let destroy_completion_attempts = &self.destroy_completion_attempts;
+            let destroy_effects = &self.destroy_effects;
             let coordinates = self.next_commit_coordinates();
             Box::pin(async move {
                 if block_create {
@@ -3761,6 +3822,7 @@ mod ownership_claims_tests {
                         .lock()
                         .expect("lock")
                         .push(destroy_completion_attempt);
+                    destroy_effects.lock().expect("lock").push(effects);
                     if destroy_not_owner {
                         return Err(crate::muc::RoomCommitError::NotOwner);
                     }
@@ -6315,6 +6377,13 @@ mod ownership_claims_tests {
             vec![Some(attempt)],
             "the pending terminal transition must arm the registered completion"
         );
+        {
+            let effects = store.destroy_effects.lock().expect("lock");
+            assert!(matches!(
+                effects[0].effects(),
+                [crate::muc::RoomEffect::DestroyNotification { .. }]
+            ));
+        }
         allow.notify_one();
         assert!(matches!(
             create.await.expect("create task"),

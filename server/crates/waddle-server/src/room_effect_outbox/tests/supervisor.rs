@@ -463,6 +463,21 @@ async fn janitor_smoke_telemetry_reports_completed_room_effect_sweep() {
     let metrics = waddle_xmpp::telemetry::test_support::acquire().await;
     let state = create_test_websocket_state().await;
     let store = Arc::clone(&state.deps.protocol.room_effect_outbox);
+    // The clustering-gated sweep step queries `clustering_nodes` (its
+    // production DDL is Postgres-only, bootstrapped by the claim store);
+    // give the SQLite fixture the minimal shape so a sweep can complete.
+    #[cfg(feature = "clustering")]
+    store
+        .database()
+        .guard()
+        .await
+        .expect("fixture guard")
+        .execute(
+            "CREATE TABLE IF NOT EXISTS clustering_nodes (node_id TEXT PRIMARY KEY, node_epoch TEXT NOT NULL, expired BOOLEAN NOT NULL DEFAULT FALSE)",
+            (),
+        )
+        .await
+        .expect("fixture clustering_nodes");
     let room_jid = integration_room_jid("janitor-smoke");
     let recipient = full_jid("janitor@example.com/device");
     let (lifecycle, revision) =

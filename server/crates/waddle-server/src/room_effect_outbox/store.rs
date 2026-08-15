@@ -151,6 +151,43 @@ impl RoomEffectOutboxStore {
             ordinals,
         }))
     }
+    /// Locate the exact terminal destroy reservation for a tombstoned
+    /// lifecycle.  The destroy-completion executor uses this after its
+    /// app-level wipe succeeds, so recovery cannot depend on an actor-local
+    /// reservation that may have been lost in a crash.
+    pub async fn terminal_reservation_for_lifecycle(
+        &self,
+        lifecycle: waddle_xmpp::muc::RoomLifecycleId,
+    ) -> Result<Option<RoomEffectReservation>, RoomEffectOutboxError> {
+        let connection = self.db.guard().await?;
+        let mut rows = connection
+            .query(
+                "SELECT revision, ordinal FROM clustering_muc_room_effects \
+                 WHERE lifecycle_id = ? AND terminal AND NOT superseded \
+                 ORDER BY revision, ordinal",
+                crate::db_params![lifecycle.to_string()],
+            )
+            .await?;
+        let mut reservation: Option<RoomEffectReservation> = None;
+        while let Some(row) = rows.next().await? {
+            let revision = waddle_xmpp::muc::RoomRevision::from_stored(row.get(0)?)
+                .ok_or(RoomEffectOutboxError::InvalidCoordinate)?;
+            let ordinal = waddle_xmpp::muc::RoomEffectOrdinal::from_stored(row.get(1)?)
+                .ok_or(RoomEffectOutboxError::InvalidCoordinate)?;
+            match &mut reservation {
+                Some(existing) if existing.revision == revision => existing.ordinals.push(ordinal),
+                Some(_) => return Err(RoomEffectOutboxError::InvalidCoordinate),
+                slot @ None => {
+                    *slot = Some(RoomEffectReservation {
+                        lifecycle,
+                        revision,
+                        ordinals: vec![ordinal],
+                    });
+                }
+            }
+        }
+        Ok(reservation)
+    }
     pub async fn arm(
         &self,
         key: &RoomEffectKey,

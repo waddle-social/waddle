@@ -24,7 +24,10 @@ use super::room_actor::{
     SealForDestroy, SealGuard, SealIfInactive, SealIfInactiveOutcome, UnsealDestroy,
     UnsealInactive,
 };
-use super::{MucRoom, RoomCommitError, RoomConfig, RoomDurableMutation};
+use super::{
+    DestroyPassword, DestroyReason, DestroyRecipient, MucOccupantNick, MucRoom, RoomCommitError,
+    RoomConfig, RoomDurableMutation, RoomMutationEffects,
+};
 use crate::metrics;
 use crate::ownership::{
     ClaimEpoch, ClaimError, ClaimSnapshot, ClaimStore, Entity, EntityType, ExactReleaseOutcome,
@@ -464,6 +467,38 @@ pub enum RoomRegistryError {
 }
 
 impl RoomRegistryActor {
+    fn destroy_effects(completion: &DestroyCompletion) -> RoomMutationEffects {
+        let recipients = completion
+            .room
+            .occupants
+            .values()
+            .map(|occupant| DestroyRecipient {
+                nick: MucOccupantNick::new(occupant.nick.clone())
+                    .expect("nick was previously accepted"),
+                sessions: completion
+                    .room
+                    .get_occupant_sessions(&occupant.nick)
+                    .into_iter()
+                    .collect(),
+            })
+            .collect();
+        RoomMutationEffects::destroy(
+            completion.room_jid.clone(),
+            completion
+                .request
+                .reason
+                .clone()
+                .and_then(DestroyReason::new),
+            completion.request.alternate_venue.clone(),
+            completion
+                .request
+                .password
+                .clone()
+                .and_then(DestroyPassword::new),
+            recipients,
+        )
+    }
+
     async fn destroy_completion_blocks_recreation(&self, room_jid: &BareJid) -> bool {
         if self
             .pending_unpublished_destroys
@@ -5047,12 +5082,20 @@ impl RoomRegistryActor {
                     }
                 }
                 if let Some(store) = &self.durable_store {
+                    let committed_completion = retained.completion.clone();
                     if let Err(error) = store
                         .commit_room_mutation(
                             &room_jid,
                             &entry.claim_fence,
-                            RoomDurableMutation::Destroy { completion_attempt },
-                            crate::muc::RoomMutationEffects::none(),
+                            RoomDurableMutation::Destroy {
+                                completion_attempt: committed_completion
+                                    .as_ref()
+                                    .map(|completion| completion.attempt),
+                            },
+                            committed_completion
+                                .as_ref()
+                                .map(Self::destroy_effects)
+                                .unwrap_or_else(RoomMutationEffects::none),
                         )
                         .await
                     {
@@ -5120,6 +5163,10 @@ impl RoomRegistryActor {
                     // would leave its persisted outbox record inert.
                     return DestroyRoomOutcome::DurableWipeFailed;
                 }
+                let effects = completion
+                    .as_ref()
+                    .map(Self::destroy_effects)
+                    .unwrap_or_else(RoomMutationEffects::none);
                 let commit = store
                     .commit_room_mutation(
                         &room_jid,
@@ -5129,7 +5176,7 @@ impl RoomRegistryActor {
                                 .as_ref()
                                 .map(|completion| completion.attempt),
                         },
-                        crate::muc::RoomMutationEffects::none(),
+                        effects,
                     )
                     .await;
                 if let Err(error) = commit {
