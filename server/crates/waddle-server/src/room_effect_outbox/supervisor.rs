@@ -189,12 +189,10 @@ async fn arm_with_retry(
     let mut retry_delay = initial_retry_delay();
     loop {
         match try_arm_reservation(store, reservation).await {
-            Ok(ArmOutcome::StillStaged) => {
-                tokio::time::sleep(retry_delay).await;
-                retry_delay = retry_delay
-                    .saturating_mul(2)
-                    .min(Duration::from_secs(10 * 60));
-            }
+            // StillStaged should be unreachable (the arm UPDATE matches any
+            // inert, non-superseded row), but if it ever occurs it must not
+            // spin inside this call and starve the supervisor's other pending
+            // reservations — hand it back to the outer pending set instead.
             Ok(outcome) => return outcome,
             Err(error) => {
                 tracing::warn!(

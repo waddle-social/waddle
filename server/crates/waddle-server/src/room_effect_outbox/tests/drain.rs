@@ -1485,3 +1485,74 @@ async fn reaping_superseded_leased_head_unblocks_terminal_drain() {
     );
     assert_eq!(store.queue_depth().await.expect("queue depth"), 0);
 }
+
+#[tokio::test]
+async fn local_enqueue_timeout_still_attempts_the_rest_of_the_roster_before_release() {
+    // Regression (persona round 2): a timed-out head recipient must not abort
+    // the roster loop — the tail still gets its frame on the SAME attempt and
+    // only then is the row released for retry (no head re-spam, no tail
+    // starvation).
+    let state = create_test_websocket_state().await;
+    let room: BareJid = "roster-tail@muc.example.com".parse().expect("room");
+    let blocked_recipient = full_jid("blocked-head@example.test/device");
+    let tail_recipient = full_jid("tail@example.test/device");
+    let lifecycle = create_owned_room_and_lifecycle_for(state.as_ref(), &room).await;
+    let reservation = enqueue_effects(
+        state.as_ref(),
+        lifecycle,
+        initial_revision(),
+        &config_effects_for(
+            &room,
+            vec![blocked_recipient.clone(), tail_recipient.clone()],
+        ),
+        0,
+    )
+    .await;
+    state
+        .deps
+        .protocol
+        .room_effect_outbox
+        .arm_reservation(&reservation, 0)
+        .await
+        .expect("arm reservation");
+
+    let (blocked_tx, _blocked_rx) = mpsc::channel::<OutboundStanza>(1);
+    register_test_connection(state.as_ref(), &blocked_recipient, blocked_tx.clone()).await;
+    blocked_tx
+        .send(OutboundStanza::new(Stanza::Presence(
+            xmpp_parsers::presence::Presence::new(xmpp_parsers::presence::Type::None),
+        )))
+        .await
+        .expect("prefill blocked recipient channel");
+    let (tail_tx, mut tail_rx) = mpsc::channel::<OutboundStanza>(4);
+    register_test_connection(state.as_ref(), &tail_recipient, tail_tx).await;
+
+    let state_for_drain = Arc::clone(&state);
+    let drain =
+        tokio::spawn(async move { drain_due_effects(state_for_drain.as_ref(), 0, 8).await });
+    let outbound = tokio::time::timeout(Duration::from_secs(10), tail_rx.recv())
+        .await
+        .expect("tail recipient must receive its frame on the same attempt")
+        .expect("tail outbound");
+    outbound
+        .write_acceptance
+        .as_ref()
+        .expect("tail write acceptance")
+        .acknowledge();
+    let summary = drain.await.expect("drain join").expect("drain result");
+    assert_eq!(summary.requeued, 1, "row released after the full roster pass");
+    let key = RoomEffectKey {
+        lifecycle,
+        revision: initial_revision(),
+        ordinal: reservation.ordinals[0],
+    };
+    let row = state
+        .deps
+        .protocol
+        .room_effect_outbox
+        .find(&key)
+        .await
+        .expect("find released row")
+        .expect("row retained for retry");
+    assert!(row.lease_token.is_none(), "lease released for retry");
+}

@@ -5630,17 +5630,15 @@ mod group_dm_durable_reconciliation_tests {
                         RoomCommitError::Database(RoomCommitDatabaseError::sanitized())
                     })?;
                     if let Some(superseded) = effects.superseding_reservation() {
-                        let deleted = outbox
+                        // Mirror production tolerance (muc_durable.rs): rows
+                        // already consumed by arming/drain or an interleaved
+                        // supersession are not an error.
+                        let _ = outbox
                             .supersede_reservation_in_tx(&mut tx, superseded)
                             .await
                             .map_err(|_| {
                                 RoomCommitError::Database(RoomCommitDatabaseError::sanitized())
                             })?;
-                        if deleted.len() != superseded.ordinals.len() {
-                            return Err(RoomCommitError::Database(
-                                RoomCommitDatabaseError::sanitized(),
-                            ));
-                        }
                     }
                     let reservation = if effects.effects().is_empty() {
                         None

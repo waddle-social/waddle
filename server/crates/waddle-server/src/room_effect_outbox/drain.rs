@@ -375,6 +375,7 @@ async fn drain_claimed(
     let mut acks = Vec::new();
     let mut inline = Vec::new();
     let mut remote_retry_needed = false;
+    let mut local_retry_needed = false;
     for (recipient, stanza) in rendered {
         if initiator == Some(&recipient) {
             inline.push(InlineRoomEffectFrame {
@@ -394,20 +395,17 @@ async fn drain_claimed(
             }
             LocalQueueResult::NotConnected => {}
             LocalQueueResult::TimedOut => {
+                // Keep attempting the rest of the roster before releasing:
+                // aborting here would re-spam the already-queued head on every
+                // retry while starving the tail behind one backpressured
+                // recipient (same discipline as the remote Retryable path).
                 tracing::warn!(
                     recipient = %recipient,
                     room = %claimed.row.room_jid,
-                    "room effect outbox local enqueue timed out; releasing row for retry"
+                    "room effect outbox local enqueue timed out; will release after remaining recipients"
                 );
-                let _ = store
-                    .release(
-                        &claimed.row.key,
-                        &claimed.lease_token,
-                        now_ms,
-                        RoomEffectLastError::InfrastructureTransient,
-                    )
-                    .await?;
-                return Ok(ClaimDisposition::Requeued);
+                local_retry_needed = true;
+                continue;
             }
         }
         // A resource absent from this node may be registered on a peer.  A
@@ -419,7 +417,7 @@ async fn drain_claimed(
             remote_retry_needed = true;
         }
     }
-    if remote_retry_needed {
+    if remote_retry_needed || local_retry_needed {
         let _ = store
             .release(
                 &claimed.row.key,
