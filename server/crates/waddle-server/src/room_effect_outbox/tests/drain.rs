@@ -10,12 +10,14 @@ use waddle_xmpp::muc::{
     RoomMutationEffects, RoomRevision,
 };
 use waddle_xmpp::registry::OutboundStanza;
+use xmpp_parsers::minidom::Element;
 
 use super::*;
 use crate::room_effect_outbox::drain::{
     complete_after_write, drain_due_effects, drain_reservation_inline,
 };
 use crate::room_effect_outbox::RoomEffectEnqueue;
+use crate::server::routes::websocket::stanza_to_xml;
 use crate::server::routes::websocket::tests::{
     create_test_websocket_state, register_test_connection,
 };
@@ -169,6 +171,19 @@ async fn recv_outbound(rx: &mut mpsc::Receiver<OutboundStanza>) -> OutboundStanz
         .await
         .expect("outbound receive timeout")
         .expect("outbound stanza")
+}
+
+fn muc_status_codes(outbound: &OutboundStanza) -> Vec<String> {
+    let xml = stanza_to_xml(&outbound.stanza);
+    let message = xml.parse::<Element>().expect("outbound MUC XML");
+    message
+        .get_child("x", waddle_xmpp::muc::presence::NS_MUC_USER)
+        .expect("MUC user payload")
+        .children()
+        .filter(|child| child.name() == "status")
+        .filter_map(|status| status.attr("code"))
+        .map(ToOwned::to_owned)
+        .collect()
 }
 
 #[tokio::test]
@@ -663,6 +678,107 @@ async fn complete_after_write_waits_for_local_acceptance() {
             .expect("find row")
             .is_none(),
         "the row should delete once the write path accepts it"
+    );
+}
+
+#[tokio::test]
+async fn sequential_logging_transitions_drain_as_distinct_170_then_171_messages() {
+    let state = create_test_websocket_state().await;
+    let room_jid = drain_room_jid();
+    let alice = full_jid("alice@example.test/device");
+    let lifecycle = create_owned_room_and_lifecycle(state.as_ref()).await;
+    let (alice_tx, mut alice_rx) = mpsc::channel::<OutboundStanza>(4);
+    register_test_connection(state.as_ref(), &alice, alice_tx).await;
+
+    let enable = enqueue_effects(
+        state.as_ref(),
+        lifecycle,
+        initial_revision(),
+        &RoomMutationEffects::config(
+            room_jid.clone(),
+            vec![MucConfigStatusCode::LoggingEnabled],
+            vec![alice.clone()],
+        ),
+        0,
+    )
+    .await;
+    let disable = enqueue_effects(
+        state.as_ref(),
+        lifecycle,
+        initial_revision().next().expect("second revision"),
+        &RoomMutationEffects::config(
+            room_jid,
+            vec![MucConfigStatusCode::LoggingDisabled],
+            vec![alice.clone()],
+        ),
+        0,
+    )
+    .await;
+    state
+        .deps
+        .protocol
+        .room_effect_outbox
+        .arm_reservation(&enable, 0)
+        .await
+        .expect("arm logging enabled");
+    state
+        .deps
+        .protocol
+        .room_effect_outbox
+        .arm_reservation(&disable, 0)
+        .await
+        .expect("arm logging disabled");
+
+    let first_state = Arc::clone(&state);
+    let first_drain =
+        tokio::spawn(async move { drain_due_effects(first_state.as_ref(), 0, 8).await });
+    let enabled = recv_outbound(&mut alice_rx).await;
+    let enabled_xml = stanza_to_xml(&enabled.stanza);
+    assert_eq!(
+        muc_status_codes(&enabled),
+        vec!["170".to_owned()],
+        "logging enable must be its own first config message: {enabled_xml}"
+    );
+    enabled
+        .write_acceptance
+        .as_ref()
+        .expect("local logging-enable message has write acceptance")
+        .acknowledge();
+    assert_eq!(
+        first_drain
+            .await
+            .expect("first drain task")
+            .expect("first drain")
+            .drained,
+        1
+    );
+
+    let second_state = Arc::clone(&state);
+    let second_drain =
+        tokio::spawn(async move { drain_due_effects(second_state.as_ref(), 0, 8).await });
+    let disabled = recv_outbound(&mut alice_rx).await;
+    let disabled_xml = stanza_to_xml(&disabled.stanza);
+    assert_eq!(
+        muc_status_codes(&disabled),
+        vec!["171".to_owned()],
+        "logging disable must follow as a separate config message: {disabled_xml}"
+    );
+    disabled
+        .write_acceptance
+        .as_ref()
+        .expect("local logging-disable message has write acceptance")
+        .acknowledge();
+    assert_eq!(
+        second_drain
+            .await
+            .expect("second drain task")
+            .expect("second drain")
+            .drained,
+        1
+    );
+    assert!(
+        alice_rx.try_recv().is_err(),
+        "each transition must be delivered exactly once"
     );
 }
 

@@ -256,3 +256,110 @@ where
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::convert::Infallible;
+    use std::pin::Pin;
+    use std::task::{Context, Poll};
+    use waddle_xmpp::{
+        registry::{OutboundStanza, OutboundWriteAcceptance},
+        Stanza,
+    };
+
+    struct RecordingSink {
+        sent: Vec<Message>,
+        acceptance: Option<tokio::sync::oneshot::Receiver<()>>,
+        acceptance_pending_on_send: bool,
+    }
+
+    impl futures::Sink<Message> for RecordingSink {
+        type Error = Infallible;
+
+        fn poll_ready(
+            self: Pin<&mut Self>,
+            _cx: &mut Context<'_>,
+        ) -> Poll<Result<(), Self::Error>> {
+            Poll::Ready(Ok(()))
+        }
+
+        fn start_send(mut self: Pin<&mut Self>, item: Message) -> Result<(), Self::Error> {
+            self.acceptance_pending_on_send = matches!(
+                self.acceptance
+                    .as_mut()
+                    .expect("writer acceptance receiver")
+                    .try_recv(),
+                Err(tokio::sync::oneshot::error::TryRecvError::Empty)
+            );
+            self.sent.push(item);
+            Ok(())
+        }
+
+        fn poll_flush(
+            self: Pin<&mut Self>,
+            _cx: &mut Context<'_>,
+        ) -> Poll<Result<(), Self::Error>> {
+            Poll::Ready(Ok(()))
+        }
+
+        fn poll_close(
+            self: Pin<&mut Self>,
+            _cx: &mut Context<'_>,
+        ) -> Poll<Result<(), Self::Error>> {
+            Poll::Ready(Ok(()))
+        }
+    }
+
+    #[tokio::test]
+    async fn direct_frame_write_acceptance_follows_sm_backed_writer_handoff() {
+        let state = crate::server::routes::websocket::tests::create_test_websocket_state().await;
+        let lifecycle = crate::clustering::NodeLifecycle::new();
+        let permit = lifecycle.admit().expect("serving permit");
+        let shutdown = tokio_util::sync::CancellationToken::new();
+        let mut conn = WsConnState::new();
+        conn.sm_state
+            .enable("outbound-write-acceptance".to_owned(), true, Some(300));
+        let (acceptance, accepted) = OutboundWriteAcceptance::new();
+        let mut sink = RecordingSink {
+            sent: Vec::new(),
+            acceptance: Some(accepted),
+            acceptance_pending_on_send: false,
+        };
+        let mut reader = futures::stream::pending::<Result<Message, Infallible>>();
+        let mut timers = TransportTimers::new();
+        let stanza = Stanza::Message(xmpp_parsers::message::Message::new(Some(
+            "alice@example.test".parse().expect("recipient JID"),
+        )));
+
+        assert!(
+            handle_outbound_stanza(
+                &mut sink,
+                &mut reader,
+                &state,
+                &mut conn,
+                &mut timers,
+                OutboundStanza::with_write_acceptance(stanza, acceptance),
+                OutboundAuthority {
+                    permit: &permit,
+                    shutdown: &shutdown,
+                },
+            )
+            .await
+        );
+        assert_eq!(conn.sm_state.queue_len(), 1, "SM owns recovery before ack");
+        assert_eq!(sink.sent.len(), 1, "writer accepted the direct frame");
+        assert!(
+            sink.acceptance_pending_on_send,
+            "registry enqueue must not acknowledge before the writer accepts the frame"
+        );
+        assert!(
+            sink.acceptance
+                .take()
+                .expect("writer acceptance receiver")
+                .await
+                .is_ok(),
+            "SM-backed writer resolves acceptance"
+        );
+    }
+}

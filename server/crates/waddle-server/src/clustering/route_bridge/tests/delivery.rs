@@ -1,6 +1,18 @@
 use super::*;
+use crate::room_effect_outbox::drain::drain_due_effects;
+use crate::room_effect_outbox::{
+    RoomEffectEnqueue, RoomEffectKey, RoomEffectLastError, RoomEffectOriginInstanceId,
+    RoomEffectProducingNode,
+};
+use crate::server::routes::websocket::tests::create_test_websocket_state_with_clustering;
+use waddle_xmpp::muc::room_registry_actor::CreateRoom;
+use waddle_xmpp::muc::{
+    MucConfigStatusCode, RoomConfig, RoomLifecycleId, RoomLifecycleState, RoomMutationEffects,
+    RoomRevision,
+};
 use waddle_xmpp::ownership::ClaimEpoch;
 use waddle_xmpp::pending_delivery::SmSessionId;
+use waddle_xmpp::stream_management::InMemorySmSessionRegistry;
 use waddle_xmpp::stream_management::{DetachedSession, SmSessionRegistry};
 use xmpp_parsers::message::Message;
 
@@ -26,6 +38,177 @@ async fn unwired_bridge_reports_unreachable_without_advancing_effects() {
 
     assert_eq!(err, OrderedRelayNackReason::Unreachable);
 }
+
+#[tokio::test]
+async fn remote_socket_delivery_preserves_direct_frame_kind() {
+    let services = Arc::new(
+        services_with_claims(
+            origin_identity(),
+            receiver_identity(),
+            receiver_identity(),
+            test_peer_id(),
+        )
+        .await,
+    );
+    let bridge = OrderedRelayDeliveryBridge::new(
+        CancellationToken::new(),
+        &ClusteringMessagingConfig::default(),
+    );
+    bridge.wire(Arc::clone(&services));
+    let target = target_full();
+    let (tx, mut rx) = mpsc::channel(1);
+    let entry = ConnectionEntry::new(tx);
+    let owner = entry.carbons_handle();
+    services
+        .connection_registry
+        .register_entry(target.clone(), entry);
+    bridge
+        .test_insert_remote_socket_registration(
+            target.clone(),
+            Arc::clone(&owner),
+            NodeId::new("remote-user-owner".to_owned()),
+        )
+        .await;
+    let registration_id = bridge
+        .remote_socket_resources
+        .lock()
+        .await
+        .get(&target)
+        .expect("socket registration")
+        .registration_id;
+
+    let reply = bridge
+        .deliver_remote_resource_frame_on_socket(RelayDeliverRemoteResourceFrame {
+            frame: RemoteResourceOutboundFrame {
+                jid: target.clone(),
+                registration_id,
+                stanza: RemoteStanza(Stanza::Message(Message::new(Some(jid::Jid::from(
+                    target.clone(),
+                ))))),
+                kind: DeliveryKind::DirectFrame,
+            },
+            trace: RelayTraceContext::default(),
+        })
+        .await;
+
+    assert_eq!(reply.status, RelayRemoteResourceFrameStatus::Delivered);
+    assert_eq!(
+        rx.recv().await.expect("socket receives relayed frame").kind,
+        DeliveryKind::DirectFrame,
+        "remote resource frames must bypass the recipient pass"
+    );
+}
+
+#[tokio::test]
+async fn drained_remote_direct_frame_retry_releases_room_effect_as_infrastructure_transient() {
+    let stop = CancellationToken::new();
+    stop.cancel();
+    let bridge = OrderedRelayDeliveryBridge::new(stop, &ClusteringMessagingConfig::default());
+    let target = target_full();
+    bridge.remote_owner_resources.lock().await.insert(
+        target.clone(),
+        RemoteOwnerRegistration {
+            registration_id: RemoteResourceRegistrationId::fresh(),
+            socket_node: NodeId::new("unreachable-remote-socket".to_owned()),
+            socket_generation: RemoteResourceSocketGeneration::next(None),
+            owner: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+        },
+    );
+    let state = create_test_websocket_state_with_clustering(
+        crate::clustering::ClusteringHandles {
+            ordered_relay_delivery_bridge: Some(Arc::clone(&bridge)),
+            ..crate::clustering::ClusteringHandles::default()
+        },
+        Arc::new(InMemorySmSessionRegistry::new()),
+    )
+    .await;
+    let room_jid: jid::BareJid = "room@muc.example.com".parse().expect("room JID");
+    let lifecycle = RoomLifecycleId::generate();
+    state
+        .deps
+        .protocol
+        .room_registry
+        .ask(CreateRoom {
+            room_jid: room_jid.clone(),
+            waddle_id: "remote-effect-room".to_owned(),
+            channel_id: "remote-effect-room".to_owned(),
+            config: RoomConfig::default(),
+        })
+        .await
+        .expect("create owned room");
+    let store = &state.deps.protocol.room_effect_outbox;
+    let connection = store.database().guard().await.expect("database connection");
+    connection
+        .execute(
+            "CREATE TABLE IF NOT EXISTS clustering_muc_room_lifecycles (lifecycle_id TEXT NOT NULL, room_jid TEXT NOT NULL, revision BIGINT NOT NULL, state TEXT NOT NULL)",
+            (),
+        )
+        .await
+        .expect("create lifecycle table");
+    connection
+        .execute(
+            "INSERT INTO clustering_muc_room_lifecycles (lifecycle_id, room_jid, revision, state) VALUES (?, ?, ?, ?)",
+            crate::db_params![
+                lifecycle.to_string(),
+                room_jid.to_string(),
+                RoomRevision::initial().as_i64(),
+                RoomLifecycleState::Active.as_db_str(),
+            ],
+        )
+        .await
+        .expect("insert lifecycle");
+    drop(connection);
+    let effects = RoomMutationEffects::config(
+        room_jid,
+        vec![MucConfigStatusCode::NonPrivacyConfigurationChange],
+        vec![target.clone()],
+    );
+    let origin = RoomEffectOriginInstanceId::new("test-origin".to_owned()).expect("origin");
+    let producing_node =
+        RoomEffectProducingNode::from_node_identity(NodeIdentity::new("node-a", "epoch-a"));
+    let mut tx = store.database().begin().await.expect("transaction");
+    let reservation = store
+        .enqueue_in_tx(
+            &mut tx,
+            RoomEffectEnqueue {
+                lifecycle,
+                revision: RoomRevision::initial(),
+                effects: &effects,
+                origin: &origin,
+                producing_node: &producing_node,
+                now_ms: 0,
+            },
+        )
+        .await
+        .expect("enqueue room effect");
+    tx.commit().await.expect("commit room effect");
+    store
+        .arm_reservation(&reservation, 0)
+        .await
+        .expect("arm room effect");
+
+    let summary = drain_due_effects(state.as_ref(), 0, 8)
+        .await
+        .expect("drain room effect");
+    assert_eq!(summary.drained, 0);
+    assert_eq!(summary.requeued, 1);
+    let row = store
+        .find(&RoomEffectKey {
+            lifecycle,
+            revision: RoomRevision::initial(),
+            ordinal: reservation.ordinals[0],
+        })
+        .await
+        .expect("find released row")
+        .expect("retryable remote delivery retains the row");
+    assert_eq!(
+        row.last_error,
+        Some(RoomEffectLastError::InfrastructureTransient)
+    );
+    assert_eq!(row.attempt_count, 1);
+    assert!(row.lease_token.is_none());
+}
+
 #[tokio::test]
 async fn receiver_rejects_target_claim_not_owned_by_this_node() {
     let keypair = Keypair::generate_ed25519();

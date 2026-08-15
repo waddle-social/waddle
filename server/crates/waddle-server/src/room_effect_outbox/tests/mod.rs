@@ -92,6 +92,7 @@ fn admin_effects() -> RoomMutationEffects {
     )
 }
 
+mod config_durable;
 mod drain;
 mod store_queue;
 mod supervisor;

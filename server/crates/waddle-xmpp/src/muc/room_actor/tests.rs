@@ -1261,6 +1261,74 @@ async fn members_only_revocation_removes_every_nick_for_bare_jid() {
 }
 
 #[tokio::test]
+async fn unmanaged_members_only_post_enforcement_snapshot_excludes_removed_config_recipient() {
+    let actor = spawn_room_actor_with_config(RoomConfig {
+        members_only: false,
+        ..RoomConfig::default()
+    })
+    .await;
+    let alice = test_full_jid("alice");
+    let bob = test_full_jid("bob");
+    for (nick, real_jid, affiliation) in [
+        ("alice", alice.clone(), Affiliation::Owner),
+        ("bob", bob.clone(), Affiliation::None),
+    ] {
+        actor
+            .ask(Join {
+                nick: nick.to_owned(),
+                real_jid,
+                role: Role::Participant,
+                affiliation,
+            })
+            .await
+            .expect("join open room");
+    }
+
+    let mut config = actor.ask(GetConfig).await.expect("current config");
+    config.members_only = true;
+    actor
+        .ask(UpdateConfig {
+            config,
+            effect_plan: ConfigEffectPlan::UnmanagedMembersOnlyPostEnforcement,
+        })
+        .await
+        .expect("owner config update");
+
+    let applied = actor.ask(EnforceMembersOnly).await.expect("enforce");
+    assert!(
+        applied
+            .presence_updates
+            .iter()
+            .any(|(recipient, presence)| recipient == &bob && presence_has_status(presence, "322")),
+        "the removed occupant must receive 322"
+    );
+    assert!(
+        applied.presence_updates.iter().any(
+            |(recipient, presence)| recipient == &alice && presence_has_status(presence, "322")
+        ),
+        "the remaining occupant must observe the 322 broadcast before config fan-out"
+    );
+
+    // The store-less owner-config handler deliberately builds its config
+    // audience from this post-enforcement room snapshot.
+    let snapshot = actor
+        .ask(GetSnapshot)
+        .await
+        .expect("post-enforcement snapshot");
+    let config_recipients: Vec<FullJid> = snapshot
+        .room
+        .occupants
+        .values()
+        .flat_map(|occupant| snapshot.room.get_occupant_sessions(&occupant.nick))
+        .collect();
+    assert_eq!(
+        config_recipients,
+        vec![alice],
+        "the removed occupant must be excluded from the post-enforcement config audience"
+    );
+}
+
+#[tokio::test]
 async fn managed_members_only_enforcement_uses_explicit_affiliation_snapshot() {
     let actor = spawn_room_actor_with_config(RoomConfig {
         members_only: false,
@@ -5279,6 +5347,88 @@ async fn apply_affiliation_change_threads_admin_effects_and_reservation() {
         }
         other => panic!("expected remaining-broadcast effect, got {other:?}"),
     }
+}
+
+#[tokio::test]
+async fn zero_delta_managed_members_only_enforcement_still_commits_one_config_effect() {
+    let store = FakeDurableStore::owned();
+    let actor = spawn_room_actor_with_config_and_store(
+        RoomConfig {
+            members_only: false,
+            ..RoomConfig::default()
+        },
+        store.clone(),
+    )
+    .await;
+    let alice = test_full_jid("alice");
+    actor
+        .ask(JoinWithAffiliation {
+            sender_jid: alice.clone(),
+            nick: "alice".to_owned(),
+            affiliation_grant: JoinAffiliationGrant::Resolver(Affiliation::Member),
+            local_domain: "example.com".to_owned(),
+            admission_revision: current_admission_revision(&actor).await,
+        })
+        .await
+        .expect("already-qualified member joins");
+
+    let mut config = actor.ask(GetConfig).await.expect("current config");
+    config.members_only = true;
+    let update = actor
+        .ask(UpdateConfig {
+            config,
+            effect_plan: ConfigEffectPlan::ManagedMembersOnlyFallback,
+        })
+        .await
+        .expect("stage members-only fallback");
+    let notification = update.notification.expect("members-only notification");
+    let fallback = update.reservation.expect("staged fallback reservation");
+    let expected_fallback = fallback.clone();
+
+    let applied = actor
+        .ask(EnforceMembersOnlyAffiliations {
+            affiliations: vec![(alice.to_bare(), Affiliation::Member)],
+            fallback_reservation: Some(fallback),
+            config_status_codes: notification.status_codes.clone(),
+        })
+        .await
+        .expect("zero-delta enforcement commits");
+    assert!(
+        applied.outbox_reservation.is_some(),
+        "a zero-delta enforcement must still reserve its fused config notification"
+    );
+    assert!(
+        store.saved_affiliations().is_empty(),
+        "the qualified occupant causes no affiliation delta"
+    );
+
+    let saved_effects = store.saved_effects();
+    assert_eq!(
+        saved_effects.len(),
+        2,
+        "fallback plus exactly one fused effect"
+    );
+    let fused = &saved_effects[1];
+    assert_eq!(
+        fused.staging(),
+        crate::muc::RoomEffectStagingClass::HandlerWindow
+    );
+    assert_eq!(
+        fused.superseding_reservation(),
+        Some(&expected_fallback),
+        "the zero-delta commit must supersede the exact staged fallback"
+    );
+    assert_eq!(fused.effects().len(), 2);
+    assert!(matches!(
+        &fused.effects()[0],
+        crate::muc::RoomEffect::AdminSelfNotify { updates } if updates.is_empty()
+    ));
+    assert!(matches!(
+        &fused.effects()[1],
+        crate::muc::RoomEffect::ConfigChanged { status_codes, recipients }
+            if status_codes == &notification.status_codes
+                && recipients.as_slice() == std::slice::from_ref(&alice)
+    ));
 }
 
 #[tokio::test]

@@ -105,6 +105,69 @@ async fn staged_rows_need_exact_claim_or_arming_and_lease_token_interlocks() {
 }
 
 #[tokio::test]
+async fn infrastructure_transient_release_keeps_effect_for_a_later_drain() {
+    let (_db, store) = store_with_db("room-effect-infrastructure-retry").await;
+    let lifecycle = lifecycle();
+    let revision = initial_revision();
+    let mut tx = store.database().begin().await.expect("transaction");
+    let reservation = store
+        .enqueue_in_tx(
+            &mut tx,
+            RoomEffectEnqueue {
+                lifecycle,
+                revision,
+                effects: &config_effects(),
+                origin: &origin(),
+                producing_node: &producing_node(),
+                now_ms: 0,
+            },
+        )
+        .await
+        .expect("enqueue");
+    tx.commit().await.expect("commit");
+    store.arm_reservation(&reservation, 0).await.expect("arm");
+    let claim = store
+        .claim_due_head(0, 1)
+        .await
+        .expect("claim")
+        .pop()
+        .expect("claimed effect");
+
+    assert_eq!(
+        store
+            .release(
+                &claim.row.key,
+                &claim.lease_token,
+                0,
+                RoomEffectLastError::InfrastructureTransient,
+            )
+            .await
+            .expect("release transient failure"),
+        RoomEffectReleaseOutcome::Released { attempt_count: 1 }
+    );
+    let row = store
+        .find(&claim.row.key)
+        .await
+        .expect("find released effect")
+        .expect("transient failure must retain row");
+    assert_eq!(
+        row.last_error,
+        Some(RoomEffectLastError::InfrastructureTransient)
+    );
+    assert_eq!(row.attempt_count, 1);
+    assert!(row.lease_token.is_none());
+    assert!(
+        store
+            .claim_due_head(row.available_at_ms, 1)
+            .await
+            .expect("claim after retry delay")
+            .into_iter()
+            .any(|reclaimed| reclaimed.row.key == claim.row.key),
+        "the infrastructure-transient row becomes drainable again"
+    );
+}
+
+#[tokio::test]
 async fn staged_reservation_recovery_and_idempotent_supersession_preserve_transitions() {
     let (_db, store) = store_with_db("room-effect-config-supersession").await;
     let lifecycle = lifecycle();
