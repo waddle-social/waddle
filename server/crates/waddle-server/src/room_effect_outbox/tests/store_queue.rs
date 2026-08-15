@@ -689,3 +689,80 @@ async fn foreign_stale_epoch_terminal_rows_stay_inert_while_config_rows_arm() {
         "terminal rows must remain inert until their exact terminal completion path arms them"
     );
 }
+
+#[tokio::test]
+async fn requeued_head_never_lets_its_successor_absorb_a_small_claim_batch() {
+    // Regression (sol impl-review r2 #2): the due-candidate preselection must
+    // filter to per-lifecycle FIFO heads BEFORE ORDER BY/LIMIT. A requeued
+    // head carries a LATER available_at_ms than its successor ordinal; with a
+    // batch of 1 the successor would otherwise be selected every sweep,
+    // rejected by the FIFO CAS, and the lifecycle would never drain.
+    let (_db, store) = store_with_db("room-effect-requeued-head-batch").await;
+    let lifecycle = lifecycle();
+    let revision = initial_revision();
+    let mut tx = store.database().begin().await.expect("transaction");
+    let reservation = store
+        .enqueue_in_tx(
+            &mut tx,
+            RoomEffectEnqueue {
+                lifecycle,
+                revision,
+                effects: &admin_effects(),
+                origin: &origin(),
+                producing_node: &producing_node(),
+                now_ms: 0,
+            },
+        )
+        .await
+        .expect("enqueue two admin ordinals");
+    tx.commit().await.expect("commit");
+    store
+        .arm_reservation(&reservation, 0)
+        .await
+        .expect("arm both ordinals");
+    let head = RoomEffectKey {
+        lifecycle,
+        revision,
+        ordinal: reservation.ordinals[0],
+    };
+    let claim = store
+        .claim_exact(&head, 10)
+        .await
+        .expect("claim head")
+        .expect("head claimable");
+    store
+        .release(
+            &head,
+            &claim.lease_token,
+            10,
+            RoomEffectLastError::InfrastructureTransient,
+        )
+        .await
+        .expect("requeue head with backoff");
+    let head_available = store
+        .find(&head)
+        .await
+        .expect("find requeued head")
+        .expect("head row")
+        .available_at_ms;
+    assert!(head_available > 10, "release must push the head's due time");
+
+    // While only the successor is due, a batch of 1 must select NOTHING —
+    // not the unclaimable successor.
+    let claimed = store
+        .claim_due_head(head_available - 1, 1)
+        .await
+        .expect("claim before head due");
+    assert!(
+        claimed.is_empty(),
+        "successor ordinal must not absorb the batch window while the head is requeued"
+    );
+
+    // Once the head is due again, the same batch of 1 selects the head.
+    let claimed = store
+        .claim_due_head(head_available, 1)
+        .await
+        .expect("claim at head due");
+    assert_eq!(claimed.len(), 1, "head must be claimable at its due time");
+    assert_eq!(claimed[0].row.key, head, "the FIFO head must be selected");
+}

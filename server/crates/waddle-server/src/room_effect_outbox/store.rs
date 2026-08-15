@@ -316,7 +316,11 @@ impl RoomEffectOutboxStore {
     ) -> Result<Vec<ClaimedRoomEffect>, RoomEffectOutboxError> {
         let stale = now_ms.saturating_sub(CLAIM_TIMEOUT_MS);
         let c = self.db.guard().await?;
-        let mut rows = c.query(&format!("{} WHERE available_at_ms <= ? AND NOT superseded AND (lease_token IS NULL OR leased_at_ms <= ?) ORDER BY available_at_ms, lifecycle_id LIMIT ?", select_columns()), crate::db_params![now_ms, stale, batch.clamp(1,1000) as i64]).await?;
+        // Preselect only per-lifecycle FIFO heads: a requeued head carries a
+        // LATER available_at_ms than its successor ordinal, so without this
+        // filter a small batch would keep selecting the unclaimable successor
+        // and the lifecycle would never drain.
+        let mut rows = c.query(&format!("{} WHERE available_at_ms <= ? AND NOT superseded AND (lease_token IS NULL OR leased_at_ms <= ?) AND NOT EXISTS (SELECT 1 FROM clustering_muc_room_effects earlier WHERE earlier.lifecycle_id = clustering_muc_room_effects.lifecycle_id AND (earlier.revision < clustering_muc_room_effects.revision OR (earlier.revision = clustering_muc_room_effects.revision AND earlier.ordinal < clustering_muc_room_effects.ordinal))) ORDER BY available_at_ms, lifecycle_id LIMIT ?", select_columns()), crate::db_params![now_ms, stale, batch.clamp(1,1000) as i64]).await?;
         let mut candidates = Vec::new();
         while let Some(row) = rows.next().await? {
             candidates.push(decode_row(&row)?);

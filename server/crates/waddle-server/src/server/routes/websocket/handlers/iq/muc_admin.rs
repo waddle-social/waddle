@@ -476,11 +476,19 @@ async fn recover_admin_result_after_actor_demote(
                                 );
                             }
                             Err(error) => {
+                                // A commit was proven but its outbox rows could
+                                // not be looked up. Returning Committed here
+                                // would re-enter the direct-send path while the
+                                // durable rows may still drain — a duplicate
+                                // delivery. Stay inconclusive: no success reply
+                                // and no direct replay; the janitor finishes the
+                                // broadcast.
                                 warn!(
                                     room = %room_jid,
                                     error = %error,
-                                    "Could not recover committed MUC admin outbox reservation after actor demotion"
+                                    "Could not recover committed MUC admin outbox reservation after actor demotion; staying inconclusive"
                                 );
+                                return (AdminReconciliationOutcome::Inconclusive, false);
                             }
                         }
                     }
