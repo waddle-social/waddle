@@ -81,6 +81,7 @@ impl kameo::message::Message<AuthorizeMediatedInvite> for RoomActor {
                         Some(Affiliation::Member),
                     ),
                 ),
+                crate::muc::RoomMutationEffects::none(),
             )
             .await
             .map_err(MediatedInviteGrantError::GrantPersistFailed)?;

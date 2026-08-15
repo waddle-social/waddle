@@ -106,12 +106,15 @@ impl kameo::message::Message<JoinWithAffiliation> for RoomActor {
                 // creatorship, the actor's serialized mailbox makes
                 // exactly one of them the owner.
                 if !self.room.has_owner() {
-                    self.commit_durable(RoomDurableMutation::Affiliation(
-                        crate::muc::durable::AffiliationEntry::new(
-                            msg.sender_jid.to_bare(),
-                            Some(Affiliation::Owner),
+                    self.commit_durable(
+                        RoomDurableMutation::Affiliation(
+                            crate::muc::durable::AffiliationEntry::new(
+                                msg.sender_jid.to_bare(),
+                                Some(Affiliation::Owner),
+                            ),
                         ),
-                    ))
+                        crate::muc::RoomMutationEffects::none(),
+                    )
                     .await
                     .map_err(|error| match error {
                         super::DurablePersistError::NotOwner
@@ -697,11 +700,14 @@ impl kameo::message::Message<ReconcileChannelBackedRoom> for RoomActor {
             desired_config.name = self.room.config.name.clone();
         }
         let desired_config = desired_config.normalized();
-        self.commit_durable(RoomDurableMutation::Config {
-            config: desired_config.clone(),
-            waddle_id: waddle_id.clone(),
-            channel_id: channel_id.clone(),
-        })
+        self.commit_durable(
+            RoomDurableMutation::Config {
+                config: desired_config.clone(),
+                waddle_id: waddle_id.clone(),
+                channel_id: channel_id.clone(),
+            },
+            crate::muc::RoomMutationEffects::none(),
+        )
         .await?;
         self.room.waddle_id = waddle_id.into_string();
         self.room.channel_id = channel_id.into_string();

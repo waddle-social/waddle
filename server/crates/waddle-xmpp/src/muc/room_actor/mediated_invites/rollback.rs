@@ -108,6 +108,7 @@ impl kameo::message::Message<CommitMediatedInviteGrantRollback> for RoomActor {
                         .then_some(msg.grant.previous_affiliation),
                 ),
             ),
+            crate::muc::RoomMutationEffects::none(),
         )
         .await
         .map_err(MediatedInviteRollbackError::PersistFailedBeforeApply)?;

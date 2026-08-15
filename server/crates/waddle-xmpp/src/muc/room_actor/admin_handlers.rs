@@ -682,7 +682,10 @@ impl kameo::message::Message<ApplyAdminItems> for RoomActor {
                 .map_err(super::RoomMutationError::from)?;
         } else {
             let _ = self
-                .commit_durable(RoomDurableMutation::AffiliationBatch(durable_delta))
+                .commit_durable(
+                    RoomDurableMutation::AffiliationBatch(durable_delta),
+                    crate::muc::RoomMutationEffects::none(),
+                )
                 .await?;
         }
 
@@ -775,10 +778,13 @@ impl kameo::message::Message<ApplyAffiliationChange> for RoomActor {
         )?;
         if previous_affiliation != msg.affiliation {
             let _ = self
-                .commit_durable(RoomDurableMutation::Affiliation(durable_affiliation_entry(
-                    msg.jid.clone(),
-                    msg.affiliation,
-                )))
+                .commit_durable(
+                    RoomDurableMutation::Affiliation(durable_affiliation_entry(
+                        msg.jid.clone(),
+                        msg.affiliation,
+                    )),
+                    crate::muc::RoomMutationEffects::none(),
+                )
                 .await?;
         } else {
             self.gate_pre_mutation_ownership()
@@ -872,10 +878,13 @@ impl kameo::message::Message<EnforceMembersOnlyAffiliations> for RoomActor {
                 .map_err(super::RoomMutationError::from)?;
         } else {
             let _ = self
-                .commit_durable(RoomDurableMutation::MembersOnlyEnforcement {
-                    config: self.room.config.clone(),
-                    affiliations: durable_delta,
-                })
+                .commit_durable(
+                    RoomDurableMutation::MembersOnlyEnforcement {
+                        config: self.room.config.clone(),
+                        affiliations: durable_delta,
+                    },
+                    crate::muc::RoomMutationEffects::none(),
+                )
                 .await?;
         }
         let mut needs_rehydration = false;

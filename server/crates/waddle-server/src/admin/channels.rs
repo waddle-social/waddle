@@ -4964,6 +4964,7 @@ mod group_dm_durable_reconciliation_tests {
             room_jid: &'a BareJid,
             fence: &'a waddle_xmpp::muc::RoomClaimFenceContext,
             intent: RoomDurableMutation,
+            _effects: waddle_xmpp::muc::RoomMutationEffects,
         ) -> RoomCommitFuture<'a> {
             let exact = self.exact_fence_matches(room_jid, fence);
             let mode = self.mode;
@@ -4987,7 +4988,10 @@ mod group_dm_durable_reconciliation_tests {
                 if is_config && mode == DurableMode::ConfigCommitUnknown {
                     return Err(RoomCommitError::CommitOutcomeUnknown);
                 }
-                Ok(coordinates)
+                Ok(waddle_xmpp::muc::RoomCommitOutcome {
+                    coordinates,
+                    reservation: None,
+                })
             })
         }
 

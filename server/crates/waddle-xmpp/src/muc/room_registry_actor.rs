@@ -1496,6 +1496,7 @@ impl RoomRegistryActor {
                         &room_jid,
                         &claim_fence,
                         RoomDurableMutation::Publish,
+                        crate::muc::RoomMutationEffects::none(),
                         &identity_guard,
                     )
                     .await
@@ -1747,6 +1748,7 @@ impl RoomRegistryActor {
                 RoomDurableMutation::DestroyAndReleaseClaim {
                     completion_attempt: None,
                 },
+                crate::muc::RoomMutationEffects::none(),
             )
             .await
         {
@@ -1826,6 +1828,7 @@ impl RoomRegistryActor {
                 RoomDurableMutation::DestroyAndReleaseClaim {
                     completion_attempt: None,
                 },
+                crate::muc::RoomMutationEffects::none(),
             )
             .await
         {
@@ -2047,6 +2050,7 @@ impl RoomRegistryActor {
                             config: spec.config.clone(),
                             initial_affiliations: spec.initial_affiliations.clone(),
                         },
+                        crate::muc::RoomMutationEffects::none(),
                     )
                     .await
                 {
@@ -2104,6 +2108,7 @@ impl RoomRegistryActor {
                         &room_jid,
                         &publication_fence,
                         RoomDurableMutation::Activate,
+                        crate::muc::RoomMutationEffects::none(),
                     )
                     .await
                 {
@@ -2538,12 +2543,16 @@ impl RoomRegistryActor {
                                 .as_ref()
                                 .map(|completion| completion.attempt),
                         },
+                        crate::muc::RoomMutationEffects::none(),
                     )
                     .await
             }
-            None => Ok(super::RoomCommittedCoordinates {
-                lifecycle: super::RoomLifecycleId::generate(),
-                revision: super::RoomRevision::initial(),
+            None => Ok(super::RoomCommitOutcome {
+                coordinates: super::RoomCommittedCoordinates {
+                    lifecycle: super::RoomLifecycleId::generate(),
+                    revision: super::RoomRevision::initial(),
+                },
+                reservation: None,
             }),
         };
         match commit {
@@ -2795,7 +2804,12 @@ impl RoomRegistryActor {
                     }
                 };
                 match store
-                    .commit_room_mutation(&room_jid, &claim_fence, intent)
+                    .commit_room_mutation(
+                        &room_jid,
+                        &claim_fence,
+                        intent,
+                        crate::muc::RoomMutationEffects::none(),
+                    )
                     .await
                 {
                     Ok(_) => match phase {
@@ -2858,6 +2872,7 @@ impl RoomRegistryActor {
                     &room_jid,
                     &claim_fence,
                     RoomDurableMutation::MarkUnpublishedCleanup,
+                    crate::muc::RoomMutationEffects::none(),
                 )
                 .await
             {
@@ -4912,6 +4927,7 @@ impl RoomRegistryActor {
                 RoomDurableMutation::Destroy {
                     completion_attempt: None,
                 },
+                crate::muc::RoomMutationEffects::none(),
             )
             .await
         {
@@ -5036,6 +5052,7 @@ impl RoomRegistryActor {
                             &room_jid,
                             &entry.claim_fence,
                             RoomDurableMutation::Destroy { completion_attempt },
+                            crate::muc::RoomMutationEffects::none(),
                         )
                         .await
                     {
@@ -5112,6 +5129,7 @@ impl RoomRegistryActor {
                                 .as_ref()
                                 .map(|completion| completion.attempt),
                         },
+                        crate::muc::RoomMutationEffects::none(),
                     )
                     .await;
                 if let Err(error) = commit {
@@ -5633,7 +5651,12 @@ impl kameo::message::Message<DestroyRoomIfInactive> for RoomRegistryActor {
                         SealGuard::Dormant => RoomDurableMutation::Dormancy,
                     };
                     if let Err(error) = store
-                        .commit_room_mutation(&msg.room_jid, &entry.claim_fence, intent)
+                        .commit_room_mutation(
+                            &msg.room_jid,
+                            &entry.claim_fence,
+                            intent,
+                            crate::muc::RoomMutationEffects::none(),
+                        )
                         .await
                     {
                         if matches!(error, RoomCommitError::NotOwner) {
@@ -5806,7 +5829,12 @@ impl kameo::message::Message<ReapSealedRoom> for RoomRegistryActor {
                 };
                 if let Some(store) = &self.durable_store {
                     if let Err(error) = store
-                        .commit_room_mutation(&msg.room_jid, &entry.claim_fence, intent)
+                        .commit_room_mutation(
+                            &msg.room_jid,
+                            &entry.claim_fence,
+                            intent,
+                            crate::muc::RoomMutationEffects::none(),
+                        )
                         .await
                     {
                         if matches!(error, RoomCommitError::NotOwner) {

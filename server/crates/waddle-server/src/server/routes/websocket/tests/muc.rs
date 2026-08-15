@@ -278,6 +278,7 @@ async fn ordinary_join_coalesces_with_restoring_room_without_create_permission()
             room_jid: &'a BareJid,
             fence: &'a RoomClaimFenceContext,
             _intent: waddle_xmpp::muc::RoomDurableMutation,
+            _effects: waddle_xmpp::muc::RoomMutationEffects,
         ) -> waddle_xmpp::muc::RoomCommitFuture<'a> {
             if let Err(error) = validate_local_room_fence(room_jid, fence) {
                 return Box::pin(async move {
@@ -286,9 +287,12 @@ async fn ordinary_join_coalesces_with_restoring_room_without_create_permission()
                 });
             }
             Box::pin(async move {
-                Ok(waddle_xmpp::muc::RoomCommittedCoordinates {
-                    lifecycle: waddle_xmpp::muc::RoomLifecycleId::generate(),
-                    revision: waddle_xmpp::muc::RoomRevision::initial(),
+                Ok(waddle_xmpp::muc::RoomCommitOutcome {
+                    coordinates: waddle_xmpp::muc::RoomCommittedCoordinates {
+                        lifecycle: waddle_xmpp::muc::RoomLifecycleId::generate(),
+                        revision: waddle_xmpp::muc::RoomRevision::initial(),
+                    },
+                    reservation: None,
                 })
             })
         }
@@ -3802,6 +3806,7 @@ async fn standard_muc_owner_config_reconciles_ambiguous_members_only_commit_befo
             room_jid: &'a BareJid,
             fence: &'a waddle_xmpp::muc::durable::RoomClaimFenceContext,
             intent: waddle_xmpp::muc::RoomDurableMutation,
+            _effects: waddle_xmpp::muc::RoomMutationEffects,
         ) -> waddle_xmpp::muc::RoomCommitFuture<'a> {
             let matches = fence == &self.expected_fence(room_jid);
             let coordinates = self.next_coordinates(room_jid);
@@ -3815,7 +3820,10 @@ async fn standard_muc_owner_config_reconciles_ambiguous_members_only_commit_befo
                 if ambiguous_config {
                     Err(waddle_xmpp::muc::RoomCommitError::CommitOutcomeUnknown)
                 } else {
-                    Ok(coordinates)
+                    Ok(waddle_xmpp::muc::RoomCommitOutcome {
+                        coordinates,
+                        reservation: None,
+                    })
                 }
             })
         }
@@ -8365,6 +8373,7 @@ async fn xep0045_destroy_wipe_failure_sends_no_destroy_presence() {
             room_jid: &'a BareJid,
             fence: &'a RoomClaimFenceContext,
             intent: waddle_xmpp::muc::RoomDurableMutation,
+            _effects: waddle_xmpp::muc::RoomMutationEffects,
         ) -> waddle_xmpp::muc::RoomCommitFuture<'a> {
             let expected =
                 expected_room_fence(room_jid, self.expected_owner.clone(), ClaimEpoch(0));
@@ -8383,9 +8392,12 @@ async fn xep0045_destroy_wipe_failure_sends_no_destroy_presence() {
                 });
             }
             Box::pin(async move {
-                Ok(waddle_xmpp::muc::RoomCommittedCoordinates {
-                    lifecycle: waddle_xmpp::muc::RoomLifecycleId::generate(),
-                    revision: waddle_xmpp::muc::RoomRevision::initial(),
+                Ok(waddle_xmpp::muc::RoomCommitOutcome {
+                    coordinates: waddle_xmpp::muc::RoomCommittedCoordinates {
+                        lifecycle: waddle_xmpp::muc::RoomLifecycleId::generate(),
+                        revision: waddle_xmpp::muc::RoomRevision::initial(),
+                    },
+                    reservation: None,
                 })
             })
         }

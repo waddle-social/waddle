@@ -54,7 +54,8 @@ use tokio_util::sync::CancellationToken;
 use waddle_xmpp::muc::affiliation::AffiliationEntry;
 use waddle_xmpp::muc::durable::{
     AffiliationEntry as DurableAffiliationEntry, RoomCommitDatabaseError, RoomCommitError,
-    RoomCommitFuture, RoomCommittedCoordinates, RoomDurableMutation,
+    RoomCommitFuture, RoomCommitOutcome, RoomCommittedCoordinates, RoomDurableMutation,
+    RoomMutationEffects,
 };
 use waddle_xmpp::muc::{
     DestroyAttemptId, DurableRoomState, MucDurableFuture, MucDurableStore, RoomClaimFenceContext,
@@ -263,6 +264,7 @@ fn affiliation_from_db_str(value: &str) -> Option<Affiliation> {
 /// module doc for the schema and fencing design.
 pub struct PostgresMucRoomStore {
     db: Database,
+    room_effect_outbox: crate::room_effect_outbox::RoomEffectOutboxStore,
     /// Live process incarnation. Cached room fences remain immutable; every
     /// use must still match this handle so a self-fenced old incarnation
     /// cannot write merely because its old claim row remains in Postgres.
@@ -299,30 +301,29 @@ impl PostgresMucRoomStore {
         stop_token: CancellationToken,
         node_identity: SharedNodeIdentity,
     ) -> Result<Self, XmppError> {
-        let store = Self {
-            db,
-            node_identity,
-            stop_token,
-            exact_claim_fences: DashMap::new(),
-            published_claim_fences: DashMap::new(),
-        };
-        store.ensure_schema().await.map_err(db_err)?;
-        crate::muc_destroy_completion_outbox::MucDestroyCompletionOutboxStore::new(
-            store.db.clone(),
-        )
-        .await
-        .map_err(db_err)?;
-        crate::room_effect_outbox::RoomEffectOutboxStore::new(store.db.clone())
+        Self::ensure_schema(&db).await.map_err(db_err)?;
+        crate::muc_destroy_completion_outbox::MucDestroyCompletionOutboxStore::new(db.clone())
+            .await
+            .map_err(db_err)?;
+        let room_effect_outbox = crate::room_effect_outbox::RoomEffectOutboxStore::new(db.clone())
             .await
             .map_err(|error| {
                 crate::telemetry::mark_span_error("MUC durable storage operation failed");
                 XmppError::internal(format!("room effect outbox bootstrap error: {error}"))
             })?;
+        let store = Self {
+            db,
+            room_effect_outbox,
+            node_identity,
+            stop_token,
+            exact_claim_fences: DashMap::new(),
+            published_claim_fences: DashMap::new(),
+        };
         Ok(store)
     }
 
-    async fn ensure_schema(&self) -> Result<(), DatabaseError> {
-        let mut tx = self.db.begin().await?;
+    async fn ensure_schema(db: &Database) -> Result<(), DatabaseError> {
+        let mut tx = db.begin().await?;
         // The advisory-lock loser must observe the winner's committed DDL,
         // even when the deployment's session default is stricter.
         tx.execute("SET TRANSACTION ISOLATION LEVEL READ COMMITTED", ())
@@ -977,9 +978,13 @@ impl PostgresMucRoomStore {
         fence: &RoomClaimFenceContext,
         intent: &RoomDurableMutation,
         coordinates: RoomCommittedCoordinates,
-    ) -> Result<RoomCommittedCoordinates, RoomCommitError> {
+        reservation: Option<waddle_xmpp::muc::RoomEffectReservation>,
+    ) -> Result<RoomCommitOutcome, RoomCommitError> {
         match tx.commit().await {
-            Ok(()) => Ok(coordinates),
+            Ok(()) => Ok(RoomCommitOutcome {
+                coordinates,
+                reservation,
+            }),
             Err(error) => {
                 if is_retryable_tx_error(&error) {
                     return Err(Self::commit_error(error));
@@ -996,7 +1001,10 @@ impl PostgresMucRoomStore {
                             revision = coordinates.revision.as_i64(),
                             "MUC durable commit acknowledgement was lost after durable coordinates committed"
                         );
-                        Ok(coordinates)
+                        Ok(RoomCommitOutcome {
+                            coordinates,
+                            reservation,
+                        })
                     }
                     Ok(CommitReconciliation::NotCommitted) => Err(commit_error),
                     Ok(CommitReconciliation::Unknown) => {
@@ -1114,13 +1122,66 @@ impl PostgresMucRoomStore {
         Ok(())
     }
 
+    async fn enqueue_room_effects_in_tx(
+        &self,
+        tx: &mut Transaction<'_>,
+        room_jid: &BareJid,
+        intent: &RoomDurableMutation,
+        coordinates: waddle_xmpp::muc::RoomCommittedCoordinates,
+        effects: &RoomMutationEffects,
+        producing_node: &crate::room_effect_outbox::RoomEffectProducingNode,
+    ) -> Result<Option<waddle_xmpp::muc::RoomEffectReservation>, RoomCommitError> {
+        let waddle_xmpp::muc::RoomCommittedCoordinates {
+            lifecycle,
+            revision,
+        } = coordinates;
+        let now_ms = crate::time::now_ms();
+        if matches!(
+            intent,
+            RoomDurableMutation::Destroy { .. }
+                | RoomDurableMutation::DestroyAndReleaseClaim { .. }
+        ) {
+            self.room_effect_outbox
+                .supersede_non_terminal_in_tx(tx, lifecycle, now_ms)
+                .await
+                .map_err(|_| commit_database_error())?;
+        }
+        if effects.effects().is_empty() {
+            return Ok(None);
+        }
+        let effects_room_jid = effects.room_jid().cloned();
+        if effects_room_jid.as_ref() != Some(room_jid) {
+            return Err(RoomCommitError::EffectRoomJidMismatch {
+                mutation_room_jid: room_jid.clone(),
+                effects_room_jid,
+            });
+        }
+        let origin = crate::room_effect_outbox::room_effect_origin_instance_id();
+        self.room_effect_outbox
+            .enqueue_in_tx(
+                tx,
+                crate::room_effect_outbox::RoomEffectEnqueue {
+                    lifecycle,
+                    revision,
+                    effects,
+                    origin: &origin,
+                    producing_node,
+                    now_ms,
+                },
+            )
+            .await
+            .map(Some)
+            .map_err(|_| commit_database_error())
+    }
+
     async fn commit_room_mutation_once(
         &self,
         room_jid: &BareJid,
         fence: &RoomClaimFenceContext,
         intent: &RoomDurableMutation,
+        effects: &RoomMutationEffects,
         authority: Option<&waddle_xmpp::ownership::CurrentNodeIdentityGuard>,
-    ) -> Result<RoomCommittedCoordinates, RoomCommitError> {
+    ) -> Result<RoomCommitOutcome, RoomCommitError> {
         let identity_guard = if let Some(authority) = authority {
             if !self.node_identity.owns_guard(authority) || authority.identity() != &fence.owner {
                 remove_room_claim_fence_if(&self.exact_claim_fences, room_jid, fence);
@@ -1136,6 +1197,17 @@ impl PostgresMucRoomStore {
             remove_room_claim_fence_if(&self.published_claim_fences, room_jid, fence);
             return Err(RoomCommitError::NotOwner);
         }
+        let producing_node = if let Some(authority) = authority {
+            crate::room_effect_outbox::RoomEffectProducingNode::from_node_identity(
+                authority.identity().clone(),
+            )
+        } else if let Some(identity_guard) = identity_guard.as_ref() {
+            crate::room_effect_outbox::RoomEffectProducingNode::from_node_identity(
+                identity_guard.identity().clone(),
+            )
+        } else {
+            return Err(RoomCommitError::NotOwner);
+        };
         let mut tx = self
             .db
             .begin()
@@ -1162,7 +1234,12 @@ impl PostgresMucRoomStore {
         // and arm its completion until this transaction either commits or
         // rejects. This closes the actor-side pre-check TOCTOU window.
         if matches!(intent, RoomDurableMutation::Create { .. })
-            && Self::destroy_completion_blocks_create_in_tx(&mut tx, room_jid).await?
+            && (Self::destroy_completion_blocks_create_in_tx(&mut tx, room_jid).await?
+                || self
+                    .room_effect_outbox
+                    .has_pending_terminal_for_room_in_tx(&mut tx, room_jid)
+                    .await
+                    .map_err(|_| commit_database_error())?)
         {
             return Err(RoomCommitError::RecreationBlocked);
         }
@@ -1290,6 +1367,19 @@ impl PostgresMucRoomStore {
                 )
                 .await
                 .map_err(Self::commit_error)?;
+                let reservation = self
+                    .enqueue_room_effects_in_tx(
+                        &mut tx,
+                        room_jid,
+                        intent,
+                        waddle_xmpp::muc::RoomCommittedCoordinates {
+                            lifecycle,
+                            revision,
+                        },
+                        effects,
+                        &producing_node,
+                    )
+                    .await?;
                 self.release_claim_in_tx(&mut tx, room_jid, fence).await?;
                 if let RoomDurableMutation::DestroyAndReleaseClaim {
                     completion_attempt: Some(attempt),
@@ -1323,6 +1413,7 @@ impl PostgresMucRoomStore {
                             lifecycle,
                             revision,
                         },
+                        reservation,
                     )
                     .await;
             }
@@ -1409,6 +1500,9 @@ impl PostgresMucRoomStore {
             let stored_channel: String = room_row.get(1).map_err(Self::commit_error)?;
             drop(room_rows);
             return if stored_waddle == waddle_id.as_str() && stored_channel == channel_id.as_str() {
+                if !effects.effects().is_empty() {
+                    return Err(RoomCommitError::EffectsRequireRevision);
+                }
                 self.commit_or_reconcile(
                     tx,
                     room_jid,
@@ -1418,6 +1512,7 @@ impl PostgresMucRoomStore {
                         lifecycle,
                         revision,
                     },
+                    None,
                 )
                 .await
             } else {
@@ -1440,6 +1535,9 @@ impl PostgresMucRoomStore {
             // transition, so it keeps its coordinates and bumps nothing. A
             // missing lifecycle stays a hard `StateMissing` above — callers
             // must not conflate the two.
+            if !effects.effects().is_empty() {
+                return Err(RoomCommitError::EffectsRequireRevision);
+            }
             Self::persist_idempotent_mutation_fingerprint_in_tx(
                 &mut tx,
                 &lifecycle,
@@ -1457,6 +1555,7 @@ impl PostgresMucRoomStore {
                         lifecycle,
                         revision,
                     },
+                    None,
                 )
                 .await;
         }
@@ -1464,6 +1563,9 @@ impl PostgresMucRoomStore {
             // An acknowledgement can be lost after the dormancy transaction
             // commits. Repeating the same terminal transition must converge
             // without bumping the durable coordinates.
+            if !effects.effects().is_empty() {
+                return Err(RoomCommitError::EffectsRequireRevision);
+            }
             Self::persist_idempotent_mutation_fingerprint_in_tx(
                 &mut tx,
                 &lifecycle,
@@ -1481,12 +1583,16 @@ impl PostgresMucRoomStore {
                         lifecycle,
                         revision,
                     },
+                    None,
                 )
                 .await;
         }
         if matches!(intent, RoomDurableMutation::Publish) && state == RoomLifecycleState::Active {
             // Publishing is idempotent after an acknowledgement loss: once
             // the durable lifecycle is active, retrying must not advance it.
+            if !effects.effects().is_empty() {
+                return Err(RoomCommitError::EffectsRequireRevision);
+            }
             Self::persist_idempotent_mutation_fingerprint_in_tx(
                 &mut tx,
                 &lifecycle,
@@ -1504,6 +1610,7 @@ impl PostgresMucRoomStore {
                         lifecycle,
                         revision,
                     },
+                    None,
                 )
                 .await;
         }
@@ -1513,6 +1620,9 @@ impl PostgresMucRoomStore {
             // The handoff cleanup marker is itself acknowledgement-safe: a
             // retry after an ambiguous commit keeps the same coordinates and
             // leaves restart recovery able to find the room.
+            if !effects.effects().is_empty() {
+                return Err(RoomCommitError::EffectsRequireRevision);
+            }
             Self::persist_idempotent_mutation_fingerprint_in_tx(
                 &mut tx,
                 &lifecycle,
@@ -1530,6 +1640,7 @@ impl PostgresMucRoomStore {
                         lifecycle,
                         revision,
                     },
+                    None,
                 )
                 .await;
         }
@@ -1692,6 +1803,19 @@ impl PostgresMucRoomStore {
         )
         .await
         .map_err(Self::commit_error)?;
+        let reservation = self
+            .enqueue_room_effects_in_tx(
+                &mut tx,
+                room_jid,
+                intent,
+                waddle_xmpp::muc::RoomCommittedCoordinates {
+                    lifecycle,
+                    revision: next_revision,
+                },
+                effects,
+                &producing_node,
+            )
+            .await?;
         self.commit_or_reconcile(
             tx,
             room_jid,
@@ -1701,6 +1825,7 @@ impl PostgresMucRoomStore {
                 lifecycle,
                 revision: next_revision,
             },
+            reservation,
         )
         .await
     }
@@ -1844,11 +1969,12 @@ impl MucDurableStore for PostgresMucRoomStore {
         room_jid: &'a BareJid,
         fence: &'a RoomClaimFenceContext,
         intent: RoomDurableMutation,
+        effects: RoomMutationEffects,
     ) -> RoomCommitFuture<'a> {
         Box::pin(async move {
             for attempt in 0..ROOM_COMMIT_RETRY_ATTEMPTS {
                 match self
-                    .commit_room_mutation_once(room_jid, fence, &intent, None)
+                    .commit_room_mutation_once(room_jid, fence, &intent, &effects, None)
                     .await
                 {
                     Ok(coordinates) => return Ok(coordinates),
@@ -1872,12 +1998,13 @@ impl MucDurableStore for PostgresMucRoomStore {
         room_jid: &'a BareJid,
         fence: &'a RoomClaimFenceContext,
         intent: RoomDurableMutation,
+        effects: RoomMutationEffects,
         authority: &'a waddle_xmpp::ownership::CurrentNodeIdentityGuard,
     ) -> RoomCommitFuture<'a> {
         Box::pin(async move {
             for attempt in 0..ROOM_COMMIT_RETRY_ATTEMPTS {
                 match self
-                    .commit_room_mutation_once(room_jid, fence, &intent, Some(authority))
+                    .commit_room_mutation_once(room_jid, fence, &intent, &effects, Some(authority))
                     .await
                 {
                     Ok(coordinates) => return Ok(coordinates),
@@ -2416,8 +2543,12 @@ mod tests {
         )
         .await
         .expect("open in-memory database");
+        let room_effect_outbox = crate::room_effect_outbox::RoomEffectOutboxStore::new(db.clone())
+            .await
+            .expect("open room effect outbox");
         let store = PostgresMucRoomStore {
             db,
+            room_effect_outbox,
             node_identity: live_identity.clone(),
             stop_token: CancellationToken::new(),
             exact_claim_fences: DashMap::new(),
@@ -2443,6 +2574,7 @@ mod tests {
                         config: config.clone(),
                         initial_affiliations: Vec::new(),
                     },
+                    waddle_xmpp::muc::RoomMutationEffects::none()
                 )
                 .await,
             Err(RoomCommitError::NotOwner)
@@ -2531,6 +2663,9 @@ mod tests {
         conn.execute("DELETE FROM clustering_muc_destroy_outbox", ())
             .await
             .expect("clean destroy completion outbox");
+        conn.execute("DELETE FROM clustering_muc_room_effects", ())
+            .await
+            .expect("clean room effect outbox");
         Some((store, claim_store, db, me))
     }
 
@@ -2702,11 +2837,12 @@ mod tests {
                         Some(Affiliation::Owner),
                     )],
                 },
+                waddle_xmpp::muc::RoomMutationEffects::none(),
             )
             .await
             .expect("first write must commit");
 
-        assert_eq!(coords.revision, RoomRevision::initial());
+        assert_eq!(coords.coordinates.revision, RoomRevision::initial());
 
         let conn = store.db.guard().await.expect("guard");
         let mut lifecycle_rows = conn
@@ -2724,7 +2860,7 @@ mod tests {
         let lifecycle_id: String = lifecycle_row.get(0).expect("lifecycle id");
         let revision: i64 = lifecycle_row.get(1).expect("lifecycle revision");
         let state: String = lifecycle_row.get(2).expect("lifecycle state");
-        assert_eq!(coords.lifecycle.to_string(), lifecycle_id);
+        assert_eq!(coords.coordinates.lifecycle.to_string(), lifecycle_id);
         assert_eq!(revision, RoomRevision::initial().as_i64());
         assert_eq!(state, "preparing");
 
@@ -2742,10 +2878,10 @@ mod tests {
             .expect("room row");
         let room_lifecycle_id: String = room_row.get(0).expect("room lifecycle id");
         let room_revision: i64 = room_row.get(1).expect("room revision");
-        assert_eq!(room_lifecycle_id, coords.lifecycle.to_string());
+        assert_eq!(room_lifecycle_id, coords.coordinates.lifecycle.to_string());
         let room_revision =
             RoomRevision::from_stored(room_revision).expect("room revision must be decodable");
-        assert_eq!(room_revision, coords.revision);
+        assert_eq!(room_revision, coords.coordinates.revision);
 
         let mut affiliation_rows = conn
             .query(
@@ -2788,6 +2924,7 @@ mod tests {
                     config: RoomConfig::default(),
                     initial_affiliations: vec![],
                 },
+                waddle_xmpp::muc::RoomMutationEffects::none(),
             )
             .await
             .expect("create durable preparing room");
@@ -2796,7 +2933,7 @@ mod tests {
                 .find_preparing_room(&room_jid)
                 .await
                 .expect("find preparing room"),
-            Some(prepared)
+            Some(prepared.coordinates)
         );
 
         // A Publish acknowledgement can be lost before any transition was
@@ -2808,6 +2945,7 @@ mod tests {
                     &room_jid,
                     &fence,
                     RoomDurableMutation::MarkUnpublishedCleanup,
+                    waddle_xmpp::muc::RoomMutationEffects::none()
                 )
                 .await
                 .expect("mark cleanup after an uncommitted publish"),
@@ -2815,11 +2953,19 @@ mod tests {
         );
 
         let published = store
-            .commit_room_mutation(&room_jid, &fence, RoomDurableMutation::Publish)
+            .commit_room_mutation(
+                &room_jid,
+                &fence,
+                RoomDurableMutation::Publish,
+                waddle_xmpp::muc::RoomMutationEffects::none(),
+            )
             .await
             .expect("publish preparing room");
-        assert_eq!(published.lifecycle, prepared.lifecycle);
-        assert_eq!(published.revision.as_i64(), prepared.revision.as_i64() + 1);
+        assert_eq!(published.coordinates.lifecycle, prepared.coordinates.lifecycle);
+        assert_eq!(
+            published.coordinates.revision.as_i64(),
+            prepared.coordinates.revision.as_i64() + 1
+        );
         assert!(store
             .find_preparing_room(&room_jid)
             .await
@@ -2827,14 +2973,24 @@ mod tests {
             .is_none());
         assert_eq!(
             store
-                .commit_room_mutation(&room_jid, &fence, RoomDurableMutation::Publish)
+                .commit_room_mutation(
+                    &room_jid,
+                    &fence,
+                    RoomDurableMutation::Publish,
+                    waddle_xmpp::muc::RoomMutationEffects::none()
+                )
                 .await
                 .expect("publish acknowledgement retry converges"),
             published
         );
         assert_eq!(
             store
-                .commit_room_mutation(&room_jid, &fence, RoomDurableMutation::Activate)
+                .commit_room_mutation(
+                    &room_jid,
+                    &fence,
+                    RoomDurableMutation::Activate,
+                    waddle_xmpp::muc::RoomMutationEffects::none()
+                )
                 .await
                 .expect("an active room activation retry converges"),
             published,
@@ -2848,7 +3004,7 @@ mod tests {
             .expect("guard")
             .query(
                 "SELECT mutation_fingerprint FROM clustering_muc_room_lifecycles WHERE lifecycle_id = ?",
-                crate::db_params![published.lifecycle.to_string()],
+                crate::db_params![published.coordinates.lifecycle.to_string()],
             )
             .await
             .expect("query published lifecycle fingerprint");
@@ -2870,7 +3026,7 @@ mod tests {
                     &room_jid,
                     &fence,
                     &RoomDurableMutation::Publish,
-                    published,
+                    published.coordinates,
                 )
                 .await
                 .expect("reconcile original publish"),
@@ -2883,20 +3039,24 @@ mod tests {
                 &room_jid,
                 &fence,
                 RoomDurableMutation::MarkUnpublishedCleanup,
+                waddle_xmpp::muc::RoomMutationEffects::none(),
             )
             .await
             .expect("mark handoff cancellation before terminal cleanup");
-        assert_eq!(cleanup_marked.lifecycle, published.lifecycle);
         assert_eq!(
-            cleanup_marked.revision.as_i64(),
-            published.revision.as_i64() + 1
+            cleanup_marked.coordinates.lifecycle,
+            published.coordinates.lifecycle
+        );
+        assert_eq!(
+            cleanup_marked.coordinates.revision.as_i64(),
+            published.coordinates.revision.as_i64() + 1
         );
         assert_eq!(
             store
                 .find_preparing_room(&room_jid)
                 .await
                 .expect("marked cleanup remains recoverable after restart"),
-            Some(cleanup_marked)
+            Some(cleanup_marked.coordinates)
         );
         assert_eq!(
             store
@@ -2904,6 +3064,7 @@ mod tests {
                     &room_jid,
                     &fence,
                     RoomDurableMutation::MarkUnpublishedCleanup,
+                    waddle_xmpp::muc::RoomMutationEffects::none()
                 )
                 .await
                 .expect("cleanup marker acknowledgement retry converges"),
@@ -2916,6 +3077,7 @@ mod tests {
                 RoomDurableMutation::DestroyAndReleaseClaim {
                     completion_attempt: None,
                 },
+                waddle_xmpp::muc::RoomMutationEffects::none(),
             )
             .await
             .expect("terminal cleanup consumes the durable marker and claim");
@@ -2952,6 +3114,7 @@ mod tests {
                     config: RoomConfig::default(),
                     initial_affiliations: vec![],
                 },
+                waddle_xmpp::muc::RoomMutationEffects::none(),
             )
             .await
             .expect("create room before destroy");
@@ -2965,6 +3128,7 @@ mod tests {
                     RoomDurableMutation::Destroy {
                         completion_attempt: Some(attempt),
                     },
+                    waddle_xmpp::muc::RoomMutationEffects::none()
                 )
                 .await,
             Err(RoomCommitError::Database(_))
@@ -3005,6 +3169,7 @@ mod tests {
                 RoomDurableMutation::Destroy {
                     completion_attempt: Some(attempt),
                 },
+                waddle_xmpp::muc::RoomMutationEffects::none(),
             )
             .await
             .expect("destroy commits with its completion record");
@@ -3030,7 +3195,7 @@ mod tests {
         let lifecycle_id: String = outbox_row.get(1).expect("decode completion lifecycle");
         assert_eq!(
             lifecycle_id,
-            created.lifecycle.to_string(),
+            created.coordinates.lifecycle.to_string(),
             "the completion must be fenced to the lifecycle its destroy tombstoned"
         );
         drop(outbox_rows);
@@ -3125,7 +3290,14 @@ mod tests {
         ] {
             assert!(
                 matches!(
-                    store.commit_room_mutation(&room_jid, &fence, intent).await,
+                    store
+                        .commit_room_mutation(
+                            &room_jid,
+                            &fence,
+                            intent,
+                            waddle_xmpp::muc::RoomMutationEffects::none()
+                        )
+                        .await,
                     Err(RoomCommitError::StateMissing)
                 ),
                 "non-create mutation on a missing lifecycle must return StateMissing"
@@ -3142,11 +3314,17 @@ mod tests {
                     config: RoomConfig::default(),
                     initial_affiliations: vec![],
                 },
+                waddle_xmpp::muc::RoomMutationEffects::none(),
             )
             .await
             .expect("create seeds lifecycle");
         store
-            .commit_room_mutation(&room_jid, &fence, RoomDurableMutation::Dormancy)
+            .commit_room_mutation(
+                &room_jid,
+                &fence,
+                RoomDurableMutation::Dormancy,
+                waddle_xmpp::muc::RoomMutationEffects::none(),
+            )
             .await
             .expect("dormancy transition");
 
@@ -3161,6 +3339,7 @@ mod tests {
                             waddle_id: waddle_id("waddle"),
                             channel_id: channel_id("channel"),
                         },
+                        waddle_xmpp::muc::RoomMutationEffects::none()
                     )
                     .await,
                 Err(RoomCommitError::StateMissing)
@@ -3191,6 +3370,7 @@ mod tests {
                 RoomDurableMutation::DestroyAndReleaseClaim {
                     completion_attempt: None,
                 },
+                waddle_xmpp::muc::RoomMutationEffects::none(),
             )
             .await
             .expect("pending destroy atomically consumes its claim");
@@ -3210,6 +3390,7 @@ mod tests {
                         config: RoomConfig::default(),
                         initial_affiliations: vec![],
                     },
+                    waddle_xmpp::muc::RoomMutationEffects::none()
                 )
                 .await,
             Err(RoomCommitError::NotOwner)
@@ -3261,17 +3442,28 @@ mod tests {
                     config: RoomConfig::default(),
                     initial_affiliations: vec![],
                 },
+                waddle_xmpp::muc::RoomMutationEffects::none(),
             )
             .await
             .expect("seed room");
         let dormant = store
-            .commit_room_mutation(&room_jid, &fence, RoomDurableMutation::Dormancy)
+            .commit_room_mutation(
+                &room_jid,
+                &fence,
+                RoomDurableMutation::Dormancy,
+                waddle_xmpp::muc::RoomMutationEffects::none(),
+            )
             .await
             .expect("dormancy transition");
-        assert_eq!(dormant.revision.as_i64(), 2);
+        assert_eq!(dormant.coordinates.revision.as_i64(), 2);
 
         let redormant = store
-            .commit_room_mutation(&room_jid, &fence, RoomDurableMutation::Dormancy)
+            .commit_room_mutation(
+                &room_jid,
+                &fence,
+                RoomDurableMutation::Dormancy,
+                waddle_xmpp::muc::RoomMutationEffects::none(),
+            )
             .await
             .expect("repeating dormancy converges after an ambiguous acknowledgement");
         assert_eq!(
@@ -3280,10 +3472,15 @@ mod tests {
         );
 
         let active = store
-            .commit_room_mutation(&room_jid, &fence, RoomDurableMutation::Activate)
+            .commit_room_mutation(
+                &room_jid,
+                &fence,
+                RoomDurableMutation::Activate,
+                waddle_xmpp::muc::RoomMutationEffects::none(),
+            )
             .await
             .expect("activate transition");
-        assert_eq!(active.revision.as_i64(), 3);
+        assert_eq!(active.coordinates.revision.as_i64(), 3);
 
         let mut rows = db
             .guard()
@@ -3322,17 +3519,25 @@ mod tests {
             .expect("activated room row");
         assert_eq!(
             room_row.get::<String>(0).expect("room lifecycle id"),
-            active.lifecycle.to_string()
+            active.coordinates.lifecycle.to_string()
         );
         assert_eq!(room_row.get::<i64>(1).expect("room revision"), 3);
 
         let reactivated = store
-            .commit_room_mutation(&room_jid, &fence, RoomDurableMutation::Activate)
+            .commit_room_mutation(
+                &room_jid,
+                &fence,
+                RoomDurableMutation::Activate,
+                waddle_xmpp::muc::RoomMutationEffects::none(),
+            )
             .await
             .expect("re-activating an active lifecycle is idempotent");
-        assert_eq!(reactivated.lifecycle, active.lifecycle);
         assert_eq!(
-            reactivated.revision.as_i64(),
+            reactivated.coordinates.lifecycle,
+            active.coordinates.lifecycle
+        );
+        assert_eq!(
+            reactivated.coordinates.revision.as_i64(),
             3,
             "idempotent activation must not bump the revision"
         );
@@ -3344,7 +3549,7 @@ mod tests {
             .expect("guard")
             .query(
                 "SELECT mutation_fingerprint FROM clustering_muc_room_lifecycles WHERE lifecycle_id = ?",
-                crate::db_params![active.lifecycle.to_string()],
+                crate::db_params![active.coordinates.lifecycle.to_string()],
             )
             .await
             .expect("query reactivated lifecycle fingerprint");
@@ -3385,10 +3590,15 @@ mod tests {
             .await
             .expect("seed pre-lifecycle room row");
         let adopted = store
-            .commit_room_mutation(&adoptable, &adoptable_fence, RoomDurableMutation::Activate)
+            .commit_room_mutation(
+                &adoptable,
+                &adoptable_fence,
+                RoomDurableMutation::Activate,
+                waddle_xmpp::muc::RoomMutationEffects::none(),
+            )
             .await
             .expect("activate adopts a pre-lifecycle room row");
-        assert_eq!(adopted.revision.as_i64(), 1);
+        assert_eq!(adopted.coordinates.revision.as_i64(), 1);
 
         let mut adoption_rows = db
             .guard()
@@ -3407,7 +3617,7 @@ mod tests {
             .expect("adopted lifecycle row");
         assert_eq!(
             adoption_row.get::<String>(0).expect("lifecycle id"),
-            adopted.lifecycle.to_string()
+            adopted.coordinates.lifecycle.to_string()
         );
         assert_eq!(adoption_row.get::<i64>(1).expect("revision"), 1);
         assert_eq!(adoption_row.get::<String>(2).expect("state"), "active");
@@ -3431,7 +3641,7 @@ mod tests {
             adoption_room_row
                 .get::<String>(0)
                 .expect("room lifecycle id"),
-            adopted.lifecycle.to_string()
+            adopted.coordinates.lifecycle.to_string()
         );
         assert_eq!(adoption_room_row.get::<i64>(1).expect("room revision"), 1);
 
@@ -3486,11 +3696,12 @@ mod tests {
                 &legacy_null,
                 &legacy_null_fence,
                 RoomDurableMutation::Activate,
+                waddle_xmpp::muc::RoomMutationEffects::none(),
             )
             .await
             .expect("idempotent activate backfills fingerprint");
         assert_eq!(
-            legacy_activated,
+            legacy_activated.coordinates,
             RoomCommittedCoordinates {
                 lifecycle: legacy_lifecycle,
                 revision: legacy_revision,
@@ -3564,6 +3775,7 @@ mod tests {
                 RoomDurableMutation::Destroy {
                     completion_attempt: None,
                 },
+                waddle_xmpp::muc::RoomMutationEffects::none(),
             )
             .await
             .expect("destroy adopts and removes legacy state atomically");
@@ -3573,6 +3785,7 @@ mod tests {
                     &legacy_destroy,
                     &legacy_destroy_fence,
                     RoomDurableMutation::Activate,
+                    waddle_xmpp::muc::RoomMutationEffects::none()
                 )
                 .await,
             Err(RoomCommitError::StateMissing)
@@ -3583,7 +3796,7 @@ mod tests {
             .expect("guard")
             .query(
                 "SELECT state, revision FROM clustering_muc_room_lifecycles WHERE lifecycle_id = ?",
-                crate::db_params![destroyed_legacy.lifecycle.to_string()],
+                crate::db_params![destroyed_legacy.coordinates.lifecycle.to_string()],
             )
             .await
             .expect("query legacy tombstone");
@@ -3627,6 +3840,7 @@ mod tests {
                     &activate_jid,
                     &activate_fence,
                     RoomDurableMutation::Activate,
+                    waddle_xmpp::muc::RoomMutationEffects::none(),
                 )
                 .await
         });
@@ -3641,6 +3855,7 @@ mod tests {
                     RoomDurableMutation::Destroy {
                         completion_attempt: None,
                     },
+                    waddle_xmpp::muc::RoomMutationEffects::none(),
                 )
                 .await
         });
@@ -3681,7 +3896,12 @@ mod tests {
         assert!(
             matches!(
                 store
-                    .commit_room_mutation(&missing, &missing_fence, RoomDurableMutation::Activate)
+                    .commit_room_mutation(
+                        &missing,
+                        &missing_fence,
+                        RoomDurableMutation::Activate,
+                        waddle_xmpp::muc::RoomMutationEffects::none()
+                    )
                     .await,
                 Err(RoomCommitError::StateMissing)
             ),
@@ -3777,6 +3997,7 @@ mod tests {
                 RoomDurableMutation::DestroyAndReleaseClaim {
                     completion_attempt: Some(attempt),
                 },
+                waddle_xmpp::muc::RoomMutationEffects::none(),
             )
             .await
             .expect("pending destroy release commits");
@@ -3798,7 +4019,7 @@ mod tests {
         let lifecycle_id: String = outbox_row.get(1).expect("decode fenced lifecycle id");
         assert_eq!(
             lifecycle_id,
-            coordinates.lifecycle.to_string(),
+            coordinates.coordinates.lifecycle.to_string(),
             "coordinate-less destroy must persist the tombstoned lifecycle fence into its outbox row"
         );
         drop(outbox_rows);
@@ -3808,7 +4029,7 @@ mod tests {
             .expect("guard")
             .query(
                 "SELECT state FROM clustering_muc_room_lifecycles WHERE lifecycle_id = ?",
-                crate::db_params![coordinates.lifecycle.to_string()],
+                crate::db_params![coordinates.coordinates.lifecycle.to_string()],
             )
             .await
             .expect("query coordinate-less destroy lifecycle");
@@ -3833,7 +4054,7 @@ mod tests {
                     &RoomDurableMutation::DestroyAndReleaseClaim {
                         completion_attempt: Some(attempt),
                     },
-                    coordinates,
+                    coordinates.coordinates,
                 )
                 .await
                 .expect("reconcile exact coordinate-less destroy attempt"),
@@ -3959,6 +4180,7 @@ mod tests {
                     config: RoomConfig::default(),
                     initial_affiliations: vec![],
                 },
+                waddle_xmpp::muc::RoomMutationEffects::none(),
             )
             .await
             .expect("seed room");
@@ -3981,6 +4203,7 @@ mod tests {
                 RoomDurableMutation::Destroy {
                     completion_attempt: Some(attempt),
                 },
+                waddle_xmpp::muc::RoomMutationEffects::none(),
             )
             .await
             .expect("destroy commits");
@@ -4004,7 +4227,7 @@ mod tests {
                  VALUES (?, '{}', ?, ?, NULL, NULL)",
                 crate::db_params![
                     foreign_attempt.as_uuid().to_string(),
-                    created.lifecycle.to_string(),
+                    created.coordinates.lifecycle.to_string(),
                     crate::time::now_ms(),
                 ],
             )
@@ -4020,7 +4243,7 @@ mod tests {
                         completion_attempt: Some(attempt),
                     },
                     RoomCommittedCoordinates {
-                        lifecycle: created.lifecycle,
+                        lifecycle: created.coordinates.lifecycle,
                         revision: RoomRevision::from_stored(2).expect("destroy revision"),
                     },
                 )
@@ -4101,14 +4324,24 @@ mod tests {
         let first = tokio::spawn(async move {
             barrier_a.wait().await;
             store_a
-                .commit_room_mutation(&jid_a, &fence_a, intent_a)
+                .commit_room_mutation(
+                    &jid_a,
+                    &fence_a,
+                    intent_a,
+                    waddle_xmpp::muc::RoomMutationEffects::none(),
+                )
                 .await
                 .expect("first create")
         });
         let second = tokio::spawn(async move {
             barrier_b.wait().await;
             store_b
-                .commit_room_mutation(&jid_b, &fence_b, intent_b)
+                .commit_room_mutation(
+                    &jid_b,
+                    &fence_b,
+                    intent_b,
+                    waddle_xmpp::muc::RoomMutationEffects::none(),
+                )
                 .await
                 .expect("second create")
         });
@@ -4142,20 +4375,31 @@ mod tests {
                         config: RoomConfig::default(),
                         initial_affiliations: vec![],
                     },
+                    waddle_xmpp::muc::RoomMutationEffects::none()
                 )
                 .await,
             Err(RoomCommitError::CreateConflict)
         ));
 
         store
-            .commit_room_mutation(&room_jid, &fence, RoomDurableMutation::Dormancy)
+            .commit_room_mutation(
+                &room_jid,
+                &fence,
+                RoomDurableMutation::Dormancy,
+                waddle_xmpp::muc::RoomMutationEffects::none(),
+            )
             .await
             .expect("make the lifecycle dormant");
         let dormant_coordinates = store
-            .commit_room_mutation(&room_jid, &fence, intent)
+            .commit_room_mutation(
+                &room_jid,
+                &fence,
+                intent,
+                waddle_xmpp::muc::RoomMutationEffects::none(),
+            )
             .await
             .expect("matching create is idempotent for a dormant live lifecycle");
-        assert_eq!(dormant_coordinates.revision.as_i64(), 2);
+        assert_eq!(dormant_coordinates.coordinates.revision.as_i64(), 2);
         assert!(matches!(
             store
                 .commit_room_mutation(
@@ -4167,6 +4411,7 @@ mod tests {
                         config: RoomConfig::default(),
                         initial_affiliations: vec![],
                     },
+                    waddle_xmpp::muc::RoomMutationEffects::none()
                 )
                 .await,
             Err(RoomCommitError::CreateConflict)
@@ -4226,6 +4471,7 @@ mod tests {
                             waddle_id: waddle_id("waddle-overflow"),
                             channel_id: channel_id("channel-overflow"),
                         },
+                        waddle_xmpp::muc::RoomMutationEffects::none()
                     )
                     .await,
                 Err(RoomCommitError::RevisionOverflow)
@@ -4299,6 +4545,7 @@ mod tests {
                     config: RoomConfig::default(),
                     initial_affiliations: vec![],
                 },
+                waddle_xmpp::muc::RoomMutationEffects::none(),
             )
             .await
             .expect("seed room");
@@ -4349,6 +4596,7 @@ mod tests {
                             waddle_id: waddle_id("waddle-lock"),
                             channel_id: channel_id("channel-lock"),
                         },
+                        waddle_xmpp::muc::RoomMutationEffects::none(),
                     )
                     .await
                     .expect("blocked mutation completes after release")
@@ -4399,7 +4647,12 @@ mod tests {
             let store = Arc::clone(&store);
             async move {
                 store
-                    .commit_room_mutation(&room_jid, &fence, RoomDurableMutation::Dormancy)
+                    .commit_room_mutation(
+                        &room_jid,
+                        &fence,
+                        RoomDurableMutation::Dormancy,
+                        waddle_xmpp::muc::RoomMutationEffects::none(),
+                    )
                     .await
                     .expect("dormancy follows lock order")
             }
@@ -4434,6 +4687,7 @@ mod tests {
                         RoomDurableMutation::Destroy {
                             completion_attempt: None,
                         },
+                        waddle_xmpp::muc::RoomMutationEffects::none(),
                     )
                     .await
                     .expect("destroy follows lock order")
@@ -4469,6 +4723,7 @@ mod tests {
                     config: RoomConfig::default(),
                     initial_affiliations: vec![],
                 },
+                waddle_xmpp::muc::RoomMutationEffects::none(),
             )
             .await
             .expect("seed serialized room");
@@ -4498,9 +4753,11 @@ mod tests {
                                 waddle_id: waddle_id("waddle-serialized"),
                                 channel_id: channel_id("channel-serialized"),
                             },
+                            waddle_xmpp::muc::RoomMutationEffects::none(),
                         )
                         .await
                         .expect("first concurrent mutation")
+                        .coordinates
                         .revision
                         .as_i64()
                 }),
@@ -4518,9 +4775,11 @@ mod tests {
                                 waddle_id: waddle_id("waddle-serialized"),
                                 channel_id: channel_id("channel-serialized"),
                             },
+                            waddle_xmpp::muc::RoomMutationEffects::none(),
                         )
                         .await
                         .expect("second concurrent mutation")
+                        .coordinates
                         .revision
                         .as_i64()
                 }),
@@ -4576,6 +4835,7 @@ mod tests {
                             config: RoomConfig::default(),
                             initial_affiliations: vec![],
                         },
+                        waddle_xmpp::muc::RoomMutationEffects::none()
                     )
                     .await,
                 Err(RoomCommitError::NotOwner)
@@ -4649,6 +4909,7 @@ mod tests {
                     },
                     initial_affiliations: vec![],
                 },
+                waddle_xmpp::muc::RoomMutationEffects::none(),
             )
             .await
             .expect("seed room");
@@ -4665,10 +4926,11 @@ mod tests {
                     waddle_id: waddle_id("waddle-mono"),
                     channel_id: channel_id("channel-mono"),
                 },
+                waddle_xmpp::muc::RoomMutationEffects::none(),
             )
             .await
             .expect("config revision bump");
-        assert_eq!(config.revision.as_i64(), 2);
+        assert_eq!(config.coordinates.revision.as_i64(), 2);
 
         let subject = store
             .commit_room_mutation(
@@ -4680,10 +4942,11 @@ mod tests {
                     setter_nick: "alice".to_string(),
                     set_at: chrono::Utc::now(),
                 })),
+                waddle_xmpp::muc::RoomMutationEffects::none(),
             )
             .await
             .expect("subject revision bump");
-        assert_eq!(subject.revision.as_i64(), 3);
+        assert_eq!(subject.coordinates.revision.as_i64(), 3);
 
         let affiliation = store
             .commit_room_mutation(
@@ -4693,10 +4956,11 @@ mod tests {
                     "alice@example.com".parse().expect("valid jid"),
                     Some(Affiliation::Owner),
                 )),
+                waddle_xmpp::muc::RoomMutationEffects::none(),
             )
             .await
             .expect("affiliation revision bump");
-        assert_eq!(affiliation.revision.as_i64(), 4);
+        assert_eq!(affiliation.coordinates.revision.as_i64(), 4);
 
         let coords = room_jid;
         let conn = store.db.guard().await.expect("guard");
@@ -4715,7 +4979,7 @@ mod tests {
         let row_revision: i64 = row.get(1).expect("room revision");
         assert_eq!(row_revision, 4);
         let lifecycle_id: String = row.get(0).expect("room lifecycle id");
-        assert_eq!(lifecycle_id, affiliation.lifecycle.to_string());
+        assert_eq!(lifecycle_id, affiliation.coordinates.lifecycle.to_string());
     }
 
     #[tokio::test]
@@ -5128,6 +5392,7 @@ mod tests {
                     config: RoomConfig::default(),
                     initial_affiliations: vec![],
                 },
+                waddle_xmpp::muc::RoomMutationEffects::none(),
             )
             .await
             .expect("seed room");
@@ -5161,6 +5426,7 @@ mod tests {
                             waddle_id: waddle_id("waddle-identity-guard"),
                             channel_id: channel_id("channel-identity-guard"),
                         },
+                        waddle_xmpp::muc::RoomMutationEffects::none(),
                     )
                     .await
             }
@@ -5181,6 +5447,7 @@ mod tests {
                 .await
                 .expect("commit task")
                 .expect("commit succeeds before rotation")
+                .coordinates
                 .revision
                 .as_i64(),
             2
@@ -5273,6 +5540,7 @@ mod tests {
                     config: config.clone(),
                     initial_affiliations: Vec::new(),
                 },
+                waddle_xmpp::muc::RoomMutationEffects::none(),
             )
             .await
             .expect("create room");
@@ -5288,6 +5556,7 @@ mod tests {
                 &jid,
                 &fence,
                 RoomDurableMutation::Subject(Some(subject.clone())),
+                waddle_xmpp::muc::RoomMutationEffects::none(),
             )
             .await
             .expect("save subject");
@@ -5301,6 +5570,7 @@ mod tests {
                     bob.clone(),
                     Some(Affiliation::Owner),
                 )),
+                waddle_xmpp::muc::RoomMutationEffects::none(),
             )
             .await
             .expect("save affiliation");
@@ -5347,6 +5617,7 @@ mod tests {
                     config: RoomConfig::default(),
                     initial_affiliations: Vec::new(),
                 },
+                waddle_xmpp::muc::RoomMutationEffects::none(),
             )
             .await
             .expect("create room");
@@ -5360,6 +5631,7 @@ mod tests {
                     carol.clone(),
                     Some(Affiliation::Member),
                 )),
+                waddle_xmpp::muc::RoomMutationEffects::none(),
             )
             .await
             .expect("save member");
@@ -5375,6 +5647,7 @@ mod tests {
                 &jid,
                 &fence,
                 RoomDurableMutation::Affiliation(DurableAffiliationEntry::new(carol, None)),
+                waddle_xmpp::muc::RoomMutationEffects::none(),
             )
             .await
             .expect("save none removes the row");
@@ -5408,7 +5681,12 @@ mod tests {
         };
 
         let result = store
-            .commit_room_mutation(&jid, &fence, RoomDurableMutation::Subject(Some(subject)))
+            .commit_room_mutation(
+                &jid,
+                &fence,
+                RoomDurableMutation::Subject(Some(subject)),
+                waddle_xmpp::muc::RoomMutationEffects::none(),
+            )
             .await;
         assert!(
             matches!(&result, Err(RoomCommitError::StateMissing)),
@@ -5467,6 +5745,7 @@ mod tests {
                             config: RoomConfig::default(),
                             initial_affiliations: vec![],
                         },
+                        waddle_xmpp::muc::RoomMutationEffects::none()
                     )
                     .await,
                 Err(RoomCommitError::RecreationBlocked)
@@ -5526,6 +5805,7 @@ mod tests {
                     config: RoomConfig::default(),
                     initial_affiliations: vec![],
                 },
+                waddle_xmpp::muc::RoomMutationEffects::none(),
             )
             .await
             .expect("an inert completion reservation does not reject create");

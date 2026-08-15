@@ -117,6 +117,7 @@ impl MucDurableStore for OwnershipStore {
         room_jid: &'a BareJid,
         fence: &'a RoomClaimFenceContext,
         _intent: RoomDurableMutation,
+        _effects: waddle_xmpp::muc::RoomMutationEffects,
     ) -> RoomCommitFuture<'a> {
         let validation = self.validate_fence(room_jid, fence);
         let established =
@@ -129,7 +130,10 @@ impl MucDurableStore for OwnershipStore {
                 return Err(RoomCommitError::OwnershipUnavailable);
             }
             match state {
-                OWNED => Ok(coordinates),
+                OWNED => Ok(waddle_xmpp::muc::RoomCommitOutcome {
+                    coordinates,
+                    reservation: None,
+                }),
                 DEPOSED => Err(RoomCommitError::NotOwner),
                 UNCERTAIN => Err(RoomCommitError::OwnershipUnavailable),
                 _ => unreachable!("test ownership state"),

@@ -1597,11 +1597,17 @@ mod ownership_claims_tests {
                     },
                     initial_affiliations: Vec::new(),
                 },
+                crate::muc::RoomMutationEffects::none(),
             )
             .await
             .expect("seed dormant durable room");
         durable_store
-            .commit_room_mutation(&jid, &fence, RoomDurableMutation::Dormancy)
+            .commit_room_mutation(
+                &jid,
+                &fence,
+                RoomDurableMutation::Dormancy,
+                crate::muc::RoomMutationEffects::none(),
+            )
             .await
             .expect("make durable room dormant");
         assert_eq!(
@@ -3630,6 +3636,7 @@ mod ownership_claims_tests {
             room_jid: &'a BareJid,
             fence: &'a RoomClaimFenceContext,
             intent: crate::muc::RoomDurableMutation,
+            _effects: crate::muc::RoomMutationEffects,
         ) -> crate::muc::RoomCommitFuture<'a> {
             let store = self;
             let block = matches!(intent, crate::muc::RoomDurableMutation::Config { .. })
@@ -3834,7 +3841,10 @@ mod ownership_claims_tests {
                         .expect("preparing rooms")
                         .insert(room_jid.clone(), coordinates);
                 }
-                Ok(coordinates)
+                Ok(crate::muc::RoomCommitOutcome {
+                    coordinates,
+                    reservation: None,
+                })
             })
         }
 
@@ -4779,6 +4789,7 @@ mod ownership_claims_tests {
                     config: RoomConfig::default(),
                     initial_affiliations: Vec::new(),
                 },
+                crate::muc::RoomMutationEffects::none(),
             )
             .await
             .expect("durable pre-crash create");
@@ -4969,6 +4980,7 @@ mod ownership_claims_tests {
                     },
                     initial_affiliations: Vec::new(),
                 },
+                crate::muc::RoomMutationEffects::none(),
             )
             .await
             .expect("seed stranded preparing lifecycle");
@@ -4986,6 +4998,7 @@ mod ownership_claims_tests {
                 &room_jid,
                 &old_fence,
                 crate::muc::RoomDurableMutation::Publish,
+                crate::muc::RoomMutationEffects::none(),
             )
             .await
             .expect("publish successor before stale cleanup acquires");
@@ -4994,6 +5007,7 @@ mod ownership_claims_tests {
                 &room_jid,
                 &old_fence,
                 crate::muc::RoomDurableMutation::Dormancy,
+                crate::muc::RoomMutationEffects::none(),
             )
             .await
             .expect("make successor dormant before stale cleanup acquires");
@@ -7068,6 +7082,7 @@ mod ownership_claims_tests {
                     config: reclaimed_snapshot("must not activate").config,
                     initial_affiliations: Vec::new(),
                 },
+                crate::muc::RoomMutationEffects::none(),
             )
             .await
             .expect("seed durable preparing row");

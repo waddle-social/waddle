@@ -2078,6 +2078,7 @@ mod resolver_sync_retry_tests {
             room_jid: &'a BareJid,
             fence: &'a RoomClaimFenceContext,
             _intent: waddle_xmpp::muc::RoomDurableMutation,
+            _effects: waddle_xmpp::muc::RoomMutationEffects,
         ) -> waddle_xmpp::muc::RoomCommitFuture<'a> {
             if let Err(error) = validate_test_claim_fence(room_jid, fence) {
                 return Box::pin(async move {
@@ -2086,9 +2087,12 @@ mod resolver_sync_retry_tests {
                 });
             }
             Box::pin(async move {
-                Ok(waddle_xmpp::muc::RoomCommittedCoordinates {
-                    lifecycle: waddle_xmpp::muc::RoomLifecycleId::generate(),
-                    revision: waddle_xmpp::muc::RoomRevision::initial(),
+                Ok(waddle_xmpp::muc::RoomCommitOutcome {
+                    coordinates: waddle_xmpp::muc::RoomCommittedCoordinates {
+                        lifecycle: waddle_xmpp::muc::RoomLifecycleId::generate(),
+                        revision: waddle_xmpp::muc::RoomRevision::initial(),
+                    },
+                    reservation: None,
                 })
             })
         }

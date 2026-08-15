@@ -3682,6 +3682,7 @@ impl crate::muc::durable::MucDurableStore for FakeDurableStore {
         room_jid: &'a BareJid,
         fence: &'a crate::muc::RoomClaimFenceContext,
         intent: crate::muc::RoomDurableMutation,
+        _effects: crate::muc::RoomMutationEffects,
     ) -> crate::muc::RoomCommitFuture<'a> {
         if let Err(error) = validate_test_claim_fence(room_jid, fence) {
             return Box::pin(async move {
@@ -3747,7 +3748,10 @@ impl crate::muc::durable::MucDurableStore for FakeDurableStore {
                         )
                     }),
                 );
-                Ok(coordinates)
+                Ok(crate::muc::RoomCommitOutcome {
+                    coordinates,
+                    reservation: None,
+                })
             }
         })
     }
@@ -3847,6 +3851,7 @@ impl crate::muc::durable::MucDurableStore for FailNthAffiliationSaveStore {
         room_jid: &'a BareJid,
         fence: &'a crate::muc::RoomClaimFenceContext,
         intent: crate::muc::RoomDurableMutation,
+        _effects: crate::muc::RoomMutationEffects,
     ) -> crate::muc::RoomCommitFuture<'a> {
         if let Err(error) = validate_test_claim_fence(room_jid, fence) {
             return Box::pin(async move {
@@ -3887,7 +3892,10 @@ impl crate::muc::durable::MucDurableStore for FailNthAffiliationSaveStore {
                     crate::muc::durable::RoomCommitDatabaseError::sanitized(),
                 ))
             } else {
-                Ok(coordinates)
+                Ok(crate::muc::RoomCommitOutcome {
+                    coordinates,
+                    reservation: None,
+                })
             }
         })
     }
@@ -4063,6 +4071,7 @@ impl crate::muc::durable::MucDurableStore for FlakyThenRecoveringStore {
         room_jid: &'a BareJid,
         fence: &'a crate::muc::RoomClaimFenceContext,
         _intent: crate::muc::RoomDurableMutation,
+        _effects: crate::muc::RoomMutationEffects,
     ) -> crate::muc::RoomCommitFuture<'a> {
         let validation = validate_test_claim_fence(room_jid, fence);
         let established =
@@ -4076,7 +4085,10 @@ impl crate::muc::durable::MucDurableStore for FlakyThenRecoveringStore {
             if !established {
                 return Err(crate::muc::RoomCommitError::OwnershipUnavailable);
             }
-            Ok(coordinates)
+            Ok(crate::muc::RoomCommitOutcome {
+                coordinates,
+                reservation: None,
+            })
         })
     }
 

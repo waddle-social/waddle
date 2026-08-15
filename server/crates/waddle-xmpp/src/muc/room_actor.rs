@@ -945,7 +945,14 @@ impl RoomActor {
     async fn commit_durable(
         &mut self,
         intent: RoomDurableMutation,
-    ) -> Result<Option<RoomMutationCommit>, DurablePersistError> {
+        effects: super::RoomMutationEffects,
+    ) -> Result<
+        (
+            Option<RoomMutationCommit>,
+            Option<super::RoomEffectReservation>,
+        ),
+        DurablePersistError,
+    > {
         match self.seal_state {
             RoomSealState::Open => {}
             RoomSealState::OwnershipLost => return Err(DurablePersistError::NotOwner),
@@ -955,19 +962,19 @@ impl RoomActor {
             }
         }
         let Some(store) = self.durable_store.clone() else {
-            return Ok(None);
+            return Ok((None, None));
         };
         let fence = self
             .durable_claim_fence
             .clone()
             .ok_or(DurablePersistError::OwnershipUnavailable)?;
-        let coordinates = store
-            .commit_room_mutation(&self.room.room_jid, &fence, intent)
+        let outcome = store
+            .commit_room_mutation(&self.room.room_jid, &fence, intent, effects)
             .await
             .map_err(|error| self.classify_durable_persist_error(error))?;
-        let commit = mint_room_mutation_commit(fence, coordinates);
+        let commit = mint_room_mutation_commit(fence, outcome.coordinates);
         let _ = authorize_ephemeral_projection(commit.clone());
-        Ok(Some(commit))
+        Ok((Some(commit), outcome.reservation))
     }
 
     /// Replace config only after restoring cross-field privacy invariants.
@@ -1476,11 +1483,14 @@ impl kameo::message::Message<UpdateConfig> for RoomActor {
         _ctx: &mut Context<Self, Self::Reply>,
     ) -> Self::Reply {
         let config = msg.config.normalized();
-        self.commit_durable(RoomDurableMutation::Config {
-            config: config.clone(),
-            waddle_id: WaddleId::new(self.room.waddle_id.clone()),
-            channel_id: ChannelId::new(self.room.channel_id.clone()),
-        })
+        self.commit_durable(
+            RoomDurableMutation::Config {
+                config: config.clone(),
+                waddle_id: WaddleId::new(self.room.waddle_id.clone()),
+                channel_id: ChannelId::new(self.room.channel_id.clone()),
+            },
+            super::RoomMutationEffects::none(),
+        )
         .await?;
         self.replace_config(config);
         self.config_revision = self.config_revision.saturating_add(1);
@@ -1509,11 +1519,14 @@ impl kameo::message::Message<RollbackConfigIfRevision> for RoomActor {
             return Ok(false);
         }
         let config = msg.config.normalized();
-        self.commit_durable(RoomDurableMutation::Config {
-            config: config.clone(),
-            waddle_id: WaddleId::new(self.room.waddle_id.clone()),
-            channel_id: ChannelId::new(self.room.channel_id.clone()),
-        })
+        self.commit_durable(
+            RoomDurableMutation::Config {
+                config: config.clone(),
+                waddle_id: WaddleId::new(self.room.waddle_id.clone()),
+                channel_id: ChannelId::new(self.room.channel_id.clone()),
+            },
+            super::RoomMutationEffects::none(),
+        )
         .await?;
         self.replace_config(config);
         self.config_revision = self.config_revision.saturating_add(1);
@@ -1608,11 +1621,14 @@ impl kameo::message::Message<UpdateGroupDmConfigByMember> for RoomActor {
         let mut config = msg.config;
         config.group_dm = true;
         let config = config.normalized();
-        self.commit_durable(RoomDurableMutation::Config {
-            config: config.clone(),
-            waddle_id: WaddleId::new(self.room.waddle_id.clone()),
-            channel_id: ChannelId::new(self.room.channel_id.clone()),
-        })
+        self.commit_durable(
+            RoomDurableMutation::Config {
+                config: config.clone(),
+                waddle_id: WaddleId::new(self.room.waddle_id.clone()),
+                channel_id: ChannelId::new(self.room.channel_id.clone()),
+            },
+            super::RoomMutationEffects::none(),
+        )
         .await?;
         self.replace_config(config);
         self.config_revision = self.config_revision.saturating_add(1);
@@ -1686,8 +1702,11 @@ impl kameo::message::Message<SetSubject> for RoomActor {
             setter_nick: msg.setter_nick,
             set_at: msg.set_at,
         };
-        self.commit_durable(RoomDurableMutation::Subject(Some(subject.clone())))
-            .await?;
+        self.commit_durable(
+            RoomDurableMutation::Subject(Some(subject.clone())),
+            super::RoomMutationEffects::none(),
+        )
+        .await?;
         self.room.subject = Some(subject);
         Ok(())
     }
@@ -1763,12 +1782,13 @@ impl kameo::message::Message<ChangeAffiliation> for RoomActor {
         }
         let changed = self.room.get_affiliation(&msg.jid) != msg.affiliation;
         if changed {
-            self.commit_durable(RoomDurableMutation::Affiliation(
-                super::durable::AffiliationEntry::new(
+            self.commit_durable(
+                RoomDurableMutation::Affiliation(super::durable::AffiliationEntry::new(
                     msg.jid.clone(),
                     (msg.affiliation != Affiliation::None).then_some(msg.affiliation),
-                ),
-            ))
+                )),
+                super::RoomMutationEffects::none(),
+            )
             .await?;
         } else {
             self.gate_pre_mutation_ownership()
