@@ -1,5 +1,34 @@
 use super::*;
 
+async fn enqueue_and_arm(
+    store: &RoomEffectOutboxStore,
+    lifecycle: RoomLifecycleId,
+    revision: RoomRevision,
+    effects: RoomMutationEffects,
+) -> waddle_xmpp::muc::RoomEffectReservation {
+    let mut tx = store.database().begin().await.expect("transaction");
+    let reservation = store
+        .enqueue_in_tx(
+            &mut tx,
+            RoomEffectEnqueue {
+                lifecycle,
+                revision,
+                effects: &effects,
+                origin: &origin(),
+                producing_node: &producing_node(),
+                now_ms: 0,
+            },
+        )
+        .await
+        .expect("enqueue");
+    tx.commit().await.expect("commit");
+    store
+        .arm_reservation(&reservation, 0)
+        .await
+        .expect("arm reservation");
+    reservation
+}
+
 #[tokio::test]
 async fn enqueue_assigns_contiguous_ordinals_and_empty_is_noop() {
     let (_db, store) = store_with_db("room-effect-ordinals").await;
@@ -86,22 +115,127 @@ async fn staged_rows_need_exact_claim_or_arming_and_lease_token_interlocks() {
         .await
         .expect("exact")
         .expect("claim");
-    assert!(!store
+    assert!(
+        !store
         .revalidate(&key, &RoomEffectLeaseToken::new())
         .await
-        .expect("revalidate"));
-    assert!(store
+            .expect("revalidate")
+    );
+    assert!(
+        store
         .revalidate(&key, &claim.lease_token)
         .await
-        .expect("revalidate"));
-    assert!(!store
+            .expect("revalidate")
+    );
+    assert!(
+        !store
         .complete(&key, &RoomEffectLeaseToken::new())
         .await
-        .expect("wrong complete"));
-    assert!(store
+            .expect("wrong complete")
+    );
+    assert!(
+        store
         .complete(&key, &claim.lease_token)
         .await
-        .expect("complete"));
+            .expect("complete")
+    );
+}
+
+#[tokio::test]
+async fn handler_window_rows_wait_for_grace_but_exact_claim_is_immediate() {
+    let (_db, store) = store_with_db("room-effect-handler-window-grace").await;
+    let exact_lifecycle = lifecycle();
+    let due_lifecycle = lifecycle();
+    let revision = initial_revision();
+    let now_ms = 100;
+
+    let mut tx = store.database().begin().await.expect("transaction");
+    let exact_reservation = store
+        .enqueue_in_tx(
+            &mut tx,
+            RoomEffectEnqueue {
+                lifecycle: exact_lifecycle,
+                revision,
+                effects: &admin_effects(),
+                origin: &origin(),
+                producing_node: &producing_node(),
+                now_ms,
+            },
+        )
+        .await
+        .expect("enqueue exact row");
+    let due_reservation = store
+        .enqueue_in_tx(
+            &mut tx,
+            RoomEffectEnqueue {
+                lifecycle: due_lifecycle,
+                revision,
+                effects: &admin_effects(),
+                origin: &origin(),
+                producing_node: &producing_node(),
+                now_ms,
+            },
+        )
+        .await
+        .expect("enqueue due row");
+    tx.commit().await.expect("commit");
+
+    let exact_key = RoomEffectKey {
+        lifecycle: exact_lifecycle,
+        revision,
+        ordinal: exact_reservation.ordinals[0],
+    };
+    let due_key = RoomEffectKey {
+        lifecycle: due_lifecycle,
+        revision,
+        ordinal: due_reservation.ordinals[0],
+    };
+
+    let exact_claim = store
+        .claim_exact(&exact_key, now_ms)
+        .await
+        .expect("exact claim")
+        .expect("exact row is immediately claimable");
+    assert_eq!(exact_claim.row.key, exact_key);
+    assert!(
+        store
+            .complete(&exact_key, &exact_claim.lease_token)
+            .await
+            .expect("complete exact claim")
+    );
+
+    let due_row = store
+        .find(&due_key)
+        .await
+        .expect("find due row")
+        .expect("due row present");
+    assert_eq!(
+        due_row.available_at_ms,
+        now_ms + super::super::store::HANDLER_GRACE_MS
+    );
+    assert!(
+        due_row.available_at_ms > now_ms,
+        "handler-window rows must retain a positive grace window"
+    );
+
+    assert!(
+        store
+            .claim_due_head(due_row.available_at_ms - 1, 4)
+            .await
+            .expect("claim before grace")
+            .into_iter()
+            .all(|claim| claim.row.key != due_key),
+        "claim_due_head must not expose a handler-window row before its grace elapses"
+    );
+    assert!(
+        store
+            .claim_due_head(due_row.available_at_ms, 4)
+            .await
+            .expect("claim at grace boundary")
+            .into_iter()
+            .any(|claim| claim.row.key == due_key),
+        "claim_due_head must expose the row once the grace boundary is reached"
+    );
 }
 
 #[tokio::test]
@@ -296,4 +430,69 @@ async fn postgres_schema_has_required_room_effect_columns() {
             nullable
         );
     }
+}
+
+#[tokio::test]
+async fn fifo_order_survives_store_restart() {
+    let (db, store) = store_with_db("room-effect-restart-fifo").await;
+    let lifecycle = lifecycle();
+    let first_revision = initial_revision();
+    let second_revision = first_revision.next().expect("next revision");
+
+    let first = enqueue_and_arm(&store, lifecycle, first_revision, admin_effects()).await;
+    let second = enqueue_and_arm(&store, lifecycle, second_revision, admin_effects()).await;
+
+    drop(store);
+    let restarted = RoomEffectOutboxStore::new(db.clone())
+        .await
+        .expect("restart store");
+
+    let expected = [
+        RoomEffectKey {
+            lifecycle,
+            revision: first_revision,
+            ordinal: first.ordinals[0],
+        },
+        RoomEffectKey {
+            lifecycle,
+            revision: first_revision,
+            ordinal: first.ordinals[1],
+        },
+        RoomEffectKey {
+            lifecycle,
+            revision: second_revision,
+            ordinal: second.ordinals[0],
+        },
+        RoomEffectKey {
+            lifecycle,
+            revision: second_revision,
+            ordinal: second.ordinals[1],
+        },
+    ];
+
+    let mut observed = Vec::new();
+    for expected_key in &expected {
+        let claim = restarted
+            .claim_due_head(super::super::store::HANDLER_GRACE_MS, 8)
+            .await
+            .expect("claim after restart")
+            .into_iter()
+            .next()
+            .expect("next FIFO row");
+        observed.push(claim.row.key);
+        assert_eq!(
+            observed.last().expect("observed key"),
+            expected_key,
+            "restarted store must keep revision/ordinal FIFO order"
+        );
+        assert!(
+            restarted
+                .complete(expected_key, &claim.lease_token)
+                .await
+                .expect("complete restarted claim")
+        );
+    }
+
+    assert_eq!(observed, expected);
+    assert_eq!(restarted.queue_depth().await.expect("queue depth"), 0);
 }

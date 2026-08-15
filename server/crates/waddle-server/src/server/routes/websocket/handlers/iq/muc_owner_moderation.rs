@@ -1,6 +1,6 @@
 use super::*;
 use serde::{Deserialize, Serialize};
-use waddle_xmpp::muc::{build_destroy_notification, DestroyRequest, RoomRegistry, NS_MUC_OWNER};
+use waddle_xmpp::muc::{DestroyRequest, NS_MUC_OWNER, RoomRegistry, build_destroy_notification};
 
 use crate::server::routes::websocket::cleanup::{
     cancel_destroy_completion_attempt, drain_destroy_completion_attempt,
@@ -308,7 +308,7 @@ async fn destroyed_lifecycle_is_current(
     room_jid: &BareJid,
     lifecycle: Option<waddle_xmpp::muc::RoomLifecycleId>,
 ) -> Result<bool, ()> {
-    use crate::db::{row_value, Value};
+    use crate::db::{Value, row_value};
 
     let Some(lifecycle) = lifecycle else {
         // A clustered legacy row without a lifecycle cannot be safely replayed
@@ -726,7 +726,7 @@ pub(crate) async fn claim_persisted_destroy_completion(
     state: &WebSocketState,
     attempt: waddle_xmpp::muc::DestroyAttemptId,
 ) -> Option<LeasedDestroyCompletion> {
-    use crate::db::{row_value, ValueExt};
+    use crate::db::{ValueExt, row_value};
 
     let now = crate::time::now_ms();
     let lease_token = uuid::Uuid::new_v4().to_string();
@@ -828,7 +828,7 @@ pub(crate) async fn persisted_destroy_completion_exists(
     state: &WebSocketState,
     attempt: waddle_xmpp::muc::DestroyAttemptId,
 ) -> Option<bool> {
-    use crate::db::{row_value, Value};
+    use crate::db::{Value, row_value};
 
     let rows = match state
         .deps
@@ -994,7 +994,7 @@ async fn list_due_destroy_completion_attempts(
     now: i64,
     limit: i64,
 ) -> Vec<waddle_xmpp::muc::DestroyAttemptId> {
-    use crate::db::{row_value, ValueExt};
+    use crate::db::{ValueExt, row_value};
 
     let rows = match state
         .deps
@@ -1055,7 +1055,7 @@ pub(crate) async fn drain_persisted_destroy_completions(state: &WebSocketState) 
 /// committed. Inert rows do not block recreation, so retaining uncertain work
 /// is fail-closed without making stale intents durable demand-side locks.
 async fn reconcile_foreign_inert_destroy_completions(state: &WebSocketState) {
-    use crate::db::{row_value, ValueExt};
+    use crate::db::{ValueExt, row_value};
 
     let rows = match state
         .deps
@@ -1893,7 +1893,7 @@ pub(super) async fn handle_muc_owner_and_moderation_iq(
 mod destroy_completion_tests {
     use super::*;
     use crate::db::actor::{DbExecute, DbQueryOne};
-    use crate::db::{row_value, Value};
+    use crate::db::{Value, row_value};
     use crate::server::routes::websocket::tests::create_test_websocket_state;
 
     fn snapshot(attempt: waddle_xmpp::muc::DestroyAttemptId) -> DestroyCompletionSnapshot {
@@ -1901,6 +1901,21 @@ mod destroy_completion_tests {
             attempt,
             room_jid: "destroy@muc.example.com".parse().expect("valid bare JID"),
             lifecycle: None,
+            request: DestroyRequest::default(),
+            members: Vec::new(),
+            recipients: Vec::new(),
+        }
+    }
+
+    fn snapshot_for(
+        attempt: waddle_xmpp::muc::DestroyAttemptId,
+        room_jid: BareJid,
+        lifecycle: waddle_xmpp::muc::RoomLifecycleId,
+    ) -> DestroyCompletionSnapshot {
+        DestroyCompletionSnapshot {
+            attempt,
+            room_jid,
+            lifecycle: Some(lifecycle),
             request: DestroyRequest::default(),
             members: Vec::new(),
             recipients: Vec::new(),
@@ -2051,6 +2066,132 @@ mod destroy_completion_tests {
         }
     }
 
+    async fn insert_tombstoned_lifecycle(
+        state: &WebSocketState,
+        room_jid: &BareJid,
+        lifecycle: waddle_xmpp::muc::RoomLifecycleId,
+    ) {
+        state
+            .deps
+            .app_state
+            .db_pool
+            .global_actor()
+            .ask(DbExecute {
+                sql: "CREATE TABLE IF NOT EXISTS clustering_muc_room_lifecycles ( \
+                      lifecycle_id TEXT NOT NULL, room_jid TEXT NOT NULL, revision BIGINT NOT NULL, \
+                      state TEXT NOT NULL, mutation_fingerprint TEXT NOT NULL \
+                      )"
+                .to_string(),
+                params: vec![],
+            })
+            .await
+            .expect("create lifecycle table");
+        state
+            .deps
+            .app_state
+            .db_pool
+            .global_actor()
+            .ask(DbExecute {
+                sql: "CREATE TABLE IF NOT EXISTS clustering_muc_rooms ( \
+                      room_jid TEXT NOT NULL, lifecycle_id TEXT NOT NULL, revision BIGINT NOT NULL \
+                      )"
+                .to_string(),
+                params: vec![],
+            })
+            .await
+            .expect("create room table");
+        state
+            .deps
+            .app_state
+            .db_pool
+            .global_actor()
+            .ask(DbExecute {
+                sql: "INSERT INTO clustering_muc_room_lifecycles \
+                      (lifecycle_id, room_jid, revision, state, mutation_fingerprint) \
+                      VALUES (?, ?, ?, ?, ?)"
+                    .to_string(),
+                params: crate::db_params![
+                    lifecycle.to_string(),
+                    room_jid.to_string(),
+                    1_i64,
+                    waddle_xmpp::muc::RoomLifecycleState::Tombstoned.as_db_str(),
+                    format!("destroy-completion-test-{lifecycle}"),
+                ],
+            })
+            .await
+            .expect("insert tombstoned lifecycle");
+    }
+
+    async fn enqueue_terminal_effect(
+        state: &WebSocketState,
+        room_jid: &BareJid,
+        lifecycle: waddle_xmpp::muc::RoomLifecycleId,
+        recipients: Vec<waddle_xmpp::muc::DestroyRecipient>,
+    ) -> waddle_xmpp::muc::RoomEffectReservation {
+        let outbox = state.deps.protocol.room_effect_outbox.as_ref();
+        let mut tx = outbox
+            .database()
+            .begin()
+            .await
+            .expect("begin outbox transaction");
+        let reservation = outbox
+            .enqueue_in_tx(
+                &mut tx,
+                crate::room_effect_outbox::RoomEffectEnqueue {
+                    lifecycle,
+                    revision: waddle_xmpp::muc::RoomRevision::initial(),
+                    effects: &waddle_xmpp::muc::RoomMutationEffects::destroy(
+                        room_jid.clone(),
+                        None,
+                        None,
+                        None,
+                        recipients,
+                    ),
+                    origin: &crate::room_effect_outbox::RoomEffectOriginInstanceId::new(
+                        "destroy-completion-test-origin".to_string(),
+                    )
+                    .expect("valid room effect origin"),
+                    producing_node:
+                        &crate::room_effect_outbox::RoomEffectProducingNode::from_node_identity(
+                            waddle_xmpp::ownership::NodeIdentity::new("node-a", "epoch-a"),
+                        ),
+                    now_ms: crate::time::now_ms(),
+                },
+            )
+            .await
+            .expect("enqueue terminal effect");
+        tx.commit().await.expect("commit terminal effect");
+        reservation
+    }
+
+    async fn terminal_available_at_ms(
+        state: &WebSocketState,
+        reservation: &waddle_xmpp::muc::RoomEffectReservation,
+    ) -> i64 {
+        let row = state
+            .deps
+            .app_state
+            .db_pool
+            .global_actor()
+            .ask(DbQueryOne {
+                sql: "SELECT available_at_ms FROM clustering_muc_room_effects \
+                      WHERE lifecycle_id = ? AND revision = ? AND ordinal = ?"
+                    .to_string(),
+                params: crate::db_params![
+                    reservation.lifecycle.to_string(),
+                    reservation.revision.as_i64(),
+                    reservation.ordinals[0].as_i64(),
+                ],
+            })
+            .await
+            .expect("query terminal effect row")
+            .expect("terminal effect row exists");
+        match row_value(&row, 0).expect("terminal availability value") {
+            Value::Integer(value) => *value,
+            _ => panic!("terminal availability must be an integer"),
+        }
+    }
+
     #[tokio::test]
     async fn failed_destroy_completion_reschedules_behind_older_due_work() {
         let state = create_test_websocket_state().await;
@@ -2175,6 +2316,119 @@ mod destroy_completion_tests {
         assert!(
             leased_after > leased_before,
             "lease renewal must continue while durable finalization is still outstanding"
+        );
+    }
+
+    #[tokio::test]
+    async fn terminal_destroy_effect_stays_inert_until_the_durable_wipe_succeeds() {
+        let failed_state = create_test_websocket_state().await;
+        let failed_room: BareJid = "destroy-failed@muc.example.com"
+            .parse()
+            .expect("failed room jid");
+        let failed_lifecycle = waddle_xmpp::muc::RoomLifecycleId::generate();
+        let failed_attempt = waddle_xmpp::muc::DestroyAttemptId::generate();
+        let failed_snapshot = snapshot_for(failed_attempt, failed_room.clone(), failed_lifecycle);
+        insert_tombstoned_lifecycle(failed_state.as_ref(), &failed_room, failed_lifecycle).await;
+        let failed_reservation =
+            enqueue_terminal_effect(
+                failed_state.as_ref(),
+                &failed_room,
+                failed_lifecycle,
+                Vec::new(),
+            )
+            .await;
+        assert_eq!(
+            terminal_available_at_ms(failed_state.as_ref(), &failed_reservation).await,
+            i64::MAX,
+            "terminal destroy effects must start inert"
+        );
+        failed_state
+            .deps
+            .app_state
+            .db_pool
+            .global_actor()
+            .ask(DbExecute {
+                sql: "DROP TABLE muc_pending_invites".to_string(),
+                params: vec![],
+            })
+            .await
+            .expect("drop invite ledger to force wipe failure");
+
+        assert!(
+            complete_destroy_snapshot(failed_state.as_ref(), failed_snapshot, None)
+                .await
+                .is_err(),
+            "a wipe failure must abort completion"
+        );
+        assert_eq!(
+            terminal_available_at_ms(failed_state.as_ref(), &failed_reservation).await,
+            i64::MAX,
+            "a failed wipe must leave the terminal destroy effect inert"
+        );
+
+        let success_state = create_test_websocket_state().await;
+        let success_room: BareJid = "destroy-success@muc.example.com"
+            .parse()
+            .expect("success room jid");
+        let success_lifecycle = waddle_xmpp::muc::RoomLifecycleId::generate();
+        let inline_session: FullJid = "destroyer@example.com/phone"
+            .parse()
+            .expect("inline destroy session");
+        insert_tombstoned_lifecycle(success_state.as_ref(), &success_room, success_lifecycle).await;
+        let success_snapshot = DestroyCompletionSnapshot {
+            attempt: waddle_xmpp::muc::DestroyAttemptId::generate(),
+            room_jid: success_room.clone(),
+            lifecycle: Some(success_lifecycle),
+            request: DestroyRequest::default(),
+            members: Vec::new(),
+            recipients: vec![("owner".to_string(), vec![inline_session.clone()])],
+        };
+        let success_reservation = enqueue_terminal_effect(
+            success_state.as_ref(),
+            &success_room,
+            success_lifecycle,
+            vec![waddle_xmpp::muc::DestroyRecipient {
+                nick: waddle_xmpp::muc::MucOccupantNick::new("owner".to_string())
+                    .expect("owner nick"),
+                sessions: vec![inline_session.clone()],
+            }],
+        )
+        .await;
+        assert_eq!(
+            terminal_available_at_ms(success_state.as_ref(), &success_reservation).await,
+            i64::MAX,
+            "the success-path reservation also starts inert"
+        );
+
+        let batch = complete_destroy_snapshot(
+            success_state.as_ref(),
+            success_snapshot,
+            Some(&inline_session),
+        )
+        .await
+        .expect("successful completion snapshot");
+        assert_eq!(batch.completions.len(), 1, "the inline destroy frame must retain completion");
+
+        let terminal_row = success_state
+            .deps
+            .protocol
+            .room_effect_outbox
+            .find(&crate::room_effect_outbox::RoomEffectKey {
+                lifecycle: success_reservation.lifecycle,
+                revision: success_reservation.revision,
+                ordinal: success_reservation.ordinals[0],
+            })
+            .await
+            .expect("load armed terminal row")
+            .expect("armed terminal row exists");
+        assert!(
+            terminal_row.lease_token.is_some(),
+            "the completion executor path must leave the armed terminal row leased until write acceptance"
+        );
+        assert_ne!(
+            terminal_available_at_ms(success_state.as_ref(), &success_reservation).await,
+            i64::MAX,
+            "the executor seam must arm the terminal effect only after the wipe succeeds"
         );
     }
 

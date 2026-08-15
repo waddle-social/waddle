@@ -265,6 +265,18 @@ async fn invite_grant_and_rollback_persist_the_exact_room_invitee_and_affiliatio
             (room_jid, invitee, Affiliation::None),
         ],
     );
+    let saved_effects = store.saved_effects();
+    assert_eq!(
+        saved_effects.len(),
+        2,
+        "grant and rollback should each commit once"
+    );
+    assert!(
+        saved_effects
+            .iter()
+            .all(|effects| effects.effects().is_empty()),
+        "mediated invite durability commits must not enqueue effect rows"
+    );
 }
 
 #[tokio::test]

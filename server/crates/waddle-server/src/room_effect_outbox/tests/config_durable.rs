@@ -9,7 +9,7 @@ use waddle_xmpp::muc::room_actor::{
     ConfigEffectPlan, EnforceMembersOnlyAffiliations, GetSnapshot, JoinAffiliationGrant,
     JoinWithAffiliation, RestoreDurableRoomState, RoomActor, UpdateConfig,
 };
-use waddle_xmpp::muc::room_registry_actor::CreateRoom;
+use waddle_xmpp::muc::room_registry_actor::{CreateRoom, GetOrCreateRoom};
 use waddle_xmpp::muc::{
     MucRoom, RoomClaimFenceContext, RoomCommitError, RoomCommitOutcome, RoomCommittedCoordinates,
     RoomConfig, RoomDurableMutation, RoomMutationEffects, RoomRevision,
@@ -22,10 +22,10 @@ use waddle_xmpp::{Affiliation, Stanza};
 use super::*;
 use crate::room_effect_outbox::drain::drain_due_effects;
 use crate::room_effect_outbox::{RoomEffectArmSupervisor, RoomEffectEnqueue};
-use crate::server::routes::websocket::tests::{
-    create_test_websocket_state, register_test_connection,
-};
 use crate::server::routes::websocket::WebSocketState;
+use crate::server::routes::websocket::tests::{
+    create_test_websocket_state, create_test_websocket_state_with_db_pool, register_test_connection,
+};
 
 async fn create_owned_room_and_lifecycle(
     state: &WebSocketState,
@@ -584,4 +584,266 @@ async fn managed_members_only_removal_drains_322_before_full_config_to_remaining
         "the removed occupant is excluded from the config audience"
     );
     assert_eq!(store.queue_depth().await.expect("queue depth"), 0);
+}
+
+#[tokio::test]
+async fn armed_config_effect_preserves_original_recipients_across_dormancy_and_store_reopen() {
+    let state = create_test_websocket_state().await;
+    let room_jid = room_jid();
+    let recipient = full_jid("alice@example.test/device");
+    let lifecycle = create_owned_room_and_lifecycle(state.as_ref(), &room_jid).await;
+    let (actor, durable_store) = actor_with_outbox(state.as_ref(), &room_jid, lifecycle).await;
+    actor
+        .ask(JoinWithAffiliation {
+            sender_jid: recipient.clone(),
+            nick: "alice".to_owned(),
+            affiliation_grant: JoinAffiliationGrant::Resolver(Affiliation::Member),
+            local_domain: "example.test".to_owned(),
+            admission_revision: 0,
+        })
+        .await
+        .expect("original recipient joins before the config mutation");
+
+    let committed = actor
+        .ask(UpdateConfig {
+            config: RoomConfig {
+                enable_logging: true,
+                ..RoomConfig::default()
+            },
+            effect_plan: ConfigEffectPlan::DirectAudience,
+        })
+        .await
+        .expect("actor commits config change with direct audience");
+    let reservation = committed
+        .reservation
+        .expect("config change reserves one durable effect");
+    let key = RoomEffectKey {
+        lifecycle,
+        revision: reservation.revision,
+        ordinal: reservation.ordinals[0],
+    };
+    state
+        .deps
+        .protocol
+        .room_effect_outbox
+        .arm_reservation(&reservation, 0)
+        .await
+        .expect("arm committed config effect");
+    assert_eq!(
+        state
+            .deps
+            .protocol
+            .room_effect_outbox
+            .queue_depth()
+            .await
+            .expect("queue depth after config commit"),
+        1,
+        "the armed config effect must be the only queued row before dormancy"
+    );
+
+    let dormancy = durable_store
+        .commit_room_mutation(
+            &room_jid,
+            &durable_store.expected_fence,
+            RoomDurableMutation::Dormancy,
+            RoomMutationEffects::none(),
+        )
+        .await
+        .expect("dormancy commit");
+    assert!(
+        dormancy.reservation.is_none(),
+        "dormancy itself must not enqueue any new effect rows"
+    );
+    assert_eq!(
+        state
+            .deps
+            .protocol
+            .room_effect_outbox
+            .queue_depth()
+            .await
+            .expect("queue depth after dormancy"),
+        1,
+        "the original armed effect must survive a no-op dormancy commit"
+    );
+
+    actor.kill();
+    let fresh_state =
+        create_test_websocket_state_with_db_pool(Arc::clone(&state.deps.app_state.db_pool)).await;
+    fresh_state
+        .deps
+        .protocol
+        .room_registry
+        .ask(GetOrCreateRoom {
+            room_jid: room_jid.clone(),
+            waddle_id: "room-effect-config-test".to_owned(),
+            channel_id: "room-effect-config-test".to_owned(),
+            config: RoomConfig {
+                members_only: false,
+                enable_logging: false,
+                ..RoomConfig::default()
+            },
+        })
+        .await
+        .expect("fresh registry reacquires the room");
+    let reopened_store =
+        RoomEffectOutboxStore::new(fresh_state.deps.app_state.db_pool.global().clone())
+            .await
+            .expect("reopen room effect outbox store");
+    assert!(
+        reopened_store
+            .find(&key)
+            .await
+            .expect("find effect after store reopen")
+            .is_some(),
+        "reopening the store over the same DB pool must retain the armed effect row"
+    );
+    let reopened_row = reopened_store
+        .find(&key)
+        .await
+        .expect("reopen find row")
+        .expect("reopened row");
+    match reopened_row.effect {
+        waddle_xmpp::muc::RoomEffect::ConfigChanged { recipients, .. } => {
+            assert_eq!(
+                recipients,
+                vec![recipient.clone()],
+                "the reopened row must preserve the original mutation-time recipient set"
+            );
+        }
+        other => panic!("expected config-changed effect, got {other:?}"),
+    }
+
+    let (sender, mut receiver) = mpsc::channel(2);
+    register_test_connection(fresh_state.as_ref(), &recipient, sender).await;
+    let drain = {
+        let state = Arc::clone(&fresh_state);
+        tokio::spawn(async move {
+            drain_due_effects(state.as_ref(), super::super::store::HANDLER_GRACE_MS, 8).await
+        })
+    };
+    let delivery = receive(&mut receiver).await;
+    assert!(
+        xml(&delivery).contains("code='170'"),
+        "the drained stanza must still target the original mutation-time recipient"
+    );
+    delivery
+        .write_acceptance
+        .as_ref()
+        .expect("config write acceptance")
+        .acknowledge();
+    assert_eq!(
+        drain
+            .await
+            .expect("dormancy drain join")
+            .expect("dormancy drain")
+            .drained,
+        1
+    );
+    assert_eq!(
+        fresh_state
+            .deps
+            .protocol
+            .room_effect_outbox
+            .queue_depth()
+            .await
+            .expect("queue depth after drain"),
+        0
+    );
+}
+
+#[tokio::test]
+async fn join_processed_immediately_before_config_is_included_in_durable_config_audience() {
+    let state = create_test_websocket_state().await;
+    let room_jid = room_jid();
+    let alice = full_jid("alice@example.test/device");
+    let bob = full_jid("bob@example.test/device");
+    let lifecycle = create_owned_room_and_lifecycle(state.as_ref(), &room_jid).await;
+    let (actor, _) = actor_with_outbox(state.as_ref(), &room_jid, lifecycle).await;
+
+    actor
+        .ask(JoinWithAffiliation {
+            sender_jid: alice.clone(),
+            nick: "alice".to_owned(),
+            affiliation_grant: JoinAffiliationGrant::Resolver(Affiliation::Member),
+            local_domain: "example.test".to_owned(),
+            admission_revision: 0,
+        })
+        .await
+        .expect("first occupant joins");
+    actor
+        .ask(JoinWithAffiliation {
+            sender_jid: bob.clone(),
+            nick: "bob".to_owned(),
+            affiliation_grant: JoinAffiliationGrant::Resolver(Affiliation::Member),
+            local_domain: "example.test".to_owned(),
+            admission_revision: actor
+                .ask(GetSnapshot)
+                .await
+                .expect("admission revision before second join")
+                .admission_revision,
+        })
+        .await
+        .expect("second occupant joins immediately before config");
+    let committed = actor
+        .ask(UpdateConfig {
+            config: RoomConfig {
+                enable_logging: true,
+                ..RoomConfig::default()
+            },
+            effect_plan: ConfigEffectPlan::DirectAudience,
+        })
+        .await
+        .expect("actor commits config change");
+    let reservation = committed
+        .reservation
+        .expect("config change reserves one durable effect");
+    assert_eq!(
+        reservation.ordinals.len(),
+        1,
+        "the config change should enqueue a single durable effect row"
+    );
+    state
+        .deps
+        .protocol
+        .room_effect_outbox
+        .arm_reservation(&reservation, 0)
+        .await
+        .expect("arm committed config effect");
+
+    let (alice_sender, mut alice_receiver) = mpsc::channel(2);
+    let (bob_sender, mut bob_receiver) = mpsc::channel(2);
+    register_test_connection(state.as_ref(), &alice, alice_sender).await;
+    register_test_connection(state.as_ref(), &bob, bob_sender).await;
+
+    let drain = {
+        let state = Arc::clone(&state);
+        tokio::spawn(async move {
+            drain_due_effects(state.as_ref(), super::super::store::HANDLER_GRACE_MS, 8).await
+        })
+    };
+    let alice_delivery = receive(&mut alice_receiver).await;
+    let bob_delivery = receive(&mut bob_receiver).await;
+    assert!(xml(&alice_delivery).contains("code='170'"));
+    assert!(
+        xml(&bob_delivery).contains("code='170'"),
+        "the join that landed immediately before the config mutation must be captured in the durable audience"
+    );
+    alice_delivery
+        .write_acceptance
+        .as_ref()
+        .expect("alice config write acceptance")
+        .acknowledge();
+    bob_delivery
+        .write_acceptance
+        .as_ref()
+        .expect("bob config write acceptance")
+        .acknowledge();
+    assert_eq!(
+        drain
+            .await
+            .expect("serialized-audience drain join")
+            .expect("serialized-audience drain")
+            .drained,
+        1
+    );
 }

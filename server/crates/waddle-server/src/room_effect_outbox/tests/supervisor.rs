@@ -1,6 +1,6 @@
 use std::str::FromStr;
-use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Duration;
 
 use jid::{BareJid, FullJid};
@@ -267,6 +267,97 @@ async fn foreign_inert_row_drains_after_janitor_arming() {
 }
 
 #[tokio::test(flavor = "current_thread")]
+async fn staged_row_survives_origin_crash_until_reaper_arms_and_drains_it() {
+    let state = create_test_websocket_state().await;
+    let store = Arc::clone(&state.deps.protocol.room_effect_outbox);
+    let room_jid = integration_room_jid("stale-producer-reaper-drain");
+    let recipient = full_jid("restart@example.com/device");
+    let (lifecycle, revision) =
+        ensure_local_room_and_lifecycle(store.as_ref(), state.as_ref(), &room_jid).await;
+    let stale_node = RoomEffectProducingNode::from_node_identity(
+        waddle_xmpp::ownership::NodeIdentity::new("node-before-restart", "old-epoch"),
+    );
+    let live_node = RoomEffectProducingNode::from_node_identity(
+        waddle_xmpp::ownership::NodeIdentity::new("node-before-restart", "new-epoch"),
+    );
+    let reservation = enqueue_config_reservation_with(
+        store.as_ref(),
+        lifecycle,
+        revision,
+        room_jid,
+        vec![recipient.clone()],
+        stale_node,
+        100,
+    )
+    .await;
+    let key = RoomEffectKey {
+        lifecycle,
+        revision,
+        ordinal: reservation.ordinals[0],
+    };
+    assert_eq!(
+        store
+            .find(&key)
+            .await
+            .expect("find staged row")
+            .expect("staged row present")
+            .available_at_ms,
+        STAGED_AVAILABLE_AT_MS,
+        "without a supervisor handoff, the origin crash leaves the row inert"
+    );
+
+    let (tx, mut rx) = mpsc::channel::<OutboundStanza>(4);
+    register_test_connection(state.as_ref(), &recipient, tx).await;
+
+    assert_eq!(
+        store
+            .arm_foreign_inert(&[live_node], 250)
+            .await
+            .expect("reaper arms stale row"),
+        1
+    );
+    assert_eq!(
+        store
+            .find(&key)
+            .await
+            .expect("find armed row")
+            .expect("armed row present")
+            .available_at_ms,
+        250,
+        "the reaper should convert the inert row into a due row"
+    );
+
+    let state_for_drain = Arc::clone(&state);
+    let drain =
+        tokio::spawn(async move { drain_due_effects(state_for_drain.as_ref(), 250, 8).await });
+    let outbound = tokio::time::timeout(Duration::from_secs(1), rx.recv())
+        .await
+        .expect("reaped row delivery timeout")
+        .expect("reaped row delivery");
+    outbound
+        .write_acceptance
+        .as_ref()
+        .expect("reaped row acceptance")
+        .acknowledge();
+    assert_eq!(
+        drain
+            .await
+            .expect("reaped drain join")
+            .expect("reaped drain result")
+            .drained,
+        1
+    );
+    assert!(
+        store
+            .find(&key)
+            .await
+            .expect("find completed row")
+            .is_none(),
+        "the reaped row must complete after draining"
+    );
+}
+
+#[tokio::test(flavor = "current_thread")]
 async fn supervisor_retries_transient_store_failure_then_drains_once_store_recovers() {
     let state = create_test_websocket_state().await;
     let store = Arc::clone(&state.deps.protocol.room_effect_outbox);
@@ -394,13 +485,15 @@ async fn inline_drain_keeps_lease_until_write_acceptance_then_completes_cleanly(
         revision,
         ordinal: reservation.ordinals[0],
     };
-    assert!(store
+    assert!(
+        store
         .find(&key)
         .await
         .expect("find leased row")
         .expect("leased row exists")
         .lease_token
-        .is_some());
+            .is_some()
+    );
 
     let completion_task = tokio::spawn({
         let state = Arc::clone(&state);

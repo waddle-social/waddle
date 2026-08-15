@@ -782,13 +782,15 @@ async fn stale_exact_owner_demotion_preserves_a_fresh_same_jid_room() {
         })
         .await
         .expect("create old room");
-    assert!(registry
+    assert!(
+        registry
         .ask(DemoteRoomIfOwner {
             room_jid: room_jid.clone(),
             owner: old.clone(),
         })
         .await
-        .expect("demote old room"));
+            .expect("demote old room")
+    );
     claim_store
         .release(
             &Entity::new(EntityType::RoomActor, room_jid.to_string()),
@@ -809,18 +811,22 @@ async fn stale_exact_owner_demotion_preserves_a_fresh_same_jid_room() {
         .await
         .expect("create fresh room");
 
-    assert!(!registry
+    assert!(
+        !registry
         .ask(DemoteRoomIfOwner {
             room_jid: room_jid.clone(),
             owner: old,
         })
         .await
-        .expect("stale demotion"));
-    assert!(registry
+            .expect("stale demotion")
+    );
+    assert!(
+        registry
         .ask(GetRoom { room_jid })
         .await
         .expect("fresh room lookup")
-        .is_some());
+            .is_some()
+    );
 }
 
 #[tokio::test]
@@ -846,13 +852,15 @@ async fn exact_actor_demotion_cannot_evict_a_different_same_jid_actor() {
         OccupantIdSecret::for_testing(b"test-secret".to_vec()),
     ));
 
-    assert!(!registry
+    assert!(
+        !registry
         .ask(DemoteRoomIfExactActor {
             room_jid: room_jid.clone(),
             actor_ref: unrelated_same_jid,
         })
         .await
-        .expect("reject unrelated exact actor"));
+            .expect("reject unrelated exact actor")
+    );
     assert_eq!(
         registry
             .ask(GetRoom {
@@ -865,18 +873,22 @@ async fn exact_actor_demotion_cannot_evict_a_different_same_jid_actor() {
         registered.id(),
     );
 
-    assert!(registry
+    assert!(
+        registry
         .ask(DemoteRoomIfExactActor {
             room_jid: room_jid.clone(),
             actor_ref: registered,
         })
         .await
-        .expect("demote exact registered actor"));
-    assert!(registry
+            .expect("demote exact registered actor")
+    );
+    assert!(
+        registry
         .ask(GetRoom { room_jid })
         .await
         .expect("lookup after exact demotion")
-        .is_none());
+            .is_none()
+    );
 }
 
 #[tokio::test]
@@ -970,21 +982,25 @@ async fn registered_destroy_preseal_can_abort_after_definite_non_delivery() {
         .await
         .expect("register completion");
 
-    assert!(registry
+    assert!(
+        registry
         .ask(AbortDestroyRoomAttempt {
             room_jid: room_jid.clone(),
             attempt,
         })
         .await
-        .expect("abort reply"));
+            .expect("abort reply")
+    );
     assert_eq!(
         actor.ask(GetRoomSealState).await.expect("seal state"),
         RoomSealState::Open
     );
-    assert!(!registry
+    assert!(
+        !registry
         .ask(ReapSealedRoom { room_jid })
         .await
-        .expect("active room is not reaped"));
+            .expect("active room is not reaped")
+    );
 }
 
 #[tokio::test(start_paused = true)]
@@ -1461,8 +1477,8 @@ mod ownership_claims_tests {
     };
     use crate::types::Affiliation;
     use async_trait::async_trait;
-    use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
     use std::sync::Mutex;
+    use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 
     fn foreign_identity() -> NodeIdentity {
         NodeIdentity::new("foreign-node", "foreign-epoch")
@@ -1619,13 +1635,15 @@ mod ownership_claims_tests {
         );
         durable_store.forget_claim_fence(&jid, &fence);
 
-        assert!(registry
+        assert!(
+            registry
             .ask(GetRoom {
                 room_jid: jid.clone(),
             })
             .await
             .expect("lookup before destroy")
-            .is_none());
+                .is_none()
+        );
         assert_eq!(
             registry
                 .ask(DestroyRoom {
@@ -1641,6 +1659,26 @@ mod ownership_claims_tests {
             vec![jid.to_string()],
             "DestroyRoom must tombstone dormant durable state even without a local room actor"
         );
+        assert_eq!(
+            *durable_store
+                .destroy_completion_attempts
+                .lock()
+                .expect("lock"),
+            vec![None],
+            "destroying dormant durable state without a local room entry must stay attempt-less"
+        );
+        {
+            let effects = durable_store.destroy_effects.lock().expect("lock");
+            assert_eq!(
+                effects.len(),
+                1,
+                "the dormant durable destroy must commit once"
+            );
+            assert!(
+                effects[0].effects().is_empty(),
+                "destroy_durable_room_without_local_entry must not persist terminal effect rows"
+            );
+        }
         assert!(
             claim_store
                 .current_claim(&entity)
@@ -1952,11 +1990,13 @@ mod ownership_claims_tests {
                 .expect("ack"),
             "ack must release the leased completion"
         );
-        assert!(registry
+        assert!(
+            registry
             .ask(TakeDestroyCompletions)
             .await
             .expect("post-ack lease")
-            .is_empty());
+                .is_empty()
+        );
         assert!(
             !registry
                 .ask(RequeueDestroyCompletion { attempt })
@@ -2172,6 +2212,8 @@ mod ownership_claims_tests {
     #[tokio::test]
     async fn plain_destroy_does_not_consume_an_owner_iq_completion_snapshot() {
         let registry = spawn_registry().await;
+        let store = Arc::new(RecordingDurableStore::default());
+        wire_recording_store(&registry, Arc::clone(&store)).await;
         let jid = test_room_jid("plain-destroy-no-owner-snapshot");
         let actor = registry
             .ask(get_or_create(jid.clone()))
@@ -2212,6 +2254,21 @@ mod ownership_claims_tests {
                 .expect("take completions")
                 .is_empty(),
             "a plain destroy must never run cleanup from an owner-IQ snapshot"
+        );
+        assert_eq!(
+            *store.destroy_completion_attempts.lock().expect("lock"),
+            vec![None],
+            "an attempt-less plain destroy must not arm a terminal completion"
+        );
+        let effects = store.destroy_effects.lock().expect("lock");
+        assert_eq!(
+            effects.len(),
+            1,
+            "the durable destroy must still commit once"
+        );
+        assert!(
+            effects[0].effects().is_empty(),
+            "an attempt-less plain destroy with no retained completion must persist zero outbox rows"
         );
     }
 
@@ -2286,7 +2343,7 @@ mod ownership_claims_tests {
             &registry,
             Arc::clone(&claim_store),
             SharedNodeIdentity::new(this_identity()),
-            durable_store,
+            Arc::clone(&durable_store),
         )
         .await;
 
@@ -2319,11 +2376,13 @@ mod ownership_claims_tests {
                 .expect("reconcile on lookup"),
             None,
         );
-        assert!(claim_store
+        assert!(
+            claim_store
             .current_claim(&entity)
             .await
             .expect("authoritative claim lookup")
-            .is_none());
+                .is_none()
+        );
     }
 
     #[tokio::test]
@@ -2338,7 +2397,7 @@ mod ownership_claims_tests {
             &registry,
             Arc::clone(&claim_store),
             SharedNodeIdentity::new(this_identity()),
-            durable_store,
+            Arc::clone(&durable_store),
         )
         .await;
 
@@ -2421,7 +2480,7 @@ mod ownership_claims_tests {
             &registry,
             Arc::clone(&claim_store),
             SharedNodeIdentity::new(this_identity()),
-            durable_store,
+            Arc::clone(&durable_store),
         )
         .await;
 
@@ -2519,11 +2578,13 @@ mod ownership_claims_tests {
                 .expect("reap"),
             "reaper must resume the retained destroy attempt"
         );
-        assert!(registry
+        assert!(
+            registry
             .ask(GetRoom { room_jid: jid })
             .await
             .expect("lookup")
-            .is_none());
+                .is_none()
+        );
     }
 
     #[tokio::test]
@@ -2601,7 +2662,7 @@ mod ownership_claims_tests {
             &registry,
             Arc::clone(&claim_store),
             SharedNodeIdentity::new(this_identity()),
-            durable_store,
+            Arc::clone(&durable_store),
         )
         .await;
         let room_jid = test_room_jid("dormancy-state-missing-guarded");
@@ -2616,26 +2677,40 @@ mod ownership_claims_tests {
             .await
             .expect("dormancy probe");
 
-        assert!(registry
+        assert!(
+            registry
             .ask(DestroyRoomIfInactive {
                 room_jid: room_jid.clone(),
                 expected_occupancy_revision: probe.occupancy_revision,
                 guard: crate::muc::room_actor::SealGuard::Dormant,
             })
             .await
-            .expect("guarded eviction"));
-        assert!(registry
+                .expect("guarded eviction")
+        );
+        assert!(
+            registry
             .ask(GetRoom {
                 room_jid: room_jid.clone(),
             })
             .await
             .expect("room lookup")
-            .is_none());
-        assert!(claim_store
+                .is_none()
+        );
+        assert!(
+            claim_store
             .current_claim(&entity)
             .await
             .expect("claim lookup")
-            .is_none());
+                .is_none()
+        );
+        assert!(
+            durable_store
+                .destroy_effects
+                .lock()
+                .expect("lock")
+                .is_empty(),
+            "inactive-room dormancy cleanup must not enqueue terminal effect rows"
+        );
     }
 
     #[tokio::test]
@@ -2650,7 +2725,7 @@ mod ownership_claims_tests {
             &registry,
             Arc::clone(&claim_store),
             SharedNodeIdentity::new(this_identity()),
-            durable_store,
+            Arc::clone(&durable_store),
         )
         .await;
         let room_jid = test_room_jid("dormancy-state-missing-reaper");
@@ -2671,24 +2746,38 @@ mod ownership_claims_tests {
             crate::muc::room_actor::SealIfInactiveOutcome::Inactive,
         );
 
-        assert!(registry
+        assert!(
+            registry
             .ask(ReapSealedRoom {
                 room_jid: room_jid.clone(),
             })
             .await
-            .expect("reap sealed room"));
-        assert!(registry
+                .expect("reap sealed room")
+        );
+        assert!(
+            registry
             .ask(GetRoom {
                 room_jid: room_jid.clone(),
             })
             .await
             .expect("room lookup")
-            .is_none());
-        assert!(claim_store
+                .is_none()
+        );
+        assert!(
+            claim_store
             .current_claim(&entity)
             .await
             .expect("claim lookup")
-            .is_none());
+                .is_none()
+        );
+        assert!(
+            durable_store
+                .destroy_effects
+                .lock()
+                .expect("lock")
+                .is_empty(),
+            "sealed-room dormancy reaping must not enqueue terminal effect rows"
+        );
     }
 
     #[tokio::test]
@@ -2775,13 +2864,15 @@ mod ownership_claims_tests {
 
         for index in 0..MAX_PENDING_ROOM_RELEASES {
             let pending_jid = test_room_jid(&format!("deposed-backlog-{index}"));
-            assert!(registry
+            assert!(
+                registry
                 .ask(RememberOrdinaryReleaseForTest {
                     room_jid: pending_jid.clone(),
                     claim_fence: room_claim_fence(&pending_jid, ClaimEpoch(index as i64)),
                 })
                 .await
-                .expect("fill exact-release backlog"));
+                    .expect("fill exact-release backlog")
+            );
         }
         identity.rotate(foreign_identity()).await;
 
@@ -3596,6 +3687,7 @@ mod ownership_claims_tests {
         demote_notifications: Mutex<Vec<(String, String)>>,
         deleted_rooms: Mutex<Vec<String>>,
         destroy_completion_attempts: Mutex<Vec<Option<crate::muc::DestroyAttemptId>>>,
+        destroy_intents: Mutex<Vec<crate::muc::RoomDurableMutation>>,
         destroy_effects: Mutex<Vec<crate::muc::RoomMutationEffects>>,
         fail_deletes: bool,
         /// Simulates a transaction that committed terminal deletion but lost
@@ -3772,6 +3864,7 @@ mod ownership_claims_tests {
                 _ => None,
             };
             let destroy_completion_attempts = &self.destroy_completion_attempts;
+            let destroy_intents = &self.destroy_intents;
             let destroy_effects = &self.destroy_effects;
             let coordinates = self.next_commit_coordinates();
             Box::pin(async move {
@@ -3822,6 +3915,7 @@ mod ownership_claims_tests {
                         .lock()
                         .expect("lock")
                         .push(destroy_completion_attempt);
+                    destroy_intents.lock().expect("lock").push(intent.clone());
                     destroy_effects.lock().expect("lock").push(effects);
                     if destroy_not_owner {
                         return Err(crate::muc::RoomCommitError::NotOwner);
@@ -4098,11 +4192,13 @@ mod ownership_claims_tests {
         let exact_fence = RoomClaimFenceContext::new(entity.clone(), owner.clone(), epoch);
 
         assert!(store.current_claim_fence(&room_jid).is_none());
-        assert!(store
+        assert!(
+            store
             .load_room_state_fenced(&room_jid, &exact_fence)
             .await
             .expect("the unadvertised exact claim may hydrate")
-            .is_none());
+                .is_none()
+        );
 
         let wrong_incarnation = RoomClaimFenceContext::new(
             entity.clone(),
@@ -4115,37 +4211,49 @@ mod ownership_claims_tests {
                 .await,
             Err(crate::XmppError::OwnershipLost { .. })
         ));
-        assert!(!store
+        assert!(
+            !store
             .check_exact_claim_fence(&room_jid, &wrong_incarnation)
             .await
-            .expect("a stale tuple is a definitive ownership miss"));
+                .expect("a stale tuple is a definitive ownership miss")
+        );
 
         let wrong_epoch = RoomClaimFenceContext::new(entity, owner, ClaimEpoch(epoch.0 + 1));
-        assert!(store
+        assert!(
+            store
             .load_room_state_fenced(&room_jid, &wrong_epoch)
             .await
-            .is_err());
+                .is_err()
+        );
 
         store.fence_lost.store(true, Ordering::SeqCst);
-        assert!(!store
+        assert!(
+            !store
             .check_exact_claim_fence(&room_jid, &wrong_incarnation)
             .await
-            .expect("a stale tuple remains a definitive ownership miss"));
-        assert!(!store
+                .expect("a stale tuple remains a definitive ownership miss")
+        );
+        assert!(
+            !store
             .check_exact_claim_fence(&room_jid, &exact_fence)
             .await
-            .expect("a lost fence is a definitive ownership miss"));
+                .expect("a lost fence is a definitive ownership miss")
+        );
         store.fence_lost.store(false, Ordering::SeqCst);
 
         store.fail_fenced_loads_remaining.store(1, Ordering::SeqCst);
-        assert!(store
+        assert!(
+            store
             .load_room_state_fenced(&room_jid, &wrong_incarnation)
             .await
-            .is_err());
-        assert!(store
+                .is_err()
+        );
+        assert!(
+            store
             .load_room_state_fenced(&room_jid, &exact_fence)
             .await
-            .is_err());
+                .is_err()
+        );
         assert_eq!(
             store.fail_fenced_loads_remaining.load(Ordering::SeqCst),
             0,
@@ -4153,25 +4261,33 @@ mod ownership_claims_tests {
         );
 
         let missing_authority = RecordingDurableStore::default();
-        assert!(missing_authority
+        assert!(
+            missing_authority
             .load_room_state_fenced(&room_jid, &exact_fence)
             .await
-            .is_err());
-        assert!(missing_authority
+                .is_err()
+        );
+        assert!(
+            missing_authority
             .check_exact_claim_fence(&room_jid, &exact_fence)
             .await
-            .is_err());
+                .is_err()
+        );
 
         claim_store.fail_next_current_claim();
-        assert!(store
+        assert!(
+            store
             .load_room_state_fenced(&room_jid, &exact_fence)
             .await
-            .is_err());
+                .is_err()
+        );
         claim_store.fail_next_current_claim();
-        assert!(store
+        assert!(
+            store
             .check_exact_claim_fence(&room_jid, &exact_fence)
             .await
-            .is_err());
+                .is_err()
+        );
     }
 
     #[tokio::test]
@@ -4193,10 +4309,12 @@ mod ownership_claims_tests {
             ..RecordingDurableStore::default()
         };
         ownership_loss_store.bind_claim_store(Arc::clone(&claim_store) as Arc<dyn ClaimStore>);
-        assert!(ownership_loss_store
+        assert!(
+            ownership_loss_store
             .load_room_state_fenced(&room_jid, &stale_fence)
             .await
-            .is_err());
+                .is_err()
+        );
         assert!(matches!(
             ownership_loss_store
                 .load_room_state_fenced(&room_jid, &exact_fence)
@@ -4209,17 +4327,21 @@ mod ownership_claims_tests {
             ..RecordingDurableStore::default()
         };
         blocking_store.bind_claim_store(claim_store as Arc<dyn ClaimStore>);
-        assert!(blocking_store
+        assert!(
+            blocking_store
             .load_room_state_fenced(&room_jid, &stale_fence)
             .await
-            .is_err());
-        assert!(tokio::time::timeout(
+                .is_err()
+        );
+        assert!(
+            tokio::time::timeout(
             std::time::Duration::from_millis(100),
             blocking_store.load_room_state_fenced(&room_jid, &exact_fence),
         )
         .await
         .expect("a stale fence must not advance the blocking fault's call index")
-        .is_ok());
+            .is_ok()
+        );
     }
 
     fn blocking_restore_store(
@@ -4387,11 +4509,13 @@ mod ownership_claims_tests {
             store.current_claim_fence(&blocked_jid).is_some(),
             "the exact fence is published with the ready registry entry"
         );
-        assert!(lookup
+        assert!(
+            lookup
             .await
             .expect("lookup task")
             .expect("lookup reply")
-            .is_some());
+                .is_some()
+        );
         assert_eq!(
             store.load_calls.load(Ordering::SeqCst),
             4,
@@ -4521,13 +4645,15 @@ mod ownership_claims_tests {
             Err(SendError::HandlerError(RoomRegistryError::RoomAlreadyExists(ref room)))
                 if *room == room_jid
         ));
-        assert!(registry
+        assert!(
+            registry
             .ask(GetRoom {
                 room_jid: room_jid.clone(),
             })
             .await
             .expect("restored room lookup")
-            .is_some());
+                .is_some()
+        );
     }
 
     #[tokio::test]
@@ -4573,13 +4699,15 @@ mod ownership_claims_tests {
             .expect("second task")
             .expect("replacement creator acquisition");
         assert_eq!(acquisition.creation, RoomCreation::Created);
-        assert!(registry
+        assert!(
+            registry
             .ask(GetRoom {
                 room_jid: room_jid.clone(),
             })
             .await
             .expect("published room lookup")
-            .is_some());
+                .is_some()
+        );
     }
 
     #[tokio::test]
@@ -4645,13 +4773,15 @@ mod ownership_claims_tests {
                 RoomRegistryError::OwnershipUnavailable(ref room)
             )) if *room == room_jid
         ));
-        assert!(registry
+        assert!(
+            registry
             .ask(GetRoom {
                 room_jid: room_jid.clone(),
             })
             .await
             .expect("unpublished incompatible room lookup")
-            .is_none());
+                .is_none()
+        );
 
         tokio::time::timeout(std::time::Duration::from_secs(1), async {
             loop {
@@ -5417,12 +5547,14 @@ mod ownership_claims_tests {
             .ask(GetPendingReclaimedRoomBacklog)
             .await
             .expect("reclaimed backlog before duplicate");
-        assert!(registry
+        assert!(
+            registry
             .ask(ReservePendingReclaimedRoom {
                 room_jid: existing_reclaimed_room,
             })
             .await
-            .expect("repeat existing exact reclaimed reservation"));
+                .expect("repeat existing exact reclaimed reservation")
+        );
         // Compare depth only: `oldest_age_ms` is wall-clock at ask-time, so
         // two asks straddling a millisecond boundary differ spuriously (#1416).
         assert_eq!(
@@ -5434,12 +5566,14 @@ mod ownership_claims_tests {
             backlog_before.depth,
             "an exact reclaimed responsibility must not gain a redundant bare-JID reservation",
         );
-        assert!(!registry
+        assert!(
+            !registry
             .ask(ReservePendingReclaimedRoom {
                 room_jid: novel_room_jid,
             })
             .await
-            .expect("reject novel reclaimed reservation at capacity"));
+                .expect("reject novel reclaimed reservation at capacity")
+        );
         registry.kill();
     }
 
@@ -5602,13 +5736,15 @@ mod ownership_claims_tests {
         let release_count = MAX_PENDING_ROOM_RELEASES / 2;
         for index in 0..release_count {
             let release_jid = test_room_jid(&format!("bounded-release-{index}"));
-            assert!(registry
+            assert!(
+                registry
                 .ask(RememberOrdinaryReleaseForTest {
                     room_jid: release_jid.clone(),
                     claim_fence: room_claim_fence(&release_jid, ClaimEpoch(index as i64 + 1)),
                 })
                 .await
-                .expect("remember release"));
+                    .expect("remember release")
+            );
         }
         let store = Arc::new(RecordingDurableStore {
             block_all_loads: true,
@@ -5649,20 +5785,24 @@ mod ownership_claims_tests {
                 RoomRegistryError::OwnershipReconciliationPending(ref room)
             )) if *room == overflow_jid
         ));
-        assert!(!registry
+        assert!(
+            !registry
             .ask(ReservePendingReclaimedRoom {
                 room_jid: test_room_jid("bounded-reclaimed-overflow"),
             })
             .await
-            .expect("reclaimed admission observes the same global bound"));
+                .expect("reclaimed admission observes the same global bound")
+        );
         let release_overflow_jid = test_room_jid("bounded-release-overflow");
-        assert!(!registry
+        assert!(
+            !registry
             .ask(RememberOrdinaryReleaseForTest {
                 room_jid: release_overflow_jid.clone(),
                 claim_fence: room_claim_fence(&release_overflow_jid, ClaimEpoch(999)),
             })
             .await
-            .expect("ordinary release admission observes the same global bound"));
+                .expect("ordinary release admission observes the same global bound")
+        );
         registry.kill();
         for task in pending {
             task.abort();
@@ -5674,12 +5814,14 @@ mod ownership_claims_tests {
         let registry = spawn_registry().await;
         for index in 0..MAX_PENDING_RECLAIMED_ROOMS {
             let room_jid = test_room_jid(&format!("bounded-reclaimed-{index}"));
-            assert!(registry
+            assert!(
+                registry
                 .ask(ReservePendingReclaimedRoom {
                     room_jid: room_jid.clone(),
                 })
                 .await
-                .expect("reserve reclaimed room"));
+                    .expect("reserve reclaimed room")
+            );
             if index % 2 == 0 {
                 registry
                     .ask(RememberPendingReclaimedRoom {
@@ -5693,13 +5835,15 @@ mod ownership_claims_tests {
         }
         for index in 0..MAX_PENDING_ROOM_RELEASES {
             let room_jid = test_room_jid(&format!("bounded-release-{index}"));
-            assert!(registry
+            assert!(
+                registry
                 .ask(RememberOrdinaryReleaseForTest {
                     room_jid: room_jid.clone(),
                     claim_fence: room_claim_fence(&room_jid, ClaimEpoch(index as i64 + 1)),
                 })
                 .await
-                .expect("remember release"));
+                    .expect("remember release")
+            );
         }
         wire_recording_store(&registry, Arc::new(RecordingDurableStore::default())).await;
 
@@ -5829,21 +5973,25 @@ mod ownership_claims_tests {
             .expect("create room before saturation");
         for index in 0..MAX_PENDING_ROOM_RELEASES {
             let release_jid = test_room_jid(&format!("{name}-release-{index}"));
-            assert!(registry
+            assert!(
+                registry
                 .ask(RememberOrdinaryReleaseForTest {
                     room_jid: release_jid.clone(),
                     claim_fence: room_claim_fence(&release_jid, ClaimEpoch(index as i64 + 1),),
                 })
                 .await
-                .expect("fill release inventory"));
+                    .expect("fill release inventory")
+            );
         }
         for index in 0..MAX_PENDING_RECLAIMED_ROOMS {
-            assert!(registry
+            assert!(
+                registry
                 .ask(ReservePendingReclaimedRoom {
                     room_jid: test_room_jid(&format!("{name}-reclaimed-{index}")),
                 })
                 .await
-                .expect("fill reclaimed inventory"));
+                    .expect("fill reclaimed inventory")
+            );
         }
         identity.rotate(foreign_identity()).await;
         claim_store.fail_next_release();
@@ -5863,19 +6011,23 @@ mod ownership_claims_tests {
         let (registry, claim_store, _identity, room_jid, owner) =
             saturated_registry_with_deposed_room("saturated-demotion").await;
 
-        assert!(registry
+        assert!(
+            registry
             .ask(DemoteRoomIfOwner {
                 room_jid: room_jid.clone(),
                 owner,
             })
             .await
-            .expect("demote old-identity room"));
-        assert!(registry
+                .expect("demote old-identity room")
+        );
+        assert!(
+            registry
             .ask(IsPendingRoomReleaseOnly {
                 room_jid: room_jid.clone(),
             })
             .await
-            .expect("deposed fence remains typed"));
+                .expect("deposed fence remains typed")
+        );
         assert_eq!(
             registry
                 .ask(PendingRoomOwnershipResponsibilityCountForTest)
@@ -5884,11 +6036,13 @@ mod ownership_claims_tests {
             MAX_PENDING_ROOM_OWNERSHIP_RESPONSIBILITIES + 1,
             "moving the deposed entry into release state is slot-neutral"
         );
-        assert!(claim_store
+        assert!(
+            claim_store
             .current_claim(&Entity::new(EntityType::RoomActor, room_jid.to_string()))
             .await
             .expect("claim lookup")
-            .is_some());
+                .is_some()
+        );
         registry.kill();
     }
 
@@ -5907,12 +6061,14 @@ mod ownership_claims_tests {
                 .expect("evict deposed room"),
             DestroyRoomOutcome::Destroyed
         );
-        assert!(registry
+        assert!(
+            registry
             .ask(IsPendingRoomReleaseOnly {
                 room_jid: room_jid.clone(),
             })
             .await
-            .expect("deposed fence remains typed"));
+                .expect("deposed fence remains typed")
+        );
         assert_eq!(
             registry
                 .ask(PendingRoomOwnershipResponsibilityCountForTest)
@@ -5921,11 +6077,13 @@ mod ownership_claims_tests {
             MAX_PENDING_ROOM_OWNERSHIP_RESPONSIBILITIES + 1,
             "deposed eviction transfers rather than discards the saturated responsibility"
         );
-        assert!(claim_store
+        assert!(
+            claim_store
             .current_claim(&Entity::new(EntityType::RoomActor, room_jid.to_string()))
             .await
             .expect("claim lookup")
-            .is_some());
+                .is_some()
+        );
         registry.kill();
     }
 
@@ -5960,18 +6118,22 @@ mod ownership_claims_tests {
         ));
         allow.notify_one();
         tokio::task::yield_now().await;
-        assert!(registry
+        assert!(
+            registry
             .ask(GetRoom {
                 room_jid: room_jid.clone(),
             })
             .await
             .expect("lookup after terminal drain")
-            .is_none());
-        assert!(claim_store
+                .is_none()
+        );
+        assert!(
+            claim_store
             .current_claim(&entity)
             .await
             .expect("claim lookup")
-            .is_none());
+                .is_none()
+        );
     }
 
     #[tokio::test]
@@ -6015,18 +6177,22 @@ mod ownership_claims_tests {
                 retained: 0,
             }
         );
-        assert!(registry
+        assert!(
+            registry
             .ask(PendingUnpublishedDestroyForTest {
                 room_jid: room_jid.clone(),
             })
             .await
             .expect("pending unpublished after drain")
-            .is_none());
-        assert!(claim_store
+                .is_none()
+        );
+        assert!(
+            claim_store
             .current_claim(&entity)
             .await
             .expect("claim lookup after drain")
-            .is_none());
+                .is_none()
+        );
         assert_eq!(
             store
                 .deleted_rooms
@@ -6057,13 +6223,15 @@ mod ownership_claims_tests {
         .await;
         for index in 0..MAX_PENDING_ROOM_RELEASES {
             let backlog_jid = test_room_jid(&format!("terminal-unpublished-retained-{index}"));
-            assert!(registry
+            assert!(
+                registry
                 .ask(RememberOrdinaryReleaseForTest {
                     room_jid: backlog_jid.clone(),
                     claim_fence: room_claim_fence(&backlog_jid, ClaimEpoch(index as i64 + 1)),
                 })
                 .await
-                .expect("fill release backlog"));
+                    .expect("fill release backlog")
+            );
         }
 
         let room_jid = test_room_jid("terminal-unpublished-release-failure");
@@ -6095,19 +6263,23 @@ mod ownership_claims_tests {
                 retained: 1,
             }
         );
-        assert!(registry
+        assert!(
+            registry
             .ask(PendingUnpublishedDestroyForTest {
                 room_jid: room_jid.clone(),
             })
             .await
             .expect("pending unpublished after failed release")
-            .is_none());
-        assert!(registry
+                .is_none()
+        );
+        assert!(
+            registry
             .ask(IsPendingRoomReleaseOnly {
                 room_jid: room_jid.clone(),
             })
             .await
-            .expect("exact release retained after failed shutdown cleanup"));
+                .expect("exact release retained after failed shutdown cleanup")
+        );
         assert_eq!(
             registry
                 .ask(GetPendingRoomReleaseBacklog)
@@ -6117,11 +6289,13 @@ mod ownership_claims_tests {
             1,
             "after terminal drain releases the saturated backlog, the unpublished room's failed exact release must remain retained as the lone pending exact responsibility"
         );
-        assert!(claim_store
+        assert!(
+            claim_store
             .current_claim(&entity)
             .await
             .expect("claim after failed shutdown release")
-            .is_some());
+                .is_some()
+        );
         assert_eq!(
             store
                 .deleted_rooms
@@ -6168,13 +6342,15 @@ mod ownership_claims_tests {
                 if *room == room_jid
         ));
         allow.notify_one();
-        assert!(registry
+        assert!(
+            registry
             .ask(GetRoom {
                 room_jid: room_jid.clone(),
             })
             .await
             .expect("lookup after destroy")
-            .is_none());
+                .is_none()
+        );
         tokio::time::timeout(std::time::Duration::from_secs(1), async {
             loop {
                 if claim_store
@@ -6287,11 +6463,13 @@ mod ownership_claims_tests {
                 .expect("destroy pending room"),
             DestroyRoomOutcome::Destroyed,
         );
-        assert!(claim_store
+        assert!(
+            claim_store
             .current_claim(&entity)
             .await
             .expect("claim lookup after destroy")
-            .is_none());
+                .is_none()
+        );
 
         allow.notify_one();
         assert!(matches!(
@@ -6299,19 +6477,23 @@ mod ownership_claims_tests {
             Err(SendError::HandlerError(RoomRegistryError::OwnershipUnavailable(ref room)))
                 if *room == room_jid
         ));
-        assert!(registry
+        assert!(
+            registry
             .ask(GetRoom {
                 room_jid: room_jid.clone(),
             })
             .await
             .expect("room lookup")
-            .is_none());
-        assert!(store
+                .is_none()
+        );
+        assert!(
+            store
             .persisted_room_states
             .lock()
             .expect("persisted room states")
             .get(&room_jid)
-            .is_none());
+                .is_none()
+        );
     }
 
     #[tokio::test]
@@ -6377,6 +6559,12 @@ mod ownership_claims_tests {
             vec![Some(attempt)],
             "the pending terminal transition must arm the registered completion"
         );
+        assert!(matches!(
+            store.destroy_intents.lock().expect("lock").as_slice(),
+            [crate::muc::RoomDurableMutation::DestroyAndReleaseClaim {
+                completion_attempt: Some(recorded_attempt)
+            }] if *recorded_attempt == attempt
+        ));
         {
             let effects = store.destroy_effects.lock().expect("lock");
             assert!(matches!(
@@ -6476,13 +6664,15 @@ mod ownership_claims_tests {
             .await
             .expect("restore started");
 
-        assert!(registry
+        assert!(
+            registry
             .ask(DemoteRoomIfOwner {
                 room_jid: room_jid.clone(),
                 owner: this_identity(),
             })
             .await
-            .expect("demote pending room"));
+                .expect("demote pending room")
+        );
         assert!(matches!(
             create.await.expect("create task"),
             Err(SendError::HandlerError(RoomRegistryError::OwnershipUnavailable(ref room)))
@@ -6490,13 +6680,15 @@ mod ownership_claims_tests {
         ));
         allow.notify_one();
         tokio::task::yield_now().await;
-        assert!(registry
+        assert!(
+            registry
             .ask(GetRoom {
                 room_jid: room_jid.clone(),
             })
             .await
             .expect("lookup after demotion")
-            .is_none());
+                .is_none()
+        );
         tokio::time::timeout(std::time::Duration::from_secs(1), async {
             loop {
                 if claim_store
@@ -6546,11 +6738,13 @@ mod ownership_claims_tests {
             Err(SendError::HandlerError(RoomRegistryError::OwnershipUnavailable(ref room)))
                 if *room == jid
         ));
-        assert!(registry
+        assert!(
+            registry
             .ask(GetRoom { room_jid: jid })
             .await
             .expect("room lookup")
-            .is_none());
+                .is_none()
+        );
     }
 
     #[tokio::test]
@@ -6585,13 +6779,15 @@ mod ownership_claims_tests {
                 RoomRegistryError::OwnershipReconciliationPending(ref room)
             )) if *room == jid
         ));
-        assert!(registry
+        assert!(
+            registry
             .ask(GetRoom {
                 room_jid: jid.clone(),
             })
             .await
             .expect("room lookup")
-            .is_none());
+                .is_none()
+        );
 
         registry
             .ask(GetOrCreateRoom {
@@ -6639,11 +6835,13 @@ mod ownership_claims_tests {
                 RoomRegistryError::OwnershipReconciliationPending(ref room)
             )) if *room == jid
         ));
-        assert!(registry
+        assert!(
+            registry
             .ask(GetRoom { room_jid: jid })
             .await
             .expect("room lookup")
-            .is_none());
+                .is_none()
+        );
     }
 
     #[tokio::test]
@@ -6800,18 +6998,22 @@ mod ownership_claims_tests {
                 RoomRegistryError::OwnershipUnavailable(room)
             )) if room == jid
         ));
-        assert!(registry
+        assert!(
+            registry
             .ask(GetRoom {
                 room_jid: jid.clone(),
             })
             .await
             .expect("room lookup after failed restore")
-            .is_none());
-        assert!(claim_store
+                .is_none()
+        );
+        assert!(
+            claim_store
             .current_claim(&Entity::new(EntityType::RoomActor, jid.to_string()))
             .await
             .expect("claim lookup after failed restore")
-            .is_none());
+                .is_none()
+        );
         assert!(
             durable_store.current_claim_fence(&jid).is_none(),
             "a definitively released demand claim must clear its exact durable fence",
@@ -6852,13 +7054,15 @@ mod ownership_claims_tests {
                 .await,
             Err(SendError::HandlerError(RoomRegistryError::OwnershipUnavailable(room))) if room == jid
         ));
-        assert!(registry
+        assert!(
+            registry
             .ask(GetRoom {
                 room_jid: jid.clone(),
             })
             .await
             .expect("room lookup")
-            .is_none());
+                .is_none()
+        );
         assert_eq!(durable_store.load_calls.load(Ordering::SeqCst), 1);
         assert!(durable_store.current_claim_fence(&jid).is_none());
         assert_eq!(
@@ -6919,18 +7123,22 @@ mod ownership_claims_tests {
         .await
         .expect("the old exact tuple receives terminal cleanup");
         assert_eq!(claim_store.exact_release_calls.load(Ordering::SeqCst), 1);
-        assert!(claim_store
+        assert!(
+            claim_store
             .current_claim(&Entity::new(EntityType::RoomActor, jid.to_string()))
             .await
             .expect("claim lookup")
-            .is_none());
-        assert!(registry
+                .is_none()
+        );
+        assert!(
+            registry
             .ask(GetRoom {
                 room_jid: jid.clone(),
             })
             .await
             .expect("room lookup")
-            .is_none());
+                .is_none()
+        );
         assert!(durable_store.current_claim_fence(&jid).is_none());
     }
 
@@ -6973,11 +7181,13 @@ mod ownership_claims_tests {
             "restored-after-retry",
         );
         assert_eq!(durable_store.load_calls.load(Ordering::SeqCst), 2);
-        assert!(claim_store
+        assert!(
+            claim_store
             .current_claim(&Entity::new(EntityType::RoomActor, jid.to_string()))
             .await
             .expect("claim lookup")
-            .is_some());
+                .is_some()
+        );
     }
 
     fn reclaimed_snapshot(name: &str) -> DurableRoomState {
@@ -7170,23 +7380,29 @@ mod ownership_claims_tests {
             .await
             .expect("reconcile preparing row");
         assert_eq!(outcome, ReclaimedRoomOutcome::Released);
-        assert!(registry
+        assert!(
+            registry
             .ask(GetRoom {
                 room_jid: jid.clone(),
             })
             .await
             .expect("lookup after preparing recovery")
-            .is_none());
-        assert!(claim_store
+                .is_none()
+        );
+        assert!(
+            claim_store
             .current_claim(&Entity::new(EntityType::RoomActor, jid.to_string()))
             .await
             .expect("claim lookup after preparing recovery")
-            .is_none());
-        assert!(durable_store
+                .is_none()
+        );
+        assert!(
+            durable_store
             .find_preparing_room(&jid)
             .await
             .expect("preparing marker after recovery")
-            .is_none());
+                .is_none()
+        );
         assert_eq!(
             durable_store
                 .deleted_rooms
@@ -7227,13 +7443,15 @@ mod ownership_claims_tests {
             .await
             .expect("reconcile failed restore");
         assert_eq!(outcome, ReclaimedRoomOutcome::PendingRetry);
-        assert!(registry
+        assert!(
+            registry
             .ask(GetRoom {
                 room_jid: jid.clone(),
             })
             .await
             .expect("room lookup after failed restore")
-            .is_none());
+                .is_none()
+        );
         assert_eq!(
             registry
                 .ask(GetPendingReclaimedRoomBacklog)
@@ -7280,13 +7498,15 @@ mod ownership_claims_tests {
                 .expect("reconcile"),
             ReclaimedRoomOutcome::LostRace
         );
-        assert!(registry
+        assert!(
+            registry
             .ask(GetRoom {
                 room_jid: jid.clone(),
             })
             .await
             .expect("room lookup")
-            .is_none());
+                .is_none()
+        );
         assert_eq!(durable_store.load_calls.load(Ordering::SeqCst), 2);
         assert_eq!(
             claim_store.exact_release_calls.load(Ordering::SeqCst),
@@ -7345,11 +7565,13 @@ mod ownership_claims_tests {
             .await
             .expect("reconcile");
         assert_eq!(outcome, ReclaimedRoomOutcome::PendingRetry);
-        assert!(registry
+        assert!(
+            registry
             .ask(GetRoom { room_jid: jid })
             .await
             .expect("get")
-            .is_none());
+                .is_none()
+        );
     }
 
     #[tokio::test]
@@ -7466,16 +7688,20 @@ mod ownership_claims_tests {
             .expect("reconcile rotated work");
 
         assert_eq!(outcome, ReclaimedRoomOutcome::Released);
-        assert!(claim_store
+        assert!(
+            claim_store
             .current_claim(&Entity::new(EntityType::RoomActor, jid.to_string()))
             .await
             .expect("claim lookup")
-            .is_none());
-        assert!(registry
+                .is_none()
+        );
+        assert!(
+            registry
             .ask(GetRoom { room_jid: jid })
             .await
             .expect("room lookup")
-            .is_none());
+                .is_none()
+        );
     }
 
     #[tokio::test]
@@ -7524,16 +7750,20 @@ mod ownership_claims_tests {
             .expect("retry after rotation");
 
         assert_eq!(retried, ReclaimedRoomOutcome::Released);
-        assert!(claim_store
+        assert!(
+            claim_store
             .current_claim(&Entity::new(EntityType::RoomActor, jid.to_string()))
             .await
             .expect("claim lookup")
-            .is_none());
-        assert!(registry
+                .is_none()
+        );
+        assert!(
+            registry
             .ask(ListPendingReclaimedRooms { limit: 8 })
             .await
             .expect("pending retries")
-            .is_empty());
+                .is_empty()
+        );
     }
 
     #[tokio::test]
@@ -7588,16 +7818,20 @@ mod ownership_claims_tests {
         .await
         .expect("the locally superseded exact tuple is released once");
         assert_eq!(claim_store.exact_release_calls.load(Ordering::SeqCst), 1);
-        assert!(claim_store
+        assert!(
+            claim_store
             .current_claim(&Entity::new(EntityType::RoomActor, jid.to_string()))
             .await
             .expect("claim lookup")
-            .is_none());
-        assert!(registry
+                .is_none()
+        );
+        assert!(
+            registry
             .ask(ListPendingReclaimedRooms { limit: 8 })
             .await
             .expect("pending retries")
-            .is_empty());
+                .is_empty()
+        );
     }
 
     #[tokio::test]
@@ -7639,13 +7873,15 @@ mod ownership_claims_tests {
             Err(SendError::HandlerError(RoomRegistryError::OwnershipUnavailable(ref room)))
                 if *room == jid
         ));
-        assert!(registry
+        assert!(
+            registry
             .ask(GetRoom {
                 room_jid: jid.clone(),
             })
             .await
             .expect("lookup")
-            .is_none());
+                .is_none()
+        );
         assert_eq!(
             registry
                 .ask(GetPendingRoomReleaseBacklog)
@@ -7662,11 +7898,13 @@ mod ownership_claims_tests {
                 .expect("retry exact cleanup"),
             1
         );
-        assert!(claim_store
+        assert!(
+            claim_store
             .current_claim(&Entity::new(EntityType::RoomActor, jid.to_string()))
             .await
             .expect("claim lookup")
-            .is_none());
+                .is_none()
+        );
     }
 
     #[tokio::test]
@@ -7716,18 +7954,22 @@ mod ownership_claims_tests {
                 RoomRegistryError::OwnershipReconciliationPending(ref room)
             )) if *room == jid
         ));
-        assert!(registry
+        assert!(
+            registry
             .ask(GetRoom {
                 room_jid: jid.clone(),
             })
             .await
             .expect("room lookup")
-            .is_none());
-        assert!(claim_store
+                .is_none()
+        );
+        assert!(
+            claim_store
             .current_claim(&entity)
             .await
             .expect("released old claim")
-            .is_none());
+                .is_none()
+        );
     }
 
     #[tokio::test]
@@ -7787,18 +8029,22 @@ mod ownership_claims_tests {
             Err(SendError::HandlerError(RoomRegistryError::OwnershipUnavailable(ref room)))
                 if *room == jid
         ));
-        assert!(registry
+        assert!(
+            registry
             .ask(GetRoom {
                 room_jid: jid.clone(),
             })
             .await
             .expect("lookup")
-            .is_none());
-        assert!(claim_store
+                .is_none()
+        );
+        assert!(
+            claim_store
             .current_claim(&Entity::new(EntityType::RoomActor, jid.to_string()))
             .await
             .expect("claim lookup")
-            .is_none());
+                .is_none()
+        );
     }
 
     #[tokio::test]
@@ -8067,11 +8313,13 @@ mod ownership_claims_tests {
             "publication must re-fence after detached readiness preflight"
         );
         assert_eq!(registry.ask(RoomCount).await.expect("room count"), 0);
-        assert!(registry
+        assert!(
+            registry
             .ask(GetRoom { room_jid: jid })
             .await
             .expect("lost room lookup")
-            .is_none());
+                .is_none()
+        );
     }
 
     #[tokio::test(start_paused = true)]
@@ -8141,11 +8389,13 @@ mod ownership_claims_tests {
             0,
             "the actor must redrive transferred release responsibility without an external janitor"
         );
-        assert!(claim_store
+        assert!(
+            claim_store
             .current_claim(&Entity::new(EntityType::RoomActor, jid.to_string()))
             .await
             .expect("claim lookup")
-            .is_none());
+                .is_none()
+        );
     }
 
     #[tokio::test(start_paused = true)]
@@ -8207,11 +8457,13 @@ mod ownership_claims_tests {
                 retained: 0,
             }
         );
-        assert!(claim_store
+        assert!(
+            claim_store
             .current_claim(&Entity::new(EntityType::RoomActor, jid.to_string()))
             .await
             .expect("claim lookup")
-            .is_none());
+                .is_none()
+        );
         assert_eq!(
             registry
                 .ask(GetPendingRoomReleaseBacklog)
@@ -8276,11 +8528,13 @@ mod ownership_claims_tests {
                 .expect("reconcile acquisition"),
             1
         );
-        assert!(claim_store
+        assert!(
+            claim_store
             .current_claim(&Entity::new(EntityType::RoomActor, jid.to_string()))
             .await
             .expect("claim lookup")
-            .is_none());
+                .is_none()
+        );
     }
 
     #[tokio::test]
@@ -8370,11 +8624,13 @@ mod ownership_claims_tests {
                 .name,
             "clean retry snapshot"
         );
-        assert!(registry
+        assert!(
+            registry
             .ask(ListPendingReclaimedRooms { limit: 8 })
             .await
             .expect("list pending after adoption")
-            .is_empty());
+                .is_empty()
+        );
     }
 
     #[tokio::test]
@@ -8429,11 +8685,13 @@ mod ownership_claims_tests {
             .await
             .expect("retry");
         assert_eq!(retried, ReclaimedRoomOutcome::Released);
-        assert!(claim_store
+        assert!(
+            claim_store
             .current_claim(&Entity::new(EntityType::RoomActor, jid.to_string()))
             .await
             .expect("claim after retry")
-            .is_none());
+                .is_none()
+        );
     }
 
     #[tokio::test]
@@ -8493,11 +8751,13 @@ mod ownership_claims_tests {
                 .depth,
             0
         );
-        assert!(claim_store
+        assert!(
+            claim_store
             .current_claim(&Entity::new(EntityType::RoomActor, jid.to_string()))
             .await
             .expect("claim lookup")
-            .is_none());
+                .is_none()
+        );
     }
 
     #[tokio::test]
@@ -8595,19 +8855,23 @@ mod ownership_claims_tests {
                 .await
                 .expect("fill backlog");
         }
-        assert!(!registry
+        assert!(
+            !registry
             .ask(DestroyRoomIfInactive {
                 room_jid: jid,
                 expected_occupancy_revision: 0,
                 guard: SealGuard::Dormant,
             })
             .await
-            .expect("capacity refusal"));
-        assert!(!acquisition
+                .expect("capacity refusal")
+        );
+        assert!(
+            !acquisition
             .actor_ref
             .ask(IsSealed)
             .await
-            .expect("sealed probe"));
+                .expect("sealed probe")
+        );
     }
 
     #[tokio::test]
@@ -8615,22 +8879,26 @@ mod ownership_claims_tests {
         let registry = spawn_registry().await;
         for index in 0..MAX_PENDING_ROOM_RELEASES {
             let jid = test_room_jid(&format!("bounded-backlog-{index}"));
-            assert!(registry
+            assert!(
+                registry
                 .ask(RememberOrdinaryReleaseForTest {
                     room_jid: jid.clone(),
                     claim_fence: room_claim_fence(&jid, ClaimEpoch(index as i64)),
                 })
                 .await
-                .expect("fill backlog"));
+                    .expect("fill backlog")
+            );
         }
         let overflow_jid = test_room_jid("bounded-overflow");
-        assert!(!registry
+        assert!(
+            !registry
             .ask(RememberOrdinaryReleaseForTest {
                 room_jid: overflow_jid.clone(),
                 claim_fence: room_claim_fence(&overflow_jid, ClaimEpoch(999)),
             })
             .await
-            .expect("bounded insertion outcome"));
+                .expect("bounded insertion outcome")
+        );
         assert!(matches!(
             registry
                 .ask(GetOrCreateRoom {
@@ -8664,13 +8932,15 @@ mod ownership_claims_tests {
                 .acquire(&Entity::new(EntityType::RoomActor, jid.to_string()), &owner)
                 .await
                 .expect("seed current-owner claim");
-            assert!(registry
+            assert!(
+                registry
                 .ask(ReservePendingAcquisitionForTest {
                     room_jid: jid,
                     owner: owner.clone(),
                 })
                 .await
-                .expect("reserve acquisition"));
+                    .expect("reserve acquisition")
+            );
         }
         registry
             .ask(WireClusteringClaims {
@@ -8683,13 +8953,15 @@ mod ownership_claims_tests {
             .expect("wire seeded claim store");
         for index in 0..MAX_PENDING_ROOM_RELEASES {
             let jid = test_room_jid(&format!("fair-release-{index}"));
-            assert!(registry
+            assert!(
+                registry
                 .ask(RememberOrdinaryReleaseForTest {
                     room_jid: jid.clone(),
                     claim_fence: room_claim_fence(&jid, ClaimEpoch(index as i64)),
                 })
                 .await
-                .expect("fill release backlog"));
+                    .expect("fill release backlog")
+            );
         }
 
         assert_eq!(
@@ -8725,30 +8997,38 @@ mod ownership_claims_tests {
     async fn pending_only_room_is_shutdown_sealable_but_not_current_live_generation() {
         let registry = spawn_registry().await;
         let jid = test_room_jid("pending-only");
-        assert!(registry
+        assert!(
+            registry
             .ask(RememberOrdinaryReleaseForTest {
                 room_jid: jid.clone(),
                 claim_fence: room_claim_fence(&jid, ClaimEpoch(7)),
             })
             .await
-            .expect("remember pending-only generation"));
+                .expect("remember pending-only generation")
+        );
 
-        assert!(!registry
+        assert!(
+            !registry
             .ask(IsCurrentRoomPendingRelease {
                 room_jid: jid.clone(),
             })
             .await
-            .expect("generation-scoped live query"));
-        assert!(registry
+                .expect("generation-scoped live query")
+        );
+        assert!(
+            registry
             .ask(IsPendingRoomReleaseOnly { room_jid: jid })
             .await
-            .expect("shutdown pending-only query"));
-        assert!(!registry
+                .expect("shutdown pending-only query")
+        );
+        assert!(
+            !registry
             .ask(IsCurrentIdentityPendingRoomReleaseOnly {
                 room_jid: test_room_jid("pending-only"),
             })
             .await
-            .expect("current-identity shutdown query"));
+                .expect("current-identity shutdown query")
+        );
     }
 
     #[tokio::test]
@@ -8765,14 +9045,17 @@ mod ownership_claims_tests {
             })
             .await
             .expect("wire current identity");
-        assert!(registry
+        assert!(
+            registry
             .ask(RememberOrdinaryReleaseForTest {
                 room_jid: current_jid.clone(),
                 claim_fence: room_claim_fence(&current_jid, ClaimEpoch(8)),
             })
             .await
-            .expect("remember current fence"));
-        assert!(registry
+                .expect("remember current fence")
+        );
+        assert!(
+            registry
             .ask(RememberOrdinaryReleaseForTest {
                 room_jid: stale_jid.clone(),
                 claim_fence: RoomClaimFenceContext::new(
@@ -8782,20 +9065,25 @@ mod ownership_claims_tests {
                 ),
             })
             .await
-            .expect("remember stale fence"));
+                .expect("remember stale fence")
+        );
 
-        assert!(registry
+        assert!(
+            registry
             .ask(IsCurrentIdentityPendingRoomReleaseOnly {
                 room_jid: current_jid,
             })
             .await
-            .expect("current fence query"));
-        assert!(!registry
+                .expect("current fence query")
+        );
+        assert!(
+            !registry
             .ask(IsCurrentIdentityPendingRoomReleaseOnly {
                 room_jid: stale_jid,
             })
             .await
-            .expect("stale fence query"));
+                .expect("stale fence query")
+        );
     }
 
     #[tokio::test]
@@ -8812,20 +9100,24 @@ mod ownership_claims_tests {
             .await
             .expect("create room")
             .actor_ref;
-        assert!(registry
+        assert!(
+            registry
             .ask(RememberOrdinaryReleaseForTest {
                 room_jid: jid.clone(),
                 claim_fence: room_claim_fence(&jid, ClaimEpoch(77)),
             })
             .await
-            .expect("remember exact pending responsibility"));
+                .expect("remember exact pending responsibility")
+        );
         actor.kill();
         actor.wait_for_shutdown().await;
 
-        assert!(registry
+        assert!(
+            registry
             .ask(IsPendingRoomReleaseOnly { room_jid: jid })
             .await
-            .expect("dead-entry pending-only query"));
+                .expect("dead-entry pending-only query")
+        );
     }
 
     #[tokio::test]
@@ -8846,13 +9138,15 @@ mod ownership_claims_tests {
         actor.wait_for_shutdown().await;
         for index in 0..MAX_PENDING_ROOM_RELEASES {
             let jid = test_room_jid(&format!("dead-progress-{index}"));
-            assert!(registry
+            assert!(
+                registry
                 .ask(RememberOrdinaryReleaseForTest {
                     room_jid: jid.clone(),
                     claim_fence: room_claim_fence(&jid, ClaimEpoch(index as i64 + 100)),
                 })
                 .await
-                .expect("fill backlog"));
+                    .expect("fill backlog")
+            );
         }
 
         assert!(matches!(
@@ -8945,12 +9239,14 @@ mod ownership_claims_tests {
             .await
             .expect("wire");
         let jid = test_room_jid("terminal-reservation-handoff");
-        assert!(registry
+        assert!(
+            registry
             .ask(ReservePendingReclaimedRoom {
                 room_jid: jid.clone(),
             })
             .await
-            .expect("reserve before steal"));
+                .expect("reserve before steal")
+        );
         let entity = Entity::new(EntityType::RoomActor, jid.to_string());
         claim_store
             .acquire(&entity, &owner)
@@ -8972,11 +9268,13 @@ mod ownership_claims_tests {
                 retained: 0,
             }
         );
-        assert!(claim_store
+        assert!(
+            claim_store
             .current_claim(&entity)
             .await
             .expect("read drained claim")
-            .is_none());
+                .is_none()
+        );
         assert_eq!(
             registry
                 .ask(GetPendingReclaimedRoomBacklog)
@@ -9009,13 +9307,15 @@ mod ownership_claims_tests {
             .acquire(&entity, &owner)
             .await
             .expect("seed exact claim");
-        assert!(registry
+        assert!(
+            registry
             .ask(RememberOrdinaryReleaseForTest {
                 room_jid: jid.clone(),
                 claim_fence: RoomClaimFenceContext::new(entity.clone(), owner, epoch),
             })
             .await
-            .expect("remember pending exact release"));
+                .expect("remember pending exact release")
+        );
 
         let outcome = registry
             .ask(DrainRoomOwnershipForShutdown {
@@ -9032,11 +9332,13 @@ mod ownership_claims_tests {
                 retained: 0,
             }
         );
-        assert!(claim_store
+        assert!(
+            claim_store
             .current_claim(&entity)
             .await
             .expect("read drained claim")
-            .is_none());
+                .is_none()
+        );
         assert_eq!(
             registry
                 .ask(GetPendingRoomReleaseBacklog)
@@ -9063,12 +9365,14 @@ mod ownership_claims_tests {
             .expect("wire");
         let jid = test_room_jid("terminal-late-steal-commit");
         let entity = Entity::new(EntityType::RoomActor, jid.to_string());
-        assert!(registry
+        assert!(
+            registry
             .ask(ReservePendingReclaimedRoom {
                 room_jid: jid.clone(),
             })
             .await
-            .expect("reserve before steal"));
+                .expect("reserve before steal")
+        );
 
         let before_commit = registry
             .ask(DrainRoomOwnershipForShutdown {
@@ -9112,11 +9416,13 @@ mod ownership_claims_tests {
                 retained: 0,
             }
         );
-        assert!(claim_store
+        assert!(
+            claim_store
             .current_claim(&entity)
             .await
             .expect("read drained late claim")
-            .is_none());
+                .is_none()
+        );
         assert_eq!(
             registry
                 .ask(GetPendingReclaimedRoomBacklog)
@@ -9144,12 +9450,14 @@ mod ownership_claims_tests {
             .await
             .expect("wire");
         let jid = test_room_jid("terminal-reservation-release-failure");
-        assert!(registry
+        assert!(
+            registry
             .ask(ReservePendingReclaimedRoom {
                 room_jid: jid.clone(),
             })
             .await
-            .expect("reserve before steal"));
+                .expect("reserve before steal")
+        );
 
         let outcome = registry
             .ask(DrainRoomOwnershipForShutdown {
@@ -9165,12 +9473,14 @@ mod ownership_claims_tests {
                 retained: 1,
             }
         );
-        assert!(registry
+        assert!(
+            registry
             .ask(IsCurrentIdentityPendingRoomReleaseOnly {
                 room_jid: jid.clone(),
             })
             .await
-            .expect("typed exact-release inventory"));
+                .expect("typed exact-release inventory")
+        );
         assert_eq!(
             registry
                 .ask(GetPendingReclaimedRoomBacklog)
@@ -9186,10 +9496,12 @@ mod ownership_claims_tests {
                 .expect("retry exact release"),
             1
         );
-        assert!(!registry
+        assert!(
+            !registry
             .ask(IsPendingRoomReleaseOnly { room_jid: jid })
             .await
-            .expect("exact fence cleared after successful retry"));
+                .expect("exact fence cleared after successful retry")
+        );
     }
 
     #[tokio::test]
@@ -9213,12 +9525,14 @@ mod ownership_claims_tests {
             .acquire(&entity, &owner)
             .await
             .expect("seed active claim");
-        assert!(registry
+        assert!(
+            registry
             .ask(ReservePendingReclaimedRoom {
                 room_jid: jid.clone(),
             })
             .await
-            .expect("reserve before terminal fencing"));
+                .expect("reserve before terminal fencing")
+        );
         identity.disable().await;
 
         let outcome = registry
@@ -9235,15 +9549,19 @@ mod ownership_claims_tests {
                 retained: 0,
             }
         );
-        assert!(claim_store
+        assert!(
+            claim_store
             .current_claim(&entity)
             .await
             .expect("read drained claim")
-            .is_none());
-        assert!(!registry
+                .is_none()
+        );
+        assert!(
+            !registry
             .ask(IsPendingRoomReleaseOnly { room_jid: jid })
             .await
-            .expect("typed release cleared"));
+                .expect("typed release cleared")
+        );
     }
 
     #[tokio::test]
@@ -9295,22 +9613,28 @@ mod ownership_claims_tests {
                 retained: 0,
             }
         );
-        assert!(claim_store
+        assert!(
+            claim_store
             .current_claim(&entity)
             .await
             .expect("read drained claim")
-            .is_none());
-        assert!(registry
+                .is_none()
+        );
+        assert!(
+            registry
             .ask(ListPendingReclaimedRooms { limit: 8 })
             .await
             .expect("pending after drain")
-            .is_empty());
-        assert!(!registry
+                .is_empty()
+        );
+        assert!(
+            !registry
             .ask(ReservePendingReclaimedRoom {
                 room_jid: jid.clone(),
             })
             .await
-            .expect("terminal reservation refusal"));
+                .expect("terminal reservation refusal")
+        );
 
         let demand = registry
             .ask(GetOrCreateRoom {
@@ -9412,12 +9736,14 @@ mod ownership_claims_tests {
             .await
             .expect("read live claim")
             .expect("live claim exists");
-        assert!(registry
+        assert!(
+            registry
             .ask(ReservePendingReclaimedRoom {
                 room_jid: jid.clone(),
             })
             .await
-            .expect("reserve ambiguous steal"));
+                .expect("reserve ambiguous steal")
+        );
 
         let outcome = registry
             .ask(DrainRoomOwnershipForShutdown {
@@ -9433,22 +9759,28 @@ mod ownership_claims_tests {
                 retained: 0,
             }
         );
-        assert!(claim_store
+        assert!(
+            claim_store
             .fence(&entity, &owner, snapshot.claim_epoch)
             .await
-            .expect("fence live claim"));
-        assert!(registry
+                .expect("fence live claim")
+        );
+        assert!(
+            registry
             .ask(GetRoom {
                 room_jid: jid.clone(),
             })
             .await
             .expect("get live room")
-            .is_some());
-        assert!(registry
+                .is_some()
+        );
+        assert!(
+            registry
             .ask(ListPendingReclaimedRooms { limit: 8 })
             .await
             .expect("pending after live duplicate cleanup")
-            .is_empty());
+                .is_empty()
+        );
     }
 
     #[tokio::test]
@@ -9545,10 +9877,12 @@ mod ownership_claims_tests {
 
         claim_store.allow_late_release.notify_one();
         claim_store.late_release_completed.notified().await;
-        assert!(claim_store
+        assert!(
+            claim_store
             .fence(&entity, &identity, live.claim_epoch)
             .await
-            .expect("fresh claim survives late old delete"));
+                .expect("fresh claim survives late old delete")
+        );
         assert!(acquisition.actor_ref.is_alive());
     }
 
@@ -9766,10 +10100,12 @@ mod ownership_claims_tests {
 
         claim_store.allow_late_release.notify_one();
         claim_store.late_release_completed.notified().await;
-        assert!(claim_store
+        assert!(
+            claim_store
             .fence(&entity, &identity, live.claim_epoch)
             .await
-            .expect("fresh claim survives late reclaimed delete"));
+                .expect("fresh claim survives late reclaimed delete")
+        );
         assert!(acquisition.actor_ref.is_alive());
     }
 
@@ -9818,11 +10154,13 @@ mod ownership_claims_tests {
             })
             .await
             .expect("ignore malformed reclaimed handoff");
-        assert!(registry
+        assert!(
+            registry
             .ask(ListPendingReclaimedRooms { limit: 8 })
             .await
             .expect("pending reclaimed rooms")
-            .is_empty());
+                .is_empty()
+        );
 
         assert_eq!(
             registry
@@ -9852,15 +10190,19 @@ mod ownership_claims_tests {
             .expect("get target after malformed reconciliation")
             .expect("target remains registered");
         assert_eq!(still_registered.id(), target.id());
-        assert!(claim_store
+        assert!(
+            claim_store
             .fence(&target_fence.entity, &owner, target_fence.epoch)
             .await
-            .expect("target claim lookup"));
-        assert!(registry
+                .expect("target claim lookup")
+        );
+        assert!(
+            registry
             .ask(ListPendingReclaimedRooms { limit: 8 })
             .await
             .expect("pending reclaimed rooms after reconciliation")
-            .is_empty());
+                .is_empty()
+        );
     }
 
     #[tokio::test]
@@ -9894,11 +10236,13 @@ mod ownership_claims_tests {
                 .await,
             ReclaimedRoomOutcome::LostRace,
         );
-        assert!(claim_store
+        assert!(
+            claim_store
             .current_claim(&target_entity)
             .await
             .expect("target claim lookup")
-            .is_some());
+                .is_some()
+        );
         assert!(registry.pending_reclaimed_rooms.is_empty());
     }
 
@@ -9916,12 +10260,14 @@ mod ownership_claims_tests {
             .await
             .expect("wire");
         let jid = test_room_jid("reserved-reclaimed-blocks-demand");
-        assert!(registry
+        assert!(
+            registry
             .ask(ReservePendingReclaimedRoom {
                 room_jid: jid.clone(),
             })
             .await
-            .expect("reserve reclaimed room"));
+                .expect("reserve reclaimed room")
+        );
 
         assert!(matches!(
             registry
@@ -9937,11 +10283,13 @@ mod ownership_claims_tests {
             ))
                 if blocked == jid
         ));
-        assert!(claim_store
+        assert!(
+            claim_store
             .current_claim(&Entity::new(EntityType::RoomActor, jid.to_string()))
             .await
             .expect("claim lookup")
-            .is_none());
+                .is_none()
+        );
     }
 
     #[tokio::test(start_paused = true)]
@@ -9970,17 +10318,21 @@ mod ownership_claims_tests {
             .await
             .expect("bounded reconcile");
         assert_eq!(first, ReclaimedRoomOutcome::PendingRetry);
-        assert!(registry
+        assert!(
+            registry
             .ask(ListPendingReclaimedRooms { limit: 8 })
             .await
             .expect("registry remains responsive after timeout")
             .iter()
-            .any(|entry| entry.room_jid == jid && entry.claim_fence.epoch == epoch));
-        assert!(claim_store
+                .any(|entry| entry.room_jid == jid && entry.claim_fence.epoch == epoch)
+        );
+        assert!(
+            claim_store
             .current_claim(&Entity::new(EntityType::RoomActor, jid.to_string()))
             .await
             .expect("claim retained")
-            .is_some());
+                .is_some()
+        );
 
         claim_store.set_release_delay(std::time::Duration::ZERO);
         let retried = registry
@@ -10437,26 +10789,30 @@ mod ownership_claims_tests {
             ))
         ));
 
-        assert!(registry
+        assert!(
+            registry
             .ask(DestroyRoomIfInactive {
                 room_jid: room_jid.clone(),
                 expected_occupancy_revision: 0,
                 guard: SealGuard::Dormant,
             })
             .await
-            .expect("typed inactive destroy"));
+                .expect("typed inactive destroy")
+        );
         actor.wait_for_shutdown().await;
         assert!(
             !actor.is_alive(),
             "the deposed ActorRef must be hard-killed"
         );
-        assert!(registry
+        assert!(
+            registry
             .ask(GetRoom {
                 room_jid: room_jid.clone(),
             })
             .await
             .expect("room lookup")
-            .is_none());
+                .is_none()
+        );
         assert_eq!(claim_store.release_calls.load(Ordering::SeqCst), 0);
         assert!(durable_store.current_claim_fence(&room_jid).is_none());
         assert!(durable_store.deleted_rooms.lock().expect("lock").is_empty());
@@ -10538,28 +10894,34 @@ mod ownership_claims_tests {
 
         for index in 0..MAX_PENDING_ROOM_RELEASES {
             let pending_jid = test_room_jid(&format!("sealed-reap-backlog-{index}"));
-            assert!(registry
+            assert!(
+                registry
                 .ask(RememberOrdinaryReleaseForTest {
                     room_jid: pending_jid.clone(),
                     claim_fence: room_claim_fence(&pending_jid, ClaimEpoch(index as i64)),
                 })
                 .await
-                .expect("fill exact-release backlog"));
+                    .expect("fill exact-release backlog")
+            );
         }
 
-        assert!(!registry
+        assert!(
+            !registry
             .ask(ReapSealedRoom {
                 room_jid: inactive_jid.clone(),
             })
             .await
-            .expect("ordinary reaper remains fenced"));
-        assert!(registry
+                .expect("ordinary reaper remains fenced")
+        );
+        assert!(
+            registry
             .ask(GetRoom {
                 room_jid: inactive_jid,
             })
             .await
             .expect("get inactive target")
-            .is_some());
+                .is_some()
+        );
 
         durable_store.fence_lost.store(true, Ordering::SeqCst);
         let join = deposed_actor
@@ -10578,21 +10940,25 @@ mod ownership_claims_tests {
             ))
         ));
 
-        assert!(registry
+        assert!(
+            registry
             .ask(ReapSealedRoom {
                 room_jid: deposed_jid.clone(),
             })
             .await
-            .expect("deposed reaper bypasses backlog"));
+                .expect("deposed reaper bypasses backlog")
+        );
         deposed_actor.wait_for_shutdown().await;
         assert!(!deposed_actor.is_alive());
-        assert!(registry
+        assert!(
+            registry
             .ask(GetRoom {
                 room_jid: deposed_jid.clone(),
             })
             .await
             .expect("get deposed target")
-            .is_none());
+                .is_none()
+        );
         assert!(durable_store.deleted_rooms.lock().expect("lock").is_empty());
         assert_eq!(
             claim_store.release_calls.load(Ordering::SeqCst),
@@ -10659,19 +11025,23 @@ mod ownership_claims_tests {
             ))
         ));
 
-        assert!(registry
+        assert!(
+            registry
             .ask(ReapSealedRoom {
                 room_jid: room_jid.clone(),
             })
             .await
-            .expect("reap identity-rotated actor"));
+                .expect("reap identity-rotated actor")
+        );
         actor.wait_for_shutdown().await;
         assert!(!actor.is_alive());
-        assert!(claim_store
+        assert!(
+            claim_store
             .current_claim(&entity)
             .await
             .expect("old exact claim lookup")
-            .is_none());
+                .is_none()
+        );
         assert!(durable_store.current_claim_fence(&room_jid).is_none());
     }
 }

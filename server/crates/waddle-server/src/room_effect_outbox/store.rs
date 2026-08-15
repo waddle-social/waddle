@@ -73,7 +73,7 @@ impl RoomEffectOutboxStore {
         let mut ordinal = waddle_xmpp::muc::RoomEffectOrdinal::first();
         let mut ordinals = Vec::with_capacity(effects.effects().len());
         for effect in effects.effects() {
-            tx.execute("INSERT INTO clustering_muc_room_effects (lifecycle_id, revision, ordinal, room_jid, kind, terminal, payload_json, available_at_ms, superseded, origin_instance_id, producing_node, lease_token, leased_at_ms, attempt_count, last_error, created_at_ms) VALUES (?, ?, ?, ?, ?, ?, ?, ?, FALSE, ?, ?, NULL, NULL, 0, NULL, ?)", crate::db_params![lifecycle.to_string(), revision.as_i64(), ordinal.as_i64(), room_jid.ok_or(RoomEffectOutboxError::InvalidPayload)?.to_string(), effect.kind().as_db_str(), effect.is_terminal(), encode_effect(effect)?, available_at_ms, origin.as_str(), producing_node.clone(), now_ms]).await?;
+            tx.execute("INSERT INTO clustering_muc_room_effects (lifecycle_id, revision, ordinal, room_jid, kind, terminal, payload_json, available_at_ms, superseded, origin_instance_id, producing_node, lease_token, leased_at_ms, attempt_count, last_error, created_at_ms) VALUES (?, ?, ?, ?, ?, (? <> 0), ?, ?, FALSE, ?, ?, NULL, NULL, 0, NULL, ?)", crate::db_params![lifecycle.to_string(), revision.as_i64(), ordinal.as_i64(), room_jid.ok_or(RoomEffectOutboxError::InvalidPayload)?.to_string(), effect.kind().as_db_str(), effect.is_terminal(), encode_effect(effect)?, available_at_ms, origin.as_str(), producing_node.clone(), now_ms]).await?;
             ordinals.push(ordinal);
             ordinal = ordinal
                 .next()

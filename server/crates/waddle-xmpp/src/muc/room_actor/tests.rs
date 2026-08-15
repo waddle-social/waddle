@@ -1189,18 +1189,22 @@ async fn role_none_kick_notifies_same_nick_sibling_sessions() {
         .await
         .expect("kick succeeds");
 
-    assert!(updates
+    assert!(
+        updates
         .presence_updates
         .iter()
         .any(|(recipient, presence)| {
             recipient == &alice_laptop && presence_has_status(presence, "307")
-        }));
-    assert!(updates
+            })
+    );
+    assert!(
+        updates
         .presence_updates
         .iter()
         .any(|(recipient, presence)| {
             recipient == &alice_phone && presence_has_status(presence, "307")
-        }));
+            })
+    );
     assert_eq!(actor.ask(OccupantCount).await.expect("count"), 0);
 }
 
@@ -1245,18 +1249,22 @@ async fn members_only_revocation_removes_every_nick_for_bare_jid() {
         .await
         .expect("revocation succeeds");
 
-    assert!(updates
+    assert!(
+        updates
         .presence_updates
         .iter()
         .any(|(recipient, presence)| {
             recipient == &alice_laptop && presence_has_status(presence, "321")
-        }));
-    assert!(updates
+            })
+    );
+    assert!(
+        updates
         .presence_updates
         .iter()
         .any(|(recipient, presence)| {
             recipient == &alice_phone && presence_has_status(presence, "321")
-        }));
+            })
+    );
     assert_eq!(actor.ask(OccupantCount).await.expect("count"), 0);
 }
 
@@ -4637,10 +4645,12 @@ async fn destroy_seal_retains_leave_without_emitting_effects_before_unseal() {
         0,
         "a destroy that reopens must not restore a session that departed while sealed"
     );
-    assert!(actor
+    assert!(
+        actor
         .ask(UnsealDestroy { attempt })
         .await
-        .expect("matching unseal reply"));
+            .expect("matching unseal reply")
+    );
     assert_eq!(
         actor.ask(OccupantCount).await.expect("occupant count"),
         0,
@@ -5494,6 +5504,42 @@ async fn no_op_affiliation_change_still_checks_ownership_when_deposed() {
         result,
         Err(SendError::HandlerError(AffiliationMutationError::NotOwner))
     ));
+}
+
+#[tokio::test]
+async fn set_subject_owned_commit_persists_zero_effect_rows() {
+    let store = FakeDurableStore::owned();
+    let actor = spawn_room_actor_with_store(store.clone()).await;
+    let setter: BareJid = "alice@example.com".parse().expect("valid jid");
+
+    actor
+        .ask(SetSubject {
+            texts: RoomSubjectTexts::from_iter([(String::new(), "new subject".to_string())]),
+            setter,
+            setter_nick: "alice".to_string(),
+            set_at: chrono::Utc::now(),
+        })
+        .await
+        .expect("subject update succeeds");
+
+    let saved_effects = store.saved_effects();
+    assert_eq!(saved_effects.len(), 1, "subject commit should persist once");
+    assert!(
+        saved_effects
+            .iter()
+            .all(|effects| effects.effects().is_empty()),
+        "subject mutations must not enqueue durable effect rows"
+    );
+    assert!(
+        actor
+            .ask(GetSnapshot)
+            .await
+            .expect("subject query")
+            .room
+            .subject
+            .is_some(),
+        "the successful subject commit must still update room state"
+    );
 }
 
 #[tokio::test]
@@ -6554,10 +6600,12 @@ async fn destroy_unseal_only_reopens_the_matching_attempt() {
             .expect("do not replace active destroy attempt"),
         RoomSealState::Destroying { attempt: first }
     );
-    assert!(actor
+    assert!(
+        actor
         .ask(UnsealDestroy { attempt: first })
         .await
-        .expect("matching unseal reply"));
+            .expect("matching unseal reply")
+    );
     assert_eq!(
         actor
             .ask(SealForDestroy { attempt: second })
@@ -6565,10 +6613,12 @@ async fn destroy_unseal_only_reopens_the_matching_attempt() {
             .expect("pre-seal newer destroy"),
         RoomSealState::Destroying { attempt: second }
     );
-    assert!(!actor
+    assert!(
+        !actor
         .ask(UnsealDestroy { attempt: first })
         .await
-        .expect("stale unseal reply"));
+            .expect("stale unseal reply")
+    );
     assert_eq!(
         actor.ask(GetRoomSealState).await.expect("seal state"),
         RoomSealState::Destroying { attempt: second }
