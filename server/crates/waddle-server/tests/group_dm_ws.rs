@@ -602,10 +602,19 @@ fn extract_field(frame: &str, var: &str) -> Option<String> {
     let marker_sq = format!(r#"var='{var}'"#);
     let idx = frame.find(&marker_dq).or_else(|| frame.find(&marker_sq))?;
     let after = &frame[idx..];
-    let open = after.find("<value>")?;
-    let inner = &after[open + "<value>".len()..];
-    let close = inner.find("</value>")?;
-    Some(inner[..close].to_string())
+    // An empty value may serialize self-closed (`<value/>`), which is
+    // XML-identical to `<value></value>`; accept whichever comes first.
+    let open = after.find("<value>");
+    let self_closed = after.find("<value/>");
+    match (open, self_closed) {
+        (Some(open), sc) if sc.is_none_or(|sc| open < sc) => {
+            let inner = &after[open + "<value>".len()..];
+            let close = inner.find("</value>")?;
+            Some(inner[..close].to_string())
+        }
+        (_, Some(_)) => Some(String::new()),
+        (_, None) => None,
+    }
 }
 
 fn is_result(frame: &str) -> bool {

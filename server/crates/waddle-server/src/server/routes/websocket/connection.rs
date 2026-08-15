@@ -2769,8 +2769,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn terminal_recovery_replay_recording_retains_inline_room_effect_reservations_for_retry()
-    {
+    async fn terminal_recovery_replay_recording_settles_inline_room_effect_reservations() {
         let state = super::super::tests::create_test_websocket_state().await;
         let room_jid = replay_completion_room_jid();
         let initiator: FullJid = "alice@example.com/device".parse().expect("initiator JID");
@@ -2802,17 +2801,28 @@ mod tests {
             1,
             "the initiator reply is retained in the terminal recovery replay buffer"
         );
-        assert_eq!(
-            state
-                .deps
-                .protocol
-                .room_effect_outbox
-                .queue_depth()
-                .await
-                .expect("queue depth"),
-            1,
-            "terminal recovery must retain the leased completion for janitor retry"
-        );
+        // Settlement runs on a spawned completion task; poll for the settled
+        // state instead of racing it. Round-4 semantics: a resumable session's
+        // terminal recovery buffer is a recovery-owning path, so recorded
+        // frames settle their completions (non-resumable sessions retain).
+        tokio::time::timeout(std::time::Duration::from_secs(10), async {
+            loop {
+                if state
+                    .deps
+                    .protocol
+                    .room_effect_outbox
+                    .queue_depth()
+                    .await
+                    .expect("queue depth")
+                    == 0
+                {
+                    return;
+                }
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("recorded resumable frames settle their completions");
     }
 
     #[tokio::test]
