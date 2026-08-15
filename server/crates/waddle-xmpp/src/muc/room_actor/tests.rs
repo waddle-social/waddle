@@ -1377,6 +1377,76 @@ async fn managed_members_only_enforcement_uses_explicit_affiliation_snapshot() {
 }
 
 #[tokio::test]
+async fn managed_members_only_enforcement_persists_survivor_voice_changes() {
+    let store = FakeDurableStore::owned();
+    let actor = spawn_room_actor_with_config_and_store(
+        RoomConfig {
+            members_only: false,
+            moderated: true,
+            ..RoomConfig::default()
+        },
+        store.clone(),
+    )
+    .await;
+    let alice = test_full_jid("alice");
+    actor
+        .ask(Join {
+            nick: "alice".to_string(),
+            real_jid: alice.clone(),
+            role: Role::Visitor,
+            affiliation: Affiliation::None,
+        })
+        .await
+        .expect("open moderated visitor joins");
+
+    let mut config = actor.ask(GetConfig).await.expect("config");
+    config.members_only = true;
+    let update = actor
+        .ask(UpdateConfig {
+            config,
+            effect_plan: ConfigEffectPlan::ManagedMembersOnlyFallback,
+        })
+        .await
+        .expect("members-only config");
+    let notification = update.notification.expect("config notification");
+
+    let applied = actor
+        .ask(EnforceMembersOnlyAffiliations {
+            affiliations: vec![(alice.to_bare(), Affiliation::Member)],
+            fallback_reservation: update.reservation,
+            config_status_codes: notification.status_codes.clone(),
+        })
+        .await
+        .expect("managed enforcement succeeds");
+    assert_eq!(
+        applied.voice_changes,
+        vec![(alice.clone(), Voice::Voiced)],
+        "the promoted survivor regains voice immediately"
+    );
+
+    let saved_effects = store.saved_effects();
+    let fused = &saved_effects[1];
+    match &fused.effects()[1] {
+        crate::muc::RoomEffect::AdminRemainingBroadcast {
+            presence_updates,
+            removed_sessions,
+            voice_changes,
+        } => {
+            assert!(presence_updates.is_empty());
+            assert!(removed_sessions.is_empty());
+            assert_eq!(
+                voice_changes,
+                &vec![crate::muc::OccupantVoiceChange {
+                    session: alice,
+                    voice: Voice::Voiced,
+                }]
+            );
+        }
+        other => panic!("expected remaining-broadcast effect, got {other:?}"),
+    }
+}
+
+#[tokio::test]
 async fn managed_members_only_enforcement_treats_missing_snapshot_entry_as_none() {
     let actor = spawn_room_actor_with_config(RoomConfig {
         members_only: false,
@@ -4423,6 +4493,55 @@ async fn update_config_durable_commit_allows_the_mutation_when_owned() {
 }
 
 #[tokio::test]
+async fn update_config_persists_moderation_flip_voice_changes() {
+    let store = FakeDurableStore::owned();
+    let actor = spawn_room_actor_with_store(store.clone()).await;
+    let alice = test_full_jid("alice");
+    actor
+        .ask(Join {
+            nick: "alice".to_string(),
+            real_jid: alice.clone(),
+            role: Role::Visitor,
+            affiliation: Affiliation::None,
+        })
+        .await
+        .expect("visitor joins unmoderated room");
+
+    let mut config = actor.ask(GetConfig).await.expect("config");
+    config.moderated = true;
+    actor
+        .ask(UpdateConfig {
+            config,
+            effect_plan: ConfigEffectPlan::DirectAudience,
+        })
+        .await
+        .expect("moderation flip persists");
+
+    let saved_effects = store.saved_effects();
+    match &saved_effects[0].effects()[0] {
+        crate::muc::RoomEffect::ConfigChanged {
+            status_codes,
+            recipients,
+            voice_changes,
+        } => {
+            assert_eq!(
+                status_codes,
+                &vec![crate::muc::MucConfigStatusCode::NonPrivacyConfigurationChange]
+            );
+            assert_eq!(recipients, &vec![alice.clone()]);
+            assert_eq!(
+                voice_changes,
+                &vec![crate::muc::OccupantVoiceChange {
+                    session: alice,
+                    voice: Voice::Muted,
+                }]
+            );
+        }
+        other => panic!("expected config-changed effect, got {other:?}"),
+    }
+}
+
+#[tokio::test]
 async fn update_config_durable_commit_fails_closed_on_transient_ownership_error() {
     let actor = spawn_room_actor_with_store(FakeDurableStore::transient_failure()).await;
     let original = actor.ask(GetConfig).await.expect("ask").members_only;
@@ -5431,10 +5550,138 @@ async fn zero_delta_managed_members_only_enforcement_still_commits_one_config_ef
     ));
     assert!(matches!(
         &fused.effects()[2],
-        crate::muc::RoomEffect::ConfigChanged { status_codes, recipients }
+        crate::muc::RoomEffect::ConfigChanged { status_codes, recipients, voice_changes }
             if status_codes == &notification.status_codes
                 && recipients.as_slice() == std::slice::from_ref(&alice)
+                && voice_changes.is_empty()
     ));
+}
+
+#[tokio::test]
+async fn managed_members_only_enforcement_dedupes_sibling_nick_322_effects() {
+    let store = FakeDurableStore::owned();
+    let actor = spawn_room_actor_with_config_and_store(
+        RoomConfig {
+            members_only: false,
+            ..RoomConfig::default()
+        },
+        store.clone(),
+    )
+    .await;
+    let owner = test_full_jid("owner");
+    let alice_laptop = test_full_jid_resource("alice", "laptop");
+    let alice_phone = test_full_jid_resource("alice", "phone");
+
+    for (nick, real_jid, affiliation_grant) in [
+        (
+            "owner",
+            owner.clone(),
+            JoinAffiliationGrant::Resolver(Affiliation::Owner),
+        ),
+        (
+            "alice",
+            alice_laptop.clone(),
+            JoinAffiliationGrant::Resolver(Affiliation::None),
+        ),
+        (
+            "alice-phone",
+            alice_phone.clone(),
+            JoinAffiliationGrant::Resolver(Affiliation::None),
+        ),
+    ] {
+        actor
+            .ask(JoinWithAffiliation {
+                sender_jid: real_jid,
+                nick: nick.to_owned(),
+                affiliation_grant,
+                local_domain: "example.com".to_owned(),
+                admission_revision: current_admission_revision(&actor).await,
+            })
+            .await
+            .expect("join");
+    }
+
+    let mut config = actor.ask(GetConfig).await.expect("current config");
+    config.members_only = true;
+    let update = actor
+        .ask(UpdateConfig {
+            config,
+            effect_plan: ConfigEffectPlan::ManagedMembersOnlyFallback,
+        })
+        .await
+        .expect("stage members-only fallback");
+    let notification = update.notification.expect("members-only notification");
+
+    actor
+        .ask(EnforceMembersOnlyAffiliations {
+            affiliations: vec![
+                (owner.to_bare(), Affiliation::Owner),
+                (alice_laptop.to_bare(), Affiliation::None),
+            ],
+            fallback_reservation: update.reservation,
+            config_status_codes: notification.status_codes.clone(),
+        })
+        .await
+        .expect("managed enforcement commits");
+
+    let saved_effects = store.saved_effects();
+    assert_eq!(
+        saved_effects.len(),
+        2,
+        "fallback plus exactly one fused effect"
+    );
+    let fused = &saved_effects[1];
+    assert_eq!(fused.effects().len(), 3);
+
+    match &fused.effects()[0] {
+        crate::muc::RoomEffect::AdminSelfNotify { updates } => {
+            let pairs: std::collections::BTreeSet<(String, String)> = updates
+                .iter()
+                .map(|update| (update.occupant.to_string(), update.recipient.to_string()))
+                .collect();
+            assert_eq!(updates.len(), 2, "one self 322 per removed nick");
+            assert_eq!(
+                pairs.len(),
+                2,
+                "duplicate sibling self-updates must not be persisted"
+            );
+        }
+        other => panic!("expected self-notify effect, got {other:?}"),
+    }
+
+    match &fused.effects()[1] {
+        crate::muc::RoomEffect::AdminRemainingBroadcast {
+            presence_updates,
+            removed_sessions,
+            voice_changes,
+        } => {
+            let pairs: std::collections::BTreeSet<(String, String)> = presence_updates
+                .iter()
+                .map(|update| (update.occupant.to_string(), update.recipient.to_string()))
+                .collect();
+            assert_eq!(
+                presence_updates.len(),
+                4,
+                "two removed nicks should fan out to the owner and sibling session once each"
+            );
+            assert_eq!(
+                pairs.len(),
+                4,
+                "duplicate sibling broadcasts must not be persisted"
+            );
+            let removed_sessions: std::collections::BTreeSet<String> =
+                removed_sessions.iter().map(ToString::to_string).collect();
+            assert_eq!(
+                removed_sessions,
+                std::collections::BTreeSet::from([
+                    alice_laptop.to_string(),
+                    alice_phone.to_string(),
+                ])
+            );
+            assert!(voice_changes.is_empty());
+        }
+        other => panic!("expected remaining-broadcast effect, got {other:?}"),
+    }
 }
 
 #[tokio::test]

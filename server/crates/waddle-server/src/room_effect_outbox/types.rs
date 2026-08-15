@@ -201,6 +201,7 @@ pub enum PersistedRoomEffect {
     ConfigChanged {
         status_codes: Vec<PersistedMucConfigStatusCode>,
         recipients: Vec<FullJid>,
+        voice_changes: Vec<PersistedOccupantVoiceChange>,
     },
     AdminSelfNotify {
         updates: Vec<OccupantPresenceUpdate>,
@@ -223,9 +224,17 @@ impl From<&RoomEffect> for PersistedRoomEffect {
             RoomEffect::ConfigChanged {
                 status_codes,
                 recipients,
+                voice_changes,
             } => Self::ConfigChanged {
                 status_codes: status_codes.iter().copied().map(Into::into).collect(),
                 recipients: recipients.clone(),
+                voice_changes: voice_changes
+                    .iter()
+                    .map(|v| PersistedOccupantVoiceChange {
+                        session: v.session.clone(),
+                        voice: v.voice.into(),
+                    })
+                    .collect(),
             },
             RoomEffect::AdminSelfNotify { updates } => Self::AdminSelfNotify {
                 updates: updates.clone(),
@@ -266,9 +275,17 @@ impl TryFrom<PersistedRoomEffect> for RoomEffect {
             PersistedRoomEffect::ConfigChanged {
                 status_codes,
                 recipients,
+                voice_changes,
             } => Self::ConfigChanged {
                 status_codes: status_codes.into_iter().map(Into::into).collect(),
                 recipients,
+                voice_changes: voice_changes
+                    .into_iter()
+                    .map(|v| OccupantVoiceChange {
+                        session: v.session,
+                        voice: v.voice.into(),
+                    })
+                    .collect(),
             },
             PersistedRoomEffect::AdminSelfNotify { updates } => Self::AdminSelfNotify { updates },
             PersistedRoomEffect::AdminRemainingBroadcast {

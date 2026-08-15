@@ -625,6 +625,11 @@ pub(super) async fn apply_muc_owner_config(
         })
         .await
     {
+        // If we have to compensate the committed config write, invalidate the
+        // deferred members-only sweep before awaiting rollback. Otherwise the
+        // guard's Drop would still spawn the stale 322 enforcement after the
+        // actor restored the previous config.
+        config_reservation.clear_members_only_enforcement();
         rollback_config_or_arm_reservation(
             state,
             &room_actor,
@@ -863,8 +868,8 @@ mod tests {
     use waddle_xmpp::ownership::NodeIdentity;
 
     use super::{
-        CommittedConfigReservationGuard, PendingMembersOnlyEnforcement,
-        PendingMembersOnlyEnforcementRequest,
+        rollback_config_or_arm_reservation, CommittedConfigReservationGuard,
+        PendingMembersOnlyEnforcement, PendingMembersOnlyEnforcementRequest,
     };
     use crate::room_effect_outbox::{
         RoomEffectEnqueue, RoomEffectKey, RoomEffectOriginInstanceId, RoomEffectProducingNode,
@@ -1122,6 +1127,116 @@ mod tests {
                 waddle_sfu::Identity::from_jid(alice),
             )],
             "detached unmanaged enforcement must still revoke the removed occupant from the SFU"
+        );
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn rollback_clears_deferred_members_only_enforcement_before_guard_drop() {
+        let sfu = Arc::new(RecordingSfu::default());
+        let state = create_test_websocket_state_with_sfu(sfu.clone()).await;
+        let room = room_jid();
+        let room_actor = get_or_create_room_actor(
+            state.as_ref(),
+            &room,
+            waddle_xmpp::muc::RoomConfig {
+                members_only: false,
+                ..waddle_xmpp::muc::RoomConfig::default()
+            },
+            "waddle".to_owned(),
+            "channel".to_owned(),
+        )
+        .await
+        .expect("create room")
+        .actor_ref;
+        let admin = full_jid("admin@example.test/desktop");
+        let alice = full_jid("alice@example.test/phone");
+        room_actor
+            .ask(JoinWithAffiliation {
+                sender_jid: admin.clone(),
+                nick: "admin".to_owned(),
+                affiliation_grant: JoinAffiliationGrant::Resolver(waddle_xmpp::Affiliation::Owner),
+                local_domain: "example.test".to_owned(),
+                admission_revision: 0,
+            })
+            .await
+            .expect("admin join");
+        room_actor
+            .ask(JoinWithAffiliation {
+                sender_jid: alice.clone(),
+                nick: "alice".to_owned(),
+                affiliation_grant: JoinAffiliationGrant::Resolver(waddle_xmpp::Affiliation::None),
+                local_domain: "example.test".to_owned(),
+                admission_revision: 0,
+            })
+            .await
+            .expect("alice join");
+        let previous_config = snapshot_room(state.as_ref(), &room).await.room.config;
+        let applied = room_actor
+            .ask(UpdateConfig {
+                config: waddle_xmpp::muc::RoomConfig {
+                    members_only: true,
+                    ..waddle_xmpp::muc::RoomConfig::default()
+                },
+                effect_plan: ConfigEffectPlan::DirectAudience,
+            })
+            .await
+            .expect("members-only config commit");
+        let (_admin_tx, mut admin_rx) = {
+            let (tx, rx) = mpsc::channel(8);
+            let _ = register_test_connection(state.as_ref(), &admin, tx).await;
+            ((), rx)
+        };
+        let (_alice_tx, mut alice_rx) = {
+            let (tx, rx) = mpsc::channel(8);
+            let _ = register_test_connection(state.as_ref(), &alice, tx).await;
+            ((), rx)
+        };
+
+        {
+            let mut guard =
+                CommittedConfigReservationGuard::new(state.as_ref(), applied.reservation);
+            guard.defer_to_members_only_enforcement(PendingMembersOnlyEnforcement {
+                actor: room_actor.clone(),
+                request: PendingMembersOnlyEnforcementRequest::Unmanaged,
+                fallback_reservation: guard.reservation().cloned(),
+                room_jid: room.clone(),
+                connections: state.deps.protocol.connection_registry.clone(),
+                sfu: state.deps.protocol.sfu.clone(),
+                arm_supervisor: state.deps.protocol.room_effect_arm_supervisor.clone(),
+            });
+            guard.clear_members_only_enforcement();
+            rollback_config_or_arm_reservation(
+                state.as_ref(),
+                &room_actor,
+                applied.revision,
+                previous_config.clone(),
+                guard.reservation(),
+            )
+            .await;
+        }
+
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        assert!(
+            admin_rx.try_recv().is_err(),
+            "rollback must not emit stale 322/config frames to remaining occupants"
+        );
+        assert!(
+            alice_rx.try_recv().is_err(),
+            "rollback must not emit stale 322/config frames to restored occupants"
+        );
+
+        let snapshot = snapshot_room(state.as_ref(), &room).await;
+        assert_eq!(
+            snapshot.room.config.members_only, previous_config.members_only,
+            "rollback must restore the original room config"
+        );
+        assert!(
+            snapshot.room.get_occupant("alice").is_some(),
+            "rollback must leave the restored occupant seated"
+        );
+        assert!(
+            sfu.snapshot().is_empty(),
+            "rollback must not revoke SFU access when the stale 322 sweep is cancelled"
         );
     }
 }

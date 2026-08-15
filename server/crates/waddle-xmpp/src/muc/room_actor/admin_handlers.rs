@@ -1,4 +1,7 @@
-use std::{collections::BTreeMap, convert::Infallible};
+use std::{
+    collections::{BTreeMap, BTreeSet},
+    convert::Infallible,
+};
 
 use jid::{BareJid, FullJid};
 use kameo::message::Context;
@@ -23,6 +26,17 @@ fn all_room_sessions(room: &MucRoom) -> Vec<FullJid> {
     room.occupants
         .values()
         .flat_map(|occupant| room.get_occupant_sessions(&occupant.nick))
+        .collect()
+}
+
+fn occupied_bare_jids(room: &MucRoom) -> Vec<BareJid> {
+    let mut seen = BTreeSet::new();
+    room.occupants
+        .values()
+        .filter_map(|occupant| {
+            let bare = occupant.real_jid.to_bare();
+            seen.insert(bare.clone()).then_some(bare)
+        })
         .collect()
 }
 
@@ -1062,12 +1076,7 @@ impl kameo::message::Message<EnforceMembersOnlyAffiliations> for RoomActor {
             config_status_codes,
         } = msg;
         let affiliations: BTreeMap<BareJid, Affiliation> = affiliations.into_iter().collect();
-        let occupied_jids: Vec<BareJid> = self
-            .room
-            .occupants
-            .values()
-            .map(|occupant| occupant.real_jid.to_bare())
-            .collect();
+        let occupied_jids = occupied_bare_jids(&self.room);
         if occupied_jids
             .iter()
             .any(|jid| self.invite_rollback_pending(jid))
@@ -1164,6 +1173,12 @@ impl kameo::message::Message<EnforceMembersOnlyAffiliations> for RoomActor {
                 self_updates,
                 remaining_updates,
                 applied.removed_by_moderation.clone(),
+                applied
+                    .voice_changes
+                    .iter()
+                    .cloned()
+                    .map(|(session, voice)| OccupantVoiceChange { session, voice })
+                    .collect(),
                 config_status_codes,
                 all_room_sessions(&staged_room),
             );

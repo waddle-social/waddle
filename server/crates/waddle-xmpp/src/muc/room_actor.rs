@@ -17,7 +17,7 @@ use super::durable::{
     RoomDurableMutation, RoomMutationCommit, WaddleId,
 };
 use super::pin::{PinStateChange, PinnedEntry};
-use super::{MucRoom, RoomConfig, RoomSubjectTexts, SubjectState};
+use super::{MucRoom, OccupantVoiceChange, RoomConfig, RoomSubjectTexts, SubjectState};
 use crate::types::{Affiliation, Role, Voice};
 
 /// A join-path ownership proof is fail-closed, but it must not monopolize the
@@ -1017,19 +1017,50 @@ impl RoomActor {
         })
     }
 
+    fn config_voice_changes_for_update(&self, next: &RoomConfig) -> Vec<OccupantVoiceChange> {
+        if self.room.config.moderated == next.moderated {
+            return Vec::new();
+        }
+
+        let current_moderation = self.room.moderation();
+        let next_moderation = crate::types::Moderation::from_moderated_flag(next.moderated);
+        self.room
+            .occupants
+            .values()
+            .flat_map(|occupant| {
+                let current_voice = occupant.role.voice(current_moderation);
+                let next_voice = occupant.role.voice(next_moderation);
+                (current_voice != next_voice)
+                    .then(|| {
+                        self.room
+                            .get_occupant_sessions(&occupant.nick)
+                            .into_iter()
+                            .map(move |session| OccupantVoiceChange {
+                                session,
+                                voice: next_voice,
+                            })
+                    })
+                    .into_iter()
+                    .flatten()
+            })
+            .collect()
+    }
+
     fn config_effects_for_update(
         &self,
         next: &RoomConfig,
         plan: ConfigEffectPlan,
     ) -> (super::RoomMutationEffects, Option<ConfigChangeNotification>) {
         let notification = self.config_notification_for_update(next, plan);
+        let voice_changes = self.config_voice_changes_for_update(next);
         let effects = notification
             .as_ref()
             .map(|notification| {
-                super::RoomMutationEffects::config(
+                super::RoomMutationEffects::config_with_voice_changes(
                     self.room.room_jid.clone(),
                     notification.status_codes.clone(),
                     notification.recipients.clone(),
+                    voice_changes,
                 )
             })
             .unwrap_or_else(super::RoomMutationEffects::none);

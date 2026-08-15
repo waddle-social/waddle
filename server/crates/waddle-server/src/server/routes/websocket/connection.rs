@@ -37,9 +37,10 @@ enum WebSocketAdmissionRevocation {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum ResponseBatchCompletionDisposition {
-    Complete,
-    DropForRetry,
+enum BatchCompletionOutcome {
+    Delivered,
+    RetainedForRecovery,
+    RetryOnly,
 }
 
 /// Revalidate immediately before returning the upgrade response, and again
@@ -1501,26 +1502,32 @@ async fn handle_inbound_text(
         BatchWriteOutcome::Continue => {
             conn.commit_server_stream_open_response();
             conn.publish_pending_sm_enable(state.as_ref());
-            settle_response_batch_completions(
+            let accepted_frame_indices: Vec<_> = (0..responses.frames.len()).collect();
+            settle_batch_completions(
                 state,
-                responses.completions,
-                completion_disposition_after_live_write(conn),
+                BatchCompletionOutcome::Delivered,
+                conn.sm_state.is_resumable(),
+                &accepted_frame_indices,
+                response_batch_completion_frames(responses),
             );
         }
         BatchWriteOutcome::TransportClosed | BatchWriteOutcome::DeferredCapExhausted => {
-            settle_response_batch_completions_for_frames(
+            settle_batch_completions(
                 state,
-                responses,
-                completion_disposition_after_live_write(conn),
+                BatchCompletionOutcome::RetainedForRecovery,
+                conn.sm_state.is_resumable(),
                 &write_report.accepted_frame_indices,
+                response_batch_completion_frames(responses),
             );
             return false;
         }
         BatchWriteOutcome::AuthorityRevoked => {
-            settle_response_batch_completions(
+            settle_batch_completions(
                 state,
-                responses.completions,
-                ResponseBatchCompletionDisposition::DropForRetry,
+                BatchCompletionOutcome::RetainedForRecovery,
+                conn.sm_state.is_resumable(),
+                &write_report.accepted_frame_indices,
+                response_batch_completion_frames(responses),
             );
             // No further frame was recorded or written. Any `<enable/>`
             // response that did reach the socket returned Continue and must
@@ -1847,33 +1854,17 @@ fn record_response_batch_for_replay(
 ) {
     let accepted_frame_indices =
         batch_write::record_remaining_for_replay(conn, responses.frames.iter().cloned(), policy);
-    settle_response_batch_completions_for_frames(
+    let outcome = match policy {
+        BatchSmPolicy::Record => BatchCompletionOutcome::RetainedForRecovery,
+        BatchSmPolicy::ReplaySuppressed => BatchCompletionOutcome::RetryOnly,
+    };
+    settle_batch_completions(
         state,
-        responses,
-        completion_disposition_after_replay_record(conn, policy),
+        outcome,
+        conn.sm_state.is_resumable(),
         &accepted_frame_indices,
+        response_batch_completion_frames(responses),
     );
-}
-
-fn completion_disposition_after_live_write(
-    conn: &WsConnState,
-) -> ResponseBatchCompletionDisposition {
-    if conn.sm_recovery_required {
-        ResponseBatchCompletionDisposition::DropForRetry
-    } else {
-        ResponseBatchCompletionDisposition::Complete
-    }
-}
-
-fn completion_disposition_after_replay_record(
-    conn: &WsConnState,
-    policy: BatchSmPolicy,
-) -> ResponseBatchCompletionDisposition {
-    if matches!(policy, BatchSmPolicy::Record) && !conn.sm_recovery_required {
-        ResponseBatchCompletionDisposition::Complete
-    } else {
-        ResponseBatchCompletionDisposition::DropForRetry
-    }
 }
 
 fn terminal_recovery_recording_is_full(conn: &WsConnState) -> bool {
@@ -1906,25 +1897,24 @@ fn response_batch_ends_with_websocket_stream_close(responses: &[ResponseFrame]) 
         .is_some_and(ResponseFrame::is_websocket_stream_close)
 }
 
-fn settle_response_batch_completions(
+fn response_batch_completion_frames(
+    responses: ResponseBatch,
+) -> Vec<(
+    crate::room_effect_outbox::drain::RoomEffectCompletion,
+    usize,
+)> {
+    responses
+        .completions
+        .into_iter()
+        .zip(responses.completion_frame_indices)
+        .collect()
+}
+
+fn complete_batch_completions(
     state: &Arc<WebSocketState>,
     completions: Vec<crate::room_effect_outbox::drain::RoomEffectCompletion>,
-    disposition: ResponseBatchCompletionDisposition,
 ) {
-    if !matches!(disposition, ResponseBatchCompletionDisposition::Complete) {
-        if !completions.is_empty() {
-            debug!(
-                retained = completions.len(),
-                "Retaining room effect completions for retry after response batch was not durably accepted"
-            );
-        }
-        return;
-    }
-    let mut seen = std::collections::HashSet::new();
     for completion in completions {
-        if !seen.insert((completion.key.clone(), completion.lease.clone())) {
-            continue;
-        }
         let state = Arc::clone(state);
         tokio::spawn(async move {
             match crate::room_effect_outbox::drain::complete_after_write(
@@ -1952,33 +1942,75 @@ fn settle_response_batch_completions(
     }
 }
 
-fn settle_response_batch_completions_for_frames(
+fn settle_batch_completions(
     state: &Arc<WebSocketState>,
-    responses: ResponseBatch,
-    accepted_disposition: ResponseBatchCompletionDisposition,
+    outcome: BatchCompletionOutcome,
+    resumable: bool,
     accepted_frame_indices: &[usize],
+    completion_frames: Vec<(
+        crate::room_effect_outbox::drain::RoomEffectCompletion,
+        usize,
+    )>,
+) {
+    let (completions_to_complete, retained) = select_batch_completions_to_complete(
+        outcome,
+        resumable,
+        accepted_frame_indices,
+        completion_frames,
+    );
+    if retained > 0 {
+        debug!(
+            retained,
+            ?outcome,
+            resumable,
+            "Retaining room effect completions for retry after response batch was not durably accepted"
+        );
+    }
+    complete_batch_completions(state, completions_to_complete);
+}
+
+fn select_batch_completions_to_complete(
+    outcome: BatchCompletionOutcome,
+    resumable: bool,
+    accepted_frame_indices: &[usize],
+    completion_frames: Vec<(
+        crate::room_effect_outbox::drain::RoomEffectCompletion,
+        usize,
+    )>,
+) -> (
+    Vec<crate::room_effect_outbox::drain::RoomEffectCompletion>,
+    usize,
 ) {
     let accepted_frame_indices: std::collections::HashSet<_> =
         accepted_frame_indices.iter().copied().collect();
-    let mut accepted_completions = Vec::new();
-    let mut retry_completions = Vec::new();
-    for (completion, frame_index) in responses
-        .completions
-        .into_iter()
-        .zip(responses.completion_frame_indices)
-    {
-        if accepted_frame_indices.contains(&frame_index) {
-            accepted_completions.push(completion);
+    let mut grouped = std::collections::HashMap::new();
+    for (completion, frame_index) in completion_frames {
+        let completion_key = (completion.key.clone(), completion.lease.clone());
+        grouped
+            .entry(completion_key)
+            .and_modify(
+                |(_, all_frames_accepted): &mut (
+                    crate::room_effect_outbox::drain::RoomEffectCompletion,
+                    bool,
+                )| {
+                    *all_frames_accepted &= accepted_frame_indices.contains(&frame_index)
+                },
+            )
+            .or_insert((completion, accepted_frame_indices.contains(&frame_index)));
+    }
+    let mut completions_to_complete = Vec::new();
+    let mut retained = 0usize;
+    for (_, (completion, all_frames_accepted)) in grouped {
+        let complete = all_frames_accepted
+            && (matches!(outcome, BatchCompletionOutcome::Delivered)
+                || (resumable && matches!(outcome, BatchCompletionOutcome::RetainedForRecovery)));
+        if complete {
+            completions_to_complete.push(completion);
         } else {
-            retry_completions.push(completion);
+            retained += 1;
         }
     }
-    settle_response_batch_completions(state, accepted_completions, accepted_disposition);
-    settle_response_batch_completions(
-        state,
-        retry_completions,
-        ResponseBatchCompletionDisposition::DropForRetry,
-    );
+    (completions_to_complete, retained)
 }
 
 #[cfg(test)]
@@ -2076,6 +2108,10 @@ mod tests {
         BareJid::from_str("replay-completion@muc.example.com").expect("room JID")
     }
 
+    fn other_replay_completion_room_jid() -> BareJid {
+        BareJid::from_str("other-replay-completion@muc.example.com").expect("room JID")
+    }
+
     fn replay_completion_origin() -> crate::room_effect_outbox::RoomEffectOriginInstanceId {
         crate::room_effect_outbox::RoomEffectOriginInstanceId::new(
             "connection-replay-completion".to_owned(),
@@ -2142,8 +2178,25 @@ mod tests {
         revision: waddle_xmpp::muc::RoomRevision,
         recipient: &FullJid,
     ) -> waddle_xmpp::muc::RoomEffectReservation {
-        let effects = waddle_xmpp::muc::RoomMutationEffects::config(
+        enqueue_inline_config_reservation_for_room_replay_completion(
+            state,
             replay_completion_room_jid(),
+            lifecycle,
+            revision,
+            recipient,
+        )
+        .await
+    }
+
+    async fn enqueue_inline_config_reservation_for_room_replay_completion(
+        state: &WebSocketState,
+        room_jid: BareJid,
+        lifecycle: waddle_xmpp::muc::RoomLifecycleId,
+        revision: waddle_xmpp::muc::RoomRevision,
+        recipient: &FullJid,
+    ) -> waddle_xmpp::muc::RoomEffectReservation {
+        let effects = waddle_xmpp::muc::RoomMutationEffects::config(
+            room_jid,
             vec![waddle_xmpp::muc::MucConfigStatusCode::NonPrivacyConfigurationChange],
             vec![recipient.clone()],
         );
@@ -2191,6 +2244,27 @@ mod tests {
         );
         let frame = frames.frames.pop().expect("inline frame");
         (ResponseFrame::from(frame.stanza), frame.completion)
+    }
+
+    async fn wait_for_room_effect_queue_depth(state: &Arc<WebSocketState>, expected: i64) {
+        tokio::time::timeout(std::time::Duration::from_secs(1), async {
+            loop {
+                if state
+                    .deps
+                    .protocol
+                    .room_effect_outbox
+                    .queue_depth()
+                    .await
+                    .expect("queue depth")
+                    == expected
+                {
+                    break;
+                }
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("queue depth wait");
     }
 
     #[tokio::test]
@@ -2691,24 +2765,7 @@ mod tests {
             1,
             "the initiator reply is retained for SM replay"
         );
-        tokio::time::timeout(std::time::Duration::from_secs(1), async {
-            loop {
-                if state
-                    .deps
-                    .protocol
-                    .room_effect_outbox
-                    .queue_depth()
-                    .await
-                    .expect("queue depth")
-                    == 0
-                {
-                    break;
-                }
-                tokio::task::yield_now().await;
-            }
-        })
-        .await
-        .expect("replay recording should finish the retained completion");
+        wait_for_room_effect_queue_depth(&state, 0).await;
     }
 
     #[tokio::test]
@@ -2772,12 +2829,15 @@ mod tests {
             &initiator,
         )
         .await;
-        let second_reservation = enqueue_inline_config_reservation_for_replay_completion(
+        let other_room_jid = other_replay_completion_room_jid();
+        let second_lifecycle =
+            create_owned_room_and_lifecycle_for_replay_completion(state.as_ref(), &other_room_jid)
+                .await;
+        let second_reservation = enqueue_inline_config_reservation_for_room_replay_completion(
             state.as_ref(),
-            lifecycle,
-            waddle_xmpp::muc::RoomRevision::initial()
-                .next()
-                .expect("next replay-completion revision"),
+            other_room_jid,
+            second_lifecycle,
+            waddle_xmpp::muc::RoomRevision::initial(),
             &initiator,
         )
         .await;
@@ -2798,31 +2858,15 @@ mod tests {
             second_completion.clone(),
         )]));
 
-        settle_response_batch_completions_for_frames(
+        settle_batch_completions(
             &state,
-            responses,
-            ResponseBatchCompletionDisposition::Complete,
+            BatchCompletionOutcome::Delivered,
+            true,
             &[0],
+            response_batch_completion_frames(responses),
         );
 
-        tokio::time::timeout(std::time::Duration::from_secs(1), async {
-            loop {
-                if state
-                    .deps
-                    .protocol
-                    .room_effect_outbox
-                    .queue_depth()
-                    .await
-                    .expect("queue depth")
-                    == 1
-                {
-                    break;
-                }
-                tokio::task::yield_now().await;
-            }
-        })
-        .await
-        .expect("only the recorded completion should be finished");
+        wait_for_room_effect_queue_depth(&state, 1).await;
 
         assert!(
             crate::room_effect_outbox::drain::complete_after_write(
@@ -2833,6 +2877,255 @@ mod tests {
             .expect("complete retained completion"),
             "the unrecorded completion must still be retained for retry"
         );
+    }
+
+    #[tokio::test]
+    async fn resumable_partial_acceptance_retains_multi_frame_completion_for_retry() {
+        let state = super::super::tests::create_test_websocket_state().await;
+        let room_jid = replay_completion_room_jid();
+        let initiator: FullJid = "alice@example.com/device".parse().expect("initiator JID");
+        let lifecycle =
+            create_owned_room_and_lifecycle_for_replay_completion(state.as_ref(), &room_jid).await;
+        let reservation = enqueue_inline_config_reservation_for_replay_completion(
+            state.as_ref(),
+            lifecycle,
+            waddle_xmpp::muc::RoomRevision::initial(),
+            &initiator,
+        )
+        .await;
+        let (frame, completion) =
+            drain_single_inline_completion_frame(state.as_ref(), &reservation, &initiator).await;
+
+        let mut responses =
+            ResponseBatch::from_completion_frames(vec![(frame.clone(), completion.clone())]);
+        responses
+            .frames
+            .push(ResponseFrame::from(websocket_stream_close_element()));
+        responses.append_batch(ResponseBatch::from_completion_frames(vec![(
+            frame,
+            completion.clone(),
+        )]));
+
+        settle_batch_completions(
+            &state,
+            BatchCompletionOutcome::RetainedForRecovery,
+            true,
+            &[0],
+            response_batch_completion_frames(responses),
+        );
+
+        assert_eq!(
+            state
+                .deps
+                .protocol
+                .room_effect_outbox
+                .queue_depth()
+                .await
+                .expect("queue depth"),
+            1,
+            "a partially accepted sibling frame set must retain the shared completion"
+        );
+        assert!(
+            crate::room_effect_outbox::drain::complete_after_write(state.as_ref(), &completion)
+                .await
+                .expect("complete retained completion"),
+            "the shared completion must still be retained for retry"
+        );
+    }
+
+    #[tokio::test]
+    async fn non_resumable_replay_recording_retains_inline_room_effect_reservations_for_retry() {
+        let state = super::super::tests::create_test_websocket_state().await;
+        let room_jid = replay_completion_room_jid();
+        let initiator: FullJid = "alice@example.com/device".parse().expect("initiator JID");
+        let lifecycle =
+            create_owned_room_and_lifecycle_for_replay_completion(state.as_ref(), &room_jid).await;
+        let reservation = enqueue_inline_config_reservation_for_replay_completion(
+            state.as_ref(),
+            lifecycle,
+            waddle_xmpp::muc::RoomRevision::initial(),
+            &initiator,
+        )
+        .await;
+        let (frame, completion) =
+            drain_single_inline_completion_frame(state.as_ref(), &reservation, &initiator).await;
+
+        let mut conn = WsConnState::new();
+        conn.sm_state
+            .enable("non-resumable-replay-completion".to_string(), false, None);
+        record_response_batch_for_replay(
+            &state,
+            &mut conn,
+            ResponseBatch::from_completion_frames(vec![(frame, completion.clone())]),
+            BatchSmPolicy::Record,
+        );
+
+        assert_eq!(
+            state
+                .deps
+                .protocol
+                .room_effect_outbox
+                .queue_depth()
+                .await
+                .expect("queue depth"),
+            1,
+            "non-resumable replay recording must retain the leased completion for retry"
+        );
+        assert!(
+            crate::room_effect_outbox::drain::complete_after_write(state.as_ref(), &completion)
+                .await
+                .expect("complete retained completion"),
+            "the recorded-but-non-resumable completion must still be retained for retry"
+        );
+    }
+
+    #[tokio::test]
+    async fn authority_revoked_resumable_recording_settles_only_recorded_completions() {
+        let state = super::super::tests::create_test_websocket_state().await;
+        let room_jid = replay_completion_room_jid();
+        let initiator: FullJid = "alice@example.com/device".parse().expect("initiator JID");
+        let lifecycle =
+            create_owned_room_and_lifecycle_for_replay_completion(state.as_ref(), &room_jid).await;
+        let first_reservation = enqueue_inline_config_reservation_for_replay_completion(
+            state.as_ref(),
+            lifecycle,
+            waddle_xmpp::muc::RoomRevision::initial(),
+            &initiator,
+        )
+        .await;
+        let other_room_jid = other_replay_completion_room_jid();
+        let second_lifecycle =
+            create_owned_room_and_lifecycle_for_replay_completion(state.as_ref(), &other_room_jid)
+                .await;
+        let second_reservation = enqueue_inline_config_reservation_for_room_replay_completion(
+            state.as_ref(),
+            other_room_jid,
+            second_lifecycle,
+            waddle_xmpp::muc::RoomRevision::initial(),
+            &initiator,
+        )
+        .await;
+        let (first_frame, first_completion) =
+            drain_single_inline_completion_frame(state.as_ref(), &first_reservation, &initiator)
+                .await;
+        let (second_frame, second_completion) =
+            drain_single_inline_completion_frame(state.as_ref(), &second_reservation, &initiator)
+                .await;
+
+        let mut responses =
+            ResponseBatch::from_completion_frames(vec![(first_frame, first_completion)]);
+        responses
+            .frames
+            .push(ResponseFrame::from(websocket_stream_close_element()));
+        responses.append_batch(ResponseBatch::from_completion_frames(vec![(
+            second_frame,
+            second_completion.clone(),
+        )]));
+
+        settle_batch_completions(
+            &state,
+            BatchCompletionOutcome::RetainedForRecovery,
+            true,
+            &[0],
+            response_batch_completion_frames(responses),
+        );
+
+        wait_for_room_effect_queue_depth(&state, 1).await;
+
+        assert!(
+            crate::room_effect_outbox::drain::complete_after_write(
+                state.as_ref(),
+                &second_completion
+            )
+            .await
+            .expect("complete retained completion"),
+            "only the unrecorded authority-revoked completion must remain for retry"
+        );
+    }
+
+    #[tokio::test]
+    async fn batch_completion_selection_matrix_covers_outcome_resumable_acceptance_and_siblings() {
+        let state = super::super::tests::create_test_websocket_state().await;
+        let room_jid = replay_completion_room_jid();
+        let initiator: FullJid = "alice@example.com/device".parse().expect("initiator JID");
+        let lifecycle =
+            create_owned_room_and_lifecycle_for_replay_completion(state.as_ref(), &room_jid).await;
+        let first_reservation = enqueue_inline_config_reservation_for_replay_completion(
+            state.as_ref(),
+            lifecycle,
+            waddle_xmpp::muc::RoomRevision::initial(),
+            &initiator,
+        )
+        .await;
+        let (first_frame, first_completion) =
+            drain_single_inline_completion_frame(state.as_ref(), &first_reservation, &initiator)
+                .await;
+
+        for outcome in [
+            BatchCompletionOutcome::Delivered,
+            BatchCompletionOutcome::RetainedForRecovery,
+            BatchCompletionOutcome::RetryOnly,
+        ] {
+            for resumable in [false, true] {
+                for partial_acceptance in [false, true] {
+                    for multi_frame_completion in [false, true] {
+                        let responses = if multi_frame_completion {
+                            let mut responses = ResponseBatch::from_completion_frames(vec![(
+                                first_frame.clone(),
+                                first_completion.clone(),
+                            )]);
+                            responses.append_batch(ResponseBatch::from_completion_frames(vec![(
+                                first_frame.clone(),
+                                first_completion.clone(),
+                            )]));
+                            responses
+                        } else {
+                            ResponseBatch::from_completion_frames(vec![(
+                                first_frame.clone(),
+                                first_completion.clone(),
+                            )])
+                        };
+                        let accepted_indices: Vec<_> = if partial_acceptance {
+                            if multi_frame_completion {
+                                vec![0]
+                            } else {
+                                Vec::new()
+                            }
+                        } else if multi_frame_completion {
+                            vec![0, 1]
+                        } else {
+                            vec![0]
+                        };
+                        let (selected, retained) = select_batch_completions_to_complete(
+                            outcome,
+                            resumable,
+                            &accepted_indices,
+                            response_batch_completion_frames(responses),
+                        );
+                        let should_complete = !partial_acceptance
+                            && (matches!(outcome, BatchCompletionOutcome::Delivered)
+                                || (resumable
+                                    && matches!(
+                                        outcome,
+                                        BatchCompletionOutcome::RetainedForRecovery
+                                    )));
+                        assert_eq!(
+                            selected.len(),
+                            usize::from(should_complete),
+                            "outcome={outcome:?} resumable={resumable} partial={partial_acceptance} multi={multi_frame_completion}"
+                        );
+                        assert_eq!(
+                            retained,
+                            usize::from(!should_complete),
+                            "outcome={outcome:?} resumable={resumable} partial={partial_acceptance} multi={multi_frame_completion}"
+                        );
+                        if should_complete {
+                            assert_eq!(selected[0].key, first_completion.key);
+                        }
+                    }
+                }
+            }
+        }
     }
 
     #[tokio::test]
@@ -2849,12 +3142,15 @@ mod tests {
             &initiator,
         )
         .await;
-        let second_reservation = enqueue_inline_config_reservation_for_replay_completion(
+        let other_room_jid = other_replay_completion_room_jid();
+        let second_lifecycle =
+            create_owned_room_and_lifecycle_for_replay_completion(state.as_ref(), &other_room_jid)
+                .await;
+        let second_reservation = enqueue_inline_config_reservation_for_room_replay_completion(
             state.as_ref(),
-            lifecycle,
-            waddle_xmpp::muc::RoomRevision::initial()
-                .next()
-                .expect("next replay-completion revision"),
+            other_room_jid,
+            second_lifecycle,
+            waddle_xmpp::muc::RoomRevision::initial(),
             &initiator,
         )
         .await;
@@ -2895,24 +3191,7 @@ mod tests {
 
         record_response_batch_for_replay(&state, &mut conn, responses, BatchSmPolicy::Record);
 
-        tokio::time::timeout(std::time::Duration::from_secs(1), async {
-            loop {
-                if state
-                    .deps
-                    .protocol
-                    .room_effect_outbox
-                    .queue_depth()
-                    .await
-                    .expect("queue depth")
-                    == 1
-                {
-                    break;
-                }
-                tokio::task::yield_now().await;
-            }
-        })
-        .await
-        .expect("only the terminally recorded completion should be finished");
+        wait_for_room_effect_queue_depth(&state, 1).await;
 
         assert_eq!(
             conn.terminal_sm_recovery.queue_len(),

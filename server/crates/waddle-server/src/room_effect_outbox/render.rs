@@ -20,6 +20,7 @@ pub fn rebuild_effect(
         RoomEffect::ConfigChanged {
             status_codes,
             recipients,
+            ..
         } => recipients
             .iter()
             .cloned()
@@ -76,6 +77,7 @@ pub fn rebuild_effect(
 
 pub fn effect_voice_changes(effect: &RoomEffect) -> &[OccupantVoiceChange] {
     match effect {
+        RoomEffect::ConfigChanged { voice_changes, .. } => voice_changes,
         RoomEffect::AdminRemainingBroadcast { voice_changes, .. } => voice_changes,
         _ => &[],
     }
@@ -201,6 +203,7 @@ mod tests {
                 MucConfigStatusCode::NonPrivacyConfigurationChange,
             ],
             recipients: vec![real_jid(), peer_jid()],
+            voice_changes: Vec::new(),
         };
 
         let rendered = rebuild_effect(&room_jid(), &effect, &occupant_id_secret());
@@ -387,11 +390,13 @@ mod tests {
         assert!(effect_voice_changes(&RoomEffect::ConfigChanged {
             status_codes: Vec::new(),
             recipients: Vec::new(),
+            voice_changes: Vec::new(),
         })
         .is_empty());
         assert!(effect_removed_sessions(&RoomEffect::ConfigChanged {
             status_codes: Vec::new(),
             recipients: Vec::new(),
+            voice_changes: Vec::new(),
         })
         .is_empty());
     }

@@ -17,7 +17,6 @@ pub use types::{
     RoomEffectProducingNode, RoomEffectReleaseOutcome, RoomEffectRow,
 };
 
-#[cfg(feature = "clustering")]
 pub(crate) fn room_effect_origin_instance_id() -> RoomEffectOriginInstanceId {
     static INSTANCE_ID: std::sync::OnceLock<RoomEffectOriginInstanceId> =
         std::sync::OnceLock::new();

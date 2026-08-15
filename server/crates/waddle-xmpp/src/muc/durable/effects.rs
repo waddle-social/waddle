@@ -93,6 +93,7 @@ pub enum RoomEffect {
     ConfigChanged {
         status_codes: Vec<MucConfigStatusCode>,
         recipients: Vec<FullJid>,
+        voice_changes: Vec<OccupantVoiceChange>,
     },
     AdminSelfNotify {
         updates: Vec<OccupantPresenceUpdate>,
@@ -200,12 +201,21 @@ impl RoomMutationEffects {
         status_codes: Vec<MucConfigStatusCode>,
         recipients: Vec<FullJid>,
     ) -> Self {
+        Self::config_with_voice_changes(room_jid, status_codes, recipients, Vec::new())
+    }
+    pub fn config_with_voice_changes(
+        room_jid: BareJid,
+        status_codes: Vec<MucConfigStatusCode>,
+        recipients: Vec<FullJid>,
+        voice_changes: Vec<OccupantVoiceChange>,
+    ) -> Self {
         Self {
             room_jid: Some(room_jid),
             staging: RoomEffectStagingClass::StagedConfig,
             effects: vec![RoomEffect::ConfigChanged {
                 status_codes,
                 recipients,
+                voice_changes,
             }],
             superseding_reservation: None,
         }
@@ -238,6 +248,7 @@ impl RoomMutationEffects {
         self_updates: Vec<OccupantPresenceUpdate>,
         remaining_updates: Vec<OccupantPresenceUpdate>,
         removed_sessions: Vec<FullJid>,
+        voice_changes: Vec<OccupantVoiceChange>,
         status_codes: Vec<MucConfigStatusCode>,
         recipients: Vec<FullJid>,
     ) -> Self {
@@ -251,11 +262,12 @@ impl RoomMutationEffects {
                 RoomEffect::AdminRemainingBroadcast {
                     presence_updates: remaining_updates,
                     removed_sessions,
-                    voice_changes: Vec::new(),
+                    voice_changes,
                 },
                 RoomEffect::ConfigChanged {
                     status_codes,
                     recipients,
+                    voice_changes: Vec::new(),
                 },
             ],
             superseding_reservation: None,
@@ -436,6 +448,7 @@ mod tests {
                 reason: None,
             }],
             vec![carol.clone()],
+            Vec::new(),
             vec![MucConfigStatusCode::NonPrivacyConfigurationChange],
             vec![carol],
         );

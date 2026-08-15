@@ -41,17 +41,46 @@ async fn enqueue_config_reservation_with(
     producing_node: RoomEffectProducingNode,
     now_ms: i64,
 ) -> waddle_xmpp::muc::RoomEffectReservation {
+    enqueue_config_reservation_with_origin(
+        store,
+        ConfigReservationSpec {
+            lifecycle,
+            revision,
+            room_jid,
+            recipients,
+            origin: origin(),
+            producing_node,
+            now_ms,
+        },
+    )
+    .await
+}
+
+struct ConfigReservationSpec {
+    lifecycle: RoomLifecycleId,
+    revision: RoomRevision,
+    room_jid: BareJid,
+    recipients: Vec<FullJid>,
+    origin: RoomEffectOriginInstanceId,
+    producing_node: RoomEffectProducingNode,
+    now_ms: i64,
+}
+
+async fn enqueue_config_reservation_with_origin(
+    store: &RoomEffectOutboxStore,
+    spec: ConfigReservationSpec,
+) -> waddle_xmpp::muc::RoomEffectReservation {
     let mut tx = store.database().begin().await.expect("transaction");
     let reservation = store
         .enqueue_in_tx(
             &mut tx,
             RoomEffectEnqueue {
-                lifecycle,
-                revision,
-                effects: &config_effects_for(room_jid, recipients),
-                origin: &origin(),
-                producing_node: &producing_node,
-                now_ms,
+                lifecycle: spec.lifecycle,
+                revision: spec.revision,
+                effects: &config_effects_for(spec.room_jid, spec.recipients),
+                origin: &spec.origin,
+                producing_node: &spec.producing_node,
+                now_ms: spec.now_ms,
             },
         )
         .await
@@ -292,6 +321,89 @@ async fn foreign_inert_row_drains_after_janitor_arming() {
         "the armed foreign row must complete after delivery"
     );
     assert_eq!(reservation.ordinals.len(), 1);
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn standalone_janitor_arms_predecessor_instance_rows_without_touching_current_rows() {
+    let state = create_test_websocket_state().await;
+    let store = Arc::clone(&state.deps.protocol.room_effect_outbox);
+    let predecessor_room = integration_room_jid("standalone-predecessor");
+    let current_room = integration_room_jid("standalone-current");
+    let predecessor_origin =
+        RoomEffectOriginInstanceId::new("predecessor-instance".to_owned()).expect("origin");
+    let current_origin = crate::room_effect_outbox::room_effect_origin_instance_id();
+
+    let (predecessor_lifecycle, predecessor_revision) =
+        ensure_local_room_and_lifecycle(store.as_ref(), state.as_ref(), &predecessor_room).await;
+    let (current_lifecycle, current_revision) =
+        ensure_local_room_and_lifecycle(store.as_ref(), state.as_ref(), &current_room).await;
+
+    let predecessor = enqueue_config_reservation_with_origin(
+        store.as_ref(),
+        ConfigReservationSpec {
+            lifecycle: predecessor_lifecycle,
+            revision: predecessor_revision,
+            room_jid: predecessor_room,
+            recipients: vec![full_jid("predecessor@example.com/device")],
+            origin: predecessor_origin,
+            producing_node: producing_node(),
+            now_ms: 0,
+        },
+    )
+    .await;
+    let current = enqueue_config_reservation_with_origin(
+        store.as_ref(),
+        ConfigReservationSpec {
+            lifecycle: current_lifecycle,
+            revision: current_revision,
+            room_jid: current_room,
+            recipients: vec![full_jid("current@example.com/device")],
+            origin: current_origin,
+            producing_node: producing_node(),
+            now_ms: 0,
+        },
+    )
+    .await;
+
+    let predecessor_key = RoomEffectKey {
+        lifecycle: predecessor_lifecycle,
+        revision: predecessor_revision,
+        ordinal: predecessor.ordinals[0],
+    };
+    let current_key = RoomEffectKey {
+        lifecycle: current_lifecycle,
+        revision: current_revision,
+        ordinal: current.ordinals[0],
+    };
+
+    spawn_room_effect_outbox_janitor(&state);
+
+    tokio::time::timeout(Duration::from_secs(7), async {
+        loop {
+            let predecessor_available_at = store
+                .find(&predecessor_key)
+                .await
+                .expect("find predecessor row")
+                .expect("predecessor row present")
+                .available_at_ms;
+            let current_available_at = store
+                .find(&current_key)
+                .await
+                .expect("find current row")
+                .expect("current row present")
+                .available_at_ms;
+            if predecessor_available_at != STAGED_AVAILABLE_AT_MS {
+                assert_eq!(
+                    current_available_at, STAGED_AVAILABLE_AT_MS,
+                    "current-process inert rows must remain staged in standalone recovery"
+                );
+                return;
+            }
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("standalone predecessor arming timeout");
 }
 
 #[tokio::test(flavor = "current_thread")]

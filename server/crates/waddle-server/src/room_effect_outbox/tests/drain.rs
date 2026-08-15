@@ -7,13 +7,13 @@ use jid::{BareJid, FullJid};
 use tokio::sync::mpsc;
 use waddle_xmpp::muc::room_registry_actor::CreateRoom;
 use waddle_xmpp::muc::{
-    DestroyRecipient, MucConfigStatusCode, RoomConfig, RoomLifecycleId, RoomLifecycleState,
-    RoomMutationEffects, RoomRevision,
+    DestroyRecipient, MucConfigStatusCode, OccupantVoiceChange, RoomConfig, RoomLifecycleId,
+    RoomLifecycleState, RoomMutationEffects, RoomRevision,
 };
 use waddle_xmpp::ownership::{ClaimStore, Entity, EntityType, InProcessClaimStore, NodeIdentity};
 use waddle_xmpp::registry::OutboundStanza;
 use waddle_xmpp::stream_management::InMemorySmSessionRegistry;
-use waddle_xmpp::Stanza;
+use waddle_xmpp::{Stanza, Voice};
 use xmpp_parsers::minidom::Element;
 
 use super::*;
@@ -37,6 +37,19 @@ fn config_effects_for(room_jid: &BareJid, recipients: Vec<FullJid>) -> RoomMutat
         room_jid.clone(),
         vec![MucConfigStatusCode::NonPrivacyConfigurationChange],
         recipients,
+    )
+}
+
+fn config_effects_with_voice_changes_for(
+    room_jid: &BareJid,
+    recipients: Vec<FullJid>,
+    voice_changes: Vec<OccupantVoiceChange>,
+) -> RoomMutationEffects {
+    RoomMutationEffects::config_with_voice_changes(
+        room_jid.clone(),
+        vec![MucConfigStatusCode::NonPrivacyConfigurationChange],
+        recipients,
+        voice_changes,
     )
 }
 
@@ -1986,4 +1999,73 @@ async fn drain_replays_persisted_admin_removal_sfu_unregisters() {
         unregistered[0].1.as_livekit_identity(),
         removed_session.to_string()
     );
+}
+
+#[tokio::test]
+async fn drain_replays_persisted_config_voice_changes_to_sfu() {
+    let recorder = Arc::new(crate::server::routes::websocket::tests::RecordingSfu::default());
+    let state = create_test_websocket_state_with_sfu(recorder.clone()).await;
+    let room_jid = drain_room_jid();
+    let lifecycle = create_owned_room_and_lifecycle_for(state.as_ref(), &room_jid).await;
+    let recipient = full_jid("alice@example.test/device");
+    let reservation = enqueue_and_arm(
+        state.deps.protocol.room_effect_outbox.as_ref(),
+        lifecycle,
+        initial_revision(),
+        config_effects_with_voice_changes_for(
+            &room_jid,
+            vec![recipient.clone()],
+            vec![OccupantVoiceChange {
+                session: recipient.clone(),
+                voice: Voice::Muted,
+            }],
+        ),
+    )
+    .await;
+
+    let persisted = state
+        .deps
+        .protocol
+        .room_effect_outbox
+        .find(&RoomEffectKey {
+            lifecycle,
+            revision: initial_revision(),
+            ordinal: reservation.ordinals[0],
+        })
+        .await
+        .expect("find persisted config row")
+        .expect("persisted config row exists");
+    match persisted.effect {
+        waddle_xmpp::muc::RoomEffect::ConfigChanged { voice_changes, .. } => assert_eq!(
+            voice_changes,
+            vec![OccupantVoiceChange {
+                session: recipient.clone(),
+                voice: Voice::Muted,
+            }]
+        ),
+        other => panic!("expected persisted config row, got {other:?}"),
+    }
+
+    let (sender, mut receiver) = mpsc::channel(2);
+    register_test_connection(state.as_ref(), &recipient, sender).await;
+    let drain = {
+        let state = Arc::clone(&state);
+        tokio::spawn(
+            async move { drain_due_effects(state.as_ref(), crate::time::now_ms(), 8).await },
+        )
+    };
+    let outbound = recv_outbound(&mut receiver).await;
+    outbound
+        .write_acceptance
+        .as_ref()
+        .expect("config write acceptance")
+        .acknowledge();
+    let summary = drain.await.expect("drain join").expect("drain summary");
+
+    assert_eq!(summary.drained, 1, "the config row should drain once");
+    let updates = recorder.update_snapshot();
+    assert_eq!(updates.len(), 1, "one persisted voice change should replay");
+    assert_eq!(updates[0].0.as_str(), room_jid.as_str());
+    assert_eq!(updates[0].1.as_livekit_identity(), recipient.to_string());
+    assert_eq!(updates[0].2, waddle_sfu::MediaCapabilities::listen_only());
 }

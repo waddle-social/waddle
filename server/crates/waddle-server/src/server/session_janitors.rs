@@ -5877,7 +5877,8 @@ async fn run_room_effect_outbox_sweep(state: &WebSocketState, batch_size: usize)
         {
             match store.current_producing_nodes().await {
                 Ok(nodes) => {
-                    if let Err(error) = store.arm_foreign_inert(&nodes, crate::time::now_ms()).await
+                    if let Err(error) =
+                        store.arm_foreign_inert(&nodes, crate::time::now_ms()).await
                     {
                         failed = true;
                         warn!(%error, "room effect outbox foreign inert arming failed");
@@ -5888,6 +5889,26 @@ async fn run_room_effect_outbox_sweep(state: &WebSocketState, batch_size: usize)
                     warn!(%error, "room effect outbox live-node query failed");
                 }
             }
+        } else if let Err(error) = store
+            .arm_predecessor_inert(
+                &crate::room_effect_outbox::room_effect_origin_instance_id(),
+                crate::time::now_ms(),
+            )
+            .await
+        {
+            failed = true;
+            warn!(%error, "room effect outbox standalone predecessor arming failed");
+        }
+        #[cfg(not(feature = "clustering"))]
+        if let Err(error) = store
+            .arm_predecessor_inert(
+                &crate::room_effect_outbox::room_effect_origin_instance_id(),
+                crate::time::now_ms(),
+            )
+            .await
+        {
+            failed = true;
+            warn!(%error, "room effect outbox standalone predecessor arming failed");
         }
         match store.queue_depth().await {
             Ok(depth) => waddle_xmpp::histogram_record!(

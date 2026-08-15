@@ -6,7 +6,7 @@ use kameo::actor::Spawn;
 use tokio::sync::mpsc;
 use waddle_xmpp::muc::durable::{MucDurableFuture, MucDurableStore, RoomCommitFuture};
 use waddle_xmpp::muc::room_actor::{
-    ConfigEffectPlan, EnforceMembersOnlyAffiliations, GetSnapshot, JoinAffiliationGrant,
+    ConfigEffectPlan, EnforceMembersOnlyAffiliations, GetSnapshot, Join, JoinAffiliationGrant,
     JoinWithAffiliation, RestoreDurableRoomState, RollbackConfigIfRevision, RoomActor,
     UpdateConfig,
 };
@@ -18,13 +18,14 @@ use waddle_xmpp::muc::{
 use waddle_xmpp::ownership::{ClaimEpoch, Entity, EntityType, NodeIdentity};
 use waddle_xmpp::registry::OutboundStanza;
 use waddle_xmpp::xep::xep0421::OccupantIdSecret;
-use waddle_xmpp::Affiliation;
+use waddle_xmpp::{Affiliation, Role, Voice};
 
 use super::*;
 use crate::room_effect_outbox::drain::drain_due_effects;
 use crate::room_effect_outbox::{RoomEffectArmSupervisor, RoomEffectEnqueue};
 use crate::server::routes::websocket::tests::{
-    create_test_websocket_state, create_test_websocket_state_with_db_pool, register_test_connection,
+    create_test_websocket_state, create_test_websocket_state_with_db_pool,
+    create_test_websocket_state_with_sfu, register_test_connection,
 };
 use crate::server::routes::websocket::WebSocketState;
 
@@ -234,6 +235,25 @@ async fn actor_with_outbox(
     room_jid: &jid::BareJid,
     lifecycle: waddle_xmpp::muc::RoomLifecycleId,
 ) -> (kameo::actor::ActorRef<RoomActor>, Arc<ActorOutboxStore>) {
+    actor_with_outbox_config(
+        state,
+        room_jid,
+        lifecycle,
+        RoomConfig {
+            members_only: false,
+            enable_logging: false,
+            ..RoomConfig::default()
+        },
+    )
+    .await
+}
+
+async fn actor_with_outbox_config(
+    state: &WebSocketState,
+    room_jid: &jid::BareJid,
+    lifecycle: waddle_xmpp::muc::RoomLifecycleId,
+    config: RoomConfig,
+) -> (kameo::actor::ActorRef<RoomActor>, Arc<ActorOutboxStore>) {
     let store = ActorOutboxStore::new(
         Arc::clone(&state.deps.protocol.room_effect_outbox),
         lifecycle,
@@ -244,11 +264,7 @@ async fn actor_with_outbox(
             room_jid.clone(),
             "room-effect-config-test".to_owned(),
             "room-effect-config-test".to_owned(),
-            RoomConfig {
-                members_only: false,
-                enable_logging: false,
-                ..RoomConfig::default()
-            },
+            config,
         ),
         OccupantIdSecret::new(b"room-effect-actor-outbox-secret-32b".to_vec())
             .expect("test occupant-id secret"),
@@ -447,6 +463,246 @@ async fn zero_delta_members_only_enforcement_supersedes_fallback_and_delivers_on
         "no fallback duplicate is delivered"
     );
     assert_eq!(store.queue_depth().await.expect("queue depth"), 0);
+}
+
+#[tokio::test]
+async fn moderation_flip_drain_replays_persisted_voice_changes_to_sfu() {
+    let recorder = Arc::new(crate::server::routes::websocket::tests::RecordingSfu::default());
+    let state = create_test_websocket_state_with_sfu(recorder.clone()).await;
+    let room_jid = room_jid();
+    let recipient = full_jid("alice@example.test/device");
+    let lifecycle = create_owned_room_and_lifecycle(state.as_ref(), &room_jid).await;
+    let (actor, _) = actor_with_outbox(state.as_ref(), &room_jid, lifecycle).await;
+    actor
+        .ask(Join {
+            nick: "alice".to_owned(),
+            real_jid: recipient.clone(),
+            role: Role::Visitor,
+            affiliation: Affiliation::None,
+        })
+        .await
+        .expect("visitor joins");
+    let update = actor
+        .ask(UpdateConfig {
+            config: RoomConfig {
+                moderated: true,
+                ..RoomConfig::default()
+            },
+            effect_plan: ConfigEffectPlan::DirectAudience,
+        })
+        .await
+        .expect("moderation flip commits");
+    let reservation = update.reservation.expect("config commit reserves row");
+
+    let persisted = state
+        .deps
+        .protocol
+        .room_effect_outbox
+        .find(&RoomEffectKey {
+            lifecycle,
+            revision: reservation.revision,
+            ordinal: reservation.ordinals[0],
+        })
+        .await
+        .expect("find persisted config row")
+        .expect("persisted config row");
+    match persisted.effect {
+        waddle_xmpp::muc::RoomEffect::ConfigChanged { voice_changes, .. } => assert_eq!(
+            voice_changes,
+            vec![waddle_xmpp::muc::OccupantVoiceChange {
+                session: recipient.clone(),
+                voice: Voice::Muted,
+            }]
+        ),
+        other => panic!("expected config row, got {other:?}"),
+    }
+
+    state
+        .deps
+        .protocol
+        .room_effect_outbox
+        .arm_reservation(&reservation, 0)
+        .await
+        .expect("arm persisted config row");
+
+    let (sender, mut receiver) = mpsc::channel(2);
+    register_test_connection(state.as_ref(), &recipient, sender).await;
+    let drain = {
+        let state = Arc::clone(&state);
+        tokio::spawn(async move { drain_due_effects(state.as_ref(), 0, 8).await })
+    };
+    let delivery = receive(&mut receiver).await;
+    assert!(xml(&delivery).contains("code='104'"));
+    delivery
+        .write_acceptance
+        .as_ref()
+        .expect("config write acceptance")
+        .acknowledge();
+    assert_eq!(
+        drain
+            .await
+            .expect("config drain join")
+            .expect("config drain"),
+        crate::room_effect_outbox::drain::RoomEffectDrainSummary {
+            drained: 1,
+            ..Default::default()
+        }
+    );
+    assert_eq!(
+        recorder.update_snapshot(),
+        vec![(
+            waddle_sfu::CallId::new(room_jid.to_string()).expect("valid call id"),
+            waddle_sfu::Identity::from_jid(recipient),
+            waddle_sfu::MediaCapabilities::listen_only(),
+        )]
+    );
+}
+
+#[tokio::test]
+async fn managed_members_only_drain_replays_persisted_voice_changes_to_sfu() {
+    let recorder = Arc::new(crate::server::routes::websocket::tests::RecordingSfu::default());
+    let state = create_test_websocket_state_with_sfu(recorder.clone()).await;
+    let room_jid = room_jid();
+    let recipient = full_jid("alice@example.test/device");
+    let lifecycle = create_owned_room_and_lifecycle(state.as_ref(), &room_jid).await;
+    let (actor, _) = actor_with_outbox_config(
+        state.as_ref(),
+        &room_jid,
+        lifecycle,
+        RoomConfig {
+            moderated: true,
+            members_only: false,
+            enable_logging: false,
+            ..RoomConfig::default()
+        },
+    )
+    .await;
+    actor
+        .ask(Join {
+            nick: "alice".to_owned(),
+            real_jid: recipient.clone(),
+            role: Role::Visitor,
+            affiliation: Affiliation::None,
+        })
+        .await
+        .expect("visitor joins");
+    let config_update = actor
+        .ask(UpdateConfig {
+            config: RoomConfig {
+                moderated: true,
+                members_only: true,
+                enable_logging: false,
+                ..RoomConfig::default()
+            },
+            effect_plan: ConfigEffectPlan::ManagedMembersOnlyFallback,
+        })
+        .await
+        .expect("actor stages managed members-only fallback");
+    let fallback = config_update
+        .reservation
+        .expect("config commit reserves fallback");
+    let config_status_codes = config_update
+        .notification
+        .expect("members-only change is notified")
+        .status_codes;
+    let store = state.deps.protocol.room_effect_outbox.as_ref();
+    let enforcement = actor
+        .ask(EnforceMembersOnlyAffiliations {
+            affiliations: vec![(recipient.to_bare(), Affiliation::Member)],
+            fallback_reservation: Some(fallback.clone()),
+            config_status_codes,
+        })
+        .await
+        .expect("managed enforcement commits")
+        .outbox_reservation
+        .expect("enforcement reserves fused effects");
+    assert!(
+        store
+            .find(&RoomEffectKey {
+                lifecycle,
+                revision: fallback.revision,
+                ordinal: fallback.ordinals[0],
+            })
+            .await
+            .expect("find fallback")
+            .is_none(),
+        "the staged fallback is superseded before a supervisor can arm it"
+    );
+
+    let persisted = store
+        .find(&RoomEffectKey {
+            lifecycle,
+            revision: enforcement.revision,
+            ordinal: enforcement.ordinals[1],
+        })
+        .await
+        .expect("find persisted admin row")
+        .expect("persisted admin row");
+    match persisted.effect {
+        waddle_xmpp::muc::RoomEffect::AdminRemainingBroadcast { voice_changes, .. } => {
+            assert_eq!(
+                voice_changes,
+                vec![waddle_xmpp::muc::OccupantVoiceChange {
+                    session: recipient.clone(),
+                    voice: Voice::Voiced,
+                }]
+            );
+        }
+        other => panic!("expected admin remaining-broadcast row, got {other:?}"),
+    }
+
+    let (sender, mut receiver) = mpsc::channel(2);
+    register_test_connection(state.as_ref(), &recipient, sender).await;
+
+    assert_eq!(
+        drain_due_effects(state.as_ref(), super::super::store::HANDLER_GRACE_MS, 8)
+            .await
+            .expect("drain empty self-notify"),
+        crate::room_effect_outbox::drain::RoomEffectDrainSummary {
+            drained: 1,
+            ..Default::default()
+        }
+    );
+    assert_eq!(
+        drain_due_effects(state.as_ref(), super::super::store::HANDLER_GRACE_MS, 8)
+            .await
+            .expect("drain remaining-broadcast"),
+        crate::room_effect_outbox::drain::RoomEffectDrainSummary {
+            drained: 1,
+            ..Default::default()
+        }
+    );
+    let config_drain = {
+        let state = Arc::clone(&state);
+        tokio::spawn(async move {
+            drain_due_effects(state.as_ref(), super::super::store::HANDLER_GRACE_MS, 8).await
+        })
+    };
+    let delivery = receive(&mut receiver).await;
+    assert!(xml(&delivery).contains("code='104'"));
+    delivery
+        .write_acceptance
+        .as_ref()
+        .expect("config write acceptance")
+        .acknowledge();
+    assert_eq!(
+        config_drain
+            .await
+            .expect("config drain join")
+            .expect("config drain"),
+        crate::room_effect_outbox::drain::RoomEffectDrainSummary {
+            drained: 1,
+            ..Default::default()
+        }
+    );
+    assert_eq!(
+        recorder.update_snapshot(),
+        vec![(
+            waddle_sfu::CallId::new(room_jid.to_string()).expect("valid call id"),
+            waddle_sfu::Identity::from_jid(recipient),
+            waddle_sfu::MediaCapabilities::from_muc_voice(Voice::Voiced),
+        )]
+    );
 }
 
 #[tokio::test]

@@ -620,6 +620,41 @@ impl RoomEffectOutboxStore {
         }
         Ok(armed)
     }
+    /// In standalone topology there is exactly one live process, so any inert
+    /// committed row from a different process incarnation belongs to a dead
+    /// predecessor and can be armed without consulting cluster claims.
+    pub async fn list_predecessor_inert(
+        &self,
+        current_origin: &RoomEffectOriginInstanceId,
+    ) -> Result<Vec<RoomEffectRow>, RoomEffectOutboxError> {
+        let connection = self.db.guard().await?;
+        let mut rows = connection
+            .query(
+                &format!(
+                    "{} WHERE available_at_ms = ? AND NOT terminal AND NOT superseded AND origin_instance_id <> ?",
+                    select_columns()
+                ),
+                crate::db_params![INERT, current_origin.as_str()],
+            )
+            .await?;
+        let mut stale = Vec::new();
+        while let Some(row) = rows.next().await? {
+            stale.push(decode_row(&row)?);
+        }
+        Ok(stale)
+    }
+    pub async fn arm_predecessor_inert(
+        &self,
+        current_origin: &RoomEffectOriginInstanceId,
+        now_ms: i64,
+    ) -> Result<u64, RoomEffectOutboxError> {
+        let rows = self.list_predecessor_inert(current_origin).await?;
+        let mut armed = 0;
+        for row in rows {
+            armed += u64::from(self.arm(&row.key, now_ms).await?);
+        }
+        Ok(armed)
+    }
     /// Snapshot currently-live cluster node incarnations.  Epoch is part of
     /// the identity, so a restarted node with the same node id still arms the
     /// predecessor's inert committed rows.
