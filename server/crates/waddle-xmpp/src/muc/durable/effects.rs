@@ -160,6 +160,14 @@ pub enum RoomEffectStagingClass {
 }
 
 /// A validated effect set for one room durable mutation.
+///
+/// Load-bearing invariant: within one mutation's effect set, the recipient
+/// sets of distinct ordinals are DISJOINT (self-frames vs remaining
+/// broadcast vs post-removal config audiences). The inline drain relies on
+/// this: it may deliver ordinal k while ordinal k-1's lease is still retained
+/// for the response batch, so a shared recipient could otherwise observe a
+/// FIFO inversion across a crash gap. Every constructor below must preserve
+/// disjointness.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RoomMutationEffects {
     room_jid: Option<BareJid>,

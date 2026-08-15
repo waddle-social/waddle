@@ -1,7 +1,8 @@
 //! Leased delivery of durable room mutation effects.
 //!
 //! Lifecycle rule: an effect may execute only while its exact lifecycle is
-//! the room's live lifecycle, or while that exact lifecycle is tombstoned.
+//! the room's live lifecycle; TERMINAL effects alone may additionally execute
+//! while that exact lifecycle is tombstoned.
 //! The latter preserves the wipe-first/destroy-presence contract; a recreated
 //! room cannot commit while its predecessor's terminal effect exists.
 
