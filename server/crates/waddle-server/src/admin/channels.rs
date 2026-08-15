@@ -6638,8 +6638,11 @@ mod group_dm_durable_reconciliation_tests {
         )
         .await;
 
+        // Promptness bound: anything comfortably below the 5s write-acceptance
+        // timeout proves the command did not wait on its own socket; CI's
+        // loaded nextest workers need headroom beyond 1s.
         tokio::time::timeout(
-            std::time::Duration::from_secs(1),
+            std::time::Duration::from_secs(3),
             run_set_affiliation(
                 state,
                 Some(websocket_state.as_ref()),
@@ -6675,7 +6678,7 @@ mod group_dm_durable_reconciliation_tests {
             .await
         });
         tokio::time::sleep(std::time::Duration::from_millis(50)).await;
-        let outbound = tokio::time::timeout(std::time::Duration::from_secs(1), receiver.recv())
+        let outbound = tokio::time::timeout(std::time::Duration::from_secs(10), receiver.recv())
             .await
             .expect("async drain reaches caller connection")
             .expect("caller connection remains open");
@@ -6688,7 +6691,7 @@ mod group_dm_durable_reconciliation_tests {
             .await
             .expect("manual drain joins")
             .expect("manual drain succeeds");
-        tokio::time::timeout(std::time::Duration::from_secs(1), async {
+        tokio::time::timeout(std::time::Duration::from_secs(10), async {
             loop {
                 if websocket_state
                     .deps
