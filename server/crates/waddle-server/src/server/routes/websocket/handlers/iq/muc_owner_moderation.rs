@@ -375,7 +375,7 @@ async fn complete_destroy_snapshot(
     snapshot: DestroyCompletionSnapshot,
     inline_session: Option<&FullJid>,
 ) -> Result<ResponseBatch, ()> {
-    let room_jid = snapshot.room_jid;
+    let room_jid = snapshot.room_jid.clone();
     let wipe_completed = match wipe_destroyed_room_durable_state(
         state,
         &room_jid,
@@ -401,6 +401,8 @@ async fn complete_destroy_snapshot(
         return Ok(ResponseBatch::default());
     }
     if let Some(lifecycle) = snapshot.lifecycle {
+        let inline_presence_required = inline_session
+            .is_some_and(|session| snapshot_recipients_include_session(&snapshot, session));
         let reservation = state
             .deps
             .protocol
@@ -409,37 +411,40 @@ async fn complete_destroy_snapshot(
             .await
             .map_err(|error| {
                 warn!(room = %room_jid, %error, "Failed to recover terminal MUC destroy effect reservation");
-            })?
-            .ok_or_else(|| {
-                warn!(room = %room_jid, lifecycle = %lifecycle, "Committed destroy completion has no terminal MUC effect");
             })?;
-        state
-            .deps
-            .protocol
-            .room_effect_outbox
-            .arm_reservation(&reservation, crate::time::now_ms())
+        let batch = if let Some(reservation) = reservation {
+            state
+                .deps
+                .protocol
+                .room_effect_outbox
+                .arm_reservation(&reservation, crate::time::now_ms())
+                .await
+                .map_err(|error| {
+                    warn!(room = %room_jid, %error, "Failed to arm terminal MUC destroy effect after durable wipe");
+                })?;
+            let drained = crate::room_effect_outbox::drain::drain_reservation_inline(
+                state,
+                &reservation,
+                inline_session,
+            )
             .await
             .map_err(|error| {
-                warn!(room = %room_jid, %error, "Failed to arm terminal MUC destroy effect after durable wipe");
+                warn!(room = %room_jid, %error, "Failed to drain armed terminal MUC destroy effect");
             })?;
-        let drained = crate::room_effect_outbox::drain::drain_reservation_inline(
-            state,
-            &reservation,
-            inline_session,
-        )
-        .await
-        .map_err(|error| {
-            warn!(room = %room_jid, %error, "Failed to drain armed terminal MUC destroy effect");
-        })?;
-        let batch = response_batch_from_inline_room_effect_frames(drained);
-        if inline_session.is_some() && batch.completions.is_empty() {
-            // A generic/janitor delivery cannot order a queued frame ahead
-            // of this connection's IQ result. Only an inline completion
-            // proves that the initiator's §10.9 presence is in the response
-            // batch before the result; otherwise let the requester time out
-            // while durable recovery finishes the committed broadcast.
-            return Err(());
-        }
+            let batch = response_batch_from_inline_room_effect_frames(drained);
+            if inline_presence_required && batch.completions.is_empty() {
+                // A generic/janitor delivery cannot order a queued frame ahead
+                // of this connection's IQ result. Only an inline completion
+                // proves that the initiator's §10.9 presence is in the response
+                // batch before the result; otherwise let the requester time out
+                // while durable recovery finishes the committed broadcast.
+                return Err(());
+            }
+            batch
+        } else {
+            debug!(room = %room_jid, lifecycle = %lifecycle, "Committed destroy completion has no terminal MUC effect rows");
+            ResponseBatch::default()
+        };
         for recipient in &snapshot.recipients {
             for session_jid in &recipient.1 {
                 super::super::super::muc_call_sfu::unregister_participant_from_room(
@@ -515,6 +520,16 @@ async fn complete_destroy_snapshot(
     }
     debug!(room = %room_jid, "Completed committed MUC room destroy");
     Ok(ResponseBatch::from(frames))
+}
+
+fn snapshot_recipients_include_session(
+    snapshot: &DestroyCompletionSnapshot,
+    session: &FullJid,
+) -> bool {
+    snapshot
+        .recipients
+        .iter()
+        .any(|(_, sessions)| sessions.iter().any(|recipient| recipient == session))
 }
 
 fn delivery_outcome_warrants_retry(outcome: &waddle_xmpp::registry::BroadcastOutcome) -> bool {
@@ -1894,7 +1909,9 @@ mod destroy_completion_tests {
     use super::*;
     use crate::db::actor::{DbExecute, DbQueryOne};
     use crate::db::{Value, row_value};
-    use crate::server::routes::websocket::tests::create_test_websocket_state;
+    use crate::server::routes::websocket::tests::{
+        create_test_websocket_state, register_test_connection,
+    };
 
     fn snapshot(attempt: waddle_xmpp::muc::DestroyAttemptId) -> DestroyCompletionSnapshot {
         DestroyCompletionSnapshot {
@@ -2429,6 +2446,98 @@ mod destroy_completion_tests {
             terminal_available_at_ms(success_state.as_ref(), &success_reservation).await,
             i64::MAX,
             "the executor seam must arm the terminal effect only after the wipe succeeds"
+        );
+    }
+
+    #[tokio::test]
+    async fn terminal_destroy_without_recipients_completes_without_inline_frames() {
+        let state = create_test_websocket_state().await;
+        let room_jid: BareJid = "destroy-empty-audience@muc.example.com"
+            .parse()
+            .expect("room jid");
+        let lifecycle = waddle_xmpp::muc::RoomLifecycleId::generate();
+        let inline_session: FullJid = "owner@example.com/phone"
+            .parse()
+            .expect("inline session");
+        let snapshot = DestroyCompletionSnapshot {
+            attempt: waddle_xmpp::muc::DestroyAttemptId::generate(),
+            room_jid: room_jid.clone(),
+            lifecycle: Some(lifecycle),
+            request: DestroyRequest::default(),
+            members: Vec::new(),
+            recipients: Vec::new(),
+        };
+        insert_tombstoned_lifecycle(state.as_ref(), &room_jid, lifecycle).await;
+        let reservation = enqueue_terminal_effect(
+            state.as_ref(),
+            &room_jid,
+            lifecycle,
+            Vec::new(),
+        )
+        .await;
+
+        let batch = complete_destroy_snapshot(state.as_ref(), snapshot, Some(&inline_session))
+            .await
+            .expect("zero-recipient destroy completion");
+
+        assert!(
+            batch.frames.is_empty(),
+            "a zero-recipient terminal destroy must not fabricate inline presence"
+        );
+        assert!(
+            batch.completions.is_empty(),
+            "a zero-recipient terminal destroy must complete without retained writer acks"
+        );
+        assert!(
+            state
+                .deps
+                .protocol
+                .room_effect_outbox
+                .find(&crate::room_effect_outbox::RoomEffectKey {
+                    lifecycle: reservation.lifecycle,
+                    revision: reservation.revision,
+                    ordinal: reservation.ordinals[0],
+                })
+                .await
+                .expect("query zero-recipient terminal row")
+                .is_none(),
+            "a zero-recipient terminal destroy row must complete instead of hanging leased"
+        );
+    }
+
+    #[tokio::test]
+    async fn destroy_completion_without_terminal_effect_rows_still_finalizes() {
+        let state = create_test_websocket_state().await;
+        let room_jid: BareJid = "destroy-no-terminal-row@muc.example.com"
+            .parse()
+            .expect("room jid");
+        let lifecycle = waddle_xmpp::muc::RoomLifecycleId::generate();
+        let inline_session: FullJid = "owner@example.com/web"
+            .parse()
+            .expect("inline session");
+        let (inline_tx, mut inline_rx) = tokio::sync::mpsc::channel(4);
+        register_test_connection(state.as_ref(), &inline_session, inline_tx).await;
+        let snapshot = DestroyCompletionSnapshot {
+            attempt: waddle_xmpp::muc::DestroyAttemptId::generate(),
+            room_jid: room_jid.clone(),
+            lifecycle: Some(lifecycle),
+            request: DestroyRequest::default(),
+            members: Vec::new(),
+            recipients: vec![("owner".to_string(), vec![inline_session.clone()])],
+        };
+        insert_tombstoned_lifecycle(state.as_ref(), &room_jid, lifecycle).await;
+
+        let batch = complete_destroy_snapshot(state.as_ref(), snapshot, Some(&inline_session))
+            .await
+            .expect("rowless destroy completion");
+
+        assert!(
+            batch.frames.is_empty() && batch.completions.is_empty(),
+            "a lifecycle with no terminal effect rows should finalize as a no-op"
+        );
+        assert!(
+            inline_rx.try_recv().is_err(),
+            "terminal-less legacy destroys must not send fallback destroy presence frames"
         );
     }
 

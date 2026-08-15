@@ -181,10 +181,10 @@ pub(super) use errors::{
 };
 
 pub(super) fn response_batch_from_inline_room_effect_frames(
-    frames: Vec<crate::room_effect_outbox::drain::InlineRoomEffectFrame>,
+    frames: crate::room_effect_outbox::drain::InlineRoomEffectDrain,
 ) -> ResponseBatch {
     let mut batch = ResponseBatch::default();
-    for frame in frames {
+    for frame in frames.frames {
         batch.frames.push(stanza_to_xml(&frame.stanza));
         batch.completions.push(frame.completion);
     }

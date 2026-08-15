@@ -1,4 +1,6 @@
 use super::*;
+use waddle_xmpp::muc::DestroyRecipient;
+use waddle_xmpp::ownership::NodeIdentity;
 
 async fn enqueue_and_arm(
     store: &RoomEffectOutboxStore,
@@ -27,6 +29,19 @@ async fn enqueue_and_arm(
         .await
         .expect("arm reservation");
     reservation
+}
+
+fn destroy_effects() -> RoomMutationEffects {
+    RoomMutationEffects::destroy(
+        room_jid(),
+        None,
+        None,
+        None,
+        vec![DestroyRecipient {
+            nick: nick("alice"),
+            sessions: vec![full_jid("alice@example.test/device")],
+        }],
+    )
 }
 
 #[tokio::test]
@@ -235,6 +250,88 @@ async fn handler_window_rows_wait_for_grace_but_exact_claim_is_immediate() {
             .into_iter()
             .any(|claim| claim.row.key == due_key),
         "claim_due_head must expose the row once the grace boundary is reached"
+    );
+}
+
+#[tokio::test]
+async fn reservation_lookup_includes_handler_window_and_leased_rows_until_they_drain() {
+    let (_db, store) = store_with_db("room-effect-revision-lookup").await;
+    let lifecycle = lifecycle();
+    let revision = initial_revision();
+    let mut tx = store.database().begin().await.expect("transaction");
+    let reservation = store
+        .enqueue_in_tx(
+            &mut tx,
+            RoomEffectEnqueue {
+                lifecycle,
+                revision,
+                effects: &admin_effects(),
+                origin: &origin(),
+                producing_node: &producing_node(),
+                now_ms: 100,
+            },
+        )
+        .await
+        .expect("enqueue reservation");
+    tx.commit().await.expect("commit");
+
+    assert_eq!(
+        store
+            .reservation_for_revision(lifecycle, revision)
+            .await
+            .expect("lookup handler-window reservation"),
+        Some(reservation.clone()),
+        "recovery lookup must see handler-window rows before their grace elapses"
+    );
+
+    let key = RoomEffectKey {
+        lifecycle,
+        revision,
+        ordinal: reservation.ordinals[0],
+    };
+    let claim = store
+        .claim_exact(&key, 100)
+        .await
+        .expect("claim leased row")
+        .expect("leased row exists");
+    assert_eq!(
+        store
+            .reservation_for_revision(lifecycle, revision)
+            .await
+            .expect("lookup leased reservation"),
+        Some(reservation.clone()),
+        "recovery lookup must preserve rows that are currently leased"
+    );
+
+    assert!(
+        store
+            .complete(&key, &claim.lease_token)
+            .await
+            .expect("complete first row")
+    );
+    let second_key = RoomEffectKey {
+        lifecycle,
+        revision,
+        ordinal: reservation.ordinals[1],
+    };
+    let second_claim = store
+        .claim_exact(&second_key, 100)
+        .await
+        .expect("claim second row")
+        .expect("second row exists");
+    assert!(
+        store
+            .complete(&second_key, &second_claim.lease_token)
+            .await
+            .expect("complete second row")
+    );
+    assert!(
+        store
+            .reservation_for_revision(lifecycle, revision)
+            .await
+            .expect("lookup drained reservation")
+            .is_none(),
+        "recovery lookup must stop returning drained rows"
     );
 }
 
@@ -495,4 +592,100 @@ async fn fifo_order_survives_store_restart() {
 
     assert_eq!(observed, expected);
     assert_eq!(restarted.queue_depth().await.expect("queue depth"), 0);
+}
+
+#[tokio::test]
+async fn foreign_stale_epoch_terminal_rows_stay_inert_while_config_rows_arm() {
+    let (_db, store) = store_with_db("room-effect-foreign-inert-terminal").await;
+    let stale_node = producing_node();
+    let current_nodes = vec![RoomEffectProducingNode::from_node_identity(
+        NodeIdentity::new("node-a", "epoch-b"),
+    )];
+    let config_lifecycle = lifecycle();
+    let terminal_lifecycle = lifecycle();
+    let revision = initial_revision();
+    let now_ms = 250;
+
+    let mut tx = store.database().begin().await.expect("transaction");
+    let config_reservation = store
+        .enqueue_in_tx(
+            &mut tx,
+            RoomEffectEnqueue {
+                lifecycle: config_lifecycle,
+                revision,
+                effects: &config_effects(),
+                origin: &origin(),
+                producing_node: &stale_node,
+                now_ms: 0,
+            },
+        )
+        .await
+        .expect("enqueue foreign config row");
+    let terminal_reservation = store
+        .enqueue_in_tx(
+            &mut tx,
+            RoomEffectEnqueue {
+                lifecycle: terminal_lifecycle,
+                revision,
+                effects: &destroy_effects(),
+                origin: &origin(),
+                producing_node: &stale_node,
+                now_ms: 0,
+            },
+        )
+        .await
+        .expect("enqueue foreign terminal row");
+    tx.commit().await.expect("commit");
+
+    let foreign_rows = store
+        .list_foreign_inert(&current_nodes)
+        .await
+        .expect("list foreign inert rows");
+    assert_eq!(
+        foreign_rows
+            .iter()
+            .map(|row| row.key.clone())
+            .collect::<Vec<_>>(),
+        vec![RoomEffectKey {
+            lifecycle: config_lifecycle,
+            revision,
+            ordinal: config_reservation.ordinals[0],
+        }],
+        "terminal rows must be excluded from foreign inert inventory"
+    );
+
+    assert_eq!(
+        store
+            .arm_foreign_inert(&current_nodes, now_ms)
+            .await
+            .expect("arm foreign inert rows"),
+        1,
+        "only stale-epoch config rows should arm"
+    );
+
+    let config_row = store
+        .find(&RoomEffectKey {
+            lifecycle: config_lifecycle,
+            revision,
+            ordinal: config_reservation.ordinals[0],
+        })
+        .await
+        .expect("find config row")
+        .expect("config row exists");
+    assert_eq!(config_row.available_at_ms, now_ms);
+
+    let terminal_row = store
+        .find(&RoomEffectKey {
+            lifecycle: terminal_lifecycle,
+            revision,
+            ordinal: terminal_reservation.ordinals[0],
+        })
+        .await
+        .expect("find terminal row")
+        .expect("terminal row exists");
+    assert_eq!(
+        terminal_row.available_at_ms,
+        i64::MAX,
+        "terminal rows must remain inert until their exact terminal completion path arms them"
+    );
 }

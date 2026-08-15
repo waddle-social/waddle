@@ -301,12 +301,16 @@ async fn inline_drain_respects_fifo_across_revisions() {
         .await
         .expect("drain first");
     assert_eq!(frames.len(), 1, "the FIFO head should drain first");
+    let blocked = drain_reservation_inline(state.as_ref(), &second, Some(&alice))
+        .await
+        .expect("drain second while first leased");
     assert!(
-        drain_reservation_inline(state.as_ref(), &second, Some(&alice))
-            .await
-            .expect("drain second while first leased")
-            .is_empty(),
+        blocked.is_empty(),
         "later revisions must stay blocked until the head completes"
+    );
+    assert_eq!(
+        blocked.summary.leased, 1,
+        "a blocked later revision must report the live head lease"
     );
     assert!(
         complete_after_write(state.as_ref(), &frames[0].completion)

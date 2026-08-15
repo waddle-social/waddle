@@ -7445,6 +7445,107 @@ async fn xep0045_destroy_notifies_every_occupant_session_and_wipes_durable_state
     );
 }
 
+#[tokio::test]
+async fn xep0045_nonoccupant_owner_destroy_gets_result_without_destroy_presence() {
+    let state = create_test_websocket_state().await;
+    let owner_session = create_test_server_owner_session(state.as_ref(), "alice").await;
+    let room_jid: BareJid = "destroy-owner-not-occupant@muc.example.com"
+        .parse()
+        .expect("room jid");
+    let alice: FullJid = "alice@example.com/web".parse().expect("alice jid");
+    let bob: FullJid = "bob@example.com/web".parse().expect("bob jid");
+    let bob_session = create_test_session(state.as_ref(), "bob").await;
+    let (bob_tx, mut bob_rx) = mpsc::channel(8);
+    register_test_connection(state.as_ref(), &bob, bob_tx).await;
+
+    let owner_join = handle_muc_join(
+        state.as_ref(),
+        "example.com",
+        &room_jid,
+        &alice,
+        "alice",
+        None,
+        &Some(owner_session.clone()),
+    )
+    .await;
+    assert!(
+        !owner_join
+            .iter()
+            .any(|frame| frame.contains("type='error'") || frame.contains("type=\"error\"")),
+        "privileged owner join must create the room: {owner_join:?}"
+    );
+
+    let join_frames = handle_muc_join(
+        state.as_ref(),
+        "example.com",
+        &room_jid,
+        &bob,
+        "bob",
+        None,
+        &Some(bob_session),
+    )
+    .await;
+    assert!(
+        !join_frames
+            .iter()
+            .any(|frame| frame.contains("type='error'") || frame.contains("type=\"error\"")),
+        "bob join must succeed: {join_frames:?}"
+    );
+    while bob_rx.try_recv().is_ok() {}
+
+    let room_actor = state
+        .deps
+        .protocol
+        .room_registry
+        .ask(waddle_xmpp::muc::room_registry_actor::GetRoom {
+            room_jid: room_jid.clone(),
+        })
+        .await
+        .expect("registry ask")
+        .expect("room exists");
+    room_actor
+        .ask(ChangeAffiliation {
+            jid: alice.to_bare(),
+            affiliation: Affiliation::Owner,
+        })
+        .await
+        .expect("grant remote owner affiliation");
+    let _ = handle_muc_leave(state.as_ref(), &room_jid, &alice, "alice", None).await;
+    while bob_rx.try_recv().is_ok() {}
+
+    let responses = handle_iq(
+        &owner_destroy_iq_frame(&room_jid),
+        "example.com",
+        "muc.example.com",
+        state.as_ref(),
+        &Some(owner_session),
+        &ready_phase(&alice),
+    )
+    .await;
+
+    assert!(
+        responses
+            .iter()
+            .any(|frame| frame.contains("type=\"result\"") || frame.contains("type='result'")),
+        "non-occupant owner destroy must still return an IQ result: {responses:?}"
+    );
+    assert!(
+        !responses.iter().any(
+            |frame| Element::from_str(frame).is_ok_and(|el| presence_has_muc_user_destroy(&el))
+        ),
+        "a non-occupant owner must not receive a destroy presence: {responses:?}"
+    );
+
+    let outbound = bob_rx
+        .try_recv()
+        .expect("bob must receive the destroy presence");
+    let element = Element::from_str(&stanza_to_xml(&outbound.stanza)).expect("destroy presence");
+    assert!(
+        presence_has_muc_user_destroy(&element),
+        "remaining occupants still receive the destroy presence: {element:?}"
+    );
+}
+
 /// §10.9 destroy-then-rejoin: the recreated room must be a FRESH room —
 /// no config, subject, or ban list carried over from the destroyed one.
 #[tokio::test]

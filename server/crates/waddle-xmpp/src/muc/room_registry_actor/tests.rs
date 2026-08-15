@@ -1863,6 +1863,8 @@ mod ownership_claims_tests {
     #[tokio::test]
     async fn reconciled_destroy_queues_registered_owner_post_commit_work() {
         let registry = spawn_registry().await;
+        let store = Arc::new(RecordingDurableStore::default());
+        wire_recording_store(&registry, Arc::clone(&store)).await;
         let jid = test_room_jid("reconcile-destroy-completion");
         let actor = registry
             .ask(get_or_create(jid.clone()))
@@ -1917,6 +1919,15 @@ mod ownership_claims_tests {
         );
         assert_eq!(completions[0].attempt, attempt);
         assert_eq!(completions[0].room_jid, jid);
+        let effects = store.destroy_effects.lock().expect("lock");
+        assert!(
+            !effects.is_empty(),
+            "retained destroy reconciliation must persist a terminal effect row"
+        );
+        assert!(matches!(
+            effects[0].effects(),
+            [crate::muc::RoomEffect::DestroyNotification { .. }]
+        ));
     }
 
     #[tokio::test]
@@ -5383,6 +5394,65 @@ mod ownership_claims_tests {
         );
         allow_load.notify_waiters();
         let _ = creating.await.expect("initial creator task");
+    }
+
+
+    #[tokio::test]
+    async fn pending_preparation_destroy_ack_unknown_reconciles_retained_terminal_effects() {
+        let room_jid = test_room_jid("pending-destroy-ack-unknown-retained-completion");
+        let claim_store: Arc<dyn ClaimStore> = Arc::new(InProcessClaimStore::new());
+        let store = Arc::new(RecordingDurableStore::with_claim_store(Arc::clone(
+            &claim_store,
+        )));
+        let durable_store: Arc<dyn MucDurableStore> = store.clone();
+        let owner = this_identity();
+        let entity = Entity::new(EntityType::RoomActor, room_jid.to_string());
+        let epoch = claim_store
+            .ensure_claimed(&entity, &owner)
+            .await
+            .expect("seed exact pending-destroy claim");
+        let fence = RoomClaimFenceContext::new(entity, owner, epoch);
+        store.establish_claim_fence(&room_jid, fence.clone());
+
+        let attempt = crate::muc::DestroyAttemptId::generate();
+        let outcome = RoomRegistryActor::reconcile_unpublished_preparation_destroy_attempt(
+            durable_store,
+            Arc::clone(&claim_store),
+            room_jid.clone(),
+            fence,
+            UnpublishedDestroyPhase::RecoverPreparingDestroy,
+            Some(DestroyCompletion {
+                attempt,
+                room_jid: room_jid.clone(),
+                room: MucRoom::new(
+                    room_jid,
+                    "w".to_string(),
+                    "c".to_string(),
+                    RoomConfig::default(),
+                ),
+                request: crate::muc::DestroyRequest::default(),
+            }),
+        )
+        .await;
+        assert!(matches!(
+            outcome,
+            UnpublishedPreparationDestroyOutcome::Committed
+        ));
+        let effects = store.destroy_effects.lock().expect("lock");
+        assert_eq!(
+            effects.len(),
+            1,
+            "the preparing-destroy recovery commit should stage one terminal effect row"
+        );
+        assert!(matches!(
+            effects[0].effects(),
+            [crate::muc::RoomEffect::DestroyNotification { .. }]
+        ));
+        assert_eq!(
+            *store.destroy_completion_attempts.lock().expect("lock"),
+            vec![Some(attempt)],
+            "recovery must arm the retained completion attempt"
+        );
     }
 
     #[tokio::test]

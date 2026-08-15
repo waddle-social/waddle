@@ -6,6 +6,7 @@
 //! room cannot commit while its predecessor's terminal effect exists.
 
 use std::collections::HashSet;
+use std::ops::{Deref, DerefMut};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
@@ -73,6 +74,35 @@ pub struct InlineRoomEffectFrame {
     pub completion: RoomEffectCompletion,
 }
 
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+pub struct InlineRoomEffectDrainSummary {
+    pub inline: u64,
+    pub completed: u64,
+    pub requeued: u64,
+    pub stale: u64,
+    pub leased: u64,
+}
+
+#[derive(Debug, Default, Clone)]
+pub struct InlineRoomEffectDrain {
+    pub frames: Vec<InlineRoomEffectFrame>,
+    pub summary: InlineRoomEffectDrainSummary,
+}
+
+impl Deref for InlineRoomEffectDrain {
+    type Target = Vec<InlineRoomEffectFrame>;
+
+    fn deref(&self) -> &Self::Target {
+        &self.frames
+    }
+}
+
+impl DerefMut for InlineRoomEffectDrain {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        &mut self.frames
+    }
+}
+
 pub async fn complete_after_write(
     state: &WebSocketState,
     completion: &RoomEffectCompletion,
@@ -130,9 +160,9 @@ pub async fn drain_reservation_inline(
     state: &WebSocketState,
     reservation: &RoomEffectReservation,
     initiator: Option<&FullJid>,
-) -> Result<Vec<InlineRoomEffectFrame>, RoomEffectOutboxError> {
+) -> Result<InlineRoomEffectDrain, RoomEffectOutboxError> {
     let now_ms = crate::time::now_ms();
-    let mut frames = Vec::new();
+    let mut drain = InlineRoomEffectDrain::default();
     // Inline draining still observes the same ownership fence as the janitor;
     // it merely changes the destination of the initiating session's frame.
     let inline_owned_rooms = local_room_jids(&state.deps.protocol.room_registry).await;
@@ -149,6 +179,11 @@ pub async fn drain_reservation_inline(
             .claim_exact(&key, now_ms)
             .await?
         else {
+            match classify_inline_claim_miss(state, &key, now_ms).await? {
+                InlineClaimMiss::Absent => {}
+                InlineClaimMiss::LeasedOrBlocked => drain.summary.leased += 1,
+                InlineClaimMiss::Stale => drain.summary.stale += 1,
+            }
             continue;
         };
         match drain_claimed(
@@ -160,14 +195,45 @@ pub async fn drain_reservation_inline(
         )
         .await?
         {
-            ClaimDisposition::Inline(mut returned) => frames.append(&mut returned),
-            ClaimDisposition::Completed
-            | ClaimDisposition::Requeued
-            | ClaimDisposition::Stale
-            | ClaimDisposition::Leased => {}
+            ClaimDisposition::Completed => drain.summary.completed += 1,
+            ClaimDisposition::Requeued => drain.summary.requeued += 1,
+            ClaimDisposition::Stale => drain.summary.stale += 1,
+            ClaimDisposition::Leased => drain.summary.leased += 1,
+            ClaimDisposition::Inline(mut returned) => {
+                drain.summary.inline += 1;
+                drain.frames.append(&mut returned);
+            }
         }
     }
-    Ok(frames)
+    Ok(drain)
+}
+
+enum InlineClaimMiss {
+    Absent,
+    LeasedOrBlocked,
+    Stale,
+}
+
+async fn classify_inline_claim_miss(
+    state: &WebSocketState,
+    key: &RoomEffectKey,
+    now_ms: i64,
+) -> Result<InlineClaimMiss, RoomEffectOutboxError> {
+    let store = &state.deps.protocol.room_effect_outbox;
+    let Some(row) = store.find(key).await? else {
+        return Ok(InlineClaimMiss::Absent);
+    };
+    if row.superseded || !store.lifecycle_is_executable(&row).await? {
+        return Ok(InlineClaimMiss::Stale);
+    }
+    let stale_lease = now_ms.saturating_sub(super::store::CLAIM_TIMEOUT_MS);
+    if row
+        .leased_at_ms
+        .is_some_and(|leased_at_ms| leased_at_ms > stale_lease)
+    {
+        return Ok(InlineClaimMiss::LeasedOrBlocked);
+    }
+    Ok(InlineClaimMiss::LeasedOrBlocked)
 }
 
 enum ClaimDisposition {

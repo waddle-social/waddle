@@ -2568,17 +2568,20 @@ impl RoomRegistryActor {
 
         let commit = match &self.durable_store {
             Some(store) => {
+                let committed_completion = retained.completion.clone();
                 store
                     .commit_room_mutation(
                         room_jid,
                         &entry.claim_fence,
                         RoomDurableMutation::Destroy {
-                            completion_attempt: retained
-                                .completion
+                            completion_attempt: committed_completion
                                 .as_ref()
                                 .map(|completion| completion.attempt),
                         },
-                        crate::muc::RoomMutationEffects::none(),
+                        committed_completion
+                            .as_ref()
+                            .map(Self::destroy_effects)
+                            .unwrap_or_else(RoomMutationEffects::none),
                     )
                     .await
             }
@@ -2813,7 +2816,7 @@ impl RoomRegistryActor {
         room_jid: BareJid,
         claim_fence: super::RoomClaimFenceContext,
         phase: UnpublishedDestroyPhase,
-        completion_attempt: Option<super::DestroyAttemptId>,
+        completion: Option<DestroyCompletion>,
     ) -> UnpublishedPreparationDestroyOutcome {
         match tokio::time::timeout(
             ROOM_OWNERSHIP_CALL_TIMEOUT,
@@ -2835,7 +2838,20 @@ impl RoomRegistryActor {
                         }
                     }
                     UnpublishedDestroyPhase::RecoverPreparingDestroy => {
-                        RoomDurableMutation::DestroyAndReleaseClaim { completion_attempt }
+                        RoomDurableMutation::DestroyAndReleaseClaim {
+                            completion_attempt: completion
+                                .as_ref()
+                                .map(|completion| completion.attempt),
+                        }
+                    }
+                };
+                let effects = match phase {
+                    UnpublishedDestroyPhase::RecoverPreparingDestroy => completion
+                        .as_ref()
+                        .map(Self::destroy_effects)
+                        .unwrap_or_else(RoomMutationEffects::none),
+                    UnpublishedDestroyPhase::MarkCleanup | UnpublishedDestroyPhase::Destroy => {
+                        RoomMutationEffects::none()
                     }
                 };
                 match store
@@ -2843,7 +2859,7 @@ impl RoomRegistryActor {
                         &room_jid,
                         &claim_fence,
                         intent,
-                        crate::muc::RoomMutationEffects::none(),
+                        effects,
                     )
                     .await
                 {
@@ -3362,12 +3378,10 @@ impl kameo::message::Message<RetryUnpublishedPreparationDestroy> for RoomRegistr
         let claim_fence = msg.claim_fence.clone();
         let registry_ref = ctx.actor_ref().clone();
         let claim_store = Arc::clone(&self.claim_store);
-        let completion_attempt = self.destroy_attempts.get(&room_jid).and_then(|retained| {
-            retained
-                .completion
-                .as_ref()
-                .map(|completion| completion.attempt)
-        });
+        let completion = self
+            .destroy_attempts
+            .get(&room_jid)
+            .and_then(|retained| retained.completion.clone());
         tokio::spawn(async move {
             let outcome = RoomRegistryActor::reconcile_unpublished_preparation_destroy_attempt(
                 store,
@@ -3375,7 +3389,7 @@ impl kameo::message::Message<RetryUnpublishedPreparationDestroy> for RoomRegistr
                 room_jid.clone(),
                 claim_fence.clone(),
                 phase,
-                completion_attempt,
+                completion,
             )
             .await;
             let _ = registry_ref
@@ -3819,19 +3833,17 @@ impl RoomRegistryActor {
             else {
                 continue;
             };
-            let completion_attempt = self.destroy_attempts.get(&room_jid).and_then(|retained| {
-                retained
-                    .completion
-                    .as_ref()
-                    .map(|completion| completion.attempt)
-            });
+            let completion = self
+                .destroy_attempts
+                .get(&room_jid)
+                .and_then(|retained| retained.completion.clone());
             match Self::reconcile_unpublished_preparation_destroy_attempt(
                 Arc::clone(&store),
                 Arc::clone(&claim_store),
                 room_jid.clone(),
                 claim_fence.clone(),
                 phase,
-                completion_attempt,
+                completion,
             )
             .await
             {
