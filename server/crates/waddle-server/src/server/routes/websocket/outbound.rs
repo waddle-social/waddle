@@ -144,6 +144,12 @@ where
                     return false;
                 }
                 AuthoritySendOutcome::AuthorityRevoked => {
+                    // The frame may already sit in the live SM queue, but the
+                    // old generation has not yet detached and persisted that
+                    // queue. Mirror the force-detach/pending contract here:
+                    // in-memory recording alone is not enough to settle the
+                    // producer. Dropping the unacknowledged token makes the
+                    // producer retain the row for lease-expiry retry.
                     return false;
                 }
             };
@@ -367,6 +373,46 @@ mod tests {
         }
     }
 
+    struct RevokeDuringReadySink {
+        lifecycle: crate::clustering::NodeLifecycle,
+        ready_polls: usize,
+    }
+
+    impl futures::Sink<Message> for RevokeDuringReadySink {
+        type Error = Infallible;
+
+        fn poll_ready(
+            mut self: Pin<&mut Self>,
+            cx: &mut Context<'_>,
+        ) -> Poll<Result<(), Self::Error>> {
+            self.ready_polls += 1;
+            if self.ready_polls == 1 {
+                self.lifecycle.begin_drain();
+                cx.waker().wake_by_ref();
+                return Poll::Pending;
+            }
+            Poll::Ready(Ok(()))
+        }
+
+        fn start_send(self: Pin<&mut Self>, _item: Message) -> Result<(), Self::Error> {
+            panic!("authority revocation must suppress start_send");
+        }
+
+        fn poll_flush(
+            self: Pin<&mut Self>,
+            _cx: &mut Context<'_>,
+        ) -> Poll<Result<(), Self::Error>> {
+            Poll::Ready(Ok(()))
+        }
+
+        fn poll_close(
+            self: Pin<&mut Self>,
+            _cx: &mut Context<'_>,
+        ) -> Poll<Result<(), Self::Error>> {
+            Poll::Ready(Ok(()))
+        }
+    }
+
     #[tokio::test]
     async fn direct_frame_write_acceptance_follows_sm_backed_writer_handoff() {
         let state = crate::server::routes::websocket::tests::create_test_websocket_state().await;
@@ -536,6 +582,63 @@ mod tests {
                 Ok(())
             ),
             "an unrecoverable replay-gapped frame must not settle its producer"
+        );
+    }
+
+    #[tokio::test]
+    async fn authority_revoked_gap_free_resumable_direct_frame_keeps_write_acceptance_pending() {
+        let state = crate::server::routes::websocket::tests::create_test_websocket_state().await;
+        let lifecycle = crate::clustering::NodeLifecycle::new();
+        let permit = lifecycle.admit().expect("serving permit");
+        let shutdown = tokio_util::sync::CancellationToken::new();
+        let mut conn = WsConnState::new();
+        conn.sm_state.enable(
+            "outbound-write-acceptance-authority-revoked".to_owned(),
+            true,
+            Some(300),
+        );
+        let (acceptance, mut accepted) = OutboundWriteAcceptance::new();
+        let mut sink = RevokeDuringReadySink {
+            lifecycle: lifecycle.clone(),
+            ready_polls: 0,
+        };
+        let mut reader = futures::stream::pending::<Result<Message, Infallible>>();
+        let mut timers = TransportTimers::new();
+        let stanza = Stanza::Message(xmpp_parsers::message::Message::new(Some(
+            "alice@example.test".parse().expect("recipient JID"),
+        )));
+
+        assert!(
+            !handle_outbound_stanza(
+                &mut sink,
+                &mut reader,
+                &state,
+                &mut conn,
+                &mut timers,
+                OutboundStanza::with_write_acceptance(stanza, acceptance),
+                OutboundAuthority {
+                    permit: &permit,
+                    shutdown: &shutdown,
+                },
+            )
+            .await
+        );
+        assert_eq!(
+            conn.sm_state.queue_len(),
+            1,
+            "the live SM queue recorded the frame"
+        );
+        assert!(
+            conn.sm_state.replay_gap_through().is_none(),
+            "the resumable queue stayed gap-free before detach"
+        );
+        assert_eq!(sink.ready_polls, 1, "revocation interrupted the ready wait");
+        assert!(
+            matches!(
+                accepted.try_recv(),
+                Err(tokio::sync::oneshot::error::TryRecvError::Closed)
+            ),
+            "authority revocation must drop unacknowledged acceptance so the producer retains the row for retry"
         );
     }
 }

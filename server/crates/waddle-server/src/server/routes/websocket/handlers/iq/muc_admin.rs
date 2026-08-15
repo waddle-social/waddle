@@ -1699,7 +1699,9 @@ mod tests {
     use waddle_xmpp::xep::xep0421::OccupantIdSecret;
 
     use crate::room_effect_outbox::RoomEffectEnqueue;
-    use crate::server::routes::websocket::tests::create_test_websocket_state;
+    use crate::server::routes::websocket::tests::{
+        create_test_websocket_state, register_test_connection,
+    };
 
     fn test_secret() -> OccupantIdSecret {
         OccupantIdSecret::new(b"occupant-id-secret-at-least-32-bytes".to_vec())
@@ -1765,6 +1767,64 @@ mod tests {
             )
             .await
             .expect("enqueue recovered reservation");
+        tx.commit().await.expect("commit");
+        reservation
+    }
+
+    async fn enqueue_self_kick_reservation(
+        state: &WebSocketState,
+        room_jid: &BareJid,
+        coordinates: RoomCommittedCoordinates,
+        sessions: &[FullJid],
+    ) -> waddle_xmpp::muc::RoomEffectReservation {
+        let store = state.deps.protocol.room_effect_outbox.as_ref();
+        let mut tx = store.database().begin().await.expect("transaction");
+        let occupant = room_jid
+            .with_resource_str("owner")
+            .expect("owner nick is a valid resource");
+        let occupant_bare_jid = sessions
+            .first()
+            .expect("self-kick reservation needs at least one session")
+            .to_bare();
+        let nick = waddle_xmpp::muc::MucOccupantNick::new("owner".to_owned()).expect("owner nick");
+        let effects = waddle_xmpp::muc::RoomMutationEffects::admin(
+            room_jid.clone(),
+            sessions
+                .iter()
+                .cloned()
+                .map(|recipient| waddle_xmpp::muc::OccupantPresenceUpdate {
+                    recipient: recipient.clone(),
+                    is_self: true,
+                    occupant: occupant.clone(),
+                    nick: nick.clone(),
+                    occupant_bare_jid: occupant_bare_jid.clone(),
+                    disclosed_real_jid: Some(recipient),
+                    affiliation: Affiliation::Member,
+                    kind: waddle_xmpp::muc::AdminPresenceKind::Kicked,
+                    actor: Some("mod@example.com".parse().expect("actor bare JID")),
+                    reason: None,
+                })
+                .collect(),
+            Vec::new(),
+            sessions.to_vec(),
+            Vec::new(),
+        );
+        let origin = test_origin();
+        let producing_node = test_producing_node();
+        let reservation = store
+            .enqueue_in_tx(
+                &mut tx,
+                RoomEffectEnqueue {
+                    lifecycle: coordinates.lifecycle,
+                    revision: coordinates.revision,
+                    effects: &effects,
+                    origin: &origin,
+                    producing_node: &producing_node,
+                    now_ms: 0,
+                },
+            )
+            .await
+            .expect("enqueue self-kick reservation");
         tx.commit().await.expect("commit");
         reservation
     }
@@ -2719,6 +2779,141 @@ mod tests {
             .expect("find retained row")
             .expect("requeued row remains");
         assert!(retained.lease_token.is_none());
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn self_kick_preresult_sibling_timeout_keeps_presence_before_result() {
+        let state = create_test_websocket_state().await;
+        let room_jid: BareJid = "admin-self-kick-backpressured-sibling@muc.example.com"
+            .parse()
+            .expect("room JID");
+        let owner: FullJid = "owner@example.com/web".parse().expect("owner full jid");
+        let sibling: FullJid = "owner@example.com/phone".parse().expect("sibling full jid");
+        let coordinates = RoomCommittedCoordinates {
+            lifecycle: waddle_xmpp::muc::RoomLifecycleId::generate(),
+            revision: waddle_xmpp::muc::RoomRevision::initial(),
+        };
+        state
+            .deps
+            .protocol
+            .room_registry
+            .ask(CreateRoom {
+                room_jid: room_jid.clone(),
+                waddle_id: "waddle".to_owned(),
+                channel_id: "channel".to_owned(),
+                config: RoomConfig::default(),
+            })
+            .await
+            .expect("acquire local room ownership");
+        insert_lifecycle_row(
+            state.as_ref(),
+            &room_jid,
+            coordinates,
+            RoomLifecycleState::Active,
+        )
+        .await;
+        let (sibling_tx, mut sibling_rx) =
+            tokio::sync::mpsc::channel::<waddle_xmpp::registry::OutboundStanza>(1);
+        sibling_tx
+            .send(waddle_xmpp::registry::OutboundStanza::new(
+                Stanza::Presence(xmpp_parsers::presence::Presence::new(
+                    xmpp_parsers::presence::Type::None,
+                )),
+            ))
+            .await
+            .expect("prefill sibling queue");
+        register_test_connection(state.as_ref(), &sibling, sibling_tx).await;
+
+        let reservation = enqueue_self_kick_reservation(
+            state.as_ref(),
+            &room_jid,
+            coordinates,
+            &[owner.clone(), sibling.clone()],
+        )
+        .await;
+        let (pre_result, post_result) = split_room_effect_reservation(&reservation, 1);
+        let pre_result = pre_result.expect("self-kick pre-result row");
+        let mut batch = ResponseBatch::default();
+
+        // Real time on purpose: pausing the clock makes every sqlx pool
+        // acquire race the auto-advanced deadline (instant PoolTimedOut
+        // under parallel load). The backpressured sibling send times out on
+        // its own after LOCAL_ACCEPTANCE_TIMEOUT (~5s).
+        let (summary, mut batch) = async {
+            extend_batch_with_inline_room_effect_frames(
+                &mut batch,
+                state.as_ref(),
+                &pre_result,
+                Some(&owner),
+            )
+            .await
+            .map(|summary| (summary, batch))
+        }
+        .await
+        .expect("pre-result drain");
+        assert_eq!(summary.inline, 1);
+        assert_eq!(summary.completed, 0);
+        assert_eq!(summary.requeued, 0);
+        assert_eq!(summary.stale, 0);
+        assert_eq!(summary.leased, 0);
+
+        batch.frames.push(
+            iq_to_xml(build_admin_set_result(
+                "self-kick-timeout",
+                &room_jid,
+                &Jid::from(owner.clone()),
+            ))
+            .into(),
+        );
+        if let Some(post_result) = post_result.as_ref() {
+            extend_batch_with_inline_room_effect_frames(
+                &mut batch,
+                state.as_ref(),
+                post_result,
+                Some(&owner),
+            )
+            .await
+            .expect("post-result drain");
+        }
+
+        assert_eq!(
+            batch.frames.len(),
+            2,
+            "the handler seam must emit self-presence before the IQ result"
+        );
+        let self_presence_xml = batch.frames[0].clone().into_serialized_xml();
+        assert!(
+            self_presence_xml.starts_with("<presence")
+                && self_presence_xml.contains("code='307'")
+                && self_presence_xml.contains("code='110'"),
+            "the initiator must still receive the self-kick presence first: {self_presence_xml}"
+        );
+        let result_xml = batch.frames[1].clone().into_serialized_xml();
+        assert!(
+            result_xml.starts_with("<iq")
+                && result_xml.contains("type='result'")
+                && result_xml.contains("id='self-kick-timeout'"),
+            "the IQ result must still follow the inline self-presence: {result_xml}"
+        );
+        sibling_rx
+            .try_recv()
+            .expect("the prefilled sibling frame remains queued");
+        assert!(
+            sibling_rx.try_recv().is_err(),
+            "the timed-out sibling send must not enqueue an extra frame"
+        );
+        assert_eq!(
+            batch.completions.len(),
+            1,
+            "the inline self-presence keeps one completion"
+        );
+        let completion = batch.completions.pop().expect("inline completion");
+        assert!(
+            !crate::room_effect_outbox::drain::complete_after_write(state.as_ref(), &completion)
+                .await
+                .expect("complete released self-kick retry"),
+            "the released retry row must stay queued after the handler emits the success batch"
+        );
     }
 
     #[tokio::test]

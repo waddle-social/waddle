@@ -485,6 +485,17 @@ async fn drain_claimed(
                 RoomEffectLastError::InfrastructureTransient,
             )
             .await?;
+        if !inline.is_empty() {
+            let completion = RoomEffectCompletion {
+                key: claimed.row.key.clone(),
+                lease: claimed.lease_token.clone(),
+                pending_local_acceptances: Arc::new(Mutex::new(Some(acks))),
+            };
+            for frame in &mut inline {
+                frame.completion = completion.clone();
+            }
+            return Ok(ClaimDisposition::Inline(inline));
+        }
         return Ok(ClaimDisposition::Requeued);
     }
     if !inline.is_empty() {

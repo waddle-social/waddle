@@ -537,13 +537,12 @@ async fn supervisor_retries_transient_store_failure_then_drains_once_store_recov
     )
     .await;
 
-    tokio::time::pause();
+    // Real time on purpose (paused-clock sqlx acquires PoolTimedOut).
     supervisor.arm(reservation.clone());
     for _ in 0..4 {
         tokio::task::yield_now().await;
     }
     assert_eq!(armed.load(Ordering::SeqCst), 0);
-    tokio::time::advance(Duration::from_millis(10)).await;
 
     rename_effect_table(
         store.as_ref(),
@@ -551,9 +550,8 @@ async fn supervisor_retries_transient_store_failure_then_drains_once_store_recov
         "clustering_muc_room_effects",
     )
     .await;
-    tokio::time::resume();
 
-    let outbound = tokio::time::timeout(Duration::from_secs(1), recipient_rx.recv())
+    let outbound = tokio::time::timeout(Duration::from_secs(30), recipient_rx.recv())
         .await
         .expect("recipient delivery timeout")
         .expect("recipient delivery");

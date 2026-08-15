@@ -107,6 +107,37 @@ fn inline_admin_effects_for(room_jid: &BareJid, initiator: &FullJid) -> RoomMuta
     )
 }
 
+fn self_removal_effects_for(room_jid: &BareJid, sessions: &[FullJid]) -> RoomMutationEffects {
+    let occupant = full_jid("room@muc.example.com/alice");
+    let nick = nick("alice");
+    let occupant_bare_jid = sessions
+        .first()
+        .expect("self-removal needs at least one session")
+        .to_bare();
+    RoomMutationEffects::admin(
+        room_jid.clone(),
+        sessions
+            .iter()
+            .cloned()
+            .map(|recipient| OccupantPresenceUpdate {
+                recipient: recipient.clone(),
+                is_self: true,
+                occupant: occupant.clone(),
+                nick: nick.clone(),
+                occupant_bare_jid: occupant_bare_jid.clone(),
+                disclosed_real_jid: Some(recipient),
+                affiliation: waddle_xmpp::Affiliation::Member,
+                kind: AdminPresenceKind::Kicked,
+                actor: Some(BareJid::from_str("mod@example.test").expect("actor JID")),
+                reason: None,
+            })
+            .collect(),
+        Vec::new(),
+        sessions.to_vec(),
+        Vec::new(),
+    )
+}
+
 async fn enqueue_effects(
     state: &WebSocketState,
     lifecycle: RoomLifecycleId,
@@ -1551,6 +1582,71 @@ async fn complete_after_write_waits_for_local_acceptance() {
             .expect("find row")
             .is_none(),
         "the row should delete once the write path accepts it"
+    );
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn inline_self_removal_still_returns_initiator_frame_when_sibling_send_times_out() {
+    let state = create_test_websocket_state().await;
+    let room_jid = drain_room_jid();
+    let initiator = full_jid("alice@example.test/web");
+    let sibling = full_jid("alice@example.test/phone");
+    let lifecycle = create_owned_room_and_lifecycle(state.as_ref()).await;
+    let (sibling_tx, mut sibling_rx) = mpsc::channel::<OutboundStanza>(1);
+    sibling_tx
+        .send(OutboundStanza::new(Stanza::Presence(
+            xmpp_parsers::presence::Presence::new(xmpp_parsers::presence::Type::None),
+        )))
+        .await
+        .expect("prefill sibling channel");
+    register_test_connection(state.as_ref(), &sibling, sibling_tx).await;
+    let reservation = enqueue_effects(
+        state.as_ref(),
+        lifecycle,
+        initial_revision(),
+        &self_removal_effects_for(&room_jid, &[initiator.clone(), sibling.clone()]),
+        0,
+    )
+    .await;
+
+    // Real time on purpose: a paused clock makes sqlx pool acquires race the
+    // auto-advanced deadline (instant PoolTimedOut under parallel load). The
+    // backpressured sibling send times out on its own (~5s).
+    let mut frames = drain_reservation_inline(state.as_ref(), &reservation, Some(&initiator))
+        .await
+        .expect("inline drain after sibling timeout");
+    assert_eq!(
+        frames.len(),
+        1,
+        "the initiator self-removal frame must still be returned inline"
+    );
+    assert_eq!(frames.summary.inline, 1);
+    assert_eq!(frames.summary.completed, 0);
+    sibling_rx
+        .try_recv()
+        .expect("the original prefilled sibling frame remains queued");
+    assert!(
+        sibling_rx.try_recv().is_err(),
+        "the backpressured sibling send must never enqueue a second frame"
+    );
+    assert_eq!(
+        state
+            .deps
+            .protocol
+            .room_effect_outbox
+            .queue_depth()
+            .await
+            .expect("queue depth after retry release"),
+        2,
+        "the released self-notify row and its untouched sibling effect must remain queued for retry"
+    );
+
+    let completion = frames.remove(0).completion;
+    assert!(
+        !complete_after_write(state.as_ref(), &completion)
+            .await
+            .expect("complete released inline retry"),
+        "released retry rows should still hand the initiator a completion token without deleting the queued retry"
     );
 }
 

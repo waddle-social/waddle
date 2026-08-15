@@ -789,6 +789,7 @@ async fn handle_xmpp_websocket(
     } else {
         cleanup_connection_shutdown(state.as_ref(), &mut outbound_rx, &mut conn, superseded).await
     };
+    finalize_replay_recorded_completions(&state, &mut conn, shutdown_outcome);
 
     // ADR-0017 Phase 3 Slice 6: only now — after this connection's own
     // detach-for-resume persistence has actually run above — tell the
@@ -1847,7 +1848,7 @@ async fn process_deferred_inbound_after_transport_loss(
 }
 
 fn record_response_batch_for_replay(
-    state: &Arc<WebSocketState>,
+    _state: &Arc<WebSocketState>,
     conn: &mut WsConnState,
     responses: ResponseBatch,
     policy: BatchSmPolicy,
@@ -1858,13 +1859,21 @@ fn record_response_batch_for_replay(
         BatchSmPolicy::Record => BatchCompletionOutcome::RetainedForRecovery,
         BatchSmPolicy::ReplaySuppressed => BatchCompletionOutcome::RetryOnly,
     };
-    settle_batch_completions(
-        state,
+    let (completions_to_complete, retained) = select_batch_completions_to_complete(
         outcome,
         conn.sm_state.is_resumable(),
         &accepted_frame_indices,
         response_batch_completion_frames(responses),
     );
+    if retained > 0 {
+        debug!(
+            retained,
+            ?outcome,
+            resumable = conn.sm_state.is_resumable(),
+            "Retaining room effect completions for retry after replay-only response batch was not durably accepted"
+        );
+    }
+    queue_replay_recorded_completions(conn, completions_to_complete);
 }
 
 fn terminal_recovery_recording_is_full(conn: &WsConnState) -> bool {
@@ -1967,6 +1976,44 @@ fn settle_batch_completions(
         );
     }
     complete_batch_completions(state, completions_to_complete);
+}
+
+fn queue_replay_recorded_completions(
+    conn: &mut WsConnState,
+    completions: Vec<crate::room_effect_outbox::drain::RoomEffectCompletion>,
+) {
+    let mut queued: std::collections::HashSet<_> = conn
+        .pending_replay_completions
+        .iter()
+        .map(|completion| (completion.key.clone(), completion.lease.clone()))
+        .collect();
+    for completion in completions {
+        let completion_key = (completion.key.clone(), completion.lease.clone());
+        if queued.insert(completion_key) {
+            conn.pending_replay_completions.push(completion);
+        }
+    }
+}
+
+fn finalize_replay_recorded_completions(
+    state: &Arc<WebSocketState>,
+    conn: &mut WsConnState,
+    shutdown_outcome: cleanup::ConnectionShutdownOutcome,
+) {
+    if conn.pending_replay_completions.is_empty() {
+        return;
+    }
+
+    if shutdown_outcome == cleanup::ConnectionShutdownOutcome::Detached {
+        complete_batch_completions(state, std::mem::take(&mut conn.pending_replay_completions));
+        return;
+    }
+
+    debug!(
+        retained = conn.pending_replay_completions.len(),
+        ?shutdown_outcome,
+        "Retaining replay-only room effect completions because cleanup did not persist a detached owner"
+    );
 }
 
 fn select_batch_completions_to_complete(
@@ -2734,7 +2781,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn replay_recording_completes_inline_room_effect_reservations() {
+    async fn replay_recording_defers_inline_room_effect_settlement_until_detach_persists() {
         let state = super::super::tests::create_test_websocket_state().await;
         let room_jid = replay_completion_room_jid();
         let initiator: FullJid = "alice@example.com/device".parse().expect("initiator JID");
@@ -2756,7 +2803,7 @@ mod tests {
         record_response_batch_for_replay(
             &state,
             &mut conn,
-            ResponseBatch::from_completion_frames(vec![(frame, completion)]),
+            ResponseBatch::from_completion_frames(vec![(frame, completion.clone())]),
             BatchSmPolicy::Record,
         );
 
@@ -2765,11 +2812,28 @@ mod tests {
             1,
             "the initiator reply is retained for SM replay"
         );
+        assert_eq!(
+            state
+                .deps
+                .protocol
+                .room_effect_outbox
+                .queue_depth()
+                .await
+                .expect("queue depth"),
+            1,
+            "pre-detach replay recording must keep the leased completion until cleanup proves detach"
+        );
+
+        finalize_replay_recorded_completions(
+            &state,
+            &mut conn,
+            cleanup::ConnectionShutdownOutcome::Detached,
+        );
         wait_for_room_effect_queue_depth(&state, 0).await;
     }
 
     #[tokio::test]
-    async fn terminal_recovery_replay_recording_settles_inline_room_effect_reservations() {
+    async fn replay_recording_not_persisted_cleanup_retains_inline_room_effect_reservations() {
         let state = super::super::tests::create_test_websocket_state().await;
         let room_jid = replay_completion_room_jid();
         let initiator: FullJid = "alice@example.com/device".parse().expect("initiator JID");
@@ -2792,7 +2856,7 @@ mod tests {
         record_response_batch_for_replay(
             &state,
             &mut conn,
-            ResponseBatch::from_completion_frames(vec![(frame, completion)]),
+            ResponseBatch::from_completion_frames(vec![(frame, completion.clone())]),
             BatchSmPolicy::Record,
         );
 
@@ -2801,28 +2865,116 @@ mod tests {
             1,
             "the initiator reply is retained in the terminal recovery replay buffer"
         );
-        // Settlement runs on a spawned completion task; poll for the settled
-        // state instead of racing it. Round-4 semantics: a resumable session's
-        // terminal recovery buffer is a recovery-owning path, so recorded
-        // frames settle their completions (non-resumable sessions retain).
-        tokio::time::timeout(std::time::Duration::from_secs(10), async {
-            loop {
-                if state
-                    .deps
-                    .protocol
-                    .room_effect_outbox
-                    .queue_depth()
-                    .await
-                    .expect("queue depth")
-                    == 0
-                {
-                    return;
-                }
-                tokio::task::yield_now().await;
-            }
-        })
-        .await
-        .expect("recorded resumable frames settle their completions");
+        finalize_replay_recorded_completions(
+            &state,
+            &mut conn,
+            cleanup::ConnectionShutdownOutcome::NotPersisted,
+        );
+        assert_eq!(
+            state
+                .deps
+                .protocol
+                .room_effect_outbox
+                .queue_depth()
+                .await
+                .expect("queue depth"),
+            1,
+            "a NotPersisted cleanup must retain replay-only completions for retry"
+        );
+        assert!(
+            crate::room_effect_outbox::drain::complete_after_write(state.as_ref(), &completion)
+                .await
+                .expect("complete retained completion"),
+            "the retained completion must still be available for retry after NotPersisted cleanup"
+        );
+    }
+
+    #[tokio::test]
+    async fn not_persisted_cleanup_keeps_replay_only_tail_after_written_prefix_settles() {
+        let state = super::super::tests::create_test_websocket_state().await;
+        let initiator: FullJid = "alice@example.com/device".parse().expect("initiator JID");
+
+        let first_room_jid = replay_completion_room_jid();
+        let first_lifecycle =
+            create_owned_room_and_lifecycle_for_replay_completion(state.as_ref(), &first_room_jid)
+                .await;
+        let first_reservation = enqueue_inline_config_reservation_for_replay_completion(
+            state.as_ref(),
+            first_lifecycle,
+            waddle_xmpp::muc::RoomRevision::initial(),
+            &initiator,
+        )
+        .await;
+        let (first_frame, first_completion) =
+            drain_single_inline_completion_frame(state.as_ref(), &first_reservation, &initiator)
+                .await;
+
+        let second_room_jid = other_replay_completion_room_jid();
+        let second_lifecycle =
+            create_owned_room_and_lifecycle_for_replay_completion(state.as_ref(), &second_room_jid)
+                .await;
+        let second_reservation = enqueue_inline_config_reservation_for_room_replay_completion(
+            state.as_ref(),
+            second_room_jid,
+            second_lifecycle,
+            waddle_xmpp::muc::RoomRevision::initial(),
+            &initiator,
+        )
+        .await;
+        let (second_frame, second_completion) =
+            drain_single_inline_completion_frame(state.as_ref(), &second_reservation, &initiator)
+                .await;
+
+        let mut conn = WsConnState::new();
+        conn.sm_state
+            .enable("mixed-prefix-and-tail".to_string(), true, Some(300));
+
+        settle_batch_completions(
+            &state,
+            BatchCompletionOutcome::RetainedForRecovery,
+            true,
+            &[0],
+            response_batch_completion_frames(ResponseBatch::from_completion_frames(vec![(
+                first_frame,
+                first_completion,
+            )])),
+        );
+        wait_for_room_effect_queue_depth(&state, 1).await;
+
+        record_response_batch_for_replay(
+            &state,
+            &mut conn,
+            ResponseBatch::from_completion_frames(vec![(second_frame, second_completion.clone())]),
+            BatchSmPolicy::Record,
+        );
+        assert_eq!(conn.pending_replay_completions.len(), 1);
+
+        finalize_replay_recorded_completions(
+            &state,
+            &mut conn,
+            cleanup::ConnectionShutdownOutcome::NotPersisted,
+        );
+
+        assert_eq!(
+            state
+                .deps
+                .protocol
+                .room_effect_outbox
+                .queue_depth()
+                .await
+                .expect("queue depth"),
+            1,
+            "the live-written prefix must settle while the replay-only tail stays leased"
+        );
+        assert!(
+            crate::room_effect_outbox::drain::complete_after_write(
+                state.as_ref(),
+                &second_completion
+            )
+            .await
+            .expect("complete retained replay-only tail"),
+            "the replay-only tail must remain available for retry after NotPersisted cleanup"
+        );
     }
 
     #[tokio::test]
@@ -3199,7 +3351,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn replay_recording_partial_terminal_acceptance_retains_unrecorded_room_effects() {
+    async fn replay_recording_partial_terminal_acceptance_retains_all_room_effects_until_cleanup() {
         let state = super::super::tests::create_test_websocket_state().await;
         let room_jid = replay_completion_room_jid();
         let initiator: FullJid = "alice@example.com/device".parse().expect("initiator JID");
@@ -3261,12 +3413,31 @@ mod tests {
 
         record_response_batch_for_replay(&state, &mut conn, responses, BatchSmPolicy::Record);
 
-        wait_for_room_effect_queue_depth(&state, 1).await;
+        assert_eq!(
+            state
+                .deps
+                .protocol
+                .room_effect_outbox
+                .queue_depth()
+                .await
+                .expect("queue depth"),
+            2,
+            "pre-detach terminal replay recording must keep both recorded and unrecorded completions leased"
+        );
 
         assert_eq!(
             conn.terminal_sm_recovery.queue_len(),
             TERMINAL_RECOVERY_QUEUE_CAP,
             "terminal recovery should accept only one more completion frame"
+        );
+        assert!(
+            crate::room_effect_outbox::drain::complete_after_write(
+                state.as_ref(),
+                &first_completion
+            )
+            .await
+            .expect("complete retained recorded completion"),
+            "the terminally recorded completion must stay retained until cleanup settles it"
         );
         assert!(
             crate::room_effect_outbox::drain::complete_after_write(

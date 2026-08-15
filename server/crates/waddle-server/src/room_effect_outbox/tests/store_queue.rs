@@ -498,6 +498,165 @@ async fn staged_reservation_recovery_and_idempotent_supersession_preserve_transi
 }
 
 #[tokio::test]
+async fn pure_104_successor_coalesces_empty_104_but_preserves_voice_changes() {
+    let (_db, store) = store_with_db("room-effect-config-pure-104-supersession").await;
+    let pure_lifecycle = lifecycle();
+    let first_revision = initial_revision();
+
+    let mut tx = store.database().begin().await.expect("transaction");
+    let empty_reservation = store
+        .enqueue_in_tx(
+            &mut tx,
+            RoomEffectEnqueue {
+                lifecycle: pure_lifecycle,
+                revision: first_revision,
+                effects: &config_effects(),
+                origin: &origin(),
+                producing_node: &producing_node(),
+                now_ms: 10,
+            },
+        )
+        .await
+        .expect("enqueue empty 104");
+    tx.commit().await.expect("commit empty 104");
+    assert_eq!(
+        store
+            .staged_reservation_for(pure_lifecycle, first_revision)
+            .await
+            .expect("lookup empty 104"),
+        Some(empty_reservation.clone())
+    );
+
+    let pure_104_revision = first_revision.next().expect("next revision");
+    let mut tx = store.database().begin().await.expect("transaction");
+    assert_eq!(
+        store
+            .supersede_idempotent_config_in_tx(
+                &mut tx,
+                pure_lifecycle,
+                &[MucConfigStatusCode::NonPrivacyConfigurationChange],
+            )
+            .await
+            .expect("coalesce empty 104"),
+        1
+    );
+    let pure_104_reservation = store
+        .enqueue_in_tx(
+            &mut tx,
+            RoomEffectEnqueue {
+                lifecycle: pure_lifecycle,
+                revision: pure_104_revision,
+                effects: &config_effects(),
+                origin: &origin(),
+                producing_node: &producing_node(),
+                now_ms: 11,
+            },
+        )
+        .await
+        .expect("enqueue successor 104");
+    tx.commit().await.expect("commit pure 104 supersession");
+
+    assert!(
+        store
+            .staged_reservation_for(pure_lifecycle, first_revision)
+            .await
+            .expect("lookup coalesced empty 104")
+            .is_none(),
+        "a pure-104 successor should consume the staged empty 104"
+    );
+    assert_eq!(
+        store
+            .staged_reservation_for(pure_lifecycle, pure_104_revision)
+            .await
+            .expect("lookup successor 104"),
+        Some(pure_104_reservation)
+    );
+
+    let voiced_lifecycle = lifecycle();
+    let voiced_revision = initial_revision();
+    let voiced_effects = RoomMutationEffects::config_with_voice_changes(
+        room_jid(),
+        vec![MucConfigStatusCode::NonPrivacyConfigurationChange],
+        vec![full_jid("alice@example.test/device")],
+        vec![OccupantVoiceChange {
+            session: full_jid("carol@example.test/device"),
+            voice: waddle_xmpp::Voice::Muted,
+        }],
+    );
+
+    let mut tx = store.database().begin().await.expect("transaction");
+    let voiced_reservation = store
+        .enqueue_in_tx(
+            &mut tx,
+            RoomEffectEnqueue {
+                lifecycle: voiced_lifecycle,
+                revision: voiced_revision,
+                effects: &voiced_effects,
+                origin: &origin(),
+                producing_node: &producing_node(),
+                now_ms: 20,
+            },
+        )
+        .await
+        .expect("enqueue voiced 104");
+    tx.commit().await.expect("commit voiced 104");
+    assert_eq!(
+        store
+            .staged_reservation_for(voiced_lifecycle, voiced_revision)
+            .await
+            .expect("lookup voiced 104"),
+        Some(voiced_reservation.clone())
+    );
+
+    let voiced_successor_revision = voiced_revision.next().expect("next voiced revision");
+    let mut tx = store.database().begin().await.expect("transaction");
+    assert_eq!(
+        store
+            .supersede_idempotent_config_in_tx(
+                &mut tx,
+                voiced_lifecycle,
+                &[MucConfigStatusCode::NonPrivacyConfigurationChange],
+            )
+            .await
+            .expect("preserve voiced 104"),
+        0
+    );
+    let voiced_successor = store
+        .enqueue_in_tx(
+            &mut tx,
+            RoomEffectEnqueue {
+                lifecycle: voiced_lifecycle,
+                revision: voiced_successor_revision,
+                effects: &config_effects(),
+                origin: &origin(),
+                producing_node: &producing_node(),
+                now_ms: 21,
+            },
+        )
+        .await
+        .expect("enqueue successor after voiced 104");
+    tx.commit()
+        .await
+        .expect("commit voiced 104 supersession attempt");
+
+    assert_eq!(
+        store
+            .staged_reservation_for(voiced_lifecycle, voiced_revision)
+            .await
+            .expect("lookup preserved voiced 104"),
+        Some(voiced_reservation),
+        "a pure-104 successor must not consume staged voice transitions"
+    );
+    assert_eq!(
+        store
+            .staged_reservation_for(voiced_lifecycle, voiced_successor_revision)
+            .await
+            .expect("lookup voiced successor"),
+        Some(voiced_successor)
+    );
+}
+
+#[tokio::test]
 async fn postgres_schema_has_required_room_effect_columns() {
     let Some(url) = std::env::var("WADDLE_TEST_POSTGRES_URL").ok() else {
         return;

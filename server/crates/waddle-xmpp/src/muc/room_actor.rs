@@ -83,6 +83,11 @@ pub struct RoomSnapshot {
     /// state after the actor read completes.
     pub claim_fence: Option<super::durable::RoomClaimFenceContext>,
     pub durable_coordinates: Option<super::durable::RoomCommittedCoordinates>,
+    /// Exact durable coordinates for the revision that most recently changed
+    /// this actor's room config. Kept distinct from `durable_coordinates`
+    /// because later affiliation/admin commits advance the room lifecycle
+    /// without owning the config-change outbox row.
+    pub config_durable_coordinates: Option<super::durable::RoomCommittedCoordinates>,
     pub config_revision: u64,
     pub admission_revision: u64,
 }
@@ -384,6 +389,7 @@ impl OccupantInfo {
 pub struct RoomActor {
     room: MucRoom,
     durable_coordinates: Option<super::durable::RoomCommittedCoordinates>,
+    config_durable_coordinates: Option<super::durable::RoomCommittedCoordinates>,
     config_revision: u64,
     /// Monotonic sequence used to timestamp admission-relevant snapshots.
     /// Scope-specific watermarks below decide whether a snapshot is stale;
@@ -610,6 +616,7 @@ impl RoomActor {
         Self {
             room,
             durable_coordinates: None,
+            config_durable_coordinates: None,
             config_revision: 0,
             admission_revision: 0,
             room_admission_revision: 0,
@@ -1627,6 +1634,7 @@ impl kameo::message::Message<UpdateConfig> for RoomActor {
                 effects,
             )
             .await?;
+        self.config_durable_coordinates = self.durable_coordinates;
         self.replace_config(config);
         self.config_revision = self.config_revision.saturating_add(1);
         self.advance_room_admission_revision();
@@ -1670,6 +1678,7 @@ impl kameo::message::Message<RollbackConfigIfRevision> for RoomActor {
                 .unwrap_or_else(super::RoomMutationEffects::none),
         )
         .await?;
+        self.config_durable_coordinates = self.durable_coordinates;
         self.replace_config(config);
         self.config_revision = self.config_revision.saturating_add(1);
         self.advance_room_admission_revision();
@@ -1775,6 +1784,7 @@ impl kameo::message::Message<UpdateGroupDmConfigByMember> for RoomActor {
                 effects,
             )
             .await?;
+        self.config_durable_coordinates = self.durable_coordinates;
         self.replace_config(config);
         self.config_revision = self.config_revision.saturating_add(1);
         self.advance_room_admission_revision();
@@ -1783,6 +1793,7 @@ impl kameo::message::Message<UpdateGroupDmConfigByMember> for RoomActor {
                 room: self.room.clone(),
                 claim_fence: self.durable_claim_fence.clone(),
                 durable_coordinates: self.durable_coordinates,
+                config_durable_coordinates: self.config_durable_coordinates,
                 config_revision: self.config_revision,
                 admission_revision: self.admission_revision,
             },
@@ -2345,6 +2356,7 @@ impl kameo::message::Message<GetSnapshot> for RoomActor {
             room: self.room.clone(),
             claim_fence: self.durable_claim_fence.clone(),
             durable_coordinates: self.durable_coordinates,
+            config_durable_coordinates: self.config_durable_coordinates,
             config_revision: self.config_revision,
             admission_revision: self.admission_revision,
         })

@@ -299,8 +299,16 @@ impl RoomEffectOutboxStore {
         let mut keys = Vec::new();
         while let Some(row) = rows.next().await? {
             let decoded = decode_row(&row)?;
-            if matches!(&decoded.effect, waddle_xmpp::muc::RoomEffect::ConfigChanged { status_codes, .. } if status_codes.iter().all(|c| *c == waddle_xmpp::muc::MucConfigStatusCode::NonPrivacyConfigurationChange))
-            {
+            if matches!(
+                &decoded.effect,
+                waddle_xmpp::muc::RoomEffect::ConfigChanged {
+                    status_codes,
+                    voice_changes,
+                    ..
+                } if voice_changes.is_empty()
+                    && status_codes.iter().all(|c| *c
+                        == waddle_xmpp::muc::MucConfigStatusCode::NonPrivacyConfigurationChange)
+            ) {
                 keys.push(decoded.key);
             }
         }

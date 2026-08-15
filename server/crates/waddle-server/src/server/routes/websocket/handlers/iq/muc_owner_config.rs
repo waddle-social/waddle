@@ -183,6 +183,45 @@ struct CancelledOwnerConfigAskRecoveryGuard {
 }
 
 impl CancelledOwnerConfigAskRecoveryGuard {
+    fn exact_config_coordinates(
+        &self,
+        snapshot: &waddle_xmpp::muc::room_actor::RoomSnapshot,
+    ) -> Option<waddle_xmpp::muc::RoomCommittedCoordinates> {
+        (snapshot.config_revision == self.expected_revision
+            && snapshot.room.config == self.intended_config)
+            .then_some(
+                snapshot
+                    .config_durable_coordinates
+                    .or(snapshot.durable_coordinates),
+            )
+            .flatten()
+    }
+
+    async fn recovered_reservation(
+        &self,
+        snapshot: &waddle_xmpp::muc::room_actor::RoomSnapshot,
+    ) -> Option<waddle_xmpp::muc::RoomEffectReservation> {
+        let coordinates = match self.exact_config_coordinates(snapshot) {
+            Some(coordinates) => coordinates,
+            None => return None,
+        };
+        match self
+            .outbox
+            .staged_reservation_for(coordinates.lifecycle, coordinates.revision)
+            .await
+        {
+            Ok(reservation) => reservation,
+            Err(error) => {
+                tracing::warn!(
+                    room = %self.room_jid,
+                    %error,
+                    "cancelled owner config ask recovery could not load the staged reservation"
+                );
+                None
+            }
+        }
+    }
+
     fn arm_only(
         state: &WebSocketState,
         actor: &kameo::actor::ActorRef<waddle_xmpp::muc::room_actor::RoomActor>,
@@ -227,60 +266,44 @@ impl CancelledOwnerConfigAskRecoveryGuard {
     }
 
     async fn recover(self) {
-        let snapshot = match self
-            .actor
-            .ask(GetSnapshot)
-            .reply_timeout(OWNER_CONFIG_RECOVERY_ASK_TIMEOUT)
-            .await
-        {
-            Ok(snapshot) => snapshot,
-            Err(error) => {
-                tracing::warn!(
-                    room = %self.room_jid,
-                    ?error,
-                    "cancelled owner config ask recovery could not snapshot the room"
-                );
-                return;
-            }
-        };
-        let exact_intended_config = snapshot.config_revision == self.expected_revision
-            && snapshot.room.config == self.intended_config;
-        let recovered_reservation = if let Some(coordinates) = snapshot.durable_coordinates {
-            let revision_offset = snapshot
-                .config_revision
-                .saturating_sub(self.expected_revision);
-            let Some(reconciled_revision) = (snapshot.config_revision >= self.expected_revision)
-                .then(|| {
-                    i64::try_from(revision_offset).ok().and_then(|offset| {
-                        coordinates
-                            .revision
-                            .as_i64()
-                            .checked_sub(offset)
-                            .and_then(waddle_xmpp::muc::RoomRevision::from_stored)
-                    })
-                })
-                .flatten()
-            else {
-                return;
-            };
+        let mut timeout_attempt = 0_i64;
+        let snapshot = loop {
             match self
-                .outbox
-                .staged_reservation_for(coordinates.lifecycle, reconciled_revision)
+                .actor
+                .ask(GetSnapshot)
+                .reply_timeout(OWNER_CONFIG_RECOVERY_ASK_TIMEOUT)
                 .await
             {
-                Ok(reservation) => reservation,
+                Ok(snapshot) => break snapshot,
+                // Both Timeout variants mean the same thing here: the actor
+                // did not answer in time (kameo reports reply timeouts with
+                // and without the returned message). Retry either way — the
+                // give-up arm below is for closed/dead actors only.
+                Err(kameo::error::SendError::Timeout(_)) => {
+                    timeout_attempt = timeout_attempt.saturating_add(1);
+                    let backoff_ms = crate::room_effect_outbox::retry_delay_ms(timeout_attempt);
+                    tracing::warn!(
+                        room = %self.room_jid,
+                        timeout_attempt,
+                        backoff_ms,
+                        "cancelled owner config ask recovery snapshot timed out; retrying"
+                    );
+                    tokio::time::sleep(std::time::Duration::from_millis(backoff_ms.max(0) as u64))
+                        .await;
+                }
                 Err(error) => {
                     tracing::warn!(
                         room = %self.room_jid,
-                        %error,
-                        "cancelled owner config ask recovery could not load the staged reservation"
+                        ?error,
+                        "cancelled owner config ask recovery could not snapshot the room"
                     );
                     return;
                 }
             }
-        } else {
-            None
         };
+        let exact_intended_config = snapshot.config_revision == self.expected_revision
+            && snapshot.room.config == self.intended_config;
+        let recovered_reservation = self.recovered_reservation(&snapshot).await;
         match &self.action {
             CancelledOwnerConfigAskRecoveryAction::ArmReservation { arm_supervisor } => {
                 if let Some(reservation) = recovered_reservation {
@@ -292,8 +315,6 @@ impl CancelledOwnerConfigAskRecoveryGuard {
                     seed.clone()
                         .run(self.actor.clone(), recovered_reservation)
                         .await;
-                } else if let Some(reservation) = recovered_reservation {
-                    seed.arm_supervisor.clone().arm(reservation);
                 }
             }
         }
@@ -1089,12 +1110,16 @@ mod tests {
     use std::sync::Arc;
     use tokio::sync::mpsc;
     use tokio::sync::Notify;
+    use tokio_util::sync::CancellationToken;
     use waddle_xmpp::muc::{
         durable::{
             DurableRoomState, MucDurableFuture, MucDurableStore, RoomCommitDatabaseError,
             RoomCommitError, RoomCommitFuture, RoomCommittedCoordinates, RoomDurableMutation,
         },
-        room_actor::{ConfigEffectPlan, JoinAffiliationGrant, JoinWithAffiliation, UpdateConfig},
+        room_actor::{
+            ChangeAffiliation, ConfigEffectPlan, GetSnapshot, JoinAffiliationGrant,
+            JoinWithAffiliation, UpdateConfig,
+        },
         room_registry_actor::WireClusteringClaims,
         MucConfigStatusCode, RoomEffectReservation, RoomLifecycleId, RoomMutationEffects,
         RoomRevision,
@@ -1106,7 +1131,7 @@ mod tests {
     use super::{
         apply_muc_owner_config, rollback_config_or_arm_reservation,
         CommittedConfigReservationGuard, PendingMembersOnlyEnforcement,
-        PendingMembersOnlyEnforcementRequest,
+        PendingMembersOnlyEnforcementRequest, OWNER_CONFIG_RECOVERY_ASK_TIMEOUT,
     };
     use crate::room_effect_outbox::{
         RoomEffectEnqueue, RoomEffectKey, RoomEffectOriginInstanceId, RoomEffectProducingNode,
@@ -1173,7 +1198,7 @@ mod tests {
     #[derive(Clone)]
     struct CommitPause {
         reached: Arc<Notify>,
-        release: Arc<Notify>,
+        release: CancellationToken,
     }
 
     impl CommitPause {
@@ -1182,7 +1207,7 @@ mod tests {
         fn new() -> Self {
             Self {
                 reached: Arc::new(Notify::new()),
-                release: Arc::new(Notify::new()),
+                release: CancellationToken::new(),
             }
         }
 
@@ -1193,13 +1218,11 @@ mod tests {
         }
 
         async fn wait_until_released(&self) {
-            tokio::time::timeout(Self::TIMEOUT, self.release.notified())
-                .await
-                .expect("timed out waiting to release the paused owner-config commit reply");
+            self.release.cancelled().await;
         }
 
         fn release(&self) {
-            self.release.notify_one();
+            self.release.cancel();
         }
     }
 
@@ -1400,7 +1423,7 @@ mod tests {
     }
 
     #[tokio::test(flavor = "current_thread")]
-    async fn cancelled_owner_config_ask_recovers_and_arms_the_committed_reservation() {
+    async fn cancelled_owner_config_snapshot_timeout_then_arms_committed_reservation() {
         let state = create_test_websocket_state().await;
         let durable_store =
             PausableConfigDurableStore::new(Arc::clone(&state.deps.protocol.room_effect_outbox));
@@ -1513,9 +1536,43 @@ mod tests {
 
         task.abort();
         let _ = task.await;
+
+        // Real time on purpose: choreographing the spawned recovery task,
+        // the actor mailbox, and the sqlite pool under a paused clock is
+        // race-prone. Hold the pause across the recovery's first snapshot
+        // ask so it must time out and retry; total test budget stays far
+        // below the CI slow threshold.
+        tokio::time::sleep(OWNER_CONFIG_RECOVERY_ASK_TIMEOUT + Duration::from_millis(500)).await;
+        assert_eq!(
+            state
+                .deps
+                .protocol
+                .room_effect_outbox
+                .find(&key)
+                .await
+                .expect("still-inert row lookup")
+                .expect("still-inert row")
+                .available_at_ms,
+            i64::MAX,
+            "the timed-out recovery snapshot must not arm the row before its retry"
+        );
+
         pause.release();
 
-        tokio::time::timeout(Duration::from_secs(1), async {
+        let recovered_snapshot = room_actor
+            .ask(GetSnapshot)
+            .await
+            .expect("snapshot after releasing paused config commit");
+        assert_eq!(recovered_snapshot.config_revision, 1);
+        assert_eq!(
+            recovered_snapshot.config_durable_coordinates,
+            Some(RoomCommittedCoordinates {
+                lifecycle,
+                revision: RoomRevision::from_stored(revision).expect("config revision"),
+            })
+        );
+
+        tokio::time::timeout(Duration::from_secs(30), async {
             loop {
                 if state
                     .deps
@@ -1530,11 +1587,175 @@ mod tests {
                 {
                     return;
                 }
-                tokio::task::yield_now().await;
+                tokio::time::sleep(Duration::from_millis(50)).await;
             }
         })
         .await
         .expect("cancelled owner-config ask must still arm the committed row");
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn cancelled_owner_config_interleaved_affiliation_mutation_still_arms_config_row() {
+        let state = create_test_websocket_state().await;
+        let durable_store =
+            PausableConfigDurableStore::new(Arc::clone(&state.deps.protocol.room_effect_outbox));
+        let claim_store: Arc<dyn ClaimStore> = Arc::new(InProcessClaimStore::new());
+        state
+            .deps
+            .protocol
+            .room_registry
+            .ask(WireClusteringClaims {
+                claim_store,
+                node_identity: SharedNodeIdentity::new(NodeIdentity::new(
+                    "owner-config-interleaved-node",
+                    "owner-config-interleaved-epoch",
+                )),
+                durable_store: Some(durable_store.clone()),
+                rollout_backoff: None,
+            })
+            .await
+            .expect("wire durable owner-config store");
+
+        let room = room_jid();
+        let room_actor = get_or_create_room_actor(
+            state.as_ref(),
+            &room,
+            waddle_xmpp::muc::RoomConfig::default(),
+            "waddle".to_owned(),
+            "channel".to_owned(),
+        )
+        .await
+        .expect("create room")
+        .actor_ref;
+        let owner = full_jid("alice@example.test/desktop");
+        room_actor
+            .ask(JoinWithAffiliation {
+                sender_jid: owner.clone(),
+                nick: "alice".to_owned(),
+                affiliation_grant: JoinAffiliationGrant::Resolver(waddle_xmpp::Affiliation::Owner),
+                local_domain: "example.test".to_owned(),
+                admission_revision: 0,
+            })
+            .await
+            .expect("owner join");
+
+        let submit_form =
+            xmpp_parsers::minidom::Element::builder("x", waddle_xmpp::muc::DATA_FORMS_NS)
+                .attr(
+                    minidom::rxml::xml_ncname!("type").to_owned(),
+                    "submit".to_owned(),
+                )
+                .append(
+                    xmpp_parsers::minidom::Element::builder(
+                        "field",
+                        waddle_xmpp::muc::DATA_FORMS_NS,
+                    )
+                    .attr(
+                        minidom::rxml::xml_ncname!("var").to_owned(),
+                        "muc#roomconfig_roomname",
+                    )
+                    .append(
+                        xmpp_parsers::minidom::Element::builder(
+                            "value",
+                            waddle_xmpp::muc::DATA_FORMS_NS,
+                        )
+                        .append("After")
+                        .build(),
+                    )
+                    .build(),
+                )
+                .build();
+        let iq = xmpp_parsers::iq::Iq::Set {
+            from: Some(jid::Jid::from(owner.clone())),
+            to: Some(jid::Jid::from(room.clone())),
+            id: "owner-config-interleaved".into(),
+            payload: xmpp_parsers::minidom::Element::builder(
+                "query",
+                waddle_xmpp::muc::NS_MUC_OWNER,
+            )
+            .append(submit_form)
+            .build(),
+        };
+        let owner_session = crate::auth::Session::new("alice@example.test", "alice", "alice");
+        let pause = durable_store.pause_next_commit_reply();
+        let task_state = Arc::clone(&state);
+        let task_room = room.clone();
+        let task_owner = owner.clone();
+        let task_session = owner_session.clone();
+        let task = tokio::spawn(async move {
+            let _ = apply_muc_owner_config(
+                task_state.as_ref(),
+                &task_room,
+                &iq,
+                Some(&task_session),
+                Some(&task_owner),
+            )
+            .await;
+        });
+
+        pause.wait_until_reached().await;
+        let (lifecycle, revision) = *durable_store
+            .coordinates
+            .lock()
+            .expect("coordinates lock")
+            .get(&room)
+            .expect("committed coordinates");
+        let key = RoomEffectKey {
+            lifecycle,
+            revision: RoomRevision::from_stored(revision).expect("revision"),
+            ordinal: waddle_xmpp::muc::RoomEffectOrdinal::first(),
+        };
+
+        task.abort();
+        let _ = task.await;
+
+        // Hold the pause past the recovery's first snapshot ask so the retry
+        // observes the post-interleave state deterministically (the
+        // affiliation ask below queues behind the paused commit and processes
+        // before the retry snapshot). Real time on purpose — see the sibling
+        // snapshot-timeout test.
+        tokio::time::sleep(OWNER_CONFIG_RECOVERY_ASK_TIMEOUT + Duration::from_millis(500)).await;
+
+        pause.release();
+        room_actor
+            .ask(ChangeAffiliation {
+                jid: BareJid::from_str("bob@example.test").expect("member bare JID"),
+                affiliation: waddle_xmpp::Affiliation::Member,
+            })
+            .await
+            .expect("interleaved affiliation mutation");
+        assert_eq!(
+            room_actor
+                .ask(GetSnapshot)
+                .await
+                .expect("snapshot after interleaved affiliation")
+                .durable_coordinates
+                .expect("latest durable coordinates")
+                .revision,
+            RoomRevision::from_stored(revision + 1).expect("later revision"),
+            "the interleaved affiliation mutation must advance the actor's latest durable coordinates"
+        );
+
+        tokio::time::timeout(Duration::from_secs(30), async {
+            loop {
+                if state
+                    .deps
+                    .protocol
+                    .room_effect_outbox
+                    .find(&key)
+                    .await
+                    .expect("armed row lookup")
+                    .expect("armed row")
+                    .available_at_ms
+                    != i64::MAX
+                {
+                    return;
+                }
+                tokio::time::sleep(Duration::from_millis(50)).await;
+            }
+        })
+        .await
+        .expect("the cancelled config recovery must arm the original config row after an interleaved affiliation revision");
     }
 
     #[tokio::test(flavor = "current_thread")]
