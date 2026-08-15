@@ -119,12 +119,46 @@ async fn recover_exact_room_after_ambiguous_config_commit(
     Ok((recovered.actor_ref, recovered_snapshot))
 }
 
+fn request_config_reservation_arm(
+    state: &WebSocketState,
+    reservation: Option<&waddle_xmpp::muc::RoomEffectReservation>,
+) {
+    let Some(reservation) = reservation else {
+        return;
+    };
+    state
+        .deps
+        .protocol
+        .room_effect_arm_supervisor
+        .arm(reservation.clone());
+}
+
+async fn rollback_config_or_arm_reservation(
+    state: &WebSocketState,
+    room_actor: &kameo::actor::ActorRef<waddle_xmpp::muc::room_actor::RoomActor>,
+    expected_revision: u64,
+    previous_config: waddle_xmpp::muc::RoomConfig,
+    reservation: Option<&waddle_xmpp::muc::RoomEffectReservation>,
+) {
+    let rollback = room_actor
+        .ask(waddle_xmpp::muc::room_actor::RollbackConfigIfRevision {
+            expected_revision,
+            config: previous_config,
+            reservation: reservation.cloned(),
+        })
+        .await;
+    if !matches!(rollback, Ok(true)) {
+        request_config_reservation_arm(state, reservation);
+    }
+}
+
 pub(super) async fn apply_muc_owner_config(
     state: &WebSocketState,
     room_jid: &BareJid,
     iq: &xmpp_parsers::iq::Iq,
     session: Option<&Session>,
-) -> Result<(), String> {
+    initiator: Option<&FullJid>,
+) -> Result<ResponseBatch, String> {
     let mut room_actor = get_room_actor(state, room_jid)
         .await
         .ok_or_else(|| "room actor not found".to_string())?;
@@ -251,13 +285,27 @@ pub(super) async fn apply_muc_owner_config(
     config = config.normalized();
     let mut recovered_broadcast_room = None;
     let mut recovered_voice_roster = None;
+    let effect_plan = if !previous_members_only && config.members_only {
+        if channel_id.is_some() {
+            waddle_xmpp::muc::room_actor::ConfigEffectPlan::ManagedMembersOnlyFallback
+        } else {
+            waddle_xmpp::muc::room_actor::ConfigEffectPlan::UnmanagedMembersOnlyPostEnforcement
+        }
+    } else {
+        waddle_xmpp::muc::room_actor::ConfigEffectPlan::DirectAudience
+    };
+    let mut config_reservation = None;
     let expected_revision = match room_actor
         .ask(UpdateConfig {
             config: config.clone(),
+            effect_plan,
         })
         .await
     {
-        Ok(revision) => revision,
+        Ok(applied) => {
+            config_reservation = applied.reservation;
+            applied.revision
+        }
         Err(kameo::error::SendError::HandlerError(
             waddle_xmpp::muc::room_actor::RoomMutationError::CommitOutcomeUnknown,
         )) => {
@@ -302,6 +350,15 @@ pub(super) async fn apply_muc_owner_config(
             );
             recovered_broadcast_room = Some(room_with_reconciled_config);
             room_actor = recovered_actor;
+            if let Some(coordinates) = recovered_snapshot.durable_coordinates {
+                config_reservation = state
+                    .deps
+                    .protocol
+                    .room_effect_outbox
+                    .staged_reservation_for(coordinates.lifecycle, coordinates.revision)
+                    .await
+                    .map_err(|error| format!("config reservation recovery failed: {error}"))?;
+            }
             recovered_snapshot.config_revision
         }
         Err(error) => return Err(format!("config update failed: {error:?}")),
@@ -311,10 +368,10 @@ pub(super) async fn apply_muc_owner_config(
 
     let Some(channel_id) = channel_id else {
         if !previous_members_only && config.members_only {
-            let applied = room_actor
-                .ask(EnforceMembersOnly)
-                .await
-                .map_err(|error| format!("members-only enforcement failed: {error:?}"))?;
+            let applied = room_actor.ask(EnforceMembersOnly).await.map_err(|error| {
+                request_config_reservation_arm(state, config_reservation.as_ref());
+                format!("members-only enforcement failed: {error:?}")
+            })?;
             super::super::super::muc_call_sfu::converge_members_only_sweep_via_sfu(
                 state.deps.protocol.sfu.as_ref(),
                 room_jid,
@@ -341,15 +398,17 @@ pub(super) async fn apply_muc_owner_config(
             .ask(GetSnapshot)
             .await
             .map_err(|error| format!("post-config snapshot failed: {error:?}"))?;
-        broadcast_muc_config_change(
+        return Ok(drain_or_broadcast_config_change(
             state,
             room_jid,
             recovered_broadcast_room
                 .as_ref()
                 .unwrap_or(&post_update_snapshot.room),
             &config_status_codes,
-        );
-        return Ok(());
+            config_reservation.as_ref(),
+            initiator,
+        )
+        .await);
     };
 
     let now = chrono::Utc::now().to_rfc3339();
@@ -384,12 +443,14 @@ pub(super) async fn apply_muc_owner_config(
         })
         .await
     {
-        let _ = room_actor
-            .ask(waddle_xmpp::muc::room_actor::RollbackConfigIfRevision {
-                expected_revision,
-                config: previous_config,
-            })
-            .await;
+        rollback_config_or_arm_reservation(
+            state,
+            &room_actor,
+            expected_revision,
+            previous_config,
+            config_reservation.as_ref(),
+        )
+        .await;
         return Err(format!("channel upsert failed: {error}"));
     }
 
@@ -407,26 +468,38 @@ pub(super) async fn apply_muc_owner_config(
     if !previous_members_only && config.members_only {
         let applied = if let Some(affiliations) = managed_enforcement_affiliations {
             room_actor
-                .ask(EnforceMembersOnlyAffiliations { affiliations })
+                .ask(EnforceMembersOnlyAffiliations {
+                    affiliations,
+                    fallback_reservation: config_reservation.clone(),
+                    config_status_codes: config_status_codes.clone(),
+                })
                 .await
-                .map_err(|error| format!("members-only enforcement failed: {error:?}"))?
+                .map_err(|error| {
+                    request_config_reservation_arm(state, config_reservation.as_ref());
+                    format!("members-only enforcement failed: {error:?}")
+                })?
         } else {
-            room_actor
-                .ask(EnforceMembersOnly)
-                .await
-                .map_err(|error| format!("members-only enforcement failed: {error:?}"))?
+            room_actor.ask(EnforceMembersOnly).await.map_err(|error| {
+                request_config_reservation_arm(state, config_reservation.as_ref());
+                format!("members-only enforcement failed: {error:?}")
+            })?
         };
+        if applied.outbox_reservation.is_some() {
+            config_reservation = applied.outbox_reservation.clone();
+        }
         super::super::super::muc_call_sfu::converge_members_only_sweep_via_sfu(
             state.deps.protocol.sfu.as_ref(),
             room_jid,
             &applied,
         );
-        for (recipient, presence) in applied.presence_updates {
-            let _ = state
-                .deps
-                .protocol
-                .connection_registry
-                .try_send_to(&recipient, Stanza::Presence(presence));
+        if applied.outbox_reservation.is_none() {
+            for (recipient, presence) in applied.presence_updates {
+                let _ = state
+                    .deps
+                    .protocol
+                    .connection_registry
+                    .try_send_to(&recipient, Stanza::Presence(presence));
+            }
         }
     }
 
@@ -444,26 +517,63 @@ pub(super) async fn apply_muc_owner_config(
         .ask(GetSnapshot)
         .await
         .map_err(|error| format!("post-config snapshot failed: {error:?}"))?;
-    broadcast_muc_config_change(
+    Ok(drain_or_broadcast_config_change(
         state,
         room_jid,
         recovered_broadcast_room
             .as_ref()
             .unwrap_or(&post_update_snapshot.room),
         &config_status_codes,
-    );
-
-    Ok(())
+        config_reservation.as_ref(),
+        initiator,
+    )
+    .await)
 }
 
-fn broadcast_muc_config_change(
+async fn drain_or_broadcast_config_change(
     state: &WebSocketState,
     room_jid: &BareJid,
     room: &waddle_xmpp::muc::MucRoom,
     status_codes: &[waddle_xmpp::muc::MucConfigStatusCode],
-) {
+    reservation: Option<&waddle_xmpp::muc::RoomEffectReservation>,
+    initiator: Option<&FullJid>,
+) -> ResponseBatch {
     if status_codes.is_empty() {
-        return;
+        return ResponseBatch::default();
+    }
+    if let Some(reservation) = reservation {
+        if let Err(error) = state
+            .deps
+            .protocol
+            .room_effect_outbox
+            .arm_reservation(reservation, crate::time::now_ms())
+            .await
+        {
+            tracing::warn!(
+                room = %room_jid,
+                %error,
+                "owner config direct arm failed after committed mutation; supervisor will retry"
+            );
+            request_config_reservation_arm(state, Some(reservation));
+            return ResponseBatch::default();
+        }
+        match crate::room_effect_outbox::drain::drain_reservation_inline(
+            state,
+            reservation,
+            initiator,
+        )
+        .await
+        {
+            Ok(frames) => return response_batch_from_inline_room_effect_frames(frames),
+            Err(error) => {
+                tracing::warn!(
+                    room = %room_jid,
+                    %error,
+                    "owner config inline drain failed after committed mutation"
+                );
+                return ResponseBatch::default();
+            }
+        }
     }
 
     for occupant in room.occupants.values() {
@@ -480,6 +590,7 @@ fn broadcast_muc_config_change(
                 .try_send_to(&recipient_jid, Stanza::Message(message));
         }
     }
+    ResponseBatch::default()
 }
 
 /// Thin adapter: run the shared moderation-flip convergence only when

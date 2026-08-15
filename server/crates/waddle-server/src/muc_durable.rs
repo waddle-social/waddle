@@ -1146,6 +1146,30 @@ impl PostgresMucRoomStore {
                 .await
                 .map_err(|_| commit_database_error())?;
         }
+        if let Some(reservation) = effects.superseding_reservation() {
+            let deleted = self
+                .room_effect_outbox
+                .supersede_reservation_in_tx(tx, reservation)
+                .await
+                .map_err(|_| commit_database_error())?;
+            if deleted.len() != reservation.ordinals.len() {
+                return Err(commit_database_error());
+            }
+        }
+        let successor_config_codes = effects.effects().iter().find_map(|effect| match effect {
+            waddle_xmpp::muc::RoomEffect::ConfigChanged { status_codes, .. } => {
+                Some(status_codes.as_slice())
+            }
+            _ => None,
+        });
+        if matches!(intent, RoomDurableMutation::Config { .. }) {
+            if let Some(successor_codes) = successor_config_codes {
+                self.room_effect_outbox
+                    .supersede_idempotent_config_in_tx(tx, lifecycle, successor_codes)
+                    .await
+                    .map_err(|_| commit_database_error())?;
+            }
+        }
         if effects.effects().is_empty() {
             return Ok(None);
         }
@@ -1893,7 +1917,7 @@ impl PostgresMucRoomStore {
     ) -> Result<Option<DurableRoomState>, XmppError> {
         let mut room_rows = tx
             .query(
-                "SELECT waddle_id, channel_id, config_json, subject_json FROM \
+                "SELECT waddle_id, channel_id, config_json, subject_json, lifecycle_id, revision FROM \
                  clustering_muc_rooms WHERE room_jid = ?",
                 crate::db_params![room_jid.to_string()],
             )
@@ -1906,6 +1930,8 @@ impl PostgresMucRoomStore {
         let channel_id: String = row.get(1).map_err(db_err)?;
         let config_json: String = row.get(2).map_err(db_err)?;
         let subject_json: Option<String> = row.get(3).map_err(db_err)?;
+        let lifecycle_id: Option<String> = row.get(4).map_err(db_err)?;
+        let revision: Option<i64> = row.get(5).map_err(db_err)?;
         let config: RoomConfig = serde_json::from_str(&config_json).map_err(|error| {
             XmppError::internal(format!("durable room config decode failed: {error}"))
         })?;
@@ -1954,6 +1980,23 @@ impl PostgresMucRoomStore {
         }
 
         Ok(Some(DurableRoomState {
+            coordinates: lifecycle_id
+                .zip(revision)
+                .map(|(lifecycle_id, revision)| {
+                    let lifecycle = uuid::Uuid::parse_str(&lifecycle_id)
+                        .map(RoomLifecycleId::from_uuid)
+                        .map_err(|_| {
+                            XmppError::internal("durable room lifecycle decode failed".to_string())
+                        })?;
+                    let revision = RoomRevision::from_stored(revision).ok_or_else(|| {
+                        XmppError::internal("durable room revision decode failed".to_string())
+                    })?;
+                    Ok::<RoomCommittedCoordinates, XmppError>(RoomCommittedCoordinates {
+                        lifecycle,
+                        revision,
+                    })
+                })
+                .transpose()?,
             waddle_id,
             channel_id,
             config,

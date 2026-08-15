@@ -5796,7 +5796,10 @@ async fn xep0045_mediated_invite_members_only_restricted_to_admins_with_auto_add
         .expect("config");
     config.members_only = true;
     room_actor
-        .ask(waddle_xmpp::muc::room_actor::UpdateConfig { config })
+        .ask(waddle_xmpp::muc::room_actor::UpdateConfig {
+            config,
+            effect_plan: waddle_xmpp::muc::room_actor::ConfigEffectPlan::DirectAudience,
+        })
         .await
         .expect("members-only config");
 

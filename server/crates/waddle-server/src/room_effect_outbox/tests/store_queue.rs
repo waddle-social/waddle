@@ -105,6 +105,85 @@ async fn staged_rows_need_exact_claim_or_arming_and_lease_token_interlocks() {
 }
 
 #[tokio::test]
+async fn staged_reservation_recovery_and_idempotent_supersession_preserve_transitions() {
+    let (_db, store) = store_with_db("room-effect-config-supersession").await;
+    let lifecycle = lifecycle();
+    let first_revision = initial_revision();
+    let mut tx = store.database().begin().await.expect("transaction");
+    let first = config_effects();
+    let first_reservation = store
+        .enqueue_in_tx(
+            &mut tx,
+            RoomEffectEnqueue {
+                lifecycle,
+                revision: first_revision,
+                effects: &first,
+                origin: &origin(),
+                producing_node: &producing_node(),
+                now_ms: 10,
+            },
+        )
+        .await
+        .expect("enqueue 104");
+    tx.commit().await.expect("commit 104");
+    assert_eq!(
+        store
+            .staged_reservation_for(lifecycle, first_revision)
+            .await
+            .expect("recover reservation"),
+        Some(first_reservation)
+    );
+
+    let logging_revision = first_revision.next().expect("next revision");
+    let logging = RoomMutationEffects::config(
+        room_jid(),
+        vec![MucConfigStatusCode::LoggingEnabled],
+        vec![full_jid("alice@example.test/device")],
+    );
+    let mut tx = store.database().begin().await.expect("transaction");
+    let logging_reservation = store
+        .enqueue_in_tx(
+            &mut tx,
+            RoomEffectEnqueue {
+                lifecycle,
+                revision: logging_revision,
+                effects: &logging,
+                origin: &origin(),
+                producing_node: &producing_node(),
+                now_ms: 11,
+            },
+        )
+        .await
+        .expect("enqueue 170");
+    store
+        .supersede_idempotent_config_in_tx(
+            &mut tx,
+            lifecycle,
+            &[MucConfigStatusCode::LoggingEnabled],
+        )
+        .await
+        .expect("preserve 104 for a logging-only successor");
+    tx.commit().await.expect("commit supersession");
+
+    assert!(
+        store
+            .staged_reservation_for(lifecycle, first_revision)
+            .await
+            .expect("first lookup")
+            .is_some(),
+        "a logging-only successor must not replace a pending 104"
+    );
+    assert_eq!(
+        store
+            .staged_reservation_for(lifecycle, logging_revision)
+            .await
+            .expect("logging lookup"),
+        Some(logging_reservation),
+        "a pending logging transition must never be superseded"
+    );
+}
+
+#[tokio::test]
 async fn postgres_schema_has_required_room_effect_columns() {
     let Some(url) = std::env::var("WADDLE_TEST_POSTGRES_URL").ok() else {
         return;

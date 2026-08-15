@@ -125,6 +125,32 @@ impl RoomEffectOutboxStore {
         }
         Ok(result)
     }
+    pub async fn staged_reservation_for(
+        &self,
+        lifecycle: waddle_xmpp::muc::RoomLifecycleId,
+        revision: waddle_xmpp::muc::RoomRevision,
+    ) -> Result<Option<RoomEffectReservation>, RoomEffectOutboxError> {
+        let connection = self.db.guard().await?;
+        let mut rows = connection
+            .query(
+                "SELECT ordinal FROM clustering_muc_room_effects \
+                 WHERE lifecycle_id = ? AND revision = ? AND available_at_ms = ? \
+                 AND NOT superseded ORDER BY ordinal",
+                crate::db_params![lifecycle.to_string(), revision.as_i64(), INERT],
+            )
+            .await?;
+        let mut ordinals = Vec::new();
+        while let Some(row) = rows.next().await? {
+            let ordinal = waddle_xmpp::muc::RoomEffectOrdinal::from_stored(row.get(0)?)
+                .ok_or(RoomEffectOutboxError::InvalidCoordinate)?;
+            ordinals.push(ordinal);
+        }
+        Ok((!ordinals.is_empty()).then_some(RoomEffectReservation {
+            lifecycle,
+            revision,
+            ordinals,
+        }))
+    }
     pub async fn arm(
         &self,
         key: &RoomEffectKey,
@@ -197,7 +223,13 @@ impl RoomEffectOutboxStore {
         &self,
         tx: &mut Transaction<'_>,
         lifecycle: waddle_xmpp::muc::RoomLifecycleId,
+        successor_codes: &[waddle_xmpp::muc::MucConfigStatusCode],
     ) -> Result<u64, RoomEffectOutboxError> {
+        if !successor_codes
+            .contains(&waddle_xmpp::muc::MucConfigStatusCode::NonPrivacyConfigurationChange)
+        {
+            return Ok(0);
+        }
         let mut rows = tx.query(&format!("{} WHERE lifecycle_id = ? AND kind = 'config_changed' AND available_at_ms = ? AND NOT superseded", select_columns()), crate::db_params![lifecycle.to_string(), INERT]).await?;
         let mut keys = Vec::new();
         while let Some(row) = rows.next().await? {

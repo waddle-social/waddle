@@ -503,6 +503,7 @@ mod tests {
                         moderated: true,
                         ..config
                     },
+                    effect_plan: waddle_xmpp::muc::room_actor::ConfigEffectPlan::DirectAudience,
                 })
                 .await
                 .expect("set room moderated");

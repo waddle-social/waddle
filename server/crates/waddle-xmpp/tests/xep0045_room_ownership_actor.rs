@@ -18,10 +18,11 @@ use waddle_xmpp::muc::durable::{
     RoomCommitFuture, RoomCommittedCoordinates, RoomDurableMutation, RoomLifecycleId, RoomRevision,
 };
 use waddle_xmpp::muc::room_actor::{
-    DurableRestoreReadiness, GetAffiliation, GetConfig, GetDurableRestoreReadiness,
-    GetRoomSealState, GetRoomSnapshot, Join, JoinAffiliationGrant, JoinWithAffiliation,
-    OccupantCount, ResolverAffiliationSyncOutcome, RestoreDurableRoomState, RoomActor,
-    RoomActorError, RoomMutationError, RoomSealState, SyncResolverAffiliation, UpdateConfig,
+    ConfigEffectPlan, DurableRestoreReadiness, GetAffiliation, GetConfig,
+    GetDurableRestoreReadiness, GetRoomSealState, GetRoomSnapshot, Join, JoinAffiliationGrant,
+    JoinWithAffiliation, OccupantCount, ResolverAffiliationSyncOutcome, RestoreDurableRoomState,
+    RoomActor, RoomActorError, RoomMutationError, RoomSealState, SyncResolverAffiliation,
+    UpdateConfig,
 };
 use waddle_xmpp::muc::room_registry_actor::{
     CreateRoom, GetOrCreateRoom, RoomCreation, RoomRegistryActor, RoomRegistryError,
@@ -513,7 +514,12 @@ async fn assert_invalid_restore_fence_fails_closed(invalid_fence: RoomClaimFence
     let mut attempted = original_config.clone();
     attempted.name = "must not mutate".to_string();
     assert!(matches!(
-        actor.ask(UpdateConfig { config: attempted }).await,
+        actor
+            .ask(UpdateConfig {
+                config: attempted,
+                effect_plan: ConfigEffectPlan::DirectAudience,
+            })
+            .await,
         Err(SendError::HandlerError(RoomMutationError::NotOwner))
     ));
     assert_eq!(
@@ -634,7 +640,12 @@ async fn second_restore_cannot_transplant_an_actor_to_a_successor_fence() {
     let mut attempted = original_config.clone();
     attempted.name = "must remain sealed".to_string();
     assert!(matches!(
-        actor.ask(UpdateConfig { config: attempted }).await,
+        actor
+            .ask(UpdateConfig {
+                config: attempted,
+                effect_plan: ConfigEffectPlan::DirectAudience,
+            })
+            .await,
         Err(SendError::HandlerError(RoomMutationError::NotOwner))
     ));
     assert_eq!(
@@ -650,6 +661,7 @@ async fn second_restore_cannot_transplant_an_actor_to_a_successor_fence() {
 
 fn durable_existing_room() -> DurableRoomState {
     DurableRoomState {
+        coordinates: None,
         waddle_id: "durable-waddle".to_string(),
         channel_id: "durable-channel".to_string(),
         config: RoomConfig {

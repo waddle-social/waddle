@@ -113,6 +113,7 @@ fn durable_restore_only_advances_for_admission_policy_changes() {
         ..RoomConfig::default()
     };
     actor.install_durable_room_state(crate::muc::durable::DurableRoomState {
+        coordinates: None,
         waddle_id: "waddle-1".to_string(),
         channel_id: "channel-1".to_string(),
         config: cosmetic_config,
@@ -127,6 +128,7 @@ fn durable_restore_only_advances_for_admission_policy_changes() {
     let mut admission_config = actor.room.config.clone();
     admission_config.members_only = false;
     actor.install_durable_room_state(crate::muc::durable::DurableRoomState {
+        coordinates: None,
         waddle_id: "waddle-1".to_string(),
         channel_id: "channel-1".to_string(),
         config: admission_config,
@@ -498,7 +500,10 @@ async fn test_get_and_update_config() {
     let mut new_config = config;
     new_config.members_only = false;
     actor
-        .ask(UpdateConfig { config: new_config })
+        .ask(UpdateConfig {
+            config: new_config,
+            effect_plan: ConfigEffectPlan::DirectAudience,
+        })
         .await
         .expect("ask");
 
@@ -528,7 +533,10 @@ async fn members_only_enforcement_ejects_current_non_members_with_status_322() {
     let mut config = actor.ask(GetConfig).await.expect("config");
     config.members_only = true;
     actor
-        .ask(UpdateConfig { config })
+        .ask(UpdateConfig {
+            config,
+            effect_plan: ConfigEffectPlan::UnmanagedMembersOnlyPostEnforcement,
+        })
         .await
         .expect("config update");
 
@@ -1075,7 +1083,10 @@ async fn stale_admission_revision_returns_retryable_error_without_joining() {
         ..RoomConfig::default()
     };
     actor
-        .ask(UpdateConfig { config })
+        .ask(UpdateConfig {
+            config,
+            effect_plan: ConfigEffectPlan::DirectAudience,
+        })
         .await
         .expect("config update");
 
@@ -1251,7 +1262,11 @@ async fn members_only_revocation_removes_every_nick_for_bare_jid() {
 
 #[tokio::test]
 async fn managed_members_only_enforcement_uses_explicit_affiliation_snapshot() {
-    let actor = spawn_room_actor().await;
+    let actor = spawn_room_actor_with_config(RoomConfig {
+        members_only: false,
+        ..RoomConfig::default()
+    })
+    .await;
     let alice = test_full_jid("alice");
     actor
         .ask(JoinWithAffiliation {
@@ -1268,14 +1283,20 @@ async fn managed_members_only_enforcement_uses_explicit_affiliation_snapshot() {
         members_only: true,
         ..RoomConfig::default()
     };
-    actor
-        .ask(UpdateConfig { config })
+    let update = actor
+        .ask(UpdateConfig {
+            config,
+            effect_plan: ConfigEffectPlan::ManagedMembersOnlyFallback,
+        })
         .await
         .expect("members-only config");
+    let notification = update.notification.expect("config notification");
 
     let updates = actor
         .ask(EnforceMembersOnlyAffiliations {
             affiliations: vec![(alice.to_bare(), Affiliation::None)],
+            fallback_reservation: update.reservation,
+            config_status_codes: notification.status_codes,
         })
         .await
         .expect("managed enforcement succeeds")
@@ -1289,7 +1310,11 @@ async fn managed_members_only_enforcement_uses_explicit_affiliation_snapshot() {
 
 #[tokio::test]
 async fn managed_members_only_enforcement_treats_missing_snapshot_entry_as_none() {
-    let actor = spawn_room_actor().await;
+    let actor = spawn_room_actor_with_config(RoomConfig {
+        members_only: false,
+        ..RoomConfig::default()
+    })
+    .await;
     let alice = test_full_jid("alice");
     actor
         .ask(JoinWithAffiliation {
@@ -1306,14 +1331,20 @@ async fn managed_members_only_enforcement_treats_missing_snapshot_entry_as_none(
         members_only: true,
         ..RoomConfig::default()
     };
-    actor
-        .ask(UpdateConfig { config })
+    let update = actor
+        .ask(UpdateConfig {
+            config,
+            effect_plan: ConfigEffectPlan::ManagedMembersOnlyFallback,
+        })
         .await
         .expect("members-only config");
+    let notification = update.notification.expect("config notification");
 
     let updates = actor
         .ask(EnforceMembersOnlyAffiliations {
             affiliations: Vec::new(),
+            fallback_reservation: update.reservation,
+            config_status_codes: notification.status_codes,
         })
         .await
         .expect("managed enforcement succeeds")
@@ -2221,6 +2252,8 @@ async fn space_entitled_member_survives_members_only_enforcement() {
     actor
         .ask(EnforceMembersOnlyAffiliations {
             affiliations: Vec::new(),
+            fallback_reservation: None,
+            config_status_codes: Vec::new(),
         })
         .await
         .expect("enforce members-only");
@@ -2304,6 +2337,8 @@ async fn enforce_members_only_affiliations_prunes_hydrated_durable_recipient() {
     actor
         .ask(EnforceMembersOnlyAffiliations {
             affiliations: Vec::new(),
+            fallback_reservation: None,
+            config_status_codes: Vec::new(),
         })
         .await
         .expect("enforce members-only");
@@ -4129,6 +4164,7 @@ impl crate::muc::durable::MucDurableStore for FlakyThenRecoveringStore {
                 ))
             } else {
                 Ok(Some(crate::muc::durable::DurableRoomState {
+                    coordinates: None,
                     waddle_id: "waddle-1".to_string(),
                     channel_id: "channel-1".to_string(),
                     config: RoomConfig {
@@ -4260,7 +4296,12 @@ async fn update_config_durable_commit_blocks_the_mutation_when_deposed() {
 
     let mut new_config = actor.ask(GetConfig).await.expect("ask");
     new_config.members_only = !original;
-    let result = actor.ask(UpdateConfig { config: new_config }).await;
+    let result = actor
+        .ask(UpdateConfig {
+            config: new_config,
+            effect_plan: ConfigEffectPlan::DirectAudience,
+        })
+        .await;
     assert!(
         matches!(
             result,
@@ -4281,6 +4322,7 @@ async fn update_config_durable_commit_blocks_the_mutation_when_deposed() {
     let retry = actor
         .ask(UpdateConfig {
             config: retry_config,
+            effect_plan: ConfigEffectPlan::DirectAudience,
         })
         .await;
     assert!(
@@ -4301,7 +4343,10 @@ async fn update_config_durable_commit_allows_the_mutation_when_owned() {
     let mut new_config = actor.ask(GetConfig).await.expect("ask");
     new_config.members_only = !original;
     actor
-        .ask(UpdateConfig { config: new_config })
+        .ask(UpdateConfig {
+            config: new_config,
+            effect_plan: ConfigEffectPlan::DirectAudience,
+        })
         .await
         .expect("owned mutation must apply");
 
@@ -4316,7 +4361,12 @@ async fn update_config_durable_commit_fails_closed_on_transient_ownership_error(
 
     let mut new_config = actor.ask(GetConfig).await.expect("ask");
     new_config.members_only = !original;
-    let result = actor.ask(UpdateConfig { config: new_config }).await;
+    let result = actor
+        .ask(UpdateConfig {
+            config: new_config,
+            effect_plan: ConfigEffectPlan::DirectAudience,
+        })
+        .await;
     assert!(
         matches!(
             result,
@@ -4810,7 +4860,12 @@ async fn ownership_lost_seal_blocks_a_later_mutation() {
     store.set_fenced(None);
     let mut changed = original.clone();
     changed.members_only = !changed.members_only;
-    let update = actor.ask(UpdateConfig { config: changed }).await;
+    let update = actor
+        .ask(UpdateConfig {
+            config: changed,
+            effect_plan: ConfigEffectPlan::DirectAudience,
+        })
+        .await;
     assert!(matches!(
         update,
         Err(SendError::HandlerError(RoomMutationError::NotOwner))
@@ -4839,7 +4894,12 @@ async fn update_config_surfaces_a_typed_persist_failure_without_mutating_memory(
 
     let mut new_config = actor.ask(GetConfig).await.expect("ask");
     new_config.members_only = !original;
-    let result = actor.ask(UpdateConfig { config: new_config }).await;
+    let result = actor
+        .ask(UpdateConfig {
+            config: new_config,
+            effect_plan: ConfigEffectPlan::DirectAudience,
+        })
+        .await;
     assert!(
         matches!(
             result,
@@ -4864,7 +4924,12 @@ async fn update_config_seals_the_actor_when_the_fenced_write_loses_ownership() {
 
     let mut changed = original.clone();
     changed.members_only = !changed.members_only;
-    let result = actor.ask(UpdateConfig { config: changed }).await;
+    let result = actor
+        .ask(UpdateConfig {
+            config: changed,
+            effect_plan: ConfigEffectPlan::DirectAudience,
+        })
+        .await;
     assert!(
         matches!(
             result,
@@ -4887,7 +4952,12 @@ async fn update_config_seals_the_actor_when_the_fenced_write_loses_ownership() {
         "the exact ownership loss seals this actor incarnation"
     );
 
-    let later = actor.ask(UpdateConfig { config: original }).await;
+    let later = actor
+        .ask(UpdateConfig {
+            config: original,
+            effect_plan: ConfigEffectPlan::DirectAudience,
+        })
+        .await;
     assert!(
         matches!(
             later,
@@ -4913,6 +4983,7 @@ async fn unknown_durable_commit_outcome_seals_actor_before_it_can_serve_stale_me
     let result = actor
         .ask(UpdateConfig {
             config: changed.clone(),
+            effect_plan: ConfigEffectPlan::DirectAudience,
         })
         .await;
     assert!(
@@ -4935,7 +5006,12 @@ async fn unknown_durable_commit_outcome_seals_actor_before_it_can_serve_stale_me
         "the stale actor must become non-serving until the registry retires it"
     );
 
-    let later = actor.ask(UpdateConfig { config: original }).await;
+    let later = actor
+        .ask(UpdateConfig {
+            config: original,
+            effect_plan: ConfigEffectPlan::DirectAudience,
+        })
+        .await;
     assert!(
         matches!(
             later,

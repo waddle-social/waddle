@@ -1958,6 +1958,7 @@ mod tests {
                             persistent: true,
                             ..waddle_xmpp::muc::RoomConfig::default()
                         },
+                        effect_plan: waddle_xmpp::muc::room_actor::ConfigEffectPlan::DirectAudience,
                     })
                     .await
             }

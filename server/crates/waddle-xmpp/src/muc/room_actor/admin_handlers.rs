@@ -1028,6 +1028,8 @@ impl kameo::message::Message<EnforceMembersOnly> for RoomActor {
 
 pub struct EnforceMembersOnlyAffiliations {
     pub affiliations: Vec<(BareJid, Affiliation)>,
+    pub fallback_reservation: Option<RoomEffectReservation>,
+    pub config_status_codes: Vec<crate::muc::MucConfigStatusCode>,
 }
 
 impl kameo::message::Message<EnforceMembersOnlyAffiliations> for RoomActor {
@@ -1038,7 +1040,12 @@ impl kameo::message::Message<EnforceMembersOnlyAffiliations> for RoomActor {
         msg: EnforceMembersOnlyAffiliations,
         _ctx: &mut Context<Self, Self::Reply>,
     ) -> Self::Reply {
-        let affiliations: BTreeMap<BareJid, Affiliation> = msg.affiliations.into_iter().collect();
+        let EnforceMembersOnlyAffiliations {
+            affiliations,
+            fallback_reservation,
+            config_status_codes,
+        } = msg;
+        let affiliations: BTreeMap<BareJid, Affiliation> = affiliations.into_iter().collect();
         let occupied_jids: Vec<BareJid> = self
             .room
             .occupants
@@ -1074,21 +1081,6 @@ impl kameo::message::Message<EnforceMembersOnlyAffiliations> for RoomActor {
                 durable_delta.push(durable_affiliation_entry(jid.clone(), affiliation));
             }
         }
-        if durable_delta.is_empty() {
-            self.gate_pre_mutation_ownership()
-                .await
-                .map_err(super::RoomMutationError::from)?;
-        } else {
-            let _ = self
-                .commit_durable(
-                    RoomDurableMutation::MembersOnlyEnforcement {
-                        config: self.room.config.clone(),
-                        affiliations: durable_delta,
-                    },
-                    crate::muc::RoomMutationEffects::none(),
-                )
-                .await?;
-        }
         let mut needs_rehydration = false;
         for jid in &occupied_jids {
             self.invalidate_invite_grant(jid);
@@ -1122,11 +1114,68 @@ impl kameo::message::Message<EnforceMembersOnlyAffiliations> for RoomActor {
             .into_iter()
             .filter(|(session, _)| !applied.removed_by_moderation.contains(session))
             .collect();
+        let should_commit = !durable_delta.is_empty() || !config_status_codes.is_empty();
+        let durable_effect_updates = if config_status_codes.is_empty() {
+            Vec::new()
+        } else {
+            occupied_jids
+                .iter()
+                .filter_map(|jid| {
+                    let affiliation = affiliations.get(jid).copied().unwrap_or(Affiliation::None);
+                    (affiliation < Affiliation::Member).then(|| occupants_for_bare(&self.room, jid))
+                })
+                .flatten()
+                .flat_map(|occupant| {
+                    removal_presence_updates(
+                        &self.room,
+                        &self.occupant_id_secret,
+                        &occupant,
+                        STATUS_MEMBERS_ONLY_CONFIG_REMOVAL,
+                        AdminPresenceKind::MembersOnlyRemoved,
+                        None,
+                    )
+                })
+                .map(|built| built.durable)
+                .collect()
+        };
+        let effects = if config_status_codes.is_empty() {
+            crate::muc::RoomMutationEffects::none()
+        } else {
+            let (self_updates, _, _) = split_admin_effect_updates(durable_effect_updates);
+            let effects = crate::muc::RoomMutationEffects::members_only_enforcement(
+                self.room.room_jid.clone(),
+                self_updates,
+                config_status_codes,
+                all_room_sessions(&staged_room),
+            );
+            match fallback_reservation {
+                Some(reservation) => effects.with_superseding_reservation(reservation),
+                None => effects,
+            }
+        };
+        let reservation = if !should_commit {
+            self.gate_pre_mutation_ownership()
+                .await
+                .map_err(super::RoomMutationError::from)?;
+            None
+        } else {
+            let (_, reservation) = self
+                .commit_durable(
+                    RoomDurableMutation::MembersOnlyEnforcement {
+                        config: self.room.config.clone(),
+                        affiliations: durable_delta,
+                    },
+                    effects,
+                )
+                .await?;
+            reservation
+        };
         self.room = staged_room;
         if needs_rehydration {
             // R1: see `RoomActor::refresh_durable_recipients_from_source`.
             self.refresh_durable_recipients_from_source().await;
         }
+        applied.outbox_reservation = reservation;
         Ok(applied)
     }
 }

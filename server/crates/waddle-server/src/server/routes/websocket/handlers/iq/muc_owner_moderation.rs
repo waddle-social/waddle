@@ -1093,7 +1093,7 @@ pub(super) async fn handle_muc_owner_and_moderation_iq(
     state: &WebSocketState,
     phase: &ConnectionPhase,
     authenticated_session: &Option<Session>,
-) -> Vec<String> {
+) -> ResponseBatch {
     let iq = ctx.iq;
     let id = ctx.id;
     let payload_ns = ctx.payload_ns;
@@ -1113,7 +1113,8 @@ pub(super) async fn handle_muc_owner_and_moderation_iq(
                 response_from,
                 response_to,
                 bad_request_iq_error("Malformed IQ payload."),
-            )];
+            )]
+            .into();
         };
 
         let room_target = target.split('/').next().unwrap_or(target);
@@ -1123,7 +1124,8 @@ pub(super) async fn handle_muc_owner_and_moderation_iq(
                 response_from,
                 response_to,
                 jid_malformed_iq_error("Malformed JID in IQ addressing."),
-            )];
+            )]
+            .into();
         };
 
         if !is_muc_room_jid(state, &room_jid).await {
@@ -1132,7 +1134,8 @@ pub(super) async fn handle_muc_owner_and_moderation_iq(
                 response_from,
                 response_to,
                 item_not_found_iq_error("Requested item not found."),
-            )];
+            )]
+            .into();
         }
 
         let Some(sender_jid) = phase.bound_jid() else {
@@ -1141,7 +1144,8 @@ pub(super) async fn handle_muc_owner_and_moderation_iq(
                 response_from,
                 response_to,
                 not_authorized_iq_error("Authentication required."),
-            )];
+            )]
+            .into();
         };
         match muc_owner_authorized(state, &room_jid, sender_jid, authenticated_session.as_ref())
             .await
@@ -1153,7 +1157,8 @@ pub(super) async fn handle_muc_owner_and_moderation_iq(
                     response_from,
                     response_to,
                     forbidden_iq_error("Operation not permitted."),
-                )];
+                )]
+                .into();
             }
             Err(error) => {
                 warn!(
@@ -1166,7 +1171,8 @@ pub(super) async fn handle_muc_owner_and_moderation_iq(
                     response_from,
                     response_to,
                     internal_server_error_iq_error("Internal server error."),
-                )];
+                )]
+                .into();
             }
         }
 
@@ -1204,7 +1210,8 @@ pub(super) async fn handle_muc_owner_and_moderation_iq(
                         response_from,
                         response_to,
                         internal_server_error_iq_error("Internal server error."),
-                    )];
+                    )]
+                    .into();
                 }
             };
             let completion = waddle_xmpp::muc::room_registry_actor::DestroyCompletion {
@@ -1232,7 +1239,8 @@ pub(super) async fn handle_muc_owner_and_moderation_iq(
                     response_from,
                     response_to,
                     internal_server_error_iq_error("Internal server error."),
-                )];
+                )]
+                .into();
             }
             if let Err(error) = register_destroy_completion(state, completion.clone()).await {
                 warn!(room = %room_jid, %error, "Failed to retain MUC destroy completion");
@@ -1249,7 +1257,8 @@ pub(super) async fn handle_muc_owner_and_moderation_iq(
                     response_from,
                     response_to,
                     internal_server_error_iq_error("Internal server error."),
-                )];
+                )]
+                .into();
             }
             // Single atomic commit point (#1261, #1276 Greptile P1s).
             // The attempt-bound registry destroy handler
@@ -1288,7 +1297,8 @@ pub(super) async fn handle_muc_owner_and_moderation_iq(
                             response_from,
                             response_to,
                             internal_server_error_iq_error("Internal server error."),
-                        )];
+                        )]
+                        .into();
                     }
                 }
                 // The clustering durable wipe failed and the registry
@@ -1303,7 +1313,8 @@ pub(super) async fn handle_muc_owner_and_moderation_iq(
                         response_from,
                         response_to,
                         internal_server_error_iq_error("Internal server error."),
-                    )];
+                    )]
+                    .into();
                 }
                 Ok(
                     waddle_xmpp::muc::room_registry_actor::DestroyRoomOutcome::ReleaseBacklogFull,
@@ -1315,7 +1326,8 @@ pub(super) async fn handle_muc_owner_and_moderation_iq(
                         response_from,
                         response_to,
                         internal_server_error_iq_error("Internal server error."),
-                    )];
+                    )]
+                    .into();
                 }
                 // A concurrent destroy already removed the room between the
                 // `get_room_actor` lookup above and here — genuinely gone.
@@ -1327,7 +1339,8 @@ pub(super) async fn handle_muc_owner_and_moderation_iq(
                         response_from,
                         response_to,
                         item_not_found_iq_error("Requested item not found."),
-                    )];
+                    )]
+                    .into();
                 }
                 // `Unavailable` means the terminal message never entered the
                 // registry. Its registered completion must be cancelled and
@@ -1354,7 +1367,8 @@ pub(super) async fn handle_muc_owner_and_moderation_iq(
                         response_from,
                         response_to,
                         internal_server_error_iq_error("Internal server error."),
-                    )];
+                    )]
+                    .into();
                 }
                 // A reply timeout may have lost the acknowledgement after
                 // the terminal handler entered. Retain its exact completion
@@ -1370,7 +1384,8 @@ pub(super) async fn handle_muc_owner_and_moderation_iq(
                         response_from,
                         response_to,
                         internal_server_error_iq_error("Internal server error."),
-                    )];
+                    )]
+                    .into();
                 }
             }
             let mut frames =
@@ -1382,12 +1397,12 @@ pub(super) async fn handle_muc_owner_and_moderation_iq(
                 response_to,
                 None,
             ));
-            return frames;
+            return frames.into();
         }
 
         if matches!(iq, xmpp_parsers::iq::Iq::Get { .. }) {
             match build_muc_owner_config_response(state, &room_jid, id, response_to).await {
-                Ok(response) => return vec![response],
+                Ok(response) => return vec![response].into(),
                 Err(error) => {
                     warn!(
                         room = %room_jid,
@@ -1399,35 +1414,51 @@ pub(super) async fn handle_muc_owner_and_moderation_iq(
                         response_from,
                         response_to,
                         internal_server_error_iq_error("Internal server error."),
-                    )];
+                    )]
+                    .into();
                 }
             }
         }
 
-        if let Err(error) =
-            apply_muc_owner_config(state, &room_jid, iq, authenticated_session.as_ref()).await
+        let mut batch = match apply_muc_owner_config(
+            state,
+            &room_jid,
+            iq,
+            authenticated_session.as_ref(),
+            phase.bound_jid(),
+        )
+        .await
         {
-            warn!(
-                room = %room_jid,
-                error = %error,
-                "Failed to apply MUC owner config"
-            );
-            return vec![build_iq_error_xml_typed(
-                id,
-                response_from,
-                response_to,
-                internal_server_error_iq_error("Internal server error."),
-            )];
-        }
+            Ok(batch) => batch,
+            Err(error) => {
+                warn!(
+                    room = %room_jid,
+                    error = %error,
+                    "Failed to apply MUC owner config"
+                );
+                return vec![build_iq_error_xml_typed(
+                    id,
+                    response_from,
+                    response_to,
+                    internal_server_error_iq_error("Internal server error."),
+                )]
+                .into();
+            }
+        };
 
         // Treat all other owner IQ sets as successful config submit for instant rooms.
         let room_jid_string = room_jid.to_string();
-        return vec![build_iq_result_xml(
+        let mut frames = vec![build_iq_result_xml(
             id,
             Some(room_jid_string.as_str()),
             response_to,
             None,
         )];
+        frames.append(&mut batch.frames);
+        return ResponseBatch {
+            frames,
+            completions: batch.completions,
+        };
     }
 
     if let Some(request) = parse_moderation_iq(iq) {
@@ -1437,7 +1468,8 @@ pub(super) async fn handle_muc_owner_and_moderation_iq(
                 response_from,
                 response_to,
                 not_authorized_iq_error("Authentication required."),
-            )];
+            )]
+            .into();
         };
         let Some(room_jid) = iq.to().map(|jid| jid.to_bare()) else {
             return vec![build_iq_error_xml_typed(
@@ -1445,7 +1477,8 @@ pub(super) async fn handle_muc_owner_and_moderation_iq(
                 response_from,
                 response_to,
                 bad_request_iq_error("Malformed IQ payload."),
-            )];
+            )]
+            .into();
         };
         let room_actor = match get_room_actor_result(state, &room_jid).await {
             Ok(Some(room_actor)) => room_actor,
@@ -1455,7 +1488,8 @@ pub(super) async fn handle_muc_owner_and_moderation_iq(
                     response_from,
                     response_to,
                     item_not_found_iq_error("Requested item not found."),
-                )];
+                )]
+                .into();
             }
             Err(error) => {
                 warn!(room = %room_jid, %error, "MUC moderation room lookup failed");
@@ -1464,7 +1498,8 @@ pub(super) async fn handle_muc_owner_and_moderation_iq(
                     response_from,
                     response_to,
                     internal_server_error_iq_error("Internal server error."),
-                )];
+                )]
+                .into();
             }
         };
         let context = match room_actor
@@ -1480,7 +1515,8 @@ pub(super) async fn handle_muc_owner_and_moderation_iq(
                     response_from,
                     response_to,
                     internal_server_error_iq_error("Internal server error."),
-                )];
+                )]
+                .into();
             }
         };
         // XEP-0425 §"only moderators are allowed to moderate" combined with
@@ -1495,7 +1531,8 @@ pub(super) async fn handle_muc_owner_and_moderation_iq(
                 response_from,
                 response_to,
                 forbidden_iq_error("Operation not permitted."),
-            )];
+            )]
+            .into();
         }
         match state
             .deps
@@ -1511,7 +1548,8 @@ pub(super) async fn handle_muc_owner_and_moderation_iq(
                     response_from,
                     response_to,
                     item_not_found_iq_error("Requested item not found."),
-                )];
+                )]
+                .into();
             }
             Ok(None) => {
                 return vec![build_iq_error_xml_typed(
@@ -1519,7 +1557,8 @@ pub(super) async fn handle_muc_owner_and_moderation_iq(
                     response_from,
                     response_to,
                     item_not_found_iq_error("Requested item not found."),
-                )];
+                )]
+                .into();
             }
             Err(error) => {
                 warn!(room = %room_jid, target = %request.target_id, error = %error, "Failed to look up moderation target");
@@ -1528,7 +1567,8 @@ pub(super) async fn handle_muc_owner_and_moderation_iq(
                     response_from,
                     response_to,
                     internal_server_error_iq_error("Internal server error."),
-                )];
+                )]
+                .into();
             }
         }
 
@@ -1785,9 +1825,9 @@ pub(super) async fn handle_muc_owner_and_moderation_iq(
         }
 
         frames.push(build_iq_result_xml(id, response_from, response_to, None));
-        return frames;
+        return frames.into();
     }
-    Vec::new()
+    ResponseBatch::default()
 }
 
 #[cfg(test)]

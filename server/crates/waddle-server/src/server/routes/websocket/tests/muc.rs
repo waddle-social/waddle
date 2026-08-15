@@ -325,6 +325,7 @@ async fn ordinary_join_coalesces_with_restoring_room_without_create_permission()
         started: Arc::clone(&started),
         allow: Arc::clone(&allow),
         snapshot: DurableRoomState {
+            coordinates: None,
             waddle_id: "restored-waddle".to_string(),
             channel_id: "restored-channel".to_string(),
             config: waddle_xmpp::muc::RoomConfig {
@@ -589,7 +590,10 @@ async fn muc_join_full_room_returns_service_unavailable() {
         .config;
     config.max_occupants = 1;
     room_actor
-        .ask(UpdateConfig { config })
+        .ask(UpdateConfig {
+            config,
+            effect_plan: waddle_xmpp::muc::room_actor::ConfigEffectPlan::DirectAudience,
+        })
         .await
         .expect("room config update");
 
@@ -1896,7 +1900,10 @@ async fn standard_members_only_join_rejects_unaffiliated_user() {
     let mut config = actor.ask(GetConfig).await.expect("config");
     config.members_only = true;
     actor
-        .ask(UpdateConfig { config })
+        .ask(UpdateConfig {
+            config,
+            effect_plan: waddle_xmpp::muc::room_actor::ConfigEffectPlan::DirectAudience,
+        })
         .await
         .expect("members-only config");
 
@@ -3732,6 +3739,7 @@ async fn standard_muc_owner_config_reconciles_ambiguous_members_only_commit_befo
                     self.states.lock().expect("states lock").insert(
                         room_jid.clone(),
                         DurableRoomState {
+                            coordinates: None,
                             waddle_id: waddle_id.into_string(),
                             channel_id: channel_id.into_string(),
                             config,
@@ -6032,7 +6040,10 @@ async fn resumed_muc_join_presence_replays_muji_when_room_is_full() {
         .config;
     config.max_occupants = 1;
     room_actor
-        .ask(UpdateConfig { config })
+        .ask(UpdateConfig {
+            config,
+            effect_plan: waddle_xmpp::muc::room_actor::ConfigEffectPlan::DirectAudience,
+        })
         .await
         .expect("room config update");
 
@@ -6710,6 +6721,7 @@ async fn make_room_moderated(state: &WebSocketState, room_jid: &BareJid) {
                 moderated: true,
                 ..config
             },
+            effect_plan: waddle_xmpp::muc::room_actor::ConfigEffectPlan::DirectAudience,
         })
         .await
         .expect("set room moderated");

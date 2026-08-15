@@ -268,6 +268,7 @@ impl RoomClaimFenceContext {
 /// accepting any join.
 #[derive(Debug, Clone)]
 pub struct DurableRoomState {
+    pub coordinates: Option<RoomCommittedCoordinates>,
     pub waddle_id: String,
     pub channel_id: String,
     pub config: RoomConfig,

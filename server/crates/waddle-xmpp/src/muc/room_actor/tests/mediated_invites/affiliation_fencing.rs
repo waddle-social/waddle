@@ -421,6 +421,8 @@ async fn prepared_rollback_blocks_guarded_and_batched_affiliation_paths() {
         actor
             .ask(EnforceMembersOnlyAffiliations {
                 affiliations: vec![(invitee.clone(), Affiliation::Member)],
+                fallback_reservation: None,
+                config_status_codes: Vec::new(),
             })
             .await,
         Err(SendError::HandlerError(

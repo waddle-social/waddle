@@ -1774,6 +1774,7 @@ mod ownership_claims_tests {
                         name: "still-serviceable".to_string(),
                         ..RoomConfig::default()
                     },
+                    effect_plan: crate::muc::room_actor::ConfigEffectPlan::DirectAudience,
                 })
                 .await
                 .expect("mutation after failed destroy"),
@@ -3665,6 +3666,7 @@ mod ownership_claims_tests {
                     config,
                     initial_affiliations,
                 } => Some(DurableRoomState {
+                    coordinates: None,
                     waddle_id: waddle_id.as_str().to_string(),
                     channel_id: channel_id.as_str().to_string(),
                     config: config.clone(),
@@ -4190,6 +4192,7 @@ mod ownership_claims_tests {
 
     fn restored_room_snapshot(name: &str) -> DurableRoomState {
         DurableRoomState {
+            coordinates: None,
             waddle_id: "restored-waddle".to_string(),
             channel_id: "restored-channel".to_string(),
             config: RoomConfig {
@@ -6647,6 +6650,7 @@ mod ownership_claims_tests {
         let restored_owner: BareJid = "alice@example.com".parse().expect("valid jid");
         let durable_store = Arc::new(RecordingDurableStore {
             load_result: Some(DurableRoomState {
+                coordinates: None,
                 waddle_id: "restored-waddle".to_string(),
                 channel_id: "restored-channel".to_string(),
                 config: restored_config.clone(),
@@ -6909,6 +6913,7 @@ mod ownership_claims_tests {
 
     fn reclaimed_snapshot(name: &str) -> DurableRoomState {
         DurableRoomState {
+            coordinates: None,
             waddle_id: "reclaimed-waddle".to_string(),
             channel_id: "reclaimed-channel".to_string(),
             config: RoomConfig {
@@ -10085,6 +10090,7 @@ mod ownership_claims_tests {
                         name: "old-epoch in-memory mutation".to_string(),
                         ..RoomConfig::default()
                     },
+                    effect_plan: crate::muc::room_actor::ConfigEffectPlan::DirectAudience,
                 })
                 .await
         });

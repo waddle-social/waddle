@@ -518,8 +518,9 @@ pub async fn handle_iq_with_conn_state(
 
     let muc_owner_or_moderation =
         handle_muc_owner_and_moderation_iq(handler_ctx, state, phase, authenticated_session).await;
-    if !muc_owner_or_moderation.is_empty() {
-        return muc_owner_or_moderation.into();
+    if !muc_owner_or_moderation.frames.is_empty() || !muc_owner_or_moderation.completions.is_empty()
+    {
+        return muc_owner_or_moderation;
     }
 
     let archive_inbox_upload =

@@ -165,6 +165,7 @@ pub struct RoomMutationEffects {
     room_jid: Option<BareJid>,
     staging: RoomEffectStagingClass,
     effects: Vec<RoomEffect>,
+    superseding_reservation: Option<RoomEffectReservation>,
 }
 
 impl RoomMutationEffects {
@@ -173,6 +174,13 @@ impl RoomMutationEffects {
             room_jid: None,
             staging: RoomEffectStagingClass::StagedConfig,
             effects: Vec::new(),
+            superseding_reservation: None,
+        }
+    }
+    pub fn none_superseding(reservation: RoomEffectReservation) -> Self {
+        Self {
+            superseding_reservation: Some(reservation),
+            ..Self::none()
         }
     }
     pub fn config(
@@ -187,6 +195,7 @@ impl RoomMutationEffects {
                 status_codes,
                 recipients,
             }],
+            superseding_reservation: None,
         }
     }
     pub fn admin(
@@ -209,6 +218,7 @@ impl RoomMutationEffects {
                     recipients,
                 },
             ],
+            superseding_reservation: None,
         }
     }
     pub fn members_only_enforcement(
@@ -229,7 +239,12 @@ impl RoomMutationEffects {
                     recipients,
                 },
             ],
+            superseding_reservation: None,
         }
+    }
+    pub fn with_superseding_reservation(mut self, reservation: RoomEffectReservation) -> Self {
+        self.superseding_reservation = Some(reservation);
+        self
     }
     pub fn destroy(
         room_jid: BareJid,
@@ -247,6 +262,7 @@ impl RoomMutationEffects {
                 password,
                 recipients,
             }],
+            superseding_reservation: None,
         }
     }
     pub fn room_jid(&self) -> Option<&BareJid> {
@@ -257,6 +273,9 @@ impl RoomMutationEffects {
     }
     pub fn effects(&self) -> &[RoomEffect] {
         &self.effects
+    }
+    pub fn superseding_reservation(&self) -> Option<&RoomEffectReservation> {
+        self.superseding_reservation.as_ref()
     }
 }
 

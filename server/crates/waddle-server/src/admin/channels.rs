@@ -39,7 +39,7 @@ use waddle_xmpp::muc::{
     room_actor::{
         ApplyAdminItems, ApplyAffiliationChange, ChangeAffiliation, EnforceMembersOnlyAffiliations,
         GetAffiliation, GetConfig, GetSnapshot, LeaveByRealJid, ListAffiliations, ListOccupants,
-        OccupantCount, RoomActor, UpdateConfig,
+        OccupantCount, RestoreLiveRoster, RoomActor, UpdateConfig,
     },
     AdminItem, PinPermission, RoomConfig,
 };
@@ -382,14 +382,16 @@ pub async fn register(
     }
     {
         let state = Arc::clone(&app_state);
+        let websocket_state = Arc::clone(&websocket_state);
         let connections = Arc::clone(&connection_registry);
         let sfu = sfu.clone();
         registry
             .register(NODE_UPDATE, "Admin · Update channel", move |ctx| {
                 let state = Arc::clone(&state);
+                let websocket_state = Arc::clone(&websocket_state);
                 let connections = Arc::clone(&connections);
                 let sfu = sfu.clone();
-                async move { handle_update(ctx, state, connections, sfu).await }
+                async move { handle_update(ctx, state, websocket_state, connections, sfu).await }
             })
             .await;
     }
@@ -484,12 +486,16 @@ pub async fn register(
     }
     {
         let state = Arc::clone(&app_state);
+        let websocket_state = Arc::clone(&websocket_state);
         let connections = Arc::clone(&connection_registry);
         registry
             .register(NODE_GROUP_DM_RENAME, "Rename group DM", move |ctx| {
                 let state = Arc::clone(&state);
+                let websocket_state = Arc::clone(&websocket_state);
                 let connections = Arc::clone(&connections);
-                async move { handle_group_dm_rename(ctx, state, connections).await }
+                async move {
+                    handle_group_dm_rename(ctx, state, websocket_state, connections).await
+                }
             })
             .await;
     }
@@ -664,6 +670,7 @@ async fn handle_group_dm_leave(
 async fn handle_group_dm_rename(
     ctx: CommandContext,
     state: Arc<AppState>,
+    websocket_state: Arc<WebSocketState>,
     connections: Arc<ConnectionRegistry>,
 ) -> CommandResult {
     let caller_full = match ctx.from.clone().try_into_full() {
@@ -681,7 +688,7 @@ async fn handle_group_dm_rename(
             "group-dm:rename must be addressed to the room_jid".to_string(),
         )));
     }
-    match run_group_dm_rename(&state, &connections, &caller_full, &args).await {
+    match run_group_dm_rename(&state, &websocket_state, &connections, &caller_full, &args).await {
         Ok(result) => CommandResult::Completed {
             session_id: None,
             form: Some(build_group_dm_rename_form(&result)),
@@ -694,6 +701,7 @@ async fn handle_group_dm_rename(
 async fn handle_update(
     ctx: CommandContext,
     state: Arc<AppState>,
+    websocket_state: Arc<WebSocketState>,
     connections: Arc<ConnectionRegistry>,
     sfu: Option<Arc<dyn waddle_sfu::SfuService>>,
 ) -> CommandResult {
@@ -704,7 +712,7 @@ async fn handle_update(
         Ok(args) => args,
         Err(error) => return *bad_request(error),
     };
-    match run_update(&state, &connections, &args, sfu.as_ref()).await {
+    match run_update(&state, &websocket_state, &connections, &args, sfu.as_ref()).await {
         Ok(channel) => CommandResult::Completed {
             session_id: None,
             form: Some(build_channel_form(&channel)),
@@ -2303,6 +2311,7 @@ async fn run_group_dm_leave(
 
 async fn run_group_dm_rename(
     state: &AppState,
+    websocket_state: &WebSocketState,
     connections: &ConnectionRegistry,
     caller_full_jid: &FullJid,
     args: &GroupDmRenameArgs,
@@ -2356,14 +2365,14 @@ async fn run_group_dm_rename(
     let intended_config = config.normalized();
     let mut reconciled_broadcast_snapshot: Option<waddle_xmpp::muc::room_actor::RoomSnapshot> =
         None;
-    let updated_snapshot = match actor
+    let (updated_snapshot, config_reservation) = match actor
         .ask(waddle_xmpp::muc::room_actor::UpdateGroupDmConfigByMember {
             config: intended_config.clone(),
             sender_jid: caller_full_jid.clone(),
         })
         .await
     {
-        Ok(snapshot) => snapshot,
+        Ok(applied) => (applied.snapshot, applied.reservation),
         Err(kameo::error::SendError::HandlerError(
             waddle_xmpp::muc::room_actor::UpdateGroupDmConfigByMemberError::CommitOutcomeUnknown,
         )) => {
@@ -2383,7 +2392,7 @@ async fn run_group_dm_rename(
             };
             actor = recovered.actor;
             reconciled_broadcast_snapshot = Some(snapshot.clone());
-            recovered.snapshot
+            (recovered.snapshot, recovered.reservation)
         }
         Err(error) => {
             return Err(group_dm_rename_update_error(state, &args.room_jid, &actor, error).await)
@@ -2403,7 +2412,14 @@ async fn run_group_dm_rename(
         )))));
     }
     if let Err(error) = upsert_group_dm_catalog(state, &channel_id, &intended_config).await {
-        let _ = rollback_room_config_if_revision(&actor, expected_revision, previous_config).await;
+        let _ = rollback_room_config_or_arm(
+            websocket_state,
+            &actor,
+            expected_revision,
+            previous_config,
+            config_reservation.clone(),
+        )
+        .await;
         return Err(error);
     }
 
@@ -2415,8 +2431,14 @@ async fn run_group_dm_rename(
     {
         Ok(members) => members,
         Err(error) => {
-            if rollback_room_config_if_revision(&actor, expected_revision, previous_config.clone())
-                .await
+            if rollback_room_config_or_arm(
+                websocket_state,
+                &actor,
+                expected_revision,
+                previous_config.clone(),
+                config_reservation.clone(),
+            )
+            .await
             {
                 let _ = upsert_group_dm_catalog(state, &channel_id, &previous_config).await;
             }
@@ -2428,12 +2450,16 @@ async fn run_group_dm_rename(
         if !group_dm_room_config_revision_is_current(&actor, expected_revision).await {
             repair_group_dm_rename_side_effects_after_conflict(
                 state,
+                websocket_state,
                 &actor,
-                &channel_id,
-                &args.room_jid,
-                &previous_config,
-                expected_revision,
-                &updated_bookmark_members,
+                GroupDmRenameRepair {
+                    channel_id: &channel_id,
+                    room_jid: &args.room_jid,
+                    previous_config: &previous_config,
+                    expected_revision,
+                    config_reservation: config_reservation.clone(),
+                    updated_members: &updated_bookmark_members,
+                },
             )
             .await;
             return Err(Box::new(CommandResult::Error(XmppError::conflict(Some(
@@ -2448,8 +2474,14 @@ async fn run_group_dm_rename(
         )
         .await
         {
-            if rollback_room_config_if_revision(&actor, expected_revision, previous_config.clone())
-                .await
+            if rollback_room_config_or_arm(
+                websocket_state,
+                &actor,
+                expected_revision,
+                previous_config.clone(),
+                config_reservation.clone(),
+            )
+            .await
             {
                 let _ = upsert_group_dm_catalog(state, &channel_id, &previous_config).await;
                 restore_group_dm_bookmarks(
@@ -2468,19 +2500,25 @@ async fn run_group_dm_rename(
     if !group_dm_room_config_revision_is_current(&actor, expected_revision).await {
         repair_group_dm_rename_side_effects_after_conflict(
             state,
+            websocket_state,
             &actor,
-            &channel_id,
-            &args.room_jid,
-            &previous_config,
-            expected_revision,
-            &updated_bookmark_members,
+            GroupDmRenameRepair {
+                channel_id: &channel_id,
+                room_jid: &args.room_jid,
+                previous_config: &previous_config,
+                expected_revision,
+                config_reservation: config_reservation.clone(),
+                updated_members: &updated_bookmark_members,
+            },
         )
         .await;
         return Err(Box::new(CommandResult::Error(XmppError::conflict(Some(
             "group-DM rename was superseded by a newer update".to_string(),
         )))));
     }
-    if let Some(broadcast_snapshot) = reconciled_broadcast_snapshot.as_ref() {
+    if let Some(reservation) = config_reservation.as_ref() {
+        arm_config_effect_reservation(websocket_state, reservation);
+    } else if let Some(broadcast_snapshot) = reconciled_broadcast_snapshot.as_ref() {
         broadcast_group_dm_config_change(connections, &args.room_jid, broadcast_snapshot);
     } else {
         let broadcast_snapshot = actor
@@ -2729,19 +2767,38 @@ async fn restore_group_dm_bookmarks(
     }
 }
 
+/// Everything a superseded group-DM rename needs to undo: the config to
+/// restore (or arm), the staged effect reservation that guarded it, and the
+/// bookmark audience to repair.
+struct GroupDmRenameRepair<'a> {
+    channel_id: &'a str,
+    room_jid: &'a BareJid,
+    previous_config: &'a RoomConfig,
+    expected_revision: u64,
+    config_reservation: Option<waddle_xmpp::muc::RoomEffectReservation>,
+    updated_members: &'a [BareJid],
+}
+
 async fn repair_group_dm_rename_side_effects_after_conflict(
     state: &AppState,
+    websocket_state: &WebSocketState,
     actor: &ActorRef<RoomActor>,
-    channel_id: &str,
-    room_jid: &BareJid,
-    previous_config: &RoomConfig,
-    expected_revision: u64,
-    updated_members: &[BareJid],
+    repair: GroupDmRenameRepair<'_>,
 ) {
-    let target_config = if rollback_room_config_if_revision(
+    let GroupDmRenameRepair {
+        channel_id,
+        room_jid,
+        previous_config,
+        expected_revision,
+        config_reservation,
+        updated_members,
+    } = repair;
+    let target_config = if rollback_room_config_or_arm(
+        websocket_state,
         actor,
         expected_revision,
         previous_config.clone(),
+        config_reservation.clone(),
     )
     .await
     {
@@ -2763,18 +2820,27 @@ async fn repair_group_dm_rename_side_effects_after_conflict(
     .await;
 }
 
-async fn rollback_room_config_if_revision(
+async fn rollback_room_config_or_arm(
+    websocket_state: &WebSocketState,
     actor: &ActorRef<RoomActor>,
     expected_revision: u64,
     previous_config: RoomConfig,
+    reservation: Option<waddle_xmpp::muc::RoomEffectReservation>,
 ) -> bool {
-    actor
+    let rolled_back = actor
         .ask(waddle_xmpp::muc::room_actor::RollbackConfigIfRevision {
             expected_revision,
             config: previous_config,
+            reservation: reservation.clone(),
         })
         .await
-        .unwrap_or(false)
+        .unwrap_or(false);
+    if !rolled_back {
+        if let Some(reservation) = reservation {
+            arm_config_effect_reservation(websocket_state, &reservation);
+        }
+    }
+    rolled_back
 }
 
 /// XEP-0045 §10.2.1: broadcast `<message><x xmlns='muc#user'><status/></x></message>`
@@ -2811,6 +2877,20 @@ async fn broadcast_admin_config_change(
                 .await;
         }
     }
+}
+
+/// Admin command handlers do not have the websocket IQ response batch used
+/// for an inline drain. They arm through the shared supervisor, which nudges
+/// the normal drain once the reservation is eligible.
+fn arm_config_effect_reservation(
+    websocket_state: &WebSocketState,
+    reservation: &waddle_xmpp::muc::RoomEffectReservation,
+) {
+    websocket_state
+        .deps
+        .protocol
+        .room_effect_arm_supervisor
+        .arm(reservation.clone());
 }
 
 async fn broadcast_presence_updates(
@@ -2944,6 +3024,7 @@ async fn reconcile_ambiguous_group_dm_leave(
 struct RecoveredGroupDmRenameCommit {
     actor: ActorRef<RoomActor>,
     snapshot: waddle_xmpp::muc::room_actor::RoomSnapshot,
+    reservation: Option<waddle_xmpp::muc::RoomEffectReservation>,
 }
 
 async fn reconcile_ambiguous_group_dm_rename_commit(
@@ -2964,7 +3045,27 @@ async fn reconcile_ambiguous_group_dm_rename_commit(
             "room actor GetSnapshot during group-DM rename reconciliation",
         ))?;
     if snapshot.room.config == *intended_config {
-        Ok(Some(RecoveredGroupDmRenameCommit { actor, snapshot }))
+        let reservation = if let Some(coordinates) = snapshot.durable_coordinates {
+            crate::room_effect_outbox::RoomEffectOutboxStore::new(state.db_pool.global().clone())
+                .await
+                .map_err(|error| {
+                    internal_err(format!(
+                        "group-DM reservation store initialization failed: {error}"
+                    ))
+                })?
+                .staged_reservation_for(coordinates.lifecycle, coordinates.revision)
+                .await
+                .map_err(|error| {
+                    internal_err(format!("group-DM reservation recovery failed: {error}"))
+                })?
+        } else {
+            None
+        };
+        Ok(Some(RecoveredGroupDmRenameCommit {
+            actor,
+            snapshot,
+            reservation,
+        }))
     } else {
         Ok(None)
     }
@@ -3327,11 +3428,12 @@ async fn validate_group_dm_members(
 
 async fn run_update(
     state: &AppState,
+    websocket_state: &WebSocketState,
     connections: &ConnectionRegistry,
     args: &ChannelsUpdateArgs,
     sfu: Option<&Arc<dyn waddle_sfu::SfuService>>,
 ) -> Result<ChannelRef, AdminErr> {
-    let actor = state
+    let mut actor = state
         .room_registry
         .ask(GetRoom {
             room_jid: args.channel_jid.clone(),
@@ -3345,6 +3447,10 @@ async fn run_update(
         })?;
 
     let _config_guard = acquire_room_config_lock(&args.channel_jid).await;
+    let pre_update_snapshot = actor
+        .ask(GetSnapshot)
+        .await
+        .map_err(send_err("room actor GetSnapshot before channel update"))?;
     let existing = actor
         .ask(GetConfig)
         .await
@@ -3412,16 +3518,100 @@ async fn run_update(
             None
         };
 
-    let expected_revision = actor
+    let effect_plan = if !existing.requires_membership() && updated.requires_membership() {
+        waddle_xmpp::muc::room_actor::ConfigEffectPlan::ManagedMembersOnlyFallback
+    } else {
+        waddle_xmpp::muc::room_actor::ConfigEffectPlan::DirectAudience
+    };
+    let applied_config = match actor
         .ask(UpdateConfig {
             config: updated.clone(),
+            effect_plan,
         })
         .await
-        .map_err(send_err("room actor UpdateConfig"))?;
+    {
+        Ok(applied) => applied,
+        Err(kameo::error::SendError::HandlerError(
+            waddle_xmpp::muc::room_actor::RoomMutationError::CommitOutcomeUnknown,
+        )) => {
+            let _ = state
+                .room_registry
+                .ask(
+                    waddle_xmpp::muc::room_registry_actor::DemoteRoomIfExactActor {
+                        room_jid: args.channel_jid.clone(),
+                        actor_ref: actor.clone(),
+                    },
+                )
+                .await;
+            let recovered = state
+                .room_registry
+                .ask(GetOrCreateRoom {
+                    room_jid: args.channel_jid.clone(),
+                    waddle_id: pre_update_snapshot.room.waddle_id.clone(),
+                    channel_id: pre_update_snapshot.room.channel_id.clone(),
+                    config: pre_update_snapshot.room.config.clone(),
+                })
+                .await
+                .map_err(send_err(
+                    "room_registry ask GetOrCreateRoom during channel reconciliation",
+                ))?
+                .actor_ref;
+            recovered
+                .ask(RestoreLiveRoster {
+                    room: pre_update_snapshot.room.clone(),
+                })
+                .await
+                .map_err(send_err(
+                    "room actor RestoreLiveRoster during channel reconciliation",
+                ))?;
+            let snapshot = recovered.ask(GetSnapshot).await.map_err(send_err(
+                "room actor GetSnapshot during channel reconciliation",
+            ))?;
+            if snapshot.room.config != updated {
+                return Err(unavailable(
+                    "This channel update outcome is being reconciled; please retry.",
+                ));
+            }
+            let reservation = if let Some(coordinates) = snapshot.durable_coordinates {
+                crate::room_effect_outbox::RoomEffectOutboxStore::new(
+                    state.db_pool.global().clone(),
+                )
+                .await
+                .map_err(|error| {
+                    internal_err(format!(
+                        "channel reservation store initialization failed: {error}"
+                    ))
+                })?
+                .staged_reservation_for(coordinates.lifecycle, coordinates.revision)
+                .await
+                .map_err(|error| {
+                    internal_err(format!("channel reservation recovery failed: {error}"))
+                })?
+            } else {
+                None
+            };
+            actor = recovered;
+            waddle_xmpp::muc::room_actor::ConfigMutationApplied {
+                revision: snapshot.config_revision,
+                notification: None,
+                reservation,
+            }
+        }
+        Err(error) => return Err(send_err("room actor UpdateConfig")(error)),
+    };
+    let expected_revision = applied_config.revision;
+    let config_reservation = applied_config.reservation;
 
     if let Err(error) = upsert_channel_catalog(state, &channel_id, &updated, new_channel_type).await
     {
-        let _ = rollback_room_config_if_revision(&actor, expected_revision, existing.clone()).await;
+        let _ = rollback_room_config_or_arm(
+            websocket_state,
+            &actor,
+            expected_revision,
+            existing.clone(),
+            config_reservation.clone(),
+        )
+        .await;
         return Err(error);
     }
 
@@ -3438,8 +3628,14 @@ async fn run_update(
         {
             Ok(created) => created,
             Err(error) => {
-                if rollback_room_config_if_revision(&actor, expected_revision, existing.clone())
-                    .await
+                if rollback_room_config_or_arm(
+                    websocket_state,
+                    &actor,
+                    expected_revision,
+                    existing.clone(),
+                    config_reservation.clone(),
+                )
+                .await
                 {
                     restore_channel_catalog_snapshot(state, &channel_id, catalog_snapshot.as_ref())
                         .await;
@@ -3450,7 +3646,15 @@ async fn run_update(
         if let Err(error) =
             retract_duplicate_channel_bookmarks(state, &node, &channel_id, &args.channel_jid).await
         {
-            if rollback_room_config_if_revision(&actor, expected_revision, existing.clone()).await {
+            if rollback_room_config_or_arm(
+                websocket_state,
+                &actor,
+                expected_revision,
+                existing.clone(),
+                config_reservation.clone(),
+            )
+            .await
+            {
                 restore_channel_catalog_snapshot(state, &channel_id, catalog_snapshot.as_ref())
                     .await;
                 restore_channel_space_bookmark(
@@ -3467,13 +3671,25 @@ async fn run_update(
         }
     }
 
+    let mut arm_reservation = config_reservation.clone();
     if let Some(explicit_affiliations) = members_only_enforcement_affiliations {
         let applied = actor
             .ask(EnforceMembersOnlyAffiliations {
                 affiliations: explicit_affiliations,
+                fallback_reservation: config_reservation.clone(),
+                config_status_codes: waddle_xmpp::muc::config_change_status_codes(
+                    &existing, &updated,
+                ),
             })
             .await
-            .map_err(send_err("room actor EnforceMembersOnlyAffiliations"))?;
+            .map_err(|error| {
+                if let Some(reservation) = config_reservation.as_ref() {
+                    arm_config_effect_reservation(websocket_state, reservation);
+                }
+                send_err("room actor EnforceMembersOnlyAffiliations")(error)
+            })?;
+        let enforcement_has_reservation = applied.outbox_reservation.is_some();
+        arm_reservation = applied.outbox_reservation;
         // A status-322 ejection ends room membership, so it ends call
         // participation; a surviving occupant who lost voice loses
         // publish rights.
@@ -3483,7 +3699,9 @@ async fn run_update(
             &args.channel_jid,
             &applied.voice_changes,
         );
-        broadcast_presence_updates(connections, applied.presence_updates).await;
+        if !enforcement_has_reservation {
+            broadcast_presence_updates(connections, applied.presence_updates).await;
+        }
     }
 
     // A channel-type change flips `moderated` in both directions
@@ -3505,8 +3723,12 @@ async fn run_update(
     // the admin channels path notifies occupants exactly like the
     // muc#owner IQ path — status 104 (plus 170/171 when the logging
     // knob flips).
-    broadcast_admin_config_change(connections, &actor, &args.channel_jid, &existing, &updated)
-        .await;
+    if let Some(reservation) = arm_reservation.as_ref() {
+        arm_config_effect_reservation(websocket_state, reservation);
+    } else {
+        broadcast_admin_config_change(connections, &actor, &args.channel_jid, &existing, &updated)
+            .await;
+    }
 
     Ok(ChannelRef {
         channel_jid: args.channel_jid.clone(),
@@ -4999,6 +5221,7 @@ mod group_dm_durable_reconciliation_tests {
                     self.states.lock().expect("states lock").insert(
                         room_jid.clone(),
                         DurableRoomState {
+                            coordinates: None,
                             waddle_id: waddle_id.into_string(),
                             channel_id: channel_id.into_string(),
                             config,
