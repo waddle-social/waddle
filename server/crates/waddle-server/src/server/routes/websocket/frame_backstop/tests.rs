@@ -87,7 +87,7 @@ async fn groupchat_dispatch_span_carries_correlation_and_bound_identity_without_
     let backstop = StanzaBackstop::capture(&stanza, Some(&bound));
     run_with_backstop(backstop, async {
         tracing::info!("dispatch field probe");
-        Vec::new()
+        Vec::<String>::new()
     })
     .await
     .expect("dispatch completes");

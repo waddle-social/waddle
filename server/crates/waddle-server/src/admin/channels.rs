@@ -62,6 +62,7 @@ use crate::permissions::{
     CheckPermission, DeleteTuple, Object, ObjectType, Permission, PermissionError, Relation,
     Subject, SubjectType, Tuple, WriteTuple,
 };
+use crate::server::routes::websocket::WebSocketState;
 use crate::server::xmpp_state::{
     delete_xmpp_channel, get_xmpp_channel, upsert_xmpp_channel, XmppChannelRecord,
     XmppChannelUpsert,
@@ -355,6 +356,7 @@ pub struct GroupDmRenameResult {
 pub async fn register(
     registry: &waddle_xmpp::commands::CommandRegistry,
     app_state: Arc<AppState>,
+    websocket_state: Arc<WebSocketState>,
     connection_registry: Arc<ConnectionRegistry>,
     user_registry: ActorRef<waddle_xmpp::registry::UserRegistryActor>,
     sm_session_registry: Arc<InMemorySmSessionRegistry>,
@@ -420,6 +422,7 @@ pub async fn register(
     }
     {
         let state = Arc::clone(&app_state);
+        let websocket_state = Arc::clone(&websocket_state);
         let connections = Arc::clone(&connection_registry);
         let sfu = sfu.clone();
         registry
@@ -428,23 +431,28 @@ pub async fn register(
                 "Admin · Set affiliation",
                 move |ctx| {
                     let state = Arc::clone(&state);
+                    let websocket_state = Arc::clone(&websocket_state);
                     let connections = Arc::clone(&connections);
                     let sfu = sfu.clone();
-                    async move { handle_set_affiliation(ctx, state, connections, sfu).await }
+                    async move {
+                        handle_set_affiliation(ctx, state, websocket_state, connections, sfu).await
+                    }
                 },
             )
             .await;
     }
     {
         let state = Arc::clone(&app_state);
+        let websocket_state = Arc::clone(&websocket_state);
         let connections = Arc::clone(&connection_registry);
         let sfu = sfu.clone();
         registry
             .register(NODE_KICK, "Admin · Kick occupant", move |ctx| {
                 let state = Arc::clone(&state);
+                let websocket_state = Arc::clone(&websocket_state);
                 let connections = Arc::clone(&connections);
                 let sfu = sfu.clone();
-                async move { handle_kick(ctx, state, connections, sfu).await }
+                async move { handle_kick(ctx, state, websocket_state, connections, sfu).await }
             })
             .await;
     }
@@ -763,6 +771,7 @@ async fn handle_affiliations(ctx: CommandContext, state: Arc<AppState>) -> Comma
 async fn handle_set_affiliation(
     ctx: CommandContext,
     state: Arc<AppState>,
+    websocket_state: Arc<WebSocketState>,
     connections: Arc<ConnectionRegistry>,
     sfu: Option<Arc<dyn waddle_sfu::SfuService>>,
 ) -> CommandResult {
@@ -774,7 +783,16 @@ async fn handle_set_affiliation(
         Ok(args) => args,
         Err(error) => return *bad_request(error),
     };
-    match run_set_affiliation(&state, &connections, &caller_bare, &args, sfu.as_ref()).await {
+    match run_set_affiliation(
+        &state,
+        Some(websocket_state.as_ref()),
+        &connections,
+        &caller_bare,
+        &args,
+        sfu.as_ref(),
+    )
+    .await
+    {
         Ok(result) => CommandResult::Completed {
             session_id: None,
             form: Some(build_set_affiliation_form(&result)),
@@ -787,6 +805,7 @@ async fn handle_set_affiliation(
 async fn handle_kick(
     ctx: CommandContext,
     state: Arc<AppState>,
+    websocket_state: Arc<WebSocketState>,
     connections: Arc<ConnectionRegistry>,
     sfu: Option<Arc<dyn waddle_sfu::SfuService>>,
 ) -> CommandResult {
@@ -816,7 +835,16 @@ async fn handle_kick(
         Ok(args) => args,
         Err(error) => return *bad_request(error),
     };
-    match run_kick(&state, &connections, &caller_full, &args, sfu.as_ref()).await {
+    match run_kick(
+        &state,
+        Some(websocket_state.as_ref()),
+        &connections,
+        &caller_full,
+        &args,
+        sfu.as_ref(),
+    )
+    .await
+    {
         Ok(result) => CommandResult::Completed {
             session_id: None,
             form: Some(build_kick_form(&result)),
@@ -2796,6 +2824,36 @@ async fn broadcast_presence_updates(
     }
 }
 
+async fn deliver_admin_affiliation_updates(
+    websocket_state: Option<&WebSocketState>,
+    connections: &ConnectionRegistry,
+    room_jid: &BareJid,
+    presence_updates: Vec<(FullJid, xmpp_parsers::presence::Presence)>,
+    reservation: Option<&waddle_xmpp::muc::RoomEffectReservation>,
+) {
+    let Some(reservation) = reservation else {
+        broadcast_presence_updates(connections, presence_updates).await;
+        return;
+    };
+    let Some(websocket_state) = websocket_state else {
+        tracing::warn!(room = %room_jid, "admin affiliation effect awaits janitor without websocket state");
+        return;
+    };
+    if let Err(error) = crate::room_effect_outbox::drain::drain_reservation_inline(
+        websocket_state,
+        reservation,
+        None,
+    )
+    .await
+    {
+        tracing::warn!(
+            room = %room_jid,
+            error = %error,
+            "admin channel inline affiliation drain failed after committed mutation"
+        );
+    }
+}
+
 async fn group_dm_room_config_revision_is_current(
     actor: &ActorRef<RoomActor>,
     expected: u64,
@@ -3940,6 +3998,7 @@ async fn run_affiliations(
 
 async fn run_set_affiliation(
     state: &AppState,
+    websocket_state: Option<&WebSocketState>,
     connections: &ConnectionRegistry,
     caller_bare: &BareJid,
     args: &ChannelsSetAffiliationArgs,
@@ -4030,35 +4089,63 @@ async fn run_set_affiliation(
             return Err(send_err("room actor ApplyAffiliationChange")(error));
         }
     };
-    broadcast_presence_updates(connections, applied.presence_updates).await;
+    let presence_updates = applied.presence_updates;
+    let removed_by_moderation = applied.removed_by_moderation;
+    let voice_changes = applied.voice_changes;
+    let outbox_reservation = applied.outbox_reservation;
     // Membership-scoped visibility (#935): an admin-V2 ban (Outcast)
     // ends the occupant's room membership, so their live SFU call
     // participation ends with it. Fire-and-forget inside the SFU
     // layer; the moderation result is never blocked on LiveKit.
-    evict_moderation_removals(sfu, &args.channel_jid, &applied.removed_by_moderation);
+    evict_moderation_removals(sfu, &args.channel_jid, &removed_by_moderation);
     // A demotion that keeps the occupant in the room can still cost
     // them voice (e.g. `admin -> none` in a moderated room), which
     // must revoke their SFU publish rights.
-    crate::server::routes::websocket::muc_call_sfu::converge_voice_changes_via_sfu(
-        sfu,
+    if outbox_reservation.is_none() {
+        crate::server::routes::websocket::muc_call_sfu::converge_voice_changes_via_sfu(
+            sfu,
+            &args.channel_jid,
+            &voice_changes,
+        );
+    }
+    deliver_admin_affiliation_updates(
+        websocket_state,
+        connections,
         &args.channel_jid,
-        &applied.voice_changes,
-    );
+        presence_updates,
+        outbox_reservation.as_ref(),
+    )
+    .await;
     Ok(ChannelsSetAffiliationResult {
         member_jid: args.member_jid.clone(),
         affiliation: args.affiliation,
     })
 }
 
+/// Identifies one private-kick revocation: which channel member loses their
+/// affiliation, on whose authority, and what durable affiliation to restore
+/// if the in-room revocation fails.
+struct PrivateKickRevocation<'a> {
+    channel_id: &'a str,
+    caller_bare: &'a BareJid,
+    occupant_jid: &'a BareJid,
+    durable_previous_affiliation: Affiliation,
+}
+
 async fn sync_private_kick_affiliation_revocation(
     state: &AppState,
+    websocket_state: Option<&WebSocketState>,
     connections: &ConnectionRegistry,
+    room_jid: &BareJid,
     actor: &ActorRef<RoomActor>,
-    channel_id: &str,
-    caller_bare: &BareJid,
-    occupant_jid: &BareJid,
-    durable_previous_affiliation: Affiliation,
+    revocation: PrivateKickRevocation<'_>,
 ) -> Result<(), AdminErr> {
+    let PrivateKickRevocation {
+        channel_id,
+        caller_bare,
+        occupant_jid,
+        durable_previous_affiliation,
+    } = revocation;
     match actor
         .ask(ApplyAffiliationChange {
             actor: Some(caller_bare.clone()),
@@ -4068,7 +4155,14 @@ async fn sync_private_kick_affiliation_revocation(
         .await
     {
         Ok(applied) => {
-            broadcast_presence_updates(connections, applied.presence_updates).await;
+            deliver_admin_affiliation_updates(
+                websocket_state,
+                connections,
+                room_jid,
+                applied.presence_updates,
+                applied.outbox_reservation.as_ref(),
+            )
+            .await;
             Ok(())
         }
         Err(error) => {
@@ -4086,6 +4180,7 @@ async fn sync_private_kick_affiliation_revocation(
 
 async fn run_kick(
     state: &AppState,
+    websocket_state: Option<&WebSocketState>,
     connections: &ConnectionRegistry,
     caller_full: &FullJid,
     args: &ChannelsKickArgs,
@@ -4162,12 +4257,16 @@ async fn run_kick(
         if revoke_members_only_member {
             sync_private_kick_affiliation_revocation(
                 state,
+                websocket_state,
                 connections,
+                &args.channel_jid,
                 &actor,
-                &channel_id,
-                &caller_bare,
-                &args.occupant_jid,
-                durable_previous_affiliation,
+                PrivateKickRevocation {
+                    channel_id: &channel_id,
+                    caller_bare: &caller_bare,
+                    occupant_jid: &args.occupant_jid,
+                    durable_previous_affiliation,
+                },
             )
             .await?;
         }
@@ -4206,12 +4305,16 @@ async fn run_kick(
         )) if revoke_members_only_member => {
             sync_private_kick_affiliation_revocation(
                 state,
+                websocket_state,
                 connections,
+                &args.channel_jid,
                 &actor,
-                &channel_id,
-                &caller_bare,
-                &args.occupant_jid,
-                durable_previous_affiliation,
+                PrivateKickRevocation {
+                    channel_id: &channel_id,
+                    caller_bare: &caller_bare,
+                    occupant_jid: &args.occupant_jid,
+                    durable_previous_affiliation,
+                },
             )
             .await?;
             return Ok(ChannelsKickResult {
@@ -4271,12 +4374,16 @@ async fn run_kick(
     if revoke_members_only_member {
         sync_private_kick_affiliation_revocation(
             state,
+            websocket_state,
             connections,
+            &args.channel_jid,
             &actor,
-            &channel_id,
-            &caller_bare,
-            &args.occupant_jid,
-            durable_previous_affiliation,
+            PrivateKickRevocation {
+                channel_id: &channel_id,
+                caller_bare: &caller_bare,
+                occupant_jid: &args.occupant_jid,
+                durable_previous_affiliation,
+            },
         )
         .await?;
     }
@@ -4727,6 +4834,7 @@ mod sfu_eviction_tests {
         let caller: FullJid = "owner@localhost/admin".parse().expect("caller jid");
         run_kick(
             &state,
+            None,
             &connections,
             &caller,
             &ChannelsKickArgs {
@@ -4757,6 +4865,7 @@ mod sfu_eviction_tests {
         let caller: BareJid = "owner@localhost".parse().expect("caller jid");
         run_set_affiliation(
             &state,
+            None,
             &connections,
             &caller,
             &ChannelsSetAffiliationArgs {
@@ -4788,6 +4897,7 @@ mod sfu_eviction_tests {
         let caller: BareJid = "owner@localhost".parse().expect("caller jid");
         run_set_affiliation(
             &state,
+            None,
             &connections,
             &caller,
             &ChannelsSetAffiliationArgs {

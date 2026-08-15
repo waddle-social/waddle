@@ -3567,6 +3567,7 @@ struct FakeDurableStore {
     load_calls: std::sync::atomic::AtomicUsize,
     save_calls: std::sync::atomic::AtomicUsize,
     saved_affiliations: std::sync::Mutex<Vec<(BareJid, BareJid, Affiliation)>>,
+    saved_effects: std::sync::Mutex<Vec<crate::muc::RoomMutationEffects>>,
     established_fences:
         std::sync::Mutex<std::collections::HashMap<BareJid, crate::muc::RoomClaimFenceContext>>,
     lifecycle: std::sync::OnceLock<crate::muc::RoomLifecycleId>,
@@ -3612,6 +3613,7 @@ impl FakeDurableStore {
             lose_config_persist_ownership: false,
             save_calls: std::sync::atomic::AtomicUsize::new(0),
             saved_affiliations: std::sync::Mutex::new(Vec::new()),
+            saved_effects: std::sync::Mutex::new(Vec::new()),
             ..Default::default()
         }))
     }
@@ -3656,6 +3658,10 @@ impl FakeDurableStore {
         self.saved_affiliations.lock().expect("lock").clone()
     }
 
+    fn saved_effects(&self) -> Vec<crate::muc::RoomMutationEffects> {
+        self.saved_effects.lock().expect("lock").clone()
+    }
+
     fn set_fenced(&self, fenced: Option<bool>) {
         *self.fenced.lock().expect("lock") = fenced;
     }
@@ -3682,7 +3688,7 @@ impl crate::muc::durable::MucDurableStore for FakeDurableStore {
         room_jid: &'a BareJid,
         fence: &'a crate::muc::RoomClaimFenceContext,
         intent: crate::muc::RoomDurableMutation,
-        _effects: crate::muc::RoomMutationEffects,
+        effects: crate::muc::RoomMutationEffects,
     ) -> crate::muc::RoomCommitFuture<'a> {
         if let Err(error) = validate_test_claim_fence(room_jid, fence) {
             return Box::pin(async move {
@@ -3718,11 +3724,23 @@ impl crate::muc::durable::MucDurableStore for FakeDurableStore {
             _ => Vec::new(),
         };
         let saved_affiliations = &self.saved_affiliations;
+        let saved_effects = &self.saved_effects;
         let committed_room = room_jid.clone();
         let fail = self.fail_persist;
         let commit_outcome_unknown =
             self.commit_outcome_unknown || (self.commit_config_outcome_unknown && config_commit);
         let coordinates = self.next_commit_coordinates();
+        let reservation =
+            (!effects.effects().is_empty()).then(|| crate::muc::RoomEffectReservation {
+                lifecycle: coordinates.lifecycle,
+                revision: coordinates.revision,
+                ordinals: (0..effects.effects().len())
+                    .map(|ordinal| {
+                        crate::muc::RoomEffectOrdinal::from_stored(ordinal as i64)
+                            .expect("non-negative ordinal")
+                    })
+                    .collect(),
+            });
         Box::pin(async move {
             if !established {
                 Err(crate::muc::RoomCommitError::OwnershipUnavailable)
@@ -3748,9 +3766,10 @@ impl crate::muc::durable::MucDurableStore for FakeDurableStore {
                         )
                     }),
                 );
+                saved_effects.lock().expect("lock").push(effects);
                 Ok(crate::muc::RoomCommitOutcome {
                     coordinates,
-                    reservation: None,
+                    reservation,
                 })
             }
         })
@@ -5052,6 +5071,138 @@ async fn apply_admin_items_surfaces_ambiguous_commit_outcome_without_compensatio
         Affiliation::None,
         "the actor must not apply an in-memory affiliation after an ambiguous durable admin batch"
     );
+}
+
+#[tokio::test]
+async fn role_only_admin_items_stay_direct_without_an_outbox_reservation() {
+    let store = FakeDurableStore::owned();
+    let actor = spawn_room_actor_with_store(store.clone()).await;
+    let alice = test_full_jid("alice");
+
+    actor
+        .ask(Join {
+            nick: "alice".to_string(),
+            real_jid: alice.clone(),
+            role: Role::Participant,
+            affiliation: Affiliation::Member,
+        })
+        .await
+        .expect("join");
+
+    let applied = actor
+        .ask(ApplyAdminItems {
+            sender_jid: test_full_jid("owner"),
+            sender_affiliation: Affiliation::Owner,
+            sender_role: Role::Moderator,
+            items: vec![AdminItem {
+                jid: None,
+                nick: Some("alice".to_string()),
+                affiliation: None,
+                role: Some(Role::Visitor),
+                reason: None,
+            }],
+        })
+        .await
+        .expect("role change applies");
+
+    assert!(
+        applied.outbox_reservation.is_none(),
+        "pure role-only outcomes stay on the direct path"
+    );
+    assert_eq!(
+        store.save_call_count(),
+        0,
+        "no durable affiliation commit is needed"
+    );
+    assert!(
+        store.saved_effects().is_empty(),
+        "role-only mutations must not enqueue durable admin effects"
+    );
+}
+
+#[tokio::test]
+async fn apply_affiliation_change_threads_admin_effects_and_reservation() {
+    let store = FakeDurableStore::owned();
+    let actor = spawn_room_actor_with_config_and_store(
+        RoomConfig {
+            members_only: true,
+            ..RoomConfig::default()
+        },
+        store.clone(),
+    )
+    .await;
+    let alice = test_full_jid("alice");
+    let bob = test_full_jid("bob");
+
+    for (nick, real_jid) in [("alice", alice.clone()), ("bob", bob.clone())] {
+        actor
+            .ask(JoinWithAffiliation {
+                sender_jid: real_jid,
+                nick: nick.to_string(),
+                affiliation_grant: JoinAffiliationGrant::Resolver(Affiliation::Member),
+                local_domain: "example.com".to_string(),
+                admission_revision: current_admission_revision(&actor).await,
+            })
+            .await
+            .expect("join");
+    }
+
+    let applied = actor
+        .ask(ApplyAffiliationChange {
+            actor: Some("owner@example.com".parse().expect("owner jid")),
+            jid: alice.to_bare(),
+            affiliation: Affiliation::None,
+        })
+        .await
+        .expect("affiliation change applies");
+
+    let reservation = applied
+        .outbox_reservation
+        .clone()
+        .expect("durable affiliation admin work should reserve its outbox rows");
+    assert_eq!(reservation.ordinals.len(), 2);
+
+    let saved_effects = store.saved_effects();
+    assert_eq!(saved_effects.len(), 1);
+    let effects = &saved_effects[0];
+    assert_eq!(
+        effects.staging(),
+        crate::muc::RoomEffectStagingClass::HandlerWindow
+    );
+    assert_eq!(effects.effects().len(), 2);
+
+    match &effects.effects()[0] {
+        crate::muc::RoomEffect::AdminSelfNotify { updates } => {
+            assert_eq!(updates.len(), 1);
+            assert_eq!(updates[0].recipient, alice);
+            assert_eq!(updates[0].occupant_bare_jid, alice.to_bare());
+            assert_eq!(updates[0].disclosed_real_jid.as_ref(), Some(&alice));
+            assert!(matches!(
+                updates[0].kind,
+                crate::muc::AdminPresenceKind::AffiliationRemoved
+            ));
+        }
+        other => panic!("expected self-notify effect, got {other:?}"),
+    }
+
+    match &effects.effects()[1] {
+        crate::muc::RoomEffect::AdminRemainingBroadcast {
+            presence_updates,
+            voice_changes,
+            recipients,
+        } => {
+            assert_eq!(presence_updates.len(), 1);
+            assert_eq!(presence_updates[0].recipient, bob);
+            assert_eq!(presence_updates[0].occupant_bare_jid, alice.to_bare());
+            assert_eq!(
+                presence_updates[0].disclosed_real_jid.as_ref(),
+                Some(&alice)
+            );
+            assert!(voice_changes.is_empty());
+            assert_eq!(recipients.as_slice(), &[bob]);
+        }
+        other => panic!("expected remaining-broadcast effect, got {other:?}"),
+    }
 }
 
 #[tokio::test]

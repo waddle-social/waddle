@@ -99,6 +99,7 @@ async fn link_preview_lookup_for_test(
         &mut conn_state,
     )
     .await
+    .frames
 }
 
 /// Register a live connection for `bound_jid` through the production-parity
@@ -797,7 +798,8 @@ async fn handle_iq_command_request_requires_ready_phase() {
         &ConnectionPhase::authenticated(&pending_jid),
         &mut conn_state,
     )
-    .await;
+    .await
+    .frames;
 
     let response = responses.first().expect("command error response");
     assert!(
@@ -971,9 +973,7 @@ async fn handle_iq_disco_info_answers_every_component_domain() {
                 IqPayload::Error(_) => panic!(
                     "disco#info to {target} ({phase_label}) returned IqError instead of result\n{xml}",
                 ),
-                _ => panic!(
-                    "disco#info to {target} ({phase_label}) returned non-result\n{xml}",
-                ),
+                _ => panic!("disco#info to {target} ({phase_label}) returned non-result\n{xml}",),
             };
             assert_eq!(
                 query.ns(),
@@ -1846,8 +1846,7 @@ async fn handle_iq_push_service_xep0050_complete_with_unknown_sessionid_is_bad_s
     );
     assert!(
         error.children().any(|child| {
-            child.name() == "bad-sessionid"
-                && child.ns() == waddle_xmpp::xep::xep0050::NS_COMMANDS
+            child.name() == "bad-sessionid" && child.ns() == waddle_xmpp::xep::xep0050::NS_COMMANDS
         }),
         "§4.4 must carry the <bad-sessionid xmlns='http://jabber.org/protocol/commands'/> child: {response}"
     );
@@ -2841,6 +2840,7 @@ async fn admin_channels_delete_retracts_duplicate_space_bookmarks() {
     crate::admin::channels::register(
         &state.deps.protocol.command_registry,
         std::sync::Arc::clone(&state.deps.app_state),
+        std::sync::Arc::clone(&state),
         std::sync::Arc::clone(&state.deps.protocol.connection_registry),
         state.deps.protocol.user_registry.clone(),
         std::sync::Arc::clone(&state.deps.protocol.sm_session_registry),
@@ -2972,6 +2972,7 @@ async fn admin_channels_update_retracts_duplicate_space_bookmarks() {
     crate::admin::channels::register(
         &state.deps.protocol.command_registry,
         std::sync::Arc::clone(&state.deps.app_state),
+        std::sync::Arc::clone(&state),
         std::sync::Arc::clone(&state.deps.protocol.connection_registry),
         state.deps.protocol.user_registry.clone(),
         std::sync::Arc::clone(&state.deps.protocol.sm_session_registry),
@@ -3123,6 +3124,7 @@ async fn admin_channels_create_space_bookmark_grants_space_members_channel_view(
     crate::admin::channels::register(
         &state.deps.protocol.command_registry,
         std::sync::Arc::clone(&state.deps.app_state),
+        std::sync::Arc::clone(&state),
         std::sync::Arc::clone(&state.deps.protocol.connection_registry),
         state.deps.protocol.user_registry.clone(),
         std::sync::Arc::clone(&state.deps.protocol.sm_session_registry),

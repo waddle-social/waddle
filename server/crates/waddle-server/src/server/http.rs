@@ -788,15 +788,6 @@ async fn create_websocket_state(
     // typed dependencies on `AppState` (`spaces_metadata_store`,
     // `pubsub_storage`, `room_registry`) wired up via #682/#683.
     crate::admin::spaces::register(&websocket_command_registry, Arc::clone(&state)).await;
-    crate::admin::channels::register(
-        &websocket_command_registry,
-        Arc::clone(&state),
-        Arc::clone(&connection_registry),
-        user_registry.clone(),
-        Arc::clone(&sm_session_registry),
-        sfu_service.clone(),
-    )
-    .await;
     if lineage_attested {
         crate::server::bootstrap_membership::reconcile_existing_accounts_or_warn(
             state.db_pool.global_actor(),
@@ -1002,6 +993,16 @@ async fn create_websocket_state(
         },
     });
     room_effect_arm_supervisor.attach_drain_state(&websocket_state);
+    crate::admin::channels::register(
+        &websocket_state.deps.protocol.command_registry,
+        Arc::clone(&state),
+        Arc::clone(&websocket_state),
+        Arc::clone(&websocket_state.deps.protocol.connection_registry),
+        websocket_state.deps.protocol.user_registry.clone(),
+        Arc::clone(&websocket_state.deps.protocol.sm_session_registry),
+        websocket_state.deps.protocol.sfu.clone(),
+    )
+    .await;
     #[cfg(feature = "clustering")]
     if let (Some(bridge), Some((claim_store, node_identity))) = (
         &state.clustering_claims.ordered_relay_delivery_bridge,

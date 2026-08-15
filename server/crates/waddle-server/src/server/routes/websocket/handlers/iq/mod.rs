@@ -74,6 +74,7 @@ use waddle_xmpp::{
 };
 use xmpp_parsers::minidom::Element;
 
+use crate::server::routes::websocket::frame::ResponseBatch;
 use crate::telemetry::mark_span_error;
 
 mod archive_inbox_upload;
@@ -179,6 +180,17 @@ pub(super) use errors::{
     service_unavailable_iq_error,
 };
 
+pub(super) fn response_batch_from_inline_room_effect_frames(
+    frames: Vec<crate::room_effect_outbox::drain::InlineRoomEffectFrame>,
+) -> ResponseBatch {
+    let mut batch = ResponseBatch::default();
+    for frame in frames {
+        batch.frames.push(stanza_to_xml(&frame.stanza));
+        batch.completions.push(frame.completion);
+    }
+    batch
+}
+
 fn push_service_stanza_error(error: XmppError) -> xmpp_parsers::stanza_error::StanzaError {
     match error {
         XmppError::Stanza {
@@ -264,7 +276,7 @@ pub async fn handle_iq_with_conn_state(
     authenticated_session: &Option<Session>,
     phase: &ConnectionPhase,
     conn_state: &mut IqConnState<'_>,
-) -> Vec<String> {
+) -> ResponseBatch {
     let spaces_domain = state.deps.service_domains.spaces.clone();
     let community_domain = state.deps.service_domains.community.clone();
     let upload_domain = state.deps.service_domains.upload.clone();
@@ -285,7 +297,7 @@ pub async fn handle_iq_with_conn_state(
             handle_caps_disco_info_result(&iq, full, state);
         }
         debug!(id = %id, "Ignoring IQ result/error stanza");
-        return vec![];
+        return ResponseBatch::default();
     }
 
     let payload_ns = match &iq {
@@ -304,7 +316,8 @@ pub async fn handle_iq_with_conn_state(
         && iq.to().is_some_and(|to| to.domain().as_str() == muc_domain)
     {
         return handle_muc_self_ping_iq(&iq, state, phase.bound_jid(), response_from, response_to)
-            .await;
+            .await
+            .into();
     }
 
     if is_link_preview_lookup_iq(&iq) {
@@ -317,7 +330,8 @@ pub async fn handle_iq_with_conn_state(
             response_to,
             state.deps.occupant_id_secret.key(),
         )
-        .await;
+        .await
+        .into();
     }
 
     if payload_ns == ROSTER_NS {
@@ -329,7 +343,8 @@ pub async fn handle_iq_with_conn_state(
             conn_state.roster_interested,
             conn_state.registry_owner,
         )
-        .await;
+        .await
+        .into();
     }
 
     // Namespace-based dispatch takes priority over the generic
@@ -358,7 +373,8 @@ pub async fn handle_iq_with_conn_state(
                     response_from,
                     conn_state.ordered_relay_origin.clone(),
                 )
-                .await;
+                .await
+                .into();
             }
         }
     }
@@ -388,7 +404,7 @@ pub async fn handle_iq_with_conn_state(
     if let Some(frames) =
         handle_sans_io_iq(handler_ctx, state, authenticated_session, phase, conn_state).await
     {
-        return frames;
+        return frames.into();
     }
 
     // jabber:iq:roster is served by handle_roster_iq above because it needs
@@ -437,18 +453,18 @@ pub async fn handle_iq_with_conn_state(
         Vec::new()
     };
     if !misc_response.is_empty() {
-        return misc_response;
+        return misc_response.into();
     }
 
     let disco_info_response =
         handle_disco_info_iq(handler_ctx, state, phase, authenticated_session).await;
     if !disco_info_response.is_empty() {
-        return disco_info_response;
+        return disco_info_response.into();
     }
 
     let disco_items_response = handle_disco_items_iq(handler_ctx, state, phase).await;
     if !disco_items_response.is_empty() {
-        return disco_items_response;
+        return disco_items_response.into();
     }
 
     if payload_ns == "http://jabber.org/protocol/commands" {
@@ -466,7 +482,8 @@ pub async fn handle_iq_with_conn_state(
                 .map(ResolvedPrincipal::from_authenticated_session),
             phase.bound_jid(),
         )
-        .await;
+        .await
+        .into();
     }
 
     if payload_ns == "http://jabber.org/protocol/muc#admin" && is_muc_admin_iq(&iq, muc_domain) {
@@ -483,7 +500,8 @@ pub async fn handle_iq_with_conn_state(
 
     if is_pin_query_iq(&iq, muc_domain, domain) {
         return handle_pin_query_iq(&iq, state, phase.bound_jid(), response_from, response_to)
-            .await;
+            .await
+            .into();
     }
 
     if is_mentions_permissions_iq(&iq, muc_domain) {
@@ -494,24 +512,25 @@ pub async fn handle_iq_with_conn_state(
             response_from,
             response_to,
         )
-        .await;
+        .await
+        .into();
     }
 
     let muc_owner_or_moderation =
         handle_muc_owner_and_moderation_iq(handler_ctx, state, phase, authenticated_session).await;
     if !muc_owner_or_moderation.is_empty() {
-        return muc_owner_or_moderation;
+        return muc_owner_or_moderation.into();
     }
 
     let archive_inbox_upload =
         handle_archive_inbox_upload_iq(&iq, &id, payload_ns.as_str(), domain, state, phase).await;
     if !archive_inbox_upload.is_empty() {
-        return archive_inbox_upload;
+        return archive_inbox_upload.into();
     }
 
     let pubsub_response = handle_pubsub_iq(handler_ctx, state, phase, authenticated_session).await;
     if !pubsub_response.is_empty() {
-        return pubsub_response;
+        return pubsub_response.into();
     }
 
     // Unknown IQ - log a compact summary and return an error.
@@ -523,6 +542,7 @@ pub async fn handle_iq_with_conn_state(
         response_to,
         feature_not_implemented_iq_error("Requested feature not implemented."),
     )]
+    .into()
 }
 
 #[cfg(test)]

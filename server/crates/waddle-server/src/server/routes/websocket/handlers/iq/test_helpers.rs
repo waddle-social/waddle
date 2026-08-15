@@ -47,4 +47,5 @@ pub async fn handle_iq(
         &mut conn_state,
     )
     .await
+    .frames
 }

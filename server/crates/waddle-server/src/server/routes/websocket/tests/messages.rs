@@ -5005,7 +5005,8 @@ async fn inbox_query_requires_ready_phase() {
         &ConnectionPhase::authenticated(&pending_jid),
         &mut conn_state,
     )
-    .await;
+    .await
+    .frames;
 
     let response = responses.first().expect("inbox error response");
     assert!(

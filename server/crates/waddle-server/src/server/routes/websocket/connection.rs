@@ -4,7 +4,7 @@ use super::{
         write_response_batch_with_admission, BatchAuthority, BatchSmPolicy, BatchWriteOutcome,
     },
     cleanup::cleanup_connection_shutdown,
-    frame::handle_xmpp_frame_with_admission,
+    frame::{handle_xmpp_frame_with_admission, ResponseBatch},
     interpret_loop::build_interpret_deps,
     outbound::{handle_outbound_stanza, OutboundAuthority},
     registration::{register_bound_connection_after_frame_with_admission, RegistrationAfterFrame},
@@ -1406,12 +1406,12 @@ async fn handle_inbound_text(
                     resumed,
                     replay_after_h,
                 } => {
-                    responses = vec![resumed.to_xml()];
+                    responses = ResponseBatch::from_frames(vec![resumed.to_xml()]);
                     // Issue #1178: like the pre-registration resume path,
                     // replayed stanzas carry a XEP-0203 <delay/> with their
                     // original receipt time.
                     let server_domain = state.deps.auth_state.xmpp_domain.as_str();
-                    responses.extend(
+                    responses.frames.extend(
                         conn.sm_state
                             .get_stanzas_to_resend(replay_after_h)
                             .into_iter()
@@ -1425,16 +1425,16 @@ async fn handle_inbound_text(
                     );
                 }
                 SmRegistrationFinalization::ReplaceWithFailed(failed) => {
-                    responses = vec![failed.to_xml()];
+                    responses = ResponseBatch::from_frames(vec![failed.to_xml()]);
                 }
                 SmRegistrationFinalization::ReplaceWithHandledCountTooHigh {
                     acknowledged,
                     send_count,
                 } => {
-                    responses = vec![
+                    responses = ResponseBatch::from_frames(vec![
                         build_handled_count_too_high_stream_error(acknowledged, send_count),
                         websocket_stream_close_xml(),
-                    ];
+                    ]);
                 }
             }
         }
@@ -1452,7 +1452,7 @@ async fn handle_inbound_text(
         }
     }
 
-    ensure_websocket_stream_close_for_closing_phase(conn, &mut responses);
+    ensure_websocket_stream_close_for_closing_phase(conn, &mut responses.frames);
 
     // Write the batch through the chunked XEP-0198-aware writer
     // (issue #1089): each countable stanza is recorded just before
@@ -1477,7 +1477,7 @@ async fn handle_inbound_text(
         ws_receiver,
         state.as_ref(),
         conn,
-        responses,
+        responses.frames,
         policy,
         BatchAuthority {
             permit: admission_permit,
@@ -1489,6 +1489,7 @@ async fn handle_inbound_text(
         BatchWriteOutcome::Continue => {
             conn.commit_server_stream_open_response();
             conn.publish_pending_sm_enable(state.as_ref());
+            spawn_response_batch_completions(state, responses.completions);
         }
         BatchWriteOutcome::TransportClosed | BatchWriteOutcome::DeferredCapExhausted => {
             return false;
@@ -1796,7 +1797,7 @@ async fn process_deferred_inbound_after_transport_loss(
         } else {
             BatchSmPolicy::Record
         };
-        batch_write::record_remaining_for_replay(conn, responses.into_iter(), policy);
+        batch_write::record_remaining_for_replay(conn, responses.frames.into_iter(), policy);
         if conn.sm_inbound_completion.has_unhandled_hole() {
             let dropped = discard_deferred_inbound(conn);
             if dropped > 0 {
@@ -1839,6 +1840,42 @@ fn response_batch_ends_with_websocket_stream_close(responses: &[String]) -> bool
     responses
         .last()
         .is_some_and(|frame| frame == &websocket_close)
+}
+
+fn spawn_response_batch_completions(
+    state: &Arc<WebSocketState>,
+    completions: Vec<crate::room_effect_outbox::drain::RoomEffectCompletion>,
+) {
+    let mut seen = std::collections::HashSet::new();
+    for completion in completions {
+        if !seen.insert((completion.key.clone(), completion.lease.clone())) {
+            continue;
+        }
+        let state = Arc::clone(state);
+        tokio::spawn(async move {
+            match crate::room_effect_outbox::drain::complete_after_write(
+                state.as_ref(),
+                &completion,
+            )
+            .await
+            {
+                Ok(true) => {}
+                Ok(false) => {
+                    debug!(
+                        key = ?completion.key,
+                        "Retaining room effect completion after missing local acceptance"
+                    );
+                }
+                Err(error) => {
+                    warn!(
+                        key = ?completion.key,
+                        %error,
+                        "Failed to finish room effect completion after accepted response batch"
+                    );
+                }
+            }
+        });
+    }
 }
 
 #[cfg(test)]

@@ -132,6 +132,54 @@ async fn rollback_admin_affiliations(
     }
 }
 
+fn split_room_effect_reservation(
+    reservation: &waddle_xmpp::muc::RoomEffectReservation,
+    head_len: usize,
+) -> (
+    Option<waddle_xmpp::muc::RoomEffectReservation>,
+    Option<waddle_xmpp::muc::RoomEffectReservation>,
+) {
+    let head_ordinals = reservation
+        .ordinals
+        .iter()
+        .take(head_len)
+        .copied()
+        .collect::<Vec<_>>();
+    let tail_ordinals = reservation
+        .ordinals
+        .iter()
+        .skip(head_len)
+        .copied()
+        .collect::<Vec<_>>();
+    let build = |ordinals: Vec<waddle_xmpp::muc::RoomEffectOrdinal>| {
+        if ordinals.is_empty() {
+            None
+        } else {
+            Some(waddle_xmpp::muc::RoomEffectReservation {
+                lifecycle: reservation.lifecycle,
+                revision: reservation.revision,
+                ordinals,
+            })
+        }
+    };
+    (build(head_ordinals), build(tail_ordinals))
+}
+
+async fn extend_batch_with_inline_room_effect_frames(
+    batch: &mut ResponseBatch,
+    state: &WebSocketState,
+    reservation: &waddle_xmpp::muc::RoomEffectReservation,
+    initiator: Option<&FullJid>,
+) -> Result<(), crate::room_effect_outbox::RoomEffectOutboxError> {
+    let drained =
+        crate::room_effect_outbox::drain::drain_reservation_inline(state, reservation, initiator)
+            .await?;
+    let drained = response_batch_from_inline_room_effect_frames(drained);
+    batch.frames.extend(drained.frames);
+    batch.completions.extend(drained.completions);
+    Ok(())
+}
+
 /// A snapshot queued after an `ApplyAdminItems` ask is ordered after that
 /// mutation in the room actor's mailbox. It can therefore distinguish a
 /// delivered-and-applied affiliation set from a failed delivery before the
@@ -461,6 +509,7 @@ fn replay_affiliation_change_from_snapshot(
             presence_updates,
             removed_by_moderation,
             voice_changes: Vec::new(),
+            outbox_reservation: None,
         };
     }
 
@@ -502,6 +551,7 @@ fn replay_affiliation_change_from_snapshot(
             presence_updates,
             removed_by_moderation,
             voice_changes: Vec::new(),
+            outbox_reservation: None,
         };
     }
 
@@ -536,6 +586,7 @@ fn replay_affiliation_change_from_snapshot(
         presence_updates,
         removed_by_moderation: Vec::new(),
         voice_changes: changed_session_voices(&voices_before, &session_voices(room, &target_jid)),
+        outbox_reservation: None,
     }
 }
 
@@ -581,6 +632,7 @@ fn replay_role_change_from_snapshot(
             presence_updates,
             removed_by_moderation: target_sessions,
             voice_changes: Vec::new(),
+            outbox_reservation: None,
         };
     }
 
@@ -620,6 +672,7 @@ fn replay_role_change_from_snapshot(
         presence_updates,
         removed_by_moderation: Vec::new(),
         voice_changes,
+        outbox_reservation: None,
     }
 }
 
@@ -672,21 +725,22 @@ pub(super) async fn handle_muc_admin_iq(
     sender_jid: Option<&FullJid>,
     response_from: Option<&str>,
     response_to: Option<&str>,
-) -> Vec<String> {
+) -> ResponseBatch {
     let Some(sender_jid) = sender_jid else {
         return vec![build_iq_error_xml_typed(
             iq.id(),
             response_from,
             response_to,
             not_authorized_iq_error("Authentication required."),
-        )];
+        )]
+        .into();
     };
     let (mut header, payload) = iq.clone().split();
     header.from = Some(Jid::from(sender_jid.clone()));
     let iq_with_from = payload.assemble(header);
     let query = match parse_admin_query(&iq_with_from, muc_domain) {
         Ok(query) => query,
-        Err(error) => return vec![build_xmpp_error_response(&iq_with_from, error)],
+        Err(error) => return vec![build_xmpp_error_response(&iq_with_from, error)].into(),
     };
     let room_actor = match get_room_actor_result(state, &query.room_jid).await {
         Ok(Some(room_actor)) => room_actor,
@@ -696,7 +750,8 @@ pub(super) async fn handle_muc_admin_iq(
                 response_from,
                 response_to,
                 item_not_found_iq_error("Requested item not found."),
-            )];
+            )]
+            .into();
         }
         Err(error) => {
             warn!(room = %query.room_jid, %error, "MUC admin room lookup failed");
@@ -705,7 +760,8 @@ pub(super) async fn handle_muc_admin_iq(
                 response_from,
                 response_to,
                 internal_server_error_iq_error("Internal server error."),
-            )];
+            )]
+            .into();
         }
     };
     let _config_guard = if query.is_get {
@@ -727,7 +783,8 @@ pub(super) async fn handle_muc_admin_iq(
                 response_from,
                 response_to,
                 internal_server_error_iq_error("Internal server error."),
-            )];
+            )]
+            .into();
         }
     };
     let has_admin_affiliation =
@@ -751,7 +808,8 @@ pub(super) async fn handle_muc_admin_iq(
             response_from,
             response_to,
             forbidden_iq_error("Operation not permitted."),
-        )];
+        )]
+        .into();
     }
     if query.is_get {
         let snapshot = match room_actor
@@ -766,7 +824,8 @@ pub(super) async fn handle_muc_admin_iq(
                     response_from,
                     response_to,
                     internal_server_error_iq_error("Internal server error."),
-                )];
+                )]
+                .into();
             }
         };
         let to_jid = Jid::from(sender_jid.clone());
@@ -790,7 +849,8 @@ pub(super) async fn handle_muc_admin_iq(
                 &query.room_jid,
                 &to_jid,
                 &items,
-            ))];
+            ))]
+            .into();
         }
         if !has_admin_affiliation && !member_list_get {
             return vec![build_iq_error_xml_typed(
@@ -798,7 +858,8 @@ pub(super) async fn handle_muc_admin_iq(
                 response_from,
                 response_to,
                 forbidden_iq_error("Operation not permitted."),
-            )];
+            )]
+            .into();
         }
         let affiliation_filter = query.items.iter().find_map(|item| item.affiliation);
         let items: Vec<(BareJid, Affiliation)> = if let Some(affiliation) = affiliation_filter {
@@ -819,7 +880,8 @@ pub(super) async fn handle_muc_admin_iq(
             &query.room_jid,
             &to_jid,
             &items,
-        ))];
+        ))]
+        .into();
     }
     let room_jid = query.room_jid.clone();
     let items = query.items.clone();
@@ -829,7 +891,8 @@ pub(super) async fn handle_muc_admin_iq(
             response_from,
             response_to,
             bad_request_iq_error("MUC admin set cannot mix role and affiliation semantics."),
-        )];
+        )]
+        .into();
     }
     if has_incomplete_admin_set_item(&items) {
         return vec![build_iq_error_xml_typed(
@@ -837,7 +900,8 @@ pub(super) async fn handle_muc_admin_iq(
             response_from,
             response_to,
             bad_request_iq_error("Malformed MUC admin set item."),
-        )];
+        )]
+        .into();
     }
     if !is_role_change_query(&items) && !has_admin_affiliation {
         return vec![build_iq_error_xml_typed(
@@ -845,7 +909,8 @@ pub(super) async fn handle_muc_admin_iq(
             response_from,
             response_to,
             forbidden_iq_error("Operation not permitted."),
-        )];
+        )]
+        .into();
     }
     let affiliation_updates: Vec<(BareJid, Affiliation)> = if is_role_change_query(&items) {
         Vec::new()
@@ -882,7 +947,8 @@ pub(super) async fn handle_muc_admin_iq(
                             response_from,
                             response_to,
                             forbidden_iq_error("Operation not permitted."),
-                        )];
+                        )]
+                        .into();
                     }
                     if *affiliation == Affiliation::Outcast && *jid == sender_jid.to_bare() {
                         return vec![build_iq_error_xml_typed(
@@ -890,7 +956,8 @@ pub(super) async fn handle_muc_admin_iq(
                             response_from,
                             response_to,
                             conflict_iq_error("Cannot ban yourself from a room."),
-                        )];
+                        )]
+                        .into();
                     }
                     let previous_affiliation = snapshot.room.get_affiliation(jid);
                     if *affiliation != Affiliation::Owner
@@ -902,7 +969,8 @@ pub(super) async fn handle_muc_admin_iq(
                             response_from,
                             response_to,
                             not_allowed_iq_error("Admins cannot change an owner's affiliation."),
-                        )];
+                        )]
+                        .into();
                     }
                     if !can_change_affiliation(
                         context.affiliation,
@@ -914,7 +982,8 @@ pub(super) async fn handle_muc_admin_iq(
                             response_from,
                             response_to,
                             forbidden_iq_error("Operation not permitted."),
-                        )];
+                        )]
+                        .into();
                     }
                     if *affiliation == Affiliation::None {
                         final_affiliations.remove(jid);
@@ -932,7 +1001,8 @@ pub(super) async fn handle_muc_admin_iq(
                         response_from,
                         response_to,
                         conflict_iq_error("Cannot remove the last owner from a room."),
-                    )];
+                    )]
+                    .into();
                 }
                 Some(snapshot)
             }
@@ -942,7 +1012,8 @@ pub(super) async fn handle_muc_admin_iq(
                     response_from,
                     response_to,
                     internal_server_error_iq_error("Internal server error."),
-                )];
+                )]
+                .into();
             }
         }
     } else {
@@ -971,7 +1042,8 @@ pub(super) async fn handle_muc_admin_iq(
                     response_from,
                     response_to,
                     internal_server_error_iq_error("Internal server error."),
-                )];
+                )]
+                .into();
             }
         }
     } else {
@@ -1002,7 +1074,8 @@ pub(super) async fn handle_muc_admin_iq(
                     response_from,
                     response_to,
                     internal_server_error_iq_error("Internal server error."),
-                )];
+                )]
+                .into();
             }
         }
     }
@@ -1032,7 +1105,8 @@ pub(super) async fn handle_muc_admin_iq(
                 response_from,
                 response_to,
                 conflict_iq_error("Cannot remove the last owner from a room."),
-            )];
+            )]
+            .into();
         }
         Err(kameo::error::SendError::HandlerError(
             waddle_xmpp::muc::room_actor::AdminApplyError::CannotAdminModifyOwner,
@@ -1052,7 +1126,8 @@ pub(super) async fn handle_muc_admin_iq(
                 response_to,
                 waddle_xmpp::muc::admin::build_admin_items_query(&query.items),
                 not_allowed_iq_error("Admins cannot change an owner's affiliation."),
-            )];
+            )]
+            .into();
         }
         Err(kameo::error::SendError::HandlerError(
             waddle_xmpp::muc::room_actor::AdminApplyError::CannotModifyPrivilegedRole,
@@ -1072,7 +1147,8 @@ pub(super) async fn handle_muc_admin_iq(
                 response_to,
                 waddle_xmpp::muc::admin::build_admin_items_query(&query.items),
                 not_allowed_iq_error("Admins and moderators cannot change an owner or admin role."),
-            )];
+            )]
+            .into();
         }
         Err(kameo::error::SendError::HandlerError(
             waddle_xmpp::muc::room_actor::AdminApplyError::OccupantNotFound(nick),
@@ -1091,7 +1167,8 @@ pub(super) async fn handle_muc_admin_iq(
                 response_from,
                 response_to,
                 item_not_found_iq_error("No such occupant in this room."),
-            )];
+            )]
+            .into();
         }
         Err(kameo::error::SendError::HandlerError(
             waddle_xmpp::muc::room_actor::AdminApplyError::CommitOutcomeUnknown,
@@ -1150,7 +1227,8 @@ pub(super) async fn handle_muc_admin_iq(
                         resource_constraint_iq_error(
                             "This room's update outcome is being reconciled; please retry.",
                         ),
-                    )];
+                    )]
+                    .into();
                 }
                 AdminReconciliationOutcome::Inconclusive => {
                     warn!(room = %room_jid, "MUC admin commit outcome remains inconclusive; retaining optimistic managed-channel affiliations for later reconciliation");
@@ -1161,7 +1239,8 @@ pub(super) async fn handle_muc_admin_iq(
                         resource_constraint_iq_error(
                             "This room's update outcome is being reconciled; please retry.",
                         ),
-                    )];
+                    )]
+                    .into();
                 }
             }
         }
@@ -1191,7 +1270,8 @@ pub(super) async fn handle_muc_admin_iq(
                 response_from,
                 response_to,
                 resource_constraint_iq_error("This room is temporarily unavailable; please retry."),
-            )];
+            )]
+            .into();
         }
         Err(kameo::error::SendError::HandlerError(
             waddle_xmpp::muc::room_actor::AdminApplyError::OwnershipUnavailable,
@@ -1210,7 +1290,8 @@ pub(super) async fn handle_muc_admin_iq(
                 resource_constraint_iq_error(
                     "This room's ownership cannot be verified right now; please retry.",
                 ),
-            )];
+            )]
+            .into();
         }
         Err(kameo::error::SendError::HandlerError(
             waddle_xmpp::muc::room_actor::AdminApplyError::PersistFailed,
@@ -1227,7 +1308,8 @@ pub(super) async fn handle_muc_admin_iq(
                 response_from,
                 response_to,
                 internal_server_error_iq_error("Internal server error."),
-            )];
+            )]
+            .into();
         }
         Err(kameo::error::SendError::HandlerError(
             waddle_xmpp::muc::room_actor::AdminApplyError::InviteRollbackPending,
@@ -1248,7 +1330,8 @@ pub(super) async fn handle_muc_admin_iq(
                 resource_constraint_iq_error(
                     "This room's invitation state is being reconciled; please retry.",
                 ),
-            )];
+            )]
+            .into();
         }
         Err(kameo::error::SendError::HandlerError(error)) => {
             warn!(room = %room_jid, error = %error, "MUC admin set rejected");
@@ -1263,7 +1346,8 @@ pub(super) async fn handle_muc_admin_iq(
                 response_from,
                 response_to,
                 forbidden_iq_error("Operation not permitted."),
-            )];
+            )]
+            .into();
         }
         Err(
             error @ (kameo::error::SendError::ActorNotRunning(_)
@@ -1285,7 +1369,8 @@ pub(super) async fn handle_muc_admin_iq(
                 response_from,
                 response_to,
                 resource_constraint_iq_error("This room is temporarily unavailable; please retry."),
-            )];
+            )]
+            .into();
         }
         Err(error) => {
             // A non-handler failure is ambiguous: `ApplyAdminItems` may
@@ -1324,7 +1409,8 @@ pub(super) async fn handle_muc_admin_iq(
                     resource_constraint_iq_error(
                         "This room's update outcome is being reconciled; please retry.",
                     ),
-                )];
+                )]
+                .into();
             }
         }
     };
@@ -1334,6 +1420,71 @@ pub(super) async fn handle_muc_admin_iq(
     // The moderator's own broadcast copy rides this connection's
     // response frames AFTER the IQ result so the order is deterministic
     // on the moderator's stream.
+    let result_frame = iq_to_xml(build_admin_set_result(
+        iq.id(),
+        &room_jid,
+        &Jid::from(sender_jid.clone()),
+    ));
+    // Membership-scoped visibility (#935): a kick (307) or ban (301)
+    // ends the occupant's room membership, so their live SFU call
+    // participation must end with it. Presence loss never reaches
+    // this handler, and eviction failure is fire-and-forget inside
+    // the SFU layer — the moderation IQ result below is never
+    // blocked on LiveKit.
+    for removed in &applied.removed_by_moderation {
+        super::super::super::muc_call_sfu::unregister_participant_from_room(
+            state, &room_jid, removed,
+        );
+    }
+    // A reservation exists only when a durable mutation committed effect rows
+    // (clustered rooms with a durable store). Store-less rooms — including
+    // durable-shaped affiliation changes without a durable store — keep
+    // today's direct-broadcast path below.
+    if let Some(reservation) = applied.outbox_reservation.as_ref() {
+        let mut batch = ResponseBatch::default();
+        let self_kick_before_result = applied.removed_by_moderation.contains(sender_jid)
+            && is_role_change_query(&query.items);
+        let (pre_result, post_result) = if self_kick_before_result {
+            split_room_effect_reservation(reservation, 1)
+        } else {
+            (None, Some(reservation.clone()))
+        };
+        if let Some(pre_result) = pre_result.as_ref() {
+            if let Err(error) = extend_batch_with_inline_room_effect_frames(
+                &mut batch,
+                state,
+                pre_result,
+                Some(sender_jid),
+            )
+            .await
+            {
+                warn!(
+                    room = %room_jid,
+                    error = %error,
+                    "MUC admin inline pre-result drain failed after committed mutation; withholding success result"
+                );
+                return ResponseBatch::default();
+            }
+        }
+        batch.frames.push(result_frame);
+        if let Some(post_result) = post_result.as_ref() {
+            if let Err(error) = extend_batch_with_inline_room_effect_frames(
+                &mut batch,
+                state,
+                post_result,
+                Some(sender_jid),
+            )
+            .await
+            {
+                warn!(
+                    room = %room_jid,
+                    error = %error,
+                    "MUC admin inline post-result drain failed after committed mutation"
+                );
+            }
+        }
+        return batch;
+    }
     let mut remaining_broadcasts = Vec::new();
     let mut self_kick_frames = Vec::new();
     let mut moderator_frames = Vec::new();
@@ -1359,23 +1510,10 @@ pub(super) async fn handle_muc_admin_iq(
             remaining_broadcasts.push((recipient, presence));
         }
     }
-    // Membership-scoped visibility (#935): a kick (307) or ban (301)
-    // ends the occupant's room membership, so their live SFU call
-    // participation must end with it. Presence loss never reaches
-    // this handler, and eviction failure is fire-and-forget inside
-    // the SFU layer — the moderation IQ result below is never
-    // blocked on LiveKit.
-    for removed in &applied.removed_by_moderation {
-        super::super::super::muc_call_sfu::unregister_participant_from_room(
-            state, &room_jid, removed,
-        );
-    }
-    // Voice-derived media grants: any non-removal change that alters
-    // an occupant's XEP-0045 voice — an explicit `<item role='…'/>`
-    // or an affiliation change that re-derives their role — must
-    // converge their live SFU permission, otherwise a de-voiced
-    // occupant keeps publishing until they renegotiate.
-    // Fire-and-forget like the eviction above.
+    // This branch only runs when no effect reservation exists (role-only
+    // changes and store-less rooms), so voice-derived media grants are
+    // handler-owned here; reservation-backed drains apply them from the
+    // durable effect row itself.
     for (session, new_voice) in &applied.voice_changes {
         super::super::super::muc_call_sfu::apply_voice_grants_for_room(
             state, &room_jid, session, *new_voice,
@@ -1390,13 +1528,9 @@ pub(super) async fn handle_muc_admin_iq(
             .await;
     }
     let mut frames = self_kick_frames;
-    frames.push(iq_to_xml(build_admin_set_result(
-        iq.id(),
-        &room_jid,
-        &Jid::from(sender_jid.clone()),
-    )));
+    frames.push(result_frame);
     frames.extend(moderator_frames);
-    frames
+    ResponseBatch::from_frames(frames)
 }
 
 #[cfg(test)]
