@@ -1540,7 +1540,10 @@ async fn local_enqueue_timeout_still_attempts_the_rest_of_the_roster_before_rele
         .expect("tail write acceptance")
         .acknowledge();
     let summary = drain.await.expect("drain join").expect("drain result");
-    assert_eq!(summary.requeued, 1, "row released after the full roster pass");
+    assert_eq!(
+        summary.requeued, 1,
+        "row released after the full roster pass"
+    );
     let key = RoomEffectKey {
         lifecycle,
         revision: initial_revision(),
