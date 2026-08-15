@@ -327,14 +327,10 @@ async fn recover_committed_admin_effects_after_ambiguity(
     pre_apply_coordinates: Option<waddle_xmpp::muc::RoomCommittedCoordinates>,
     observed_coordinates: Option<waddle_xmpp::muc::RoomCommittedCoordinates>,
 ) -> Result<
-    (
-        waddle_xmpp::muc::room_actor::AdminItemsApplied,
-        bool,
-    ),
+    (waddle_xmpp::muc::room_actor::AdminItemsApplied, bool),
     crate::room_effect_outbox::RoomEffectOutboxError,
 > {
-    let mut applied =
-        recover_committed_admin_effects(room, items, sender_jid, occupant_id_secret);
+    let mut applied = recover_committed_admin_effects(room, items, sender_jid, occupant_id_secret);
     let proven_coordinates =
         prove_ambiguous_admin_commit_coordinates(pre_apply_coordinates, observed_coordinates);
     let suppress_direct_admin_effects =
@@ -1583,8 +1579,7 @@ pub(super) async fn handle_muc_admin_iq(
             .await
             {
                 Ok(summary)
-                    if summary.inline + summary.completed
-                        == pre_result.ordinals.len() as u64
+                    if summary.inline + summary.completed == pre_result.ordinals.len() as u64
                         && summary.requeued == 0
                         && summary.stale == 0
                         && summary.leased == 0 => {}
@@ -2375,14 +2370,13 @@ mod tests {
             RoomLifecycleState::Active,
         )
         .await;
-        let reservation =
-            enqueue_recovered_admin_reservation(
-                state.as_ref(),
-                &room_jid,
-                committed_coordinates,
-                &owner,
-            )
-            .await;
+        let reservation = enqueue_recovered_admin_reservation(
+            state.as_ref(),
+            &room_jid,
+            committed_coordinates,
+            &owner,
+        )
+        .await;
 
         let (applied, suppress_direct_admin_effects) =
             recover_committed_admin_effects_after_ambiguity(
@@ -2419,7 +2413,11 @@ mod tests {
         .expect("drain recovered reservation");
         assert_eq!(summary.inline, 1);
         assert_eq!(summary.completed, 0);
-        assert_eq!(batch.frames.len(), 1, "the recovered row must emit exactly once");
+        assert_eq!(
+            batch.frames.len(),
+            1,
+            "the recovered row must emit exactly once"
+        );
         let completion = batch
             .completions
             .pop()
@@ -2464,14 +2462,13 @@ mod tests {
             RoomLifecycleState::Active,
         )
         .await;
-        let reservation =
-            enqueue_recovered_admin_reservation(
-                state.as_ref(),
-                &room_jid,
-                committed_coordinates,
-                &owner,
-            )
-            .await;
+        let reservation = enqueue_recovered_admin_reservation(
+            state.as_ref(),
+            &room_jid,
+            committed_coordinates,
+            &owner,
+        )
+        .await;
         let key = crate::room_effect_outbox::RoomEffectKey {
             lifecycle: committed_coordinates.lifecycle,
             revision: committed_coordinates.revision,
@@ -2485,15 +2482,13 @@ mod tests {
             .await
             .expect("claim drained row")
             .expect("claim exists");
-        assert!(
-            state
-                .deps
-                .protocol
-                .room_effect_outbox
-                .complete(&key, &claim.lease_token)
-                .await
-                .expect("complete drained row")
-        );
+        assert!(state
+            .deps
+            .protocol
+            .room_effect_outbox
+            .complete(&key, &claim.lease_token)
+            .await
+            .expect("complete drained row"));
 
         let (applied, suppress_direct_admin_effects) =
             recover_committed_admin_effects_after_ambiguity(

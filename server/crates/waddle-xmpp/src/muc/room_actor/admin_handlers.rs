@@ -5,13 +5,13 @@ use kameo::message::Context;
 use xmpp_parsers::presence::Presence;
 
 use super::{AdminApplyError, AdminContext, RoomActor};
-use crate::muc::admin::{AdminItem, is_role_change_query};
+use crate::muc::admin::{is_role_change_query, AdminItem};
 use crate::muc::durable::{AffiliationEntry as DurableAffiliationEntry, RoomDurableMutation};
 use crate::muc::{
-    AdminPresenceKind, DestroyReason, MucOccupantNick, MucPresenceStatus, MucRoom, Occupant,
-    OccupantPresenceUpdate, OccupantVoiceChange, RoomEffectReservation,
     build_affiliation_change_presence, build_ban_presence, build_kick_presence,
-    build_membership_removal_presence, build_role_change_presence,
+    build_membership_removal_presence, build_role_change_presence, AdminPresenceKind,
+    DestroyReason, MucOccupantNick, MucPresenceStatus, MucRoom, Occupant, OccupantPresenceUpdate,
+    OccupantVoiceChange, RoomEffectReservation,
 };
 use crate::types::{Affiliation, Role, Voice};
 use crate::xep::xep0421::{OccupantIdSecret, OccupantIdentity};

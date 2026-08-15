@@ -2855,12 +2855,7 @@ impl RoomRegistryActor {
                     }
                 };
                 match store
-                    .commit_room_mutation(
-                        &room_jid,
-                        &claim_fence,
-                        intent,
-                        effects,
-                    )
+                    .commit_room_mutation(&room_jid, &claim_fence, intent, effects)
                     .await
                 {
                     Ok(_) => match phase {

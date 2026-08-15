@@ -88,7 +88,7 @@ pub(crate) async fn create_test_websocket_state() -> Arc<WebSocketState> {
     create_test_websocket_state_with_extension_manager(
         empty_extension_manager().await,
         TestStateOverrides::default(),
-        )
+    )
     .await
 }
 
@@ -101,7 +101,7 @@ pub(crate) async fn create_test_websocket_state_with_db_pool(
             db_pool: Some(db_pool),
             ..TestStateOverrides::default()
         },
-        )
+    )
     .await
 }
 
@@ -114,7 +114,7 @@ pub(crate) async fn create_test_websocket_state_with_sm_registry(
             sm_session_registry: Some(sm_session_registry),
             ..TestStateOverrides::default()
         },
-        )
+    )
     .await
 }
 
@@ -134,7 +134,7 @@ pub(crate) async fn create_test_websocket_state_with_sm_registry_and_pending_sto
             pending_delivery_storage: Some(pending_delivery_storage),
             ..TestStateOverrides::default()
         },
-        )
+    )
     .await
 }
 
@@ -153,7 +153,7 @@ pub(crate) async fn create_test_websocket_state_with_sm_registry_pending_and_blo
             pending_delivery_storage: Some(pending_delivery_storage),
             ..TestStateOverrides::default()
         },
-        )
+    )
     .await
 }
 
@@ -177,7 +177,7 @@ pub(crate) async fn create_test_websocket_state_with_clustering(
             sm_session_registry: Some(sm_session_registry),
             ..TestStateOverrides::default()
         },
-        )
+    )
     .await
 }
 
@@ -193,7 +193,7 @@ pub(crate) async fn create_test_websocket_state_with_sm_registry_and_ingress_sha
             ingress_shadow: Some(ingress_shadow),
             ..TestStateOverrides::default()
         },
-        )
+    )
     .await
 }
 
@@ -253,7 +253,7 @@ pub(crate) async fn create_test_websocket_state_with_sfu(
             call_sfu: Some(sfu),
             ..TestStateOverrides::default()
         },
-        )
+    )
     .await
 }
 
@@ -273,7 +273,7 @@ pub(crate) async fn create_test_websocket_state_with_sfu_and_clustering(
             clustering: Some(clustering),
             ..TestStateOverrides::default()
         },
-        )
+    )
     .await
 }
 
@@ -596,7 +596,7 @@ pub(crate) async fn create_test_websocket_state_with_calls() -> Arc<WebSocketSta
             call_sfu: Some(fixture_call_sfu()),
             ..TestStateOverrides::default()
         },
-        )
+    )
     .await
 }
 
