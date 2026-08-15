@@ -130,30 +130,22 @@ async fn staged_rows_need_exact_claim_or_arming_and_lease_token_interlocks() {
         .await
         .expect("exact")
         .expect("claim");
-    assert!(
-        !store
+    assert!(!store
         .revalidate(&key, &RoomEffectLeaseToken::new())
         .await
-            .expect("revalidate")
-    );
-    assert!(
-        store
+        .expect("revalidate"));
+    assert!(store
         .revalidate(&key, &claim.lease_token)
         .await
-            .expect("revalidate")
-    );
-    assert!(
-        !store
+        .expect("revalidate"));
+    assert!(!store
         .complete(&key, &RoomEffectLeaseToken::new())
         .await
-            .expect("wrong complete")
-    );
-    assert!(
-        store
+        .expect("wrong complete"));
+    assert!(store
         .complete(&key, &claim.lease_token)
         .await
-            .expect("complete")
-    );
+        .expect("complete"));
 }
 
 #[tokio::test]
@@ -212,12 +204,10 @@ async fn handler_window_rows_wait_for_grace_but_exact_claim_is_immediate() {
         .expect("exact claim")
         .expect("exact row is immediately claimable");
     assert_eq!(exact_claim.row.key, exact_key);
-    assert!(
-        store
-            .complete(&exact_key, &exact_claim.lease_token)
-            .await
-            .expect("complete exact claim")
-    );
+    assert!(store
+        .complete(&exact_key, &exact_claim.lease_token)
+        .await
+        .expect("complete exact claim"));
 
     let due_row = store
         .find(&due_key)
@@ -303,12 +293,10 @@ async fn reservation_lookup_includes_handler_window_and_leased_rows_until_they_d
         "recovery lookup must preserve rows that are currently leased"
     );
 
-    assert!(
-        store
-            .complete(&key, &claim.lease_token)
-            .await
-            .expect("complete first row")
-    );
+    assert!(store
+        .complete(&key, &claim.lease_token)
+        .await
+        .expect("complete first row"));
     let second_key = RoomEffectKey {
         lifecycle,
         revision,
@@ -319,12 +307,10 @@ async fn reservation_lookup_includes_handler_window_and_leased_rows_until_they_d
         .await
         .expect("claim second row")
         .expect("second row exists");
-    assert!(
-        store
-            .complete(&second_key, &second_claim.lease_token)
-            .await
-            .expect("complete second row")
-    );
+    assert!(store
+        .complete(&second_key, &second_claim.lease_token)
+        .await
+        .expect("complete second row"));
     assert!(
         store
             .reservation_for_revision(lifecycle, revision)
@@ -582,12 +568,10 @@ async fn fifo_order_survives_store_restart() {
             expected_key,
             "restarted store must keep revision/ordinal FIFO order"
         );
-        assert!(
-            restarted
-                .complete(expected_key, &claim.lease_token)
-                .await
-                .expect("complete restarted claim")
-        );
+        assert!(restarted
+            .complete(expected_key, &claim.lease_token)
+            .await
+            .expect("complete restarted claim"));
     }
 
     assert_eq!(observed, expected);

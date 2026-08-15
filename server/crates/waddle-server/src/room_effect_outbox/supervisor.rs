@@ -50,6 +50,7 @@ struct RetryState {
 enum ArmOutcome {
     Armed,
     AlreadyReady,
+    StillStaged,
     Gone,
 }
 
@@ -131,6 +132,13 @@ impl RoomEffectArmSupervisor {
                             on_armed(lifecycle);
                             nudge_drain(&runtime, &drain_state);
                         }
+                        ArmOutcome::StillStaged => {
+                            state
+                                .lock()
+                                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                                .pending
+                                .insert(ReservationKey::from(&reservation));
+                        }
                         ArmOutcome::Gone => {}
                     }
                 }
@@ -181,6 +189,12 @@ async fn arm_with_retry(
     let mut retry_delay = initial_retry_delay();
     loop {
         match try_arm_reservation(store, reservation).await {
+            Ok(ArmOutcome::StillStaged) => {
+                tokio::time::sleep(retry_delay).await;
+                retry_delay = retry_delay
+                    .saturating_mul(2)
+                    .min(Duration::from_secs(10 * 60));
+            }
             Ok(outcome) => return outcome,
             Err(error) => {
                 tracing::warn!(
@@ -224,30 +238,42 @@ async fn try_arm_reservation(
         return Ok(ArmOutcome::Armed);
     }
 
-    let mut has_ready = false;
+    let mut rows = Vec::with_capacity(reservation.ordinals.len());
     for ordinal in &reservation.ordinals {
-        let key = RoomEffectKey {
-            lifecycle: reservation.lifecycle,
-            revision: reservation.revision,
-            ordinal: *ordinal,
-        };
-        let Some(row) = store.find(&key).await? else {
-            continue;
-        };
+        rows.push(
+            store
+                .find(&RoomEffectKey {
+                    lifecycle: reservation.lifecycle,
+                    revision: reservation.revision,
+                    ordinal: *ordinal,
+                })
+                .await?,
+        );
+    }
+
+    Ok(classify_post_arm_rows(rows.iter().flatten()))
+}
+
+fn classify_post_arm_rows<'a, I>(rows: I) -> ArmOutcome
+where
+    I: IntoIterator<Item = &'a super::RoomEffectRow>,
+{
+    let mut has_ready = false;
+    for row in rows {
         if row.superseded {
             continue;
         }
         if row.available_at_ms == STAGED_AVAILABLE_AT_MS {
-            return Ok(ArmOutcome::Armed);
+            return ArmOutcome::StillStaged;
         }
         has_ready = true;
     }
 
-    Ok(if has_ready {
+    if has_ready {
         ArmOutcome::AlreadyReady
     } else {
         ArmOutcome::Gone
-    })
+    }
 }
 
 #[cfg(test)]
@@ -447,5 +473,31 @@ mod tests {
         })
         .await
         .expect("supervisor must retry after store recovery");
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn still_staged_rows_do_not_count_as_armed() {
+        let (_db, store) = store_with_db("room-effect-arm-still-staged").await;
+        let lifecycle = lifecycle();
+        let reservation =
+            enqueue_config_reservation(store.as_ref(), lifecycle, initial_revision(), 100).await;
+        let mut rows = Vec::new();
+        for ordinal in &reservation.ordinals {
+            rows.push(
+                store
+                    .find(&RoomEffectKey {
+                        lifecycle,
+                        revision: reservation.revision,
+                        ordinal: *ordinal,
+                    })
+                    .await
+                    .expect("find row"),
+            );
+        }
+
+        assert!(matches!(
+            classify_post_arm_rows(rows.iter().flatten()),
+            ArmOutcome::StillStaged
+        ));
     }
 }

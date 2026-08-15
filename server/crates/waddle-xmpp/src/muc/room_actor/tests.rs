@@ -1189,22 +1189,18 @@ async fn role_none_kick_notifies_same_nick_sibling_sessions() {
         .await
         .expect("kick succeeds");
 
-    assert!(
-        updates
+    assert!(updates
         .presence_updates
         .iter()
         .any(|(recipient, presence)| {
             recipient == &alice_laptop && presence_has_status(presence, "307")
-            })
-    );
-    assert!(
-        updates
+        }));
+    assert!(updates
         .presence_updates
         .iter()
         .any(|(recipient, presence)| {
             recipient == &alice_phone && presence_has_status(presence, "307")
-            })
-    );
+        }));
     assert_eq!(actor.ask(OccupantCount).await.expect("count"), 0);
 }
 
@@ -1249,22 +1245,18 @@ async fn members_only_revocation_removes_every_nick_for_bare_jid() {
         .await
         .expect("revocation succeeds");
 
-    assert!(
-        updates
+    assert!(updates
         .presence_updates
         .iter()
         .any(|(recipient, presence)| {
             recipient == &alice_laptop && presence_has_status(presence, "321")
-            })
-    );
-    assert!(
-        updates
+        }));
+    assert!(updates
         .presence_updates
         .iter()
         .any(|(recipient, presence)| {
             recipient == &alice_phone && presence_has_status(presence, "321")
-            })
-    );
+        }));
     assert_eq!(actor.ask(OccupantCount).await.expect("count"), 0);
 }
 
@@ -4645,12 +4637,10 @@ async fn destroy_seal_retains_leave_without_emitting_effects_before_unseal() {
         0,
         "a destroy that reopens must not restore a session that departed while sealed"
     );
-    assert!(
-        actor
+    assert!(actor
         .ask(UnsealDestroy { attempt })
         .await
-            .expect("matching unseal reply")
-    );
+        .expect("matching unseal reply"));
     assert_eq!(
         actor.ask(OccupantCount).await.expect("occupant count"),
         0,
@@ -5343,17 +5333,16 @@ async fn apply_affiliation_change_threads_admin_effects_and_reservation() {
         crate::muc::RoomEffect::AdminRemainingBroadcast {
             presence_updates,
             voice_changes,
-            recipients,
         } => {
             assert_eq!(presence_updates.len(), 1);
             assert_eq!(presence_updates[0].recipient, bob);
+            assert!(!presence_updates[0].is_self);
             assert_eq!(presence_updates[0].occupant_bare_jid, alice.to_bare());
             assert_eq!(
                 presence_updates[0].disclosed_real_jid.as_ref(),
                 Some(&alice)
             );
             assert!(voice_changes.is_empty());
-            assert_eq!(recipients.as_slice(), &[bob]);
         }
         other => panic!("expected remaining-broadcast effect, got {other:?}"),
     }
@@ -5428,13 +5417,18 @@ async fn zero_delta_managed_members_only_enforcement_still_commits_one_config_ef
         Some(&expected_fallback),
         "the zero-delta commit must supersede the exact staged fallback"
     );
-    assert_eq!(fused.effects().len(), 2);
+    assert_eq!(fused.effects().len(), 3);
     assert!(matches!(
         &fused.effects()[0],
         crate::muc::RoomEffect::AdminSelfNotify { updates } if updates.is_empty()
     ));
     assert!(matches!(
         &fused.effects()[1],
+        crate::muc::RoomEffect::AdminRemainingBroadcast { presence_updates, voice_changes }
+            if presence_updates.is_empty() && voice_changes.is_empty()
+    ));
+    assert!(matches!(
+        &fused.effects()[2],
         crate::muc::RoomEffect::ConfigChanged { status_codes, recipients }
             if status_codes == &notification.status_codes
                 && recipients.as_slice() == std::slice::from_ref(&alice)
@@ -6600,12 +6594,10 @@ async fn destroy_unseal_only_reopens_the_matching_attempt() {
             .expect("do not replace active destroy attempt"),
         RoomSealState::Destroying { attempt: first }
     );
-    assert!(
-        actor
+    assert!(actor
         .ask(UnsealDestroy { attempt: first })
         .await
-            .expect("matching unseal reply")
-    );
+        .expect("matching unseal reply"));
     assert_eq!(
         actor
             .ask(SealForDestroy { attempt: second })
@@ -6613,12 +6605,10 @@ async fn destroy_unseal_only_reopens_the_matching_attempt() {
             .expect("pre-seal newer destroy"),
         RoomSealState::Destroying { attempt: second }
     );
-    assert!(
-        !actor
+    assert!(!actor
         .ask(UnsealDestroy { attempt: first })
         .await
-            .expect("stale unseal reply")
-    );
+        .expect("stale unseal reply"));
     assert_eq!(
         actor.ask(GetRoomSealState).await.expect("seal state"),
         RoomSealState::Destroying { attempt: second }

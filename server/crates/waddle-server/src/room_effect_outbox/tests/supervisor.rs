@@ -1,6 +1,6 @@
 use std::str::FromStr;
-use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::Arc;
 use std::time::Duration;
 
 use jid::{BareJid, FullJid};
@@ -113,6 +113,34 @@ async fn ensure_local_room_and_lifecycle(
         .await
         .expect("insert lifecycle");
     (lifecycle, revision)
+}
+
+async fn insert_active_lifecycle(
+    store: &RoomEffectOutboxStore,
+    room_jid: &BareJid,
+    lifecycle: RoomLifecycleId,
+    revision: RoomRevision,
+) {
+    let connection = store.database().guard().await.expect("connection");
+    connection
+        .execute(
+            "CREATE TABLE IF NOT EXISTS clustering_muc_room_lifecycles (lifecycle_id TEXT NOT NULL, room_jid TEXT NOT NULL, revision BIGINT NOT NULL, state TEXT NOT NULL)",
+            (),
+        )
+        .await
+        .expect("create lifecycle table");
+    connection
+        .execute(
+            "INSERT INTO clustering_muc_room_lifecycles (lifecycle_id, room_jid, revision, state) VALUES (?, ?, ?, ?)",
+            crate::db_params![
+                lifecycle.to_string(),
+                room_jid.to_string(),
+                revision.as_i64(),
+                RoomLifecycleState::Active.as_db_str(),
+            ],
+        )
+        .await
+        .expect("insert lifecycle");
 }
 
 async fn rename_effect_table(store: &RoomEffectOutboxStore, from: &str, to: &str) {
@@ -485,15 +513,13 @@ async fn inline_drain_keeps_lease_until_write_acceptance_then_completes_cleanly(
         revision,
         ordinal: reservation.ordinals[0],
     };
-    assert!(
-        store
+    assert!(store
         .find(&key)
         .await
         .expect("find leased row")
         .expect("leased row exists")
         .lease_token
-            .is_some()
-    );
+        .is_some());
 
     let completion_task = tokio::spawn({
         let state = Arc::clone(&state);
@@ -556,21 +582,6 @@ async fn janitor_smoke_telemetry_reports_completed_room_effect_sweep() {
     let metrics = waddle_xmpp::telemetry::test_support::acquire().await;
     let state = create_test_websocket_state().await;
     let store = Arc::clone(&state.deps.protocol.room_effect_outbox);
-    // The clustering-gated sweep step queries `clustering_nodes` (its
-    // production DDL is Postgres-only, bootstrapped by the claim store);
-    // give the SQLite fixture the minimal shape so a sweep can complete.
-    #[cfg(feature = "clustering")]
-    store
-        .database()
-        .guard()
-        .await
-        .expect("fixture guard")
-        .execute(
-            "CREATE TABLE IF NOT EXISTS clustering_nodes (node_id TEXT PRIMARY KEY, node_epoch TEXT NOT NULL, expired BOOLEAN NOT NULL DEFAULT FALSE)",
-            (),
-        )
-        .await
-        .expect("fixture clustering_nodes");
     let room_jid = integration_room_jid("janitor-smoke");
     let recipient = full_jid("janitor@example.com/device");
     let (lifecycle, revision) =
@@ -634,4 +645,134 @@ async fn janitor_smoke_telemetry_reports_completed_room_effect_sweep() {
     })
     .await
     .expect("janitor telemetry timeout");
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn janitor_exports_requeued_and_stale_room_effect_counters() {
+    let metrics = waddle_xmpp::telemetry::test_support::acquire().await;
+    let state = create_test_websocket_state().await;
+    let store = Arc::clone(&state.deps.protocol.room_effect_outbox);
+
+    let drained_room = integration_room_jid("janitor-drained");
+    let requeued_room = integration_room_jid("janitor-requeued");
+    let stale_room = integration_room_jid("janitor-stale");
+    let recipient = full_jid("janitor-metrics@example.com/device");
+    let now_ms = crate::time::now_ms();
+
+    let (drained_lifecycle, drained_revision) =
+        ensure_local_room_and_lifecycle(store.as_ref(), state.as_ref(), &drained_room).await;
+    let requeued_lifecycle = lifecycle();
+    insert_active_lifecycle(
+        store.as_ref(),
+        &requeued_room,
+        requeued_lifecycle,
+        initial_revision(),
+    )
+    .await;
+    let stale_lifecycle = lifecycle();
+
+    let drained = enqueue_config_reservation_with(
+        store.as_ref(),
+        drained_lifecycle,
+        drained_revision,
+        drained_room,
+        vec![recipient.clone()],
+        producing_node(),
+        now_ms,
+    )
+    .await;
+    let requeued = enqueue_config_reservation_with(
+        store.as_ref(),
+        requeued_lifecycle,
+        initial_revision(),
+        requeued_room,
+        vec![full_jid("remote@example.com/device")],
+        producing_node(),
+        now_ms,
+    )
+    .await;
+    let stale = enqueue_config_reservation_with(
+        store.as_ref(),
+        stale_lifecycle,
+        initial_revision(),
+        stale_room,
+        vec![full_jid("stale@example.com/device")],
+        producing_node(),
+        now_ms,
+    )
+    .await;
+    for reservation in [&drained, &requeued, &stale] {
+        store
+            .arm_reservation(reservation, now_ms)
+            .await
+            .expect("arm reservation");
+    }
+
+    let (_owner, mut recipient_rx) = {
+        let (tx, rx) = mpsc::channel::<OutboundStanza>(8);
+        let owner = register_test_connection(state.as_ref(), &recipient, tx).await;
+        (owner, rx)
+    };
+
+    spawn_room_effect_outbox_janitor(&state);
+
+    let delivery = tokio::time::timeout(Duration::from_secs(7), recipient_rx.recv())
+        .await
+        .expect("janitor delivery timeout")
+        .expect("janitor delivery");
+    delivery
+        .write_acceptance
+        .as_ref()
+        .expect("janitor write acceptance")
+        .acknowledge();
+
+    tokio::time::timeout(Duration::from_secs(7), async {
+        loop {
+            if metrics.counter_sum(
+                "waddle.room_effect_outbox.drained",
+                &[("janitor", "room_effect_outbox")],
+            ) == Some(1)
+                && metrics.counter_sum(
+                    "waddle.room_effect_outbox.requeued",
+                    &[("janitor", "room_effect_outbox")],
+                ) == Some(1)
+                && metrics.counter_sum(
+                    "waddle.room_effect_outbox.stale",
+                    &[("janitor", "room_effect_outbox")],
+                ) == Some(1)
+                && store
+                    .find(&RoomEffectKey {
+                        lifecycle: drained_lifecycle,
+                        revision: drained_revision,
+                        ordinal: drained.ordinals[0],
+                    })
+                    .await
+                    .expect("find drained row")
+                    .is_none()
+                && store
+                    .find(&RoomEffectKey {
+                        lifecycle: requeued_lifecycle,
+                        revision: initial_revision(),
+                        ordinal: requeued.ordinals[0],
+                    })
+                    .await
+                    .expect("find requeued row")
+                    .is_some()
+                && store
+                    .find(&RoomEffectKey {
+                        lifecycle: stale_lifecycle,
+                        revision: initial_revision(),
+                        ordinal: stale.ordinals[0],
+                    })
+                    .await
+                    .expect("find stale row")
+                    .is_none()
+            {
+                return;
+            }
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("janitor metrics timeout");
 }

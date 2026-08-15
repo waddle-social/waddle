@@ -66,8 +66,8 @@ use waddle_xmpp::ownership::{
 };
 use waddle_xmpp::{Affiliation, XmppError};
 
-use crate::clustering::NodeId;
 use crate::clustering::relay::RelayHandle;
+use crate::clustering::NodeId;
 use crate::db::{Database, DatabaseError, Transaction};
 
 /// Dedicated transaction-scoped Postgres advisory lock for MUC store schema
@@ -1147,14 +1147,10 @@ impl PostgresMucRoomStore {
                 .map_err(|_| commit_database_error())?;
         }
         if let Some(reservation) = effects.superseding_reservation() {
-            let deleted = self
-                .room_effect_outbox
+            self.room_effect_outbox
                 .supersede_reservation_in_tx(tx, reservation)
                 .await
                 .map_err(|_| commit_database_error())?;
-            if deleted.len() != reservation.ordinals.len() {
-                return Err(commit_database_error());
-            }
         }
         let successor_config_codes = effects.effects().iter().find_map(|effect| match effect {
             waddle_xmpp::muc::RoomEffect::ConfigChanged { status_codes, .. } => {
@@ -2301,16 +2297,16 @@ impl MucDurableStore for PostgresMucRoomStore {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::clustering::claims::{PostgresClaimStore, clustering_control_plane_table_lock};
-    use crate::db::{DEFAULT_CONTROL_PLANE_POOL_SIZE, DatabaseConfig, DatabaseDriver};
+    use crate::clustering::claims::{clustering_control_plane_table_lock, PostgresClaimStore};
+    use crate::db::{DatabaseConfig, DatabaseDriver, DEFAULT_CONTROL_PLANE_POOL_SIZE};
     use kameo::{actor::Spawn, error::SendError};
     use std::io;
     use std::sync::Arc;
-    use waddle_xmpp::muc::RoomSubjectTexts;
     use waddle_xmpp::muc::durable::{ChannelId, WaddleId};
     use waddle_xmpp::muc::room_actor::{
         GetSnapshot, RestoreDurableRoomState, RoomActor, SetSubject, SetSubjectError,
     };
+    use waddle_xmpp::muc::RoomSubjectTexts;
     use waddle_xmpp::muc::{
         MucRoom, RoomConfig, RoomLifecycleState, RoomMutationEffects, RoomRevision,
     };
@@ -2705,27 +2701,21 @@ mod tests {
                 if lost_entity == entity
         ));
 
-        assert!(
-            !store
+        assert!(!store
             .check_fenced_fanout(&jid)
             .await
-                .expect("identity rotation is a non-serving fanout result")
-        );
-        assert!(
-            !store
+            .expect("identity rotation is a non-serving fanout result"));
+        assert!(!store
             .check_exact_claim_fence(&jid, &fence)
             .await
-                .expect("identity rotation makes the actor fence non-serving")
-        );
+            .expect("identity rotation makes the actor fence non-serving"));
         assert!(store.current_claim_fence(&jid).is_none());
         assert!(store.exact_claim_fences.get(&jid).is_none());
         assert!(store.published_claim_fences.get(&jid).is_none());
-        assert!(
-            !store
+        assert!(!store
             .check_fenced_fanout(&jid)
             .await
-                .expect("an absent published fence remains non-serving")
-        );
+            .expect("an absent published fence remains non-serving"));
     }
 
     /// Open a clean `PostgresMucRoomStore` alongside a `PostgresClaimStore`
@@ -3085,13 +3075,11 @@ mod tests {
             published.coordinates.revision.as_i64(),
             prepared.coordinates.revision.as_i64() + 1
         );
-        assert!(
-            store
+        assert!(store
             .find_preparing_room(&room_jid)
             .await
             .expect("published room no longer preparing")
-                .is_none()
-        );
+            .is_none());
         assert_eq!(
             store
                 .commit_room_mutation(
@@ -3202,13 +3190,11 @@ mod tests {
             )
             .await
             .expect("terminal cleanup consumes the durable marker and claim");
-        assert!(
-            store
+        assert!(store
             .find_preparing_room(&room_jid)
             .await
             .expect("terminal cleanup removes preparing recovery marker")
-                .is_none()
-        );
+            .is_none());
     }
 
     #[tokio::test]
@@ -3329,12 +3315,10 @@ mod tests {
         )
         .await
         .expect("restore inert completion after simulated crash");
-        assert!(
-            store
+        assert!(store
             .recover_inert_destroy_completion(&attempt)
             .await
-                .expect("proven terminal destroy can re-arm its inert completion")
-        );
+            .expect("proven terminal destroy can re-arm its inert completion"));
 
         let unproven_attempt = DestroyAttemptId::generate();
         conn.execute(
@@ -3345,12 +3329,10 @@ mod tests {
         )
         .await
         .expect("persist unproven inert completion");
-        assert!(
-            !store
+        assert!(!store
             .recover_inert_destroy_completion(&unproven_attempt)
             .await
-                .expect("unproven inert completion cannot be armed")
-        );
+            .expect("unproven inert completion cannot be armed"));
     }
 
     #[tokio::test]
@@ -3501,13 +3483,11 @@ mod tests {
             )
             .await
             .expect("pending destroy atomically consumes its claim");
-        assert!(
-            claim_store
+        assert!(claim_store
             .current_claim(&entity)
             .await
             .expect("claim lookup")
-                .is_none()
-        );
+            .is_none());
         assert!(matches!(
             store
                 .commit_room_mutation(
@@ -3545,8 +3525,8 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn activate_transitions_dormant_to_active_adopts_pre_lifecycle_rooms_and_rejects_missing_state()
-     {
+    async fn activate_transitions_dormant_to_active_adopts_pre_lifecycle_rooms_and_rejects_missing_state(
+    ) {
         let _guard = clustering_control_plane_table_lock().lock().await;
         let Some((store, claim_store, db, me)) = clean_store().await else {
             return;
@@ -4384,8 +4364,8 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn concurrent_create_is_idempotent_for_matching_life_identity_and_conflicts_on_different_ids()
-     {
+    async fn concurrent_create_is_idempotent_for_matching_life_identity_and_conflicts_on_different_ids(
+    ) {
         let _guard = clustering_control_plane_table_lock().lock().await;
         let Some((store, claim_store, db, me)) = clean_store().await else {
             return;
@@ -4701,13 +4681,11 @@ mod tests {
             )
             .await
             .expect("acquire lifecycle lock");
-        assert!(
-            lifecycle_lock_rows
+        assert!(lifecycle_lock_rows
             .next()
             .await
             .expect("lifecycle lock row")
-                .is_some()
-        );
+            .is_some());
         drop(lifecycle_lock_rows);
 
         let share_blocker = tokio::spawn({
@@ -4766,13 +4744,11 @@ mod tests {
             )
             .await
             .expect("acquire claim SHARE lock");
-        assert!(
-            share_lock_rows
+        assert!(share_lock_rows
             .next()
             .await
             .expect("claim share lock row")
-                .is_some()
-        );
+            .is_some());
         drop(share_lock_rows);
         let update = tokio::spawn({
             let room_jid = room_jid.clone();
@@ -4802,13 +4778,11 @@ mod tests {
             )
             .await
             .expect("acquire destroy claim SHARE lock");
-        assert!(
-            share_lock_rows
+        assert!(share_lock_rows
             .next()
             .await
             .expect("destroy claim share lock row")
-                .is_some()
-        );
+            .is_some());
         drop(share_lock_rows);
         let destroy = tokio::spawn({
             let room_jid = room_jid.clone();
@@ -5248,16 +5222,12 @@ mod tests {
             .await
             .expect("read lifecycle index catalog")
             .expect("lifecycle partial unique index exists");
-        assert!(
-            index
+        assert!(index
             .get::<bool>(0)
-                .expect("decode lifecycle index uniqueness")
-        );
-        assert!(
-            index
+            .expect("decode lifecycle index uniqueness"));
+        assert!(index
             .get::<bool>(1)
-                .expect("decode lifecycle index predicate")
-        );
+            .expect("decode lifecycle index predicate"));
     }
 
     #[tokio::test]
@@ -5501,12 +5471,10 @@ mod tests {
         .expect("database I/O must not retain the identity rotation guard");
         blocker.commit().await.expect("release claim-row blocker");
 
-        assert!(
-            !check
+        assert!(!check
             .await
             .expect("exact-check task")
-                .expect("database proof completes after the row lock is released")
-        );
+            .expect("database proof completes after the row lock is released"));
     }
 
     #[tokio::test]
@@ -5607,12 +5575,10 @@ mod tests {
         };
         let blocked_room = unique_room_jid("destroy-completion-blocked");
         let other_room = unique_room_jid("destroy-completion-other");
-        assert!(
-            !store
+        assert!(!store
             .destroy_completion_blocks_recreation(&blocked_room)
             .await
-                .expect("empty outbox does not block recreation")
-        );
+            .expect("empty outbox does not block recreation"));
 
         let payload = serde_json::json!({ "room_jid": blocked_room.to_string() }).to_string();
         let attempt_id = uuid::Uuid::new_v4().to_string();
@@ -5628,12 +5594,10 @@ mod tests {
             .await
             .expect("persist inert destroy completion");
 
-        assert!(
-            !store
+        assert!(!store
             .destroy_completion_blocks_recreation(&blocked_room)
             .await
-                .expect("inert completion reservation does not block recreation")
-        );
+            .expect("inert completion reservation does not block recreation"));
 
         db.guard()
             .await
@@ -5645,23 +5609,19 @@ mod tests {
             .await
             .expect("durably arm destroy completion");
 
-        assert!(
-            store
+        assert!(store
             .destroy_completion_blocks_recreation(&blocked_room)
             .await
-                .expect("matching persisted completion blocks recreation")
-        );
-        assert!(
-            !store
+            .expect("matching persisted completion blocks recreation"));
+        assert!(!store
             .destroy_completion_blocks_recreation(&other_room)
             .await
-                .expect("a different room's completion does not block recreation")
-        );
+            .expect("a different room's completion does not block recreation"));
     }
 
     #[tokio::test]
-    async fn tombstoned_terminal_effect_blocks_recreation_without_destroy_completion_until_completed()
-     {
+    async fn tombstoned_terminal_effect_blocks_recreation_without_destroy_completion_until_completed(
+    ) {
         let _guard = clustering_control_plane_table_lock().lock().await;
         let Some((store, claim_store, db, me)) = clean_store().await else {
             return;

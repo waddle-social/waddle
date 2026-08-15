@@ -9,19 +9,23 @@ use waddle_xmpp::muc::{
     DestroyRecipient, MucConfigStatusCode, RoomConfig, RoomLifecycleId, RoomLifecycleState,
     RoomMutationEffects, RoomRevision,
 };
+use waddle_xmpp::ownership::{ClaimStore, Entity, EntityType, InProcessClaimStore, NodeIdentity};
 use waddle_xmpp::registry::OutboundStanza;
+use waddle_xmpp::stream_management::InMemorySmSessionRegistry;
+use waddle_xmpp::Stanza;
 use xmpp_parsers::minidom::Element;
 
 use super::*;
-use crate::room_effect_outbox::RoomEffectEnqueue;
 use crate::room_effect_outbox::drain::{
     complete_after_write, drain_due_effects, drain_reservation_inline,
 };
-use crate::server::routes::websocket::WebSocketState;
+use crate::room_effect_outbox::RoomEffectEnqueue;
 use crate::server::routes::websocket::stanza_to_xml;
 use crate::server::routes::websocket::tests::{
-    create_test_websocket_state, register_test_connection,
+    create_test_websocket_state, create_test_websocket_state_with_clustering,
+    register_test_connection,
 };
+use crate::server::routes::websocket::WebSocketState;
 
 fn drain_room_jid() -> BareJid {
     BareJid::from_str("room@muc.example.com").expect("room JID")
@@ -45,6 +49,37 @@ fn destroy_effects_for(room_jid: &BareJid, sessions: Vec<FullJid>) -> RoomMutati
             nick: nick("alice"),
             sessions,
         }],
+    )
+}
+
+fn inline_admin_effects_for(room_jid: &BareJid, initiator: &FullJid) -> RoomMutationEffects {
+    RoomMutationEffects::admin(
+        room_jid.clone(),
+        vec![OccupantPresenceUpdate {
+            recipient: initiator.clone(),
+            is_self: true,
+            occupant: full_jid("room@muc.example.com/alice"),
+            nick: nick("alice"),
+            occupant_bare_jid: initiator.to_bare(),
+            disclosed_real_jid: Some(initiator.clone()),
+            affiliation: waddle_xmpp::Affiliation::Member,
+            kind: AdminPresenceKind::Kicked,
+            actor: Some(BareJid::from_str("mod@example.test").expect("actor JID")),
+            reason: None,
+        }],
+        vec![OccupantPresenceUpdate {
+            recipient: initiator.clone(),
+            is_self: false,
+            occupant: full_jid("room@muc.example.com/alice"),
+            nick: nick("alice"),
+            occupant_bare_jid: initiator.to_bare(),
+            disclosed_real_jid: Some(initiator.clone()),
+            affiliation: waddle_xmpp::Affiliation::Member,
+            kind: AdminPresenceKind::RoleChanged(waddle_xmpp::Role::Participant),
+            actor: None,
+            reason: None,
+        }],
+        Vec::new(),
     )
 }
 
@@ -140,8 +175,10 @@ async fn insert_lifecycle_row(
         .expect("insert lifecycle");
 }
 
-async fn create_owned_room_and_lifecycle(state: &WebSocketState) -> RoomLifecycleId {
-    let room_jid = drain_room_jid();
+async fn create_owned_room_and_lifecycle_for(
+    state: &WebSocketState,
+    room_jid: &BareJid,
+) -> RoomLifecycleId {
     let lifecycle = lifecycle();
     state
         .deps
@@ -157,13 +194,17 @@ async fn create_owned_room_and_lifecycle(state: &WebSocketState) -> RoomLifecycl
         .expect("create room");
     insert_lifecycle_row(
         state,
-        &room_jid,
+        room_jid,
         lifecycle,
         initial_revision(),
         RoomLifecycleState::Active,
     )
     .await;
     lifecycle
+}
+
+async fn create_owned_room_and_lifecycle(state: &WebSocketState) -> RoomLifecycleId {
+    create_owned_room_and_lifecycle_for(state, &drain_room_jid()).await
 }
 
 async fn recv_outbound(rx: &mut mpsc::Receiver<OutboundStanza>) -> OutboundStanza {
@@ -229,12 +270,10 @@ async fn fifo_claiming_keeps_two_ordinals_per_revision_ordered_and_lifecycles_in
         "a later due row is not claimable while an earlier row exists"
     );
     for claim in initial {
-        assert!(
-            store
+        assert!(store
             .complete(&claim.row.key, &claim.lease_token)
             .await
-                .expect("complete head")
-        );
+            .expect("complete head"));
     }
 
     let mut observed = vec![(first_revision, first.ordinals[0])];
@@ -256,12 +295,10 @@ async fn fifo_claiming_keeps_two_ordinals_per_revision_ordered_and_lifecycles_in
             "one lifecycle drains in revision, ordinal order"
         );
         observed.push(expected);
-        assert!(
-            store
+        assert!(store
             .complete(&claim.row.key, &claim.lease_token)
             .await
-                .expect("complete FIFO row")
-        );
+            .expect("complete FIFO row"));
     }
     assert_eq!(
         observed,
@@ -309,9 +346,10 @@ async fn inline_drain_respects_fifo_across_revisions() {
         "later revisions must stay blocked until the head completes"
     );
     assert_eq!(
-        blocked.summary.leased, 1,
-        "a blocked later revision must report the live head lease"
+        blocked.summary.blocked, 1,
+        "a later revision blocked by an earlier row must be classified as blocked"
     );
+    assert_eq!(blocked.summary.leased, 0);
     assert!(
         complete_after_write(state.as_ref(), &frames[0].completion)
             .await
@@ -338,6 +376,131 @@ async fn inline_drain_respects_fifo_across_revisions() {
             .await
             .expect("queue depth"),
         0
+    );
+}
+
+#[tokio::test]
+async fn inline_drain_claims_later_ordinal_when_earlier_row_is_leased_by_same_drain() {
+    let state = create_test_websocket_state().await;
+    let room_jid = drain_room_jid();
+    let initiator = full_jid("alice@example.test/device");
+    let lifecycle = create_owned_room_and_lifecycle(state.as_ref()).await;
+    let reservation = enqueue_effects(
+        state.as_ref(),
+        lifecycle,
+        initial_revision(),
+        &inline_admin_effects_for(&room_jid, &initiator),
+        0,
+    )
+    .await;
+
+    let mut frames = drain_reservation_inline(state.as_ref(), &reservation, Some(&initiator))
+        .await
+        .expect("inline drain");
+    assert_eq!(
+        frames.len(),
+        2,
+        "the same inline drain must advance past its own leased ordinal-0 head"
+    );
+    assert_eq!(frames.summary.inline, 2);
+    for frame in frames.drain(..) {
+        assert!(
+            complete_after_write(state.as_ref(), &frame.completion)
+                .await
+                .expect("complete inline frame"),
+            "each retained inline lease should complete cleanly"
+        );
+    }
+    assert_eq!(
+        state
+            .deps
+            .protocol
+            .room_effect_outbox
+            .queue_depth()
+            .await
+            .expect("queue depth"),
+        0
+    );
+}
+
+#[tokio::test]
+async fn inline_drain_keeps_later_ordinal_blocked_when_earlier_head_has_foreign_lease() {
+    let state = create_test_websocket_state().await;
+    let room_jid = drain_room_jid();
+    let initiator = full_jid("alice@example.test/device");
+    let lifecycle = create_owned_room_and_lifecycle(state.as_ref()).await;
+    let reservation = enqueue_effects(
+        state.as_ref(),
+        lifecycle,
+        initial_revision(),
+        &inline_admin_effects_for(&room_jid, &initiator),
+        0,
+    )
+    .await;
+    let first_key = RoomEffectKey {
+        lifecycle,
+        revision: initial_revision(),
+        ordinal: reservation.ordinals[0],
+    };
+    let foreign_claim = state
+        .deps
+        .protocol
+        .room_effect_outbox
+        .claim_exact(&first_key, crate::time::now_ms())
+        .await
+        .expect("foreign claim")
+        .expect("foreign lease");
+
+    let blocked = drain_reservation_inline(state.as_ref(), &reservation, Some(&initiator))
+        .await
+        .expect("inline drain with foreign head lease");
+    assert!(
+        blocked.is_empty(),
+        "a foreign lease on ordinal 0 must still block ordinal 1"
+    );
+    assert_eq!(blocked.summary.leased, 1);
+    assert_eq!(blocked.summary.blocked, 1);
+    assert!(state
+        .deps
+        .protocol
+        .room_effect_outbox
+        .release_unattempted(&first_key, &foreign_claim.lease_token, 0, 0)
+        .await
+        .expect("release foreign lease"));
+}
+
+#[tokio::test]
+async fn inline_drain_reports_live_exact_row_as_leased_not_blocked() {
+    let state = create_test_websocket_state().await;
+    let room_jid = drain_room_jid();
+    let alice = full_jid("alice@example.test/device");
+    let lifecycle = create_owned_room_and_lifecycle(state.as_ref()).await;
+    let reservation = enqueue_effects(
+        state.as_ref(),
+        lifecycle,
+        initial_revision(),
+        &config_effects_for(&room_jid, vec![alice.clone()]),
+        0,
+    )
+    .await;
+
+    let first = drain_reservation_inline(state.as_ref(), &reservation, Some(&alice))
+        .await
+        .expect("first inline drain");
+    assert_eq!(first.len(), 1);
+
+    let second = drain_reservation_inline(state.as_ref(), &reservation, Some(&alice))
+        .await
+        .expect("second inline drain while leased");
+    assert!(second.is_empty());
+    assert_eq!(second.summary.leased, 1);
+    assert_eq!(second.summary.blocked, 0);
+
+    assert!(
+        complete_after_write(state.as_ref(), &first[0].completion)
+            .await
+            .expect("complete first"),
+        "leased exact rows should still complete once the retained frame is acknowledged"
     );
 }
 
@@ -394,7 +557,7 @@ async fn due_drain_requeues_nonterminal_rows_when_room_is_not_locally_owned() {
         "ownership misses must not burn retries"
     );
     assert_eq!(
-        row.available_at_ms, 1_000,
+        row.available_at_ms, 15_000,
         "ownership misses requeue after the fixed delay"
     );
     assert!(
@@ -420,7 +583,7 @@ async fn due_drain_requeues_nonterminal_rows_when_room_is_not_locally_owned() {
     let state_for_owned_drain = Arc::clone(&state);
     let owned_drain =
         tokio::spawn(
-            async move { drain_due_effects(state_for_owned_drain.as_ref(), 1_000, 8).await },
+            async move { drain_due_effects(state_for_owned_drain.as_ref(), 15_000, 8).await },
         );
     let outbound = recv_outbound(&mut rx).await;
     outbound
@@ -451,6 +614,118 @@ async fn due_drain_requeues_nonterminal_rows_when_room_is_not_locally_owned() {
             .expect("find drained row")
             .is_none(),
         "the locally-owned retry must complete the original row"
+    );
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn due_drain_times_out_a_full_local_channel_and_keeps_other_lifecycles_moving() {
+    let state = create_test_websocket_state().await;
+    let blocked_room: BareJid = "blocked@muc.example.com".parse().expect("blocked room");
+    let healthy_room: BareJid = "healthy@muc.example.com".parse().expect("healthy room");
+    let blocked_recipient = full_jid("blocked@example.test/device");
+    let healthy_recipient = full_jid("healthy@example.test/device");
+    let blocked_lifecycle =
+        create_owned_room_and_lifecycle_for(state.as_ref(), &blocked_room).await;
+    let healthy_lifecycle =
+        create_owned_room_and_lifecycle_for(state.as_ref(), &healthy_room).await;
+
+    let blocked = enqueue_effects(
+        state.as_ref(),
+        blocked_lifecycle,
+        initial_revision(),
+        &config_effects_for(&blocked_room, vec![blocked_recipient.clone()]),
+        0,
+    )
+    .await;
+    let healthy = enqueue_effects(
+        state.as_ref(),
+        healthy_lifecycle,
+        initial_revision(),
+        &config_effects_for(&healthy_room, vec![healthy_recipient.clone()]),
+        0,
+    )
+    .await;
+    state
+        .deps
+        .protocol
+        .room_effect_outbox
+        .arm_reservation(&blocked, 0)
+        .await
+        .expect("arm blocked reservation");
+    state
+        .deps
+        .protocol
+        .room_effect_outbox
+        .arm_reservation(&healthy, 0)
+        .await
+        .expect("arm healthy reservation");
+
+    let (blocked_tx, _blocked_rx) = mpsc::channel::<OutboundStanza>(1);
+    register_test_connection(state.as_ref(), &blocked_recipient, blocked_tx.clone()).await;
+    blocked_tx
+        .send(OutboundStanza::new(Stanza::Presence(
+            xmpp_parsers::presence::Presence::new(xmpp_parsers::presence::Type::None),
+        )))
+        .await
+        .expect("prefill blocked recipient channel");
+    let (healthy_tx, mut healthy_rx) = mpsc::channel::<OutboundStanza>(4);
+    register_test_connection(state.as_ref(), &healthy_recipient, healthy_tx).await;
+
+    let state_for_drain = Arc::clone(&state);
+    let drain =
+        tokio::spawn(async move { drain_due_effects(state_for_drain.as_ref(), 0, 8).await });
+    let outbound = tokio::time::timeout(Duration::from_secs(7), healthy_rx.recv())
+        .await
+        .expect("healthy lifecycle must drain after the blocked enqueue timeout")
+        .expect("healthy outbound");
+    outbound
+        .write_acceptance
+        .as_ref()
+        .expect("healthy write acceptance")
+        .acknowledge();
+    let summary = drain.await.expect("drain join").expect("drain result");
+
+    assert_eq!(summary.drained, 1);
+    assert_eq!(summary.requeued, 1);
+    assert_eq!(summary.stale, 0);
+    assert_eq!(summary.dead_lettered, 0);
+
+    let blocked_row = state
+        .deps
+        .protocol
+        .room_effect_outbox
+        .find(&RoomEffectKey {
+            lifecycle: blocked_lifecycle,
+            revision: initial_revision(),
+            ordinal: blocked.ordinals[0],
+        })
+        .await
+        .expect("find blocked row")
+        .expect("blocked row persists for retry");
+    assert_eq!(blocked_row.attempt_count, 1);
+    assert_eq!(
+        blocked_row.last_error,
+        Some(RoomEffectLastError::InfrastructureTransient)
+    );
+    assert_eq!(
+        blocked_row.available_at_ms,
+        super::super::store::retry_delay_ms(1)
+    );
+    assert!(blocked_row.lease_token.is_none());
+    assert!(
+        state
+            .deps
+            .protocol
+            .room_effect_outbox
+            .find(&RoomEffectKey {
+                lifecycle: healthy_lifecycle,
+                revision: initial_revision(),
+                ordinal: healthy.ordinals[0],
+            })
+            .await
+            .expect("find healthy row")
+            .is_none(),
+        "the healthy lifecycle must still drain in the same sweep"
     );
 }
 
@@ -517,6 +792,181 @@ async fn due_drain_executes_terminal_rows_without_local_room_ownership() {
             .is_none(),
         "terminal rows must drain even when no local actor owns the room"
     );
+}
+
+#[tokio::test]
+async fn due_drain_dead_letters_old_unclaimed_nonterminal_rows() {
+    let state = create_test_websocket_state().await;
+    let room_jid = drain_room_jid();
+    let lifecycle = lifecycle();
+    let now_ms = 24 * 60 * 60 * 1_000 + 1;
+    insert_lifecycle_row(
+        state.as_ref(),
+        &room_jid,
+        lifecycle,
+        initial_revision(),
+        RoomLifecycleState::Active,
+    )
+    .await;
+    let reservation = enqueue_effects(
+        state.as_ref(),
+        lifecycle,
+        initial_revision(),
+        &config_effects_for(&room_jid, vec![full_jid("alice@example.test/device")]),
+        0,
+    )
+    .await;
+    state
+        .deps
+        .protocol
+        .room_effect_outbox
+        .arm_reservation(&reservation, 0)
+        .await
+        .expect("arm reservation");
+
+    let summary = drain_due_effects(state.as_ref(), now_ms, 8)
+        .await
+        .expect("drain due");
+    assert_eq!(summary.drained, 0);
+    assert_eq!(summary.requeued, 0);
+    assert_eq!(summary.stale, 0);
+    assert_eq!(summary.dead_lettered, 1);
+    assert!(
+        state
+            .deps
+            .protocol
+            .room_effect_outbox
+            .find(&RoomEffectKey {
+                lifecycle,
+                revision: initial_revision(),
+                ordinal: reservation.ordinals[0],
+            })
+            .await
+            .expect("find dead-lettered row")
+            .is_none(),
+        "an unowned row older than 24h should be deleted"
+    );
+}
+
+#[tokio::test]
+async fn due_drain_retains_old_nonterminal_rows_when_a_foreign_claim_exists() {
+    let room_jid = drain_room_jid();
+    let claim_store = Arc::new(InProcessClaimStore::new());
+    claim_store.ensure_schema().await.expect("claim schema");
+    claim_store
+        .acquire(
+            &Entity::new(EntityType::RoomActor, room_jid.to_string()),
+            &NodeIdentity::new("foreign-node", "foreign-epoch"),
+        )
+        .await
+        .expect("foreign room claim");
+    let state = create_test_websocket_state_with_clustering(
+        crate::clustering::ClusteringHandles {
+            claim_store: Some(claim_store as Arc<dyn ClaimStore>),
+            ..crate::clustering::ClusteringHandles::default()
+        },
+        Arc::new(InMemorySmSessionRegistry::new()),
+    )
+    .await;
+    let lifecycle = lifecycle();
+    let now_ms = 24 * 60 * 60 * 1_000 + 1;
+    insert_lifecycle_row(
+        state.as_ref(),
+        &room_jid,
+        lifecycle,
+        initial_revision(),
+        RoomLifecycleState::Active,
+    )
+    .await;
+    let reservation = enqueue_effects(
+        state.as_ref(),
+        lifecycle,
+        initial_revision(),
+        &config_effects_for(&room_jid, vec![full_jid("alice@example.test/device")]),
+        0,
+    )
+    .await;
+    state
+        .deps
+        .protocol
+        .room_effect_outbox
+        .arm_reservation(&reservation, 0)
+        .await
+        .expect("arm reservation");
+
+    let summary = drain_due_effects(state.as_ref(), now_ms, 8)
+        .await
+        .expect("drain due");
+    assert_eq!(summary.drained, 0);
+    assert_eq!(summary.requeued, 1);
+    assert_eq!(summary.stale, 0);
+    assert_eq!(summary.dead_lettered, 0);
+    let row = state
+        .deps
+        .protocol
+        .room_effect_outbox
+        .find(&RoomEffectKey {
+            lifecycle,
+            revision: initial_revision(),
+            ordinal: reservation.ordinals[0],
+        })
+        .await
+        .expect("find requeued row")
+        .expect("requeued row");
+    assert_eq!(row.available_at_ms, now_ms + 15_000);
+    assert!(row.lease_token.is_none());
+}
+
+#[tokio::test]
+async fn due_drain_never_dead_letters_old_terminal_rows() {
+    let state = create_test_websocket_state().await;
+    let room_jid = drain_room_jid();
+    let lifecycle = lifecycle();
+    let recipient = full_jid("alice@example.test/device");
+    let now_ms = 24 * 60 * 60 * 1_000 + 1;
+    insert_lifecycle_row(
+        state.as_ref(),
+        &room_jid,
+        lifecycle,
+        initial_revision(),
+        RoomLifecycleState::Active,
+    )
+    .await;
+    let reservation = enqueue_effects(
+        state.as_ref(),
+        lifecycle,
+        initial_revision(),
+        &destroy_effects_for(&room_jid, vec![recipient.clone()]),
+        0,
+    )
+    .await;
+    state
+        .deps
+        .protocol
+        .room_effect_outbox
+        .arm_reservation(&reservation, 0)
+        .await
+        .expect("arm destroy reservation");
+    let (tx, mut rx) = mpsc::channel::<OutboundStanza>(4);
+    register_test_connection(state.as_ref(), &recipient, tx).await;
+
+    let state_for_drain = Arc::clone(&state);
+    let drain =
+        tokio::spawn(async move { drain_due_effects(state_for_drain.as_ref(), now_ms, 8).await });
+    let outbound = recv_outbound(&mut rx).await;
+    outbound
+        .write_acceptance
+        .as_ref()
+        .expect("terminal write acceptance")
+        .acknowledge();
+    let summary = drain
+        .await
+        .expect("terminal drain join")
+        .expect("terminal drain result");
+    assert_eq!(summary.drained, 1);
+    assert_eq!(summary.requeued, 0);
+    assert_eq!(summary.stale, 0);
+    assert_eq!(summary.dead_lettered, 0);
 }
 
 #[tokio::test]
@@ -605,6 +1055,77 @@ async fn due_drain_discards_rows_for_missing_or_reused_lifecycle() {
             .await
             .expect("tombstone fence"),
         "the exact lifecycle tombstone remains executable"
+    );
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn due_drain_discards_nonterminal_rows_for_tombstoned_lifecycle() {
+    let state = create_test_websocket_state().await;
+    let room_jid = drain_room_jid();
+    let tombstoned_lifecycle = lifecycle();
+    let recipient = full_jid("alice@example.test/device");
+    insert_lifecycle_row(
+        state.as_ref(),
+        &room_jid,
+        tombstoned_lifecycle,
+        initial_revision(),
+        RoomLifecycleState::Tombstoned,
+    )
+    .await;
+    let reservation = enqueue_effects(
+        state.as_ref(),
+        tombstoned_lifecycle,
+        initial_revision(),
+        &config_effects_for(&room_jid, vec![recipient]),
+        0,
+    )
+    .await;
+    state
+        .deps
+        .protocol
+        .room_effect_outbox
+        .arm_reservation(&reservation, 0)
+        .await
+        .expect("arm non-terminal tombstoned reservation");
+
+    let key = RoomEffectKey {
+        lifecycle: tombstoned_lifecycle,
+        revision: initial_revision(),
+        ordinal: reservation.ordinals[0],
+    };
+    let row = state
+        .deps
+        .protocol
+        .room_effect_outbox
+        .find(&key)
+        .await
+        .expect("find non-terminal tombstoned row")
+        .expect("non-terminal tombstoned row");
+    assert!(
+        !state
+            .deps
+            .protocol
+            .room_effect_outbox
+            .lifecycle_is_executable(&row)
+            .await
+            .expect("non-terminal tombstone fence"),
+        "only terminal rows may execute from a tombstoned lifecycle"
+    );
+
+    let summary = drain_due_effects(state.as_ref(), 0, 8)
+        .await
+        .expect("drain tombstoned non-terminal");
+    assert_eq!(summary.stale, 1);
+    assert!(
+        state
+            .deps
+            .protocol
+            .room_effect_outbox
+            .find(&key)
+            .await
+            .expect("find drained stale row")
+            .is_none(),
+        "non-terminal rows fenced by a tombstoned lifecycle must be discarded"
     );
 }
 

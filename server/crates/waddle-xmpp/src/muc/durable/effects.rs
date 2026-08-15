@@ -68,6 +68,7 @@ pub enum AdminPresenceKind {
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct OccupantPresenceUpdate {
     pub recipient: FullJid,
+    pub is_self: bool,
     pub occupant: FullJid,
     pub nick: MucOccupantNick,
     /// Identity snapshot needed to rebuild the exact MUC presence after the
@@ -99,7 +100,6 @@ pub enum RoomEffect {
     AdminRemainingBroadcast {
         presence_updates: Vec<OccupantPresenceUpdate>,
         voice_changes: Vec<OccupantVoiceChange>,
-        recipients: Vec<FullJid>,
     },
     DestroyNotification {
         reason: Option<DestroyReason>,
@@ -203,7 +203,6 @@ impl RoomMutationEffects {
         self_updates: Vec<OccupantPresenceUpdate>,
         remaining_updates: Vec<OccupantPresenceUpdate>,
         voice_changes: Vec<OccupantVoiceChange>,
-        recipients: Vec<FullJid>,
     ) -> Self {
         Self {
             room_jid: Some(room_jid),
@@ -215,7 +214,6 @@ impl RoomMutationEffects {
                 RoomEffect::AdminRemainingBroadcast {
                     presence_updates: remaining_updates,
                     voice_changes,
-                    recipients,
                 },
             ],
             superseding_reservation: None,
@@ -224,6 +222,7 @@ impl RoomMutationEffects {
     pub fn members_only_enforcement(
         room_jid: BareJid,
         self_updates: Vec<OccupantPresenceUpdate>,
+        remaining_updates: Vec<OccupantPresenceUpdate>,
         status_codes: Vec<MucConfigStatusCode>,
         recipients: Vec<FullJid>,
     ) -> Self {
@@ -233,6 +232,10 @@ impl RoomMutationEffects {
             effects: vec![
                 RoomEffect::AdminSelfNotify {
                     updates: self_updates,
+                },
+                RoomEffect::AdminRemainingBroadcast {
+                    presence_updates: remaining_updates,
+                    voice_changes: Vec::new(),
                 },
                 RoomEffect::ConfigChanged {
                     status_codes,

@@ -1,3 +1,5 @@
+use std::collections::HashSet;
+
 use jid::BareJid;
 use waddle_xmpp::muc::{RoomEffectReservation, RoomEffectStagingClass, RoomMutationEffects};
 
@@ -342,6 +344,24 @@ impl RoomEffectOutboxStore {
     ) -> Result<Option<ClaimedRoomEffect>, RoomEffectOutboxError> {
         self.claim_inner(key, now_ms, true).await
     }
+    pub async fn claim_exact_with_owned_leases(
+        &self,
+        key: &RoomEffectKey,
+        now_ms: i64,
+        owned_leases: &HashSet<RoomEffectLeaseToken>,
+    ) -> Result<Option<ClaimedRoomEffect>, RoomEffectOutboxError> {
+        if let Some(claimed) = self.claim_exact(key, now_ms).await? {
+            return Ok(Some(claimed));
+        }
+        if owned_leases.is_empty()
+            || !self
+                .earlier_rows_are_leased_by(key, now_ms, owned_leases)
+                .await?
+        {
+            return Ok(None);
+        }
+        self.claim_exact_without_earlier_exists(key, now_ms).await
+    }
     async fn claim_inner(
         &self,
         key: &RoomEffectKey,
@@ -373,6 +393,78 @@ impl RoomEffectOutboxStore {
             return Ok(None);
         }
         drop(c);
+        let mut row = self
+            .find(key)
+            .await?
+            .ok_or(RoomEffectOutboxError::InvalidCoordinate)?;
+        row.lease_token = Some(token.clone());
+        Ok(Some(ClaimedRoomEffect {
+            row,
+            lease_token: token,
+        }))
+    }
+    async fn earlier_rows_are_leased_by(
+        &self,
+        key: &RoomEffectKey,
+        now_ms: i64,
+        owned_leases: &HashSet<RoomEffectLeaseToken>,
+    ) -> Result<bool, RoomEffectOutboxError> {
+        let stale = now_ms.saturating_sub(CLAIM_TIMEOUT_MS);
+        let connection = self.db.guard().await?;
+        let mut rows = connection
+            .query(
+                "SELECT lease_token, leased_at_ms FROM clustering_muc_room_effects WHERE lifecycle_id = ? AND (revision < ? OR (revision = ? AND ordinal < ?))",
+                crate::db_params![
+                    key.lifecycle.to_string(),
+                    key.revision.as_i64(),
+                    key.revision.as_i64(),
+                    key.ordinal.as_i64(),
+                ],
+            )
+            .await?;
+        while let Some(row) = rows.next().await? {
+            let Some(token) = row
+                .get::<Option<String>>(0)?
+                .map(RoomEffectLeaseToken::from_stored)
+            else {
+                return Ok(false);
+            };
+            let Some(leased_at_ms) = row.get::<Option<i64>>(1)? else {
+                return Ok(false);
+            };
+            if leased_at_ms <= stale || !owned_leases.contains(&token) {
+                return Ok(false);
+            }
+        }
+        Ok(true)
+    }
+    async fn claim_exact_without_earlier_exists(
+        &self,
+        key: &RoomEffectKey,
+        now_ms: i64,
+    ) -> Result<Option<ClaimedRoomEffect>, RoomEffectOutboxError> {
+        let stale = now_ms.saturating_sub(CLAIM_TIMEOUT_MS);
+        let token = RoomEffectLeaseToken::new();
+        let connection = self.db.guard().await?;
+        if connection
+            .execute(
+                "UPDATE clustering_muc_room_effects SET lease_token = ?, leased_at_ms = ? WHERE lifecycle_id = ? AND revision = ? AND ordinal = ? AND NOT superseded AND (lease_token IS NULL OR leased_at_ms <= ?) AND (NOT terminal OR NOT EXISTS (SELECT 1 FROM clustering_muc_room_effects active WHERE active.lifecycle_id = clustering_muc_room_effects.lifecycle_id AND (active.revision <> clustering_muc_room_effects.revision OR active.ordinal <> clustering_muc_room_effects.ordinal) AND active.lease_token IS NOT NULL AND active.leased_at_ms > ?))",
+                crate::db_params![
+                    token.as_str(),
+                    now_ms,
+                    key.lifecycle.to_string(),
+                    key.revision.as_i64(),
+                    key.ordinal.as_i64(),
+                    stale,
+                    stale,
+                ],
+            )
+            .await?
+            != 1
+        {
+            return Ok(None);
+        }
+        drop(connection);
         let mut row = self
             .find(key)
             .await?
@@ -579,7 +671,7 @@ impl RoomEffectOutboxStore {
         };
         let state: String = exact.get(0)?;
         if state == waddle_xmpp::muc::RoomLifecycleState::Tombstoned.as_db_str() {
-            return Ok(true);
+            return Ok(row.effect.is_terminal());
         }
         let mut current = connection
             .query(

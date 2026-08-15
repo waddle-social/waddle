@@ -208,7 +208,6 @@ pub enum PersistedRoomEffect {
     AdminRemainingBroadcast {
         presence_updates: Vec<OccupantPresenceUpdate>,
         voice_changes: Vec<PersistedOccupantVoiceChange>,
-        recipients: Vec<FullJid>,
     },
     DestroyNotification {
         reason: Option<DestroyReason>,
@@ -233,7 +232,6 @@ impl From<&RoomEffect> for PersistedRoomEffect {
             RoomEffect::AdminRemainingBroadcast {
                 presence_updates,
                 voice_changes,
-                recipients,
             } => Self::AdminRemainingBroadcast {
                 presence_updates: presence_updates.clone(),
                 voice_changes: voice_changes
@@ -243,7 +241,6 @@ impl From<&RoomEffect> for PersistedRoomEffect {
                         voice: v.voice.into(),
                     })
                     .collect(),
-                recipients: recipients.clone(),
             },
             RoomEffect::DestroyNotification {
                 reason,
@@ -274,7 +271,6 @@ impl TryFrom<PersistedRoomEffect> for RoomEffect {
             PersistedRoomEffect::AdminRemainingBroadcast {
                 presence_updates,
                 voice_changes,
-                recipients,
             } => Self::AdminRemainingBroadcast {
                 presence_updates,
                 voice_changes: voice_changes
@@ -284,7 +280,6 @@ impl TryFrom<PersistedRoomEffect> for RoomEffect {
                         voice: v.voice.into(),
                     })
                     .collect(),
-                recipients,
             },
             PersistedRoomEffect::DestroyNotification {
                 reason,

@@ -85,7 +85,6 @@ fn rebuild_admin_update(
     update: &OccupantPresenceUpdate,
     occupant_id_secret: &OccupantIdSecret,
 ) -> (FullJid, Stanza) {
-    let is_self = update.recipient.to_bare() == update.occupant_bare_jid;
     let occupant_identity = OccupantIdentity {
         bare_jid: &update.occupant_bare_jid,
         real_jid: update.disclosed_real_jid.as_ref(),
@@ -97,7 +96,7 @@ fn rebuild_admin_update(
         AdminPresenceKind::Banned => build_ban_presence(
             &update.occupant,
             &update.recipient,
-            MucPresenceStatus::new(is_self, false),
+            MucPresenceStatus::new(update.is_self, false),
             reason,
             actor,
             &occupant_identity,
@@ -106,7 +105,7 @@ fn rebuild_admin_update(
             &update.occupant,
             &update.recipient,
             update.affiliation,
-            MucPresenceStatus::new(is_self, false),
+            MucPresenceStatus::new(update.is_self, false),
             reason,
             actor,
             &occupant_identity,
@@ -115,7 +114,7 @@ fn rebuild_admin_update(
             &update.occupant,
             &update.recipient,
             STATUS_AFFILIATION_CHANGE_REMOVAL,
-            MucPresenceStatus::new(is_self, false),
+            MucPresenceStatus::new(update.is_self, false),
             actor,
             &occupant_identity,
         ),
@@ -123,7 +122,7 @@ fn rebuild_admin_update(
             &update.occupant,
             &update.recipient,
             STATUS_MEMBERS_ONLY_CONFIG_REMOVAL,
-            MucPresenceStatus::new(is_self, false),
+            MucPresenceStatus::new(update.is_self, false),
             actor,
             &occupant_identity,
         ),
@@ -132,7 +131,7 @@ fn rebuild_admin_update(
             &update.recipient,
             update.affiliation,
             role,
-            MucPresenceStatus::new(is_self, false),
+            MucPresenceStatus::new(update.is_self, false),
             &occupant_identity,
         ),
     };
@@ -238,6 +237,7 @@ mod tests {
         let alice_real = real_jid();
         let self_update = OccupantPresenceUpdate {
             recipient: alice_real.clone(),
+            is_self: true,
             occupant: occupant_jid(),
             nick: MucOccupantNick::new("alice".to_owned()).expect("nick"),
             occupant_bare_jid: alice_bare.clone(),
@@ -249,6 +249,7 @@ mod tests {
         };
         let broadcast_update = OccupantPresenceUpdate {
             recipient: peer_jid(),
+            is_self: false,
             occupant: occupant_jid(),
             nick: MucOccupantNick::new("alice".to_owned()).expect("nick"),
             occupant_bare_jid: alice_bare.clone(),
@@ -266,7 +267,6 @@ mod tests {
                 session: peer_jid(),
                 voice: Voice::Muted,
             }],
-            recipients: vec![peer_jid()],
         };
 
         let rendered = rebuild_effect(&room_jid(), &effect, &secret);
@@ -365,7 +365,6 @@ mod tests {
         let effect = RoomEffect::AdminRemainingBroadcast {
             presence_updates: Vec::new(),
             voice_changes: voice_changes.clone(),
-            recipients: vec![peer_jid()],
         };
 
         assert_eq!(effect_voice_changes(&effect), voice_changes.as_slice());
@@ -381,6 +380,7 @@ mod tests {
         let effect = RoomEffect::AdminSelfNotify {
             updates: vec![OccupantPresenceUpdate {
                 recipient: real_jid(),
+                is_self: true,
                 occupant: occupant_jid(),
                 nick: MucOccupantNick::new("alice".to_owned()).expect("nick"),
                 occupant_bare_jid: bare_jid("alice@example.test"),
@@ -394,5 +394,38 @@ mod tests {
 
         let rendered = rebuild_effect(&room_jid(), &effect, &occupant_id_secret());
         assert_eq!(rendered.len(), 1);
+    }
+
+    #[test]
+    fn rebuild_admin_update_uses_producer_is_self_for_same_bare_sibling_session() {
+        let sibling_bare = bare_jid("alice@example.test");
+        let sibling_recipient = full_jid("alice@example.test/laptop");
+        let effect = RoomEffect::AdminRemainingBroadcast {
+            presence_updates: vec![OccupantPresenceUpdate {
+                recipient: sibling_recipient.clone(),
+                is_self: false,
+                occupant: occupant_jid(),
+                nick: MucOccupantNick::new("alice".to_owned()).expect("nick"),
+                occupant_bare_jid: sibling_bare,
+                disclosed_real_jid: None,
+                affiliation: Affiliation::Member,
+                kind: AdminPresenceKind::MembersOnlyRemoved,
+                actor: None,
+                reason: None,
+            }],
+            voice_changes: Vec::new(),
+        };
+
+        let rendered = rebuild_effect(&room_jid(), &effect, &occupant_id_secret());
+        let frame = xml(&rendered[0].1);
+
+        assert!(
+            frame.contains("code=\"322\"") || frame.contains("code='322'"),
+            "expected members-only removal status: {frame}"
+        );
+        assert!(
+            !frame.contains("code=\"110\"") && !frame.contains("code='110'"),
+            "sibling session under the same bare JID must not be stamped as self: {frame}"
+        );
     }
 }

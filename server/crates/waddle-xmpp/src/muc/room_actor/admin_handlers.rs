@@ -5,13 +5,13 @@ use kameo::message::Context;
 use xmpp_parsers::presence::Presence;
 
 use super::{AdminApplyError, AdminContext, RoomActor};
-use crate::muc::admin::{is_role_change_query, AdminItem};
+use crate::muc::admin::{AdminItem, is_role_change_query};
 use crate::muc::durable::{AffiliationEntry as DurableAffiliationEntry, RoomDurableMutation};
 use crate::muc::{
+    AdminPresenceKind, DestroyReason, MucOccupantNick, MucPresenceStatus, MucRoom, Occupant,
+    OccupantPresenceUpdate, OccupantVoiceChange, RoomEffectReservation,
     build_affiliation_change_presence, build_ban_presence, build_kick_presence,
-    build_membership_removal_presence, build_role_change_presence, AdminPresenceKind,
-    DestroyReason, MucOccupantNick, MucPresenceStatus, MucRoom, Occupant, OccupantPresenceUpdate,
-    OccupantVoiceChange, RoomEffectReservation,
+    build_membership_removal_presence, build_role_change_presence,
 };
 use crate::types::{Affiliation, Role, Voice};
 use crate::xep::xep0421::{OccupantIdSecret, OccupantIdentity};
@@ -71,52 +71,56 @@ struct DurableAdminUpdate {
     update: OccupantPresenceUpdate,
 }
 
+struct DurableAdminUpdateInput<'a> {
+    occupant_jid: &'a FullJid,
+    recipient: &'a FullJid,
+    is_self: bool,
+    kind: AdminPresenceKind,
+    actor: Option<&'a BareJid>,
+    reason: Option<&'a str>,
+}
+
 fn durable_admin_update(
     room: &MucRoom,
     occupant: &Occupant,
-    occupant_jid: &FullJid,
-    recipient: &FullJid,
-    kind: AdminPresenceKind,
-    actor: Option<&BareJid>,
-    reason: Option<&str>,
+    input: DurableAdminUpdateInput<'_>,
 ) -> OccupantPresenceUpdate {
     OccupantPresenceUpdate {
-        recipient: recipient.clone(),
-        occupant: occupant_jid.clone(),
+        recipient: input.recipient.clone(),
+        is_self: input.is_self,
+        occupant: input.occupant_jid.clone(),
         nick: MucOccupantNick::new(occupant.nick.clone()).expect("nick was previously accepted"),
         occupant_bare_jid: occupant.real_jid.to_bare(),
-        disclosed_real_jid: visible_real_jid_for_recipient(room, recipient, &occupant.real_jid)
-            .cloned(),
+        disclosed_real_jid: visible_real_jid_for_recipient(
+            room,
+            input.recipient,
+            &occupant.real_jid,
+        )
+        .cloned(),
         affiliation: occupant.affiliation,
-        kind,
-        actor: actor.cloned(),
-        reason: reason.and_then(|value| DestroyReason::new(value.to_owned())),
+        kind: input.kind,
+        actor: input.actor.cloned(),
+        reason: input
+            .reason
+            .and_then(|value| DestroyReason::new(value.to_owned())),
     }
 }
 
 fn split_admin_effect_updates(
     updates: Vec<DurableAdminUpdate>,
-) -> (
-    Vec<OccupantPresenceUpdate>,
-    Vec<OccupantPresenceUpdate>,
-    Vec<FullJid>,
-) {
+) -> (Vec<OccupantPresenceUpdate>, Vec<OccupantPresenceUpdate>) {
     let mut self_updates = Vec::new();
     let mut remaining_updates = Vec::new();
-    let mut recipients = Vec::new();
 
     for durable in updates {
         if durable.is_self {
             self_updates.push(durable.update);
             continue;
         }
-        if !recipients.contains(&durable.update.recipient) {
-            recipients.push(durable.update.recipient.clone());
-        }
         remaining_updates.push(durable.update);
     }
 
-    (self_updates, remaining_updates, recipients)
+    (self_updates, remaining_updates)
 }
 
 fn admin_effects_for_applied(
@@ -128,7 +132,7 @@ fn admin_effects_for_applied(
         return crate::muc::RoomMutationEffects::none();
     }
 
-    let (self_updates, remaining_updates, recipients) = split_admin_effect_updates(durable_updates);
+    let (self_updates, remaining_updates) = split_admin_effect_updates(durable_updates);
     crate::muc::RoomMutationEffects::admin(
         room_jid,
         self_updates,
@@ -138,7 +142,6 @@ fn admin_effects_for_applied(
             .cloned()
             .map(|(session, voice)| OccupantVoiceChange { session, voice })
             .collect(),
-        recipients,
     )
 }
 
@@ -181,11 +184,14 @@ fn removal_presence_updates(
                     update: durable_admin_update(
                         room,
                         occupant,
-                        &from_room_jid,
-                        &recipient,
-                        kind,
-                        actor,
-                        None,
+                        DurableAdminUpdateInput {
+                            occupant_jid: &from_room_jid,
+                            recipient: &recipient,
+                            is_self,
+                            kind,
+                            actor,
+                            reason: None,
+                        },
                     ),
                 },
             }
@@ -261,11 +267,14 @@ fn apply_affiliation_change_with_effects(
                     update: durable_admin_update(
                         room,
                         occupant,
-                        &from_room_jid,
-                        &recipient,
-                        AdminPresenceKind::Banned,
-                        actor,
-                        reason,
+                        DurableAdminUpdateInput {
+                            occupant_jid: &from_room_jid,
+                            recipient: &recipient,
+                            is_self,
+                            kind: AdminPresenceKind::Banned,
+                            actor,
+                            reason,
+                        },
                     ),
                 });
                 updates.push((recipient, presence));
@@ -357,11 +366,14 @@ fn apply_affiliation_change_with_effects(
                 update: durable_admin_update(
                     room,
                     occupant,
-                    &from_room_jid,
-                    &recipient,
-                    AdminPresenceKind::RoleChanged(occupant.role),
-                    None,
-                    None,
+                    DurableAdminUpdateInput {
+                        occupant_jid: &from_room_jid,
+                        recipient: &recipient,
+                        is_self,
+                        kind: AdminPresenceKind::RoleChanged(occupant.role),
+                        actor: None,
+                        reason: None,
+                    },
                 ),
             });
             updates.push((recipient, presence));
@@ -1141,10 +1153,12 @@ impl kameo::message::Message<EnforceMembersOnlyAffiliations> for RoomActor {
         let effects = if config_status_codes.is_empty() {
             crate::muc::RoomMutationEffects::none()
         } else {
-            let (self_updates, _, _) = split_admin_effect_updates(durable_effect_updates);
+            let (self_updates, remaining_updates) =
+                split_admin_effect_updates(durable_effect_updates);
             let effects = crate::muc::RoomMutationEffects::members_only_enforcement(
                 self.room.room_jid.clone(),
                 self_updates,
+                remaining_updates,
                 config_status_codes,
                 all_room_sessions(&staged_room),
             );

@@ -15,6 +15,7 @@ use kameo::actor::ActorRef;
 use tokio::sync::oneshot;
 use waddle_xmpp::muc::room_registry_actor::{LocalRoomJids, RoomRegistryActor};
 use waddle_xmpp::muc::RoomEffectReservation;
+use waddle_xmpp::ownership::{Entity, EntityType};
 use waddle_xmpp::registry::{OutboundWriteAcceptance, SendResult};
 use waddle_xmpp::Stanza;
 
@@ -30,13 +31,15 @@ use crate::server::routes::websocket::WebSocketState;
 
 const OWNERSHIP_LOOKUP_TIMEOUT: Duration = waddle_xmpp::muc::ROOM_REGISTRY_REPLY_TIMEOUT;
 const LOCAL_ACCEPTANCE_TIMEOUT: Duration = Duration::from_secs(5);
-const NOT_OWNER_DELAY_MS: i64 = 1_000;
+const OWNERSHIP_RETRY_DELAY_MS: i64 = 15_000;
+const OWNERSHIP_DEAD_LETTER_MS: i64 = 24 * 60 * 60 * 1_000;
 
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
 pub struct RoomEffectDrainSummary {
     pub drained: u64,
     pub requeued: u64,
     pub stale: u64,
+    pub dead_lettered: u64,
 }
 
 /// Completion retained for initiator-stream frames.  The handler must call
@@ -80,6 +83,8 @@ pub struct InlineRoomEffectDrainSummary {
     pub completed: u64,
     pub requeued: u64,
     pub stale: u64,
+    pub dead_lettered: u64,
+    pub blocked: u64,
     pub leased: u64,
 }
 
@@ -145,6 +150,7 @@ pub async fn drain_due_effects(
             ClaimDisposition::Completed => summary.drained += 1,
             ClaimDisposition::Requeued => summary.requeued += 1,
             ClaimDisposition::Stale => summary.stale += 1,
+            ClaimDisposition::DeadLettered => summary.dead_lettered += 1,
             ClaimDisposition::Leased | ClaimDisposition::Inline(_) => {}
         }
     }
@@ -163,6 +169,7 @@ pub async fn drain_reservation_inline(
 ) -> Result<InlineRoomEffectDrain, RoomEffectOutboxError> {
     let now_ms = crate::time::now_ms();
     let mut drain = InlineRoomEffectDrain::default();
+    let mut owned_leases = HashSet::new();
     // Inline draining still observes the same ownership fence as the janitor;
     // it merely changes the destination of the initiating session's frame.
     let inline_owned_rooms = local_room_jids(&state.deps.protocol.room_registry).await;
@@ -176,12 +183,13 @@ pub async fn drain_reservation_inline(
             .deps
             .protocol
             .room_effect_outbox
-            .claim_exact(&key, now_ms)
+            .claim_exact_with_owned_leases(&key, now_ms, &owned_leases)
             .await?
         else {
             match classify_inline_claim_miss(state, &key, now_ms).await? {
                 InlineClaimMiss::Absent => {}
-                InlineClaimMiss::LeasedOrBlocked => drain.summary.leased += 1,
+                InlineClaimMiss::Blocked => drain.summary.blocked += 1,
+                InlineClaimMiss::Leased => drain.summary.leased += 1,
                 InlineClaimMiss::Stale => drain.summary.stale += 1,
             }
             continue;
@@ -198,8 +206,12 @@ pub async fn drain_reservation_inline(
             ClaimDisposition::Completed => drain.summary.completed += 1,
             ClaimDisposition::Requeued => drain.summary.requeued += 1,
             ClaimDisposition::Stale => drain.summary.stale += 1,
+            ClaimDisposition::DeadLettered => drain.summary.dead_lettered += 1,
             ClaimDisposition::Leased => drain.summary.leased += 1,
             ClaimDisposition::Inline(mut returned) => {
+                if let Some(frame) = returned.first() {
+                    owned_leases.insert(frame.completion.lease.clone());
+                }
                 drain.summary.inline += 1;
                 drain.frames.append(&mut returned);
             }
@@ -210,7 +222,8 @@ pub async fn drain_reservation_inline(
 
 enum InlineClaimMiss {
     Absent,
-    LeasedOrBlocked,
+    Blocked,
+    Leased,
     Stale,
 }
 
@@ -231,17 +244,44 @@ async fn classify_inline_claim_miss(
         .leased_at_ms
         .is_some_and(|leased_at_ms| leased_at_ms > stale_lease)
     {
-        return Ok(InlineClaimMiss::LeasedOrBlocked);
+        return Ok(InlineClaimMiss::Leased);
     }
-    Ok(InlineClaimMiss::LeasedOrBlocked)
+    let lifecycle_rows = store.list_for_lifecycle(key.lifecycle).await?;
+    let blocked_by_earlier = lifecycle_rows.iter().any(|candidate| {
+        candidate.key.lifecycle == key.lifecycle
+            && (candidate.key.revision < key.revision
+                || (candidate.key.revision == key.revision && candidate.key.ordinal < key.ordinal))
+    });
+    if blocked_by_earlier {
+        return Ok(InlineClaimMiss::Blocked);
+    }
+    let blocked_terminal_lease = row.effect.is_terminal()
+        && lifecycle_rows.iter().any(|candidate| {
+            candidate.key.lifecycle == key.lifecycle
+                && candidate.key != *key
+                && candidate
+                    .leased_at_ms
+                    .is_some_and(|leased_at_ms| leased_at_ms > stale_lease)
+        });
+    if blocked_terminal_lease {
+        return Ok(InlineClaimMiss::Blocked);
+    }
+    Ok(InlineClaimMiss::Leased)
 }
 
 enum ClaimDisposition {
     Completed,
     Requeued,
     Stale,
+    DeadLettered,
     Leased,
     Inline(Vec<InlineRoomEffectFrame>),
+}
+
+enum LocalQueueResult {
+    Accepted(oneshot::Receiver<()>),
+    NotConnected,
+    TimedOut,
 }
 
 async fn drain_claimed(
@@ -262,12 +302,32 @@ async fn drain_claimed(
         match local_rooms {
             Ok(rooms) if rooms.contains(&claimed.row.room_jid) => {}
             Ok(_) => {
+                let old_enough =
+                    now_ms.saturating_sub(claimed.row.created_at_ms) >= OWNERSHIP_DEAD_LETTER_MS;
+                if old_enough
+                    && room_has_no_claim_at_all(state, &claimed.row.room_jid)
+                        .await
+                        .unwrap_or(false)
+                {
+                    tracing::warn!(
+                        room = %claimed.row.room_jid,
+                        lifecycle = %claimed.row.key.lifecycle,
+                        revision = claimed.row.key.revision.as_i64(),
+                        ordinal = claimed.row.key.ordinal.as_i64(),
+                        age_ms = now_ms.saturating_sub(claimed.row.created_at_ms),
+                        "room effect outbox row never reached an owning node; dead-lettering"
+                    );
+                    let _ = store
+                        .complete(&claimed.row.key, &claimed.lease_token)
+                        .await?;
+                    return Ok(ClaimDisposition::DeadLettered);
+                }
                 store
                     .release_unattempted(
                         &claimed.row.key,
                         &claimed.lease_token,
                         now_ms,
-                        NOT_OWNER_DELAY_MS,
+                        OWNERSHIP_RETRY_DELAY_MS,
                     )
                     .await?;
                 return Ok(ClaimDisposition::Requeued);
@@ -278,7 +338,7 @@ async fn drain_claimed(
                         &claimed.row.key,
                         &claimed.lease_token,
                         now_ms,
-                        NOT_OWNER_DELAY_MS,
+                        OWNERSHIP_RETRY_DELAY_MS,
                     )
                     .await?;
                 return Ok(ClaimDisposition::Requeued);
@@ -327,9 +387,28 @@ async fn drain_claimed(
             });
             continue;
         }
-        if let Some(ack) = queue_local(state, &recipient, stanza.clone()).await {
-            acks.push(ack);
-            continue;
+        match queue_local(state, &recipient, stanza.clone()).await {
+            LocalQueueResult::Accepted(ack) => {
+                acks.push(ack);
+                continue;
+            }
+            LocalQueueResult::NotConnected => {}
+            LocalQueueResult::TimedOut => {
+                tracing::warn!(
+                    recipient = %recipient,
+                    room = %claimed.row.room_jid,
+                    "room effect outbox local enqueue timed out; releasing row for retry"
+                );
+                let _ = store
+                    .release(
+                        &claimed.row.key,
+                        &claimed.lease_token,
+                        now_ms,
+                        RoomEffectLastError::InfrastructureTransient,
+                    )
+                    .await?;
+                return Ok(ClaimDisposition::Requeued);
+            }
         }
         // A resource absent from this node may be registered on a peer.  A
         // successful DirectFrame bridge handoff is the remote completion
@@ -381,17 +460,21 @@ async fn queue_local(
     state: &WebSocketState,
     recipient: &FullJid,
     stanza: Stanza,
-) -> Option<oneshot::Receiver<()>> {
+) -> LocalQueueResult {
     let (acceptance, receiver) = OutboundWriteAcceptance::new();
-    match state
-        .deps
-        .protocol
-        .connection_registry
-        .send_to_with_write_acceptance(recipient, stanza, acceptance)
-        .await
+    match tokio::time::timeout(
+        LOCAL_ACCEPTANCE_TIMEOUT,
+        state
+            .deps
+            .protocol
+            .connection_registry
+            .send_to_with_write_acceptance(recipient, stanza, acceptance),
+    )
+    .await
     {
-        SendResult::Sent => Some(receiver),
-        SendResult::NotConnected | SendResult::ChannelClosed => None,
+        Ok(SendResult::Sent) => LocalQueueResult::Accepted(receiver),
+        Ok(SendResult::NotConnected | SendResult::ChannelClosed) => LocalQueueResult::NotConnected,
+        Err(_) => LocalQueueResult::TimedOut,
     }
 }
 
@@ -423,4 +506,33 @@ async fn local_room_jids(
                 "room effect outbox could not resolve locally owned rooms"
             );
         })
+}
+
+async fn room_has_no_claim_at_all(
+    state: &WebSocketState,
+    room_jid: &jid::BareJid,
+) -> Result<bool, ()> {
+    let Some(claim_store) = state.deps.app_state.clustering_claims.claim_store.as_ref() else {
+        return Ok(true);
+    };
+    let entity = Entity::new(EntityType::RoomActor, room_jid.to_string());
+    match tokio::time::timeout(OWNERSHIP_LOOKUP_TIMEOUT, claim_store.current_claim(&entity)).await {
+        Ok(Ok(claim)) => Ok(claim.is_none()),
+        Ok(Err(error)) => {
+            tracing::warn!(
+                room = %room_jid,
+                %error,
+                "room effect outbox could not confirm room claim absence; retaining row"
+            );
+            Err(())
+        }
+        Err(_) => {
+            tracing::warn!(
+                room = %room_jid,
+                timeout_ms = OWNERSHIP_LOOKUP_TIMEOUT.as_millis() as u64,
+                "room effect outbox room claim lookup timed out; retaining row"
+            );
+            Err(())
+        }
+    }
 }

@@ -966,7 +966,9 @@ pub(crate) fn spawn_orphan_reaper_janitor(
                     }
                 }
                 if !stop_after_sweep && !workers_healthy {
-                    error!("orphan reaper worker exited during sweep; restarting workers with retained work");
+                    error!(
+                        "orphan reaper worker exited during sweep; restarting workers with retained work"
+                    );
                     supervisor = supervisor.restarted(registry.clone(), stop.clone()).await;
                     if supervisor.workers.fatal_fence.is_cancelled() {
                         stop_after_sweep = true;
@@ -999,7 +1001,12 @@ pub(crate) fn spawn_orphan_reaper_janitor(
                 .await
             {
                 Ok(outcome) if outcome.retained > 0 => {
-                    error!(released = outcome.released, preserved_live = outcome.preserved_live, retained = outcome.retained, "orphan reaper: terminal RoomRegistry claim drain retained exact fences for node-expiry recovery");
+                    error!(
+                        released = outcome.released,
+                        preserved_live = outcome.preserved_live,
+                        retained = outcome.retained,
+                        "orphan reaper: terminal RoomRegistry claim drain retained exact fences for node-expiry recovery"
+                    );
                 }
                 Ok(outcome) => {
                     debug!(
@@ -5829,6 +5836,27 @@ async fn run_room_effect_outbox_sweep(state: &WebSocketState, batch_size: usize)
                     summary.drained,
                     Janitor::RoomEffectOutbox,
                 );
+                waddle_xmpp::counter_add!(
+                    "waddle.room_effect_outbox.requeued",
+                    "1",
+                    "Room-effect outbox rows released for retry during a sweep.",
+                    summary.requeued,
+                    Janitor::RoomEffectOutbox,
+                );
+                waddle_xmpp::counter_add!(
+                    "waddle.room_effect_outbox.stale",
+                    "1",
+                    "Room-effect outbox rows discarded as stale during a sweep.",
+                    summary.stale,
+                    Janitor::RoomEffectOutbox,
+                );
+                waddle_xmpp::counter_add!(
+                    "waddle.room_effect_outbox.dead_lettered",
+                    "1",
+                    "Room-effect outbox rows dead-lettered after remaining globally unowned for 24h.",
+                    summary.dead_lettered,
+                    Janitor::RoomEffectOutbox,
+                );
             }
             Err(error) => {
                 failed = true;
@@ -5840,16 +5868,25 @@ async fn run_room_effect_outbox_sweep(state: &WebSocketState, batch_size: usize)
             warn!(%error, "room effect outbox superseded-row reaper failed");
         }
         #[cfg(feature = "clustering")]
-        match store.current_producing_nodes().await {
-            Ok(nodes) => {
-                if let Err(error) = store.arm_foreign_inert(&nodes, crate::time::now_ms()).await {
-                    failed = true;
-                    warn!(%error, "room effect outbox foreign inert arming failed");
+        if state
+            .deps
+            .app_state
+            .clustering_claims
+            .claim_pair()
+            .is_some()
+        {
+            match store.current_producing_nodes().await {
+                Ok(nodes) => {
+                    if let Err(error) = store.arm_foreign_inert(&nodes, crate::time::now_ms()).await
+                    {
+                        failed = true;
+                        warn!(%error, "room effect outbox foreign inert arming failed");
+                    }
                 }
-            }
-            Err(error) => {
-                failed = true;
-                warn!(%error, "room effect outbox live-node query failed");
+                Err(error) => {
+                    failed = true;
+                    warn!(%error, "room effect outbox live-node query failed");
+                }
             }
         }
         match store.queue_depth().await {

@@ -7,7 +7,8 @@ use tokio::sync::mpsc;
 use waddle_xmpp::muc::durable::{MucDurableFuture, MucDurableStore, RoomCommitFuture};
 use waddle_xmpp::muc::room_actor::{
     ConfigEffectPlan, EnforceMembersOnlyAffiliations, GetSnapshot, JoinAffiliationGrant,
-    JoinWithAffiliation, RestoreDurableRoomState, RoomActor, UpdateConfig,
+    JoinWithAffiliation, RestoreDurableRoomState, RollbackConfigIfRevision, RoomActor,
+    UpdateConfig,
 };
 use waddle_xmpp::muc::room_registry_actor::{CreateRoom, GetOrCreateRoom};
 use waddle_xmpp::muc::{
@@ -15,17 +16,17 @@ use waddle_xmpp::muc::{
     RoomConfig, RoomDurableMutation, RoomMutationEffects, RoomRevision,
 };
 use waddle_xmpp::ownership::{ClaimEpoch, Entity, EntityType, NodeIdentity};
-use waddle_xmpp::registry::{OutboundStanza, OutboundWriteAcceptance};
+use waddle_xmpp::registry::OutboundStanza;
 use waddle_xmpp::xep::xep0421::OccupantIdSecret;
-use waddle_xmpp::{Affiliation, Stanza};
+use waddle_xmpp::Affiliation;
 
 use super::*;
 use crate::room_effect_outbox::drain::drain_due_effects;
 use crate::room_effect_outbox::{RoomEffectArmSupervisor, RoomEffectEnqueue};
-use crate::server::routes::websocket::WebSocketState;
 use crate::server::routes::websocket::tests::{
     create_test_websocket_state, create_test_websocket_state_with_db_pool, register_test_connection,
 };
+use crate::server::routes::websocket::WebSocketState;
 
 async fn create_owned_room_and_lifecycle(
     state: &WebSocketState,
@@ -116,12 +117,19 @@ impl MucDurableStore for ActorOutboxStore {
         &'a self,
         _room_jid: &'a jid::BareJid,
         fence: &'a RoomClaimFenceContext,
-        _intent: RoomDurableMutation,
+        intent: RoomDurableMutation,
         effects: RoomMutationEffects,
     ) -> RoomCommitFuture<'a> {
         let exact = fence == &self.expected_fence;
         let lifecycle = self.lifecycle;
         let outbox = Arc::clone(&self.outbox);
+        let successor_config_codes = effects.effects().iter().find_map(|effect| match effect {
+            waddle_xmpp::muc::RoomEffect::ConfigChanged { status_codes, .. } => {
+                Some(status_codes.clone())
+            }
+            _ => None,
+        });
+        let is_config_mutation = matches!(intent, RoomDurableMutation::Config { .. });
         let revision = {
             let mut next = self.next_revision.lock().expect("revision lock");
             let revision = RoomRevision::from_stored(*next).expect("positive revision");
@@ -136,20 +144,25 @@ impl MucDurableStore for ActorOutboxStore {
                 RoomCommitError::Database(waddle_xmpp::muc::RoomCommitDatabaseError::sanitized())
             })?;
             if let Some(reservation) = effects.superseding_reservation() {
-                if outbox
+                outbox
                     .supersede_reservation_in_tx(&mut tx, reservation)
                     .await
                     .map_err(|_| {
                         RoomCommitError::Database(
                             waddle_xmpp::muc::RoomCommitDatabaseError::sanitized(),
                         )
-                    })?
-                    .len()
-                    != reservation.ordinals.len()
-                {
-                    return Err(RoomCommitError::Database(
-                        waddle_xmpp::muc::RoomCommitDatabaseError::sanitized(),
-                    ));
+                    })?;
+            }
+            if is_config_mutation {
+                if let Some(successor_codes) = successor_config_codes.as_deref() {
+                    outbox
+                        .supersede_idempotent_config_in_tx(&mut tx, lifecycle, successor_codes)
+                        .await
+                        .map_err(|_| {
+                            RoomCommitError::Database(
+                                waddle_xmpp::muc::RoomCommitDatabaseError::sanitized(),
+                            )
+                        })?;
                 }
             }
             let reservation = if effects.effects().is_empty() {
@@ -271,6 +284,7 @@ async fn uncommitted_members_only_enforcement_arms_and_delivers_its_staged_fallb
         .ask(UpdateConfig {
             config: RoomConfig {
                 members_only: true,
+                enable_logging: false,
                 ..RoomConfig::default()
             },
             effect_plan: ConfigEffectPlan::ManagedMembersOnlyFallback,
@@ -380,8 +394,8 @@ async fn zero_delta_members_only_enforcement_supersedes_fallback_and_delivers_on
     );
     assert_eq!(
         enforcement.ordinals.len(),
-        2,
-        "self-notify then config effect"
+        3,
+        "self-notify, remaining-broadcast, then config effect"
     );
     let (sender, mut receiver) = mpsc::channel(2);
     register_test_connection(state.as_ref(), &recipient, sender).await;
@@ -395,6 +409,16 @@ async fn zero_delta_members_only_enforcement_supersedes_fallback_and_delivers_on
             ..Default::default()
         },
         "the empty self-notify remains the FIFO head of the fused pair"
+    );
+    assert_eq!(
+        drain_due_effects(state.as_ref(), super::super::store::HANDLER_GRACE_MS, 8,)
+            .await
+            .expect("drain empty remaining-broadcast"),
+        crate::room_effect_outbox::drain::RoomEffectDrainSummary {
+            drained: 1,
+            ..Default::default()
+        },
+        "the empty remaining-broadcast must also preserve FIFO before config"
     );
     let config_drain = {
         let state = Arc::clone(&state);
@@ -423,6 +447,191 @@ async fn zero_delta_members_only_enforcement_supersedes_fallback_and_delivers_on
         "no fallback duplicate is delivered"
     );
     assert_eq!(store.queue_depth().await.expect("queue depth"), 0);
+}
+
+#[tokio::test]
+async fn managed_members_only_enforcement_commits_after_interleaved_config_consumes_fallback() {
+    let state = create_test_websocket_state().await;
+    let room_jid = room_jid();
+    let removed = full_jid("alice@example.test/device");
+    let remaining = full_jid("bob@example.test/device");
+    let lifecycle = create_owned_room_and_lifecycle(state.as_ref(), &room_jid).await;
+    let (actor, _) = actor_with_outbox(state.as_ref(), &room_jid, lifecycle).await;
+    for (sender_jid, nick) in [(removed.clone(), "alice"), (remaining.clone(), "bob")] {
+        actor
+            .ask(JoinWithAffiliation {
+                sender_jid,
+                nick: nick.to_owned(),
+                affiliation_grant: JoinAffiliationGrant::Resolver(Affiliation::Member),
+                local_domain: "example.test".to_owned(),
+                admission_revision: actor
+                    .ask(GetSnapshot)
+                    .await
+                    .expect("current admission revision")
+                    .admission_revision,
+            })
+            .await
+            .expect("occupant joins with managed membership");
+    }
+    let config_update = actor
+        .ask(UpdateConfig {
+            config: RoomConfig {
+                members_only: true,
+                enable_logging: false,
+                ..RoomConfig::default()
+            },
+            effect_plan: ConfigEffectPlan::ManagedMembersOnlyFallback,
+        })
+        .await
+        .expect("actor stages managed fallback");
+    let fallback = config_update
+        .reservation
+        .expect("config update reserves fallback");
+    let status_codes = config_update
+        .notification
+        .expect("members-only change is notified")
+        .status_codes;
+    let (removed_sender, mut removed_receiver) = mpsc::channel(2);
+    let (remaining_sender, mut remaining_receiver) = mpsc::channel(2);
+    register_test_connection(state.as_ref(), &removed, removed_sender).await;
+    register_test_connection(state.as_ref(), &remaining, remaining_sender).await;
+    let interleaved = actor
+        .ask(UpdateConfig {
+            config: RoomConfig {
+                members_only: true,
+                enable_logging: false,
+                name: "interleaved config".to_owned(),
+                ..RoomConfig::default()
+            },
+            effect_plan: ConfigEffectPlan::DirectAudience,
+        })
+        .await
+        .expect("interleaved pure-104 config commits");
+    assert!(
+        state
+            .deps
+            .protocol
+            .room_effect_outbox
+            .staged_reservation_for(lifecycle, fallback.revision)
+            .await
+            .expect("lookup consumed fallback")
+            .is_none(),
+        "the interleaved pure-104 config commit consumes the staged fallback"
+    );
+    let interleaved_reservation = interleaved
+        .reservation
+        .expect("pure-104 config reserves its own effect");
+    state
+        .deps
+        .protocol
+        .room_effect_outbox
+        .arm_reservation(&interleaved_reservation, 0)
+        .await
+        .expect("arm interleaved config");
+    let interleaved_drain = {
+        let state = Arc::clone(&state);
+        tokio::spawn(async move { drain_due_effects(state.as_ref(), 0, 8).await })
+    };
+    for receiver in [&mut removed_receiver, &mut remaining_receiver] {
+        let delivery = receive(receiver).await;
+        assert!(xml(&delivery).contains("code='104'"));
+        delivery
+            .write_acceptance
+            .as_ref()
+            .expect("interleaved config write acceptance")
+            .acknowledge();
+    }
+    assert_eq!(
+        interleaved_drain
+            .await
+            .expect("interleaved drain join")
+            .expect("interleaved drain")
+            .drained,
+        1
+    );
+    let applied = actor
+        .ask(EnforceMembersOnlyAffiliations {
+            affiliations: vec![
+                (removed.to_bare(), Affiliation::None),
+                (remaining.to_bare(), Affiliation::Member),
+            ],
+            fallback_reservation: Some(fallback.clone()),
+            config_status_codes: status_codes,
+        })
+        .await
+        .expect("enforcement still commits after the fallback was already consumed");
+    let enforcement = applied
+        .outbox_reservation
+        .expect("enforcement reserves the fused durable effects");
+    assert_eq!(enforcement.ordinals.len(), 3);
+
+    let removal_drain = {
+        let state = Arc::clone(&state);
+        tokio::spawn(async move {
+            drain_due_effects(state.as_ref(), super::super::store::HANDLER_GRACE_MS, 8).await
+        })
+    };
+    let removal = receive(&mut removed_receiver).await;
+    assert!(xml(&removal).contains("code='322'"));
+    removal
+        .write_acceptance
+        .as_ref()
+        .expect("322 write acceptance")
+        .acknowledge();
+    assert_eq!(
+        removal_drain
+            .await
+            .expect("322 drain join")
+            .expect("322 drain")
+            .drained,
+        1
+    );
+
+    let remaining_broadcast_drain = {
+        let state = Arc::clone(&state);
+        tokio::spawn(async move {
+            drain_due_effects(state.as_ref(), super::super::store::HANDLER_GRACE_MS, 8).await
+        })
+    };
+    let remaining_322 = receive(&mut remaining_receiver).await;
+    assert!(xml(&remaining_322).contains("code='322'"));
+    remaining_322
+        .write_acceptance
+        .as_ref()
+        .expect("remaining 322 write acceptance")
+        .acknowledge();
+    assert_eq!(
+        remaining_broadcast_drain
+            .await
+            .expect("remaining 322 drain join")
+            .expect("remaining 322 drain")
+            .drained,
+        1,
+        "the remaining-occupant 322 must still drain after the missing-row supersession path"
+    );
+
+    let config_drain = {
+        let state = Arc::clone(&state);
+        tokio::spawn(async move {
+            drain_due_effects(state.as_ref(), super::super::store::HANDLER_GRACE_MS, 8).await
+        })
+    };
+    let config = receive(&mut remaining_receiver).await;
+    assert!(xml(&config).contains("code='104'"));
+    config
+        .write_acceptance
+        .as_ref()
+        .expect("config write acceptance")
+        .acknowledge();
+    assert_eq!(
+        config_drain
+            .await
+            .expect("config drain join")
+            .expect("config drain")
+            .drained,
+        1,
+        "the fused config effect must still drain after the missing-row supersession path"
+    );
 }
 
 #[tokio::test]
@@ -483,36 +692,6 @@ async fn managed_members_only_removal_drains_322_before_full_config_to_remaining
         })
         .await
         .expect("non-zero-delta enforcement commits");
-    let remaining_322 = applied
-        .presence_updates
-        .iter()
-        .find_map(|(recipient, presence)| {
-            (recipient == &remaining
-                && crate::server::routes::websocket::stanza_to_xml(&Stanza::Presence(
-                    presence.clone(),
-                ))
-                .contains("code='322'"))
-            .then(|| presence.clone())
-        })
-        .expect("remaining member receives the 322 broadcast");
-    let (acceptance, _accepted) = OutboundWriteAcceptance::new();
-    assert!(
-        state
-            .deps
-            .protocol
-            .connection_registry
-            .send_to_with_write_acceptance(&remaining, Stanza::Presence(remaining_322), acceptance)
-            .await
-            .is_sent(),
-        "the real actor-produced 322 must enter Bob's writer path"
-    );
-    let remaining_322 = receive(&mut remaining_receiver).await;
-    assert!(xml(&remaining_322).contains("code='322'"));
-    remaining_322
-        .write_acceptance
-        .as_ref()
-        .expect("remaining 322 write acceptance")
-        .acknowledge();
     let enforcement = applied
         .outbox_reservation
         .expect("enforcement reserves ordered effects");
@@ -528,7 +707,7 @@ async fn managed_members_only_removal_drains_322_before_full_config_to_remaining
             .is_none(),
         "the actor commit supersedes the exact fallback"
     );
-    assert_eq!(enforcement.ordinals.len(), 2);
+    assert_eq!(enforcement.ordinals.len(), 3);
     let removal_drain = {
         let state = Arc::clone(&state);
         tokio::spawn(async move {
@@ -549,7 +728,30 @@ async fn managed_members_only_removal_drains_322_before_full_config_to_remaining
             .expect("322 drain")
             .drained,
         1,
-        "the removal is the fused effect's FIFO head"
+        "the removed occupant self-notify is the fused effect's FIFO head"
+    );
+
+    let remaining_broadcast_drain = {
+        let state = Arc::clone(&state);
+        tokio::spawn(async move {
+            drain_due_effects(state.as_ref(), super::super::store::HANDLER_GRACE_MS, 8).await
+        })
+    };
+    let remaining_322 = receive(&mut remaining_receiver).await;
+    assert!(xml(&remaining_322).contains("code='322'"));
+    remaining_322
+        .write_acceptance
+        .as_ref()
+        .expect("remaining 322 write acceptance")
+        .acknowledge();
+    assert_eq!(
+        remaining_broadcast_drain
+            .await
+            .expect("remaining 322 drain join")
+            .expect("remaining 322 drain")
+            .drained,
+        1,
+        "the remaining-occupant 322 must drain as its own FIFO effect"
     );
 
     let config_drain = {
@@ -584,6 +786,83 @@ async fn managed_members_only_removal_drains_322_before_full_config_to_remaining
         "the removed occupant is excluded from the config audience"
     );
     assert_eq!(store.queue_depth().await.expect("queue depth"), 0);
+}
+
+#[tokio::test]
+async fn rollback_config_proceeds_after_staged_row_was_already_drained() {
+    let state = create_test_websocket_state().await;
+    let room_jid = room_jid();
+    let recipient = full_jid("alice@example.test/device");
+    let lifecycle = create_owned_room_and_lifecycle(state.as_ref(), &room_jid).await;
+    let (actor, _) = actor_with_outbox(state.as_ref(), &room_jid, lifecycle).await;
+    actor
+        .ask(JoinWithAffiliation {
+            sender_jid: recipient.clone(),
+            nick: "alice".to_owned(),
+            affiliation_grant: JoinAffiliationGrant::Resolver(Affiliation::Member),
+            local_domain: "example.test".to_owned(),
+            admission_revision: 0,
+        })
+        .await
+        .expect("recipient joins before the config mutation");
+    let committed = actor
+        .ask(UpdateConfig {
+            config: RoomConfig {
+                enable_logging: true,
+                ..RoomConfig::default()
+            },
+            effect_plan: ConfigEffectPlan::DirectAudience,
+        })
+        .await
+        .expect("config update commits");
+    let expected_revision = committed.revision;
+    let reservation = committed
+        .reservation
+        .expect("config update reserves one staged effect");
+    state
+        .deps
+        .protocol
+        .room_effect_outbox
+        .arm_reservation(&reservation, 0)
+        .await
+        .expect("arm staged row");
+    let (sender, mut receiver) = mpsc::channel(2);
+    register_test_connection(state.as_ref(), &recipient, sender).await;
+    let drain = {
+        let state = Arc::clone(&state);
+        tokio::spawn(async move { drain_due_effects(state.as_ref(), 0, 8).await })
+    };
+    let delivery = receive(&mut receiver).await;
+    assert!(xml(&delivery).contains("code='170'"));
+    delivery
+        .write_acceptance
+        .as_ref()
+        .expect("write acceptance")
+        .acknowledge();
+    assert_eq!(
+        drain.await.expect("drain join").expect("drain").drained,
+        1,
+        "the staged row must be gone before rollback runs"
+    );
+    assert!(actor
+        .ask(RollbackConfigIfRevision {
+            expected_revision,
+            config: RoomConfig {
+                enable_logging: false,
+                ..RoomConfig::default()
+            },
+            reservation: Some(reservation),
+        })
+        .await
+        .expect("rollback after drained row"));
+    let snapshot = actor
+        .ask(GetSnapshot)
+        .await
+        .expect("snapshot after rollback");
+    assert!(
+        !snapshot.room.config.enable_logging,
+        "the rollback should still revert the in-memory config after the row was already drained"
+    );
 }
 
 #[tokio::test]

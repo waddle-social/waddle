@@ -64,6 +64,7 @@ fn admin_effects() -> RoomMutationEffects {
         room_jid(),
         vec![OccupantPresenceUpdate {
             recipient: full_jid("alice@example.test/device"),
+            is_self: true,
             occupant: full_jid("room@conference.example.test/alice"),
             nick: nick("alice"),
             occupant_bare_jid: BareJid::from_str("alice@example.test").expect("bare JID"),
@@ -75,6 +76,7 @@ fn admin_effects() -> RoomMutationEffects {
         }],
         vec![OccupantPresenceUpdate {
             recipient: full_jid("bob@example.test/device"),
+            is_self: false,
             occupant: full_jid("room@conference.example.test/alice"),
             nick: nick("alice"),
             occupant_bare_jid: BareJid::from_str("alice@example.test").expect("bare JID"),
@@ -88,7 +90,6 @@ fn admin_effects() -> RoomMutationEffects {
             session: full_jid("carol@example.test/device"),
             voice: Voice::Muted,
         }],
-        vec![full_jid("bob@example.test/device")],
     )
 }
 
