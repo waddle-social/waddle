@@ -133,6 +133,41 @@ fn request_config_reservation_arm(
         .arm(reservation.clone());
 }
 
+struct CommittedConfigReservationGuard<'a> {
+    state: &'a WebSocketState,
+    reservation: Option<waddle_xmpp::muc::RoomEffectReservation>,
+}
+
+impl<'a> CommittedConfigReservationGuard<'a> {
+    fn new(
+        state: &'a WebSocketState,
+        reservation: Option<waddle_xmpp::muc::RoomEffectReservation>,
+    ) -> Self {
+        Self { state, reservation }
+    }
+
+    fn reservation(&self) -> Option<&waddle_xmpp::muc::RoomEffectReservation> {
+        self.reservation.as_ref()
+    }
+
+    fn replace(
+        &mut self,
+        reservation: Option<waddle_xmpp::muc::RoomEffectReservation>,
+    ) -> Option<waddle_xmpp::muc::RoomEffectReservation> {
+        std::mem::replace(&mut self.reservation, reservation)
+    }
+
+    fn clear(&mut self) {
+        self.reservation = None;
+    }
+}
+
+impl Drop for CommittedConfigReservationGuard<'_> {
+    fn drop(&mut self) {
+        request_config_reservation_arm(self.state, self.reservation());
+    }
+}
+
 async fn rollback_config_or_arm_reservation(
     state: &WebSocketState,
     room_actor: &kameo::actor::ActorRef<waddle_xmpp::muc::room_actor::RoomActor>,
@@ -365,13 +400,14 @@ pub(super) async fn apply_muc_owner_config(
     };
     let config_status_codes =
         waddle_xmpp::muc::config_change_status_codes(&previous_config, &config);
+    let mut config_reservation = CommittedConfigReservationGuard::new(state, config_reservation);
 
     let Some(channel_id) = channel_id else {
         if !previous_members_only && config.members_only {
-            let applied = room_actor.ask(EnforceMembersOnly).await.map_err(|error| {
-                request_config_reservation_arm(state, config_reservation.as_ref());
-                format!("members-only enforcement failed: {error:?}")
-            })?;
+            let applied = room_actor
+                .ask(EnforceMembersOnly)
+                .await
+                .map_err(|error| format!("members-only enforcement failed: {error:?}"))?;
             super::super::super::muc_call_sfu::converge_members_only_sweep_via_sfu(
                 state.deps.protocol.sfu.as_ref(),
                 room_jid,
@@ -398,17 +434,19 @@ pub(super) async fn apply_muc_owner_config(
             .ask(GetSnapshot)
             .await
             .map_err(|error| format!("post-config snapshot failed: {error:?}"))?;
-        return Ok(drain_or_broadcast_config_change(
+        let response = drain_or_broadcast_config_change(
             state,
             room_jid,
             recovered_broadcast_room
                 .as_ref()
                 .unwrap_or(&post_update_snapshot.room),
             &config_status_codes,
-            config_reservation.as_ref(),
+            config_reservation.reservation(),
             initiator,
         )
-        .await);
+        .await;
+        config_reservation.clear();
+        return Ok(response);
     };
 
     let now = chrono::Utc::now().to_rfc3339();
@@ -448,9 +486,10 @@ pub(super) async fn apply_muc_owner_config(
             &room_actor,
             expected_revision,
             previous_config,
-            config_reservation.as_ref(),
+            config_reservation.reservation(),
         )
         .await;
+        config_reservation.clear();
         return Err(format!("channel upsert failed: {error}"));
     }
 
@@ -470,22 +509,19 @@ pub(super) async fn apply_muc_owner_config(
             room_actor
                 .ask(EnforceMembersOnlyAffiliations {
                     affiliations,
-                    fallback_reservation: config_reservation.clone(),
+                    fallback_reservation: config_reservation.reservation().cloned(),
                     config_status_codes: config_status_codes.clone(),
                 })
                 .await
-                .map_err(|error| {
-                    request_config_reservation_arm(state, config_reservation.as_ref());
-                    format!("members-only enforcement failed: {error:?}")
-                })?
+                .map_err(|error| format!("members-only enforcement failed: {error:?}"))?
         } else {
-            room_actor.ask(EnforceMembersOnly).await.map_err(|error| {
-                request_config_reservation_arm(state, config_reservation.as_ref());
-                format!("members-only enforcement failed: {error:?}")
-            })?
+            room_actor
+                .ask(EnforceMembersOnly)
+                .await
+                .map_err(|error| format!("members-only enforcement failed: {error:?}"))?
         };
         if applied.outbox_reservation.is_some() {
-            config_reservation = applied.outbox_reservation.clone();
+            let _ = config_reservation.replace(applied.outbox_reservation.clone());
         }
         super::super::super::muc_call_sfu::converge_members_only_sweep_via_sfu(
             state.deps.protocol.sfu.as_ref(),
@@ -517,17 +553,19 @@ pub(super) async fn apply_muc_owner_config(
         .ask(GetSnapshot)
         .await
         .map_err(|error| format!("post-config snapshot failed: {error:?}"))?;
-    Ok(drain_or_broadcast_config_change(
+    let response = drain_or_broadcast_config_change(
         state,
         room_jid,
         recovered_broadcast_room
             .as_ref()
             .unwrap_or(&post_update_snapshot.room),
         &config_status_codes,
-        config_reservation.as_ref(),
+        config_reservation.reservation(),
         initiator,
     )
-    .await)
+    .await;
+    config_reservation.clear();
+    Ok(response)
 }
 
 async fn drain_or_broadcast_config_change(
@@ -661,5 +699,121 @@ mod channel_type_projection_tests {
 
         assert!(config.group_dm);
         assert!(config.members_only);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::str::FromStr;
+    use std::time::Duration;
+
+    use jid::{BareJid, FullJid};
+    use waddle_xmpp::muc::{
+        MucConfigStatusCode, RoomEffectReservation, RoomLifecycleId, RoomMutationEffects,
+        RoomRevision,
+    };
+    use waddle_xmpp::ownership::NodeIdentity;
+
+    use super::CommittedConfigReservationGuard;
+    use crate::room_effect_outbox::{
+        RoomEffectEnqueue, RoomEffectKey, RoomEffectOriginInstanceId, RoomEffectProducingNode,
+    };
+    use crate::server::routes::websocket::{tests::create_test_websocket_state, WebSocketState};
+
+    fn room_jid() -> BareJid {
+        BareJid::from_str("cancellation-room@conference.example.test").expect("room JID")
+    }
+
+    fn full_jid(value: &str) -> FullJid {
+        FullJid::from_str(value).expect("full JID")
+    }
+
+    fn config_effects() -> RoomMutationEffects {
+        RoomMutationEffects::config(
+            room_jid(),
+            vec![MucConfigStatusCode::NonPrivacyConfigurationChange],
+            vec![full_jid("alice@example.test/device")],
+        )
+    }
+
+    fn origin() -> RoomEffectOriginInstanceId {
+        RoomEffectOriginInstanceId::new("config-guard-origin".to_owned()).expect("origin")
+    }
+
+    fn producing_node() -> RoomEffectProducingNode {
+        RoomEffectProducingNode::from_node_identity(NodeIdentity::new("node-a", "epoch-a"))
+    }
+
+    async fn enqueue_config_reservation(
+        state: &WebSocketState,
+        lifecycle: RoomLifecycleId,
+        revision: RoomRevision,
+    ) -> RoomEffectReservation {
+        let store = state.deps.protocol.room_effect_outbox.as_ref();
+        let mut tx = store.database().begin().await.expect("transaction");
+        let reservation = store
+            .enqueue_in_tx(
+                &mut tx,
+                RoomEffectEnqueue {
+                    lifecycle,
+                    revision,
+                    effects: &config_effects(),
+                    origin: &origin(),
+                    producing_node: &producing_node(),
+                    now_ms: 100,
+                },
+            )
+            .await
+            .expect("enqueue");
+        tx.commit().await.expect("commit");
+        reservation
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn dropped_committed_config_reservation_registers_supervisor_fallback() {
+        let state = create_test_websocket_state().await;
+        let lifecycle = RoomLifecycleId::generate();
+        let revision = RoomRevision::initial();
+        let reservation = enqueue_config_reservation(state.as_ref(), lifecycle, revision).await;
+        let key = RoomEffectKey {
+            lifecycle,
+            revision,
+            ordinal: reservation.ordinals[0],
+        };
+        let store = state.deps.protocol.room_effect_outbox.as_ref();
+
+        assert_eq!(
+            store
+                .find(&key)
+                .await
+                .expect("staged row lookup")
+                .expect("staged row present")
+                .available_at_ms,
+            i64::MAX,
+            "committed config reservation starts inert"
+        );
+
+        {
+            let _guard =
+                CommittedConfigReservationGuard::new(state.as_ref(), Some(reservation.clone()));
+        }
+
+        tokio::time::timeout(Duration::from_secs(1), async {
+            loop {
+                if store
+                    .find(&key)
+                    .await
+                    .expect("armed row lookup")
+                    .expect("armed row present")
+                    .available_at_ms
+                    != i64::MAX
+                {
+                    return;
+                }
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("drop-time supervisor registration must arm the staged row");
     }
 }

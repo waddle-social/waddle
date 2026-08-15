@@ -153,6 +153,36 @@ impl RoomEffectArmSupervisor {
         });
     }
 
+    /// Start an exact drain without making the command handler wait for a
+    /// recipient writer. Admin commands have no response-batch ordering
+    /// requirement, but their handler-window rows still need an immediate
+    /// post-commit delivery attempt rather than waiting for the janitor.
+    pub fn spawn_reservation_drain(&self, reservation: RoomEffectReservation) {
+        let drain_state = Arc::clone(&self.drain_state);
+        self.runtime.spawn(async move {
+            let state = drain_state
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .as_ref()
+                .and_then(Weak::upgrade);
+            let Some(state) = state else {
+                return;
+            };
+            let drain = crate::room_effect_outbox::drain::drain_local_reservation_after_commit(
+                state.as_ref(),
+                &reservation,
+            )
+            .await;
+            if let Err(error) = drain {
+                tracing::warn!(
+                    lifecycle = %reservation.lifecycle,
+                    revision = reservation.revision.as_i64(),
+                    "admin command room-effect drain failed after committed mutation: {error}"
+                );
+            }
+        });
+    }
+
     #[cfg(test)]
     pub(super) fn state_snapshot(&self) -> (bool, usize) {
         let state = self

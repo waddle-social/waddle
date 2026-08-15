@@ -1,3 +1,4 @@
+use std::collections::HashSet;
 use std::str::FromStr;
 use std::sync::Arc;
 use std::time::Duration;
@@ -56,7 +57,7 @@ fn inline_admin_effects_for(room_jid: &BareJid, initiator: &FullJid) -> RoomMuta
     RoomMutationEffects::admin(
         room_jid.clone(),
         vec![OccupantPresenceUpdate {
-            recipient: initiator.clone(),
+            recipient: full_jid("bob@example.test/device"),
             is_self: true,
             occupant: full_jid("room@muc.example.com/alice"),
             nick: nick("alice"),
@@ -399,10 +400,10 @@ async fn inline_drain_claims_later_ordinal_when_earlier_row_is_leased_by_same_dr
         .expect("inline drain");
     assert_eq!(
         frames.len(),
-        2,
-        "the same inline drain must advance past its own leased ordinal-0 head"
+        1,
+        "the initiator's self frame remains retained until the caller accepts it"
     );
-    assert_eq!(frames.summary.inline, 2);
+    assert_eq!(frames.summary.inline, 1);
     for frame in frames.drain(..) {
         assert!(
             complete_after_write(state.as_ref(), &frame.completion)
@@ -420,6 +421,56 @@ async fn inline_drain_claims_later_ordinal_when_earlier_row_is_leased_by_same_dr
             .await
             .expect("queue depth"),
         0
+    );
+}
+
+#[tokio::test]
+async fn exact_owned_lease_bypass_requires_recipient_disjoint_earlier_rows() {
+    let (_db, store) = store_with_db("room-effect-drain-owned-lease-overlap").await;
+    let lifecycle = lifecycle();
+    let alice = full_jid("alice@example.test/device");
+    let first = enqueue_and_arm(
+        &store,
+        lifecycle,
+        initial_revision(),
+        config_effects_for(&room_jid(), vec![alice.clone()]),
+    )
+    .await;
+    let second = enqueue_and_arm(
+        &store,
+        lifecycle,
+        initial_revision().next().expect("next revision"),
+        config_effects_for(&room_jid(), vec![alice]),
+    )
+    .await;
+    let first_key = RoomEffectKey {
+        lifecycle,
+        revision: initial_revision(),
+        ordinal: first.ordinals[0],
+    };
+    let second_key = RoomEffectKey {
+        lifecycle,
+        revision: initial_revision().next().expect("next revision"),
+        ordinal: second.ordinals[0],
+    };
+    let first_claim = store
+        .claim_exact(&first_key, super::super::store::HANDLER_GRACE_MS)
+        .await
+        .expect("claim earlier row")
+        .expect("earlier row is claimable");
+    let owned_leases = HashSet::from([first_claim.lease_token.clone()]);
+
+    assert!(
+        store
+            .claim_exact_with_owned_leases(
+                &second_key,
+                super::super::store::HANDLER_GRACE_MS,
+                &owned_leases,
+            )
+            .await
+            .expect("later claim result")
+            .is_none(),
+        "owned-lease bypass must not skip an earlier retained row that targets the same recipient"
     );
 }
 
@@ -532,6 +583,7 @@ async fn due_drain_requeues_nonterminal_rows_when_room_is_not_locally_owned() {
         .arm_reservation(&reservation, 0)
         .await
         .expect("arm reservation");
+    let release_floor = crate::time::now_ms();
 
     let summary = drain_due_effects(state.as_ref(), 0, 8)
         .await
@@ -556,14 +608,15 @@ async fn due_drain_requeues_nonterminal_rows_when_room_is_not_locally_owned() {
         row.attempt_count, 0,
         "ownership misses must not burn retries"
     );
-    assert_eq!(
-        row.available_at_ms, 15_000,
-        "ownership misses requeue after the fixed delay"
+    assert!(
+        row.available_at_ms >= release_floor.saturating_add(15_000),
+        "ownership misses requeue from the actual release time"
     );
     assert!(
         row.lease_token.is_none(),
         "ownership miss must release the lease"
     );
+    let retry_available_at_ms = row.available_at_ms;
 
     state
         .deps
@@ -581,10 +634,9 @@ async fn due_drain_requeues_nonterminal_rows_when_room_is_not_locally_owned() {
     let (tx, mut rx) = mpsc::channel::<OutboundStanza>(4);
     register_test_connection(state.as_ref(), &recipient, tx).await;
     let state_for_owned_drain = Arc::clone(&state);
-    let owned_drain =
-        tokio::spawn(
-            async move { drain_due_effects(state_for_owned_drain.as_ref(), 15_000, 8).await },
-        );
+    let owned_drain = tokio::spawn(async move {
+        drain_due_effects(state_for_owned_drain.as_ref(), retry_available_at_ms, 8).await
+    });
     let outbound = recv_outbound(&mut rx).await;
     outbound
         .write_acceptance
@@ -670,6 +722,7 @@ async fn due_drain_times_out_a_full_local_channel_and_keeps_other_lifecycles_mov
         .expect("prefill blocked recipient channel");
     let (healthy_tx, mut healthy_rx) = mpsc::channel::<OutboundStanza>(4);
     register_test_connection(state.as_ref(), &healthy_recipient, healthy_tx).await;
+    let release_floor = crate::time::now_ms();
 
     let state_for_drain = Arc::clone(&state);
     let drain =
@@ -707,9 +760,10 @@ async fn due_drain_times_out_a_full_local_channel_and_keeps_other_lifecycles_mov
         blocked_row.last_error,
         Some(RoomEffectLastError::InfrastructureTransient)
     );
-    assert_eq!(
-        blocked_row.available_at_ms,
-        super::super::store::retry_delay_ms(1)
+    assert!(
+        blocked_row.available_at_ms
+            >= release_floor.saturating_add(super::super::store::retry_delay_ms(1)),
+        "retry backoff must start from the actual release time, not the original claim timestamp"
     );
     assert!(blocked_row.lease_token.is_none());
     assert!(
@@ -893,6 +947,7 @@ async fn due_drain_retains_old_nonterminal_rows_when_a_foreign_claim_exists() {
         .arm_reservation(&reservation, 0)
         .await
         .expect("arm reservation");
+    let release_floor = crate::time::now_ms();
 
     let summary = drain_due_effects(state.as_ref(), now_ms, 8)
         .await
@@ -913,7 +968,10 @@ async fn due_drain_retains_old_nonterminal_rows_when_a_foreign_claim_exists() {
         .await
         .expect("find requeued row")
         .expect("requeued row");
-    assert_eq!(row.available_at_ms, now_ms + 15_000);
+    assert!(
+        row.available_at_ms >= release_floor.saturating_add(15_000),
+        "foreign-claim ownership misses requeue from the actual release time"
+    );
     assert!(row.lease_token.is_none());
 }
 
@@ -1558,4 +1616,97 @@ async fn local_enqueue_timeout_still_attempts_the_rest_of_the_roster_before_rele
         .expect("find released row")
         .expect("row retained for retry");
     assert!(row.lease_token.is_none(), "lease released for retry");
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn due_drain_aborts_remaining_roster_after_lease_loss() {
+    let state = create_test_websocket_state().await;
+    let room: BareJid = "lease-loss@muc.example.com".parse().expect("room");
+    let blocked_recipient = full_jid("blocked-head@example.test/device");
+    let tail_recipient = full_jid("tail@example.test/device");
+    let lifecycle = create_owned_room_and_lifecycle_for(state.as_ref(), &room).await;
+    let reservation = enqueue_effects(
+        state.as_ref(),
+        lifecycle,
+        initial_revision(),
+        &config_effects_for(
+            &room,
+            vec![blocked_recipient.clone(), tail_recipient.clone()],
+        ),
+        0,
+    )
+    .await;
+    state
+        .deps
+        .protocol
+        .room_effect_outbox
+        .arm_reservation(&reservation, 0)
+        .await
+        .expect("arm reservation");
+    let key = RoomEffectKey {
+        lifecycle,
+        revision: initial_revision(),
+        ordinal: reservation.ordinals[0],
+    };
+
+    let (blocked_tx, _blocked_rx) = mpsc::channel::<OutboundStanza>(1);
+    register_test_connection(state.as_ref(), &blocked_recipient, blocked_tx.clone()).await;
+    blocked_tx
+        .send(OutboundStanza::new(Stanza::Presence(
+            xmpp_parsers::presence::Presence::new(xmpp_parsers::presence::Type::None),
+        )))
+        .await
+        .expect("prefill blocked recipient channel");
+    let (tail_tx, mut tail_rx) = mpsc::channel::<OutboundStanza>(4);
+    register_test_connection(state.as_ref(), &tail_recipient, tail_tx).await;
+
+    let state_for_release = Arc::clone(&state);
+    let key_for_release = key.clone();
+    let release = tokio::spawn(async move {
+        loop {
+            let row = state_for_release
+                .deps
+                .protocol
+                .room_effect_outbox
+                .find(&key_for_release)
+                .await
+                .expect("find claimed row")
+                .expect("claimed row exists");
+            if let Some(token) = row.lease_token.clone() {
+                state_for_release
+                    .deps
+                    .protocol
+                    .room_effect_outbox
+                    .release_unattempted(&key_for_release, &token, crate::time::now_ms(), 0)
+                    .await
+                    .expect("release stolen lease");
+                break;
+            }
+            tokio::task::yield_now().await;
+        }
+    });
+
+    let state_for_drain = Arc::clone(&state);
+    let drain =
+        tokio::spawn(async move { drain_due_effects(state_for_drain.as_ref(), 0, 8).await });
+    release.await.expect("release task");
+    assert!(
+        tokio::time::timeout(Duration::from_secs(6), tail_rx.recv())
+            .await
+            .is_err(),
+        "no later recipient should receive a frame after the lease is lost mid-roster"
+    );
+    let summary = drain.await.expect("drain join").expect("drain result");
+    assert_eq!(summary.drained, 0);
+    assert_eq!(summary.requeued, 0);
+    assert_eq!(summary.stale, 1, "the stolen lease is reported as stale");
+    let row = state
+        .deps
+        .protocol
+        .room_effect_outbox
+        .find(&key)
+        .await
+        .expect("find released row")
+        .expect("released row retained");
+    assert!(row.lease_token.is_none(), "lost lease must stay released");
 }

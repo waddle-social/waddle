@@ -147,7 +147,7 @@ pub async fn drain_due_effects(
     };
     let mut summary = RoomEffectDrainSummary::default();
     for claimed in claimed {
-        match drain_claimed(state, claimed, now_ms, local_rooms.as_ref(), None).await? {
+        match drain_claimed(state, claimed, now_ms, local_rooms.as_ref(), None, false).await? {
             ClaimDisposition::Completed => summary.drained += 1,
             ClaimDisposition::Requeued => summary.requeued += 1,
             ClaimDisposition::Stale => summary.stale += 1,
@@ -167,6 +167,26 @@ pub async fn drain_reservation_inline(
     state: &WebSocketState,
     reservation: &RoomEffectReservation,
     initiator: Option<&FullJid>,
+) -> Result<InlineRoomEffectDrain, RoomEffectOutboxError> {
+    drain_reservation(state, reservation, initiator, false).await
+}
+
+/// Drain a reservation produced by a command that has just committed through
+/// its local room actor. The actor acquisition is the ownership proof, so the
+/// background handoff must not reclassify the fresh row as non-local while the
+/// registry is between reconciliation steps.
+pub async fn drain_local_reservation_after_commit(
+    state: &WebSocketState,
+    reservation: &RoomEffectReservation,
+) -> Result<InlineRoomEffectDrain, RoomEffectOutboxError> {
+    drain_reservation(state, reservation, None, true).await
+}
+
+async fn drain_reservation(
+    state: &WebSocketState,
+    reservation: &RoomEffectReservation,
+    initiator: Option<&FullJid>,
+    committed_locally: bool,
 ) -> Result<InlineRoomEffectDrain, RoomEffectOutboxError> {
     let now_ms = crate::time::now_ms();
     let mut drain = InlineRoomEffectDrain::default();
@@ -201,6 +221,7 @@ pub async fn drain_reservation_inline(
             now_ms,
             inline_owned_rooms.as_ref(),
             initiator,
+            committed_locally,
         )
         .await?
         {
@@ -291,6 +312,7 @@ async fn drain_claimed(
     now_ms: i64,
     local_rooms: Result<&HashSet<jid::BareJid>, &()>,
     initiator: Option<&FullJid>,
+    committed_locally: bool,
 ) -> Result<ClaimDisposition, RoomEffectOutboxError> {
     let store = &state.deps.protocol.room_effect_outbox;
     if !store.lifecycle_is_executable(&claimed.row).await? {
@@ -299,7 +321,7 @@ async fn drain_claimed(
             .await?;
         return Ok(ClaimDisposition::Stale);
     }
-    if !claimed.row.effect.is_terminal() {
+    if !claimed.row.effect.is_terminal() && !committed_locally {
         match local_rooms {
             Ok(rooms) if rooms.contains(&claimed.row.room_jid) => {}
             Ok(_) => {
@@ -323,22 +345,24 @@ async fn drain_claimed(
                         .await?;
                     return Ok(ClaimDisposition::DeadLettered);
                 }
+                let release_now_ms = actual_release_base_ms(now_ms);
                 store
                     .release_unattempted(
                         &claimed.row.key,
                         &claimed.lease_token,
-                        now_ms,
+                        release_now_ms,
                         OWNERSHIP_RETRY_DELAY_MS,
                     )
                     .await?;
                 return Ok(ClaimDisposition::Requeued);
             }
             Err(()) => {
+                let release_now_ms = actual_release_base_ms(now_ms);
                 store
                     .release_unattempted(
                         &claimed.row.key,
                         &claimed.lease_token,
-                        now_ms,
+                        release_now_ms,
                         OWNERSHIP_RETRY_DELAY_MS,
                     )
                     .await?;
@@ -377,7 +401,21 @@ async fn drain_claimed(
     let mut inline = Vec::new();
     let mut remote_retry_needed = false;
     let mut local_retry_needed = false;
-    for (recipient, stanza) in rendered {
+    for (index, (recipient, stanza)) in rendered.into_iter().enumerate() {
+        if index > 0 && !renew_claim_lease(state, &claimed.row.key, &claimed.lease_token).await? {
+            tracing::warn!(
+                room = %claimed.row.room_jid,
+                lifecycle = %claimed.row.key.lifecycle,
+                revision = claimed.row.key.revision.as_i64(),
+                ordinal = claimed.row.key.ordinal.as_i64(),
+                "room effect outbox lost its lease mid-roster; aborting the remaining recipients"
+            );
+            // Same condition as a failed revalidate: another holder owns
+            // delivery now — report it identically so sweep telemetry (and
+            // tests) see one disposition for a lost lease regardless of
+            // which checkpoint detected it.
+            return Ok(ClaimDisposition::Stale);
+        }
         if initiator == Some(&recipient) {
             inline.push(InlineRoomEffectFrame {
                 stanza,
@@ -419,11 +457,12 @@ async fn drain_claimed(
         }
     }
     if remote_retry_needed || local_retry_needed {
+        let release_now_ms = actual_release_base_ms(now_ms);
         let _ = store
             .release(
                 &claimed.row.key,
                 &claimed.lease_token,
-                now_ms,
+                release_now_ms,
                 RoomEffectLastError::InfrastructureTransient,
             )
             .await?;
@@ -489,6 +528,23 @@ async fn await_acks(acks: Vec<oneshot::Receiver<()>>) -> bool {
     tokio::time::timeout(LOCAL_ACCEPTANCE_TIMEOUT, wait)
         .await
         .unwrap_or(false)
+}
+
+async fn renew_claim_lease(
+    state: &WebSocketState,
+    key: &RoomEffectKey,
+    token: &RoomEffectLeaseToken,
+) -> Result<bool, RoomEffectOutboxError> {
+    state
+        .deps
+        .protocol
+        .room_effect_outbox
+        .renew_lease(key, token, crate::time::now_ms())
+        .await
+}
+
+fn actual_release_base_ms(claimed_at_ms: i64) -> i64 {
+    crate::time::now_ms().max(claimed_at_ms)
 }
 
 async fn local_room_jids(

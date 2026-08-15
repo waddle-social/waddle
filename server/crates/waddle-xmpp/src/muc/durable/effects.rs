@@ -163,11 +163,14 @@ pub enum RoomEffectStagingClass {
 ///
 /// Load-bearing invariant: within one mutation's effect set, the recipient
 /// sets of distinct ordinals are DISJOINT (self-frames vs remaining
-/// broadcast vs post-removal config audiences). The inline drain relies on
-/// this: it may deliver ordinal k while ordinal k-1's lease is still retained
-/// for the response batch, so a shared recipient could otherwise observe a
-/// FIFO inversion across a crash gap. Every constructor below must preserve
-/// disjointness.
+/// broadcast vs post-removal config audiences). The server enforces the
+/// drain-side bypass with an exact recipient-overlap check against earlier
+/// retained rows, and that check is only truthful if these typed effect
+/// payloads continue to describe the full delivery audience for each ordinal.
+/// The inline drain relies on this: it may deliver ordinal k while ordinal
+/// k-1's lease is still retained for the response batch, so a shared
+/// recipient could otherwise observe a FIFO inversion across a crash gap.
+/// Every constructor below must preserve disjointness.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RoomMutationEffects {
     room_jid: Option<BareJid>,
@@ -300,7 +303,41 @@ pub struct RoomEffectReservation {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::collections::HashSet;
     use std::str::FromStr;
+
+    fn effect_recipients(effect: &RoomEffect) -> HashSet<FullJid> {
+        match effect {
+            RoomEffect::ConfigChanged { recipients, .. } => recipients.iter().cloned().collect(),
+            RoomEffect::AdminSelfNotify { updates } => updates
+                .iter()
+                .map(|update| update.recipient.clone())
+                .collect(),
+            RoomEffect::AdminRemainingBroadcast {
+                presence_updates, ..
+            } => presence_updates
+                .iter()
+                .map(|update| update.recipient.clone())
+                .collect(),
+            RoomEffect::DestroyNotification { recipients, .. } => recipients
+                .iter()
+                .flat_map(|recipient| recipient.sessions.iter().cloned())
+                .collect(),
+        }
+    }
+
+    fn effects_are_pairwise_recipient_disjoint(effects: &[RoomEffect]) -> bool {
+        let mut seen = HashSet::new();
+        for effect in effects {
+            for recipient in effect_recipients(effect) {
+                if !seen.insert(recipient) {
+                    return false;
+                }
+            }
+        }
+        true
+    }
+
     #[test]
     fn kinds_round_trip() {
         for kind in [
@@ -326,6 +363,77 @@ mod tests {
         assert!(matches!(
             config.effects()[0],
             RoomEffect::ConfigChanged { .. }
+        ));
+    }
+
+    #[test]
+    fn handler_window_constructors_keep_ordinals_recipient_disjoint() {
+        let room = BareJid::from_str("room@example.test").unwrap();
+        let alice = FullJid::from_str("alice@example.test/phone").unwrap();
+        let bob = FullJid::from_str("bob@example.test/laptop").unwrap();
+        let carol = FullJid::from_str("carol@example.test/tablet").unwrap();
+
+        let admin = RoomMutationEffects::admin(
+            room.clone(),
+            vec![OccupantPresenceUpdate {
+                recipient: alice.clone(),
+                is_self: true,
+                occupant: FullJid::from_str("room@example.test/alice").unwrap(),
+                nick: MucOccupantNick::new("alice".to_owned()).unwrap(),
+                occupant_bare_jid: BareJid::from_str("alice@example.test").unwrap(),
+                disclosed_real_jid: Some(alice.clone()),
+                affiliation: Affiliation::Member,
+                kind: AdminPresenceKind::Kicked,
+                actor: None,
+                reason: None,
+            }],
+            vec![OccupantPresenceUpdate {
+                recipient: bob.clone(),
+                is_self: false,
+                occupant: FullJid::from_str("room@example.test/alice").unwrap(),
+                nick: MucOccupantNick::new("alice".to_owned()).unwrap(),
+                occupant_bare_jid: BareJid::from_str("alice@example.test").unwrap(),
+                disclosed_real_jid: Some(alice.clone()),
+                affiliation: Affiliation::Member,
+                kind: AdminPresenceKind::RoleChanged(Role::Participant),
+                actor: None,
+                reason: None,
+            }],
+            Vec::new(),
+        );
+        assert!(effects_are_pairwise_recipient_disjoint(admin.effects()));
+
+        let members_only = RoomMutationEffects::members_only_enforcement(
+            room,
+            vec![OccupantPresenceUpdate {
+                recipient: alice.clone(),
+                is_self: true,
+                occupant: FullJid::from_str("room@example.test/alice").unwrap(),
+                nick: MucOccupantNick::new("alice".to_owned()).unwrap(),
+                occupant_bare_jid: BareJid::from_str("alice@example.test").unwrap(),
+                disclosed_real_jid: Some(alice),
+                affiliation: Affiliation::Member,
+                kind: AdminPresenceKind::MembersOnlyRemoved,
+                actor: None,
+                reason: None,
+            }],
+            vec![OccupantPresenceUpdate {
+                recipient: bob.clone(),
+                is_self: false,
+                occupant: FullJid::from_str("room@example.test/alice").unwrap(),
+                nick: MucOccupantNick::new("alice".to_owned()).unwrap(),
+                occupant_bare_jid: BareJid::from_str("alice@example.test").unwrap(),
+                disclosed_real_jid: None,
+                affiliation: Affiliation::None,
+                kind: AdminPresenceKind::MembersOnlyRemoved,
+                actor: None,
+                reason: None,
+            }],
+            vec![MucConfigStatusCode::NonPrivacyConfigurationChange],
+            vec![carol],
+        );
+        assert!(effects_are_pairwise_recipient_disjoint(
+            members_only.effects()
         ));
     }
 }

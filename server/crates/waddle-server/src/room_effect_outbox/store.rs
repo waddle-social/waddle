@@ -1,6 +1,6 @@
 use std::collections::HashSet;
 
-use jid::BareJid;
+use jid::{BareJid, FullJid};
 use waddle_xmpp::muc::{RoomEffectReservation, RoomEffectStagingClass, RoomMutationEffects};
 
 use super::schema;
@@ -355,7 +355,7 @@ impl RoomEffectOutboxStore {
         }
         if owned_leases.is_empty()
             || !self
-                .earlier_rows_are_leased_by(key, now_ms, owned_leases)
+                .earlier_retained_rows_are_owned_and_recipient_disjoint(key, now_ms, owned_leases)
                 .await?
         {
             return Ok(None);
@@ -376,7 +376,9 @@ impl RoomEffectOutboxStore {
         } else {
             "AND available_at_ms <= ?"
         };
-        let sql=format!("UPDATE clustering_muc_room_effects SET lease_token = ?, leased_at_ms = ? WHERE lifecycle_id = ? AND revision = ? AND ordinal = ? {eligibility} AND NOT superseded AND (lease_token IS NULL OR leased_at_ms <= ?) AND NOT EXISTS (SELECT 1 FROM clustering_muc_room_effects earlier WHERE earlier.lifecycle_id = clustering_muc_room_effects.lifecycle_id AND (earlier.revision < clustering_muc_room_effects.revision OR (earlier.revision = clustering_muc_room_effects.revision AND earlier.ordinal < clustering_muc_room_effects.ordinal))) AND (NOT terminal OR NOT EXISTS (SELECT 1 FROM clustering_muc_room_effects active WHERE active.lifecycle_id = clustering_muc_room_effects.lifecycle_id AND (active.revision <> clustering_muc_room_effects.revision OR active.ordinal <> clustering_muc_room_effects.ordinal) AND active.lease_token IS NOT NULL AND active.leased_at_ms > ?))");
+        let sql = format!(
+            "UPDATE clustering_muc_room_effects SET lease_token = ?, leased_at_ms = ? WHERE lifecycle_id = ? AND revision = ? AND ordinal = ? {eligibility} AND NOT superseded AND (lease_token IS NULL OR leased_at_ms <= ?) AND NOT EXISTS (SELECT 1 FROM clustering_muc_room_effects earlier WHERE earlier.lifecycle_id = clustering_muc_room_effects.lifecycle_id AND (earlier.revision < clustering_muc_room_effects.revision OR (earlier.revision = clustering_muc_room_effects.revision AND earlier.ordinal < clustering_muc_room_effects.ordinal))) AND (NOT terminal OR NOT EXISTS (SELECT 1 FROM clustering_muc_room_effects active WHERE active.lifecycle_id = clustering_muc_room_effects.lifecycle_id AND (active.revision <> clustering_muc_room_effects.revision OR active.ordinal <> clustering_muc_room_effects.ordinal) AND active.lease_token IS NOT NULL AND active.leased_at_ms > ?))"
+        );
         let mut params = crate::db_params![
             token.as_str(),
             now_ms,
@@ -403,17 +405,24 @@ impl RoomEffectOutboxStore {
             lease_token: token,
         }))
     }
-    async fn earlier_rows_are_leased_by(
+    async fn earlier_retained_rows_are_owned_and_recipient_disjoint(
         &self,
         key: &RoomEffectKey,
         now_ms: i64,
         owned_leases: &HashSet<RoomEffectLeaseToken>,
     ) -> Result<bool, RoomEffectOutboxError> {
+        let Some(candidate) = self.find(key).await? else {
+            return Ok(false);
+        };
+        let candidate_recipients = effect_recipients(&candidate.effect);
         let stale = now_ms.saturating_sub(CLAIM_TIMEOUT_MS);
         let connection = self.db.guard().await?;
         let mut rows = connection
             .query(
-                "SELECT lease_token, leased_at_ms FROM clustering_muc_room_effects WHERE lifecycle_id = ? AND (revision < ? OR (revision = ? AND ordinal < ?))",
+                &format!(
+                    "{} WHERE lifecycle_id = ? AND (revision < ? OR (revision = ? AND ordinal < ?))",
+                    select_columns()
+                ),
                 crate::db_params![
                     key.lifecycle.to_string(),
                     key.revision.as_i64(),
@@ -423,16 +432,17 @@ impl RoomEffectOutboxStore {
             )
             .await?;
         while let Some(row) = rows.next().await? {
-            let Some(token) = row
-                .get::<Option<String>>(0)?
-                .map(RoomEffectLeaseToken::from_stored)
-            else {
+            let row = decode_row(&row)?;
+            let Some(token) = row.lease_token.clone() else {
                 return Ok(false);
             };
-            let Some(leased_at_ms) = row.get::<Option<i64>>(1)? else {
+            let Some(leased_at_ms) = row.leased_at_ms else {
                 return Ok(false);
             };
-            if leased_at_ms <= stale || !owned_leases.contains(&token) {
+            if leased_at_ms <= stale
+                || !owned_leases.contains(&token)
+                || !effect_recipients(&row.effect).is_disjoint(&candidate_recipients)
+            {
                 return Ok(false);
             }
         }
@@ -750,4 +760,26 @@ fn decode_row(row: &Row) -> Result<RoomEffectRow, RoomEffectOutboxError> {
             .and_then(|value| RoomEffectLastError::from_db_str(&value)),
         created_at_ms: row.get(15)?,
     })
+}
+
+fn effect_recipients(effect: &waddle_xmpp::muc::RoomEffect) -> HashSet<FullJid> {
+    match effect {
+        waddle_xmpp::muc::RoomEffect::ConfigChanged { recipients, .. } => {
+            recipients.iter().cloned().collect()
+        }
+        waddle_xmpp::muc::RoomEffect::AdminSelfNotify { updates } => updates
+            .iter()
+            .map(|update| update.recipient.clone())
+            .collect(),
+        waddle_xmpp::muc::RoomEffect::AdminRemainingBroadcast {
+            presence_updates, ..
+        } => presence_updates
+            .iter()
+            .map(|update| update.recipient.clone())
+            .collect(),
+        waddle_xmpp::muc::RoomEffect::DestroyNotification { recipients, .. } => recipients
+            .iter()
+            .flat_map(|recipient| recipient.sessions.iter().cloned())
+            .collect(),
+    }
 }
