@@ -35,6 +35,12 @@ enum WebSocketAdmissionRevocation {
     Lifecycle(crate::clustering::NodeAdmissionError),
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ResponseBatchCompletionDisposition {
+    Complete,
+    DropForRetry,
+}
+
 /// Revalidate immediately before returning the upgrade response, and again
 /// inside the upgrade callback before any XMPP state is created. Axum/Hyper
 /// writes HTTP 101 after the handler returns, so a lifecycle transition in
@@ -1489,12 +1495,26 @@ async fn handle_inbound_text(
         BatchWriteOutcome::Continue => {
             conn.commit_server_stream_open_response();
             conn.publish_pending_sm_enable(state.as_ref());
-            spawn_response_batch_completions(state, responses.completions);
+            settle_response_batch_completions(
+                state,
+                responses.completions,
+                completion_disposition_after_live_write(conn),
+            );
         }
         BatchWriteOutcome::TransportClosed | BatchWriteOutcome::DeferredCapExhausted => {
+            settle_response_batch_completions(
+                state,
+                responses.completions,
+                ResponseBatchCompletionDisposition::DropForRetry,
+            );
             return false;
         }
         BatchWriteOutcome::AuthorityRevoked => {
+            settle_response_batch_completions(
+                state,
+                responses.completions,
+                ResponseBatchCompletionDisposition::DropForRetry,
+            );
             // No further frame was recorded or written. Any `<enable/>`
             // response that did reach the socket returned Continue and must
             // still publish synchronously at its wire commit point.
@@ -1818,10 +1838,29 @@ fn record_response_batch_for_replay(
     responses: ResponseBatch,
     policy: BatchSmPolicy,
 ) {
-    let should_complete = matches!(policy, BatchSmPolicy::Record) && !conn.sm_recovery_required;
+    let completion_disposition = completion_disposition_after_replay_record(conn, policy);
     batch_write::record_remaining_for_replay(conn, responses.frames.into_iter(), policy);
-    if should_complete {
-        spawn_response_batch_completions(state, responses.completions);
+    settle_response_batch_completions(state, responses.completions, completion_disposition);
+}
+
+fn completion_disposition_after_live_write(
+    conn: &WsConnState,
+) -> ResponseBatchCompletionDisposition {
+    if conn.sm_recovery_required {
+        ResponseBatchCompletionDisposition::DropForRetry
+    } else {
+        ResponseBatchCompletionDisposition::Complete
+    }
+}
+
+fn completion_disposition_after_replay_record(
+    conn: &WsConnState,
+    policy: BatchSmPolicy,
+) -> ResponseBatchCompletionDisposition {
+    if matches!(policy, BatchSmPolicy::Record) && !conn.sm_recovery_required {
+        ResponseBatchCompletionDisposition::Complete
+    } else {
+        ResponseBatchCompletionDisposition::DropForRetry
     }
 }
 
@@ -1856,10 +1895,20 @@ fn response_batch_ends_with_websocket_stream_close(responses: &[String]) -> bool
         .is_some_and(|frame| frame == &websocket_close)
 }
 
-fn spawn_response_batch_completions(
+fn settle_response_batch_completions(
     state: &Arc<WebSocketState>,
     completions: Vec<crate::room_effect_outbox::drain::RoomEffectCompletion>,
+    disposition: ResponseBatchCompletionDisposition,
 ) {
+    if !matches!(disposition, ResponseBatchCompletionDisposition::Complete) {
+        if !completions.is_empty() {
+            debug!(
+                retained = completions.len(),
+                "Retaining room effect completions for retry after response batch was not durably accepted"
+            );
+        }
+        return;
+    }
     let mut seen = std::collections::HashSet::new();
     for completion in completions {
         if !seen.insert((completion.key.clone(), completion.lease.clone())) {
@@ -2610,6 +2659,68 @@ mod tests {
         })
         .await
         .expect("replay recording should finish the retained completion");
+    }
+
+    #[tokio::test]
+    async fn terminal_recovery_replay_recording_retains_inline_room_effect_reservations_for_retry()
+    {
+        let state = super::super::tests::create_test_websocket_state().await;
+        let room_jid = replay_completion_room_jid();
+        let initiator: FullJid = "alice@example.com/device".parse().expect("initiator JID");
+        let lifecycle =
+            create_owned_room_and_lifecycle_for_replay_completion(state.as_ref(), &room_jid).await;
+        let reservation = enqueue_inline_config_reservation_for_replay_completion(
+            state.as_ref(),
+            lifecycle,
+            &initiator,
+        )
+        .await;
+        let mut frames = crate::room_effect_outbox::drain::drain_reservation_inline(
+            state.as_ref(),
+            &reservation,
+            Some(&initiator),
+        )
+        .await
+        .expect("inline drain");
+        assert_eq!(
+            frames.len(),
+            1,
+            "one initiator frame should carry one completion"
+        );
+        let frame = frames.frames.pop().expect("inline frame");
+
+        let mut conn = WsConnState::new();
+        conn.sm_state
+            .enable("terminal-replay-completion".to_string(), true, Some(300));
+        conn.begin_terminal_sm_recovery();
+        record_response_batch_for_replay(
+            &state,
+            &mut conn,
+            ResponseBatch {
+                frames: vec![crate::server::routes::websocket::stanza_to_xml(
+                    &frame.stanza,
+                )],
+                completions: vec![frame.completion],
+            },
+            BatchSmPolicy::Record,
+        );
+
+        assert_eq!(
+            conn.terminal_sm_recovery.queue_len(),
+            1,
+            "the initiator reply is retained in the terminal recovery replay buffer"
+        );
+        assert_eq!(
+            state
+                .deps
+                .protocol
+                .room_effect_outbox
+                .queue_depth()
+                .await
+                .expect("queue depth"),
+            1,
+            "terminal recovery must retain the leased completion for janitor retry"
+        );
     }
 
     #[tokio::test]

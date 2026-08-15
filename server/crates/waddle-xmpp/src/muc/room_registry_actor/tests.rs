@@ -4380,6 +4380,84 @@ mod ownership_claims_tests {
     }
 
     #[tokio::test]
+    async fn get_or_create_with_live_roster_restores_occupants_from_typed_ids() {
+        use crate::muc::durable::{ChannelId, WaddleId};
+        use crate::muc::room_actor::{GetSnapshot, JoinAffiliationGrant, JoinWithAffiliation};
+        use crate::Affiliation;
+
+        let registry = spawn_registry().await;
+        let source_jid = test_room_jid("live-roster-source");
+        let source_actor = registry
+            .ask(GetOrCreateRoom {
+                room_jid: source_jid,
+                waddle_id: "source-waddle".to_string(),
+                channel_id: "source-channel".to_string(),
+                config: RoomConfig {
+                    name: "stale live roster".to_string(),
+                    ..RoomConfig::default()
+                },
+            })
+            .await
+            .expect("create source room")
+            .actor_ref;
+        let member: jid::FullJid = "alice@example.com/web".parse().expect("member full JID");
+        source_actor
+            .ask(JoinWithAffiliation {
+                sender_jid: member.clone(),
+                nick: "alice".to_string(),
+                affiliation_grant: JoinAffiliationGrant::Resolver(Affiliation::Member),
+                local_domain: "example.com".to_string(),
+                admission_revision: 0,
+            })
+            .await
+            .expect("join source room");
+        let stale_room = source_actor
+            .ask(GetSnapshot)
+            .await
+            .expect("source snapshot")
+            .room;
+
+        let recovered_jid = test_room_jid("live-roster-recovered");
+        let acquisition = registry
+            .ask(GetOrCreateRoomWithLiveRoster {
+                room_jid: recovered_jid.clone(),
+                waddle_id: WaddleId::new("typed-waddle".to_string()),
+                channel_id: ChannelId::new("typed-channel".to_string()),
+                config: RoomConfig {
+                    name: "authoritative successor".to_string(),
+                    ..RoomConfig::default()
+                },
+                live_room_restore: stale_room,
+            })
+            .await
+            .expect("recover room with typed live roster");
+        assert_eq!(acquisition.creation, RoomCreation::Created);
+
+        let snapshot = acquisition
+            .actor_ref
+            .ask(GetSnapshot)
+            .await
+            .expect("recovered snapshot");
+        let restored = snapshot
+            .room
+            .find_occupant_by_real_jid(&member)
+            .expect("restored occupant");
+        assert_eq!(restored.nick, "alice");
+        assert_eq!(snapshot.room.config.name, "authoritative successor");
+        assert_eq!(
+            registry
+                .ask(GetRoom {
+                    room_jid: recovered_jid,
+                })
+                .await
+                .expect("lookup recovered room")
+                .expect("recovered room exists")
+                .id(),
+            acquisition.actor_ref.id()
+        );
+    }
+
+    #[tokio::test]
     async fn blocked_restore_coalesces_its_lookup_without_blocking_unrelated_rooms() {
         let registry = spawn_registry().await;
         let blocked_jid = test_room_jid("blocked-restore");

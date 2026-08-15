@@ -2399,6 +2399,12 @@ async fn run_group_dm_rename(
             return Err(group_dm_rename_update_error(state, &args.room_jid, &actor, error).await)
         }
     };
+    // A committed config row must be registered with the producer supervisor
+    // before any later await.  The rename path has several catalog and
+    // bookmark awaits below, and a cancelled handler must not strand its
+    // staged reservation while this node remains a live producer.
+    let mut config_reservation =
+        CommittedAdminConfigReservationGuard::new(websocket_state, config_reservation);
     let expected_revision = updated_snapshot.config_revision;
     if reconciled_broadcast_snapshot.is_none()
         && find_occupant_for_full_jid(&updated_snapshot, caller_full_jid).is_none()
@@ -2418,7 +2424,7 @@ async fn run_group_dm_rename(
             &actor,
             expected_revision,
             previous_config,
-            config_reservation.clone(),
+            config_reservation.reservation().cloned(),
         )
         .await;
         return Err(error);
@@ -2437,7 +2443,7 @@ async fn run_group_dm_rename(
                 &actor,
                 expected_revision,
                 previous_config.clone(),
-                config_reservation.clone(),
+                config_reservation.reservation().cloned(),
             )
             .await
             {
@@ -2458,7 +2464,7 @@ async fn run_group_dm_rename(
                     room_jid: &args.room_jid,
                     previous_config: &previous_config,
                     expected_revision,
-                    config_reservation: config_reservation.clone(),
+                    config_reservation: config_reservation.reservation().cloned(),
                     updated_members: &updated_bookmark_members,
                 },
             )
@@ -2480,7 +2486,7 @@ async fn run_group_dm_rename(
                 &actor,
                 expected_revision,
                 previous_config.clone(),
-                config_reservation.clone(),
+                config_reservation.reservation().cloned(),
             )
             .await
             {
@@ -2508,7 +2514,7 @@ async fn run_group_dm_rename(
                 room_jid: &args.room_jid,
                 previous_config: &previous_config,
                 expected_revision,
-                config_reservation: config_reservation.clone(),
+                config_reservation: config_reservation.reservation().cloned(),
                 updated_members: &updated_bookmark_members,
             },
         )
@@ -2517,7 +2523,7 @@ async fn run_group_dm_rename(
             "group-DM rename was superseded by a newer update".to_string(),
         )))));
     }
-    if let Some(reservation) = config_reservation.as_ref() {
+    if let Some(reservation) = config_reservation.reservation() {
         arm_config_effect_reservation(websocket_state, reservation);
     } else if let Some(broadcast_snapshot) = reconciled_broadcast_snapshot.as_ref() {
         broadcast_group_dm_config_change(connections, &args.room_jid, broadcast_snapshot);
@@ -2528,6 +2534,7 @@ async fn run_group_dm_rename(
             .map_err(send_err("room actor GetSnapshot"))?;
         broadcast_group_dm_config_change(connections, &args.room_jid, &broadcast_snapshot);
     }
+    config_reservation.clear();
 
     Ok(GroupDmRenameResult {
         room_jid: args.room_jid.clone(),
@@ -2897,6 +2904,62 @@ fn arm_config_effect_reservation(
 struct CommittedAdminConfigReservationGuard<'a> {
     websocket_state: &'a WebSocketState,
     reservation: Option<waddle_xmpp::muc::RoomEffectReservation>,
+    pending_members_only_enforcement: Option<PendingAdminMembersOnlyEnforcement>,
+}
+
+struct PendingAdminMembersOnlyEnforcement {
+    actor: ActorRef<RoomActor>,
+    affiliations: Vec<(BareJid, Affiliation)>,
+    fallback_reservation: Option<waddle_xmpp::muc::RoomEffectReservation>,
+    config_status_codes: Vec<waddle_xmpp::muc::MucConfigStatusCode>,
+    room_jid: BareJid,
+    sfu: Option<Arc<dyn waddle_sfu::SfuService>>,
+    arm_supervisor: crate::room_effect_outbox::RoomEffectArmSupervisor,
+}
+
+impl PendingAdminMembersOnlyEnforcement {
+    async fn run(self) {
+        let Self {
+            actor,
+            affiliations,
+            fallback_reservation,
+            config_status_codes,
+            room_jid,
+            sfu,
+            arm_supervisor,
+        } = self;
+        let fallback_on_failure = fallback_reservation.clone();
+        match actor
+            .ask(EnforceMembersOnlyAffiliations {
+                affiliations,
+                fallback_reservation,
+                config_status_codes,
+            })
+            .await
+        {
+            Ok(applied) => {
+                if let Some(reservation) = applied.outbox_reservation.as_ref() {
+                    arm_supervisor.arm(reservation.clone());
+                }
+                evict_moderation_removals(sfu.as_ref(), &room_jid, &applied.removed_by_moderation);
+                crate::server::routes::websocket::muc_call_sfu::converge_voice_changes_via_sfu(
+                    sfu.as_ref(),
+                    &room_jid,
+                    &applied.voice_changes,
+                );
+            }
+            Err(error) => {
+                if let Some(reservation) = fallback_on_failure {
+                    arm_supervisor.arm(reservation);
+                }
+                tracing::warn!(
+                    room = %room_jid,
+                    ?error,
+                    "cancelled admin channel config recovery could not enforce members-only"
+                );
+            }
+        }
+    }
 }
 
 impl<'a> CommittedAdminConfigReservationGuard<'a> {
@@ -2907,6 +2970,7 @@ impl<'a> CommittedAdminConfigReservationGuard<'a> {
         Self {
             websocket_state,
             reservation,
+            pending_members_only_enforcement: None,
         }
     }
 
@@ -2923,11 +2987,27 @@ impl<'a> CommittedAdminConfigReservationGuard<'a> {
 
     fn clear(&mut self) {
         self.reservation = None;
+        self.pending_members_only_enforcement = None;
+    }
+
+    fn defer_to_members_only_enforcement(
+        &mut self,
+        pending_members_only_enforcement: PendingAdminMembersOnlyEnforcement,
+    ) {
+        self.pending_members_only_enforcement = Some(pending_members_only_enforcement);
+    }
+
+    fn clear_members_only_enforcement(&mut self) {
+        self.pending_members_only_enforcement = None;
     }
 }
 
 impl Drop for CommittedAdminConfigReservationGuard<'_> {
     fn drop(&mut self) {
+        if let Some(pending) = self.pending_members_only_enforcement.take() {
+            tokio::spawn(pending.run());
+            return;
+        }
         if let Some(reservation) = self.reservation() {
             arm_config_effect_reservation(self.websocket_state, reservation);
         }
@@ -3107,8 +3187,8 @@ async fn recover_actor_with_merged_live_roster(
         .room_registry
         .ask(GetOrCreateRoomWithLiveRoster {
             room_jid: room_jid.clone(),
-            waddle_id: spec.waddle_id.to_string(),
-            channel_id: spec.channel_id.to_string(),
+            waddle_id: waddle_xmpp::muc::durable::WaddleId::new(spec.waddle_id.to_string()),
+            channel_id: waddle_xmpp::muc::durable::ChannelId::new(spec.channel_id.to_string()),
             config: spec.config,
             live_room_restore: stale_room,
         })
@@ -3751,6 +3831,21 @@ async fn run_update(
     let expected_revision = applied_config.revision;
     let mut config_reservation =
         CommittedAdminConfigReservationGuard::new(websocket_state, applied_config.reservation);
+    if let Some(affiliations) = members_only_enforcement_affiliations.as_ref() {
+        config_reservation.defer_to_members_only_enforcement(PendingAdminMembersOnlyEnforcement {
+            actor: actor.clone(),
+            affiliations: affiliations.clone(),
+            fallback_reservation: config_reservation.reservation().cloned(),
+            config_status_codes: waddle_xmpp::muc::config_change_status_codes(&existing, &updated),
+            room_jid: args.channel_jid.clone(),
+            sfu: sfu.cloned(),
+            arm_supervisor: websocket_state
+                .deps
+                .protocol
+                .room_effect_arm_supervisor
+                .clone(),
+        });
+    }
 
     if let Err(error) = upsert_channel_catalog(state, &channel_id, &updated, new_channel_type).await
     {
@@ -3841,6 +3936,7 @@ async fn run_update(
                 }
                 send_err("room actor EnforceMembersOnlyAffiliations")(error)
             })?;
+        config_reservation.clear_members_only_enforcement();
         let enforcement_has_reservation = applied.outbox_reservation.is_some();
         arm_reservation = applied.outbox_reservation;
         if enforcement_has_reservation {
@@ -5435,6 +5531,72 @@ mod tests {
         wait_for_admin_reservation_to_arm(state.as_ref(), &recovered).await;
         drain_admin_effect_and_ack(state, &mut receiver).await;
     }
+
+    #[tokio::test]
+    async fn failed_cancelled_members_only_enforcement_arms_its_config_fallback() {
+        let state = create_test_websocket_state().await;
+        let room_jid = admin_effect_room_jid();
+        let lifecycle = RoomLifecycleId::generate();
+        create_owned_admin_effect_room(state.as_ref(), &room_jid, lifecycle).await;
+        let actor = state
+            .deps
+            .protocol
+            .room_registry
+            .ask(GetRoom {
+                room_jid: room_jid.clone(),
+            })
+            .await
+            .expect("room lookup")
+            .expect("room actor");
+        let recipient: FullJid = "alice@example.com/admin".parse().expect("recipient JID");
+        let reservation = stage_admin_config_effect(
+            state.as_ref(),
+            lifecycle,
+            RoomRevision::initial(),
+            &room_jid,
+            recipient,
+        )
+        .await;
+        let key = RoomEffectKey {
+            lifecycle,
+            revision: reservation.revision,
+            ordinal: reservation.ordinals[0],
+        };
+        actor.kill();
+        let mut guard =
+            CommittedAdminConfigReservationGuard::new(state.as_ref(), Some(reservation.clone()));
+        guard.defer_to_members_only_enforcement(PendingAdminMembersOnlyEnforcement {
+            actor,
+            affiliations: Vec::new(),
+            fallback_reservation: Some(reservation),
+            config_status_codes: vec![MucConfigStatusCode::NonPrivacyConfigurationChange],
+            room_jid,
+            sfu: None,
+            arm_supervisor: state.deps.protocol.room_effect_arm_supervisor.clone(),
+        });
+        drop(guard);
+
+        tokio::time::timeout(Duration::from_secs(1), async {
+            loop {
+                if state
+                    .deps
+                    .protocol
+                    .room_effect_outbox
+                    .find(&key)
+                    .await
+                    .expect("fallback row lookup")
+                    .expect("fallback row")
+                    .available_at_ms
+                    != i64::MAX
+                {
+                    return;
+                }
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("failed detached enforcement arms the staged config fallback");
+    }
 }
 
 #[cfg(test)]
@@ -6357,6 +6519,268 @@ mod group_dm_durable_reconciliation_tests {
     }
 
     #[tokio::test]
+    async fn cancelled_group_dm_member_config_arms_its_committed_reservation() {
+        let websocket_state =
+            crate::server::routes::websocket::tests::create_test_websocket_state().await;
+        let state = websocket_state.deps.app_state.as_ref();
+        let durable_store = TestGroupDmDurableStore::with_outbox(
+            DurableMode::CommitSucceeds,
+            Arc::clone(&websocket_state.deps.protocol.room_effect_outbox),
+        );
+        let claim_store: Arc<dyn ClaimStore> = Arc::new(InProcessClaimStore::new());
+        state
+            .room_registry
+            .ask(WireClusteringClaims {
+                claim_store,
+                node_identity: SharedNodeIdentity::new(NodeIdentity::new(
+                    "group-dm-cancellation-node",
+                    "group-dm-cancellation-epoch",
+                )),
+                durable_store: Some(durable_store),
+                rollout_backoff: None,
+            })
+            .await
+            .expect("wire durable group-DM store");
+
+        let room_jid: BareJid = "group-dm-cancellation@muc.localhost"
+            .parse()
+            .expect("room JID");
+        let member: BareJid = "alice@localhost".parse().expect("member JID");
+        let caller: FullJid = "alice@localhost/web".parse().expect("caller JID");
+        let (_channel_id, actor) =
+            seed_group_dm(state, &room_jid, "Before", std::slice::from_ref(&member)).await;
+        actor
+            .ask(Join {
+                nick: "alice".to_owned(),
+                real_jid: caller.clone(),
+                role: Role::Participant,
+                affiliation: Affiliation::Member,
+            })
+            .await
+            .expect("seat group-DM member");
+        let mut updated = actor
+            .ask(waddle_xmpp::muc::room_actor::GetSnapshot)
+            .await
+            .expect("snapshot")
+            .room
+            .config;
+        updated.name = "After".to_owned();
+        let applied = actor
+            .ask(waddle_xmpp::muc::room_actor::UpdateGroupDmConfigByMember {
+                config: updated,
+                sender_jid: caller,
+            })
+            .await
+            .expect("member config commit");
+        let reservation = applied.reservation.expect("staged config reservation");
+        let key = crate::room_effect_outbox::RoomEffectKey {
+            lifecycle: reservation.lifecycle,
+            revision: reservation.revision,
+            ordinal: reservation.ordinals[0],
+        };
+        let store = websocket_state.deps.protocol.room_effect_outbox.as_ref();
+        assert_eq!(
+            store
+                .find(&key)
+                .await
+                .expect("staged row lookup")
+                .expect("staged row")
+                .available_at_ms,
+            i64::MAX,
+            "the config reservation starts inert"
+        );
+
+        // This drop is the cancellation window before `run_group_dm_rename`
+        // reaches its catalog and bookmark awaits.
+        drop(CommittedAdminConfigReservationGuard::new(
+            websocket_state.as_ref(),
+            Some(reservation),
+        ));
+
+        tokio::time::timeout(std::time::Duration::from_secs(1), async {
+            loop {
+                if store
+                    .find(&key)
+                    .await
+                    .expect("armed row lookup")
+                    .expect("armed row")
+                    .available_at_ms
+                    != i64::MAX
+                {
+                    return;
+                }
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("cancelled member-config producer arms its committed reservation");
+    }
+
+    #[tokio::test]
+    async fn cancelled_channel_members_only_flip_enforces_and_supersedes_config_fallback() {
+        let websocket_state =
+            crate::server::routes::websocket::tests::create_test_websocket_state().await;
+        let state = websocket_state.deps.app_state.as_ref();
+        let durable_store = TestGroupDmDurableStore::with_outbox(
+            DurableMode::CommitSucceeds,
+            Arc::clone(&websocket_state.deps.protocol.room_effect_outbox),
+        );
+        let claim_store: Arc<dyn ClaimStore> = Arc::new(InProcessClaimStore::new());
+        state
+            .room_registry
+            .ask(WireClusteringClaims {
+                claim_store,
+                node_identity: SharedNodeIdentity::new(NodeIdentity::new(
+                    "members-only-cancellation-node",
+                    "members-only-cancellation-epoch",
+                )),
+                durable_store: Some(durable_store),
+                rollout_backoff: None,
+            })
+            .await
+            .expect("wire durable channel store");
+
+        let room_jid: BareJid = "members-only-cancellation@muc.localhost"
+            .parse()
+            .expect("room JID");
+        let owner_bare: BareJid = "owner@localhost".parse().expect("owner JID");
+        let non_member_bare: BareJid = "bob@localhost".parse().expect("non-member JID");
+        let owner: FullJid = "owner@localhost/web".parse().expect("owner session");
+        let non_member: FullJid = "bob@localhost/web".parse().expect("non-member session");
+        let (_channel_id, actor) = seed_managed_channel(
+            state,
+            &room_jid,
+            "Before",
+            &[(owner_bare.clone(), Affiliation::Owner)],
+        )
+        .await;
+        for (nick, real_jid, affiliation) in [
+            ("owner", owner.clone(), Affiliation::Owner),
+            ("bob", non_member.clone(), Affiliation::None),
+        ] {
+            actor
+                .ask(Join {
+                    nick: nick.to_owned(),
+                    real_jid,
+                    role: Role::Participant,
+                    affiliation,
+                })
+                .await
+                .expect("seat test occupant");
+        }
+        let mut open_config = actor
+            .ask(waddle_xmpp::muc::room_actor::GetSnapshot)
+            .await
+            .expect("initial snapshot")
+            .room
+            .config;
+        open_config.members_only = false;
+        let _ = actor
+            .ask(UpdateConfig {
+                config: open_config,
+                effect_plan: waddle_xmpp::muc::room_actor::ConfigEffectPlan::DirectAudience,
+            })
+            .await
+            .expect("open the seeded channel");
+        let previous = actor
+            .ask(waddle_xmpp::muc::room_actor::GetSnapshot)
+            .await
+            .expect("snapshot")
+            .room
+            .config;
+        let mut updated = previous.clone();
+        updated.members_only = true;
+        let config_status_codes = waddle_xmpp::muc::config_change_status_codes(&previous, &updated);
+        let committed = actor
+            .ask(UpdateConfig {
+                config: updated,
+                effect_plan:
+                    waddle_xmpp::muc::room_actor::ConfigEffectPlan::ManagedMembersOnlyFallback,
+            })
+            .await
+            .expect("members-only config commit");
+        let fallback_reservation = committed.reservation.expect("staged fallback reservation");
+        let lifecycle = fallback_reservation.lifecycle;
+        let fallback_revision = fallback_reservation.revision;
+        let mut guard = CommittedAdminConfigReservationGuard::new(
+            websocket_state.as_ref(),
+            Some(fallback_reservation.clone()),
+        );
+        guard.defer_to_members_only_enforcement(PendingAdminMembersOnlyEnforcement {
+            actor: actor.clone(),
+            affiliations: vec![
+                (owner_bare, Affiliation::Owner),
+                (non_member_bare, Affiliation::None),
+            ],
+            fallback_reservation: Some(fallback_reservation),
+            config_status_codes,
+            room_jid: room_jid.clone(),
+            sfu: None,
+            arm_supervisor: websocket_state
+                .deps
+                .protocol
+                .room_effect_arm_supervisor
+                .clone(),
+        });
+
+        // This drop models cancellation after the config commit but before the
+        // caller reaches `EnforceMembersOnlyAffiliations`.
+        drop(guard);
+
+        tokio::time::timeout(std::time::Duration::from_secs(1), async {
+            loop {
+                let snapshot = actor
+                    .ask(waddle_xmpp::muc::room_actor::GetSnapshot)
+                    .await
+                    .expect("post-cancellation snapshot");
+                if snapshot
+                    .room
+                    .find_occupant_by_real_jid(&non_member)
+                    .is_none()
+                {
+                    return;
+                }
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("detached enforcement evicts the non-member");
+
+        let rows = websocket_state
+            .deps
+            .protocol
+            .room_effect_outbox
+            .list_for_lifecycle(lifecycle)
+            .await
+            .expect("list durable effects");
+        let config_recipients: Vec<_> = rows
+            .iter()
+            .filter(|row| row.key.revision > fallback_revision)
+            .filter_map(|row| match &row.effect {
+                waddle_xmpp::muc::RoomEffect::ConfigChanged { recipients, .. } => {
+                    Some(recipients.as_slice())
+                }
+                _ => None,
+            })
+            .flatten()
+            .collect();
+        assert_eq!(
+            config_recipients,
+            vec![&owner],
+            "the enforcement supersedes the fallback and leaves one config notification"
+        );
+        assert!(
+            rows.iter().any(|row| matches!(
+                &row.effect,
+                waddle_xmpp::muc::RoomEffect::AdminSelfNotify { updates }
+                    if row.key.revision > fallback_revision
+                        && updates.iter().any(|update| update.recipient == non_member)
+            )),
+            "the replacement effect includes the non-member's status-322 removal"
+        );
+    }
+
+    #[tokio::test]
     async fn group_dm_rename_recovery_preserves_post_publication_leave_and_join() {
         let websocket_state =
             crate::server::routes::websocket::tests::create_test_websocket_state().await;
@@ -6668,29 +7092,36 @@ mod group_dm_durable_reconciliation_tests {
         };
         wait_for_room_effect_to_arm(websocket_state.as_ref(), &key).await;
 
-        let drain_state = Arc::clone(&websocket_state);
-        let drain = tokio::spawn(async move {
-            crate::room_effect_outbox::drain::drain_due_effects(
-                drain_state.as_ref(),
-                crate::time::now_ms(),
-                8,
-            )
-            .await
-        });
-        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
-        let outbound = tokio::time::timeout(std::time::Duration::from_secs(10), receiver.recv())
-            .await
-            .expect("async drain reaches caller connection")
-            .expect("caller connection remains open");
+        // Drain-and-poll instead of one spawned drain + one recv: the
+        // command's own detached drain can already hold (or have released
+        // with backoff) the row's lease, so a single drain pass at a fixed
+        // instant races it. Alternate recv attempts with fresh drain passes
+        // (using a due-time far in the future so backoff never hides the
+        // row) until the frame lands.
+        let outbound = tokio::time::timeout(std::time::Duration::from_secs(30), async {
+            loop {
+                if let Ok(frame) =
+                    tokio::time::timeout(std::time::Duration::from_millis(200), receiver.recv())
+                        .await
+                {
+                    return frame.expect("caller connection remains open");
+                }
+                let _ = crate::room_effect_outbox::drain::drain_due_effects(
+                    websocket_state.as_ref(),
+                    crate::time::now_ms()
+                        .saturating_add(crate::room_effect_outbox::MAX_RETRY_DELAY_MS),
+                    8,
+                )
+                .await;
+            }
+        })
+        .await
+        .expect("async drain reaches caller connection");
         outbound
             .write_acceptance
             .as_ref()
             .expect("admin effect retains write acceptance")
             .acknowledge();
-        let _ = drain
-            .await
-            .expect("manual drain joins")
-            .expect("manual drain succeeds");
         tokio::time::timeout(std::time::Duration::from_secs(10), async {
             loop {
                 if websocket_state

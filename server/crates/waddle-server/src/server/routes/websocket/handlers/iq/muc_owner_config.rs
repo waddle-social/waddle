@@ -136,6 +136,67 @@ fn request_config_reservation_arm(
 struct CommittedConfigReservationGuard<'a> {
     state: &'a WebSocketState,
     reservation: Option<waddle_xmpp::muc::RoomEffectReservation>,
+    pending_members_only_enforcement: Option<PendingMembersOnlyEnforcement>,
+}
+
+struct PendingMembersOnlyEnforcement {
+    actor: kameo::actor::ActorRef<waddle_xmpp::muc::room_actor::RoomActor>,
+    affiliations: Vec<(BareJid, waddle_xmpp::Affiliation)>,
+    fallback_reservation: Option<waddle_xmpp::muc::RoomEffectReservation>,
+    config_status_codes: Vec<waddle_xmpp::muc::MucConfigStatusCode>,
+    room_jid: BareJid,
+    connections: std::sync::Arc<waddle_xmpp::registry::ConnectionRegistry>,
+    sfu: Option<std::sync::Arc<dyn waddle_sfu::SfuService>>,
+    arm_supervisor: crate::room_effect_outbox::RoomEffectArmSupervisor,
+}
+
+impl PendingMembersOnlyEnforcement {
+    async fn run(self) {
+        let Self {
+            actor,
+            affiliations,
+            fallback_reservation,
+            config_status_codes,
+            room_jid,
+            connections,
+            sfu,
+            arm_supervisor,
+        } = self;
+        let fallback_on_failure = fallback_reservation.clone();
+        match actor
+            .ask(EnforceMembersOnlyAffiliations {
+                affiliations,
+                fallback_reservation,
+                config_status_codes,
+            })
+            .await
+        {
+            Ok(applied) => {
+                super::super::super::muc_call_sfu::converge_members_only_sweep_via_sfu(
+                    sfu.as_ref(),
+                    &room_jid,
+                    &applied,
+                );
+                if let Some(reservation) = applied.outbox_reservation.as_ref() {
+                    arm_supervisor.arm(reservation.clone());
+                } else {
+                    for (recipient, presence) in applied.presence_updates {
+                        let _ = connections.try_send_to(&recipient, Stanza::Presence(presence));
+                    }
+                }
+            }
+            Err(error) => {
+                if let Some(reservation) = fallback_on_failure {
+                    arm_supervisor.arm(reservation);
+                }
+                tracing::warn!(
+                    room = %room_jid,
+                    ?error,
+                    "cancelled owner config recovery could not enforce members-only"
+                );
+            }
+        }
+    }
 }
 
 impl<'a> CommittedConfigReservationGuard<'a> {
@@ -143,7 +204,11 @@ impl<'a> CommittedConfigReservationGuard<'a> {
         state: &'a WebSocketState,
         reservation: Option<waddle_xmpp::muc::RoomEffectReservation>,
     ) -> Self {
-        Self { state, reservation }
+        Self {
+            state,
+            reservation,
+            pending_members_only_enforcement: None,
+        }
     }
 
     fn reservation(&self) -> Option<&waddle_xmpp::muc::RoomEffectReservation> {
@@ -159,11 +224,27 @@ impl<'a> CommittedConfigReservationGuard<'a> {
 
     fn clear(&mut self) {
         self.reservation = None;
+        self.pending_members_only_enforcement = None;
+    }
+
+    fn defer_to_members_only_enforcement(
+        &mut self,
+        pending_members_only_enforcement: PendingMembersOnlyEnforcement,
+    ) {
+        self.pending_members_only_enforcement = Some(pending_members_only_enforcement);
+    }
+
+    fn clear_members_only_enforcement(&mut self) {
+        self.pending_members_only_enforcement = None;
     }
 }
 
 impl Drop for CommittedConfigReservationGuard<'_> {
     fn drop(&mut self) {
+        if let Some(pending) = self.pending_members_only_enforcement.take() {
+            tokio::spawn(pending.run());
+            return;
+        }
         request_config_reservation_arm(self.state, self.reservation());
     }
 }
@@ -401,6 +482,18 @@ pub(super) async fn apply_muc_owner_config(
     let config_status_codes =
         waddle_xmpp::muc::config_change_status_codes(&previous_config, &config);
     let mut config_reservation = CommittedConfigReservationGuard::new(state, config_reservation);
+    if let Some(affiliations) = managed_enforcement_affiliations.as_ref() {
+        config_reservation.defer_to_members_only_enforcement(PendingMembersOnlyEnforcement {
+            actor: room_actor.clone(),
+            affiliations: affiliations.clone(),
+            fallback_reservation: config_reservation.reservation().cloned(),
+            config_status_codes: config_status_codes.clone(),
+            room_jid: room_jid.clone(),
+            connections: state.deps.protocol.connection_registry.clone(),
+            sfu: state.deps.protocol.sfu.clone(),
+            arm_supervisor: state.deps.protocol.room_effect_arm_supervisor.clone(),
+        });
+    }
 
     let Some(channel_id) = channel_id else {
         if !previous_members_only && config.members_only {
@@ -520,6 +613,7 @@ pub(super) async fn apply_muc_owner_config(
                 .await
                 .map_err(|error| format!("members-only enforcement failed: {error:?}"))?
         };
+        config_reservation.clear_members_only_enforcement();
         if applied.outbox_reservation.is_some() {
             let _ = config_reservation.replace(applied.outbox_reservation.clone());
         }

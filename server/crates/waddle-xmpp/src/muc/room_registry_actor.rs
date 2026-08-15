@@ -4650,8 +4650,8 @@ pub struct GetOrCreateRoom {
 
 pub struct GetOrCreateRoomWithLiveRoster {
     pub room_jid: BareJid,
-    pub waddle_id: String,
-    pub channel_id: String,
+    pub waddle_id: WaddleId,
+    pub channel_id: ChannelId,
     pub config: RoomConfig,
     pub live_room_restore: MucRoom,
 }
@@ -4723,8 +4723,8 @@ impl kameo::message::Message<GetOrCreateRoomWithLiveRoster> for RoomRegistryActo
             )));
         }
         let creation_spec = Arc::new(RoomCreationSpec {
-            waddle_id: msg.waddle_id,
-            channel_id: msg.channel_id,
+            waddle_id: msg.waddle_id.into_string(),
+            channel_id: msg.channel_id.into_string(),
             config: msg.config,
             initial_affiliations: Vec::new(),
             live_room_restore: Some(msg.live_room_restore),
