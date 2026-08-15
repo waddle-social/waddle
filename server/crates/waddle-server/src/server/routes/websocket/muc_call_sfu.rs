@@ -18,6 +18,7 @@
 //! session in is a benign no-op.
 
 use jid::{BareJid, FullJid};
+use std::collections::{BTreeMap, HashSet};
 use waddle_sfu::{
     CallId, Identity, MediaCapabilities, ObservedCallSids, SidObservationDisposition,
     TeardownDisposition,
@@ -85,30 +86,7 @@ pub(crate) fn unregister_participant_via_sfu(
     let _ = sfu.unregister_call_participant(&call_id, &identity, None);
 }
 
-/// Converge `jid`'s live SFU media grants with their XEP-0045 voice
-/// after a non-removal change — an explicit role change, or an
-/// affiliation change that re-derived their role. The SFU layer
-/// revokes outstanding join tokens on a downgrade and pushes the new
-/// permission to LiveKit fire-and-forget, so moderation handling is
-/// never blocked on the SFU.
-///
-/// Same no-op conditions as [`unregister_participant_from_room`]
-/// (no SFU configured, room JID not a valid call-id).
-pub(crate) fn apply_voice_grants_for_room(
-    state: &WebSocketState,
-    room_jid: &BareJid,
-    jid: &FullJid,
-    voice: Voice,
-) {
-    let Some(sfu) = state.deps.protocol.sfu.as_ref() else {
-        return;
-    };
-    apply_voice_grants_via_sfu(sfu, room_jid, jid, voice);
-}
-
-/// SFU-handle variant of [`apply_voice_grants_for_room`] for callers
-/// that don't hold a `WebSocketState` (the admin V2 command handlers
-/// receive the SFU as an explicit dependency).
+/// Push a session's XEP-0045 voice grant through an explicit SFU handle.
 pub(crate) fn apply_voice_grants_via_sfu(
     sfu: &std::sync::Arc<dyn waddle_sfu::SfuService>,
     room_jid: &BareJid,
@@ -126,20 +104,35 @@ pub(crate) fn apply_voice_grants_via_sfu(
     );
 }
 
-/// Converge the live SFU media grants of every session whose XEP-0045
-/// voice changed without leaving the room. An affiliation change can
-/// re-derive an occupant's role and silently take voice away, so every
-/// moderation surface must push these — not just the XMPP IQ path.
-pub(crate) fn converge_voice_changes_via_sfu(
+fn effective_voice_changes<'a>(
+    removed_sessions: &[FullJid],
+    voice_changes: &'a [(FullJid, Voice)],
+) -> Vec<(&'a FullJid, Voice)> {
+    let removed: HashSet<&FullJid> = removed_sessions.iter().collect();
+    let mut fused = BTreeMap::new();
+    for (session, voice) in voice_changes {
+        if removed.contains(session) {
+            continue;
+        }
+        fused.insert(session, *voice);
+    }
+    fused.into_iter().collect()
+}
+
+pub(crate) fn converge_moderation_deltas_via_sfu(
     sfu: Option<&std::sync::Arc<dyn waddle_sfu::SfuService>>,
     room_jid: &BareJid,
+    removed_sessions: &[FullJid],
     voice_changes: &[(FullJid, Voice)],
 ) {
     let Some(sfu) = sfu else {
         return;
     };
-    for (session, voice) in voice_changes {
-        apply_voice_grants_via_sfu(sfu, room_jid, session, *voice);
+    for removed in removed_sessions {
+        unregister_participant_via_sfu(sfu, room_jid, removed);
+    }
+    for (session, voice) in effective_voice_changes(removed_sessions, voice_changes) {
+        apply_voice_grants_via_sfu(sfu, room_jid, session, voice);
     }
 }
 
@@ -370,13 +363,12 @@ pub(crate) fn converge_members_only_sweep_via_sfu(
     room_jid: &BareJid,
     applied: &waddle_xmpp::muc::room_actor::AdminItemsApplied,
 ) {
-    let Some(sfu) = sfu else {
-        return;
-    };
-    for removed in &applied.removed_by_moderation {
-        unregister_participant_via_sfu(sfu, room_jid, removed);
-    }
-    converge_voice_changes_via_sfu(Some(sfu), room_jid, &applied.voice_changes);
+    converge_moderation_deltas_via_sfu(
+        sfu,
+        room_jid,
+        &applied.removed_by_moderation,
+        &applied.voice_changes,
+    );
 }
 
 /// Local-only teardown variant for the LiveKit webhook bridge. The
@@ -562,6 +554,40 @@ mod tests {
                 "bob@example.com/phone".parse().unwrap(),
                 Role::Participant.voice(Moderation::from_moderated_flag(true))
             )
+        );
+    }
+
+    #[test]
+    fn effective_voice_changes_last_write_wins_per_session() {
+        let alice: FullJid = "alice@example.com/web".parse().unwrap();
+        let bob: FullJid = "bob@example.com/web".parse().unwrap();
+        let voice_changes = [
+            (alice.clone(), Voice::Muted),
+            (bob.clone(), Voice::Muted),
+            (alice.clone(), Voice::Voiced),
+        ];
+
+        let fused = effective_voice_changes(&[], &voice_changes);
+
+        assert_eq!(
+            fused,
+            vec![(&alice, Voice::Voiced), (&bob, Voice::Muted)],
+            "the last moderation delta per session must win"
+        );
+    }
+
+    #[test]
+    fn effective_voice_changes_omit_removed_sessions() {
+        let alice: FullJid = "alice@example.com/web".parse().unwrap();
+        let bob: FullJid = "bob@example.com/web".parse().unwrap();
+        let voice_changes = [(alice.clone(), Voice::Voiced), (bob.clone(), Voice::Muted)];
+
+        let fused = effective_voice_changes(std::slice::from_ref(&alice), &voice_changes);
+
+        assert_eq!(
+            fused,
+            vec![(&bob, Voice::Muted)],
+            "removed sessions must never be re-granted voice in the same moderation batch"
         );
     }
 }

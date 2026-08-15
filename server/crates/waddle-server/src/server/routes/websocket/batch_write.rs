@@ -324,10 +324,12 @@ where
         }
         let current_was_recorded = current_should_record;
         let request_ack = if current_was_recorded {
-            accepted_frame_indices.push(frame_index);
-            conn.sm_state
-                .record_outbound(frame_xml.clone(), SmEvictionPath::Batch)
-                .request_ack
+            let (request_ack, accepted) =
+                record_live_sm_frame(conn, frame_xml.clone(), SmEvictionPath::Batch);
+            if accepted {
+                accepted_frame_indices.push(frame_index);
+            }
+            request_ack
         } else {
             false
         };
@@ -695,6 +697,22 @@ fn should_record(conn: &WsConnState, frame_xml: &str, policy: BatchSmPolicy) -> 
         && is_countable_stanza(frame_xml)
 }
 
+fn record_live_sm_frame(
+    conn: &mut WsConnState,
+    frame_xml: String,
+    eviction_path: SmEvictionPath,
+) -> (bool, bool) {
+    let request_ack = conn
+        .sm_state
+        .record_outbound(frame_xml, eviction_path)
+        .request_ack;
+    // A replay gap means resume can no longer guarantee recovery of newly
+    // recorded-but-unwritten frames. Keep them in recovery inventory, but do
+    // not settle producer completions as if they were durably accepted.
+    let accepted = conn.sm_state.replay_gap_through().is_none();
+    (request_ack, accepted)
+}
+
 /// The transport died mid-batch (or a send-window pause timed out): record
 /// every not-yet-written countable frame so the resume replay window covers
 /// the rest of the batch. The cadence signal is moot (no wire), which mirrors
@@ -762,10 +780,9 @@ where
                 conn.record_terminal_recovery_outbound(frame_xml);
                 conn.terminal_sm_recovery.queue_len() > before
             } else {
-                let _ = conn
-                    .sm_state
-                    .record_outbound(frame_xml, SmEvictionPath::ReplayTail);
-                true
+                let (_, accepted) =
+                    record_live_sm_frame(conn, frame_xml, SmEvictionPath::ReplayTail);
+                accepted
             };
             if accepted {
                 accepted_frame_indices.push(frame_index);

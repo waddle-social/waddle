@@ -2990,6 +2990,66 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn resumable_replay_gap_recording_retains_inline_room_effect_reservations_for_retry() {
+        let state = super::super::tests::create_test_websocket_state().await;
+        let room_jid = replay_completion_room_jid();
+        let initiator: FullJid = "alice@example.com/device".parse().expect("initiator JID");
+        let lifecycle =
+            create_owned_room_and_lifecycle_for_replay_completion(state.as_ref(), &room_jid).await;
+        let reservation = enqueue_inline_config_reservation_for_replay_completion(
+            state.as_ref(),
+            lifecycle,
+            waddle_xmpp::muc::RoomRevision::initial(),
+            &initiator,
+        )
+        .await;
+        let (frame, completion) =
+            drain_single_inline_completion_frame(state.as_ref(), &reservation, &initiator).await;
+
+        let mut conn = WsConnState::new();
+        conn.sm_state = waddle_xmpp::stream_management::StreamManagementState::with_config(1, 100);
+        conn.sm_state.enable(
+            "resumable-replay-gap-completion".to_string(),
+            true,
+            Some(300),
+        );
+        let _ = conn.sm_state.record_outbound(
+            "<message xmlns='jabber:client' id='already-owned'><body>prefix</body></message>"
+                .to_string(),
+            waddle_xmpp::telemetry::attributes::SmEvictionPath::DirectOutbound,
+        );
+        record_response_batch_for_replay(
+            &state,
+            &mut conn,
+            ResponseBatch::from_completion_frames(vec![(frame, completion.clone())]),
+            BatchSmPolicy::Record,
+        );
+
+        assert_eq!(
+            conn.sm_state.replay_gap_through(),
+            Some(1),
+            "overflowing the live resumable queue must mark the replay gap"
+        );
+        assert_eq!(
+            state
+                .deps
+                .protocol
+                .room_effect_outbox
+                .queue_depth()
+                .await
+                .expect("queue depth"),
+            1,
+            "a gapped replay tail must retain the leased completion for retry"
+        );
+        assert!(
+            crate::room_effect_outbox::drain::complete_after_write(state.as_ref(), &completion)
+                .await
+                .expect("complete retained completion"),
+            "a replay-gap frame must not settle the completion as accepted work"
+        );
+    }
+
+    #[tokio::test]
     async fn authority_revoked_resumable_recording_settles_only_recorded_completions() {
         let state = super::super::tests::create_test_websocket_state().await;
         let room_jid = replay_completion_room_jid();

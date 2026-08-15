@@ -6859,6 +6859,104 @@ async fn muc_admin_ban_evicts_target_sessions_from_room_call() {
 }
 
 #[tokio::test]
+async fn muc_admin_ban_preserves_single_space_nick_in_rendered_presence() {
+    let state = create_test_websocket_state().await;
+    let owner_session = create_test_server_owner_session(state.as_ref(), "alice").await;
+    let bob_session = create_test_session(state.as_ref(), "bob").await;
+    let room_jid: BareJid = "ban-space-nick@muc.example.com".parse().expect("room jid");
+    let alice: FullJid = "alice@example.com/web".parse().expect("alice jid");
+    let bob: FullJid = "bob@example.com/web".parse().expect("bob jid");
+    let (bob_tx, mut bob_rx) = mpsc::channel(8);
+    register_test_connection(state.as_ref(), &bob, bob_tx).await;
+
+    let _ = handle_muc_join(
+        state.as_ref(),
+        "example.com",
+        &room_jid,
+        &alice,
+        "alice",
+        None,
+        &Some(owner_session.clone()),
+    )
+    .await;
+    let bob_join = handle_muc_join(
+        state.as_ref(),
+        "example.com",
+        &room_jid,
+        &bob,
+        " ",
+        None,
+        &Some(bob_session),
+    )
+    .await;
+    assert!(
+        !bob_join
+            .iter()
+            .any(|frame| frame.contains("type='error'") || frame.contains("type=\"error\"")),
+        "single-space nick join must succeed: {bob_join:?}"
+    );
+    while bob_rx.try_recv().is_ok() {}
+
+    let room_actor = state
+        .deps
+        .protocol
+        .room_registry
+        .ask(waddle_xmpp::muc::room_registry_actor::GetRoom {
+            room_jid: room_jid.clone(),
+        })
+        .await
+        .expect("registry ask")
+        .expect("room exists");
+    room_actor
+        .ask(ChangeAffiliation {
+            jid: alice.to_bare(),
+            affiliation: Affiliation::Owner,
+        })
+        .await
+        .expect("grant owner");
+
+    let ban_iq = build_admin_set_iq_xml(
+        &room_jid,
+        "ban-space-bob",
+        Element::builder("item", waddle_xmpp::muc::NS_MUC_ADMIN)
+            .attr(
+                minidom::rxml::xml_ncname!("jid").to_owned(),
+                "bob@example.com",
+            )
+            .attr(
+                minidom::rxml::xml_ncname!("affiliation").to_owned(),
+                "outcast",
+            )
+            .build(),
+    );
+    let responses = handle_iq(
+        &ban_iq,
+        "example.com",
+        "muc.example.com",
+        state.as_ref(),
+        &Some(owner_session),
+        &ready_phase(&alice),
+    )
+    .await;
+    assert!(responses[0].contains("type='result'"), "{responses:?}");
+
+    let outbound = bob_rx
+        .try_recv()
+        .expect("banned session destroy/broadcast presence");
+    let xml = stanza_to_xml(&outbound.stanza);
+    let presence = Element::from_str(&xml).expect("ban presence XML");
+    assert_eq!(
+        presence.attr("from"),
+        Some(format!("{room_jid}/ ").as_str()),
+        "the rendered ban presence must preserve the exact admitted nick: {xml}"
+    );
+    assert!(
+        xml.contains("code='301'") || xml.contains("code=\"301\""),
+        "the single-space nicked occupant must still receive a ban presence: {xml}"
+    );
+}
+
+#[tokio::test]
 async fn muc_admin_role_demotion_does_not_evict_from_room_call() {
     let recorder = Arc::new(crate::server::routes::websocket::tests::RecordingSfu::default());
     let state = create_test_websocket_state_with_sfu(recorder.clone()).await;
@@ -7442,6 +7540,97 @@ async fn xep0045_destroy_notifies_every_occupant_session_and_wipes_durable_state
     assert!(
         room_after.is_none(),
         "destroyed room must leave the registry"
+    );
+}
+
+#[tokio::test]
+async fn xep0045_destroy_preserves_single_space_nick_in_rendered_presence() {
+    let state = create_test_websocket_state().await;
+    let owner_session = create_test_server_owner_session(state.as_ref(), "alice").await;
+    let bob_session = create_test_session(state.as_ref(), "bob").await;
+    let room_jid: BareJid = "destroy-space-nick@muc.example.com"
+        .parse()
+        .expect("room jid");
+    let alice: FullJid = "alice@example.com/web".parse().expect("alice jid");
+    let bob: FullJid = "bob@example.com/web".parse().expect("bob jid");
+    let (bob_tx, mut bob_rx) = mpsc::channel(8);
+    register_test_connection(state.as_ref(), &bob, bob_tx).await;
+
+    let _ = handle_muc_join(
+        state.as_ref(),
+        "example.com",
+        &room_jid,
+        &alice,
+        "alice",
+        None,
+        &Some(owner_session.clone()),
+    )
+    .await;
+    let bob_join = handle_muc_join(
+        state.as_ref(),
+        "example.com",
+        &room_jid,
+        &bob,
+        " ",
+        None,
+        &Some(bob_session),
+    )
+    .await;
+    assert!(
+        !bob_join
+            .iter()
+            .any(|frame| frame.contains("type='error'") || frame.contains("type=\"error\"")),
+        "single-space nick join must succeed: {bob_join:?}"
+    );
+    while bob_rx.try_recv().is_ok() {}
+
+    let room_actor = state
+        .deps
+        .protocol
+        .room_registry
+        .ask(waddle_xmpp::muc::room_registry_actor::GetRoom {
+            room_jid: room_jid.clone(),
+        })
+        .await
+        .expect("registry ask")
+        .expect("room exists");
+    room_actor
+        .ask(ChangeAffiliation {
+            jid: alice.to_bare(),
+            affiliation: Affiliation::Owner,
+        })
+        .await
+        .expect("grant owner");
+
+    let responses = handle_iq(
+        &owner_destroy_iq_frame(&room_jid),
+        "example.com",
+        "muc.example.com",
+        state.as_ref(),
+        &Some(owner_session),
+        &ready_phase(&alice),
+    )
+    .await;
+    assert!(
+        responses
+            .iter()
+            .any(|frame| frame.contains("type=\"result\"") || frame.contains("type='result'")),
+        "owner receives destroy result: {responses:?}"
+    );
+
+    let outbound = bob_rx
+        .try_recv()
+        .expect("destroyed occupant session presence");
+    let xml = stanza_to_xml(&outbound.stanza);
+    let presence = Element::from_str(&xml).expect("destroy presence XML");
+    assert!(
+        presence_has_muc_user_destroy(&presence),
+        "single-space nick destroy presence must carry <destroy/>: {xml}"
+    );
+    assert_eq!(
+        presence.attr("from"),
+        Some(format!("{room_jid}/ ").as_str()),
+        "the rendered destroy presence must preserve the exact admitted nick: {xml}"
     );
 }
 

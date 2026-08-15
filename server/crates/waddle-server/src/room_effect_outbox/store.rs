@@ -540,7 +540,7 @@ impl RoomEffectOutboxStore {
                 RoomEffectReleaseOutcome::LostLease
             });
         }
-        let n=c.execute("UPDATE clustering_muc_room_effects SET attempt_count=?, last_error=?, available_at_ms=?, lease_token=NULL, leased_at_ms=NULL WHERE lifecycle_id=? AND revision=? AND ordinal=? AND lease_token=?",crate::db_params![next,error.as_db_str(),now_ms.saturating_add(retry_delay_ms(next)),key.lifecycle.to_string(),key.revision.as_i64(),key.ordinal.as_i64(),token.as_str()]).await?;
+        let n=c.execute("UPDATE clustering_muc_room_effects SET attempt_count=?, last_error=?, available_at_ms=?, lease_token=NULL, leased_at_ms=NULL, unowned_since_ms=NULL WHERE lifecycle_id=? AND revision=? AND ordinal=? AND lease_token=?",crate::db_params![next,error.as_db_str(),now_ms.saturating_add(retry_delay_ms(next)),key.lifecycle.to_string(),key.revision.as_i64(),key.ordinal.as_i64(),token.as_str()]).await?;
         Ok(if n == 1 {
             RoomEffectReleaseOutcome::Released {
                 attempt_count: next,
@@ -574,6 +574,66 @@ impl RoomEffectOutboxStore {
             )
             .await?
             == 1)
+    }
+    pub async fn note_unowned_since_if_absent(
+        &self,
+        key: &RoomEffectKey,
+        token: &RoomEffectLeaseToken,
+        now_ms: i64,
+    ) -> Result<Option<i64>, RoomEffectOutboxError> {
+        let Some(row) = self.find(key).await? else {
+            return Ok(None);
+        };
+        if row.lease_token.as_ref() != Some(token) {
+            return Ok(None);
+        }
+        if let Some(unowned_since_ms) = row.unowned_since_ms {
+            return Ok(Some(unowned_since_ms));
+        }
+        let connection = self.db.guard().await?;
+        if connection
+            .execute(
+                "UPDATE clustering_muc_room_effects SET unowned_since_ms = ? \
+                 WHERE lifecycle_id = ? AND revision = ? AND ordinal = ? AND lease_token = ? \
+                   AND unowned_since_ms IS NULL",
+                crate::db_params![
+                    now_ms,
+                    key.lifecycle.to_string(),
+                    key.revision.as_i64(),
+                    key.ordinal.as_i64(),
+                    token.as_str(),
+                ],
+            )
+            .await?
+            == 1
+        {
+            return Ok(Some(now_ms));
+        }
+        Ok(self
+            .find(key)
+            .await?
+            .and_then(|row| {
+                (row.lease_token.as_ref() == Some(token)).then_some(row.unowned_since_ms)
+            })
+            .flatten())
+    }
+    pub async fn clear_unowned_since(
+        &self,
+        key: &RoomEffectKey,
+    ) -> Result<(), RoomEffectOutboxError> {
+        let connection = self.db.guard().await?;
+        connection
+            .execute(
+                "UPDATE clustering_muc_room_effects SET unowned_since_ms = NULL \
+                 WHERE lifecycle_id = ? AND revision = ? AND ordinal = ? AND unowned_since_ms IS NOT NULL",
+                crate::db_params![
+                    key.lifecycle.to_string(),
+                    key.revision.as_i64(),
+                    key.ordinal.as_i64(),
+                ],
+            )
+            .await?;
+        Ok(())
     }
     pub async fn reap_superseded(&self, now_ms: i64) -> Result<u64, RoomEffectOutboxError> {
         let c = self.db.guard().await?;
@@ -756,7 +816,7 @@ impl RoomEffectOutboxStore {
     }
 }
 fn select_columns() -> &'static str {
-    "SELECT lifecycle_id, revision, ordinal, room_jid, kind, terminal, payload_json, available_at_ms, superseded, origin_instance_id, producing_node, lease_token, leased_at_ms, attempt_count, last_error, created_at_ms FROM clustering_muc_room_effects"
+    "SELECT lifecycle_id, revision, ordinal, room_jid, kind, terminal, payload_json, available_at_ms, superseded, origin_instance_id, producing_node, lease_token, leased_at_ms, attempt_count, last_error, created_at_ms, unowned_since_ms FROM clustering_muc_room_effects"
 }
 fn decode_row(row: &Row) -> Result<RoomEffectRow, RoomEffectOutboxError> {
     let lifecycle_string: String = row.get(0)?;
@@ -794,6 +854,7 @@ fn decode_row(row: &Row) -> Result<RoomEffectRow, RoomEffectOutboxError> {
             .get::<Option<String>>(14)?
             .and_then(|value| RoomEffectLastError::from_db_str(&value)),
         created_at_ms: row.get(15)?,
+        unowned_since_ms: row.get(16)?,
     })
 }
 

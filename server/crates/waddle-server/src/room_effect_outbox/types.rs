@@ -81,6 +81,7 @@ pub struct RoomEffectRow {
     pub attempt_count: i64,
     pub last_error: Option<RoomEffectLastError>,
     pub created_at_ms: i64,
+    pub unowned_since_ms: Option<i64>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

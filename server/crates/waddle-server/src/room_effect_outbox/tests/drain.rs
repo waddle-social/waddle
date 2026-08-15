@@ -1,7 +1,7 @@
 use std::collections::HashSet;
 use std::str::FromStr;
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use jid::{BareJid, FullJid};
 use tokio::sync::mpsc;
@@ -30,6 +30,15 @@ use crate::server::routes::websocket::WebSocketState;
 
 fn drain_room_jid() -> BareJid {
     BareJid::from_str("room@muc.example.com").expect("room JID")
+}
+
+fn epoch_now_ms() -> i64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .expect("system clock is after the Unix epoch")
+        .as_millis()
+        .try_into()
+        .expect("epoch milliseconds fit in i64")
 }
 
 fn config_effects_for(room_jid: &BareJid, recipients: Vec<FullJid>) -> RoomMutationEffects {
@@ -233,7 +242,10 @@ async fn create_owned_room_and_lifecycle(state: &WebSocketState) -> RoomLifecycl
 }
 
 async fn recv_outbound(rx: &mut mpsc::Receiver<OutboundStanza>) -> OutboundStanza {
-    tokio::time::timeout(Duration::from_secs(1), rx.recv())
+    // Positive waits stay generous: CI's loaded nextest workers stretched a
+    // 1s bound past its margin (drain passes hold 5s enqueue timeouts ahead
+    // of the frame under test).
+    tokio::time::timeout(Duration::from_secs(15), rx.recv())
         .await
         .expect("outbound receive timeout")
         .expect("outbound stanza")
@@ -933,7 +945,7 @@ async fn due_drain_dead_letters_old_unclaimed_nonterminal_rows() {
     let state = create_test_websocket_state().await;
     let room_jid = drain_room_jid();
     let lifecycle = lifecycle();
-    let now_ms = 24 * 60 * 60 * 1_000 + 1;
+    let now_ms = epoch_now_ms() + 24 * 60 * 60 * 1_000 + 1;
     insert_lifecycle_row(
         state.as_ref(),
         &room_jid,
@@ -962,6 +974,35 @@ async fn due_drain_dead_letters_old_unclaimed_nonterminal_rows() {
         .await
         .expect("drain due");
     assert_eq!(summary.drained, 0);
+    assert_eq!(summary.requeued, 1);
+    assert_eq!(summary.stale, 0);
+    assert_eq!(summary.dead_lettered, 0);
+    let key = RoomEffectKey {
+        lifecycle,
+        revision: initial_revision(),
+        ordinal: reservation.ordinals[0],
+    };
+    let row = state
+        .deps
+        .protocol
+        .room_effect_outbox
+        .find(&key)
+        .await
+        .expect("find retained row")
+        .expect("retained row");
+    assert_eq!(
+        row.unowned_since_ms,
+        Some(now_ms),
+        "first claim-gap observation starts the continuous unowned window"
+    );
+    let summary = drain_due_effects(
+        state.as_ref(),
+        now_ms + 15_000 + (24 * 60 * 60 * 1_000) + 1,
+        8,
+    )
+    .await
+    .expect("drain due after continuous gap");
+    assert_eq!(summary.drained, 0);
     assert_eq!(summary.requeued, 0);
     assert_eq!(summary.stale, 0);
     assert_eq!(summary.dead_lettered, 1);
@@ -970,15 +1011,11 @@ async fn due_drain_dead_letters_old_unclaimed_nonterminal_rows() {
             .deps
             .protocol
             .room_effect_outbox
-            .find(&RoomEffectKey {
-                lifecycle,
-                revision: initial_revision(),
-                ordinal: reservation.ordinals[0],
-            })
+            .find(&key)
             .await
             .expect("find dead-lettered row")
             .is_none(),
-        "an unowned row older than 24h should be deleted"
+        "a continuously unowned row older than 24h should be deleted"
     );
 }
 
@@ -1053,6 +1090,106 @@ async fn due_drain_retains_old_nonterminal_rows_when_a_foreign_claim_exists() {
         "foreign-claim ownership misses requeue from the actual release time"
     );
     assert!(row.lease_token.is_none());
+}
+
+#[tokio::test]
+async fn due_drain_does_not_dead_letter_old_rows_after_a_recent_claimed_observation() {
+    let room_jid = drain_room_jid();
+    let claim_store = Arc::new(InProcessClaimStore::new());
+    claim_store.ensure_schema().await.expect("claim schema");
+    let foreign = NodeIdentity::new("foreign-node", "foreign-epoch");
+    let entity = Entity::new(EntityType::RoomActor, room_jid.to_string());
+    claim_store
+        .acquire(&entity, &foreign)
+        .await
+        .expect("foreign room claim");
+    let state = create_test_websocket_state_with_clustering(
+        crate::clustering::ClusteringHandles {
+            claim_store: Some(claim_store.clone() as Arc<dyn ClaimStore>),
+            ..crate::clustering::ClusteringHandles::default()
+        },
+        Arc::new(InMemorySmSessionRegistry::new()),
+    )
+    .await;
+    let lifecycle = lifecycle();
+    insert_lifecycle_row(
+        state.as_ref(),
+        &room_jid,
+        lifecycle,
+        initial_revision(),
+        RoomLifecycleState::Active,
+    )
+    .await;
+    let reservation = enqueue_effects(
+        state.as_ref(),
+        lifecycle,
+        initial_revision(),
+        &config_effects_for(&room_jid, vec![full_jid("alice@example.test/device")]),
+        0,
+    )
+    .await;
+    state
+        .deps
+        .protocol
+        .room_effect_outbox
+        .arm_reservation(&reservation, 0)
+        .await
+        .expect("arm reservation");
+    let key = RoomEffectKey {
+        lifecycle,
+        revision: initial_revision(),
+        ordinal: reservation.ordinals[0],
+    };
+
+    let observed_claimed_at_ms = epoch_now_ms() + 24 * 60 * 60 * 1_000 + 1;
+    let summary = drain_due_effects(state.as_ref(), observed_claimed_at_ms, 8)
+        .await
+        .expect("drain due with foreign claim");
+    assert_eq!(summary.requeued, 1);
+    assert_eq!(summary.dead_lettered, 0);
+    assert_eq!(
+        state
+            .deps
+            .protocol
+            .room_effect_outbox
+            .find(&key)
+            .await
+            .expect("find retained row")
+            .expect("retained row")
+            .unowned_since_ms,
+        None,
+        "a live foreign claim must reset any pending claim-gap timer"
+    );
+
+    let foreign_claim = claim_store
+        .current_claim(&entity)
+        .await
+        .expect("current foreign claim")
+        .expect("foreign claim snapshot");
+    claim_store
+        .release(&entity, &foreign, foreign_claim.claim_epoch)
+        .await
+        .expect("release foreign claim");
+
+    let gap_now_ms = observed_claimed_at_ms + 15_000 + 2;
+    let summary = drain_due_effects(state.as_ref(), gap_now_ms, 8)
+        .await
+        .expect("drain due during claim gap");
+    assert_eq!(summary.requeued, 1);
+    assert_eq!(summary.dead_lettered, 0);
+    assert_eq!(
+        state
+            .deps
+            .protocol
+            .room_effect_outbox
+            .find(&key)
+            .await
+            .expect("find retained row after gap")
+            .expect("retained row after gap")
+            .unowned_since_ms,
+        Some(gap_now_ms),
+        "claim-gap age must start when the row becomes globally unowned, not when it was created"
+    );
 }
 
 #[tokio::test]

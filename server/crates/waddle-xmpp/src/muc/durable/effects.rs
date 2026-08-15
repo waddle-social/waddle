@@ -1,6 +1,7 @@
 //! Typed, durable MUC room-mutation effects (#1646).
 
 use jid::{BareJid, FullJid};
+use std::sync::OnceLock;
 
 use crate::muc::MucConfigStatusCode;
 use crate::types::{Affiliation, Role, Voice};
@@ -13,12 +14,26 @@ pub struct MucOccupantNick(String);
 
 impl MucOccupantNick {
     pub fn new(value: String) -> Option<Self> {
-        (!value.trim().is_empty()).then_some(Self(value))
+        if value.is_empty() {
+            return None;
+        }
+        let validator = durable_nick_validator_room_jid();
+        validator.with_resource_str(&value).ok()?;
+        Some(Self(value))
     }
 
     pub fn as_str(&self) -> &str {
         &self.0
     }
+}
+
+fn durable_nick_validator_room_jid() -> &'static BareJid {
+    static ROOM_JID: OnceLock<BareJid> = OnceLock::new();
+    ROOM_JID.get_or_init(|| {
+        "validator@muc.example.test"
+            .parse()
+            .expect("literal durable nick validator room JID")
+    })
 }
 
 /// Human-facing XEP-0045 destroy reason. Kept distinct from an arbitrary
@@ -367,6 +382,25 @@ mod tests {
         }
         assert_eq!(RoomEffectKind::from_db_str("nope"), None);
     }
+
+    #[test]
+    fn muc_occupant_nick_accepts_any_admitted_resourcepart() {
+        let nick = MucOccupantNick::new(" ".to_owned()).expect("single-space nick");
+        assert_eq!(nick.as_str(), " ");
+    }
+
+    #[test]
+    fn muc_occupant_nick_rejects_invalid_resourceparts() {
+        assert!(
+            MucOccupantNick::new(String::new()).is_none(),
+            "empty nick must still be rejected"
+        );
+        assert!(
+            MucOccupantNick::new("\u{0000}".to_owned()).is_none(),
+            "control characters must not be admitted as resourceparts"
+        );
+    }
+
     #[test]
     fn constructors_fix_effect_pairing_and_stage() {
         let room = BareJid::from_str("room@example.test").unwrap();

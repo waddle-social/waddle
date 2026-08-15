@@ -35,6 +35,11 @@ const LOCAL_ACCEPTANCE_TIMEOUT: Duration = Duration::from_secs(5);
 const OWNERSHIP_RETRY_DELAY_MS: i64 = 15_000;
 const OWNERSHIP_DEAD_LETTER_MS: i64 = 24 * 60 * 60 * 1_000;
 
+enum ClaimPresence {
+    Claimed,
+    Unclaimed,
+}
+
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
 pub struct RoomEffectDrainSummary {
     pub drained: u64,
@@ -323,27 +328,39 @@ async fn drain_claimed(
     }
     if !claimed.row.effect.is_terminal() && !committed_locally {
         match local_rooms {
-            Ok(rooms) if rooms.contains(&claimed.row.room_jid) => {}
+            Ok(rooms) if rooms.contains(&claimed.row.room_jid) => {
+                store.clear_unowned_since(&claimed.row.key).await?;
+            }
             Ok(_) => {
-                let old_enough =
-                    now_ms.saturating_sub(claimed.row.created_at_ms) >= OWNERSHIP_DEAD_LETTER_MS;
-                if old_enough
-                    && room_has_no_claim_at_all(state, &claimed.row.room_jid)
-                        .await
-                        .unwrap_or(false)
-                {
-                    tracing::warn!(
-                        room = %claimed.row.room_jid,
-                        lifecycle = %claimed.row.key.lifecycle,
-                        revision = claimed.row.key.revision.as_i64(),
-                        ordinal = claimed.row.key.ordinal.as_i64(),
-                        age_ms = now_ms.saturating_sub(claimed.row.created_at_ms),
-                        "room effect outbox row never reached an owning node; dead-lettering"
-                    );
-                    let _ = store
-                        .complete(&claimed.row.key, &claimed.lease_token)
-                        .await?;
-                    return Ok(ClaimDisposition::DeadLettered);
+                match room_claim_presence(state, &claimed.row.room_jid).await {
+                    Ok(ClaimPresence::Unclaimed) => {
+                        let unowned_since_ms = store
+                            .note_unowned_since_if_absent(
+                                &claimed.row.key,
+                                &claimed.lease_token,
+                                now_ms,
+                            )
+                            .await?
+                            .unwrap_or(now_ms);
+                        if now_ms.saturating_sub(unowned_since_ms) > OWNERSHIP_DEAD_LETTER_MS {
+                            tracing::warn!(
+                                room = %claimed.row.room_jid,
+                                lifecycle = %claimed.row.key.lifecycle,
+                                revision = claimed.row.key.revision.as_i64(),
+                                ordinal = claimed.row.key.ordinal.as_i64(),
+                                unowned_age_ms = now_ms.saturating_sub(unowned_since_ms),
+                                "room effect outbox row remained globally unowned for 24h; dead-lettering"
+                            );
+                            let _ = store
+                                .complete(&claimed.row.key, &claimed.lease_token)
+                                .await?;
+                            return Ok(ClaimDisposition::DeadLettered);
+                        }
+                    }
+                    Ok(ClaimPresence::Claimed) => {
+                        store.clear_unowned_since(&claimed.row.key).await?;
+                    }
+                    Err(()) => {}
                 }
                 let release_now_ms = actual_release_base_ms(now_ms);
                 store
@@ -369,6 +386,8 @@ async fn drain_claimed(
                 return Ok(ClaimDisposition::Requeued);
             }
         }
+    } else if !claimed.row.effect.is_terminal() {
+        store.clear_unowned_since(&claimed.row.key).await?;
     }
     if !renew_claim_lease(state, &claimed.row.key, &claimed.lease_token).await? {
         // A stale, stolen, or destroy-superseded preclaimed row must not
@@ -381,21 +400,17 @@ async fn drain_claimed(
     // Voice capability changes are typed side effects of the same durable
     // admin mutation.  They have no XMPP wire stanza of their own, but must
     // converge on the node that owns the room before the lease completes.
-    for removed_session in effect_removed_sessions(&claimed.row.effect) {
-        crate::server::routes::websocket::muc_call_sfu::unregister_participant_from_room(
-            state,
-            &claimed.row.room_jid,
-            removed_session,
-        );
-    }
-    for change in effect_voice_changes(&claimed.row.effect) {
-        crate::server::routes::websocket::muc_call_sfu::apply_voice_grants_for_room(
-            state,
-            &claimed.row.room_jid,
-            &change.session,
-            change.voice,
-        );
-    }
+    let removed_sessions = effect_removed_sessions(&claimed.row.effect);
+    let voice_changes: Vec<_> = effect_voice_changes(&claimed.row.effect)
+        .iter()
+        .map(|change| (change.session.clone(), change.voice))
+        .collect();
+    crate::server::routes::websocket::muc_call_sfu::converge_moderation_deltas_via_sfu(
+        state.deps.protocol.sfu.as_ref(),
+        &claimed.row.room_jid,
+        removed_sessions,
+        &voice_changes,
+    );
     let rendered = rebuild_effect(
         &claimed.row.room_jid,
         &claimed.row.effect,
@@ -567,16 +582,20 @@ async fn local_room_jids(
         })
 }
 
-async fn room_has_no_claim_at_all(
+async fn room_claim_presence(
     state: &WebSocketState,
     room_jid: &jid::BareJid,
-) -> Result<bool, ()> {
+) -> Result<ClaimPresence, ()> {
     let Some(claim_store) = state.deps.app_state.clustering_claims.claim_store.as_ref() else {
-        return Ok(true);
+        return Ok(ClaimPresence::Unclaimed);
     };
     let entity = Entity::new(EntityType::RoomActor, room_jid.to_string());
     match tokio::time::timeout(OWNERSHIP_LOOKUP_TIMEOUT, claim_store.current_claim(&entity)).await {
-        Ok(Ok(claim)) => Ok(claim.is_none()),
+        Ok(Ok(claim)) => Ok(if claim.is_none() {
+            ClaimPresence::Unclaimed
+        } else {
+            ClaimPresence::Claimed
+        }),
         Ok(Err(error)) => {
             tracing::warn!(
                 room = %room_jid,

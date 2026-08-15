@@ -50,7 +50,7 @@ where
             let pending_row_id = outbound_stanza.pending_row_id.clone();
             let pending_row_receipt_at = outbound_stanza.pending_row_original_receipt_at;
             let mut request_ack_after = false;
-            let mut recovery_owned = false;
+            let mut resumable_recovery_owned = false;
             if conn.sm_state.enabled && is_countable_stanza(&xml) {
                 let record_result = match pending_row_receipt_at {
                     Some(receipt_at) => conn.sm_state.record_outbound_with_receipt_at(
@@ -63,7 +63,8 @@ where
                         .record_outbound(xml.clone(), SmEvictionPath::DirectOutbound),
                 };
                 request_ack_after = record_result.request_ack;
-                recovery_owned = true;
+                resumable_recovery_owned =
+                    conn.sm_state.is_resumable() && conn.sm_state.replay_gap_through().is_none();
                 // Locked Q7b SM-ack lifecycle: bind the just-assigned outbound
                 // counter back onto pending_delivery flush rows before the next
                 // queued SM ack can range-delete them.
@@ -134,7 +135,15 @@ where
             .await
             {
                 AuthoritySendOutcome::Sent => true,
-                AuthoritySendOutcome::TransportClosed | AuthoritySendOutcome::AuthorityRevoked => {
+                AuthoritySendOutcome::TransportClosed => {
+                    if resumable_recovery_owned {
+                        if let Some(acceptance) = outbound_stanza.write_acceptance.as_ref() {
+                            acceptance.acknowledge();
+                        }
+                    }
+                    return false;
+                }
+                AuthoritySendOutcome::AuthorityRevoked => {
                     return false;
                 }
             };
@@ -143,7 +152,7 @@ where
             // write.  Without SM, a successful sink write is the only
             // available acceptance point.  Either way, registry enqueue alone
             // is never enough to resolve this notification.
-            if sent && (recovery_owned || !conn.sm_state.enabled) {
+            if sent {
                 if let Some(acceptance) = outbound_stanza.write_acceptance.as_ref() {
                     acceptance.acknowledge();
                 }
@@ -261,6 +270,7 @@ where
 mod tests {
     use super::*;
     use std::convert::Infallible;
+    use std::io;
     use std::pin::Pin;
     use std::task::{Context, Poll};
     use waddle_xmpp::{
@@ -294,6 +304,52 @@ mod tests {
             );
             self.sent.push(item);
             Ok(())
+        }
+
+        fn poll_flush(
+            self: Pin<&mut Self>,
+            _cx: &mut Context<'_>,
+        ) -> Poll<Result<(), Self::Error>> {
+            Poll::Ready(Ok(()))
+        }
+
+        fn poll_close(
+            self: Pin<&mut Self>,
+            _cx: &mut Context<'_>,
+        ) -> Poll<Result<(), Self::Error>> {
+            Poll::Ready(Ok(()))
+        }
+    }
+
+    struct TransportClosedSink {
+        acceptance: Option<tokio::sync::oneshot::Receiver<()>>,
+        acceptance_pending_on_send: bool,
+        send_attempts: usize,
+    }
+
+    impl futures::Sink<Message> for TransportClosedSink {
+        type Error = io::Error;
+
+        fn poll_ready(
+            self: Pin<&mut Self>,
+            _cx: &mut Context<'_>,
+        ) -> Poll<Result<(), Self::Error>> {
+            Poll::Ready(Ok(()))
+        }
+
+        fn start_send(mut self: Pin<&mut Self>, _item: Message) -> Result<(), Self::Error> {
+            self.acceptance_pending_on_send = matches!(
+                self.acceptance
+                    .as_mut()
+                    .expect("writer acceptance receiver")
+                    .try_recv(),
+                Err(tokio::sync::oneshot::error::TryRecvError::Empty)
+            );
+            self.send_attempts += 1;
+            Err(io::Error::new(
+                io::ErrorKind::BrokenPipe,
+                "simulated transport close",
+            ))
         }
 
         fn poll_flush(
@@ -360,6 +416,126 @@ mod tests {
                 .await
                 .is_ok(),
             "SM-backed writer resolves acceptance"
+        );
+    }
+
+    #[tokio::test]
+    async fn resumable_sm_direct_frame_acknowledges_write_acceptance_on_transport_close() {
+        let state = crate::server::routes::websocket::tests::create_test_websocket_state().await;
+        let lifecycle = crate::clustering::NodeLifecycle::new();
+        let permit = lifecycle.admit().expect("serving permit");
+        let shutdown = tokio_util::sync::CancellationToken::new();
+        let mut conn = WsConnState::new();
+        conn.sm_state.enable(
+            "outbound-write-acceptance-close".to_owned(),
+            true,
+            Some(300),
+        );
+        let (acceptance, accepted) = OutboundWriteAcceptance::new();
+        let mut sink = TransportClosedSink {
+            acceptance: Some(accepted),
+            acceptance_pending_on_send: false,
+            send_attempts: 0,
+        };
+        let mut reader = futures::stream::pending::<Result<Message, Infallible>>();
+        let mut timers = TransportTimers::new();
+        let stanza = Stanza::Message(xmpp_parsers::message::Message::new(Some(
+            "alice@example.test".parse().expect("recipient JID"),
+        )));
+
+        assert!(
+            !handle_outbound_stanza(
+                &mut sink,
+                &mut reader,
+                &state,
+                &mut conn,
+                &mut timers,
+                OutboundStanza::with_write_acceptance(stanza, acceptance),
+                OutboundAuthority {
+                    permit: &permit,
+                    shutdown: &shutdown,
+                },
+            )
+            .await
+        );
+        assert_eq!(sink.send_attempts, 1, "writer attempted the direct send");
+        assert_eq!(
+            conn.sm_state.queue_len(),
+            1,
+            "resumable SM retained recovery ownership"
+        );
+        assert!(
+            sink.acceptance_pending_on_send,
+            "registry enqueue must not acknowledge before the writer attempts the frame"
+        );
+        assert!(
+            sink.acceptance
+                .take()
+                .expect("writer acceptance receiver")
+                .await
+                .is_ok(),
+            "resumable SM ownership must resolve acceptance even after transport close"
+        );
+    }
+
+    #[tokio::test]
+    async fn replay_gapped_sm_direct_frame_keeps_write_acceptance_pending_on_transport_close() {
+        let state = crate::server::routes::websocket::tests::create_test_websocket_state().await;
+        let lifecycle = crate::clustering::NodeLifecycle::new();
+        let permit = lifecycle.admit().expect("serving permit");
+        let shutdown = tokio_util::sync::CancellationToken::new();
+        let mut conn = WsConnState::new();
+        conn.sm_state.enable(
+            "outbound-write-acceptance-replay-gap".to_owned(),
+            true,
+            Some(300),
+        );
+        for sequence in 0..waddle_xmpp::stream_management::DEFAULT_MAX_UNACKED_QUEUE_SIZE {
+            let _ = conn.sm_state.record_outbound(
+                format!("<message id='{sequence}'/>"),
+                SmEvictionPath::DirectOutbound,
+            );
+        }
+        let (acceptance, accepted) = OutboundWriteAcceptance::new();
+        let mut sink = TransportClosedSink {
+            acceptance: Some(accepted),
+            acceptance_pending_on_send: false,
+            send_attempts: 0,
+        };
+        let mut reader = futures::stream::pending::<Result<Message, Infallible>>();
+        let mut timers = TransportTimers::new();
+        let stanza = Stanza::Message(xmpp_parsers::message::Message::new(Some(
+            "alice@example.test".parse().expect("recipient JID"),
+        )));
+
+        assert!(
+            !handle_outbound_stanza(
+                &mut sink,
+                &mut reader,
+                &state,
+                &mut conn,
+                &mut timers,
+                OutboundStanza::with_write_acceptance(stanza, acceptance),
+                OutboundAuthority {
+                    permit: &permit,
+                    shutdown: &shutdown,
+                },
+            )
+            .await
+        );
+        assert!(
+            conn.sm_state.replay_gap_through().is_some(),
+            "the overflowed frame cannot be recovered by SM resumption"
+        );
+        assert!(
+            !matches!(
+                sink.acceptance
+                    .as_mut()
+                    .expect("writer acceptance receiver")
+                    .try_recv(),
+                Ok(())
+            ),
+            "an unrecoverable replay-gapped frame must not settle its producer"
         );
     }
 }

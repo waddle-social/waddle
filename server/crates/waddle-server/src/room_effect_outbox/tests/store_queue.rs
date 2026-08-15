@@ -532,6 +532,7 @@ async fn postgres_schema_has_required_room_effect_columns() {
         ("attempt_count", "NO"),
         ("last_error", "YES"),
         ("created_at_ms", "NO"),
+        ("unowned_since_ms", "YES"),
     ] {
         let mut rows = connection.query(
             "SELECT is_nullable FROM information_schema.columns WHERE table_schema = current_schema() AND table_name = 'clustering_muc_room_effects' AND column_name = ?",
@@ -610,6 +611,64 @@ async fn fifo_order_survives_store_restart() {
 
     assert_eq!(observed, expected);
     assert_eq!(restarted.queue_depth().await.expect("queue depth"), 0);
+}
+
+#[tokio::test]
+async fn owner_release_clears_unowned_since() {
+    let (_db, store) = store_with_db("room-effect-owner-release-clears-unowned").await;
+    let lifecycle = lifecycle();
+    let reservation =
+        enqueue_and_arm(&store, lifecycle, initial_revision(), config_effects()).await;
+    let key = RoomEffectKey {
+        lifecycle,
+        revision: initial_revision(),
+        ordinal: reservation.ordinals[0],
+    };
+    let claim = store
+        .claim_due_head(0, 1)
+        .await
+        .expect("claim due row")
+        .pop()
+        .expect("claimed row");
+
+    assert_eq!(
+        store
+            .note_unowned_since_if_absent(&key, &claim.lease_token, 10)
+            .await
+            .expect("mark unowned"),
+        Some(10)
+    );
+    assert_eq!(
+        store
+            .find(&key)
+            .await
+            .expect("find row")
+            .expect("row")
+            .unowned_since_ms,
+        Some(10)
+    );
+
+    assert_eq!(
+        store
+            .release(
+                &key,
+                &claim.lease_token,
+                11,
+                RoomEffectLastError::InfrastructureTransient,
+            )
+            .await
+            .expect("release"),
+        RoomEffectReleaseOutcome::Released { attempt_count: 1 }
+    );
+    assert_eq!(
+        store
+            .find(&key)
+            .await
+            .expect("find row")
+            .expect("row")
+            .unowned_since_ms,
+        None
+    );
 }
 
 #[tokio::test]
