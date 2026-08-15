@@ -1465,12 +1465,9 @@ pub(super) async fn handle_muc_owner_and_moderation_iq(
                 return ResponseBatch::default();
             };
             let room_jid_string = room_jid.to_string();
-            batch.frames.push(build_iq_result_xml(
-                id,
-                Some(room_jid_string.as_str()),
-                response_to,
-                None,
-            ));
+            batch.frames.push(
+                build_iq_result_xml(id, Some(room_jid_string.as_str()), response_to, None).into(),
+            );
             return batch;
         }
 
@@ -1522,17 +1519,13 @@ pub(super) async fn handle_muc_owner_and_moderation_iq(
 
         // Treat all other owner IQ sets as successful config submit for instant rooms.
         let room_jid_string = room_jid.to_string();
-        let mut frames = vec![build_iq_result_xml(
+        batch.prepend_frames(vec![build_iq_result_xml(
             id,
             Some(room_jid_string.as_str()),
             response_to,
             None,
-        )];
-        frames.append(&mut batch.frames);
-        return ResponseBatch {
-            frames,
-            completions: batch.completions,
-        };
+        )]);
+        return batch;
     }
 
     if let Some(request) = parse_moderation_iq(iq) {

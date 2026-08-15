@@ -1,10 +1,11 @@
 use super::*;
 use super::{
     batch_write::{
-        write_response_batch_with_admission, BatchAuthority, BatchSmPolicy, BatchWriteOutcome,
+        write_response_batch_report_with_admission, write_response_batch_with_admission,
+        BatchAuthority, BatchSmPolicy, BatchWriteOutcome,
     },
     cleanup::cleanup_connection_shutdown,
-    frame::{handle_xmpp_frame_with_admission, ResponseBatch},
+    frame::{handle_xmpp_frame_with_admission, ResponseBatch, ResponseFrame, StreamErrorFrame},
     interpret_loop::build_interpret_deps,
     outbound::{handle_outbound_stanza, OutboundAuthority},
     registration::{register_bound_connection_after_frame_with_admission, RegistrationAfterFrame},
@@ -18,8 +19,8 @@ use super::{
     stream_management::SmRegistrationFinalization,
     timers::TransportTimers,
     transport_xml::{
-        build_conflict_stream_error, build_handled_count_too_high_stream_error,
-        build_system_shutdown_stream_error, websocket_stream_close_xml,
+        build_conflict_stream_error, build_system_shutdown_stream_error,
+        websocket_stream_close_element, websocket_stream_close_xml,
     },
 };
 use axum::{
@@ -1412,7 +1413,7 @@ async fn handle_inbound_text(
                     resumed,
                     replay_after_h,
                 } => {
-                    responses = ResponseBatch::from_frames(vec![resumed.to_xml()]);
+                    responses = ResponseBatch::from_frames(vec![resumed.to_element()]);
                     // Issue #1178: like the pre-registration resume path,
                     // replayed stanzas carry a XEP-0203 <delay/> with their
                     // original receipt time.
@@ -1422,24 +1423,29 @@ async fn handle_inbound_text(
                             .get_stanzas_to_resend(replay_after_h)
                             .into_iter()
                             .map(|entry| {
-                                waddle_xmpp::stream_management::stamp_replay_delay(
-                                    &entry.stanza_xml,
-                                    server_domain,
-                                    entry.original_receipt_at,
+                                ResponseFrame::from_serialized_xml(
+                                    waddle_xmpp::stream_management::stamp_replay_delay(
+                                        &entry.stanza_xml,
+                                        server_domain,
+                                        entry.original_receipt_at,
+                                    ),
                                 )
                             }),
                     );
                 }
                 SmRegistrationFinalization::ReplaceWithFailed(failed) => {
-                    responses = ResponseBatch::from_frames(vec![failed.to_xml()]);
+                    responses = ResponseBatch::from_frames(vec![failed.to_element()]);
                 }
                 SmRegistrationFinalization::ReplaceWithHandledCountTooHigh {
                     acknowledged,
                     send_count,
                 } => {
                     responses = ResponseBatch::from_frames(vec![
-                        build_handled_count_too_high_stream_error(acknowledged, send_count),
-                        websocket_stream_close_xml(),
+                        ResponseFrame::from(StreamErrorFrame::HandledCountTooHigh {
+                            acknowledged,
+                            send_count,
+                        }),
+                        ResponseFrame::from(websocket_stream_close_element()),
                     ]);
                 }
             }
@@ -1478,20 +1484,20 @@ async fn handle_inbound_text(
     } else {
         BatchSmPolicy::Record
     };
-    match write_response_batch_with_admission(
+    let write_report = write_response_batch_report_with_admission(
         ws_sender,
         ws_receiver,
         state.as_ref(),
         conn,
-        responses.frames,
+        responses.frames.clone(),
         policy,
         BatchAuthority {
             permit: admission_permit,
             shutdown: shutdown_token,
         },
     )
-    .await
-    {
+    .await;
+    match write_report.outcome {
         BatchWriteOutcome::Continue => {
             conn.commit_server_stream_open_response();
             conn.publish_pending_sm_enable(state.as_ref());
@@ -1502,10 +1508,11 @@ async fn handle_inbound_text(
             );
         }
         BatchWriteOutcome::TransportClosed | BatchWriteOutcome::DeferredCapExhausted => {
-            settle_response_batch_completions(
+            settle_response_batch_completions_for_frames(
                 state,
-                responses.completions,
-                ResponseBatchCompletionDisposition::DropForRetry,
+                responses,
+                completion_disposition_after_live_write(conn),
+                &write_report.accepted_frame_indices,
             );
             return false;
         }
@@ -1838,9 +1845,14 @@ fn record_response_batch_for_replay(
     responses: ResponseBatch,
     policy: BatchSmPolicy,
 ) {
-    let completion_disposition = completion_disposition_after_replay_record(conn, policy);
-    batch_write::record_remaining_for_replay(conn, responses.frames.into_iter(), policy);
-    settle_response_batch_completions(state, responses.completions, completion_disposition);
+    let accepted_frame_indices =
+        batch_write::record_remaining_for_replay(conn, responses.frames.iter().cloned(), policy);
+    settle_response_batch_completions_for_frames(
+        state,
+        responses,
+        completion_disposition_after_replay_record(conn, policy),
+        &accepted_frame_indices,
+    );
 }
 
 fn completion_disposition_after_live_write(
@@ -1877,7 +1889,7 @@ fn discard_deferred_inbound(conn: &mut WsConnState) -> usize {
 
 fn ensure_websocket_stream_close_for_closing_phase(
     conn: &WsConnState,
-    responses: &mut Vec<String>,
+    responses: &mut Vec<ResponseFrame>,
 ) {
     if !matches!(conn.phase, ConnectionPhase::Closing { .. })
         || response_batch_ends_with_websocket_stream_close(responses)
@@ -1885,14 +1897,13 @@ fn ensure_websocket_stream_close_for_closing_phase(
         return;
     }
 
-    responses.push(websocket_stream_close_xml());
+    responses.push(ResponseFrame::from(websocket_stream_close_element()));
 }
 
-fn response_batch_ends_with_websocket_stream_close(responses: &[String]) -> bool {
-    let websocket_close = websocket_stream_close_xml();
+fn response_batch_ends_with_websocket_stream_close(responses: &[ResponseFrame]) -> bool {
     responses
         .last()
-        .is_some_and(|frame| frame == &websocket_close)
+        .is_some_and(ResponseFrame::is_websocket_stream_close)
 }
 
 fn settle_response_batch_completions(
@@ -1939,6 +1950,35 @@ fn settle_response_batch_completions(
             }
         });
     }
+}
+
+fn settle_response_batch_completions_for_frames(
+    state: &Arc<WebSocketState>,
+    responses: ResponseBatch,
+    accepted_disposition: ResponseBatchCompletionDisposition,
+    accepted_frame_indices: &[usize],
+) {
+    let accepted_frame_indices: std::collections::HashSet<_> =
+        accepted_frame_indices.iter().copied().collect();
+    let mut accepted_completions = Vec::new();
+    let mut retry_completions = Vec::new();
+    for (completion, frame_index) in responses
+        .completions
+        .into_iter()
+        .zip(responses.completion_frame_indices)
+    {
+        if accepted_frame_indices.contains(&frame_index) {
+            accepted_completions.push(completion);
+        } else {
+            retry_completions.push(completion);
+        }
+    }
+    settle_response_batch_completions(state, accepted_completions, accepted_disposition);
+    settle_response_batch_completions(
+        state,
+        retry_completions,
+        ResponseBatchCompletionDisposition::DropForRetry,
+    );
 }
 
 #[cfg(test)]
@@ -2099,6 +2139,7 @@ mod tests {
     async fn enqueue_inline_config_reservation_for_replay_completion(
         state: &WebSocketState,
         lifecycle: waddle_xmpp::muc::RoomLifecycleId,
+        revision: waddle_xmpp::muc::RoomRevision,
         recipient: &FullJid,
     ) -> waddle_xmpp::muc::RoomEffectReservation {
         let effects = waddle_xmpp::muc::RoomMutationEffects::config(
@@ -2115,7 +2156,7 @@ mod tests {
                 &mut tx,
                 crate::room_effect_outbox::RoomEffectEnqueue {
                     lifecycle,
-                    revision: waddle_xmpp::muc::RoomRevision::initial(),
+                    revision,
                     effects: &effects,
                     origin: &origin,
                     producing_node: &producing_node,
@@ -2126,6 +2167,30 @@ mod tests {
             .expect("enqueue");
         tx.commit().await.expect("commit");
         reservation
+    }
+
+    async fn drain_single_inline_completion_frame(
+        state: &WebSocketState,
+        reservation: &waddle_xmpp::muc::RoomEffectReservation,
+        initiator: &FullJid,
+    ) -> (
+        ResponseFrame,
+        crate::room_effect_outbox::drain::RoomEffectCompletion,
+    ) {
+        let mut frames = crate::room_effect_outbox::drain::drain_reservation_inline(
+            state,
+            reservation,
+            Some(initiator),
+        )
+        .await
+        .expect("inline drain");
+        assert_eq!(
+            frames.len(),
+            1,
+            "one initiator frame should carry one completion"
+        );
+        let frame = frames.frames.pop().expect("inline frame");
+        (ResponseFrame::from(frame.stanza), frame.completion)
     }
 
     #[tokio::test]
@@ -2604,22 +2669,12 @@ mod tests {
         let reservation = enqueue_inline_config_reservation_for_replay_completion(
             state.as_ref(),
             lifecycle,
+            waddle_xmpp::muc::RoomRevision::initial(),
             &initiator,
         )
         .await;
-        let mut frames = crate::room_effect_outbox::drain::drain_reservation_inline(
-            state.as_ref(),
-            &reservation,
-            Some(&initiator),
-        )
-        .await
-        .expect("inline drain");
-        assert_eq!(
-            frames.len(),
-            1,
-            "one initiator frame should carry one completion"
-        );
-        let frame = frames.frames.pop().expect("inline frame");
+        let (frame, completion) =
+            drain_single_inline_completion_frame(state.as_ref(), &reservation, &initiator).await;
 
         let mut conn = WsConnState::new();
         conn.sm_state
@@ -2627,12 +2682,7 @@ mod tests {
         record_response_batch_for_replay(
             &state,
             &mut conn,
-            ResponseBatch {
-                frames: vec![crate::server::routes::websocket::stanza_to_xml(
-                    &frame.stanza,
-                )],
-                completions: vec![frame.completion],
-            },
+            ResponseBatch::from_completion_frames(vec![(frame, completion)]),
             BatchSmPolicy::Record,
         );
 
@@ -2672,22 +2722,12 @@ mod tests {
         let reservation = enqueue_inline_config_reservation_for_replay_completion(
             state.as_ref(),
             lifecycle,
+            waddle_xmpp::muc::RoomRevision::initial(),
             &initiator,
         )
         .await;
-        let mut frames = crate::room_effect_outbox::drain::drain_reservation_inline(
-            state.as_ref(),
-            &reservation,
-            Some(&initiator),
-        )
-        .await
-        .expect("inline drain");
-        assert_eq!(
-            frames.len(),
-            1,
-            "one initiator frame should carry one completion"
-        );
-        let frame = frames.frames.pop().expect("inline frame");
+        let (frame, completion) =
+            drain_single_inline_completion_frame(state.as_ref(), &reservation, &initiator).await;
 
         let mut conn = WsConnState::new();
         conn.sm_state
@@ -2696,12 +2736,7 @@ mod tests {
         record_response_batch_for_replay(
             &state,
             &mut conn,
-            ResponseBatch {
-                frames: vec![crate::server::routes::websocket::stanza_to_xml(
-                    &frame.stanza,
-                )],
-                completions: vec![frame.completion],
-            },
+            ResponseBatch::from_completion_frames(vec![(frame, completion)]),
             BatchSmPolicy::Record,
         );
 
@@ -2720,6 +2755,178 @@ mod tests {
                 .expect("queue depth"),
             1,
             "terminal recovery must retain the leased completion for janitor retry"
+        );
+    }
+
+    #[tokio::test]
+    async fn live_writer_partial_sm_acceptance_completes_only_recorded_room_effects() {
+        let state = super::super::tests::create_test_websocket_state().await;
+        let room_jid = replay_completion_room_jid();
+        let initiator: FullJid = "alice@example.com/device".parse().expect("initiator JID");
+        let lifecycle =
+            create_owned_room_and_lifecycle_for_replay_completion(state.as_ref(), &room_jid).await;
+        let first_reservation = enqueue_inline_config_reservation_for_replay_completion(
+            state.as_ref(),
+            lifecycle,
+            waddle_xmpp::muc::RoomRevision::initial(),
+            &initiator,
+        )
+        .await;
+        let second_reservation = enqueue_inline_config_reservation_for_replay_completion(
+            state.as_ref(),
+            lifecycle,
+            waddle_xmpp::muc::RoomRevision::initial()
+                .next()
+                .expect("next replay-completion revision"),
+            &initiator,
+        )
+        .await;
+        let (first_frame, first_completion) =
+            drain_single_inline_completion_frame(state.as_ref(), &first_reservation, &initiator)
+                .await;
+        let (second_frame, second_completion) =
+            drain_single_inline_completion_frame(state.as_ref(), &second_reservation, &initiator)
+                .await;
+
+        let mut responses =
+            ResponseBatch::from_completion_frames(vec![(first_frame, first_completion)]);
+        responses
+            .frames
+            .push(ResponseFrame::from(websocket_stream_close_element()));
+        responses.append_batch(ResponseBatch::from_completion_frames(vec![(
+            second_frame,
+            second_completion.clone(),
+        )]));
+
+        settle_response_batch_completions_for_frames(
+            &state,
+            responses,
+            ResponseBatchCompletionDisposition::Complete,
+            &[0],
+        );
+
+        tokio::time::timeout(std::time::Duration::from_secs(1), async {
+            loop {
+                if state
+                    .deps
+                    .protocol
+                    .room_effect_outbox
+                    .queue_depth()
+                    .await
+                    .expect("queue depth")
+                    == 1
+                {
+                    break;
+                }
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("only the recorded completion should be finished");
+
+        assert!(
+            crate::room_effect_outbox::drain::complete_after_write(
+                state.as_ref(),
+                &second_completion
+            )
+            .await
+            .expect("complete retained completion"),
+            "the unrecorded completion must still be retained for retry"
+        );
+    }
+
+    #[tokio::test]
+    async fn replay_recording_partial_terminal_acceptance_retains_unrecorded_room_effects() {
+        let state = super::super::tests::create_test_websocket_state().await;
+        let room_jid = replay_completion_room_jid();
+        let initiator: FullJid = "alice@example.com/device".parse().expect("initiator JID");
+        let lifecycle =
+            create_owned_room_and_lifecycle_for_replay_completion(state.as_ref(), &room_jid).await;
+        let first_reservation = enqueue_inline_config_reservation_for_replay_completion(
+            state.as_ref(),
+            lifecycle,
+            waddle_xmpp::muc::RoomRevision::initial(),
+            &initiator,
+        )
+        .await;
+        let second_reservation = enqueue_inline_config_reservation_for_replay_completion(
+            state.as_ref(),
+            lifecycle,
+            waddle_xmpp::muc::RoomRevision::initial()
+                .next()
+                .expect("next replay-completion revision"),
+            &initiator,
+        )
+        .await;
+        let (first_frame, first_completion) =
+            drain_single_inline_completion_frame(state.as_ref(), &first_reservation, &initiator)
+                .await;
+        let (second_frame, second_completion) =
+            drain_single_inline_completion_frame(state.as_ref(), &second_reservation, &initiator)
+                .await;
+
+        let mut responses =
+            ResponseBatch::from_completion_frames(vec![(first_frame, first_completion.clone())]);
+        responses
+            .frames
+            .push(ResponseFrame::from(websocket_stream_close_element()));
+        responses.append_batch(ResponseBatch::from_completion_frames(vec![(
+            second_frame,
+            second_completion.clone(),
+        )]));
+
+        let mut conn = WsConnState::new();
+        conn.sm_state.enable(
+            "partial-terminal-replay-completion".to_string(),
+            true,
+            Some(300),
+        );
+        conn.begin_terminal_sm_recovery();
+        for sequence in 0..(TERMINAL_RECOVERY_QUEUE_CAP - 1) {
+            let mut prefix =
+                xmpp_parsers::message::Message::new(Some(jid::Jid::from(initiator.clone())));
+            prefix.id = Some(xmpp_parsers::message::Id(format!(
+                "partial-terminal-prefix-{sequence}"
+            )));
+            conn.record_terminal_recovery_outbound(
+                waddle_xmpp::parser::stanza_to_string(prefix).expect("serialize terminal prefix"),
+            );
+        }
+
+        record_response_batch_for_replay(&state, &mut conn, responses, BatchSmPolicy::Record);
+
+        tokio::time::timeout(std::time::Duration::from_secs(1), async {
+            loop {
+                if state
+                    .deps
+                    .protocol
+                    .room_effect_outbox
+                    .queue_depth()
+                    .await
+                    .expect("queue depth")
+                    == 1
+                {
+                    break;
+                }
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("only the terminally recorded completion should be finished");
+
+        assert_eq!(
+            conn.terminal_sm_recovery.queue_len(),
+            TERMINAL_RECOVERY_QUEUE_CAP,
+            "terminal recovery should accept only one more completion frame"
+        );
+        assert!(
+            crate::room_effect_outbox::drain::complete_after_write(
+                state.as_ref(),
+                &second_completion
+            )
+            .await
+            .expect("complete retained completion"),
+            "the terminally unrecorded completion must still be retained for retry"
         );
     }
 
@@ -2952,14 +3159,15 @@ mod tests {
     fn closing_phase_appends_websocket_stream_close_frame() {
         let mut conn = WsConnState::new();
         conn.phase = ConnectionPhase::closing(None);
-        let mut responses = vec![element_to_xml(
+        let mut responses = vec![ResponseFrame::from(
             Element::builder("failed", waddle_xmpp::stream_management::SM_NS).build(),
         )];
 
         ensure_websocket_stream_close_for_closing_phase(&conn, &mut responses);
 
         assert_eq!(responses.len(), 2);
-        let close = Element::from_str(&responses[1]).expect("close frame xml");
+        let close = Element::from_str(&responses[1].clone().into_serialized_xml())
+            .expect("close frame xml");
         assert_eq!(close.name(), "close");
         assert_eq!(close.ns(), "urn:ietf:params:xml:ns:xmpp-framing");
     }
@@ -2968,7 +3176,7 @@ mod tests {
     fn closing_phase_does_not_duplicate_websocket_stream_close_frame() {
         let mut conn = WsConnState::new();
         conn.phase = ConnectionPhase::closing(None);
-        let mut responses = vec![websocket_stream_close_xml()];
+        let mut responses = vec![ResponseFrame::from(websocket_stream_close_element())];
 
         ensure_websocket_stream_close_for_closing_phase(&conn, &mut responses);
 

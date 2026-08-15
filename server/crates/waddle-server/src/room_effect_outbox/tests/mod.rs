@@ -86,6 +86,7 @@ fn admin_effects() -> RoomMutationEffects {
             actor: None,
             reason: None,
         }],
+        Vec::new(),
         vec![OccupantVoiceChange {
             session: full_jid("carol@example.test/device"),
             voice: Voice::Muted,

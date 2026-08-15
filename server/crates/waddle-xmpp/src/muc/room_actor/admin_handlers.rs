@@ -126,9 +126,10 @@ fn split_admin_effect_updates(
 fn admin_effects_for_applied(
     room_jid: BareJid,
     durable_updates: Vec<DurableAdminUpdate>,
+    removed_by_moderation: Vec<FullJid>,
     voice_changes: &[(FullJid, Voice)],
 ) -> crate::muc::RoomMutationEffects {
-    if durable_updates.is_empty() && voice_changes.is_empty() {
+    if durable_updates.is_empty() && removed_by_moderation.is_empty() && voice_changes.is_empty() {
         return crate::muc::RoomMutationEffects::none();
     }
 
@@ -137,6 +138,7 @@ fn admin_effects_for_applied(
         room_jid,
         self_updates,
         remaining_updates,
+        removed_by_moderation,
         voice_changes
             .iter()
             .cloned()
@@ -919,6 +921,7 @@ impl kameo::message::Message<ApplyAdminItems> for RoomActor {
                     admin_effects_for_applied(
                         self.room.room_jid.clone(),
                         durable_updates,
+                        removed_by_moderation.clone(),
                         &voice_changes,
                     ),
                 )
@@ -993,6 +996,7 @@ impl kameo::message::Message<ApplyAffiliationChange> for RoomActor {
                     admin_effects_for_applied(
                         self.room.room_jid.clone(),
                         durable_updates,
+                        applied.removed_by_moderation.clone(),
                         &applied.voice_changes,
                     ),
                 )
@@ -1159,6 +1163,7 @@ impl kameo::message::Message<EnforceMembersOnlyAffiliations> for RoomActor {
                 self.room.room_jid.clone(),
                 self_updates,
                 remaining_updates,
+                applied.removed_by_moderation.clone(),
                 config_status_codes,
                 all_room_sessions(&staged_room),
             );

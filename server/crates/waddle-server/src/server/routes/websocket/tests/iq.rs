@@ -99,7 +99,7 @@ async fn link_preview_lookup_for_test(
         &mut conn_state,
     )
     .await
-    .frames
+    .into_serialized_frames()
 }
 
 /// Register a live connection for `bound_jid` through the production-parity
@@ -799,7 +799,7 @@ async fn handle_iq_command_request_requires_ready_phase() {
         &mut conn_state,
     )
     .await
-    .frames;
+    .into_serialized_frames();
 
     let response = responses.first().expect("command error response");
     assert!(

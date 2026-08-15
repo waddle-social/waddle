@@ -99,6 +99,7 @@ pub enum RoomEffect {
     },
     AdminRemainingBroadcast {
         presence_updates: Vec<OccupantPresenceUpdate>,
+        removed_sessions: Vec<FullJid>,
         voice_changes: Vec<OccupantVoiceChange>,
     },
     DestroyNotification {
@@ -213,6 +214,7 @@ impl RoomMutationEffects {
         room_jid: BareJid,
         self_updates: Vec<OccupantPresenceUpdate>,
         remaining_updates: Vec<OccupantPresenceUpdate>,
+        removed_sessions: Vec<FullJid>,
         voice_changes: Vec<OccupantVoiceChange>,
     ) -> Self {
         Self {
@@ -224,6 +226,7 @@ impl RoomMutationEffects {
                 },
                 RoomEffect::AdminRemainingBroadcast {
                     presence_updates: remaining_updates,
+                    removed_sessions,
                     voice_changes,
                 },
             ],
@@ -234,6 +237,7 @@ impl RoomMutationEffects {
         room_jid: BareJid,
         self_updates: Vec<OccupantPresenceUpdate>,
         remaining_updates: Vec<OccupantPresenceUpdate>,
+        removed_sessions: Vec<FullJid>,
         status_codes: Vec<MucConfigStatusCode>,
         recipients: Vec<FullJid>,
     ) -> Self {
@@ -246,6 +250,7 @@ impl RoomMutationEffects {
                 },
                 RoomEffect::AdminRemainingBroadcast {
                     presence_updates: remaining_updates,
+                    removed_sessions,
                     voice_changes: Vec::new(),
                 },
                 RoomEffect::ConfigChanged {
@@ -399,6 +404,7 @@ mod tests {
                 actor: None,
                 reason: None,
             }],
+            vec![carol.clone()],
             Vec::new(),
         );
         assert!(effects_are_pairwise_recipient_disjoint(admin.effects()));
@@ -429,6 +435,7 @@ mod tests {
                 actor: None,
                 reason: None,
             }],
+            vec![carol.clone()],
             vec![MucConfigStatusCode::NonPrivacyConfigurationChange],
             vec![carol],
         );

@@ -114,8 +114,8 @@ impl SmEnabled {
         }
     }
 
-    /// Serialize to an `<enabled/>` XML string.
-    pub fn to_xml(&self) -> String {
+    /// Build the `<enabled/>` element.
+    pub fn to_element(&self) -> Element {
         let mut builder = Element::builder("enabled", SM_NS).attr(
             minidom::rxml::xml_ncname!("id").to_owned(),
             self.id.as_str(),
@@ -132,7 +132,12 @@ impl SmEnabled {
         if let Some(location) = self.location.as_deref() {
             builder = builder.attr(minidom::rxml::xml_ncname!("location").to_owned(), location);
         }
-        element_to_xml(builder.build())
+        builder.build()
+    }
+
+    /// Serialize to an `<enabled/>` XML string.
+    pub fn to_xml(&self) -> String {
+        element_to_xml(self.to_element())
     }
 }
 

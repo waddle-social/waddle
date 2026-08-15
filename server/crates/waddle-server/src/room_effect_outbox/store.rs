@@ -509,7 +509,7 @@ impl RoomEffectOutboxStore {
         now_ms: i64,
     ) -> Result<bool, RoomEffectOutboxError> {
         let c = self.db.guard().await?;
-        Ok(c.execute("UPDATE clustering_muc_room_effects SET leased_at_ms=? WHERE lifecycle_id=? AND revision=? AND ordinal=? AND lease_token=?",crate::db_params![now_ms,key.lifecycle.to_string(),key.revision.as_i64(),key.ordinal.as_i64(),token.as_str()]).await?==1)
+        Ok(c.execute("UPDATE clustering_muc_room_effects SET leased_at_ms=? WHERE lifecycle_id=? AND revision=? AND ordinal=? AND lease_token=? AND NOT superseded",crate::db_params![now_ms,key.lifecycle.to_string(),key.revision.as_i64(),key.ordinal.as_i64(),token.as_str()]).await?==1)
     }
     pub async fn release(
         &self,

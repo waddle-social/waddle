@@ -207,6 +207,7 @@ pub enum PersistedRoomEffect {
     },
     AdminRemainingBroadcast {
         presence_updates: Vec<OccupantPresenceUpdate>,
+        removed_sessions: Vec<FullJid>,
         voice_changes: Vec<PersistedOccupantVoiceChange>,
     },
     DestroyNotification {
@@ -231,9 +232,11 @@ impl From<&RoomEffect> for PersistedRoomEffect {
             },
             RoomEffect::AdminRemainingBroadcast {
                 presence_updates,
+                removed_sessions,
                 voice_changes,
             } => Self::AdminRemainingBroadcast {
                 presence_updates: presence_updates.clone(),
+                removed_sessions: removed_sessions.clone(),
                 voice_changes: voice_changes
                     .iter()
                     .map(|v| PersistedOccupantVoiceChange {
@@ -270,9 +273,11 @@ impl TryFrom<PersistedRoomEffect> for RoomEffect {
             PersistedRoomEffect::AdminSelfNotify { updates } => Self::AdminSelfNotify { updates },
             PersistedRoomEffect::AdminRemainingBroadcast {
                 presence_updates,
+                removed_sessions,
                 voice_changes,
             } => Self::AdminRemainingBroadcast {
                 presence_updates,
+                removed_sessions,
                 voice_changes: voice_changes
                     .into_iter()
                     .map(|v| OccupantVoiceChange {

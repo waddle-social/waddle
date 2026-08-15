@@ -47,5 +47,5 @@ pub async fn handle_iq(
         &mut conn_state,
     )
     .await
-    .frames
+    .into_serialized_frames()
 }

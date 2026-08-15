@@ -185,8 +185,7 @@ pub(super) fn response_batch_from_inline_room_effect_frames(
 ) -> ResponseBatch {
     let mut batch = ResponseBatch::default();
     for frame in frames.frames {
-        batch.frames.push(stanza_to_xml(&frame.stanza));
-        batch.completions.push(frame.completion);
+        batch.push_completion_frame(frame.stanza, frame.completion);
     }
     batch
 }

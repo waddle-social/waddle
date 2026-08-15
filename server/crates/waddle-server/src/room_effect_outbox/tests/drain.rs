@@ -24,7 +24,7 @@ use crate::room_effect_outbox::RoomEffectEnqueue;
 use crate::server::routes::websocket::stanza_to_xml;
 use crate::server::routes::websocket::tests::{
     create_test_websocket_state, create_test_websocket_state_with_clustering,
-    register_test_connection,
+    create_test_websocket_state_with_sfu, register_test_connection,
 };
 use crate::server::routes::websocket::WebSocketState;
 
@@ -80,6 +80,7 @@ fn inline_admin_effects_for(room_jid: &BareJid, initiator: &FullJid) -> RoomMuta
             actor: None,
             reason: None,
         }],
+        Vec::new(),
         Vec::new(),
     )
 }
@@ -138,6 +139,16 @@ async fn enqueue_and_arm(
         .await
         .expect("arm reservation");
     reservation
+}
+
+fn admin_removal_effects_for(room_jid: &BareJid, removed_session: FullJid) -> RoomMutationEffects {
+    RoomMutationEffects::admin(
+        room_jid.clone(),
+        Vec::new(),
+        Vec::new(),
+        vec![removed_session],
+        Vec::new(),
+    )
 }
 
 async fn insert_lifecycle_row(
@@ -667,6 +678,62 @@ async fn due_drain_requeues_nonterminal_rows_when_room_is_not_locally_owned() {
             .is_none(),
         "the locally-owned retry must complete the original row"
     );
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn due_drain_renews_single_recipient_rows_before_the_first_send() {
+    let state = create_test_websocket_state().await;
+    let room_jid = drain_room_jid();
+    let recipient = full_jid("alice@example.test/device");
+    let lifecycle = create_owned_room_and_lifecycle(state.as_ref()).await;
+    let reservation = enqueue_effects(
+        state.as_ref(),
+        lifecycle,
+        initial_revision(),
+        &config_effects_for(&room_jid, vec![recipient.clone()]),
+        0,
+    )
+    .await;
+    state
+        .deps
+        .protocol
+        .room_effect_outbox
+        .arm_reservation(&reservation, 0)
+        .await
+        .expect("arm reservation");
+    let key = RoomEffectKey {
+        lifecycle,
+        revision: initial_revision(),
+        ordinal: reservation.ordinals[0],
+    };
+
+    let (tx, mut rx) = mpsc::channel::<OutboundStanza>(4);
+    register_test_connection(state.as_ref(), &recipient, tx).await;
+    let state_for_drain = Arc::clone(&state);
+    let drain =
+        tokio::spawn(async move { drain_due_effects(state_for_drain.as_ref(), 0, 8).await });
+    let outbound = recv_outbound(&mut rx).await;
+    let row = state
+        .deps
+        .protocol
+        .room_effect_outbox
+        .find(&key)
+        .await
+        .expect("find leased row")
+        .expect("row remains leased before write acceptance");
+    assert!(
+        row.leased_at_ms
+            .is_some_and(|leased_at_ms| leased_at_ms > 0),
+        "the current row lease must be renewed before its first recipient send"
+    );
+    outbound
+        .write_acceptance
+        .as_ref()
+        .expect("write acceptance")
+        .acknowledge();
+    let summary = drain.await.expect("drain join").expect("drain result");
+    assert_eq!(summary.drained, 1);
+    assert_eq!(summary.stale, 0);
 }
 
 #[tokio::test(flavor = "current_thread")]
@@ -1211,9 +1278,12 @@ async fn due_drain_redelivers_after_writer_ack_gap_expires() {
         .await
         .expect("arm reservation");
 
+    let first_now_ms = crate::time::now_ms();
     let state_for_first = Arc::clone(&state);
     let first =
-        tokio::spawn(async move { drain_due_effects(state_for_first.as_ref(), 0, 8).await });
+        tokio::spawn(
+            async move { drain_due_effects(state_for_first.as_ref(), first_now_ms, 8).await },
+        );
     let first_delivery = recv_outbound(&mut rx).await;
     assert!(
         first_delivery.write_acceptance.is_some(),
@@ -1227,9 +1297,10 @@ async fn due_drain_redelivers_after_writer_ack_gap_expires() {
     assert_eq!(summary.requeued, 0);
     assert_eq!(summary.stale, 0);
 
+    let second_now_ms = crate::time::now_ms() + CLAIM_TIMEOUT_MS + 1;
     let state_for_second = Arc::clone(&state);
     let second = tokio::spawn(async move {
-        drain_due_effects(state_for_second.as_ref(), CLAIM_TIMEOUT_MS + 1, 8).await
+        drain_due_effects(state_for_second.as_ref(), second_now_ms, 8).await
     });
     let second_delivery = recv_outbound(&mut rx).await;
     second_delivery
@@ -1709,4 +1780,210 @@ async fn due_drain_aborts_remaining_roster_after_lease_loss() {
         .expect("find released row")
         .expect("released row retained");
     assert!(row.lease_token.is_none(), "lost lease must stay released");
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn superseded_mid_pass_renewal_aborts_delivery_and_unblocks_terminal_drain() {
+    let state = create_test_websocket_state().await;
+    let room: BareJid = "superseded-mid-pass@muc.example.com".parse().expect("room");
+    let blocked_recipient = full_jid("blocked-head@example.test/device");
+    let stale_tail_recipient = full_jid("stale-tail@example.test/device");
+    let terminal_recipient = full_jid("terminal@example.test/device");
+    let lifecycle = create_owned_room_and_lifecycle_for(state.as_ref(), &room).await;
+    let store = state.deps.protocol.room_effect_outbox.as_ref();
+    let config = enqueue_effects(
+        state.as_ref(),
+        lifecycle,
+        initial_revision(),
+        &config_effects_for(
+            &room,
+            vec![blocked_recipient.clone(), stale_tail_recipient.clone()],
+        ),
+        0,
+    )
+    .await;
+    store.arm_reservation(&config, 0).await.expect("arm config");
+    let config_key = RoomEffectKey {
+        lifecycle,
+        revision: initial_revision(),
+        ordinal: config.ordinals[0],
+    };
+
+    let (blocked_tx, _blocked_rx) = mpsc::channel::<OutboundStanza>(1);
+    register_test_connection(state.as_ref(), &blocked_recipient, blocked_tx.clone()).await;
+    blocked_tx
+        .send(OutboundStanza::new(Stanza::Presence(
+            xmpp_parsers::presence::Presence::new(xmpp_parsers::presence::Type::None),
+        )))
+        .await
+        .expect("prefill blocked recipient channel");
+    let (tail_tx, mut tail_rx) = mpsc::channel::<OutboundStanza>(4);
+    register_test_connection(state.as_ref(), &stale_tail_recipient, tail_tx).await;
+    let terminal_recipient_for_supersede = terminal_recipient.clone();
+
+    let state_for_supersede = Arc::clone(&state);
+    let config_key_for_supersede = config_key.clone();
+    let supersede = tokio::spawn(async move {
+        loop {
+            let row = state_for_supersede
+                .deps
+                .protocol
+                .room_effect_outbox
+                .find(&config_key_for_supersede)
+                .await
+                .expect("find leased config row")
+                .expect("leased config row exists");
+            if row
+                .leased_at_ms
+                .is_some_and(|leased_at_ms| leased_at_ms > 0)
+            {
+                let mut tx = state_for_supersede
+                    .deps
+                    .protocol
+                    .room_effect_outbox
+                    .database()
+                    .begin()
+                    .await
+                    .expect("transaction");
+                state_for_supersede
+                    .deps
+                    .protocol
+                    .room_effect_outbox
+                    .supersede_non_terminal_in_tx(&mut tx, lifecycle, 0)
+                    .await
+                    .expect("supersede leased config row");
+                let destroy = state_for_supersede
+                    .deps
+                    .protocol
+                    .room_effect_outbox
+                    .enqueue_in_tx(
+                        &mut tx,
+                        RoomEffectEnqueue {
+                            lifecycle,
+                            revision: initial_revision().next().expect("next revision"),
+                            effects: &destroy_effects_for(
+                                &room,
+                                vec![terminal_recipient_for_supersede.clone()],
+                            ),
+                            origin: &origin(),
+                            producing_node: &producing_node(),
+                            now_ms: 0,
+                        },
+                    )
+                    .await
+                    .expect("enqueue destroy");
+                tx.commit().await.expect("commit destroy");
+                state_for_supersede
+                    .deps
+                    .protocol
+                    .room_effect_outbox
+                    .arm_reservation(&destroy, 0)
+                    .await
+                    .expect("arm destroy");
+                break;
+            }
+            tokio::task::yield_now().await;
+        }
+    });
+
+    let state_for_drain = Arc::clone(&state);
+    let first_drain =
+        tokio::spawn(async move { drain_due_effects(state_for_drain.as_ref(), 1, 8).await });
+    supersede.await.expect("supersede task");
+    assert!(
+        tokio::time::timeout(Duration::from_secs(6), tail_rx.recv())
+            .await
+            .is_err(),
+        "a superseded row must not emit later-recipient frames after the lease-renew barrier fails"
+    );
+    let first_summary = first_drain
+        .await
+        .expect("first drain join")
+        .expect("first drain result");
+    assert_eq!(first_summary.drained, 0);
+    assert_eq!(first_summary.requeued, 0);
+    assert_eq!(
+        first_summary.stale, 1,
+        "mid-pass supersession should abort the obsolete row as stale"
+    );
+
+    let (terminal_tx, mut terminal_rx) = mpsc::channel::<OutboundStanza>(4);
+    register_test_connection(state.as_ref(), &terminal_recipient, terminal_tx).await;
+    let state_for_terminal = Arc::clone(&state);
+    let terminal_drain =
+        tokio::spawn(async move { drain_due_effects(state_for_terminal.as_ref(), 0, 8).await });
+    let outbound = recv_outbound(&mut terminal_rx).await;
+    outbound
+        .write_acceptance
+        .as_ref()
+        .expect("terminal write acceptance")
+        .acknowledge();
+    let terminal_summary = terminal_drain
+        .await
+        .expect("terminal drain join")
+        .expect("terminal drain result");
+    assert_eq!(
+        terminal_summary.drained, 1,
+        "the terminal destroy row should drain once the superseded predecessor aborts"
+    );
+    assert_eq!(store.queue_depth().await.expect("queue depth"), 0);
+}
+
+#[tokio::test]
+async fn drain_replays_persisted_admin_removal_sfu_unregisters() {
+    let recorder = Arc::new(crate::server::routes::websocket::tests::RecordingSfu::default());
+    let state = create_test_websocket_state_with_sfu(recorder.clone()).await;
+    let room_jid = drain_room_jid();
+    let lifecycle = create_owned_room_and_lifecycle_for(state.as_ref(), &room_jid).await;
+    let removed_session = full_jid("alice@example.test/device");
+    let reservation = enqueue_and_arm(
+        state.deps.protocol.room_effect_outbox.as_ref(),
+        lifecycle,
+        initial_revision(),
+        admin_removal_effects_for(&room_jid, removed_session.clone()),
+    )
+    .await;
+
+    let persisted = state
+        .deps
+        .protocol
+        .room_effect_outbox
+        .find(&RoomEffectKey {
+            lifecycle,
+            revision: initial_revision(),
+            ordinal: reservation.ordinals[1],
+        })
+        .await
+        .expect("find persisted removal row")
+        .expect("persisted removal row exists");
+    match persisted.effect {
+        waddle_xmpp::muc::RoomEffect::AdminRemainingBroadcast {
+            removed_sessions, ..
+        } => assert_eq!(removed_sessions, vec![removed_session.clone()]),
+        other => panic!("expected persisted admin-removal row, got {other:?}"),
+    }
+
+    let first_summary = drain_due_effects(state.as_ref(), crate::time::now_ms(), 8)
+        .await
+        .expect("drain first admin ordinal");
+    let second_summary = drain_due_effects(state.as_ref(), crate::time::now_ms(), 8)
+        .await
+        .expect("drain persisted removal ordinal");
+
+    assert_eq!(
+        first_summary.drained + second_summary.drained,
+        2,
+        "both admin ordinals should complete"
+    );
+    let unregistered = recorder.snapshot();
+    assert_eq!(
+        unregistered.len(),
+        1,
+        "expected one replayed SFU unregister"
+    );
+    assert_eq!(unregistered[0].0.as_str(), room_jid.as_str());
+    assert_eq!(
+        unregistered[0].1.as_livekit_identity(),
+        removed_session.to_string()
+    );
 }

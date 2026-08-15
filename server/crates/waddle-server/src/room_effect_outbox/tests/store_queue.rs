@@ -149,6 +149,40 @@ async fn staged_rows_need_exact_claim_or_arming_and_lease_token_interlocks() {
 }
 
 #[tokio::test]
+async fn renew_lease_rejects_superseded_rows() {
+    let (_db, store) = store_with_db("room-effect-renew-superseded").await;
+    let lifecycle = lifecycle();
+    let reservation =
+        enqueue_and_arm(&store, lifecycle, initial_revision(), config_effects()).await;
+    let key = RoomEffectKey {
+        lifecycle,
+        revision: initial_revision(),
+        ordinal: reservation.ordinals[0],
+    };
+    let claim = store
+        .claim_due_head(0, 1)
+        .await
+        .expect("claim due row")
+        .pop()
+        .expect("claimed row");
+
+    let mut tx = store.database().begin().await.expect("transaction");
+    store
+        .supersede_non_terminal_in_tx(&mut tx, lifecycle, 0)
+        .await
+        .expect("supersede leased row");
+    tx.commit().await.expect("commit supersession");
+
+    assert!(
+        !store
+            .renew_lease(&key, &claim.lease_token, 1)
+            .await
+            .expect("renew superseded row"),
+        "renewal must fail once a leased row is superseded"
+    );
+}
+
+#[tokio::test]
 async fn handler_window_rows_wait_for_grace_but_exact_claim_is_immediate() {
     let (_db, store) = store_with_db("room-effect-handler-window-grace").await;
     let exact_lifecycle = lifecycle();

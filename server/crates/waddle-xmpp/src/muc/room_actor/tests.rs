@@ -5332,6 +5332,7 @@ async fn apply_affiliation_change_threads_admin_effects_and_reservation() {
     match &effects.effects()[1] {
         crate::muc::RoomEffect::AdminRemainingBroadcast {
             presence_updates,
+            removed_sessions,
             voice_changes,
         } => {
             assert_eq!(presence_updates.len(), 1);
@@ -5342,6 +5343,7 @@ async fn apply_affiliation_change_threads_admin_effects_and_reservation() {
                 presence_updates[0].disclosed_real_jid.as_ref(),
                 Some(&alice)
             );
+            assert_eq!(removed_sessions, &vec![alice.clone()]);
             assert!(voice_changes.is_empty());
         }
         other => panic!("expected remaining-broadcast effect, got {other:?}"),
@@ -5424,8 +5426,8 @@ async fn zero_delta_managed_members_only_enforcement_still_commits_one_config_ef
     ));
     assert!(matches!(
         &fused.effects()[1],
-        crate::muc::RoomEffect::AdminRemainingBroadcast { presence_updates, voice_changes }
-            if presence_updates.is_empty() && voice_changes.is_empty()
+        crate::muc::RoomEffect::AdminRemainingBroadcast { presence_updates, removed_sessions, voice_changes }
+            if presence_updates.is_empty() && removed_sessions.is_empty() && voice_changes.is_empty()
     ));
     assert!(matches!(
         &fused.effects()[2],

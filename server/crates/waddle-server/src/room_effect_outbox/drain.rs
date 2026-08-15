@@ -20,7 +20,7 @@ use waddle_xmpp::ownership::{Entity, EntityType};
 use waddle_xmpp::registry::{OutboundWriteAcceptance, SendResult};
 use waddle_xmpp::Stanza;
 
-use super::render::{effect_voice_changes, rebuild_effect};
+use super::render::{effect_removed_sessions, effect_voice_changes, rebuild_effect};
 use super::{
     ClaimedRoomEffect, RoomEffectKey, RoomEffectLastError, RoomEffectLeaseToken,
     RoomEffectOutboxError,
@@ -370,12 +370,9 @@ async fn drain_claimed(
             }
         }
     }
-    if !store
-        .revalidate(&claimed.row.key, &claimed.lease_token)
-        .await?
-    {
-        // A destroy superseded this leased row.  Store semantics permit its
-        // holder to delete it, and no wire frame may escape this barrier.
+    if !renew_claim_lease(state, &claimed.row.key, &claimed.lease_token).await? {
+        // A stale, stolen, or destroy-superseded preclaimed row must not
+        // execute; complete() only deletes the still-owned superseded case.
         let _ = store
             .complete(&claimed.row.key, &claimed.lease_token)
             .await?;
@@ -384,6 +381,13 @@ async fn drain_claimed(
     // Voice capability changes are typed side effects of the same durable
     // admin mutation.  They have no XMPP wire stanza of their own, but must
     // converge on the node that owns the room before the lease completes.
+    for removed_session in effect_removed_sessions(&claimed.row.effect) {
+        crate::server::routes::websocket::muc_call_sfu::unregister_participant_from_room(
+            state,
+            &claimed.row.room_jid,
+            removed_session,
+        );
+    }
     for change in effect_voice_changes(&claimed.row.effect) {
         crate::server::routes::websocket::muc_call_sfu::apply_voice_grants_for_room(
             state,
@@ -401,8 +405,8 @@ async fn drain_claimed(
     let mut inline = Vec::new();
     let mut remote_retry_needed = false;
     let mut local_retry_needed = false;
-    for (index, (recipient, stanza)) in rendered.into_iter().enumerate() {
-        if index > 0 && !renew_claim_lease(state, &claimed.row.key, &claimed.lease_token).await? {
+    for (recipient, stanza) in rendered {
+        if !renew_claim_lease(state, &claimed.row.key, &claimed.lease_token).await? {
             tracing::warn!(
                 room = %claimed.row.room_jid,
                 lifecycle = %claimed.row.key.lifecycle,

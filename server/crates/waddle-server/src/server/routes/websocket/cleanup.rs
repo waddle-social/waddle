@@ -2479,8 +2479,7 @@ pub(crate) async fn drain_destroy_completions(
                         warn!(%error, "Failed to retain MUC destroy completion after durable acknowledgement failure");
                     }
                 }
-                batch.frames.extend(completion_frames.frames);
-                batch.completions.extend(completion_frames.completions);
+                batch.append_batch(completion_frames);
             }
             Err(()) => {
                 let _ = super::handlers::iq::muc_owner_moderation::finalize_persisted_destroy_completion(state, &lease, false).await;

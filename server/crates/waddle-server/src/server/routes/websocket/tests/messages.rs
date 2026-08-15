@@ -5006,7 +5006,7 @@ async fn inbox_query_requires_ready_phase() {
         &mut conn_state,
     )
     .await
-    .frames;
+    .into_serialized_frames();
 
     let response = responses.first().expect("inbox error response");
     assert!(

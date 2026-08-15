@@ -342,6 +342,16 @@ async fn grant_member(admin: &mut WsXmppClient, room: &str, jid: &str) {
     let _ = expect_iq_result(admin, &iq_id).await;
 }
 
+async fn grant_owner(admin: &mut WsXmppClient, room: &str, jid: &str) {
+    let iq_id = format!("grant-owner-{}", uuid::Uuid::new_v4());
+    send_element(
+        admin,
+        muc_admin_affiliation_iq(room, &iq_id, jid, "owner", None),
+    )
+    .await;
+    let _ = expect_iq_result(admin, &iq_id).await;
+}
+
 #[tokio::test]
 async fn xep_0045_self_kick_delivers_307_before_iq_result() {
     let _guard = TEST_SERIAL.lock().await;
@@ -582,6 +592,72 @@ async fn xep_0045_membership_loss_returns_iq_result_before_321_presences() {
     let _ = admin.close().await;
     let _ = alice.close().await;
     let _ = bob.close().await;
+}
+
+#[tokio::test]
+async fn xep_0045_self_membership_loss_delivers_321_before_iq_result() {
+    let _guard = TEST_SERIAL.lock().await;
+    let alice_pass = format!("alice-pass-{}", uuid::Uuid::new_v4());
+    let server = TestServer::start_with_extra_accounts(&[(ALICE, &alice_pass)]);
+
+    let admin_pass = server.fixed_account_password().to_string();
+    let mut admin = connect(&server, ADMIN, &admin_pass, "self-member-loss-admin").await;
+    let mut alice = connect(&server, ALICE, &alice_pass, "self-member-loss-alice").await;
+    let room = format!("self-member-loss-{}@muc.{DOMAIN}", uuid::Uuid::new_v4());
+
+    join_room(&mut admin, &room, ADMIN).await;
+    settle_clients(&mut [&mut admin]).await;
+
+    make_members_only(&mut admin, &room).await;
+    settle_clients(&mut [&mut admin]).await;
+
+    grant_member(&mut admin, &room, &format!("{ALICE}@{DOMAIN}")).await;
+    settle_clients(&mut [&mut admin]).await;
+
+    join_room(&mut alice, &room, ALICE).await;
+    settle_clients(&mut [&mut admin, &mut alice]).await;
+
+    grant_owner(&mut admin, &room, &format!("{ALICE}@{DOMAIN}")).await;
+    settle_clients(&mut [&mut admin, &mut alice]).await;
+
+    let remove_id = format!("self-member-loss-{}", uuid::Uuid::new_v4());
+    send_element(
+        &mut admin,
+        muc_admin_affiliation_iq(
+            &room,
+            &remove_id,
+            &format!("{ADMIN}@{DOMAIN}"),
+            "none",
+            None,
+        ),
+    )
+    .await;
+
+    let expected_from = format!("{room}/{ADMIN}");
+    let self_removal = admin.recv().await.expect("admin self removal");
+    assert_unavailable_admin_presence(
+        &self_removal,
+        &expected_from,
+        "321",
+        Some("none"),
+        Some("none"),
+        true,
+    );
+
+    let _ = expect_iq_result(&mut admin, &remove_id).await;
+
+    let alice_broadcast = alice.recv().await.expect("alice self-removal broadcast");
+    assert_unavailable_admin_presence(
+        &alice_broadcast,
+        &expected_from,
+        "321",
+        Some("none"),
+        Some("none"),
+        false,
+    );
+
+    let _ = admin.close().await;
+    let _ = alice.close().await;
 }
 
 #[tokio::test]

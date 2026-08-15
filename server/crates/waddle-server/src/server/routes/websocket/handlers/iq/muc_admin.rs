@@ -179,8 +179,7 @@ async fn extend_batch_with_inline_room_effect_frames(
             .await?;
     let summary = drained.summary;
     let drained = response_batch_from_inline_room_effect_frames(drained);
-    batch.frames.extend(drained.frames);
-    batch.completions.extend(drained.completions);
+    batch.append_batch(drained);
     Ok(summary)
 }
 
@@ -1562,9 +1561,8 @@ pub(super) async fn handle_muc_admin_iq(
     // today's direct-broadcast path below.
     if let Some(reservation) = applied.outbox_reservation.as_ref() {
         let mut batch = ResponseBatch::default();
-        let self_kick_before_result = applied.removed_by_moderation.contains(sender_jid)
-            && is_role_change_query(&query.items);
-        let (pre_result, post_result) = if self_kick_before_result {
+        let self_removal_before_result = applied.removed_by_moderation.contains(sender_jid);
+        let (pre_result, post_result) = if self_removal_before_result {
             split_room_effect_reservation(reservation, 1)
         } else {
             (None, Some(reservation.clone()))
@@ -1601,7 +1599,7 @@ pub(super) async fn handle_muc_admin_iq(
                 }
             }
         }
-        batch.frames.push(result_frame);
+        batch.frames.push(result_frame.into());
         if let Some(post_result) = post_result.as_ref() {
             if let Err(error) = extend_batch_with_inline_room_effect_frames(
                 &mut batch,

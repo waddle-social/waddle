@@ -141,59 +141,97 @@ struct CommittedConfigReservationGuard<'a> {
 
 struct PendingMembersOnlyEnforcement {
     actor: kameo::actor::ActorRef<waddle_xmpp::muc::room_actor::RoomActor>,
-    affiliations: Vec<(BareJid, waddle_xmpp::Affiliation)>,
+    request: PendingMembersOnlyEnforcementRequest,
     fallback_reservation: Option<waddle_xmpp::muc::RoomEffectReservation>,
-    config_status_codes: Vec<waddle_xmpp::muc::MucConfigStatusCode>,
     room_jid: BareJid,
     connections: std::sync::Arc<waddle_xmpp::registry::ConnectionRegistry>,
     sfu: Option<std::sync::Arc<dyn waddle_sfu::SfuService>>,
     arm_supervisor: crate::room_effect_outbox::RoomEffectArmSupervisor,
 }
 
+enum PendingMembersOnlyEnforcementRequest {
+    Managed {
+        affiliations: Vec<(BareJid, waddle_xmpp::Affiliation)>,
+        config_status_codes: Vec<waddle_xmpp::muc::MucConfigStatusCode>,
+    },
+    Unmanaged,
+}
+
 impl PendingMembersOnlyEnforcement {
     async fn run(self) {
         let Self {
             actor,
-            affiliations,
+            request,
             fallback_reservation,
-            config_status_codes,
             room_jid,
             connections,
             sfu,
             arm_supervisor,
         } = self;
         let fallback_on_failure = fallback_reservation.clone();
-        match actor
-            .ask(EnforceMembersOnlyAffiliations {
+        match request {
+            PendingMembersOnlyEnforcementRequest::Managed {
                 affiliations,
-                fallback_reservation,
                 config_status_codes,
-            })
-            .await
-        {
-            Ok(applied) => {
-                super::super::super::muc_call_sfu::converge_members_only_sweep_via_sfu(
-                    sfu.as_ref(),
-                    &room_jid,
-                    &applied,
-                );
-                if let Some(reservation) = applied.outbox_reservation.as_ref() {
-                    arm_supervisor.arm(reservation.clone());
-                } else {
-                    for (recipient, presence) in applied.presence_updates {
-                        let _ = connections.try_send_to(&recipient, Stanza::Presence(presence));
+            } => match actor
+                .ask(EnforceMembersOnlyAffiliations {
+                    affiliations,
+                    fallback_reservation,
+                    config_status_codes,
+                })
+                .await
+            {
+                Ok(applied) => {
+                    super::super::super::muc_call_sfu::converge_members_only_sweep_via_sfu(
+                        sfu.as_ref(),
+                        &room_jid,
+                        &applied,
+                    );
+                    if let Some(reservation) = applied.outbox_reservation.as_ref() {
+                        arm_supervisor.arm(reservation.clone());
+                    } else {
+                        for (recipient, presence) in applied.presence_updates {
+                            let _ = connections.try_send_to(&recipient, Stanza::Presence(presence));
+                        }
                     }
                 }
-            }
-            Err(error) => {
-                if let Some(reservation) = fallback_on_failure {
-                    arm_supervisor.arm(reservation);
+                Err(error) => {
+                    if let Some(reservation) = fallback_on_failure {
+                        arm_supervisor.arm(reservation);
+                    }
+                    tracing::warn!(
+                        room = %room_jid,
+                        ?error,
+                        "cancelled owner config recovery could not enforce members-only"
+                    );
                 }
-                tracing::warn!(
-                    room = %room_jid,
-                    ?error,
-                    "cancelled owner config recovery could not enforce members-only"
-                );
+            },
+            PendingMembersOnlyEnforcementRequest::Unmanaged => {
+                match actor.ask(EnforceMembersOnly).await {
+                    Ok(applied) => {
+                        super::super::super::muc_call_sfu::converge_members_only_sweep_via_sfu(
+                            sfu.as_ref(),
+                            &room_jid,
+                            &applied,
+                        );
+                        for (recipient, presence) in applied.presence_updates {
+                            let _ = connections.try_send_to(&recipient, Stanza::Presence(presence));
+                        }
+                        if let Some(reservation) = fallback_reservation {
+                            arm_supervisor.arm(reservation);
+                        }
+                    }
+                    Err(error) => {
+                        if let Some(reservation) = fallback_on_failure {
+                            arm_supervisor.arm(reservation);
+                        }
+                        tracing::warn!(
+                            room = %room_jid,
+                            ?error,
+                            "cancelled owner config recovery could not enforce members-only"
+                        );
+                    }
+                }
             }
         }
     }
@@ -485,9 +523,21 @@ pub(super) async fn apply_muc_owner_config(
     if let Some(affiliations) = managed_enforcement_affiliations.as_ref() {
         config_reservation.defer_to_members_only_enforcement(PendingMembersOnlyEnforcement {
             actor: room_actor.clone(),
-            affiliations: affiliations.clone(),
+            request: PendingMembersOnlyEnforcementRequest::Managed {
+                affiliations: affiliations.clone(),
+                config_status_codes: config_status_codes.clone(),
+            },
             fallback_reservation: config_reservation.reservation().cloned(),
-            config_status_codes: config_status_codes.clone(),
+            room_jid: room_jid.clone(),
+            connections: state.deps.protocol.connection_registry.clone(),
+            sfu: state.deps.protocol.sfu.clone(),
+            arm_supervisor: state.deps.protocol.room_effect_arm_supervisor.clone(),
+        });
+    } else if !previous_members_only && config.members_only && channel_id.is_none() {
+        config_reservation.defer_to_members_only_enforcement(PendingMembersOnlyEnforcement {
+            actor: room_actor.clone(),
+            request: PendingMembersOnlyEnforcementRequest::Unmanaged,
+            fallback_reservation: config_reservation.reservation().cloned(),
             room_jid: room_jid.clone(),
             connections: state.deps.protocol.connection_registry.clone(),
             sfu: state.deps.protocol.sfu.clone(),
@@ -501,6 +551,7 @@ pub(super) async fn apply_muc_owner_config(
                 .ask(EnforceMembersOnly)
                 .await
                 .map_err(|error| format!("members-only enforcement failed: {error:?}"))?;
+            config_reservation.clear_members_only_enforcement();
             super::super::super::muc_call_sfu::converge_members_only_sweep_via_sfu(
                 state.deps.protocol.sfu.as_ref(),
                 room_jid,
@@ -802,17 +853,31 @@ mod tests {
     use std::time::Duration;
 
     use jid::{BareJid, FullJid};
+    use std::sync::Arc;
+    use tokio::sync::mpsc;
     use waddle_xmpp::muc::{
+        room_actor::{ConfigEffectPlan, JoinAffiliationGrant, JoinWithAffiliation, UpdateConfig},
         MucConfigStatusCode, RoomEffectReservation, RoomLifecycleId, RoomMutationEffects,
         RoomRevision,
     };
     use waddle_xmpp::ownership::NodeIdentity;
 
-    use super::CommittedConfigReservationGuard;
+    use super::{
+        CommittedConfigReservationGuard, PendingMembersOnlyEnforcement,
+        PendingMembersOnlyEnforcementRequest,
+    };
     use crate::room_effect_outbox::{
         RoomEffectEnqueue, RoomEffectKey, RoomEffectOriginInstanceId, RoomEffectProducingNode,
     };
-    use crate::server::routes::websocket::{tests::create_test_websocket_state, WebSocketState};
+    use crate::server::routes::websocket::{
+        cleanup::get_or_create_room_actor,
+        stanza_to_xml,
+        tests::{
+            create_test_websocket_state, create_test_websocket_state_with_sfu,
+            register_test_connection, snapshot_room, RecordingSfu,
+        },
+        WebSocketState,
+    };
 
     fn room_jid() -> BareJid {
         BareJid::from_str("cancellation-room@conference.example.test").expect("room JID")
@@ -909,5 +974,154 @@ mod tests {
         })
         .await
         .expect("drop-time supervisor registration must arm the staged row");
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn dropped_committed_config_reservation_detaches_unmanaged_members_only_enforcement() {
+        let sfu = Arc::new(RecordingSfu::default());
+        let state = create_test_websocket_state_with_sfu(sfu.clone()).await;
+        let room = room_jid();
+        let room_actor = get_or_create_room_actor(
+            state.as_ref(),
+            &room,
+            waddle_xmpp::muc::RoomConfig {
+                members_only: false,
+                ..waddle_xmpp::muc::RoomConfig::default()
+            },
+            "waddle".to_owned(),
+            "channel".to_owned(),
+        )
+        .await
+        .expect("create room")
+        .actor_ref;
+        let admin = full_jid("admin@example.test/desktop");
+        let alice = full_jid("alice@example.test/phone");
+        room_actor
+            .ask(JoinWithAffiliation {
+                sender_jid: admin.clone(),
+                nick: "admin".to_owned(),
+                affiliation_grant: JoinAffiliationGrant::Resolver(waddle_xmpp::Affiliation::Owner),
+                local_domain: "example.test".to_owned(),
+                admission_revision: 0,
+            })
+            .await
+            .expect("admin join");
+        room_actor
+            .ask(JoinWithAffiliation {
+                sender_jid: alice.clone(),
+                nick: "alice".to_owned(),
+                affiliation_grant: JoinAffiliationGrant::Resolver(waddle_xmpp::Affiliation::None),
+                local_domain: "example.test".to_owned(),
+                admission_revision: 0,
+            })
+            .await
+            .expect("alice join");
+        room_actor
+            .ask(UpdateConfig {
+                config: waddle_xmpp::muc::RoomConfig {
+                    members_only: true,
+                    ..waddle_xmpp::muc::RoomConfig::default()
+                },
+                effect_plan: ConfigEffectPlan::DirectAudience,
+            })
+            .await
+            .expect("members-only config commit");
+        let (_admin_tx, mut admin_rx) = {
+            let (tx, rx) = mpsc::channel(8);
+            let _ = register_test_connection(state.as_ref(), &admin, tx).await;
+            ((), rx)
+        };
+        let (_alice_tx, mut alice_rx) = {
+            let (tx, rx) = mpsc::channel(8);
+            let _ = register_test_connection(state.as_ref(), &alice, tx).await;
+            ((), rx)
+        };
+        let lifecycle = RoomLifecycleId::generate();
+        let revision = RoomRevision::initial();
+        let reservation = enqueue_config_reservation(state.as_ref(), lifecycle, revision).await;
+        let key = RoomEffectKey {
+            lifecycle,
+            revision,
+            ordinal: reservation.ordinals[0],
+        };
+        let store = state.deps.protocol.room_effect_outbox.as_ref();
+
+        {
+            let mut guard =
+                CommittedConfigReservationGuard::new(state.as_ref(), Some(reservation.clone()));
+            guard.defer_to_members_only_enforcement(PendingMembersOnlyEnforcement {
+                actor: room_actor.clone(),
+                request: PendingMembersOnlyEnforcementRequest::Unmanaged,
+                fallback_reservation: Some(reservation.clone()),
+                room_jid: room.clone(),
+                connections: state.deps.protocol.connection_registry.clone(),
+                sfu: state.deps.protocol.sfu.clone(),
+                arm_supervisor: state.deps.protocol.room_effect_arm_supervisor.clone(),
+            });
+        }
+
+        let alice_presence = tokio::time::timeout(Duration::from_secs(1), alice_rx.recv())
+            .await
+            .expect("alice detached removal timeout")
+            .expect("alice detached removal");
+        let admin_presence = tokio::time::timeout(Duration::from_secs(1), admin_rx.recv())
+            .await
+            .expect("admin detached removal timeout")
+            .expect("admin detached removal");
+        let alice_xml = stanza_to_xml(&alice_presence.stanza);
+        let admin_xml = stanza_to_xml(&admin_presence.stanza);
+        assert!(
+            alice_xml.contains("code='322'") && alice_xml.contains("code='110'"),
+            "detached unmanaged enforcement must notify the removed occupant first-class: {alice_xml}"
+        );
+        assert!(
+            admin_xml.contains("code='322'"),
+            "detached unmanaged enforcement must notify remaining occupants: {admin_xml}"
+        );
+
+        tokio::time::timeout(Duration::from_secs(1), async {
+            loop {
+                if store
+                    .find(&key)
+                    .await
+                    .expect("armed row lookup")
+                    .expect("armed row present")
+                    .available_at_ms
+                    != i64::MAX
+                {
+                    return;
+                }
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect(
+            "detached unmanaged enforcement must arm the config reservation after the 322 sweep",
+        );
+
+        tokio::time::timeout(Duration::from_secs(1), async {
+            loop {
+                if snapshot_room(state.as_ref(), &room)
+                    .await
+                    .room
+                    .get_occupant("alice")
+                    .is_none()
+                {
+                    return;
+                }
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("detached unmanaged enforcement must evict the non-member from the room");
+
+        assert_eq!(
+            sfu.snapshot(),
+            vec![(
+                waddle_sfu::CallId::new(room.to_string()).expect("valid call id"),
+                waddle_sfu::Identity::from_jid(alice),
+            )],
+            "detached unmanaged enforcement must still revoke the removed occupant from the SFU"
+        );
     }
 }

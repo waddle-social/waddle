@@ -81,6 +81,15 @@ pub fn effect_voice_changes(effect: &RoomEffect) -> &[OccupantVoiceChange] {
     }
 }
 
+pub fn effect_removed_sessions(effect: &RoomEffect) -> &[FullJid] {
+    match effect {
+        RoomEffect::AdminRemainingBroadcast {
+            removed_sessions, ..
+        } => removed_sessions,
+        _ => &[],
+    }
+}
+
 fn rebuild_admin_update(
     update: &OccupantPresenceUpdate,
     occupant_id_secret: &OccupantIdSecret,
@@ -263,6 +272,7 @@ mod tests {
         };
         let effect = RoomEffect::AdminRemainingBroadcast {
             presence_updates: vec![self_update.clone(), broadcast_update.clone()],
+            removed_sessions: vec![real_jid()],
             voice_changes: vec![waddle_xmpp::muc::OccupantVoiceChange {
                 session: peer_jid(),
                 voice: Voice::Muted,
@@ -362,13 +372,24 @@ mod tests {
             session: peer_jid(),
             voice: Voice::Muted,
         }];
+        let removed_sessions = vec![real_jid()];
         let effect = RoomEffect::AdminRemainingBroadcast {
             presence_updates: Vec::new(),
+            removed_sessions: removed_sessions.clone(),
             voice_changes: voice_changes.clone(),
         };
 
         assert_eq!(effect_voice_changes(&effect), voice_changes.as_slice());
+        assert_eq!(
+            effect_removed_sessions(&effect),
+            removed_sessions.as_slice()
+        );
         assert!(effect_voice_changes(&RoomEffect::ConfigChanged {
+            status_codes: Vec::new(),
+            recipients: Vec::new(),
+        })
+        .is_empty());
+        assert!(effect_removed_sessions(&RoomEffect::ConfigChanged {
             status_codes: Vec::new(),
             recipients: Vec::new(),
         })
@@ -413,6 +434,7 @@ mod tests {
                 actor: None,
                 reason: None,
             }],
+            removed_sessions: vec![real_jid()],
             voice_changes: Vec::new(),
         };
 
