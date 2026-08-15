@@ -2961,7 +2961,10 @@ mod tests {
             )
             .await
             .expect("publish preparing room");
-        assert_eq!(published.coordinates.lifecycle, prepared.coordinates.lifecycle);
+        assert_eq!(
+            published.coordinates.lifecycle,
+            prepared.coordinates.lifecycle
+        );
         assert_eq!(
             published.coordinates.revision.as_i64(),
             prepared.coordinates.revision.as_i64() + 1

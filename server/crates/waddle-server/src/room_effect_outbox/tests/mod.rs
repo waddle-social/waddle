@@ -48,10 +48,14 @@ fn nick(value: &str) -> MucOccupantNick {
 }
 
 fn config_effects() -> RoomMutationEffects {
+    config_effects_for(room_jid(), vec![full_jid("alice@example.test/device")])
+}
+
+fn config_effects_for(room_jid: BareJid, recipients: Vec<FullJid>) -> RoomMutationEffects {
     RoomMutationEffects::config(
-        room_jid(),
+        room_jid,
         vec![MucConfigStatusCode::NonPrivacyConfigurationChange],
-        vec![full_jid("alice@example.test/device")],
+        recipients,
     )
 }
 
@@ -88,4 +92,6 @@ fn admin_effects() -> RoomMutationEffects {
     )
 }
 
+mod drain;
 mod store_queue;
+mod supervisor;
