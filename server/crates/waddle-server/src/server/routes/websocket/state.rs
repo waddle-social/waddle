@@ -1267,6 +1267,14 @@ pub struct ProtocolServices {
     /// teardown insertion encounters a transient database failure.
     pub(crate) call_teardown_persistence:
         crate::call_teardown_outbox::CallTeardownPersistenceSupervisor,
+    /// Durable, per-room FIFO mutation-effect queue.  Producers own enqueueing
+    /// in their mutation transaction; this shared handle is exclusively the
+    /// consumer/janitor and arm-supervisor boundary.
+    pub room_effect_outbox: Arc<crate::room_effect_outbox::RoomEffectOutboxStore>,
+    /// Origin-owned retry path for committed staged config effects.  It has
+    /// only the truthful Arm disposition; rollback/supersession deletes rows
+    /// transactionally elsewhere.
+    pub room_effect_arm_supervisor: crate::room_effect_outbox::RoomEffectArmSupervisor,
     /// Async LiveKit admin view of the concrete SFU, retained separately
     /// from the synchronous protocol service for the teardown janitor.
     pub call_teardown_executor: Option<waddle_sfu::LiveKitTeardownExecutor>,
@@ -1544,6 +1552,11 @@ pub(super) struct WsConnState {
     /// promotes what was retained, rejects XEP-0198 resume, and regenerable
     /// presence fan-out is replayed by a fresh bind/rejoin.
     pub(super) terminal_sm_recovery: StreamManagementState,
+    /// Room-effect completions for responses recorded only into in-memory
+    /// replay after transport loss. They settle only once cleanup proves a
+    /// detached replay owner exists; `NotPersisted` leaves them leased.
+    pub(super) pending_replay_completions:
+        Vec<crate::room_effect_outbox::drain::RoomEffectCompletion>,
     /// Countable stanzas dropped because terminal recovery hit
     /// [`TERMINAL_RECOVERY_QUEUE_CAP`]. Logged at most once per connection.
     pub(super) terminal_sm_recovery_dropped: usize,
@@ -1626,6 +1639,7 @@ impl WsConnState {
             deferred_inbound: std::collections::VecDeque::new(),
             sm_recovery_required: false,
             terminal_sm_recovery: StreamManagementState::new(),
+            pending_replay_completions: Vec::new(),
             terminal_sm_recovery_dropped: 0,
             terminal_sm_recovery_drop_warned: false,
             send_window_pause_deadline: None,

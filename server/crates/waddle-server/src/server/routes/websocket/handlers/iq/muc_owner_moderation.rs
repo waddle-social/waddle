@@ -374,8 +374,8 @@ async fn complete_destroy_snapshot(
     state: &WebSocketState,
     snapshot: DestroyCompletionSnapshot,
     inline_session: Option<&FullJid>,
-) -> Result<Vec<String>, ()> {
-    let room_jid = snapshot.room_jid;
+) -> Result<ResponseBatch, ()> {
+    let room_jid = snapshot.room_jid.clone();
     let wipe_completed = match wipe_destroyed_room_durable_state(
         state,
         &room_jid,
@@ -398,7 +398,64 @@ async fn complete_destroy_snapshot(
     };
     if !wipe_completed {
         debug!(room = %room_jid, "Skipped stale destroy completion after room lifecycle replacement");
-        return Ok(Vec::new());
+        return Ok(ResponseBatch::default());
+    }
+    if let Some(lifecycle) = snapshot.lifecycle {
+        let inline_presence_required = inline_session
+            .is_some_and(|session| snapshot_recipients_include_session(&snapshot, session));
+        let reservation = state
+            .deps
+            .protocol
+            .room_effect_outbox
+            .terminal_reservation_for_lifecycle(lifecycle)
+            .await
+            .map_err(|error| {
+                warn!(room = %room_jid, %error, "Failed to recover terminal MUC destroy effect reservation");
+            })?;
+        let batch = if let Some(reservation) = reservation {
+            state
+                .deps
+                .protocol
+                .room_effect_outbox
+                .arm_reservation(&reservation, crate::time::now_ms())
+                .await
+                .map_err(|error| {
+                    warn!(room = %room_jid, %error, "Failed to arm terminal MUC destroy effect after durable wipe");
+                })?;
+            let drained = crate::room_effect_outbox::drain::drain_reservation_inline(
+                state,
+                &reservation,
+                inline_session,
+            )
+            .await
+            .map_err(|error| {
+                warn!(room = %room_jid, %error, "Failed to drain armed terminal MUC destroy effect");
+            })?;
+            let batch = response_batch_from_inline_room_effect_frames(drained);
+            if inline_presence_required && batch.completions.is_empty() {
+                // A generic/janitor delivery cannot order a queued frame ahead
+                // of this connection's IQ result. Only an inline completion
+                // proves that the initiator's §10.9 presence is in the response
+                // batch before the result; otherwise let the requester time out
+                // while durable recovery finishes the committed broadcast.
+                return Err(());
+            }
+            batch
+        } else {
+            debug!(room = %room_jid, lifecycle = %lifecycle, "Committed destroy completion has no terminal MUC effect rows");
+            ResponseBatch::default()
+        };
+        for recipient in &snapshot.recipients {
+            for session_jid in &recipient.1 {
+                super::super::super::muc_call_sfu::unregister_participant_from_room(
+                    state,
+                    &room_jid,
+                    session_jid,
+                );
+            }
+        }
+        debug!(room = %room_jid, "Completed committed MUC room destroy through terminal effect outbox");
+        return Ok(batch);
     }
     let mut frames = Vec::new();
     for (nick, sessions) in snapshot.recipients {
@@ -462,7 +519,17 @@ async fn complete_destroy_snapshot(
         }
     }
     debug!(room = %room_jid, "Completed committed MUC room destroy");
-    Ok(frames)
+    Ok(ResponseBatch::from(frames))
+}
+
+fn snapshot_recipients_include_session(
+    snapshot: &DestroyCompletionSnapshot,
+    session: &FullJid,
+) -> bool {
+    snapshot
+        .recipients
+        .iter()
+        .any(|(_, sessions)| sessions.iter().any(|recipient| recipient == session))
 }
 
 fn delivery_outcome_warrants_retry(outcome: &waddle_xmpp::registry::BroadcastOutcome) -> bool {
@@ -844,7 +911,7 @@ pub(crate) async fn complete_leased_destroy_completion(
     state: &WebSocketState,
     completion: &LeasedDestroyCompletion,
     inline_session: Option<&FullJid>,
-) -> Result<Vec<String>, ()> {
+) -> Result<ResponseBatch, ()> {
     renew_persisted_destroy_completion_lease(state, completion).await?;
     let cleanup = complete_destroy_snapshot(state, completion.snapshot.clone(), inline_session);
     tokio::pin!(cleanup);
@@ -1093,7 +1160,7 @@ pub(super) async fn handle_muc_owner_and_moderation_iq(
     state: &WebSocketState,
     phase: &ConnectionPhase,
     authenticated_session: &Option<Session>,
-) -> Vec<String> {
+) -> ResponseBatch {
     let iq = ctx.iq;
     let id = ctx.id;
     let payload_ns = ctx.payload_ns;
@@ -1113,7 +1180,8 @@ pub(super) async fn handle_muc_owner_and_moderation_iq(
                 response_from,
                 response_to,
                 bad_request_iq_error("Malformed IQ payload."),
-            )];
+            )]
+            .into();
         };
 
         let room_target = target.split('/').next().unwrap_or(target);
@@ -1123,7 +1191,8 @@ pub(super) async fn handle_muc_owner_and_moderation_iq(
                 response_from,
                 response_to,
                 jid_malformed_iq_error("Malformed JID in IQ addressing."),
-            )];
+            )]
+            .into();
         };
 
         if !is_muc_room_jid(state, &room_jid).await {
@@ -1132,7 +1201,8 @@ pub(super) async fn handle_muc_owner_and_moderation_iq(
                 response_from,
                 response_to,
                 item_not_found_iq_error("Requested item not found."),
-            )];
+            )]
+            .into();
         }
 
         let Some(sender_jid) = phase.bound_jid() else {
@@ -1141,7 +1211,8 @@ pub(super) async fn handle_muc_owner_and_moderation_iq(
                 response_from,
                 response_to,
                 not_authorized_iq_error("Authentication required."),
-            )];
+            )]
+            .into();
         };
         match muc_owner_authorized(state, &room_jid, sender_jid, authenticated_session.as_ref())
             .await
@@ -1153,7 +1224,8 @@ pub(super) async fn handle_muc_owner_and_moderation_iq(
                     response_from,
                     response_to,
                     forbidden_iq_error("Operation not permitted."),
-                )];
+                )]
+                .into();
             }
             Err(error) => {
                 warn!(
@@ -1166,7 +1238,8 @@ pub(super) async fn handle_muc_owner_and_moderation_iq(
                     response_from,
                     response_to,
                     internal_server_error_iq_error("Internal server error."),
-                )];
+                )]
+                .into();
             }
         }
 
@@ -1204,7 +1277,8 @@ pub(super) async fn handle_muc_owner_and_moderation_iq(
                         response_from,
                         response_to,
                         internal_server_error_iq_error("Internal server error."),
-                    )];
+                    )]
+                    .into();
                 }
             };
             let completion = waddle_xmpp::muc::room_registry_actor::DestroyCompletion {
@@ -1232,7 +1306,8 @@ pub(super) async fn handle_muc_owner_and_moderation_iq(
                     response_from,
                     response_to,
                     internal_server_error_iq_error("Internal server error."),
-                )];
+                )]
+                .into();
             }
             if let Err(error) = register_destroy_completion(state, completion.clone()).await {
                 warn!(room = %room_jid, %error, "Failed to retain MUC destroy completion");
@@ -1249,7 +1324,8 @@ pub(super) async fn handle_muc_owner_and_moderation_iq(
                     response_from,
                     response_to,
                     internal_server_error_iq_error("Internal server error."),
-                )];
+                )]
+                .into();
             }
             // Single atomic commit point (#1261, #1276 Greptile P1s).
             // The attempt-bound registry destroy handler
@@ -1288,7 +1364,8 @@ pub(super) async fn handle_muc_owner_and_moderation_iq(
                             response_from,
                             response_to,
                             internal_server_error_iq_error("Internal server error."),
-                        )];
+                        )]
+                        .into();
                     }
                 }
                 // The clustering durable wipe failed and the registry
@@ -1303,7 +1380,8 @@ pub(super) async fn handle_muc_owner_and_moderation_iq(
                         response_from,
                         response_to,
                         internal_server_error_iq_error("Internal server error."),
-                    )];
+                    )]
+                    .into();
                 }
                 Ok(
                     waddle_xmpp::muc::room_registry_actor::DestroyRoomOutcome::ReleaseBacklogFull,
@@ -1315,7 +1393,8 @@ pub(super) async fn handle_muc_owner_and_moderation_iq(
                         response_from,
                         response_to,
                         internal_server_error_iq_error("Internal server error."),
-                    )];
+                    )]
+                    .into();
                 }
                 // A concurrent destroy already removed the room between the
                 // `get_room_actor` lookup above and here — genuinely gone.
@@ -1327,7 +1406,8 @@ pub(super) async fn handle_muc_owner_and_moderation_iq(
                         response_from,
                         response_to,
                         item_not_found_iq_error("Requested item not found."),
-                    )];
+                    )]
+                    .into();
                 }
                 // `Unavailable` means the terminal message never entered the
                 // registry. Its registered completion must be cancelled and
@@ -1354,7 +1434,8 @@ pub(super) async fn handle_muc_owner_and_moderation_iq(
                         response_from,
                         response_to,
                         internal_server_error_iq_error("Internal server error."),
-                    )];
+                    )]
+                    .into();
                 }
                 // A reply timeout may have lost the acknowledgement after
                 // the terminal handler entered. Retain its exact completion
@@ -1370,24 +1451,29 @@ pub(super) async fn handle_muc_owner_and_moderation_iq(
                         response_from,
                         response_to,
                         internal_server_error_iq_error("Internal server error."),
-                    )];
+                    )]
+                    .into();
                 }
             }
-            let mut frames =
-                drain_destroy_completion_attempt(state, attempt, Some(sender_jid)).await;
+            let Ok(mut batch) =
+                drain_destroy_completion_attempt(state, attempt, Some(sender_jid)).await
+            else {
+                // The destroy is already durable. Do not send an IQ result
+                // ahead of the required §10.9 presence if its inline drain
+                // cannot make progress; the leased completion and janitor
+                // retain the committed notification for retry.
+                return ResponseBatch::default();
+            };
             let room_jid_string = room_jid.to_string();
-            frames.push(build_iq_result_xml(
-                id,
-                Some(room_jid_string.as_str()),
-                response_to,
-                None,
-            ));
-            return frames;
+            batch.frames.push(
+                build_iq_result_xml(id, Some(room_jid_string.as_str()), response_to, None).into(),
+            );
+            return batch;
         }
 
         if matches!(iq, xmpp_parsers::iq::Iq::Get { .. }) {
             match build_muc_owner_config_response(state, &room_jid, id, response_to).await {
-                Ok(response) => return vec![response],
+                Ok(response) => return vec![response].into(),
                 Err(error) => {
                     warn!(
                         room = %room_jid,
@@ -1399,35 +1485,47 @@ pub(super) async fn handle_muc_owner_and_moderation_iq(
                         response_from,
                         response_to,
                         internal_server_error_iq_error("Internal server error."),
-                    )];
+                    )]
+                    .into();
                 }
             }
         }
 
-        if let Err(error) =
-            apply_muc_owner_config(state, &room_jid, iq, authenticated_session.as_ref()).await
+        let mut batch = match apply_muc_owner_config(
+            state,
+            &room_jid,
+            iq,
+            authenticated_session.as_ref(),
+            phase.bound_jid(),
+        )
+        .await
         {
-            warn!(
-                room = %room_jid,
-                error = %error,
-                "Failed to apply MUC owner config"
-            );
-            return vec![build_iq_error_xml_typed(
-                id,
-                response_from,
-                response_to,
-                internal_server_error_iq_error("Internal server error."),
-            )];
-        }
+            Ok(batch) => batch,
+            Err(error) => {
+                warn!(
+                    room = %room_jid,
+                    error = %error,
+                    "Failed to apply MUC owner config"
+                );
+                return vec![build_iq_error_xml_typed(
+                    id,
+                    response_from,
+                    response_to,
+                    internal_server_error_iq_error("Internal server error."),
+                )]
+                .into();
+            }
+        };
 
         // Treat all other owner IQ sets as successful config submit for instant rooms.
         let room_jid_string = room_jid.to_string();
-        return vec![build_iq_result_xml(
+        batch.prepend_frames(vec![build_iq_result_xml(
             id,
             Some(room_jid_string.as_str()),
             response_to,
             None,
-        )];
+        )]);
+        return batch;
     }
 
     if let Some(request) = parse_moderation_iq(iq) {
@@ -1437,7 +1535,8 @@ pub(super) async fn handle_muc_owner_and_moderation_iq(
                 response_from,
                 response_to,
                 not_authorized_iq_error("Authentication required."),
-            )];
+            )]
+            .into();
         };
         let Some(room_jid) = iq.to().map(|jid| jid.to_bare()) else {
             return vec![build_iq_error_xml_typed(
@@ -1445,7 +1544,8 @@ pub(super) async fn handle_muc_owner_and_moderation_iq(
                 response_from,
                 response_to,
                 bad_request_iq_error("Malformed IQ payload."),
-            )];
+            )]
+            .into();
         };
         let room_actor = match get_room_actor_result(state, &room_jid).await {
             Ok(Some(room_actor)) => room_actor,
@@ -1455,7 +1555,8 @@ pub(super) async fn handle_muc_owner_and_moderation_iq(
                     response_from,
                     response_to,
                     item_not_found_iq_error("Requested item not found."),
-                )];
+                )]
+                .into();
             }
             Err(error) => {
                 warn!(room = %room_jid, %error, "MUC moderation room lookup failed");
@@ -1464,7 +1565,8 @@ pub(super) async fn handle_muc_owner_and_moderation_iq(
                     response_from,
                     response_to,
                     internal_server_error_iq_error("Internal server error."),
-                )];
+                )]
+                .into();
             }
         };
         let context = match room_actor
@@ -1480,7 +1582,8 @@ pub(super) async fn handle_muc_owner_and_moderation_iq(
                     response_from,
                     response_to,
                     internal_server_error_iq_error("Internal server error."),
-                )];
+                )]
+                .into();
             }
         };
         // XEP-0425 §"only moderators are allowed to moderate" combined with
@@ -1495,7 +1598,8 @@ pub(super) async fn handle_muc_owner_and_moderation_iq(
                 response_from,
                 response_to,
                 forbidden_iq_error("Operation not permitted."),
-            )];
+            )]
+            .into();
         }
         match state
             .deps
@@ -1511,7 +1615,8 @@ pub(super) async fn handle_muc_owner_and_moderation_iq(
                     response_from,
                     response_to,
                     item_not_found_iq_error("Requested item not found."),
-                )];
+                )]
+                .into();
             }
             Ok(None) => {
                 return vec![build_iq_error_xml_typed(
@@ -1519,7 +1624,8 @@ pub(super) async fn handle_muc_owner_and_moderation_iq(
                     response_from,
                     response_to,
                     item_not_found_iq_error("Requested item not found."),
-                )];
+                )]
+                .into();
             }
             Err(error) => {
                 warn!(room = %room_jid, target = %request.target_id, error = %error, "Failed to look up moderation target");
@@ -1528,7 +1634,8 @@ pub(super) async fn handle_muc_owner_and_moderation_iq(
                     response_from,
                     response_to,
                     internal_server_error_iq_error("Internal server error."),
-                )];
+                )]
+                .into();
             }
         }
 
@@ -1785,9 +1892,9 @@ pub(super) async fn handle_muc_owner_and_moderation_iq(
         }
 
         frames.push(build_iq_result_xml(id, response_from, response_to, None));
-        return frames;
+        return frames.into();
     }
-    Vec::new()
+    ResponseBatch::default()
 }
 
 #[cfg(test)]
@@ -1795,13 +1902,30 @@ mod destroy_completion_tests {
     use super::*;
     use crate::db::actor::{DbExecute, DbQueryOne};
     use crate::db::{row_value, Value};
-    use crate::server::routes::websocket::tests::create_test_websocket_state;
+    use crate::server::routes::websocket::tests::{
+        create_test_websocket_state, register_test_connection,
+    };
 
     fn snapshot(attempt: waddle_xmpp::muc::DestroyAttemptId) -> DestroyCompletionSnapshot {
         DestroyCompletionSnapshot {
             attempt,
             room_jid: "destroy@muc.example.com".parse().expect("valid bare JID"),
             lifecycle: None,
+            request: DestroyRequest::default(),
+            members: Vec::new(),
+            recipients: Vec::new(),
+        }
+    }
+
+    fn snapshot_for(
+        attempt: waddle_xmpp::muc::DestroyAttemptId,
+        room_jid: BareJid,
+        lifecycle: waddle_xmpp::muc::RoomLifecycleId,
+    ) -> DestroyCompletionSnapshot {
+        DestroyCompletionSnapshot {
+            attempt,
+            room_jid,
+            lifecycle: Some(lifecycle),
             request: DestroyRequest::default(),
             members: Vec::new(),
             recipients: Vec::new(),
@@ -1952,6 +2076,132 @@ mod destroy_completion_tests {
         }
     }
 
+    async fn insert_tombstoned_lifecycle(
+        state: &WebSocketState,
+        room_jid: &BareJid,
+        lifecycle: waddle_xmpp::muc::RoomLifecycleId,
+    ) {
+        state
+            .deps
+            .app_state
+            .db_pool
+            .global_actor()
+            .ask(DbExecute {
+                sql: "CREATE TABLE IF NOT EXISTS clustering_muc_room_lifecycles ( \
+                      lifecycle_id TEXT NOT NULL, room_jid TEXT NOT NULL, revision BIGINT NOT NULL, \
+                      state TEXT NOT NULL, mutation_fingerprint TEXT NOT NULL \
+                      )"
+                .to_string(),
+                params: vec![],
+            })
+            .await
+            .expect("create lifecycle table");
+        state
+            .deps
+            .app_state
+            .db_pool
+            .global_actor()
+            .ask(DbExecute {
+                sql: "CREATE TABLE IF NOT EXISTS clustering_muc_rooms ( \
+                      room_jid TEXT NOT NULL, lifecycle_id TEXT NOT NULL, revision BIGINT NOT NULL \
+                      )"
+                .to_string(),
+                params: vec![],
+            })
+            .await
+            .expect("create room table");
+        state
+            .deps
+            .app_state
+            .db_pool
+            .global_actor()
+            .ask(DbExecute {
+                sql: "INSERT INTO clustering_muc_room_lifecycles \
+                      (lifecycle_id, room_jid, revision, state, mutation_fingerprint) \
+                      VALUES (?, ?, ?, ?, ?)"
+                    .to_string(),
+                params: crate::db_params![
+                    lifecycle.to_string(),
+                    room_jid.to_string(),
+                    1_i64,
+                    waddle_xmpp::muc::RoomLifecycleState::Tombstoned.as_db_str(),
+                    format!("destroy-completion-test-{lifecycle}"),
+                ],
+            })
+            .await
+            .expect("insert tombstoned lifecycle");
+    }
+
+    async fn enqueue_terminal_effect(
+        state: &WebSocketState,
+        room_jid: &BareJid,
+        lifecycle: waddle_xmpp::muc::RoomLifecycleId,
+        recipients: Vec<waddle_xmpp::muc::DestroyRecipient>,
+    ) -> waddle_xmpp::muc::RoomEffectReservation {
+        let outbox = state.deps.protocol.room_effect_outbox.as_ref();
+        let mut tx = outbox
+            .database()
+            .begin()
+            .await
+            .expect("begin outbox transaction");
+        let reservation = outbox
+            .enqueue_in_tx(
+                &mut tx,
+                crate::room_effect_outbox::RoomEffectEnqueue {
+                    lifecycle,
+                    revision: waddle_xmpp::muc::RoomRevision::initial(),
+                    effects: &waddle_xmpp::muc::RoomMutationEffects::destroy(
+                        room_jid.clone(),
+                        None,
+                        None,
+                        None,
+                        recipients,
+                    ),
+                    origin: &crate::room_effect_outbox::RoomEffectOriginInstanceId::new(
+                        "destroy-completion-test-origin".to_string(),
+                    )
+                    .expect("valid room effect origin"),
+                    producing_node:
+                        &crate::room_effect_outbox::RoomEffectProducingNode::from_node_identity(
+                            waddle_xmpp::ownership::NodeIdentity::new("node-a", "epoch-a"),
+                        ),
+                    now_ms: crate::time::now_ms(),
+                },
+            )
+            .await
+            .expect("enqueue terminal effect");
+        tx.commit().await.expect("commit terminal effect");
+        reservation
+    }
+
+    async fn terminal_available_at_ms(
+        state: &WebSocketState,
+        reservation: &waddle_xmpp::muc::RoomEffectReservation,
+    ) -> i64 {
+        let row = state
+            .deps
+            .app_state
+            .db_pool
+            .global_actor()
+            .ask(DbQueryOne {
+                sql: "SELECT available_at_ms FROM clustering_muc_room_effects \
+                      WHERE lifecycle_id = ? AND revision = ? AND ordinal = ?"
+                    .to_string(),
+                params: crate::db_params![
+                    reservation.lifecycle.to_string(),
+                    reservation.revision.as_i64(),
+                    reservation.ordinals[0].as_i64(),
+                ],
+            })
+            .await
+            .expect("query terminal effect row")
+            .expect("terminal effect row exists");
+        match row_value(&row, 0).expect("terminal availability value") {
+            Value::Integer(value) => *value,
+            _ => panic!("terminal availability must be an integer"),
+        }
+    }
+
     #[tokio::test]
     async fn failed_destroy_completion_reschedules_behind_older_due_work() {
         let state = create_test_websocket_state().await;
@@ -2076,6 +2326,205 @@ mod destroy_completion_tests {
         assert!(
             leased_after > leased_before,
             "lease renewal must continue while durable finalization is still outstanding"
+        );
+    }
+
+    #[tokio::test]
+    async fn terminal_destroy_effect_stays_inert_until_the_durable_wipe_succeeds() {
+        let failed_state = create_test_websocket_state().await;
+        let failed_room: BareJid = "destroy-failed@muc.example.com"
+            .parse()
+            .expect("failed room jid");
+        let failed_lifecycle = waddle_xmpp::muc::RoomLifecycleId::generate();
+        let failed_attempt = waddle_xmpp::muc::DestroyAttemptId::generate();
+        let failed_snapshot = snapshot_for(failed_attempt, failed_room.clone(), failed_lifecycle);
+        insert_tombstoned_lifecycle(failed_state.as_ref(), &failed_room, failed_lifecycle).await;
+        let failed_reservation = enqueue_terminal_effect(
+            failed_state.as_ref(),
+            &failed_room,
+            failed_lifecycle,
+            Vec::new(),
+        )
+        .await;
+        assert_eq!(
+            terminal_available_at_ms(failed_state.as_ref(), &failed_reservation).await,
+            i64::MAX,
+            "terminal destroy effects must start inert"
+        );
+        failed_state
+            .deps
+            .app_state
+            .db_pool
+            .global_actor()
+            .ask(DbExecute {
+                sql: "DROP TABLE muc_pending_invites".to_string(),
+                params: vec![],
+            })
+            .await
+            .expect("drop invite ledger to force wipe failure");
+
+        assert!(
+            complete_destroy_snapshot(failed_state.as_ref(), failed_snapshot, None)
+                .await
+                .is_err(),
+            "a wipe failure must abort completion"
+        );
+        assert_eq!(
+            terminal_available_at_ms(failed_state.as_ref(), &failed_reservation).await,
+            i64::MAX,
+            "a failed wipe must leave the terminal destroy effect inert"
+        );
+
+        let success_state = create_test_websocket_state().await;
+        let success_room: BareJid = "destroy-success@muc.example.com"
+            .parse()
+            .expect("success room jid");
+        let success_lifecycle = waddle_xmpp::muc::RoomLifecycleId::generate();
+        let inline_session: FullJid = "destroyer@example.com/phone"
+            .parse()
+            .expect("inline destroy session");
+        insert_tombstoned_lifecycle(success_state.as_ref(), &success_room, success_lifecycle).await;
+        let success_snapshot = DestroyCompletionSnapshot {
+            attempt: waddle_xmpp::muc::DestroyAttemptId::generate(),
+            room_jid: success_room.clone(),
+            lifecycle: Some(success_lifecycle),
+            request: DestroyRequest::default(),
+            members: Vec::new(),
+            recipients: vec![("owner".to_string(), vec![inline_session.clone()])],
+        };
+        let success_reservation = enqueue_terminal_effect(
+            success_state.as_ref(),
+            &success_room,
+            success_lifecycle,
+            vec![waddle_xmpp::muc::DestroyRecipient {
+                nick: waddle_xmpp::muc::MucOccupantNick::new("owner".to_string())
+                    .expect("owner nick"),
+                sessions: vec![inline_session.clone()],
+            }],
+        )
+        .await;
+        assert_eq!(
+            terminal_available_at_ms(success_state.as_ref(), &success_reservation).await,
+            i64::MAX,
+            "the success-path reservation also starts inert"
+        );
+
+        let batch = complete_destroy_snapshot(
+            success_state.as_ref(),
+            success_snapshot,
+            Some(&inline_session),
+        )
+        .await
+        .expect("successful completion snapshot");
+        assert_eq!(
+            batch.completions.len(),
+            1,
+            "the inline destroy frame must retain completion"
+        );
+
+        let terminal_row = success_state
+            .deps
+            .protocol
+            .room_effect_outbox
+            .find(&crate::room_effect_outbox::RoomEffectKey {
+                lifecycle: success_reservation.lifecycle,
+                revision: success_reservation.revision,
+                ordinal: success_reservation.ordinals[0],
+            })
+            .await
+            .expect("load armed terminal row")
+            .expect("armed terminal row exists");
+        assert!(
+            terminal_row.lease_token.is_some(),
+            "the completion executor path must leave the armed terminal row leased until write acceptance"
+        );
+        assert_ne!(
+            terminal_available_at_ms(success_state.as_ref(), &success_reservation).await,
+            i64::MAX,
+            "the executor seam must arm the terminal effect only after the wipe succeeds"
+        );
+    }
+
+    #[tokio::test]
+    async fn terminal_destroy_without_recipients_completes_without_inline_frames() {
+        let state = create_test_websocket_state().await;
+        let room_jid: BareJid = "destroy-empty-audience@muc.example.com"
+            .parse()
+            .expect("room jid");
+        let lifecycle = waddle_xmpp::muc::RoomLifecycleId::generate();
+        let inline_session: FullJid = "owner@example.com/phone".parse().expect("inline session");
+        let snapshot = DestroyCompletionSnapshot {
+            attempt: waddle_xmpp::muc::DestroyAttemptId::generate(),
+            room_jid: room_jid.clone(),
+            lifecycle: Some(lifecycle),
+            request: DestroyRequest::default(),
+            members: Vec::new(),
+            recipients: Vec::new(),
+        };
+        insert_tombstoned_lifecycle(state.as_ref(), &room_jid, lifecycle).await;
+        let reservation =
+            enqueue_terminal_effect(state.as_ref(), &room_jid, lifecycle, Vec::new()).await;
+
+        let batch = complete_destroy_snapshot(state.as_ref(), snapshot, Some(&inline_session))
+            .await
+            .expect("zero-recipient destroy completion");
+
+        assert!(
+            batch.frames.is_empty(),
+            "a zero-recipient terminal destroy must not fabricate inline presence"
+        );
+        assert!(
+            batch.completions.is_empty(),
+            "a zero-recipient terminal destroy must complete without retained writer acks"
+        );
+        assert!(
+            state
+                .deps
+                .protocol
+                .room_effect_outbox
+                .find(&crate::room_effect_outbox::RoomEffectKey {
+                    lifecycle: reservation.lifecycle,
+                    revision: reservation.revision,
+                    ordinal: reservation.ordinals[0],
+                })
+                .await
+                .expect("query zero-recipient terminal row")
+                .is_none(),
+            "a zero-recipient terminal destroy row must complete instead of hanging leased"
+        );
+    }
+
+    #[tokio::test]
+    async fn destroy_completion_without_terminal_effect_rows_still_finalizes() {
+        let state = create_test_websocket_state().await;
+        let room_jid: BareJid = "destroy-no-terminal-row@muc.example.com"
+            .parse()
+            .expect("room jid");
+        let lifecycle = waddle_xmpp::muc::RoomLifecycleId::generate();
+        let inline_session: FullJid = "owner@example.com/web".parse().expect("inline session");
+        let (inline_tx, mut inline_rx) = tokio::sync::mpsc::channel(4);
+        register_test_connection(state.as_ref(), &inline_session, inline_tx).await;
+        let snapshot = DestroyCompletionSnapshot {
+            attempt: waddle_xmpp::muc::DestroyAttemptId::generate(),
+            room_jid: room_jid.clone(),
+            lifecycle: Some(lifecycle),
+            request: DestroyRequest::default(),
+            members: Vec::new(),
+            recipients: vec![("owner".to_string(), vec![inline_session.clone()])],
+        };
+        insert_tombstoned_lifecycle(state.as_ref(), &room_jid, lifecycle).await;
+
+        let batch = complete_destroy_snapshot(state.as_ref(), snapshot, Some(&inline_session))
+            .await
+            .expect("rowless destroy completion");
+
+        assert!(
+            batch.frames.is_empty() && batch.completions.is_empty(),
+            "a lifecycle with no terminal effect rows should finalize as a no-op"
+        );
+        assert!(
+            inline_rx.try_recv().is_err(),
+            "terminal-less legacy destroys must not send fallback destroy presence frames"
         );
     }
 

@@ -1597,11 +1597,17 @@ mod ownership_claims_tests {
                     },
                     initial_affiliations: Vec::new(),
                 },
+                crate::muc::RoomMutationEffects::none(),
             )
             .await
             .expect("seed dormant durable room");
         durable_store
-            .commit_room_mutation(&jid, &fence, RoomDurableMutation::Dormancy)
+            .commit_room_mutation(
+                &jid,
+                &fence,
+                RoomDurableMutation::Dormancy,
+                crate::muc::RoomMutationEffects::none(),
+            )
             .await
             .expect("make durable room dormant");
         assert_eq!(
@@ -1635,6 +1641,26 @@ mod ownership_claims_tests {
             vec![jid.to_string()],
             "DestroyRoom must tombstone dormant durable state even without a local room actor"
         );
+        assert_eq!(
+            *durable_store
+                .destroy_completion_attempts
+                .lock()
+                .expect("lock"),
+            vec![None],
+            "destroying dormant durable state without a local room entry must stay attempt-less"
+        );
+        {
+            let effects = durable_store.destroy_effects.lock().expect("lock");
+            assert_eq!(
+                effects.len(),
+                1,
+                "the dormant durable destroy must commit once"
+            );
+            assert!(
+                effects[0].effects().is_empty(),
+                "destroy_durable_room_without_local_entry must not persist terminal effect rows"
+            );
+        }
         assert!(
             claim_store
                 .current_claim(&entity)
@@ -1768,6 +1794,7 @@ mod ownership_claims_tests {
                         name: "still-serviceable".to_string(),
                         ..RoomConfig::default()
                     },
+                    effect_plan: crate::muc::room_actor::ConfigEffectPlan::DirectAudience,
                 })
                 .await
                 .expect("mutation after failed destroy"),
@@ -1818,6 +1845,8 @@ mod ownership_claims_tests {
     #[tokio::test]
     async fn reconciled_destroy_queues_registered_owner_post_commit_work() {
         let registry = spawn_registry().await;
+        let store = Arc::new(RecordingDurableStore::default());
+        wire_recording_store(&registry, Arc::clone(&store)).await;
         let jid = test_room_jid("reconcile-destroy-completion");
         let actor = registry
             .ask(get_or_create(jid.clone()))
@@ -1872,6 +1901,15 @@ mod ownership_claims_tests {
         );
         assert_eq!(completions[0].attempt, attempt);
         assert_eq!(completions[0].room_jid, jid);
+        let effects = store.destroy_effects.lock().expect("lock");
+        assert!(
+            !effects.is_empty(),
+            "retained destroy reconciliation must persist a terminal effect row"
+        );
+        assert!(matches!(
+            effects[0].effects(),
+            [crate::muc::RoomEffect::DestroyNotification { .. }]
+        ));
     }
 
     #[tokio::test]
@@ -2165,6 +2203,8 @@ mod ownership_claims_tests {
     #[tokio::test]
     async fn plain_destroy_does_not_consume_an_owner_iq_completion_snapshot() {
         let registry = spawn_registry().await;
+        let store = Arc::new(RecordingDurableStore::default());
+        wire_recording_store(&registry, Arc::clone(&store)).await;
         let jid = test_room_jid("plain-destroy-no-owner-snapshot");
         let actor = registry
             .ask(get_or_create(jid.clone()))
@@ -2206,6 +2246,80 @@ mod ownership_claims_tests {
                 .is_empty(),
             "a plain destroy must never run cleanup from an owner-IQ snapshot"
         );
+        assert_eq!(
+            *store.destroy_completion_attempts.lock().expect("lock"),
+            vec![None],
+            "an attempt-less plain destroy must not arm a terminal completion"
+        );
+        let effects = store.destroy_effects.lock().expect("lock");
+        assert_eq!(
+            effects.len(),
+            1,
+            "the durable destroy must still commit once"
+        );
+        assert!(
+            effects[0].effects().is_empty(),
+            "an attempt-less plain destroy with no retained completion must persist zero outbox rows"
+        );
+    }
+
+    #[tokio::test]
+    async fn plain_destroy_reuses_a_retained_completion_for_the_terminal_effect() {
+        let registry = spawn_registry().await;
+        let store = Arc::new(RecordingDurableStore::default());
+        wire_recording_store(&registry, Arc::clone(&store)).await;
+        let room_jid = test_room_jid("plain-destroy-retained-completion-effect");
+        let actor = registry
+            .ask(get_or_create(room_jid.clone()))
+            .await
+            .expect("create room")
+            .actor_ref;
+        let attempt = crate::muc::DestroyAttemptId::generate();
+        let room = actor
+            .ask(crate::muc::room_actor::GetSnapshot)
+            .await
+            .expect("snapshot")
+            .room;
+        registry
+            .ask(RegisterDestroyCompletion {
+                completion: DestroyCompletion {
+                    attempt,
+                    room_jid: room_jid.clone(),
+                    room,
+                    request: crate::muc::DestroyRequest::default(),
+                },
+            })
+            .await
+            .expect("register completion");
+        registry
+            .ask(RememberDestroyAttemptForTest {
+                room_jid: room_jid.clone(),
+                attempt,
+            })
+            .await
+            .expect("retain completion");
+
+        assert_eq!(
+            registry
+                .ask(DestroyRoom {
+                    room_jid,
+                    reason: DestroyRoomReason::Destroy,
+                })
+                .await
+                .expect("plain destroy"),
+            DestroyRoomOutcome::Destroyed,
+        );
+        assert_eq!(
+            *store.destroy_completion_attempts.lock().expect("lock"),
+            vec![Some(attempt)],
+        );
+        {
+            let effects = store.destroy_effects.lock().expect("lock");
+            assert!(matches!(
+                effects[0].effects(),
+                [crate::muc::RoomEffect::DestroyNotification { .. }]
+            ));
+        }
     }
 
     #[tokio::test]
@@ -2220,7 +2334,7 @@ mod ownership_claims_tests {
             &registry,
             Arc::clone(&claim_store),
             SharedNodeIdentity::new(this_identity()),
-            durable_store,
+            Arc::clone(&durable_store),
         )
         .await;
 
@@ -2272,7 +2386,7 @@ mod ownership_claims_tests {
             &registry,
             Arc::clone(&claim_store),
             SharedNodeIdentity::new(this_identity()),
-            durable_store,
+            Arc::clone(&durable_store),
         )
         .await;
 
@@ -2355,7 +2469,7 @@ mod ownership_claims_tests {
             &registry,
             Arc::clone(&claim_store),
             SharedNodeIdentity::new(this_identity()),
-            durable_store,
+            Arc::clone(&durable_store),
         )
         .await;
 
@@ -2535,7 +2649,7 @@ mod ownership_claims_tests {
             &registry,
             Arc::clone(&claim_store),
             SharedNodeIdentity::new(this_identity()),
-            durable_store,
+            Arc::clone(&durable_store),
         )
         .await;
         let room_jid = test_room_jid("dormancy-state-missing-guarded");
@@ -2570,6 +2684,14 @@ mod ownership_claims_tests {
             .await
             .expect("claim lookup")
             .is_none());
+        assert!(
+            durable_store
+                .destroy_effects
+                .lock()
+                .expect("lock")
+                .is_empty(),
+            "inactive-room dormancy cleanup must not enqueue terminal effect rows"
+        );
     }
 
     #[tokio::test]
@@ -2584,7 +2706,7 @@ mod ownership_claims_tests {
             &registry,
             Arc::clone(&claim_store),
             SharedNodeIdentity::new(this_identity()),
-            durable_store,
+            Arc::clone(&durable_store),
         )
         .await;
         let room_jid = test_room_jid("dormancy-state-missing-reaper");
@@ -2623,6 +2745,14 @@ mod ownership_claims_tests {
             .await
             .expect("claim lookup")
             .is_none());
+        assert!(
+            durable_store
+                .destroy_effects
+                .lock()
+                .expect("lock")
+                .is_empty(),
+            "sealed-room dormancy reaping must not enqueue terminal effect rows"
+        );
     }
 
     #[tokio::test]
@@ -3530,6 +3660,8 @@ mod ownership_claims_tests {
         demote_notifications: Mutex<Vec<(String, String)>>,
         deleted_rooms: Mutex<Vec<String>>,
         destroy_completion_attempts: Mutex<Vec<Option<crate::muc::DestroyAttemptId>>>,
+        destroy_intents: Mutex<Vec<crate::muc::RoomDurableMutation>>,
+        destroy_effects: Mutex<Vec<crate::muc::RoomMutationEffects>>,
         fail_deletes: bool,
         /// Simulates a transaction that committed terminal deletion but lost
         /// its acknowledgement and whose durable reconciliation failed.
@@ -3630,6 +3762,7 @@ mod ownership_claims_tests {
             room_jid: &'a BareJid,
             fence: &'a RoomClaimFenceContext,
             intent: crate::muc::RoomDurableMutation,
+            effects: crate::muc::RoomMutationEffects,
         ) -> crate::muc::RoomCommitFuture<'a> {
             let store = self;
             let block = matches!(intent, crate::muc::RoomDurableMutation::Config { .. })
@@ -3658,6 +3791,7 @@ mod ownership_claims_tests {
                     config,
                     initial_affiliations,
                 } => Some(DurableRoomState {
+                    coordinates: None,
                     waddle_id: waddle_id.as_str().to_string(),
                     channel_id: channel_id.as_str().to_string(),
                     config: config.clone(),
@@ -3703,6 +3837,8 @@ mod ownership_claims_tests {
                 _ => None,
             };
             let destroy_completion_attempts = &self.destroy_completion_attempts;
+            let destroy_intents = &self.destroy_intents;
+            let destroy_effects = &self.destroy_effects;
             let coordinates = self.next_commit_coordinates();
             Box::pin(async move {
                 if block_create {
@@ -3752,6 +3888,8 @@ mod ownership_claims_tests {
                         .lock()
                         .expect("lock")
                         .push(destroy_completion_attempt);
+                    destroy_intents.lock().expect("lock").push(intent.clone());
+                    destroy_effects.lock().expect("lock").push(effects);
                     if destroy_not_owner {
                         return Err(crate::muc::RoomCommitError::NotOwner);
                     }
@@ -3834,7 +3972,10 @@ mod ownership_claims_tests {
                         .expect("preparing rooms")
                         .insert(room_jid.clone(), coordinates);
                 }
-                Ok(coordinates)
+                Ok(crate::muc::RoomCommitOutcome {
+                    coordinates,
+                    reservation: None,
+                })
             })
         }
 
@@ -4180,6 +4321,7 @@ mod ownership_claims_tests {
 
     fn restored_room_snapshot(name: &str) -> DurableRoomState {
         DurableRoomState {
+            coordinates: None,
             waddle_id: "restored-waddle".to_string(),
             channel_id: "restored-channel".to_string(),
             config: RoomConfig {
@@ -4235,6 +4377,84 @@ mod ownership_claims_tests {
             channel_id: "c".to_string(),
             config: RoomConfig::default(),
         }
+    }
+
+    #[tokio::test]
+    async fn get_or_create_with_live_roster_restores_occupants_from_typed_ids() {
+        use crate::muc::durable::{ChannelId, WaddleId};
+        use crate::muc::room_actor::{GetSnapshot, JoinAffiliationGrant, JoinWithAffiliation};
+        use crate::Affiliation;
+
+        let registry = spawn_registry().await;
+        let source_jid = test_room_jid("live-roster-source");
+        let source_actor = registry
+            .ask(GetOrCreateRoom {
+                room_jid: source_jid,
+                waddle_id: "source-waddle".to_string(),
+                channel_id: "source-channel".to_string(),
+                config: RoomConfig {
+                    name: "stale live roster".to_string(),
+                    ..RoomConfig::default()
+                },
+            })
+            .await
+            .expect("create source room")
+            .actor_ref;
+        let member: jid::FullJid = "alice@example.com/web".parse().expect("member full JID");
+        source_actor
+            .ask(JoinWithAffiliation {
+                sender_jid: member.clone(),
+                nick: "alice".to_string(),
+                affiliation_grant: JoinAffiliationGrant::Resolver(Affiliation::Member),
+                local_domain: "example.com".to_string(),
+                admission_revision: 0,
+            })
+            .await
+            .expect("join source room");
+        let stale_room = source_actor
+            .ask(GetSnapshot)
+            .await
+            .expect("source snapshot")
+            .room;
+
+        let recovered_jid = test_room_jid("live-roster-recovered");
+        let acquisition = registry
+            .ask(GetOrCreateRoomWithLiveRoster {
+                room_jid: recovered_jid.clone(),
+                waddle_id: WaddleId::new("typed-waddle".to_string()),
+                channel_id: ChannelId::new("typed-channel".to_string()),
+                config: RoomConfig {
+                    name: "authoritative successor".to_string(),
+                    ..RoomConfig::default()
+                },
+                live_room_restore: stale_room,
+            })
+            .await
+            .expect("recover room with typed live roster");
+        assert_eq!(acquisition.creation, RoomCreation::Created);
+
+        let snapshot = acquisition
+            .actor_ref
+            .ask(GetSnapshot)
+            .await
+            .expect("recovered snapshot");
+        let restored = snapshot
+            .room
+            .find_occupant_by_real_jid(&member)
+            .expect("restored occupant");
+        assert_eq!(restored.nick, "alice");
+        assert_eq!(snapshot.room.config.name, "authoritative successor");
+        assert_eq!(
+            registry
+                .ask(GetRoom {
+                    room_jid: recovered_jid,
+                })
+                .await
+                .expect("lookup recovered room")
+                .expect("recovered room exists")
+                .id(),
+            acquisition.actor_ref.id()
+        );
     }
 
     #[tokio::test]
@@ -4779,6 +4999,7 @@ mod ownership_claims_tests {
                     config: RoomConfig::default(),
                     initial_affiliations: Vec::new(),
                 },
+                crate::muc::RoomMutationEffects::none(),
             )
             .await
             .expect("durable pre-crash create");
@@ -4969,6 +5190,7 @@ mod ownership_claims_tests {
                     },
                     initial_affiliations: Vec::new(),
                 },
+                crate::muc::RoomMutationEffects::none(),
             )
             .await
             .expect("seed stranded preparing lifecycle");
@@ -4986,6 +5208,7 @@ mod ownership_claims_tests {
                 &room_jid,
                 &old_fence,
                 crate::muc::RoomDurableMutation::Publish,
+                crate::muc::RoomMutationEffects::none(),
             )
             .await
             .expect("publish successor before stale cleanup acquires");
@@ -4994,6 +5217,7 @@ mod ownership_claims_tests {
                 &room_jid,
                 &old_fence,
                 crate::muc::RoomDurableMutation::Dormancy,
+                crate::muc::RoomMutationEffects::none(),
             )
             .await
             .expect("make successor dormant before stale cleanup acquires");
@@ -5174,6 +5398,64 @@ mod ownership_claims_tests {
         );
         allow_load.notify_waiters();
         let _ = creating.await.expect("initial creator task");
+    }
+
+    #[tokio::test]
+    async fn pending_preparation_destroy_ack_unknown_reconciles_retained_terminal_effects() {
+        let room_jid = test_room_jid("pending-destroy-ack-unknown-retained-completion");
+        let claim_store: Arc<dyn ClaimStore> = Arc::new(InProcessClaimStore::new());
+        let store = Arc::new(RecordingDurableStore::with_claim_store(Arc::clone(
+            &claim_store,
+        )));
+        let durable_store: Arc<dyn MucDurableStore> = store.clone();
+        let owner = this_identity();
+        let entity = Entity::new(EntityType::RoomActor, room_jid.to_string());
+        let epoch = claim_store
+            .ensure_claimed(&entity, &owner)
+            .await
+            .expect("seed exact pending-destroy claim");
+        let fence = RoomClaimFenceContext::new(entity, owner, epoch);
+        store.establish_claim_fence(&room_jid, fence.clone());
+
+        let attempt = crate::muc::DestroyAttemptId::generate();
+        let outcome = RoomRegistryActor::reconcile_unpublished_preparation_destroy_attempt(
+            durable_store,
+            Arc::clone(&claim_store),
+            room_jid.clone(),
+            fence,
+            UnpublishedDestroyPhase::RecoverPreparingDestroy,
+            Some(DestroyCompletion {
+                attempt,
+                room_jid: room_jid.clone(),
+                room: MucRoom::new(
+                    room_jid,
+                    "w".to_string(),
+                    "c".to_string(),
+                    RoomConfig::default(),
+                ),
+                request: crate::muc::DestroyRequest::default(),
+            }),
+        )
+        .await;
+        assert!(matches!(
+            outcome,
+            UnpublishedPreparationDestroyOutcome::Committed
+        ));
+        let effects = store.destroy_effects.lock().expect("lock");
+        assert_eq!(
+            effects.len(),
+            1,
+            "the preparing-destroy recovery commit should stage one terminal effect row"
+        );
+        assert!(matches!(
+            effects[0].effects(),
+            [crate::muc::RoomEffect::DestroyNotification { .. }]
+        ));
+        assert_eq!(
+            *store.destroy_completion_attempts.lock().expect("lock"),
+            vec![Some(attempt)],
+            "recovery must arm the retained completion attempt"
+        );
     }
 
     #[tokio::test]
@@ -6298,6 +6580,19 @@ mod ownership_claims_tests {
             vec![Some(attempt)],
             "the pending terminal transition must arm the registered completion"
         );
+        assert!(matches!(
+            store.destroy_intents.lock().expect("lock").as_slice(),
+            [crate::muc::RoomDurableMutation::DestroyAndReleaseClaim {
+                completion_attempt: Some(recorded_attempt)
+            }] if *recorded_attempt == attempt
+        ));
+        {
+            let effects = store.destroy_effects.lock().expect("lock");
+            assert!(matches!(
+                effects[0].effects(),
+                [crate::muc::RoomEffect::DestroyNotification { .. }]
+            ));
+        }
         allow.notify_one();
         assert!(matches!(
             create.await.expect("create task"),
@@ -6633,6 +6928,7 @@ mod ownership_claims_tests {
         let restored_owner: BareJid = "alice@example.com".parse().expect("valid jid");
         let durable_store = Arc::new(RecordingDurableStore {
             load_result: Some(DurableRoomState {
+                coordinates: None,
                 waddle_id: "restored-waddle".to_string(),
                 channel_id: "restored-channel".to_string(),
                 config: restored_config.clone(),
@@ -6895,6 +7191,7 @@ mod ownership_claims_tests {
 
     fn reclaimed_snapshot(name: &str) -> DurableRoomState {
         DurableRoomState {
+            coordinates: None,
             waddle_id: "reclaimed-waddle".to_string(),
             channel_id: "reclaimed-channel".to_string(),
             config: RoomConfig {
@@ -7068,6 +7365,7 @@ mod ownership_claims_tests {
                     config: reclaimed_snapshot("must not activate").config,
                     initial_affiliations: Vec::new(),
                 },
+                crate::muc::RoomMutationEffects::none(),
             )
             .await
             .expect("seed durable preparing row");
@@ -10070,6 +10368,7 @@ mod ownership_claims_tests {
                         name: "old-epoch in-memory mutation".to_string(),
                         ..RoomConfig::default()
                     },
+                    effect_plan: crate::muc::room_actor::ConfigEffectPlan::DirectAudience,
                 })
                 .await
         });

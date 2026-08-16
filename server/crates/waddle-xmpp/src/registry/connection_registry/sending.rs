@@ -1,6 +1,45 @@
 use super::*;
 
 impl ConnectionRegistry {
+    /// Enqueue a server-generated direct frame with a completion notifier that
+    /// the destination connection resolves only after accepting the frame into
+    /// its write/recovery-owning path.
+    pub async fn send_to_with_write_acceptance(
+        &self,
+        jid: &FullJid,
+        stanza: Stanza,
+        acceptance: OutboundWriteAcceptance,
+    ) -> SendResult {
+        let sender = match self.connections.get(jid) {
+            Some(entry) => entry.value().sender.clone(),
+            None => return SendResult::NotConnected,
+        };
+        let outbound = OutboundStanza::with_write_acceptance(stanza.clone(), acceptance.clone());
+        match sender.send(outbound).await {
+            Ok(()) => SendResult::Sent,
+            Err(_) => {
+                self.remove_if_sender_closed_owner(jid, &sender);
+                if let Some(entry) = self.connections.get(jid) {
+                    let current = entry.value().sender.clone();
+                    drop(entry);
+                    if !current.same_channel(&sender) {
+                        return match current
+                            .send(OutboundStanza::with_write_acceptance(stanza, acceptance))
+                            .await
+                        {
+                            Ok(()) => SendResult::Sent,
+                            Err(_) => {
+                                self.remove_if_sender_closed_owner(jid, &current);
+                                SendResult::ChannelClosed
+                            }
+                        };
+                    }
+                }
+                SendResult::ChannelClosed
+            }
+        }
+    }
+
     /// Send a stanza to a connected user as a [`DeliveryKind::DirectFrame`]
     /// — the destination's main loop writes it straight to the wire
     /// without running the recipient pass.

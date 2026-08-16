@@ -57,8 +57,8 @@ pub(super) enum StanzaTimeout {
 /// external effects before its next suspension point. A later lifecycle
 /// transition therefore fences the transport response, but cannot turn the
 /// dispatch result back into an unhandled stanza.
-pub(super) struct AdmissionDispatchResult {
-    pub(super) result: Result<Vec<String>, StanzaTimeout>,
+pub(super) struct AdmissionDispatchResult<T> {
+    pub(super) result: Result<T, StanzaTimeout>,
     pub(super) authority_revoked_after_start: bool,
 }
 
@@ -259,40 +259,43 @@ impl MessageCorrelation {
 /// `xmpp.stanza.latency` histogram (#1320 wire-up / #1321 dispatch seam);
 /// timeouts keep their dedicated counter and are not double-counted as
 /// processed.
-pub(super) async fn run_with_backstop<F>(
+pub(super) async fn run_with_backstop<F, T>(
     backstop: StanzaBackstop,
     dispatch: F,
-) -> Result<Vec<String>, StanzaTimeout>
+) -> Result<T, StanzaTimeout>
 where
-    F: Future<Output = Vec<String>> + Send,
+    F: Future<Output = T> + Send,
+    T: Default + Send,
 {
     run_with_backstop_impl(backstop, dispatch, None)
         .await
         .result
 }
 
-pub(super) async fn run_with_backstop_and_admission<F>(
+pub(super) async fn run_with_backstop_and_admission<F, T>(
     backstop: StanzaBackstop,
     dispatch: F,
     permit: &crate::clustering::NodeAdmissionPermit,
     shutdown: &tokio_util::sync::CancellationToken,
-) -> AdmissionDispatchResult
+) -> AdmissionDispatchResult<T>
 where
-    F: Future<Output = Vec<String>> + Send,
+    F: Future<Output = T> + Send,
+    T: Default + Send,
 {
     run_with_backstop_impl(backstop, dispatch, Some((permit, shutdown))).await
 }
 
-async fn run_with_backstop_impl<F>(
+async fn run_with_backstop_impl<F, T>(
     backstop: StanzaBackstop,
     dispatch: F,
     admission: Option<(
         &crate::clustering::NodeAdmissionPermit,
         &tokio_util::sync::CancellationToken,
     )>,
-) -> AdmissionDispatchResult
+) -> AdmissionDispatchResult<T>
 where
-    F: Future<Output = Vec<String>> + Send,
+    F: Future<Output = T> + Send,
+    T: Default + Send,
 {
     // This check is the responsibility boundary. It happens immediately
     // before dispatch: a revoked generation never starts a new handler,
@@ -324,7 +327,7 @@ where
     };
     let result = if authority_revoked_after_start {
         match result {
-            Ok(_) | Err(StanzaTimeout::HandledIq(_)) => Ok(Vec::new()),
+            Ok(_) | Err(StanzaTimeout::HandledIq(_)) => Ok(T::default()),
             Err(timeout) => Err(timeout),
         }
     } else {

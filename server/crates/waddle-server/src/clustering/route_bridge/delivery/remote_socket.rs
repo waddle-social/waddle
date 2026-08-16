@@ -236,6 +236,7 @@ impl OrderedRelayDeliveryBridge {
             kind: msg.frame.kind,
             pending_row_id: None,
             pending_row_original_receipt_at: None,
+            write_acceptance: None,
         };
         let outcome = services.connection_registry.try_send_outbound_if_owner(
             &msg.frame.jid,

@@ -20,11 +20,14 @@ use super::affiliation::DurableMembershipSource;
 use super::durable::{ChannelId, MucDurableStore, WaddleId};
 use super::room_actor::{
     DurableRestoreReadiness, DurableRoomOrigin, GetDurableRestoreReadiness, GetRoomSealState,
-    GetSnapshot, HydrateDurableRecipients, RestoreDurableRoomState, RoomActor, RoomSealState,
-    SealForDestroy, SealGuard, SealIfInactive, SealIfInactiveOutcome, UnsealDestroy,
+    GetSnapshot, HydrateDurableRecipients, RestoreDurableRoomState, RestoreLiveRoster, RoomActor,
+    RoomSealState, SealForDestroy, SealGuard, SealIfInactive, SealIfInactiveOutcome, UnsealDestroy,
     UnsealInactive,
 };
-use super::{MucRoom, RoomCommitError, RoomConfig, RoomDurableMutation};
+use super::{
+    DestroyPassword, DestroyReason, DestroyRecipient, MucOccupantNick, MucRoom, RoomCommitError,
+    RoomConfig, RoomDurableMutation, RoomMutationEffects,
+};
 use crate::metrics;
 use crate::ownership::{
     ClaimEpoch, ClaimError, ClaimSnapshot, ClaimStore, Entity, EntityType, ExactReleaseOutcome,
@@ -104,13 +107,25 @@ enum RoomPreparationWaiter {
     },
 }
 
-#[derive(Clone, PartialEq, Eq)]
+#[derive(Clone)]
 struct RoomCreationSpec {
     waddle_id: String,
     channel_id: String,
     config: RoomConfig,
     initial_affiliations: Vec<super::durable::AffiliationEntry>,
+    live_room_restore: Option<MucRoom>,
 }
+
+impl PartialEq for RoomCreationSpec {
+    fn eq(&self, other: &Self) -> bool {
+        self.waddle_id == other.waddle_id
+            && self.channel_id == other.channel_id
+            && self.config == other.config
+            && self.initial_affiliations == other.initial_affiliations
+    }
+}
+
+impl Eq for RoomCreationSpec {}
 
 #[derive(Clone)]
 enum RoomPreparationOrigin {
@@ -128,6 +143,16 @@ struct PendingRoomPreparation {
     origin: RoomPreparationOrigin,
     guard: RoomPreparationGuard,
     waiters: Vec<RoomPreparationWaiter>,
+}
+
+/// Everything needed to construct and prepare one room: identity, config,
+/// creation-spec affiliations, and an optional live-room restore snapshot.
+struct RoomPreparationSpec {
+    waddle_id: String,
+    channel_id: String,
+    config: RoomConfig,
+    initial_affiliations: Vec<super::durable::AffiliationEntry>,
+    live_room_restore: Option<MucRoom>,
 }
 
 enum DemandRoomPreparation {
@@ -464,6 +489,38 @@ pub enum RoomRegistryError {
 }
 
 impl RoomRegistryActor {
+    fn destroy_effects(completion: &DestroyCompletion) -> RoomMutationEffects {
+        let recipients = completion
+            .room
+            .occupants
+            .values()
+            .map(|occupant| DestroyRecipient {
+                nick: MucOccupantNick::new(occupant.nick.clone())
+                    .expect("nick was previously accepted"),
+                sessions: completion
+                    .room
+                    .get_occupant_sessions(&occupant.nick)
+                    .into_iter()
+                    .collect(),
+            })
+            .collect();
+        RoomMutationEffects::destroy(
+            completion.room_jid.clone(),
+            completion
+                .request
+                .reason
+                .clone()
+                .and_then(DestroyReason::new),
+            completion.request.alternate_venue.clone(),
+            completion
+                .request
+                .password
+                .clone()
+                .and_then(DestroyPassword::new),
+            recipients,
+        )
+    }
+
     async fn destroy_completion_blocks_recreation(&self, room_jid: &BareJid) -> bool {
         if self
             .pending_unpublished_destroys
@@ -1496,6 +1553,7 @@ impl RoomRegistryActor {
                         &room_jid,
                         &claim_fence,
                         RoomDurableMutation::Publish,
+                        crate::muc::RoomMutationEffects::none(),
                         &identity_guard,
                     )
                     .await
@@ -1529,12 +1587,16 @@ impl RoomRegistryActor {
     async fn prepare_room(
         &self,
         room_jid: BareJid,
-        waddle_id: String,
-        channel_id: String,
-        config: RoomConfig,
-        initial_affiliations: Vec<super::durable::AffiliationEntry>,
+        spec: RoomPreparationSpec,
         claim_fence: &super::RoomClaimFenceContext,
     ) -> Result<(RoomPreparationGuard, bool), RoomPreparationError> {
+        let RoomPreparationSpec {
+            waddle_id,
+            channel_id,
+            config,
+            initial_affiliations,
+            live_room_restore,
+        } = spec;
         // Establish the exact fence before any preparation-time durable I/O.
         // This deliberately does not publish the room-JID fan-out cache: that
         // still waits for the ready actor's registry insertion so an
@@ -1597,6 +1659,22 @@ impl RoomRegistryActor {
                 return Err(RoomPreparationError::ActorUnavailable);
             }
         }
+        // With a durable store, a new room receives a second durable restore
+        // after its Create commit.  Defer this transfer to the pending
+        // preparation barrier so that restore cannot overwrite the live
+        // roster between preparation and publication.
+        if self.durable_store.is_none() {
+            if let Some(room) = live_room_restore {
+                if let Err(error) = actor_ref.ask(RestoreLiveRoster { room }).await {
+                    warn!(
+                        room = %room_jid,
+                        %error,
+                        "failed to restore live roster for freshly spawned room actor"
+                    );
+                    return Err(RoomPreparationError::ActorUnavailable);
+                }
+            }
+        }
         let has_async_work = self.durable_store.is_some() || self.membership_source.is_some();
         Ok((actor_guard, has_async_work))
     }
@@ -1604,10 +1682,7 @@ impl RoomRegistryActor {
     async fn prepare_demand_room(
         &mut self,
         room_jid: &BareJid,
-        waddle_id: String,
-        channel_id: String,
-        config: RoomConfig,
-        initial_affiliations: Vec<super::durable::AffiliationEntry>,
+        spec: RoomPreparationSpec,
         registry_ref: &ActorRef<Self>,
     ) -> Result<DemandRoomPreparation, RoomRegistryError> {
         let has_async_work = self.durable_store.is_some() || self.membership_source.is_some();
@@ -1619,14 +1694,7 @@ impl RoomRegistryActor {
         let claim_fence = self.acquire_room_claim(room_jid, registry_ref).await?;
         self.poisoned_rooms.remove(room_jid);
         let (guard, has_async_work) = match self
-            .prepare_room(
-                room_jid.clone(),
-                waddle_id,
-                channel_id,
-                config,
-                initial_affiliations,
-                &claim_fence,
-            )
+            .prepare_room(room_jid.clone(), spec, &claim_fence)
             .await
         {
             Ok(prepared) => prepared,
@@ -1747,6 +1815,7 @@ impl RoomRegistryActor {
                 RoomDurableMutation::DestroyAndReleaseClaim {
                     completion_attempt: None,
                 },
+                crate::muc::RoomMutationEffects::none(),
             )
             .await
         {
@@ -1826,6 +1895,7 @@ impl RoomRegistryActor {
                 RoomDurableMutation::DestroyAndReleaseClaim {
                     completion_attempt: None,
                 },
+                crate::muc::RoomMutationEffects::none(),
             )
             .await
         {
@@ -1894,10 +1964,13 @@ impl RoomRegistryActor {
         match self
             .prepare_demand_room(
                 &room_jid,
-                creation_spec.waddle_id.clone(),
-                creation_spec.channel_id.clone(),
-                creation_spec.config.clone(),
-                creation_spec.initial_affiliations.clone(),
+                RoomPreparationSpec {
+                    waddle_id: creation_spec.waddle_id.clone(),
+                    channel_id: creation_spec.channel_id.clone(),
+                    config: creation_spec.config.clone(),
+                    initial_affiliations: creation_spec.initial_affiliations.clone(),
+                    live_room_restore: creation_spec.live_room_restore.clone(),
+                },
                 &registry_ref,
             )
             .await?
@@ -1982,6 +2055,9 @@ impl RoomRegistryActor {
             RoomPreparationOrigin::Demand { prepared_spec } => Some(Arc::clone(prepared_spec)),
             RoomPreparationOrigin::Reclaimed { .. } => None,
         };
+        let live_room_restore = creation_spec
+            .as_ref()
+            .and_then(|spec| spec.live_room_restore.clone());
         let publication_fence = claim_fence.clone();
         let waiters = waiter.into_iter().collect();
         let replaced = self.pending_room_preparations.insert(
@@ -2047,6 +2123,7 @@ impl RoomRegistryActor {
                             config: spec.config.clone(),
                             initial_affiliations: spec.initial_affiliations.clone(),
                         },
+                        crate::muc::RoomMutationEffects::none(),
                     )
                     .await
                 {
@@ -2104,6 +2181,7 @@ impl RoomRegistryActor {
                         &room_jid,
                         &publication_fence,
                         RoomDurableMutation::Activate,
+                        crate::muc::RoomMutationEffects::none(),
                     )
                     .await
                 {
@@ -2113,6 +2191,30 @@ impl RoomRegistryActor {
                         None
                     }
                 },
+                (readiness, _) => readiness,
+            };
+            // A durable Create is followed by a fenced restore.  Transfer
+            // the predecessor's ephemeral roster only after that final
+            // restore (and any activation commit), but before the final
+            // ownership fence and registry insertion.  This is the single
+            // pre-publication point at which durable and live state are both
+            // complete, so callers can never discover a roster-less actor
+            // and post-publication joins/leaves are never overwritten.
+            let readiness = match (readiness, live_room_restore) {
+                (ready @ Some(Ok(DurableRestoreReadiness::Ready(_))), Some(room)) => {
+                    match actor_ref
+                        .ask(RestoreLiveRoster { room })
+                        .mailbox_timeout(ROOM_OWNERSHIP_CALL_TIMEOUT)
+                        .reply_timeout(ROOM_OWNERSHIP_CALL_TIMEOUT)
+                        .await
+                    {
+                        Ok(()) => ready,
+                        Err(error) => {
+                            warn!(room = %room_jid, %error, "failed to transfer live roster before room publication");
+                            None
+                        }
+                    }
+                }
                 (readiness, _) => readiness,
             };
             let readiness = match readiness {
@@ -2528,22 +2630,29 @@ impl RoomRegistryActor {
 
         let commit = match &self.durable_store {
             Some(store) => {
+                let committed_completion = retained.completion.clone();
                 store
                     .commit_room_mutation(
                         room_jid,
                         &entry.claim_fence,
                         RoomDurableMutation::Destroy {
-                            completion_attempt: retained
-                                .completion
+                            completion_attempt: committed_completion
                                 .as_ref()
                                 .map(|completion| completion.attempt),
                         },
+                        committed_completion
+                            .as_ref()
+                            .map(Self::destroy_effects)
+                            .unwrap_or_else(RoomMutationEffects::none),
                     )
                     .await
             }
-            None => Ok(super::RoomCommittedCoordinates {
-                lifecycle: super::RoomLifecycleId::generate(),
-                revision: super::RoomRevision::initial(),
+            None => Ok(super::RoomCommitOutcome {
+                coordinates: super::RoomCommittedCoordinates {
+                    lifecycle: super::RoomLifecycleId::generate(),
+                    revision: super::RoomRevision::initial(),
+                },
+                reservation: None,
             }),
         };
         match commit {
@@ -2769,7 +2878,7 @@ impl RoomRegistryActor {
         room_jid: BareJid,
         claim_fence: super::RoomClaimFenceContext,
         phase: UnpublishedDestroyPhase,
-        completion_attempt: Option<super::DestroyAttemptId>,
+        completion: Option<DestroyCompletion>,
     ) -> UnpublishedPreparationDestroyOutcome {
         match tokio::time::timeout(
             ROOM_OWNERSHIP_CALL_TIMEOUT,
@@ -2791,11 +2900,24 @@ impl RoomRegistryActor {
                         }
                     }
                     UnpublishedDestroyPhase::RecoverPreparingDestroy => {
-                        RoomDurableMutation::DestroyAndReleaseClaim { completion_attempt }
+                        RoomDurableMutation::DestroyAndReleaseClaim {
+                            completion_attempt: completion
+                                .as_ref()
+                                .map(|completion| completion.attempt),
+                        }
+                    }
+                };
+                let effects = match phase {
+                    UnpublishedDestroyPhase::RecoverPreparingDestroy => completion
+                        .as_ref()
+                        .map(Self::destroy_effects)
+                        .unwrap_or_else(RoomMutationEffects::none),
+                    UnpublishedDestroyPhase::MarkCleanup | UnpublishedDestroyPhase::Destroy => {
+                        RoomMutationEffects::none()
                     }
                 };
                 match store
-                    .commit_room_mutation(&room_jid, &claim_fence, intent)
+                    .commit_room_mutation(&room_jid, &claim_fence, intent, effects)
                     .await
                 {
                     Ok(_) => match phase {
@@ -2858,6 +2980,7 @@ impl RoomRegistryActor {
                     &room_jid,
                     &claim_fence,
                     RoomDurableMutation::MarkUnpublishedCleanup,
+                    crate::muc::RoomMutationEffects::none(),
                 )
                 .await
             {
@@ -3312,12 +3435,10 @@ impl kameo::message::Message<RetryUnpublishedPreparationDestroy> for RoomRegistr
         let claim_fence = msg.claim_fence.clone();
         let registry_ref = ctx.actor_ref().clone();
         let claim_store = Arc::clone(&self.claim_store);
-        let completion_attempt = self.destroy_attempts.get(&room_jid).and_then(|retained| {
-            retained
-                .completion
-                .as_ref()
-                .map(|completion| completion.attempt)
-        });
+        let completion = self
+            .destroy_attempts
+            .get(&room_jid)
+            .and_then(|retained| retained.completion.clone());
         tokio::spawn(async move {
             let outcome = RoomRegistryActor::reconcile_unpublished_preparation_destroy_attempt(
                 store,
@@ -3325,7 +3446,7 @@ impl kameo::message::Message<RetryUnpublishedPreparationDestroy> for RoomRegistr
                 room_jid.clone(),
                 claim_fence.clone(),
                 phase,
-                completion_attempt,
+                completion,
             )
             .await;
             let _ = registry_ref
@@ -3769,19 +3890,17 @@ impl RoomRegistryActor {
             else {
                 continue;
             };
-            let completion_attempt = self.destroy_attempts.get(&room_jid).and_then(|retained| {
-                retained
-                    .completion
-                    .as_ref()
-                    .map(|completion| completion.attempt)
-            });
+            let completion = self
+                .destroy_attempts
+                .get(&room_jid)
+                .and_then(|retained| retained.completion.clone());
             match Self::reconcile_unpublished_preparation_destroy_attempt(
                 Arc::clone(&store),
                 Arc::clone(&claim_store),
                 room_jid.clone(),
                 claim_fence.clone(),
                 phase,
-                completion_attempt,
+                completion,
             )
             .await
             {
@@ -4439,10 +4558,13 @@ impl kameo::message::Message<ReconcileReclaimedRoom> for RoomRegistryActor {
         let (guard, has_async_work) = match self
             .prepare_room(
                 msg.room_jid.clone(),
-                snapshot.waddle_id,
-                snapshot.channel_id,
-                snapshot.config,
-                Vec::new(),
+                RoomPreparationSpec {
+                    waddle_id: snapshot.waddle_id,
+                    channel_id: snapshot.channel_id,
+                    config: snapshot.config,
+                    initial_affiliations: Vec::new(),
+                    live_room_restore: None,
+                },
                 &claim_fence,
             )
             .await
@@ -4526,6 +4648,14 @@ pub struct GetOrCreateRoom {
     pub config: RoomConfig,
 }
 
+pub struct GetOrCreateRoomWithLiveRoster {
+    pub room_jid: BareJid,
+    pub waddle_id: WaddleId,
+    pub channel_id: ChannelId,
+    pub config: RoomConfig,
+    pub live_room_restore: MucRoom,
+}
+
 impl kameo::message::Message<GetOrCreateRoom> for RoomRegistryActor {
     type Reply = DelegatedReply<Result<RoomAcquisition, RoomRegistryError>>;
 
@@ -4545,6 +4675,7 @@ impl kameo::message::Message<GetOrCreateRoom> for RoomRegistryActor {
             channel_id: msg.channel_id,
             config: msg.config,
             initial_affiliations: Vec::new(),
+            live_room_restore: None,
         });
         match self
             .transition_demand_room(room_jid.clone(), creation_spec, ctx.actor_ref().clone())
@@ -4562,6 +4693,72 @@ impl kameo::message::Message<GetOrCreateRoom> for RoomRegistryActor {
                 creation: RoomCreation::Created,
             })),
             Ok(DemandRoomTransition::Pending(creation_spec)) => {
+                let (delegated, reply) = ctx.reply_sender();
+                self.attach_preparation_waiter(
+                    &room_jid,
+                    reply.map(|reply| RoomPreparationWaiter::Acquisition {
+                        reply,
+                        creation_spec,
+                    }),
+                );
+                delegated
+            }
+            Err(error) => ctx.reply(Err(error)),
+        }
+    }
+}
+
+impl kameo::message::Message<GetOrCreateRoomWithLiveRoster> for RoomRegistryActor {
+    type Reply = DelegatedReply<Result<RoomAcquisition, RoomRegistryError>>;
+
+    async fn handle(
+        &mut self,
+        msg: GetOrCreateRoomWithLiveRoster,
+        ctx: &mut Context<Self, Self::Reply>,
+    ) -> Self::Reply {
+        let room_jid = msg.room_jid;
+        if self.destroy_completion_blocks_recreation(&room_jid).await {
+            return ctx.reply(Err(RoomRegistryError::OwnershipReconciliationPending(
+                room_jid,
+            )));
+        }
+        let creation_spec = Arc::new(RoomCreationSpec {
+            waddle_id: msg.waddle_id.into_string(),
+            channel_id: msg.channel_id.into_string(),
+            config: msg.config,
+            initial_affiliations: Vec::new(),
+            live_room_restore: Some(msg.live_room_restore),
+        });
+        match self
+            .transition_demand_room(room_jid.clone(), creation_spec, ctx.actor_ref().clone())
+            .await
+        {
+            // A live-roster handoff is only valid while the target actor is
+            // still unpublished.  Merging into an already-live actor could
+            // erase a join or leave that arrived after its publication.
+            Ok(DemandRoomTransition::Existing(_)) => ctx.reply(Err(
+                RoomRegistryError::OwnershipReconciliationPending(room_jid),
+            )),
+            Ok(DemandRoomTransition::Created(actor_ref)) => ctx.reply(Ok(RoomAcquisition {
+                actor_ref,
+                creation: RoomCreation::Created,
+            })),
+            Ok(DemandRoomTransition::Pending(creation_spec)) => {
+                let pending_has_live_roster = self
+                    .pending_room_preparations
+                    .get(&room_jid)
+                    .is_some_and(|pending| {
+                        matches!(
+                            &pending.origin,
+                            RoomPreparationOrigin::Demand { prepared_spec }
+                                if prepared_spec.live_room_restore.is_some()
+                        )
+                    });
+                if !pending_has_live_roster {
+                    return ctx.reply(Err(RoomRegistryError::OwnershipReconciliationPending(
+                        room_jid,
+                    )));
+                }
                 let (delegated, reply) = ctx.reply_sender();
                 self.attach_preparation_waiter(
                     &room_jid,
@@ -4606,6 +4803,7 @@ impl kameo::message::Message<GetOrCreateRoomWithInitialAffiliations> for RoomReg
             channel_id: msg.channel_id.into_string(),
             config: msg.config,
             initial_affiliations: msg.initial_affiliations,
+            live_room_restore: None,
         });
         match self
             .transition_demand_room(room_jid.clone(), creation_spec, ctx.actor_ref().clone())
@@ -4674,6 +4872,7 @@ impl kameo::message::Message<CreateInstantRoom> for RoomRegistryActor {
             channel_id,
             config,
             initial_affiliations: Vec::new(),
+            live_room_restore: None,
         });
 
         let room_jid = msg.room_jid;
@@ -4732,6 +4931,7 @@ impl kameo::message::Message<CreateRoom> for RoomRegistryActor {
             channel_id: msg.channel_id,
             config: msg.config,
             initial_affiliations: Vec::new(),
+            live_room_restore: None,
         });
         match self
             .transition_demand_room(room_jid.clone(), creation_spec, ctx.actor_ref().clone())
@@ -4786,6 +4986,7 @@ impl kameo::message::Message<CreateRoomWithInitialAffiliations> for RoomRegistry
             channel_id: msg.channel_id.into_string(),
             config: msg.config,
             initial_affiliations: msg.initial_affiliations,
+            live_room_restore: None,
         });
         match self
             .transition_demand_room(room_jid.clone(), creation_spec, ctx.actor_ref().clone())
@@ -4912,6 +5113,7 @@ impl RoomRegistryActor {
                 RoomDurableMutation::Destroy {
                     completion_attempt: None,
                 },
+                crate::muc::RoomMutationEffects::none(),
             )
             .await
         {
@@ -5031,11 +5233,20 @@ impl RoomRegistryActor {
                     }
                 }
                 if let Some(store) = &self.durable_store {
+                    let committed_completion = retained.completion.clone();
                     if let Err(error) = store
                         .commit_room_mutation(
                             &room_jid,
                             &entry.claim_fence,
-                            RoomDurableMutation::Destroy { completion_attempt },
+                            RoomDurableMutation::Destroy {
+                                completion_attempt: committed_completion
+                                    .as_ref()
+                                    .map(|completion| completion.attempt),
+                            },
+                            committed_completion
+                                .as_ref()
+                                .map(Self::destroy_effects)
+                                .unwrap_or_else(RoomMutationEffects::none),
                         )
                         .await
                     {
@@ -5103,6 +5314,10 @@ impl RoomRegistryActor {
                     // would leave its persisted outbox record inert.
                     return DestroyRoomOutcome::DurableWipeFailed;
                 }
+                let effects = completion
+                    .as_ref()
+                    .map(Self::destroy_effects)
+                    .unwrap_or_else(RoomMutationEffects::none);
                 let commit = store
                     .commit_room_mutation(
                         &room_jid,
@@ -5112,6 +5327,7 @@ impl RoomRegistryActor {
                                 .as_ref()
                                 .map(|completion| completion.attempt),
                         },
+                        effects,
                     )
                     .await;
                 if let Err(error) = commit {
@@ -5633,7 +5849,12 @@ impl kameo::message::Message<DestroyRoomIfInactive> for RoomRegistryActor {
                         SealGuard::Dormant => RoomDurableMutation::Dormancy,
                     };
                     if let Err(error) = store
-                        .commit_room_mutation(&msg.room_jid, &entry.claim_fence, intent)
+                        .commit_room_mutation(
+                            &msg.room_jid,
+                            &entry.claim_fence,
+                            intent,
+                            crate::muc::RoomMutationEffects::none(),
+                        )
                         .await
                     {
                         if matches!(error, RoomCommitError::NotOwner) {
@@ -5806,7 +6027,12 @@ impl kameo::message::Message<ReapSealedRoom> for RoomRegistryActor {
                 };
                 if let Some(store) = &self.durable_store {
                     if let Err(error) = store
-                        .commit_room_mutation(&msg.room_jid, &entry.claim_fence, intent)
+                        .commit_room_mutation(
+                            &msg.room_jid,
+                            &entry.claim_fence,
+                            intent,
+                            crate::muc::RoomMutationEffects::none(),
+                        )
                         .await
                     {
                         if matches!(error, RoomCommitError::NotOwner) {

@@ -278,6 +278,7 @@ async fn ordinary_join_coalesces_with_restoring_room_without_create_permission()
             room_jid: &'a BareJid,
             fence: &'a RoomClaimFenceContext,
             _intent: waddle_xmpp::muc::RoomDurableMutation,
+            _effects: waddle_xmpp::muc::RoomMutationEffects,
         ) -> waddle_xmpp::muc::RoomCommitFuture<'a> {
             if let Err(error) = validate_local_room_fence(room_jid, fence) {
                 return Box::pin(async move {
@@ -286,9 +287,12 @@ async fn ordinary_join_coalesces_with_restoring_room_without_create_permission()
                 });
             }
             Box::pin(async move {
-                Ok(waddle_xmpp::muc::RoomCommittedCoordinates {
-                    lifecycle: waddle_xmpp::muc::RoomLifecycleId::generate(),
-                    revision: waddle_xmpp::muc::RoomRevision::initial(),
+                Ok(waddle_xmpp::muc::RoomCommitOutcome {
+                    coordinates: waddle_xmpp::muc::RoomCommittedCoordinates {
+                        lifecycle: waddle_xmpp::muc::RoomLifecycleId::generate(),
+                        revision: waddle_xmpp::muc::RoomRevision::initial(),
+                    },
+                    reservation: None,
                 })
             })
         }
@@ -321,6 +325,7 @@ async fn ordinary_join_coalesces_with_restoring_room_without_create_permission()
         started: Arc::clone(&started),
         allow: Arc::clone(&allow),
         snapshot: DurableRoomState {
+            coordinates: None,
             waddle_id: "restored-waddle".to_string(),
             channel_id: "restored-channel".to_string(),
             config: waddle_xmpp::muc::RoomConfig {
@@ -585,7 +590,10 @@ async fn muc_join_full_room_returns_service_unavailable() {
         .config;
     config.max_occupants = 1;
     room_actor
-        .ask(UpdateConfig { config })
+        .ask(UpdateConfig {
+            config,
+            effect_plan: waddle_xmpp::muc::room_actor::ConfigEffectPlan::DirectAudience,
+        })
         .await
         .expect("room config update");
 
@@ -1892,7 +1900,10 @@ async fn standard_members_only_join_rejects_unaffiliated_user() {
     let mut config = actor.ask(GetConfig).await.expect("config");
     config.members_only = true;
     actor
-        .ask(UpdateConfig { config })
+        .ask(UpdateConfig {
+            config,
+            effect_plan: waddle_xmpp::muc::room_actor::ConfigEffectPlan::DirectAudience,
+        })
         .await
         .expect("members-only config");
 
@@ -3728,6 +3739,7 @@ async fn standard_muc_owner_config_reconciles_ambiguous_members_only_commit_befo
                     self.states.lock().expect("states lock").insert(
                         room_jid.clone(),
                         DurableRoomState {
+                            coordinates: None,
                             waddle_id: waddle_id.into_string(),
                             channel_id: channel_id.into_string(),
                             config,
@@ -3802,6 +3814,7 @@ async fn standard_muc_owner_config_reconciles_ambiguous_members_only_commit_befo
             room_jid: &'a BareJid,
             fence: &'a waddle_xmpp::muc::durable::RoomClaimFenceContext,
             intent: waddle_xmpp::muc::RoomDurableMutation,
+            _effects: waddle_xmpp::muc::RoomMutationEffects,
         ) -> waddle_xmpp::muc::RoomCommitFuture<'a> {
             let matches = fence == &self.expected_fence(room_jid);
             let coordinates = self.next_coordinates(room_jid);
@@ -3815,7 +3828,10 @@ async fn standard_muc_owner_config_reconciles_ambiguous_members_only_commit_befo
                 if ambiguous_config {
                     Err(waddle_xmpp::muc::RoomCommitError::CommitOutcomeUnknown)
                 } else {
-                    Ok(coordinates)
+                    Ok(waddle_xmpp::muc::RoomCommitOutcome {
+                        coordinates,
+                        reservation: None,
+                    })
                 }
             })
         }
@@ -6024,7 +6040,10 @@ async fn resumed_muc_join_presence_replays_muji_when_room_is_full() {
         .config;
     config.max_occupants = 1;
     room_actor
-        .ask(UpdateConfig { config })
+        .ask(UpdateConfig {
+            config,
+            effect_plan: waddle_xmpp::muc::room_actor::ConfigEffectPlan::DirectAudience,
+        })
         .await
         .expect("room config update");
 
@@ -6702,6 +6721,7 @@ async fn make_room_moderated(state: &WebSocketState, room_jid: &BareJid) {
                 moderated: true,
                 ..config
             },
+            effect_plan: waddle_xmpp::muc::room_actor::ConfigEffectPlan::DirectAudience,
         })
         .await
         .expect("set room moderated");
@@ -6836,6 +6856,104 @@ async fn muc_admin_ban_evicts_target_sessions_from_room_call() {
     );
     assert_eq!(evicted[0].0.as_str(), "ban-evicts@muc.example.com");
     assert_eq!(evicted[0].1.as_livekit_identity(), "bob@example.com/web");
+}
+
+#[tokio::test]
+async fn muc_admin_ban_preserves_single_space_nick_in_rendered_presence() {
+    let state = create_test_websocket_state().await;
+    let owner_session = create_test_server_owner_session(state.as_ref(), "alice").await;
+    let bob_session = create_test_session(state.as_ref(), "bob").await;
+    let room_jid: BareJid = "ban-space-nick@muc.example.com".parse().expect("room jid");
+    let alice: FullJid = "alice@example.com/web".parse().expect("alice jid");
+    let bob: FullJid = "bob@example.com/web".parse().expect("bob jid");
+    let (bob_tx, mut bob_rx) = mpsc::channel(8);
+    register_test_connection(state.as_ref(), &bob, bob_tx).await;
+
+    let _ = handle_muc_join(
+        state.as_ref(),
+        "example.com",
+        &room_jid,
+        &alice,
+        "alice",
+        None,
+        &Some(owner_session.clone()),
+    )
+    .await;
+    let bob_join = handle_muc_join(
+        state.as_ref(),
+        "example.com",
+        &room_jid,
+        &bob,
+        " ",
+        None,
+        &Some(bob_session),
+    )
+    .await;
+    assert!(
+        !bob_join
+            .iter()
+            .any(|frame| frame.contains("type='error'") || frame.contains("type=\"error\"")),
+        "single-space nick join must succeed: {bob_join:?}"
+    );
+    while bob_rx.try_recv().is_ok() {}
+
+    let room_actor = state
+        .deps
+        .protocol
+        .room_registry
+        .ask(waddle_xmpp::muc::room_registry_actor::GetRoom {
+            room_jid: room_jid.clone(),
+        })
+        .await
+        .expect("registry ask")
+        .expect("room exists");
+    room_actor
+        .ask(ChangeAffiliation {
+            jid: alice.to_bare(),
+            affiliation: Affiliation::Owner,
+        })
+        .await
+        .expect("grant owner");
+
+    let ban_iq = build_admin_set_iq_xml(
+        &room_jid,
+        "ban-space-bob",
+        Element::builder("item", waddle_xmpp::muc::NS_MUC_ADMIN)
+            .attr(
+                minidom::rxml::xml_ncname!("jid").to_owned(),
+                "bob@example.com",
+            )
+            .attr(
+                minidom::rxml::xml_ncname!("affiliation").to_owned(),
+                "outcast",
+            )
+            .build(),
+    );
+    let responses = handle_iq(
+        &ban_iq,
+        "example.com",
+        "muc.example.com",
+        state.as_ref(),
+        &Some(owner_session),
+        &ready_phase(&alice),
+    )
+    .await;
+    assert!(responses[0].contains("type='result'"), "{responses:?}");
+
+    let outbound = bob_rx
+        .try_recv()
+        .expect("banned session destroy/broadcast presence");
+    let xml = stanza_to_xml(&outbound.stanza);
+    let presence = Element::from_str(&xml).expect("ban presence XML");
+    assert_eq!(
+        presence.attr("from"),
+        Some(format!("{room_jid}/ ").as_str()),
+        "the rendered ban presence must preserve the exact admitted nick: {xml}"
+    );
+    assert!(
+        xml.contains("code='301'") || xml.contains("code=\"301\""),
+        "the single-space nicked occupant must still receive a ban presence: {xml}"
+    );
 }
 
 #[tokio::test]
@@ -7422,6 +7540,198 @@ async fn xep0045_destroy_notifies_every_occupant_session_and_wipes_durable_state
     assert!(
         room_after.is_none(),
         "destroyed room must leave the registry"
+    );
+}
+
+#[tokio::test]
+async fn xep0045_destroy_preserves_single_space_nick_in_rendered_presence() {
+    let state = create_test_websocket_state().await;
+    let owner_session = create_test_server_owner_session(state.as_ref(), "alice").await;
+    let bob_session = create_test_session(state.as_ref(), "bob").await;
+    let room_jid: BareJid = "destroy-space-nick@muc.example.com"
+        .parse()
+        .expect("room jid");
+    let alice: FullJid = "alice@example.com/web".parse().expect("alice jid");
+    let bob: FullJid = "bob@example.com/web".parse().expect("bob jid");
+    let (bob_tx, mut bob_rx) = mpsc::channel(8);
+    register_test_connection(state.as_ref(), &bob, bob_tx).await;
+
+    let _ = handle_muc_join(
+        state.as_ref(),
+        "example.com",
+        &room_jid,
+        &alice,
+        "alice",
+        None,
+        &Some(owner_session.clone()),
+    )
+    .await;
+    let bob_join = handle_muc_join(
+        state.as_ref(),
+        "example.com",
+        &room_jid,
+        &bob,
+        " ",
+        None,
+        &Some(bob_session),
+    )
+    .await;
+    assert!(
+        !bob_join
+            .iter()
+            .any(|frame| frame.contains("type='error'") || frame.contains("type=\"error\"")),
+        "single-space nick join must succeed: {bob_join:?}"
+    );
+    while bob_rx.try_recv().is_ok() {}
+
+    let room_actor = state
+        .deps
+        .protocol
+        .room_registry
+        .ask(waddle_xmpp::muc::room_registry_actor::GetRoom {
+            room_jid: room_jid.clone(),
+        })
+        .await
+        .expect("registry ask")
+        .expect("room exists");
+    room_actor
+        .ask(ChangeAffiliation {
+            jid: alice.to_bare(),
+            affiliation: Affiliation::Owner,
+        })
+        .await
+        .expect("grant owner");
+
+    let responses = handle_iq(
+        &owner_destroy_iq_frame(&room_jid),
+        "example.com",
+        "muc.example.com",
+        state.as_ref(),
+        &Some(owner_session),
+        &ready_phase(&alice),
+    )
+    .await;
+    assert!(
+        responses
+            .iter()
+            .any(|frame| frame.contains("type=\"result\"") || frame.contains("type='result'")),
+        "owner receives destroy result: {responses:?}"
+    );
+
+    let outbound = bob_rx
+        .try_recv()
+        .expect("destroyed occupant session presence");
+    let xml = stanza_to_xml(&outbound.stanza);
+    let presence = Element::from_str(&xml).expect("destroy presence XML");
+    assert!(
+        presence_has_muc_user_destroy(&presence),
+        "single-space nick destroy presence must carry <destroy/>: {xml}"
+    );
+    assert_eq!(
+        presence.attr("from"),
+        Some(format!("{room_jid}/ ").as_str()),
+        "the rendered destroy presence must preserve the exact admitted nick: {xml}"
+    );
+}
+
+#[tokio::test]
+async fn xep0045_nonoccupant_owner_destroy_gets_result_without_destroy_presence() {
+    let state = create_test_websocket_state().await;
+    let owner_session = create_test_server_owner_session(state.as_ref(), "alice").await;
+    let room_jid: BareJid = "destroy-owner-not-occupant@muc.example.com"
+        .parse()
+        .expect("room jid");
+    let alice: FullJid = "alice@example.com/web".parse().expect("alice jid");
+    let bob: FullJid = "bob@example.com/web".parse().expect("bob jid");
+    let bob_session = create_test_session(state.as_ref(), "bob").await;
+    let (bob_tx, mut bob_rx) = mpsc::channel(8);
+    register_test_connection(state.as_ref(), &bob, bob_tx).await;
+
+    let owner_join = handle_muc_join(
+        state.as_ref(),
+        "example.com",
+        &room_jid,
+        &alice,
+        "alice",
+        None,
+        &Some(owner_session.clone()),
+    )
+    .await;
+    assert!(
+        !owner_join
+            .iter()
+            .any(|frame| frame.contains("type='error'") || frame.contains("type=\"error\"")),
+        "privileged owner join must create the room: {owner_join:?}"
+    );
+
+    let join_frames = handle_muc_join(
+        state.as_ref(),
+        "example.com",
+        &room_jid,
+        &bob,
+        "bob",
+        None,
+        &Some(bob_session),
+    )
+    .await;
+    assert!(
+        !join_frames
+            .iter()
+            .any(|frame| frame.contains("type='error'") || frame.contains("type=\"error\"")),
+        "bob join must succeed: {join_frames:?}"
+    );
+    while bob_rx.try_recv().is_ok() {}
+
+    let room_actor = state
+        .deps
+        .protocol
+        .room_registry
+        .ask(waddle_xmpp::muc::room_registry_actor::GetRoom {
+            room_jid: room_jid.clone(),
+        })
+        .await
+        .expect("registry ask")
+        .expect("room exists");
+    room_actor
+        .ask(ChangeAffiliation {
+            jid: alice.to_bare(),
+            affiliation: Affiliation::Owner,
+        })
+        .await
+        .expect("grant remote owner affiliation");
+    let _ = handle_muc_leave(state.as_ref(), &room_jid, &alice, "alice", None).await;
+    while bob_rx.try_recv().is_ok() {}
+
+    let responses = handle_iq(
+        &owner_destroy_iq_frame(&room_jid),
+        "example.com",
+        "muc.example.com",
+        state.as_ref(),
+        &Some(owner_session),
+        &ready_phase(&alice),
+    )
+    .await;
+
+    assert!(
+        responses
+            .iter()
+            .any(|frame| frame.contains("type=\"result\"") || frame.contains("type='result'")),
+        "non-occupant owner destroy must still return an IQ result: {responses:?}"
+    );
+    assert!(
+        !responses.iter().any(
+            |frame| Element::from_str(frame).is_ok_and(|el| presence_has_muc_user_destroy(&el))
+        ),
+        "a non-occupant owner must not receive a destroy presence: {responses:?}"
+    );
+
+    let outbound = bob_rx
+        .try_recv()
+        .expect("bob must receive the destroy presence");
+    let element = Element::from_str(&stanza_to_xml(&outbound.stanza)).expect("destroy presence");
+    assert!(
+        presence_has_muc_user_destroy(&element),
+        "remaining occupants still receive the destroy presence: {element:?}"
     );
 }
 
@@ -8365,6 +8675,7 @@ async fn xep0045_destroy_wipe_failure_sends_no_destroy_presence() {
             room_jid: &'a BareJid,
             fence: &'a RoomClaimFenceContext,
             intent: waddle_xmpp::muc::RoomDurableMutation,
+            _effects: waddle_xmpp::muc::RoomMutationEffects,
         ) -> waddle_xmpp::muc::RoomCommitFuture<'a> {
             let expected =
                 expected_room_fence(room_jid, self.expected_owner.clone(), ClaimEpoch(0));
@@ -8383,9 +8694,12 @@ async fn xep0045_destroy_wipe_failure_sends_no_destroy_presence() {
                 });
             }
             Box::pin(async move {
-                Ok(waddle_xmpp::muc::RoomCommittedCoordinates {
-                    lifecycle: waddle_xmpp::muc::RoomLifecycleId::generate(),
-                    revision: waddle_xmpp::muc::RoomRevision::initial(),
+                Ok(waddle_xmpp::muc::RoomCommitOutcome {
+                    coordinates: waddle_xmpp::muc::RoomCommittedCoordinates {
+                        lifecycle: waddle_xmpp::muc::RoomLifecycleId::generate(),
+                        revision: waddle_xmpp::muc::RoomRevision::initial(),
+                    },
+                    reservation: None,
                 })
             })
         }

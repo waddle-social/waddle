@@ -471,7 +471,10 @@ async fn generic_config_update_normalizes_group_dm_members_only() {
     };
 
     actor
-        .ask(UpdateConfig { config })
+        .ask(UpdateConfig {
+            config,
+            effect_plan: ConfigEffectPlan::DirectAudience,
+        })
         .await
         .expect("generic config update");
 

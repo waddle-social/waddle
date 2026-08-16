@@ -1,4 +1,4 @@
-use super::transport_xml::{element_to_xml, sasl_failure_xml, sasl_success_xml};
+use super::transport_xml::{sasl_failure_element, sasl_success_element};
 use crate::server::routes::auth_telemetry::{
     record_auth_failure, record_auth_success, AuthFailure,
 };
@@ -8,9 +8,9 @@ use waddle_xmpp::telemetry::attributes::AuthStage;
 /// the SASL failure frame. Every failure return in this module routes
 /// through here so early-step rejections (bad base64, unknown user,
 /// malformed first message) are not invisible to the counter.
-fn sasl_failure_counted(mechanism: &'static str) -> String {
+fn sasl_failure_counted(mechanism: &'static str) -> Element {
     waddle_xmpp::metrics::record_auth_attempt(mechanism, false);
-    sasl_failure_xml("not-authorized")
+    sasl_failure_element("not-authorized")
 }
 
 fn scram_bare_identifier(username: &str, domain: &str) -> Option<BareJid> {
@@ -22,9 +22,9 @@ pub(super) fn record_scram_failure(failure: AuthFailure<'_>, bare_identifier: Op
     waddle_xmpp::metrics::record_auth_attempt("SCRAM-SHA-256", false);
 }
 
-fn scram_failure_counted(failure: AuthFailure<'_>, bare_identifier: Option<&BareJid>) -> String {
+fn scram_failure_counted(failure: AuthFailure<'_>, bare_identifier: Option<&BareJid>) -> Element {
     record_scram_failure(failure, bare_identifier);
-    sasl_failure_xml("not-authorized")
+    sasl_failure_element("not-authorized")
 }
 use super::*;
 
@@ -34,7 +34,7 @@ pub(super) async fn handle_sasl_oauthbearer(
     state: &WebSocketState,
     authenticated_session: &mut Option<Session>,
     phase: &mut ConnectionPhase,
-) -> Vec<String> {
+) -> Vec<Element> {
     debug!("SASL OAUTHBEARER auth attempt");
 
     let decoded = match BASE64_STANDARD.decode(b64_data) {
@@ -97,7 +97,7 @@ pub(super) async fn handle_sasl_oauthbearer(
             *phase = ConnectionPhase::authenticated(&full_jid);
 
             waddle_xmpp::metrics::record_auth_attempt("OAUTHBEARER", true);
-            vec![sasl_success_xml()]
+            vec![sasl_success_element()]
         }
         Err(e) => {
             warn!(error = %e, "SASL OAUTHBEARER authentication failed");
@@ -116,7 +116,7 @@ pub(super) async fn handle_sasl_scram_client_first(
     domain: &str,
     state: &WebSocketState,
     phase: &mut ConnectionPhase,
-) -> Vec<String> {
+) -> Vec<Element> {
     debug!("SASL SCRAM-SHA-256 auth attempt");
 
     let decoded = match BASE64_STANDARD.decode(b64_data.trim()) {
@@ -194,11 +194,9 @@ pub(super) async fn handle_sasl_scram_client_first(
         username,
     ));
 
-    vec![element_to_xml(
-        Element::builder("challenge", waddle_xmpp::ns::SASL)
-            .append(challenge_b64)
-            .build(),
-    )]
+    vec![Element::builder("challenge", waddle_xmpp::ns::SASL)
+        .append(challenge_b64)
+        .build()]
 }
 
 /// Handle SASL SCRAM-SHA-256 response (client-final-message).
@@ -212,7 +210,7 @@ pub(super) async fn handle_sasl_scram_response(
     mut scram: ScramPendingState,
     authenticated_session: &mut Option<Session>,
     phase: &mut ConnectionPhase,
-) -> Vec<String> {
+) -> Vec<Element> {
     let decoded = match BASE64_STANDARD.decode(b64_data.trim()) {
         Ok(data) => data,
         Err(_) => {
@@ -298,9 +296,7 @@ pub(super) async fn handle_sasl_scram_response(
     *phase = ConnectionPhase::authenticated(&full_jid);
 
     let success_b64 = BASE64_STANDARD.encode(server_final.message.as_bytes());
-    vec![element_to_xml(
-        Element::builder("success", waddle_xmpp::ns::SASL)
-            .append(success_b64)
-            .build(),
-    )]
+    vec![Element::builder("success", waddle_xmpp::ns::SASL)
+        .append(success_b64)
+        .build()]
 }

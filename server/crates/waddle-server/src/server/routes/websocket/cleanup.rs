@@ -1,5 +1,6 @@
 use super::*;
 use super::{
+    frame::ResponseBatch,
     replay::{
         drain_outbound_into_replay, drain_outbound_into_terminal_recovery, PendingRowDrainPolicy,
         TerminalDrainContext,
@@ -2379,7 +2380,7 @@ pub(crate) async fn cancel_destroy_completion_attempt(
 pub(crate) async fn drain_destroy_completions(
     state: &WebSocketState,
     inline_session: Option<&FullJid>,
-) -> Vec<String> {
+) -> ResponseBatch {
     let completions = match RoomRegistry::wrap(state.deps.protocol.room_registry.clone())
         .take_destroy_completions()
         .await
@@ -2387,10 +2388,10 @@ pub(crate) async fn drain_destroy_completions(
         Ok(completions) => completions,
         Err(error) => {
             warn!(error = %error, "Failed to drain completed MUC destroy work");
-            return Vec::new();
+            return ResponseBatch::default();
         }
     };
-    let mut frames = Vec::new();
+    let mut batch = ResponseBatch::default();
     for completion in completions {
         let attempt = completion.attempt;
         #[cfg(feature = "clustering")]
@@ -2478,7 +2479,7 @@ pub(crate) async fn drain_destroy_completions(
                         warn!(%error, "Failed to retain MUC destroy completion after durable acknowledgement failure");
                     }
                 }
-                frames.extend(completion_frames);
+                batch.append_batch(completion_frames);
             }
             Err(()) => {
                 let _ = super::handlers::iq::muc_owner_moderation::finalize_persisted_destroy_completion(state, &lease, false).await;
@@ -2492,14 +2493,14 @@ pub(crate) async fn drain_destroy_completions(
         }
     }
     super::handlers::iq::muc_owner_moderation::drain_persisted_destroy_completions(state).await;
-    frames
+    batch
 }
 
 pub(crate) async fn drain_destroy_completion_attempt(
     state: &WebSocketState,
     attempt: waddle_xmpp::muc::DestroyAttemptId,
     inline_session: Option<&FullJid>,
-) -> Vec<String> {
+) -> Result<ResponseBatch, ()> {
     let local_completion = match RoomRegistry::wrap(state.deps.protocol.room_registry.clone())
         .take_destroy_completion_attempt(attempt)
         .await
@@ -2536,7 +2537,7 @@ pub(crate) async fn drain_destroy_completion_attempt(
             {
                 warn!(%error, "Failed to retain exact MUC destroy completion after non-clustered arming failure");
             }
-            return Vec::new();
+            return Err(());
         }
     }
     let Some(lease) =
@@ -2571,7 +2572,7 @@ pub(crate) async fn drain_destroy_completion_attempt(
                 }
             }
         }
-        return Vec::new();
+        return Err(());
     };
     match super::handlers::iq::muc_owner_moderation::complete_leased_destroy_completion(
         state,
@@ -2603,7 +2604,7 @@ pub(crate) async fn drain_destroy_completion_attempt(
                     warn!(%error, "Failed to retain exact MUC destroy completion after durable acknowledgement failure");
                 }
             }
-            frames
+            Ok(frames)
         }
         Err(()) => {
             let _ =
@@ -2619,7 +2620,7 @@ pub(crate) async fn drain_destroy_completion_attempt(
                     warn!(%error, "Failed to requeue exact incomplete MUC destroy cleanup");
                 }
             }
-            Vec::new()
+            Err(())
         }
     }
 }
@@ -2768,9 +2769,11 @@ mod destroy_completion_tests {
         let first_attempt = queue_destroy_completion(state.as_ref(), &first_room).await;
         let second_attempt = queue_destroy_completion(state.as_ref(), &second_room).await;
 
-        let frames = drain_destroy_completion_attempt(state.as_ref(), first_attempt, None).await;
+        let frames = drain_destroy_completion_attempt(state.as_ref(), first_attempt, None)
+            .await
+            .expect("drain exact destroy completion");
         assert!(
-            frames.is_empty(),
+            frames.frames.is_empty(),
             "no occupant frames are expected for empty-room destroy cleanup"
         );
 

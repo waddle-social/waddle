@@ -1,4 +1,7 @@
-use std::{collections::BTreeMap, convert::Infallible};
+use std::{
+    collections::{BTreeMap, BTreeSet},
+    convert::Infallible,
+};
 
 use jid::{BareJid, FullJid};
 use kameo::message::Context;
@@ -9,8 +12,9 @@ use crate::muc::admin::{is_role_change_query, AdminItem};
 use crate::muc::durable::{AffiliationEntry as DurableAffiliationEntry, RoomDurableMutation};
 use crate::muc::{
     build_affiliation_change_presence, build_ban_presence, build_kick_presence,
-    build_membership_removal_presence, build_role_change_presence, MucPresenceStatus, MucRoom,
-    Occupant,
+    build_membership_removal_presence, build_role_change_presence, AdminPresenceKind,
+    DestroyReason, MucOccupantNick, MucPresenceStatus, MucRoom, Occupant, OccupantPresenceUpdate,
+    OccupantVoiceChange, RoomEffectReservation,
 };
 use crate::types::{Affiliation, Role, Voice};
 use crate::xep::xep0421::{OccupantIdSecret, OccupantIdentity};
@@ -22,6 +26,17 @@ fn all_room_sessions(room: &MucRoom) -> Vec<FullJid> {
     room.occupants
         .values()
         .flat_map(|occupant| room.get_occupant_sessions(&occupant.nick))
+        .collect()
+}
+
+fn occupied_bare_jids(room: &MucRoom) -> Vec<BareJid> {
+    let mut seen = BTreeSet::new();
+    room.occupants
+        .values()
+        .filter_map(|occupant| {
+            let bare = occupant.real_jid.to_bare();
+            seen.insert(bare.clone()).then_some(bare)
+        })
         .collect()
 }
 
@@ -51,13 +66,109 @@ fn durable_affiliation_entry(jid: BareJid, affiliation: Affiliation) -> DurableA
     )
 }
 
+#[derive(Debug, Clone, PartialEq)]
+struct BuiltPresenceUpdate {
+    recipient: FullJid,
+    presence: Presence,
+    durable: DurableAdminUpdate,
+}
+
+#[derive(Debug, Clone, PartialEq, Default)]
+struct AppliedAdminMutation {
+    applied: AdminItemsApplied,
+    durable_updates: Vec<DurableAdminUpdate>,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+struct DurableAdminUpdate {
+    is_self: bool,
+    update: OccupantPresenceUpdate,
+}
+
+struct DurableAdminUpdateInput<'a> {
+    occupant_jid: &'a FullJid,
+    recipient: &'a FullJid,
+    is_self: bool,
+    kind: AdminPresenceKind,
+    actor: Option<&'a BareJid>,
+    reason: Option<&'a str>,
+}
+
+fn durable_admin_update(
+    room: &MucRoom,
+    occupant: &Occupant,
+    input: DurableAdminUpdateInput<'_>,
+) -> OccupantPresenceUpdate {
+    OccupantPresenceUpdate {
+        recipient: input.recipient.clone(),
+        is_self: input.is_self,
+        occupant: input.occupant_jid.clone(),
+        nick: MucOccupantNick::new(occupant.nick.clone()).expect("nick was previously accepted"),
+        occupant_bare_jid: occupant.real_jid.to_bare(),
+        disclosed_real_jid: visible_real_jid_for_recipient(
+            room,
+            input.recipient,
+            &occupant.real_jid,
+        )
+        .cloned(),
+        affiliation: occupant.affiliation,
+        kind: input.kind,
+        actor: input.actor.cloned(),
+        reason: input
+            .reason
+            .and_then(|value| DestroyReason::new(value.to_owned())),
+    }
+}
+
+fn split_admin_effect_updates(
+    updates: Vec<DurableAdminUpdate>,
+) -> (Vec<OccupantPresenceUpdate>, Vec<OccupantPresenceUpdate>) {
+    let mut self_updates = Vec::new();
+    let mut remaining_updates = Vec::new();
+
+    for durable in updates {
+        if durable.is_self {
+            self_updates.push(durable.update);
+            continue;
+        }
+        remaining_updates.push(durable.update);
+    }
+
+    (self_updates, remaining_updates)
+}
+
+fn admin_effects_for_applied(
+    room_jid: BareJid,
+    durable_updates: Vec<DurableAdminUpdate>,
+    removed_by_moderation: Vec<FullJid>,
+    voice_changes: &[(FullJid, Voice)],
+) -> crate::muc::RoomMutationEffects {
+    if durable_updates.is_empty() && removed_by_moderation.is_empty() && voice_changes.is_empty() {
+        return crate::muc::RoomMutationEffects::none();
+    }
+
+    let (self_updates, remaining_updates) = split_admin_effect_updates(durable_updates);
+    crate::muc::RoomMutationEffects::admin(
+        room_jid,
+        self_updates,
+        remaining_updates,
+        removed_by_moderation,
+        voice_changes
+            .iter()
+            .cloned()
+            .map(|(session, voice)| OccupantVoiceChange { session, voice })
+            .collect(),
+    )
+}
+
 fn removal_presence_updates(
     room: &MucRoom,
     occupant_id_secret: &OccupantIdSecret,
     occupant: &Occupant,
     status_code: &'static str,
+    kind: AdminPresenceKind,
     actor: Option<&BareJid>,
-) -> Vec<(FullJid, Presence)> {
+) -> Vec<BuiltPresenceUpdate> {
     let from_room_jid = room
         .room_jid
         .with_resource_str(&occupant.nick)
@@ -81,19 +192,37 @@ fn removal_presence_updates(
                 actor,
                 &occupant_identity,
             );
-            (recipient, presence)
+            BuiltPresenceUpdate {
+                recipient: recipient.clone(),
+                presence,
+                durable: DurableAdminUpdate {
+                    is_self,
+                    update: durable_admin_update(
+                        room,
+                        occupant,
+                        DurableAdminUpdateInput {
+                            occupant_jid: &from_room_jid,
+                            recipient: &recipient,
+                            is_self,
+                            kind,
+                            actor,
+                            reason: None,
+                        },
+                    ),
+                },
+            }
         })
         .collect()
 }
 
-pub(super) fn apply_affiliation_change(
+fn apply_affiliation_change_with_effects(
     room: &mut MucRoom,
     occupant_id_secret: &OccupantIdSecret,
     target_jid: BareJid,
     new_affiliation: Affiliation,
     actor: Option<&BareJid>,
     reason: Option<&str>,
-) -> Result<AdminItemsApplied, AdminApplyError> {
+) -> Result<AppliedAdminMutation, AdminApplyError> {
     if new_affiliation != Affiliation::Owner {
         let target_current_affiliation = room.get_affiliation(&target_jid);
         if target_current_affiliation == Affiliation::Owner {
@@ -115,16 +244,17 @@ pub(super) fn apply_affiliation_change(
 
     let change = room.set_affiliation(target_jid.clone(), new_affiliation);
     if change.is_none() {
-        return Ok(AdminItemsApplied::default());
+        return Ok(AppliedAdminMutation::default());
     }
 
     let affected_occupants = occupants_for_bare(room, &target_jid);
     if affected_occupants.is_empty() {
-        return Ok(AdminItemsApplied::default());
+        return Ok(AppliedAdminMutation::default());
     }
 
     if new_affiliation == Affiliation::Outcast {
         let mut updates = Vec::new();
+        let mut durable_updates = Vec::new();
         let mut removed_by_moderation = Vec::new();
         for occupant in &affected_occupants {
             let from_room_jid = room
@@ -133,7 +263,7 @@ pub(super) fn apply_affiliation_change(
                 .expect("nick was previously accepted as resource");
             let occupant_bare = occupant.real_jid.to_bare();
             let removed_sessions = room.get_occupant_sessions(&occupant.nick);
-            updates.extend(all_room_sessions(room).into_iter().map(|recipient| {
+            for recipient in all_room_sessions(room) {
                 let occupant_identity = OccupantIdentity {
                     bare_jid: &occupant_bare,
                     real_jid: visible_real_jid_for_recipient(room, &recipient, &occupant.real_jid),
@@ -148,30 +278,54 @@ pub(super) fn apply_affiliation_change(
                     actor,
                     &occupant_identity,
                 );
-                (recipient, presence)
-            }));
+                durable_updates.push(DurableAdminUpdate {
+                    is_self,
+                    update: durable_admin_update(
+                        room,
+                        occupant,
+                        DurableAdminUpdateInput {
+                            occupant_jid: &from_room_jid,
+                            recipient: &recipient,
+                            is_self,
+                            kind: AdminPresenceKind::Banned,
+                            actor,
+                            reason,
+                        },
+                    ),
+                });
+                updates.push((recipient, presence));
+            }
             removed_by_moderation.extend(removed_sessions);
         }
         for occupant in affected_occupants {
             room.remove_occupant(&occupant.nick);
         }
-        return Ok(AdminItemsApplied {
-            presence_updates: updates,
-            removed_by_moderation,
-            voice_changes: Vec::new(),
+        return Ok(AppliedAdminMutation {
+            applied: AdminItemsApplied {
+                presence_updates: updates,
+                removed_by_moderation,
+                voice_changes: Vec::new(),
+                outbox_reservation: None,
+            },
+            durable_updates,
         });
     }
 
     if room.config.members_only && new_affiliation < Affiliation::Member {
         let mut updates = Vec::new();
+        let mut durable_updates = Vec::new();
         for occupant in &affected_occupants {
-            updates.extend(removal_presence_updates(
+            for built in removal_presence_updates(
                 room,
                 occupant_id_secret,
                 occupant,
                 STATUS_AFFILIATION_CHANGE_REMOVAL,
+                AdminPresenceKind::AffiliationRemoved,
                 actor,
-            ));
+            ) {
+                updates.push((built.recipient, built.presence));
+                durable_updates.push(built.durable);
+            }
         }
         // Status-321 removal (affiliation loss in a members-only room)
         // ends room membership just as surely as a kick or ban, so it
@@ -188,14 +342,19 @@ pub(super) fn apply_affiliation_change(
         for occupant in affected_occupants {
             room.remove_occupant(&occupant.nick);
         }
-        return Ok(AdminItemsApplied {
-            presence_updates: updates,
-            removed_by_moderation,
-            voice_changes: Vec::new(),
+        return Ok(AppliedAdminMutation {
+            applied: AdminItemsApplied {
+                presence_updates: updates,
+                removed_by_moderation,
+                voice_changes: Vec::new(),
+                outbox_reservation: None,
+            },
+            durable_updates,
         });
     }
 
     let mut updates = Vec::new();
+    let mut durable_updates = Vec::new();
     for occupant in &affected_occupants {
         let from_room_jid = room
             .room_jid
@@ -203,7 +362,7 @@ pub(super) fn apply_affiliation_change(
             .expect("nick was previously accepted as resource");
         let occupant_bare = occupant.real_jid.to_bare();
         let affected_sessions = room.get_occupant_sessions(&occupant.nick);
-        updates.extend(all_room_sessions(room).into_iter().map(|recipient| {
+        for recipient in all_room_sessions(room) {
             let occupant_identity = OccupantIdentity {
                 bare_jid: &occupant_bare,
                 real_jid: visible_real_jid_for_recipient(room, &recipient, &occupant.real_jid),
@@ -218,14 +377,55 @@ pub(super) fn apply_affiliation_change(
                 MucPresenceStatus::new(is_self, false),
                 &occupant_identity,
             );
-            (recipient, presence)
-        }));
+            durable_updates.push(DurableAdminUpdate {
+                is_self,
+                update: durable_admin_update(
+                    room,
+                    occupant,
+                    DurableAdminUpdateInput {
+                        occupant_jid: &from_room_jid,
+                        recipient: &recipient,
+                        is_self,
+                        kind: AdminPresenceKind::RoleChanged(occupant.role),
+                        actor: None,
+                        reason: None,
+                    },
+                ),
+            });
+            updates.push((recipient, presence));
+        }
     }
-    Ok(AdminItemsApplied {
-        presence_updates: updates,
-        removed_by_moderation: Vec::new(),
-        voice_changes: changed_session_voices(&voices_before, &session_voices(room, &target_jid)),
+    Ok(AppliedAdminMutation {
+        applied: AdminItemsApplied {
+            presence_updates: updates,
+            removed_by_moderation: Vec::new(),
+            voice_changes: changed_session_voices(
+                &voices_before,
+                &session_voices(room, &target_jid),
+            ),
+            outbox_reservation: None,
+        },
+        durable_updates,
     })
+}
+
+pub(super) fn apply_affiliation_change(
+    room: &mut MucRoom,
+    occupant_id_secret: &OccupantIdSecret,
+    target_jid: BareJid,
+    new_affiliation: Affiliation,
+    actor: Option<&BareJid>,
+    reason: Option<&str>,
+) -> Result<AdminItemsApplied, AdminApplyError> {
+    apply_affiliation_change_with_effects(
+        room,
+        occupant_id_secret,
+        target_jid,
+        new_affiliation,
+        actor,
+        reason,
+    )
+    .map(|applied| applied.applied)
 }
 
 /// Current voice of every active session belonging to `target_jid`,
@@ -288,13 +488,18 @@ pub fn enforce_members_only_from_room(
     let mut presence_updates = Vec::new();
     let mut removed_by_moderation = Vec::new();
     for occupant in &removed_occupants {
-        presence_updates.extend(removal_presence_updates(
-            room,
-            occupant_id_secret,
-            occupant,
-            STATUS_MEMBERS_ONLY_CONFIG_REMOVAL,
-            None,
-        ));
+        presence_updates.extend(
+            removal_presence_updates(
+                room,
+                occupant_id_secret,
+                occupant,
+                STATUS_MEMBERS_ONLY_CONFIG_REMOVAL,
+                AdminPresenceKind::MembersOnlyRemoved,
+                None,
+            )
+            .into_iter()
+            .map(|built| (built.recipient, built.presence)),
+        );
         removed_by_moderation.extend(room.get_occupant_sessions(&occupant.nick));
     }
     for occupant in removed_occupants {
@@ -304,6 +509,7 @@ pub fn enforce_members_only_from_room(
         presence_updates,
         removed_by_moderation,
         voice_changes: Vec::new(),
+        outbox_reservation: None,
     }
 }
 
@@ -439,6 +645,7 @@ pub struct AdminItemsApplied {
     /// (kick/ban) never appear here; they are terminal and carried by
     /// `removed_by_moderation` instead.
     pub voice_changes: Vec<(FullJid, Voice)>,
+    pub outbox_reservation: Option<RoomEffectReservation>,
 }
 
 impl kameo::message::Message<ApplyAdminItems> for RoomActor {
@@ -576,6 +783,7 @@ impl kameo::message::Message<ApplyAdminItems> for RoomActor {
                 presence_updates,
                 removed_by_moderation,
                 voice_changes,
+                outbox_reservation: None,
             });
         }
 
@@ -676,21 +884,12 @@ impl kameo::message::Message<ApplyAdminItems> for RoomActor {
             })
             .collect();
 
-        if durable_delta.is_empty() {
-            self.gate_pre_mutation_ownership()
-                .await
-                .map_err(super::RoomMutationError::from)?;
-        } else {
-            let _ = self
-                .commit_durable(RoomDurableMutation::AffiliationBatch(durable_delta))
-                .await?;
-        }
-
         let mut staged_room = self.room.clone();
         let actor = msg.sender_jid.to_bare();
         let mut presence_updates: Vec<(FullJid, Presence)> = Vec::new();
         let mut removed_by_moderation: Vec<FullJid> = Vec::new();
         let mut voice_changes: Vec<(FullJid, Voice)> = Vec::new();
+        let mut durable_updates = Vec::new();
         let mut invalidated_jids = Vec::new();
         let mut changed_affiliations = Vec::new();
         let mut requested_affiliations = Vec::new();
@@ -704,7 +903,10 @@ impl kameo::message::Message<ApplyAdminItems> for RoomActor {
             invalidated_jids.push(target_jid.clone());
             requested_affiliations.push((target_jid.clone(), new_affiliation));
             let target_current_affiliation = staged_room.get_affiliation(&target_jid);
-            let applied = apply_affiliation_change(
+            let AppliedAdminMutation {
+                applied,
+                durable_updates: applied_durable_updates,
+            } = apply_affiliation_change_with_effects(
                 &mut staged_room,
                 &self.occupant_id_secret,
                 target_jid.clone(),
@@ -718,7 +920,28 @@ impl kameo::message::Message<ApplyAdminItems> for RoomActor {
             presence_updates.extend(applied.presence_updates);
             removed_by_moderation.extend(applied.removed_by_moderation);
             voice_changes.extend(applied.voice_changes);
+            durable_updates.extend(applied_durable_updates);
         }
+
+        let outbox_reservation = if durable_delta.is_empty() {
+            self.gate_pre_mutation_ownership()
+                .await
+                .map_err(super::RoomMutationError::from)?;
+            None
+        } else {
+            let (_, reservation) = self
+                .commit_durable(
+                    RoomDurableMutation::AffiliationBatch(durable_delta),
+                    admin_effects_for_applied(
+                        self.room.room_jid.clone(),
+                        durable_updates,
+                        removed_by_moderation.clone(),
+                        &voice_changes,
+                    ),
+                )
+                .await?;
+            reservation
+        };
 
         let mut needs_rehydration = false;
         for jid in invalidated_jids {
@@ -742,6 +965,7 @@ impl kameo::message::Message<ApplyAdminItems> for RoomActor {
             presence_updates,
             removed_by_moderation,
             voice_changes,
+            outbox_reservation,
         })
     }
 }
@@ -765,7 +989,10 @@ impl kameo::message::Message<ApplyAffiliationChange> for RoomActor {
         }
         let previous_affiliation = self.room.get_affiliation(&msg.jid);
         let mut staged_room = self.room.clone();
-        let updates = apply_affiliation_change(
+        let AppliedAdminMutation {
+            mut applied,
+            durable_updates,
+        } = apply_affiliation_change_with_effects(
             &mut staged_room,
             &self.occupant_id_secret,
             msg.jid.clone(),
@@ -773,18 +1000,28 @@ impl kameo::message::Message<ApplyAffiliationChange> for RoomActor {
             msg.actor.as_ref(),
             None,
         )?;
-        if previous_affiliation != msg.affiliation {
-            let _ = self
-                .commit_durable(RoomDurableMutation::Affiliation(durable_affiliation_entry(
-                    msg.jid.clone(),
-                    msg.affiliation,
-                )))
+        let outbox_reservation = if previous_affiliation != msg.affiliation {
+            let (_, reservation) = self
+                .commit_durable(
+                    RoomDurableMutation::Affiliation(durable_affiliation_entry(
+                        msg.jid.clone(),
+                        msg.affiliation,
+                    )),
+                    admin_effects_for_applied(
+                        self.room.room_jid.clone(),
+                        durable_updates,
+                        applied.removed_by_moderation.clone(),
+                        &applied.voice_changes,
+                    ),
+                )
                 .await?;
+            reservation
         } else {
             self.gate_pre_mutation_ownership()
                 .await
                 .map_err(super::RoomMutationError::from)?;
-        }
+            None
+        };
         self.invalidate_invite_grant(&msg.jid);
         let needs_rehydration = self.prune_durable_recipient_if_removed(&msg.jid, msg.affiliation);
         if previous_affiliation != msg.affiliation {
@@ -794,7 +1031,8 @@ impl kameo::message::Message<ApplyAffiliationChange> for RoomActor {
         if needs_rehydration {
             self.refresh_durable_recipients_from_source().await;
         }
-        Ok(updates)
+        applied.outbox_reservation = outbox_reservation;
+        Ok(applied)
     }
 }
 
@@ -820,6 +1058,8 @@ impl kameo::message::Message<EnforceMembersOnly> for RoomActor {
 
 pub struct EnforceMembersOnlyAffiliations {
     pub affiliations: Vec<(BareJid, Affiliation)>,
+    pub fallback_reservation: Option<RoomEffectReservation>,
+    pub config_status_codes: Vec<crate::muc::MucConfigStatusCode>,
 }
 
 impl kameo::message::Message<EnforceMembersOnlyAffiliations> for RoomActor {
@@ -830,13 +1070,13 @@ impl kameo::message::Message<EnforceMembersOnlyAffiliations> for RoomActor {
         msg: EnforceMembersOnlyAffiliations,
         _ctx: &mut Context<Self, Self::Reply>,
     ) -> Self::Reply {
-        let affiliations: BTreeMap<BareJid, Affiliation> = msg.affiliations.into_iter().collect();
-        let occupied_jids: Vec<BareJid> = self
-            .room
-            .occupants
-            .values()
-            .map(|occupant| occupant.real_jid.to_bare())
-            .collect();
+        let EnforceMembersOnlyAffiliations {
+            affiliations,
+            fallback_reservation,
+            config_status_codes,
+        } = msg;
+        let affiliations: BTreeMap<BareJid, Affiliation> = affiliations.into_iter().collect();
+        let occupied_jids = occupied_bare_jids(&self.room);
         if occupied_jids
             .iter()
             .any(|jid| self.invite_rollback_pending(jid))
@@ -865,18 +1105,6 @@ impl kameo::message::Message<EnforceMembersOnlyAffiliations> for RoomActor {
                 changed_affiliations.push((jid.clone(), affiliation));
                 durable_delta.push(durable_affiliation_entry(jid.clone(), affiliation));
             }
-        }
-        if durable_delta.is_empty() {
-            self.gate_pre_mutation_ownership()
-                .await
-                .map_err(super::RoomMutationError::from)?;
-        } else {
-            let _ = self
-                .commit_durable(RoomDurableMutation::MembersOnlyEnforcement {
-                    config: self.room.config.clone(),
-                    affiliations: durable_delta,
-                })
-                .await?;
         }
         let mut needs_rehydration = false;
         for jid in &occupied_jids {
@@ -911,11 +1139,77 @@ impl kameo::message::Message<EnforceMembersOnlyAffiliations> for RoomActor {
             .into_iter()
             .filter(|(session, _)| !applied.removed_by_moderation.contains(session))
             .collect();
+        let should_commit = !durable_delta.is_empty() || !config_status_codes.is_empty();
+        let durable_effect_updates = if config_status_codes.is_empty() {
+            Vec::new()
+        } else {
+            occupied_jids
+                .iter()
+                .filter_map(|jid| {
+                    let affiliation = affiliations.get(jid).copied().unwrap_or(Affiliation::None);
+                    (affiliation < Affiliation::Member).then(|| occupants_for_bare(&self.room, jid))
+                })
+                .flatten()
+                .flat_map(|occupant| {
+                    removal_presence_updates(
+                        &self.room,
+                        &self.occupant_id_secret,
+                        &occupant,
+                        STATUS_MEMBERS_ONLY_CONFIG_REMOVAL,
+                        AdminPresenceKind::MembersOnlyRemoved,
+                        None,
+                    )
+                })
+                .map(|built| built.durable)
+                .collect()
+        };
+        let effects = if config_status_codes.is_empty() {
+            crate::muc::RoomMutationEffects::none()
+        } else {
+            let (self_updates, remaining_updates) =
+                split_admin_effect_updates(durable_effect_updates);
+            let effects = crate::muc::RoomMutationEffects::members_only_enforcement(
+                self.room.room_jid.clone(),
+                self_updates,
+                remaining_updates,
+                applied.removed_by_moderation.clone(),
+                applied
+                    .voice_changes
+                    .iter()
+                    .cloned()
+                    .map(|(session, voice)| OccupantVoiceChange { session, voice })
+                    .collect(),
+                config_status_codes,
+                all_room_sessions(&staged_room),
+            );
+            match fallback_reservation {
+                Some(reservation) => effects.with_superseding_reservation(reservation),
+                None => effects,
+            }
+        };
+        let reservation = if !should_commit {
+            self.gate_pre_mutation_ownership()
+                .await
+                .map_err(super::RoomMutationError::from)?;
+            None
+        } else {
+            let (_, reservation) = self
+                .commit_durable(
+                    RoomDurableMutation::MembersOnlyEnforcement {
+                        config: self.room.config.clone(),
+                        affiliations: durable_delta,
+                    },
+                    effects,
+                )
+                .await?;
+            reservation
+        };
         self.room = staged_room;
         if needs_rehydration {
             // R1: see `RoomActor::refresh_durable_recipients_from_source`.
             self.refresh_durable_recipients_from_source().await;
         }
+        applied.outbox_reservation = reservation;
         Ok(applied)
     }
 }

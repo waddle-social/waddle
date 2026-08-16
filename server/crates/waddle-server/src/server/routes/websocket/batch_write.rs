@@ -12,6 +12,7 @@
 //! `ack_threshold`th countable stanza with an `<r/>` (XEP-0198 §4
 //! permits requesting acks at any time).
 
+use super::frame::ResponseFrame;
 use super::send::{send_ws_message_with_authority, AuthoritySendOutcome};
 use super::state::WsConnState;
 use super::stream_management::{apply_sm_ack, is_countable_stanza};
@@ -58,6 +59,11 @@ pub(super) enum BatchWriteOutcome {
     DeferredCapExhausted,
     /// The node serving generation changed before the next record/write.
     AuthorityRevoked,
+}
+
+pub(super) struct BatchWriteReport {
+    pub(super) outcome: BatchWriteOutcome,
+    pub(super) accepted_frame_indices: Vec<usize>,
 }
 
 /// Normal upper bound on frames the mid-batch drain may park in
@@ -160,12 +166,12 @@ pub(super) struct BatchAuthority<'a> {
     pub(super) shutdown: &'a tokio_util::sync::CancellationToken,
 }
 
-pub(super) async fn write_response_batch_with_admission<S, SE, R, RE>(
+pub(super) async fn write_response_batch_with_admission<S, SE, R, RE, F>(
     sender: &mut S,
     reader: &mut R,
     state: &WebSocketState,
     conn: &mut WsConnState,
-    frames: Vec<String>,
+    frames: Vec<F>,
     policy: BatchSmPolicy,
     authority: BatchAuthority<'_>,
 ) -> BatchWriteOutcome
@@ -174,13 +180,37 @@ where
     SE: std::fmt::Display,
     R: futures::Stream<Item = Result<Message, RE>> + Unpin,
     RE: std::fmt::Display,
+    F: Into<ResponseFrame>,
+{
+    write_response_batch_report_with_admission(
+        sender, reader, state, conn, frames, policy, authority,
+    )
+    .await
+    .outcome
+}
+
+pub(super) async fn write_response_batch_report_with_admission<S, SE, R, RE, F>(
+    sender: &mut S,
+    reader: &mut R,
+    state: &WebSocketState,
+    conn: &mut WsConnState,
+    frames: Vec<F>,
+    policy: BatchSmPolicy,
+    authority: BatchAuthority<'_>,
+) -> BatchWriteReport
+where
+    S: Sink<Message, Error = SE> + Unpin,
+    SE: std::fmt::Display,
+    R: futures::Stream<Item = Result<Message, RE>> + Unpin,
+    RE: std::fmt::Display,
+    F: Into<ResponseFrame>,
 {
     write_response_batch_impl(
         sender,
         reader,
         state,
         conn,
-        frames,
+        frames.into_iter().map(Into::into).collect(),
         policy,
         Some((authority.permit, authority.shutdown)),
     )
@@ -192,23 +222,28 @@ async fn write_response_batch_impl<S, SE, R, RE>(
     reader: &mut R,
     state: &WebSocketState,
     conn: &mut WsConnState,
-    frames: Vec<String>,
+    frames: Vec<ResponseFrame>,
     policy: BatchSmPolicy,
     authority: Option<(
         &crate::clustering::NodeAdmissionPermit,
         &tokio_util::sync::CancellationToken,
     )>,
-) -> BatchWriteOutcome
+) -> BatchWriteReport
 where
     S: Sink<Message, Error = SE> + Unpin,
     SE: std::fmt::Display,
     R: futures::Stream<Item = Result<Message, RE>> + Unpin,
     RE: std::fmt::Display,
 {
-    let mut frames = frames.into_iter();
+    let total_frames = frames.len();
+    let mut accepted_frame_indices = Vec::new();
+    let mut frames = frames.into_iter().enumerate();
     if !batch_authoritative(authority) {
-        record_remaining_for_replay(conn, frames, policy);
-        return BatchWriteOutcome::AuthorityRevoked;
+        accepted_frame_indices.extend(record_remaining_for_replay_indexed(conn, frames, policy));
+        return BatchWriteReport {
+            outcome: BatchWriteOutcome::AuthorityRevoked,
+            accepted_frame_indices,
+        };
     }
     // Send-window pacing applies ONLY before frames that would actually grow
     // the SM unacked queue (issue #1219 review). `ReplaySuppressed` resume
@@ -216,13 +251,24 @@ where
     // `Record` batch whose next frame is uncountable control traffic must
     // write that control through even while a previously-recorded backlog has
     // the pause latch set.
-    while let Some(frame) = frames.next() {
+    while let Some((frame_index, frame)) = frames.next() {
         if !batch_authoritative(authority) {
-            record_current_and_remaining_for_replay(conn, frame, frames, policy, false);
-            return BatchWriteOutcome::AuthorityRevoked;
+            accepted_frame_indices.extend(record_current_and_remaining_for_replay_indexed(
+                conn,
+                frame_index,
+                frame,
+                frames,
+                policy,
+                false,
+            ));
+            return BatchWriteReport {
+                outcome: BatchWriteOutcome::AuthorityRevoked,
+                accepted_frame_indices,
+            };
         }
-        let current_recorded = should_record(conn, &frame, policy);
-        if current_recorded && conn.sm_state.needs_send_pause() {
+        let frame_xml = frame.clone().into_serialized_xml();
+        let current_should_record = should_record(conn, &frame_xml, policy);
+        if current_should_record && conn.sm_state.needs_send_pause() {
             match await_send_window_recovery(sender, reader, state, conn, authority).await {
                 SendWindowOutcome::Recovered => {}
                 SendWindowOutcome::DeferredCapExhausted => {
@@ -233,33 +279,77 @@ where
                     // tail are accepted work: record them into the terminal
                     // recovery inventory instead of dropping them — cleanup
                     // promotes them alongside the recorded prefix.
-                    record_current_and_remaining_for_replay(conn, frame, frames, policy, false);
-                    return BatchWriteOutcome::DeferredCapExhausted;
+                    accepted_frame_indices.extend(record_current_and_remaining_for_replay_indexed(
+                        conn,
+                        frame_index,
+                        frame,
+                        frames,
+                        policy,
+                        false,
+                    ));
+                    return BatchWriteReport {
+                        outcome: BatchWriteOutcome::DeferredCapExhausted,
+                        accepted_frame_indices,
+                    };
                 }
                 SendWindowOutcome::TransportClosed | SendWindowOutcome::TimedOut => {
-                    record_current_and_remaining_for_replay(conn, frame, frames, policy, false);
-                    return BatchWriteOutcome::TransportClosed;
+                    accepted_frame_indices.extend(record_current_and_remaining_for_replay_indexed(
+                        conn,
+                        frame_index,
+                        frame,
+                        frames,
+                        policy,
+                        false,
+                    ));
+                    return BatchWriteReport {
+                        outcome: BatchWriteOutcome::TransportClosed,
+                        accepted_frame_indices,
+                    };
                 }
                 SendWindowOutcome::AuthorityRevoked => {
-                    record_current_and_remaining_for_replay(conn, frame, frames, policy, false);
-                    return BatchWriteOutcome::AuthorityRevoked;
+                    accepted_frame_indices.extend(record_current_and_remaining_for_replay_indexed(
+                        conn,
+                        frame_index,
+                        frame,
+                        frames,
+                        policy,
+                        false,
+                    ));
+                    return BatchWriteReport {
+                        outcome: BatchWriteOutcome::AuthorityRevoked,
+                        accepted_frame_indices,
+                    };
                 }
             }
         }
-        let request_ack = if current_recorded {
-            conn.sm_state
-                .record_outbound(frame.clone(), SmEvictionPath::Batch)
-                .request_ack
+        let current_was_recorded = current_should_record;
+        let request_ack = if current_was_recorded {
+            let (request_ack, accepted) =
+                record_live_sm_frame(conn, frame_xml.clone(), SmEvictionPath::Batch);
+            if accepted {
+                accepted_frame_indices.push(frame_index);
+            }
+            request_ack
         } else {
             false
         };
         if !batch_authoritative(authority) {
-            record_current_and_remaining_for_replay(conn, frame, frames, policy, current_recorded);
-            return BatchWriteOutcome::AuthorityRevoked;
+            accepted_frame_indices.extend(record_current_and_remaining_for_replay_indexed(
+                conn,
+                frame_index,
+                frame,
+                frames,
+                policy,
+                current_was_recorded,
+            ));
+            return BatchWriteReport {
+                outcome: BatchWriteOutcome::AuthorityRevoked,
+                accepted_frame_indices,
+            };
         }
         if let Err(outcome) = send_window_message(
             sender,
-            Message::Text(frame.into()),
+            Message::Text(frame.into_serialized_xml().into()),
             "Failed to send WebSocket message",
             authority,
         )
@@ -267,15 +357,23 @@ where
         {
             return match outcome {
                 SendWindowOutcome::TransportClosed => {
-                    record_remaining_for_replay(conn, frames, policy);
-                    BatchWriteOutcome::TransportClosed
+                    accepted_frame_indices
+                        .extend(record_remaining_for_replay_indexed(conn, frames, policy));
+                    BatchWriteReport {
+                        outcome: BatchWriteOutcome::TransportClosed,
+                        accepted_frame_indices,
+                    }
                 }
                 SendWindowOutcome::AuthorityRevoked => {
                     // The countable current frame was recorded before the
                     // readiness race; an uncountable control is intentionally
                     // excluded from XEP-0198 replay. Preserve only the tail.
-                    record_remaining_for_replay(conn, frames, policy);
-                    BatchWriteOutcome::AuthorityRevoked
+                    accepted_frame_indices
+                        .extend(record_remaining_for_replay_indexed(conn, frames, policy));
+                    BatchWriteReport {
+                        outcome: BatchWriteOutcome::AuthorityRevoked,
+                        accepted_frame_indices,
+                    }
                 }
                 SendWindowOutcome::Recovered
                 | SendWindowOutcome::DeferredCapExhausted
@@ -284,8 +382,12 @@ where
         }
         if request_ack {
             if !batch_authoritative(authority) {
-                record_remaining_for_replay(conn, frames, policy);
-                return BatchWriteOutcome::AuthorityRevoked;
+                accepted_frame_indices
+                    .extend(record_remaining_for_replay_indexed(conn, frames, policy));
+                return BatchWriteReport {
+                    outcome: BatchWriteOutcome::AuthorityRevoked,
+                    accepted_frame_indices,
+                };
             }
             if let Err(outcome) = send_window_message(
                 sender,
@@ -297,12 +399,20 @@ where
             {
                 return match outcome {
                     SendWindowOutcome::TransportClosed => {
-                        record_remaining_for_replay(conn, frames, policy);
-                        BatchWriteOutcome::TransportClosed
+                        accepted_frame_indices
+                            .extend(record_remaining_for_replay_indexed(conn, frames, policy));
+                        BatchWriteReport {
+                            outcome: BatchWriteOutcome::TransportClosed,
+                            accepted_frame_indices,
+                        }
                     }
                     SendWindowOutcome::AuthorityRevoked => {
-                        record_remaining_for_replay(conn, frames, policy);
-                        BatchWriteOutcome::AuthorityRevoked
+                        accepted_frame_indices
+                            .extend(record_remaining_for_replay_indexed(conn, frames, policy));
+                        BatchWriteReport {
+                            outcome: BatchWriteOutcome::AuthorityRevoked,
+                            accepted_frame_indices,
+                        }
                     }
                     SendWindowOutcome::Recovered
                     | SendWindowOutcome::DeferredCapExhausted
@@ -315,17 +425,28 @@ where
             match drain_ready_inbound(sender, reader, state, conn, authority).await {
                 DrainSignal::Idle => {}
                 DrainSignal::TransportClosed => {
-                    record_remaining_for_replay(conn, frames, policy);
-                    return BatchWriteOutcome::TransportClosed;
+                    accepted_frame_indices
+                        .extend(record_remaining_for_replay_indexed(conn, frames, policy));
+                    return BatchWriteReport {
+                        outcome: BatchWriteOutcome::TransportClosed,
+                        accepted_frame_indices,
+                    };
                 }
                 DrainSignal::AuthorityRevoked => {
-                    record_remaining_for_replay(conn, frames, policy);
-                    return BatchWriteOutcome::AuthorityRevoked;
+                    accepted_frame_indices
+                        .extend(record_remaining_for_replay_indexed(conn, frames, policy));
+                    return BatchWriteReport {
+                        outcome: BatchWriteOutcome::AuthorityRevoked,
+                        accepted_frame_indices,
+                    };
                 }
             }
         }
     }
-    BatchWriteOutcome::Continue
+    BatchWriteReport {
+        outcome: BatchWriteOutcome::Continue,
+        accepted_frame_indices: (0..total_frames).collect(),
+    }
 }
 
 /// Block until the XEP-0198 send window recovers to the low watermark,
@@ -442,7 +563,7 @@ where
                         }
                         if let Err(outcome) = send_window_message(
                             sender,
-                            Message::Text(response.into()),
+                            Message::Text(response.into_serialized_xml().into()),
                             "Failed to send SM ack stream error",
                             authority,
                         )
@@ -570,8 +691,26 @@ where
     Ok(())
 }
 
-fn should_record(conn: &WsConnState, frame: &str, policy: BatchSmPolicy) -> bool {
-    conn.sm_state.enabled && matches!(policy, BatchSmPolicy::Record) && is_countable_stanza(frame)
+fn should_record(conn: &WsConnState, frame_xml: &str, policy: BatchSmPolicy) -> bool {
+    conn.sm_state.enabled
+        && matches!(policy, BatchSmPolicy::Record)
+        && is_countable_stanza(frame_xml)
+}
+
+fn record_live_sm_frame(
+    conn: &mut WsConnState,
+    frame_xml: String,
+    eviction_path: SmEvictionPath,
+) -> (bool, bool) {
+    let request_ack = conn
+        .sm_state
+        .record_outbound(frame_xml, eviction_path)
+        .request_ack;
+    // A replay gap means resume can no longer guarantee recovery of newly
+    // recorded-but-unwritten frames. Keep them in recovery inventory, but do
+    // not settle producer completions as if they were durably accepted.
+    let accepted = conn.sm_state.replay_gap_through().is_none();
+    (request_ack, accepted)
 }
 
 /// The transport died mid-batch (or a send-window pause timed out): record
@@ -589,41 +728,69 @@ fn should_record(conn: &WsConnState, frame: &str, policy: BatchSmPolicy) -> bool
 /// promotes the bounded recorded prefix and rejects resume, so partial
 /// recording is acceptable and no later frame can evict the already-recorded
 /// prefix from the capped live SM queue.
-pub(super) fn record_remaining_for_replay(
+pub(super) fn record_remaining_for_replay<F>(
     conn: &mut WsConnState,
-    frames: impl Iterator<Item = String>,
+    frames: impl Iterator<Item = F>,
     policy: BatchSmPolicy,
-) {
-    for frame in frames {
-        if should_record(conn, &frame, policy) {
-            if conn.sm_recovery_required {
-                conn.record_terminal_recovery_outbound(frame);
-            } else {
-                let _ = conn
-                    .sm_state
-                    .record_outbound(frame, SmEvictionPath::ReplayTail);
-            }
-        }
-    }
-    conn.warn_terminal_recovery_drops_once();
+) -> Vec<usize>
+where
+    F: Into<ResponseFrame>,
+{
+    record_remaining_for_replay_indexed(conn, frames.enumerate(), policy)
 }
 
 /// Preserve the current frame plus the unconsumed iterator tail when
 /// revocation lands before the current frame was locally recorded. Once a
 /// countable frame has entered the SM queue, recording it again would create
 /// a duplicate sequence entry; only the iterator tail remains to be saved.
-fn record_current_and_remaining_for_replay(
+fn record_current_and_remaining_for_replay_indexed(
     conn: &mut WsConnState,
-    current: String,
-    remaining: impl Iterator<Item = String>,
+    current_index: usize,
+    current: ResponseFrame,
+    remaining: impl Iterator<Item = (usize, ResponseFrame)>,
     policy: BatchSmPolicy,
-    current_recorded: bool,
-) {
-    if current_recorded {
-        record_remaining_for_replay(conn, remaining, policy);
+    current_already_recorded: bool,
+) -> Vec<usize> {
+    if current_already_recorded {
+        record_remaining_for_replay_indexed(conn, remaining, policy)
     } else {
-        record_remaining_for_replay(conn, std::iter::once(current).chain(remaining), policy);
+        record_remaining_for_replay_indexed(
+            conn,
+            std::iter::once((current_index, current)).chain(remaining),
+            policy,
+        )
     }
+}
+
+fn record_remaining_for_replay_indexed<F>(
+    conn: &mut WsConnState,
+    frames: impl Iterator<Item = (usize, F)>,
+    policy: BatchSmPolicy,
+) -> Vec<usize>
+where
+    F: Into<ResponseFrame>,
+{
+    let mut accepted_frame_indices = Vec::new();
+    for (frame_index, frame) in frames {
+        let frame: ResponseFrame = frame.into();
+        let frame_xml = frame.into_serialized_xml();
+        if should_record(conn, &frame_xml, policy) {
+            let accepted = if conn.sm_recovery_required {
+                let before = conn.terminal_sm_recovery.queue_len();
+                conn.record_terminal_recovery_outbound(frame_xml);
+                conn.terminal_sm_recovery.queue_len() > before
+            } else {
+                let (_, accepted) =
+                    record_live_sm_frame(conn, frame_xml, SmEvictionPath::ReplayTail);
+                accepted
+            };
+            if accepted {
+                accepted_frame_indices.push(frame_index);
+            }
+        }
+    }
+    conn.warn_terminal_recovery_drops_once();
+    accepted_frame_indices
 }
 
 /// Result of a non-blocking inbound drain pass.
@@ -713,7 +880,7 @@ where
                         }
                         if let Err(outcome) = send_window_message(
                             sender,
-                            Message::Text(response.into()),
+                            Message::Text(response.into_serialized_xml().into()),
                             "Failed to send SM ack stream error",
                             authority,
                         )

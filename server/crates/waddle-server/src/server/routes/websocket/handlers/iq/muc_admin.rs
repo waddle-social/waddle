@@ -132,6 +132,57 @@ async fn rollback_admin_affiliations(
     }
 }
 
+fn split_room_effect_reservation(
+    reservation: &waddle_xmpp::muc::RoomEffectReservation,
+    head_len: usize,
+) -> (
+    Option<waddle_xmpp::muc::RoomEffectReservation>,
+    Option<waddle_xmpp::muc::RoomEffectReservation>,
+) {
+    let head_ordinals = reservation
+        .ordinals
+        .iter()
+        .take(head_len)
+        .copied()
+        .collect::<Vec<_>>();
+    let tail_ordinals = reservation
+        .ordinals
+        .iter()
+        .skip(head_len)
+        .copied()
+        .collect::<Vec<_>>();
+    let build = |ordinals: Vec<waddle_xmpp::muc::RoomEffectOrdinal>| {
+        if ordinals.is_empty() {
+            None
+        } else {
+            Some(waddle_xmpp::muc::RoomEffectReservation {
+                lifecycle: reservation.lifecycle,
+                revision: reservation.revision,
+                ordinals,
+            })
+        }
+    };
+    (build(head_ordinals), build(tail_ordinals))
+}
+
+async fn extend_batch_with_inline_room_effect_frames(
+    batch: &mut ResponseBatch,
+    state: &WebSocketState,
+    reservation: &waddle_xmpp::muc::RoomEffectReservation,
+    initiator: Option<&FullJid>,
+) -> Result<
+    crate::room_effect_outbox::drain::InlineRoomEffectDrainSummary,
+    crate::room_effect_outbox::RoomEffectOutboxError,
+> {
+    let drained =
+        crate::room_effect_outbox::drain::drain_reservation_inline(state, reservation, initiator)
+            .await?;
+    let summary = drained.summary;
+    let drained = response_batch_from_inline_room_effect_frames(drained);
+    batch.append_batch(drained);
+    Ok(summary)
+}
+
 /// A snapshot queued after an `ApplyAdminItems` ask is ordered after that
 /// mutation in the room actor's mailbox. It can therefore distinguish a
 /// delivered-and-applied affiliation set from a failed delivery before the
@@ -251,7 +302,73 @@ fn reconcile_admin_result_from_rooms(
     }
 }
 
+fn derive_ambiguous_admin_commit_coordinates(
+    pre_apply_coordinates: Option<waddle_xmpp::muc::RoomCommittedCoordinates>,
+    observed_coordinates: Option<waddle_xmpp::muc::RoomCommittedCoordinates>,
+) -> Option<waddle_xmpp::muc::RoomCommittedCoordinates> {
+    let (Some(pre_apply_coordinates), Some(observed_coordinates)) =
+        (pre_apply_coordinates, observed_coordinates)
+    else {
+        return None;
+    };
+    let expected_revision = pre_apply_coordinates.revision.next()?;
+    (observed_coordinates.lifecycle == pre_apply_coordinates.lifecycle
+        && observed_coordinates.revision >= expected_revision)
+        .then_some(waddle_xmpp::muc::RoomCommittedCoordinates {
+            lifecycle: pre_apply_coordinates.lifecycle,
+            revision: expected_revision,
+        })
+}
+
+fn observed_admin_coordinates_make_direct_replay_unsafe(
+    pre_apply_coordinates: Option<waddle_xmpp::muc::RoomCommittedCoordinates>,
+    observed_coordinates: Option<waddle_xmpp::muc::RoomCommittedCoordinates>,
+) -> bool {
+    let Some(observed_coordinates) = observed_coordinates else {
+        return false;
+    };
+    let Some(pre_apply_coordinates) = pre_apply_coordinates else {
+        return true;
+    };
+    observed_coordinates.lifecycle != pre_apply_coordinates.lifecycle
+        || observed_coordinates.revision > pre_apply_coordinates.revision
+}
+
+async fn recover_committed_admin_effects_after_ambiguity(
+    state: &WebSocketState,
+    room: &waddle_xmpp::muc::MucRoom,
+    items: &[AdminItem],
+    sender_jid: &FullJid,
+    occupant_id_secret: &waddle_xmpp::xep::xep0421::OccupantIdSecret,
+    pre_apply_coordinates: Option<waddle_xmpp::muc::RoomCommittedCoordinates>,
+    observed_coordinates: Option<waddle_xmpp::muc::RoomCommittedCoordinates>,
+) -> Result<
+    (waddle_xmpp::muc::room_actor::AdminItemsApplied, bool),
+    crate::room_effect_outbox::RoomEffectOutboxError,
+> {
+    let mut applied = recover_committed_admin_effects(room, items, sender_jid, occupant_id_secret);
+    let proven_coordinates =
+        derive_ambiguous_admin_commit_coordinates(pre_apply_coordinates, observed_coordinates);
+    let suppress_direct_admin_effects = !is_role_change_query(items)
+        && observed_admin_coordinates_make_direct_replay_unsafe(
+            pre_apply_coordinates,
+            observed_coordinates,
+        );
+    applied.outbox_reservation = if let Some(coordinates) = proven_coordinates {
+        state
+            .deps
+            .protocol
+            .room_effect_outbox
+            .reservation_for_revision(coordinates.lifecycle, coordinates.revision)
+            .await?
+    } else {
+        None
+    };
+    Ok((applied, suppress_direct_admin_effects))
+}
+
 async fn reconcile_ambiguous_admin_result(
+    state: &WebSocketState,
     room_actor: &kameo::actor::ActorRef<waddle_xmpp::muc::room_actor::RoomActor>,
     room_jid: &BareJid,
     pre_apply_snapshot: Option<&waddle_xmpp::muc::room_actor::RoomSnapshot>,
@@ -260,6 +377,7 @@ async fn reconcile_ambiguous_admin_result(
     occupant_id_secret: &waddle_xmpp::xep::xep0421::OccupantIdSecret,
 ) -> (
     Option<waddle_xmpp::muc::room_actor::AdminItemsApplied>,
+    bool,
     bool,
 ) {
     match room_actor
@@ -276,11 +394,35 @@ async fn reconcile_ambiguous_admin_result(
                 sender_jid,
                 occupant_id_secret,
             ) {
-                AdminReconciliationOutcome::Committed(applied) => (Some(applied), false),
-                AdminReconciliationOutcome::NotCommitted => (None, true),
-                AdminReconciliationOutcome::Inconclusive => (None, false),
+                AdminReconciliationOutcome::Committed(_) => {
+                    match recover_committed_admin_effects_after_ambiguity(
+                        state,
+                        &snapshot_before_apply.room,
+                        items,
+                        sender_jid,
+                        occupant_id_secret,
+                        snapshot_before_apply.durable_coordinates,
+                        snapshot.durable_coordinates,
+                    )
+                    .await
+                    {
+                        Ok((applied, suppress_direct_admin_effects)) => {
+                            (Some(applied), false, suppress_direct_admin_effects)
+                        }
+                        Err(error) => {
+                            warn!(
+                                room = %room_jid,
+                                error = %error,
+                                "Could not recover committed MUC admin outbox reservation after ambiguous actor failure"
+                            );
+                            (None, false, false)
+                        }
+                    }
+                }
+                AdminReconciliationOutcome::NotCommitted => (None, true, false),
+                AdminReconciliationOutcome::Inconclusive => (None, false, false),
             },
-            None => (None, false),
+            None => (None, false, false),
         },
         Err(snapshot_error) => {
             warn!(
@@ -288,7 +430,7 @@ async fn reconcile_ambiguous_admin_result(
                 error = ?snapshot_error,
                 "Could not reconcile ambiguous MUC admin actor failure"
             );
-            (None, false)
+            (None, false, false)
         }
     }
 }
@@ -299,7 +441,7 @@ async fn recover_admin_result_after_actor_demote(
     pre_apply_snapshot: &waddle_xmpp::muc::room_actor::RoomSnapshot,
     items: &[AdminItem],
     sender_jid: &FullJid,
-) -> AdminReconciliationOutcome {
+) -> (AdminReconciliationOutcome, bool) {
     let room_registry =
         waddle_xmpp::muc::RoomRegistry::wrap(state.deps.protocol.room_registry.clone());
     for attempt in 0..ADMIN_ROOM_RECOVERY_ATTEMPTS {
@@ -322,7 +464,7 @@ async fn recover_admin_result_after_actor_demote(
                 .await
             {
                 Ok(snapshot) => {
-                    return reconcile_admin_result_from_rooms(
+                    let outcome = reconcile_admin_result_from_rooms(
                         &pre_apply_snapshot.room,
                         None,
                         Some(&snapshot.room),
@@ -330,6 +472,42 @@ async fn recover_admin_result_after_actor_demote(
                         sender_jid,
                         &state.deps.occupant_id_secret,
                     );
+                    if matches!(outcome, AdminReconciliationOutcome::Committed(_)) {
+                        match recover_committed_admin_effects_after_ambiguity(
+                            state,
+                            &pre_apply_snapshot.room,
+                            items,
+                            sender_jid,
+                            &state.deps.occupant_id_secret,
+                            pre_apply_snapshot.durable_coordinates,
+                            snapshot.durable_coordinates,
+                        )
+                        .await
+                        {
+                            Ok((applied, suppress_direct_admin_effects)) => {
+                                return (
+                                    AdminReconciliationOutcome::Committed(applied),
+                                    suppress_direct_admin_effects,
+                                );
+                            }
+                            Err(error) => {
+                                // A commit was proven but its outbox rows could
+                                // not be looked up. Returning Committed here
+                                // would re-enter the direct-send path while the
+                                // durable rows may still drain — a duplicate
+                                // delivery. Stay inconclusive: no success reply
+                                // and no direct replay; the janitor finishes the
+                                // broadcast.
+                                warn!(
+                                    room = %room_jid,
+                                    error = %error,
+                                    "Could not recover committed MUC admin outbox reservation after actor demotion; staying inconclusive"
+                                );
+                                return (AdminReconciliationOutcome::Inconclusive, false);
+                            }
+                        }
+                    }
+                    return (outcome, false);
                 }
                 Err(error) => {
                     warn!(
@@ -354,7 +532,7 @@ async fn recover_admin_result_after_actor_demote(
             }
         }
     }
-    AdminReconciliationOutcome::Inconclusive
+    (AdminReconciliationOutcome::Inconclusive, false)
 }
 
 fn all_room_sessions(room: &waddle_xmpp::muc::MucRoom) -> Vec<FullJid> {
@@ -405,6 +583,21 @@ fn changed_session_voices(
         .collect()
 }
 
+fn occupant_room_jid(room: &waddle_xmpp::muc::MucRoom, nick: &str) -> Option<FullJid> {
+    match room.room_jid.with_resource_str(nick) {
+        Ok(jid) => Some(jid),
+        Err(error) => {
+            tracing::warn!(
+                room = %room.room_jid,
+                nick,
+                ?error,
+                "recovered admin snapshot carries a nickname outside the admitted resourcepart grammar; suppressing presence replay for that occupant"
+            );
+            None
+        }
+    }
+}
+
 fn replay_affiliation_change_from_snapshot(
     room: &mut waddle_xmpp::muc::MucRoom,
     occupant_id_secret: &waddle_xmpp::xep::xep0421::OccupantIdSecret,
@@ -429,29 +622,27 @@ fn replay_affiliation_change_from_snapshot(
         let mut presence_updates = Vec::new();
         let mut removed_by_moderation = Vec::new();
         for occupant in &affected_occupants {
-            let from_room_jid = room
-                .room_jid
-                .with_resource_str(&occupant.nick)
-                .expect("nick was previously accepted as resource");
             let removed_sessions = room.get_occupant_sessions(&occupant.nick);
             let occupant_bare = occupant.real_jid.to_bare();
-            presence_updates.extend(all_room_sessions(room).into_iter().map(|recipient| {
-                let occupant_identity = waddle_xmpp::xep::xep0421::OccupantIdentity {
-                    bare_jid: &occupant_bare,
-                    real_jid: Some(&occupant.real_jid),
-                    secret: occupant_id_secret,
-                };
-                let is_self = removed_sessions.iter().any(|jid| jid == &recipient);
-                let presence = waddle_xmpp::muc::build_ban_presence(
-                    &from_room_jid,
-                    &recipient,
-                    waddle_xmpp::muc::MucPresenceStatus::new(is_self, false),
-                    reason,
-                    Some(actor),
-                    &occupant_identity,
-                );
-                (recipient, presence)
-            }));
+            if let Some(from_room_jid) = occupant_room_jid(room, &occupant.nick) {
+                presence_updates.extend(all_room_sessions(room).into_iter().map(|recipient| {
+                    let occupant_identity = waddle_xmpp::xep::xep0421::OccupantIdentity {
+                        bare_jid: &occupant_bare,
+                        real_jid: Some(&occupant.real_jid),
+                        secret: occupant_id_secret,
+                    };
+                    let is_self = removed_sessions.iter().any(|jid| jid == &recipient);
+                    let presence = waddle_xmpp::muc::build_ban_presence(
+                        &from_room_jid,
+                        &recipient,
+                        waddle_xmpp::muc::MucPresenceStatus::new(is_self, false),
+                        reason,
+                        Some(actor),
+                        &occupant_identity,
+                    );
+                    (recipient, presence)
+                }));
+            }
             removed_by_moderation.extend(removed_sessions);
         }
         for occupant in affected_occupants {
@@ -461,6 +652,7 @@ fn replay_affiliation_change_from_snapshot(
             presence_updates,
             removed_by_moderation,
             voice_changes: Vec::new(),
+            outbox_reservation: None,
         };
     }
 
@@ -471,29 +663,27 @@ fn replay_affiliation_change_from_snapshot(
             .flat_map(|occupant| room.get_occupant_sessions(&occupant.nick))
             .collect();
         for occupant in &affected_occupants {
-            let from_room_jid = room
-                .room_jid
-                .with_resource_str(&occupant.nick)
-                .expect("nick was previously accepted as resource");
             let removed_sessions = room.get_occupant_sessions(&occupant.nick);
             let occupant_bare = occupant.real_jid.to_bare();
-            presence_updates.extend(all_room_sessions(room).into_iter().map(|recipient| {
-                let occupant_identity = waddle_xmpp::xep::xep0421::OccupantIdentity {
-                    bare_jid: &occupant_bare,
-                    real_jid: Some(&occupant.real_jid),
-                    secret: occupant_id_secret,
-                };
-                let is_self = removed_sessions.iter().any(|jid| jid == &recipient);
-                let presence = waddle_xmpp::muc::build_membership_removal_presence(
-                    &from_room_jid,
-                    &recipient,
-                    "321",
-                    waddle_xmpp::muc::MucPresenceStatus::new(is_self, false),
-                    Some(actor),
-                    &occupant_identity,
-                );
-                (recipient, presence)
-            }));
+            if let Some(from_room_jid) = occupant_room_jid(room, &occupant.nick) {
+                presence_updates.extend(all_room_sessions(room).into_iter().map(|recipient| {
+                    let occupant_identity = waddle_xmpp::xep::xep0421::OccupantIdentity {
+                        bare_jid: &occupant_bare,
+                        real_jid: Some(&occupant.real_jid),
+                        secret: occupant_id_secret,
+                    };
+                    let is_self = removed_sessions.iter().any(|jid| jid == &recipient);
+                    let presence = waddle_xmpp::muc::build_membership_removal_presence(
+                        &from_room_jid,
+                        &recipient,
+                        "321",
+                        waddle_xmpp::muc::MucPresenceStatus::new(is_self, false),
+                        Some(actor),
+                        &occupant_identity,
+                    );
+                    (recipient, presence)
+                }));
+            }
         }
         for occupant in affected_occupants {
             room.remove_occupant(&occupant.nick);
@@ -502,40 +692,40 @@ fn replay_affiliation_change_from_snapshot(
             presence_updates,
             removed_by_moderation,
             voice_changes: Vec::new(),
+            outbox_reservation: None,
         };
     }
 
     let mut presence_updates = Vec::new();
     for occupant in &affected_occupants {
-        let from_room_jid = room
-            .room_jid
-            .with_resource_str(&occupant.nick)
-            .expect("nick was previously accepted as resource");
         let affected_sessions = room.get_occupant_sessions(&occupant.nick);
         let occupant_bare = occupant.real_jid.to_bare();
-        presence_updates.extend(all_room_sessions(room).into_iter().map(|recipient| {
-            let occupant_identity = waddle_xmpp::xep::xep0421::OccupantIdentity {
-                bare_jid: &occupant_bare,
-                real_jid: Some(&occupant.real_jid),
-                secret: occupant_id_secret,
-            };
-            let is_self = affected_sessions.iter().any(|jid| jid == &recipient);
-            let presence = waddle_xmpp::muc::build_affiliation_change_presence(
-                &from_room_jid,
-                &recipient,
-                new_affiliation,
-                occupant.role,
-                waddle_xmpp::muc::MucPresenceStatus::new(is_self, false),
-                &occupant_identity,
-            );
-            (recipient, presence)
-        }));
+        if let Some(from_room_jid) = occupant_room_jid(room, &occupant.nick) {
+            presence_updates.extend(all_room_sessions(room).into_iter().map(|recipient| {
+                let occupant_identity = waddle_xmpp::xep::xep0421::OccupantIdentity {
+                    bare_jid: &occupant_bare,
+                    real_jid: Some(&occupant.real_jid),
+                    secret: occupant_id_secret,
+                };
+                let is_self = affected_sessions.iter().any(|jid| jid == &recipient);
+                let presence = waddle_xmpp::muc::build_affiliation_change_presence(
+                    &from_room_jid,
+                    &recipient,
+                    new_affiliation,
+                    occupant.role,
+                    waddle_xmpp::muc::MucPresenceStatus::new(is_self, false),
+                    &occupant_identity,
+                );
+                (recipient, presence)
+            }));
+        }
     }
 
     waddle_xmpp::muc::room_actor::AdminItemsApplied {
         presence_updates,
         removed_by_moderation: Vec::new(),
         voice_changes: changed_session_voices(&voices_before, &session_voices(room, &target_jid)),
+        outbox_reservation: None,
     }
 }
 
@@ -550,37 +740,36 @@ fn replay_role_change_from_snapshot(
     let Some(target_occupant) = room.get_occupant(target_nick).cloned() else {
         return waddle_xmpp::muc::room_actor::AdminItemsApplied::default();
     };
-    let from_room_jid = room
-        .room_jid
-        .with_resource_str(target_nick)
-        .expect("nick was previously accepted as resource");
     let target_bare = target_occupant.real_jid.to_bare();
     let target_sessions = room.get_occupant_sessions(target_nick);
     if new_role == waddle_xmpp::Role::None {
         let mut presence_updates = Vec::new();
-        for recipient in all_room_sessions(room) {
-            let target_identity = waddle_xmpp::xep::xep0421::OccupantIdentity {
-                bare_jid: &target_bare,
-                real_jid: Some(&target_occupant.real_jid),
-                secret: occupant_id_secret,
-            };
-            let is_self = target_sessions.iter().any(|jid| jid == &recipient);
-            let presence = waddle_xmpp::muc::build_kick_presence(
-                &from_room_jid,
-                &recipient,
-                target_occupant.affiliation,
-                waddle_xmpp::muc::MucPresenceStatus::new(is_self, false),
-                reason,
-                Some(actor),
-                &target_identity,
-            );
-            presence_updates.push((recipient, presence));
+        if let Some(from_room_jid) = occupant_room_jid(room, target_nick) {
+            for recipient in all_room_sessions(room) {
+                let target_identity = waddle_xmpp::xep::xep0421::OccupantIdentity {
+                    bare_jid: &target_bare,
+                    real_jid: Some(&target_occupant.real_jid),
+                    secret: occupant_id_secret,
+                };
+                let is_self = target_sessions.iter().any(|jid| jid == &recipient);
+                let presence = waddle_xmpp::muc::build_kick_presence(
+                    &from_room_jid,
+                    &recipient,
+                    target_occupant.affiliation,
+                    waddle_xmpp::muc::MucPresenceStatus::new(is_self, false),
+                    reason,
+                    Some(actor),
+                    &target_identity,
+                );
+                presence_updates.push((recipient, presence));
+            }
         }
         room.remove_occupant(target_nick);
         return waddle_xmpp::muc::room_actor::AdminItemsApplied {
             presence_updates,
             removed_by_moderation: target_sessions,
             voice_changes: Vec::new(),
+            outbox_reservation: None,
         };
     }
 
@@ -599,27 +788,30 @@ fn replay_role_change_from_snapshot(
         Vec::new()
     };
     let mut presence_updates = Vec::new();
-    for recipient in all_room_sessions(room) {
-        let target_identity = waddle_xmpp::xep::xep0421::OccupantIdentity {
-            bare_jid: &target_bare,
-            real_jid: Some(&target_occupant.real_jid),
-            secret: occupant_id_secret,
-        };
-        let is_self = target_sessions.iter().any(|jid| jid == &recipient);
-        let presence = waddle_xmpp::muc::build_role_change_presence(
-            &from_room_jid,
-            &recipient,
-            target_occupant.affiliation,
-            new_role,
-            waddle_xmpp::muc::MucPresenceStatus::new(is_self, false),
-            &target_identity,
-        );
-        presence_updates.push((recipient, presence));
+    if let Some(from_room_jid) = occupant_room_jid(room, target_nick) {
+        for recipient in all_room_sessions(room) {
+            let target_identity = waddle_xmpp::xep::xep0421::OccupantIdentity {
+                bare_jid: &target_bare,
+                real_jid: Some(&target_occupant.real_jid),
+                secret: occupant_id_secret,
+            };
+            let is_self = target_sessions.iter().any(|jid| jid == &recipient);
+            let presence = waddle_xmpp::muc::build_role_change_presence(
+                &from_room_jid,
+                &recipient,
+                target_occupant.affiliation,
+                new_role,
+                waddle_xmpp::muc::MucPresenceStatus::new(is_self, false),
+                &target_identity,
+            );
+            presence_updates.push((recipient, presence));
+        }
     }
     waddle_xmpp::muc::room_actor::AdminItemsApplied {
         presence_updates,
         removed_by_moderation: Vec::new(),
         voice_changes,
+        outbox_reservation: None,
     }
 }
 
@@ -672,21 +864,22 @@ pub(super) async fn handle_muc_admin_iq(
     sender_jid: Option<&FullJid>,
     response_from: Option<&str>,
     response_to: Option<&str>,
-) -> Vec<String> {
+) -> ResponseBatch {
     let Some(sender_jid) = sender_jid else {
         return vec![build_iq_error_xml_typed(
             iq.id(),
             response_from,
             response_to,
             not_authorized_iq_error("Authentication required."),
-        )];
+        )]
+        .into();
     };
     let (mut header, payload) = iq.clone().split();
     header.from = Some(Jid::from(sender_jid.clone()));
     let iq_with_from = payload.assemble(header);
     let query = match parse_admin_query(&iq_with_from, muc_domain) {
         Ok(query) => query,
-        Err(error) => return vec![build_xmpp_error_response(&iq_with_from, error)],
+        Err(error) => return vec![build_xmpp_error_response(&iq_with_from, error)].into(),
     };
     let room_actor = match get_room_actor_result(state, &query.room_jid).await {
         Ok(Some(room_actor)) => room_actor,
@@ -696,7 +889,8 @@ pub(super) async fn handle_muc_admin_iq(
                 response_from,
                 response_to,
                 item_not_found_iq_error("Requested item not found."),
-            )];
+            )]
+            .into();
         }
         Err(error) => {
             warn!(room = %query.room_jid, %error, "MUC admin room lookup failed");
@@ -705,7 +899,8 @@ pub(super) async fn handle_muc_admin_iq(
                 response_from,
                 response_to,
                 internal_server_error_iq_error("Internal server error."),
-            )];
+            )]
+            .into();
         }
     };
     let _config_guard = if query.is_get {
@@ -727,7 +922,8 @@ pub(super) async fn handle_muc_admin_iq(
                 response_from,
                 response_to,
                 internal_server_error_iq_error("Internal server error."),
-            )];
+            )]
+            .into();
         }
     };
     let has_admin_affiliation =
@@ -751,7 +947,8 @@ pub(super) async fn handle_muc_admin_iq(
             response_from,
             response_to,
             forbidden_iq_error("Operation not permitted."),
-        )];
+        )]
+        .into();
     }
     if query.is_get {
         let snapshot = match room_actor
@@ -766,7 +963,8 @@ pub(super) async fn handle_muc_admin_iq(
                     response_from,
                     response_to,
                     internal_server_error_iq_error("Internal server error."),
-                )];
+                )]
+                .into();
             }
         };
         let to_jid = Jid::from(sender_jid.clone());
@@ -790,7 +988,8 @@ pub(super) async fn handle_muc_admin_iq(
                 &query.room_jid,
                 &to_jid,
                 &items,
-            ))];
+            ))]
+            .into();
         }
         if !has_admin_affiliation && !member_list_get {
             return vec![build_iq_error_xml_typed(
@@ -798,7 +997,8 @@ pub(super) async fn handle_muc_admin_iq(
                 response_from,
                 response_to,
                 forbidden_iq_error("Operation not permitted."),
-            )];
+            )]
+            .into();
         }
         let affiliation_filter = query.items.iter().find_map(|item| item.affiliation);
         let items: Vec<(BareJid, Affiliation)> = if let Some(affiliation) = affiliation_filter {
@@ -819,7 +1019,8 @@ pub(super) async fn handle_muc_admin_iq(
             &query.room_jid,
             &to_jid,
             &items,
-        ))];
+        ))]
+        .into();
     }
     let room_jid = query.room_jid.clone();
     let items = query.items.clone();
@@ -829,7 +1030,8 @@ pub(super) async fn handle_muc_admin_iq(
             response_from,
             response_to,
             bad_request_iq_error("MUC admin set cannot mix role and affiliation semantics."),
-        )];
+        )]
+        .into();
     }
     if has_incomplete_admin_set_item(&items) {
         return vec![build_iq_error_xml_typed(
@@ -837,7 +1039,8 @@ pub(super) async fn handle_muc_admin_iq(
             response_from,
             response_to,
             bad_request_iq_error("Malformed MUC admin set item."),
-        )];
+        )]
+        .into();
     }
     if !is_role_change_query(&items) && !has_admin_affiliation {
         return vec![build_iq_error_xml_typed(
@@ -845,7 +1048,8 @@ pub(super) async fn handle_muc_admin_iq(
             response_from,
             response_to,
             forbidden_iq_error("Operation not permitted."),
-        )];
+        )]
+        .into();
     }
     let affiliation_updates: Vec<(BareJid, Affiliation)> = if is_role_change_query(&items) {
         Vec::new()
@@ -882,7 +1086,8 @@ pub(super) async fn handle_muc_admin_iq(
                             response_from,
                             response_to,
                             forbidden_iq_error("Operation not permitted."),
-                        )];
+                        )]
+                        .into();
                     }
                     if *affiliation == Affiliation::Outcast && *jid == sender_jid.to_bare() {
                         return vec![build_iq_error_xml_typed(
@@ -890,7 +1095,8 @@ pub(super) async fn handle_muc_admin_iq(
                             response_from,
                             response_to,
                             conflict_iq_error("Cannot ban yourself from a room."),
-                        )];
+                        )]
+                        .into();
                     }
                     let previous_affiliation = snapshot.room.get_affiliation(jid);
                     if *affiliation != Affiliation::Owner
@@ -902,7 +1108,8 @@ pub(super) async fn handle_muc_admin_iq(
                             response_from,
                             response_to,
                             not_allowed_iq_error("Admins cannot change an owner's affiliation."),
-                        )];
+                        )]
+                        .into();
                     }
                     if !can_change_affiliation(
                         context.affiliation,
@@ -914,7 +1121,8 @@ pub(super) async fn handle_muc_admin_iq(
                             response_from,
                             response_to,
                             forbidden_iq_error("Operation not permitted."),
-                        )];
+                        )]
+                        .into();
                     }
                     if *affiliation == Affiliation::None {
                         final_affiliations.remove(jid);
@@ -932,7 +1140,8 @@ pub(super) async fn handle_muc_admin_iq(
                         response_from,
                         response_to,
                         conflict_iq_error("Cannot remove the last owner from a room."),
-                    )];
+                    )]
+                    .into();
                 }
                 Some(snapshot)
             }
@@ -942,7 +1151,8 @@ pub(super) async fn handle_muc_admin_iq(
                     response_from,
                     response_to,
                     internal_server_error_iq_error("Internal server error."),
-                )];
+                )]
+                .into();
             }
         }
     } else {
@@ -971,7 +1181,8 @@ pub(super) async fn handle_muc_admin_iq(
                     response_from,
                     response_to,
                     internal_server_error_iq_error("Internal server error."),
-                )];
+                )]
+                .into();
             }
         }
     } else {
@@ -1002,10 +1213,12 @@ pub(super) async fn handle_muc_admin_iq(
                     response_from,
                     response_to,
                     internal_server_error_iq_error("Internal server error."),
-                )];
+                )]
+                .into();
             }
         }
     }
+    let mut suppress_direct_admin_effects = false;
     let applied = match room_actor
         .ask(ApplyAdminItems {
             sender_jid: sender_jid.clone(),
@@ -1032,7 +1245,8 @@ pub(super) async fn handle_muc_admin_iq(
                 response_from,
                 response_to,
                 conflict_iq_error("Cannot remove the last owner from a room."),
-            )];
+            )]
+            .into();
         }
         Err(kameo::error::SendError::HandlerError(
             waddle_xmpp::muc::room_actor::AdminApplyError::CannotAdminModifyOwner,
@@ -1052,7 +1266,8 @@ pub(super) async fn handle_muc_admin_iq(
                 response_to,
                 waddle_xmpp::muc::admin::build_admin_items_query(&query.items),
                 not_allowed_iq_error("Admins cannot change an owner's affiliation."),
-            )];
+            )]
+            .into();
         }
         Err(kameo::error::SendError::HandlerError(
             waddle_xmpp::muc::room_actor::AdminApplyError::CannotModifyPrivilegedRole,
@@ -1072,7 +1287,8 @@ pub(super) async fn handle_muc_admin_iq(
                 response_to,
                 waddle_xmpp::muc::admin::build_admin_items_query(&query.items),
                 not_allowed_iq_error("Admins and moderators cannot change an owner or admin role."),
-            )];
+            )]
+            .into();
         }
         Err(kameo::error::SendError::HandlerError(
             waddle_xmpp::muc::room_actor::AdminApplyError::OccupantNotFound(nick),
@@ -1091,20 +1307,24 @@ pub(super) async fn handle_muc_admin_iq(
                 response_from,
                 response_to,
                 item_not_found_iq_error("No such occupant in this room."),
-            )];
+            )]
+            .into();
         }
         Err(kameo::error::SendError::HandlerError(
             waddle_xmpp::muc::room_actor::AdminApplyError::CommitOutcomeUnknown,
         )) => {
-            let (recovered_applied, _) = reconcile_ambiguous_admin_result(
-                &room_actor,
-                &room_jid,
-                pre_apply_snapshot.as_ref(),
-                &query.items,
-                sender_jid,
-                &state.deps.occupant_id_secret,
-            )
-            .await;
+            let (recovered_applied, _, recovered_suppress_direct_admin_effects) =
+                reconcile_ambiguous_admin_result(
+                    state,
+                    &room_actor,
+                    &room_jid,
+                    pre_apply_snapshot.as_ref(),
+                    &query.items,
+                    sender_jid,
+                    &state.deps.occupant_id_secret,
+                )
+                .await;
+            suppress_direct_admin_effects = recovered_suppress_direct_admin_effects;
             let _ = state
                 .deps
                 .protocol
@@ -1116,20 +1336,22 @@ pub(super) async fn handle_muc_admin_iq(
                     },
                 )
                 .await;
-            let reconciliation = if let Some(applied) = recovered_applied {
-                AdminReconciliationOutcome::Committed(applied)
-            } else if let Some(snapshot_before_apply) = pre_apply_snapshot.as_ref() {
-                recover_admin_result_after_actor_demote(
-                    state,
-                    &room_jid,
-                    snapshot_before_apply,
-                    &query.items,
-                    sender_jid,
-                )
-                .await
-            } else {
-                AdminReconciliationOutcome::Inconclusive
-            };
+            let (reconciliation, demoted_suppress_direct_admin_effects) =
+                if let Some(applied) = recovered_applied {
+                    (AdminReconciliationOutcome::Committed(applied), false)
+                } else if let Some(snapshot_before_apply) = pre_apply_snapshot.as_ref() {
+                    recover_admin_result_after_actor_demote(
+                        state,
+                        &room_jid,
+                        snapshot_before_apply,
+                        &query.items,
+                        sender_jid,
+                    )
+                    .await
+                } else {
+                    (AdminReconciliationOutcome::Inconclusive, false)
+                };
+            suppress_direct_admin_effects |= demoted_suppress_direct_admin_effects;
             match reconciliation {
                 AdminReconciliationOutcome::Committed(applied) => {
                     warn!(room = %room_jid, "MUC admin commit outcome was ambiguous but the committed affiliation batch was reconciled");
@@ -1150,7 +1372,8 @@ pub(super) async fn handle_muc_admin_iq(
                         resource_constraint_iq_error(
                             "This room's update outcome is being reconciled; please retry.",
                         ),
-                    )];
+                    )]
+                    .into();
                 }
                 AdminReconciliationOutcome::Inconclusive => {
                     warn!(room = %room_jid, "MUC admin commit outcome remains inconclusive; retaining optimistic managed-channel affiliations for later reconciliation");
@@ -1161,7 +1384,8 @@ pub(super) async fn handle_muc_admin_iq(
                         resource_constraint_iq_error(
                             "This room's update outcome is being reconciled; please retry.",
                         ),
-                    )];
+                    )]
+                    .into();
                 }
             }
         }
@@ -1191,7 +1415,8 @@ pub(super) async fn handle_muc_admin_iq(
                 response_from,
                 response_to,
                 resource_constraint_iq_error("This room is temporarily unavailable; please retry."),
-            )];
+            )]
+            .into();
         }
         Err(kameo::error::SendError::HandlerError(
             waddle_xmpp::muc::room_actor::AdminApplyError::OwnershipUnavailable,
@@ -1210,7 +1435,8 @@ pub(super) async fn handle_muc_admin_iq(
                 resource_constraint_iq_error(
                     "This room's ownership cannot be verified right now; please retry.",
                 ),
-            )];
+            )]
+            .into();
         }
         Err(kameo::error::SendError::HandlerError(
             waddle_xmpp::muc::room_actor::AdminApplyError::PersistFailed,
@@ -1227,7 +1453,8 @@ pub(super) async fn handle_muc_admin_iq(
                 response_from,
                 response_to,
                 internal_server_error_iq_error("Internal server error."),
-            )];
+            )]
+            .into();
         }
         Err(kameo::error::SendError::HandlerError(
             waddle_xmpp::muc::room_actor::AdminApplyError::InviteRollbackPending,
@@ -1248,7 +1475,8 @@ pub(super) async fn handle_muc_admin_iq(
                 resource_constraint_iq_error(
                     "This room's invitation state is being reconciled; please retry.",
                 ),
-            )];
+            )]
+            .into();
         }
         Err(kameo::error::SendError::HandlerError(error)) => {
             warn!(room = %room_jid, error = %error, "MUC admin set rejected");
@@ -1263,7 +1491,8 @@ pub(super) async fn handle_muc_admin_iq(
                 response_from,
                 response_to,
                 forbidden_iq_error("Operation not permitted."),
-            )];
+            )]
+            .into();
         }
         Err(
             error @ (kameo::error::SendError::ActorNotRunning(_)
@@ -1285,7 +1514,8 @@ pub(super) async fn handle_muc_admin_iq(
                 response_from,
                 response_to,
                 resource_constraint_iq_error("This room is temporarily unavailable; please retry."),
-            )];
+            )]
+            .into();
         }
         Err(error) => {
             // A non-handler failure is ambiguous: `ApplyAdminItems` may
@@ -1295,16 +1525,19 @@ pub(super) async fn handle_muc_admin_iq(
             // managed-channel tuples. If the snapshot proves the affiliation
             // batch committed, reconstruct the caller-owned outward effects so
             // bans, membership removals, and voice changes are not dropped.
-            let (recovered_applied, rollback_required) = reconcile_ambiguous_admin_result(
-                &room_actor,
-                &room_jid,
-                pre_apply_snapshot.as_ref(),
-                &query.items,
-                sender_jid,
-                &state.deps.occupant_id_secret,
-            )
-            .await;
+            let (recovered_applied, rollback_required, recovered_suppress_direct_admin_effects) =
+                reconcile_ambiguous_admin_result(
+                    state,
+                    &room_actor,
+                    &room_jid,
+                    pre_apply_snapshot.as_ref(),
+                    &query.items,
+                    sender_jid,
+                    &state.deps.occupant_id_secret,
+                )
+                .await;
             if let Some(applied) = recovered_applied {
+                suppress_direct_admin_effects = recovered_suppress_direct_admin_effects;
                 warn!(room = %room_jid, error = ?error, "MUC admin actor reply was ambiguous but the committed affiliation batch was reconciled");
                 applied
             } else {
@@ -1324,7 +1557,8 @@ pub(super) async fn handle_muc_admin_iq(
                     resource_constraint_iq_error(
                         "This room's update outcome is being reconciled; please retry.",
                     ),
-                )];
+                )]
+                .into();
             }
         }
     };
@@ -1334,6 +1568,77 @@ pub(super) async fn handle_muc_admin_iq(
     // The moderator's own broadcast copy rides this connection's
     // response frames AFTER the IQ result so the order is deterministic
     // on the moderator's stream.
+    let result_frame = iq_to_xml(build_admin_set_result(
+        iq.id(),
+        &room_jid,
+        &Jid::from(sender_jid.clone()),
+    ));
+    // A reservation exists only when a durable mutation committed effect rows
+    // (clustered rooms with a durable store). Store-less rooms — including
+    // durable-shaped affiliation changes without a durable store — keep
+    // today's direct-broadcast path below.
+    if let Some(reservation) = applied.outbox_reservation.as_ref() {
+        let mut batch = ResponseBatch::default();
+        let self_removal_before_result = applied.removed_by_moderation.contains(sender_jid);
+        let (pre_result, post_result) = if self_removal_before_result {
+            split_room_effect_reservation(reservation, 1)
+        } else {
+            (None, Some(reservation.clone()))
+        };
+        if let Some(pre_result) = pre_result.as_ref() {
+            match extend_batch_with_inline_room_effect_frames(
+                &mut batch,
+                state,
+                pre_result,
+                Some(sender_jid),
+            )
+            .await
+            {
+                Ok(summary)
+                    if summary.inline + summary.completed == pre_result.ordinals.len() as u64
+                        && summary.requeued == 0
+                        && summary.stale == 0
+                        && summary.leased == 0 => {}
+                Ok(summary) => {
+                    warn!(
+                        room = %room_jid,
+                        ?summary,
+                        "MUC admin inline pre-result drain could not fully inline/complete committed rows; withholding success result"
+                    );
+                    return ResponseBatch::default();
+                }
+                Err(error) => {
+                    warn!(
+                        room = %room_jid,
+                        error = %error,
+                        "MUC admin inline pre-result drain failed after committed mutation; withholding success result"
+                    );
+                    return ResponseBatch::default();
+                }
+            }
+        }
+        batch.frames.push(result_frame.into());
+        if let Some(post_result) = post_result.as_ref() {
+            if let Err(error) = extend_batch_with_inline_room_effect_frames(
+                &mut batch,
+                state,
+                post_result,
+                Some(sender_jid),
+            )
+            .await
+            {
+                warn!(
+                    room = %room_jid,
+                    error = %error,
+                    "MUC admin inline post-result drain failed after committed mutation"
+                );
+            }
+        }
+        return batch;
+    }
+    if suppress_direct_admin_effects {
+        return ResponseBatch::from_frames(vec![result_frame]);
+    }
     let mut remaining_broadcasts = Vec::new();
     let mut self_kick_frames = Vec::new();
     let mut moderator_frames = Vec::new();
@@ -1359,28 +1664,16 @@ pub(super) async fn handle_muc_admin_iq(
             remaining_broadcasts.push((recipient, presence));
         }
     }
-    // Membership-scoped visibility (#935): a kick (307) or ban (301)
-    // ends the occupant's room membership, so their live SFU call
-    // participation must end with it. Presence loss never reaches
-    // this handler, and eviction failure is fire-and-forget inside
-    // the SFU layer — the moderation IQ result below is never
-    // blocked on LiveKit.
-    for removed in &applied.removed_by_moderation {
-        super::super::super::muc_call_sfu::unregister_participant_from_room(
-            state, &room_jid, removed,
-        );
-    }
-    // Voice-derived media grants: any non-removal change that alters
-    // an occupant's XEP-0045 voice — an explicit `<item role='…'/>`
-    // or an affiliation change that re-derives their role — must
-    // converge their live SFU permission, otherwise a de-voiced
-    // occupant keeps publishing until they renegotiate.
-    // Fire-and-forget like the eviction above.
-    for (session, new_voice) in &applied.voice_changes {
-        super::super::super::muc_call_sfu::apply_voice_grants_for_room(
-            state, &room_jid, session, *new_voice,
-        );
-    }
+    // This branch only runs when no effect reservation exists (role-only
+    // changes and store-less rooms), so voice-derived media grants are
+    // handler-owned here; reservation-backed drains apply them from the
+    // durable effect row itself.
+    super::super::super::muc_call_sfu::converge_moderation_deltas_via_sfu(
+        state.deps.protocol.sfu.as_ref(),
+        &room_jid,
+        &applied.removed_by_moderation,
+        &applied.voice_changes,
+    );
     for (recipient, presence) in remaining_broadcasts {
         let _ = state
             .deps
@@ -1390,24 +1683,40 @@ pub(super) async fn handle_muc_admin_iq(
             .await;
     }
     let mut frames = self_kick_frames;
-    frames.push(iq_to_xml(build_admin_set_result(
-        iq.id(),
-        &room_jid,
-        &Jid::from(sender_jid.clone()),
-    )));
+    frames.push(result_frame);
     frames.extend(moderator_frames);
-    frames
+    ResponseBatch::from_frames(frames)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use waddle_xmpp::muc::{Occupant, RoomConfig};
+    use waddle_xmpp::muc::room_registry_actor::CreateRoom;
+    use waddle_xmpp::muc::{
+        MucConfigStatusCode, Occupant, RoomCommittedCoordinates, RoomConfig, RoomLifecycleState,
+    };
+    use waddle_xmpp::ownership::NodeIdentity;
     use waddle_xmpp::xep::xep0421::OccupantIdSecret;
+
+    use crate::room_effect_outbox::RoomEffectEnqueue;
+    use crate::server::routes::websocket::tests::{
+        create_test_websocket_state, register_test_connection,
+    };
 
     fn test_secret() -> OccupantIdSecret {
         OccupantIdSecret::new(b"occupant-id-secret-at-least-32-bytes".to_vec())
             .expect("test secret meets minimum length")
+    }
+
+    fn test_origin() -> crate::room_effect_outbox::RoomEffectOriginInstanceId {
+        crate::room_effect_outbox::RoomEffectOriginInstanceId::new("origin-instance".to_owned())
+            .expect("origin instance")
+    }
+
+    fn test_producing_node() -> crate::room_effect_outbox::RoomEffectProducingNode {
+        crate::room_effect_outbox::RoomEffectProducingNode::from_node_identity(NodeIdentity::new(
+            "node-a", "epoch-a",
+        ))
     }
 
     fn seat(
@@ -1427,6 +1736,132 @@ mod tests {
             is_remote: false,
             home_server: None,
         });
+    }
+
+    async fn enqueue_recovered_admin_reservation(
+        state: &WebSocketState,
+        room_jid: &BareJid,
+        coordinates: RoomCommittedCoordinates,
+        recipient: &FullJid,
+    ) -> waddle_xmpp::muc::RoomEffectReservation {
+        let store = state.deps.protocol.room_effect_outbox.as_ref();
+        let mut tx = store.database().begin().await.expect("transaction");
+        let effects = waddle_xmpp::muc::RoomMutationEffects::config(
+            room_jid.clone(),
+            vec![MucConfigStatusCode::NonPrivacyConfigurationChange],
+            vec![recipient.clone()],
+        );
+        let origin = test_origin();
+        let producing_node = test_producing_node();
+        let reservation = store
+            .enqueue_in_tx(
+                &mut tx,
+                RoomEffectEnqueue {
+                    lifecycle: coordinates.lifecycle,
+                    revision: coordinates.revision,
+                    effects: &effects,
+                    origin: &origin,
+                    producing_node: &producing_node,
+                    now_ms: 0,
+                },
+            )
+            .await
+            .expect("enqueue recovered reservation");
+        tx.commit().await.expect("commit");
+        reservation
+    }
+
+    async fn enqueue_self_kick_reservation(
+        state: &WebSocketState,
+        room_jid: &BareJid,
+        coordinates: RoomCommittedCoordinates,
+        sessions: &[FullJid],
+    ) -> waddle_xmpp::muc::RoomEffectReservation {
+        let store = state.deps.protocol.room_effect_outbox.as_ref();
+        let mut tx = store.database().begin().await.expect("transaction");
+        let occupant = room_jid
+            .with_resource_str("owner")
+            .expect("owner nick is a valid resource");
+        let occupant_bare_jid = sessions
+            .first()
+            .expect("self-kick reservation needs at least one session")
+            .to_bare();
+        let nick = waddle_xmpp::muc::MucOccupantNick::new("owner".to_owned()).expect("owner nick");
+        let effects = waddle_xmpp::muc::RoomMutationEffects::admin(
+            room_jid.clone(),
+            sessions
+                .iter()
+                .cloned()
+                .map(|recipient| waddle_xmpp::muc::OccupantPresenceUpdate {
+                    recipient: recipient.clone(),
+                    is_self: true,
+                    occupant: occupant.clone(),
+                    nick: nick.clone(),
+                    occupant_bare_jid: occupant_bare_jid.clone(),
+                    disclosed_real_jid: Some(recipient),
+                    affiliation: Affiliation::Member,
+                    kind: waddle_xmpp::muc::AdminPresenceKind::Kicked,
+                    actor: Some("mod@example.com".parse().expect("actor bare JID")),
+                    reason: None,
+                })
+                .collect(),
+            Vec::new(),
+            sessions.to_vec(),
+            Vec::new(),
+        );
+        let origin = test_origin();
+        let producing_node = test_producing_node();
+        let reservation = store
+            .enqueue_in_tx(
+                &mut tx,
+                RoomEffectEnqueue {
+                    lifecycle: coordinates.lifecycle,
+                    revision: coordinates.revision,
+                    effects: &effects,
+                    origin: &origin,
+                    producing_node: &producing_node,
+                    now_ms: 0,
+                },
+            )
+            .await
+            .expect("enqueue self-kick reservation");
+        tx.commit().await.expect("commit");
+        reservation
+    }
+
+    async fn insert_lifecycle_row(
+        state: &WebSocketState,
+        room_jid: &BareJid,
+        coordinates: RoomCommittedCoordinates,
+        state_name: RoomLifecycleState,
+    ) {
+        let connection = state
+            .deps
+            .protocol
+            .room_effect_outbox
+            .database()
+            .guard()
+            .await
+            .expect("connection");
+        connection
+            .execute(
+                "CREATE TABLE IF NOT EXISTS clustering_muc_room_lifecycles (lifecycle_id TEXT NOT NULL, room_jid TEXT NOT NULL, revision BIGINT NOT NULL, state TEXT NOT NULL)",
+                (),
+            )
+            .await
+            .expect("create lifecycle table");
+        connection
+            .execute(
+                "INSERT INTO clustering_muc_room_lifecycles (lifecycle_id, room_jid, revision, state) VALUES (?, ?, ?, ?)",
+                crate::db_params![
+                    coordinates.lifecycle.to_string(),
+                    room_jid.to_string(),
+                    coordinates.revision.as_i64(),
+                    state_name.as_db_str(),
+                ],
+            )
+            .await
+            .expect("insert lifecycle");
     }
 
     #[test]
@@ -1965,6 +2400,679 @@ mod tests {
                 waddle_xmpp::Voice::Muted,
             )],
             "a reconciled role demotion must still converge the occupant's SFU voice grant"
+        );
+    }
+
+    #[test]
+    fn committed_affiliation_recovery_skips_invalid_snapshot_nick_without_panicking() {
+        let room_jid: BareJid = "admin-invalid-affiliation-recovery@muc.example.com"
+            .parse()
+            .expect("room JID");
+        let mut room = waddle_xmpp::muc::MucRoom::new(
+            room_jid,
+            "waddle".to_string(),
+            "channel".to_string(),
+            RoomConfig {
+                moderated: true,
+                members_only: false,
+                ..RoomConfig::default()
+            },
+        );
+        seat(
+            &mut room,
+            "owner",
+            "owner@example.com/web",
+            Affiliation::Owner,
+            waddle_xmpp::Role::Moderator,
+        );
+        seat(
+            &mut room,
+            "mallory\u{0}invalid",
+            "mallory@example.com/web",
+            Affiliation::Admin,
+            waddle_xmpp::Role::Moderator,
+        );
+
+        let applied = recover_committed_admin_effects(
+            &room,
+            &[AdminItem {
+                jid: Some("mallory@example.com".parse().expect("mallory bare jid")),
+                nick: None,
+                affiliation: Some(Affiliation::None),
+                role: None,
+                reason: None,
+            }],
+            &"owner@example.com/web".parse().expect("owner full jid"),
+            &test_secret(),
+        );
+
+        assert!(
+            applied.presence_updates.is_empty(),
+            "an invalid recovered nick must suppress replayed presence instead of panicking"
+        );
+        assert_eq!(
+            applied.voice_changes,
+            vec![(
+                "mallory@example.com/web".parse().expect("mallory full jid"),
+                waddle_xmpp::Voice::Muted,
+            )],
+            "recovery must still preserve the surviving occupant's voice delta"
+        );
+    }
+
+    #[test]
+    fn committed_role_recovery_skips_invalid_snapshot_nick_without_panicking() {
+        let room_jid: BareJid = "admin-invalid-role-recovery@muc.example.com"
+            .parse()
+            .expect("room JID");
+        let mut room = waddle_xmpp::muc::MucRoom::new(
+            room_jid,
+            "waddle".to_string(),
+            "channel".to_string(),
+            RoomConfig {
+                moderated: true,
+                members_only: false,
+                ..RoomConfig::default()
+            },
+        );
+        seat(
+            &mut room,
+            "owner",
+            "owner@example.com/web",
+            Affiliation::Owner,
+            waddle_xmpp::Role::Moderator,
+        );
+        seat(
+            &mut room,
+            "mallory\u{0}invalid",
+            "mallory@example.com/web",
+            Affiliation::Member,
+            waddle_xmpp::Role::Participant,
+        );
+
+        let applied = recover_committed_admin_effects(
+            &room,
+            &[AdminItem {
+                jid: None,
+                nick: Some("mallory\u{0}invalid".to_string()),
+                affiliation: None,
+                role: Some(waddle_xmpp::Role::Visitor),
+                reason: None,
+            }],
+            &"owner@example.com/web".parse().expect("owner full jid"),
+            &test_secret(),
+        );
+
+        assert!(
+            applied.presence_updates.is_empty(),
+            "an invalid recovered nick must suppress role-change replay instead of panicking"
+        );
+        assert_eq!(
+            applied.voice_changes,
+            vec![(
+                "mallory@example.com/web".parse().expect("mallory full jid"),
+                waddle_xmpp::Voice::Muted,
+            )],
+            "role recovery must still preserve the occupant's voice delta"
+        );
+    }
+
+    #[tokio::test]
+    async fn ambiguous_admin_recovery_restores_present_outbox_reservation_by_revision() {
+        let state = create_test_websocket_state().await;
+        let room_jid: BareJid = "admin-recovered-reservation@muc.example.com"
+            .parse()
+            .expect("room JID");
+        let target: BareJid = "target@example.com".parse().expect("target JID");
+        let owner: FullJid = "owner@example.com/web".parse().expect("owner full jid");
+        let before = waddle_xmpp::muc::MucRoom::new(
+            room_jid.clone(),
+            "waddle".to_string(),
+            "channel".to_string(),
+            RoomConfig::default(),
+        );
+        let pre_apply_coordinates = RoomCommittedCoordinates {
+            lifecycle: waddle_xmpp::muc::RoomLifecycleId::generate(),
+            revision: waddle_xmpp::muc::RoomRevision::initial(),
+        };
+        let committed_coordinates = RoomCommittedCoordinates {
+            lifecycle: pre_apply_coordinates.lifecycle,
+            revision: pre_apply_coordinates
+                .revision
+                .next()
+                .expect("next revision"),
+        };
+        state
+            .deps
+            .protocol
+            .room_registry
+            .ask(CreateRoom {
+                room_jid: room_jid.clone(),
+                waddle_id: "waddle".to_owned(),
+                channel_id: "channel".to_owned(),
+                config: RoomConfig::default(),
+            })
+            .await
+            .expect("acquire local room ownership");
+        insert_lifecycle_row(
+            state.as_ref(),
+            &room_jid,
+            committed_coordinates,
+            RoomLifecycleState::Active,
+        )
+        .await;
+        let reservation = enqueue_recovered_admin_reservation(
+            state.as_ref(),
+            &room_jid,
+            committed_coordinates,
+            &owner,
+        )
+        .await;
+
+        let (applied, suppress_direct_admin_effects) =
+            recover_committed_admin_effects_after_ambiguity(
+                state.as_ref(),
+                &before,
+                &[AdminItem {
+                    jid: Some(target),
+                    nick: None,
+                    affiliation: Some(Affiliation::Member),
+                    role: None,
+                    reason: None,
+                }],
+                &owner,
+                &test_secret(),
+                Some(pre_apply_coordinates),
+                Some(committed_coordinates),
+            )
+            .await
+            .expect("recover committed admin effects");
+
+        assert!(suppress_direct_admin_effects);
+        assert_eq!(applied.outbox_reservation, Some(reservation));
+        let mut batch = ResponseBatch::default();
+        let summary = extend_batch_with_inline_room_effect_frames(
+            &mut batch,
+            state.as_ref(),
+            applied
+                .outbox_reservation
+                .as_ref()
+                .expect("recovered reservation"),
+            Some(&owner),
+        )
+        .await
+        .expect("drain recovered reservation");
+        assert_eq!(summary.inline, 1);
+        assert_eq!(summary.completed, 0);
+        assert_eq!(
+            batch.frames.len(),
+            1,
+            "the recovered row must emit exactly once"
+        );
+        let completion = batch
+            .completions
+            .pop()
+            .expect("recovered inline completion");
+        assert!(
+            crate::room_effect_outbox::drain::complete_after_write(state.as_ref(), &completion)
+                .await
+                .expect("complete recovered row"),
+            "the drained recovered row must delete once written"
+        );
+    }
+
+    #[tokio::test]
+    async fn ambiguous_admin_recovery_emits_nothing_when_recovered_rows_are_already_drained() {
+        let state = create_test_websocket_state().await;
+        let room_jid: BareJid = "admin-recovered-drained@muc.example.com"
+            .parse()
+            .expect("room JID");
+        let target: BareJid = "target@example.com".parse().expect("target JID");
+        let owner: FullJid = "owner@example.com/web".parse().expect("owner full jid");
+        let before = waddle_xmpp::muc::MucRoom::new(
+            room_jid.clone(),
+            "waddle".to_string(),
+            "channel".to_string(),
+            RoomConfig::default(),
+        );
+        let pre_apply_coordinates = RoomCommittedCoordinates {
+            lifecycle: waddle_xmpp::muc::RoomLifecycleId::generate(),
+            revision: waddle_xmpp::muc::RoomRevision::initial(),
+        };
+        let committed_coordinates = RoomCommittedCoordinates {
+            lifecycle: pre_apply_coordinates.lifecycle,
+            revision: pre_apply_coordinates
+                .revision
+                .next()
+                .expect("next revision"),
+        };
+        insert_lifecycle_row(
+            state.as_ref(),
+            &room_jid,
+            committed_coordinates,
+            RoomLifecycleState::Active,
+        )
+        .await;
+        let reservation = enqueue_recovered_admin_reservation(
+            state.as_ref(),
+            &room_jid,
+            committed_coordinates,
+            &owner,
+        )
+        .await;
+        let key = crate::room_effect_outbox::RoomEffectKey {
+            lifecycle: committed_coordinates.lifecycle,
+            revision: committed_coordinates.revision,
+            ordinal: reservation.ordinals[0],
+        };
+        let claim = state
+            .deps
+            .protocol
+            .room_effect_outbox
+            .claim_exact(&key, 0)
+            .await
+            .expect("claim drained row")
+            .expect("claim exists");
+        assert!(state
+            .deps
+            .protocol
+            .room_effect_outbox
+            .complete(&key, &claim.lease_token)
+            .await
+            .expect("complete drained row"));
+
+        let (applied, suppress_direct_admin_effects) =
+            recover_committed_admin_effects_after_ambiguity(
+                state.as_ref(),
+                &before,
+                &[AdminItem {
+                    jid: Some(target),
+                    nick: None,
+                    affiliation: Some(Affiliation::Member),
+                    role: None,
+                    reason: None,
+                }],
+                &owner,
+                &test_secret(),
+                Some(pre_apply_coordinates),
+                Some(committed_coordinates),
+            )
+            .await
+            .expect("recover committed admin effects");
+
+        assert!(suppress_direct_admin_effects);
+        assert!(
+            applied.outbox_reservation.is_none(),
+            "drained recovered rows must not trigger a direct fallback replay"
+        );
+        let mut batch = ResponseBatch::default();
+        if let Some(reservation) = applied.outbox_reservation.as_ref() {
+            let _ = extend_batch_with_inline_room_effect_frames(
+                &mut batch,
+                state.as_ref(),
+                reservation,
+                Some(&owner),
+            )
+            .await
+            .expect("drain recovered reservation");
+        }
+        assert!(
+            batch.frames.is_empty() && batch.completions.is_empty(),
+            "already-drained recovered rows must not emit duplicate inline frames"
+        );
+    }
+
+    #[tokio::test]
+    async fn self_kick_preresult_ownership_lookup_failure_requeues_without_emitting_frames() {
+        let state = create_test_websocket_state().await;
+        let room_jid: BareJid = "admin-self-kick-leased@muc.example.com"
+            .parse()
+            .expect("room JID");
+        let owner: FullJid = "owner@example.com/web".parse().expect("owner full jid");
+        let coordinates = RoomCommittedCoordinates {
+            lifecycle: waddle_xmpp::muc::RoomLifecycleId::generate(),
+            revision: waddle_xmpp::muc::RoomRevision::initial(),
+        };
+        insert_lifecycle_row(
+            state.as_ref(),
+            &room_jid,
+            coordinates,
+            RoomLifecycleState::Active,
+        )
+        .await;
+        let reservation =
+            enqueue_recovered_admin_reservation(state.as_ref(), &room_jid, coordinates, &owner)
+                .await;
+        let key = crate::room_effect_outbox::RoomEffectKey {
+            lifecycle: coordinates.lifecycle,
+            revision: coordinates.revision,
+            ordinal: reservation.ordinals[0],
+        };
+        state.deps.protocol.room_registry.kill();
+
+        let mut batch = ResponseBatch::default();
+        let summary = extend_batch_with_inline_room_effect_frames(
+            &mut batch,
+            state.as_ref(),
+            &reservation,
+            Some(&owner),
+        )
+        .await
+        .expect("attempt pre-result drain");
+
+        assert_eq!(summary.requeued, 1);
+        assert_eq!(
+            summary.inline + summary.completed,
+            0,
+            "a requeued pre-result row must not count as delivered"
+        );
+        assert!(
+            batch.frames.is_empty() && batch.completions.is_empty(),
+            "the self-kick pre-result seam must not emit success-adjacent frames while ownership lookup fails"
+        );
+        let retained = state
+            .deps
+            .protocol
+            .room_effect_outbox
+            .find(&key)
+            .await
+            .expect("find retained row")
+            .expect("requeued row remains");
+        assert!(retained.lease_token.is_none());
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn self_kick_preresult_sibling_timeout_keeps_presence_before_result() {
+        let state = create_test_websocket_state().await;
+        let room_jid: BareJid = "admin-self-kick-backpressured-sibling@muc.example.com"
+            .parse()
+            .expect("room JID");
+        let owner: FullJid = "owner@example.com/web".parse().expect("owner full jid");
+        let sibling: FullJid = "owner@example.com/phone".parse().expect("sibling full jid");
+        let coordinates = RoomCommittedCoordinates {
+            lifecycle: waddle_xmpp::muc::RoomLifecycleId::generate(),
+            revision: waddle_xmpp::muc::RoomRevision::initial(),
+        };
+        state
+            .deps
+            .protocol
+            .room_registry
+            .ask(CreateRoom {
+                room_jid: room_jid.clone(),
+                waddle_id: "waddle".to_owned(),
+                channel_id: "channel".to_owned(),
+                config: RoomConfig::default(),
+            })
+            .await
+            .expect("acquire local room ownership");
+        insert_lifecycle_row(
+            state.as_ref(),
+            &room_jid,
+            coordinates,
+            RoomLifecycleState::Active,
+        )
+        .await;
+        let (sibling_tx, mut sibling_rx) =
+            tokio::sync::mpsc::channel::<waddle_xmpp::registry::OutboundStanza>(1);
+        sibling_tx
+            .send(waddle_xmpp::registry::OutboundStanza::new(
+                Stanza::Presence(xmpp_parsers::presence::Presence::new(
+                    xmpp_parsers::presence::Type::None,
+                )),
+            ))
+            .await
+            .expect("prefill sibling queue");
+        register_test_connection(state.as_ref(), &sibling, sibling_tx).await;
+
+        let reservation = enqueue_self_kick_reservation(
+            state.as_ref(),
+            &room_jid,
+            coordinates,
+            &[owner.clone(), sibling.clone()],
+        )
+        .await;
+        let (pre_result, post_result) = split_room_effect_reservation(&reservation, 1);
+        let pre_result = pre_result.expect("self-kick pre-result row");
+        let mut batch = ResponseBatch::default();
+
+        // Real time on purpose: pausing the clock makes every sqlx pool
+        // acquire race the auto-advanced deadline (instant PoolTimedOut
+        // under parallel load). The backpressured sibling send times out on
+        // its own after LOCAL_ACCEPTANCE_TIMEOUT (~5s).
+        let (summary, mut batch) = async {
+            extend_batch_with_inline_room_effect_frames(
+                &mut batch,
+                state.as_ref(),
+                &pre_result,
+                Some(&owner),
+            )
+            .await
+            .map(|summary| (summary, batch))
+        }
+        .await
+        .expect("pre-result drain");
+        assert_eq!(summary.inline, 1);
+        assert_eq!(summary.completed, 0);
+        assert_eq!(summary.requeued, 0);
+        assert_eq!(summary.stale, 0);
+        assert_eq!(summary.leased, 0);
+
+        batch.frames.push(
+            iq_to_xml(build_admin_set_result(
+                "self-kick-timeout",
+                &room_jid,
+                &Jid::from(owner.clone()),
+            ))
+            .into(),
+        );
+        if let Some(post_result) = post_result.as_ref() {
+            extend_batch_with_inline_room_effect_frames(
+                &mut batch,
+                state.as_ref(),
+                post_result,
+                Some(&owner),
+            )
+            .await
+            .expect("post-result drain");
+        }
+
+        assert_eq!(
+            batch.frames.len(),
+            2,
+            "the handler seam must emit self-presence before the IQ result"
+        );
+        let self_presence_xml = batch.frames[0].clone().into_serialized_xml();
+        assert!(
+            self_presence_xml.starts_with("<presence")
+                && self_presence_xml.contains("code='307'")
+                && self_presence_xml.contains("code='110'"),
+            "the initiator must still receive the self-kick presence first: {self_presence_xml}"
+        );
+        let result_xml = batch.frames[1].clone().into_serialized_xml();
+        assert!(
+            result_xml.starts_with("<iq")
+                && result_xml.contains("type='result'")
+                && result_xml.contains("id='self-kick-timeout'"),
+            "the IQ result must still follow the inline self-presence: {result_xml}"
+        );
+        sibling_rx
+            .try_recv()
+            .expect("the prefilled sibling frame remains queued");
+        assert!(
+            sibling_rx.try_recv().is_err(),
+            "the timed-out sibling send must not enqueue an extra frame"
+        );
+        assert_eq!(
+            batch.completions.len(),
+            1,
+            "the inline self-presence keeps one completion"
+        );
+        let completion = batch.completions.pop().expect("inline completion");
+        assert!(
+            !crate::room_effect_outbox::drain::complete_after_write(state.as_ref(), &completion)
+                .await
+                .expect("complete released self-kick retry"),
+            "the released retry row must stay queued after the handler emits the success batch"
+        );
+    }
+
+    #[tokio::test]
+    async fn ambiguous_admin_recovery_restores_expected_reservation_after_later_revision_advance() {
+        let state = create_test_websocket_state().await;
+        let room_jid: BareJid = "admin-recovered-later-revision@muc.example.com"
+            .parse()
+            .expect("room JID");
+        let target: BareJid = "target@example.com".parse().expect("target JID");
+        let owner: FullJid = "owner@example.com/web".parse().expect("owner full jid");
+        let before = waddle_xmpp::muc::MucRoom::new(
+            room_jid.clone(),
+            "waddle".to_string(),
+            "channel".to_string(),
+            RoomConfig::default(),
+        );
+        let pre_apply_coordinates = RoomCommittedCoordinates {
+            lifecycle: waddle_xmpp::muc::RoomLifecycleId::generate(),
+            revision: waddle_xmpp::muc::RoomRevision::initial(),
+        };
+        let committed_coordinates = RoomCommittedCoordinates {
+            lifecycle: pre_apply_coordinates.lifecycle,
+            revision: pre_apply_coordinates
+                .revision
+                .next()
+                .expect("expected committed revision"),
+        };
+        let later_coordinates = RoomCommittedCoordinates {
+            lifecycle: pre_apply_coordinates.lifecycle,
+            revision: committed_coordinates
+                .revision
+                .next()
+                .expect("later revision"),
+        };
+        insert_lifecycle_row(
+            state.as_ref(),
+            &room_jid,
+            committed_coordinates,
+            RoomLifecycleState::Active,
+        )
+        .await;
+        let committed_reservation = enqueue_recovered_admin_reservation(
+            state.as_ref(),
+            &room_jid,
+            committed_coordinates,
+            &owner,
+        )
+        .await;
+        insert_lifecycle_row(
+            state.as_ref(),
+            &room_jid,
+            later_coordinates,
+            RoomLifecycleState::Active,
+        )
+        .await;
+        let later_reservation = enqueue_recovered_admin_reservation(
+            state.as_ref(),
+            &room_jid,
+            later_coordinates,
+            &owner,
+        )
+        .await;
+
+        let (applied, suppress_direct_admin_effects) =
+            recover_committed_admin_effects_after_ambiguity(
+                state.as_ref(),
+                &before,
+                &[AdminItem {
+                    jid: Some(target),
+                    nick: None,
+                    affiliation: Some(Affiliation::Member),
+                    role: None,
+                    reason: None,
+                }],
+                &owner,
+                &test_secret(),
+                Some(pre_apply_coordinates),
+                Some(later_coordinates),
+            )
+            .await
+            .expect("recover committed admin effects");
+
+        assert!(
+            suppress_direct_admin_effects,
+            "any observed durable later revision must still suppress direct replay for ambiguous A"
+        );
+        assert_eq!(
+            applied.outbox_reservation,
+            Some(committed_reservation),
+            "a later same-lifecycle snapshot must recover A's expected revision reservation"
+        );
+        assert!(
+            state
+                .deps
+                .protocol
+                .room_effect_outbox
+                .find(&crate::room_effect_outbox::RoomEffectKey {
+                    lifecycle: later_coordinates.lifecycle,
+                    revision: later_coordinates.revision,
+                    ordinal: later_reservation.ordinals[0],
+                })
+                .await
+                .expect("find later reservation row")
+                .is_some(),
+            "B's later reservation must remain untouched while A is recovered"
+        );
+    }
+
+    #[tokio::test]
+    async fn ambiguous_admin_recovery_keeps_direct_replay_for_earlier_revision_observation() {
+        let state = create_test_websocket_state().await;
+        let room_jid: BareJid = "admin-recovered-earlier-revision@muc.example.com"
+            .parse()
+            .expect("room JID");
+        let target: BareJid = "target@example.com".parse().expect("target JID");
+        let owner: FullJid = "owner@example.com/web".parse().expect("owner full jid");
+        let before = waddle_xmpp::muc::MucRoom::new(
+            room_jid,
+            "waddle".to_string(),
+            "channel".to_string(),
+            RoomConfig::default(),
+        );
+        let pre_apply_coordinates = RoomCommittedCoordinates {
+            lifecycle: waddle_xmpp::muc::RoomLifecycleId::generate(),
+            revision: waddle_xmpp::muc::RoomRevision::initial()
+                .next()
+                .expect("second revision"),
+        };
+        let observed_coordinates = RoomCommittedCoordinates {
+            lifecycle: pre_apply_coordinates.lifecycle,
+            revision: pre_apply_coordinates.revision,
+        };
+
+        let (applied, suppress_direct_admin_effects) =
+            recover_committed_admin_effects_after_ambiguity(
+                state.as_ref(),
+                &before,
+                &[AdminItem {
+                    jid: Some(target),
+                    nick: None,
+                    affiliation: Some(Affiliation::Member),
+                    role: None,
+                    reason: None,
+                }],
+                &owner,
+                &test_secret(),
+                Some(pre_apply_coordinates),
+                Some(observed_coordinates),
+            )
+            .await
+            .expect("recover committed admin effects");
+
+        assert!(
+            !suppress_direct_admin_effects,
+            "the pre-apply revision is negative durable proof, so the direct replay fallback must stay enabled"
+        );
+        assert!(
+            applied.outbox_reservation.is_none(),
+            "earlier revision observations must not bind a recovered reservation"
         );
     }
 }

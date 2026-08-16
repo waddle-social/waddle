@@ -35,6 +35,8 @@ pub mod pubsub;
 pub mod pubsub_authz;
 pub mod push_registrations;
 pub mod push_service;
+/// Durable, FIFO room-mutation broadcast effect queue (#1646).
+pub mod room_effect_outbox;
 pub mod room_policy;
 pub mod server;
 pub mod sm_persistence;

@@ -55,8 +55,8 @@ pub(crate) fn element_to_xml(element: xmpp_parsers::minidom::Element) -> String 
     String::from_utf8(buf).expect("xmpp_parsers serializes valid UTF-8")
 }
 
-pub(super) fn websocket_stream_open_xml(domain: &str) -> String {
-    let open = Element::builder("open", "urn:ietf:params:xml:ns:xmpp-framing")
+pub(super) fn websocket_stream_open_element(domain: &str) -> Element {
+    Element::builder("open", "urn:ietf:params:xml:ns:xmpp-framing")
         .attr(minidom::rxml::xml_ncname!("from").to_owned(), domain)
         .attr(
             minidom::rxml::xml_ncname!("id").to_owned(),
@@ -68,12 +68,20 @@ pub(super) fn websocket_stream_open_xml(domain: &str) -> String {
             minidom::rxml::xml_ncname!("lang").to_owned(),
             "en",
         )
-        .build();
-    element_to_xml(open)
+        .build()
+}
+
+#[cfg(test)]
+pub(super) fn websocket_stream_open_xml(domain: &str) -> String {
+    element_to_xml(websocket_stream_open_element(domain))
+}
+
+pub(super) fn websocket_stream_close_element() -> Element {
+    Element::builder("close", "urn:ietf:params:xml:ns:xmpp-framing").build()
 }
 
 pub(super) fn websocket_stream_close_xml() -> String {
-    element_to_xml(Element::builder("close", "urn:ietf:params:xml:ns:xmpp-framing").build())
+    element_to_xml(websocket_stream_close_element())
 }
 
 pub(crate) fn iq_to_xml(iq: xmpp_parsers::iq::Iq) -> String {
@@ -269,7 +277,7 @@ pub(super) fn build_conflict_stream_error() -> String {
     String::from_utf8(writer.into_inner()).expect("quick-xml serializes valid UTF-8")
 }
 
-pub(super) fn build_stream_features_xml(authenticated: bool) -> String {
+pub(super) fn build_stream_features_element(authenticated: bool) -> Element {
     let mut features = Element::builder("features", waddle_xmpp::ns::STREAM);
     if authenticated {
         features = features.append(Element::builder("bind", waddle_xmpp::ns::BIND).build());
@@ -296,23 +304,35 @@ pub(super) fn build_stream_features_xml(authenticated: bool) -> String {
         );
     }
 
-    element_to_xml(features.build())
+    features.build()
 }
 
-pub(super) fn build_stream_features_for_phase(phase: &ConnectionPhase) -> String {
-    build_stream_features_xml(phase.is_authenticated())
+#[cfg(test)]
+pub(super) fn build_stream_features_xml(authenticated: bool) -> String {
+    element_to_xml(build_stream_features_element(authenticated))
 }
 
+pub(super) fn build_stream_features_for_phase_element(phase: &ConnectionPhase) -> Element {
+    build_stream_features_element(phase.is_authenticated())
+}
+
+pub(super) fn sasl_success_element() -> Element {
+    Element::builder("success", waddle_xmpp::ns::SASL).build()
+}
+
+#[cfg(test)]
 pub(super) fn sasl_success_xml() -> String {
-    element_to_xml(Element::builder("success", waddle_xmpp::ns::SASL).build())
+    element_to_xml(sasl_success_element())
+}
+
+pub(super) fn sasl_failure_element(condition: &str) -> Element {
+    Element::builder("failure", waddle_xmpp::ns::SASL)
+        .append(Element::builder(condition, waddle_xmpp::ns::SASL).build())
+        .build()
 }
 
 pub(super) fn sasl_failure_xml(condition: &str) -> String {
-    element_to_xml(
-        Element::builder("failure", waddle_xmpp::ns::SASL)
-            .append(Element::builder(condition, waddle_xmpp::ns::SASL).build())
-            .build(),
-    )
+    element_to_xml(sasl_failure_element(condition))
 }
 
 #[cfg(test)]

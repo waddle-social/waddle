@@ -87,12 +87,20 @@ pub(crate) async fn seed_local_account(state: &WebSocketState, localpart: &str) 
 pub(crate) async fn create_test_websocket_state() -> Arc<WebSocketState> {
     create_test_websocket_state_with_extension_manager(
         empty_extension_manager().await,
-        None,
-        None,
-        None,
-        None,
-        None,
-        None,
+        TestStateOverrides::default(),
+    )
+    .await
+}
+
+pub(crate) async fn create_test_websocket_state_with_db_pool(
+    db_pool: Arc<DatabasePool>,
+) -> Arc<WebSocketState> {
+    create_test_websocket_state_with_extension_manager(
+        empty_extension_manager().await,
+        TestStateOverrides {
+            db_pool: Some(db_pool),
+            ..TestStateOverrides::default()
+        },
     )
     .await
 }
@@ -102,12 +110,10 @@ pub(crate) async fn create_test_websocket_state_with_sm_registry(
 ) -> Arc<WebSocketState> {
     create_test_websocket_state_with_extension_manager(
         empty_extension_manager().await,
-        None,
-        None,
-        Some(sm_session_registry),
-        None,
-        None,
-        None,
+        TestStateOverrides {
+            sm_session_registry: Some(sm_session_registry),
+            ..TestStateOverrides::default()
+        },
     )
     .await
 }
@@ -123,12 +129,11 @@ pub(crate) async fn create_test_websocket_state_with_sm_registry_and_pending_sto
 ) -> Arc<WebSocketState> {
     create_test_websocket_state_with_extension_manager(
         empty_extension_manager().await,
-        None,
-        None,
-        Some(sm_session_registry),
-        None,
-        Some(pending_delivery_storage),
-        None,
+        TestStateOverrides {
+            sm_session_registry: Some(sm_session_registry),
+            pending_delivery_storage: Some(pending_delivery_storage),
+            ..TestStateOverrides::default()
+        },
     )
     .await
 }
@@ -142,12 +147,12 @@ pub(crate) async fn create_test_websocket_state_with_sm_registry_pending_and_blo
 ) -> Arc<WebSocketState> {
     create_test_websocket_state_with_extension_manager(
         empty_extension_manager().await,
-        None,
-        None,
-        Some(sm_session_registry),
-        Some(blocking_storage),
-        Some(pending_delivery_storage),
-        None,
+        TestStateOverrides {
+            sm_session_registry: Some(sm_session_registry),
+            blocking_storage: Some(blocking_storage),
+            pending_delivery_storage: Some(pending_delivery_storage),
+            ..TestStateOverrides::default()
+        },
     )
     .await
 }
@@ -167,12 +172,11 @@ pub(crate) async fn create_test_websocket_state_with_clustering(
 ) -> Arc<WebSocketState> {
     create_test_websocket_state_with_extension_manager(
         empty_extension_manager().await,
-        None,
-        Some(clustering),
-        Some(sm_session_registry),
-        None,
-        None,
-        None,
+        TestStateOverrides {
+            clustering: Some(clustering),
+            sm_session_registry: Some(sm_session_registry),
+            ..TestStateOverrides::default()
+        },
     )
     .await
 }
@@ -184,12 +188,11 @@ pub(crate) async fn create_test_websocket_state_with_sm_registry_and_ingress_sha
 ) -> Arc<WebSocketState> {
     create_test_websocket_state_with_extension_manager(
         empty_extension_manager().await,
-        None,
-        None,
-        Some(sm_session_registry),
-        None,
-        None,
-        Some(ingress_shadow),
+        TestStateOverrides {
+            sm_session_registry: Some(sm_session_registry),
+            ingress_shadow: Some(ingress_shadow),
+            ..TestStateOverrides::default()
+        },
     )
     .await
 }
@@ -246,12 +249,10 @@ pub(crate) async fn create_test_websocket_state_with_sfu(
 ) -> Arc<WebSocketState> {
     create_test_websocket_state_with_extension_manager(
         empty_extension_manager().await,
-        Some(sfu),
-        None,
-        None,
-        None,
-        None,
-        None,
+        TestStateOverrides {
+            call_sfu: Some(sfu),
+            ..TestStateOverrides::default()
+        },
     )
     .await
 }
@@ -267,12 +268,11 @@ pub(crate) async fn create_test_websocket_state_with_sfu_and_clustering(
 ) -> Arc<WebSocketState> {
     create_test_websocket_state_with_extension_manager(
         empty_extension_manager().await,
-        Some(sfu),
-        Some(clustering),
-        None,
-        None,
-        None,
-        None,
+        TestStateOverrides {
+            call_sfu: Some(sfu),
+            clustering: Some(clustering),
+            ..TestStateOverrides::default()
+        },
     )
     .await
 }
@@ -592,12 +592,10 @@ fn fixture_call_sfu() -> Arc<dyn waddle_sfu::SfuService> {
 pub(crate) async fn create_test_websocket_state_with_calls() -> Arc<WebSocketState> {
     create_test_websocket_state_with_extension_manager(
         empty_extension_manager().await,
-        Some(fixture_call_sfu()),
-        None,
-        None,
-        None,
-        None,
-        None,
+        TestStateOverrides {
+            call_sfu: Some(fixture_call_sfu()),
+            ..TestStateOverrides::default()
+        },
     )
     .await
 }
@@ -617,22 +615,41 @@ async fn empty_extension_manager() -> Arc<ExtensionManager> {
     )
 }
 
+/// Optional fixture substitutions for one test websocket state; unset fields
+/// take the shared defaults.
+#[derive(Default)]
+struct TestStateOverrides {
+    db_pool: Option<Arc<DatabasePool>>,
+    call_sfu: Option<Arc<dyn waddle_sfu::SfuService>>,
+    clustering: Option<crate::clustering::ClusteringHandles>,
+    sm_session_registry: Option<Arc<InMemorySmSessionRegistry>>,
+    blocking_storage: Option<Arc<dyn waddle_xmpp::xep::xep0191::BlockingStorage>>,
+    pending_delivery_storage:
+        Option<Arc<dyn waddle_xmpp::pending_delivery::storage::PendingDeliveryStorage>>,
+    ingress_shadow: Option<crate::ingress_shadow::IngressShadowHandle>,
+}
+
 async fn create_test_websocket_state_with_extension_manager(
     extension_manager: Arc<ExtensionManager>,
-    call_sfu: Option<Arc<dyn waddle_sfu::SfuService>>,
-    clustering_override: Option<crate::clustering::ClusteringHandles>,
-    sm_session_registry_override: Option<Arc<InMemorySmSessionRegistry>>,
-    blocking_storage_override: Option<Arc<dyn waddle_xmpp::xep::xep0191::BlockingStorage>>,
-    pending_delivery_storage_override: Option<
-        Arc<dyn waddle_xmpp::pending_delivery::storage::PendingDeliveryStorage>,
-    >,
-    ingress_shadow_override: Option<crate::ingress_shadow::IngressShadowHandle>,
+    overrides: TestStateOverrides,
 ) -> Arc<WebSocketState> {
-    let config = DatabaseConfig::default();
-    let pool_config = PoolConfig;
-    let db_pool = DatabasePool::new(config, pool_config)
-        .await
-        .expect("db pool");
+    let TestStateOverrides {
+        db_pool: db_pool_override,
+        call_sfu,
+        clustering: clustering_override,
+        sm_session_registry: sm_session_registry_override,
+        blocking_storage: blocking_storage_override,
+        pending_delivery_storage: pending_delivery_storage_override,
+        ingress_shadow: ingress_shadow_override,
+    } = overrides;
+    let db_pool = match db_pool_override {
+        Some(db_pool) => db_pool,
+        None => Arc::new(
+            DatabasePool::new(DatabaseConfig::default(), PoolConfig)
+                .await
+                .expect("db pool"),
+        ),
+    };
 
     let runner = MigrationRunner::global();
     runner.run(db_pool.global()).await.expect("migrations");
@@ -644,7 +661,7 @@ async fn create_test_websocket_state_with_extension_manager(
 
     let server_config = ServerConfig::test_homeserver();
     let public_websocket_url = url::Url::parse("wss://example.com/ws").expect("test WebSocket URL");
-    let mut app_state_built = AppState::new(Arc::new(db_pool));
+    let mut app_state_built = AppState::new(db_pool);
     if let Some(clustering) = clustering_override {
         app_state_built.clustering_claims = clustering;
     }
@@ -744,6 +761,15 @@ async fn create_test_websocket_state_with_extension_manager(
             Arc::clone(&call_teardown_outbox),
             tokio::runtime::Handle::current(),
         );
+    let room_effect_outbox = Arc::new(
+        crate::room_effect_outbox::RoomEffectOutboxStore::new(app_state.db_pool.global().clone())
+            .await
+            .expect("room effect outbox"),
+    );
+    let room_effect_arm_supervisor = crate::room_effect_outbox::RoomEffectArmSupervisor::new(
+        Arc::clone(&room_effect_outbox),
+        tokio::runtime::Handle::current(),
+    );
 
     let test_inbox_storage: Arc<dyn waddle_xmpp::inbox::storage::InboxStorage> =
         Arc::new(waddle_xmpp::inbox::storage::InMemoryInboxStorage::new());
@@ -821,6 +847,8 @@ async fn create_test_websocket_state_with_extension_manager(
                     notification_outbox,
                     call_teardown_outbox,
                     call_teardown_persistence,
+                    room_effect_outbox,
+                    room_effect_arm_supervisor,
                     call_teardown_executor: None,
                     notification_settings_projection,
                     dnd_projection,

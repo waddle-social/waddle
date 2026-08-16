@@ -16,7 +16,8 @@ use crate::server::session_janitors::{
     spawn_critical_registry_supervisor, spawn_destroy_completion_janitor,
     spawn_graceful_shutdown_drain, spawn_notification_outbox_janitor, spawn_orphan_reaper_janitor,
     spawn_pending_delivery_claim_janitor, spawn_push_service_publish_job_janitor,
-    spawn_room_dormancy_janitor, spawn_sm_expiry_janitor, spawn_user_actor_reaper,
+    spawn_room_dormancy_janitor, spawn_room_effect_outbox_janitor, spawn_sm_expiry_janitor,
+    spawn_user_actor_reaper,
 };
 use crate::server::topology::bootstrap_fresh_xmpp_topology;
 use crate::server::trace::{attach_http_route_template, make_request_span, observe_http_response};
@@ -580,6 +581,15 @@ async fn create_websocket_state(
             Arc::clone(&call_teardown_outbox),
             tokio::runtime::Handle::current(),
         );
+    let room_effect_outbox = Arc::new(
+        crate::room_effect_outbox::RoomEffectOutboxStore::new(state.db_pool.global().clone())
+            .await
+            .map_err(|error| anyhow::anyhow!("failed to initialize room effect outbox: {error}"))?,
+    );
+    let room_effect_arm_supervisor = crate::room_effect_outbox::RoomEffectArmSupervisor::new(
+        Arc::clone(&room_effect_outbox),
+        tokio::runtime::Handle::current(),
+    );
     // Build the sans-I/O stanza dispatcher with the handlers migrated so far.
     // See `waddle_xmpp::protocol` for the state-machine design; any IQ
     // namespace registered here short-circuits the legacy string-matching
@@ -778,15 +788,6 @@ async fn create_websocket_state(
     // typed dependencies on `AppState` (`spaces_metadata_store`,
     // `pubsub_storage`, `room_registry`) wired up via #682/#683.
     crate::admin::spaces::register(&websocket_command_registry, Arc::clone(&state)).await;
-    crate::admin::channels::register(
-        &websocket_command_registry,
-        Arc::clone(&state),
-        Arc::clone(&connection_registry),
-        user_registry.clone(),
-        Arc::clone(&sm_session_registry),
-        sfu_service.clone(),
-    )
-    .await;
     if lineage_attested {
         crate::server::bootstrap_membership::reconcile_existing_accounts_or_warn(
             state.db_pool.global_actor(),
@@ -954,6 +955,8 @@ async fn create_websocket_state(
                 notification_outbox,
                 call_teardown_outbox,
                 call_teardown_persistence,
+                room_effect_outbox,
+                room_effect_arm_supervisor: room_effect_arm_supervisor.clone(),
                 call_teardown_executor,
                 notification_settings_projection,
                 dnd_projection,
@@ -989,6 +992,17 @@ async fn create_websocket_state(
             shutdown: shutdown_handle,
         },
     });
+    room_effect_arm_supervisor.attach_drain_state(&websocket_state);
+    crate::admin::channels::register(
+        &websocket_state.deps.protocol.command_registry,
+        Arc::clone(&state),
+        Arc::clone(&websocket_state),
+        Arc::clone(&websocket_state.deps.protocol.connection_registry),
+        websocket_state.deps.protocol.user_registry.clone(),
+        Arc::clone(&websocket_state.deps.protocol.sm_session_registry),
+        websocket_state.deps.protocol.sfu.clone(),
+    )
+    .await;
     #[cfg(feature = "clustering")]
     if let (Some(bridge), Some((claim_store, node_identity))) = (
         &state.clustering_claims.ordered_relay_delivery_bridge,
@@ -1103,6 +1117,7 @@ fn promote_to_serving_and_spawn_janitors(
     spawn_pending_delivery_claim_janitor(websocket_state);
     spawn_notification_outbox_janitor(websocket_state);
     spawn_call_teardown_outbox_janitor(websocket_state);
+    spawn_room_effect_outbox_janitor(websocket_state);
     spawn_push_service_publish_job_janitor(websocket_state);
     spawn_auth_state_janitor(websocket_state);
     spawn_destroy_completion_janitor(websocket_state);

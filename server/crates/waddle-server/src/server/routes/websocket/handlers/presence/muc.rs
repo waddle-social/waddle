@@ -433,11 +433,23 @@ pub(crate) async fn route_room_presence_to_occupant(
     }
 }
 
-async fn try_deliver_registered_remote_resource(
+/// Ordered-relay handoff for generated recipient-addressed MUC frames.  The
+/// room-effect outbox shares this exact DirectFrame path: a successful bridge
+/// handoff is its remote completion boundary, without changing relay wire
+/// contracts.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum RegisteredRemoteDelivery {
+    #[cfg(feature = "clustering")]
+    Delivered,
+    Absent,
+    Retryable,
+}
+
+pub(crate) async fn registered_remote_resource_delivery(
     state: &WebSocketState,
     target: &FullJid,
     stanza: &Stanza,
-) -> bool {
+) -> RegisteredRemoteDelivery {
     #[cfg(feature = "clustering")]
     {
         let Some(bridge) = state
@@ -447,22 +459,46 @@ async fn try_deliver_registered_remote_resource(
             .ordered_relay_delivery_bridge
             .as_ref()
         else {
-            return false;
+            return RegisteredRemoteDelivery::Absent;
         };
-        bridge
+        match bridge
             .try_deliver_registered_remote_resource(
                 target,
                 stanza,
                 waddle_xmpp::registry::DeliveryKind::DirectFrame,
             )
             .await
-            .is_some()
+        {
+            Some(crate::server::routes::interpret::FullJidDeliveryOutcome::Delivered) => {
+                RegisteredRemoteDelivery::Delivered
+            }
+            Some(
+                crate::server::routes::interpret::FullJidDeliveryOutcome::Dropped
+                | crate::server::routes::interpret::FullJidDeliveryOutcome::MaybeCommitted,
+            ) => RegisteredRemoteDelivery::Retryable,
+            Some(
+                crate::server::routes::interpret::FullJidDeliveryOutcome::Unavailable
+                | crate::server::routes::interpret::FullJidDeliveryOutcome::QueuedDetached,
+            )
+            | None => RegisteredRemoteDelivery::Absent,
+        }
     }
     #[cfg(not(feature = "clustering"))]
     {
         let _ = (state, target, stanza);
-        false
+        RegisteredRemoteDelivery::Absent
     }
+}
+
+pub(crate) async fn try_deliver_registered_remote_resource(
+    state: &WebSocketState,
+    target: &FullJid,
+    stanza: &Stanza,
+) -> bool {
+    !matches!(
+        registered_remote_resource_delivery(state, target, stanza).await,
+        RegisteredRemoteDelivery::Absent
+    )
 }
 
 #[cfg(feature = "clustering")]
@@ -2078,6 +2114,7 @@ mod resolver_sync_retry_tests {
             room_jid: &'a BareJid,
             fence: &'a RoomClaimFenceContext,
             _intent: waddle_xmpp::muc::RoomDurableMutation,
+            _effects: waddle_xmpp::muc::RoomMutationEffects,
         ) -> waddle_xmpp::muc::RoomCommitFuture<'a> {
             if let Err(error) = validate_test_claim_fence(room_jid, fence) {
                 return Box::pin(async move {
@@ -2086,9 +2123,12 @@ mod resolver_sync_retry_tests {
                 });
             }
             Box::pin(async move {
-                Ok(waddle_xmpp::muc::RoomCommittedCoordinates {
-                    lifecycle: waddle_xmpp::muc::RoomLifecycleId::generate(),
-                    revision: waddle_xmpp::muc::RoomRevision::initial(),
+                Ok(waddle_xmpp::muc::RoomCommitOutcome {
+                    coordinates: waddle_xmpp::muc::RoomCommittedCoordinates {
+                        lifecycle: waddle_xmpp::muc::RoomLifecycleId::generate(),
+                        revision: waddle_xmpp::muc::RoomRevision::initial(),
+                    },
+                    reservation: None,
                 })
             })
         }

@@ -156,6 +156,7 @@ impl waddle_xmpp::muc::MucDurableStore for SubjectMutationStore {
         room_jid: &'a jid::BareJid,
         fence: &'a waddle_xmpp::muc::RoomClaimFenceContext,
         intent: waddle_xmpp::muc::RoomDurableMutation,
+        _effects: waddle_xmpp::muc::RoomMutationEffects,
     ) -> waddle_xmpp::muc::RoomCommitFuture<'a> {
         let mode = self.mode();
         let stored_state = &self.stored_state;
@@ -197,9 +198,12 @@ impl waddle_xmpp::muc::MucDurableStore for SubjectMutationStore {
                 }
                 _ => {
                     persist_subject_store_intent(stored_state, intent);
-                    Ok(waddle_xmpp::muc::RoomCommittedCoordinates {
-                        lifecycle: waddle_xmpp::muc::RoomLifecycleId::generate(),
-                        revision: waddle_xmpp::muc::RoomRevision::initial(),
+                    Ok(waddle_xmpp::muc::RoomCommitOutcome {
+                        coordinates: waddle_xmpp::muc::RoomCommittedCoordinates {
+                            lifecycle: waddle_xmpp::muc::RoomLifecycleId::generate(),
+                            revision: waddle_xmpp::muc::RoomRevision::initial(),
+                        },
+                        reservation: None,
                     })
                 }
             }
@@ -242,6 +246,7 @@ fn persist_subject_store_intent(
         } => {
             *stored_state.lock().expect("stored state lock") =
                 Some(waddle_xmpp::muc::DurableRoomState {
+                    coordinates: None,
                     waddle_id: waddle_id.into_string(),
                     channel_id: channel_id.into_string(),
                     config,

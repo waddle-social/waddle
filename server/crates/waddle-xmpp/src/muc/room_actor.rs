@@ -17,7 +17,7 @@ use super::durable::{
     RoomDurableMutation, RoomMutationCommit, WaddleId,
 };
 use super::pin::{PinStateChange, PinnedEntry};
-use super::{MucRoom, RoomConfig, RoomSubjectTexts, SubjectState};
+use super::{MucRoom, OccupantVoiceChange, RoomConfig, RoomSubjectTexts, SubjectState};
 use crate::types::{Affiliation, Role, Voice};
 
 /// A join-path ownership proof is fail-closed, but it must not monopolize the
@@ -82,6 +82,12 @@ pub struct RoomSnapshot {
     /// retain this immutable context instead of consulting mutable registry
     /// state after the actor read completes.
     pub claim_fence: Option<super::durable::RoomClaimFenceContext>,
+    pub durable_coordinates: Option<super::durable::RoomCommittedCoordinates>,
+    /// Exact durable coordinates for the revision that most recently changed
+    /// this actor's room config. Kept distinct from `durable_coordinates`
+    /// because later affiliation/admin commits advance the room lifecycle
+    /// without owning the config-change outbox row.
+    pub config_durable_coordinates: Option<super::durable::RoomCommittedCoordinates>,
     pub config_revision: u64,
     pub admission_revision: u64,
 }
@@ -382,6 +388,8 @@ impl OccupantInfo {
 #[derive(Actor)]
 pub struct RoomActor {
     room: MucRoom,
+    durable_coordinates: Option<super::durable::RoomCommittedCoordinates>,
+    config_durable_coordinates: Option<super::durable::RoomCommittedCoordinates>,
     config_revision: u64,
     /// Monotonic sequence used to timestamp admission-relevant snapshots.
     /// Scope-specific watermarks below decide whether a snapshot is stale;
@@ -607,6 +615,8 @@ impl RoomActor {
         room.config = room.config.normalized();
         Self {
             room,
+            durable_coordinates: None,
+            config_durable_coordinates: None,
             config_revision: 0,
             admission_revision: 0,
             room_admission_revision: 0,
@@ -630,6 +640,7 @@ impl RoomActor {
     /// they do not affect whether or how an occupant may enter.
     fn install_durable_room_state(&mut self, state: super::durable::DurableRoomState) {
         let previous_admission_state = self.admission_policy_snapshot();
+        self.durable_coordinates = state.coordinates;
         self.room.waddle_id = state.waddle_id;
         self.room.channel_id = state.channel_id;
         self.replace_config(state.config);
@@ -945,7 +956,14 @@ impl RoomActor {
     async fn commit_durable(
         &mut self,
         intent: RoomDurableMutation,
-    ) -> Result<Option<RoomMutationCommit>, DurablePersistError> {
+        effects: super::RoomMutationEffects,
+    ) -> Result<
+        (
+            Option<RoomMutationCommit>,
+            Option<super::RoomEffectReservation>,
+        ),
+        DurablePersistError,
+    > {
         match self.seal_state {
             RoomSealState::Open => {}
             RoomSealState::OwnershipLost => return Err(DurablePersistError::NotOwner),
@@ -955,24 +973,105 @@ impl RoomActor {
             }
         }
         let Some(store) = self.durable_store.clone() else {
-            return Ok(None);
+            return Ok((None, None));
         };
         let fence = self
             .durable_claim_fence
             .clone()
             .ok_or(DurablePersistError::OwnershipUnavailable)?;
-        let coordinates = store
-            .commit_room_mutation(&self.room.room_jid, &fence, intent)
+        let outcome = store
+            .commit_room_mutation(&self.room.room_jid, &fence, intent, effects)
             .await
             .map_err(|error| self.classify_durable_persist_error(error))?;
-        let commit = mint_room_mutation_commit(fence, coordinates);
+        let commit = mint_room_mutation_commit(fence, outcome.coordinates);
+        self.durable_coordinates = Some(outcome.coordinates);
         let _ = authorize_ephemeral_projection(commit.clone());
-        Ok(Some(commit))
+        Ok((Some(commit), outcome.reservation))
     }
 
     /// Replace config only after restoring cross-field privacy invariants.
     fn replace_config(&mut self, config: RoomConfig) {
         self.room.config = config.normalized();
+    }
+
+    fn config_effect_recipients(&self, next: &RoomConfig, plan: ConfigEffectPlan) -> Vec<FullJid> {
+        let use_post_enforcement_audience =
+            matches!(plan, ConfigEffectPlan::UnmanagedMembersOnlyPostEnforcement)
+                && !self.room.config.requires_membership()
+                && next.requires_membership();
+        self.room
+            .occupants
+            .values()
+            .filter(|occupant| {
+                !use_post_enforcement_audience || occupant.affiliation >= Affiliation::Member
+            })
+            .flat_map(|occupant| self.room.get_occupant_sessions(&occupant.nick))
+            .collect()
+    }
+
+    fn config_notification_for_update(
+        &self,
+        next: &RoomConfig,
+        plan: ConfigEffectPlan,
+    ) -> Option<ConfigChangeNotification> {
+        let status_codes = super::config_change_status_codes(&self.room.config, next);
+        if status_codes.is_empty() {
+            return None;
+        }
+        Some(ConfigChangeNotification {
+            status_codes,
+            recipients: self.config_effect_recipients(next, plan),
+        })
+    }
+
+    fn config_voice_changes_for_update(&self, next: &RoomConfig) -> Vec<OccupantVoiceChange> {
+        if self.room.config.moderated == next.moderated {
+            return Vec::new();
+        }
+
+        let current_moderation = self.room.moderation();
+        let next_moderation = crate::types::Moderation::from_moderated_flag(next.moderated);
+        self.room
+            .occupants
+            .values()
+            .flat_map(|occupant| {
+                let current_voice = occupant.role.voice(current_moderation);
+                let next_voice = occupant.role.voice(next_moderation);
+                (current_voice != next_voice)
+                    .then(|| {
+                        self.room
+                            .get_occupant_sessions(&occupant.nick)
+                            .into_iter()
+                            .map(move |session| OccupantVoiceChange {
+                                session,
+                                voice: next_voice,
+                            })
+                    })
+                    .into_iter()
+                    .flatten()
+            })
+            .collect()
+    }
+
+    fn config_effects_for_update(
+        &self,
+        next: &RoomConfig,
+        plan: ConfigEffectPlan,
+    ) -> (super::RoomMutationEffects, Option<ConfigChangeNotification>) {
+        let notification = self.config_notification_for_update(next, plan);
+        let voice_changes = self.config_voice_changes_for_update(next);
+        let effects = notification
+            .as_ref()
+            .map(|notification| {
+                super::RoomMutationEffects::config_with_voice_changes(
+                    self.room.room_jid.clone(),
+                    notification.status_codes.clone(),
+                    notification.recipients.clone(),
+                    voice_changes,
+                )
+            })
+            .unwrap_or_else(super::RoomMutationEffects::none);
+        (effects, notification)
     }
 
     /// Drop a JID from the spawn-time hydrated durable-recipient
@@ -1060,6 +1159,53 @@ impl RoomActor {
             }
         }
     }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ConfigChangeNotification {
+    pub status_codes: Vec<super::MucConfigStatusCode>,
+    pub recipients: Vec<FullJid>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ConfigMutationApplied {
+    pub revision: u64,
+    pub notification: Option<ConfigChangeNotification>,
+    pub reservation: Option<super::RoomEffectReservation>,
+}
+
+impl PartialEq<u64> for ConfigMutationApplied {
+    fn eq(&self, other: &u64) -> bool {
+        self.revision == *other
+    }
+}
+
+impl PartialEq<ConfigMutationApplied> for u64 {
+    fn eq(&self, other: &ConfigMutationApplied) -> bool {
+        *self == other.revision
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct GroupDmConfigMutationApplied {
+    pub snapshot: RoomSnapshot,
+    pub notification: Option<ConfigChangeNotification>,
+    pub reservation: Option<super::RoomEffectReservation>,
+}
+
+impl std::ops::Deref for GroupDmConfigMutationApplied {
+    type Target = RoomSnapshot;
+
+    fn deref(&self) -> &Self::Target {
+        &self.snapshot
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ConfigEffectPlan {
+    DirectAudience,
+    ManagedMembersOnlyFallback,
+    UnmanagedMembersOnlyPostEnforcement,
 }
 
 /// Hydrate this actor incarnation's durable-recipient set from the
@@ -1465,10 +1611,11 @@ impl kameo::message::Message<GetConfig> for RoomActor {
 /// Replace the room configuration.
 pub struct UpdateConfig {
     pub config: RoomConfig,
+    pub effect_plan: ConfigEffectPlan,
 }
 
 impl kameo::message::Message<UpdateConfig> for RoomActor {
-    type Reply = Result<u64, RoomMutationError>;
+    type Reply = Result<ConfigMutationApplied, RoomMutationError>;
 
     async fn handle(
         &mut self,
@@ -1476,16 +1623,26 @@ impl kameo::message::Message<UpdateConfig> for RoomActor {
         _ctx: &mut Context<Self, Self::Reply>,
     ) -> Self::Reply {
         let config = msg.config.normalized();
-        self.commit_durable(RoomDurableMutation::Config {
-            config: config.clone(),
-            waddle_id: WaddleId::new(self.room.waddle_id.clone()),
-            channel_id: ChannelId::new(self.room.channel_id.clone()),
-        })
-        .await?;
+        let (effects, notification) = self.config_effects_for_update(&config, msg.effect_plan);
+        let (_, reservation) = self
+            .commit_durable(
+                RoomDurableMutation::Config {
+                    config: config.clone(),
+                    waddle_id: WaddleId::new(self.room.waddle_id.clone()),
+                    channel_id: ChannelId::new(self.room.channel_id.clone()),
+                },
+                effects,
+            )
+            .await?;
+        self.config_durable_coordinates = self.durable_coordinates;
         self.replace_config(config);
         self.config_revision = self.config_revision.saturating_add(1);
         self.advance_room_admission_revision();
-        Ok(self.config_revision)
+        Ok(ConfigMutationApplied {
+            revision: self.config_revision,
+            notification,
+            reservation,
+        })
     }
 }
 
@@ -1495,6 +1652,7 @@ impl kameo::message::Message<UpdateConfig> for RoomActor {
 pub struct RollbackConfigIfRevision {
     pub expected_revision: u64,
     pub config: RoomConfig,
+    pub reservation: Option<super::RoomEffectReservation>,
 }
 
 impl kameo::message::Message<RollbackConfigIfRevision> for RoomActor {
@@ -1509,12 +1667,18 @@ impl kameo::message::Message<RollbackConfigIfRevision> for RoomActor {
             return Ok(false);
         }
         let config = msg.config.normalized();
-        self.commit_durable(RoomDurableMutation::Config {
-            config: config.clone(),
-            waddle_id: WaddleId::new(self.room.waddle_id.clone()),
-            channel_id: ChannelId::new(self.room.channel_id.clone()),
-        })
+        self.commit_durable(
+            RoomDurableMutation::Config {
+                config: config.clone(),
+                waddle_id: WaddleId::new(self.room.waddle_id.clone()),
+                channel_id: ChannelId::new(self.room.channel_id.clone()),
+            },
+            msg.reservation
+                .map(super::RoomMutationEffects::none_superseding)
+                .unwrap_or_else(super::RoomMutationEffects::none),
+        )
         .await?;
+        self.config_durable_coordinates = self.durable_coordinates;
         self.replace_config(config);
         self.config_revision = self.config_revision.saturating_add(1);
         self.advance_room_admission_revision();
@@ -1580,7 +1744,7 @@ impl From<DurablePersistError> for UpdateGroupDmConfigByMemberError {
 }
 
 impl kameo::message::Message<UpdateGroupDmConfigByMember> for RoomActor {
-    type Reply = Result<RoomSnapshot, UpdateGroupDmConfigByMemberError>;
+    type Reply = Result<GroupDmConfigMutationApplied, UpdateGroupDmConfigByMemberError>;
 
     async fn handle(
         &mut self,
@@ -1608,20 +1772,33 @@ impl kameo::message::Message<UpdateGroupDmConfigByMember> for RoomActor {
         let mut config = msg.config;
         config.group_dm = true;
         let config = config.normalized();
-        self.commit_durable(RoomDurableMutation::Config {
-            config: config.clone(),
-            waddle_id: WaddleId::new(self.room.waddle_id.clone()),
-            channel_id: ChannelId::new(self.room.channel_id.clone()),
-        })
-        .await?;
+        let (effects, notification) =
+            self.config_effects_for_update(&config, ConfigEffectPlan::DirectAudience);
+        let (_, reservation) = self
+            .commit_durable(
+                RoomDurableMutation::Config {
+                    config: config.clone(),
+                    waddle_id: WaddleId::new(self.room.waddle_id.clone()),
+                    channel_id: ChannelId::new(self.room.channel_id.clone()),
+                },
+                effects,
+            )
+            .await?;
+        self.config_durable_coordinates = self.durable_coordinates;
         self.replace_config(config);
         self.config_revision = self.config_revision.saturating_add(1);
         self.advance_room_admission_revision();
-        Ok(RoomSnapshot {
-            room: self.room.clone(),
-            claim_fence: self.durable_claim_fence.clone(),
-            config_revision: self.config_revision,
-            admission_revision: self.admission_revision,
+        Ok(GroupDmConfigMutationApplied {
+            snapshot: RoomSnapshot {
+                room: self.room.clone(),
+                claim_fence: self.durable_claim_fence.clone(),
+                durable_coordinates: self.durable_coordinates,
+                config_durable_coordinates: self.config_durable_coordinates,
+                config_revision: self.config_revision,
+                admission_revision: self.admission_revision,
+            },
+            notification,
+            reservation,
         })
     }
 }
@@ -1686,8 +1863,11 @@ impl kameo::message::Message<SetSubject> for RoomActor {
             setter_nick: msg.setter_nick,
             set_at: msg.set_at,
         };
-        self.commit_durable(RoomDurableMutation::Subject(Some(subject.clone())))
-            .await?;
+        self.commit_durable(
+            RoomDurableMutation::Subject(Some(subject.clone())),
+            super::RoomMutationEffects::none(),
+        )
+        .await?;
         self.room.subject = Some(subject);
         Ok(())
     }
@@ -1763,12 +1943,13 @@ impl kameo::message::Message<ChangeAffiliation> for RoomActor {
         }
         let changed = self.room.get_affiliation(&msg.jid) != msg.affiliation;
         if changed {
-            self.commit_durable(RoomDurableMutation::Affiliation(
-                super::durable::AffiliationEntry::new(
+            self.commit_durable(
+                RoomDurableMutation::Affiliation(super::durable::AffiliationEntry::new(
                     msg.jid.clone(),
                     (msg.affiliation != Affiliation::None).then_some(msg.affiliation),
-                ),
-            ))
+                )),
+                super::RoomMutationEffects::none(),
+            )
             .await?;
         } else {
             self.gate_pre_mutation_ownership()
@@ -2174,6 +2355,8 @@ impl kameo::message::Message<GetSnapshot> for RoomActor {
         Ok(RoomSnapshot {
             room: self.room.clone(),
             claim_fence: self.durable_claim_fence.clone(),
+            durable_coordinates: self.durable_coordinates,
+            config_durable_coordinates: self.config_durable_coordinates,
             config_revision: self.config_revision,
             admission_revision: self.admission_revision,
         })

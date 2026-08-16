@@ -123,6 +123,67 @@ async fn send_to_if_owner_delivers_only_to_the_owning_session() {
 }
 
 #[tokio::test]
+async fn send_to_with_write_acceptance_attaches_token_without_acknowledging_enqueue() {
+    let registry = ConnectionRegistry::new();
+    let jid = test_jid("write-accepted");
+    let (tx, mut rx) = mpsc::channel(1);
+    registry.register(jid.clone(), tx);
+    let (acceptance, mut accepted) = OutboundWriteAcceptance::new();
+
+    assert!(registry
+        .send_to_with_write_acceptance(
+            &jid,
+            Stanza::Message(make_test_message("write-accepted@example.com")),
+            acceptance,
+        )
+        .await
+        .is_sent());
+    assert!(matches!(
+        accepted.try_recv(),
+        Err(tokio::sync::oneshot::error::TryRecvError::Empty)
+    ));
+
+    let outbound = rx
+        .recv()
+        .await
+        .expect("destination dequeues outbound frame");
+    assert_eq!(outbound.kind, DeliveryKind::DirectFrame);
+    assert!(matches!(
+        accepted.try_recv(),
+        Err(tokio::sync::oneshot::error::TryRecvError::Empty)
+    ));
+
+    assert!(outbound.write_acceptance.is_some());
+    drop(outbound);
+    assert!(matches!(
+        accepted.try_recv(),
+        Err(tokio::sync::oneshot::error::TryRecvError::Closed)
+    ));
+}
+
+#[tokio::test]
+async fn send_to_with_write_acceptance_not_connected_never_acknowledges() {
+    let registry = ConnectionRegistry::new();
+    let jid = test_jid("absent");
+    let (acceptance, mut accepted) = OutboundWriteAcceptance::new();
+
+    assert!(matches!(
+        registry
+            .send_to_with_write_acceptance(
+                &jid,
+                Stanza::Message(make_test_message("absent@example.com")),
+                acceptance,
+            )
+            .await,
+        SendResult::NotConnected
+    ));
+    assert!(matches!(
+        accepted.try_recv(),
+        Err(tokio::sync::oneshot::error::TryRecvError::Closed)
+    ));
+}
+
+#[tokio::test]
 async fn test_register_entry_preserves_prebuilt_entry_state_and_sender() {
     let registry = ConnectionRegistry::new();
     let jid: FullJid = "user@example.com/web".parse().unwrap();

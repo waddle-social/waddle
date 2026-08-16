@@ -1851,6 +1851,7 @@ mod tests {
             room_jid: &'a jid::BareJid,
             fence: &'a waddle_xmpp::muc::RoomClaimFenceContext,
             intent: waddle_xmpp::muc::RoomDurableMutation,
+            _effects: waddle_xmpp::muc::RoomMutationEffects,
         ) -> waddle_xmpp::muc::RoomCommitFuture<'a> {
             if let Err(error) = validate_local_room_fence(room_jid, fence) {
                 return Box::pin(async move {
@@ -1869,9 +1870,12 @@ mod tests {
                     self.persisted
                         .store(true, std::sync::atomic::Ordering::SeqCst);
                 }
-                Ok(waddle_xmpp::muc::RoomCommittedCoordinates {
-                    lifecycle: waddle_xmpp::muc::RoomLifecycleId::generate(),
-                    revision: waddle_xmpp::muc::RoomRevision::initial(),
+                Ok(waddle_xmpp::muc::RoomCommitOutcome {
+                    coordinates: waddle_xmpp::muc::RoomCommittedCoordinates {
+                        lifecycle: waddle_xmpp::muc::RoomLifecycleId::generate(),
+                        revision: waddle_xmpp::muc::RoomRevision::initial(),
+                    },
+                    reservation: None,
                 })
             })
         }
@@ -1954,6 +1958,7 @@ mod tests {
                             persistent: true,
                             ..waddle_xmpp::muc::RoomConfig::default()
                         },
+                        effect_plan: waddle_xmpp::muc::room_actor::ConfigEffectPlan::DirectAudience,
                     })
                     .await
             }

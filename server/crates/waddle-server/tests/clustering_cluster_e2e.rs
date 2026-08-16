@@ -1985,7 +1985,7 @@ async fn deposed_owner_with_live_socket_room_actor_scenario() {
     use waddle_xmpp::muc::durable::{
         DurableRoomState, MucDurableFuture, MucDurableStore, RoomClaimFenceContext,
     };
-    use waddle_xmpp::muc::room_actor::{HealthCheck, UpdateConfig};
+    use waddle_xmpp::muc::room_actor::{ConfigEffectPlan, HealthCheck, UpdateConfig};
     use waddle_xmpp::muc::{RoomConfig, RoomRegistry};
     use waddle_xmpp::ownership::{
         ClaimStore, Entity, EntityType, NodeIdentity, SharedNodeIdentity,
@@ -2051,6 +2051,7 @@ async fn deposed_owner_with_live_socket_room_actor_scenario() {
             room_jid: &'a jid::BareJid,
             fence: &'a RoomClaimFenceContext,
             intent: waddle_xmpp::muc::RoomDurableMutation,
+            _effects: waddle_xmpp::muc::RoomMutationEffects,
         ) -> waddle_xmpp::muc::RoomCommitFuture<'a> {
             if let Err(error) = self.validate_fence(room_jid, fence) {
                 return Box::pin(async move {
@@ -2062,9 +2063,12 @@ async fn deposed_owner_with_live_socket_room_actor_scenario() {
                 return Box::pin(pending()) as Pin<Box<_>>;
             }
             Box::pin(async move {
-                Ok(waddle_xmpp::muc::RoomCommittedCoordinates {
-                    lifecycle: waddle_xmpp::muc::RoomLifecycleId::generate(),
-                    revision: waddle_xmpp::muc::RoomRevision::initial(),
+                Ok(waddle_xmpp::muc::RoomCommitOutcome {
+                    coordinates: waddle_xmpp::muc::RoomCommittedCoordinates {
+                        lifecycle: waddle_xmpp::muc::RoomLifecycleId::generate(),
+                        revision: waddle_xmpp::muc::RoomRevision::initial(),
+                    },
+                    reservation: None,
                 })
             })
         }
@@ -2134,6 +2138,7 @@ async fn deposed_owner_with_live_socket_room_actor_scenario() {
     actor_ref
         .tell(UpdateConfig {
             config: RoomConfig::default(),
+            effect_plan: ConfigEffectPlan::DirectAudience,
         })
         .await
         .expect("enqueue post-publication mutation wedge");

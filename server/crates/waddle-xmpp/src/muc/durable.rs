@@ -40,8 +40,14 @@ use crate::ownership::{ClaimEpoch, CurrentNodeIdentityGuard, Entity, NodeIdentit
 use crate::types::Affiliation;
 use crate::XmppError;
 
+mod effects;
 pub mod lifecycle;
 
+pub use effects::{
+    AdminPresenceKind, DestroyPassword, DestroyReason, DestroyRecipient, MucOccupantNick,
+    OccupantPresenceUpdate, OccupantVoiceChange, RoomEffect, RoomEffectKind, RoomEffectReservation,
+    RoomEffectStagingClass, RoomMutationEffects,
+};
 pub use lifecycle::{
     DestroyAttemptId, EphemeralProjectionAuthorization, RoomCommittedCoordinates, RoomEffectIntent,
     RoomEffectOrdinal, RoomLifecycleId, RoomLifecycleState, RoomMutationCommit, RoomRevision,
@@ -67,7 +73,14 @@ pub type MucDurableFuture<'a, T> = Pin<Box<dyn Future<Output = Result<T, XmppErr
 
 /// Boxed future returned by [`MucDurableStore::commit_room_mutation`].
 pub type RoomCommitFuture<'a> =
-    Pin<Box<dyn Future<Output = Result<RoomCommittedCoordinates, RoomCommitError>> + Send + 'a>>;
+    Pin<Box<dyn Future<Output = Result<RoomCommitOutcome, RoomCommitError>> + Send + 'a>>;
+
+/// Durable coordinates plus the reservation for effects staged by this commit.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RoomCommitOutcome {
+    pub coordinates: RoomCommittedCoordinates,
+    pub reservation: Option<RoomEffectReservation>,
+}
 
 /// One durable affiliation delta carried by [`RoomDurableMutation`].
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -212,6 +225,13 @@ pub enum RoomCommitError {
     StateMissing,
     #[error("room create lost the race to a different durable room identity")]
     CreateConflict,
+    #[error("room mutation effects belong to a different room")]
+    EffectRoomJidMismatch {
+        mutation_room_jid: BareJid,
+        effects_room_jid: Option<BareJid>,
+    },
+    #[error("room mutation effects require a revision-advancing commit")]
+    EffectsRequireRevision,
     #[error("room mutation commit failed")]
     Database(#[source] RoomCommitDatabaseError),
 }
@@ -248,6 +268,7 @@ impl RoomClaimFenceContext {
 /// accepting any join.
 #[derive(Debug, Clone)]
 pub struct DurableRoomState {
+    pub coordinates: Option<RoomCommittedCoordinates>,
     pub waddle_id: String,
     pub channel_id: String,
     pub config: RoomConfig,
@@ -316,6 +337,7 @@ pub trait MucDurableStore: Send + Sync {
         room_jid: &'a BareJid,
         fence: &'a RoomClaimFenceContext,
         intent: RoomDurableMutation,
+        effects: RoomMutationEffects,
     ) -> RoomCommitFuture<'a>;
 
     /// Commit with publication authority that is already held by the caller.
@@ -326,10 +348,11 @@ pub trait MucDurableStore: Send + Sync {
         room_jid: &'a BareJid,
         fence: &'a RoomClaimFenceContext,
         intent: RoomDurableMutation,
+        effects: RoomMutationEffects,
         authority: &'a CurrentNodeIdentityGuard,
     ) -> RoomCommitFuture<'a> {
         let _ = authority;
-        self.commit_room_mutation(room_jid, fence, intent)
+        self.commit_room_mutation(room_jid, fence, intent, effects)
     }
 
     /// Whether a committed destroy's server-owned completion is still

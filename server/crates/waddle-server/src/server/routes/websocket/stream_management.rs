@@ -1,5 +1,8 @@
-use super::transport_xml::{build_handled_count_too_high_stream_error, websocket_stream_close_xml};
 use super::*;
+use super::{
+    frame::{ResponseFrame, StreamErrorFrame},
+    transport_xml::websocket_stream_close_element,
+};
 
 /// Operation-owned resume claim.  Dropping an uncommitted guard returns the
 /// frozen snapshot to the registry without creating server-local claim state.
@@ -398,7 +401,7 @@ pub(super) async fn handle_sm_stanza(
     sm: SmStanza,
     state: &WebSocketState,
     ctx: SmCtx<'_>,
-) -> Vec<String> {
+) -> Vec<ResponseFrame> {
     use waddle_xmpp::stream_management::SmAck;
 
     match sm {
@@ -412,7 +415,9 @@ pub(super) async fn handle_sm_stanza(
             )
             .await
         }
-        SmStanza::Request => vec![SmAck::new(ctx.sm_state.get_inbound_count()).to_xml()],
+        SmStanza::Request => vec![ResponseFrame::from_serialized_xml(
+            SmAck::new(ctx.sm_state.get_inbound_count()).to_xml(),
+        )],
         SmStanza::Ack(ack) => apply_sm_ack(state, ctx.sm_state, ctx.phase, ack.h).await,
         SmStanza::Resume(resume) => handle_sm_resume(resume, state, ctx).await,
         // Server-origin nonzas should never arrive from a client. Ignore.
@@ -462,7 +467,7 @@ pub(super) async fn apply_sm_ack(
     sm_state: &mut StreamManagementState,
     phase: &mut ConnectionPhase,
     h: u32,
-) -> Vec<String> {
+) -> Vec<ResponseFrame> {
     // Ordering matters: the regress check MUST run before the exceeds
     // check. `ack_exceeds_outbound` is an exact mod-2^32 window from
     // last_acked, which classifies the regressed half-space as
@@ -490,8 +495,11 @@ pub(super) async fn apply_sm_ack(
         );
         *phase = ConnectionPhase::closing(phase.bound_jid().cloned());
         return vec![
-            build_handled_count_too_high_stream_error(h, send_count),
-            websocket_stream_close_xml(),
+            ResponseFrame::from(StreamErrorFrame::HandledCountTooHigh {
+                acknowledged: h,
+                send_count,
+            }),
+            ResponseFrame::from(websocket_stream_close_element()),
         ];
     }
     // Capture the PRE-acknowledge floor: the newly-acknowledged rows
@@ -540,14 +548,18 @@ async fn handle_sm_enable(
     sm_state: &mut StreamManagementState,
     phase: &ConnectionPhase,
     pending_commit: &mut Option<SmEnableCommit>,
-) -> Vec<String> {
+) -> Vec<ResponseFrame> {
     use waddle_xmpp::stream_management::{SmEnabled, SmFailed};
 
     if !phase.allows_stream_management_enable() {
-        return vec![SmFailed::with_condition("unexpected-request").to_xml()];
+        return vec![ResponseFrame::from(
+            SmFailed::with_condition("unexpected-request").to_element(),
+        )];
     }
     if sm_state.enabled || pending_commit.is_some() {
-        return vec![SmFailed::with_condition("unexpected-request").to_xml()];
+        return vec![ResponseFrame::from(
+            SmFailed::with_condition("unexpected-request").to_element(),
+        )];
     }
 
     let stream_id = uuid::Uuid::new_v4().to_string();
@@ -587,7 +599,9 @@ async fn handle_sm_enable(
                 stream_id = %stream_id,
                 "SM enable rejected because exact claim admission did not complete"
             );
-            return vec![SmFailed::with_condition("resource-constraint").to_xml()];
+            return vec![ResponseFrame::from(
+                SmFailed::with_condition("resource-constraint").to_element(),
+            )];
         };
         Some(publication)
     } else {
@@ -615,7 +629,7 @@ async fn handle_sm_enable(
         enable.resume,
         max,
     ));
-    vec![enabled.to_xml()]
+    vec![ResponseFrame::from(enabled.to_element())]
 }
 
 /// Outcome of racing [`waddle_xmpp::stream_management::InMemorySmSessionRegistry::prepare_cross_node_resume`]
@@ -721,7 +735,11 @@ pub(super) async fn attempt_cross_node_resume_raced(
     }
 }
 
-async fn handle_sm_resume(resume: SmResume, state: &WebSocketState, ctx: SmCtx<'_>) -> Vec<String> {
+async fn handle_sm_resume(
+    resume: SmResume,
+    state: &WebSocketState,
+    ctx: SmCtx<'_>,
+) -> Vec<ResponseFrame> {
     use waddle_xmpp::stream_management::{
         stamp_replay_delay, CrossNodeResumeOutcome, SmFailed, SmResumed,
     };
@@ -751,7 +769,9 @@ async fn handle_sm_resume(resume: SmResume, state: &WebSocketState, ctx: SmCtx<'
     // Stream resumption is only legal before this transport has established a
     // fresh SASL/bind lifecycle of its own.
     if !phase.allows_stream_management_resume() {
-        return vec![SmFailed::with_condition("unexpected-request").to_xml()];
+        return vec![ResponseFrame::from(
+            SmFailed::with_condition("unexpected-request").to_element(),
+        )];
     }
 
     let detached = match state
@@ -814,7 +834,9 @@ async fn handle_sm_resume(resume: SmResume, state: &WebSocketState, ctx: SmCtx<'
                         stream_id = %resume.previd,
                         "SM resume rejected: cross-node identity mismatch"
                     );
-                    return vec![SmFailed::with_condition("not-authorized").to_xml()];
+                    return vec![ResponseFrame::from(
+                        SmFailed::with_condition("not-authorized").to_element(),
+                    )];
                 }
                 Some(CrossNodeAttemptOutcome::Completed(Ok(
                     CrossNodeResumeOutcome::OwnerUnreachable,
@@ -829,7 +851,9 @@ async fn handle_sm_resume(resume: SmResume, state: &WebSocketState, ctx: SmCtx<'
                         "SM resume rejected: cross-node owner unreachable within the \
                          resume-handshake window"
                     );
-                    return vec![SmFailed::with_condition("resource-constraint").to_xml()];
+                    return vec![ResponseFrame::from(
+                        SmFailed::with_condition("resource-constraint").to_element(),
+                    )];
                 }
                 Some(CrossNodeAttemptOutcome::Completed(Ok(
                     CrossNodeResumeOutcome::StorageUnavailable,
@@ -839,7 +863,9 @@ async fn handle_sm_resume(resume: SmResume, state: &WebSocketState, ctx: SmCtx<'
                         "SM resume rejected: transient storage failure after winning the \
                          cross-node claim; claim released for retry"
                     );
-                    return vec![SmFailed::with_condition("internal-server-error").to_xml()];
+                    return vec![ResponseFrame::from(
+                        SmFailed::with_condition("internal-server-error").to_element(),
+                    )];
                 }
                 Some(CrossNodeAttemptOutcome::Completed(Ok(CrossNodeResumeOutcome::NotFound)))
                 | None => {
@@ -847,7 +873,9 @@ async fn handle_sm_resume(resume: SmResume, state: &WebSocketState, ctx: SmCtx<'
                         stream_id = %resume.previd,
                         "SM resume rejected: session not found or expired"
                     );
-                    return vec![SmFailed::with_condition("item-not-found").to_xml()];
+                    return vec![ResponseFrame::from(
+                        SmFailed::with_condition("item-not-found").to_element(),
+                    )];
                 }
                 Some(CrossNodeAttemptOutcome::Completed(Err(error))) => {
                     warn!(
@@ -855,7 +883,9 @@ async fn handle_sm_resume(resume: SmResume, state: &WebSocketState, ctx: SmCtx<'
                         %error,
                         "SM resume failed: cross-node registry error"
                     );
-                    return vec![SmFailed::with_condition("internal-server-error").to_xml()];
+                    return vec![ResponseFrame::from(
+                        SmFailed::with_condition("internal-server-error").to_element(),
+                    )];
                 }
                 Some(CrossNodeAttemptOutcome::ShutdownAbandoned) => {
                     // FIX 3: cancellation won the race before the attempt
@@ -883,7 +913,9 @@ async fn handle_sm_resume(resume: SmResume, state: &WebSocketState, ctx: SmCtx<'
         }
         Err(e) => {
             warn!(stream_id = %resume.previd, error = %e, "SM resume failed: registry error");
-            return vec![SmFailed::with_condition("internal-server-error").to_xml()];
+            return vec![ResponseFrame::from(
+                SmFailed::with_condition("internal-server-error").to_element(),
+            )];
         }
     };
 
@@ -901,12 +933,16 @@ async fn handle_sm_resume(resume: SmResume, state: &WebSocketState, ctx: SmCtx<'
         Ok(Some(principal)) => principal,
         Ok(None) => {
             claim_guard.release().await;
-            return vec![SmFailed::with_condition("not-authorized").to_xml()];
+            return vec![ResponseFrame::from(
+                SmFailed::with_condition("not-authorized").to_element(),
+            )];
         }
         Err(error) => {
             warn!(stream_id = %resume.previd, %error, "SM resume principal lookup unavailable");
             claim_guard.release().await;
-            return vec![SmFailed::with_condition("internal-server-error").to_xml()];
+            return vec![ResponseFrame::from(
+                SmFailed::with_condition("internal-server-error").to_element(),
+            )];
         }
     };
 
@@ -921,12 +957,16 @@ async fn handle_sm_resume(resume: SmResume, state: &WebSocketState, ctx: SmCtx<'
         crate::auth::session::PrincipalResolution::Missing
         | crate::auth::session::PrincipalResolution::Mismatched => {
             claim_guard.release().await;
-            return vec![SmFailed::with_condition("not-authorized").to_xml()];
+            return vec![ResponseFrame::from(
+                SmFailed::with_condition("not-authorized").to_element(),
+            )];
         }
         crate::auth::session::PrincipalResolution::StorageError(error) => {
             warn!(stream_id = %resume.previd, %error, "SM resume principal resolution unavailable");
             claim_guard.release().await;
-            return vec![SmFailed::with_condition("internal-server-error").to_xml()];
+            return vec![ResponseFrame::from(
+                SmFailed::with_condition("internal-server-error").to_element(),
+            )];
         }
     }
 
@@ -938,7 +978,9 @@ async fn handle_sm_resume(resume: SmResume, state: &WebSocketState, ctx: SmCtx<'
                 "SM resume rejected due to authenticated identity mismatch"
             );
             claim_guard.release().await;
-            return vec![SmFailed::with_condition("not-authorized").to_xml()];
+            return vec![ResponseFrame::from(
+                SmFailed::with_condition("not-authorized").to_element(),
+            )];
         }
     }
 
@@ -959,9 +1001,9 @@ async fn handle_sm_resume(resume: SmResume, state: &WebSocketState, ctx: SmCtx<'
             "SM resume rejected: replay window no longer contains every stanza required by client h"
         );
         claim_guard.release().await;
-        return vec![
-            SmFailed::resume_failed("resource-constraint", detached.inbound_count).to_xml(),
-        ];
+        return vec![ResponseFrame::from(
+            SmFailed::resume_failed("resource-constraint", detached.inbound_count).to_element(),
+        )];
     }
 
     if detached.handled_count_exceeds_outbound(resume.h) {
@@ -974,8 +1016,11 @@ async fn handle_sm_resume(resume: SmResume, state: &WebSocketState, ctx: SmCtx<'
             "SM resume rejected: handled count too high"
         );
         return vec![
-            build_handled_count_too_high_stream_error(resume.h, detached.outbound_count),
-            websocket_stream_close_xml(),
+            ResponseFrame::from(StreamErrorFrame::HandledCountTooHigh {
+                acknowledged: resume.h,
+                send_count: detached.outbound_count,
+            }),
+            ResponseFrame::from(websocket_stream_close_element()),
         ];
     }
 
@@ -998,12 +1043,16 @@ async fn handle_sm_resume(resume: SmResume, state: &WebSocketState, ctx: SmCtx<'
         crate::auth::session::PrincipalResolution::Missing
         | crate::auth::session::PrincipalResolution::Mismatched => {
             claim_guard.release().await;
-            return vec![SmFailed::with_condition("not-authorized").to_xml()];
+            return vec![ResponseFrame::from(
+                SmFailed::with_condition("not-authorized").to_element(),
+            )];
         }
         crate::auth::session::PrincipalResolution::StorageError(error) => {
             warn!(stream_id = %resume.previd, %error, "SM final principal recheck unavailable");
             claim_guard.release().await;
-            return vec![SmFailed::with_condition("internal-server-error").to_xml()];
+            return vec![ResponseFrame::from(
+                SmFailed::with_condition("internal-server-error").to_element(),
+            )];
         }
     };
 
@@ -1017,7 +1066,9 @@ async fn handle_sm_resume(resume: SmResume, state: &WebSocketState, ctx: SmCtx<'
             "SM resume rejected: detached snapshot JID diverged from durable principal"
         );
         claim_guard.release().await;
-        return vec![SmFailed::with_condition("not-authorized").to_xml()];
+        return vec![ResponseFrame::from(
+            SmFailed::with_condition("not-authorized").to_element(),
+        )];
     }
 
     // Commit the staged snapshot only after the durable recheck succeeds.
@@ -1070,11 +1121,15 @@ async fn handle_sm_resume(resume: SmResume, state: &WebSocketState, ctx: SmCtx<'
     // timeline position instead of the drain time (XEP-0198 Acks-section
     // redelivery stamping, applied to the <resumed/> replay by analogy).
     let server_domain = state.deps.auth_state.xmpp_domain.as_str();
-    let replay: Vec<String> = sm_state
+    let replay: Vec<ResponseFrame> = sm_state
         .get_stanzas_to_resend(resume.h)
         .into_iter()
         .map(|entry| {
-            stamp_replay_delay(&entry.stanza_xml, server_domain, entry.original_receipt_at)
+            ResponseFrame::from_serialized_xml(stamp_replay_delay(
+                &entry.stanza_xml,
+                server_domain,
+                entry.original_receipt_at,
+            ))
         })
         .collect();
     info!(
@@ -1085,7 +1140,9 @@ async fn handle_sm_resume(resume: SmResume, state: &WebSocketState, ctx: SmCtx<'
     );
 
     let mut responses = Vec::with_capacity(replay.len() + 1);
-    responses.push(SmResumed::new(resume.previd, sm_state.get_inbound_count()).to_xml());
+    responses.push(ResponseFrame::from(
+        SmResumed::new(resume.previd, sm_state.get_inbound_count()).to_element(),
+    ));
     responses.extend(replay);
     responses
 }
