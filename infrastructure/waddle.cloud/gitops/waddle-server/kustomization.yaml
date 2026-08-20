@@ -2,6 +2,7 @@ apiVersion: kustomize.config.k8s.io/v1beta1
 kind: Kustomization
 resources:
   - postgresql-cluster.yaml
+  - postgresql-monitoring-ingress.yaml
   - spicedb-postgres-app-user-external-secret.yaml
   - spicedb-config-external-secret.yaml
   - spicedb-postgres-cluster.yaml

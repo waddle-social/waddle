@@ -29,7 +29,7 @@ and preserves links and history.
 | File | Dashboard | Status |
 |---|---|---|
 | `01-overview.json` | Waddle overview | Panel-complete. **Message rate by kind ships dark** until #1320 wires the metric label. |
-| `02-delivery-reliability.json` | Waddle delivery reliability | Panel-complete. |
+| `02-delivery-reliability.json` | Waddle delivery reliability | Panel-complete, including the ingress shadow soak row for #1695. |
 | `03-clustering.json` | Waddle clustering | Panel-complete. **Claims released/abandoned on drain ships dark** until #1295 lands. |
 | `04-client-experience.json` | Waddle client experience | Panel-complete; all signals come from Faro in Loki. |
 | `05-calls.json` | Waddle calls | Deliberate board-wide skeleton, marked by the `skeleton` tag, until #1317, #1318, and #1319 land. |
@@ -62,4 +62,3 @@ its Mimir/Loki ruler scopes cannot publish dashboards or annotations.
    panels. Keep `schemaVersion` at the repository's current Grafana schema.
 3. Open a PR. Dashboard lint runs automatically; sync happens after merge to
    `main` when the dashboard inputs changed.
-

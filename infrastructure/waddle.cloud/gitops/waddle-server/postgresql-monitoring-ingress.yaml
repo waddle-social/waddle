@@ -1,0 +1,202 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: postgresql-monitoring-ingress
+  namespace: waddle
+  labels:
+    cnpg.io/reload: ""
+data:
+  queries: |
+    waddle_ingress_table:
+      target_databases: ["waddle"]
+      query: |
+        SELECT
+          relname AS "table",
+          pg_total_relation_size(relid) AS total_bytes,
+          n_live_tup AS live_tuples,
+          n_dead_tup AS dead_tuples
+        FROM pg_stat_user_tables
+        WHERE schemaname = 'public'
+          AND relname IN (
+          'ingress_messages',
+          'ingress_origin_aliases',
+          'ingress_sm_refs',
+          'ingress_deliveries',
+          'ingress_sm_streams',
+          'ingress_effect_intents'
+        )
+        ORDER BY relname
+      primary: true
+      metrics:
+        - table:
+            usage: LABEL
+            description: Ingress table name.
+        - total_bytes:
+            usage: GAUGE
+            description: Total on-disk bytes for the ingress table and its indexes.
+        - live_tuples:
+            usage: GAUGE
+            description: Estimated live tuples in the ingress table.
+        - dead_tuples:
+            usage: GAUGE
+            description: Estimated dead tuples in the ingress table.
+
+    waddle_ingress_gc:
+      target_databases: ["waddle"]
+      query: |
+        WITH cutoff AS (
+          SELECT now() - interval '8 days' AS value
+        )
+        SELECT
+          count(*) FILTER (
+            WHERE message.terminal_at <= cutoff.value
+              AND (
+                EXISTS (
+                  SELECT 1
+                  FROM ingress_origin_aliases alias
+                  WHERE alias.message_key = message.message_key
+                )
+                OR (
+                  NOT EXISTS (
+                    SELECT 1
+                    FROM ingress_sm_refs ref
+                    WHERE ref.message_key = message.message_key
+                  )
+                  AND NOT EXISTS (
+                    SELECT 1
+                    FROM ingress_deliveries delivery
+                    WHERE delivery.message_key = message.message_key
+                  )
+                )
+              )
+          ) AS eligible_messages,
+          coalesce(
+            extract(epoch FROM now() - min(message.terminal_at) FILTER (
+              WHERE message.terminal_at <= cutoff.value
+                AND (
+                  EXISTS (
+                    SELECT 1
+                    FROM ingress_origin_aliases alias
+                    WHERE alias.message_key = message.message_key
+                  )
+                  OR (
+                    NOT EXISTS (
+                      SELECT 1
+                      FROM ingress_sm_refs ref
+                      WHERE ref.message_key = message.message_key
+                    )
+                    AND NOT EXISTS (
+                      SELECT 1
+                      FROM ingress_deliveries delivery
+                      WHERE delivery.message_key = message.message_key
+                    )
+                  )
+                )
+            )),
+            0
+          ) AS oldest_eligible_age_seconds,
+          count(*) FILTER (
+            WHERE message.terminal_at <= cutoff.value
+              AND (
+                EXISTS (
+                  SELECT 1
+                  FROM ingress_sm_refs ref
+                  WHERE ref.message_key = message.message_key
+                )
+                OR EXISTS (
+                  SELECT 1
+                  FROM ingress_deliveries delivery
+                  WHERE delivery.message_key = message.message_key
+                )
+              )
+          ) AS retained_referenced_messages
+        FROM ingress_messages message
+        CROSS JOIN cutoff
+      primary: true
+      metrics:
+        - eligible_messages:
+            usage: GAUGE
+            description: Terminal ingress messages currently eligible for retention GC.
+        - oldest_eligible_age_seconds:
+            usage: GAUGE
+            description: Age in seconds of the oldest ingress message eligible for retention GC.
+        - retained_referenced_messages:
+            usage: GAUGE
+            description: Terminal ingress messages retained because they still have an SM reference or delivery.
+
+    waddle_ingress_messages:
+      target_databases: ["waddle"]
+      query: |
+        SELECT
+          least(floor(extract(epoch FROM now() - created_at) / 86400), 14)::text AS age_days,
+          CASE
+            WHEN terminal_at IS NULL THEN 'live'
+            WHEN EXISTS (
+              SELECT 1
+              FROM ingress_sm_refs ref
+              WHERE ref.message_key = message.message_key
+            ) OR EXISTS (
+              SELECT 1
+              FROM ingress_deliveries delivery
+              WHERE delivery.message_key = message.message_key
+            ) THEN 'terminal_referenced'
+            ELSE 'terminal_unreferenced'
+          END AS state,
+          count(*) AS count
+        FROM ingress_messages message
+        GROUP BY age_days, state
+      primary: true
+      metrics:
+        - age_days:
+            usage: LABEL
+            description: Message age bucket in days, capped at 14.
+        - state:
+            usage: LABEL
+            description: Ingress message lifecycle state.
+        - count:
+            usage: GAUGE
+            description: Number of ingress messages in the age and lifecycle-state bucket.
+
+    # Day 1 replaces these sentinel bounds with the controlled-message cohort;
+    # CNPG hot-reloads this ConfigMap without restarting PostgreSQL.
+    waddle_ingress_cohort:
+      target_databases: ["waddle"]
+      query: |
+        SELECT
+          CASE
+            WHEN terminal_at IS NULL THEN 'live'
+            WHEN EXISTS (
+              SELECT 1
+              FROM ingress_sm_refs ref
+              WHERE ref.message_key = message.message_key
+            ) OR EXISTS (
+              SELECT 1
+              FROM ingress_deliveries delivery
+              WHERE delivery.message_key = message.message_key
+            ) THEN 'terminal_referenced'
+            ELSE 'terminal_unreferenced'
+          END AS state,
+          count(*) AS count
+        FROM ingress_messages message
+        WHERE created_at >= '1970-01-01T00:00:00Z'
+          AND created_at < '1970-01-02T00:00:00Z'
+        GROUP BY state
+      primary: true
+      metrics:
+        - state:
+            usage: LABEL
+            description: Ingress message lifecycle state.
+        - count:
+            usage: GAUGE
+            description: Number of controlled-cohort ingress messages in the lifecycle state.
+
+    waddle_ingress_streams:
+      target_databases: ["waddle"]
+      query: |
+        SELECT count(*) AS open_streams
+        FROM ingress_sm_streams
+      primary: true
+      metrics:
+        - open_streams:
+            usage: GAUGE
+            description: Number of ingress shadow stream records currently open.
