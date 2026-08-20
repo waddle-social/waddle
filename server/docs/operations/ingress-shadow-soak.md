@@ -128,9 +128,10 @@ read-only except the rollout restart in the churn exercise.
    kubectl --context teleport.waddle.social-production get --raw /api/v1/nodes/production-control-plane-01/proxy/metrics
    ```
 
-4. Post the Day-0 baselines to [#1695](https://github.com/waddle-social/waddle/issues/1695): `rate(cnpg_collector_wal_bytes[10m])`, each
-   `cnpg_waddle_ingress_table_total_bytes` value as `B(T0)`, PostgreSQL
-   backend use, and `cnpg_waddle_ingress_streams_open_streams`. Record the
+4. Post the Day-0 baselines to [#1695](https://github.com/waddle-social/waddle/issues/1695): `rate(cnpg_collector_wal_bytes[10m])`,
+   `B(T0)` where `B(T) = sum(cnpg_waddle_ingress_table_total_bytes)` evaluated
+   at `T` (one scalar; also record the per-table values for context),
+   PostgreSQL backend use, and `cnpg_waddle_ingress_streams_open_streams`. Record the
    dashboard link and the two replica instance names with the post.
 
 ## Observation window
@@ -206,13 +207,13 @@ mid-window, the window restarts.
 
 | Area | Pass criterion |
 | --- | --- |
-| Completion | For each replica, `ingress_shadow_completions_total / ingress_shadow_admissions_total >= 0.999`. |
-| Candidate quality | For each replica, `parked / (parked + no_claim_fence + no_principal + no_capture) >= 0.99`, using `ingress_shadow_candidates_total`. |
+| Completion | Restart-stable, over the whole window at T0 + 10d: `sum(increase(ingress_shadow_completions_total[10d])) / sum(increase(ingress_shadow_admissions_total[10d])) >= 0.999`, and the same ratio `by (instance)` is `>= 0.999` for every pod that existed in the window (`increase` is counter-reset safe; summing over `instance` absorbs the churn-restart pod replacement). |
+| Candidate quality | Over the whole window at T0 + 10d, with `c(o) = sum(increase(ingress_shadow_candidates_total{outcome="o"}[10d]))`: `c(parked) / (c(parked) + c(no_claim_fence) + c(no_principal) + c(no_capture)) >= 0.99`, globally and `by (instance)` for every pod in the window. |
 | Cohort | At T0 + 10 days all three `cnpg_waddle_ingress_cohort_count{state}` series are present (the query always emits explicit zeros) with `terminal_unreferenced == 0` and `live == 0`; `sum(cohort at T0 + 10d) <= sum(cohort at T0 + 1d) - U1`; absence of a cohort series is a failed check, never a pass. |
 | Retained references | `cnpg_waddle_ingress_gc_retained_referenced_messages` (terminal rows past the cutoff kept alive by long-lived streams — GC rescans them on every run) at T0 + 10d is `<= 2 × (value at T0 + 5d) + 100`. |
 | Instrumentation | Every series in Day-0 step 3 is still present at T0 + 10d; `IngressShadowSeriesMissing` and `PostgresCnpgSeriesMissing` never fired. |
 | Reclamation | `cnpg_waddle_ingress_gc_eligible_messages` is never above zero for six hours; `cnpg_waddle_ingress_gc_oldest_eligible_age_seconds < 777600` (9 days); `sum(increase(ingress_shadow_gc_reclaimed_messages_total[10d])) >= U1`. |
-| Growth | Let `G1 = B(T0+5d) - B(T0)` and `G2 = B(T0+10d) - B(T0+5d)`. Pass when `G2 <= 1.5 * G1 + 16 MiB` and `B(T0+10d) < 1 GiB`. |
+| Growth | With `B(T) = sum(cnpg_waddle_ingress_table_total_bytes)` at `T`: `G1 = B(T0+5d) - B(T0)`, `G2 = B(T0+10d) - B(T0+5d)`. Pass when `G2 <= 1.5 * G1 + 16 MiB` and `B(T0+10d) < 1 GiB`. |
 | PostgreSQL | Backends stay below 80% of `max_connections`; data and WAL PVC use stay below 70% on both instances. |
 | Submission latency | p99 `ingress_shadow_tx_duration_seconds` remains below 2 seconds. |
 
@@ -274,7 +275,20 @@ COMMIT;
 ```
 
 After the message tables are empty, delete `ingress_sm_streams` in the same
-batched shape (`ORDER BY created_at, sm_ingress_id LIMIT 1000`). `DELETE`
+epoch-locked, batched shape:
+
+```sql
+BEGIN;
+SELECT epoch FROM ingress_protocol_epoch WHERE id = 1 FOR SHARE; -- must be 0
+CREATE TEMP TABLE stream_batch ON COMMIT DROP AS
+  SELECT sm_ingress_id FROM ingress_sm_streams
+  ORDER BY created_at, sm_ingress_id LIMIT 1000;
+DELETE FROM ingress_sm_streams
+  WHERE sm_ingress_id IN (SELECT sm_ingress_id FROM stream_batch);
+COMMIT;
+```
+
+`DELETE`
 only marks tuples dead: run `VACUUM (ANALYZE)` on the six tables afterwards,
 and if the goal was to give space back to the data PVC, schedule
 `VACUUM FULL` (or `pg_repack`) with the shadow disabled — it takes an

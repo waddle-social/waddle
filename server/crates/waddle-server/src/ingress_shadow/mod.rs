@@ -1546,11 +1546,15 @@ impl IngressShadowProcessor {
             }
             IngressShadowTask::Submit(submission) => {
                 let mut attempts = 0_usize;
+                let last_attempt_started = Arc::new(std::sync::Mutex::new(None::<Instant>));
                 let timed = tokio::time::timeout(
                     DEFAULT_TX_DEADLINE,
                     run_with_retry(self.retry_attempts, || {
                         attempts += 1;
                         let started = Instant::now();
+                        *last_attempt_started
+                            .lock()
+                            .expect("attempt start mutex must not be poisoned") = Some(started);
                         let submission = submission.clone();
                         async move {
                             let result = self.execute_submission(&submission).await;
@@ -1618,6 +1622,15 @@ impl IngressShadowProcessor {
                         }
                     }
                     Err(_) => {
+                        // The deadline cancelled the attempt before it could
+                        // record itself: account the cut-off attempt so slow
+                        // transactions cannot hide from the latency gate.
+                        if let Some(started) = *last_attempt_started
+                            .lock()
+                            .expect("attempt start mutex must not be poisoned")
+                        {
+                            record_submission_attempt_duration(started.elapsed());
+                        }
                         observe_retry_sequence(attempts, true);
                         observe(IngressShadowObservation::Decision {
                             stream_id,

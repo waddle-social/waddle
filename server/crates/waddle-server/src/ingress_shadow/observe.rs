@@ -141,9 +141,10 @@ pub fn observe(observation: IngressShadowObservation) {
                 handled_ordinal = handled_ordinal.map(|ordinal| ordinal.to_storage()),
                 "ingress shadow failed"
             );
-            if matches!(kind, IngressShadowRequestKind::Submit) {
-                reliability::increment_ingress_shadow_completions();
-            }
+            // Not a completion: every admitted submission terminates through
+            // `Decision` (exhaustion and timeouts are typed decision classes)
+            // or through the outstanding guard's `Aborted`; counting `Failed`
+            // here too would double-count against that guard.
         }
         IngressShadowObservation::Decision {
             stream_id,
@@ -229,6 +230,27 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn submission_failed_observation_is_not_a_completion() {
+        let metrics = waddle_xmpp::telemetry::test_support::acquire().await;
+        let completions_before = metrics
+            .counter_sum("ingress.shadow.completions", &[])
+            .unwrap_or(0);
+        observe(IngressShadowObservation::Failed {
+            kind: IngressShadowRequestKind::Submit,
+            stream_id: stream_id(),
+            claim_epoch: None,
+            handled_ordinal: None,
+        });
+        assert_eq!(
+            metrics
+                .counter_sum("ingress.shadow.completions", &[])
+                .unwrap_or(0),
+            completions_before,
+            "completions are decisions + aborted only"
+        );
+    }
+
+    #[tokio::test]
     async fn submission_admission_and_terminal_observations_balance() {
         let metrics = waddle_xmpp::telemetry::test_support::acquire().await;
         let admissions_before = metrics
@@ -252,11 +274,12 @@ mod tests {
             kind: IngressShadowRequestKind::Submit,
             stream_id: stream_id(),
         });
-        observe(IngressShadowObservation::Failed {
-            kind: IngressShadowRequestKind::Submit,
+        observe(IngressShadowObservation::Decision {
             stream_id: stream_id(),
             claim_epoch: None,
             handled_ordinal: None,
+            class: IngressShadowDecisionClass::Storage,
+            alias: IngressShadowAliasOutcome::None,
         });
 
         assert_eq!(
