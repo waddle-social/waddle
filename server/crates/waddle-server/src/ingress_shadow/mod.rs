@@ -1464,6 +1464,45 @@ fn record_submission_attempt_duration(duration: Duration) {
     );
 }
 
+/// Times exactly one submission attempt and records it exactly once: on
+/// completion through [`AttemptTimer::finish`], or — if the deadline cancels
+/// the attempt future mid-flight — from `Drop`, so slow transactions cannot
+/// hide from the latency gate. An attempt that already finished records
+/// nothing more when the enclosing future is later dropped in backoff.
+#[cfg(feature = "clustering")]
+struct AttemptTimer {
+    started: Instant,
+    recorded: bool,
+}
+
+#[cfg(feature = "clustering")]
+impl AttemptTimer {
+    fn start() -> Self {
+        Self {
+            started: Instant::now(),
+            recorded: false,
+        }
+    }
+
+    fn finish(mut self) {
+        self.record();
+    }
+
+    fn record(&mut self) {
+        if !self.recorded {
+            self.recorded = true;
+            record_submission_attempt_duration(self.started.elapsed());
+        }
+    }
+}
+
+#[cfg(feature = "clustering")]
+impl Drop for AttemptTimer {
+    fn drop(&mut self) {
+        self.record();
+    }
+}
+
 #[cfg(feature = "clustering")]
 async fn orphaned_shadow_streams(
     database: &Database,
@@ -1546,19 +1585,15 @@ impl IngressShadowProcessor {
             }
             IngressShadowTask::Submit(submission) => {
                 let mut attempts = 0_usize;
-                let last_attempt_started = Arc::new(std::sync::Mutex::new(None::<Instant>));
                 let timed = tokio::time::timeout(
                     DEFAULT_TX_DEADLINE,
                     run_with_retry(self.retry_attempts, || {
                         attempts += 1;
-                        let started = Instant::now();
-                        *last_attempt_started
-                            .lock()
-                            .expect("attempt start mutex must not be poisoned") = Some(started);
+                        let timer = AttemptTimer::start();
                         let attempt = self.execute_submission(&submission);
                         async move {
                             let result = attempt.await;
-                            record_submission_attempt_duration(started.elapsed());
+                            timer.finish();
                             result
                         }
                     }),
@@ -1622,15 +1657,8 @@ impl IngressShadowProcessor {
                         }
                     }
                     Err(_) => {
-                        // The deadline cancelled the attempt before it could
-                        // record itself: account the cut-off attempt so slow
-                        // transactions cannot hide from the latency gate.
-                        if let Some(started) = *last_attempt_started
-                            .lock()
-                            .expect("attempt start mutex must not be poisoned")
-                        {
-                            record_submission_attempt_duration(started.elapsed());
-                        }
+                        // A cancelled in-flight attempt has already recorded
+                        // itself through `AttemptTimer::drop`.
                         observe_retry_sequence(attempts, true);
                         observe(IngressShadowObservation::Decision {
                             stream_id,
