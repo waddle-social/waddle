@@ -2525,6 +2525,178 @@ mod tests {
         );
     }
 
+    #[tokio::test]
+    async fn timeout_cancelled_submission_attempt_records_once_and_observes_storage() {
+        let metrics = waddle_xmpp::telemetry::test_support::acquire().await;
+        let duration_before = metrics
+            .histogram_count("ingress.shadow.tx.duration", &[])
+            .unwrap_or(0);
+        let storage_before = metrics
+            .counter_sum("ingress.shadow.decisions", &[("class", "storage")])
+            .unwrap_or(0);
+
+        let timed = tokio::time::timeout(DEFAULT_TX_DEADLINE, async {
+            let timer = AttemptTimer::start();
+            std::future::pending::<()>().await;
+            timer.finish();
+        })
+        .await;
+
+        assert!(
+            timed.is_err(),
+            "the simulated submission must hit its deadline"
+        );
+        // This is the timeout arm of IngressShadowProcessor::execute: the
+        // cancelled AttemptTimer records from Drop, then the worker emits the
+        // typed Storage decision for the submission.
+        observe(IngressShadowObservation::Decision {
+            stream_id: SmSessionId::new("timeout-storage"),
+            claim_epoch: None,
+            handled_ordinal: None,
+            class: IngressShadowDecisionClass::Storage,
+            alias: IngressShadowAliasOutcome::None,
+        });
+
+        assert_eq!(
+            metrics
+                .histogram_count("ingress.shadow.tx.duration", &[])
+                .unwrap_or(0),
+            duration_before + 1,
+            "deadline cancellation must export exactly one duration sample"
+        );
+        assert!(
+            metrics
+                .histogram_bounds("ingress.shadow.tx.duration")
+                .expect("duration histogram must be exported")
+                .iter()
+                .any(|bound| *bound >= DEFAULT_TX_DEADLINE.as_secs_f64()),
+            "the seconds histogram must retain a bucket at or above the 2.5-second deadline"
+        );
+        assert!(
+            histogram_minimum(&metrics, "ingress.shadow.tx.duration")
+                .expect("duration histogram must preserve its sample minimum")
+                >= DEFAULT_TX_DEADLINE.as_secs_f64(),
+            "the cancelled attempt duration must be at least the 2.5-second deadline"
+        );
+        assert_eq!(
+            metrics
+                .counter_sum("ingress.shadow.decisions", &[("class", "storage")])
+                .unwrap_or(0),
+            storage_before + 1,
+            "deadline cancellation must terminate with the typed Storage decision"
+        );
+    }
+
+    #[tokio::test]
+    async fn finished_attempt_is_not_recorded_again_when_enclosing_future_is_dropped() {
+        let metrics = waddle_xmpp::telemetry::test_support::acquire().await;
+        let duration_before = metrics
+            .histogram_count("ingress.shadow.tx.duration", &[])
+            .unwrap_or(0);
+        let finished = Arc::new(Notify::new());
+        let task = tokio::spawn({
+            let finished = finished.clone();
+            async move {
+                let timer = AttemptTimer::start();
+                timer.finish();
+                finished.notify_one();
+                std::future::pending::<()>().await;
+            }
+        });
+
+        tokio::time::timeout(Duration::from_millis(250), finished.notified())
+            .await
+            .expect("attempt should finish before its enclosing future is dropped");
+        task.abort();
+        let _ = task.await;
+
+        assert_eq!(
+            metrics
+                .histogram_count("ingress.shadow.tx.duration", &[])
+                .unwrap_or(0),
+            duration_before + 1,
+            "a finished timer must not record a second duration when its future drops"
+        );
+    }
+
+    #[tokio::test]
+    async fn ingress_shadow_enabled_gauge_callback_reads_current_enabled_state() {
+        let metrics = waddle_xmpp::telemetry::test_support::acquire().await;
+        init_ingress_shadow_instruments(false, None);
+        assert_eq!(
+            observable_gauge_value(&metrics, "ingress.shadow.enabled"),
+            Some(0),
+            "disabled initialization must update the callback source to zero"
+        );
+
+        init_ingress_shadow_instruments(
+            true,
+            Some(Arc::new(std::sync::Mutex::new(
+                StreamActivityState::default(),
+            ))),
+        );
+        assert_eq!(
+            observable_gauge_value(&metrics, "ingress.shadow.enabled"),
+            Some(1),
+            "enabled initialization must update the callback source to one"
+        );
+    }
+
+    fn observable_gauge_value(
+        metrics: &waddle_xmpp::telemetry::test_support::MetricsTestGuard,
+        name: &str,
+    ) -> Option<i64> {
+        use opentelemetry_sdk::metrics::data::{AggregatedMetrics, MetricData};
+
+        // `exported()` returns every batch since the guard was acquired; an
+        // observable gauge reports its current value at each collection, so
+        // the latest batch carries the state under test.
+        let mut latest = None;
+        for resource in metrics.exported() {
+            for scope in resource.scope_metrics() {
+                for metric in scope.metrics() {
+                    if metric.name() != name {
+                        continue;
+                    }
+                    let AggregatedMetrics::I64(MetricData::Gauge(gauge)) = metric.data() else {
+                        continue;
+                    };
+                    if let Some(point) = gauge.data_points().next() {
+                        latest = Some(point.value());
+                    }
+                }
+            }
+        }
+        latest
+    }
+
+    fn histogram_minimum(
+        metrics: &waddle_xmpp::telemetry::test_support::MetricsTestGuard,
+        name: &str,
+    ) -> Option<f64> {
+        use opentelemetry_sdk::metrics::data::{AggregatedMetrics, MetricData};
+
+        for resource in metrics.exported() {
+            for scope in resource.scope_metrics() {
+                for metric in scope.metrics() {
+                    if metric.name() != name {
+                        continue;
+                    }
+                    let AggregatedMetrics::F64(MetricData::Histogram(histogram)) = metric.data()
+                    else {
+                        continue;
+                    };
+                    for point in histogram.data_points() {
+                        if let Some(minimum) = point.min() {
+                            return Some(minimum);
+                        }
+                    }
+                }
+            }
+        }
+        None
+    }
+
     fn test_handle(
         queue_capacity: usize,
         max_concurrency: usize,
@@ -3837,6 +4009,7 @@ mod tests {
 
     #[tokio::test]
     async fn successful_submission_runs_production_retention_gc() {
+        let metrics = waddle_xmpp::telemetry::test_support::acquire().await;
         let Some(fixture) = ShadowFixture::open("production_retention_gc").await else {
             return;
         };
@@ -3888,10 +4061,68 @@ mod tests {
                 ..
             })
         ));
+        let completed_before = metrics
+            .counter_sum("ingress.shadow.gc.runs", &[("outcome", "completed")])
+            .unwrap_or(0);
+        let reclaimed_before = metrics
+            .counter_sum("ingress.shadow.gc.reclaimed_messages", &[])
+            .unwrap_or(0);
         fixture.processor.run_retention_gc().await;
         assert_eq!(fixture.frontier().await, 2);
         fixture.assert_rows(1, 1, 1, 0).await;
+        assert_eq!(
+            metrics
+                .counter_sum("ingress.shadow.gc.runs", &[("outcome", "completed")])
+                .unwrap_or(0),
+            completed_before + 1,
+            "production GC must record its completed outcome"
+        );
+        assert_eq!(
+            metrics
+                .counter_sum("ingress.shadow.gc.reclaimed_messages", &[])
+                .unwrap_or(0),
+            reclaimed_before + 1,
+            "production GC must report the terminalized message it reclaimed"
+        );
         fixture.close().await;
+    }
+
+    #[tokio::test]
+    async fn retention_gc_records_failed_outcome_when_database_is_not_postgres() {
+        let metrics = waddle_xmpp::telemetry::test_support::acquire().await;
+        let database = Database::from_config(
+            "ingress-shadow-gc-non-postgres",
+            &DatabaseConfig::new(DatabaseDriver::Sqlite, "sqlite::memory:"),
+        )
+        .await
+        .expect("open deterministic non-Postgres database");
+        let processor = IngressShadowProcessor {
+            database,
+            lineage: LineageConfig {
+                deployment_uuid: None,
+                action: None,
+            },
+            node_identity: SharedNodeIdentity::new(NodeIdentity::new("gc-node", "epoch-a")),
+            retry_attempts: 0,
+            tx: Arc::new(std::sync::Mutex::new(None)),
+            enqueued_streams: Arc::new(std::sync::Mutex::new(HashSet::new())),
+            retiring_streams: Arc::new(std::sync::Mutex::new(HashSet::new())),
+            forced_alias_serialization_failures: Arc::new(AtomicUsize::new(0)),
+            forced_retirement_retryable_failures: Arc::new(AtomicUsize::new(0)),
+        };
+        let failed_before = metrics
+            .counter_sum("ingress.shadow.gc.runs", &[("outcome", "failed")])
+            .unwrap_or(0);
+
+        processor.run_retention_gc().await;
+
+        assert_eq!(
+            metrics
+                .counter_sum("ingress.shadow.gc.runs", &[("outcome", "failed")])
+                .unwrap_or(0),
+            failed_before + 1,
+            "Postgres-only GC setup failure must export the failed outcome"
+        );
     }
 
     #[tokio::test]
@@ -4037,6 +4268,61 @@ mod tests {
         })
         .await
         .expect("outstanding map should empty after forced shutdown");
+    }
+
+    #[tokio::test]
+    async fn failed_submission_then_outstanding_drop_completes_once_as_aborted() {
+        let failed_observed = Arc::new(Notify::new());
+        let handle = test_handle_with_outstanding(2, 1, {
+            let failed_observed = failed_observed.clone();
+            move |task, outstanding| {
+                let failed_observed = failed_observed.clone();
+                Box::pin(async move {
+                    if matches!(task, IngressShadowTask::Submit(_)) {
+                        let outstanding = outstanding.expect("submit must have an obligation");
+                        observe(IngressShadowObservation::Failed {
+                            kind: IngressShadowRequestKind::Submit,
+                            stream_id: outstanding.stream_id.clone(),
+                            claim_epoch: None,
+                            handled_ordinal: None,
+                        });
+                        failed_observed.notify_one();
+                        drop(outstanding);
+                    }
+                })
+            }
+        });
+        let metrics = waddle_xmpp::telemetry::test_support::acquire().await;
+        let before = submission_metrics(&metrics);
+        let failed = failed_observed.notified();
+
+        assert_eq!(
+            handle.try_submit(base_submission(Message::new(Some(Jid::from(
+                "room@conference.example.com"
+                    .parse::<BareJid>()
+                    .expect("room jid"),
+            ))))),
+            IngressShadowDisposition::Enqueued
+        );
+        tokio::time::timeout(Duration::from_millis(250), failed)
+            .await
+            .expect("worker should observe Failed before its outstanding guard drops");
+        assert!(handle.drain_and_join(Duration::from_millis(250)).await);
+
+        assert_eq!(
+            submission_metrics(&metrics),
+            IngressShadowSubmissionMetrics {
+                admissions: before.admissions + 1,
+                completions: before.completions + 1,
+                aborted: before.aborted + 1,
+            },
+            "Failed is not a completion; the armed guard must supply one aborted completion"
+        );
+        assert_eq!(
+            outstanding_count(&handle),
+            0,
+            "dropping the armed guard must release its obligation exactly once"
+        );
     }
 
     #[tokio::test]
