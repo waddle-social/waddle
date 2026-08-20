@@ -1718,7 +1718,9 @@ describe("createLocalStorageResumePersistence — localStorage adapter", () => {
     enqueueQueuedMessage("alice@example.com", {
       kind: "dm",
       id: "dm-owned-sm-tail",
-      createdAt: "2026-08-08T12:34:56.789Z",
+      // Relative: the outbound queue drops entries older than QUEUE_TTL_MS
+      // (7 days), so a pinned date silently expires the fixture.
+      createdAt: new Date(Date.now() - 60_000).toISOString(),
       peerJid: "bob@example.com",
       body: "hello from superseded recovery",
     });
