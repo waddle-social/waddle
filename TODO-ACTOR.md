@@ -35,22 +35,24 @@ Merge order within the wave: **#1642 lands first** (advisory remediation + −6k
 ## Wave 2 — after their wave-1 blockers
 
 - [OK] ⚠ **#1643** `feat(server): durable principal fence for cross-node SM resume` (after #1642) — MERGED 375ba545 (PR #1666, 2026-08-07). Both #1610 defects root-caused; custody branch deleted. Owed: post-deploy Loki checks, follow-up #1667 (expired-claim promotion). Note for #1651: do NOT resurrect harvest's fail-closed runner policy as-is — it breaks the combined global+waddle test-runner history (see PR #1666 root-cause).
-- [ ] ⚠ **#1645** `fix(server): commit durable room state before memory mutation` (after #1644) — the inversion across every durable mutation kind; boundary lock ordering; retires `OwnershipLostAfterApply`/`PersistFailed` windows. Heavy adversarial review.
+- [OK] ⚠ **#1645** `fix(server): commit durable room state before memory mutation` (after #1644) — MERGED 90240584 (PR #1692, 2026-08-14). The inversion across every durable mutation kind; boundary lock ordering; retires `OwnershipLostAfterApply`/`PersistFailed` windows. Heavy adversarial review.
 - [OK] **#1652** `feat(server): database lineage attestation at readiness` — MERGED 0b59cfca (PR #1672, 2026-08-10); enrollment-gated rollout owed.
 - [OK] ⚠ **#1653** `feat(server): expand-only foundation schema with inert epoch guards` — PR #1686: table pack, inert transaction-bound guards, manifest, and epoch-0 compatibility proof.
 
 ## Wave 3
 
-- [ ] **#1646** `feat(server): durable room effect outbox with per-lifecycle FIFO` (after #1645) — follow the `call_teardown_outbox` pattern; destroy leases + tombstone.
+- [OK] **#1646** `feat(server): durable room effect outbox with per-lifecycle FIFO` (after #1645) — follow the `call_teardown_outbox` pattern; destroy leases + tombstone. MERGED 8ea8cfe5 (PR #1694, 2026-08-16). Follow-up **#1696** (end-to-end remote write acceptance for relayed effects; needs a `deliver_ordered.vN` bump).
 - [ ] **#1647** `feat(server): one-use occupancy projection authorization` (after #1645, ∥ #1646) — occupancy + pins only; calls carved out.
-- [ ] **#1654** `feat(server): Postgres ingress unit-of-work seam and substrate repositories` (after #1652 + #1653) — dark; one-transaction-spans-everything proof.
+- [OK] **#1654** `feat(server): Postgres ingress unit-of-work seam and substrate repositories` (after #1652 + #1653) — dark; one-transaction-spans-everything proof.
 
 ## Wave 4
 
-- [ ] **#1655** `feat(server): transaction-taking MAM and inbox repositories` (after #1654) — MAM leaves its private pool; call sites untouched until cutover.
-- [ ] ⚠ **#1656** `feat(server): shadow atomic ingress transaction` (after #1655 + #1643 + #1644) — full boundary transaction on live traffic, new-tables-only; shadow health via P0.5 closed-variant vocabulary.
+- [OK] **#1655** `feat(server): transaction-taking MAM and inbox repositories` (after #1654) — MERGED 61726ad1 (PR #1691, 2026-08-12). MAM leaves its private pool; call sites untouched until cutover.
+- [OK] ⚠ **#1656** `feat(server): shadow atomic ingress transaction` (after #1655 + #1643 + #1644) — MERGED 0818f7fd (PR #1693, 2026-08-14); issue stays open as the soak-gate record. Full boundary transaction on live traffic, new-tables-only; shadow health via P0.5 closed-variant vocabulary.
 
 **⏸ Soak gate:** deploy #1656 and let the shadow run in prod until decision-class / alias-outcome / retry counts look clean. Do not collapse #1656 and #1657 into one step — the gap is the de-risking.
+
+- [ ] **#1695** `ops(server): enable WADDLE_INGRESS_SHADOW_ENABLED in prod and run the #1656 soak` — the shadow shipped **off** (prod ConfigMap verified 2026-08-20: no `WADDLE_INGRESS_SHADOW_*` key); the soak had not started. Enables the flag via `config.extraEnv` in the prod HelmRelease, adds the `waddle-ingress-shadow` Mimir alert group + dashboard row, and the runbook `server/docs/operations/ingress-shadow-soak.md` with the pass criteria and observation window. #1657 stays blocked until the window is recorded as passed on #1695.
 
 ## Wave 5
 
