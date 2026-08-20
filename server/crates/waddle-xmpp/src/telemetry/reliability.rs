@@ -897,7 +897,9 @@ mod tests {
             .collect();
 
         for word in rules.split(|c: char| !(c.is_ascii_alphanumeric() || c == '_')) {
-            if !(word.starts_with("xmpp_") || word.starts_with("waddle_call_"))
+            if !(word.starts_with("xmpp_")
+                || word.starts_with("waddle_call_")
+                || word.starts_with("ingress_shadow_"))
                 || !word.ends_with("_total")
             {
                 continue;

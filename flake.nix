@@ -239,6 +239,11 @@
               mkdir -p "$sourceRoot/../infrastructure/waddle.cloud/rules/mimir"
               cp ${./infrastructure/waddle.cloud/rules/mimir/waddle-reliability.yaml} \
                 "$sourceRoot/../infrastructure/waddle.cloud/rules/mimir/waddle-reliability.yaml"
+              # The CNPG monitoring-query drift test (waddle-server, Postgres
+              # lane) reads the ConfigMap the same way (#1695).
+              mkdir -p "$sourceRoot/../infrastructure/waddle.cloud/gitops/waddle-server"
+              cp ${./infrastructure/waddle.cloud/gitops/waddle-server/postgresql-monitoring-ingress.yaml} \
+                "$sourceRoot/../infrastructure/waddle.cloud/gitops/waddle-server/postgresql-monitoring-ingress.yaml"
             '';
           };
           serverTestArgs = testArgs // {

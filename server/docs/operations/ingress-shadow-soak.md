@@ -118,6 +118,11 @@ read-only except the rollout restart in the churn exercise.
    kubelet_volume_stats_available_bytes
    ```
 
+   `ingress_shadow_tx_duration_seconds_bucket` is the repository's first
+   classic-histogram consumer: confirm at least one `le`-labelled series is
+   queryable (not only the `_sum`/`_count`), otherwise `IngressShadowTxSlow`
+   evaluates over nothing.
+
    For the kubelet families, require the `namespace="waddle"` series for all
    four PVCs: `postgresql-1`, `postgresql-1-wal`, `postgresql-2`, and
    `postgresql-2-wal`. Inspect the two direct scrape sources read-only when a
@@ -214,6 +219,10 @@ mid-window, the window restarts.
 | Cohort | At T0 + 10 days all three `cnpg_waddle_ingress_cohort_count{state}` series are present (the query always emits explicit zeros) with `terminal_unreferenced == 0` and `live == 0`; `sum(cohort at T0 + 10d) <= sum(cohort at T0 + 1d) - U1`; absence of a cohort series is a failed check, never a pass. |
 | Retained references | `cnpg_waddle_ingress_gc_retained_referenced_messages` (terminal rows past the cutoff kept alive by long-lived streams — GC rescans them on every run) at T0 + 10d is `<= 2 × (value at T0 + 5d) + 100`. |
 | Instrumentation | Every series in Day-0 step 3 is still present at T0 + 10d; `IngressShadowSeriesMissing`, `PostgresCnpgSeriesMissing` and `IngressShadowCnpgQueriesMissing` never fired. |
+| Reclamation | GC is event-driven (it runs after successful submissions and retirements), so the backlog criterion carries the same traffic qualification as `IngressShadowGcBacklog`: `cnpg_waddle_ingress_gc_eligible_messages` is never above zero for six hours **while** `sum(increase(ingress_shadow_admissions_total[6h])) > 0`; an idle backlog is bounded instead by `cnpg_waddle_ingress_gc_oldest_eligible_age_seconds < 777600` (9 days) throughout; `sum(increase(ingress_shadow_gc_reclaimed_messages_total[10d])) >= U1`. |
+| Growth | With `B(T) = sum(cnpg_waddle_ingress_table_total_bytes)` at `T`: `G1 = B(T0+5d) - B(T0)`, `G2 = B(T0+10d) - B(T0+5d)`. Pass when `G2 <= 1.5 * G1 + 16 MiB` and `B(T0+10d) < 1 GiB`. |
+| PostgreSQL | Backends stay below 80% of `max_connections`; data and WAL PVC use stay below 70% on both instances. |
+| Submission latency | p99 `ingress_shadow_tx_duration_seconds` remains below 2 seconds. |
 
 Known instrumentation limit: retention GC runs under the worker's 2.5 s
 transaction deadline and commits per candidate, so a GC run that times out
@@ -222,10 +231,6 @@ does not count. `IngressShadowGcFailing` firing is therefore a soak finding
 against #1656's GC budget (tracked as a follow-up issue), and the cohort
 state metrics — not the reclaimed counter — are the primary reclamation
 evidence.
-| Reclamation | GC is event-driven (it runs after successful submissions and retirements), so the backlog criterion carries the same traffic qualification as `IngressShadowGcBacklog`: `cnpg_waddle_ingress_gc_eligible_messages` is never above zero for six hours **while** `sum(increase(ingress_shadow_admissions_total[6h])) > 0`; an idle backlog is bounded instead by `cnpg_waddle_ingress_gc_oldest_eligible_age_seconds < 777600` (9 days) throughout; `sum(increase(ingress_shadow_gc_reclaimed_messages_total[10d])) >= U1`. |
-| Growth | With `B(T) = sum(cnpg_waddle_ingress_table_total_bytes)` at `T`: `G1 = B(T0+5d) - B(T0)`, `G2 = B(T0+10d) - B(T0+5d)`. Pass when `G2 <= 1.5 * G1 + 16 MiB` and `B(T0+10d) < 1 GiB`. |
-| PostgreSQL | Backends stay below 80% of `max_connections`; data and WAL PVC use stay below 70% on both instances. |
-| Submission latency | p99 `ingress_shadow_tx_duration_seconds` remains below 2 seconds. |
 
 ## Loki checks
 

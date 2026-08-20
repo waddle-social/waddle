@@ -1193,6 +1193,44 @@ async fn postgres_incompatible_ingress_schema_drift_fails_without_recording_new_
     drop_postgres_schema(&admin, &schema).await;
 }
 
+/// Runs without PostgreSQL: the extractor must accept the checked-in
+/// ConfigMap exactly as formatted, so a parser/format drift fails here and
+/// not only in the Postgres lane.
+#[test]
+fn ingress_monitoring_configmap_extracts_every_query() {
+    let yaml_path = monitoring_configmap_path();
+    let yaml = fs::read_to_string(&yaml_path).unwrap_or_else(|error| {
+        panic!(
+            "read ingress monitoring ConfigMap at {} (is the flake.nix postUnpack copy intact?): {error}",
+            yaml_path.display()
+        )
+    });
+    let queries = extract_monitoring_queries(&yaml).expect("extract ingress monitoring queries");
+    let names: Vec<&str> = queries.iter().map(|query| query.name.as_str()).collect();
+    assert_eq!(names, EXPECTED_MONITORING_QUERIES);
+    for query in &queries {
+        assert!(
+            !query.metrics.is_empty() && query.sql.contains("FROM"),
+            "query {} extracted without metrics or SQL",
+            query.name
+        );
+    }
+}
+
+const EXPECTED_MONITORING_QUERIES: [&str; 5] = [
+    "waddle_ingress_table",
+    "waddle_ingress_gc",
+    "waddle_ingress_messages",
+    "waddle_ingress_cohort",
+    "waddle_ingress_streams",
+];
+
+fn monitoring_configmap_path() -> PathBuf {
+    PathBuf::from(env!("CARGO_MANIFEST_DIR")).join(
+        "../../../infrastructure/waddle.cloud/gitops/waddle-server/postgresql-monitoring-ingress.yaml",
+    )
+}
+
 #[derive(Debug)]
 struct MonitoringQuery {
     name: String,
@@ -1206,34 +1244,21 @@ async fn postgres_monitoring_queries_match_migrated_ingress_schema() {
         eprintln!("skipping: WADDLE_TEST_POSTGRES_URL not set (ingress monitoring queries)");
         return;
     };
-    let yaml_path = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join(
-        "../../../infrastructure/waddle.cloud/gitops/waddle-server/postgresql-monitoring-ingress.yaml",
-    );
-    let yaml = match fs::read_to_string(&yaml_path) {
-        Ok(yaml) => yaml,
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-            eprintln!(
-                "skipping: ingress monitoring ConfigMap is absent at {} (packaged build)",
-                yaml_path.display()
-            );
-            return;
-        }
-        Err(error) => panic!(
-            "read ingress monitoring ConfigMap at {}: {error}",
+    let yaml_path = monitoring_configmap_path();
+    // Never skip on a missing file: the nix test lanes materialize this
+    // path through `testArgs.postUnpack` in flake.nix, and a silent skip
+    // would turn this guard green-by-absence (same rule as the Mimir-rules
+    // guard in waddle-xmpp).
+    let yaml = fs::read_to_string(&yaml_path).unwrap_or_else(|error| {
+        panic!(
+            "read ingress monitoring ConfigMap at {} (is the flake.nix postUnpack copy intact?): {error}",
             yaml_path.display()
-        ),
-    };
+        )
+    });
     let queries = extract_monitoring_queries(&yaml).expect("extract ingress monitoring queries");
     let names: Vec<&str> = queries.iter().map(|query| query.name.as_str()).collect();
     assert_eq!(
-        names,
-        [
-            "waddle_ingress_table",
-            "waddle_ingress_gc",
-            "waddle_ingress_messages",
-            "waddle_ingress_cohort",
-            "waddle_ingress_streams",
-        ],
+        names, EXPECTED_MONITORING_QUERIES,
         "the ConfigMap query set changed; update this test's expectations deliberately"
     );
 
@@ -1479,7 +1504,7 @@ fn extract_query_block(
 
     let mut metrics = Vec::new();
     for (offset, line) in lines[metrics_start + 1..end].iter().enumerate() {
-        if line.trim().is_empty() {
+        if line.trim().is_empty() || line.trim_start().starts_with('#') {
             continue;
         }
         if let Some(metric) = line.strip_prefix("        - ") {
