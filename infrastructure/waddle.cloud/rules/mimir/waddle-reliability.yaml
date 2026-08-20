@@ -152,7 +152,7 @@ groups:
             team: waddle
           annotations:
             runbook: https://github.com/waddle-social/waddle/blob/main/server/docs/operations/ingress-shadow-soak.md ; https://github.com/waddle-social/waddle/issues/1695
-            soak-temporary: "removed with the shadow in #1657"
+            lifecycle: "soak-temporary — removed with the shadow in #1657"
             summary: A waddle-server replica has not reported ingress shadow enabled for 10m.
         - alert: IngressShadowDisabledReplica
           expr: max by (instance) (ingress_shadow_skips_total{reason="disabled"}) > 0
@@ -162,7 +162,7 @@ groups:
             team: waddle
           annotations:
             runbook: https://github.com/waddle-social/waddle/blob/main/server/docs/operations/ingress-shadow-soak.md ; https://github.com/waddle-social/waddle/issues/1695
-            soak-temporary: "removed with the shadow in #1657"
+            lifecycle: "soak-temporary — removed with the shadow in #1657"
             summary: A replica is dropping ingress shadow work because the feature is disabled.
         - alert: IngressShadowClosedDrops
           expr: sum(increase(ingress_shadow_skips_total{reason="closed"}[10m])) > 0
@@ -171,7 +171,7 @@ groups:
             team: waddle
           annotations:
             runbook: https://github.com/waddle-social/waddle/blob/main/server/docs/operations/ingress-shadow-soak.md ; https://github.com/waddle-social/waddle/issues/1695
-            soak-temporary: "removed with the shadow in #1657"
+            lifecycle: "soak-temporary — removed with the shadow in #1657"
             summary: Ingress shadow submissions were dropped because intake was closed.
         - alert: IngressShadowSaturated
           expr: sum(increase(ingress_shadow_skips_total{reason=~"queue_full|parking_full"}[15m])) > 0
@@ -180,7 +180,7 @@ groups:
             team: waddle
           annotations:
             runbook: https://github.com/waddle-social/waddle/blob/main/server/docs/operations/ingress-shadow-soak.md ; https://github.com/waddle-social/waddle/issues/1695
-            soak-temporary: "removed with the shadow in #1657"
+            lifecycle: "soak-temporary — removed with the shadow in #1657"
             summary: Ingress shadow intake saturated and started dropping work.
         - alert: IngressShadowStalledSubmission
           expr: max by (instance) (ingress_shadow_oldest_outstanding_submission_age_seconds) > 30
@@ -190,7 +190,7 @@ groups:
             team: waddle
           annotations:
             runbook: https://github.com/waddle-social/waddle/blob/main/server/docs/operations/ingress-shadow-soak.md ; https://github.com/waddle-social/waddle/issues/1695
-            soak-temporary: "removed with the shadow in #1657"
+            lifecycle: "soak-temporary — removed with the shadow in #1657"
             summary: A replica has had an outstanding ingress shadow submission older than 30s for 5m.
         - alert: IngressShadowAborted
           expr: sum(increase(ingress_shadow_aborted_total[1h])) > 0
@@ -199,7 +199,7 @@ groups:
             team: waddle
           annotations:
             runbook: "expected only during the declared churn restart; record the count on #1695. https://github.com/waddle-social/waddle/blob/main/server/docs/operations/ingress-shadow-soak.md ; https://github.com/waddle-social/waddle/issues/1695"
-            soak-temporary: "removed with the shadow in #1657"
+            lifecycle: "soak-temporary — removed with the shadow in #1657"
             summary: Ingress shadow submissions were aborted before completion in the last hour.
         - alert: IngressShadowCandidateStarvation
           expr: sum by (instance) (increase(ingress_shadow_candidates_total{outcome=~"no_claim_fence|no_principal|no_capture"}[30m])) > sum by (instance) (increase(ingress_shadow_candidates_total{outcome="parked"}[30m]))
@@ -209,7 +209,7 @@ groups:
             team: waddle
           annotations:
             runbook: https://github.com/waddle-social/waddle/blob/main/server/docs/operations/ingress-shadow-soak.md ; https://github.com/waddle-social/waddle/issues/1695
-            soak-temporary: "removed with the shadow in #1657"
+            lifecycle: "soak-temporary — removed with the shadow in #1657"
             summary: Candidate gating exclusions are outpacing parked ingress shadow submissions on a replica.
         - alert: IngressShadowAliasConflict
           expr: sum(increase(ingress_shadow_alias_outcomes_total{outcome="conflict"}[1h])) > 0
@@ -218,7 +218,7 @@ groups:
             team: waddle
           annotations:
             runbook: https://github.com/waddle-social/waddle/blob/main/server/docs/operations/ingress-shadow-soak.md ; https://github.com/waddle-social/waddle/issues/1695
-            soak-temporary: "removed with the shadow in #1657"
+            lifecycle: "soak-temporary — removed with the shadow in #1657"
             summary: Ingress shadow alias enrollment hit a conflict in the last hour.
         - alert: IngressShadowRetryExhausted
           expr: sum(increase(ingress_shadow_tx_retries_total{outcome="exhausted"}[1h])) > 0
@@ -227,7 +227,7 @@ groups:
             team: waddle
           annotations:
             runbook: https://github.com/waddle-social/waddle/blob/main/server/docs/operations/ingress-shadow-soak.md ; https://github.com/waddle-social/waddle/issues/1695
-            soak-temporary: "removed with the shadow in #1657"
+            lifecycle: "soak-temporary — removed with the shadow in #1657"
             summary: Ingress shadow transaction retries exhausted in the last hour.
         - alert: IngressShadowInfraDecisions
           expr: sum(increase(ingress_shadow_decisions_total{class=~"storage|serialization_exhaustion|capture_overflow"}[1h])) > 0
@@ -236,7 +236,7 @@ groups:
             team: waddle
           annotations:
             runbook: https://github.com/waddle-social/waddle/blob/main/server/docs/operations/ingress-shadow-soak.md ; https://github.com/waddle-social/waddle/issues/1695
-            soak-temporary: "removed with the shadow in #1657"
+            lifecycle: "soak-temporary — removed with the shadow in #1657"
             summary: Ingress shadow recorded infrastructure-related failure decisions in the last hour.
         - alert: IngressShadowGcFailing
           expr: sum(increase(ingress_shadow_gc_runs_total{outcome=~"failed|timed_out"}[1h])) > 0
@@ -245,7 +245,7 @@ groups:
             team: waddle
           annotations:
             runbook: https://github.com/waddle-social/waddle/blob/main/server/docs/operations/ingress-shadow-soak.md ; https://github.com/waddle-social/waddle/issues/1695
-            soak-temporary: "removed with the shadow in #1657"
+            lifecycle: "soak-temporary — removed with the shadow in #1657"
             summary: Ingress shadow retention GC failed or timed out in the last hour.
         - alert: IngressShadowGcBacklog
           expr: max(cnpg_waddle_ingress_gc_eligible_messages) > 0
@@ -255,7 +255,7 @@ groups:
             team: waddle
           annotations:
             runbook: https://github.com/waddle-social/waddle/blob/main/server/docs/operations/ingress-shadow-soak.md ; https://github.com/waddle-social/waddle/issues/1695
-            soak-temporary: "removed with the shadow in #1657"
+            lifecycle: "soak-temporary — removed with the shadow in #1657"
             summary: GC-eligible ingress shadow messages persisted for 6h.
         - alert: IngressShadowGcAge
           expr: max(cnpg_waddle_ingress_gc_oldest_eligible_age_seconds) > 777600
@@ -264,7 +264,7 @@ groups:
             team: waddle
           annotations:
             runbook: https://github.com/waddle-social/waddle/blob/main/server/docs/operations/ingress-shadow-soak.md ; https://github.com/waddle-social/waddle/issues/1695
-            soak-temporary: "removed with the shadow in #1657"
+            lifecycle: "soak-temporary — removed with the shadow in #1657"
             summary: The oldest GC-eligible ingress shadow message is older than 9 days.
         - alert: IngressShadowTxSlow
           expr: histogram_quantile(0.99, sum by (le) (rate(ingress_shadow_tx_duration_seconds_bucket[10m]))) > 2
@@ -274,7 +274,7 @@ groups:
             team: waddle
           annotations:
             runbook: https://github.com/waddle-social/waddle/blob/main/server/docs/operations/ingress-shadow-soak.md ; https://github.com/waddle-social/waddle/issues/1695
-            soak-temporary: "removed with the shadow in #1657"
+            lifecycle: "soak-temporary — removed with the shadow in #1657"
             summary: The ingress shadow transaction p99 exceeded 2 seconds for 30m.
         - alert: PostgresBackendsHigh
           expr: max by (instance) (sum by (instance) (cnpg_backends_total) / on (instance) group_left() cnpg_pg_settings_setting{name="max_connections"}) > 0.8
