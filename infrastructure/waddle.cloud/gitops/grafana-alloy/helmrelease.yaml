@@ -154,10 +154,15 @@ spec:
             }
           }
 
+          // 60s: the custom ingress queries scan ingress_messages on the
+          // primary; these are 8-day-retention gauges and gain nothing
+          // from a 30s cadence. The timeout keeps a slow collection from
+          // stacking scrapes.
           prometheus.scrape "cnpg" {
             targets         = discovery.relabel.cnpg.output
             forward_to      = [otelcol.receiver.prometheus.cnpg.receiver]
-            scrape_interval = "30s"
+            scrape_interval = "60s"
+            scrape_timeout  = "20s"
           }
 
           otelcol.receiver.prometheus "cnpg" {
@@ -184,6 +189,10 @@ spec:
               regex         = "(.+)"
               target_label  = "__metrics_path__"
               replacement   = "/api/v1/nodes/$1/proxy/metrics"
+            }
+            rule {
+              source_labels = ["__meta_kubernetes_node_name"]
+              target_label  = "instance"
             }
             rule {
               target_label = "job"

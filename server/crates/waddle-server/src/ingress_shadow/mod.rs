@@ -394,8 +394,10 @@ fn init_ingress_shadow_instruments(
     INSTRUMENTS.get_or_init(|| IngressShadowInstruments {
         _enabled: opentelemetry::global::meter("waddle-server")
             .i64_observable_gauge("ingress.shadow.enabled")
+            // No unit on purpose: the OTLP→Prometheus translation appends
+            // `_ratio` to unit-"1" gauges, which would rename the series the
+            // soak alerts select (`ingress_shadow_enabled`).
             .with_description("Whether the ingress-shadow worker is enabled for this replica.")
-            .with_unit("1")
             .with_callback({
                 let state = state.clone();
                 move |observer| {

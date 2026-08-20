@@ -44,74 +44,33 @@ data:
     waddle_ingress_gc:
       target_databases: ["waddle"]
       query: |
+        -- Bounded by the partial terminal_at index; `eligible` is exactly the
+        -- substrate GC candidate predicate (ingress_substrate::expired_candidates).
+        -- Uncorrelated IN (SELECT ...) lets PostgreSQL use hashed subplans
+        -- instead of per-row probes.
         WITH cutoff AS (
           SELECT now() - interval '8 days' AS value
+        ),
+        expired AS (
+          SELECT
+            message.message_key,
+            message.terminal_at,
+            message.message_key IN (SELECT alias.message_key FROM ingress_origin_aliases alias) AS has_alias,
+            message.message_key IN (SELECT ref.message_key FROM ingress_sm_refs ref) AS has_ref,
+            message.message_key IN (SELECT delivery.message_key FROM ingress_deliveries delivery) AS has_delivery
+          FROM ingress_messages message
+          CROSS JOIN cutoff
+          WHERE message.terminal_at IS NOT NULL
+            AND message.terminal_at <= cutoff.value
         )
         SELECT
-          count(*) FILTER (
-            WHERE message.terminal_at <= cutoff.value
-              AND (
-                EXISTS (
-                  SELECT 1
-                  FROM ingress_origin_aliases alias
-                  WHERE alias.message_key = message.message_key
-                )
-                OR (
-                  NOT EXISTS (
-                    SELECT 1
-                    FROM ingress_sm_refs ref
-                    WHERE ref.message_key = message.message_key
-                  )
-                  AND NOT EXISTS (
-                    SELECT 1
-                    FROM ingress_deliveries delivery
-                    WHERE delivery.message_key = message.message_key
-                  )
-                )
-              )
-          ) AS eligible_messages,
+          count(*) FILTER (WHERE has_alias OR (NOT has_ref AND NOT has_delivery)) AS eligible_messages,
           coalesce(
-            extract(epoch FROM now() - min(message.terminal_at) FILTER (
-              WHERE message.terminal_at <= cutoff.value
-                AND (
-                  EXISTS (
-                    SELECT 1
-                    FROM ingress_origin_aliases alias
-                    WHERE alias.message_key = message.message_key
-                  )
-                  OR (
-                    NOT EXISTS (
-                      SELECT 1
-                      FROM ingress_sm_refs ref
-                      WHERE ref.message_key = message.message_key
-                    )
-                    AND NOT EXISTS (
-                      SELECT 1
-                      FROM ingress_deliveries delivery
-                      WHERE delivery.message_key = message.message_key
-                    )
-                  )
-                )
-            )),
+            extract(epoch FROM now() - min(terminal_at) FILTER (WHERE has_alias OR (NOT has_ref AND NOT has_delivery))),
             0
           ) AS oldest_eligible_age_seconds,
-          count(*) FILTER (
-            WHERE message.terminal_at <= cutoff.value
-              AND (
-                EXISTS (
-                  SELECT 1
-                  FROM ingress_sm_refs ref
-                  WHERE ref.message_key = message.message_key
-                )
-                OR EXISTS (
-                  SELECT 1
-                  FROM ingress_deliveries delivery
-                  WHERE delivery.message_key = message.message_key
-                )
-              )
-          ) AS retained_referenced_messages
-        FROM ingress_messages message
-        CROSS JOIN cutoff
+          count(*) FILTER (WHERE has_ref OR has_delivery) AS retained_referenced_messages
+        FROM expired
       primary: true
       metrics:
         - eligible_messages:
@@ -128,18 +87,12 @@ data:
       target_databases: ["waddle"]
       query: |
         SELECT
-          least(floor(extract(epoch FROM now() - created_at) / 86400), 14)::text AS age_days,
+          least(floor(extract(epoch FROM now() - message.created_at) / 86400), 14)::text AS age_days,
           CASE
-            WHEN terminal_at IS NULL THEN 'live'
-            WHEN EXISTS (
-              SELECT 1
-              FROM ingress_sm_refs ref
-              WHERE ref.message_key = message.message_key
-            ) OR EXISTS (
-              SELECT 1
-              FROM ingress_deliveries delivery
-              WHERE delivery.message_key = message.message_key
-            ) THEN 'terminal_referenced'
+            WHEN message.terminal_at IS NULL THEN 'live'
+            WHEN message.message_key IN (SELECT ref.message_key FROM ingress_sm_refs ref)
+              OR message.message_key IN (SELECT delivery.message_key FROM ingress_deliveries delivery)
+              THEN 'terminal_referenced'
             ELSE 'terminal_unreferenced'
           END AS state,
           count(*) AS count
@@ -162,25 +115,30 @@ data:
     waddle_ingress_cohort:
       target_databases: ["waddle"]
       query: |
-        SELECT
-          CASE
-            WHEN terminal_at IS NULL THEN 'live'
-            WHEN EXISTS (
-              SELECT 1
-              FROM ingress_sm_refs ref
-              WHERE ref.message_key = message.message_key
-            ) OR EXISTS (
-              SELECT 1
-              FROM ingress_deliveries delivery
-              WHERE delivery.message_key = message.message_key
-            ) THEN 'terminal_referenced'
-            ELSE 'terminal_unreferenced'
-          END AS state,
-          count(*) AS count
-        FROM ingress_messages message
-        WHERE created_at >= '1970-01-01T00:00:00Z'
-          AND created_at < '1970-01-02T00:00:00Z'
-        GROUP BY state
+        -- Every state row is always emitted (explicit zeros), so the pass
+        -- criterion `terminal_unreferenced == 0` is an observed value, never
+        -- an absent series.
+        WITH states(state) AS (
+          VALUES ('live'), ('terminal_referenced'), ('terminal_unreferenced')
+        ),
+        cohort AS (
+          SELECT
+            CASE
+              WHEN message.terminal_at IS NULL THEN 'live'
+              WHEN message.message_key IN (SELECT ref.message_key FROM ingress_sm_refs ref)
+                OR message.message_key IN (SELECT delivery.message_key FROM ingress_deliveries delivery)
+                THEN 'terminal_referenced'
+              ELSE 'terminal_unreferenced'
+            END AS state
+          FROM ingress_messages message
+          WHERE message.created_at >= '1970-01-01T00:00:00Z'
+            AND message.created_at < '1970-01-02T00:00:00Z'
+        )
+        SELECT states.state, count(cohort.state) AS count
+        FROM states
+        LEFT JOIN cohort ON cohort.state = states.state
+        GROUP BY states.state
+        ORDER BY states.state
       primary: true
       metrics:
         - state:

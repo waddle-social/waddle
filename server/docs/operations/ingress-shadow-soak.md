@@ -39,6 +39,14 @@ the server pipeline render from `server/env.cue`,
 `cue vet -d '#PublishedValues'`, and `flux push` of
 `gitops-waddle-server:latest`; Flux then applies the rendered HelmRelease.
 
+This PR also adds `spec.monitoring.customQueriesConfigMap` to the `postgresql`
+CNPG Cluster. CloudNativePG reloads monitoring configuration through the
+instance manager without restarting PostgreSQL, but verify it on the live
+operator before the window opens: after Flux applies the change,
+`kubectl --context teleport.waddle.social-production -n waddle get cluster postgresql`
+must still show both instances with their original start times
+(`cnpg_pg_postmaster_start_time` unchanged) and no switchover event.
+
 The deployment is a RollingUpdate with `maxSurge: 1` and `maxUnavailable: 0`.
 Expect as many as three server pods during the rollout. The current baseline is
 44 PostgreSQL backends of 100; allow four dedicated shadow-pool connections per
@@ -190,7 +198,8 @@ silent throughout the window — `IngressShadowNotEnabled`,
 `IngressShadowTxSlow`, `PostgresBackendsHigh`, `PostgresWalVolumeHigh`,
 `PostgresWalRateHigh`, `PostgresCollectorError`, `PostgresDataPvcHigh`,
 `PostgresWalPvcHigh`, `PostgresDataPvcSeriesMissing`,
-`PostgresWalPvcSeriesMissing` — with one exception: `IngressShadowAborted`
+`PostgresWalPvcSeriesMissing`, `IngressShadowSeriesMissing`,
+`PostgresCnpgSeriesMissing` — with one exception: `IngressShadowAborted`
 may fire during the declared churn restart. Record that exception and its
 count in #1695. Thresholds are final before activation; if one must change
 mid-window, the window restarts.
@@ -199,7 +208,9 @@ mid-window, the window restarts.
 | --- | --- |
 | Completion | For each replica, `ingress_shadow_completions_total / ingress_shadow_admissions_total >= 0.999`. |
 | Candidate quality | For each replica, `parked / (parked + no_claim_fence + no_principal + no_capture) >= 0.99`, using `ingress_shadow_candidates_total`. |
-| Cohort | At T0 + 10 days, `terminal_unreferenced == 0` and `live == 0`; `sum(cohort at T0 + 10d) <= sum(cohort at T0 + 1d) - U1`. |
+| Cohort | At T0 + 10 days all three `cnpg_waddle_ingress_cohort_count{state}` series are present (the query always emits explicit zeros) with `terminal_unreferenced == 0` and `live == 0`; `sum(cohort at T0 + 10d) <= sum(cohort at T0 + 1d) - U1`; absence of a cohort series is a failed check, never a pass. |
+| Retained references | `cnpg_waddle_ingress_gc_retained_referenced_messages` (terminal rows past the cutoff kept alive by long-lived streams — GC rescans them on every run) at T0 + 10d is `<= 2 × (value at T0 + 5d) + 100`. |
+| Instrumentation | Every series in Day-0 step 3 is still present at T0 + 10d; `IngressShadowSeriesMissing` and `PostgresCnpgSeriesMissing` never fired. |
 | Reclamation | `cnpg_waddle_ingress_gc_eligible_messages` is never above zero for six hours; `cnpg_waddle_ingress_gc_oldest_eligible_age_seconds < 777600` (9 days); `sum(increase(ingress_shadow_gc_reclaimed_messages_total[10d])) >= U1`. |
 | Growth | Let `G1 = B(T0+5d) - B(T0)` and `G2 = B(T0+10d) - B(T0+5d)`. Pass when `G2 <= 1.5 * G1 + 16 MiB` and `B(T0+10d) < 1 GiB`. |
 | PostgreSQL | Backends stay below 80% of `max_connections`; data and WAL PVC use stay below 70% on both instances. |
@@ -242,35 +253,32 @@ ingress_sm_streams
 ```
 
 Never use `TRUNCATE`; guarded ingress tables reject it at every epoch. Row-wise
-`DELETE` is allowed at epoch 0 and preserves the required lock ordering. One
-batch, repeated until every statement reports zero rows:
+`DELETE` is allowed at epoch 0 and preserves the required lock ordering. Select
+each batch exactly once (a temp table, keyed with a deterministic tiebreak) so
+every child delete sees the same key set — only `ingress_effect_intents`
+cascades; the other child tables have plain foreign keys and would abort the
+transaction on a divergent batch. Repeat until the batch is empty:
 
 ```sql
 BEGIN;
 SELECT epoch FROM ingress_protocol_epoch WHERE id = 1 FOR SHARE; -- must be 0
-WITH batch AS (
-  SELECT message_key FROM ingress_messages ORDER BY created_at LIMIT 1000
-)
-DELETE FROM ingress_effect_intents WHERE message_key IN (SELECT message_key FROM batch);
-WITH batch AS (
-  SELECT message_key FROM ingress_messages ORDER BY created_at LIMIT 1000
-)
-DELETE FROM ingress_deliveries WHERE message_key IN (SELECT message_key FROM batch);
-WITH batch AS (
-  SELECT message_key FROM ingress_messages ORDER BY created_at LIMIT 1000
-)
-DELETE FROM ingress_sm_refs WHERE message_key IN (SELECT message_key FROM batch);
-WITH batch AS (
-  SELECT message_key FROM ingress_messages ORDER BY created_at LIMIT 1000
-)
-DELETE FROM ingress_origin_aliases WHERE message_key IN (SELECT message_key FROM batch);
-DELETE FROM ingress_messages WHERE message_key IN (
-  SELECT message_key FROM ingress_messages ORDER BY created_at LIMIT 1000
-);
+CREATE TEMP TABLE batch ON COMMIT DROP AS
+  SELECT message_key FROM ingress_messages
+  ORDER BY created_at, message_key LIMIT 1000;
+DELETE FROM ingress_effect_intents  WHERE message_key IN (SELECT message_key FROM batch);
+DELETE FROM ingress_deliveries      WHERE message_key IN (SELECT message_key FROM batch);
+DELETE FROM ingress_sm_refs         WHERE message_key IN (SELECT message_key FROM batch);
+DELETE FROM ingress_origin_aliases  WHERE message_key IN (SELECT message_key FROM batch);
+DELETE FROM ingress_messages        WHERE message_key IN (SELECT message_key FROM batch);
 COMMIT;
--- after the message tables are empty:
-DELETE FROM ingress_sm_streams;
 ```
+
+After the message tables are empty, delete `ingress_sm_streams` in the same
+batched shape (`ORDER BY created_at, sm_ingress_id LIMIT 1000`). `DELETE`
+only marks tuples dead: run `VACUUM (ANALYZE)` on the six tables afterwards,
+and if the goal was to give space back to the data PVC, schedule
+`VACUUM FULL` (or `pg_repack`) with the shadow disabled — it takes an
+`ACCESS EXCLUSIVE` lock on each table.
 
 ## Outcome
 
