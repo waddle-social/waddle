@@ -26,7 +26,7 @@ use chrono::Utc;
 #[cfg(feature = "clustering")]
 use jid::BareJid;
 #[cfg(feature = "clustering")]
-use std::collections::{HashMap, HashSet, VecDeque};
+use std::collections::{BTreeMap, HashMap, HashSet, VecDeque};
 #[cfg(feature = "clustering")]
 use std::future::Future;
 #[cfg(feature = "clustering")]
@@ -35,6 +35,8 @@ use std::pin::Pin;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
+#[cfg(feature = "clustering")]
+use std::time::Instant;
 use thiserror::Error;
 #[cfg(feature = "clustering")]
 use tokio::sync::mpsc;
@@ -261,18 +263,169 @@ struct RetirementRetryDispatcher {
 struct StreamActivityState {
     pending: HashMap<SmSessionId, usize>,
     idle_waiters: HashMap<SmSessionId, Arc<Notify>>,
+    outstanding: BTreeMap<u64, Instant>,
+    next_seq: u64,
 }
 
 #[cfg(feature = "clustering")]
 struct QueuedIngressShadowTask {
     task: IngressShadowTask,
     permit: Option<OwnedSemaphorePermit>,
+    outstanding: Option<OutstandingSubmission>,
+}
+
+/// An admitted submission's obligation: registered before the task is
+/// handed to the worker and released exactly once — by the terminal
+/// `Decision`/`Failed` observation, or as `Aborted` if the task is dropped
+/// without one (forced shutdown, intake closed under a queued task).
+#[cfg(feature = "clustering")]
+struct OutstandingSubmission {
+    stream_activity: Arc<std::sync::Mutex<StreamActivityState>>,
+    stream_id: SmSessionId,
+    seq: u64,
+    armed: bool,
+}
+
+#[cfg(feature = "clustering")]
+impl OutstandingSubmission {
+    /// Forget an obligation whose submission was never accepted (the
+    /// channel send failed): no completion and no abort is recorded.
+    fn disarm(mut self) {
+        self.armed = false;
+        stream_activity_lock(&self.stream_activity)
+            .outstanding
+            .remove(&self.seq);
+    }
+}
+
+#[cfg(feature = "clustering")]
+impl Drop for OutstandingSubmission {
+    fn drop(&mut self) {
+        if self.armed {
+            finish_outstanding(
+                &self.stream_activity,
+                &self.stream_id,
+                self.seq,
+                OutstandingEnd::Aborted,
+            );
+        }
+    }
+}
+
+#[cfg(feature = "clustering")]
+fn stream_activity_lock(
+    stream_activity: &std::sync::Mutex<StreamActivityState>,
+) -> std::sync::MutexGuard<'_, StreamActivityState> {
+    stream_activity
+        .lock()
+        .expect("stream activity mutex must not be poisoned")
+}
+
+#[cfg(feature = "clustering")]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum OutstandingEnd {
+    /// The worker produced the submission's terminal decision.
+    Decision,
+    /// The task was dropped without a decision (forced shutdown, intake
+    /// closed under a queued task).
+    Aborted,
+}
+
+#[cfg(feature = "clustering")]
+struct IngressShadowTelemetryState {
+    enabled: AtomicBool,
+    stream_activity: std::sync::Mutex<Option<Arc<std::sync::Mutex<StreamActivityState>>>>,
+}
+
+#[cfg(feature = "clustering")]
+impl IngressShadowTelemetryState {
+    fn set(
+        &self,
+        enabled: bool,
+        stream_activity: Option<Arc<std::sync::Mutex<StreamActivityState>>>,
+    ) {
+        self.enabled.store(enabled, Ordering::Release);
+        *self
+            .stream_activity
+            .lock()
+            .expect("ingress shadow telemetry state mutex must not be poisoned") = stream_activity;
+    }
+
+    fn oldest_outstanding_submission_age_seconds(&self) -> f64 {
+        let Some(stream_activity) = self
+            .stream_activity
+            .lock()
+            .expect("ingress shadow telemetry state mutex must not be poisoned")
+            .clone()
+        else {
+            return 0.0;
+        };
+        let oldest = stream_activity_lock(&stream_activity)
+            .outstanding
+            .values()
+            .next()
+            .map_or(0.0, |enqueued_at| enqueued_at.elapsed().as_secs_f64());
+        oldest
+    }
+}
+
+#[cfg(feature = "clustering")]
+fn init_ingress_shadow_instruments(
+    enabled: bool,
+    stream_activity: Option<Arc<std::sync::Mutex<StreamActivityState>>>,
+) {
+    struct IngressShadowInstruments {
+        _enabled: opentelemetry::metrics::ObservableGauge<i64>,
+        _oldest_outstanding_submission_age: opentelemetry::metrics::ObservableGauge<f64>,
+    }
+
+    static STATE: std::sync::OnceLock<Arc<IngressShadowTelemetryState>> =
+        std::sync::OnceLock::new();
+    static INSTRUMENTS: std::sync::OnceLock<IngressShadowInstruments> = std::sync::OnceLock::new();
+    let state = STATE
+        .get_or_init(|| {
+            Arc::new(IngressShadowTelemetryState {
+                enabled: AtomicBool::new(false),
+                stream_activity: std::sync::Mutex::new(None),
+            })
+        })
+        .clone();
+    state.set(enabled, stream_activity);
+    INSTRUMENTS.get_or_init(|| IngressShadowInstruments {
+        _enabled: opentelemetry::global::meter("waddle-server")
+            .i64_observable_gauge("ingress.shadow.enabled")
+            .with_description("Whether the ingress-shadow worker is enabled for this replica.")
+            .with_unit("1")
+            .with_callback({
+                let state = state.clone();
+                move |observer| {
+                    observer.observe(i64::from(state.enabled.load(Ordering::Acquire)), &[]);
+                }
+            })
+            .build(),
+        _oldest_outstanding_submission_age: opentelemetry::global::meter("waddle-server")
+            .f64_observable_gauge("ingress.shadow.oldest_outstanding_submission_age")
+            .with_description(
+                "Age in seconds of this replica's oldest admitted but uncompleted ingress-shadow submission.",
+            )
+            .with_unit("s")
+            .with_callback(move |observer| {
+                observer.observe(state.oldest_outstanding_submission_age_seconds(), &[]);
+            })
+            .build(),
+    });
 }
 
 #[cfg(feature = "clustering")]
 type IngressShadowExecuteFuture = Pin<Box<dyn Future<Output = ()> + Send + 'static>>;
 #[cfg(feature = "clustering")]
-type IngressShadowExecutor =
+type IngressShadowExecutor = Arc<
+    dyn Fn(IngressShadowTask, Option<OutstandingSubmission>) -> IngressShadowExecuteFuture
+        + Send
+        + Sync,
+>;
+#[cfg(all(test, feature = "clustering"))]
+type IngressShadowSimpleExecutor =
     Arc<dyn Fn(IngressShadowTask) -> IngressShadowExecuteFuture + Send + Sync>;
 
 impl IngressShadowTask {
@@ -324,6 +477,8 @@ impl IngressShadowHandle {
         node_identity: Option<SharedNodeIdentity>,
     ) -> Result<Self, IngressShadowStartupError> {
         if !config.enabled {
+            #[cfg(feature = "clustering")]
+            init_ingress_shadow_instruments(false, None);
             return Ok(Self::disabled());
         }
         validate_ingress_shadow_prerequisites(
@@ -351,6 +506,7 @@ impl IngressShadowHandle {
             let enqueued_streams = Arc::new(std::sync::Mutex::new(HashSet::new()));
             let retiring_streams = Arc::new(std::sync::Mutex::new(HashSet::new()));
             let stream_activity = Arc::new(std::sync::Mutex::new(StreamActivityState::default()));
+            init_ingress_shadow_instruments(true, Some(stream_activity.clone()));
             let worker = IngressShadowProcessor {
                 database,
                 lineage,
@@ -382,10 +538,10 @@ impl IngressShadowHandle {
                 retiring_streams,
                 Some(worker.database.clone()),
                 stream_activity,
-                Arc::new(move |task| {
+                Arc::new(move |task, outstanding| {
                     let worker = worker.clone();
                     Box::pin(async move {
-                        worker.execute(task).await;
+                        worker.execute(task, outstanding.as_ref()).await;
                     })
                 }),
             );
@@ -564,7 +720,7 @@ impl IngressShadowHandle {
     fn spawn_worker(
         queue_capacity: usize,
         max_concurrency: usize,
-        execute: IngressShadowExecutor,
+        execute: IngressShadowSimpleExecutor,
     ) -> Self {
         Self::spawn_worker_with_enqueued_streams(
             WorkerLimits {
@@ -576,7 +732,7 @@ impl IngressShadowHandle {
             Arc::new(std::sync::Mutex::new(HashSet::new())),
             None,
             Arc::new(std::sync::Mutex::new(StreamActivityState::default())),
-            execute,
+            Arc::new(move |task, _outstanding| execute(task)),
         )
     }
 
@@ -738,16 +894,21 @@ fn try_send_worker_task(
                 Err(disposition) => return disposition,
             };
             note_stream_task_enqueued(stream_activity, &stream_id);
+            let outstanding = register_outstanding(stream_activity, stream_id.clone());
             match send_worker_task(
                 tx,
                 QueuedIngressShadowTask {
                     task: submit,
                     permit: Some(permit),
+                    outstanding: Some(outstanding),
                 },
             ) {
                 Ok(()) => IngressShadowDisposition::Enqueued,
-                Err(task) => {
+                Err(mut task) => {
                     note_stream_task_finished(stream_activity, &stream_id);
+                    if let Some(outstanding) = task.outstanding.take() {
+                        outstanding.disarm();
+                    }
                     drop(task.permit);
                     IngressShadowDisposition::Closed
                 }
@@ -794,6 +955,7 @@ fn send_enrollment_task(
                 stream_id: stream_id.clone(),
             },
             permit: Some(permit),
+            outstanding: None,
         },
     ) {
         Ok(()) => IngressShadowDisposition::Enqueued,
@@ -830,6 +992,7 @@ fn ensure_stream_enrollment_task(
                 stream_id: stream_id.clone(),
             },
             permit: Some(permit),
+            outstanding: None,
         },
     ) {
         Ok(()) => IngressShadowDisposition::Enqueued,
@@ -863,6 +1026,7 @@ fn send_retirement_task(
         QueuedIngressShadowTask {
             task: IngressShadowTask::Retire { stream_id },
             permit: None,
+            outstanding: None,
         },
     ) {
         Ok(()) => IngressShadowDisposition::Enqueued,
@@ -883,6 +1047,7 @@ fn reschedule_retirement_task(
         QueuedIngressShadowTask {
             task: IngressShadowTask::Retire { stream_id },
             permit: None,
+            outstanding: None,
         },
     ) {
         Ok(()) => IngressShadowDisposition::Enqueued,
@@ -951,6 +1116,51 @@ fn note_stream_task_finished(
     };
     if let Some(waiter) = waiter {
         waiter.notify_waiters();
+    }
+}
+
+/// Register an admitted submission's obligation and return its handle.
+#[cfg(feature = "clustering")]
+fn register_outstanding(
+    stream_activity: &Arc<std::sync::Mutex<StreamActivityState>>,
+    stream_id: SmSessionId,
+) -> OutstandingSubmission {
+    let seq = {
+        let mut state = stream_activity_lock(stream_activity);
+        let seq = state.next_seq;
+        state.next_seq = state.next_seq.wrapping_add(1);
+        state.outstanding.insert(seq, Instant::now());
+        seq
+    };
+    OutstandingSubmission {
+        stream_activity: stream_activity.clone(),
+        stream_id,
+        seq,
+        armed: true,
+    }
+}
+
+/// Release an obligation exactly once; later calls for the same `seq` are
+/// no-ops, so a terminal observation followed by the handle's drop never
+/// double-counts.
+#[cfg(feature = "clustering")]
+fn finish_outstanding(
+    stream_activity: &Arc<std::sync::Mutex<StreamActivityState>>,
+    stream_id: &SmSessionId,
+    seq: u64,
+    end: OutstandingEnd,
+) {
+    let existed = stream_activity_lock(stream_activity)
+        .outstanding
+        .remove(&seq)
+        .is_some();
+    if !existed {
+        return;
+    }
+    if matches!(end, OutstandingEnd::Aborted) {
+        waddle_xmpp::telemetry::reliability::increment_ingress_shadow_aborted();
+        waddle_xmpp::telemetry::reliability::increment_ingress_shadow_completions();
+        tracing::warn!(stream_id = %stream_id, seq, "ingress shadow submission aborted before completion");
     }
 }
 
@@ -1242,6 +1452,17 @@ fn observe_retry_sequence(attempts: usize, exhausted: bool) {
 }
 
 #[cfg(feature = "clustering")]
+fn record_submission_attempt_duration(duration: Duration) {
+    waddle_xmpp::histogram_record!(
+        "ingress.shadow.tx.duration",
+        "s",
+        "Duration of one shadow-ingress submission transaction attempt.",
+        buckets: waddle_xmpp::telemetry::SECOND_SCALE_BUCKETS,
+        duration.as_secs_f64(),
+    );
+}
+
+#[cfg(feature = "clustering")]
 async fn orphaned_shadow_streams(
     database: &Database,
     limit: usize,
@@ -1272,7 +1493,7 @@ async fn orphaned_shadow_streams(
 
 #[cfg(feature = "clustering")]
 impl IngressShadowProcessor {
-    async fn execute(&self, task: IngressShadowTask) {
+    async fn execute(&self, task: IngressShadowTask, outstanding: Option<&OutstandingSubmission>) {
         let kind = task.kind();
         let stream_id = task.stream_id().clone();
         let claim_epoch = match &task {
@@ -1327,7 +1548,13 @@ impl IngressShadowProcessor {
                     DEFAULT_TX_DEADLINE,
                     run_with_retry(self.retry_attempts, || {
                         attempts += 1;
-                        self.execute_submission(&submission)
+                        let started = Instant::now();
+                        let submission = submission.clone();
+                        async move {
+                            let result = self.execute_submission(&submission).await;
+                            record_submission_attempt_duration(started.elapsed());
+                            result
+                        }
                     }),
                 )
                 .await;
@@ -1349,6 +1576,14 @@ impl IngressShadowProcessor {
                             class: outcome.decision,
                             alias: outcome.alias,
                         });
+                        if let Some(outstanding) = outstanding {
+                            finish_outstanding(
+                                &outstanding.stream_activity,
+                                &outstanding.stream_id,
+                                outstanding.seq,
+                                OutstandingEnd::Decision,
+                            );
+                        }
                         if outcome.run_retention_gc {
                             self.run_retention_gc().await;
                         }
@@ -1371,6 +1606,14 @@ impl IngressShadowProcessor {
                             class,
                             alias: IngressShadowAliasOutcome::None,
                         });
+                        if let Some(outstanding) = outstanding {
+                            finish_outstanding(
+                                &outstanding.stream_activity,
+                                &outstanding.stream_id,
+                                outstanding.seq,
+                                OutstandingEnd::Decision,
+                            );
+                        }
                     }
                     Err(_) => {
                         observe_retry_sequence(attempts, true);
@@ -1381,6 +1624,14 @@ impl IngressShadowProcessor {
                             class: IngressShadowDecisionClass::Storage,
                             alias: IngressShadowAliasOutcome::None,
                         });
+                        if let Some(outstanding) = outstanding {
+                            finish_outstanding(
+                                &outstanding.stream_activity,
+                                &outstanding.stream_id,
+                                outstanding.seq,
+                                OutstandingEnd::Decision,
+                            );
+                        }
                     }
                 }
             }
@@ -1743,6 +1994,9 @@ impl IngressShadowProcessor {
             Ok(substrate) => substrate,
             Err(error) => {
                 tracing::warn!(%error, "ingress shadow retention GC setup failed");
+                waddle_xmpp::telemetry::reliability::increment_ingress_shadow_gc_run(
+                    waddle_xmpp::telemetry::attributes::IngressGcOutcome::Failed,
+                );
                 return;
             }
         };
@@ -1752,12 +2006,25 @@ impl IngressShadowProcessor {
         )
         .await
         {
-            Ok(Ok(_)) => {}
+            Ok(Ok(outcome)) => {
+                waddle_xmpp::telemetry::reliability::increment_ingress_shadow_gc_run(
+                    waddle_xmpp::telemetry::attributes::IngressGcOutcome::Completed,
+                );
+                waddle_xmpp::telemetry::reliability::add_ingress_shadow_gc_reclaimed_messages(
+                    u64::try_from(outcome.deleted_messages).unwrap_or(u64::MAX),
+                );
+            }
             Ok(Err(error)) => {
                 tracing::warn!(%error, "ingress shadow retention GC failed");
+                waddle_xmpp::telemetry::reliability::increment_ingress_shadow_gc_run(
+                    waddle_xmpp::telemetry::attributes::IngressGcOutcome::Failed,
+                );
             }
             Err(error) => {
                 tracing::warn!(%error, "ingress shadow retention GC timed out");
+                waddle_xmpp::telemetry::reliability::increment_ingress_shadow_gc_run(
+                    waddle_xmpp::telemetry::attributes::IngressGcOutcome::TimedOut,
+                );
             }
         }
     }
@@ -1882,9 +2149,14 @@ impl IngressShadowScheduler {
             // pending count and let a claim transfer treat active shadow work
             // as drained.
             let counted_submission = matches!(task.task, IngressShadowTask::Submit(_));
+            let QueuedIngressShadowTask {
+                task,
+                permit,
+                outstanding,
+            } = task;
             let task_handle = tokio::spawn(async move {
-                (execute)(task.task).await;
-                drop(task.permit);
+                (execute)(task, outstanding).await;
+                drop(permit);
                 task_shutdown.finish_active_task(&task_finished_for_completion);
                 if counted_submission {
                     note_stream_task_finished(&stream_activity, &stream_id);
@@ -2196,12 +2468,102 @@ mod tests {
         }
     }
 
+    #[tokio::test]
+    async fn submission_duration_uses_second_scale_buckets() {
+        let metrics = waddle_xmpp::telemetry::test_support::acquire().await;
+        record_submission_attempt_duration(Duration::from_millis(25));
+        assert_eq!(
+            metrics.histogram_count("ingress.shadow.tx.duration", &[]),
+            Some(1)
+        );
+        assert_eq!(
+            metrics.histogram_bounds("ingress.shadow.tx.duration"),
+            Some(waddle_xmpp::telemetry::SECOND_SCALE_BUCKETS.to_vec())
+        );
+    }
+
     fn test_handle(
         queue_capacity: usize,
         max_concurrency: usize,
         execute: impl Fn(IngressShadowTask) -> IngressShadowExecuteFuture + Send + Sync + 'static,
     ) -> IngressShadowHandle {
         IngressShadowHandle::spawn_worker(queue_capacity, max_concurrency, Arc::new(execute))
+    }
+
+    fn test_handle_with_outstanding(
+        queue_capacity: usize,
+        max_concurrency: usize,
+        execute: impl Fn(IngressShadowTask, Option<OutstandingSubmission>) -> IngressShadowExecuteFuture
+            + Send
+            + Sync
+            + 'static,
+    ) -> IngressShadowHandle {
+        IngressShadowHandle::spawn_worker_with_enqueued_streams(
+            WorkerLimits {
+                queue_capacity,
+                max_concurrency,
+            },
+            Arc::new(std::sync::Mutex::new(None)),
+            Arc::new(std::sync::Mutex::new(HashSet::new())),
+            Arc::new(std::sync::Mutex::new(HashSet::new())),
+            None,
+            Arc::new(std::sync::Mutex::new(StreamActivityState::default())),
+            Arc::new(move |task, outstanding| execute(task, outstanding)),
+        )
+    }
+
+    fn outstanding_count(handle: &IngressShadowHandle) -> usize {
+        match handle.inner.as_ref() {
+            IngressShadowInner::Worker {
+                stream_activity, ..
+            } => stream_activity
+                .lock()
+                .expect("stream activity mutex must not be poisoned")
+                .outstanding
+                .len(),
+            IngressShadowInner::Disabled => 0,
+        }
+    }
+
+    fn oldest_outstanding_age_seconds(handle: &IngressShadowHandle) -> f64 {
+        let Some(stream_activity) = (match handle.inner.as_ref() {
+            IngressShadowInner::Worker {
+                stream_activity, ..
+            } => Some(stream_activity),
+            IngressShadowInner::Disabled => None,
+        }) else {
+            return 0.0;
+        };
+        stream_activity
+            .lock()
+            .expect("stream activity mutex must not be poisoned")
+            .outstanding
+            .values()
+            .next()
+            .map_or(0.0, |enqueued_at| enqueued_at.elapsed().as_secs_f64())
+    }
+
+    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+    struct IngressShadowSubmissionMetrics {
+        admissions: u64,
+        completions: u64,
+        aborted: u64,
+    }
+
+    fn submission_metrics(
+        metrics: &waddle_xmpp::telemetry::test_support::MetricsTestGuard,
+    ) -> IngressShadowSubmissionMetrics {
+        IngressShadowSubmissionMetrics {
+            admissions: metrics
+                .counter_sum("ingress.shadow.admissions", &[])
+                .unwrap_or(0),
+            completions: metrics
+                .counter_sum("ingress.shadow.completions", &[])
+                .unwrap_or(0),
+            aborted: metrics
+                .counter_sum("ingress.shadow.aborted", &[])
+                .unwrap_or(0),
+        }
     }
 
     struct PoolCloseSignal(Option<oneshot::Sender<()>>);
@@ -3337,9 +3699,12 @@ mod tests {
 
         fixture
             .processor
-            .execute(IngressShadowTask::Submit(Box::new(
-                fixture.submission_with_archive_intent(1, Some("mixed-retry-origin")),
-            )))
+            .execute(
+                IngressShadowTask::Submit(Box::new(
+                    fixture.submission_with_archive_intent(1, Some("mixed-retry-origin")),
+                )),
+                None,
+            )
             .await;
 
         let after = guard
@@ -3574,6 +3939,307 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn active_submission_is_aborted_by_forced_shutdown() {
+        let submit_started = Arc::new(Notify::new());
+        let handle = test_handle_with_outstanding(2, 1, {
+            let submit_started = submit_started.clone();
+            move |task, outstanding| {
+                let submit_started = submit_started.clone();
+                Box::pin(async move {
+                    if matches!(task, IngressShadowTask::Submit(_)) {
+                        let _outstanding = outstanding.expect("submit must have an obligation");
+                        submit_started.notify_waiters();
+                        std::future::pending::<()>().await;
+                    }
+                })
+            }
+        });
+        let metrics = waddle_xmpp::telemetry::test_support::acquire().await;
+
+        let started = submit_started.notified();
+        assert_eq!(
+            handle.try_submit(base_submission(Message::new(Some(Jid::from(
+                "room@conference.example.com"
+                    .parse::<BareJid>()
+                    .expect("room jid")
+            ))))),
+            IngressShadowDisposition::Enqueued
+        );
+        tokio::time::timeout(Duration::from_millis(250), started)
+            .await
+            .expect("submission should start");
+        let before = submission_metrics(&metrics);
+
+        assert!(
+            !handle.drain_and_join(Duration::from_millis(20)).await,
+            "tiny timeout should force stop while active"
+        );
+        handle.wait_for_completion().await;
+        assert_eq!(
+            submission_metrics(&metrics),
+            IngressShadowSubmissionMetrics {
+                admissions: before.admissions,
+                completions: before.completions + 1,
+                aborted: before.aborted + 1,
+            },
+            "forced shutdown must record one completed and aborted admitted submission"
+        );
+        tokio::time::timeout(Duration::from_millis(250), async {
+            loop {
+                if outstanding_count(&handle) == 0 {
+                    break;
+                }
+                tokio::time::sleep(Duration::from_millis(5)).await;
+            }
+        })
+        .await
+        .expect("outstanding map should empty after forced shutdown");
+    }
+
+    #[tokio::test]
+    async fn queued_submission_is_aborted_when_intake_closes() {
+        let submit_started = Arc::new(Notify::new());
+        let handle = test_handle_with_outstanding(2, 1, {
+            let submit_started = submit_started.clone();
+            move |task, outstanding| {
+                let submit_started = submit_started.clone();
+                Box::pin(async move {
+                    if matches!(task, IngressShadowTask::Submit(_)) {
+                        let _outstanding = outstanding.expect("submit must have an obligation");
+                        submit_started.notify_waiters();
+                        std::future::pending::<()>().await;
+                    }
+                })
+            }
+        });
+        let metrics = waddle_xmpp::telemetry::test_support::acquire().await;
+        let message = Message::new(Some(jid::Jid::from(
+            "room@conference.example.com"
+                .parse::<BareJid>()
+                .expect("room jid"),
+        )));
+        let mut first = base_submission(message);
+        let mut second = base_submission(Message::new(Some(jid::Jid::from(
+            "room@conference.example.com"
+                .parse::<BareJid>()
+                .expect("room jid"),
+        ))));
+        let stream_id = SmSessionId::new("queued-stream");
+        first.stream_id = stream_id.clone();
+        second.stream_id = stream_id;
+
+        let started = submit_started.notified();
+        assert_eq!(handle.try_submit(first), IngressShadowDisposition::Enqueued);
+        tokio::time::timeout(Duration::from_millis(250), started)
+            .await
+            .expect("first queued submission should start");
+        assert_eq!(
+            handle.try_submit(second),
+            IngressShadowDisposition::Enqueued
+        );
+        assert_eq!(
+            outstanding_count(&handle),
+            2,
+            "the second admitted submission must remain queued behind the active stream"
+        );
+        let before = submission_metrics(&metrics);
+
+        assert!(
+            !handle.drain_and_join(Duration::from_millis(20)).await,
+            "tiny timeout should force stop while active"
+        );
+        handle.wait_for_completion().await;
+        assert_eq!(
+            submission_metrics(&metrics),
+            IngressShadowSubmissionMetrics {
+                admissions: before.admissions,
+                completions: before.completions + 2,
+                aborted: before.aborted + 2,
+            },
+            "the active and queued submissions must each be aborted exactly once"
+        );
+        tokio::time::timeout(Duration::from_millis(250), async {
+            loop {
+                if outstanding_count(&handle) == 0 {
+                    break;
+                }
+                tokio::time::sleep(Duration::from_millis(5)).await;
+            }
+        })
+        .await
+        .expect("outstanding map should empty after forced shutdown");
+    }
+
+    #[tokio::test]
+    async fn closed_intake_rejects_submit() {
+        let handle = test_handle_with_outstanding(1, 1, |_task, _outstanding| Box::pin(async {}));
+        let metrics = waddle_xmpp::telemetry::test_support::acquire().await;
+        let before = submission_metrics(&metrics);
+        let IngressShadowInner::Worker { tx, .. } = handle.inner.as_ref() else {
+            panic!("worker test handle should be available");
+        };
+        close_worker_intake(tx);
+
+        assert_eq!(
+            handle.try_submit(base_submission(Message::new(Some(jid::Jid::from(
+                "room@conference.example.com"
+                    .parse::<BareJid>()
+                    .expect("room jid")
+            ))))),
+            IngressShadowDisposition::Closed
+        );
+        assert_eq!(
+            submission_metrics(&metrics),
+            before,
+            "a closed intake must not admit, complete, or abort a submission"
+        );
+        assert_eq!(
+            outstanding_count(&handle),
+            0,
+            "closed intake should not leak outstanding submissions"
+        );
+        assert!(handle.drain_and_join(Duration::from_millis(250)).await);
+    }
+
+    #[tokio::test]
+    async fn completion_does_not_double_count_when_outstanding_is_dropped_after_task_finishes() {
+        let submit_started = Arc::new(Notify::new());
+        let submit_done = Arc::new(Notify::new());
+        let release_submit = Arc::new(Notify::new());
+        let handle = test_handle_with_outstanding(2, 1, {
+            let submit_started = submit_started.clone();
+            let submit_done = submit_done.clone();
+            let release_submit = release_submit.clone();
+            move |task, outstanding| {
+                let submit_started = submit_started.clone();
+                let submit_done = submit_done.clone();
+                let release_submit = release_submit.clone();
+                Box::pin(async move {
+                    if matches!(task, IngressShadowTask::Submit(_)) {
+                        let outstanding = outstanding.expect("submit must have an obligation");
+                        submit_started.notify_waiters();
+                        release_submit.notified().await;
+                        observe(IngressShadowObservation::Decision {
+                            stream_id: outstanding.stream_id.clone(),
+                            claim_epoch: None,
+                            handled_ordinal: None,
+                            class: IngressShadowDecisionClass::Accepted,
+                            alias: IngressShadowAliasOutcome::None,
+                        });
+                        finish_outstanding(
+                            &outstanding.stream_activity,
+                            &outstanding.stream_id,
+                            outstanding.seq,
+                            OutstandingEnd::Decision,
+                        );
+                        submit_done.notify_waiters();
+                    }
+                })
+            }
+        });
+        let metrics = waddle_xmpp::telemetry::test_support::acquire().await;
+        let started = submit_started.notified();
+        let done = submit_done.notified();
+        assert_eq!(
+            handle.try_submit(base_submission(Message::new(Some(Jid::from(
+                "room@conference.example.com"
+                    .parse::<BareJid>()
+                    .expect("room jid")
+            ))))),
+            IngressShadowDisposition::Enqueued
+        );
+        tokio::time::timeout(Duration::from_millis(250), started)
+            .await
+            .expect("submit task should start");
+        let before = submission_metrics(&metrics);
+        release_submit.notify_waiters();
+        tokio::time::timeout(Duration::from_millis(250), done)
+            .await
+            .expect("submit task should finish quickly");
+
+        assert!(handle.drain_and_join(Duration::from_millis(250)).await);
+        assert_eq!(
+            outstanding_count(&handle),
+            0,
+            "the terminal decision must release the outstanding submission before its handle drops"
+        );
+        assert_eq!(
+            submission_metrics(&metrics),
+            IngressShadowSubmissionMetrics {
+                admissions: before.admissions,
+                completions: before.completions + 1,
+                aborted: before.aborted,
+            },
+            "the terminal decision must complete once and suppress the drop abort"
+        );
+    }
+
+    #[tokio::test]
+    async fn oldest_outstanding_submission_age_tracks_inflight_work() {
+        let started = Arc::new(Notify::new());
+        let release = Arc::new(Notify::new());
+        let handle = test_handle_with_outstanding(2, 1, {
+            let started = started.clone();
+            let release = release.clone();
+            move |task, outstanding| {
+                let started = started.clone();
+                let release = release.clone();
+                Box::pin(async move {
+                    if matches!(task, IngressShadowTask::Submit(_)) {
+                        let outstanding = outstanding.expect("submit must have an obligation");
+                        started.notify_waiters();
+                        release.notified().await;
+                        finish_outstanding(
+                            &outstanding.stream_activity,
+                            &outstanding.stream_id,
+                            outstanding.seq,
+                            OutstandingEnd::Decision,
+                        );
+                    }
+                })
+            }
+        });
+        let message = Message::new(Some(Jid::from(
+            "room@conference.example.com"
+                .parse::<BareJid>()
+                .expect("room jid"),
+        )));
+        let mut submission = base_submission(message);
+        submission.stream_id = SmSessionId::new("age-stream");
+        let submit_started = started.notified();
+        assert_eq!(
+            handle.try_submit(submission),
+            IngressShadowDisposition::Enqueued
+        );
+        tokio::time::timeout(Duration::from_millis(250), submit_started)
+            .await
+            .expect("submission should start");
+        tokio::time::sleep(Duration::from_millis(20)).await;
+        let age_during = oldest_outstanding_age_seconds(&handle);
+        assert!(age_during > 0.0);
+        release.notify_waiters();
+
+        assert!(handle.drain_and_join(Duration::from_millis(250)).await);
+
+        tokio::time::timeout(Duration::from_millis(250), async {
+            loop {
+                if oldest_outstanding_age_seconds(&handle) == 0.0 {
+                    break;
+                }
+                tokio::time::sleep(Duration::from_millis(5)).await;
+            }
+        })
+        .await
+        .expect("outstanding map should be empty after completion");
+
+        assert_eq!(
+            oldest_outstanding_age_seconds(&handle),
+            0.0,
+            "no outstanding submissions should result in age 0"
+        );
+    }
+
+    #[tokio::test]
     async fn tasks_registered_after_force_stop_are_aborted_immediately() {
         let shutdown = Arc::new(IngressShadowShutdown::default());
         shutdown.force_stop();
@@ -3617,7 +4283,7 @@ mod tests {
                     IngressShadowTask::Retire { .. } => "retire",
                 };
                 started_tx.send(label).expect("record worker start");
-                processor.execute(task).await;
+                processor.execute(task, None).await;
                 finished_tx.send(label).expect("record worker finish");
             })
         });
@@ -4145,7 +4811,7 @@ mod tests {
             Arc::new(std::sync::Mutex::new(StreamActivityState::default())),
             Arc::new({
                 let release_first = release_first.clone();
-                move |task| {
+                move |task, _outstanding| {
                     let release_first = release_first.clone();
                     let retiring_streams = retiring_streams.clone();
                     let started_tx = started_tx.clone();
@@ -4220,9 +4886,12 @@ mod tests {
             .insert(fixture.stream_id.clone());
 
         processor
-            .execute(IngressShadowTask::Retire {
-                stream_id: fixture.stream_id.clone(),
-            })
+            .execute(
+                IngressShadowTask::Retire {
+                    stream_id: fixture.stream_id.clone(),
+                },
+                None,
+            )
             .await;
 
         assert!(matches!(

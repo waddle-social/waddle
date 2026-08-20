@@ -437,6 +437,77 @@ impl MetricAttribute for IngressRetryOutcome {
     }
 }
 
+/// `outcome` — whether a message stanza was eligible to park a shadow-ingress
+/// submission.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum IngressCandidateOutcome {
+    Parked,
+    Disabled,
+    NoStream,
+    NonResumable,
+    NoClaimFence,
+    NoPrincipal,
+    NoCapture,
+}
+
+impl IngressCandidateOutcome {
+    pub const ALL: [Self; 7] = [
+        Self::Parked,
+        Self::Disabled,
+        Self::NoStream,
+        Self::NonResumable,
+        Self::NoClaimFence,
+        Self::NoPrincipal,
+        Self::NoCapture,
+    ];
+}
+
+impl sealed::Sealed for IngressCandidateOutcome {}
+impl MetricAttribute for IngressCandidateOutcome {
+    fn key(&self) -> &'static str {
+        "outcome"
+    }
+
+    fn value(&self) -> &'static str {
+        match self {
+            Self::Parked => "parked",
+            Self::Disabled => "disabled",
+            Self::NoStream => "no_stream",
+            Self::NonResumable => "non_resumable",
+            Self::NoClaimFence => "no_claim_fence",
+            Self::NoPrincipal => "no_principal",
+            Self::NoCapture => "no_capture",
+        }
+    }
+}
+
+/// `outcome` — how a shadow-ingress retention GC run ended.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum IngressGcOutcome {
+    Completed,
+    Failed,
+    TimedOut,
+}
+
+impl IngressGcOutcome {
+    pub const ALL: [Self; 3] = [Self::Completed, Self::Failed, Self::TimedOut];
+}
+
+impl sealed::Sealed for IngressGcOutcome {}
+impl MetricAttribute for IngressGcOutcome {
+    fn key(&self) -> &'static str {
+        "outcome"
+    }
+
+    fn value(&self) -> &'static str {
+        match self {
+            Self::Completed => "completed",
+            Self::Failed => "failed",
+            Self::TimedOut => "timed_out",
+        }
+    }
+}
+
 /// `reason` — why shadow ingress intentionally skipped or dropped work.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum IngressSkipReason {

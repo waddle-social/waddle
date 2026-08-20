@@ -94,6 +94,9 @@ pub fn observe(observation: IngressShadowObservation) {
     match observation {
         IngressShadowObservation::Accepted { kind, stream_id } => {
             tracing::debug!(?kind, stream_id = %stream_id, "ingress shadow accepted");
+            if matches!(kind, IngressShadowRequestKind::Submit) {
+                reliability::increment_ingress_shadow_admissions();
+            }
         }
         IngressShadowObservation::Dropped {
             kind,
@@ -138,6 +141,9 @@ pub fn observe(observation: IngressShadowObservation) {
                 handled_ordinal = handled_ordinal.map(|ordinal| ordinal.to_storage()),
                 "ingress shadow failed"
             );
+            if matches!(kind, IngressShadowRequestKind::Submit) {
+                reliability::increment_ingress_shadow_completions();
+            }
         }
         IngressShadowObservation::Decision {
             stream_id,
@@ -160,6 +166,7 @@ pub fn observe(observation: IngressShadowObservation) {
             if let Some(metric_alias) = alias_outcome(alias) {
                 reliability::increment_ingress_shadow_alias_outcome(metric_alias);
             }
+            reliability::increment_ingress_shadow_completions();
         }
     }
 }
@@ -210,5 +217,81 @@ fn alias_outcome(alias: IngressShadowAliasOutcome) -> Option<MetricAliasOutcome>
         IngressShadowAliasOutcome::Inserted => Some(MetricAliasOutcome::Inserted),
         IngressShadowAliasOutcome::Existing => Some(MetricAliasOutcome::Existing),
         IngressShadowAliasOutcome::Conflict => Some(MetricAliasOutcome::Conflict),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn stream_id() -> SmSessionId {
+        SmSessionId::new("telemetry-stream")
+    }
+
+    #[tokio::test]
+    async fn submission_admission_and_terminal_observations_balance() {
+        let metrics = waddle_xmpp::telemetry::test_support::acquire().await;
+        let admissions_before = metrics
+            .counter_sum("ingress.shadow.admissions", &[])
+            .unwrap_or(0);
+        let completions_before = metrics
+            .counter_sum("ingress.shadow.completions", &[])
+            .unwrap_or(0);
+        observe(IngressShadowObservation::Accepted {
+            kind: IngressShadowRequestKind::Submit,
+            stream_id: stream_id(),
+        });
+        observe(IngressShadowObservation::Decision {
+            stream_id: stream_id(),
+            claim_epoch: None,
+            handled_ordinal: None,
+            class: IngressShadowDecisionClass::Accepted,
+            alias: IngressShadowAliasOutcome::None,
+        });
+        observe(IngressShadowObservation::Accepted {
+            kind: IngressShadowRequestKind::Submit,
+            stream_id: stream_id(),
+        });
+        observe(IngressShadowObservation::Failed {
+            kind: IngressShadowRequestKind::Submit,
+            stream_id: stream_id(),
+            claim_epoch: None,
+            handled_ordinal: None,
+        });
+
+        assert_eq!(
+            metrics
+                .counter_sum("ingress.shadow.admissions", &[])
+                .unwrap_or(0),
+            admissions_before + 2
+        );
+        assert_eq!(
+            metrics
+                .counter_sum("ingress.shadow.completions", &[])
+                .unwrap_or(0),
+            completions_before + 2
+        );
+    }
+
+    #[tokio::test]
+    async fn enrollment_failure_is_not_a_submission_completion() {
+        let metrics = waddle_xmpp::telemetry::test_support::acquire().await;
+        let completions_before = metrics
+            .counter_sum("ingress.shadow.completions", &[])
+            .unwrap_or(0);
+        observe(IngressShadowObservation::Failed {
+            kind: IngressShadowRequestKind::Enroll,
+            stream_id: stream_id(),
+            claim_epoch: None,
+            handled_ordinal: None,
+        });
+
+        assert_eq!(
+            metrics
+                .counter_sum("ingress.shadow.completions", &[])
+                .unwrap_or(0),
+            completions_before,
+            "enrollment failure must not count as a submission completion"
+        );
     }
 }
