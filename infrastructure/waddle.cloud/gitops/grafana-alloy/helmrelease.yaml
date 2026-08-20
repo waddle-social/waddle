@@ -118,6 +118,105 @@ spec:
             }
           }
 
+          // ---------- Prometheus scrape of CNPG instance metrics ----------
+          // CNPG exposes exporter metrics directly from each instance pod on
+          // the `metrics` container port; keep per-pod identity for alerting.
+          discovery.kubernetes "cnpg" {
+            role = "pod"
+            namespaces {
+              names = ["waddle"]
+            }
+          }
+
+          discovery.relabel "cnpg" {
+            targets = discovery.kubernetes.cnpg.targets
+            rule {
+              source_labels = ["__meta_kubernetes_pod_label_cnpg_io_cluster"]
+              action        = "keep"
+              regex         = "postgresql"
+            }
+            rule {
+              source_labels = ["__meta_kubernetes_pod_container_port_name"]
+              action        = "keep"
+              regex         = "metrics"
+            }
+            rule {
+              source_labels = ["__meta_kubernetes_pod_name"]
+              target_label  = "instance"
+            }
+            rule {
+              source_labels = ["__meta_kubernetes_pod_label_cnpg_io_instanceRole"]
+              target_label  = "role"
+            }
+            rule {
+              target_label = "job"
+              replacement  = "cloudnative-pg"
+            }
+          }
+
+          prometheus.scrape "cnpg" {
+            targets         = discovery.relabel.cnpg.output
+            forward_to      = [otelcol.receiver.prometheus.cnpg.receiver]
+            scrape_interval = "30s"
+          }
+
+          otelcol.receiver.prometheus "cnpg" {
+            output {
+              metrics = [otelcol.processor.batch.default.input]
+            }
+          }
+
+          // ---------- Prometheus scrape of kubelet PVC metrics ----------
+          // Scrape kubelet through the apiserver node proxy so Alloy can ship
+          // PVC utilization for the CNPG data and WAL volumes.
+          discovery.kubernetes "kubelet" {
+            role = "node"
+          }
+
+          discovery.relabel "kubelet" {
+            targets = discovery.kubernetes.kubelet.targets
+            rule {
+              target_label = "__address__"
+              replacement  = "kubernetes.default.svc:443"
+            }
+            rule {
+              source_labels = ["__meta_kubernetes_node_name"]
+              regex         = "(.+)"
+              target_label  = "__metrics_path__"
+              replacement   = "/api/v1/nodes/$1/proxy/metrics"
+            }
+            rule {
+              target_label = "job"
+              replacement  = "kubelet"
+            }
+          }
+
+          prometheus.scrape "kubelet" {
+            targets           = discovery.relabel.kubelet.output
+            forward_to        = [prometheus.relabel.kubelet.receiver]
+            scheme            = "https"
+            bearer_token_file = "/var/run/secrets/kubernetes.io/serviceaccount/token"
+            scrape_interval   = "30s"
+            tls_config {
+              ca_file = "/var/run/secrets/kubernetes.io/serviceaccount/ca.crt"
+            }
+          }
+
+          prometheus.relabel "kubelet" {
+            forward_to = [otelcol.receiver.prometheus.kubelet.receiver]
+            rule {
+              source_labels = ["__name__", "namespace"]
+              action        = "keep"
+              regex         = "kubelet_volume_stats_(used|capacity|available)_bytes;waddle"
+            }
+          }
+
+          otelcol.receiver.prometheus "kubelet" {
+            output {
+              metrics = [otelcol.processor.batch.default.input]
+            }
+          }
+
           // ---------- Prometheus scrape of LiveKit SFU /metrics ----------
           // The livekit-sfu Service exposes LiveKit's native Prometheus
           // listener on the `prometheus` port. Discover endpoints rather

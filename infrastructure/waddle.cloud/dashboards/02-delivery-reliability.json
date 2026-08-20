@@ -160,6 +160,319 @@
       ],
       "fieldConfig": { "defaults": { "unit": "short" } },
       "gridPos": { "h": 8, "w": 24, "x": 0, "y": 16 }
+    },
+    {
+      "collapsed": false,
+      "gridPos": { "h": 1, "w": 24, "x": 0, "y": 24 },
+      "id": null,
+      "panels": [],
+      "title": "Ingress shadow soak",
+      "type": "row"
+    },
+    {
+      "type": "timeseries",
+      "title": "Shadow candidates by outcome",
+      "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+      "targets": [
+        {
+          "expr": "sum by (outcome) (increase(ingress_shadow_candidates_total[5m])) or vector(0)",
+          "legendFormat": "{{outcome}}",
+          "refId": "A"
+        }
+      ],
+      "fieldConfig": { "defaults": { "unit": "short" } },
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 25 }
+    },
+    {
+      "type": "timeseries",
+      "title": "Admissions, completions, and aborted by instance",
+      "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+      "targets": [
+        {
+          "expr": "sum by (instance) (increase(ingress_shadow_admissions_total[5m])) or vector(0)",
+          "legendFormat": "admissions {{instance}}",
+          "refId": "A"
+        },
+        {
+          "expr": "sum by (instance) (increase(ingress_shadow_completions_total[5m])) or vector(0)",
+          "legendFormat": "completions {{instance}}",
+          "refId": "B"
+        },
+        {
+          "expr": "sum by (instance) (increase(ingress_shadow_aborted_total[5m])) or vector(0)",
+          "legendFormat": "aborted {{instance}}",
+          "refId": "C"
+        }
+      ],
+      "fieldConfig": { "defaults": { "unit": "short" } },
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 25 }
+    },
+    {
+      "type": "timeseries",
+      "title": "Enabled and oldest outstanding age by instance",
+      "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+      "targets": [
+        {
+          "expr": "max by (instance) (ingress_shadow_enabled)",
+          "legendFormat": "enabled {{instance}}",
+          "refId": "A"
+        },
+        {
+          "expr": "max by (instance) (ingress_shadow_oldest_outstanding_submission_age_seconds)",
+          "legendFormat": "oldest age {{instance}}",
+          "refId": "B"
+        }
+      ],
+      "fieldConfig": { "defaults": { "unit": "short" } },
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 33 }
+    },
+    {
+      "type": "timeseries",
+      "title": "Decisions by class",
+      "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+      "targets": [
+        {
+          "expr": "sum by (class) (increase(ingress_shadow_decisions_total[5m])) or vector(0)",
+          "legendFormat": "{{class}}",
+          "refId": "A"
+        }
+      ],
+      "fieldConfig": { "defaults": { "unit": "short" } },
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 33 }
+    },
+    {
+      "type": "timeseries",
+      "title": "Skips by reason",
+      "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+      "targets": [
+        {
+          "expr": "sum by (reason) (increase(ingress_shadow_skips_total[5m])) or vector(0)",
+          "legendFormat": "{{reason}}",
+          "refId": "A"
+        }
+      ],
+      "fieldConfig": { "defaults": { "unit": "short" } },
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 41 }
+    },
+    {
+      "type": "timeseries",
+      "title": "Alias outcomes",
+      "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+      "targets": [
+        {
+          "expr": "sum by (outcome) (increase(ingress_shadow_alias_outcomes_total[5m])) or vector(0)",
+          "legendFormat": "{{outcome}}",
+          "refId": "A"
+        }
+      ],
+      "fieldConfig": { "defaults": { "unit": "short" } },
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 41 }
+    },
+    {
+      "type": "timeseries",
+      "title": "Transaction retries",
+      "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+      "targets": [
+        {
+          "expr": "sum by (outcome) (increase(ingress_shadow_tx_retries_total[5m])) or vector(0)",
+          "legendFormat": "{{outcome}}",
+          "refId": "A"
+        }
+      ],
+      "fieldConfig": { "defaults": { "unit": "short" } },
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 49 }
+    },
+    {
+      "type": "timeseries",
+      "title": "Transaction duration p50 and p99",
+      "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+      "targets": [
+        {
+          "expr": "histogram_quantile(0.50, sum by (le) (rate(ingress_shadow_tx_duration_seconds_bucket[10m]))) or vector(0)",
+          "legendFormat": "p50",
+          "refId": "A"
+        },
+        {
+          "expr": "histogram_quantile(0.99, sum by (le) (rate(ingress_shadow_tx_duration_seconds_bucket[10m]))) or vector(0)",
+          "legendFormat": "p99",
+          "refId": "B"
+        }
+      ],
+      "fieldConfig": { "defaults": { "unit": "s" } },
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 49 }
+    },
+    {
+      "type": "timeseries",
+      "title": "GC runs and reclaimed messages",
+      "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+      "targets": [
+        {
+          "expr": "sum by (outcome) (increase(ingress_shadow_gc_runs_total[5m])) or vector(0)",
+          "legendFormat": "gc {{outcome}}",
+          "refId": "A"
+        },
+        {
+          "expr": "sum(increase(ingress_shadow_gc_reclaimed_messages_total[5m])) or vector(0)",
+          "legendFormat": "reclaimed messages",
+          "refId": "B"
+        }
+      ],
+      "fieldConfig": { "defaults": { "unit": "short" } },
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 57 }
+    },
+    {
+      "type": "timeseries",
+      "title": "GC eligible messages, oldest eligible age, and retained referenced",
+      "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+      "targets": [
+        {
+          "expr": "max(cnpg_waddle_ingress_gc_eligible_messages)",
+          "legendFormat": "eligible messages",
+          "refId": "A"
+        },
+        {
+          "expr": "max(cnpg_waddle_ingress_gc_oldest_eligible_age_seconds)",
+          "legendFormat": "oldest eligible age",
+          "refId": "B"
+        },
+        {
+          "expr": "max(cnpg_waddle_ingress_gc_retained_referenced_messages)",
+          "legendFormat": "retained referenced",
+          "refId": "C"
+        }
+      ],
+      "fieldConfig": { "defaults": { "unit": "short" } },
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 57 }
+    },
+    {
+      "type": "timeseries",
+      "title": "Messages by age bucket and state",
+      "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+      "targets": [
+        {
+          "expr": "sum by (age_days, state) (cnpg_waddle_ingress_messages_count)",
+          "legendFormat": "{{state}} day {{age_days}}",
+          "refId": "A"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "custom": {
+            "drawStyle": "bars",
+            "fillOpacity": 80,
+            "lineWidth": 1,
+            "showPoints": "never",
+            "stacking": { "group": "A", "mode": "normal" }
+          }
+        }
+      },
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 65 }
+    },
+    {
+      "type": "timeseries",
+      "title": "Cohort by state",
+      "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+      "targets": [
+        {
+          "expr": "sum by (state) (cnpg_waddle_ingress_cohort_count)",
+          "legendFormat": "{{state}}",
+          "refId": "A"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "custom": {
+            "drawStyle": "bars",
+            "fillOpacity": 70,
+            "lineWidth": 1,
+            "showPoints": "never"
+          }
+        }
+      },
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 65 }
+    },
+    {
+      "type": "timeseries",
+      "title": "Ingress table bytes and tuples",
+      "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+      "targets": [
+        {
+          "expr": "max by (table) (cnpg_waddle_ingress_table_total_bytes)",
+          "legendFormat": "bytes {{table}}",
+          "refId": "A"
+        },
+        {
+          "expr": "max by (table) (cnpg_waddle_ingress_table_live_tuples)",
+          "legendFormat": "live {{table}}",
+          "refId": "B"
+        },
+        {
+          "expr": "max by (table) (cnpg_waddle_ingress_table_dead_tuples)",
+          "legendFormat": "dead {{table}}",
+          "refId": "C"
+        }
+      ],
+      "fieldConfig": { "defaults": {} },
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 73 }
+    },
+    {
+      "type": "timeseries",
+      "title": "Postgres backends and max connections by instance",
+      "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+      "targets": [
+        {
+          "expr": "sum by (instance) (cnpg_backends_total)",
+          "legendFormat": "backends {{instance}}",
+          "refId": "A"
+        },
+        {
+          "expr": "max by (instance) (cnpg_pg_settings_setting{name=\"max_connections\"})",
+          "legendFormat": "max_connections {{instance}}",
+          "refId": "B"
+        }
+      ],
+      "fieldConfig": { "defaults": { "unit": "short" } },
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 73 }
+    },
+    {
+      "type": "timeseries",
+      "title": "WAL size, WAL volume, and WAL rate",
+      "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+      "targets": [
+        {
+          "expr": "max by (instance, value) (cnpg_collector_pg_wal{value=~\"size|volume_size\"})",
+          "legendFormat": "wal {{value}} {{instance}}",
+          "refId": "A"
+        },
+        {
+          "expr": "max by (instance) (rate(cnpg_collector_wal_bytes[5m]))",
+          "legendFormat": "wal rate {{instance}}",
+          "refId": "B"
+        }
+      ],
+      "fieldConfig": { "defaults": {} },
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 81 }
+    },
+    {
+      "type": "timeseries",
+      "title": "Postgres PVC used and capacity",
+      "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+      "targets": [
+        {
+          "expr": "max by (persistentvolumeclaim) (kubelet_volume_stats_used_bytes{namespace=\"waddle\", persistentvolumeclaim=~\"postgresql-(1|2)(-wal)?\"})",
+          "legendFormat": "used {{persistentvolumeclaim}}",
+          "refId": "A"
+        },
+        {
+          "expr": "max by (persistentvolumeclaim) (kubelet_volume_stats_capacity_bytes{namespace=\"waddle\", persistentvolumeclaim=~\"postgresql-(1|2)(-wal)?\"})",
+          "legendFormat": "capacity {{persistentvolumeclaim}}",
+          "refId": "B"
+        }
+      ],
+      "fieldConfig": { "defaults": { "unit": "bytes" } },
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 81 }
     }
   ],
   "refresh": "30s",
