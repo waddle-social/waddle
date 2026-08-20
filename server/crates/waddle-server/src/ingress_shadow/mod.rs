@@ -276,8 +276,8 @@ struct QueuedIngressShadowTask {
 
 /// An admitted submission's obligation: registered before the task is
 /// handed to the worker and released exactly once — by the terminal
-/// `Decision`/`Failed` observation, or as `Aborted` if the task is dropped
-/// without one (forced shutdown, intake closed under a queued task).
+/// `Decision` observation, or as `Aborted` if the task is dropped without
+/// one (forced shutdown discarding queued or in-flight work).
 #[cfg(feature = "clustering")]
 struct OutstandingSubmission {
     stream_activity: Arc<std::sync::Mutex<StreamActivityState>>,
@@ -1555,9 +1555,9 @@ impl IngressShadowProcessor {
                         *last_attempt_started
                             .lock()
                             .expect("attempt start mutex must not be poisoned") = Some(started);
-                        let submission = submission.clone();
+                        let attempt = self.execute_submission(&submission);
                         async move {
-                            let result = self.execute_submission(&submission).await;
+                            let result = attempt.await;
                             record_submission_attempt_duration(started.elapsed());
                             result
                         }
@@ -4012,7 +4012,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn queued_submission_is_aborted_when_intake_closes() {
+    async fn queued_submission_is_aborted_by_forced_shutdown() {
         let submit_started = Arc::new(Notify::new());
         let handle = test_handle_with_outstanding(2, 1, {
             let submit_started = submit_started.clone();
