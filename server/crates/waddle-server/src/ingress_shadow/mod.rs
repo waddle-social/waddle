@@ -4088,6 +4088,92 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn retention_gc_records_timed_out_outcome_when_gc_blocks_on_a_locked_row() {
+        let metrics = waddle_xmpp::telemetry::test_support::acquire().await;
+        let Some(fixture) = ShadowFixture::open("retention_gc_timeout").await else {
+            return;
+        };
+        assert!(matches!(
+            fixture
+                .processor
+                .execute_submission(&fixture.submission(1, Some("gc-timeout-origin")))
+                .await,
+            Ok(ShadowSubmissionOutcome {
+                commit_kind: Some(IngressShadowCommitKind::Advanced),
+                alias: IngressShadowAliasOutcome::Inserted,
+                ..
+            })
+        ));
+        let message_key = fixture
+            .message_key_for_ordinal(1)
+            .await
+            .expect("seed submission should create a canonical row");
+        fixture
+            .execute(
+                "DELETE FROM ingress_sm_refs WHERE message_key = ?::uuid",
+                crate::db_params![message_key.to_storage().to_string()],
+            )
+            .await
+            .expect("orphan terminalized message so retention GC can reclaim it");
+        fixture
+            .execute(
+                "UPDATE ingress_messages SET terminal_at = ?::timestamptz WHERE message_key = ?::uuid",
+                crate::db_params![
+                    (Utc::now()
+                        - crate::ingress_substrate::ALIAS_RETENTION
+                        - ChronoDuration::seconds(1))
+                    .to_rfc3339(),
+                    message_key.to_storage().to_string(),
+                ],
+            )
+            .await
+            .expect("age terminal message beyond alias retention");
+
+        // Mirror the substrate GC race: its candidate lock is FOR UPDATE, so
+        // this independent transaction keeps the production GC past its deadline.
+        let mut lock = fixture.db.begin().await.expect("begin message lock tx");
+        lock.query(
+            "SELECT 1 FROM ingress_messages WHERE message_key = ?::uuid FOR UPDATE",
+            crate::db_params![message_key.to_storage().to_string()],
+        )
+        .await
+        .expect("lock expired terminal message row");
+        let timed_out_before = metrics
+            .counter_sum("ingress.shadow.gc.runs", &[("outcome", "timed_out")])
+            .unwrap_or(0);
+        let completed_before = metrics
+            .counter_sum("ingress.shadow.gc.runs", &[("outcome", "completed")])
+            .unwrap_or(0);
+
+        let processor = fixture.processor.clone();
+        let gc = tokio::spawn(async move { processor.run_retention_gc().await });
+        wait_for_lock_waiter(&fixture.admin, "FOR UPDATE").await;
+        assert!(
+            !gc.is_finished(),
+            "production GC must still wait on the row lock"
+        );
+        gc.await
+            .expect("join production retention GC after its deadline");
+        lock.commit().await.expect("release message row lock");
+
+        assert_eq!(
+            metrics
+                .counter_sum("ingress.shadow.gc.runs", &[("outcome", "timed_out")])
+                .unwrap_or(0),
+            timed_out_before + 1,
+            "blocked production GC must record the timed_out outcome"
+        );
+        assert_eq!(
+            metrics
+                .counter_sum("ingress.shadow.gc.runs", &[("outcome", "completed")])
+                .unwrap_or(0),
+            completed_before,
+            "a timed-out production GC must not record a completed outcome"
+        );
+        fixture.close().await;
+    }
+
+    #[tokio::test]
     async fn retention_gc_records_failed_outcome_when_database_is_not_postgres() {
         let metrics = waddle_xmpp::telemetry::test_support::acquire().await;
         let database = Database::from_config(
