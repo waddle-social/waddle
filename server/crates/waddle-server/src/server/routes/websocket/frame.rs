@@ -729,11 +729,25 @@ fn parked_shadow_submission(
     stanza: &Stanza,
     capture: Option<crate::ingress_shadow::IngressEffectCapture>,
 ) -> Option<ParkedIngressShadowSubmission> {
+    let Stanza::Message(message) = stanza else {
+        return None;
+    };
     if !state.deps.protocol.ingress_shadow.is_enabled() {
+        waddle_xmpp::telemetry::reliability::increment_ingress_shadow_candidate(
+            waddle_xmpp::telemetry::attributes::IngressCandidateOutcome::Disabled,
+        );
         return None;
     }
-    let stream_id = sm_state.stream_id.as_deref()?;
+    let Some(stream_id) = sm_state.stream_id.as_deref() else {
+        waddle_xmpp::telemetry::reliability::increment_ingress_shadow_candidate(
+            waddle_xmpp::telemetry::attributes::IngressCandidateOutcome::NoStream,
+        );
+        return None;
+    };
     if !sm_state.is_resumable() {
+        waddle_xmpp::telemetry::reliability::increment_ingress_shadow_candidate(
+            waddle_xmpp::telemetry::attributes::IngressCandidateOutcome::NonResumable,
+        );
         debug!(
             stream_id,
             "ingress shadow explicitly excludes non-resumable SM traffic until a connection-scoped fence exists"
@@ -746,18 +760,32 @@ fn parked_shadow_submission(
         .sm_session_registry
         .current_sm_claim_fence(stream_id)
     else {
+        waddle_xmpp::telemetry::reliability::increment_ingress_shadow_candidate(
+            waddle_xmpp::telemetry::attributes::IngressCandidateOutcome::NoClaimFence,
+        );
         debug!(
             stream_id,
             "ingress shadow skipped SM traffic because no current claim fence was present"
         );
         return None;
     };
-    let principal =
-        authenticated_session.and_then(|session| session.authenticated_principal_ref().ok())?;
-    let capture = capture?;
-    let Stanza::Message(message) = stanza else {
+    let Some(principal) =
+        authenticated_session.and_then(|session| session.authenticated_principal_ref().ok())
+    else {
+        waddle_xmpp::telemetry::reliability::increment_ingress_shadow_candidate(
+            waddle_xmpp::telemetry::attributes::IngressCandidateOutcome::NoPrincipal,
+        );
         return None;
     };
+    let Some(capture) = capture else {
+        waddle_xmpp::telemetry::reliability::increment_ingress_shadow_candidate(
+            waddle_xmpp::telemetry::attributes::IngressCandidateOutcome::NoCapture,
+        );
+        return None;
+    };
+    waddle_xmpp::telemetry::reliability::increment_ingress_shadow_candidate(
+        waddle_xmpp::telemetry::attributes::IngressCandidateOutcome::Parked,
+    );
     Some(ParkedIngressShadowSubmission {
         stream_id: waddle_xmpp::pending_delivery::SmSessionId::new(stream_id),
         owner: fence.owner().clone(),
@@ -1009,6 +1037,7 @@ mod inbound_dispatch_tests {
 
     #[tokio::test]
     async fn disabled_shadow_skips_capture_and_preserves_shadow_ordinal() {
+        let metrics = waddle_xmpp::telemetry::test_support::acquire().await;
         let websocket_state =
             crate::server::routes::websocket::tests::create_test_websocket_state().await;
         let mut sm_state = waddle_xmpp::stream_management::StreamManagementState::new();
@@ -1047,11 +1076,70 @@ mod inbound_dispatch_tests {
         assert_eq!(sequence.0, 1);
         assert_eq!(sm_state.shadow_ordinal.to_storage(), 0);
         assert_eq!(sm_state.get_inbound_count(), 1);
+        assert_eq!(
+            metrics.counter_sum("ingress.shadow.candidates", &[("outcome", "disabled")]),
+            Some(1)
+        );
+    }
+
+    #[cfg(feature = "clustering")]
+    #[tokio::test]
+    async fn enabled_shadow_counts_message_without_stream_id_as_no_stream_candidate() {
+        let metrics = waddle_xmpp::telemetry::test_support::acquire().await;
+        let websocket_state =
+            crate::server::routes::websocket::tests::create_test_websocket_state_with_sm_registry_and_ingress_shadow(
+                Arc::new(InMemorySmSessionRegistry::new()),
+                IngressShadowHandle::spawn_test_worker(8, 1, |_kind, _stream_id| async move {}),
+            )
+            .await;
+        let sm_state = waddle_xmpp::stream_management::StreamManagementState::new();
+        let stanza = Stanza::Message(xmpp_parsers::message::Message::new(Some(
+            "room@muc.example.com".parse::<jid::Jid>().expect("jid"),
+        )));
+
+        assert!(
+            parked_shadow_submission(websocket_state.as_ref(), &sm_state, None, &stanza, None,)
+                .is_none()
+        );
+        assert_eq!(
+            metrics.counter_sum("ingress.shadow.candidates", &[("outcome", "no_stream")]),
+            Some(1)
+        );
+    }
+
+    #[cfg(feature = "clustering")]
+    #[tokio::test]
+    async fn enabled_shadow_counts_missing_claim_fence_before_later_gates() {
+        let metrics = waddle_xmpp::telemetry::test_support::acquire().await;
+        let websocket_state =
+            crate::server::routes::websocket::tests::create_test_websocket_state_with_sm_registry_and_ingress_shadow(
+                Arc::new(InMemorySmSessionRegistry::new()),
+                IngressShadowHandle::spawn_test_worker(8, 1, |_kind, _stream_id| async move {}),
+            )
+            .await;
+        let mut sm_state = waddle_xmpp::stream_management::StreamManagementState::new();
+        sm_state.enable("missing-fence".to_string(), true, Some(300));
+        let stanza = Stanza::Message(xmpp_parsers::message::Message::new(Some(
+            "room@muc.example.com".parse::<jid::Jid>().expect("jid"),
+        )));
+
+        assert!(
+            parked_shadow_submission(websocket_state.as_ref(), &sm_state, None, &stanza, None,)
+                .is_none()
+        );
+        assert_eq!(
+            metrics.counter_sum(
+                "ingress.shadow.candidates",
+                &[("outcome", "no_claim_fence")]
+            ),
+            Some(1)
+        );
     }
 
     #[cfg(feature = "clustering")]
     #[tokio::test]
     async fn non_resumable_sm_explicitly_skips_shadow_parking() {
+        let metrics = waddle_xmpp::telemetry::test_support::acquire().await;
         let websocket_state =
             crate::server::routes::websocket::tests::create_test_websocket_state_with_sm_registry_and_ingress_shadow(
                 Arc::new(InMemorySmSessionRegistry::new()),
@@ -1077,6 +1165,167 @@ mod inbound_dispatch_tests {
         )
         .is_none());
         assert_eq!(sm_state.shadow_ordinal.to_storage(), 0);
+        assert_eq!(
+            metrics.counter_sum("ingress.shadow.candidates", &[("outcome", "non_resumable")]),
+            Some(1)
+        );
+    }
+
+    #[cfg(feature = "clustering")]
+    #[tokio::test]
+    async fn enabled_shadow_parks_fenced_principal_message_with_capture() {
+        let metrics = waddle_xmpp::telemetry::test_support::acquire().await;
+        let registry = Arc::new(InMemorySmSessionRegistry::new());
+        let _claim_guard = registry
+            .ensure_session_claim("shadow-parked")
+            .await
+            .expect("test SM stream should acquire its claim fence");
+        let websocket_state =
+            crate::server::routes::websocket::tests::create_test_websocket_state_with_sm_registry_and_ingress_shadow(
+                registry,
+                IngressShadowHandle::spawn_test_worker(8, 1, |_kind, _stream_id| async move {}),
+            )
+            .await;
+        let mut sm_state = waddle_xmpp::stream_management::StreamManagementState::new();
+        sm_state.enable("shadow-parked".to_string(), true, Some(300));
+        let session = crate::auth::Session::new("alice@example.com", "alice", "alice");
+        let stanza = Stanza::Message(xmpp_parsers::message::Message::new(Some(
+            "room@muc.example.com".parse::<jid::Jid>().expect("jid"),
+        )));
+        let capture = ingress_effect_capture_for_stanza(websocket_state.as_ref(), None, &stanza)
+            .expect("enabled shadow must allocate message capture");
+        let parked_before = metrics
+            .counter_sum("ingress.shadow.candidates", &[("outcome", "parked")])
+            .unwrap_or(0);
+
+        assert!(parked_shadow_submission(
+            websocket_state.as_ref(),
+            &sm_state,
+            Some(&session),
+            &stanza,
+            Some(capture),
+        )
+        .is_some());
+        assert_eq!(
+            metrics
+                .counter_sum("ingress.shadow.candidates", &[("outcome", "parked")])
+                .unwrap_or(0),
+            parked_before + 1
+        );
+    }
+
+    #[cfg(feature = "clustering")]
+    #[tokio::test]
+    async fn enabled_shadow_counts_fenced_message_without_principal() {
+        let metrics = waddle_xmpp::telemetry::test_support::acquire().await;
+        let registry = Arc::new(InMemorySmSessionRegistry::new());
+        let _claim_guard = registry
+            .ensure_session_claim("shadow-no-principal")
+            .await
+            .expect("test SM stream should acquire its claim fence");
+        let websocket_state =
+            crate::server::routes::websocket::tests::create_test_websocket_state_with_sm_registry_and_ingress_shadow(
+                registry,
+                IngressShadowHandle::spawn_test_worker(8, 1, |_kind, _stream_id| async move {}),
+            )
+            .await;
+        let mut sm_state = waddle_xmpp::stream_management::StreamManagementState::new();
+        sm_state.enable("shadow-no-principal".to_string(), true, Some(300));
+        let stanza = Stanza::Message(xmpp_parsers::message::Message::new(Some(
+            "room@muc.example.com".parse::<jid::Jid>().expect("jid"),
+        )));
+        let capture = ingress_effect_capture_for_stanza(websocket_state.as_ref(), None, &stanza)
+            .expect("enabled shadow must allocate message capture");
+        let no_principal_before = metrics
+            .counter_sum("ingress.shadow.candidates", &[("outcome", "no_principal")])
+            .unwrap_or(0);
+
+        assert!(parked_shadow_submission(
+            websocket_state.as_ref(),
+            &sm_state,
+            None,
+            &stanza,
+            Some(capture),
+        )
+        .is_none());
+        assert_eq!(
+            metrics
+                .counter_sum("ingress.shadow.candidates", &[("outcome", "no_principal")],)
+                .unwrap_or(0),
+            no_principal_before + 1
+        );
+    }
+
+    #[cfg(feature = "clustering")]
+    #[tokio::test]
+    async fn enabled_shadow_counts_fenced_principal_message_without_capture() {
+        let metrics = waddle_xmpp::telemetry::test_support::acquire().await;
+        let registry = Arc::new(InMemorySmSessionRegistry::new());
+        let _claim_guard = registry
+            .ensure_session_claim("shadow-no-capture")
+            .await
+            .expect("test SM stream should acquire its claim fence");
+        let websocket_state =
+            crate::server::routes::websocket::tests::create_test_websocket_state_with_sm_registry_and_ingress_shadow(
+                registry,
+                IngressShadowHandle::spawn_test_worker(8, 1, |_kind, _stream_id| async move {}),
+            )
+            .await;
+        let mut sm_state = waddle_xmpp::stream_management::StreamManagementState::new();
+        sm_state.enable("shadow-no-capture".to_string(), true, Some(300));
+        let session = crate::auth::Session::new("alice@example.com", "alice", "alice");
+        let stanza = Stanza::Message(xmpp_parsers::message::Message::new(Some(
+            "room@muc.example.com".parse::<jid::Jid>().expect("jid"),
+        )));
+        let no_capture_before = metrics
+            .counter_sum("ingress.shadow.candidates", &[("outcome", "no_capture")])
+            .unwrap_or(0);
+
+        assert!(parked_shadow_submission(
+            websocket_state.as_ref(),
+            &sm_state,
+            Some(&session),
+            &stanza,
+            None,
+        )
+        .is_none());
+        assert_eq!(
+            metrics
+                .counter_sum("ingress.shadow.candidates", &[("outcome", "no_capture")])
+                .unwrap_or(0),
+            no_capture_before + 1
+        );
+    }
+
+    #[cfg(feature = "clustering")]
+    #[tokio::test]
+    async fn enabled_shadow_does_not_count_non_message_stanzas_as_candidates() {
+        let metrics = waddle_xmpp::telemetry::test_support::acquire().await;
+        let websocket_state =
+            crate::server::routes::websocket::tests::create_test_websocket_state_with_sm_registry_and_ingress_shadow(
+                Arc::new(InMemorySmSessionRegistry::new()),
+                IngressShadowHandle::spawn_test_worker(8, 1, |_kind, _stream_id| async move {}),
+            )
+            .await;
+        let sm_state = waddle_xmpp::stream_management::StreamManagementState::new();
+        let stanza = Stanza::Presence(xmpp_parsers::presence::Presence::new(
+            xmpp_parsers::presence::Type::None,
+        ));
+        let candidates_before = metrics
+            .counter_sum("ingress.shadow.candidates", &[])
+            .unwrap_or(0);
+
+        assert!(
+            parked_shadow_submission(websocket_state.as_ref(), &sm_state, None, &stanza, None)
+                .is_none()
+        );
+        assert_eq!(
+            metrics
+                .counter_sum("ingress.shadow.candidates", &[])
+                .unwrap_or(0),
+            candidates_before,
+            "only message stanzas may be counted as ingress-shadow candidates"
+        );
     }
 
     #[test]

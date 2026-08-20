@@ -11,6 +11,12 @@ spec:
       database: waddle
       owner: waddle
 
+  monitoring:
+    customQueriesConfigMap:
+      - name: postgresql-monitoring-ingress
+        key: queries
+    disableDefaultQueries: false
+
   storage:
     size: 10Gi
     storageClass: openebs-mayastor

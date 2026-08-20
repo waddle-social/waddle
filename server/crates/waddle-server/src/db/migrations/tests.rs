@@ -3,6 +3,8 @@ use crate::db::{
     migration_checksum, Database, DatabaseConfig, DatabaseDriver, DatabaseError,
     MigrationLedgerError, MigrationNamespace, WADDLE_NAMESPACE_START,
 };
+use sqlx::{Column, Row};
+use std::{collections::HashSet, fs, path::PathBuf};
 
 #[tokio::test]
 async fn test_migration_runner_global() {
@@ -1189,6 +1191,360 @@ async fn postgres_incompatible_ingress_schema_drift_fails_without_recording_new_
 
     drop(db);
     drop_postgres_schema(&admin, &schema).await;
+}
+
+/// Runs without PostgreSQL: the extractor must accept the checked-in
+/// ConfigMap exactly as formatted, so a parser/format drift fails here and
+/// not only in the Postgres lane.
+#[test]
+fn ingress_monitoring_configmap_extracts_every_query() {
+    let yaml_path = monitoring_configmap_path();
+    let yaml = fs::read_to_string(&yaml_path).unwrap_or_else(|error| {
+        panic!(
+            "read ingress monitoring ConfigMap at {} (is the flake.nix postUnpack copy intact?): {error}",
+            yaml_path.display()
+        )
+    });
+    let queries = extract_monitoring_queries(&yaml).expect("extract ingress monitoring queries");
+    let names: Vec<&str> = queries.iter().map(|query| query.name.as_str()).collect();
+    assert_eq!(names, EXPECTED_MONITORING_QUERIES);
+    for query in &queries {
+        assert!(
+            !query.metrics.is_empty() && query.sql.contains("FROM"),
+            "query {} extracted without metrics or SQL",
+            query.name
+        );
+    }
+}
+
+const EXPECTED_MONITORING_QUERIES: [&str; 5] = [
+    "waddle_ingress_table",
+    "waddle_ingress_gc",
+    "waddle_ingress_messages",
+    "waddle_ingress_cohort",
+    "waddle_ingress_streams",
+];
+
+fn monitoring_configmap_path() -> PathBuf {
+    PathBuf::from(env!("CARGO_MANIFEST_DIR")).join(
+        "../../../infrastructure/waddle.cloud/gitops/waddle-server/postgresql-monitoring-ingress.yaml",
+    )
+}
+
+#[derive(Debug)]
+struct MonitoringQuery {
+    name: String,
+    sql: String,
+    metrics: Vec<String>,
+}
+
+#[tokio::test]
+async fn postgres_monitoring_queries_match_migrated_ingress_schema() {
+    let Ok(database_url) = std::env::var("WADDLE_TEST_POSTGRES_URL") else {
+        eprintln!("skipping: WADDLE_TEST_POSTGRES_URL not set (ingress monitoring queries)");
+        return;
+    };
+    let yaml_path = monitoring_configmap_path();
+    // Never skip on a missing file: the nix test lanes materialize this
+    // path through `testArgs.postUnpack` in flake.nix, and a silent skip
+    // would turn this guard green-by-absence (same rule as the Mimir-rules
+    // guard in waddle-xmpp).
+    let yaml = fs::read_to_string(&yaml_path).unwrap_or_else(|error| {
+        panic!(
+            "read ingress monitoring ConfigMap at {} (is the flake.nix postUnpack copy intact?): {error}",
+            yaml_path.display()
+        )
+    });
+    let queries = extract_monitoring_queries(&yaml).expect("extract ingress monitoring queries");
+    let names: Vec<&str> = queries.iter().map(|query| query.name.as_str()).collect();
+    assert_eq!(
+        names, EXPECTED_MONITORING_QUERIES,
+        "the ConfigMap query set changed; update this test's expectations deliberately"
+    );
+
+    let schema = unique_postgres_schema_name("monitoring_queries");
+    let (db, admin) = open_isolated_postgres_database(&database_url, &schema).await;
+    MigrationRunner::single()
+        .run(&db)
+        .await
+        .expect("run migrations in isolated postgres schema");
+
+    let query_pool = sqlx::PgPool::connect(db.database_url())
+        .await
+        .expect("connect isolated postgres query pool");
+    for monitoring_query in queries {
+        // The production query pins `schemaname = 'public'`; the fixture
+        // migrates into an isolated schema, so point it at that schema to
+        // keep the table-name literals under test.
+        let sql = if monitoring_query.name == "waddle_ingress_table" {
+            assert!(
+                monitoring_query.sql.contains("schemaname = 'public'"),
+                "waddle_ingress_table must filter on schemaname = 'public'"
+            );
+            monitoring_query
+                .sql
+                .replace("schemaname = 'public'", "schemaname = current_schema()")
+        } else {
+            monitoring_query.sql.clone()
+        };
+        let rows = sqlx::query(&sql)
+            .fetch_all(&query_pool)
+            .await
+            .unwrap_or_else(|error| {
+                panic!(
+                    "execute monitoring query {} against migrated schema: {error}",
+                    monitoring_query.name
+                )
+            });
+        assert_declared_metric_columns(&monitoring_query, &rows);
+
+        match monitoring_query.name.as_str() {
+            "waddle_ingress_gc" | "waddle_ingress_streams" => assert_eq!(
+                rows.len(),
+                1,
+                "{} must return one aggregate row for an empty ingress schema",
+                monitoring_query.name
+            ),
+            "waddle_ingress_cohort" => {
+                let states: Vec<(String, i64)> = rows
+                    .iter()
+                    .map(|row| {
+                        (
+                            row.try_get("state").expect("decode cohort state"),
+                            row.try_get("count").expect("decode cohort count"),
+                        )
+                    })
+                    .collect();
+                assert_eq!(
+                    states,
+                    vec![
+                        ("live".to_string(), 0),
+                        ("terminal_referenced".to_string(), 0),
+                        ("terminal_unreferenced".to_string(), 0),
+                    ],
+                    "waddle_ingress_cohort must report each empty lifecycle state"
+                );
+            }
+            "waddle_ingress_table" => {
+                let tables: Vec<String> = rows
+                    .iter()
+                    .map(|row| row.try_get("table").expect("decode table name"))
+                    .collect();
+                assert_eq!(
+                    tables,
+                    [
+                        "ingress_deliveries",
+                        "ingress_effect_intents",
+                        "ingress_messages",
+                        "ingress_origin_aliases",
+                        "ingress_sm_refs",
+                        "ingress_sm_streams",
+                    ],
+                    "every monitored ingress table must exist in the migrated schema"
+                );
+            }
+            "waddle_ingress_messages" => {}
+            other => panic!("unexpected ingress monitoring query {other}"),
+        }
+    }
+
+    query_pool.close().await;
+    drop(db);
+    drop_postgres_schema(&admin, &schema).await;
+}
+
+fn assert_declared_metric_columns(query: &MonitoringQuery, rows: &[sqlx::postgres::PgRow]) {
+    let Some(row) = rows.first() else {
+        return;
+    };
+    let columns: HashSet<&str> = row.columns().iter().map(|column| column.name()).collect();
+    for metric in &query.metrics {
+        assert!(
+            columns.contains(metric.as_str()),
+            "{} result is missing declared metric column {metric}; got {columns:?}",
+            query.name
+        );
+    }
+}
+
+/// Extract the fixed CNPG ConfigMap shape without a YAML dependency.
+///
+/// The `queries` literal must use four-space query names, an exact six-space
+/// `query: |` field whose SQL is indented eight spaces, and an exact
+/// six-space `metrics:` field whose metric maps begin with eight-space
+/// `- <column>:` entries. Formatting that changes those anchors is rejected
+/// so no query can be silently omitted from schema-drift coverage.
+fn extract_monitoring_queries(yaml: &str) -> Result<Vec<MonitoringQuery>, String> {
+    let lines: Vec<&str> = yaml.lines().collect();
+    let queries_start = lines
+        .iter()
+        .position(|line| *line == "  queries: |")
+        .ok_or("missing exact ConfigMap `  queries: |` block")?;
+    let query_end = lines[queries_start + 1..]
+        .iter()
+        .position(|line| !line.is_empty() && !line.starts_with(' '))
+        .map_or(lines.len(), |offset| queries_start + 1 + offset);
+
+    let mut headers = Vec::new();
+    for (index, &line) in lines
+        .iter()
+        .enumerate()
+        .take(query_end)
+        .skip(queries_start + 1)
+    {
+        if line.trim().is_empty() || line.trim_start().starts_with('#') {
+            continue;
+        }
+        if line.starts_with('\t') {
+            return Err(format!("line {} uses tab indentation", index + 1));
+        }
+        if indentation(line) == 4 {
+            let name = line
+                .strip_prefix("    ")
+                .and_then(|value| value.strip_suffix(':'))
+                .filter(|value| !value.is_empty() && !value.contains(char::is_whitespace))
+                .ok_or_else(|| format!("line {} is not a four-space query name", index + 1))?;
+            headers.push((index, name));
+        }
+    }
+    if headers.is_empty() {
+        return Err("ConfigMap queries block contains no four-space query names".to_string());
+    }
+    if let Some((first_header, _)) = headers.first() {
+        for (offset, line) in lines[queries_start + 1..*first_header].iter().enumerate() {
+            if !line.trim().is_empty() && !line.trim_start().starts_with('#') {
+                return Err(format!(
+                    "queries block has content before its first query name at line {}",
+                    queries_start + 2 + offset
+                ));
+            }
+        }
+    }
+
+    headers
+        .iter()
+        .enumerate()
+        .map(|(header_index, &(start, name))| {
+            let end = headers
+                .get(header_index + 1)
+                .map_or(query_end, |(next, _)| *next);
+            extract_query_block(&lines, start, end, name)
+        })
+        .collect()
+}
+
+fn extract_query_block(
+    lines: &[&str],
+    start: usize,
+    end: usize,
+    name: &str,
+) -> Result<MonitoringQuery, String> {
+    let query_fields: Vec<usize> = (start + 1..end)
+        .filter(|&index| lines[index] == "      query: |")
+        .collect();
+    let metrics_fields: Vec<usize> = (start + 1..end)
+        .filter(|&index| lines[index] == "      metrics:")
+        .collect();
+    if query_fields.len() != 1 || metrics_fields.len() != 1 {
+        return Err(format!(
+            "query {name} must contain exactly one `      query: |` and one `      metrics:` field"
+        ));
+    }
+
+    let query_start = query_fields[0];
+    let metrics_start = metrics_fields[0];
+    if metrics_start <= query_start {
+        return Err(format!("query {name} places metrics before its SQL"));
+    }
+    for (offset, line) in lines[start + 1..query_start].iter().enumerate() {
+        if line.trim().is_empty() || line.trim_start().starts_with('#') {
+            continue;
+        }
+        if !line.starts_with("      ") || line.starts_with("        ") {
+            return Err(format!(
+                "query {name} has malformed field indentation before SQL at line {}",
+                start + 2 + offset
+            ));
+        }
+    }
+    let sql_end = (query_start + 1..end)
+        .find(|&index| lines[index].starts_with("      ") && !lines[index].starts_with("        "))
+        .unwrap_or(end);
+    if sql_end > metrics_start {
+        return Err(format!("query {name} has no field after its SQL literal"));
+    }
+
+    let mut sql = Vec::new();
+    for (offset, line) in lines[query_start + 1..sql_end].iter().enumerate() {
+        if line.is_empty() {
+            sql.push(String::new());
+        } else if let Some(sql_line) = line.strip_prefix("        ") {
+            sql.push(sql_line.to_string());
+        } else {
+            return Err(format!(
+                "query {name} has non-eight-space SQL indentation at line {}",
+                query_start + 2 + offset
+            ));
+        }
+    }
+    if sql.iter().all(|line| line.trim().is_empty()) {
+        return Err(format!("query {name} has an empty SQL literal"));
+    }
+    for (offset, line) in lines[sql_end..metrics_start].iter().enumerate() {
+        if line.trim().is_empty() || line.trim_start().starts_with('#') {
+            continue;
+        }
+        if !line.starts_with("      ") || line.starts_with("        ") {
+            return Err(format!(
+                "query {name} has malformed field indentation before metrics at line {}",
+                sql_end + 1 + offset
+            ));
+        }
+    }
+
+    let mut metrics = Vec::new();
+    for (offset, line) in lines[metrics_start + 1..end].iter().enumerate() {
+        if line.trim().is_empty() || line.trim_start().starts_with('#') {
+            continue;
+        }
+        if let Some(metric) = line.strip_prefix("        - ") {
+            let metric = metric
+                .strip_suffix(':')
+                .filter(|metric| !metric.is_empty() && !metric.contains(char::is_whitespace))
+                .ok_or_else(|| {
+                    format!(
+                        "query {name} has malformed metric entry at line {}",
+                        metrics_start + 2 + offset
+                    )
+                })?;
+            if !metrics.iter().all(|existing| existing != metric) {
+                return Err(format!(
+                    "query {name} declares metric {metric} more than once"
+                ));
+            }
+            metrics.push(metric.to_string());
+        } else if line.starts_with("            ") && !metrics.is_empty() {
+            continue;
+        } else {
+            return Err(format!(
+                "query {name} has malformed metrics indentation at line {}",
+                metrics_start + 2 + offset
+            ));
+        }
+    }
+    if metrics.is_empty() {
+        return Err(format!("query {name} declares no metric columns"));
+    }
+
+    Ok(MonitoringQuery {
+        name: name.to_string(),
+        sql: sql.join("\n"),
+        metrics,
+    })
+}
+
+fn indentation(line: &str) -> usize {
+    line.len() - line.trim_start_matches(' ').len()
 }
 
 #[tokio::test]

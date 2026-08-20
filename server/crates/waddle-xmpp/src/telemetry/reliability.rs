@@ -10,8 +10,9 @@
 //! scrape during the dual-emit release.
 
 use super::attributes::{
-    IngressAliasOutcome, IngressDecisionClass, IngressRetryOutcome, IngressSkipReason, Janitor,
-    PushRetryReason, PushSuppressReason, SmEvictionPath, SweepOutcome,
+    IngressAliasOutcome, IngressCandidateOutcome, IngressDecisionClass, IngressGcOutcome,
+    IngressRetryOutcome, IngressSkipReason, Janitor, PushRetryReason, PushSuppressReason,
+    SmEvictionPath, SweepOutcome,
 };
 
 /// One table entry: a private `mod <helper> { fn add(count) }` holding
@@ -219,6 +220,16 @@ pub fn register_reliability_counters() {
     for reason in IngressSkipReason::ALL {
         add_ingress_shadow_skips(0, reason);
     }
+    for outcome in IngressCandidateOutcome::ALL {
+        add_ingress_shadow_candidates(0, outcome);
+    }
+    for outcome in IngressGcOutcome::ALL {
+        add_ingress_shadow_gc_runs(0, outcome);
+    }
+    add_ingress_shadow_admissions(0);
+    add_ingress_shadow_completions(0);
+    add_ingress_shadow_aborted(0);
+    add_ingress_shadow_gc_reclaimed_messages(0);
     add_push_candidate_created(0);
     add_push_candidate_coalesced(0);
     add_push_outbox_published(0);
@@ -392,6 +403,86 @@ pub fn increment_ingress_shadow_skip(reason: IngressSkipReason) {
     add_ingress_shadow_skips(1, reason);
 }
 
+fn add_ingress_shadow_candidates(count: u64, outcome: IngressCandidateOutcome) {
+    crate::counter_add!(
+        "ingress.shadow.candidates",
+        "{candidate}",
+        "Message-stanza shadow-ingress parking candidates by closed outcome.",
+        count,
+        outcome,
+    );
+}
+
+pub fn increment_ingress_shadow_candidate(outcome: IngressCandidateOutcome) {
+    add_ingress_shadow_candidates(1, outcome);
+}
+
+fn add_ingress_shadow_gc_runs(count: u64, outcome: IngressGcOutcome) {
+    crate::counter_add!(
+        "ingress.shadow.gc.runs",
+        "{run}",
+        "Shadow-ingress retention GC runs by closed outcome.",
+        count,
+        outcome,
+    );
+}
+
+pub fn increment_ingress_shadow_gc_run(outcome: IngressGcOutcome) {
+    add_ingress_shadow_gc_runs(1, outcome);
+}
+
+fn add_ingress_shadow_admissions(count: u64) {
+    crate::counter_add!(
+        "ingress.shadow.admissions",
+        "{submission}",
+        "Shadow-ingress submissions accepted by the worker.",
+        count,
+    );
+}
+
+pub fn increment_ingress_shadow_admissions() {
+    add_ingress_shadow_admissions(1);
+}
+
+fn add_ingress_shadow_completions(count: u64) {
+    crate::counter_add!(
+        "ingress.shadow.completions",
+        "{submission}",
+        "Accepted shadow-ingress submissions that reached a terminal completion.",
+        count,
+    );
+}
+
+pub fn increment_ingress_shadow_completions() {
+    add_ingress_shadow_completions(1);
+}
+
+fn add_ingress_shadow_aborted(count: u64) {
+    crate::counter_add!(
+        "ingress.shadow.aborted",
+        "{submission}",
+        "Accepted shadow-ingress submissions aborted before completion.",
+        count,
+    );
+}
+
+pub fn increment_ingress_shadow_aborted() {
+    add_ingress_shadow_aborted(1);
+}
+
+fn record_ingress_shadow_gc_reclaimed_messages(count: u64) {
+    crate::counter_add!(
+        "ingress.shadow.gc.reclaimed_messages",
+        "{message}",
+        "Ingress messages reclaimed by completed shadow retention GC runs.",
+        count,
+    );
+}
+
+pub fn add_ingress_shadow_gc_reclaimed_messages(count: u64) {
+    record_ingress_shadow_gc_reclaimed_messages(count);
+}
+
 // The legacy unknown-reason catch-all family is gone with the text
 // renderer: the sealed `PushSuppressReason` enum makes an unmapped
 // reason a compile error, so it was structurally unreachable and
@@ -451,6 +542,12 @@ mod tests {
         increment_ingress_shadow_alias_outcome(IngressAliasOutcome::Conflict);
         increment_ingress_shadow_tx_retry(IngressRetryOutcome::Exhausted);
         increment_ingress_shadow_skip(IngressSkipReason::Unenrolled);
+        increment_ingress_shadow_candidate(IngressCandidateOutcome::NoCapture);
+        increment_ingress_shadow_gc_run(IngressGcOutcome::TimedOut);
+        increment_ingress_shadow_admissions();
+        increment_ingress_shadow_completions();
+        increment_ingress_shadow_aborted();
+        add_ingress_shadow_gc_reclaimed_messages(3);
         assert_eq!(
             guard.counter_sum("ingress.shadow.decisions", &[("class", "storage")]),
             Some(1)
@@ -466,6 +563,24 @@ mod tests {
         assert_eq!(
             guard.counter_sum("ingress.shadow.skips", &[("reason", "unenrolled")]),
             Some(1)
+        );
+        assert_eq!(
+            guard.counter_sum("ingress.shadow.candidates", &[("outcome", "no_capture")]),
+            Some(1)
+        );
+        assert_eq!(
+            guard.counter_sum("ingress.shadow.gc.runs", &[("outcome", "timed_out")]),
+            Some(1)
+        );
+        assert_eq!(guard.counter_sum("ingress.shadow.admissions", &[]), Some(1));
+        assert_eq!(
+            guard.counter_sum("ingress.shadow.completions", &[]),
+            Some(1)
+        );
+        assert_eq!(guard.counter_sum("ingress.shadow.aborted", &[]), Some(1));
+        assert_eq!(
+            guard.counter_sum("ingress.shadow.gc.reclaimed_messages", &[]),
+            Some(3)
         );
     }
 
@@ -553,6 +668,12 @@ mod tests {
         "ingress.shadow.alias.outcomes",
         "ingress.shadow.tx.retries",
         "ingress.shadow.skips",
+        "ingress.shadow.candidates",
+        "ingress.shadow.gc.runs",
+        "ingress.shadow.admissions",
+        "ingress.shadow.completions",
+        "ingress.shadow.aborted",
+        "ingress.shadow.gc.reclaimed_messages",
     ];
 
     /// Every metric name startup registration is expected to export.
@@ -637,6 +758,22 @@ mod tests {
                 Some(0),
                 "ingress skip reason {} not registered",
                 reason.value()
+            );
+        }
+        for outcome in IngressCandidateOutcome::ALL {
+            assert_eq!(
+                guard.counter_sum("ingress.shadow.candidates", &[("outcome", outcome.value())]),
+                Some(0),
+                "ingress candidate outcome {} not registered",
+                outcome.value()
+            );
+        }
+        for outcome in IngressGcOutcome::ALL {
+            assert_eq!(
+                guard.counter_sum("ingress.shadow.gc.runs", &[("outcome", outcome.value())]),
+                Some(0),
+                "ingress GC outcome {} not registered",
+                outcome.value()
             );
         }
         for reason in PushRetryReason::ALL {
@@ -760,7 +897,9 @@ mod tests {
             .collect();
 
         for word in rules.split(|c: char| !(c.is_ascii_alphanumeric() || c == '_')) {
-            if !(word.starts_with("xmpp_") || word.starts_with("waddle_call_"))
+            if !(word.starts_with("xmpp_")
+                || word.starts_with("waddle_call_")
+                || word.starts_with("ingress_shadow_"))
                 || !word.ends_with("_total")
             {
                 continue;

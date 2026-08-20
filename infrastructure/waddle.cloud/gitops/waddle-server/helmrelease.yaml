@@ -65,6 +65,16 @@ spec:
         - randax
       s3Endpoint: "https://f90cc3950ab5b356ec869fe64c867ea7.r2.cloudflarestorage.com"
       s3Bucket: "waddle-social-files"
+      # Ingress-shadow soak (#1695): the #1656 shadow atomic ingress
+      # transaction runs on live traffic against the shadow tables only;
+      # the existing path keeps sole authority over delivery and wire `h`.
+      # Gates the #1657 authority cutover; removed with the shadow in
+      # #1657. Rollback = delete this key (pods roll via checksum/config).
+      # Rollback stops shadow writes AND the shadow's retention GC while
+      # leaving the shadow rows in place — see
+      # server/docs/operations/ingress-shadow-soak.md before flipping it.
+      extraEnv:
+        WADDLE_INGRESS_SHADOW_ENABLED: "true"
     database:
       driver: postgres
     spicedb:
