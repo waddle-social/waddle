@@ -222,7 +222,7 @@ does not count. `IngressShadowGcFailing` firing is therefore a soak finding
 against #1656's GC budget (tracked as a follow-up issue), and the cohort
 state metrics — not the reclaimed counter — are the primary reclamation
 evidence.
-| Reclamation | `cnpg_waddle_ingress_gc_eligible_messages` is never above zero for six hours; `cnpg_waddle_ingress_gc_oldest_eligible_age_seconds < 777600` (9 days); `sum(increase(ingress_shadow_gc_reclaimed_messages_total[10d])) >= U1`. |
+| Reclamation | GC is event-driven (it runs after successful submissions and retirements), so the backlog criterion carries the same traffic qualification as `IngressShadowGcBacklog`: `cnpg_waddle_ingress_gc_eligible_messages` is never above zero for six hours **while** `sum(increase(ingress_shadow_admissions_total[6h])) > 0`; an idle backlog is bounded instead by `cnpg_waddle_ingress_gc_oldest_eligible_age_seconds < 777600` (9 days) throughout; `sum(increase(ingress_shadow_gc_reclaimed_messages_total[10d])) >= U1`. |
 | Growth | With `B(T) = sum(cnpg_waddle_ingress_table_total_bytes)` at `T`: `G1 = B(T0+5d) - B(T0)`, `G2 = B(T0+10d) - B(T0+5d)`. Pass when `G2 <= 1.5 * G1 + 16 MiB` and `B(T0+10d) < 1 GiB`. |
 | PostgreSQL | Backends stay below 80% of `max_connections`; data and WAL PVC use stay below 70% on both instances. |
 | Submission latency | p99 `ingress_shadow_tx_duration_seconds` remains below 2 seconds. |
