@@ -1224,6 +1224,18 @@ async fn postgres_monitoring_queries_match_migrated_ingress_schema() {
         ),
     };
     let queries = extract_monitoring_queries(&yaml).expect("extract ingress monitoring queries");
+    let names: Vec<&str> = queries.iter().map(|query| query.name.as_str()).collect();
+    assert_eq!(
+        names,
+        [
+            "waddle_ingress_table",
+            "waddle_ingress_gc",
+            "waddle_ingress_messages",
+            "waddle_ingress_cohort",
+            "waddle_ingress_streams",
+        ],
+        "the ConfigMap query set changed; update this test's expectations deliberately"
+    );
 
     let schema = unique_postgres_schema_name("monitoring_queries");
     let (db, admin) = open_isolated_postgres_database(&database_url, &schema).await;
@@ -1236,7 +1248,21 @@ async fn postgres_monitoring_queries_match_migrated_ingress_schema() {
         .await
         .expect("connect isolated postgres query pool");
     for monitoring_query in queries {
-        let rows = sqlx::query(&monitoring_query.sql)
+        // The production query pins `schemaname = 'public'`; the fixture
+        // migrates into an isolated schema, so point it at that schema to
+        // keep the table-name literals under test.
+        let sql = if monitoring_query.name == "waddle_ingress_table" {
+            assert!(
+                monitoring_query.sql.contains("schemaname = 'public'"),
+                "waddle_ingress_table must filter on schemaname = 'public'"
+            );
+            monitoring_query
+                .sql
+                .replace("schemaname = 'public'", "schemaname = current_schema()")
+        } else {
+            monitoring_query.sql.clone()
+        };
+        let rows = sqlx::query(&sql)
             .fetch_all(&query_pool)
             .await
             .unwrap_or_else(|error| {
@@ -1274,7 +1300,25 @@ async fn postgres_monitoring_queries_match_migrated_ingress_schema() {
                     "waddle_ingress_cohort must report each empty lifecycle state"
                 );
             }
-            "waddle_ingress_table" | "waddle_ingress_messages" => {}
+            "waddle_ingress_table" => {
+                let tables: Vec<String> = rows
+                    .iter()
+                    .map(|row| row.try_get("table").expect("decode table name"))
+                    .collect();
+                assert_eq!(
+                    tables,
+                    [
+                        "ingress_deliveries",
+                        "ingress_effect_intents",
+                        "ingress_messages",
+                        "ingress_origin_aliases",
+                        "ingress_sm_refs",
+                        "ingress_sm_streams",
+                    ],
+                    "every monitored ingress table must exist in the migrated schema"
+                );
+            }
+            "waddle_ingress_messages" => {}
             other => panic!("unexpected ingress monitoring query {other}"),
         }
     }

@@ -125,7 +125,8 @@ read-only except the rollout restart in the churn exercise.
 
    ```sh
    kubectl --context teleport.waddle.social-production get --raw /api/v1/namespaces/waddle/pods/postgresql-1:9187/proxy/metrics
-   kubectl --context teleport.waddle.social-production get --raw /api/v1/nodes/production-control-plane-01/proxy/metrics
+   node="$(kubectl --context teleport.waddle.social-production get nodes -o jsonpath='{.items[0].metadata.name}')"
+   kubectl --context teleport.waddle.social-production get --raw "/api/v1/nodes/${node}/proxy/metrics"
    ```
 
 4. Post the Day-0 baselines to [#1695](https://github.com/waddle-social/waddle/issues/1695): `rate(cnpg_collector_wal_bytes[10m])`,
@@ -200,7 +201,8 @@ silent throughout the window — `IngressShadowNotEnabled`,
 `PostgresWalRateHigh`, `PostgresCollectorError`, `PostgresDataPvcHigh`,
 `PostgresWalPvcHigh`, `PostgresDataPvcSeriesMissing`,
 `PostgresWalPvcSeriesMissing`, `IngressShadowSeriesMissing`,
-`PostgresCnpgSeriesMissing` — with one exception: `IngressShadowAborted`
+`PostgresCnpgSeriesMissing`, `IngressShadowCnpgQueriesMissing` — with one
+exception: `IngressShadowAborted`
 may fire during the declared churn restart. Record that exception and its
 count in #1695. Thresholds are final before activation; if one must change
 mid-window, the window restarts.
@@ -211,7 +213,15 @@ mid-window, the window restarts.
 | Candidate quality | Over the whole window at T0 + 10d, with `c(o) = sum(increase(ingress_shadow_candidates_total{outcome="o"}[10d]))`: `c(parked) / (c(parked) + c(no_claim_fence) + c(no_principal) + c(no_capture)) >= 0.99`, globally and `by (instance)` for every pod in the window. |
 | Cohort | At T0 + 10 days all three `cnpg_waddle_ingress_cohort_count{state}` series are present (the query always emits explicit zeros) with `terminal_unreferenced == 0` and `live == 0`; `sum(cohort at T0 + 10d) <= sum(cohort at T0 + 1d) - U1`; absence of a cohort series is a failed check, never a pass. |
 | Retained references | `cnpg_waddle_ingress_gc_retained_referenced_messages` (terminal rows past the cutoff kept alive by long-lived streams — GC rescans them on every run) at T0 + 10d is `<= 2 × (value at T0 + 5d) + 100`. |
-| Instrumentation | Every series in Day-0 step 3 is still present at T0 + 10d; `IngressShadowSeriesMissing` and `PostgresCnpgSeriesMissing` never fired. |
+| Instrumentation | Every series in Day-0 step 3 is still present at T0 + 10d; `IngressShadowSeriesMissing`, `PostgresCnpgSeriesMissing` and `IngressShadowCnpgQueriesMissing` never fired. |
+
+Known instrumentation limit: retention GC runs under the worker's 2.5 s
+transaction deadline and commits per candidate, so a GC run that times out
+has already reclaimed rows that `ingress_shadow_gc_reclaimed_messages_total`
+does not count. `IngressShadowGcFailing` firing is therefore a soak finding
+against #1656's GC budget (tracked as a follow-up issue), and the cohort
+state metrics — not the reclaimed counter — are the primary reclamation
+evidence.
 | Reclamation | `cnpg_waddle_ingress_gc_eligible_messages` is never above zero for six hours; `cnpg_waddle_ingress_gc_oldest_eligible_age_seconds < 777600` (9 days); `sum(increase(ingress_shadow_gc_reclaimed_messages_total[10d])) >= U1`. |
 | Growth | With `B(T) = sum(cnpg_waddle_ingress_table_total_bytes)` at `T`: `G1 = B(T0+5d) - B(T0)`, `G2 = B(T0+10d) - B(T0+5d)`. Pass when `G2 <= 1.5 * G1 + 16 MiB` and `B(T0+10d) < 1 GiB`. |
 | PostgreSQL | Backends stay below 80% of `max_connections`; data and WAL PVC use stay below 70% on both instances. |

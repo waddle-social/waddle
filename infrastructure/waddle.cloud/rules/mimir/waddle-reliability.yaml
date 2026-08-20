@@ -248,7 +248,7 @@ groups:
             lifecycle: "soak-temporary — removed with the shadow in #1657"
             summary: Ingress shadow retention GC failed or timed out in the last hour.
         - alert: IngressShadowGcBacklog
-          expr: max(cnpg_waddle_ingress_gc_eligible_messages) > 0
+          expr: (max(cnpg_waddle_ingress_gc_eligible_messages) > 0) and on() (sum(increase(ingress_shadow_admissions_total[6h])) > 0)
           for: 6h
           labels:
             severity: warning
@@ -256,7 +256,7 @@ groups:
           annotations:
             runbook: https://github.com/waddle-social/waddle/blob/main/server/docs/operations/ingress-shadow-soak.md ; https://github.com/waddle-social/waddle/issues/1695
             lifecycle: "soak-temporary — removed with the shadow in #1657"
-            summary: GC-eligible ingress shadow messages persisted for 6h.
+            summary: GC-eligible ingress shadow messages persisted for 6h while submissions (which trigger GC) kept flowing — retention GC is not draining.
         - alert: IngressShadowGcAge
           expr: max(cnpg_waddle_ingress_gc_oldest_eligible_age_seconds) > 777600
           labels:
@@ -295,6 +295,16 @@ groups:
           annotations:
             runbook: https://github.com/waddle-social/waddle/blob/main/server/docs/operations/ingress-shadow-soak.md ; https://github.com/waddle-social/waddle/issues/1695
             summary: The CloudNativePG exporter series are absent — the Alloy cnpg scrape or the exporter broke; every cnpg_* backed rule is silently not evaluating.
+        - alert: IngressShadowCnpgQueriesMissing
+          expr: absent(cnpg_waddle_ingress_gc_eligible_messages)
+          for: 15m
+          labels:
+            severity: warning
+            team: waddle
+          annotations:
+            runbook: https://github.com/waddle-social/waddle/blob/main/server/docs/operations/ingress-shadow-soak.md ; https://github.com/waddle-social/waddle/issues/1695
+            lifecycle: "soak-temporary — removed with the shadow in #1657"
+            summary: The primary-only ingress custom-query series are absent (exporter running but the postgresql-monitoring-ingress queries are not producing on the primary) — IngressShadowGcBacklog/GcAge are silently not evaluating.
         - alert: PostgresBackendsHigh
           expr: max by (instance) (sum by (instance) (cnpg_backends_total) / on (instance) group_left() cnpg_pg_settings_setting{name="max_connections"}) > 0.8
           for: 10m
@@ -303,7 +313,7 @@ groups:
             team: waddle
           annotations:
             runbook: https://github.com/waddle-social/waddle/blob/main/server/docs/operations/ingress-shadow-soak.md ; https://github.com/waddle-social/waddle/issues/1695
-            summary: PostgreSQL backend utilization exceeded 80% of max_connections for 10m.
+            summary: PostgreSQL backend utilization exceeded 80% of max_connections for 10m. Derivation (2026-08-20 preflight) - max_connections=100, 44 in use; the shadow adds 4 per pod, a 3-pod surge ≈77 peak, so 80% leaves headroom above the worst rollout case.
         - alert: PostgresWalVolumeHigh
           expr: max by (instance) (cnpg_collector_pg_wal{value="size"} / on (instance) group_left() cnpg_collector_pg_wal{value="volume_size"}) > 0.7
           for: 10m
@@ -312,7 +322,7 @@ groups:
             team: waddle
           annotations:
             runbook: https://github.com/waddle-social/waddle/blob/main/server/docs/operations/ingress-shadow-soak.md ; https://github.com/waddle-social/waddle/issues/1695
-            summary: PostgreSQL WAL volume utilization exceeded 70% for 10m.
+            summary: PostgreSQL WAL volume utilization exceeded 70% for 10m. Derivation - 620 MB of 2 GiB (29%) measured 2026-08-20; 70% is the standard volume guard.
         - alert: PostgresWalRateHigh
           expr: max by (instance) (rate(cnpg_collector_wal_bytes[10m])) > 1048576
           for: 30m
@@ -321,7 +331,7 @@ groups:
             team: waddle
           annotations:
             runbook: https://github.com/waddle-social/waddle/blob/main/server/docs/operations/ingress-shadow-soak.md ; https://github.com/waddle-social/waddle/issues/1695
-            summary: PostgreSQL WAL generation exceeded 1 MiB/s for 30m.
+            summary: PostgreSQL WAL generation exceeded 1 MiB/s for 30m. Derivation - measured 5.6 KB/s live and ≈10 KB/s long-run average on 2026-08-20; 1 MiB/s is ≈100-180x that.
         - alert: PostgresCollectorError
           expr: max(cnpg_last_error) > 0
           for: 15m
@@ -339,7 +349,7 @@ groups:
             team: waddle
           annotations:
             runbook: https://github.com/waddle-social/waddle/blob/main/server/docs/operations/ingress-shadow-soak.md ; https://github.com/waddle-social/waddle/issues/1695
-            summary: A PostgreSQL data PVC exceeded 70% utilization for 10m.
+            summary: A PostgreSQL data PVC exceeded 70% utilization for 10m. Derivation - 281 MB of 10.67 GB used on 2026-08-20; 70% is the standard volume guard.
         - alert: PostgresWalPvcHigh
           expr: max by (persistentvolumeclaim) (kubelet_volume_stats_used_bytes{namespace="waddle",persistentvolumeclaim=~"postgresql-[0-9]+-wal"}) / on (persistentvolumeclaim) max by (persistentvolumeclaim) (kubelet_volume_stats_capacity_bytes{namespace="waddle",persistentvolumeclaim=~"postgresql-[0-9]+-wal"}) > 0.7
           for: 10m
@@ -348,7 +358,7 @@ groups:
             team: waddle
           annotations:
             runbook: https://github.com/waddle-social/waddle/blob/main/server/docs/operations/ingress-shadow-soak.md ; https://github.com/waddle-social/waddle/issues/1695
-            summary: A PostgreSQL WAL PVC exceeded 70% utilization for 10m.
+            summary: A PostgreSQL WAL PVC exceeded 70% utilization for 10m. Derivation - 669 MB of 2.08 GB used on 2026-08-20; 70% is the standard volume guard.
         - alert: PostgresDataPvcSeriesMissing
           expr: (count(max by (persistentvolumeclaim) (kubelet_volume_stats_used_bytes{namespace="waddle",persistentvolumeclaim=~"postgresql-[0-9]+"}) / on (persistentvolumeclaim) max by (persistentvolumeclaim) (kubelet_volume_stats_capacity_bytes{namespace="waddle",persistentvolumeclaim=~"postgresql-[0-9]+"})) or vector(0)) < 2
           for: 10m
