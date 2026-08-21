@@ -5,6 +5,8 @@ metadata:
   namespace: waddle
   labels:
     cnpg.io/reload: ""
+# CloudNativePG runs these with `SET ROLE pg_monitor`; migration V1011 grants
+# that role SELECT on the ingress tables (the catalog views need no grant).
 data:
   queries: |
     waddle_ingress_table:

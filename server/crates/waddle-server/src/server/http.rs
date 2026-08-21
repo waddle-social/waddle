@@ -120,7 +120,12 @@ pub(crate) async fn start_http_server(deps: HttpServerDeps) -> Result<()> {
         .with_graceful_shutdown(async move {
             stop_token.cancelled().await;
             info!("HTTP server received shutdown signal; awaiting SM Q6 drain");
-            if tokio::time::timeout(drain_timeout, drain_complete.notified())
+            // The drain task may spend up to FORCED_TEARDOWN_JOIN past its own
+            // deadline letting forcibly aborted ingress-shadow work record its
+            // telemetry; wait through that margin so the pre-exit metrics
+            // flush (server/mod.rs) never races those counters.
+            let drain_wait = drain_timeout + crate::ingress_shadow::FORCED_TEARDOWN_JOIN;
+            if tokio::time::timeout(drain_wait, drain_complete.notified())
                 .await
                 .is_err()
             {

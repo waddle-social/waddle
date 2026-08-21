@@ -145,6 +145,15 @@ struct IngressShadowShutdown {
     complete_notify: Notify,
 }
 
+/// Bound on waiting, after `force_stop`, for every admitted submission's
+/// obligation to be released (`AbortHandle::abort` only schedules the
+/// cancellation; queued tasks drop when the scheduler loop exits). The HTTP
+/// shutdown coordinator extends its drain wait by this margin so the final
+/// metrics flush never starts while this barrier is still recording aborts.
+pub const FORCED_TEARDOWN_JOIN: Duration = Duration::from_millis(250);
+#[cfg(feature = "clustering")]
+const FORCED_TEARDOWN_POLL: Duration = Duration::from_millis(5);
+
 #[cfg(feature = "clustering")]
 impl IngressShadowShutdown {
     fn cancel(&self) {
@@ -284,18 +293,6 @@ struct OutstandingSubmission {
     stream_id: SmSessionId,
     seq: u64,
     armed: bool,
-}
-
-#[cfg(feature = "clustering")]
-impl OutstandingSubmission {
-    /// Forget an obligation whose submission was never accepted (the
-    /// channel send failed): no completion and no abort is recorded.
-    fn disarm(mut self) {
-        self.armed = false;
-        stream_activity_lock(&self.stream_activity)
-            .outstanding
-            .remove(&self.seq);
-    }
 }
 
 #[cfg(feature = "clustering")]
@@ -661,7 +658,12 @@ impl IngressShadowHandle {
         match self.inner.as_ref() {
             IngressShadowInner::Disabled => true,
             #[cfg(feature = "clustering")]
-            IngressShadowInner::Worker { tx, shutdown, .. } => {
+            IngressShadowInner::Worker {
+                tx,
+                shutdown,
+                stream_activity,
+                ..
+            } => {
                 shutdown.cancel();
                 close_worker_intake(tx);
                 if tokio::time::timeout(timeout, shutdown.wait_for_completion())
@@ -671,6 +673,24 @@ impl IngressShadowHandle {
                     true
                 } else {
                     shutdown.force_stop();
+                    // Every admitted submission — queued, never polled, or
+                    // in flight — is released through `finish_outstanding`
+                    // exactly when its terminal/abort telemetry is emitted,
+                    // so an empty outstanding map is the barrier the final
+                    // telemetry flush needs.
+                    if tokio::time::timeout(
+                        FORCED_TEARDOWN_JOIN,
+                        wait_for_outstanding_drained(stream_activity),
+                    )
+                    .await
+                    .is_err()
+                    {
+                        tracing::warn!(
+                            outstanding = stream_activity_lock(stream_activity).outstanding.len(),
+                            budget_ms = FORCED_TEARDOWN_JOIN.as_millis(),
+                            "forced ingress shadow teardown barrier expired with admitted submissions still outstanding"
+                        );
+                    }
                     false
                 }
             }
@@ -896,21 +916,10 @@ fn try_send_worker_task(
                 Err(disposition) => return disposition,
             };
             note_stream_task_enqueued(stream_activity, &stream_id);
-            let outstanding = register_outstanding(stream_activity, stream_id.clone());
-            match send_worker_task(
-                tx,
-                QueuedIngressShadowTask {
-                    task: submit,
-                    permit: Some(permit),
-                    outstanding: Some(outstanding),
-                },
-            ) {
+            match admit_submission(tx, stream_activity, stream_id.clone(), submit, permit) {
                 Ok(()) => IngressShadowDisposition::Enqueued,
-                Err(mut task) => {
+                Err(task) => {
                     note_stream_task_finished(stream_activity, &stream_id);
-                    if let Some(outstanding) = task.outstanding.take() {
-                        outstanding.disarm();
-                    }
                     drop(task.permit);
                     IngressShadowDisposition::Closed
                 }
@@ -1121,8 +1130,56 @@ fn note_stream_task_finished(
     }
 }
 
-/// Register an admitted submission's obligation and return its handle.
+/// Admit a submission atomically: the obligation is registered, the task is
+/// handed to the worker and the admission counter advances all under the
+/// activity lock (the channel send is synchronous), so no observer — the
+/// worker releasing the obligation, or the forced-teardown barrier — can see
+/// an admitted submission whose admission has not been counted yet. A closed
+/// intake leaves no trace: the entry is removed before the lock is released
+/// and the disarmed guard records nothing.
 #[cfg(feature = "clustering")]
+fn admit_submission(
+    tx: &IngressShadowTx,
+    stream_activity: &Arc<std::sync::Mutex<StreamActivityState>>,
+    stream_id: SmSessionId,
+    submit: IngressShadowTask,
+    permit: OwnedSemaphorePermit,
+) -> Result<(), QueuedIngressShadowTask> {
+    let mut state = stream_activity_lock(stream_activity);
+    let seq = state.next_seq;
+    state.next_seq = state.next_seq.wrapping_add(1);
+    state.outstanding.insert(seq, Instant::now());
+    let outstanding = OutstandingSubmission {
+        stream_activity: stream_activity.clone(),
+        stream_id,
+        seq,
+        armed: true,
+    };
+    match send_worker_task(
+        tx,
+        QueuedIngressShadowTask {
+            task: submit,
+            permit: Some(permit),
+            outstanding: Some(outstanding),
+        },
+    ) {
+        Ok(()) => {
+            waddle_xmpp::telemetry::reliability::increment_ingress_shadow_admissions();
+            Ok(())
+        }
+        Err(mut task) => {
+            state.outstanding.remove(&seq);
+            if let Some(mut rejected) = task.outstanding.take() {
+                rejected.armed = false;
+            }
+            Err(task)
+        }
+    }
+}
+
+/// Register an admitted submission's obligation and return its handle
+/// (test-only: production admission goes through [`admit_submission`]).
+#[cfg(all(test, feature = "clustering"))]
 fn register_outstanding(
     stream_activity: &Arc<std::sync::Mutex<StreamActivityState>>,
     stream_id: SmSessionId,
@@ -1142,6 +1199,16 @@ fn register_outstanding(
     }
 }
 
+/// Resolve once no admitted submission is outstanding.
+#[cfg(feature = "clustering")]
+async fn wait_for_outstanding_drained(
+    stream_activity: &Arc<std::sync::Mutex<StreamActivityState>>,
+) {
+    while !stream_activity_lock(stream_activity).outstanding.is_empty() {
+        tokio::time::sleep(FORCED_TEARDOWN_POLL).await;
+    }
+}
+
 /// Release an obligation exactly once; later calls for the same `seq` are
 /// no-ops, so a terminal observation followed by the handle's drop never
 /// double-counts.
@@ -1152,11 +1219,11 @@ fn finish_outstanding(
     seq: u64,
     end: OutstandingEnd,
 ) {
-    let existed = stream_activity_lock(stream_activity)
-        .outstanding
-        .remove(&seq)
-        .is_some();
-    if !existed {
+    // The obligation is released under the lock and only after its telemetry
+    // has been recorded, so a forced-teardown observer that finds the map
+    // empty is guaranteed to see the counters already advanced.
+    let mut state = stream_activity_lock(stream_activity);
+    if !state.outstanding.contains_key(&seq) {
         return;
     }
     if matches!(end, OutstandingEnd::Aborted) {
@@ -1164,6 +1231,7 @@ fn finish_outstanding(
         waddle_xmpp::telemetry::reliability::increment_ingress_shadow_completions();
         tracing::warn!(stream_id = %stream_id, seq, "ingress shadow submission aborted before completion");
     }
+    state.outstanding.remove(&seq);
 }
 
 #[cfg(feature = "clustering")]
@@ -1453,13 +1521,21 @@ fn observe_retry_sequence(attempts: usize, exhausted: bool) {
     waddle_xmpp::telemetry::reliability::increment_ingress_shadow_tx_retry(outcome);
 }
 
+/// Second-scale buckets with an explicit boundary at the soak's 2 s p99 gate
+/// and at the 2.5 s attempt deadline: without a 2.0 edge, a steady 1.1 s
+/// would interpolate to ≈2.49 s inside `(1.0, 2.5]` and false-fail the gate.
+#[cfg(feature = "clustering")]
+const SHADOW_TX_DURATION_BUCKETS: [f64; 12] = [
+    0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1.0, 2.0, 2.5, 5.0, 10.0,
+];
+
 #[cfg(feature = "clustering")]
 fn record_submission_attempt_duration(duration: Duration) {
     waddle_xmpp::histogram_record!(
         "ingress.shadow.tx.duration",
         "s",
         "Duration of one shadow-ingress submission transaction attempt.",
-        buckets: waddle_xmpp::telemetry::SECOND_SCALE_BUCKETS,
+        buckets: SHADOW_TX_DURATION_BUCKETS,
         duration.as_secs_f64(),
     );
 }
@@ -2521,7 +2597,11 @@ mod tests {
         );
         assert_eq!(
             metrics.histogram_bounds("ingress.shadow.tx.duration"),
-            Some(waddle_xmpp::telemetry::SECOND_SCALE_BUCKETS.to_vec())
+            Some(SHADOW_TX_DURATION_BUCKETS.to_vec())
+        );
+        assert!(
+            SHADOW_TX_DURATION_BUCKETS.contains(&2.0) && SHADOW_TX_DURATION_BUCKETS.contains(&2.5),
+            "the p99 gate (2 s) and the attempt deadline (2.5 s) must be bucket edges"
         );
     }
 
@@ -4334,7 +4414,8 @@ mod tests {
             !handle.drain_and_join(Duration::from_millis(20)).await,
             "tiny timeout should force stop while active"
         );
-        handle.wait_for_completion().await;
+        // No extra barrier: `drain_and_join(false)` itself must have waited
+        // for every admitted submission to release (forced-teardown contract).
         assert_eq!(
             submission_metrics(&metrics),
             IngressShadowSubmissionMetrics {
@@ -4411,6 +4492,96 @@ mod tests {
         );
     }
 
+    /// Forced teardown right after admission: whether the scheduler has not
+    /// dispatched the task yet, has spawned it but it was never polled, or it
+    /// is in flight, exactly one completion (aborted or decided) must exist
+    /// per admission by the time `drain_and_join(false)` returns.
+    #[tokio::test]
+    async fn submission_forced_down_immediately_after_admission_balances_regardless_of_poll_state()
+    {
+        let handle = test_handle_with_outstanding(4, 1, |task, outstanding| {
+            Box::pin(async move {
+                if matches!(task, IngressShadowTask::Submit(_)) {
+                    let _outstanding = outstanding.expect("submit must have an obligation");
+                    std::future::pending::<()>().await;
+                }
+            })
+        });
+        let metrics = waddle_xmpp::telemetry::test_support::acquire().await;
+        let before = submission_metrics(&metrics);
+        for index in 0..3 {
+            let mut submission = base_submission(Message::new(Some(jid::Jid::from(
+                "room@conference.example.com"
+                    .parse::<BareJid>()
+                    .expect("room jid"),
+            ))));
+            submission.stream_id = SmSessionId::new(format!("immediate-{index}"));
+            assert_eq!(
+                handle.try_submit(submission),
+                IngressShadowDisposition::Enqueued
+            );
+        }
+        assert_eq!(outstanding_count(&handle), 3);
+
+        assert!(!handle.drain_and_join(Duration::ZERO).await);
+        let after = submission_metrics(&metrics);
+        assert_eq!(after.admissions, before.admissions + 3);
+        assert_eq!(
+            after.completions,
+            before.completions + 3,
+            "every admission must be terminal once the forced barrier returns"
+        );
+        assert_eq!(after.aborted, before.aborted + 3);
+        assert_eq!(outstanding_count(&handle), 0);
+    }
+
+    /// Deterministic spawned-before-first-poll abort on the production
+    /// primitives: `force_stop` has already fired when the scheduler tracks a
+    /// freshly spawned task, so `track_active_task` aborts it before its
+    /// first poll (mod.rs `track_active_task`). The admitted obligation it
+    /// carries must still be released exactly once as `Aborted`, and the
+    /// outstanding-map barrier must observe that.
+    #[tokio::test]
+    async fn submission_spawned_but_never_polled_is_aborted_exactly_once() {
+        let metrics = waddle_xmpp::telemetry::test_support::acquire().await;
+        let before = submission_metrics(&metrics);
+        let stream_activity = Arc::new(std::sync::Mutex::new(StreamActivityState::default()));
+        let shutdown = Arc::new(IngressShadowShutdown::default());
+        let stream_id = SmSessionId::new("spawned-unpolled");
+        let outstanding = register_outstanding(&stream_activity, stream_id);
+        let polled = Arc::new(AtomicBool::new(false));
+        let task_polled = polled.clone();
+        let task = tokio::spawn(async move {
+            task_polled.store(true, Ordering::Release);
+            let _outstanding = outstanding;
+            std::future::pending::<()>().await;
+        });
+
+        shutdown.force_stop();
+        shutdown.track_active_task(Arc::new(AtomicBool::new(false)), task.abort_handle());
+        tokio::time::timeout(
+            FORCED_TEARDOWN_JOIN,
+            wait_for_outstanding_drained(&stream_activity),
+        )
+        .await
+        .expect("the aborted, never-polled task must release its obligation");
+
+        let join_error = task.await.expect_err("the task must be cancelled");
+        assert!(join_error.is_cancelled());
+        assert!(
+            !polled.load(Ordering::Acquire),
+            "the task must have been aborted before its first poll"
+        );
+        let after = submission_metrics(&metrics);
+        assert_eq!(after.aborted, before.aborted + 1);
+        assert_eq!(after.completions, before.completions + 1);
+        assert_eq!(outstanding_count_in(&stream_activity), 0);
+    }
+
+    fn outstanding_count_in(stream_activity: &Arc<std::sync::Mutex<StreamActivityState>>) -> usize {
+        stream_activity_lock(stream_activity).outstanding.len()
+    }
+
     #[tokio::test]
     async fn queued_submission_is_aborted_by_forced_shutdown() {
         let submit_started = Arc::new(Notify::new());
@@ -4463,7 +4634,8 @@ mod tests {
             !handle.drain_and_join(Duration::from_millis(20)).await,
             "tiny timeout should force stop while active"
         );
-        handle.wait_for_completion().await;
+        // No extra barrier: `drain_and_join(false)` itself must have waited
+        // for every admitted submission to release (forced-teardown contract).
         assert_eq!(
             submission_metrics(&metrics),
             IngressShadowSubmissionMetrics {

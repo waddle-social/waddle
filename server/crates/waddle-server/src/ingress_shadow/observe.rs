@@ -93,10 +93,10 @@ pub enum IngressShadowObservation {
 pub fn observe(observation: IngressShadowObservation) {
     match observation {
         IngressShadowObservation::Accepted { kind, stream_id } => {
+            // `ingress.shadow.admissions` is counted inside the synchronized
+            // admission path (`admit_submission`), not here: the observation
+            // runs after the worker already owns the obligation.
             tracing::debug!(?kind, stream_id = %stream_id, "ingress shadow accepted");
-            if matches!(kind, IngressShadowRequestKind::Submit) {
-                reliability::increment_ingress_shadow_admissions();
-            }
         }
         IngressShadowObservation::Dropped {
             kind,
@@ -251,7 +251,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn submission_admission_and_terminal_observations_balance() {
+    async fn submission_terminal_observations_count_completions_only() {
         let metrics = waddle_xmpp::telemetry::test_support::acquire().await;
         let admissions_before = metrics
             .counter_sum("ingress.shadow.admissions", &[])
@@ -286,7 +286,8 @@ mod tests {
             metrics
                 .counter_sum("ingress.shadow.admissions", &[])
                 .unwrap_or(0),
-            admissions_before + 2
+            admissions_before,
+            "admissions are counted by the synchronized admission path, not by observations"
         );
         assert_eq!(
             metrics

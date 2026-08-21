@@ -286,15 +286,6 @@ groups:
             runbook: https://github.com/waddle-social/waddle/blob/main/server/docs/operations/ingress-shadow-soak.md ; https://github.com/waddle-social/waddle/issues/1695
             lifecycle: "soak-temporary — removed with the shadow in #1657"
             summary: The ingress shadow metric families are absent — the OTLP export or the instruments broke; every IngressShadow* rule is silently not evaluating.
-        - alert: PostgresCnpgSeriesMissing
-          expr: absent(cnpg_last_error)
-          for: 15m
-          labels:
-            severity: warning
-            team: waddle
-          annotations:
-            runbook: https://github.com/waddle-social/waddle/blob/main/server/docs/operations/ingress-shadow-soak.md ; https://github.com/waddle-social/waddle/issues/1695
-            summary: The CloudNativePG exporter series are absent — the Alloy cnpg scrape or the exporter broke; every cnpg_* backed rule is silently not evaluating.
         - alert: IngressShadowCnpgQueriesMissing
           expr: absent(cnpg_waddle_ingress_gc_eligible_messages)
           for: 15m
@@ -305,6 +296,20 @@ groups:
             runbook: https://github.com/waddle-social/waddle/blob/main/server/docs/operations/ingress-shadow-soak.md ; https://github.com/waddle-social/waddle/issues/1695
             lifecycle: "soak-temporary — removed with the shadow in #1657"
             summary: The primary-only ingress custom-query series are absent (exporter running but the postgresql-monitoring-ingress queries are not producing on the primary) — IngressShadowGcBacklog/GcAge are silently not evaluating.
+    # Grafana Cloud Mimir caps a rule group at 20 rules (rulesSync 400 on
+    # 2026-08-20 with 25); the soak-temporary IngressShadow* rules stay above,
+    # the permanent Postgres capacity gates live here.
+    - name: waddle-postgres
+      rules:
+        - alert: PostgresCnpgSeriesMissing
+          expr: ((count(up{job="cloudnative-pg"} == 1) or vector(0)) < 2) or absent(cnpg_last_error)
+          for: 15m
+          labels:
+            severity: warning
+            team: waddle
+          annotations:
+            runbook: https://github.com/waddle-social/waddle/blob/main/server/docs/operations/ingress-shadow-soak.md ; https://github.com/waddle-social/waddle/issues/1695
+            summary: Fewer than 2 CloudNativePG instances are being scraped (2 expected), or the core `cnpg_last_error` family is absent although the scrapes succeed — a standby or the primary stopped exporting, the Alloy cnpg scrape broke, or the exporter renamed/dropped its families; the backend/WAL/collector rules are evaluating against a partial cluster. The `or vector(0)` keeps this firing when every target vanishes.
         - alert: PostgresBackendsHigh
           expr: max by (instance) (sum by (instance) (cnpg_backends_total) / on (instance) group_left() cnpg_pg_settings_setting{name="max_connections"}) > 0.8
           for: 10m
