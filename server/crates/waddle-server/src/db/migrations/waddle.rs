@@ -511,6 +511,25 @@ INSERT INTO ingress_epoch_guard_manifest (table_name) VALUES
     ('ingress_effect_intents');
 "#;
 
+pub const V1011_INGRESS_MONITORING_GRANTS: &str = r#"
+SELECT 1;
+"#;
+
+/// CloudNativePG runs custom monitoring queries with `SET ROLE pg_monitor`
+/// (#1695 soak visibility); `pg_monitor` can read the catalog but not
+/// application tables, so the ingress tables grant it SELECT explicitly.
+/// Read-only: the epoch guards are unaffected.
+pub const V1011_INGRESS_MONITORING_GRANTS_POSTGRES: &str = r#"
+GRANT SELECT ON TABLE
+    ingress_messages,
+    ingress_origin_aliases,
+    ingress_sm_refs,
+    ingress_deliveries,
+    ingress_sm_streams,
+    ingress_effect_intents
+TO pg_monitor;
+"#;
+
 /// Get all waddle schema migrations in order.
 ///
 /// Versions are intentionally offset from global migrations so a single
@@ -576,6 +595,12 @@ pub fn all() -> Vec<Migration> {
             description: "Add shadow ingress streams and effect intents".to_string(),
             sql_sqlite: V1010_SHADOW_INGRESS_SURFACE,
             sql_postgres: V1010_SHADOW_INGRESS_SURFACE_POSTGRES,
+        },
+        Migration {
+            version: 1011,
+            description: "Grant pg_monitor read access to the ingress tables".to_string(),
+            sql_sqlite: V1011_INGRESS_MONITORING_GRANTS,
+            sql_postgres: V1011_INGRESS_MONITORING_GRANTS_POSTGRES,
         },
     ]
 }
