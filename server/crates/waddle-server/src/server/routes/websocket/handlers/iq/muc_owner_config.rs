@@ -108,6 +108,7 @@ async fn recover_exact_room_after_ambiguous_config_commit(
         .actor_ref
         .ask(waddle_xmpp::muc::room_actor::RestoreLiveRoster {
             room: recovery_snapshot.room.clone(),
+            occupancy_revision: recovery_snapshot.occupancy_revision,
         })
         .await
         .map_err(|error| format!("recovered roster restore failed: {error:?}"))?;
@@ -189,11 +190,7 @@ impl CancelledOwnerConfigAskRecoveryGuard {
     ) -> Option<waddle_xmpp::muc::RoomCommittedCoordinates> {
         (snapshot.config_revision == self.expected_revision
             && snapshot.room.config == self.intended_config)
-            .then_some(
-                snapshot
-                    .config_durable_coordinates
-                    .or(snapshot.durable_coordinates),
-            )
+            .then_some(snapshot.config_durable_coordinates)
             .flatten()
     }
 
@@ -748,7 +745,7 @@ pub(super) async fn apply_muc_owner_config(
             );
             recovered_broadcast_room = Some(room_with_reconciled_config);
             room_actor = recovered_actor;
-            if let Some(coordinates) = recovered_snapshot.durable_coordinates {
+            if let Some(coordinates) = recovered_snapshot.config_durable_coordinates {
                 config_reservation = state
                     .deps
                     .protocol
@@ -1277,6 +1274,7 @@ mod tests {
                         room_jid.clone(),
                         DurableRoomState {
                             coordinates: None,
+                            config_coordinates: None,
                             waddle_id: waddle_id.into_string(),
                             channel_id: channel_id.into_string(),
                             config,
@@ -1295,7 +1293,8 @@ mod tests {
                         },
                     );
                 }
-                RoomDurableMutation::Config { config, .. } => {
+                RoomDurableMutation::Config { config, .. }
+                | RoomDurableMutation::MembersOnlyEnforcement { config, .. } => {
                     if let Some(state) = self.states.lock().expect("states lock").get_mut(room_jid)
                     {
                         state.config = config;
@@ -1305,9 +1304,17 @@ mod tests {
             }
         }
 
-        fn record_coordinates(&self, room_jid: &BareJid, coordinates: RoomCommittedCoordinates) {
+        fn record_coordinates(
+            &self,
+            room_jid: &BareJid,
+            coordinates: RoomCommittedCoordinates,
+            is_config_commit: bool,
+        ) {
             if let Some(state) = self.states.lock().expect("states lock").get_mut(room_jid) {
                 state.coordinates = Some(coordinates);
+                if is_config_commit {
+                    state.config_coordinates = Some(coordinates);
+                }
             }
         }
 
@@ -1385,8 +1392,14 @@ mod tests {
                 tx.commit()
                     .await
                     .map_err(|_| RoomCommitError::Database(RoomCommitDatabaseError::sanitized()))?;
+                let is_config_commit = matches!(
+                    &intent,
+                    RoomDurableMutation::Create { .. }
+                        | RoomDurableMutation::Config { .. }
+                        | RoomDurableMutation::MembersOnlyEnforcement { .. }
+                );
                 self.apply_mutation(room_jid, intent);
-                self.record_coordinates(room_jid, coordinates);
+                self.record_coordinates(room_jid, coordinates, is_config_commit);
                 let pause = { self.commit_pause.lock().expect("commit pause lock").take() };
                 if let Some(pause) = pause {
                     // Each pause has exactly one producer and one test waiter. `notify_one`

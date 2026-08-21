@@ -9,22 +9,35 @@
 //!
 //! This is a dark foundation slice. It deliberately contains no SQL mapping,
 //! serialization, or effect algebra: #1645 owns the first durable writer,
-//! #1646 owns the typed outbox algebra, and #1647 owns projection resync.
+//! #1646 owns the typed outbox algebra; #1647 binds transient projections to
+//! the exact durable commit that authorized them.
 
 use std::fmt;
 
+use super::projection::RoomProjectionKind;
 use super::RoomClaimFenceContext;
 
 mod commit {
-    use super::{RoomClaimFenceContext, RoomCommittedCoordinates, RoomLifecycleId, RoomRevision};
+    use super::{
+        RoomClaimFenceContext, RoomCommitKind, RoomCommittedCoordinates, RoomLifecycleId,
+        RoomRevision,
+    };
+    use crate::muc::durable::RoomProjectionKind;
 
     /// Proof returned by the durable commit path before any in-memory apply.
     /// Only this submodule can construct it directly.
-    #[derive(Debug, Clone, PartialEq, Eq)]
+    ///
+    /// ```compile_fail
+    /// use waddle_xmpp::muc::durable::RoomMutationCommit;
+    /// let commit: RoomMutationCommit = todo!();
+    /// let _duplicate = commit.clone();
+    /// ```
+    #[derive(Debug, PartialEq, Eq)]
     pub struct RoomMutationCommit {
         fence: RoomClaimFenceContext,
         lifecycle: RoomLifecycleId,
         revision: RoomRevision,
+        kind: RoomCommitKind,
     }
 
     impl RoomMutationCommit {
@@ -39,6 +52,17 @@ mod commit {
         pub fn revision(&self) -> RoomRevision {
             self.revision
         }
+
+        pub fn coordinates(&self) -> RoomCommittedCoordinates {
+            RoomCommittedCoordinates {
+                lifecycle: self.lifecycle,
+                revision: self.revision,
+            }
+        }
+
+        pub fn kind(&self) -> RoomCommitKind {
+            self.kind
+        }
     }
 
     /// A transient, one-use capability authorizing an ephemeral projection
@@ -47,13 +71,26 @@ mod commit {
     #[derive(Debug)]
     pub struct EphemeralProjectionAuthorization {
         commit: RoomMutationCommit,
+        kind: RoomProjectionKind,
     }
 
     impl EphemeralProjectionAuthorization {
+        pub fn kind(&self) -> RoomProjectionKind {
+            self.kind
+        }
+
         /// Consume this one-use capability and recover the durable-commit
         /// proof that authorizes the ephemeral projection.
-        pub fn consume(self) -> RoomMutationCommit {
-            self.commit
+        ///
+        /// ```compile_fail,E0382
+        /// use waddle_xmpp::muc::durable::EphemeralProjectionAuthorization;
+        /// fn twice(authorization: EphemeralProjectionAuthorization) {
+        ///     let _ = authorization.consume();
+        ///     let _ = authorization.consume();
+        /// }
+        /// ```
+        pub fn consume(self) -> (RoomMutationCommit, RoomProjectionKind) {
+            (self.commit, self.kind)
         }
     }
 
@@ -61,35 +98,54 @@ mod commit {
     pub(super) fn mint_room_mutation_commit(
         fence: RoomClaimFenceContext,
         coordinates: RoomCommittedCoordinates,
+        kind: RoomCommitKind,
     ) -> RoomMutationCommit {
         RoomMutationCommit {
             fence,
             lifecycle: coordinates.lifecycle,
             revision: coordinates.revision,
+            kind,
         }
     }
 
     /// Mint the one-use authorization paired with a durable commit proof.
     pub(super) fn authorize_ephemeral_projection(
         commit: RoomMutationCommit,
-    ) -> EphemeralProjectionAuthorization {
-        EphemeralProjectionAuthorization { commit }
+    ) -> Result<EphemeralProjectionAuthorization, NotAProjectionCommit> {
+        match commit.kind {
+            RoomCommitKind::Projection(kind) => {
+                Ok(EphemeralProjectionAuthorization { commit, kind })
+            }
+            RoomCommitKind::State => Err(NotAProjectionCommit),
+        }
     }
+
+    #[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
+    #[error("state commit cannot authorize an ephemeral projection")]
+    pub struct NotAProjectionCommit;
 }
 
-pub use commit::{EphemeralProjectionAuthorization, RoomMutationCommit};
+pub use commit::{EphemeralProjectionAuthorization, NotAProjectionCommit, RoomMutationCommit};
 
 pub(crate) fn mint_room_mutation_commit(
     fence: RoomClaimFenceContext,
     coordinates: RoomCommittedCoordinates,
+    kind: RoomCommitKind,
 ) -> RoomMutationCommit {
-    commit::mint_room_mutation_commit(fence, coordinates)
+    commit::mint_room_mutation_commit(fence, coordinates, kind)
 }
 
 pub(crate) fn authorize_ephemeral_projection(
     commit: RoomMutationCommit,
-) -> EphemeralProjectionAuthorization {
+) -> Result<EphemeralProjectionAuthorization, NotAProjectionCommit> {
     commit::authorize_ephemeral_projection(commit)
+}
+
+/// The durable intent category that minted a [`RoomMutationCommit`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RoomCommitKind {
+    Projection(RoomProjectionKind),
+    State,
 }
 
 /// Identifies one room incarnation, from durable creation until the room is
@@ -368,6 +424,7 @@ mod tests {
                 lifecycle,
                 revision,
             },
+            RoomCommitKind::State,
         );
 
         assert_eq!(commit.fence(), &fence);
@@ -397,10 +454,31 @@ mod tests {
                 lifecycle: RoomLifecycleId::generate(),
                 revision: RoomRevision::initial(),
             },
+            RoomCommitKind::Projection(RoomProjectionKind::OccupancyJoin),
         );
-        let expected = commit.clone();
+        let (consumed, kind) = authorize_ephemeral_projection(commit)
+            .expect("projection commit authorizes projection")
+            .consume();
 
-        assert_eq!(authorize_ephemeral_projection(commit).consume(), expected);
+        assert_eq!(kind, RoomProjectionKind::OccupancyJoin);
+        assert_eq!(consumed.kind(), RoomCommitKind::Projection(kind));
+    }
+
+    #[test]
+    fn state_commit_cannot_mint_projection_authorization() {
+        let commit = mint_room_mutation_commit(
+            claim_fence(),
+            RoomCommittedCoordinates {
+                lifecycle: RoomLifecycleId::generate(),
+                revision: RoomRevision::initial(),
+            },
+            RoomCommitKind::State,
+        );
+
+        assert!(matches!(
+            authorize_ephemeral_projection(commit),
+            Err(NotAProjectionCommit)
+        ));
     }
 
     #[test]

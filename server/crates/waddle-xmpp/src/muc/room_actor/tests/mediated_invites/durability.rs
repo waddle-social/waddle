@@ -55,8 +55,10 @@ async fn unacknowledged_rollback_blocks_dormancy_and_both_seal_guards() {
         .await
         .expect("remove inviter affiliation");
     actor
-        .ask(Leave {
-            nick: "inviter".to_string(),
+        .ask(LeaveByRealJid {
+            sender_jid: inviter.clone(),
+            cause: crate::muc::durable::OccupancyLeaveCause::Explicit,
+            session: LeaveSessionSelector::Any,
         })
         .await
         .expect("leave room");
@@ -346,8 +348,10 @@ async fn rollback_persist_failure_retains_the_exact_token_and_reservation_for_re
         ))
     ));
     actor
-        .ask(Leave {
-            nick: "inviter".to_string(),
+        .ask(LeaveByRealJid {
+            sender_jid: inviter.clone(),
+            cause: crate::muc::durable::OccupancyLeaveCause::Explicit,
+            session: LeaveSessionSelector::Any,
         })
         .await
         .expect("leave while rollback remains prepared");

@@ -389,6 +389,30 @@ pub fn adjust_muc_occupant_total(delta: i64) {
     ensure_pod_gauges();
 }
 
+/// Record the durable commit that gates an ephemeral MUC projection.
+pub fn record_muc_projection_commit(projection: &str, outcome: &str) {
+    meter()
+        .u64_counter("waddle.muc.projection.commit")
+        .with_description("Durable commits authorizing MUC projections")
+        .build()
+        .add(
+            1,
+            &[
+                KeyValue::new("projection", projection.to_string()),
+                KeyValue::new("outcome", outcome.to_string()),
+            ],
+        );
+}
+
+/// Record a rejected one-use MUC projection authorization.
+pub fn record_muc_projection_refused(cause: &str) {
+    meter()
+        .u64_counter("waddle.muc.projection.refused")
+        .with_description("Rejected MUC projection authorizations")
+        .build()
+        .add(1, &[KeyValue::new("cause", cause.to_string())]);
+}
+
 // ============================================================================
 // Extension Enrichment Metrics
 // ============================================================================

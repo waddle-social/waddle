@@ -519,10 +519,13 @@ async fn guarded_destroy_refuses_when_join_landed_after_dormancy_probe() {
     // After the occupant leaves, a fresh probe + matching revision
     // destroys the actually-dormant room.
     actor
-        .ask(LeaveByRealJid { sender_jid: alice })
+        .ask(LeaveByRealJid {
+            sender_jid: alice,
+            cause: crate::muc::durable::OccupancyLeaveCause::Explicit,
+            session: crate::muc::room_actor::LeaveSessionSelector::Any,
+        })
         .await
-        .expect("leave")
-        .expect("outcome");
+        .expect("leave");
     let probe = actor.ask(IsDormant).await.expect("second probe");
     assert!(probe.dormant, "room is dormant again after the leave");
     let destroyed: bool = registry
@@ -1452,8 +1455,9 @@ mod ownership_claims_tests {
         DurableRoomState, MucDurableFuture, MucDurableStore, RoomClaimFenceContext,
     };
     use crate::muc::room_actor::{
-        GetAffiliation, GetConfig, IsSealed, JoinAffiliationGrant, JoinWithAffiliation,
-        ResolverAffiliationSyncOutcome, SyncResolverAffiliation, UpdateConfig,
+        GetAffiliation, GetConfig, GetRoomSealState, GetSnapshot, IsSealed, JoinAffiliationGrant,
+        JoinWithAffiliation, PingSelfCheck, ResolverAffiliationSyncOutcome, RoomActorError,
+        SyncResolverAffiliation, UpdateConfig,
     };
     use crate::ownership::{
         ClaimEpoch, ClaimError, ClaimSnapshot, ClaimStore, Entity, EntityType, InProcessClaimStore,
@@ -3652,6 +3656,7 @@ mod ownership_claims_tests {
         block_next_config_save: AtomicBool,
         config_save_started: Option<Arc<tokio::sync::Notify>>,
         allow_config_save: Option<Arc<tokio::sync::Notify>>,
+        lose_projection_persist_ownership_once: AtomicBool,
         block_create_for: Option<BareJid>,
         create_started: Option<Arc<tokio::sync::Notify>>,
         allow_create: Option<Arc<tokio::sync::Notify>>,
@@ -3682,6 +3687,12 @@ mod ownership_claims_tests {
         /// be visible from the real durable store before publication.
         persisted_room_states: Mutex<HashMap<BareJid, DurableRoomState>>,
         preparing_rooms: Mutex<HashMap<BareJid, crate::muc::RoomCommittedCoordinates>>,
+        recorded_commits: Mutex<
+            Vec<(
+                crate::muc::RoomDurableMutation,
+                crate::muc::RoomCommittedCoordinates,
+            )>,
+        >,
         lifecycle: std::sync::OnceLock<crate::muc::RoomLifecycleId>,
         next_revision: AtomicUsize,
     }
@@ -3754,6 +3765,20 @@ mod ownership_claims_tests {
                     .expect("positive revision"),
             }
         }
+
+        fn set_lose_projection_persist_ownership_once(&self) {
+            self.lose_projection_persist_ownership_once
+                .store(true, Ordering::SeqCst);
+        }
+
+        fn recorded_commits(
+            &self,
+        ) -> Vec<(
+            crate::muc::RoomDurableMutation,
+            crate::muc::RoomCommittedCoordinates,
+        )> {
+            self.recorded_commits.lock().expect("lock").clone()
+        }
     }
 
     impl MucDurableStore for RecordingDurableStore {
@@ -3792,6 +3817,7 @@ mod ownership_claims_tests {
                     initial_affiliations,
                 } => Some(DurableRoomState {
                     coordinates: None,
+                    config_coordinates: None,
                     waddle_id: waddle_id.as_str().to_string(),
                     channel_id: channel_id.as_str().to_string(),
                     config: config.clone(),
@@ -3840,6 +3866,11 @@ mod ownership_claims_tests {
             let destroy_intents = &self.destroy_intents;
             let destroy_effects = &self.destroy_effects;
             let coordinates = self.next_commit_coordinates();
+            let projection_persist_lost =
+                matches!(&intent, crate::muc::RoomDurableMutation::Projection(_))
+                    && self
+                        .lose_projection_persist_ownership_once
+                        .swap(false, Ordering::SeqCst);
             Box::pin(async move {
                 if block_create {
                     if let Some(started) = create_started {
@@ -3864,6 +3895,9 @@ mod ownership_claims_tests {
                         }
                         _ => crate::muc::RoomCommitError::OwnershipUnavailable,
                     })?;
+                if projection_persist_lost {
+                    return Err(crate::muc::RoomCommitError::NotOwner);
+                }
                 if block {
                     let claim_fences = Arc::clone(&store.exact_claim_fences);
                     let stale_rejected = Arc::clone(&store.stale_config_save_rejected);
@@ -3948,6 +3982,55 @@ mod ownership_claims_tests {
                         .expect("lock")
                         .insert(room_jid.clone(), created_state);
                 }
+                if let Some(state) = store
+                    .persisted_room_states
+                    .lock()
+                    .expect("lock")
+                    .get_mut(room_jid)
+                {
+                    state.coordinates = Some(coordinates);
+                    match &intent {
+                        crate::muc::RoomDurableMutation::Config { config, .. }
+                        | crate::muc::RoomDurableMutation::MembersOnlyEnforcement {
+                            config, ..
+                        } => {
+                            state.config = config.clone();
+                            state.config_coordinates = Some(coordinates);
+                        }
+                        crate::muc::RoomDurableMutation::Affiliation(entry) => {
+                            state
+                                .affiliations
+                                .retain(|current| current.jid != entry.jid);
+                            if let Some(affiliation) = entry.affiliation {
+                                state.affiliations.push(
+                                    crate::muc::affiliation::AffiliationEntry::new(
+                                        entry.jid.clone(),
+                                        affiliation,
+                                    ),
+                                );
+                            }
+                        }
+                        crate::muc::RoomDurableMutation::AffiliationBatch(entries) => {
+                            for entry in entries {
+                                state
+                                    .affiliations
+                                    .retain(|current| current.jid != entry.jid);
+                                if let Some(affiliation) = entry.affiliation {
+                                    state.affiliations.push(
+                                        crate::muc::affiliation::AffiliationEntry::new(
+                                            entry.jid.clone(),
+                                            affiliation,
+                                        ),
+                                    );
+                                }
+                            }
+                        }
+                        crate::muc::RoomDurableMutation::Create { .. } => {
+                            state.config_coordinates = Some(coordinates);
+                        }
+                        _ => {}
+                    }
+                }
                 if creates {
                     store
                         .preparing_rooms
@@ -3972,6 +4055,11 @@ mod ownership_claims_tests {
                         .expect("preparing rooms")
                         .insert(room_jid.clone(), coordinates);
                 }
+                store
+                    .recorded_commits
+                    .lock()
+                    .expect("lock")
+                    .push((intent, coordinates));
                 Ok(crate::muc::RoomCommitOutcome {
                     coordinates,
                     reservation: None,
@@ -4322,6 +4410,7 @@ mod ownership_claims_tests {
     fn restored_room_snapshot(name: &str) -> DurableRoomState {
         DurableRoomState {
             coordinates: None,
+            config_coordinates: None,
             waddle_id: "restored-waddle".to_string(),
             channel_id: "restored-channel".to_string(),
             config: RoomConfig {
@@ -4411,11 +4500,11 @@ mod ownership_claims_tests {
             })
             .await
             .expect("join source room");
-        let stale_room = source_actor
+        let source_snapshot = source_actor
             .ask(GetSnapshot)
             .await
-            .expect("source snapshot")
-            .room;
+            .expect("source snapshot");
+        let stale_room = source_snapshot.room;
 
         let recovered_jid = test_room_jid("live-roster-recovered");
         let acquisition = registry
@@ -4428,6 +4517,7 @@ mod ownership_claims_tests {
                     ..RoomConfig::default()
                 },
                 live_room_restore: stale_room,
+                occupancy_revision: source_snapshot.occupancy_revision,
             })
             .await
             .expect("recover room with typed live roster");
@@ -6929,6 +7019,7 @@ mod ownership_claims_tests {
         let durable_store = Arc::new(RecordingDurableStore {
             load_result: Some(DurableRoomState {
                 coordinates: None,
+                config_coordinates: None,
                 waddle_id: "restored-waddle".to_string(),
                 channel_id: "restored-channel".to_string(),
                 config: restored_config.clone(),
@@ -7192,6 +7283,7 @@ mod ownership_claims_tests {
     fn reclaimed_snapshot(name: &str) -> DurableRoomState {
         DurableRoomState {
             coordinates: None,
+            config_coordinates: None,
             waddle_id: "reclaimed-waddle".to_string(),
             channel_id: "reclaimed-channel".to_string(),
             config: RoomConfig {
@@ -10882,6 +10974,154 @@ mod ownership_claims_tests {
             .expect("old exact claim lookup")
             .is_none());
         assert!(durable_store.current_claim_fence(&room_jid).is_none());
+    }
+
+    #[tokio::test]
+    async fn claim_loss_during_join_projection_reaps_actor_and_successor_accepts_rejoin() {
+        let registry = spawn_registry().await;
+        let claim_store = Arc::new(InProcessClaimStore::new());
+        let durable_store = Arc::new(RecordingDurableStore::default());
+        wire_recording_store_with_claims(
+            &registry,
+            Arc::clone(&claim_store) as Arc<dyn ClaimStore>,
+            SharedNodeIdentity::new(this_identity()),
+            Arc::clone(&durable_store),
+        )
+        .await;
+
+        let room_jid = test_room_jid("join-projection-claim-loss");
+        let actor = registry
+            .ask(GetOrCreateRoom {
+                room_jid: room_jid.clone(),
+                waddle_id: "w".to_string(),
+                channel_id: "c".to_string(),
+                config: RoomConfig::default(),
+            })
+            .await
+            .expect("create room")
+            .actor_ref;
+        let alice: jid::FullJid = "alice@example.com/web".parse().expect("alice jid");
+        let bob: jid::FullJid = "bob@example.com/phone".parse().expect("bob jid");
+
+        actor
+            .ask(JoinWithAffiliation {
+                sender_jid: alice.clone(),
+                nick: "alice".to_string(),
+                affiliation_grant: JoinAffiliationGrant::Resolver(Affiliation::Member),
+                local_domain: "example.com".to_string(),
+                admission_revision: 0,
+            })
+            .await
+            .expect("alice join");
+        let old_head = actor
+            .ask(GetSnapshot)
+            .await
+            .expect("pre-loss snapshot")
+            .durable_coordinates
+            .expect("durable head after alice join");
+
+        durable_store.set_lose_projection_persist_ownership_once();
+        let failed_join = actor
+            .ask(JoinWithAffiliation {
+                sender_jid: bob.clone(),
+                nick: "bob".to_string(),
+                affiliation_grant: JoinAffiliationGrant::Resolver(Affiliation::Member),
+                local_domain: "example.com".to_string(),
+                admission_revision: 0,
+            })
+            .await;
+        assert!(matches!(
+            failed_join,
+            Err(SendError::HandlerError(RoomActorError::RoomSealed))
+        ));
+        assert_eq!(
+            actor.ask(GetRoomSealState).await.expect("seal state"),
+            crate::muc::room_actor::RoomSealState::OwnershipLost,
+            "projection ownership loss must seal the actor definitively"
+        );
+
+        assert!(registry
+            .ask(ReapSealedRoom {
+                room_jid: room_jid.clone(),
+            })
+            .await
+            .expect("reap sealed predecessor"));
+        actor.wait_for_shutdown().await;
+        assert!(!actor.is_alive(), "the sealed predecessor must be retired");
+
+        let successor = registry
+            .ask(GetOrCreateRoom {
+                room_jid: room_jid.clone(),
+                waddle_id: "w".to_string(),
+                channel_id: "c".to_string(),
+                config: RoomConfig::default(),
+            })
+            .await
+            .expect("restore successor")
+            .actor_ref;
+        assert_ne!(
+            successor.id(),
+            actor.id(),
+            "a successor actor must replace the sealed one"
+        );
+        let restored_snapshot = successor.ask(GetSnapshot).await.expect("restored snapshot");
+        assert_eq!(
+            restored_snapshot.durable_coordinates,
+            Some(old_head),
+            "the successor must restore from the durable head left by alice's join"
+        );
+        assert!(matches!(
+            successor
+                .ask(PingSelfCheck {
+                    nick: "alice".to_string(),
+                    sender_jid: alice.clone(),
+                })
+                .await,
+            Err(SendError::HandlerError(RoomActorError::OccupantNotFound(_)))
+        ));
+
+        successor
+            .ask(JoinWithAffiliation {
+                sender_jid: bob.clone(),
+                nick: "bob".to_string(),
+                affiliation_grant: JoinAffiliationGrant::Resolver(Affiliation::Member),
+                local_domain: "example.com".to_string(),
+                admission_revision: 0,
+            })
+            .await
+            .expect("bob rejoin on successor");
+        successor
+            .ask(JoinWithAffiliation {
+                sender_jid: alice.clone(),
+                nick: "alice".to_string(),
+                affiliation_grant: JoinAffiliationGrant::Resolver(Affiliation::Member),
+                local_domain: "example.com".to_string(),
+                admission_revision: 0,
+            })
+            .await
+            .expect("alice rejoin on successor");
+
+        let new_head = successor
+            .ask(GetSnapshot)
+            .await
+            .expect("post-rejoin snapshot")
+            .durable_coordinates
+            .expect("durable head after successor rejoins");
+        assert!(
+            new_head.revision > old_head.revision,
+            "the successor rejoins must advance the projection head"
+        );
+        assert!(matches!(
+            durable_store
+                .recorded_commits()
+                .last(),
+            Some((
+                crate::muc::RoomDurableMutation::Projection(
+                    crate::muc::durable::RoomProjection::OccupancyJoin { .. }
+                ),
+                coordinates,
+            )) if *coordinates == new_head
+        ));
     }
 }
 

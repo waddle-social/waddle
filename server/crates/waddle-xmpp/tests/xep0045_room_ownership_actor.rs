@@ -662,6 +662,7 @@ async fn second_restore_cannot_transplant_an_actor_to_a_successor_fence() {
 fn durable_existing_room() -> DurableRoomState {
     DurableRoomState {
         coordinates: None,
+        config_coordinates: None,
         waddle_id: "durable-waddle".to_string(),
         channel_id: "durable-channel".to_string(),
         config: RoomConfig {

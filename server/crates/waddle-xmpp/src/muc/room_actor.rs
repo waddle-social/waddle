@@ -13,8 +13,9 @@ use thiserror::Error;
 
 use super::affiliation::AffiliationEntry;
 use super::durable::{
-    authorize_ephemeral_projection, mint_room_mutation_commit, ChannelId, RoomCommitError,
-    RoomDurableMutation, RoomMutationCommit, WaddleId,
+    authorize_ephemeral_projection, mint_room_mutation_commit, ChannelId,
+    EphemeralProjectionAuthorization, RoomCommitError, RoomDurableMutation, RoomMutationCommit,
+    RoomProjection, RoomProjectionKind, WaddleId,
 };
 use super::pin::{PinStateChange, PinnedEntry};
 use super::{MucRoom, OccupantVoiceChange, RoomConfig, RoomSubjectTexts, SubjectState};
@@ -52,10 +53,41 @@ pub use mediated_invites::{
 };
 pub use occupancy_handlers::{
     ClearMujiPresence, GetActiveMujiSessions, InCallPresenceUpdateOutcome, JoinAffiliationGrant,
-    JoinWithAffiliation, LeaveByRealJid, MujiPresenceUpdateOutcome, PingSelfCheck,
-    PresenceUpdateData, ReconcileChannelBackedRoom, ResolverAffiliationSyncOutcome,
-    SyncResolverAffiliation, UpsertInCallState, UpsertMujiPresence,
+    JoinWithAffiliation, LeaveByRealJid, LeaveDisposition, LeaveSessionSelector,
+    MujiPresenceUpdateOutcome, PingSelfCheck, PresenceUpdateData, ReconcileChannelBackedRoom,
+    ResolverAffiliationSyncOutcome, SyncResolverAffiliation, UpsertInCallState, UpsertMujiPresence,
 };
+
+/// A local occupancy generation used to avoid removing a replacement session
+/// while retrying a previously deferred departure.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub struct OccupancyWatermark(pub(crate) u64);
+
+impl OccupancyWatermark {
+    pub const fn initial() -> Self {
+        Self(0)
+    }
+
+    pub const fn from_revision(revision: u64) -> Self {
+        Self(revision)
+    }
+}
+
+/// A durable commit capability for exactly one in-memory projection.
+pub(super) enum ProjectionGate {
+    Unfenced,
+    Authorized(EphemeralProjectionAuthorization),
+}
+
+#[derive(Debug, Error, Clone, Copy, PartialEq, Eq)]
+pub enum ProjectionRefusal {
+    #[error("projection capability was minted under a different fence or lifecycle coordinates")]
+    ForeignCapability,
+    #[error("projection capability revision was already projected")]
+    RevisionAlreadyProjected,
+    #[error("projection capability was minted for a different projection kind")]
+    WrongProjectionKind,
+}
 pub use snapshot_handlers::{
     BuildGroupchatBroadcast, GetNicknameGeneration, GetRoomSnapshot, GroupchatBroadcastResult,
     RoomChainOccupant, RoomChainSnapshot,
@@ -90,6 +122,7 @@ pub struct RoomSnapshot {
     pub config_durable_coordinates: Option<super::durable::RoomCommittedCoordinates>,
     pub config_revision: u64,
     pub admission_revision: u64,
+    pub occupancy_revision: u64,
 }
 
 /// Transfer the live, non-durable room state into an authoritative successor.
@@ -98,6 +131,7 @@ pub struct RoomSnapshot {
 /// are restored.
 pub struct RestoreLiveRoster {
     pub room: MucRoom,
+    pub occupancy_revision: u64,
 }
 
 impl kameo::message::Message<RestoreLiveRoster> for RoomActor {
@@ -129,6 +163,7 @@ impl kameo::message::Message<RestoreLiveRoster> for RoomActor {
             }
         }
         self.room = restored;
+        self.occupancy_revision = self.occupancy_revision.max(msg.occupancy_revision);
     }
 }
 
@@ -411,6 +446,8 @@ pub struct RoomActor {
     /// makes the probe's revision stale, closing the probe→destroy
     /// TOCTOU that orphaned freshly-admitted occupants.
     occupancy_revision: u64,
+    /// The newest durable revision consumed by an ephemeral projection.
+    projected_revision: Option<super::durable::RoomRevision>,
     /// Why this actor refuses further admissions. Keeping the reason typed
     /// lets the registry distinguish an ordinary inactivity seal, whose
     /// removal must retain exact-release backlog fencing, from a definitive
@@ -624,6 +661,7 @@ impl RoomActor {
             invite_operations: HashMap::new(),
             invite_operation_by_invitee: HashMap::new(),
             occupancy_revision: 0,
+            projected_revision: None,
             seal_state: RoomSealState::Open,
             occupant_id_secret,
             durable_member_recipients: Vec::new(),
@@ -641,6 +679,8 @@ impl RoomActor {
     fn install_durable_room_state(&mut self, state: super::durable::DurableRoomState) {
         let previous_admission_state = self.admission_policy_snapshot();
         self.durable_coordinates = state.coordinates;
+        self.config_durable_coordinates = state.config_coordinates;
+        self.projected_revision = state.coordinates.map(|coordinates| coordinates.revision);
         self.room.waddle_id = state.waddle_id;
         self.room.channel_id = state.channel_id;
         self.replace_config(state.config);
@@ -979,14 +1019,92 @@ impl RoomActor {
             .durable_claim_fence
             .clone()
             .ok_or(DurablePersistError::OwnershipUnavailable)?;
+        let kind = super::durable::RoomCommitKind::of(&intent);
         let outcome = store
             .commit_room_mutation(&self.room.room_jid, &fence, intent, effects)
             .await
             .map_err(|error| self.classify_durable_persist_error(error))?;
-        let commit = mint_room_mutation_commit(fence, outcome.coordinates);
+        let commit = mint_room_mutation_commit(fence, outcome.coordinates, kind);
         self.durable_coordinates = Some(outcome.coordinates);
-        let _ = authorize_ephemeral_projection(commit.clone());
         Ok((Some(commit), outcome.reservation))
+    }
+
+    pub(super) async fn commit_projection(
+        &mut self,
+        projection: RoomProjection,
+    ) -> Result<ProjectionGate, DurablePersistError> {
+        let kind = projection.kind();
+        let (commit, _) = self
+            .commit_durable(
+                RoomDurableMutation::Projection(projection),
+                super::RoomMutationEffects::none(),
+            )
+            .await?;
+        match commit {
+            None => Ok(ProjectionGate::Unfenced),
+            Some(commit) => match authorize_ephemeral_projection(commit) {
+                Ok(authorization) => {
+                    crate::metrics::record_muc_projection_commit(kind.as_str(), "ok");
+                    Ok(ProjectionGate::Authorized(authorization))
+                }
+                Err(_) => {
+                    crate::metrics::record_muc_projection_commit(kind.as_str(), "not_projection");
+                    Err(DurablePersistError::PersistFailed)
+                }
+            },
+        }
+    }
+
+    pub(super) fn project<T>(
+        &mut self,
+        gate: ProjectionGate,
+        expected: RoomProjectionKind,
+        apply: impl FnOnce(&mut Self) -> T,
+    ) -> Result<T, ProjectionRefusal> {
+        let ProjectionGate::Authorized(authorization) = gate else {
+            return Ok(apply(self));
+        };
+        let (commit, kind) = authorization.consume();
+        if kind != expected {
+            crate::metrics::record_muc_projection_refused("wrong_kind");
+            tracing::warn!(room = %self.room.room_jid, "refusing projection with wrong kind");
+            return Err(ProjectionRefusal::WrongProjectionKind);
+        }
+        if self.durable_claim_fence.as_ref() != Some(commit.fence())
+            || self.durable_coordinates != Some(commit.coordinates())
+        {
+            self.seal_state = RoomSealState::OwnershipLost;
+            crate::metrics::record_muc_projection_refused("foreign_capability");
+            return Err(ProjectionRefusal::ForeignCapability);
+        }
+        if self
+            .projected_revision
+            .is_some_and(|revision| revision >= commit.revision())
+        {
+            crate::metrics::record_muc_projection_refused("revision_already_projected");
+            return Err(ProjectionRefusal::RevisionAlreadyProjected);
+        }
+        self.projected_revision = Some(commit.revision());
+        Ok(apply(self))
+    }
+
+    pub(super) fn map_projection_commit_error(error: DurablePersistError) -> RoomActorError {
+        match error {
+            DurablePersistError::NotOwner | DurablePersistError::CommitOutcomeUnknown => {
+                RoomActorError::RoomSealed
+            }
+            DurablePersistError::OwnershipUnavailable | DurablePersistError::PersistFailed => {
+                RoomActorError::OwnershipUnavailable
+            }
+        }
+    }
+
+    pub(super) fn map_projection_refusal(refusal: ProjectionRefusal) -> RoomActorError {
+        match refusal {
+            ProjectionRefusal::ForeignCapability => RoomActorError::RoomSealed,
+            ProjectionRefusal::RevisionAlreadyProjected
+            | ProjectionRefusal::WrongProjectionKind => RoomActorError::OwnershipUnavailable,
+        }
     }
 
     /// Replace config only after restoring cross-field privacy invariants.
@@ -1436,33 +1554,32 @@ impl kameo::message::Message<Join> for RoomActor {
         if self.room.get_occupant(&msg.nick).is_some() {
             return Err(RoomActorError::NickAlreadyInUse(msg.nick));
         }
-        self.room.add_occupant(super::Occupant {
-            real_jid: msg.real_jid,
-            nick: msg.nick,
-            role: msg.role,
-            affiliation: msg.affiliation,
-            is_remote: false,
-            home_server: None,
-        });
-        self.occupancy_revision = self.occupancy_revision.saturating_add(1);
-        Ok(())
-    }
-}
-
-/// Remove an occupant from the room.
-pub struct Leave {
-    pub nick: String,
-}
-
-impl kameo::message::Message<Leave> for RoomActor {
-    type Reply = Result<(), RoomActorError>;
-
-    async fn handle(&mut self, msg: Leave, _ctx: &mut Context<Self, Self::Reply>) -> Self::Reply {
-        self.reject_sealed_effects().await?;
-        self.room
-            .remove_occupant(&msg.nick)
-            .map(|_| ())
-            .ok_or(RoomActorError::OccupantNotFound(msg.nick))
+        let Some(durable_nick) = super::durable::MucOccupantNick::new(msg.nick.clone()) else {
+            return Err(RoomActorError::NickAlreadyInUse(msg.nick));
+        };
+        let gate = self
+            .commit_projection(RoomProjection::OccupancyJoin {
+                occupant: msg.real_jid.clone(),
+                nick: durable_nick,
+            })
+            .await
+            .map_err(Self::map_projection_commit_error)?;
+        self.project(gate, RoomProjectionKind::OccupancyJoin, |actor| {
+            actor.room.add_occupant(super::Occupant {
+                real_jid: msg.real_jid.clone(),
+                nick: msg.nick.clone(),
+                role: msg.role,
+                affiliation: msg.affiliation,
+                is_remote: false,
+                home_server: None,
+            });
+            actor.room.set_session_watermark(
+                msg.real_jid,
+                OccupancyWatermark::from_revision(actor.occupancy_revision.saturating_add(1)),
+            );
+            actor.occupancy_revision = actor.occupancy_revision.saturating_add(1);
+        })
+        .map_err(Self::map_projection_refusal)
     }
 }
 
@@ -1796,6 +1913,7 @@ impl kameo::message::Message<UpdateGroupDmConfigByMember> for RoomActor {
                 config_durable_coordinates: self.config_durable_coordinates,
                 config_revision: self.config_revision,
                 admission_revision: self.admission_revision,
+                occupancy_revision: self.occupancy_revision,
             },
             notification,
             reservation,
@@ -1894,15 +2012,32 @@ impl kameo::message::Message<ApplyPin> for RoomActor {
         // is an externally visible effect. Refuse both while sealed so the
         // interpreter cannot announce a pin the actor did not retain.
         self.reject_sealed_effects().await?;
-        match msg.change {
+        let projection = match &msg.change {
             PinStateChange::Pin(entry) => {
-                self.room.upsert_pin(entry);
+                RoomProjection::Pin(super::durable::RoomPinProjection::Pin {
+                    target: entry.target_stanza_id.clone(),
+                })
             }
             PinStateChange::Unpin { target_stanza_id } => {
-                self.room.remove_pin_by_target(&target_stanza_id);
+                RoomProjection::Pin(super::durable::RoomPinProjection::Unpin {
+                    target: target_stanza_id.clone(),
+                })
             }
-        }
-        Ok(())
+        };
+        let expected = projection.kind();
+        let gate = self
+            .commit_projection(projection)
+            .await
+            .map_err(Self::map_projection_commit_error)?;
+        self.project(gate, expected, |actor| match msg.change {
+            PinStateChange::Pin(entry) => {
+                actor.room.upsert_pin(entry);
+            }
+            PinStateChange::Unpin { target_stanza_id } => {
+                actor.room.remove_pin_by_target(&target_stanza_id);
+            }
+        })
+        .map_err(Self::map_projection_refusal)
     }
 }
 
@@ -2359,6 +2494,7 @@ impl kameo::message::Message<GetSnapshot> for RoomActor {
             config_durable_coordinates: self.config_durable_coordinates,
             config_revision: self.config_revision,
             admission_revision: self.admission_revision,
+            occupancy_revision: self.occupancy_revision,
         })
     }
 }

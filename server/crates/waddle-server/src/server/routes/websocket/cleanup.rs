@@ -7,8 +7,12 @@ use super::{
     },
     state::WsConnState,
     stream_management::sm_show_from_name,
+    LocalDepartureItem,
 };
-use waddle_xmpp::muc::room_actor::{LeaveOutcome, SealGuard};
+use waddle_xmpp::muc::durable::OccupancyLeaveCause;
+use waddle_xmpp::muc::room_actor::{
+    LeaveDisposition, LeaveOutcome, LeaveSessionSelector, SealGuard,
+};
 use waddle_xmpp::muc::room_registry_actor::{RoomAcquisition, RoomRegistryError};
 use waddle_xmpp::muc::RoomRegistry;
 use waddle_xmpp::xep::xep0272::Muji;
@@ -212,6 +216,19 @@ pub enum MucCleanupOutcome {
 
 #[cfg(any(not(feature = "clustering"), test))]
 pub async fn cleanup_muc_presence_for_jid(
+    state: &WebSocketState,
+    jid: &FullJid,
+) -> MucCleanupOutcome {
+    if cleanup_muc_presence(state, jid).await {
+        MucCleanupOutcome::Completed
+    } else {
+        MucCleanupOutcome::Failed
+    }
+}
+
+/// Re-drive the local room traversal after a retained departure becomes due.
+/// The caller has already checked that no same-FullJID replacement is live.
+pub(crate) async fn redrive_local_muc_cleanup(
     state: &WebSocketState,
     jid: &FullJid,
 ) -> MucCleanupOutcome {
@@ -1768,6 +1785,11 @@ async fn cleanup_muc_presence_with_origin(
         Err(error) => {
             completed = false;
             warn!(error = %error, "Failed to list room actors");
+            state
+                .deps
+                .protocol
+                .pending_local_muc_departures
+                .record(LocalDepartureItem::FullJidSweep { jid: jid.clone() });
             Vec::new()
         }
     };
@@ -1778,12 +1800,19 @@ async fn cleanup_muc_presence_with_origin(
             Err(error) => {
                 completed = false;
                 warn!(room = %room_jid, error = %error, "Failed to get room actor");
+                state
+                    .deps
+                    .protocol
+                    .pending_local_muc_departures
+                    .record(LocalDepartureItem::FullJidSweep { jid: jid.clone() });
                 continue;
             }
         };
         let leave_result = room_actor
             .ask(LeaveByRealJid {
                 sender_jid: jid.clone(),
+                cause: OccupancyLeaveCause::Disconnect,
+                session: LeaveSessionSelector::Any,
             })
             .await;
         // SFU teardown runs *after* the room actor has dropped the
@@ -1797,9 +1826,9 @@ async fn cleanup_muc_presence_with_origin(
         // would otherwise hold the participant slot until its own
         // (long) timeout. Idempotent on the SFU side — calling for
         // rooms where the user was never in a call is a no-op.
-        super::muc_call_sfu::unregister_participant_from_room(state, &room_jid, jid);
         match leave_result {
-            Ok(Some(outcome)) => {
+            Ok(LeaveDisposition::Left(outcome)) => {
+                super::muc_call_sfu::unregister_participant_from_room(state, &room_jid, jid);
                 debug!(
                     room = %room_jid,
                     nick = %outcome.nick,
@@ -1821,14 +1850,39 @@ async fn cleanup_muc_presence_with_origin(
                     completed = false;
                 }
             }
-            Ok(None) => {}
+            Ok(LeaveDisposition::Deferred { watermark }) => {
+                completed = false;
+                super::muc_call_sfu::unregister_participant_from_room(state, &room_jid, jid);
+                state.deps.protocol.pending_local_muc_departures.record(
+                    LocalDepartureItem::RoomDeparture {
+                        room: room_jid,
+                        jid: jid.clone(),
+                        cause: OccupancyLeaveCause::Disconnect,
+                        selector: LeaveSessionSelector::JoinedAtOrBefore(watermark),
+                    },
+                );
+            }
+            Ok(
+                LeaveDisposition::NotOccupant
+                | LeaveDisposition::Superseded
+                | LeaveDisposition::Suppressed,
+            ) => {}
             Err(error) => {
                 completed = false;
+                state.deps.protocol.pending_local_muc_departures.record(
+                    LocalDepartureItem::ConfirmRetired {
+                        room: room_jid.clone(),
+                        jid: jid.clone(),
+                        actor: room_actor.id(),
+                        cause: OccupancyLeaveCause::Disconnect,
+                        selector: LeaveSessionSelector::Any,
+                    },
+                );
                 warn!(
                     room = %room_jid,
                     jid = %jid,
                     error = ?error,
-                    "Failed to remove disconnected user from MUC room"
+                    "Failed to remove disconnected user from MUC room; waiting for actor retirement"
                 );
             }
         }
@@ -2903,11 +2957,17 @@ mod eviction_tests {
             .expect("room count");
         assert_eq!(count_before, 1);
 
-        let outcome = room_actor
-            .ask(LeaveByRealJid { sender_jid: alice })
+        let waddle_xmpp::muc::room_actor::LeaveDisposition::Left(outcome) = room_actor
+            .ask(LeaveByRealJid {
+                sender_jid: alice,
+                cause: waddle_xmpp::muc::durable::OccupancyLeaveCause::Disconnect,
+                session: waddle_xmpp::muc::room_actor::LeaveSessionSelector::Any,
+            })
             .await
             .expect("leave")
-            .expect("outcome present");
+        else {
+            panic!("occupant leaves");
+        };
         assert!(outcome.removed_last_session);
         assert_eq!(outcome.occupant_count, 0);
         assert!(!outcome.is_persistent);
@@ -2955,11 +3015,17 @@ mod eviction_tests {
             .await
             .expect("alice joins");
 
-        let outcome = room_actor
-            .ask(LeaveByRealJid { sender_jid: alice })
+        let waddle_xmpp::muc::room_actor::LeaveDisposition::Left(outcome) = room_actor
+            .ask(LeaveByRealJid {
+                sender_jid: alice,
+                cause: waddle_xmpp::muc::durable::OccupancyLeaveCause::Disconnect,
+                session: waddle_xmpp::muc::room_actor::LeaveSessionSelector::Any,
+            })
             .await
             .expect("leave")
-            .expect("outcome present");
+        else {
+            panic!("occupant leaves");
+        };
         assert!(outcome.removed_last_session);
         assert_eq!(outcome.occupant_count, 0);
         assert!(
@@ -3011,11 +3077,17 @@ mod eviction_tests {
                 .expect("join");
         }
 
-        let outcome = room_actor
-            .ask(LeaveByRealJid { sender_jid: alice })
+        let waddle_xmpp::muc::room_actor::LeaveDisposition::Left(outcome) = room_actor
+            .ask(LeaveByRealJid {
+                sender_jid: alice,
+                cause: waddle_xmpp::muc::durable::OccupancyLeaveCause::Disconnect,
+                session: waddle_xmpp::muc::room_actor::LeaveSessionSelector::Any,
+            })
             .await
             .expect("leave")
-            .expect("outcome present");
+        else {
+            panic!("occupant leaves");
+        };
         assert_eq!(outcome.occupant_count, 1);
 
         maybe_evict_empty_room(&state, &room_jid, &outcome).await;
@@ -3133,6 +3205,356 @@ mod remote_muc_cleanup_disposition_tests {
                 remote_muc_cleanup_disposition(&attempted(outcome)),
                 RemoteMucCleanupDisposition::UncertainCommit
             );
+        }
+    }
+}
+
+#[cfg(all(test, feature = "clustering"))]
+mod local_departure_cleanup_tests {
+    use super::super::tests::{
+        create_test_websocket_state, create_test_websocket_state_with_clustering,
+        register_test_connection, snapshot_room,
+    };
+    use super::*;
+    use crate::clustering::ClusteringHandles;
+    use jid::{BareJid, FullJid};
+    use kameo::actor::ActorRef;
+    use std::collections::HashMap;
+    use std::sync::{
+        atomic::{AtomicUsize, Ordering},
+        Arc, Mutex, OnceLock,
+    };
+    use std::time::{Duration, Instant};
+    use tokio::sync::mpsc;
+    use waddle_xmpp::muc::durable::{
+        DurableRoomState, MucDurableFuture, MucDurableStore, RoomClaimFenceContext,
+    };
+    use waddle_xmpp::muc::room_actor::{JoinAffiliationGrant, JoinWithAffiliation, RoomActor};
+    use waddle_xmpp::muc::room_registry_actor::{CreateRoom, WireClusteringClaims};
+    use waddle_xmpp::muc::{
+        RoomCommitError, RoomCommitOutcome, RoomCommittedCoordinates, RoomConfig, RoomLifecycleId,
+        RoomMutationEffects, RoomRevision,
+    };
+    use waddle_xmpp::ownership::{
+        ClaimStore, InProcessClaimStore, NodeIdentity, SharedNodeIdentity,
+    };
+    use waddle_xmpp::Affiliation;
+
+    #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+    enum LeaveProjectionMode {
+        Succeed,
+        OwnershipUnavailable,
+        NotOwner,
+    }
+
+    struct CleanupProjectionStore {
+        leave_mode: Mutex<LeaveProjectionMode>,
+        established_fences: Mutex<HashMap<BareJid, RoomClaimFenceContext>>,
+        lifecycle: OnceLock<RoomLifecycleId>,
+        next_revision: AtomicUsize,
+    }
+
+    impl CleanupProjectionStore {
+        fn new() -> Arc<Self> {
+            Arc::new(Self {
+                leave_mode: Mutex::new(LeaveProjectionMode::Succeed),
+                established_fences: Mutex::new(HashMap::new()),
+                lifecycle: OnceLock::new(),
+                next_revision: AtomicUsize::new(0),
+            })
+        }
+
+        fn set_leave_mode(&self, mode: LeaveProjectionMode) {
+            *self.leave_mode.lock().expect("leave mode lock") = mode;
+        }
+
+        fn next_commit_coordinates(&self) -> RoomCommittedCoordinates {
+            let lifecycle = *self.lifecycle.get_or_init(RoomLifecycleId::generate);
+            let revision = self.next_revision.fetch_add(1, Ordering::SeqCst) + 1;
+            RoomCommittedCoordinates {
+                lifecycle,
+                revision: RoomRevision::from_stored(revision as i64).expect("positive revision"),
+            }
+        }
+    }
+
+    impl MucDurableStore for CleanupProjectionStore {
+        fn load_room_state_fenced<'a>(
+            &'a self,
+            room_jid: &'a BareJid,
+            fence: &'a RoomClaimFenceContext,
+        ) -> MucDurableFuture<'a, Option<DurableRoomState>> {
+            let exact = self
+                .established_fences
+                .lock()
+                .expect("fence lock")
+                .get(room_jid)
+                .cloned();
+            let given = fence.clone();
+            Box::pin(async move {
+                if exact.as_ref() == Some(&given) {
+                    Ok(None)
+                } else {
+                    Err(waddle_xmpp::XmppError::internal(
+                        "unexpected room claim fence",
+                    ))
+                }
+            })
+        }
+
+        fn commit_room_mutation<'a>(
+            &'a self,
+            room_jid: &'a BareJid,
+            fence: &'a RoomClaimFenceContext,
+            intent: waddle_xmpp::muc::RoomDurableMutation,
+            _effects: RoomMutationEffects,
+        ) -> waddle_xmpp::muc::RoomCommitFuture<'a> {
+            let exact = self
+                .established_fences
+                .lock()
+                .expect("fence lock")
+                .get(room_jid)
+                .cloned();
+            let given = fence.clone();
+            let leave_mode = *self.leave_mode.lock().expect("leave mode lock");
+            let coordinates = self.next_commit_coordinates();
+            Box::pin(async move {
+                if exact.as_ref() != Some(&given) {
+                    return Err(RoomCommitError::OwnershipUnavailable);
+                }
+                match intent {
+                    waddle_xmpp::muc::RoomDurableMutation::Projection(
+                        waddle_xmpp::muc::durable::RoomProjection::OccupancyLeave { .. },
+                    ) => match leave_mode {
+                        LeaveProjectionMode::Succeed => Ok(RoomCommitOutcome {
+                            coordinates,
+                            reservation: None,
+                        }),
+                        LeaveProjectionMode::OwnershipUnavailable => {
+                            Err(RoomCommitError::OwnershipUnavailable)
+                        }
+                        LeaveProjectionMode::NotOwner => Err(RoomCommitError::NotOwner),
+                    },
+                    _ => Ok(RoomCommitOutcome {
+                        coordinates,
+                        reservation: None,
+                    }),
+                }
+            })
+        }
+
+        fn establish_claim_fence(&self, room_jid: &BareJid, fence: RoomClaimFenceContext) {
+            self.established_fences
+                .lock()
+                .expect("fence lock")
+                .insert(room_jid.clone(), fence);
+        }
+
+        fn check_exact_claim_fence<'a>(
+            &'a self,
+            room_jid: &'a BareJid,
+            fence: &'a RoomClaimFenceContext,
+        ) -> MucDurableFuture<'a, bool> {
+            let exact = self
+                .established_fences
+                .lock()
+                .expect("fence lock")
+                .get(room_jid)
+                .cloned();
+            let given = fence.clone();
+            Box::pin(async move { Ok(exact.as_ref() == Some(&given)) })
+        }
+    }
+
+    fn room_jid(local: &str) -> BareJid {
+        format!("{local}@muc.example.com")
+            .parse()
+            .expect("room jid")
+    }
+
+    fn full_jid(value: &str) -> FullJid {
+        value.parse().expect("full jid")
+    }
+
+    async fn clustered_state_with_store(store: Arc<CleanupProjectionStore>) -> Arc<WebSocketState> {
+        let claim_store = Arc::new(InProcessClaimStore::new());
+        let node_identity = SharedNodeIdentity::new(NodeIdentity::local());
+        let durable_store: Arc<dyn MucDurableStore> = store.clone();
+        let state = create_test_websocket_state_with_clustering(
+            ClusteringHandles {
+                claim_store: Some(claim_store.clone() as Arc<dyn ClaimStore>),
+                node_identity: Some(node_identity.clone()),
+                muc_durable_store: Some(durable_store.clone()),
+                ..ClusteringHandles::default()
+            },
+            Arc::new(waddle_xmpp::stream_management::InMemorySmSessionRegistry::new()),
+        )
+        .await;
+        state
+            .deps
+            .protocol
+            .room_registry
+            .ask(WireClusteringClaims {
+                claim_store: claim_store as Arc<dyn ClaimStore>,
+                node_identity,
+                durable_store: Some(durable_store),
+                rollout_backoff: None,
+            })
+            .await
+            .expect("wire clustering claims");
+        state
+    }
+
+    async fn join_member(room_actor: &ActorRef<RoomActor>, jid: &FullJid, nick: &str) {
+        room_actor
+            .ask(JoinWithAffiliation {
+                sender_jid: jid.clone(),
+                nick: nick.to_string(),
+                affiliation_grant: JoinAffiliationGrant::Resolver(Affiliation::Member),
+                local_domain: "example.com".to_string(),
+                admission_revision: 0,
+            })
+            .await
+            .expect("join occupant");
+    }
+
+    #[tokio::test]
+    async fn disconnect_cleanup_deferred_leave_records_room_departure_and_does_not_broadcast() {
+        let store = CleanupProjectionStore::new();
+        let state = clustered_state_with_store(store.clone()).await;
+        let room_jid = room_jid("disconnect-deferred");
+        let room_actor = state
+            .deps
+            .protocol
+            .room_registry
+            .ask(CreateRoom {
+                room_jid: room_jid.clone(),
+                waddle_id: "w".to_string(),
+                channel_id: "c".to_string(),
+                config: RoomConfig::default(),
+            })
+            .await
+            .expect("create room");
+        let alice = full_jid("alice@example.com/web");
+        let bob = full_jid("bob@example.com/phone");
+        join_member(&room_actor, &alice, "alice").await;
+        join_member(&room_actor, &bob, "bob").await;
+
+        let (bob_tx, mut bob_rx) = mpsc::channel(8);
+        register_test_connection(state.as_ref(), &bob, bob_tx).await;
+        let watermark = snapshot_room(state.as_ref(), &room_jid)
+            .await
+            .occupancy_revision;
+
+        store.set_leave_mode(LeaveProjectionMode::OwnershipUnavailable);
+        assert_eq!(
+            cleanup_muc_presence_for_jid(state.as_ref(), &alice).await,
+            MucCleanupOutcome::Failed
+        );
+
+        let due = state
+            .deps
+            .protocol
+            .pending_local_muc_departures
+            .take_due(Instant::now());
+        assert_eq!(due.len(), 1, "one deferred room departure is retained");
+        assert!(
+            tokio::time::timeout(Duration::from_millis(100), bob_rx.recv())
+                .await
+                .is_err()
+        );
+        match &due[0].item {
+            LocalDepartureItem::RoomDeparture {
+                room,
+                jid,
+                cause,
+                selector,
+            } => {
+                assert_eq!(room, &room_jid);
+                assert_eq!(jid, &alice);
+                assert_eq!(*cause, OccupancyLeaveCause::Disconnect);
+                assert_eq!(
+                    *selector,
+                    LeaveSessionSelector::JoinedAtOrBefore(
+                        waddle_xmpp::muc::room_actor::OccupancyWatermark::from_revision(watermark)
+                    )
+                );
+            }
+            other => panic!("expected retained room departure, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn disconnect_cleanup_enumeration_failure_records_full_jid_sweep() {
+        let state = create_test_websocket_state().await;
+        state.deps.protocol.room_registry.kill();
+        state.deps.protocol.room_registry.wait_for_shutdown().await;
+
+        let jid = full_jid("alice@example.com/web");
+        assert_eq!(
+            cleanup_muc_presence_for_jid(state.as_ref(), &jid).await,
+            MucCleanupOutcome::Failed
+        );
+
+        let due = state
+            .deps
+            .protocol
+            .pending_local_muc_departures
+            .take_due(Instant::now());
+        assert_eq!(due.len(), 1);
+        assert_eq!(
+            due[0].item,
+            LocalDepartureItem::FullJidSweep { jid: jid.clone() }
+        );
+    }
+
+    #[tokio::test]
+    async fn disconnect_cleanup_room_sealed_records_confirm_retired() {
+        let store = CleanupProjectionStore::new();
+        let state = clustered_state_with_store(store.clone()).await;
+        let room_jid = room_jid("disconnect-sealed");
+        let room_actor = state
+            .deps
+            .protocol
+            .room_registry
+            .ask(CreateRoom {
+                room_jid: room_jid.clone(),
+                waddle_id: "w".to_string(),
+                channel_id: "c".to_string(),
+                config: RoomConfig::default(),
+            })
+            .await
+            .expect("create room");
+        let alice = full_jid("alice@example.com/web");
+        join_member(&room_actor, &alice, "alice").await;
+
+        store.set_leave_mode(LeaveProjectionMode::NotOwner);
+        assert_eq!(
+            cleanup_muc_presence_for_jid(state.as_ref(), &alice).await,
+            MucCleanupOutcome::Failed
+        );
+
+        let due = state
+            .deps
+            .protocol
+            .pending_local_muc_departures
+            .take_due(Instant::now());
+        assert_eq!(due.len(), 1, "sealed actor responsibility is retained");
+        match &due[0].item {
+            LocalDepartureItem::ConfirmRetired {
+                room,
+                jid,
+                actor,
+                cause,
+                selector,
+            } => {
+                assert_eq!(room, &room_jid);
+                assert_eq!(jid, &alice);
+                assert_eq!(*actor, room_actor.id());
+                assert_eq!(*cause, OccupancyLeaveCause::Disconnect);
+                assert_eq!(*selector, LeaveSessionSelector::Any);
+            }
+            other => panic!("expected confirm-retired item, got {other:?}"),
         }
     }
 }

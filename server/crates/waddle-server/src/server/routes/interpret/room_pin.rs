@@ -388,7 +388,121 @@ mod tests {
     use super::*;
     use crate::ingress_shadow::IngressEffectCapture;
     use crate::server::routes::interpret::Deps;
+    use crate::server::routes::websocket::handlers::presence::handle_muc_join;
+    use crate::server::routes::websocket::tests::{
+        create_test_server_owner_session, create_test_websocket_state, register_test_connection,
+    };
+    use jid::BareJid;
+    use std::sync::{Arc, Mutex};
+    use tokio::sync::mpsc;
+    use waddle_xmpp::muc::durable::{
+        MucDurableFuture, MucDurableStore, RoomClaimFenceContext, RoomLifecycleId, RoomProjection,
+        RoomRevision,
+    };
+    use waddle_xmpp::muc::room_actor::RestoreDurableRoomState;
+    use waddle_xmpp::muc::room_registry_actor::CreateRoom;
+    use waddle_xmpp::ownership::{ClaimEpoch, Entity, EntityType, NodeIdentity};
     use waddle_xmpp_core::xep0359::StanzaId;
+
+    struct PinProjectionFailingStore {
+        lifecycle: RoomLifecycleId,
+        next_revision: Mutex<RoomRevision>,
+    }
+
+    impl PinProjectionFailingStore {
+        fn new() -> Arc<Self> {
+            Arc::new(Self {
+                lifecycle: RoomLifecycleId::generate(),
+                next_revision: Mutex::new(RoomRevision::initial()),
+            })
+        }
+
+        fn next_coordinates(&self) -> waddle_xmpp::muc::RoomCommittedCoordinates {
+            let mut revision = self.next_revision.lock().expect("revision lock");
+            let current = *revision;
+            *revision = revision.next().expect("test revisions must not overflow");
+            waddle_xmpp::muc::RoomCommittedCoordinates {
+                lifecycle: self.lifecycle,
+                revision: current,
+            }
+        }
+    }
+
+    impl MucDurableStore for PinProjectionFailingStore {
+        fn load_room_state_fenced<'a>(
+            &'a self,
+            room_jid: &'a BareJid,
+            fence: &'a RoomClaimFenceContext,
+        ) -> MucDurableFuture<'a, Option<waddle_xmpp::muc::durable::DurableRoomState>> {
+            let validation = validate_pin_test_claim_fence(room_jid, fence);
+            Box::pin(async move {
+                validation?;
+                Ok(None)
+            })
+        }
+
+        fn commit_room_mutation<'a>(
+            &'a self,
+            room_jid: &'a BareJid,
+            fence: &'a RoomClaimFenceContext,
+            intent: waddle_xmpp::muc::RoomDurableMutation,
+            _effects: waddle_xmpp::muc::RoomMutationEffects,
+        ) -> waddle_xmpp::muc::RoomCommitFuture<'a> {
+            if let Err(error) = validate_pin_test_claim_fence(room_jid, fence) {
+                return Box::pin(async move {
+                    let _ = error;
+                    Err(waddle_xmpp::muc::RoomCommitError::NotOwner)
+                });
+            }
+            let coordinates = self.next_coordinates();
+            Box::pin(async move {
+                if matches!(
+                    intent,
+                    waddle_xmpp::muc::RoomDurableMutation::Projection(RoomProjection::Pin(_))
+                ) {
+                    return Err(waddle_xmpp::muc::RoomCommitError::OwnershipUnavailable);
+                }
+                Ok(waddle_xmpp::muc::RoomCommitOutcome {
+                    coordinates,
+                    reservation: None,
+                })
+            })
+        }
+
+        fn check_fenced_fanout<'a>(&'a self, _room_jid: &'a BareJid) -> MucDurableFuture<'a, bool> {
+            Box::pin(async { Ok(true) })
+        }
+
+        fn check_exact_claim_fence<'a>(
+            &'a self,
+            room_jid: &'a BareJid,
+            fence: &'a RoomClaimFenceContext,
+        ) -> MucDurableFuture<'a, bool> {
+            let matches = fence == &pin_test_claim_fence(room_jid);
+            Box::pin(async move { Ok(matches) })
+        }
+    }
+
+    fn pin_test_claim_fence(room_jid: &BareJid) -> RoomClaimFenceContext {
+        RoomClaimFenceContext::new(
+            Entity::new(EntityType::RoomActor, room_jid.to_string()),
+            NodeIdentity::local(),
+            ClaimEpoch(1),
+        )
+    }
+
+    fn validate_pin_test_claim_fence(
+        room_jid: &BareJid,
+        fence: &RoomClaimFenceContext,
+    ) -> Result<(), waddle_xmpp::XmppError> {
+        if fence == &pin_test_claim_fence(room_jid) {
+            Ok(())
+        } else {
+            Err(waddle_xmpp::XmppError::internal(
+                "unexpected room claim fence in pin projection handler test",
+            ))
+        }
+    }
 
     #[tokio::test]
     async fn missing_room_actor_does_not_capture_pin_intent() {
@@ -447,6 +561,104 @@ mod tests {
                 IngressEffectIntent::Pin { room: captured_room, .. } if captured_room == &room
             )),
             "unpin capture must not survive a missing room actor",
+        );
+    }
+
+    #[tokio::test]
+    async fn pin_projection_commit_failure_does_not_broadcast_or_store() {
+        let state = create_test_websocket_state().await;
+        let alice_session = create_test_server_owner_session(state.as_ref(), "alice").await;
+        let room: BareJid = "pin-projection-failure@muc.example.com"
+            .parse()
+            .expect("room jid");
+        let alice: jid::FullJid = "alice@example.com/web".parse().expect("alice jid");
+        let bob: jid::FullJid = "bob@example.com/web".parse().expect("bob jid");
+        let (bob_tx, mut bob_rx) = mpsc::channel(8);
+        let store = PinProjectionFailingStore::new();
+        let room_actor = state
+            .deps
+            .protocol
+            .room_registry
+            .ask(CreateRoom {
+                room_jid: room.clone(),
+                waddle_id: "test-waddle".to_string(),
+                channel_id: "test-channel".to_string(),
+                config: waddle_xmpp::muc::RoomConfig {
+                    members_only: false,
+                    ..Default::default()
+                },
+            })
+            .await
+            .expect("create room");
+        room_actor
+            .ask(RestoreDurableRoomState {
+                store: store as Arc<dyn MucDurableStore>,
+                claim_fence: pin_test_claim_fence(&room),
+            })
+            .await
+            .expect("install pin projection store");
+        register_test_connection(state.as_ref(), &bob, bob_tx).await;
+
+        let alice_join = handle_muc_join(
+            state.as_ref(),
+            "example.com",
+            &room,
+            &alice,
+            "alice",
+            None,
+            &Some(alice_session),
+        )
+        .await;
+        assert!(
+            alice_join
+                .iter()
+                .any(|frame| frame.contains("status code='110'")),
+            "alice join must succeed before pinning: {alice_join:?}"
+        );
+        let bob_join = handle_muc_join(
+            state.as_ref(),
+            "example.com",
+            &room,
+            &bob,
+            "bob",
+            None,
+            &None,
+        )
+        .await;
+        assert!(
+            bob_join
+                .iter()
+                .any(|frame| frame.contains("status code='110'")),
+            "bob join must succeed before observing pin broadcasts"
+        );
+        while bob_rx.try_recv().is_ok() {}
+
+        let mut deps = Deps::registry_only(&state.deps.protocol.connection_registry);
+        deps.room_registry = Some(&state.deps.protocol.room_registry);
+        apply_pin_change_event(
+            &deps,
+            room.clone(),
+            PinChangeRequest::Pin {
+                target_stanza_id: StanzaId::new("pin-target", jid::Jid::from(room.clone())),
+                pinner_jid: alice.to_bare(),
+                pinner_nick: "alice".to_string(),
+                pinned_at: chrono::Utc::now(),
+            },
+            0,
+        )
+        .await;
+
+        assert!(
+            bob_rx.try_recv().is_err(),
+            "failed pin projection must not fan out a <pin-event/> system message"
+        );
+        assert!(
+            room_actor
+                .ask(GetPinList)
+                .await
+                .expect("pin list")
+                .is_empty(),
+            "failed pin projection must not store the pin in actor memory"
         );
     }
 }

@@ -76,6 +76,232 @@ const DESTROY_COMPLETION_JANITOR_INTERVAL: Duration = Duration::from_secs(1);
 /// harmless between sweeps (they route to `NotConnected`/detached), so a
 /// 5-minute reap keeps `UserRegistryActor.users` bounded without hot-looping.
 const USER_ACTOR_REAPER_INTERVAL: Duration = Duration::from_secs(300);
+const LOCAL_MUC_DEPARTURE_INTERVAL: Duration = Duration::from_secs(2);
+
+/// Retry retained local MUC departures. These entries share the lifetime of
+/// local room occupancy, so a process crash discards both sides together.
+pub(crate) fn spawn_local_muc_departure_janitor(websocket_state: &Arc<WebSocketState>) {
+    let weak_state = Arc::downgrade(websocket_state);
+    tokio::spawn(async move {
+        let mut ticker = tokio::time::interval(LOCAL_MUC_DEPARTURE_INTERVAL);
+        loop {
+            ticker.tick().await;
+            let Some(state) = weak_state.upgrade() else {
+                break;
+            };
+            run_local_muc_departure_sweep(&state)
+                .instrument(janitor_sweep_span(Janitor::LocalMucDeparture))
+                .await;
+            waddle_xmpp::telemetry::reliability::record_janitor_sweep(
+                Janitor::LocalMucDeparture,
+                SweepOutcome::Completed,
+            );
+        }
+    });
+}
+
+pub(crate) async fn run_local_muc_departure_sweep(state: &WebSocketState) {
+    use crate::admin::channels::{broadcast_group_dm_leave, GroupDmLeaveEffect};
+    use crate::server::routes::websocket::{
+        broadcast_muc_leave_to_remaining, broadcast_muc_muji_clear_to_remaining,
+        get_room_actor_result, maybe_evict_empty_room, LocalDepartureItem, PendingLocalDeparture,
+    };
+    use waddle_xmpp::muc::durable::OccupancyLeaveCause;
+    use waddle_xmpp::muc::room_actor::{LeaveByRealJid, LeaveDisposition};
+
+    for pending in state
+        .deps
+        .protocol
+        .pending_local_muc_departures
+        .take_due(std::time::Instant::now())
+    {
+        let mut item = pending.item;
+        loop {
+            match item {
+                LocalDepartureItem::FullJidSweep { jid } => {
+                    if state
+                        .deps
+                        .protocol
+                        .connection_registry
+                        .get_entry(&jid)
+                        .is_some()
+                    {
+                        crate::metrics::record_local_departure_retry("skipped_live");
+                        break;
+                    }
+                    let _ = routes::websocket::redrive_local_muc_cleanup(state, &jid).await;
+                    crate::metrics::record_local_departure_retry("completed");
+                    break;
+                }
+                LocalDepartureItem::RoomDeparture {
+                    room,
+                    jid,
+                    cause,
+                    selector,
+                } => {
+                    if matches!(cause, OccupancyLeaveCause::Disconnect)
+                        && state
+                            .deps
+                            .protocol
+                            .connection_registry
+                            .get_entry(&jid)
+                            .is_some()
+                    {
+                        crate::metrics::record_local_departure_retry("skipped_live");
+                        break;
+                    }
+                    let actor = match get_room_actor_result(state, &room).await {
+                        Ok(Some(actor)) => actor,
+                        Ok(None) => {
+                            crate::metrics::record_local_departure_retry("actor_gone");
+
+                            break;
+                        }
+                        Err(_) => {
+                            state
+                                .deps
+                                .protocol
+                                .pending_local_muc_departures
+                                .requeue_with_backoff(PendingLocalDeparture {
+                                    item: LocalDepartureItem::RoomDeparture {
+                                        room,
+                                        jid,
+                                        cause,
+                                        selector,
+                                    },
+                                    attempts: pending.attempts,
+                                    not_before: pending.not_before,
+                                });
+                            crate::metrics::record_local_departure_retry("requeued");
+                            break;
+                        }
+                    };
+                    match actor
+                        .ask(LeaveByRealJid {
+                            sender_jid: jid.clone(),
+                            cause,
+                            session: selector,
+                        })
+                        .await
+                    {
+                        Ok(LeaveDisposition::Left(outcome)) => {
+                            match cause {
+                                OccupancyLeaveCause::Disconnect => {
+                                    broadcast_muc_leave_to_remaining(state, &room, &jid, &outcome)
+                                        .await;
+                                    broadcast_muc_muji_clear_to_remaining(
+                                        state, &room, &jid, &outcome,
+                                    )
+                                    .await;
+                                    let _ = maybe_evict_empty_room(state, &room, &outcome).await;
+                                }
+                                OccupancyLeaveCause::Administrative => {
+                                    broadcast_group_dm_leave(
+                                        &state.deps.app_state,
+                                        state.deps.protocol.connection_registry.as_ref(),
+                                        &jid,
+                                        state
+                                            .deps
+                                            .protocol
+                                            .connection_registry
+                                            .get_entry(&jid)
+                                            .is_some(),
+                                        &GroupDmLeaveEffect::from(outcome.as_ref()),
+                                    );
+                                }
+                                OccupancyLeaveCause::Explicit => {}
+                            }
+                            crate::metrics::record_local_departure_retry("completed");
+                            break;
+                        }
+                        Ok(LeaveDisposition::Deferred { watermark }) => {
+                            state
+                                .deps
+                                .protocol
+                                .pending_local_muc_departures
+                                .requeue_with_backoff(PendingLocalDeparture {
+                                    item: LocalDepartureItem::RoomDeparture {
+                                        room,
+                                        jid,
+                                        cause,
+                                        selector:
+                                            waddle_xmpp::muc::room_actor::LeaveSessionSelector::JoinedAtOrBefore(
+                                                watermark,
+                                            ),
+                                    },
+                                    attempts: pending.attempts,
+                                    not_before: pending.not_before,
+                                });
+                            crate::metrics::record_local_departure_retry("requeued");
+                            break;
+                        }
+                        Ok(LeaveDisposition::NotOccupant) => {
+                            crate::metrics::record_local_departure_retry("not_occupant");
+
+                            break;
+                        }
+                        Ok(LeaveDisposition::Superseded) => {
+                            crate::metrics::record_local_departure_retry("superseded");
+                            break;
+                        }
+                        Ok(LeaveDisposition::Suppressed) => {
+                            crate::metrics::record_local_departure_retry("completed");
+                            break;
+                        }
+                        Err(_) => {
+                            item = LocalDepartureItem::ConfirmRetired {
+                                room,
+                                jid,
+                                actor: actor.id(),
+                                cause,
+                                selector,
+                            };
+                        }
+                    }
+                }
+                LocalDepartureItem::ConfirmRetired {
+                    room,
+                    jid,
+                    actor: recorded,
+                    cause,
+                    selector,
+                } => match get_room_actor_result(state, &room).await {
+                    Ok(None) => {
+                        crate::metrics::record_local_departure_retry("retired");
+                        break;
+                    }
+                    Ok(Some(current)) if current.id() != recorded => {
+                        item = LocalDepartureItem::RoomDeparture {
+                            room,
+                            jid,
+                            cause,
+                            selector,
+                        };
+                    }
+                    Ok(Some(_)) | Err(_) => {
+                        crate::metrics::record_local_departure_retry("awaiting_reap");
+                        state
+                            .deps
+                            .protocol
+                            .pending_local_muc_departures
+                            .requeue_with_backoff(PendingLocalDeparture {
+                                item: LocalDepartureItem::ConfirmRetired {
+                                    room,
+                                    jid,
+                                    actor: recorded,
+                                    cause,
+                                    selector,
+                                },
+                                attempts: pending.attempts,
+                                not_before: pending.not_before,
+                            });
+                        break;
+                    }
+                },
+            }
+        }
+    }
+}
 
 /// Upper bound on each `UserRegistryActor` ask the reaper makes (`ListUsers`,
 /// per-user `ReapUserIfEmpty`, `UserCount`). A wedged or backed-up registry
@@ -7221,11 +7447,17 @@ mod room_dormancy_tests {
             })
             .await
             .expect("join");
-        actor
-            .ask(LeaveByRealJid { sender_jid: alice })
-            .await
-            .expect("leave")
-            .expect("outcome");
+        assert!(matches!(
+            actor
+                .ask(LeaveByRealJid {
+                    sender_jid: alice,
+                    cause: waddle_xmpp::muc::durable::OccupancyLeaveCause::Disconnect,
+                    session: waddle_xmpp::muc::room_actor::LeaveSessionSelector::Any,
+                })
+                .await
+                .expect("leave"),
+            waddle_xmpp::muc::room_actor::LeaveDisposition::Left(_)
+        ));
 
         let counts = sweep_dormant_rooms_once(&state).await;
         assert_eq!(counts.evicted, 1);
@@ -7263,11 +7495,17 @@ mod room_dormancy_tests {
             })
             .await
             .expect("resolver-derived member join");
-        actor
-            .ask(LeaveByRealJid { sender_jid: alice })
-            .await
-            .expect("leave")
-            .expect("outcome");
+        assert!(matches!(
+            actor
+                .ask(LeaveByRealJid {
+                    sender_jid: alice,
+                    cause: waddle_xmpp::muc::durable::OccupancyLeaveCause::Disconnect,
+                    session: waddle_xmpp::muc::room_actor::LeaveSessionSelector::Any,
+                })
+                .await
+                .expect("leave"),
+            waddle_xmpp::muc::room_actor::LeaveDisposition::Left(_)
+        ));
 
         let counts = sweep_dormant_rooms_once(&state).await;
         assert_eq!(
@@ -7308,13 +7546,17 @@ mod room_dormancy_tests {
             })
             .await
             .expect("first join");
-        actor
-            .ask(LeaveByRealJid {
-                sender_jid: alice.clone(),
-            })
-            .await
-            .expect("leave")
-            .expect("outcome");
+        assert!(matches!(
+            actor
+                .ask(LeaveByRealJid {
+                    sender_jid: alice.clone(),
+                    cause: waddle_xmpp::muc::durable::OccupancyLeaveCause::Disconnect,
+                    session: waddle_xmpp::muc::room_actor::LeaveSessionSelector::Any,
+                })
+                .await
+                .expect("leave"),
+            waddle_xmpp::muc::room_actor::LeaveDisposition::Left(_)
+        ));
         let counts = sweep_dormant_rooms_once(&state).await;
         assert_eq!(counts.evicted, 1, "room evicted while dormant");
 
@@ -7687,6 +7929,692 @@ mod user_reaper_tests {
                 .load(std::sync::atomic::Ordering::SeqCst),
             3,
             "the deferred terminal release should clear on the next sweep"
+        );
+    }
+}
+
+#[cfg(all(test, feature = "clustering"))]
+mod local_muc_departure_tests {
+    use super::run_local_muc_departure_sweep;
+    use crate::clustering::ClusteringHandles;
+    use crate::server::routes::websocket::tests::{
+        create_test_websocket_state, create_test_websocket_state_with_clustering,
+        create_test_websocket_state_with_sfu, register_test_connection, snapshot_room,
+        RecordingSfu,
+    };
+    use jid::{BareJid, FullJid};
+    use std::collections::HashMap;
+    use std::sync::{
+        atomic::{AtomicUsize, Ordering},
+        Arc, Mutex, OnceLock,
+    };
+    use std::time::Instant;
+    use tokio::sync::mpsc;
+    use waddle_xmpp::muc::durable::{
+        ChannelId, DurableRoomState, MucDurableFuture, MucDurableStore, OccupancyLeaveCause,
+        RoomClaimFenceContext, WaddleId,
+    };
+    use waddle_xmpp::muc::room_actor::{
+        GetSnapshot, Join, LeaveByRealJid, LeaveSessionSelector, OccupancyWatermark,
+        RestoreLiveRoster, SealGuard, SealIfInactive, SealIfInactiveOutcome, UnsealInactive,
+    };
+    use waddle_xmpp::muc::room_registry_actor::{
+        CreateRoom, GetOrCreateRoomWithLiveRoster, ReapSealedRoom, WireClusteringClaims,
+    };
+    use waddle_xmpp::muc::{
+        RoomCommitError, RoomCommitOutcome, RoomCommittedCoordinates, RoomConfig, RoomLifecycleId,
+        RoomMutationEffects, RoomRegistry, RoomRevision,
+    };
+    use waddle_xmpp::ownership::{
+        ClaimStore, InProcessClaimStore, NodeIdentity, SharedNodeIdentity,
+    };
+    use waddle_xmpp::stream_management::InMemorySmSessionRegistry;
+    use waddle_xmpp_core::{Affiliation, Role};
+
+    fn room_jid(local: &str) -> BareJid {
+        format!("{local}@muc.example.com")
+            .parse()
+            .expect("room jid")
+    }
+
+    fn full_jid(value: &str) -> FullJid {
+        value.parse().expect("full jid")
+    }
+
+    async fn create_room(
+        state: &crate::server::routes::websocket::WebSocketState,
+        room_jid: &BareJid,
+    ) -> kameo::actor::ActorRef<waddle_xmpp::muc::room_actor::RoomActor> {
+        state
+            .deps
+            .protocol
+            .room_registry
+            .ask(CreateRoom {
+                room_jid: room_jid.clone(),
+                waddle_id: "w".to_string(),
+                channel_id: "c".to_string(),
+                config: RoomConfig::default(),
+            })
+            .await
+            .expect("create room")
+    }
+
+    async fn join_member(
+        actor: &kameo::actor::ActorRef<waddle_xmpp::muc::room_actor::RoomActor>,
+        jid: &FullJid,
+        nick: &str,
+    ) {
+        actor
+            .ask(Join {
+                nick: nick.to_string(),
+                real_jid: jid.clone(),
+                role: Role::Participant,
+                affiliation: Affiliation::Member,
+            })
+            .await
+            .expect("join member");
+    }
+
+    #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+    enum LeaveProjectionMode {
+        Succeed,
+        OwnershipUnavailable,
+        NotOwner,
+    }
+
+    struct JanitorProjectionStore {
+        leave_mode: Mutex<LeaveProjectionMode>,
+        established_fences: Mutex<HashMap<BareJid, RoomClaimFenceContext>>,
+        lifecycle: OnceLock<RoomLifecycleId>,
+        next_revision: AtomicUsize,
+    }
+
+    impl JanitorProjectionStore {
+        fn new() -> Arc<Self> {
+            Arc::new(Self {
+                leave_mode: Mutex::new(LeaveProjectionMode::Succeed),
+                established_fences: Mutex::new(HashMap::new()),
+                lifecycle: OnceLock::new(),
+                next_revision: AtomicUsize::new(0),
+            })
+        }
+
+        fn set_leave_mode(&self, mode: LeaveProjectionMode) {
+            *self.leave_mode.lock().expect("leave mode lock") = mode;
+        }
+
+        fn next_commit_coordinates(&self) -> RoomCommittedCoordinates {
+            let lifecycle = *self.lifecycle.get_or_init(RoomLifecycleId::generate);
+            let revision = self.next_revision.fetch_add(1, Ordering::SeqCst) + 1;
+            RoomCommittedCoordinates {
+                lifecycle,
+                revision: RoomRevision::from_stored(revision as i64).expect("positive revision"),
+            }
+        }
+    }
+
+    impl MucDurableStore for JanitorProjectionStore {
+        fn load_room_state_fenced<'a>(
+            &'a self,
+            room_jid: &'a BareJid,
+            fence: &'a RoomClaimFenceContext,
+        ) -> MucDurableFuture<'a, Option<DurableRoomState>> {
+            let exact = self
+                .established_fences
+                .lock()
+                .expect("fence lock")
+                .get(room_jid)
+                .cloned();
+            let given = fence.clone();
+            Box::pin(async move {
+                if exact.as_ref() == Some(&given) {
+                    Ok(None)
+                } else {
+                    Err(waddle_xmpp::XmppError::internal(
+                        "unexpected room claim fence",
+                    ))
+                }
+            })
+        }
+
+        fn commit_room_mutation<'a>(
+            &'a self,
+            room_jid: &'a BareJid,
+            fence: &'a RoomClaimFenceContext,
+            intent: waddle_xmpp::muc::RoomDurableMutation,
+            _effects: RoomMutationEffects,
+        ) -> waddle_xmpp::muc::RoomCommitFuture<'a> {
+            let exact = self
+                .established_fences
+                .lock()
+                .expect("fence lock")
+                .get(room_jid)
+                .cloned();
+            let given = fence.clone();
+            let leave_mode = *self.leave_mode.lock().expect("leave mode lock");
+            let coordinates = self.next_commit_coordinates();
+            Box::pin(async move {
+                if exact.as_ref() != Some(&given) {
+                    return Err(RoomCommitError::OwnershipUnavailable);
+                }
+                match intent {
+                    waddle_xmpp::muc::RoomDurableMutation::Projection(
+                        waddle_xmpp::muc::durable::RoomProjection::OccupancyLeave { .. },
+                    ) => match leave_mode {
+                        LeaveProjectionMode::Succeed => Ok(RoomCommitOutcome {
+                            coordinates,
+                            reservation: None,
+                        }),
+                        LeaveProjectionMode::OwnershipUnavailable => {
+                            Err(RoomCommitError::OwnershipUnavailable)
+                        }
+                        LeaveProjectionMode::NotOwner => Err(RoomCommitError::NotOwner),
+                    },
+                    _ => Ok(RoomCommitOutcome {
+                        coordinates,
+                        reservation: None,
+                    }),
+                }
+            })
+        }
+
+        fn establish_claim_fence(&self, room_jid: &BareJid, fence: RoomClaimFenceContext) {
+            self.established_fences
+                .lock()
+                .expect("fence lock")
+                .insert(room_jid.clone(), fence);
+        }
+
+        fn check_exact_claim_fence<'a>(
+            &'a self,
+            room_jid: &'a BareJid,
+            fence: &'a RoomClaimFenceContext,
+        ) -> MucDurableFuture<'a, bool> {
+            let exact = self
+                .established_fences
+                .lock()
+                .expect("fence lock")
+                .get(room_jid)
+                .cloned();
+            let given = fence.clone();
+            Box::pin(async move { Ok(exact.as_ref() == Some(&given)) })
+        }
+    }
+
+    async fn clustered_state_with_store(
+        store: Arc<JanitorProjectionStore>,
+    ) -> Arc<crate::server::routes::websocket::WebSocketState> {
+        let claim_store = Arc::new(InProcessClaimStore::new());
+        let node_identity = SharedNodeIdentity::new(NodeIdentity::local());
+        let durable_store: Arc<dyn MucDurableStore> = store.clone();
+        let state = create_test_websocket_state_with_clustering(
+            ClusteringHandles {
+                claim_store: Some(claim_store.clone() as Arc<dyn ClaimStore>),
+                node_identity: Some(node_identity.clone()),
+                muc_durable_store: Some(durable_store.clone()),
+                ..ClusteringHandles::default()
+            },
+            Arc::new(InMemorySmSessionRegistry::new()),
+        )
+        .await;
+        state
+            .deps
+            .protocol
+            .room_registry
+            .ask(WireClusteringClaims {
+                claim_store: claim_store as Arc<dyn ClaimStore>,
+                node_identity,
+                durable_store: Some(durable_store),
+                rollout_backoff: None,
+            })
+            .await
+            .expect("wire clustering claims");
+        state
+    }
+
+    async fn assert_disconnect_departure_retry_fans_out_once(room_name: &str) {
+        let store = JanitorProjectionStore::new();
+        let state = clustered_state_with_store(store.clone()).await;
+        let room = room_jid(room_name);
+        let alice = full_jid("alice@example.com/web");
+        let bob = full_jid("bob@example.com/phone");
+        let actor = state
+            .deps
+            .protocol
+            .room_registry
+            .ask(CreateRoom {
+                room_jid: room.clone(),
+                waddle_id: "w".to_string(),
+                channel_id: "c".to_string(),
+                config: RoomConfig {
+                    persistent: false,
+                    ..RoomConfig::default()
+                },
+            })
+            .await
+            .expect("create inactive target room");
+        join_member(&actor, &alice, "alice").await;
+        join_member(&actor, &bob, "bob").await;
+        let (bob_tx, mut bob_rx) = mpsc::channel(8);
+        register_test_connection(state.as_ref(), &bob, bob_tx).await;
+        while bob_rx.try_recv().is_ok() {}
+        store.set_leave_mode(LeaveProjectionMode::OwnershipUnavailable);
+        state.deps.protocol.pending_local_muc_departures.record(
+            crate::server::routes::websocket::LocalDepartureItem::RoomDeparture {
+                room: room.clone(),
+                jid: alice.clone(),
+                cause: OccupancyLeaveCause::Disconnect,
+                selector: LeaveSessionSelector::Any,
+            },
+        );
+
+        run_local_muc_departure_sweep(&state).await;
+
+        assert!(
+            bob_rx.try_recv().is_err(),
+            "the deferred retry must not broadcast unavailable yet"
+        );
+        assert_eq!(
+            state.deps.protocol.pending_local_muc_departures.len(),
+            1,
+            "the deferred retry stays in the local inventory"
+        );
+
+        store.set_leave_mode(LeaveProjectionMode::Succeed);
+        tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+        run_local_muc_departure_sweep(&state).await;
+
+        let unavailable = bob_rx.try_recv().expect("exactly one unavailable");
+        let waddle_xmpp::Stanza::Presence(presence) = unavailable.stanza else {
+            panic!("expected presence broadcast");
+        };
+        assert_eq!(presence.type_, xmpp_parsers::presence::Type::Unavailable);
+        assert!(
+            bob_rx.try_recv().is_err(),
+            "the successful retry must fan out exactly once"
+        );
+        assert_eq!(
+            state.deps.protocol.pending_local_muc_departures.len(),
+            0,
+            "the retained room departure must converge once the leave commits"
+        );
+    }
+
+    #[tokio::test]
+    async fn local_departure_sweep_deferred_then_left_fans_out_once() {
+        assert_disconnect_departure_retry_fans_out_once("janitor-deferred-then-left").await;
+    }
+
+    #[tokio::test]
+    async fn disconnect_cleanup_transient_leave_converges_via_janitor_with_exactly_one_unavailable()
+    {
+        assert_disconnect_departure_retry_fans_out_once("disconnect-janitor-converges").await;
+    }
+
+    #[tokio::test]
+    async fn local_departure_sweep_replacement_rejoin_is_superseded_without_sfu_teardown() {
+        let recorder = Arc::new(RecordingSfu::default());
+        let state = create_test_websocket_state_with_sfu(recorder.clone()).await;
+        let room = room_jid("superseded-rejoin");
+        let jid = full_jid("alice@example.com/web");
+        let actor = create_room(state.as_ref(), &room).await;
+        join_member(&actor, &jid, "alice").await;
+        let before = actor.ask(GetSnapshot).await.expect("snapshot");
+        let watermark = OccupancyWatermark::from_revision(before.occupancy_revision);
+        // A replacement connection binds the same full JID and re-joins under
+        // the same nick: the existing-session rejoin path advances the
+        // session watermark past the deferred attempt's.
+        actor
+            .ask(waddle_xmpp::muc::room_actor::JoinWithAffiliation {
+                sender_jid: jid.clone(),
+                nick: "alice".to_string(),
+                affiliation_grant: waddle_xmpp::muc::room_actor::JoinAffiliationGrant::Resolver(
+                    Affiliation::Member,
+                ),
+                local_domain: "example.com".to_string(),
+                admission_revision: before.admission_revision,
+            })
+            .await
+            .expect("replacement rejoin");
+        state.deps.protocol.pending_local_muc_departures.record(
+            crate::server::routes::websocket::LocalDepartureItem::RoomDeparture {
+                room: room.clone(),
+                jid: jid.clone(),
+                cause: OccupancyLeaveCause::Disconnect,
+                selector: LeaveSessionSelector::JoinedAtOrBefore(watermark),
+            },
+        );
+
+        run_local_muc_departure_sweep(&state).await;
+
+        assert!(
+            recorder.snapshot().is_empty(),
+            "superseded retry must not unregister the SFU participant"
+        );
+        let snapshot = actor.ask(GetSnapshot).await.expect("snapshot after sweep");
+        assert!(
+            snapshot.room.find_occupant_by_real_jid(&jid).is_some(),
+            "the replacement session must remain present after a superseded retry"
+        );
+        assert_eq!(
+            state.deps.protocol.pending_local_muc_departures.len(),
+            0,
+            "a superseded retry converges and drops the retained item"
+        );
+    }
+
+    #[tokio::test]
+    async fn local_departure_sweep_skips_live_registration_for_disconnect_only() {
+        let store = JanitorProjectionStore::new();
+        let state = clustered_state_with_store(store.clone()).await;
+        let room = room_jid("skip-live");
+        let jid = full_jid("alice@example.com/web");
+        let actor = create_room(state.as_ref(), &room).await;
+        join_member(&actor, &jid, "alice").await;
+        // The administrative departure stays deferred while the resource is
+        // live; the disconnect item is superseded by that live registration.
+        store.set_leave_mode(LeaveProjectionMode::OwnershipUnavailable);
+        let (tx, _rx) = mpsc::channel(4);
+        register_test_connection(state.as_ref(), &jid, tx).await;
+        state.deps.protocol.pending_local_muc_departures.record(
+            crate::server::routes::websocket::LocalDepartureItem::RoomDeparture {
+                room: room.clone(),
+                jid: jid.clone(),
+                cause: OccupancyLeaveCause::Disconnect,
+                selector: LeaveSessionSelector::Any,
+            },
+        );
+        state.deps.protocol.pending_local_muc_departures.record(
+            crate::server::routes::websocket::LocalDepartureItem::RoomDeparture {
+                room: room.clone(),
+                jid: jid.clone(),
+                cause: OccupancyLeaveCause::Administrative,
+                selector: LeaveSessionSelector::Any,
+            },
+        );
+
+        run_local_muc_departure_sweep(&state).await;
+
+        assert_eq!(
+            state.deps.protocol.pending_local_muc_departures.len(),
+            1,
+            "the disconnect item is dropped for a live replacement, while the administrative item is retained"
+        );
+        // The deferred administrative item re-armed with backoff: look past it.
+        let remaining = state
+            .deps
+            .protocol
+            .pending_local_muc_departures
+            .take_due(Instant::now() + std::time::Duration::from_secs(120));
+        assert_eq!(remaining.len(), 1);
+        assert!(matches!(
+            remaining[0].item,
+            crate::server::routes::websocket::LocalDepartureItem::RoomDeparture {
+                cause: OccupancyLeaveCause::Administrative,
+                ..
+            }
+        ));
+    }
+
+    #[tokio::test]
+    async fn confirm_retired_waits_for_reap_then_converges() {
+        let state = create_test_websocket_state().await;
+        let room = room_jid("confirm-retired");
+        let jid = full_jid("alice@example.com/web");
+        let actor = create_room(state.as_ref(), &room).await;
+        let actor_id = actor.id();
+        state.deps.protocol.pending_local_muc_departures.record(
+            crate::server::routes::websocket::LocalDepartureItem::ConfirmRetired {
+                room: room.clone(),
+                jid: jid.clone(),
+                actor: actor_id,
+                cause: OccupancyLeaveCause::Disconnect,
+                selector: LeaveSessionSelector::Any,
+            },
+        );
+
+        run_local_muc_departure_sweep(&state).await;
+        assert_eq!(
+            state.deps.protocol.pending_local_muc_departures.len(),
+            1,
+            "a live actor with the same id must be requeued while waiting for reap"
+        );
+
+        let destroyed = RoomRegistry::wrap(state.deps.protocol.room_registry.clone())
+            .destroy_room_if_inactive(
+                room.clone(),
+                actor
+                    .ask(GetSnapshot)
+                    .await
+                    .expect("snapshot")
+                    .occupancy_revision,
+                waddle_xmpp::muc::room_actor::SealGuard::Dormant,
+            )
+            .await
+            .expect("destroy dormant room");
+        assert!(destroyed, "the test room should be reapable");
+
+        run_local_muc_departure_sweep(&state).await;
+        assert_eq!(
+            state.deps.protocol.pending_local_muc_departures.len(),
+            0,
+            "the retained confirm-retired item must converge once the actor disappears"
+        );
+    }
+
+    #[tokio::test]
+    async fn confirm_retired_with_successor_converts_to_departure_and_leaves_transplanted_roster() {
+        let store = JanitorProjectionStore::new();
+        let state = clustered_state_with_store(store.clone()).await;
+        let room = room_jid("confirm-retired-successor");
+        let alice = full_jid("alice@example.com/web");
+        let bob = full_jid("bob@example.com/phone");
+        let actor = create_room(state.as_ref(), &room).await;
+        join_member(&actor, &alice, "alice").await;
+        join_member(&actor, &bob, "bob").await;
+        let predecessor_snapshot = actor.ask(GetSnapshot).await.expect("predecessor snapshot");
+
+        store.set_leave_mode(LeaveProjectionMode::NotOwner);
+        assert!(matches!(
+            actor
+                .ask(LeaveByRealJid {
+                    sender_jid: alice.clone(),
+                    cause: OccupancyLeaveCause::Disconnect,
+                    session: LeaveSessionSelector::Any,
+                })
+                .await,
+            Err(kameo::error::SendError::HandlerError(
+                waddle_xmpp::muc::room_actor::RoomActorError::RoomSealed
+            ))
+        ));
+
+        let reaped = state
+            .deps
+            .protocol
+            .room_registry
+            .ask(ReapSealedRoom {
+                room_jid: room.clone(),
+            })
+            .await
+            .expect("reap sealed predecessor");
+        assert!(reaped, "the sealed predecessor must be purgeable");
+
+        store.set_leave_mode(LeaveProjectionMode::Succeed);
+        let successor = state
+            .deps
+            .protocol
+            .room_registry
+            .ask(GetOrCreateRoomWithLiveRoster {
+                room_jid: room.clone(),
+                waddle_id: WaddleId::new("w".to_string()),
+                channel_id: ChannelId::new("c".to_string()),
+                config: RoomConfig::default(),
+                live_room_restore: predecessor_snapshot.room,
+                occupancy_revision: predecessor_snapshot.occupancy_revision,
+            })
+            .await
+            .expect("spawn successor with live roster")
+            .actor_ref;
+        assert_ne!(
+            successor.id(),
+            actor.id(),
+            "the registry must now point at a successor actor"
+        );
+
+        state.deps.protocol.pending_local_muc_departures.record(
+            crate::server::routes::websocket::LocalDepartureItem::ConfirmRetired {
+                room: room.clone(),
+                jid: alice.clone(),
+                actor: actor.id(),
+                cause: OccupancyLeaveCause::Disconnect,
+                selector: LeaveSessionSelector::Any,
+            },
+        );
+
+        run_local_muc_departure_sweep(&state).await;
+
+        assert_eq!(
+            state.deps.protocol.pending_local_muc_departures.len(),
+            0,
+            "the successor conversion must leave the transplanted roster in one sweep"
+        );
+        let snapshot = successor
+            .ask(GetSnapshot)
+            .await
+            .expect("successor snapshot");
+        assert!(
+            snapshot.room.find_occupant_by_real_jid(&alice).is_none(),
+            "the converted retry must remove the transplanted departed session"
+        );
+        assert!(
+            snapshot.room.find_occupant_by_real_jid(&bob).is_some(),
+            "the converted retry must preserve the rest of the transplanted roster"
+        );
+    }
+
+    #[tokio::test]
+    async fn inactive_seal_deferred_then_unseal_inactive_retry_leaves() {
+        let state = create_test_websocket_state().await;
+        let room = room_jid("inactive-seal-retry");
+        let source_room = room_jid("inactive-source");
+        let alice = full_jid("alice@example.com/web");
+        let source_actor = create_room(state.as_ref(), &source_room).await;
+        join_member(&source_actor, &alice, "alice").await;
+        let source_snapshot = source_actor
+            .ask(GetSnapshot)
+            .await
+            .expect("source snapshot");
+
+        let actor = create_room(state.as_ref(), &room).await;
+        assert!(matches!(
+            actor
+                .ask(SealIfInactive {
+                    expected_occupancy_revision: 0,
+                    guard: SealGuard::EmptyNonPersistent,
+                })
+                .await
+                .expect("seal inactive"),
+            SealIfInactiveOutcome::Inactive
+        ));
+        actor
+            .ask(RestoreLiveRoster {
+                room: source_snapshot.room,
+                occupancy_revision: source_snapshot.occupancy_revision,
+            })
+            .await
+            .expect("restore live roster into inactive actor");
+        state.deps.protocol.pending_local_muc_departures.record(
+            crate::server::routes::websocket::LocalDepartureItem::RoomDeparture {
+                room: room.clone(),
+                jid: alice.clone(),
+                cause: OccupancyLeaveCause::Disconnect,
+                selector: LeaveSessionSelector::Any,
+            },
+        );
+
+        run_local_muc_departure_sweep(&state).await;
+
+        assert_eq!(
+            state.deps.protocol.pending_local_muc_departures.len(),
+            1,
+            "the inactive seal must defer the janitor retry"
+        );
+        assert!(actor.ask(UnsealInactive).await.expect("unseal inactive"));
+
+        run_local_muc_departure_sweep(&state).await;
+
+        assert_eq!(
+            state.deps.protocol.pending_local_muc_departures.len(),
+            0,
+            "the retried leave must converge after the inactive seal is lifted"
+        );
+        let snapshot = actor.ask(GetSnapshot).await.expect("post-retry snapshot");
+        assert!(
+            snapshot.room.find_occupant_by_real_jid(&alice).is_none(),
+            "the retried inactive leave must remove the occupant"
+        );
+    }
+
+    #[tokio::test]
+    async fn full_jid_sweep_reruns_cleanup_and_converges_without_evicting_replacement() {
+        let state = create_test_websocket_state().await;
+        let room = room_jid("full-jid-sweep");
+        let jid = full_jid("alice@example.com/web");
+        let actor = create_room(state.as_ref(), &room).await;
+        join_member(&actor, &jid, "alice").await;
+        let (tx, _rx) = mpsc::channel(4);
+        register_test_connection(state.as_ref(), &jid, tx).await;
+        state.deps.protocol.pending_local_muc_departures.record(
+            crate::server::routes::websocket::LocalDepartureItem::FullJidSweep { jid: jid.clone() },
+        );
+
+        run_local_muc_departure_sweep(&state).await;
+
+        assert_eq!(
+            state.deps.protocol.pending_local_muc_departures.len(),
+            0,
+            "a live replacement short-circuits the full-JID sweep"
+        );
+        let snapshot = snapshot_room(state.as_ref(), &room).await.room;
+        assert!(
+            snapshot.find_occupant_by_real_jid(&jid).is_some(),
+            "the live replacement occupancy must be left intact"
+        );
+    }
+
+    #[tokio::test]
+    async fn stuck_item_emits_metric_and_is_still_retried() {
+        let metrics = waddle_xmpp::telemetry::test_support::acquire().await;
+        let state = create_test_websocket_state().await;
+        let room = room_jid("stuck-confirm-retired");
+        let actor = create_room(state.as_ref(), &room).await;
+        state
+            .deps
+            .protocol
+            .pending_local_muc_departures
+            .requeue_with_backoff(crate::server::routes::websocket::PendingLocalDeparture {
+                item: crate::server::routes::websocket::LocalDepartureItem::ConfirmRetired {
+                    room,
+                    jid: full_jid("alice@example.com/web"),
+                    actor: actor.id(),
+                    cause: OccupancyLeaveCause::Disconnect,
+                    selector: LeaveSessionSelector::Any,
+                },
+                attempts: 10,
+                not_before: Instant::now(),
+            });
+
+        run_local_muc_departure_sweep(&state).await;
+
+        assert_eq!(
+            metrics.counter_sum("waddle.muc.local_departure_retry", &[("outcome", "stuck")]),
+            Some(1),
+            "a repeatedly requeued item must emit the stuck metric"
+        );
+        assert_eq!(
+            state.deps.protocol.pending_local_muc_departures.len(),
+            1,
+            "the stuck item must still be retained for another retry"
         );
     }
 }

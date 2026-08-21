@@ -50,21 +50,23 @@ pub use effects::{
     RoomEffectStagingClass, RoomMutationEffects,
 };
 pub use lifecycle::{
-    DestroyAttemptId, EphemeralProjectionAuthorization, RoomCommittedCoordinates, RoomEffectIntent,
-    RoomEffectOrdinal, RoomLifecycleId, RoomLifecycleState, RoomMutationCommit, RoomRevision,
+    DestroyAttemptId, EphemeralProjectionAuthorization, NotAProjectionCommit, RoomCommitKind,
+    RoomCommittedCoordinates, RoomEffectIntent, RoomEffectOrdinal, RoomLifecycleId,
+    RoomLifecycleState, RoomMutationCommit, RoomRevision,
 };
 pub use projection::{OccupancyLeaveCause, RoomPinProjection, RoomProjection, RoomProjectionKind};
 
 pub(crate) fn mint_room_mutation_commit(
     fence: RoomClaimFenceContext,
     coordinates: RoomCommittedCoordinates,
+    kind: RoomCommitKind,
 ) -> RoomMutationCommit {
-    lifecycle::mint_room_mutation_commit(fence, coordinates)
+    lifecycle::mint_room_mutation_commit(fence, coordinates, kind)
 }
 
 pub(crate) fn authorize_ephemeral_projection(
     commit: RoomMutationCommit,
-) -> EphemeralProjectionAuthorization {
+) -> Result<EphemeralProjectionAuthorization, NotAProjectionCommit> {
     lifecycle::authorize_ephemeral_projection(commit)
 }
 
@@ -191,6 +193,15 @@ pub enum RoomDurableMutation {
     /// Commit a claim-fenced lifecycle revision that authorizes one deferred
     /// in-memory projection (#1647). Carries no authoritative room state.
     Projection(RoomProjection),
+}
+
+impl RoomCommitKind {
+    pub(crate) const fn of(intent: &RoomDurableMutation) -> Self {
+        match intent {
+            RoomDurableMutation::Projection(projection) => Self::Projection(projection.kind()),
+            _ => Self::State,
+        }
+    }
 }
 
 /// Sanitized database failure marker for room commits.

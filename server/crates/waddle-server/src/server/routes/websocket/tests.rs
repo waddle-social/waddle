@@ -92,6 +92,20 @@ pub(crate) async fn create_test_websocket_state() -> Arc<WebSocketState> {
     .await
 }
 
+/// Like [`create_test_websocket_state`], but the protocol room registry IS the
+/// app-state registry (production wiring), so admin commands and janitor
+/// sweeps observe the same room actors.
+pub(crate) async fn create_test_websocket_state_sharing_app_room_registry() -> Arc<WebSocketState> {
+    create_test_websocket_state_with_extension_manager(
+        empty_extension_manager().await,
+        TestStateOverrides {
+            share_app_room_registry: true,
+            ..Default::default()
+        },
+    )
+    .await
+}
+
 pub(crate) async fn create_test_websocket_state_with_db_pool(
     db_pool: Arc<DatabasePool>,
 ) -> Arc<WebSocketState> {
@@ -627,6 +641,10 @@ struct TestStateOverrides {
     pending_delivery_storage:
         Option<Arc<dyn waddle_xmpp::pending_delivery::storage::PendingDeliveryStorage>>,
     ingress_shadow: Option<crate::ingress_shadow::IngressShadowHandle>,
+    /// Wire `deps.protocol.room_registry` to the app-state registry, as
+    /// production does, for tests that drive admin commands and janitors
+    /// against the same rooms.
+    share_app_room_registry: bool,
 }
 
 async fn create_test_websocket_state_with_extension_manager(
@@ -641,6 +659,7 @@ async fn create_test_websocket_state_with_extension_manager(
         blocking_storage: blocking_storage_override,
         pending_delivery_storage: pending_delivery_storage_override,
         ingress_shadow: ingress_shadow_override,
+        share_app_room_registry,
     } = overrides;
     let db_pool = match db_pool_override {
         Some(db_pool) => db_pool,
@@ -791,11 +810,17 @@ async fn create_test_websocket_state_with_extension_manager(
                     user_registry: waddle_xmpp::registry::UserRegistryActor::spawn(
                         waddle_xmpp::registry::UserRegistryActor::new(),
                     ),
-                    room_registry: RoomRegistryActor::spawn(RoomRegistryActor::new(
-                        "muc.example.com".to_string(),
-                        OccupantIdSecret::new(b"test-occupant-id-secret-32-bytes-long".to_vec())
+                    room_registry: if share_app_room_registry {
+                        app_state.room_registry.clone()
+                    } else {
+                        RoomRegistryActor::spawn(RoomRegistryActor::new(
+                            "muc.example.com".to_string(),
+                            OccupantIdSecret::new(
+                                b"test-occupant-id-secret-32-bytes-long".to_vec(),
+                            )
                             .expect("test secret meets length floor"),
-                    )),
+                        ))
+                    },
                     mam_storage,
                     inbox_storage: Arc::clone(&test_inbox_storage),
                     threads_storage: Arc::new(
@@ -872,6 +897,9 @@ async fn create_test_websocket_state_with_extension_manager(
                     call_threads: Arc::new(dashmap::DashMap::new()),
                     call_thread_end_locks: Arc::new(dashmap::DashMap::new()),
                     remote_muc_memberships: Arc::new(super::RemoteMucMemberships::default()),
+                    pending_local_muc_departures: Arc::new(
+                        super::PendingLocalMucDepartures::default(),
+                    ),
                     resolver_affiliation_syncs: Arc::new(
                         super::ResolverAffiliationSyncScheduler::default(),
                     ),
@@ -898,7 +926,7 @@ async fn create_test_websocket_state_with_extension_manager(
         })
 }
 
-async fn create_test_session(state: &WebSocketState, username: &str) -> Session {
+pub(crate) async fn create_test_session(state: &WebSocketState, username: &str) -> Session {
     seed_local_account(state, username).await;
     let session = Session::new(
         &format!("{username}@{}", state.deps.auth_state.xmpp_domain),

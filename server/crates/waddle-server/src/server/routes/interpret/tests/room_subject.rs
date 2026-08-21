@@ -247,6 +247,7 @@ fn persist_subject_store_intent(
             *stored_state.lock().expect("stored state lock") =
                 Some(waddle_xmpp::muc::DurableRoomState {
                     coordinates: None,
+                    config_coordinates: None,
                     waddle_id: waddle_id.into_string(),
                     channel_id: channel_id.into_string(),
                     config,

@@ -38,6 +38,8 @@ pub enum OccupancyLeaveCause {
     /// The occupant's session ended (disconnect, stream-management expiry,
     /// janitor re-drive).
     Disconnect,
+    /// A channel or group-DM administrator removed the occupant.
+    Administrative,
 }
 
 /// A pin-list projection keyed by the archived target stanza.

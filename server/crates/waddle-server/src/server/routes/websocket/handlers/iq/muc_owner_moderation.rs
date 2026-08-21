@@ -2103,7 +2103,8 @@ mod destroy_completion_tests {
             .global_actor()
             .ask(DbExecute {
                 sql: "CREATE TABLE IF NOT EXISTS clustering_muc_rooms ( \
-                      room_jid TEXT NOT NULL, lifecycle_id TEXT NOT NULL, revision BIGINT NOT NULL \
+                      room_jid TEXT NOT NULL, lifecycle_id TEXT NOT NULL, revision BIGINT NOT NULL, \
+                      config_lifecycle_id TEXT, config_revision BIGINT \
                       )"
                 .to_string(),
                 params: vec![],

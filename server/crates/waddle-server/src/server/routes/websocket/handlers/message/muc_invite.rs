@@ -77,6 +77,7 @@ pub(super) async fn recover_actor_after_ambiguous_invite_grant(
     recovered
         .ask(waddle_xmpp::muc::room_actor::RestoreLiveRoster {
             room: snapshot.room.clone(),
+            occupancy_revision: snapshot.occupancy_revision,
         })
         .await
         .ok()?;

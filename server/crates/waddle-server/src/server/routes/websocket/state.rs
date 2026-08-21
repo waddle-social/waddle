@@ -1359,6 +1359,8 @@ pub struct ProtocolServices {
     /// presence to the authoritative remote RoomActor even though no local
     /// RoomActor exists to discover by registry scan.
     pub remote_muc_memberships: Arc<RemoteMucMemberships>,
+    /// Local departures retained until the owning room actor can project them.
+    pub pending_local_muc_departures: Arc<super::PendingLocalMucDepartures>,
     /// At most one detached resolver-affiliation repair per room/member pair.
     /// Rejected joins coalesce here instead of spawning unbounded retry tasks.
     pub resolver_affiliation_syncs: Arc<ResolverAffiliationSyncScheduler>,

@@ -113,7 +113,7 @@ struct RoomCreationSpec {
     channel_id: String,
     config: RoomConfig,
     initial_affiliations: Vec<super::durable::AffiliationEntry>,
-    live_room_restore: Option<MucRoom>,
+    live_room_restore: Option<LiveRoomRestore>,
 }
 
 impl PartialEq for RoomCreationSpec {
@@ -152,7 +152,13 @@ struct RoomPreparationSpec {
     channel_id: String,
     config: RoomConfig,
     initial_affiliations: Vec<super::durable::AffiliationEntry>,
-    live_room_restore: Option<MucRoom>,
+    live_room_restore: Option<LiveRoomRestore>,
+}
+
+#[derive(Clone)]
+struct LiveRoomRestore {
+    room: MucRoom,
+    occupancy_revision: u64,
 }
 
 enum DemandRoomPreparation {
@@ -1664,8 +1670,14 @@ impl RoomRegistryActor {
         // preparation barrier so that restore cannot overwrite the live
         // roster between preparation and publication.
         if self.durable_store.is_none() {
-            if let Some(room) = live_room_restore {
-                if let Err(error) = actor_ref.ask(RestoreLiveRoster { room }).await {
+            if let Some(restore) = live_room_restore {
+                if let Err(error) = actor_ref
+                    .ask(RestoreLiveRoster {
+                        room: restore.room,
+                        occupancy_revision: restore.occupancy_revision,
+                    })
+                    .await
+                {
                     warn!(
                         room = %room_jid,
                         %error,
@@ -2201,9 +2213,12 @@ impl RoomRegistryActor {
             // complete, so callers can never discover a roster-less actor
             // and post-publication joins/leaves are never overwritten.
             let readiness = match (readiness, live_room_restore) {
-                (ready @ Some(Ok(DurableRestoreReadiness::Ready(_))), Some(room)) => {
+                (ready @ Some(Ok(DurableRestoreReadiness::Ready(_))), Some(restore)) => {
                     match actor_ref
-                        .ask(RestoreLiveRoster { room })
+                        .ask(RestoreLiveRoster {
+                            room: restore.room,
+                            occupancy_revision: restore.occupancy_revision,
+                        })
                         .mailbox_timeout(ROOM_OWNERSHIP_CALL_TIMEOUT)
                         .reply_timeout(ROOM_OWNERSHIP_CALL_TIMEOUT)
                         .await
@@ -4654,6 +4669,7 @@ pub struct GetOrCreateRoomWithLiveRoster {
     pub channel_id: ChannelId,
     pub config: RoomConfig,
     pub live_room_restore: MucRoom,
+    pub occupancy_revision: u64,
 }
 
 impl kameo::message::Message<GetOrCreateRoom> for RoomRegistryActor {
@@ -4727,7 +4743,10 @@ impl kameo::message::Message<GetOrCreateRoomWithLiveRoster> for RoomRegistryActo
             channel_id: msg.channel_id.into_string(),
             config: msg.config,
             initial_affiliations: Vec::new(),
-            live_room_restore: Some(msg.live_room_restore),
+            live_room_restore: Some(LiveRoomRestore {
+                room: msg.live_room_restore,
+                occupancy_revision: msg.occupancy_revision,
+            }),
         });
         match self
             .transition_demand_room(room_jid.clone(), creation_spec, ctx.actor_ref().clone())

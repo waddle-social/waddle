@@ -470,17 +470,27 @@ pub async fn register(
     }
     {
         let state = Arc::clone(&app_state);
+        let websocket_state = Arc::clone(&websocket_state);
         let connections = Arc::clone(&connection_registry);
         let user_registry = user_registry.clone();
         let sm_sessions = Arc::clone(&sm_session_registry);
         registry
             .register(NODE_GROUP_DM_LEAVE, "Leave group DM", move |ctx| {
                 let state = Arc::clone(&state);
+                let websocket_state = Arc::clone(&websocket_state);
                 let connections = Arc::clone(&connections);
                 let user_registry = user_registry.clone();
                 let sm_sessions = Arc::clone(&sm_sessions);
                 async move {
-                    handle_group_dm_leave(ctx, state, connections, user_registry, sm_sessions).await
+                    handle_group_dm_leave(
+                        ctx,
+                        state,
+                        websocket_state,
+                        connections,
+                        user_registry,
+                        sm_sessions,
+                    )
+                    .await
                 }
             })
             .await;
@@ -629,6 +639,7 @@ async fn handle_group_dm_create(ctx: CommandContext, state: Arc<AppState>) -> Co
 async fn handle_group_dm_leave(
     ctx: CommandContext,
     state: Arc<AppState>,
+    websocket_state: Arc<WebSocketState>,
     connections: Arc<ConnectionRegistry>,
     user_registry: ActorRef<waddle_xmpp::registry::UserRegistryActor>,
     sm_sessions: Arc<InMemorySmSessionRegistry>,
@@ -651,6 +662,7 @@ async fn handle_group_dm_leave(
     };
     match run_group_dm_leave(
         &state,
+        &websocket_state.deps.protocol.pending_local_muc_departures,
         &connections,
         &user_registry,
         &sm_sessions,
@@ -2138,6 +2150,7 @@ async fn run_group_dm_create(
 
 async fn run_group_dm_leave(
     state: &AppState,
+    pending_local_muc_departures: &Arc<crate::server::routes::websocket::PendingLocalMucDepartures>,
     connections: &ConnectionRegistry,
     user_registry: &ActorRef<waddle_xmpp::registry::UserRegistryActor>,
     sm_sessions: &InMemorySmSessionRegistry,
@@ -2286,20 +2299,61 @@ async fn run_group_dm_leave(
         }
     } else {
         for resource in resources {
-            if let Some(outcome) = actor
+            match actor
                 .ask(LeaveByRealJid {
                     sender_jid: resource.clone(),
+                    cause: waddle_xmpp::muc::durable::OccupancyLeaveCause::Administrative,
+                    session: waddle_xmpp::muc::room_actor::LeaveSessionSelector::Any,
                 })
                 .await
-                .map_err(send_err("room actor LeaveByRealJid"))?
             {
-                broadcast_group_dm_leave(
-                    state,
-                    connections,
-                    &resource,
-                    live_resource_set.contains(&resource),
-                    &GroupDmLeaveEffect::from(&outcome),
-                );
+                Ok(waddle_xmpp::muc::room_actor::LeaveDisposition::Left(outcome)) => {
+                    broadcast_group_dm_leave(
+                        state,
+                        connections,
+                        &resource,
+                        live_resource_set.contains(&resource),
+                        &GroupDmLeaveEffect::from(outcome.as_ref()),
+                    );
+                }
+                Ok(
+                    waddle_xmpp::muc::room_actor::LeaveDisposition::NotOccupant
+                    | waddle_xmpp::muc::room_actor::LeaveDisposition::Superseded
+                    | waddle_xmpp::muc::room_actor::LeaveDisposition::Suppressed,
+                ) => {}
+                Ok(waddle_xmpp::muc::room_actor::LeaveDisposition::Deferred { .. }) => {
+                    pending_local_muc_departures.record(
+                        crate::server::routes::websocket::LocalDepartureItem::RoomDeparture {
+                            room: args.room_jid.clone(),
+                            jid: resource,
+                            cause: waddle_xmpp::muc::durable::OccupancyLeaveCause::Administrative,
+                            selector: waddle_xmpp::muc::room_actor::LeaveSessionSelector::Any,
+                        },
+                    );
+                }
+                Err(kameo::error::SendError::HandlerError(
+                    waddle_xmpp::muc::room_actor::RoomActorError::RoomSealed,
+                )) => {
+                    pending_local_muc_departures.record(
+                        crate::server::routes::websocket::LocalDepartureItem::ConfirmRetired {
+                            room: args.room_jid.clone(),
+                            jid: resource,
+                            actor: actor.id(),
+                            cause: waddle_xmpp::muc::durable::OccupancyLeaveCause::Administrative,
+                            selector: waddle_xmpp::muc::room_actor::LeaveSessionSelector::Any,
+                        },
+                    );
+                }
+                Err(_) => {
+                    pending_local_muc_departures.record(
+                        crate::server::routes::websocket::LocalDepartureItem::RoomDeparture {
+                            room: args.room_jid.clone(),
+                            jid: resource,
+                            cause: waddle_xmpp::muc::durable::OccupancyLeaveCause::Administrative,
+                            selector: waddle_xmpp::muc::room_actor::LeaveSessionSelector::Any,
+                        },
+                    );
+                }
             }
         }
     }
@@ -2647,7 +2701,7 @@ fn find_occupant_for_full_jid<'a>(
     })
 }
 
-struct GroupDmLeaveEffect {
+pub(crate) struct GroupDmLeaveEffect {
     nick: String,
     affiliation: Affiliation,
     leaving_room_jid: FullJid,
@@ -2708,7 +2762,7 @@ fn group_dm_leave_effects_from_snapshot(
     effects
 }
 
-fn broadcast_group_dm_leave(
+pub(crate) fn broadcast_group_dm_leave(
     state: &AppState,
     connections: &ConnectionRegistry,
     leaving_real_jid: &FullJid,
@@ -3027,7 +3081,7 @@ impl CancelledConfigAskRecoveryGuard {
         };
         let exact_intended_config = snapshot.config_revision == self.expected_revision
             && snapshot.room.config == self.intended_config;
-        let recovered_reservation = if let Some(coordinates) = snapshot.durable_coordinates {
+        let recovered_reservation = if let Some(coordinates) = snapshot.config_durable_coordinates {
             let revision_offset = snapshot
                 .config_revision
                 .saturating_sub(self.expected_revision);
@@ -3360,10 +3414,9 @@ async fn recover_actor_with_merged_live_roster(
     // snapshot after it is inherently racy. Capture the live roster first;
     // unlike the prior fallback, an unreadable actor is a visible recovery
     // failure rather than permission to replay an older caller snapshot.
-    let stale_room = stale_actor
+    let stale_snapshot = stale_actor
         .ask(GetSnapshot)
         .await
-        .map(|snapshot| snapshot.room)
         .map_err(send_err(snapshot_context))?;
     let demoted = state
         .room_registry
@@ -3389,7 +3442,8 @@ async fn recover_actor_with_merged_live_roster(
             waddle_id: waddle_xmpp::muc::durable::WaddleId::new(spec.waddle_id.to_string()),
             channel_id: waddle_xmpp::muc::durable::ChannelId::new(spec.channel_id.to_string()),
             config: spec.config,
-            live_room_restore: stale_room,
+            live_room_restore: stale_snapshot.room,
+            occupancy_revision: stale_snapshot.occupancy_revision,
         })
         .await
         .map_err(send_err(get_or_create_context))?
@@ -3493,7 +3547,7 @@ async fn reconcile_ambiguous_group_dm_rename_commit(
     )
     .await?;
     if snapshot.room.config == *intended_config {
-        let reservation = if let Some(coordinates) = snapshot.durable_coordinates {
+        let reservation = if let Some(coordinates) = snapshot.config_durable_coordinates {
             crate::room_effect_outbox::RoomEffectOutboxStore::new(state.db_pool.global().clone())
                 .await
                 .map_err(|error| {
@@ -4035,7 +4089,7 @@ async fn run_update(
                     "This channel update outcome is being reconciled; please retry.",
                 ));
             }
-            let reservation = if let Some(coordinates) = snapshot.durable_coordinates {
+            let reservation = if let Some(coordinates) = snapshot.config_durable_coordinates {
                 crate::room_effect_outbox::RoomEffectOutboxStore::new(
                     state.db_pool.global().clone(),
                 )
@@ -5993,14 +6047,19 @@ mod group_dm_durable_reconciliation_tests {
     use crate::server::AppState;
     use kameo::actor::Spawn;
     use std::collections::HashMap;
-    use std::sync::{Arc, Mutex};
+    use std::sync::{
+        atomic::{AtomicUsize, Ordering},
+        Arc, Mutex,
+    };
     use tokio::sync::mpsc;
     use waddle_xmpp::muc::durable::{
         DurableRoomState, MucDurableFuture, MucDurableStore, RoomCommitDatabaseError,
         RoomCommitError, RoomCommitFuture, RoomCommittedCoordinates, RoomDurableMutation,
         RoomLifecycleId, RoomRevision,
     };
-    use waddle_xmpp::muc::room_actor::Join;
+    use waddle_xmpp::muc::room_actor::{
+        GetSnapshot, Join, JoinAffiliationGrant, JoinWithAffiliation,
+    };
     use waddle_xmpp::muc::room_registry_actor::{
         CreateRoomWithInitialAffiliations, WireClusteringClaims,
     };
@@ -6018,6 +6077,7 @@ mod group_dm_durable_reconciliation_tests {
         DestroyFails,
         AffiliationCommitUnknown,
         ConfigCommitUnknown,
+        ProjectionLeaveSecondOwnershipUnavailableOnce,
     }
 
     #[derive(Clone)]
@@ -6060,6 +6120,7 @@ mod group_dm_durable_reconciliation_tests {
         fences: Mutex<HashMap<BareJid, waddle_xmpp::muc::RoomClaimFenceContext>>,
         coordinates: Mutex<HashMap<BareJid, (RoomLifecycleId, i64)>>,
         commit_pause: Mutex<Option<CommitPause>>,
+        projection_leave_attempts: AtomicUsize,
     }
 
     impl TestGroupDmDurableStore {
@@ -6085,6 +6146,7 @@ mod group_dm_durable_reconciliation_tests {
                 fences: Mutex::new(HashMap::new()),
                 coordinates: Mutex::new(HashMap::new()),
                 commit_pause: Mutex::new(None),
+                projection_leave_attempts: AtomicUsize::new(0),
             })
         }
 
@@ -6120,6 +6182,7 @@ mod group_dm_durable_reconciliation_tests {
                         room_jid.clone(),
                         DurableRoomState {
                             coordinates: None,
+                            config_coordinates: None,
                             waddle_id: waddle_id.into_string(),
                             channel_id: channel_id.into_string(),
                             config,
@@ -6153,7 +6216,8 @@ mod group_dm_durable_reconciliation_tests {
                         );
                     }
                 }
-                RoomDurableMutation::Config { config, .. } => {
+                RoomDurableMutation::Config { config, .. }
+                | RoomDurableMutation::MembersOnlyEnforcement { config, .. } => {
                     let mut states = self.states.lock().expect("states lock");
                     let state = states.get_mut(room_jid).expect("room state present");
                     state.config = config;
@@ -6165,9 +6229,17 @@ mod group_dm_durable_reconciliation_tests {
             }
         }
 
-        fn record_coordinates(&self, room_jid: &BareJid, coordinates: RoomCommittedCoordinates) {
+        fn record_coordinates(
+            &self,
+            room_jid: &BareJid,
+            coordinates: RoomCommittedCoordinates,
+            is_config_commit: bool,
+        ) {
             if let Some(state) = self.states.lock().expect("states lock").get_mut(room_jid) {
                 state.coordinates = Some(coordinates);
+                if is_config_commit {
+                    state.config_coordinates = Some(coordinates);
+                }
             }
         }
 
@@ -6212,6 +6284,17 @@ mod group_dm_durable_reconciliation_tests {
             let exact = self.exact_fence_matches(room_jid, fence);
             let mode = self.mode;
             let coordinates = self.next_coordinates(room_jid);
+            let projection_leave_attempt = matches!(
+                &intent,
+                RoomDurableMutation::Projection(
+                    waddle_xmpp::muc::durable::RoomProjection::OccupancyLeave { .. }
+                )
+            )
+            .then(|| {
+                self.projection_leave_attempts
+                    .fetch_add(1, Ordering::SeqCst)
+                    + 1
+            });
             Box::pin(async move {
                 if !exact {
                     return Err(RoomCommitError::NotOwner);
@@ -6270,8 +6353,19 @@ mod group_dm_durable_reconciliation_tests {
                 } else {
                     None
                 };
+                let is_config_commit = matches!(
+                    &intent,
+                    RoomDurableMutation::Create { .. }
+                        | RoomDurableMutation::Config { .. }
+                        | RoomDurableMutation::MembersOnlyEnforcement { .. }
+                );
+                if mode == DurableMode::ProjectionLeaveSecondOwnershipUnavailableOnce
+                    && projection_leave_attempt == Some(2)
+                {
+                    return Err(RoomCommitError::OwnershipUnavailable);
+                }
                 self.apply_mutation(room_jid, intent);
-                self.record_coordinates(room_jid, coordinates);
+                self.record_coordinates(room_jid, coordinates, is_config_commit);
                 let pause = { self.commit_pause.lock().expect("commit pause lock").take() };
                 if let Some(pause) = pause {
                     // Each pause has exactly one producer and one test waiter. `notify_one`
@@ -6624,9 +6718,12 @@ mod group_dm_durable_reconciliation_tests {
             .await
             .expect("register live caller resource");
         let sm_sessions = InMemorySmSessionRegistry::new();
+        let pending_local_muc_departures =
+            Arc::new(crate::server::routes::websocket::PendingLocalMucDepartures::default());
 
         let result = run_group_dm_leave(
             &state,
+            &pending_local_muc_departures,
             &connections,
             &user_registry,
             &sm_sessions,
@@ -6662,6 +6759,243 @@ mod group_dm_durable_reconciliation_tests {
         assert!(
             outbound_rx.try_recv().is_ok(),
             "leave presence should be sent even when ambiguous leave commit is reconciled"
+        );
+    }
+
+    #[tokio::test]
+    async fn admin_partial_success_converges_via_janitor_and_command_retry_does_not_refanout() {
+        let websocket_state =
+            crate::server::routes::websocket::tests::create_test_websocket_state_sharing_app_room_registry().await;
+        let state = websocket_state.deps.app_state.as_ref();
+        let durable_store = TestGroupDmDurableStore::new(
+            DurableMode::ProjectionLeaveSecondOwnershipUnavailableOnce,
+        );
+        let claim_store: Arc<dyn ClaimStore> = Arc::new(InProcessClaimStore::new());
+        state
+            .room_registry
+            .ask(WireClusteringClaims {
+                claim_store,
+                node_identity: SharedNodeIdentity::new(NodeIdentity::new(
+                    "group-dm-admin-partial-node",
+                    "group-dm-admin-partial-epoch",
+                )),
+                durable_store: Some(durable_store),
+                rollout_backoff: None,
+            })
+            .await
+            .expect("wire durable group-DM store");
+
+        let room_jid: BareJid = "group-dm-admin-partial@muc.localhost"
+            .parse()
+            .expect("room JID");
+        let member: BareJid = "alice@localhost".parse().expect("member JID");
+        let recipient_bare: BareJid = "bob@localhost".parse().expect("recipient JID");
+        let alice_phone: FullJid = "alice@localhost/phone".parse().expect("alice phone JID");
+        let alice_web: FullJid = "alice@localhost/web".parse().expect("alice web JID");
+        let bob_phone: FullJid = "bob@localhost/phone".parse().expect("bob phone JID");
+        let (_channel_id, actor) = seed_group_dm(
+            state,
+            &room_jid,
+            "Leave",
+            &[member.clone(), recipient_bare.clone()],
+        )
+        .await;
+        actor
+            .ask(JoinWithAffiliation {
+                sender_jid: alice_phone.clone(),
+                nick: "alice".to_string(),
+                affiliation_grant: JoinAffiliationGrant::Resolver(Affiliation::Member),
+                local_domain: "localhost".to_string(),
+                admission_revision: actor
+                    .ask(GetSnapshot)
+                    .await
+                    .expect("snapshot before alice phone join")
+                    .admission_revision,
+            })
+            .await
+            .expect("join alice phone");
+        actor
+            .ask(JoinWithAffiliation {
+                sender_jid: alice_web.clone(),
+                nick: "alice".to_string(),
+                affiliation_grant: JoinAffiliationGrant::Resolver(Affiliation::Member),
+                local_domain: "localhost".to_string(),
+                admission_revision: actor
+                    .ask(GetSnapshot)
+                    .await
+                    .expect("snapshot before alice web join")
+                    .admission_revision,
+            })
+            .await
+            .expect("join alice web");
+        actor
+            .ask(JoinWithAffiliation {
+                sender_jid: bob_phone.clone(),
+                nick: "bob".to_string(),
+                affiliation_grant: JoinAffiliationGrant::Resolver(Affiliation::Member),
+                local_domain: "localhost".to_string(),
+                admission_revision: actor
+                    .ask(GetSnapshot)
+                    .await
+                    .expect("snapshot before bob join")
+                    .admission_revision,
+            })
+            .await
+            .expect("join bob");
+
+        let (alice_phone_tx, mut alice_phone_rx) = mpsc::channel(8);
+        crate::server::routes::websocket::tests::register_test_connection(
+            websocket_state.as_ref(),
+            &alice_phone,
+            alice_phone_tx,
+        )
+        .await;
+        let (alice_web_tx, mut alice_web_rx) = mpsc::channel(8);
+        crate::server::routes::websocket::tests::register_test_connection(
+            websocket_state.as_ref(),
+            &alice_web,
+            alice_web_tx,
+        )
+        .await;
+        let (bob_tx, mut bob_rx) = mpsc::channel(8);
+        crate::server::routes::websocket::tests::register_test_connection(
+            websocket_state.as_ref(),
+            &bob_phone,
+            bob_tx,
+        )
+        .await;
+
+        let result = run_group_dm_leave(
+            state,
+            &websocket_state.deps.protocol.pending_local_muc_departures,
+            websocket_state.deps.protocol.connection_registry.as_ref(),
+            &websocket_state.deps.protocol.user_registry,
+            websocket_state.deps.protocol.sm_session_registry.as_ref(),
+            &alice_web,
+            &GroupDmLeaveArgs {
+                room_jid: room_jid.clone(),
+            },
+        )
+        .await
+        .unwrap_or_else(|_| panic!("leave result"));
+        assert!(result.left, "membership removal still succeeds");
+
+        let alice_phone_leave = alice_phone_rx
+            .try_recv()
+            .expect("the first resource receives its self unavailable");
+        let waddle_xmpp::Stanza::Presence(alice_phone_presence) = alice_phone_leave.stanza else {
+            panic!("expected presence broadcast for the first resource");
+        };
+        assert_eq!(
+            alice_phone_presence.type_,
+            xmpp_parsers::presence::Type::Unavailable
+        );
+        assert!(
+            alice_web_rx.try_recv().is_err(),
+            "the deferred second resource must not receive an unavailable yet"
+        );
+        assert!(
+            bob_rx.try_recv().is_err(),
+            "the room must not fan out the final leave before the deferred retry converges"
+        );
+
+        let mut pending = websocket_state
+            .deps
+            .protocol
+            .pending_local_muc_departures
+            .take_due(std::time::Instant::now());
+        assert_eq!(
+            pending.len(),
+            1,
+            "exactly one deferred administrative item is retained"
+        );
+        let retained = pending.pop().expect("retained departure");
+        assert!(matches!(
+            retained.item,
+            crate::server::routes::websocket::LocalDepartureItem::RoomDeparture {
+                ref room,
+                ref jid,
+                cause: waddle_xmpp::muc::durable::OccupancyLeaveCause::Administrative,
+                selector: waddle_xmpp::muc::room_actor::LeaveSessionSelector::Any,
+            } if room == &room_jid && jid == &alice_web
+        ));
+        websocket_state
+            .deps
+            .protocol
+            .pending_local_muc_departures
+            .requeue_with_backoff(retained);
+        assert!(
+            websocket_state
+                .deps
+                .protocol
+                .connection_registry
+                .get_entry(&alice_web)
+                .is_some(),
+            "the deferred administrative resource stays live while retained for janitor retry"
+        );
+
+        tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+        crate::server::session_janitors::run_local_muc_departure_sweep(websocket_state.as_ref())
+            .await;
+
+        let alice_web_leave = alice_web_rx
+            .try_recv()
+            .expect("the janitor must self-notify the deferred live resource");
+        let waddle_xmpp::Stanza::Presence(alice_web_presence) = alice_web_leave.stanza else {
+            panic!("expected janitor self unavailable");
+        };
+        assert_eq!(
+            alice_web_presence.type_,
+            xmpp_parsers::presence::Type::Unavailable
+        );
+        let bob_leave = bob_rx
+            .try_recv()
+            .expect("the janitor must fan out the final administrative leave once");
+        let waddle_xmpp::Stanza::Presence(bob_presence) = bob_leave.stanza else {
+            panic!("expected janitor fan-out unavailable");
+        };
+        assert_eq!(
+            bob_presence.type_,
+            xmpp_parsers::presence::Type::Unavailable
+        );
+        assert!(
+            alice_phone_rx.try_recv().is_err(),
+            "the already-left first resource must not be notified twice"
+        );
+        assert!(
+            alice_web_rx.try_recv().is_err() && bob_rx.try_recv().is_err(),
+            "the janitor retry must emit exactly one group-DM leave shape"
+        );
+        assert_eq!(
+            websocket_state
+                .deps
+                .protocol
+                .pending_local_muc_departures
+                .len(),
+            0,
+            "the deferred administrative item converges once the retry commits"
+        );
+
+        let second = run_group_dm_leave(
+            state,
+            &websocket_state.deps.protocol.pending_local_muc_departures,
+            websocket_state.deps.protocol.connection_registry.as_ref(),
+            &websocket_state.deps.protocol.user_registry,
+            websocket_state.deps.protocol.sm_session_registry.as_ref(),
+            &alice_web,
+            &GroupDmLeaveArgs { room_jid },
+        )
+        .await
+        .unwrap_or_else(|_| panic!("second leave result"));
+        assert!(
+            !second.left,
+            "retrying the command after convergence exits early"
+        );
+        assert!(
+            alice_phone_rx.try_recv().is_err()
+                && alice_web_rx.try_recv().is_err()
+                && bob_rx.try_recv().is_err(),
+            "the command retry must not refan out any leave presence"
         );
     }
 
@@ -7412,13 +7746,17 @@ mod group_dm_durable_reconciliation_tests {
                     let joiner = joiner.clone();
                     Box::pin(async move {
                         assert!(
-                            actor
-                                .ask(LeaveByRealJid {
-                                    sender_jid: caller.clone(),
-                                })
-                                .await
-                                .expect("leave recovered room")
-                                .is_some(),
+                            matches!(
+                                actor
+                                    .ask(LeaveByRealJid {
+                                        sender_jid: caller.clone(),
+                                        cause: waddle_xmpp::muc::durable::OccupancyLeaveCause::Administrative,
+                                        session: waddle_xmpp::muc::room_actor::LeaveSessionSelector::Any,
+                                    })
+                                    .await
+                                    .expect("leave recovered room"),
+                                waddle_xmpp::muc::room_actor::LeaveDisposition::Left(_)
+                            ),
                             "seeded caller must be able to leave the recovered actor"
                         );
                         actor
@@ -7517,13 +7855,17 @@ mod group_dm_durable_reconciliation_tests {
                     let joiner = joiner.clone();
                     Box::pin(async move {
                         assert!(
-                            actor
-                                .ask(LeaveByRealJid {
-                                    sender_jid: owner.clone(),
-                                })
-                                .await
-                                .expect("leave recovered channel")
-                                .is_some(),
+                            matches!(
+                                actor
+                                    .ask(LeaveByRealJid {
+                                        sender_jid: owner.clone(),
+                                        cause: waddle_xmpp::muc::durable::OccupancyLeaveCause::Administrative,
+                                        session: waddle_xmpp::muc::room_actor::LeaveSessionSelector::Any,
+                                    })
+                                    .await
+                                    .expect("leave recovered channel"),
+                                waddle_xmpp::muc::room_actor::LeaveDisposition::Left(_)
+                            ),
                             "seeded owner must be able to leave the recovered actor"
                         );
                         actor
@@ -7615,6 +7957,17 @@ mod group_dm_durable_reconciliation_tests {
             ],
         )
         .await;
+        // The caller's join commits a #1647 occupancy projection revision, so
+        // read the seeded coordinates only after it.
+        actor
+            .ask(Join {
+                nick: "alice".to_owned(),
+                real_jid: caller.clone(),
+                role: Role::Moderator,
+                affiliation: Affiliation::Admin,
+            })
+            .await
+            .expect("join caller");
         let seeded_coordinates = *durable_store
             .coordinates
             .lock()
@@ -7628,15 +7981,6 @@ mod group_dm_durable_reconciliation_tests {
             seeded_coordinates.1 + 1,
         )
         .await;
-        actor
-            .ask(Join {
-                nick: "alice".to_owned(),
-                real_jid: caller.clone(),
-                role: Role::Moderator,
-                affiliation: Affiliation::Admin,
-            })
-            .await
-            .expect("join caller");
         let (sender, mut receiver) = mpsc::channel(4);
         crate::server::routes::websocket::tests::register_test_connection(
             websocket_state.as_ref(),

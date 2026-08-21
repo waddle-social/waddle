@@ -2,6 +2,7 @@ use jid::{BareJid, FullJid};
 
 use super::affiliation::{self, AffiliationChange, AffiliationProvenance};
 use super::room::{MucRoom, Occupant};
+use super::room_actor::OccupancyWatermark;
 use crate::types::{Affiliation, Role};
 
 impl MucRoom {
@@ -134,6 +135,7 @@ impl MucRoom {
         real_jid: FullJid,
         nick: String,
         local_domain: Option<&str>,
+        watermark: OccupancyWatermark,
     ) -> &Occupant {
         if let Some(existing) = self.occupants.get(&nick) {
             if existing.real_jid.to_bare() == real_jid.to_bare() {
@@ -142,8 +144,9 @@ impl MucRoom {
                     .entry(nick.clone())
                     .or_insert_with(|| vec![existing.real_jid.clone()]);
                 if !sessions.iter().any(|session| session == &real_jid) {
-                    sessions.push(real_jid);
+                    sessions.push(real_jid.clone());
                 }
+                self.session_watermarks.insert(real_jid, watermark);
                 return self
                     .occupants
                     .get(&nick)
@@ -185,6 +188,7 @@ impl MucRoom {
             .or_insert(floor);
         *gen += 1;
 
+        self.session_watermarks.insert(real_jid.clone(), watermark);
         self.occupant_sessions.insert(nick.clone(), vec![real_jid]);
         self.occupants.insert(nick.clone(), occupant);
         self.occupants
@@ -266,6 +270,7 @@ mod tests {
             full("alice@example.com/web"),
             "alice".to_string(),
             None,
+            OccupancyWatermark::initial(),
         );
 
         let alice = room.occupants.get("alice").expect("alice joined");
@@ -307,7 +312,12 @@ mod tests {
         let bob_bare = bare("bob@example.com");
         room.affiliation_list
             .set(bob_bare.clone(), Affiliation::Member);
-        room.add_occupant_with_affiliation(full("bob@example.com/desk"), "bob".to_string(), None);
+        room.add_occupant_with_affiliation(
+            full("bob@example.com/desk"),
+            "bob".to_string(),
+            None,
+            OccupancyWatermark::initial(),
+        );
         assert_eq!(
             room.occupants.get("bob").expect("bob joined").role,
             Role::Participant

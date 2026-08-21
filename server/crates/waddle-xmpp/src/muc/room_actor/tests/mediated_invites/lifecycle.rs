@@ -606,8 +606,10 @@ async fn no_grant_operation_does_not_pin_an_otherwise_dormant_room() {
         .await
         .expect("authorize no-grant invite");
     actor
-        .ask(Leave {
-            nick: "inviter".to_string(),
+        .ask(LeaveByRealJid {
+            sender_jid: test_full_jid("inviter"),
+            cause: crate::muc::durable::OccupancyLeaveCause::Explicit,
+            session: LeaveSessionSelector::Any,
         })
         .await
         .expect("leave room");

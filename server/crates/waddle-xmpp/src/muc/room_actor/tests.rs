@@ -81,7 +81,10 @@ async fn restoring_live_roster_rederives_occupant_authorization() {
     let actor = RoomActor::spawn(RoomActor::new(authoritative_room, test_secret()));
 
     actor
-        .ask(RestoreLiveRoster { room: stale_room })
+        .ask(RestoreLiveRoster {
+            room: stale_room,
+            occupancy_revision: 0,
+        })
         .await
         .expect("restore live roster");
 
@@ -103,6 +106,13 @@ async fn current_admission_revision(actor: &ActorRef<RoomActor>) -> u64 {
         .admission_revision
 }
 
+fn departed(disposition: LeaveDisposition) -> LeaveOutcome {
+    match disposition {
+        LeaveDisposition::Left(outcome) => *outcome,
+        other => panic!("expected an applied departure, got {other:?}"),
+    }
+}
+
 #[test]
 fn durable_restore_only_advances_for_admission_policy_changes() {
     let mut actor = RoomActor::new(test_room(), test_secret());
@@ -114,6 +124,7 @@ fn durable_restore_only_advances_for_admission_policy_changes() {
     };
     actor.install_durable_room_state(crate::muc::durable::DurableRoomState {
         coordinates: None,
+        config_coordinates: None,
         waddle_id: "waddle-1".to_string(),
         channel_id: "channel-1".to_string(),
         config: cosmetic_config,
@@ -129,6 +140,7 @@ fn durable_restore_only_advances_for_admission_policy_changes() {
     admission_config.members_only = false;
     actor.install_durable_room_state(crate::muc::durable::DurableRoomState {
         coordinates: None,
+        config_coordinates: None,
         waddle_id: "waddle-1".to_string(),
         channel_id: "channel-1".to_string(),
         config: admission_config,
@@ -293,7 +305,7 @@ async fn test_join_with_admin_affiliation_allowed_when_room_full() {
 
     actor
         .ask(JoinWithAffiliation {
-            sender_jid: alice,
+            sender_jid: alice.clone(),
             nick: "alice".to_string(),
             affiliation_grant: JoinAffiliationGrant::Resolver(Affiliation::Member),
             local_domain: "example.com".to_string(),
@@ -381,7 +393,11 @@ async fn join_and_leave_emit_presence_and_occupant_metrics() {
     );
 
     actor
-        .ask(LeaveByRealJid { sender_jid: alice })
+        .ask(LeaveByRealJid {
+            sender_jid: alice,
+            cause: crate::muc::durable::OccupancyLeaveCause::Explicit,
+            session: LeaveSessionSelector::Any,
+        })
         .await
         .expect("leave is infallible");
 
@@ -407,8 +423,10 @@ async fn test_leave() {
         .expect("join");
 
     actor
-        .ask(Leave {
-            nick: "alice".to_string(),
+        .ask(LeaveByRealJid {
+            sender_jid: test_full_jid("alice"),
+            cause: crate::muc::durable::OccupancyLeaveCause::Explicit,
+            session: LeaveSessionSelector::Any,
         })
         .await
         .expect("leave should succeed");
@@ -422,15 +440,14 @@ async fn test_leave_unknown_nick() {
     let actor = spawn_room_actor().await;
 
     let result = actor
-        .ask(Leave {
-            nick: "ghost".to_string(),
+        .ask(LeaveByRealJid {
+            sender_jid: test_full_jid("ghost"),
+            cause: crate::muc::durable::OccupancyLeaveCause::Explicit,
+            session: LeaveSessionSelector::Any,
         })
-        .await;
-    assert!(matches!(
-        result,
-        Err(SendError::HandlerError(RoomActorError::OccupantNotFound(nick)))
-            if nick == "ghost"
-    ));
+        .await
+        .expect("leave reply");
+    assert!(matches!(result, LeaveDisposition::NotOccupant));
 }
 
 #[tokio::test]
@@ -1610,10 +1627,14 @@ async fn leave_by_real_jid_surfaces_is_persistent_true_for_default_rooms() {
         .expect("join");
 
     let outcome = actor
-        .ask(crate::muc::room_actor::LeaveByRealJid { sender_jid: alice })
+        .ask(crate::muc::room_actor::LeaveByRealJid {
+            sender_jid: alice,
+            cause: crate::muc::durable::OccupancyLeaveCause::Explicit,
+            session: LeaveSessionSelector::Any,
+        })
         .await
-        .expect("leave")
-        .expect("outcome");
+        .map(departed)
+        .expect("leave");
     assert!(
         outcome.is_persistent,
         "default RoomConfig is persistent (Waddle channel shape) — \
@@ -1642,10 +1663,14 @@ async fn leave_by_real_jid_surfaces_is_persistent_false_for_instant_rooms() {
         .expect("join");
 
     let outcome = actor
-        .ask(crate::muc::room_actor::LeaveByRealJid { sender_jid: alice })
+        .ask(crate::muc::room_actor::LeaveByRealJid {
+            sender_jid: alice,
+            cause: crate::muc::durable::OccupancyLeaveCause::Explicit,
+            session: LeaveSessionSelector::Any,
+        })
         .await
-        .expect("leave")
-        .expect("outcome");
+        .map(departed)
+        .expect("leave");
     assert!(
         !outcome.is_persistent,
         "instant rooms (XEP-0045 §10.1.3) report is_persistent=false \
@@ -1730,10 +1755,14 @@ async fn is_dormant_true_after_resolver_derived_member_leaves() {
         .await
         .expect("resolver-derived member join");
     actor
-        .ask(crate::muc::room_actor::LeaveByRealJid { sender_jid: alice })
+        .ask(crate::muc::room_actor::LeaveByRealJid {
+            sender_jid: alice,
+            cause: crate::muc::durable::OccupancyLeaveCause::Explicit,
+            session: LeaveSessionSelector::Any,
+        })
         .await
-        .expect("leave")
-        .expect("outcome");
+        .map(departed)
+        .expect("leave");
     assert!(
         actor
             .ask(crate::muc::room_actor::IsDormant)
@@ -1885,10 +1914,12 @@ async fn leave_by_real_jid_removes_every_occupancy_of_the_full_jid() {
     let outcome = actor
         .ask(crate::muc::room_actor::LeaveByRealJid {
             sender_jid: alice.clone(),
+            cause: crate::muc::durable::OccupancyLeaveCause::Explicit,
+            session: LeaveSessionSelector::Any,
         })
         .await
-        .expect("leave")
-        .expect("outcome");
+        .map(departed)
+        .expect("leave");
 
     assert_eq!(
         outcome.occupant_count, 1,
@@ -1922,10 +1953,14 @@ async fn leave_by_real_jid_removes_every_occupancy_of_the_full_jid() {
         .expect("rejoin");
     assert_eq!(actor.ask(OccupantCount).await.expect("count"), 2);
     actor
-        .ask(crate::muc::room_actor::LeaveByRealJid { sender_jid: alice })
+        .ask(crate::muc::room_actor::LeaveByRealJid {
+            sender_jid: alice,
+            cause: crate::muc::durable::OccupancyLeaveCause::Explicit,
+            session: LeaveSessionSelector::Any,
+        })
         .await
-        .expect("second leave")
-        .expect("outcome");
+        .map(departed)
+        .expect("second leave");
     assert_eq!(actor.ask(OccupantCount).await.expect("count"), 1);
 }
 
@@ -1954,10 +1989,14 @@ async fn is_dormant_false_when_explicit_ban_outlives_occupancy() {
         .await
         .expect("ban");
     actor
-        .ask(crate::muc::room_actor::LeaveByRealJid { sender_jid: alice })
+        .ask(crate::muc::room_actor::LeaveByRealJid {
+            sender_jid: alice,
+            cause: crate::muc::durable::OccupancyLeaveCause::Explicit,
+            session: LeaveSessionSelector::Any,
+        })
         .await
-        .expect("leave")
-        .expect("outcome");
+        .map(departed)
+        .expect("leave");
     assert!(
         !actor
             .ask(crate::muc::room_actor::IsDormant)
@@ -1983,10 +2022,14 @@ async fn is_dormant_true_after_last_occupant_leaves_with_no_stored_state() {
         .await
         .expect("join");
     actor
-        .ask(crate::muc::room_actor::LeaveByRealJid { sender_jid: alice })
+        .ask(crate::muc::room_actor::LeaveByRealJid {
+            sender_jid: alice,
+            cause: crate::muc::durable::OccupancyLeaveCause::Explicit,
+            session: LeaveSessionSelector::Any,
+        })
         .await
-        .expect("leave")
-        .expect("outcome");
+        .map(departed)
+        .expect("leave");
     assert!(
         actor
             .ask(crate::muc::room_actor::IsDormant)
@@ -3138,7 +3181,11 @@ async fn leaving_occupant_clears_muji_state() {
 
     // Alice leaves; carol joins after.
     actor
-        .ask(crate::muc::room_actor::LeaveByRealJid { sender_jid: alice })
+        .ask(crate::muc::room_actor::LeaveByRealJid {
+            sender_jid: alice,
+            cause: crate::muc::durable::OccupancyLeaveCause::Explicit,
+            session: LeaveSessionSelector::Any,
+        })
         .await
         .expect("leave");
     let join_outcome = actor
@@ -3210,10 +3257,12 @@ async fn leaving_originator_session_clears_muji_state_even_with_peer_sessions_re
     let leave_outcome = actor
         .ask(crate::muc::room_actor::LeaveByRealJid {
             sender_jid: desktop.clone(),
+            cause: crate::muc::durable::OccupancyLeaveCause::Explicit,
+            session: LeaveSessionSelector::Any,
         })
         .await
         .expect("desktop leave");
-    let leave_outcome = leave_outcome.expect("alice present");
+    let leave_outcome = departed(leave_outcome);
     assert!(
         !leave_outcome.removed_last_session,
         "mobile is still in the room, so alice's nick is not vacated"
@@ -3295,7 +3344,11 @@ async fn leaving_non_originator_session_preserves_muji_state() {
 
     // Mobile (NOT the originator) disconnects.
     actor
-        .ask(crate::muc::room_actor::LeaveByRealJid { sender_jid: mobile })
+        .ask(crate::muc::room_actor::LeaveByRealJid {
+            sender_jid: mobile,
+            cause: crate::muc::durable::OccupancyLeaveCause::Explicit,
+            session: LeaveSessionSelector::Any,
+        })
         .await
         .expect("mobile leave");
 
@@ -3369,10 +3422,14 @@ async fn leaving_one_active_same_nick_session_preserves_sibling_active_muji_stat
         .expect("mobile is an occupant");
 
     let leave_outcome = actor
-        .ask(crate::muc::room_actor::LeaveByRealJid { sender_jid: mobile })
+        .ask(crate::muc::room_actor::LeaveByRealJid {
+            sender_jid: mobile,
+            cause: crate::muc::durable::OccupancyLeaveCause::Explicit,
+            session: LeaveSessionSelector::Any,
+        })
         .await
-        .expect("mobile leave")
-        .expect("alice present");
+        .map(departed)
+        .expect("mobile leave");
 
     assert!(leave_outcome.cleared_muji_state);
     assert!(
@@ -3736,6 +3793,7 @@ struct FakeDurableStore {
     commit_outcome_unknown: bool,
     commit_config_outcome_unknown: bool,
     lose_config_persist_ownership: bool,
+    lose_projection_persist_ownership: bool,
     lose_restore_ownership: bool,
     load_calls: std::sync::atomic::AtomicUsize,
     save_calls: std::sync::atomic::AtomicUsize,
@@ -3745,6 +3803,10 @@ struct FakeDurableStore {
         std::sync::Mutex<std::collections::HashMap<BareJid, crate::muc::RoomClaimFenceContext>>,
     lifecycle: std::sync::OnceLock<crate::muc::RoomLifecycleId>,
     next_revision: std::sync::atomic::AtomicUsize,
+    replay_last_coordinates: std::sync::atomic::AtomicBool,
+    last_coordinates: std::sync::Mutex<Option<crate::muc::RoomCommittedCoordinates>>,
+    recorded_intents: std::sync::Mutex<Vec<crate::muc::RoomDurableMutation>>,
+    restored_state: std::sync::Mutex<Option<crate::muc::durable::DurableRoomState>>,
 }
 
 impl FakeDurableStore {
@@ -3768,6 +3830,14 @@ impl FakeDurableStore {
     fn deposed() -> std::sync::Arc<Self> {
         Self::with_established_test_fence(std::sync::Arc::new(Self {
             fenced: std::sync::Mutex::new(Some(false)),
+            ..Default::default()
+        }))
+    }
+
+    fn deposed_on_projection() -> std::sync::Arc<Self> {
+        Self::with_established_test_fence(std::sync::Arc::new(Self {
+            fenced: std::sync::Mutex::new(Some(true)),
+            lose_projection_persist_ownership: true,
             ..Default::default()
         }))
     }
@@ -3839,6 +3909,27 @@ impl FakeDurableStore {
         *self.fenced.lock().expect("lock") = fenced;
     }
 
+    fn set_replay_last_coordinates(&self, replay: bool) {
+        self.replay_last_coordinates
+            .store(replay, std::sync::atomic::Ordering::SeqCst);
+    }
+
+    fn recorded_intents(&self) -> Vec<crate::muc::RoomDurableMutation> {
+        self.recorded_intents.lock().expect("lock").clone()
+    }
+
+    fn set_restored_coordinates(&self, coordinates: crate::muc::RoomCommittedCoordinates) {
+        *self.restored_state.lock().expect("lock") = Some(crate::muc::durable::DurableRoomState {
+            coordinates: Some(coordinates),
+            config_coordinates: None,
+            waddle_id: "waddle-1".to_owned(),
+            channel_id: "channel-1".to_owned(),
+            config: RoomConfig::default(),
+            subject: None,
+            affiliations: Vec::new(),
+        });
+    }
+
     fn next_commit_coordinates(&self) -> crate::muc::RoomCommittedCoordinates {
         let lifecycle = *self
             .lifecycle
@@ -3875,11 +3966,20 @@ impl crate::muc::durable::MucDurableStore for FakeDurableStore {
         }
         self.save_calls
             .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        self.recorded_intents
+            .lock()
+            .expect("lock")
+            .push(intent.clone());
         let established =
             self.established_fences.lock().expect("lock").get(room_jid) == Some(fence);
         let fenced = *self.fenced.lock().expect("lock");
         let lose_ownership = matches!(intent, crate::muc::RoomDurableMutation::Config { .. })
             && self.lose_config_persist_ownership;
+        // Projection commits (#1647) carry no effects by construction and are
+        // observed through `recorded_intents`; `saved_effects` keeps describing
+        // state commits only so positional fixtures stay meaningful.
+        let is_projection = matches!(intent, crate::muc::RoomDurableMutation::Projection(_));
+        let lose_projection_ownership = is_projection && self.lose_projection_persist_ownership;
         let config_commit = matches!(&intent, crate::muc::RoomDurableMutation::Config { .. });
         let committed_affiliations = match intent {
             crate::muc::RoomDurableMutation::Affiliation(entry)
@@ -3902,7 +4002,18 @@ impl crate::muc::durable::MucDurableStore for FakeDurableStore {
         let fail = self.fail_persist;
         let commit_outcome_unknown =
             self.commit_outcome_unknown || (self.commit_config_outcome_unknown && config_commit);
-        let coordinates = self.next_commit_coordinates();
+        let coordinates = if self
+            .replay_last_coordinates
+            .load(std::sync::atomic::Ordering::SeqCst)
+        {
+            self.last_coordinates
+                .lock()
+                .expect("lock")
+                .unwrap_or_else(|| self.next_commit_coordinates())
+        } else {
+            self.next_commit_coordinates()
+        };
+        *self.last_coordinates.lock().expect("lock") = Some(coordinates);
         let reservation =
             (!effects.effects().is_empty()).then(|| crate::muc::RoomEffectReservation {
                 lifecycle: coordinates.lifecycle,
@@ -3921,7 +4032,7 @@ impl crate::muc::durable::MucDurableStore for FakeDurableStore {
                 Err(crate::muc::RoomCommitError::NotOwner)
             } else if fenced.is_none() {
                 Err(crate::muc::RoomCommitError::OwnershipUnavailable)
-            } else if lose_ownership {
+            } else if lose_ownership || lose_projection_ownership {
                 Err(crate::muc::RoomCommitError::NotOwner)
             } else if commit_outcome_unknown {
                 Err(crate::muc::RoomCommitError::CommitOutcomeUnknown)
@@ -3939,7 +4050,9 @@ impl crate::muc::durable::MucDurableStore for FakeDurableStore {
                         )
                     }),
                 );
-                saved_effects.lock().expect("lock").push(effects);
+                if !is_projection {
+                    saved_effects.lock().expect("lock").push(effects);
+                }
                 Ok(crate::muc::RoomCommitOutcome {
                     coordinates,
                     reservation,
@@ -3959,12 +4072,13 @@ impl crate::muc::durable::MucDurableStore for FakeDurableStore {
             .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
         let lose_ownership = self.lose_restore_ownership;
         let entity = fence.entity.clone();
+        let restored_state = self.restored_state.lock().expect("lock").clone();
         Box::pin(async move {
             validation?;
             if lose_ownership {
                 Err(crate::XmppError::OwnershipLost { entity })
             } else {
-                Ok(None)
+                Ok(restored_state)
             }
         })
     }
@@ -4153,6 +4267,758 @@ async fn spawn_room_actor_with_config_and_store(
     actor
 }
 
+fn test_pinned_entry(id: &str) -> PinnedEntry {
+    use crate::muc::pin::PinPreview;
+
+    let room_jid: BareJid = "testroom@muc.example.com".parse().expect("valid jid");
+    PinnedEntry {
+        target_stanza_id: waddle_xmpp_core::xep0359::StanzaId::new(
+            id.to_owned(),
+            jid::Jid::from(room_jid),
+        ),
+        pinner_jid: "admin@example.com".parse().expect("valid jid"),
+        pinned_at: chrono::Utc::now(),
+        preview: PinPreview::new(
+            "alice@example.com".parse().expect("valid jid"),
+            None,
+            "important",
+            chrono::Utc::now(),
+        ),
+    }
+}
+
+struct GetProjectionTestState;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct ProjectionTestState {
+    occupancy_revision: u64,
+    projected_revision: Option<crate::muc::RoomRevision>,
+}
+
+impl kameo::message::Message<GetProjectionTestState> for RoomActor {
+    type Reply = Result<ProjectionTestState, std::convert::Infallible>;
+
+    async fn handle(
+        &mut self,
+        _msg: GetProjectionTestState,
+        _ctx: &mut kameo::message::Context<Self, Self::Reply>,
+    ) -> Self::Reply {
+        Ok(ProjectionTestState {
+            occupancy_revision: self.occupancy_revision,
+            projected_revision: self.projected_revision,
+        })
+    }
+}
+
+struct SetRoomSealForTest(RoomSealState);
+
+impl kameo::message::Message<SetRoomSealForTest> for RoomActor {
+    type Reply = Result<(), std::convert::Infallible>;
+
+    async fn handle(
+        &mut self,
+        msg: SetRoomSealForTest,
+        _ctx: &mut kameo::message::Context<Self, Self::Reply>,
+    ) -> Self::Reply {
+        self.seal_state = msg.0;
+        Ok(())
+    }
+}
+
+async fn join_as_resolver(
+    actor: &ActorRef<RoomActor>,
+    jid: FullJid,
+    nick: &str,
+) -> Result<JoinOutcome, SendError<JoinWithAffiliation, RoomActorError>> {
+    actor
+        .ask(JoinWithAffiliation {
+            sender_jid: jid,
+            nick: nick.to_owned(),
+            affiliation_grant: JoinAffiliationGrant::Resolver(Affiliation::Member),
+            local_domain: "example.com".to_owned(),
+            admission_revision: current_admission_revision(actor).await,
+        })
+        .await
+}
+
+fn projection_leave_intent_for(intents: &[crate::muc::RoomDurableMutation], jid: &FullJid) -> bool {
+    intents.iter().any(|intent| {
+        matches!(
+            intent,
+            crate::muc::RoomDurableMutation::Projection(
+                crate::muc::durable::RoomProjection::OccupancyLeave { occupant, .. }
+            ) if occupant == jid
+        )
+    })
+}
+
+#[tokio::test]
+async fn join_with_lost_claim_projects_nothing() {
+    let store = FakeDurableStore::deposed_on_projection();
+    let actor = spawn_room_actor_with_store(store).await;
+    let before = actor.ask(GetProjectionTestState).await.expect("state");
+    let alice = test_full_jid("alice");
+
+    let result = join_as_resolver(&actor, alice.clone(), "alice").await;
+
+    assert!(matches!(
+        result,
+        Err(SendError::HandlerError(RoomActorError::RoomSealed))
+    ));
+    let snapshot = actor.ask(GetSnapshot).await.expect("snapshot");
+    assert_eq!(snapshot.room.occupant_count(), 0);
+    assert_eq!(
+        actor
+            .ask(GetProjectionTestState)
+            .await
+            .expect("state")
+            .occupancy_revision,
+        before.occupancy_revision
+    );
+    assert_eq!(
+        actor.ask(GetRoomSealState).await.expect("seal"),
+        RoomSealState::OwnershipLost
+    );
+    // Resolver cache writes intentionally precede the projection commit so a
+    // revocation is visible to admission checks even while the store is down.
+    assert_eq!(
+        snapshot.room.get_affiliation(&alice.to_bare()),
+        Affiliation::Member
+    );
+}
+
+#[tokio::test]
+async fn join_with_transient_store_failure_bounces_without_memory_change() {
+    let actor = spawn_room_actor_with_store(FakeDurableStore::owned_but_persist_fails()).await;
+    let before = actor.ask(GetProjectionTestState).await.expect("state");
+
+    let result = join_as_resolver(&actor, test_full_jid("alice"), "alice").await;
+
+    assert!(matches!(
+        result,
+        Err(SendError::HandlerError(
+            RoomActorError::OwnershipUnavailable
+        ))
+    ));
+    assert_eq!(actor.ask(OccupantCount).await.expect("count"), 0);
+    assert_eq!(
+        actor
+            .ask(GetProjectionTestState)
+            .await
+            .expect("state")
+            .occupancy_revision,
+        before.occupancy_revision
+    );
+    assert_eq!(
+        actor.ask(GetRoomSealState).await.expect("seal"),
+        RoomSealState::Open
+    );
+}
+
+#[tokio::test]
+async fn leave_commits_projection_before_removing_session() {
+    let store = FakeDurableStore::owned();
+    let actor = spawn_room_actor_with_store(store.clone()).await;
+    let alice = test_full_jid("alice");
+    join_as_resolver(&actor, alice.clone(), "alice")
+        .await
+        .expect("join");
+    let before = store.recorded_intents().len();
+
+    let result = actor
+        .ask(LeaveByRealJid {
+            sender_jid: alice.clone(),
+            cause: crate::muc::durable::OccupancyLeaveCause::Explicit,
+            session: LeaveSessionSelector::Any,
+        })
+        .await
+        .expect("leave");
+
+    assert!(matches!(result, LeaveDisposition::Left(_)));
+    assert!(projection_leave_intent_for(
+        &store.recorded_intents()[before..],
+        &alice
+    ));
+    assert_eq!(actor.ask(OccupantCount).await.expect("count"), 0);
+}
+
+#[tokio::test]
+async fn leave_with_lost_claim_keeps_session_and_seals() {
+    let store = FakeDurableStore::owned();
+    let actor = spawn_room_actor_with_store(store.clone()).await;
+    let alice = test_full_jid("alice");
+    join_as_resolver(&actor, alice.clone(), "alice")
+        .await
+        .expect("join");
+    store.set_fenced(Some(false));
+
+    let result = actor
+        .ask(LeaveByRealJid {
+            sender_jid: alice,
+            cause: crate::muc::durable::OccupancyLeaveCause::Explicit,
+            session: LeaveSessionSelector::Any,
+        })
+        .await;
+
+    assert!(matches!(
+        result,
+        Err(SendError::HandlerError(RoomActorError::RoomSealed))
+    ));
+    assert_eq!(actor.ask(OccupantCount).await.expect("count"), 1);
+    assert_eq!(
+        actor.ask(GetRoomSealState).await.expect("seal"),
+        RoomSealState::OwnershipLost
+    );
+}
+
+#[tokio::test]
+async fn leave_under_inactive_seal_is_deferred_then_unseal_inactive_retry_leaves() {
+    let store = FakeDurableStore::owned();
+    let actor = spawn_room_actor_with_store(store).await;
+    let alice = test_full_jid("alice");
+    join_as_resolver(&actor, alice.clone(), "alice")
+        .await
+        .expect("join");
+    actor
+        .ask(SetRoomSealForTest(RoomSealState::Inactive))
+        .await
+        .expect("test seal");
+
+    let watermark = match actor
+        .ask(LeaveByRealJid {
+            sender_jid: alice.clone(),
+            cause: crate::muc::durable::OccupancyLeaveCause::Disconnect,
+            session: LeaveSessionSelector::Any,
+        })
+        .await
+        .expect("deferred leave")
+    {
+        LeaveDisposition::Deferred { watermark } => watermark,
+        other => panic!("expected deferred leave, got {other:?}"),
+    };
+    assert_eq!(actor.ask(OccupantCount).await.expect("count"), 1);
+    assert!(actor.ask(UnsealInactive).await.expect("unseal"));
+    assert!(matches!(
+        actor
+            .ask(LeaveByRealJid {
+                sender_jid: alice,
+                cause: crate::muc::durable::OccupancyLeaveCause::Disconnect,
+                session: LeaveSessionSelector::JoinedAtOrBefore(watermark),
+            })
+            .await
+            .expect("retried leave"),
+        LeaveDisposition::Left(_)
+    ));
+}
+
+#[tokio::test]
+async fn leave_under_ownership_lost_seal_is_room_sealed_without_memory_change() {
+    let actor = spawn_room_actor_with_store(FakeDurableStore::owned()).await;
+    let alice = test_full_jid("alice");
+    join_as_resolver(&actor, alice.clone(), "alice")
+        .await
+        .expect("join");
+    actor
+        .ask(SetRoomSealForTest(RoomSealState::OwnershipLost))
+        .await
+        .expect("test seal");
+
+    assert!(matches!(
+        actor
+            .ask(LeaveByRealJid {
+                sender_jid: alice,
+                cause: crate::muc::durable::OccupancyLeaveCause::Explicit,
+                session: LeaveSessionSelector::Any,
+            })
+            .await,
+        Err(SendError::HandlerError(RoomActorError::RoomSealed))
+    ));
+    assert_eq!(actor.ask(OccupantCount).await.expect("count"), 1);
+}
+
+#[tokio::test]
+async fn leave_unknown_jid_is_not_occupant_without_commit() {
+    let store = FakeDurableStore::owned();
+    let actor = spawn_room_actor_with_store(store.clone()).await;
+
+    assert!(matches!(
+        actor
+            .ask(LeaveByRealJid {
+                sender_jid: test_full_jid("unknown"),
+                cause: crate::muc::durable::OccupancyLeaveCause::Explicit,
+                session: LeaveSessionSelector::Any,
+            })
+            .await
+            .expect("leave"),
+        LeaveDisposition::NotOccupant
+    ));
+    assert!(!store
+        .recorded_intents()
+        .iter()
+        .any(|intent| matches!(intent, crate::muc::RoomDurableMutation::Projection(_))));
+}
+
+#[tokio::test]
+async fn deferred_leave_watermark_supersedes_after_replacement_rejoin() {
+    let store = FakeDurableStore::owned();
+    let actor = spawn_room_actor_with_store(store.clone()).await;
+    let alice = test_full_jid("alice");
+    join_as_resolver(&actor, alice.clone(), "alice")
+        .await
+        .expect("join");
+    store.set_fenced(None);
+    let watermark = match actor
+        .ask(LeaveByRealJid {
+            sender_jid: alice.clone(),
+            cause: crate::muc::durable::OccupancyLeaveCause::Disconnect,
+            session: LeaveSessionSelector::Any,
+        })
+        .await
+        .expect("deferred leave")
+    {
+        LeaveDisposition::Deferred { watermark } => watermark,
+        other => panic!("expected deferred leave, got {other:?}"),
+    };
+    store.set_fenced(Some(true));
+    join_as_resolver(&actor, alice.clone(), "alice")
+        .await
+        .expect("replacement rejoin");
+
+    assert!(matches!(
+        actor
+            .ask(LeaveByRealJid {
+                sender_jid: alice.clone(),
+                cause: crate::muc::durable::OccupancyLeaveCause::Disconnect,
+                session: LeaveSessionSelector::JoinedAtOrBefore(watermark),
+            })
+            .await
+            .expect("stale retry"),
+        LeaveDisposition::Superseded
+    ));
+    assert_eq!(actor.ask(OccupantCount).await.expect("count"), 1);
+    assert!(matches!(
+        actor
+            .ask(LeaveByRealJid {
+                sender_jid: alice,
+                cause: crate::muc::durable::OccupancyLeaveCause::Disconnect,
+                session: LeaveSessionSelector::Any,
+            })
+            .await
+            .expect("current departure"),
+        LeaveDisposition::Left(_)
+    ));
+}
+
+#[tokio::test]
+async fn legacy_join_is_gated_by_projection_commit() {
+    let actor = spawn_room_actor_with_store(FakeDurableStore::deposed()).await;
+
+    assert!(matches!(
+        actor
+            .ask(Join {
+                nick: "alice".to_owned(),
+                real_jid: test_full_jid("alice"),
+                role: Role::Participant,
+                affiliation: Affiliation::Member,
+            })
+            .await,
+        Err(SendError::HandlerError(RoomActorError::RoomSealed))
+    ));
+    assert_eq!(actor.ask(OccupantCount).await.expect("count"), 0);
+}
+
+#[tokio::test]
+async fn pin_commits_projection_before_storing() {
+    let store = FakeDurableStore::owned();
+    let actor = spawn_room_actor_with_store(store.clone()).await;
+    let pin = test_pinned_entry("pin");
+
+    actor
+        .ask(ApplyPin {
+            change: PinStateChange::Pin(pin.clone()),
+        })
+        .await
+        .expect("pin");
+
+    assert!(matches!(
+        store.recorded_intents().last(),
+        Some(crate::muc::RoomDurableMutation::Projection(
+            crate::muc::durable::RoomProjection::Pin(
+                crate::muc::durable::RoomPinProjection::Pin { target }
+            )
+        )) if target == &pin.target_stanza_id
+    ));
+    assert_eq!(actor.ask(GetPinList).await.expect("pins"), vec![pin]);
+}
+
+#[tokio::test]
+async fn pin_with_lost_claim_is_not_stored() {
+    let actor = spawn_room_actor_with_store(FakeDurableStore::deposed()).await;
+
+    assert!(matches!(
+        actor
+            .ask(ApplyPin {
+                change: PinStateChange::Pin(test_pinned_entry("pin")),
+            })
+            .await,
+        Err(SendError::HandlerError(RoomActorError::RoomSealed))
+    ));
+    assert!(actor.ask(GetPinList).await.expect("pins").is_empty());
+}
+
+#[tokio::test]
+async fn unpin_commits_projection_before_removing() {
+    let store = FakeDurableStore::owned();
+    let actor = spawn_room_actor_with_store(store.clone()).await;
+    let pin = test_pinned_entry("pin");
+    actor
+        .ask(ApplyPin {
+            change: PinStateChange::Pin(pin.clone()),
+        })
+        .await
+        .expect("seed pin");
+    let before = store.recorded_intents().len();
+
+    actor
+        .ask(ApplyPin {
+            change: PinStateChange::Unpin {
+                target_stanza_id: pin.target_stanza_id.clone(),
+            },
+        })
+        .await
+        .expect("unpin");
+
+    assert!(matches!(
+        store.recorded_intents()[before..].first(),
+        Some(crate::muc::RoomDurableMutation::Projection(
+            crate::muc::durable::RoomProjection::Pin(
+                crate::muc::durable::RoomPinProjection::Unpin { target }
+            )
+        )) if target == &pin.target_stanza_id
+    ));
+    assert!(actor.ask(GetPinList).await.expect("pins").is_empty());
+}
+
+async fn simulate_crash_after_projection_commit(
+    store: std::sync::Arc<FakeDurableStore>,
+) -> crate::muc::RoomCommittedCoordinates {
+    let mut actor = RoomActor::new(test_room(), test_secret());
+    let fence = test_claim_fence(&actor.room.room_jid);
+    <FakeDurableStore as crate::muc::durable::MucDurableStore>::establish_claim_fence(
+        &*store,
+        &actor.room.room_jid,
+        fence.clone(),
+    );
+    actor.durable_store = Some(store.clone());
+    actor.durable_claim_fence = Some(fence);
+    let gate = actor
+        .commit_projection(crate::muc::durable::RoomProjection::OccupancyJoin {
+            occupant: test_full_jid("alice"),
+            nick: crate::muc::durable::MucOccupantNick::new("alice".to_owned())
+                .expect("valid nick"),
+        })
+        .await
+        .expect("projection commit");
+    drop(gate);
+    store
+        .last_coordinates
+        .lock()
+        .expect("lock")
+        .expect("projection head")
+}
+
+#[tokio::test]
+async fn crash_between_commit_and_projection_resyncs_from_durable_head() {
+    let store = FakeDurableStore::owned();
+    let head = simulate_crash_after_projection_commit(store.clone()).await;
+    store.set_restored_coordinates(head);
+
+    let successor = spawn_room_actor_with_store(store.clone()).await;
+    let snapshot = successor.ask(GetSnapshot).await.expect("snapshot");
+    let projection = successor
+        .ask(GetProjectionTestState)
+        .await
+        .expect("projection state");
+    assert_eq!(snapshot.room.occupant_count(), 0);
+    assert_eq!(snapshot.durable_coordinates, Some(head));
+    assert_eq!(projection.projected_revision, Some(head.revision));
+    assert!(matches!(
+        store.recorded_intents().last(),
+        Some(crate::muc::RoomDurableMutation::Projection(_))
+    ));
+}
+
+#[tokio::test]
+async fn retired_occupant_self_ping_fails_and_rejoin_projects_again() {
+    let store = FakeDurableStore::owned();
+    let head = simulate_crash_after_projection_commit(store.clone()).await;
+    store.set_restored_coordinates(head);
+    let successor = spawn_room_actor_with_store(store.clone()).await;
+    let alice = test_full_jid("alice");
+
+    assert!(matches!(
+        successor
+            .ask(PingSelfCheck {
+                nick: "alice".to_owned(),
+                sender_jid: alice.clone(),
+            })
+            .await,
+        Err(SendError::HandlerError(RoomActorError::OccupantNotFound(_)))
+    ));
+    join_as_resolver(&successor, alice, "alice")
+        .await
+        .expect("rejoin");
+    let rejoin_head = successor
+        .ask(GetSnapshot)
+        .await
+        .expect("snapshot")
+        .durable_coordinates
+        .expect("coordinates");
+    assert!(rejoin_head.revision > head.revision);
+}
+
+#[test]
+fn restore_resets_projected_revision_to_head() {
+    let mut actor = RoomActor::new(test_room(), test_secret());
+    let coordinates = crate::muc::RoomCommittedCoordinates {
+        lifecycle: crate::muc::RoomLifecycleId::generate(),
+        revision: crate::muc::RoomRevision::from_stored(7).expect("revision"),
+    };
+    actor.projected_revision = Some(crate::muc::RoomRevision::from_stored(3).expect("revision"));
+    actor.install_durable_room_state(crate::muc::durable::DurableRoomState {
+        coordinates: Some(coordinates),
+        config_coordinates: None,
+        waddle_id: "waddle-1".to_owned(),
+        channel_id: "channel-1".to_owned(),
+        config: RoomConfig::default(),
+        subject: None,
+        affiliations: Vec::new(),
+    });
+    assert_eq!(actor.projected_revision, Some(coordinates.revision));
+}
+
+#[test]
+fn restore_installs_config_coordinates() {
+    let mut actor = RoomActor::new(test_room(), test_secret());
+    let coordinates = crate::muc::RoomCommittedCoordinates {
+        lifecycle: crate::muc::RoomLifecycleId::generate(),
+        revision: crate::muc::RoomRevision::from_stored(7).expect("revision"),
+    };
+    let config_coordinates = crate::muc::RoomCommittedCoordinates {
+        lifecycle: coordinates.lifecycle,
+        revision: crate::muc::RoomRevision::from_stored(5).expect("revision"),
+    };
+
+    actor.install_durable_room_state(crate::muc::durable::DurableRoomState {
+        coordinates: Some(coordinates),
+        config_coordinates: Some(config_coordinates),
+        waddle_id: "waddle-1".to_owned(),
+        channel_id: "channel-1".to_owned(),
+        config: RoomConfig::default(),
+        subject: None,
+        affiliations: Vec::new(),
+    });
+
+    assert_eq!(actor.config_durable_coordinates, Some(config_coordinates));
+}
+
+#[tokio::test]
+async fn members_only_enforcement_advances_config_coordinates() {
+    let store = FakeDurableStore::owned();
+    let actor = spawn_room_actor_with_config_and_store(
+        RoomConfig {
+            members_only: false,
+            ..RoomConfig::default()
+        },
+        store,
+    )
+    .await;
+    let alice = test_full_jid("alice");
+    join_as_resolver(&actor, alice.clone(), "alice")
+        .await
+        .expect("join");
+
+    let mut config = actor.ask(GetConfig).await.expect("current config");
+    config.members_only = true;
+    let update = actor
+        .ask(UpdateConfig {
+            config,
+            effect_plan: ConfigEffectPlan::ManagedMembersOnlyFallback,
+        })
+        .await
+        .expect("stage members-only fallback");
+    let before = actor
+        .ask(GetSnapshot)
+        .await
+        .expect("snapshot before enforcement");
+    let fallback = update
+        .reservation
+        .expect("managed members-only stages a fallback reservation");
+
+    actor
+        .ask(EnforceMembersOnlyAffiliations {
+            affiliations: vec![(alice.to_bare(), Affiliation::Member)],
+            fallback_reservation: Some(fallback),
+            config_status_codes: update
+                .notification
+                .expect("managed members-only notification")
+                .status_codes,
+        })
+        .await
+        .expect("members-only enforcement");
+
+    let after = actor
+        .ask(GetSnapshot)
+        .await
+        .expect("snapshot after enforcement");
+    assert_ne!(
+        after.durable_coordinates, before.durable_coordinates,
+        "the enforcement commit must advance the durable head"
+    );
+    assert_eq!(
+        after.config_durable_coordinates, after.durable_coordinates,
+        "members-only enforcement must retarget config recovery to its own durable head"
+    );
+}
+
+#[tokio::test]
+async fn join_commits_projection_revision_before_admitting_occupant() {
+    let store = FakeDurableStore::owned();
+    let actor = spawn_room_actor_with_store(store.clone()).await;
+    let alice = test_full_jid("alice");
+
+    actor
+        .ask(JoinWithAffiliation {
+            sender_jid: alice.clone(),
+            nick: "alice".to_owned(),
+            affiliation_grant: JoinAffiliationGrant::Resolver(Affiliation::Member),
+            local_domain: "example.com".to_owned(),
+            admission_revision: current_admission_revision(&actor).await,
+        })
+        .await
+        .expect("projection-authorized join");
+
+    assert!(matches!(
+        store.recorded_intents().last(),
+        Some(crate::muc::RoomDurableMutation::Projection(
+            crate::muc::durable::RoomProjection::OccupancyJoin { occupant, nick }
+        )) if occupant == &alice && nick.as_str() == "alice"
+    ));
+    let snapshot = actor.ask(GetSnapshot).await.expect("snapshot");
+    assert_eq!(snapshot.room.occupant_count(), 1);
+    assert_eq!(
+        snapshot.durable_coordinates,
+        store.last_coordinates.lock().expect("lock").to_owned()
+    );
+}
+
+#[tokio::test]
+async fn replayed_projection_authorization_is_refused() {
+    let store = FakeDurableStore::owned();
+    let actor = spawn_room_actor_with_store(store.clone()).await;
+    actor
+        .ask(ApplyPin {
+            change: PinStateChange::Pin(test_pinned_entry("first")),
+        })
+        .await
+        .expect("first projection");
+    store.set_replay_last_coordinates(true);
+
+    let result = actor
+        .ask(ApplyPin {
+            change: PinStateChange::Pin(test_pinned_entry("replayed")),
+        })
+        .await;
+    assert!(matches!(
+        result,
+        Err(SendError::HandlerError(
+            RoomActorError::OwnershipUnavailable
+        ))
+    ));
+    assert_eq!(actor.ask(GetPinList).await.expect("pins").len(), 1);
+    assert!(matches!(
+        actor.ask(GetRoomSealState).await.expect("seal"),
+        RoomSealState::Open
+    ));
+}
+
+#[tokio::test]
+async fn store_less_rooms_project_without_authorization() {
+    let actor = spawn_room_actor().await;
+    actor
+        .ask(ApplyPin {
+            change: PinStateChange::Pin(test_pinned_entry("local")),
+        })
+        .await
+        .expect("store-less pin projection");
+    assert_eq!(actor.ask(GetPinList).await.expect("pins").len(), 1);
+}
+
+#[test]
+fn foreign_projection_authorization_seals_actor() {
+    let mut actor = RoomActor::new(test_room(), test_secret());
+    let coordinates = crate::muc::RoomCommittedCoordinates {
+        lifecycle: crate::muc::RoomLifecycleId::generate(),
+        revision: crate::muc::RoomRevision::initial(),
+    };
+    let fence = test_claim_fence(&actor.room.room_jid);
+    actor.durable_claim_fence = Some(fence.clone());
+    actor.durable_coordinates = Some(coordinates);
+    let mut foreign_fence = fence;
+    foreign_fence.epoch = crate::ownership::ClaimEpoch(2);
+    let commit = crate::muc::durable::mint_room_mutation_commit(
+        foreign_fence,
+        coordinates,
+        crate::muc::durable::RoomCommitKind::Projection(
+            crate::muc::durable::RoomProjectionKind::OccupancyJoin,
+        ),
+    );
+    let authorization = crate::muc::durable::authorize_ephemeral_projection(commit)
+        .expect("projection authorization");
+
+    assert_eq!(
+        actor.project(
+            ProjectionGate::Authorized(authorization),
+            crate::muc::durable::RoomProjectionKind::OccupancyJoin,
+            |_| (),
+        ),
+        Err(ProjectionRefusal::ForeignCapability),
+    );
+    assert_eq!(actor.seal_state, RoomSealState::OwnershipLost);
+    assert_eq!(actor.room.occupant_count(), 0);
+}
+
+#[test]
+fn projection_kind_mismatch_is_refused_without_sealing() {
+    let mut actor = RoomActor::new(test_room(), test_secret());
+    let coordinates = crate::muc::RoomCommittedCoordinates {
+        lifecycle: crate::muc::RoomLifecycleId::generate(),
+        revision: crate::muc::RoomRevision::initial(),
+    };
+    let fence = test_claim_fence(&actor.room.room_jid);
+    actor.durable_claim_fence = Some(fence.clone());
+    actor.durable_coordinates = Some(coordinates);
+    let commit = crate::muc::durable::mint_room_mutation_commit(
+        fence,
+        coordinates,
+        crate::muc::durable::RoomCommitKind::Projection(
+            crate::muc::durable::RoomProjectionKind::Pin,
+        ),
+    );
+    let authorization = crate::muc::durable::authorize_ephemeral_projection(commit)
+        .expect("projection authorization");
+
+    assert_eq!(
+        actor.project(
+            ProjectionGate::Authorized(authorization),
+            crate::muc::durable::RoomProjectionKind::OccupancyJoin,
+            |_| (),
+        ),
+        Err(ProjectionRefusal::WrongProjectionKind),
+    );
+    assert_eq!(actor.seal_state, RoomSealState::Open);
+}
+
 async fn seal_for_destroy(actor: &ActorRef<RoomActor>) {
     actor
         .ask(SealForDestroy {
@@ -4303,6 +5169,7 @@ impl crate::muc::durable::MucDurableStore for FlakyThenRecoveringStore {
             } else {
                 Ok(Some(crate::muc::durable::DurableRoomState {
                     coordinates: None,
+                    config_coordinates: None,
                     waddle_id: "waddle-1".to_string(),
                     channel_id: "channel-1".to_string(),
                     config: RoomConfig {
@@ -4722,7 +5589,7 @@ async fn destroy_seal_blocks_members_only_enforcement() {
 }
 
 #[tokio::test]
-async fn destroy_seal_retains_leave_without_emitting_effects_before_unseal() {
+async fn leave_under_destroying_seal_is_deferred_without_memory_change() {
     let store = FakeDurableStore::owned();
     let actor = spawn_room_actor_with_store(store).await;
     let alice = test_full_jid("alice");
@@ -4743,18 +5610,21 @@ async fn destroy_seal_retains_leave_without_emitting_effects_before_unseal() {
         .await
         .expect("pre-seal for destroy");
 
-    assert!(
+    assert!(matches!(
         actor
-            .ask(LeaveByRealJid { sender_jid: alice })
+            .ask(LeaveByRealJid {
+                sender_jid: alice.clone(),
+                cause: crate::muc::durable::OccupancyLeaveCause::Explicit,
+                session: LeaveSessionSelector::Any,
+            })
             .await
-            .expect("leave ask")
-            .is_none(),
-        "a sealed actor must not emit leave effects from a queued session departure"
-    );
+            .expect("leave ask"),
+        LeaveDisposition::Deferred { .. }
+    ));
     assert_eq!(
         actor.ask(OccupantCount).await.expect("occupant count"),
-        0,
-        "a destroy that reopens must not restore a session that departed while sealed"
+        1,
+        "durable departures wait for a projection commit while the destroy is unresolved"
     );
     assert!(actor
         .ask(UnsealDestroy { attempt })
@@ -4762,9 +5632,80 @@ async fn destroy_seal_retains_leave_without_emitting_effects_before_unseal() {
         .expect("matching unseal reply"));
     assert_eq!(
         actor.ask(OccupantCount).await.expect("occupant count"),
-        0,
-        "unsealing a failed destroy retains the departure reconciliation"
+        1,
+        "unsealing does not apply a deferred departure until it is retried"
     );
+}
+
+#[tokio::test]
+async fn store_less_leave_under_destroying_seal_is_suppressed_and_recorded() {
+    let actor = spawn_room_actor().await;
+    let alice = test_full_jid("alice");
+    actor
+        .ask(Join {
+            nick: "alice".to_owned(),
+            real_jid: alice.clone(),
+            role: Role::Participant,
+            affiliation: Affiliation::Member,
+        })
+        .await
+        .expect("join");
+    seal_for_destroy(&actor).await;
+
+    assert!(matches!(
+        actor
+            .ask(LeaveByRealJid {
+                sender_jid: alice,
+                cause: crate::muc::durable::OccupancyLeaveCause::Explicit,
+                session: LeaveSessionSelector::Any,
+            })
+            .await
+            .expect("leave reply"),
+        LeaveDisposition::Suppressed
+    ));
+    assert_eq!(actor.ask(OccupantCount).await.expect("count"), 0);
+}
+
+#[tokio::test]
+async fn unseal_destroy_then_retried_leave_projects_departure() {
+    let store = FakeDurableStore::owned();
+    let actor = spawn_room_actor_with_store(store).await;
+    let alice = test_full_jid("alice");
+    actor
+        .ask(Join {
+            nick: "alice".to_owned(),
+            real_jid: alice.clone(),
+            role: Role::Participant,
+            affiliation: Affiliation::Member,
+        })
+        .await
+        .expect("join");
+    let attempt = crate::muc::DestroyAttemptId::generate();
+    actor.ask(SealForDestroy { attempt }).await.expect("seal");
+    assert!(matches!(
+        actor
+            .ask(LeaveByRealJid {
+                sender_jid: alice.clone(),
+                cause: crate::muc::durable::OccupancyLeaveCause::Explicit,
+                session: LeaveSessionSelector::Any,
+            })
+            .await
+            .expect("deferred reply"),
+        LeaveDisposition::Deferred { .. }
+    ));
+    assert!(actor.ask(UnsealDestroy { attempt }).await.expect("unseal"));
+    assert!(matches!(
+        actor
+            .ask(LeaveByRealJid {
+                sender_jid: alice,
+                cause: crate::muc::durable::OccupancyLeaveCause::Explicit,
+                session: LeaveSessionSelector::Any,
+            })
+            .await
+            .expect("retry reply"),
+        LeaveDisposition::Left(_)
+    ));
+    assert_eq!(actor.ask(OccupantCount).await.expect("count"), 0);
 }
 
 #[tokio::test]
@@ -4925,7 +5866,7 @@ async fn destroy_seal_blocks_in_call_state_updates() {
 }
 
 #[tokio::test]
-async fn destroy_seal_blocks_legacy_leave_handler() {
+async fn destroy_seal_defers_leave_handler() {
     let store = FakeDurableStore::owned();
     let actor = spawn_room_actor_with_store(store).await;
 
@@ -4942,23 +5883,18 @@ async fn destroy_seal_blocks_legacy_leave_handler() {
     seal_for_destroy(&actor).await;
 
     let leave = actor
-        .ask(Leave {
-            nick: "alice".to_string(),
+        .ask(LeaveByRealJid {
+            sender_jid: test_full_jid("alice"),
+            cause: crate::muc::durable::OccupancyLeaveCause::Explicit,
+            session: LeaveSessionSelector::Any,
         })
-        .await;
-    assert!(
-        matches!(
-            leave,
-            Err(SendError::HandlerError(
-                RoomActorError::OwnershipUnavailable
-            ))
-        ),
-        "a sealed actor must reject the legacy leave mutation path: {leave:?}"
-    );
+        .await
+        .expect("leave reply");
+    assert!(matches!(leave, LeaveDisposition::Deferred { .. }));
     assert_eq!(
         actor.ask(OccupantCount).await.expect("occupant count"),
         1,
-        "refused legacy leave must not remove the occupant"
+        "a deferred leave must not remove the occupant"
     );
 }
 
@@ -5374,8 +6310,8 @@ async fn role_only_admin_items_stay_direct_without_an_outbox_reservation() {
     );
     assert_eq!(
         store.save_call_count(),
-        0,
-        "no durable affiliation commit is needed"
+        1,
+        "the join projection commits once; the role-only change adds no durable commit"
     );
     assert!(
         store.saved_effects().is_empty(),
@@ -5943,8 +6879,10 @@ async fn resolver_none_clears_stale_resolver_derived_affiliation_and_join_is_for
         .await
         .expect("resolver-derived member joins the members-only room");
     actor
-        .ask(Leave {
-            nick: "alice".to_string(),
+        .ask(LeaveByRealJid {
+            sender_jid: alice.clone(),
+            cause: crate::muc::durable::OccupancyLeaveCause::Explicit,
+            session: LeaveSessionSelector::Any,
         })
         .await
         .expect("leave");
@@ -6052,7 +6990,7 @@ async fn sync_resolver_affiliation_clears_stale_resolver_derived_member() {
     // Seed a resolver-derived Member entry, then leave the room.
     actor
         .ask(JoinWithAffiliation {
-            sender_jid: alice,
+            sender_jid: alice.clone(),
             nick: "alice".to_string(),
             affiliation_grant: JoinAffiliationGrant::Resolver(Affiliation::Member),
             local_domain: "example.com".to_string(),
@@ -6061,8 +6999,10 @@ async fn sync_resolver_affiliation_clears_stale_resolver_derived_member() {
         .await
         .expect("resolver-derived member joins the members-only room");
     actor
-        .ask(Leave {
-            nick: "alice".to_string(),
+        .ask(LeaveByRealJid {
+            sender_jid: alice.clone(),
+            cause: crate::muc::durable::OccupancyLeaveCause::Explicit,
+            session: LeaveSessionSelector::Any,
         })
         .await
         .expect("leave");

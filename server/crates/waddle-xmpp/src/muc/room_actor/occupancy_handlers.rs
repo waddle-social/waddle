@@ -5,10 +5,14 @@ use kameo::message::Context;
 
 use super::{
     affiliation_overflows_full_room, JoinDenialReason, JoinExistingOccupant, JoinOutcome,
-    LeaveOutcome, PresenceUpdateOutcome, RoomActor, RoomActorError,
+    LeaveOutcome, OccupancyWatermark, PresenceUpdateOutcome, ProjectionGate, RoomActor,
+    RoomActorError,
 };
 use crate::muc::{
-    durable::{ChannelId, RoomDurableMutation, WaddleId},
+    durable::{
+        ChannelId, OccupancyLeaveCause, RoomDurableMutation, RoomProjection, RoomProjectionKind,
+        WaddleId,
+    },
     RoomConfig,
 };
 use crate::types::Affiliation;
@@ -207,74 +211,104 @@ impl kameo::message::Message<JoinWithAffiliation> for RoomActor {
             })
             .collect();
 
-        let occupant_count_before = self.room.occupant_count();
-        let new_occupant = self.room.add_occupant_with_affiliation(
-            msg.sender_jid,
-            msg.nick.clone(),
-            Some(msg.local_domain.as_str()),
-        );
-        let new_occupant_affiliation = new_occupant.affiliation;
-        let new_occupant_role = new_occupant.role;
-        let occupant_count = self.room.occupant_count();
-        // Observability (#1320): every accepted join is a MUC presence
-        // event; the pod-wide occupant gauge advances only when the
-        // occupant set actually grew (multi-session joins / rejoins add a
-        // session, not an occupant, so the diff is 0).
-        crate::metrics::record_muc_presence("join");
-        crate::metrics::adjust_muc_occupant_total(
-            occupant_count as i64 - occupant_count_before as i64,
-        );
-        let room_jid = self.room.room_jid.clone();
-        if matches!(msg.affiliation_grant, JoinAffiliationGrant::Resolver(_))
-            && !resolver_join_advanced_admission_revision
-        {
-            // A successful resolver-backed admission is itself a freshness
-            // boundary, even when the affiliation was already identical. A
-            // delayed rejection repair captured before this join must not
-            // retain the same revision and demote the occupant just admitted.
-            self.advance_member_admission_revision(&joining_bare_jid);
-        }
-        // #1108: every successful admission bumps the occupancy
-        // revision so a dormancy probe taken before this join can no
-        // longer authorize a destroy.
-        self.occupancy_revision = self.occupancy_revision.saturating_add(1);
-
-        let subject_state = self.room.subject.clone();
-
-        Ok(JoinOutcome {
-            existing_occupants,
-            new_occupant_affiliation,
-            new_occupant_role,
-            occupant_count,
-            room_jid,
-            is_same_bare_multi_session_join,
-            is_existing_session_rejoin,
-            subject_state,
+        // Resolver cache updates deliberately precede this commit so a
+        // revocation is visible to the admission checks even during outage.
+        let Some(durable_nick) = crate::muc::durable::MucOccupantNick::new(msg.nick.clone()) else {
+            return Err(RoomActorError::NickAlreadyInUse(msg.nick));
+        };
+        let gate = self
+            .commit_projection(RoomProjection::OccupancyJoin {
+                occupant: msg.sender_jid.clone(),
+                nick: durable_nick,
+            })
+            .await
+            .map_err(Self::map_projection_commit_error)?;
+        self.project(gate, RoomProjectionKind::OccupancyJoin, |actor| {
+            let occupant_count_before = actor.room.occupant_count();
+            let joined_at =
+                OccupancyWatermark::from_revision(actor.occupancy_revision.saturating_add(1));
+            let new_occupant = actor.room.add_occupant_with_affiliation(
+                msg.sender_jid,
+                msg.nick.clone(),
+                Some(msg.local_domain.as_str()),
+                joined_at,
+            );
+            let new_occupant_affiliation = new_occupant.affiliation;
+            let new_occupant_role = new_occupant.role;
+            let occupant_count = actor.room.occupant_count();
+            crate::metrics::record_muc_presence("join");
+            crate::metrics::adjust_muc_occupant_total(
+                occupant_count as i64 - occupant_count_before as i64,
+            );
+            let room_jid = actor.room.room_jid.clone();
+            if matches!(msg.affiliation_grant, JoinAffiliationGrant::Resolver(_))
+                && !resolver_join_advanced_admission_revision
+            {
+                actor.advance_member_admission_revision(&joining_bare_jid);
+            }
+            actor.occupancy_revision = actor.occupancy_revision.saturating_add(1);
+            JoinOutcome {
+                existing_occupants,
+                new_occupant_affiliation,
+                new_occupant_role,
+                occupant_count,
+                room_jid,
+                is_same_bare_multi_session_join,
+                is_existing_session_rejoin,
+                subject_state: actor.room.subject.clone(),
+            }
         })
+        .map_err(Self::map_projection_refusal)
     }
 }
 
 pub struct LeaveByRealJid {
     pub sender_jid: FullJid,
+    pub cause: OccupancyLeaveCause,
+    pub session: LeaveSessionSelector,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LeaveSessionSelector {
+    Any,
+    JoinedAtOrBefore(OccupancyWatermark),
+}
+
+#[derive(Debug, kameo::Reply)]
+pub enum LeaveDisposition {
+    Left(Box<LeaveOutcome>),
+    NotOccupant,
+    Superseded,
+    Deferred {
+        watermark: OccupancyWatermark,
+    },
+    /// The departure changed local state but must not emit leave effects.
+    Suppressed,
 }
 
 impl kameo::message::Message<LeaveByRealJid> for RoomActor {
-    type Reply = Result<Option<LeaveOutcome>, Infallible>;
+    type Reply = Result<LeaveDisposition, RoomActorError>;
 
     async fn handle(
         &mut self,
         msg: LeaveByRealJid,
         _ctx: &mut Context<Self, Self::Reply>,
     ) -> Self::Reply {
-        // A terminal destroy may still fail its durable commit and reopen
-        // this exact actor.  Record a queued departure in that narrow state
-        // so reopening cannot resurrect a dead session, but continue to
-        // suppress the LeaveOutcome: callers must not fan it out while the
-        // terminal result is unresolved.
-        let suppress_effects = matches!(self.seal_state, super::RoomSealState::Destroying { .. });
-        if !suppress_effects && !self.effectful_work_is_permitted().await {
-            return Ok(None);
-        }
+        let current_watermark = OccupancyWatermark::from_revision(self.occupancy_revision);
+        let suppress_effects = match self.seal_state {
+            super::RoomSealState::Inactive | super::RoomSealState::Destroying { .. }
+                if self.durable_store.is_none() =>
+            {
+                true
+            }
+            super::RoomSealState::Inactive | super::RoomSealState::Destroying { .. } => {
+                return Ok(LeaveDisposition::Deferred {
+                    watermark: current_watermark,
+                });
+            }
+            super::RoomSealState::OwnershipLost => return Err(RoomActorError::RoomSealed),
+            super::RoomSealState::Open => false,
+        };
         // #1107: collect EVERY nick this full JID occupies. Post-#1107
         // the join path refuses a second nick for the same full JID, so
         // this is normally a single entry — but pre-existing ghost
@@ -296,19 +330,27 @@ impl kameo::message::Message<LeaveByRealJid> for RoomActor {
             .collect();
         nicks.sort();
         let Some(nick) = nicks.first().cloned() else {
-            return Ok(None);
+            return Ok(LeaveDisposition::NotOccupant);
         };
         let Some(occupant) = self.room.get_occupant(&nick) else {
-            return Ok(None);
+            return Ok(LeaveDisposition::NotOccupant);
+        };
+        if matches!(
+            msg.session,
+            LeaveSessionSelector::JoinedAtOrBefore(watermark)
+                if self
+                    .room
+                    .session_watermark(&msg.sender_jid)
+                    .is_some_and(|current| current > watermark)
+        ) {
+            return Ok(LeaveDisposition::Superseded);
         };
         let affiliation = occupant.affiliation;
         let role = occupant.role;
-        let leaving_room_jid = self
-            .room
-            .room_jid
-            .clone()
-            .with_resource_str(&nick)
-            .expect("nick was previously accepted as resource");
+        let Ok(leaving_room_jid) = self.room.room_jid.clone().with_resource_str(&nick) else {
+            tracing::warn!(room = %self.room.room_jid, %nick, "occupant state contains an invalid nickname");
+            return Ok(LeaveDisposition::NotOccupant);
+        };
         let remaining_occupants: Vec<FullJid> = self
             .room
             .occupants
@@ -321,67 +363,96 @@ impl kameo::message::Message<LeaveByRealJid> for RoomActor {
             .muji_state
             .get(&nick)
             .is_some_and(|entries| entries.contains_key(&msg.sender_jid));
+        let Some(durable_nick) = crate::muc::durable::MucOccupantNick::new(nick.clone()) else {
+            tracing::warn!(room = %self.room.room_jid, %nick, "occupant state contains a non-durable nickname");
+            return Ok(LeaveDisposition::NotOccupant);
+        };
+        let gate = if suppress_effects {
+            ProjectionGate::Unfenced
+        } else {
+            match self
+                .commit_projection(RoomProjection::OccupancyLeave {
+                    occupant: msg.sender_jid.clone(),
+                    nick: durable_nick,
+                    cause: msg.cause,
+                })
+                .await
+            {
+                Ok(gate) => gate,
+                Err(
+                    super::DurablePersistError::OwnershipUnavailable
+                    | super::DurablePersistError::PersistFailed,
+                ) => {
+                    return Ok(LeaveDisposition::Deferred {
+                        watermark: current_watermark,
+                    });
+                }
+                Err(
+                    super::DurablePersistError::NotOwner
+                    | super::DurablePersistError::CommitOutcomeUnknown,
+                ) => {
+                    return Err(RoomActorError::RoomSealed);
+                }
+            }
+        };
         let occupant_count_before = self.room.occupant_count();
-        let removed_last_session = self
-            .room
-            .remove_occupant_session(&nick, &msg.sender_jid)
-            .unwrap_or(false);
-        // Reap any additional (ghost) occupancies of the same full JID.
-        // The outcome describes the primary nick; ghost occupancies are
-        // bug states that were never legitimately visible, so they are
-        // removed silently to make count and fan-out set correct.
-        for ghost_nick in nicks.iter().skip(1) {
-            self.room
-                .remove_occupant_session(ghost_nick, &msg.sender_jid);
-        }
-        let remaining_muji = if removed_last_session {
-            None
-        } else {
-            self.room.muji_for_nick(&nick)
-        };
-        let remaining_muji_sessions = if removed_last_session {
-            Vec::new()
-        } else {
-            self.room.muji_sessions_for_nick(&nick)
-        };
-        let remaining_nick_real_jid = if removed_last_session {
-            None
-        } else {
-            self.room
-                .get_occupant(&nick)
-                .map(|occupant| occupant.real_jid.clone())
-        };
-        let occupant_count = self.room.occupant_count();
-        // Observability (#1320): a processed leave is a MUC presence
-        // event; the occupant gauge decreases only when this leave
-        // removed the occupant's final session.
-        crate::metrics::record_muc_presence("leave");
-        crate::metrics::adjust_muc_occupant_total(
-            occupant_count as i64 - occupant_count_before as i64,
-        );
-        let is_persistent = self.room.config.persistent;
-        let occupancy_revision = self.occupancy_revision;
-        let outcome = LeaveOutcome {
-            nick,
-            affiliation,
-            role,
-            leaving_room_jid,
-            remaining_occupants,
-            removed_last_session,
-            cleared_muji_state,
-            remaining_muji,
-            remaining_muji_sessions,
-            remaining_nick_real_jid,
-            occupant_count,
-            is_persistent,
-            occupancy_revision,
-        };
-
-        if suppress_effects {
-            Ok(None)
-        } else {
-            Ok(Some(outcome))
-        }
+        self.project(gate, RoomProjectionKind::OccupancyLeave, |actor| {
+            let removed_last_session = actor
+                .room
+                .remove_occupant_session(&nick, &msg.sender_jid)
+                .unwrap_or(false);
+            for ghost_nick in nicks.iter().skip(1) {
+                actor
+                    .room
+                    .remove_occupant_session(ghost_nick, &msg.sender_jid);
+            }
+            let remaining_muji = if removed_last_session {
+                None
+            } else {
+                actor.room.muji_for_nick(&nick)
+            };
+            let remaining_muji_sessions = if removed_last_session {
+                Vec::new()
+            } else {
+                actor.room.muji_sessions_for_nick(&nick)
+            };
+            let remaining_nick_real_jid = if removed_last_session {
+                None
+            } else {
+                actor
+                    .room
+                    .get_occupant(&nick)
+                    .map(|occupant| occupant.real_jid.clone())
+            };
+            let occupant_count = actor.room.occupant_count();
+            crate::metrics::record_muc_presence("leave");
+            crate::metrics::adjust_muc_occupant_total(
+                occupant_count as i64 - occupant_count_before as i64,
+            );
+            LeaveDisposition::Left(Box::new(LeaveOutcome {
+                nick,
+                affiliation,
+                role,
+                leaving_room_jid,
+                remaining_occupants,
+                removed_last_session,
+                cleared_muji_state,
+                remaining_muji,
+                remaining_muji_sessions,
+                remaining_nick_real_jid,
+                occupant_count,
+                is_persistent: actor.room.config.persistent,
+                occupancy_revision: actor.occupancy_revision,
+            }))
+        })
+        .map(|outcome| {
+            if suppress_effects {
+                LeaveDisposition::Suppressed
+            } else {
+                outcome
+            }
+        })
+        .map_err(Self::map_projection_refusal)
     }
 }
 
