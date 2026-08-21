@@ -338,14 +338,14 @@ groups:
             runbook: https://github.com/waddle-social/waddle/blob/main/server/docs/operations/ingress-shadow-soak.md ; https://github.com/waddle-social/waddle/issues/1695
             summary: PostgreSQL WAL generation exceeded 1 MiB/s for 30m. Derivation - measured 5.6 KB/s live and ≈10 KB/s long-run average on 2026-08-20; 1 MiB/s is ≈100-180x that.
         - alert: PostgresCollectorError
-          expr: max(cnpg_last_error) > 0
+          expr: max(cnpg_collector_last_collection_error) > 0
           for: 15m
           labels:
             severity: warning
             team: waddle
           annotations:
             runbook: https://github.com/waddle-social/waddle/blob/main/server/docs/operations/ingress-shadow-soak.md ; https://github.com/waddle-social/waddle/issues/1695
-            summary: The CNPG metrics collector reported an error for 15m.
+            summary: The CNPG metrics collector reported an error for 15m. Uses `cnpg_collector_last_collection_error`, which reflects the latest collection; observed 2026-08-21 that `cnpg_last_error` stays at 1 after user-query errors stop (sticky until the instance manager restarts), so it is only used as a presence guard.
         - alert: PostgresDataPvcHigh
           expr: max by (persistentvolumeclaim) (kubelet_volume_stats_used_bytes{namespace="waddle",persistentvolumeclaim=~"postgresql-[0-9]+"}) / on (persistentvolumeclaim) max by (persistentvolumeclaim) (kubelet_volume_stats_capacity_bytes{namespace="waddle",persistentvolumeclaim=~"postgresql-[0-9]+"}) > 0.7
           for: 10m
