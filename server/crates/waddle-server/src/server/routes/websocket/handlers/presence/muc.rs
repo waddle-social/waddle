@@ -1943,6 +1943,7 @@ pub async fn handle_muc_leave(
             cause: waddle_xmpp::muc::durable::OccupancyLeaveCause::Explicit,
             session: waddle_xmpp::muc::room_actor::LeaveSessionSelector::Any,
         })
+        .reply_timeout(crate::server::routes::websocket::LEAVE_ASK_TIMEOUT)
         .await
     {
         Ok(waddle_xmpp::muc::room_actor::LeaveDisposition::Left(outcome)) => outcome,
@@ -1974,7 +1975,7 @@ pub async fn handle_muc_leave(
         Ok(waddle_xmpp::muc::room_actor::LeaveDisposition::Deferred { .. }) => {
             return bounce_muc_leave_ownership_unreachable(room_jid, sender_jid, nick);
         }
-        Ok(waddle_xmpp::muc::room_actor::LeaveDisposition::Suppressed) => {
+        Ok(waddle_xmpp::muc::room_actor::LeaveDisposition::Suppressed { affiliation }) => {
             // Store-less room with a destroy/dormancy in flight: the departure
             // was recorded but nothing fans out. The departing session still
             // gets its XEP-0045 §7.14 self-presence echo (as before #1647).
@@ -1986,7 +1987,7 @@ pub async fn handle_muc_leave(
                 room_jid,
                 nick,
                 sender_jid,
-                Affiliation::None,
+                affiliation,
             )];
         }
         Err(error) => {

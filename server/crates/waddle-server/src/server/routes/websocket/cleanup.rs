@@ -1808,12 +1808,15 @@ async fn cleanup_muc_presence_with_origin(
                 continue;
             }
         };
+        // Bounded: one wedged room (stuck projection transaction or mailbox)
+        // must not stall the sweep of every other room this JID occupies.
         let leave_result = room_actor
             .ask(LeaveByRealJid {
                 sender_jid: jid.clone(),
                 cause: OccupancyLeaveCause::Disconnect,
                 session: LeaveSessionSelector::Any,
             })
+            .reply_timeout(super::LEAVE_ASK_TIMEOUT)
             .await;
         // SFU teardown runs *after* the room actor has dropped the
         // session so the MUC's view of the world is the leading edge
@@ -1868,8 +1871,22 @@ async fn cleanup_muc_presence_with_origin(
             Ok(
                 LeaveDisposition::NotOccupant
                 | LeaveDisposition::Superseded
-                | LeaveDisposition::Suppressed,
+                | LeaveDisposition::Suppressed { .. },
             ) => {}
+            Err(kameo::error::SendError::Timeout(_)) => {
+                // A timeout proves nothing about the actor's seal: retain the
+                // departure itself, not a retirement watch.
+                completed = false;
+                state.deps.protocol.pending_local_muc_departures.record(
+                    LocalDepartureItem::RoomDeparture {
+                        room: room_jid.clone(),
+                        jid: jid.clone(),
+                        cause: OccupancyLeaveCause::Disconnect,
+                        selector: LeaveSessionSelector::Any,
+                    },
+                );
+                warn!(room = %room_jid, jid = %jid, "MUC leave ask timed out on disconnect; retained for retry");
+            }
             Err(error) => {
                 completed = false;
                 state.deps.protocol.pending_local_muc_departures.record(
@@ -3233,8 +3250,10 @@ mod local_departure_cleanup_tests {
     use waddle_xmpp::muc::durable::{
         DurableRoomState, MucDurableFuture, MucDurableStore, RoomClaimFenceContext,
     };
-    use waddle_xmpp::muc::room_actor::{JoinAffiliationGrant, JoinWithAffiliation, RoomActor};
-    use waddle_xmpp::muc::room_registry_actor::{CreateRoom, WireClusteringClaims};
+    use waddle_xmpp::muc::room_actor::{
+        GetSnapshot, JoinAffiliationGrant, JoinWithAffiliation, RoomActor,
+    };
+    use waddle_xmpp::muc::room_registry_actor::{CreateRoom, ListRooms, WireClusteringClaims};
     use waddle_xmpp::muc::{
         RoomCommitError, RoomCommitOutcome, RoomCommittedCoordinates, RoomConfig, RoomLifecycleId,
         RoomMutationEffects, RoomRevision,
@@ -3249,10 +3268,12 @@ mod local_departure_cleanup_tests {
         Succeed,
         OwnershipUnavailable,
         NotOwner,
+        Hang,
     }
 
     struct CleanupProjectionStore {
         leave_mode: Mutex<LeaveProjectionMode>,
+        room_leave_modes: Mutex<HashMap<BareJid, LeaveProjectionMode>>,
         established_fences: Mutex<HashMap<BareJid, RoomClaimFenceContext>>,
         lifecycle: OnceLock<RoomLifecycleId>,
         next_revision: AtomicUsize,
@@ -3262,6 +3283,7 @@ mod local_departure_cleanup_tests {
         fn new() -> Arc<Self> {
             Arc::new(Self {
                 leave_mode: Mutex::new(LeaveProjectionMode::Succeed),
+                room_leave_modes: Mutex::new(HashMap::new()),
                 established_fences: Mutex::new(HashMap::new()),
                 lifecycle: OnceLock::new(),
                 next_revision: AtomicUsize::new(0),
@@ -3270,6 +3292,13 @@ mod local_departure_cleanup_tests {
 
         fn set_leave_mode(&self, mode: LeaveProjectionMode) {
             *self.leave_mode.lock().expect("leave mode lock") = mode;
+        }
+
+        fn set_leave_mode_for_room(&self, room: &BareJid, mode: LeaveProjectionMode) {
+            self.room_leave_modes
+                .lock()
+                .expect("room leave modes lock")
+                .insert(room.clone(), mode);
         }
 
         fn next_commit_coordinates(&self) -> RoomCommittedCoordinates {
@@ -3320,7 +3349,13 @@ mod local_departure_cleanup_tests {
                 .get(room_jid)
                 .cloned();
             let given = fence.clone();
-            let leave_mode = *self.leave_mode.lock().expect("leave mode lock");
+            let leave_mode = self
+                .room_leave_modes
+                .lock()
+                .expect("room leave modes lock")
+                .get(room_jid)
+                .copied()
+                .unwrap_or_else(|| *self.leave_mode.lock().expect("leave mode lock"));
             let coordinates = self.next_commit_coordinates();
             Box::pin(async move {
                 if exact.as_ref() != Some(&given) {
@@ -3338,6 +3373,10 @@ mod local_departure_cleanup_tests {
                             Err(RoomCommitError::OwnershipUnavailable)
                         }
                         LeaveProjectionMode::NotOwner => Err(RoomCommitError::NotOwner),
+                        LeaveProjectionMode::Hang => {
+                            std::future::pending::<Result<RoomCommitOutcome, RoomCommitError>>()
+                                .await
+                        }
                     },
                     _ => Ok(RoomCommitOutcome {
                         coordinates,
@@ -3626,5 +3665,92 @@ mod local_departure_cleanup_tests {
             "the first attempt unregisters SFU"
         );
         assert_eq!(state.deps.protocol.pending_local_muc_departures.len(), 1);
+    }
+
+    #[tokio::test]
+    async fn disconnect_cleanup_leave_ask_timeout_retains_room_departure() {
+        let store = CleanupProjectionStore::new();
+        let state = clustered_state_with_store(store.clone()).await;
+        let first_room = room_jid("disconnect-timeout-first");
+        let second_room = room_jid("disconnect-timeout-second");
+        let first_actor = state
+            .deps
+            .protocol
+            .room_registry
+            .ask(CreateRoom {
+                room_jid: first_room.clone(),
+                waddle_id: "w-first".to_string(),
+                channel_id: "c-first".to_string(),
+                config: RoomConfig::default(),
+            })
+            .await
+            .expect("create first room");
+        let second_actor = state
+            .deps
+            .protocol
+            .room_registry
+            .ask(CreateRoom {
+                room_jid: second_room.clone(),
+                waddle_id: "w-second".to_string(),
+                channel_id: "c-second".to_string(),
+                config: RoomConfig::default(),
+            })
+            .await
+            .expect("create second room");
+        let alice = full_jid("alice@example.com/web");
+        let bob = full_jid("bob@example.com/phone");
+        join_member(&first_actor, &alice, "alice").await;
+        join_member(&first_actor, &bob, "bob").await;
+        join_member(&second_actor, &alice, "alice").await;
+        join_member(&second_actor, &bob, "bob").await;
+        // `ListRooms` exposes the exact HashMap iteration order that cleanup
+        // will use. Hang that first room so the second one proves the loop
+        // continues after the five-second ask timeout.
+        let room_order = state
+            .deps
+            .protocol
+            .room_registry
+            .ask(ListRooms)
+            .await
+            .expect("list rooms");
+        assert_eq!(room_order.len(), 2, "both test rooms must be listed");
+        let hanging_room = room_order[0].clone();
+        let succeeding_room = room_order[1].clone();
+        store.set_leave_mode_for_room(&hanging_room, LeaveProjectionMode::Hang);
+
+        assert_eq!(
+            cleanup_muc_presence_for_jid(state.as_ref(), &alice).await,
+            MucCleanupOutcome::Failed
+        );
+
+        let retained = state
+            .deps
+            .protocol
+            .pending_local_muc_departures
+            .take_due(Instant::now());
+        assert_eq!(retained.len(), 1, "the timed-out room must be retained");
+        assert!(matches!(
+            &retained[0].item,
+            LocalDepartureItem::RoomDeparture {
+                room,
+                jid,
+                cause: OccupancyLeaveCause::Disconnect,
+                selector: LeaveSessionSelector::Any,
+            } if room == &hanging_room && jid == &alice
+        ));
+        assert!(
+            (if succeeding_room == first_room {
+                &first_actor
+            } else {
+                &second_actor
+            })
+            .ask(GetSnapshot)
+            .await
+            .expect("succeeding room snapshot")
+            .room
+            .find_occupant_by_real_jid(&alice)
+            .is_none(),
+            "a hung leave in one room must not block cleanup of another room"
+        );
     }
 }

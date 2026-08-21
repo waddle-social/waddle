@@ -395,6 +395,38 @@ pub(crate) fn muc_occupant_total_for_test() -> i64 {
 }
 
 /// Record the durable commit that gates an ephemeral MUC projection.
+/// End-to-end duration of one occupancy handler turn (join / leave), from
+/// message receipt to reply, including preflight, admission checks, the
+/// projection commit and the in-memory apply. Records on drop so every exit
+/// path is measured.
+pub struct MucOccupancyHandlerTimer {
+    op: &'static str,
+    started: std::time::Instant,
+}
+
+impl MucOccupancyHandlerTimer {
+    pub fn start(op: &'static str) -> Self {
+        Self {
+            op,
+            started: std::time::Instant::now(),
+        }
+    }
+}
+
+impl Drop for MucOccupancyHandlerTimer {
+    fn drop(&mut self) {
+        meter()
+            .f64_histogram("waddle.muc.occupancy.handler.duration")
+            .with_description("Seconds from occupancy message receipt to reply")
+            .with_unit("s")
+            .build()
+            .record(
+                self.started.elapsed().as_secs_f64(),
+                &[KeyValue::new("op", self.op)],
+            );
+    }
+}
+
 /// Wall-clock duration of one projection commit attempt (success or failure).
 pub fn record_muc_projection_commit_duration(projection: &str, seconds: f64) {
     meter()

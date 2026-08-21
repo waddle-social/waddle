@@ -100,6 +100,10 @@ pub(crate) fn spawn_local_muc_departure_janitor(websocket_state: &Arc<WebSocketS
     });
 }
 
+/// Items one sweep pass drains at most; the remainder stay due for the next
+/// tick so a post-outage backlog cannot pin the janitor on one serial pass.
+const LOCAL_MUC_DEPARTURE_SWEEP_BUDGET: usize = 256;
+
 pub(crate) async fn run_local_muc_departure_sweep(state: &WebSocketState) {
     use crate::admin::channels::{broadcast_group_dm_leave, GroupDmLeaveEffect};
     use crate::server::routes::websocket::{
@@ -113,7 +117,7 @@ pub(crate) async fn run_local_muc_departure_sweep(state: &WebSocketState) {
         .deps
         .protocol
         .pending_local_muc_departures
-        .take_due(std::time::Instant::now())
+        .take_due_bounded(std::time::Instant::now(), LOCAL_MUC_DEPARTURE_SWEEP_BUDGET)
     {
         let mut item = pending.item;
         loop {
@@ -200,6 +204,7 @@ pub(crate) async fn run_local_muc_departure_sweep(state: &WebSocketState) {
                             cause,
                             session: selector,
                         })
+                        .reply_timeout(routes::websocket::LEAVE_ASK_TIMEOUT)
                         .await
                     {
                         Ok(LeaveDisposition::Left(outcome)) => {
@@ -262,8 +267,28 @@ pub(crate) async fn run_local_muc_departure_sweep(state: &WebSocketState) {
                             crate::metrics::record_local_departure_retry("superseded");
                             break;
                         }
-                        Ok(LeaveDisposition::Suppressed) => {
+                        Ok(LeaveDisposition::Suppressed { .. }) => {
                             crate::metrics::record_local_departure_retry("completed");
+                            break;
+                        }
+                        Err(kameo::error::SendError::Timeout(_)) => {
+                            // A timeout is not proof of retirement: keep the
+                            // departure and back off.
+                            state
+                                .deps
+                                .protocol
+                                .pending_local_muc_departures
+                                .requeue_with_backoff(PendingLocalDeparture {
+                                    item: LocalDepartureItem::RoomDeparture {
+                                        room,
+                                        jid,
+                                        cause,
+                                        selector,
+                                    },
+                                    attempts: pending.attempts,
+                                    not_before: pending.not_before,
+                                });
+                            crate::metrics::record_local_departure_retry("requeued");
                             break;
                         }
                         Err(_) => {
@@ -8039,6 +8064,7 @@ mod local_muc_departure_tests {
         Succeed,
         OwnershipUnavailable,
         NotOwner,
+        Hang,
     }
 
     struct JanitorProjectionStore {
@@ -8128,6 +8154,10 @@ mod local_muc_departure_tests {
                             Err(RoomCommitError::OwnershipUnavailable)
                         }
                         LeaveProjectionMode::NotOwner => Err(RoomCommitError::NotOwner),
+                        LeaveProjectionMode::Hang => {
+                            std::future::pending::<Result<RoomCommitOutcome, RoomCommitError>>()
+                                .await
+                        }
                     },
                     _ => Ok(RoomCommitOutcome {
                         coordinates,
@@ -8240,7 +8270,8 @@ mod local_muc_departure_tests {
         );
 
         store.set_leave_mode(LeaveProjectionMode::Succeed);
-        tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+        // The requeue backoff is 2s plus up to 25% jitter: wait past the maximum.
+        tokio::time::sleep(std::time::Duration::from_secs(3)).await;
         run_local_muc_departure_sweep(&state).await;
 
         let unavailable = bob_rx.try_recv().expect("exactly one unavailable");
@@ -8268,6 +8299,63 @@ mod local_muc_departure_tests {
     async fn disconnect_cleanup_transient_leave_converges_via_janitor_with_exactly_one_unavailable()
     {
         assert_disconnect_departure_retry_fans_out_once("disconnect-janitor-converges").await;
+    }
+
+    #[tokio::test]
+    async fn janitor_leave_ask_timeout_requeues_departure_not_confirm_retired() {
+        let metrics = waddle_xmpp::telemetry::test_support::acquire().await;
+        let store = JanitorProjectionStore::new();
+        let state = clustered_state_with_store(store.clone()).await;
+        let room = room_jid("janitor-leave-timeout");
+        let alice = full_jid("alice@example.com/web");
+        let bob = full_jid("bob@example.com/phone");
+        let actor = create_room(state.as_ref(), &room).await;
+        join_member(&actor, &alice, "alice").await;
+        join_member(&actor, &bob, "bob").await;
+        store.set_leave_mode(LeaveProjectionMode::Hang);
+        state.deps.protocol.pending_local_muc_departures.record(
+            crate::server::routes::websocket::LocalDepartureItem::RoomDeparture {
+                room: room.clone(),
+                jid: alice.clone(),
+                cause: OccupancyLeaveCause::Disconnect,
+                selector: LeaveSessionSelector::Any,
+            },
+        );
+
+        run_local_muc_departure_sweep(&state).await;
+
+        let retained = state
+            .deps
+            .protocol
+            .pending_local_muc_departures
+            .take_due(Instant::now() + std::time::Duration::from_secs(120));
+        assert_eq!(
+            retained.len(),
+            1,
+            "the timed-out departure must be retained"
+        );
+        assert_eq!(
+            retained[0].attempts, 1,
+            "the timed-out departure backs off once"
+        );
+        assert!(matches!(
+            &retained[0].item,
+            crate::server::routes::websocket::LocalDepartureItem::RoomDeparture {
+                room: retained_room,
+                jid: retained_jid,
+                cause: OccupancyLeaveCause::Disconnect,
+                selector: LeaveSessionSelector::Any,
+            } if retained_room == &room && retained_jid == &alice
+        ));
+        assert!(
+            metrics
+                .counter_sum(
+                    "waddle.muc.local_departure_retry",
+                    &[("outcome", "requeued")],
+                )
+                .is_some_and(|count| count >= 1),
+            "a timed-out janitor leave must record a requeue outcome"
+        );
     }
 
     #[tokio::test]

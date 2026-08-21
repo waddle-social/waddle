@@ -509,6 +509,8 @@ pub struct RoomActor {
     /// actor incarnation's durable restore genuinely completed. See
     /// [`DurableRestoreState`]'s own doc comment.
     restore_state: DurableRestoreState,
+    #[cfg(test)]
+    test_projection_apply_hook: Option<std::sync::Arc<dyn Fn() + Send + Sync>>,
 }
 
 #[derive(PartialEq)]
@@ -689,6 +691,8 @@ impl RoomActor {
             durable_store: None,
             durable_claim_fence: None,
             restore_state: DurableRestoreState::Ready(DurableRoomOrigin::New),
+            #[cfg(test)]
+            test_projection_apply_hook: None,
         }
     }
 
@@ -1100,6 +1104,10 @@ impl RoomActor {
         apply: impl FnOnce(&mut Self) -> T,
     ) -> Result<T, ProjectionRefusal> {
         let ProjectionGate::Authorized(authorization) = gate else {
+            #[cfg(test)]
+            if let Some(hook) = self.test_projection_apply_hook.clone() {
+                hook();
+            }
             return Ok(apply(self));
         };
         let (commit, kind) = authorization.consume();
@@ -1123,6 +1131,10 @@ impl RoomActor {
             return Err(ProjectionRefusal::RevisionAlreadyProjected);
         }
         self.projected_revision = Some(commit.revision());
+        #[cfg(test)]
+        if let Some(hook) = self.test_projection_apply_hook.clone() {
+            hook();
+        }
         Ok(apply(self))
     }
 

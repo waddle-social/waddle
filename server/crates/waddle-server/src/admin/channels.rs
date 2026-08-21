@@ -2305,6 +2305,7 @@ async fn run_group_dm_leave(
                     cause: waddle_xmpp::muc::durable::OccupancyLeaveCause::Administrative,
                     session: waddle_xmpp::muc::room_actor::LeaveSessionSelector::Any,
                 })
+                .reply_timeout(crate::server::routes::websocket::LEAVE_ASK_TIMEOUT)
                 .await
             {
                 Ok(waddle_xmpp::muc::room_actor::LeaveDisposition::Left(outcome)) => {
@@ -2319,9 +2320,21 @@ async fn run_group_dm_leave(
                 Ok(
                     waddle_xmpp::muc::room_actor::LeaveDisposition::NotOccupant
                     | waddle_xmpp::muc::room_actor::LeaveDisposition::Superseded
-                    | waddle_xmpp::muc::room_actor::LeaveDisposition::Suppressed,
+                    | waddle_xmpp::muc::room_actor::LeaveDisposition::Suppressed { .. },
                 ) => {}
                 Ok(waddle_xmpp::muc::room_actor::LeaveDisposition::Deferred { .. }) => {
+                    pending_local_muc_departures.record(
+                        crate::server::routes::websocket::LocalDepartureItem::RoomDeparture {
+                            room: args.room_jid.clone(),
+                            jid: resource,
+                            cause: waddle_xmpp::muc::durable::OccupancyLeaveCause::Administrative,
+                            selector: waddle_xmpp::muc::room_actor::LeaveSessionSelector::Any,
+                        },
+                    );
+                }
+                Err(kameo::error::SendError::Timeout(_)) => {
+                    // A timeout proves nothing about the actor's seal: retain
+                    // the administrative departure itself for the janitor.
                     pending_local_muc_departures.record(
                         crate::server::routes::websocket::LocalDepartureItem::RoomDeparture {
                             room: args.room_jid.clone(),
@@ -3081,28 +3094,37 @@ impl CancelledConfigAskRecoveryGuard {
         };
         let exact_intended_config = snapshot.config_revision == self.expected_revision
             && snapshot.room.config == self.intended_config;
-        let recovered_reservation = if let Some(coordinates) = snapshot.config_durable_coordinates {
+        let recovered_reservations: Vec<waddle_xmpp::muc::RoomEffectReservation> = if let Some(
+            coordinates,
+        ) =
+            snapshot.config_durable_coordinates
+        {
             // The durable config coordinates identify the LAST config commit
-            // exactly. If a later config commit already superseded the intended
-            // one, no arithmetic on lifecycle revisions can recover the
-            // intended row (projections, subject and affiliation commits also
-            // advance the head); leave it to the arm-by-default supervisor.
-            if snapshot.config_revision != self.expected_revision {
+            // exactly. If a later config commit already superseded the
+            // intended one, no arithmetic on lifecycle revisions can single
+            // out the intended row (projections, subject and affiliation
+            // commits also advance the head) — so arm EVERY still-inert row
+            // of this lifecycle up to the latest config commit: each such
+            // row describes a durably committed config (arm-by-default) and
+            // an unarmed one would head-of-line-block the lifecycle FIFO.
+            let lookup = if snapshot.config_revision == self.expected_revision {
+                self.outbox
+                    .staged_reservation_for(coordinates.lifecycle, coordinates.revision)
+                    .await
+                    .map(|reservation| reservation.into_iter().collect())
+            } else {
                 tracing::warn!(
                     room = %self.room_jid,
                     config_revision = snapshot.config_revision,
                     expected_revision = self.expected_revision,
-                    "cancelled admin/group-DM config ask recovery: the intended config was superseded; leaving its staged effect to the arm supervisor"
+                    "cancelled admin/group-DM config ask recovery: the intended config was superseded; arming every committed inert row up to the latest config commit"
                 );
-                return;
-            }
-            let reconciled_revision = coordinates.revision;
-            match self
-                .outbox
-                .staged_reservation_for(coordinates.lifecycle, reconciled_revision)
-                .await
-            {
-                Ok(reservation) => reservation,
+                self.outbox
+                    .staged_reservations_up_to(coordinates.lifecycle, coordinates.revision)
+                    .await
+            };
+            match lookup {
+                Ok(reservations) => reservations,
                 Err(error) => {
                     tracing::warn!(
                         room = %self.room_jid,
@@ -3113,21 +3135,26 @@ impl CancelledConfigAskRecoveryGuard {
                 }
             }
         } else {
-            None
+            Vec::new()
         };
         match &self.action {
             CancelledConfigAskRecoveryAction::ArmReservation { arm_supervisor } => {
-                if let Some(reservation) = recovered_reservation {
+                for reservation in recovered_reservations {
                     arm_supervisor.clone().arm(reservation);
                 }
             }
             CancelledConfigAskRecoveryAction::DeferMembersOnly(seed) => {
                 if exact_intended_config {
                     seed.clone()
-                        .run(self.actor.clone(), recovered_reservation)
+                        .run(
+                            self.actor.clone(),
+                            recovered_reservations.into_iter().next(),
+                        )
                         .await;
-                } else if let Some(reservation) = recovered_reservation {
-                    seed.arm_supervisor.clone().arm(reservation);
+                } else {
+                    for reservation in recovered_reservations {
+                        seed.arm_supervisor.clone().arm(reservation);
+                    }
                 }
             }
         }
@@ -6932,7 +6959,8 @@ mod group_dm_durable_reconciliation_tests {
             "the deferred administrative resource stays live while retained for janitor retry"
         );
 
-        tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+        // The requeue backoff is 2s plus up to 25% jitter: wait past the maximum.
+        tokio::time::sleep(std::time::Duration::from_secs(3)).await;
         crate::server::session_janitors::run_local_muc_departure_sweep(websocket_state.as_ref())
             .await;
 
@@ -7219,7 +7247,7 @@ mod group_dm_durable_reconciliation_tests {
     }
 
     #[tokio::test]
-    async fn cancelled_config_recovery_superseded_config_leaves_reservation_to_arm_supervisor() {
+    async fn cancelled_config_recovery_superseded_config_arms_every_committed_inert_row() {
         let websocket_state =
             crate::server::routes::websocket::tests::create_test_websocket_state().await;
         let durable_store = TestGroupDmDurableStore::with_outbox(
@@ -7284,44 +7312,52 @@ mod group_dm_durable_reconciliation_tests {
             })
             .await
             .expect("commit config");
-        let snapshot = actor.ask(GetSnapshot).await.expect("config snapshot");
-        let coordinates = snapshot
-            .config_durable_coordinates
-            .expect("config commit coordinates");
-        assert!(
-            snapshot.config_revision > 0,
-            "the test needs a supersedable config revision"
-        );
-        let reservation = applied.reservation.expect("staged config reservation");
-        assert_eq!(reservation.lifecycle, coordinates.lifecycle);
-        assert_eq!(reservation.revision, coordinates.revision);
-        let key = crate::room_effect_outbox::RoomEffectKey {
-            lifecycle: reservation.lifecycle,
-            revision: reservation.revision,
-            ordinal: reservation.ordinals[0],
+        let superseded_snapshot = actor.ask(GetSnapshot).await.expect("config snapshot");
+        let superseded_reservation = applied.reservation.expect("staged config reservation");
+        let superseded_key = crate::room_effect_outbox::RoomEffectKey {
+            lifecycle: superseded_reservation.lifecycle,
+            revision: superseded_reservation.revision,
+            ordinal: superseded_reservation.ordinals[0],
         };
-
-        CancelledConfigAskRecoveryGuard::arm_only(
-            websocket_state.as_ref(),
-            &actor,
-            &room_jid,
-            &updated_config,
-            snapshot.config_revision - 1,
-        )
-        .recover()
-        .await;
+        let latest_config = RoomConfig {
+            name: "Latest".to_owned(),
+            ..RoomConfig::default()
+        };
+        let latest_applied = actor
+            .ask(waddle_xmpp::muc::room_actor::UpdateConfig {
+                config: latest_config.clone(),
+                effect_plan: waddle_xmpp::muc::room_actor::ConfigEffectPlan::DirectAudience,
+            })
+            .await
+            .expect("commit latest config");
+        let latest_reservation = latest_applied
+            .reservation
+            .expect("latest staged config reservation");
+        let latest_key = crate::room_effect_outbox::RoomEffectKey {
+            lifecycle: latest_reservation.lifecycle,
+            revision: latest_reservation.revision,
+            ordinal: latest_reservation.ordinals[0],
+        };
+        let store = websocket_state.deps.protocol.room_effect_outbox.as_ref();
         assert_eq!(
-            websocket_state
-                .deps
-                .protocol
-                .room_effect_outbox
-                .find(&key)
+            store
+                .find(&superseded_key)
                 .await
                 .expect("superseded staged row lookup")
                 .expect("superseded staged row")
                 .available_at_ms,
             i64::MAX,
-            "a superseded config recovery leaves its staged row inert"
+            "the superseded config row starts inert"
+        );
+        assert_eq!(
+            store
+                .find(&latest_key)
+                .await
+                .expect("latest staged row lookup")
+                .expect("latest staged row")
+                .available_at_ms,
+            i64::MAX,
+            "the latest config row starts inert"
         );
 
         CancelledConfigAskRecoveryGuard::arm_only(
@@ -7329,11 +7365,103 @@ mod group_dm_durable_reconciliation_tests {
             &actor,
             &room_jid,
             &updated_config,
-            snapshot.config_revision,
+            superseded_snapshot.config_revision,
         )
         .recover()
         .await;
-        wait_for_room_effect_to_arm(websocket_state.as_ref(), &key).await;
+        wait_for_room_effect_to_arm(websocket_state.as_ref(), &superseded_key).await;
+        wait_for_room_effect_to_arm(websocket_state.as_ref(), &latest_key).await;
+
+        let exact_room_jid: BareJid = "cancelled-config-recovery-exact@muc.example.com"
+            .parse()
+            .expect("exact room JID");
+        let exact_actor = websocket_state
+            .deps
+            .protocol
+            .room_registry
+            .ask(CreateRoomWithInitialAffiliations {
+                room_jid: exact_room_jid.clone(),
+                waddle_id: waddle_xmpp::muc::durable::WaddleId::new(
+                    "admin-channel-test-exact".to_owned(),
+                ),
+                channel_id: waddle_xmpp::muc::durable::ChannelId::new(
+                    "cancelled-config-recovery-exact".to_owned(),
+                ),
+                config: RoomConfig::default(),
+                initial_affiliations: Vec::new(),
+            })
+            .await
+            .expect("create durable exact room");
+        exact_actor
+            .ask(Join {
+                nick: "alice".to_owned(),
+                real_jid: "alice@example.com/exact"
+                    .parse()
+                    .expect("exact recipient JID"),
+                role: Role::Participant,
+                affiliation: Affiliation::Member,
+            })
+            .await
+            .expect("join exact config recipient");
+        let previous_exact_config = RoomConfig {
+            name: "Earlier".to_owned(),
+            ..RoomConfig::default()
+        };
+        let previous_exact = exact_actor
+            .ask(waddle_xmpp::muc::room_actor::UpdateConfig {
+                config: previous_exact_config,
+                effect_plan: waddle_xmpp::muc::room_actor::ConfigEffectPlan::DirectAudience,
+            })
+            .await
+            .expect("commit earlier exact config");
+        let previous_exact_reservation = previous_exact
+            .reservation
+            .expect("earlier exact staged reservation");
+        let previous_exact_key = crate::room_effect_outbox::RoomEffectKey {
+            lifecycle: previous_exact_reservation.lifecycle,
+            revision: previous_exact_reservation.revision,
+            ordinal: previous_exact_reservation.ordinals[0],
+        };
+        let exact_config = RoomConfig {
+            name: "Exact".to_owned(),
+            ..RoomConfig::default()
+        };
+        let exact_applied = exact_actor
+            .ask(waddle_xmpp::muc::room_actor::UpdateConfig {
+                config: exact_config.clone(),
+                effect_plan: waddle_xmpp::muc::room_actor::ConfigEffectPlan::DirectAudience,
+            })
+            .await
+            .expect("commit exact config");
+        let exact_snapshot = exact_actor.ask(GetSnapshot).await.expect("exact snapshot");
+        let exact_reservation = exact_applied
+            .reservation
+            .expect("exact staged config reservation");
+        let exact_key = crate::room_effect_outbox::RoomEffectKey {
+            lifecycle: exact_reservation.lifecycle,
+            revision: exact_reservation.revision,
+            ordinal: exact_reservation.ordinals[0],
+        };
+        CancelledConfigAskRecoveryGuard::arm_only(
+            websocket_state.as_ref(),
+            &exact_actor,
+            &exact_room_jid,
+            &exact_config,
+            exact_snapshot.config_revision,
+        )
+        .recover()
+        .await;
+        wait_for_room_effect_to_arm(websocket_state.as_ref(), &exact_key).await;
+        assert_eq!(
+            store
+                .find(&previous_exact_key)
+                .await
+                .expect("previous exact staged row lookup")
+                .expect("previous exact staged row")
+                .available_at_ms,
+            i64::MAX,
+            "the exact branch still arms only its exact config row"
+        );
     }
 
     #[tokio::test]

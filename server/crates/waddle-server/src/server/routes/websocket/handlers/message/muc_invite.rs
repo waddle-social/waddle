@@ -52,7 +52,12 @@ pub(super) async fn recover_actor_after_ambiguous_invite_grant(
     stale_actor: &kameo::actor::ActorRef<waddle_xmpp::muc::room_actor::RoomActor>,
     snapshot: &waddle_xmpp::muc::room_actor::RoomSnapshot,
 ) -> Option<kameo::actor::ActorRef<waddle_xmpp::muc::room_actor::RoomActor>> {
-    let _ = state
+    // Demote the exact stale actor, then acquire the successor WITH the live
+    // roster in one registry step. A post-publication `RestoreLiveRoster`
+    // would erase joins/leaves that already projected on a live successor;
+    // if the stale actor was already replaced, the live successor is
+    // authoritative and gets no transplant.
+    let demoted = state
         .deps
         .protocol
         .room_registry
@@ -60,27 +65,45 @@ pub(super) async fn recover_actor_after_ambiguous_invite_grant(
             room_jid: room_jid.clone(),
             actor_ref: stale_actor.clone(),
         })
-        .await;
-    let recovered = state
-        .deps
-        .protocol
-        .room_registry
-        .ask(GetOrCreateRoom {
-            room_jid: room_jid.clone(),
-            waddle_id: snapshot.room.waddle_id.clone(),
-            channel_id: snapshot.room.channel_id.clone(),
-            config: snapshot.room.config.clone(),
-        })
-        .await
-        .ok()
-        .map(|acquisition| acquisition.actor_ref)?;
-    recovered
-        .ask(waddle_xmpp::muc::room_actor::RestoreLiveRoster {
-            room: snapshot.room.clone(),
-            occupancy_revision: snapshot.occupancy_revision,
-        })
         .await
         .ok()?;
+    let recovered = if demoted {
+        state
+            .deps
+            .protocol
+            .room_registry
+            .ask(
+                waddle_xmpp::muc::room_registry_actor::GetOrCreateRoomWithLiveRoster {
+                    room_jid: room_jid.clone(),
+                    waddle_id: waddle_xmpp::muc::durable::WaddleId::new(
+                        snapshot.room.waddle_id.clone(),
+                    ),
+                    channel_id: waddle_xmpp::muc::durable::ChannelId::new(
+                        snapshot.room.channel_id.clone(),
+                    ),
+                    config: snapshot.room.config.clone(),
+                    live_room_restore: snapshot.room.clone(),
+                    occupancy_revision: snapshot.occupancy_revision,
+                },
+            )
+            .await
+            .ok()
+            .map(|acquisition| acquisition.actor_ref)?
+    } else {
+        state
+            .deps
+            .protocol
+            .room_registry
+            .ask(GetOrCreateRoom {
+                room_jid: room_jid.clone(),
+                waddle_id: snapshot.room.waddle_id.clone(),
+                channel_id: snapshot.room.channel_id.clone(),
+                config: snapshot.room.config.clone(),
+            })
+            .await
+            .ok()
+            .map(|acquisition| acquisition.actor_ref)?
+    };
     Some(recovered)
 }
 
@@ -744,7 +767,67 @@ mod tests {
     use crate::server::routes::websocket::tests::{
         create_test_websocket_state, register_test_connection,
     };
+    use kameo::actor::{ActorRef, Spawn};
     use waddle_xmpp::ingress::IngressEffectIntent;
+    use waddle_xmpp::muc::room_actor::{
+        GetSnapshot, JoinAffiliationGrant, JoinWithAffiliation, RoomActor,
+    };
+    use waddle_xmpp::muc::room_registry_actor::CreateRoom;
+    use waddle_xmpp::muc::{MucRoom, RoomConfig};
+    use waddle_xmpp::xep::xep0421::OccupantIdSecret;
+
+    async fn create_test_room(
+        state: &WebSocketState,
+        room_jid: &jid::BareJid,
+        waddle_id: &str,
+        channel_id: &str,
+    ) -> ActorRef<RoomActor> {
+        state
+            .deps
+            .protocol
+            .room_registry
+            .ask(CreateRoom {
+                room_jid: room_jid.clone(),
+                waddle_id: waddle_id.to_string(),
+                channel_id: channel_id.to_string(),
+                config: RoomConfig::default(),
+            })
+            .await
+            .expect("create room")
+    }
+
+    fn spawn_unregistered_room(
+        room_jid: &jid::BareJid,
+        waddle_id: &str,
+        channel_id: &str,
+    ) -> ActorRef<RoomActor> {
+        RoomActor::spawn(RoomActor::new(
+            MucRoom::new(
+                room_jid.clone(),
+                waddle_id.to_string(),
+                channel_id.to_string(),
+                RoomConfig::default(),
+            ),
+            OccupantIdSecret::new(vec![b't'; 32]).expect("occupant-id secret"),
+        ))
+    }
+
+    async fn join_member(
+        room_actor: &ActorRef<RoomActor>,
+        occupant_jid: &jid::FullJid,
+        nick: &str,
+    ) {
+        room_actor
+            .ask(JoinWithAffiliation {
+                sender_jid: occupant_jid.clone(),
+                nick: nick.to_string(),
+                affiliation_grant: JoinAffiliationGrant::Resolver(waddle_xmpp::Affiliation::Member),
+                local_domain: "example.com".to_string(),
+                admission_revision: 0,
+            })
+            .await
+            .expect("join occupant");
+    }
 
     #[tokio::test]
     async fn deliver_muc_user_message_records_live_direct_route_intent() {
@@ -886,6 +969,87 @@ mod tests {
                 recipient: sender,
                 error: expected_error,
             }));
+    }
+
+    #[tokio::test]
+    async fn ambiguous_invite_recovery_does_not_overwrite_successor_roster() {
+        let state = create_test_websocket_state().await;
+        let room_jid: jid::BareJid = "ambiguous-successor@muc.example.com"
+            .parse()
+            .expect("room jid");
+        let successor =
+            create_test_room(state.as_ref(), &room_jid, "successor-w", "successor-c").await;
+        let stale_actor = spawn_unregistered_room(&room_jid, "stale-w", "stale-c");
+        let alice: jid::FullJid = "alice@example.com/web".parse().expect("alice jid");
+        let bob: jid::FullJid = "bob@example.com/phone".parse().expect("bob jid");
+
+        join_member(&stale_actor, &alice, "alice").await;
+        join_member(&successor, &bob, "bob").await;
+        let stale_snapshot = stale_actor.ask(GetSnapshot).await.expect("stale snapshot");
+
+        let recovered = recover_actor_after_ambiguous_invite_grant(
+            state.as_ref(),
+            &room_jid,
+            &stale_actor,
+            &stale_snapshot,
+        )
+        .await
+        .expect("live successor should be returned");
+
+        assert_eq!(recovered.id(), successor.id());
+        let recovered_snapshot = recovered
+            .ask(GetSnapshot)
+            .await
+            .expect("recovered snapshot");
+        assert!(
+            recovered_snapshot
+                .room
+                .find_occupant_by_real_jid(&bob)
+                .is_some(),
+            "the live successor occupant must survive recovery"
+        );
+        assert!(
+            recovered_snapshot
+                .room
+                .find_occupant_by_real_jid(&alice)
+                .is_none(),
+            "the stale snapshot must not overwrite a published successor roster"
+        );
+
+        stale_actor.kill();
+    }
+
+    #[tokio::test]
+    async fn ambiguous_invite_recovery_transplants_roster_when_stale_actor_is_demoted() {
+        let state = create_test_websocket_state().await;
+        let room_jid: jid::BareJid = "ambiguous-demotion@muc.example.com"
+            .parse()
+            .expect("room jid");
+        let stale_actor = create_test_room(state.as_ref(), &room_jid, "stale-w", "stale-c").await;
+        let alice: jid::FullJid = "alice@example.com/web".parse().expect("alice jid");
+
+        join_member(&stale_actor, &alice, "alice").await;
+        let stale_snapshot = stale_actor.ask(GetSnapshot).await.expect("stale snapshot");
+
+        let recovered = recover_actor_after_ambiguous_invite_grant(
+            state.as_ref(),
+            &room_jid,
+            &stale_actor,
+            &stale_snapshot,
+        )
+        .await
+        .expect("fresh actor should be recovered");
+
+        assert_ne!(recovered.id(), stale_actor.id());
+        let recovered_snapshot = recovered
+            .ask(GetSnapshot)
+            .await
+            .expect("recovered snapshot");
+        let restored = recovered_snapshot
+            .room
+            .find_occupant_by_real_jid(&alice)
+            .expect("demoted stale roster should be transplanted to the replacement");
+        assert_eq!(restored.nick, "alice");
     }
 }
 

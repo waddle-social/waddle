@@ -153,6 +153,42 @@ impl RoomEffectOutboxStore {
             ordinals,
         }))
     }
+    /// Every still-inert, non-terminal reservation of `lifecycle` at or below
+    /// `max_revision`, oldest first. Config-class rows are inert until armed
+    /// and describe durably committed configs (arm-by-default invariant), so a
+    /// recovery that can no longer identify its exact row arms all of them:
+    /// an unarmed row would otherwise head-of-line-block the lifecycle FIFO.
+    pub async fn staged_reservations_up_to(
+        &self,
+        lifecycle: waddle_xmpp::muc::RoomLifecycleId,
+        max_revision: waddle_xmpp::muc::RoomRevision,
+    ) -> Result<Vec<RoomEffectReservation>, RoomEffectOutboxError> {
+        let connection = self.db.guard().await?;
+        let mut rows = connection
+            .query(
+                "SELECT revision, ordinal FROM clustering_muc_room_effects \
+                 WHERE lifecycle_id = ? AND revision <= ? AND available_at_ms = ? \
+                 AND NOT superseded AND NOT terminal ORDER BY revision, ordinal",
+                crate::db_params![lifecycle.to_string(), max_revision.as_i64(), INERT],
+            )
+            .await?;
+        let mut reservations: Vec<RoomEffectReservation> = Vec::new();
+        while let Some(row) = rows.next().await? {
+            let revision = waddle_xmpp::muc::RoomRevision::from_stored(row.get(0)?)
+                .ok_or(RoomEffectOutboxError::InvalidCoordinate)?;
+            let ordinal = waddle_xmpp::muc::RoomEffectOrdinal::from_stored(row.get(1)?)
+                .ok_or(RoomEffectOutboxError::InvalidCoordinate)?;
+            match reservations.last_mut() {
+                Some(current) if current.revision == revision => current.ordinals.push(ordinal),
+                _ => reservations.push(RoomEffectReservation {
+                    lifecycle,
+                    revision,
+                    ordinals: vec![ordinal],
+                }),
+            }
+        }
+        Ok(reservations)
+    }
     pub async fn reservation_for_revision(
         &self,
         lifecycle: waddle_xmpp::muc::RoomLifecycleId,

@@ -101,6 +101,11 @@ pub(crate) use cleanup::redrive_local_muc_cleanup;
 pub(crate) use cleanup::redrive_remote_muc_cleanup;
 pub(crate) use cleanup::redrive_terminal_pending_rows_to_live_resource;
 pub use cleanup::MucCleanupOutcome;
+
+/// Upper bound on a single `LeaveByRealJid` ask from the WS/janitor side: a
+/// wedged room must not stall disconnect cleanup, the departure janitor, an
+/// administrative removal, or an explicit leave's wait-class bounce.
+pub(crate) const LEAVE_ASK_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);
 pub(crate) use cleanup::TerminalRedriveOutcome;
 pub(crate) use cleanup::{
     broadcast_muc_leave_to_remaining, broadcast_muc_muji_clear_to_remaining, maybe_evict_empty_room,

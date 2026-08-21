@@ -3807,6 +3807,7 @@ struct FakeDurableStore {
     last_coordinates: std::sync::Mutex<Option<crate::muc::RoomCommittedCoordinates>>,
     recorded_intents: std::sync::Mutex<Vec<crate::muc::RoomDurableMutation>>,
     recorded_projection_revisions: std::sync::Mutex<Vec<crate::muc::RoomRevision>>,
+    commit_events: std::sync::Arc<std::sync::Mutex<Vec<String>>>,
     projection_pause: std::sync::Mutex<Option<ProjectionCommitPause>>,
     restored_state: std::sync::Mutex<Option<crate::muc::durable::DurableRoomState>>,
 }
@@ -3942,6 +3943,10 @@ impl FakeDurableStore {
             .clone()
     }
 
+    fn commit_events(&self) -> std::sync::Arc<std::sync::Mutex<Vec<String>>> {
+        self.commit_events.clone()
+    }
+
     fn pause_next_projection_commit(&self) -> ProjectionCommitPause {
         let pause = ProjectionCommitPause::new();
         *self.projection_pause.lock().expect("lock") = Some(pause.clone());
@@ -4009,6 +4014,10 @@ impl crate::muc::durable::MucDurableStore for FakeDurableStore {
         // observed through `recorded_intents`; `saved_effects` keeps describing
         // state commits only so positional fixtures stay meaningful.
         let is_projection = matches!(intent, crate::muc::RoomDurableMutation::Projection(_));
+        let projection_kind = match &intent {
+            crate::muc::RoomDurableMutation::Projection(projection) => Some(projection.kind()),
+            _ => None,
+        };
         let projection_pause = is_projection
             .then(|| self.projection_pause.lock().expect("lock").take())
             .flatten();
@@ -4031,6 +4040,7 @@ impl crate::muc::durable::MucDurableStore for FakeDurableStore {
         };
         let saved_affiliations = &self.saved_affiliations;
         let saved_effects = &self.saved_effects;
+        let commit_events = self.commit_events.clone();
         let committed_room = room_jid.clone();
         let fail = self.fail_persist;
         let commit_outcome_unknown =
@@ -4066,8 +4076,16 @@ impl crate::muc::durable::MucDurableStore for FakeDurableStore {
             });
         Box::pin(async move {
             if let Some(pause) = projection_pause {
+                commit_events.lock().expect("lock").push(format!(
+                    "commit_started:{}",
+                    projection_kind.expect("kind").as_str()
+                ));
                 pause.entered.notify_one();
                 pause.release.notified().await;
+                commit_events
+                    .lock()
+                    .expect("lock")
+                    .push("commit_finished".to_owned());
             }
             if !established {
                 Err(crate::muc::RoomCommitError::OwnershipUnavailable)
@@ -4368,6 +4386,42 @@ impl kameo::message::Message<SetRoomSealForTest> for RoomActor {
     }
 }
 
+struct SetProjectionApplyHookForTest(std::sync::Arc<dyn Fn() + Send + Sync>);
+
+impl kameo::message::Message<SetProjectionApplyHookForTest> for RoomActor {
+    type Reply = Result<(), std::convert::Infallible>;
+
+    async fn handle(
+        &mut self,
+        msg: SetProjectionApplyHookForTest,
+        _ctx: &mut kameo::message::Context<Self, Self::Reply>,
+    ) -> Self::Reply {
+        self.test_projection_apply_hook = Some(msg.0);
+        Ok(())
+    }
+}
+
+async fn install_projection_apply_hook(
+    actor: &ActorRef<RoomActor>,
+    events: std::sync::Arc<std::sync::Mutex<Vec<String>>>,
+) {
+    let hook_events = events.clone();
+    actor
+        .ask(SetProjectionApplyHookForTest(std::sync::Arc::new(
+            move || {
+                hook_events.lock().expect("lock").push("apply".to_owned());
+            },
+        )))
+        .await
+        .expect("install apply hook");
+}
+
+fn projection_event_snapshot(
+    events: &std::sync::Arc<std::sync::Mutex<Vec<String>>>,
+) -> Vec<String> {
+    events.lock().expect("lock").clone()
+}
+
 async fn join_as_resolver(
     actor: &ActorRef<RoomActor>,
     jid: FullJid,
@@ -4646,30 +4700,34 @@ async fn non_occupant_leave_under_inactive_and_ownership_lost_seals_is_not_occup
 async fn join_commit_pending_leaves_memory_untouched_until_authorized() {
     let store = FakeDurableStore::owned();
     let actor = spawn_room_actor_with_store(store.clone()).await;
+    let events = store.commit_events();
+    install_projection_apply_hook(&actor, events.clone()).await;
     let pause = store.pause_next_projection_commit();
     let join_actor = actor.clone();
     let join = tokio::spawn(async move {
         join_as_resolver(&join_actor, test_full_jid("pending-join"), "pending").await
     });
     pause.entered.notified().await;
-
-    // Actor state is intentionally mailbox-confined, so a snapshot request
-    // queues behind the paused commit. The absence of the post-commit join
-    // metric proves the occupancy mutation has not run yet.
-    assert!(
-        tokio::time::timeout(
-            std::time::Duration::from_millis(20),
-            actor.ask(OccupantCount)
-        )
-        .await
-        .is_err(),
-        "the actor must still be waiting for durable projection authority"
+    for _ in 0..3 {
+        tokio::task::yield_now().await;
+    }
+    assert_eq!(
+        projection_event_snapshot(&events),
+        vec!["commit_started:occupancy_join".to_owned()],
+        "the in-memory join must not apply while the projection commit is paused"
     );
-
     pause.release.notify_one();
     join.await
         .expect("join task")
         .expect("join after authorization");
+    assert_eq!(
+        projection_event_snapshot(&events),
+        vec![
+            "commit_started:occupancy_join".to_owned(),
+            "commit_finished".to_owned(),
+            "apply".to_owned(),
+        ]
+    );
     assert_eq!(actor.ask(OccupantCount).await.expect("count"), 1);
 }
 
@@ -4681,6 +4739,9 @@ async fn leave_commit_pending_keeps_session_until_authorized() {
     join_as_resolver(&actor, alice.clone(), "alice")
         .await
         .expect("join");
+    let events = store.commit_events();
+    events.lock().expect("lock").clear();
+    install_projection_apply_hook(&actor, events.clone()).await;
     let pause = store.pause_next_projection_commit();
     let leave_actor = actor.clone();
     let leave = tokio::spawn(async move {
@@ -4693,20 +4754,27 @@ async fn leave_commit_pending_keeps_session_until_authorized() {
             .await
     });
     pause.entered.notified().await;
-    assert!(
-        tokio::time::timeout(
-            std::time::Duration::from_millis(20),
-            actor.ask(OccupantCount)
-        )
-        .await
-        .is_err(),
-        "the session removal must wait for durable projection authority"
+    for _ in 0..3 {
+        tokio::task::yield_now().await;
+    }
+    assert_eq!(
+        projection_event_snapshot(&events),
+        vec!["commit_started:occupancy_leave".to_owned()],
+        "the in-memory leave must not apply while the projection commit is paused"
     );
     pause.release.notify_one();
     assert!(matches!(
         leave.await.expect("leave task").expect("leave"),
         LeaveDisposition::Left(_)
     ));
+    assert_eq!(
+        projection_event_snapshot(&events),
+        vec![
+            "commit_started:occupancy_leave".to_owned(),
+            "commit_finished".to_owned(),
+            "apply".to_owned(),
+        ]
+    );
     assert_eq!(actor.ask(OccupantCount).await.expect("count"), 0);
 }
 
@@ -4714,6 +4782,8 @@ async fn leave_commit_pending_keeps_session_until_authorized() {
 async fn pin_commit_pending_keeps_pin_list_until_authorized() {
     let store = FakeDurableStore::owned();
     let actor = spawn_room_actor_with_store(store.clone()).await;
+    let events = store.commit_events();
+    install_projection_apply_hook(&actor, events.clone()).await;
     let pause = store.pause_next_projection_commit();
     let pin_actor = actor.clone();
     let pin = test_pinned_entry("pending-pin");
@@ -4725,17 +4795,27 @@ async fn pin_commit_pending_keeps_pin_list_until_authorized() {
             .await
     });
     pause.entered.notified().await;
-    assert!(
-        tokio::time::timeout(std::time::Duration::from_millis(20), actor.ask(GetPinList))
-            .await
-            .is_err(),
-        "the pin list must wait for durable projection authority"
+    for _ in 0..3 {
+        tokio::task::yield_now().await;
+    }
+    assert_eq!(
+        projection_event_snapshot(&events),
+        vec!["commit_started:pin".to_owned()],
+        "the in-memory pin apply must not run while the projection commit is paused"
     );
     pause.release.notify_one();
     apply
         .await
         .expect("pin task")
         .expect("pin after authorization");
+    assert_eq!(
+        projection_event_snapshot(&events),
+        vec![
+            "commit_started:pin".to_owned(),
+            "commit_finished".to_owned(),
+            "apply".to_owned(),
+        ]
+    );
     assert_eq!(actor.ask(GetPinList).await.expect("pins").len(), 1);
 }
 
@@ -5305,6 +5385,34 @@ async fn projection_commit_failure_is_counted_with_outcome_label() {
             "waddle.muc.projection.commit",
             &[("projection", "occupancy_join"), ("outcome", "unfenced")],
         ),
+        Some(1)
+    );
+}
+
+#[tokio::test]
+async fn occupancy_handler_duration_is_recorded_for_join_and_leave() {
+    let guard = crate::telemetry::test_support::acquire().await;
+    let actor = spawn_room_actor().await;
+    let alice = test_full_jid("handler-duration");
+
+    join_as_resolver(&actor, alice.clone(), "alice")
+        .await
+        .expect("join");
+    actor
+        .ask(LeaveByRealJid {
+            sender_jid: alice,
+            cause: crate::muc::durable::OccupancyLeaveCause::Explicit,
+            session: LeaveSessionSelector::Any,
+        })
+        .await
+        .expect("leave");
+
+    assert_eq!(
+        guard.histogram_count("waddle.muc.occupancy.handler.duration", &[("op", "join")]),
+        Some(1)
+    );
+    assert_eq!(
+        guard.histogram_count("waddle.muc.occupancy.handler.duration", &[("op", "leave")]),
         Some(1)
     );
 }
@@ -5992,7 +6100,7 @@ async fn store_less_leave_under_destroying_seal_is_suppressed_and_recorded() {
             })
             .await
             .expect("leave reply"),
-        LeaveDisposition::Suppressed
+        LeaveDisposition::Suppressed { .. }
     ));
     assert_eq!(actor.ask(OccupantCount).await.expect("count"), 0);
 }

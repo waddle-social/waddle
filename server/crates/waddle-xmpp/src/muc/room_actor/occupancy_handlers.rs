@@ -53,6 +53,7 @@ impl kameo::message::Message<JoinWithAffiliation> for RoomActor {
         msg: JoinWithAffiliation,
         _ctx: &mut Context<Self, Self::Reply>,
     ) -> Self::Reply {
+        let _handler_timer = crate::metrics::MucOccupancyHandlerTimer::start("join");
         // #1108: a caller holding a stale ActorRef must retry through the
         // registry. For an inactivity seal this also re-checks ownership so
         // the seal can strengthen to OwnershipLost before the reaper runs.
@@ -283,7 +284,12 @@ pub enum LeaveDisposition {
         watermark: OccupancyWatermark,
     },
     /// The departure changed local state but must not emit leave effects.
-    Suppressed,
+    /// Store-less room with a destroy/dormancy in flight: the departure was
+    /// recorded but nothing fans out. Carries the leaver's affiliation so the
+    /// XEP-0045 §7.14 self-presence echo can report it.
+    Suppressed {
+        affiliation: crate::types::Affiliation,
+    },
 }
 
 impl kameo::message::Message<LeaveByRealJid> for RoomActor {
@@ -294,6 +300,7 @@ impl kameo::message::Message<LeaveByRealJid> for RoomActor {
         msg: LeaveByRealJid,
         _ctx: &mut Context<Self, Self::Reply>,
     ) -> Self::Reply {
+        let _handler_timer = crate::metrics::MucOccupancyHandlerTimer::start("leave");
         // Resolve occupancy before consulting the seal: a non-occupant's leave
         // is a pure memory read with nothing to project, and every disconnect
         // asks every local room — a sealed room must not mint retained
@@ -449,12 +456,11 @@ impl kameo::message::Message<LeaveByRealJid> for RoomActor {
                 occupancy_revision: actor.occupancy_revision,
             }))
         })
-        .map(|outcome| {
-            if suppress_effects {
-                LeaveDisposition::Suppressed
-            } else {
-                outcome
-            }
+        .map(|disposition| match disposition {
+            LeaveDisposition::Left(outcome) if suppress_effects => LeaveDisposition::Suppressed {
+                affiliation: outcome.affiliation,
+            },
+            other => other,
         })
         .map_err(Self::map_projection_refusal)
     }
