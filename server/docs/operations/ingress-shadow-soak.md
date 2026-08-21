@@ -112,11 +112,17 @@ read-only except the rollout restart in the churn exercise.
    cnpg_collector_pg_wal{value="volume_size"}
    cnpg_collector_wal_bytes
    cnpg_last_error
+   cnpg_collector_last_collection_error
 
    kubelet_volume_stats_used_bytes
    kubelet_volume_stats_capacity_bytes
    kubelet_volume_stats_available_bytes
    ```
+
+   `cnpg_collector_last_collection_error` must read 0 on both instances;
+   `cnpg_last_error` is sticky after a user-query failure (observed
+   2026-08-21: it stayed at 1 after the V1011 grant fixed the queries) and
+   only proves the family is present.
 
    `ingress_shadow_tx_duration_seconds_bucket` is the repository's first
    classic-histogram consumer: confirm at least one `le`-labelled series is
