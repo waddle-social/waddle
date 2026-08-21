@@ -389,7 +389,25 @@ pub fn adjust_muc_occupant_total(delta: i64) {
     ensure_pod_gauges();
 }
 
+#[cfg(test)]
+pub(crate) fn muc_occupant_total_for_test() -> i64 {
+    MUC_OCCUPANT_TOTAL.load(Ordering::Relaxed)
+}
+
 /// Record the durable commit that gates an ephemeral MUC projection.
+/// Wall-clock duration of one projection commit attempt (success or failure).
+pub fn record_muc_projection_commit_duration(projection: &str, seconds: f64) {
+    meter()
+        .f64_histogram("waddle.muc.projection.commit.duration")
+        .with_description("Seconds spent committing a MUC projection revision")
+        .with_unit("s")
+        .build()
+        .record(
+            seconds,
+            &[KeyValue::new("projection", projection.to_string())],
+        );
+}
+
 pub fn record_muc_projection_commit(projection: &str, outcome: &str) {
     meter()
         .u64_counter("waddle.muc.projection.commit")

@@ -1974,7 +1974,21 @@ pub async fn handle_muc_leave(
         Ok(waddle_xmpp::muc::room_actor::LeaveDisposition::Deferred { .. }) => {
             return bounce_muc_leave_ownership_unreachable(room_jid, sender_jid, nick);
         }
-        Ok(waddle_xmpp::muc::room_actor::LeaveDisposition::Suppressed) => return Vec::new(),
+        Ok(waddle_xmpp::muc::room_actor::LeaveDisposition::Suppressed) => {
+            // Store-less room with a destroy/dormancy in flight: the departure
+            // was recorded but nothing fans out. The departing session still
+            // gets its XEP-0045 §7.14 self-presence echo (as before #1647).
+            super::super::super::muc_call_sfu::unregister_participant_from_room(
+                state, room_jid, sender_jid,
+            );
+            return vec![build_muc_self_unavailable_xml(
+                state,
+                room_jid,
+                nick,
+                sender_jid,
+                Affiliation::None,
+            )];
+        }
         Err(error) => {
             warn!(room = %room_jid, nick = %nick, sender = %sender_jid, error = ?error, "Failed to leave MUC room");
             return bounce_muc_leave_ownership_unreachable(room_jid, sender_jid, nick);
@@ -3102,7 +3116,9 @@ mod occupancy_projection_handler_tests {
         MucDurableFuture, MucDurableStore, RoomClaimFenceContext, RoomLifecycleId, RoomProjection,
         RoomRevision,
     };
-    use waddle_xmpp::muc::room_actor::{GetSnapshot, RestoreDurableRoomState, RoomActor};
+    use waddle_xmpp::muc::room_actor::{
+        GetSnapshot, RestoreDurableRoomState, RoomActor, SealForDestroy,
+    };
     use waddle_xmpp::muc::room_registry_actor::CreateRoom;
     use waddle_xmpp::ownership::{ClaimEpoch, Entity, EntityType, NodeIdentity};
 
@@ -3490,6 +3506,65 @@ mod occupancy_projection_handler_tests {
         let snapshot = actor.ask(GetSnapshot).await.expect("room snapshot");
         assert_eq!(snapshot.room.find_nick_by_real_jid(&bob), Some("bob"));
         assert!(snapshot.room.find_nick_by_real_jid(&alice).is_none());
+    }
+
+    #[tokio::test]
+    async fn store_less_suppressed_leave_still_echoes_self_unavailable() {
+        let state = create_test_websocket_state().await;
+        let room_jid: BareJid = "suppressed-store-less@muc.example.com"
+            .parse()
+            .expect("room jid");
+        let alice: FullJid = "alice@example.com/web".parse().expect("alice jid");
+        let bob: FullJid = "bob@example.com/web".parse().expect("bob jid");
+        let (bob_tx, mut bob_rx) = mpsc::channel(8);
+        let actor = state
+            .deps
+            .protocol
+            .room_registry
+            .ask(CreateRoom {
+                room_jid: room_jid.clone(),
+                waddle_id: "test-waddle".to_string(),
+                channel_id: "test-channel".to_string(),
+                config: waddle_xmpp::muc::RoomConfig {
+                    members_only: false,
+                    ..Default::default()
+                },
+            })
+            .await
+            .expect("create store-less room");
+        register_test_connection(state.as_ref(), &bob, bob_tx).await;
+        for (jid, nick) in [(&alice, "alice"), (&bob, "bob")] {
+            let joined = handle_muc_join(
+                state.as_ref(),
+                "example.com",
+                &room_jid,
+                jid,
+                nick,
+                None,
+                &None,
+            )
+            .await;
+            assert!(joined
+                .iter()
+                .any(|frame| frame.contains("status code='110'")));
+        }
+        while bob_rx.try_recv().is_ok() {}
+        actor
+            .ask(SealForDestroy {
+                attempt: waddle_xmpp::muc::DestroyAttemptId::generate(),
+            })
+            .await
+            .expect("seal destroying");
+
+        let frames = handle_muc_leave(state.as_ref(), &room_jid, &alice, "alice", None).await;
+
+        assert_eq!(frames.len(), 1);
+        assert!(frames[0].contains("type='unavailable'"), "{frames:?}");
+        assert!(frames[0].contains("status code='110'"), "{frames:?}");
+        assert!(
+            bob_rx.try_recv().is_err(),
+            "suppressed leave must not fan out"
+        );
     }
 }
 

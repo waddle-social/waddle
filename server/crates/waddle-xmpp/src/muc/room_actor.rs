@@ -79,6 +79,16 @@ pub(super) enum ProjectionGate {
     Authorized(EphemeralProjectionAuthorization),
 }
 
+/// Bounded outcome label for a failed projection commit.
+const fn projection_commit_failure_label(error: &DurablePersistError) -> &'static str {
+    match error {
+        DurablePersistError::NotOwner => "not_owner",
+        DurablePersistError::OwnershipUnavailable => "ownership_unavailable",
+        DurablePersistError::PersistFailed => "persist_failed",
+        DurablePersistError::CommitOutcomeUnknown => "commit_outcome_unknown",
+    }
+}
+
 #[derive(Debug, Error, Clone, Copy, PartialEq, Eq)]
 pub enum ProjectionRefusal {
     #[error("projection capability was minted under a different fence or lifecycle coordinates")]
@@ -142,10 +152,15 @@ impl kameo::message::Message<RestoreLiveRoster> for RoomActor {
         msg: RestoreLiveRoster,
         _ctx: &mut Context<Self, Self::Reply>,
     ) -> Self::Reply {
+        let occupant_count_before = self.room.occupant_count();
         let config = self.room.config.clone();
         let subject = self.room.subject.clone();
         let affiliations = self.room.affiliation_list.clone();
         let mut restored = msg.room;
+        // The transplant restores THIS room's live roster; its identity is
+        // never the restored value's (durable commits key their claim fence
+        // by the actor's room JID).
+        restored.room_jid = self.room.room_jid.clone();
         restored.config = config;
         restored.subject = subject;
         restored.affiliation_list = affiliations;
@@ -163,6 +178,11 @@ impl kameo::message::Message<RestoreLiveRoster> for RoomActor {
             }
         }
         self.room = restored;
+        // The predecessor's `Drop` releases its occupants from the pod-wide
+        // gauge; the transplanted roster is this actor's to account for now.
+        crate::metrics::adjust_muc_occupant_total(
+            self.room.occupant_count() as i64 - occupant_count_before as i64,
+        );
         self.occupancy_revision = self.occupancy_revision.max(msg.occupancy_revision);
     }
 }
@@ -1034,14 +1054,32 @@ impl RoomActor {
         projection: RoomProjection,
     ) -> Result<ProjectionGate, DurablePersistError> {
         let kind = projection.kind();
-        let (commit, _) = self
+        let started = std::time::Instant::now();
+        let committed = self
             .commit_durable(
                 RoomDurableMutation::Projection(projection),
                 super::RoomMutationEffects::none(),
             )
-            .await?;
+            .await;
+        crate::metrics::record_muc_projection_commit_duration(
+            kind.as_str(),
+            started.elapsed().as_secs_f64(),
+        );
+        let (commit, _) = match committed {
+            Ok(committed) => committed,
+            Err(error) => {
+                crate::metrics::record_muc_projection_commit(
+                    kind.as_str(),
+                    projection_commit_failure_label(&error),
+                );
+                return Err(error);
+            }
+        };
         match commit {
-            None => Ok(ProjectionGate::Unfenced),
+            None => {
+                crate::metrics::record_muc_projection_commit(kind.as_str(), "unfenced");
+                Ok(ProjectionGate::Unfenced)
+            }
             Some(commit) => match authorize_ephemeral_projection(commit) {
                 Ok(authorization) => {
                     crate::metrics::record_muc_projection_commit(kind.as_str(), "ok");

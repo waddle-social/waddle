@@ -3082,23 +3082,21 @@ impl CancelledConfigAskRecoveryGuard {
         let exact_intended_config = snapshot.config_revision == self.expected_revision
             && snapshot.room.config == self.intended_config;
         let recovered_reservation = if let Some(coordinates) = snapshot.config_durable_coordinates {
-            let revision_offset = snapshot
-                .config_revision
-                .saturating_sub(self.expected_revision);
-            let Some(reconciled_revision) = (snapshot.config_revision >= self.expected_revision)
-                .then(|| {
-                    i64::try_from(revision_offset).ok().and_then(|offset| {
-                        coordinates
-                            .revision
-                            .as_i64()
-                            .checked_sub(offset)
-                            .and_then(waddle_xmpp::muc::RoomRevision::from_stored)
-                    })
-                })
-                .flatten()
-            else {
+            // The durable config coordinates identify the LAST config commit
+            // exactly. If a later config commit already superseded the intended
+            // one, no arithmetic on lifecycle revisions can recover the
+            // intended row (projections, subject and affiliation commits also
+            // advance the head); leave it to the arm-by-default supervisor.
+            if snapshot.config_revision != self.expected_revision {
+                tracing::warn!(
+                    room = %self.room_jid,
+                    config_revision = snapshot.config_revision,
+                    expected_revision = self.expected_revision,
+                    "cancelled admin/group-DM config ask recovery: the intended config was superseded; leaving its staged effect to the arm supervisor"
+                );
                 return;
-            };
+            }
+            let reconciled_revision = coordinates.revision;
             match self
                 .outbox
                 .staged_reservation_for(coordinates.lifecycle, reconciled_revision)
@@ -7217,6 +7215,124 @@ mod group_dm_durable_reconciliation_tests {
         task.abort();
         let _ = task.await;
 
+        wait_for_room_effect_to_arm(websocket_state.as_ref(), &key).await;
+    }
+
+    #[tokio::test]
+    async fn cancelled_config_recovery_superseded_config_leaves_reservation_to_arm_supervisor() {
+        let websocket_state =
+            crate::server::routes::websocket::tests::create_test_websocket_state().await;
+        let durable_store = TestGroupDmDurableStore::with_outbox(
+            DurableMode::CommitSucceeds,
+            Arc::clone(&websocket_state.deps.protocol.room_effect_outbox),
+        );
+        let claim_store: Arc<dyn ClaimStore> = Arc::new(InProcessClaimStore::new());
+        websocket_state
+            .deps
+            .protocol
+            .room_registry
+            .ask(WireClusteringClaims {
+                claim_store,
+                node_identity: SharedNodeIdentity::new(NodeIdentity::new(
+                    "cancelled-config-recovery-node",
+                    "cancelled-config-recovery-epoch",
+                )),
+                durable_store: Some(durable_store),
+                rollout_backoff: None,
+            })
+            .await
+            .expect("wire durable room registry");
+
+        let room_jid: BareJid = "cancelled-config-recovery@muc.example.com"
+            .parse()
+            .expect("room JID");
+        let actor = websocket_state
+            .deps
+            .protocol
+            .room_registry
+            .ask(CreateRoomWithInitialAffiliations {
+                room_jid: room_jid.clone(),
+                waddle_id: waddle_xmpp::muc::durable::WaddleId::new(
+                    "admin-channel-test".to_owned(),
+                ),
+                channel_id: waddle_xmpp::muc::durable::ChannelId::new(
+                    "cancelled-config-recovery".to_owned(),
+                ),
+                config: RoomConfig::default(),
+                initial_affiliations: Vec::new(),
+            })
+            .await
+            .expect("create durable room");
+        let recipient: FullJid = "alice@example.com/admin".parse().expect("recipient JID");
+        actor
+            .ask(Join {
+                nick: "alice".to_owned(),
+                real_jid: recipient,
+                role: Role::Participant,
+                affiliation: Affiliation::Member,
+            })
+            .await
+            .expect("join config-effect recipient");
+        let updated_config = RoomConfig {
+            name: "After".to_owned(),
+            ..RoomConfig::default()
+        };
+        let applied = actor
+            .ask(waddle_xmpp::muc::room_actor::UpdateConfig {
+                config: updated_config.clone(),
+                effect_plan: waddle_xmpp::muc::room_actor::ConfigEffectPlan::DirectAudience,
+            })
+            .await
+            .expect("commit config");
+        let snapshot = actor.ask(GetSnapshot).await.expect("config snapshot");
+        let coordinates = snapshot
+            .config_durable_coordinates
+            .expect("config commit coordinates");
+        assert!(
+            snapshot.config_revision > 0,
+            "the test needs a supersedable config revision"
+        );
+        let reservation = applied.reservation.expect("staged config reservation");
+        assert_eq!(reservation.lifecycle, coordinates.lifecycle);
+        assert_eq!(reservation.revision, coordinates.revision);
+        let key = crate::room_effect_outbox::RoomEffectKey {
+            lifecycle: reservation.lifecycle,
+            revision: reservation.revision,
+            ordinal: reservation.ordinals[0],
+        };
+
+        CancelledConfigAskRecoveryGuard::arm_only(
+            websocket_state.as_ref(),
+            &actor,
+            &room_jid,
+            &updated_config,
+            snapshot.config_revision - 1,
+        )
+        .recover()
+        .await;
+        assert_eq!(
+            websocket_state
+                .deps
+                .protocol
+                .room_effect_outbox
+                .find(&key)
+                .await
+                .expect("superseded staged row lookup")
+                .expect("superseded staged row")
+                .available_at_ms,
+            i64::MAX,
+            "a superseded config recovery leaves its staged row inert"
+        );
+
+        CancelledConfigAskRecoveryGuard::arm_only(
+            websocket_state.as_ref(),
+            &actor,
+            &room_jid,
+            &updated_config,
+            snapshot.config_revision,
+        )
+        .recover()
+        .await;
         wait_for_room_effect_to_arm(websocket_state.as_ref(), &key).await;
     }
 

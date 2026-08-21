@@ -294,21 +294,10 @@ impl kameo::message::Message<LeaveByRealJid> for RoomActor {
         msg: LeaveByRealJid,
         _ctx: &mut Context<Self, Self::Reply>,
     ) -> Self::Reply {
-        let current_watermark = OccupancyWatermark::from_revision(self.occupancy_revision);
-        let suppress_effects = match self.seal_state {
-            super::RoomSealState::Inactive | super::RoomSealState::Destroying { .. }
-                if self.durable_store.is_none() =>
-            {
-                true
-            }
-            super::RoomSealState::Inactive | super::RoomSealState::Destroying { .. } => {
-                return Ok(LeaveDisposition::Deferred {
-                    watermark: current_watermark,
-                });
-            }
-            super::RoomSealState::OwnershipLost => return Err(RoomActorError::RoomSealed),
-            super::RoomSealState::Open => false,
-        };
+        // Resolve occupancy before consulting the seal: a non-occupant's leave
+        // is a pure memory read with nothing to project, and every disconnect
+        // asks every local room — a sealed room must not mint retained
+        // departures for sessions it never held.
         // #1107: collect EVERY nick this full JID occupies. Post-#1107
         // the join path refuses a second nick for the same full JID, so
         // this is normally a single entry — but pre-existing ghost
@@ -334,6 +323,21 @@ impl kameo::message::Message<LeaveByRealJid> for RoomActor {
         };
         let Some(occupant) = self.room.get_occupant(&nick) else {
             return Ok(LeaveDisposition::NotOccupant);
+        };
+        let current_watermark = OccupancyWatermark::from_revision(self.occupancy_revision);
+        let suppress_effects = match self.seal_state {
+            super::RoomSealState::Inactive | super::RoomSealState::Destroying { .. }
+                if self.durable_store.is_none() =>
+            {
+                true
+            }
+            super::RoomSealState::Inactive | super::RoomSealState::Destroying { .. } => {
+                return Ok(LeaveDisposition::Deferred {
+                    watermark: current_watermark,
+                });
+            }
+            super::RoomSealState::OwnershipLost => return Err(RoomActorError::RoomSealed),
+            super::RoomSealState::Open => false,
         };
         if matches!(
             msg.session,

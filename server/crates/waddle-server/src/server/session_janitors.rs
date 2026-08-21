@@ -129,8 +129,26 @@ pub(crate) async fn run_local_muc_departure_sweep(state: &WebSocketState) {
                         crate::metrics::record_local_departure_retry("skipped_live");
                         break;
                     }
-                    let _ = routes::websocket::redrive_local_muc_cleanup(state, &jid).await;
-                    crate::metrics::record_local_departure_retry("completed");
+                    match routes::websocket::redrive_local_muc_cleanup(state, &jid).await {
+                        routes::websocket::MucCleanupOutcome::Completed => {
+                            crate::metrics::record_local_departure_retry("completed");
+                        }
+                        routes::websocket::MucCleanupOutcome::Failed => {
+                            // The cleanup re-recorded whatever it could not
+                            // finish; keep THIS sweep's attempt count and
+                            // backoff instead of re-arming from zero.
+                            state
+                                .deps
+                                .protocol
+                                .pending_local_muc_departures
+                                .requeue_with_backoff(PendingLocalDeparture {
+                                    item: LocalDepartureItem::FullJidSweep { jid },
+                                    attempts: pending.attempts,
+                                    not_before: pending.not_before,
+                                });
+                            crate::metrics::record_local_departure_retry("requeued");
+                        }
+                    }
                     break;
                 }
                 LocalDepartureItem::RoomDeparture {
@@ -7955,8 +7973,9 @@ mod local_muc_departure_tests {
         RoomClaimFenceContext, WaddleId,
     };
     use waddle_xmpp::muc::room_actor::{
-        GetSnapshot, Join, LeaveByRealJid, LeaveSessionSelector, OccupancyWatermark,
-        RestoreLiveRoster, SealGuard, SealIfInactive, SealIfInactiveOutcome, UnsealInactive,
+        GetSnapshot, Join, LeaveByRealJid, LeaveDisposition, LeaveSessionSelector,
+        OccupancyWatermark, RestoreLiveRoster, SealGuard, SealIfInactive, SealIfInactiveOutcome,
+        UnsealInactive,
     };
     use waddle_xmpp::muc::room_registry_actor::{
         CreateRoom, GetOrCreateRoomWithLiveRoster, ReapSealedRoom, WireClusteringClaims,
@@ -8304,6 +8323,106 @@ mod local_muc_departure_tests {
     }
 
     #[tokio::test]
+    async fn second_disconnect_after_rejoin_is_not_superseded_by_the_older_watermark() {
+        let store = JanitorProjectionStore::new();
+        let state = clustered_state_with_store(store.clone()).await;
+        let room = room_jid("second-disconnect-rejoin");
+        let alice = full_jid("alice@example.com/web");
+        let bob = full_jid("bob@example.com/phone");
+        let actor = create_room(state.as_ref(), &room).await;
+        join_member(&actor, &alice, "alice").await;
+        join_member(&actor, &bob, "bob").await;
+        let (bob_tx, mut bob_rx) = mpsc::channel(8);
+        register_test_connection(state.as_ref(), &bob, bob_tx).await;
+        while bob_rx.try_recv().is_ok() {}
+
+        store.set_leave_mode(LeaveProjectionMode::OwnershipUnavailable);
+        let first = match actor
+            .ask(LeaveByRealJid {
+                sender_jid: alice.clone(),
+                cause: OccupancyLeaveCause::Disconnect,
+                session: LeaveSessionSelector::Any,
+            })
+            .await
+            .expect("first disconnect")
+        {
+            LeaveDisposition::Deferred { watermark } => watermark,
+            other => panic!("expected first deferred leave, got {other:?}"),
+        };
+        state.deps.protocol.pending_local_muc_departures.record(
+            crate::server::routes::websocket::LocalDepartureItem::RoomDeparture {
+                room: room.clone(),
+                jid: alice.clone(),
+                cause: OccupancyLeaveCause::Disconnect,
+                selector: LeaveSessionSelector::JoinedAtOrBefore(first),
+            },
+        );
+        actor
+            .ask(waddle_xmpp::muc::room_actor::JoinWithAffiliation {
+                sender_jid: alice.clone(),
+                nick: "alice".to_string(),
+                affiliation_grant: waddle_xmpp::muc::room_actor::JoinAffiliationGrant::Resolver(
+                    Affiliation::Member,
+                ),
+                local_domain: "example.com".to_string(),
+                admission_revision: actor
+                    .ask(GetSnapshot)
+                    .await
+                    .expect("snapshot before rejoin")
+                    .admission_revision,
+            })
+            .await
+            .expect("replacement rejoin");
+        let second = match actor
+            .ask(LeaveByRealJid {
+                sender_jid: alice.clone(),
+                cause: OccupancyLeaveCause::Disconnect,
+                session: LeaveSessionSelector::Any,
+            })
+            .await
+            .expect("second disconnect")
+        {
+            LeaveDisposition::Deferred { watermark } => watermark,
+            other => panic!("expected second deferred leave, got {other:?}"),
+        };
+        assert!(
+            second > first,
+            "a replacement join must advance its watermark"
+        );
+        state.deps.protocol.pending_local_muc_departures.record(
+            crate::server::routes::websocket::LocalDepartureItem::RoomDeparture {
+                room: room.clone(),
+                jid: alice.clone(),
+                cause: OccupancyLeaveCause::Disconnect,
+                selector: LeaveSessionSelector::JoinedAtOrBefore(second),
+            },
+        );
+
+        store.set_leave_mode(LeaveProjectionMode::Succeed);
+        run_local_muc_departure_sweep(&state).await;
+
+        assert!(
+            bob_rx.try_recv().is_ok(),
+            "the newest retry must fan out once"
+        );
+        assert!(
+            bob_rx.try_recv().is_err(),
+            "the departure must fan out exactly once"
+        );
+        assert!(
+            actor
+                .ask(GetSnapshot)
+                .await
+                .expect("snapshot")
+                .room
+                .find_occupant_by_real_jid(&alice)
+                .is_none(),
+            "the newest watermark must remove the rejoined session"
+        );
+        assert_eq!(state.deps.protocol.pending_local_muc_departures.len(), 0);
+    }
+
+    #[tokio::test]
     async fn local_departure_sweep_skips_live_registration_for_disconnect_only() {
         let store = JanitorProjectionStore::new();
         let state = clustered_state_with_store(store.clone()).await;
@@ -8394,7 +8513,18 @@ mod local_muc_departure_tests {
             .expect("destroy dormant room");
         assert!(destroyed, "the test room should be reapable");
 
-        run_local_muc_departure_sweep(&state).await;
+        // The registry retires the actor asynchronously and a requeued item
+        // re-arms with a 2s backoff, so converge with a bounded poll.
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(15);
+        loop {
+            run_local_muc_departure_sweep(&state).await;
+            if state.deps.protocol.pending_local_muc_departures.len() == 0
+                || std::time::Instant::now() > deadline
+            {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(250)).await;
+        }
         assert_eq!(
             state.deps.protocol.pending_local_muc_departures.len(),
             0,
@@ -8494,7 +8624,10 @@ mod local_muc_departure_tests {
 
     #[tokio::test]
     async fn inactive_seal_deferred_then_unseal_inactive_retry_leaves() {
-        let state = create_test_websocket_state().await;
+        // Durable-store rooms defer under an inactivity seal (store-less rooms
+        // keep today's suppressed departure instead).
+        let store = JanitorProjectionStore::new();
+        let state = clustered_state_with_store(store).await;
         let room = room_jid("inactive-seal-retry");
         let source_room = room_jid("inactive-source");
         let alice = full_jid("alice@example.com/web");
@@ -8510,7 +8643,7 @@ mod local_muc_departure_tests {
             actor
                 .ask(SealIfInactive {
                     expected_occupancy_revision: 0,
-                    guard: SealGuard::EmptyNonPersistent,
+                    guard: SealGuard::Dormant,
                 })
                 .await
                 .expect("seal inactive"),
@@ -8541,7 +8674,17 @@ mod local_muc_departure_tests {
         );
         assert!(actor.ask(UnsealInactive).await.expect("unseal inactive"));
 
-        run_local_muc_departure_sweep(&state).await;
+        // The deferred item re-armed with a 2s backoff: poll until it is due.
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(15);
+        loop {
+            run_local_muc_departure_sweep(&state).await;
+            if state.deps.protocol.pending_local_muc_departures.len() == 0
+                || std::time::Instant::now() > deadline
+            {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(250)).await;
+        }
 
         assert_eq!(
             state.deps.protocol.pending_local_muc_departures.len(),
@@ -8583,6 +8726,103 @@ mod local_muc_departure_tests {
     }
 
     #[tokio::test]
+    async fn full_jid_sweep_redrive_failure_requeues_with_backoff_then_converges() {
+        let metrics = waddle_xmpp::telemetry::test_support::acquire().await;
+        let failed_state = create_test_websocket_state().await;
+        let failed_room = room_jid("full-jid-sweep-redrive-failed");
+        let jid = full_jid("alice@example.com/web");
+        let failed_actor = create_room(failed_state.as_ref(), &failed_room).await;
+        join_member(&failed_actor, &jid, "alice").await;
+
+        // `WebSocketState` owns a concrete RoomRegistry actor reference, so
+        // killing it is the available enumeration-failure injection. Create a
+        // fresh fixture below to model enumeration becoming available again.
+        failed_state.deps.protocol.room_registry.kill();
+        failed_state
+            .deps
+            .protocol
+            .room_registry
+            .wait_for_shutdown()
+            .await;
+        failed_state
+            .deps
+            .protocol
+            .pending_local_muc_departures
+            .record(
+                crate::server::routes::websocket::LocalDepartureItem::FullJidSweep {
+                    jid: jid.clone(),
+                },
+            );
+
+        run_local_muc_departure_sweep(&failed_state).await;
+
+        let mut requeued = failed_state
+            .deps
+            .protocol
+            .pending_local_muc_departures
+            .take_due(Instant::now() + std::time::Duration::from_secs(120));
+        assert_eq!(requeued.len(), 1, "the failed redrive remains retained");
+        assert_eq!(requeued[0].attempts, 1, "the failed redrive backs off once");
+        // The recorder is process-global: sibling tests may add to this
+        // counter concurrently, so assert the outcome was recorded at least once.
+        assert!(
+            metrics
+                .counter_sum(
+                    "waddle.muc.local_departure_retry",
+                    &[("outcome", "requeued")],
+                )
+                .is_some_and(|count| count >= 1),
+            "the failed redrive records its requeue outcome"
+        );
+
+        let restored_state = create_test_websocket_state().await;
+        let restored_room = room_jid("full-jid-sweep-redrive-restored");
+        let restored_actor = create_room(restored_state.as_ref(), &restored_room).await;
+        join_member(&restored_actor, &jid, "alice").await;
+        let requeued = requeued.pop().expect("retained full-JID sweep");
+        restored_state
+            .deps
+            .protocol
+            .pending_local_muc_departures
+            .record_pending_for_test(crate::server::routes::websocket::PendingLocalDeparture {
+                item: requeued.item,
+                attempts: requeued.attempts,
+                // Model the janitor's next pass after the retained item's
+                // backoff has elapsed in the recovered registry fixture.
+                not_before: Instant::now(),
+            });
+
+        run_local_muc_departure_sweep(&restored_state).await;
+
+        let snapshot = restored_actor
+            .ask(GetSnapshot)
+            .await
+            .expect("restored cleanup snapshot");
+        assert!(
+            snapshot.room.find_occupant_by_real_jid(&jid).is_none(),
+            "the re-driven full-JID cleanup removes the disconnected occupant"
+        );
+        assert_eq!(
+            restored_state
+                .deps
+                .protocol
+                .pending_local_muc_departures
+                .len(),
+            0,
+            "the completed redrive leaves no retained sweep"
+        );
+        assert!(
+            metrics
+                .counter_sum(
+                    "waddle.muc.local_departure_retry",
+                    &[("outcome", "completed")],
+                )
+                .is_some_and(|count| count >= 1),
+            "the successful redrive records its completion outcome"
+        );
+    }
+
+    #[tokio::test]
     async fn stuck_item_emits_metric_and_is_still_retried() {
         let metrics = waddle_xmpp::telemetry::test_support::acquire().await;
         let state = create_test_websocket_state().await;
@@ -8592,7 +8832,7 @@ mod local_muc_departure_tests {
             .deps
             .protocol
             .pending_local_muc_departures
-            .requeue_with_backoff(crate::server::routes::websocket::PendingLocalDeparture {
+            .record_pending_for_test(crate::server::routes::websocket::PendingLocalDeparture {
                 item: crate::server::routes::websocket::LocalDepartureItem::ConfirmRetired {
                     room,
                     jid: full_jid("alice@example.com/web"),
@@ -8609,7 +8849,7 @@ mod local_muc_departure_tests {
         assert_eq!(
             metrics.counter_sum("waddle.muc.local_departure_retry", &[("outcome", "stuck")]),
             Some(1),
-            "a repeatedly requeued item must emit the stuck metric"
+            "the sweep's own requeue of a repeatedly pending item must emit the stuck metric"
         );
         assert_eq!(
             state.deps.protocol.pending_local_muc_departures.len(),

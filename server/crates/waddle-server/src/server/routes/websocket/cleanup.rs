@@ -1826,9 +1826,13 @@ async fn cleanup_muc_presence_with_origin(
         // would otherwise hold the participant slot until its own
         // (long) timeout. Idempotent on the SFU side — calling for
         // rooms where the user was never in a call is a no-op.
+        // SFU teardown is keyed by (room, full JID) and idempotent: the
+        // connection is physically gone, so it runs on the first attempt
+        // regardless of how the room answered (today's semantics; #1703 tracks
+        // the generation-safe variant).
+        super::muc_call_sfu::unregister_participant_from_room(state, &room_jid, jid);
         match leave_result {
             Ok(LeaveDisposition::Left(outcome)) => {
-                super::muc_call_sfu::unregister_participant_from_room(state, &room_jid, jid);
                 debug!(
                     room = %room_jid,
                     nick = %outcome.nick,
@@ -1852,7 +1856,6 @@ async fn cleanup_muc_presence_with_origin(
             }
             Ok(LeaveDisposition::Deferred { watermark }) => {
                 completed = false;
-                super::muc_call_sfu::unregister_participant_from_room(state, &room_jid, jid);
                 state.deps.protocol.pending_local_muc_departures.record(
                     LocalDepartureItem::RoomDeparture {
                         room: room_jid,
@@ -3213,7 +3216,8 @@ mod remote_muc_cleanup_disposition_tests {
 mod local_departure_cleanup_tests {
     use super::super::tests::{
         create_test_websocket_state, create_test_websocket_state_with_clustering,
-        register_test_connection, snapshot_room,
+        create_test_websocket_state_with_sfu_and_clustering, register_test_connection,
+        snapshot_room, RecordingSfu,
     };
     use super::*;
     use crate::clustering::ClusteringHandles;
@@ -3405,6 +3409,38 @@ mod local_departure_cleanup_tests {
         state
     }
 
+    async fn clustered_state_with_sfu_and_store(
+        store: Arc<CleanupProjectionStore>,
+        sfu: Arc<RecordingSfu>,
+    ) -> Arc<WebSocketState> {
+        let claim_store = Arc::new(InProcessClaimStore::new());
+        let node_identity = SharedNodeIdentity::new(NodeIdentity::local());
+        let durable_store: Arc<dyn MucDurableStore> = store.clone();
+        let state = create_test_websocket_state_with_sfu_and_clustering(
+            sfu,
+            ClusteringHandles {
+                claim_store: Some(claim_store.clone() as Arc<dyn ClaimStore>),
+                node_identity: Some(node_identity.clone()),
+                muc_durable_store: Some(durable_store.clone()),
+                ..ClusteringHandles::default()
+            },
+        )
+        .await;
+        state
+            .deps
+            .protocol
+            .room_registry
+            .ask(WireClusteringClaims {
+                claim_store: claim_store as Arc<dyn ClaimStore>,
+                node_identity,
+                durable_store: Some(durable_store),
+                rollout_backoff: None,
+            })
+            .await
+            .expect("wire clustering claims");
+        state
+    }
+
     async fn join_member(room_actor: &ActorRef<RoomActor>, jid: &FullJid, nick: &str) {
         room_actor
             .ask(JoinWithAffiliation {
@@ -3556,5 +3592,39 @@ mod local_departure_cleanup_tests {
             }
             other => panic!("expected confirm-retired item, got {other:?}"),
         }
+    }
+
+    #[tokio::test]
+    async fn disconnect_cleanup_room_sealed_still_unregisters_sfu_participant() {
+        let store = CleanupProjectionStore::new();
+        let recorder = Arc::new(RecordingSfu::default());
+        let state = clustered_state_with_sfu_and_store(store.clone(), recorder.clone()).await;
+        let room_jid = room_jid("disconnect-sealed-sfu");
+        let room_actor = state
+            .deps
+            .protocol
+            .room_registry
+            .ask(CreateRoom {
+                room_jid: room_jid.clone(),
+                waddle_id: "w".to_string(),
+                channel_id: "c".to_string(),
+                config: RoomConfig::default(),
+            })
+            .await
+            .expect("create room");
+        let alice = full_jid("alice@example.com/web");
+        join_member(&room_actor, &alice, "alice").await;
+        store.set_leave_mode(LeaveProjectionMode::NotOwner);
+
+        assert_eq!(
+            cleanup_muc_presence_for_jid(state.as_ref(), &alice).await,
+            MucCleanupOutcome::Failed
+        );
+        assert_eq!(
+            recorder.snapshot().len(),
+            1,
+            "the first attempt unregisters SFU"
+        );
+        assert_eq!(state.deps.protocol.pending_local_muc_departures.len(), 1);
     }
 }
