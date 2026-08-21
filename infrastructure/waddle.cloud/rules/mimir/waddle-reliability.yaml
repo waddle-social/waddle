@@ -302,14 +302,14 @@ groups:
     - name: waddle-postgres
       rules:
         - alert: PostgresCnpgSeriesMissing
-          expr: (count(up{job="cloudnative-pg"} == 1) or vector(0)) < 2
+          expr: ((count(up{job="cloudnative-pg"} == 1) or vector(0)) < 2) or absent(cnpg_last_error)
           for: 15m
           labels:
             severity: warning
             team: waddle
           annotations:
             runbook: https://github.com/waddle-social/waddle/blob/main/server/docs/operations/ingress-shadow-soak.md ; https://github.com/waddle-social/waddle/issues/1695
-            summary: Fewer than 2 CloudNativePG instances are being scraped (2 expected) — a standby or the primary stopped exporting, or the Alloy cnpg scrape broke; the backend/WAL/collector rules are evaluating against a partial cluster. The `or vector(0)` keeps this firing when every target vanishes.
+            summary: Fewer than 2 CloudNativePG instances are being scraped (2 expected), or the core `cnpg_last_error` family is absent although the scrapes succeed — a standby or the primary stopped exporting, the Alloy cnpg scrape broke, or the exporter renamed/dropped its families; the backend/WAL/collector rules are evaluating against a partial cluster. The `or vector(0)` keeps this firing when every target vanishes.
         - alert: PostgresBackendsHigh
           expr: max by (instance) (sum by (instance) (cnpg_backends_total) / on (instance) group_left() cnpg_pg_settings_setting{name="max_connections"}) > 0.8
           for: 10m

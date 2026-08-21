@@ -147,9 +147,10 @@ struct IngressShadowShutdown {
 
 /// Bound on waiting, after `force_stop`, for every admitted submission's
 /// obligation to be released (`AbortHandle::abort` only schedules the
-/// cancellation; queued tasks drop when the scheduler loop exits).
-#[cfg(feature = "clustering")]
-const FORCED_TEARDOWN_JOIN: Duration = Duration::from_millis(250);
+/// cancellation; queued tasks drop when the scheduler loop exits). The HTTP
+/// shutdown coordinator extends its drain wait by this margin so the final
+/// metrics flush never starts while this barrier is still recording aborts.
+pub const FORCED_TEARDOWN_JOIN: Duration = Duration::from_millis(250);
 #[cfg(feature = "clustering")]
 const FORCED_TEARDOWN_POLL: Duration = Duration::from_millis(5);
 
@@ -292,18 +293,6 @@ struct OutstandingSubmission {
     stream_id: SmSessionId,
     seq: u64,
     armed: bool,
-}
-
-#[cfg(feature = "clustering")]
-impl OutstandingSubmission {
-    /// Forget an obligation whose submission was never accepted (the
-    /// channel send failed): no completion and no abort is recorded.
-    fn disarm(mut self) {
-        self.armed = false;
-        stream_activity_lock(&self.stream_activity)
-            .outstanding
-            .remove(&self.seq);
-    }
 }
 
 #[cfg(feature = "clustering")]
@@ -927,21 +916,10 @@ fn try_send_worker_task(
                 Err(disposition) => return disposition,
             };
             note_stream_task_enqueued(stream_activity, &stream_id);
-            let outstanding = register_outstanding(stream_activity, stream_id.clone());
-            match send_worker_task(
-                tx,
-                QueuedIngressShadowTask {
-                    task: submit,
-                    permit: Some(permit),
-                    outstanding: Some(outstanding),
-                },
-            ) {
+            match admit_submission(tx, stream_activity, stream_id.clone(), submit, permit) {
                 Ok(()) => IngressShadowDisposition::Enqueued,
-                Err(mut task) => {
+                Err(task) => {
                     note_stream_task_finished(stream_activity, &stream_id);
-                    if let Some(outstanding) = task.outstanding.take() {
-                        outstanding.disarm();
-                    }
                     drop(task.permit);
                     IngressShadowDisposition::Closed
                 }
@@ -1152,8 +1130,56 @@ fn note_stream_task_finished(
     }
 }
 
-/// Register an admitted submission's obligation and return its handle.
+/// Admit a submission atomically: the obligation is registered, the task is
+/// handed to the worker and the admission counter advances all under the
+/// activity lock (the channel send is synchronous), so no observer — the
+/// worker releasing the obligation, or the forced-teardown barrier — can see
+/// an admitted submission whose admission has not been counted yet. A closed
+/// intake leaves no trace: the entry is removed before the lock is released
+/// and the disarmed guard records nothing.
 #[cfg(feature = "clustering")]
+fn admit_submission(
+    tx: &IngressShadowTx,
+    stream_activity: &Arc<std::sync::Mutex<StreamActivityState>>,
+    stream_id: SmSessionId,
+    submit: IngressShadowTask,
+    permit: OwnedSemaphorePermit,
+) -> Result<(), QueuedIngressShadowTask> {
+    let mut state = stream_activity_lock(stream_activity);
+    let seq = state.next_seq;
+    state.next_seq = state.next_seq.wrapping_add(1);
+    state.outstanding.insert(seq, Instant::now());
+    let outstanding = OutstandingSubmission {
+        stream_activity: stream_activity.clone(),
+        stream_id,
+        seq,
+        armed: true,
+    };
+    match send_worker_task(
+        tx,
+        QueuedIngressShadowTask {
+            task: submit,
+            permit: Some(permit),
+            outstanding: Some(outstanding),
+        },
+    ) {
+        Ok(()) => {
+            waddle_xmpp::telemetry::reliability::increment_ingress_shadow_admissions();
+            Ok(())
+        }
+        Err(mut task) => {
+            state.outstanding.remove(&seq);
+            if let Some(mut rejected) = task.outstanding.take() {
+                rejected.armed = false;
+            }
+            Err(task)
+        }
+    }
+}
+
+/// Register an admitted submission's obligation and return its handle
+/// (test-only: production admission goes through [`admit_submission`]).
+#[cfg(all(test, feature = "clustering"))]
 fn register_outstanding(
     stream_activity: &Arc<std::sync::Mutex<StreamActivityState>>,
     stream_id: SmSessionId,
@@ -4540,7 +4566,8 @@ mod tests {
         .await
         .expect("the aborted, never-polled task must release its obligation");
 
-        assert!(task.await.unwrap_err().is_cancelled());
+        let join_error = task.await.expect_err("the task must be cancelled");
+        assert!(join_error.is_cancelled());
         assert!(
             !polled.load(Ordering::Acquire),
             "the task must have been aborted before its first poll"
