@@ -143,33 +143,15 @@ struct IngressShadowShutdown {
     active_task_aborts: std::sync::Mutex<Vec<ActiveShadowTask>>,
     complete: AtomicBool,
     complete_notify: Notify,
-    /// Spawned task futures still alive (running or not yet dropped after an
-    /// abort). Forced teardown waits for this to reach zero so the abort
-    /// telemetry emitted from those futures' `Drop` impls lands before the
-    /// process flushes and exits.
-    live_tasks: std::sync::atomic::AtomicUsize,
-    live_notify: Notify,
 }
 
-/// Bound on waiting for aborted task futures to actually drop after
-/// `force_stop`; `AbortHandle::abort` only schedules the cancellation.
+/// Bound on waiting, after `force_stop`, for every admitted submission's
+/// obligation to be released (`AbortHandle::abort` only schedules the
+/// cancellation; queued tasks drop when the scheduler loop exits).
 #[cfg(feature = "clustering")]
 const FORCED_TEARDOWN_JOIN: Duration = Duration::from_millis(250);
-
-/// Held by every spawned task future as its first local, so it drops last —
-/// after the outstanding-submission guard has recorded any abort.
 #[cfg(feature = "clustering")]
-struct LiveTaskGuard {
-    shutdown: Arc<IngressShadowShutdown>,
-}
-
-#[cfg(feature = "clustering")]
-impl Drop for LiveTaskGuard {
-    fn drop(&mut self) {
-        self.shutdown.live_tasks.fetch_sub(1, Ordering::AcqRel);
-        self.shutdown.live_notify.notify_waiters();
-    }
-}
+const FORCED_TEARDOWN_POLL: Duration = Duration::from_millis(5);
 
 #[cfg(feature = "clustering")]
 impl IngressShadowShutdown {
@@ -217,24 +199,6 @@ impl IngressShadowShutdown {
     fn mark_complete(&self) {
         self.complete.store(true, Ordering::Release);
         self.complete_notify.notify_waiters();
-    }
-
-    fn live_task_guard(self: &Arc<Self>) -> LiveTaskGuard {
-        self.live_tasks.fetch_add(1, Ordering::AcqRel);
-        LiveTaskGuard {
-            shutdown: self.clone(),
-        }
-    }
-
-    /// Resolve once every spawned task future has been dropped.
-    async fn wait_for_live_tasks(&self) {
-        loop {
-            let notified = self.live_notify.notified();
-            if self.live_tasks.load(Ordering::Acquire) == 0 {
-                return;
-            }
-            notified.await;
-        }
     }
 
     async fn wait_for_completion(&self) {
@@ -705,7 +669,12 @@ impl IngressShadowHandle {
         match self.inner.as_ref() {
             IngressShadowInner::Disabled => true,
             #[cfg(feature = "clustering")]
-            IngressShadowInner::Worker { tx, shutdown, .. } => {
+            IngressShadowInner::Worker {
+                tx,
+                shutdown,
+                stream_activity,
+                ..
+            } => {
                 shutdown.cancel();
                 close_worker_intake(tx);
                 if tokio::time::timeout(timeout, shutdown.wait_for_completion())
@@ -715,11 +684,16 @@ impl IngressShadowHandle {
                     true
                 } else {
                     shutdown.force_stop();
-                    // Let the aborted futures drop (and record their aborts)
-                    // before the caller proceeds to the final telemetry flush.
-                    let _ =
-                        tokio::time::timeout(FORCED_TEARDOWN_JOIN, shutdown.wait_for_live_tasks())
-                            .await;
+                    // Every admitted submission — queued, never polled, or
+                    // in flight — is released through `finish_outstanding`
+                    // exactly when its terminal/abort telemetry is emitted,
+                    // so an empty outstanding map is the barrier the final
+                    // telemetry flush needs.
+                    let _ = tokio::time::timeout(
+                        FORCED_TEARDOWN_JOIN,
+                        wait_for_outstanding_drained(stream_activity),
+                    )
+                    .await;
                     false
                 }
             }
@@ -1188,6 +1162,16 @@ fn register_outstanding(
         stream_id,
         seq,
         armed: true,
+    }
+}
+
+/// Resolve once no admitted submission is outstanding.
+#[cfg(feature = "clustering")]
+async fn wait_for_outstanding_drained(
+    stream_activity: &Arc<std::sync::Mutex<StreamActivityState>>,
+) {
+    while !stream_activity_lock(stream_activity).outstanding.is_empty() {
+        tokio::time::sleep(FORCED_TEARDOWN_POLL).await;
     }
 }
 
@@ -2254,11 +2238,7 @@ impl IngressShadowScheduler {
                 permit,
                 outstanding,
             } = task;
-            let live_task = task_shutdown.live_task_guard();
             let task_handle = tokio::spawn(async move {
-                // First local: drops last, after `outstanding` has recorded
-                // an abort if the future is cancelled mid-execution.
-                let _live_task = live_task;
                 (execute)(task, outstanding).await;
                 drop(permit);
                 task_shutdown.finish_active_task(&task_finished_for_completion);
@@ -4399,7 +4379,8 @@ mod tests {
             !handle.drain_and_join(Duration::from_millis(20)).await,
             "tiny timeout should force stop while active"
         );
-        handle.wait_for_completion().await;
+        // No extra barrier: `drain_and_join(false)` itself must have waited
+        // for every admitted submission to release (forced-teardown contract).
         assert_eq!(
             submission_metrics(&metrics),
             IngressShadowSubmissionMetrics {
@@ -4528,7 +4509,8 @@ mod tests {
             !handle.drain_and_join(Duration::from_millis(20)).await,
             "tiny timeout should force stop while active"
         );
-        handle.wait_for_completion().await;
+        // No extra barrier: `drain_and_join(false)` itself must have waited
+        // for every admitted submission to release (forced-teardown contract).
         assert_eq!(
             submission_metrics(&metrics),
             IngressShadowSubmissionMetrics {
