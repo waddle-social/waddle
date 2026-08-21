@@ -42,6 +42,7 @@ use crate::XmppError;
 
 mod effects;
 pub mod lifecycle;
+pub mod projection;
 
 pub use effects::{
     AdminPresenceKind, DestroyPassword, DestroyReason, DestroyRecipient, MucOccupantNick,
@@ -52,6 +53,7 @@ pub use lifecycle::{
     DestroyAttemptId, EphemeralProjectionAuthorization, RoomCommittedCoordinates, RoomEffectIntent,
     RoomEffectOrdinal, RoomLifecycleId, RoomLifecycleState, RoomMutationCommit, RoomRevision,
 };
+pub use projection::{OccupancyLeaveCause, RoomPinProjection, RoomProjection, RoomProjectionKind};
 
 pub(crate) fn mint_room_mutation_commit(
     fence: RoomClaimFenceContext,
@@ -186,6 +188,9 @@ pub enum RoomDurableMutation {
     },
     Dormancy,
     Activate,
+    /// Commit a claim-fenced lifecycle revision that authorizes one deferred
+    /// in-memory projection (#1647). Carries no authoritative room state.
+    Projection(RoomProjection),
 }
 
 /// Sanitized database failure marker for room commits.
