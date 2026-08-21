@@ -194,7 +194,7 @@ Pass only if all of the following are recorded:
 
 ## Pass criteria
 
-Every rule in the `waddle-ingress-shadow` group of
+Every rule in the `waddle-ingress-shadow` and `waddle-postgres` groups of
 `infrastructure/waddle.cloud/rules/mimir/waddle-reliability.yaml` must stay
 silent throughout the window — `IngressShadowNotEnabled`,
 `IngressShadowDisabledReplica`, `IngressShadowClosedDrops`,

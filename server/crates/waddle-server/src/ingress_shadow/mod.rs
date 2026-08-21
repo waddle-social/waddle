@@ -143,6 +143,32 @@ struct IngressShadowShutdown {
     active_task_aborts: std::sync::Mutex<Vec<ActiveShadowTask>>,
     complete: AtomicBool,
     complete_notify: Notify,
+    /// Spawned task futures still alive (running or not yet dropped after an
+    /// abort). Forced teardown waits for this to reach zero so the abort
+    /// telemetry emitted from those futures' `Drop` impls lands before the
+    /// process flushes and exits.
+    live_tasks: std::sync::atomic::AtomicUsize,
+    live_notify: Notify,
+}
+
+/// Bound on waiting for aborted task futures to actually drop after
+/// `force_stop`; `AbortHandle::abort` only schedules the cancellation.
+#[cfg(feature = "clustering")]
+const FORCED_TEARDOWN_JOIN: Duration = Duration::from_millis(250);
+
+/// Held by every spawned task future as its first local, so it drops last —
+/// after the outstanding-submission guard has recorded any abort.
+#[cfg(feature = "clustering")]
+struct LiveTaskGuard {
+    shutdown: Arc<IngressShadowShutdown>,
+}
+
+#[cfg(feature = "clustering")]
+impl Drop for LiveTaskGuard {
+    fn drop(&mut self) {
+        self.shutdown.live_tasks.fetch_sub(1, Ordering::AcqRel);
+        self.shutdown.live_notify.notify_waiters();
+    }
 }
 
 #[cfg(feature = "clustering")]
@@ -191,6 +217,24 @@ impl IngressShadowShutdown {
     fn mark_complete(&self) {
         self.complete.store(true, Ordering::Release);
         self.complete_notify.notify_waiters();
+    }
+
+    fn live_task_guard(self: &Arc<Self>) -> LiveTaskGuard {
+        self.live_tasks.fetch_add(1, Ordering::AcqRel);
+        LiveTaskGuard {
+            shutdown: self.clone(),
+        }
+    }
+
+    /// Resolve once every spawned task future has been dropped.
+    async fn wait_for_live_tasks(&self) {
+        loop {
+            let notified = self.live_notify.notified();
+            if self.live_tasks.load(Ordering::Acquire) == 0 {
+                return;
+            }
+            notified.await;
+        }
     }
 
     async fn wait_for_completion(&self) {
@@ -671,6 +715,11 @@ impl IngressShadowHandle {
                     true
                 } else {
                     shutdown.force_stop();
+                    // Let the aborted futures drop (and record their aborts)
+                    // before the caller proceeds to the final telemetry flush.
+                    let _ =
+                        tokio::time::timeout(FORCED_TEARDOWN_JOIN, shutdown.wait_for_live_tasks())
+                            .await;
                     false
                 }
             }
@@ -1453,13 +1502,21 @@ fn observe_retry_sequence(attempts: usize, exhausted: bool) {
     waddle_xmpp::telemetry::reliability::increment_ingress_shadow_tx_retry(outcome);
 }
 
+/// Second-scale buckets with an explicit boundary at the soak's 2 s p99 gate
+/// and at the 2.5 s attempt deadline: without a 2.0 edge, a steady 1.1 s
+/// would interpolate to ≈2.49 s inside `(1.0, 2.5]` and false-fail the gate.
+#[cfg(feature = "clustering")]
+const SHADOW_TX_DURATION_BUCKETS: [f64; 12] = [
+    0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1.0, 2.0, 2.5, 5.0, 10.0,
+];
+
 #[cfg(feature = "clustering")]
 fn record_submission_attempt_duration(duration: Duration) {
     waddle_xmpp::histogram_record!(
         "ingress.shadow.tx.duration",
         "s",
         "Duration of one shadow-ingress submission transaction attempt.",
-        buckets: waddle_xmpp::telemetry::SECOND_SCALE_BUCKETS,
+        buckets: SHADOW_TX_DURATION_BUCKETS,
         duration.as_secs_f64(),
     );
 }
@@ -2197,7 +2254,11 @@ impl IngressShadowScheduler {
                 permit,
                 outstanding,
             } = task;
+            let live_task = task_shutdown.live_task_guard();
             let task_handle = tokio::spawn(async move {
+                // First local: drops last, after `outstanding` has recorded
+                // an abort if the future is cancelled mid-execution.
+                let _live_task = live_task;
                 (execute)(task, outstanding).await;
                 drop(permit);
                 task_shutdown.finish_active_task(&task_finished_for_completion);
@@ -2521,7 +2582,11 @@ mod tests {
         );
         assert_eq!(
             metrics.histogram_bounds("ingress.shadow.tx.duration"),
-            Some(waddle_xmpp::telemetry::SECOND_SCALE_BUCKETS.to_vec())
+            Some(SHADOW_TX_DURATION_BUCKETS.to_vec())
+        );
+        assert!(
+            SHADOW_TX_DURATION_BUCKETS.contains(&2.0) && SHADOW_TX_DURATION_BUCKETS.contains(&2.5),
+            "the p99 gate (2 s) and the attempt deadline (2.5 s) must be bucket edges"
         );
     }
 
