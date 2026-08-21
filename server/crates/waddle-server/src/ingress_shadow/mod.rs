@@ -4509,6 +4509,52 @@ mod tests {
         assert_eq!(outstanding_count(&handle), 0);
     }
 
+    /// Deterministic spawned-before-first-poll abort on the production
+    /// primitives: `force_stop` has already fired when the scheduler tracks a
+    /// freshly spawned task, so `track_active_task` aborts it before its
+    /// first poll (mod.rs `track_active_task`). The admitted obligation it
+    /// carries must still be released exactly once as `Aborted`, and the
+    /// outstanding-map barrier must observe that.
+    #[tokio::test]
+    async fn submission_spawned_but_never_polled_is_aborted_exactly_once() {
+        let metrics = waddle_xmpp::telemetry::test_support::acquire().await;
+        let before = submission_metrics(&metrics);
+        let stream_activity = Arc::new(std::sync::Mutex::new(StreamActivityState::default()));
+        let shutdown = Arc::new(IngressShadowShutdown::default());
+        let stream_id = SmSessionId::new("spawned-unpolled");
+        let outstanding = register_outstanding(&stream_activity, stream_id);
+        let polled = Arc::new(AtomicBool::new(false));
+        let task_polled = polled.clone();
+        let task = tokio::spawn(async move {
+            task_polled.store(true, Ordering::Release);
+            let _outstanding = outstanding;
+            std::future::pending::<()>().await;
+        });
+
+        shutdown.force_stop();
+        shutdown.track_active_task(Arc::new(AtomicBool::new(false)), task.abort_handle());
+        tokio::time::timeout(
+            FORCED_TEARDOWN_JOIN,
+            wait_for_outstanding_drained(&stream_activity),
+        )
+        .await
+        .expect("the aborted, never-polled task must release its obligation");
+
+        assert!(task.await.unwrap_err().is_cancelled());
+        assert!(
+            !polled.load(Ordering::Acquire),
+            "the task must have been aborted before its first poll"
+        );
+        let after = submission_metrics(&metrics);
+        assert_eq!(after.aborted, before.aborted + 1);
+        assert_eq!(after.completions, before.completions + 1);
+        assert_eq!(outstanding_count_in(&stream_activity), 0);
+    }
+
+    fn outstanding_count_in(stream_activity: &Arc<std::sync::Mutex<StreamActivityState>>) -> usize {
+        stream_activity_lock(stream_activity).outstanding.len()
+    }
+
     #[tokio::test]
     async fn queued_submission_is_aborted_by_forced_shutdown() {
         let submit_started = Arc::new(Notify::new());
