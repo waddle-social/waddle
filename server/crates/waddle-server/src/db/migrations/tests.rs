@@ -1023,7 +1023,7 @@ async fn postgres_single_runner_backfills_checksums_when_legacy_ledger_has_no_pe
     let schema = unique_postgres_schema_name("ledger_pure_adoption");
     let (db, admin) = open_isolated_postgres_database(&database_url, &schema).await;
     let runner = MigrationRunner::single();
-    assert_eq!(runner.migrations.len(), 21);
+    assert_eq!(runner.migrations.len(), 22);
     runner.run(&db).await.expect("initial single migration run");
 
     let conn = db.guard().await.expect("postgres guard");
@@ -1037,7 +1037,7 @@ async fn postgres_single_runner_backfills_checksums_when_legacy_ledger_has_no_pe
         .await
         .expect("pure adoption rerun")
         .is_empty());
-    assert_eq!(migration_ledger_row_count(&db).await, 21);
+    assert_eq!(migration_ledger_row_count(&db).await, 22);
     assert_all_migration_checksums(&db, DatabaseDriver::Postgres).await;
     assert!(runner
         .run(&db)
@@ -1282,6 +1282,13 @@ async fn postgres_monitoring_queries_match_migrated_ingress_schema() {
         .acquire()
         .await
         .expect("acquire connection for pg_monitor queries");
+    // The fixture lives in an isolated schema; production tables are in
+    // `public`, where pg_monitor already has USAGE. Grant the same here so
+    // the table-level V1011 grant is what the test exercises.
+    sqlx::query(&format!("GRANT USAGE ON SCHEMA {schema} TO pg_monitor"))
+        .execute(&admin)
+        .await
+        .expect("grant fixture schema usage to pg_monitor");
     sqlx::query("SET ROLE pg_monitor")
         .execute(&mut *monitor_conn)
         .await

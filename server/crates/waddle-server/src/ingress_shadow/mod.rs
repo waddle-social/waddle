@@ -689,11 +689,19 @@ impl IngressShadowHandle {
                     // exactly when its terminal/abort telemetry is emitted,
                     // so an empty outstanding map is the barrier the final
                     // telemetry flush needs.
-                    let _ = tokio::time::timeout(
+                    if tokio::time::timeout(
                         FORCED_TEARDOWN_JOIN,
                         wait_for_outstanding_drained(stream_activity),
                     )
-                    .await;
+                    .await
+                    .is_err()
+                    {
+                        tracing::warn!(
+                            outstanding = stream_activity_lock(stream_activity).outstanding.len(),
+                            budget_ms = FORCED_TEARDOWN_JOIN.as_millis(),
+                            "forced ingress shadow teardown barrier expired with admitted submissions still outstanding"
+                        );
+                    }
                     false
                 }
             }
@@ -1185,11 +1193,11 @@ fn finish_outstanding(
     seq: u64,
     end: OutstandingEnd,
 ) {
-    let existed = stream_activity_lock(stream_activity)
-        .outstanding
-        .remove(&seq)
-        .is_some();
-    if !existed {
+    // The obligation is released under the lock and only after its telemetry
+    // has been recorded, so a forced-teardown observer that finds the map
+    // empty is guaranteed to see the counters already advanced.
+    let mut state = stream_activity_lock(stream_activity);
+    if !state.outstanding.contains_key(&seq) {
         return;
     }
     if matches!(end, OutstandingEnd::Aborted) {
@@ -1197,6 +1205,7 @@ fn finish_outstanding(
         waddle_xmpp::telemetry::reliability::increment_ingress_shadow_completions();
         tracing::warn!(stream_id = %stream_id, seq, "ingress shadow submission aborted before completion");
     }
+    state.outstanding.remove(&seq);
 }
 
 #[cfg(feature = "clustering")]
@@ -4455,6 +4464,49 @@ mod tests {
             0,
             "dropping the armed guard must release its obligation exactly once"
         );
+    }
+
+    /// Forced teardown right after admission: whether the scheduler has not
+    /// dispatched the task yet, has spawned it but it was never polled, or it
+    /// is in flight, exactly one completion (aborted or decided) must exist
+    /// per admission by the time `drain_and_join(false)` returns.
+    #[tokio::test]
+    async fn submission_forced_down_immediately_after_admission_balances_regardless_of_poll_state()
+    {
+        let handle = test_handle_with_outstanding(4, 1, |task, outstanding| {
+            Box::pin(async move {
+                if matches!(task, IngressShadowTask::Submit(_)) {
+                    let _outstanding = outstanding.expect("submit must have an obligation");
+                    std::future::pending::<()>().await;
+                }
+            })
+        });
+        let metrics = waddle_xmpp::telemetry::test_support::acquire().await;
+        let before = submission_metrics(&metrics);
+        for index in 0..3 {
+            let mut submission = base_submission(Message::new(Some(jid::Jid::from(
+                "room@conference.example.com"
+                    .parse::<BareJid>()
+                    .expect("room jid"),
+            ))));
+            submission.stream_id = SmSessionId::new(format!("immediate-{index}"));
+            assert_eq!(
+                handle.try_submit(submission),
+                IngressShadowDisposition::Enqueued
+            );
+        }
+        assert_eq!(outstanding_count(&handle), 3);
+
+        assert!(!handle.drain_and_join(Duration::ZERO).await);
+        let after = submission_metrics(&metrics);
+        assert_eq!(after.admissions, before.admissions + 3);
+        assert_eq!(
+            after.completions,
+            before.completions + 3,
+            "every admission must be terminal once the forced barrier returns"
+        );
+        assert_eq!(after.aborted, before.aborted + 3);
+        assert_eq!(outstanding_count(&handle), 0);
     }
 
     #[tokio::test]
