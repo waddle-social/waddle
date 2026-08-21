@@ -739,7 +739,7 @@ async fn v1010_rolls_forward_from_a_v1009_ledger() {
     drop(conn);
 
     let applied = MigrationRunner::single().run(&db).await.unwrap();
-    assert_eq!(applied, vec![1010]);
+    assert_eq!(applied, vec![1010, 1011]);
     assert_eq!(
         migration_ledger_checksum(&db, 1010).await.as_deref(),
         Some(migration_checksum(&migration_by_version(1010), DatabaseDriver::Sqlite).as_str())
