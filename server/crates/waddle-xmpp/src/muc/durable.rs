@@ -274,6 +274,12 @@ impl RoomClaimFenceContext {
 #[derive(Debug, Clone)]
 pub struct DurableRoomState {
     pub coordinates: Option<RoomCommittedCoordinates>,
+    /// Coordinates of the last config-effect-producing commit (`Create`,
+    /// `Config`, `MembersOnlyEnforcement`). Distinct from the lifecycle head
+    /// so outbox config recovery survives actor retirement even when later
+    /// non-config commits (subject, affiliations, #1647 projections) advance
+    /// the head (#1647).
+    pub config_coordinates: Option<RoomCommittedCoordinates>,
     pub waddle_id: String,
     pub channel_id: String,
     pub config: RoomConfig,
