@@ -82,6 +82,13 @@ pub enum LocalDepartureItem {
         /// Per-recipient fan-out progress (see `RoomDeparture::notified`).
         notified: HashSet<FullJid>,
     },
+    /// A guarded empty-room destroy whose bounded registry ask failed: the
+    /// destroy is owed until the registry answers definitively (destroyed,
+    /// absent, or refused because a newer join bumped the revision).
+    EvictEmptyRoom {
+        room: BareJid,
+        occupancy_revision: u64,
+    },
     AckReceipt {
         room: BareJid,
         jid: FullJid,
@@ -99,6 +106,7 @@ enum LocalDepartureKey {
     FullJidSweep(FullJid),
     RoomScoped(BareJid, FullJid, u8),
     Ack(BareJid, FullJid, LeaveAttemptId),
+    Evict(BareJid),
     InFlight(BareJid, FullJid, u8, LeaveAttemptId),
 }
 
@@ -115,6 +123,7 @@ impl LocalDepartureItem {
             Self::AckReceipt {
                 room, jid, attempt, ..
             } => LocalDepartureKey::Ack(room.clone(), jid.clone(), *attempt),
+            Self::EvictEmptyRoom { room, .. } => LocalDepartureKey::Evict(room.clone()),
             Self::InFlight {
                 room,
                 jid,
@@ -208,13 +217,29 @@ impl LocalDepartureItem {
                 attempt: merged_attempt,
                 notified: merged_notified.clone(),
             },
+            (
+                LocalDepartureItem::EvictEmptyRoom {
+                    room,
+                    occupancy_revision: existing_revision,
+                },
+                LocalDepartureItem::EvictEmptyRoom {
+                    occupancy_revision: incoming_revision,
+                    ..
+                },
+            ) => LocalDepartureItem::EvictEmptyRoom {
+                room,
+                // The newest leave's revision is the guard that must hold.
+                occupancy_revision: existing_revision.max(incoming_revision),
+            },
             (existing, _) => existing,
         }
     }
 
     fn attempt(&self) -> Option<LeaveAttemptId> {
         match self {
-            Self::FullJidSweep { .. } | Self::AckReceipt { .. } => None,
+            Self::FullJidSweep { .. } | Self::AckReceipt { .. } | Self::EvictEmptyRoom { .. } => {
+                None
+            }
             Self::RoomDeparture { attempt, .. }
             | Self::ConfirmRetired { attempt, .. }
             | Self::InFlight { attempt, .. } => Some(*attempt),
@@ -232,7 +257,10 @@ impl LocalDepartureItem {
 
     fn selector(&self) -> Option<LeaveSessionSelector> {
         match self {
-            Self::FullJidSweep { .. } | Self::AckReceipt { .. } | Self::InFlight { .. } => None,
+            Self::FullJidSweep { .. }
+            | Self::AckReceipt { .. }
+            | Self::InFlight { .. }
+            | Self::EvictEmptyRoom { .. } => None,
             Self::RoomDeparture { selector, .. } | Self::ConfirmRetired { selector, .. } => {
                 Some(*selector)
             }
@@ -290,7 +318,7 @@ pub struct PendingLocalMucDepartures {
 #[derive(Debug, Default)]
 struct Inventory {
     entries: HashMap<LocalDepartureKey, PendingLocalDeparture>,
-    counts: [i64; 5],
+    counts: [i64; 6],
 }
 
 const fn kind_slot(item: &LocalDepartureItem) -> usize {
@@ -300,6 +328,7 @@ const fn kind_slot(item: &LocalDepartureItem) -> usize {
         LocalDepartureItem::ConfirmRetired { .. } => 2,
         LocalDepartureItem::AckReceipt { .. } => 3,
         LocalDepartureItem::InFlight { .. } => 4,
+        LocalDepartureItem::EvictEmptyRoom { .. } => 5,
     }
 }
 
@@ -349,6 +378,7 @@ impl Inventory {
             "confirm_retired",
             "ack_receipt",
             "in_flight",
+            "evict_empty_room",
         ]
         .into_iter()
         .zip(self.counts)
@@ -443,6 +473,13 @@ impl PendingLocalMucDepartures {
 
     #[cfg(all(test, feature = "clustering"))]
     pub(crate) fn record_pending_for_test(&self, entry: PendingLocalDeparture) {
+        let mut inventory = self.entries.lock().expect("local departure inventory lock");
+        inventory.insert(entry);
+        inventory.record_gauges();
+    }
+
+    #[cfg(test)]
+    pub(crate) fn record_pending_for_test_any(&self, entry: PendingLocalDeparture) {
         let mut inventory = self.entries.lock().expect("local departure inventory lock");
         inventory.insert(entry);
         inventory.record_gauges();
@@ -1327,6 +1364,18 @@ mod tests {
             .expect("merged retirement watch");
         assert!(matches!(
             retained.item,
+            LocalDepartureItem::ConfirmRetired { ref notified, .. }
+                if notified == &HashSet::from([bob.clone()])
+        ));
+        // Reverse direction: an existing ConfirmRetired's progress must be
+        // READ when something merges onto it (pins the accessor arm).
+        pending.record_pending_for_test_any(retained);
+        pending.record(departure(newer, HashSet::new()));
+        let merged = pending
+            .take_for_test(&departure(newer, HashSet::new()))
+            .expect("re-merged retirement watch");
+        assert!(matches!(
+            merged.item,
             LocalDepartureItem::ConfirmRetired { ref notified, .. }
                 if notified == &HashSet::from([bob])
         ));

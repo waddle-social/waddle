@@ -500,6 +500,7 @@ pub(crate) fn evict_empty_room_detached(
         return;
     }
     let registry = state.deps.protocol.room_registry.clone();
+    let pending = Arc::clone(&state.deps.protocol.pending_local_muc_departures);
     let room_jid = room_jid.clone();
     let occupancy_revision = outcome.occupancy_revision;
     tokio::spawn(async move {
@@ -511,7 +512,13 @@ pub(crate) fn evict_empty_room_detached(
             )
             .await
         {
-            warn!(room = %room_jid, error = %error, "Detached guarded destroy of empty room failed");
+            // The destroy stays owed: retain it for the janitor, which
+            // retries the bounded ask until the registry answers.
+            warn!(room = %room_jid, error = %error, "Detached guarded destroy of empty room failed; retained for retry");
+            pending.record(LocalDepartureItem::EvictEmptyRoom {
+                room: room_jid,
+                occupancy_revision,
+            });
         }
     });
 }

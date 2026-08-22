@@ -2178,7 +2178,7 @@ async fn run_group_dm_leave(
     }
 
     let caller_bare = caller_full_jid.to_bare();
-    let actor = state
+    let mut actor = state
         .room_registry
         .ask(GetRoom {
             room_jid: args.room_jid.clone(),
@@ -2197,10 +2197,6 @@ async fn run_group_dm_leave(
         })
         .await
         .map_err(send_err("room actor GetAffiliation"))?;
-    let pre_leave_snapshot = actor
-        .ask(GetSnapshot)
-        .await
-        .map_err(send_err("room actor GetSnapshot"))?;
     let left = pre_leave_affiliation >= Affiliation::Member;
     if !left {
         return Ok(GroupDmLeaveResult {
@@ -2226,8 +2222,6 @@ async fn run_group_dm_leave(
     }
     resources.sort();
     resources.dedup();
-    let mut reconciled_leave_effects = None;
-
     delete_group_dm_member_tuple(state, &channel_id, &caller_bare)
         .await
         .map_err(|error| Box::new(CommandResult::Error(error)))?;
@@ -2246,7 +2240,7 @@ async fn run_group_dm_leave(
             kameo::error::SendError::HandlerError(
                 waddle_xmpp::muc::room_actor::AffiliationMutationError::CommitOutcomeUnknown,
             ) => {
-                !reconcile_ambiguous_group_dm_leave(
+                match reconcile_ambiguous_group_dm_leave(
                     state,
                     &args.room_jid,
                     &channel_id,
@@ -2255,6 +2249,17 @@ async fn run_group_dm_leave(
                     &caller_bare,
                 )
                 .await
+                {
+                    Some(recovered) => {
+                        // The successor carries the transplanted roster, so
+                        // the ordinary occupancy-leave loop below removes the
+                        // leaver's sessions with the full retained-retry
+                        // machinery — no synthesized effects.
+                        actor = recovered;
+                        false
+                    }
+                    None => true,
+                }
             }
             _ => true,
         };
@@ -2268,37 +2273,11 @@ async fn run_group_dm_leave(
             )
             .await;
         }
-        if matches!(
-            error,
-            kameo::error::SendError::HandlerError(
-                waddle_xmpp::muc::room_actor::AffiliationMutationError::CommitOutcomeUnknown
-            )
-        ) && !should_restore_membership
-        {
-            // Recovery replaces the actor from durable state, which has no
-            // live roster. Preserve the pre-recovery roster and synthesize
-            // the same unavailable effects only after the exact leave is
-            // proven committed.
-            reconciled_leave_effects = Some(group_dm_leave_effects_from_snapshot(
-                &pre_leave_snapshot.room,
-                &resources,
-            ));
-        }
         if should_restore_membership {
             return Err(send_err("room actor ChangeAffiliation")(error));
         }
     }
-    if let Some(effects) = reconciled_leave_effects {
-        for (resource, effect) in effects {
-            broadcast_group_dm_leave(
-                state,
-                connections,
-                &resource,
-                live_resource_set.contains(&resource),
-                &effect,
-            );
-        }
-    } else {
+    {
         for resource in resources {
             let attempt = waddle_xmpp::muc::room_actor::LeaveAttemptId::generate();
             let in_flight = crate::server::routes::websocket::LocalDepartureItem::InFlight {
@@ -2780,47 +2759,6 @@ impl From<&waddle_xmpp::muc::room_actor::LeaveOutcome> for GroupDmLeaveEffect {
             removed_last_session: outcome.removed_last_session,
         }
     }
-}
-
-fn group_dm_leave_effects_from_snapshot(
-    room: &waddle_xmpp::muc::MucRoom,
-    resources: &[FullJid],
-) -> Vec<(FullJid, GroupDmLeaveEffect)> {
-    let mut room = room.clone();
-    let mut effects = Vec::new();
-    for resource in resources {
-        let Some(occupant) = room.find_occupant_by_real_jid(resource).cloned() else {
-            continue;
-        };
-        let sessions = room.get_occupant_sessions(&occupant.nick);
-        if !sessions.iter().any(|session| session == resource) {
-            continue;
-        }
-        let remaining_occupants = room
-            .occupants
-            .values()
-            .flat_map(|occupant| room.get_occupant_sessions(&occupant.nick))
-            .filter(|session| session != resource)
-            .collect();
-        let removed_last_session = room
-            .remove_occupant_session(&occupant.nick, resource)
-            .expect("occupant session was present in the snapshot");
-        let leaving_room_jid = room
-            .room_jid
-            .with_resource_str(&occupant.nick)
-            .expect("accepted MUC nick is a valid resource");
-        effects.push((
-            resource.clone(),
-            GroupDmLeaveEffect {
-                nick: occupant.nick,
-                affiliation: occupant.affiliation,
-                leaving_room_jid,
-                remaining_occupants,
-                removed_last_session,
-            },
-        ));
-    }
-    effects
 }
 
 pub(crate) fn broadcast_group_dm_leave(
@@ -3611,6 +3549,10 @@ async fn recover_group_dm_actor_after_demote(
     Ok(actor)
 }
 
+/// `Some(successor)` when the ambiguous leave commit is proven durable: the
+/// successor carries the transplanted live roster (the leaver's sessions
+/// included), so the caller MUST still run the ordinary occupancy-leave path
+/// against it — reconciliation only settles the affiliation.
 async fn reconcile_ambiguous_group_dm_leave(
     state: &AppState,
     room_jid: &BareJid,
@@ -3618,19 +3560,20 @@ async fn reconcile_ambiguous_group_dm_leave(
     record: &XmppChannelRecord,
     stale_actor: &ActorRef<RoomActor>,
     caller_bare: &BareJid,
-) -> bool {
+) -> Option<ActorRef<RoomActor>> {
     let Ok(actor) =
         recover_group_dm_actor_after_demote(state, room_jid, channel_id, record, stale_actor).await
     else {
-        return false;
+        return None;
     };
-    actor
+    let committed = actor
         .ask(GetAffiliation {
             jid: caller_bare.clone(),
         })
         .await
         .map(|affiliation| affiliation == Affiliation::None)
-        .unwrap_or(false)
+        .unwrap_or(false);
+    committed.then_some(actor)
 }
 
 struct RecoveredGroupDmRenameCommit {

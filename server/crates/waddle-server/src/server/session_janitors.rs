@@ -479,6 +479,44 @@ pub(crate) async fn run_local_muc_departure_sweep(state: &WebSocketState) {
                         notified,
                     };
                 }
+                LocalDepartureItem::EvictEmptyRoom {
+                    room,
+                    occupancy_revision,
+                } => {
+                    match waddle_xmpp::muc::RoomRegistry::wrap(
+                        state.deps.protocol.room_registry.clone(),
+                    )
+                    .destroy_room_if_inactive(
+                        room.clone(),
+                        occupancy_revision,
+                        waddle_xmpp::muc::room_actor::SealGuard::EmptyNonPersistent,
+                    )
+                    .await
+                    {
+                        // Destroyed, already absent, or refused because a
+                        // newer join bumped the revision: all definitive.
+                        Ok(_) => {
+                            crate::metrics::record_local_departure_retry("completed");
+                            break;
+                        }
+                        Err(_) => {
+                            crate::metrics::record_local_departure_retry("requeued");
+                            state
+                                .deps
+                                .protocol
+                                .pending_local_muc_departures
+                                .requeue_with_backoff(PendingLocalDeparture {
+                                    item: LocalDepartureItem::EvictEmptyRoom {
+                                        room,
+                                        occupancy_revision,
+                                    },
+                                    attempts: pending.attempts,
+                                    not_before: pending.not_before,
+                                });
+                            break;
+                        }
+                    }
+                }
                 LocalDepartureItem::AckReceipt {
                     room,
                     jid,
@@ -9581,6 +9619,26 @@ mod local_muc_departure_tests {
     }
 
     #[tokio::test]
+    async fn retained_empty_room_eviction_converges_when_the_registry_answers() {
+        use crate::server::routes::websocket::LocalDepartureItem;
+        let state = create_test_websocket_state().await;
+        let room = room_jid("evict-retained");
+        state.deps.protocol.pending_local_muc_departures.record(
+            LocalDepartureItem::EvictEmptyRoom {
+                room,
+                occupancy_revision: 1,
+            },
+        );
+        assert_eq!(state.deps.protocol.pending_local_muc_departures.len(), 1);
+        run_local_muc_departure_sweep(&state).await;
+        assert_eq!(
+            state.deps.protocol.pending_local_muc_departures.len(),
+            0,
+            "an absent room is a definitive answer: the owed destroy converges"
+        );
+    }
+
+    #[tokio::test]
     async fn fresh_leave_never_consumes_an_unacknowledged_receipt_but_a_retained_retry_does() {
         // While an acknowledgement is still in flight (or retained for the
         // janitor), an unrelated fresh leave of the same gone JID and cause
@@ -9881,6 +9939,8 @@ mod local_muc_departure_tests {
         let jid = full_jid("alice@example.com/web");
         let actor = create_room(state.as_ref(), &room).await;
         let actor_id = actor.id();
+        let attempt = waddle_xmpp::muc::room_actor::LeaveAttemptId::generate();
+        let notified_bob: HashSet<FullJid> = HashSet::from([full_jid("bob@example.com/phone")]);
         state.deps.protocol.pending_local_muc_departures.record(
             crate::server::routes::websocket::LocalDepartureItem::ConfirmRetired {
                 room: room.clone(),
@@ -9888,8 +9948,8 @@ mod local_muc_departure_tests {
                 actor: actor_id,
                 cause: OccupancyLeaveCause::Disconnect,
                 selector: LeaveSessionSelector::Any,
-                attempt: waddle_xmpp::muc::room_actor::LeaveAttemptId::generate(),
-                notified: HashSet::new(),
+                attempt,
+                notified: notified_bob.clone(),
             },
         );
 
@@ -9898,6 +9958,24 @@ mod local_muc_departure_tests {
             state.deps.protocol.pending_local_muc_departures.len(),
             1,
             "a live actor with the same id must be requeued while waiting for reap"
+        );
+        assert!(
+            state
+                .deps
+                .protocol
+                .pending_local_muc_departures
+                .contains_for_test(
+                    &crate::server::routes::websocket::LocalDepartureItem::ConfirmRetired {
+                        room: room.clone(),
+                        jid: jid.clone(),
+                        actor: actor_id,
+                        cause: OccupancyLeaveCause::Disconnect,
+                        selector: LeaveSessionSelector::Any,
+                        attempt,
+                        notified: notified_bob,
+                    }
+                ),
+            "the awaiting-reap requeue carries the fan-out progress"
         );
 
         let destroyed = RoomRegistry::wrap(state.deps.protocol.room_registry.clone())
@@ -9943,6 +10021,9 @@ mod local_muc_departure_tests {
         let actor = create_room(state.as_ref(), &room).await;
         join_member(&actor, &alice, "alice").await;
         join_member(&actor, &bob, "bob").await;
+        let (bob_tx, mut bob_rx) = mpsc::channel(8);
+        register_test_connection(state.as_ref(), &bob, bob_tx).await;
+        while bob_rx.try_recv().is_ok() {}
         let predecessor_snapshot = actor.ask(GetSnapshot).await.expect("predecessor snapshot");
 
         store.set_leave_mode(LeaveProjectionMode::NotOwner);
@@ -10004,7 +10085,9 @@ mod local_muc_departure_tests {
                 cause: OccupancyLeaveCause::Disconnect,
                 selector: LeaveSessionSelector::Any,
                 attempt: waddle_xmpp::muc::room_actor::LeaveAttemptId::generate(),
-                notified: HashSet::new(),
+                // The dead task had already notified bob before the retirement
+                // watch: the successor's resumed fan-out must skip bob.
+                notified: HashSet::from([bob.clone()]),
             },
         );
 
@@ -10026,6 +10109,10 @@ mod local_muc_departure_tests {
         assert!(
             snapshot.room.find_occupant_by_real_jid(&bob).is_some(),
             "the converted retry must preserve the rest of the transplanted roster"
+        );
+        assert!(
+            bob_rx.try_recv().is_err(),
+            "progress carried through ConfirmRetired: bob is not notified twice"
         );
     }
 
