@@ -377,6 +377,9 @@ pub fn init() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     // helper lives with the webhook route in this crate (#1436, #1452).
     crate::server::routes::livekit_webhook::register_webhook_counters();
 
+    #[cfg(feature = "clustering")]
+    crate::clustering::metrics::register_clustering_counters();
+
     // Build OTLP logs exporter + provider. The tracing bridge below
     // feeds every `tracing::{info,warn,error,debug,trace}!` event into
     // this provider as an OTLP log record, in addition to stdout.

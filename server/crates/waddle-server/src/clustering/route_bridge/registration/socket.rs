@@ -1,6 +1,20 @@
 use super::super::delivery::receiver::{current_claim, user_entity};
 use super::super::*;
 
+/// Observe the sender's interpretation of the current state-carrying update
+/// exchange. The separate zero-payload hint layer is tracked by #1661.
+fn record_remote_resource_update(
+    outcome: waddle_xmpp::telemetry::attributes::RemoteResourceUpdateOutcome,
+) {
+    waddle_xmpp::counter_add!(
+        "waddle.clustering.remote_resource_updates",
+        "{update}",
+        "Sender-interpreted outcomes of remote-resource state updates",
+        1,
+        outcome,
+    );
+}
+
 fn remote_resource_busy_register_backoff(attempt: usize) -> std::time::Duration {
     std::time::Duration::from_millis(50 * (attempt as u64 + 1))
 }
@@ -117,7 +131,7 @@ where
                 tracing::debug!(
                     jid = %jid,
                     owner_node = %user_owner.as_str(),
-                    %error,
+                    error_class = "reply_timeout",
                     "clustered remote-resource register reply timed out; retrying idempotent registration"
                 );
                 tokio::time::sleep(backoff).await;
@@ -211,11 +225,11 @@ impl OrderedRelayDeliveryBridge {
         .await
         {
             Ok(reply) => reply,
-            Err(error) => {
+            Err(_) => {
                 tracing::warn!(
                     jid = %jid,
                     owner_node = %user_owner.as_str(),
-                    %error,
+                    error_class = "ask_failed",
                     "clustered remote-resource register ask failed"
                 );
                 return RemoteResourceRegisterOutcome::Failed;
@@ -325,10 +339,10 @@ impl OrderedRelayDeliveryBridge {
                     RemoteResourceUnregisterOutcome::Failed
                 }
             },
-            Err(error) => {
+            Err(_) => {
                 tracing::warn!(
                     jid = %jid,
-                    %error,
+                    error_class = "ask_failed",
                     "clustered remote-resource unregister ask failed; no remote cleanup proof"
                 );
                 self.record_pending_remote_socket_unregister(jid, &registration)
@@ -393,11 +407,11 @@ impl OrderedRelayDeliveryBridge {
             Ok(Some(snapshot)) => {
                 !snapshot.owner_lease_fresh || snapshot.owner.node_id != pending.user_owner.as_str()
             }
-            Err(error) => {
+            Err(_) => {
                 tracing::warn!(
                     jid = %pending.key.jid,
                     owner_node = %pending.user_owner.as_str(),
-                    %error,
+                    error_class = "backend",
                     "clustered remote-resource unregister: claim liveness check failed; \
                      retaining the obligation"
                 );
@@ -499,7 +513,7 @@ impl OrderedRelayDeliveryBridge {
                     tracing::warn!(
                         jid = %pending.key.jid,
                         owner_node = %pending.user_owner.as_str(),
-                        %error,
+                        error_class = "ask_failed",
                         "clustered remote-resource unregister retry ask failed"
                     );
                 }
@@ -545,10 +559,15 @@ impl OrderedRelayDeliveryBridge {
         {
             Ok(RelayRemoteResourceUpdateReply {
                 status: RelayRemoteResourceUpdateStatus::Updated,
-            }) => {}
+            }) => record_remote_resource_update(
+                waddle_xmpp::telemetry::attributes::RemoteResourceUpdateOutcome::Updated,
+            ),
             Ok(RelayRemoteResourceUpdateReply {
                 status: RelayRemoteResourceUpdateStatus::StaleRegistration,
             }) => {
+                record_remote_resource_update(
+                    waddle_xmpp::telemetry::attributes::RemoteResourceUpdateOutcome::StaleRegistration,
+                );
                 // The owner reports this REGISTRATION stale — that is not
                 // evidence the CLIENT is displaced, and killing the live
                 // socket here spuriously kicked healthy resources with
@@ -566,6 +585,9 @@ impl OrderedRelayDeliveryBridge {
             Ok(RelayRemoteResourceUpdateReply {
                 status: RelayRemoteResourceUpdateStatus::Unavailable,
             }) => {
+                record_remote_resource_update(
+                    waddle_xmpp::telemetry::attributes::RemoteResourceUpdateOutcome::Unavailable,
+                );
                 // Transient owner-side unavailability. Staleness is
                 // unproven — keep registration and socket, and retry the
                 // update so a dropped flip (e.g. unavailable presence)
@@ -577,10 +599,13 @@ impl OrderedRelayDeliveryBridge {
                 );
                 self.schedule_remote_state_resync(jid, &registration.owner);
             }
-            Err(error) => {
+            Err(_) => {
+                record_remote_resource_update(
+                    waddle_xmpp::telemetry::attributes::RemoteResourceUpdateOutcome::AskFailed,
+                );
                 tracing::warn!(
                     jid = %jid,
-                    %error,
+                    error_class = "ask_failed",
                     "clustered remote-resource state update ask failed; \
                      keeping the socket and scheduling a resync"
                 );
@@ -865,8 +890,8 @@ impl OrderedRelayDeliveryBridge {
                 Ok(RelayRemoteResourceUpdateReply {
                     status: RelayRemoteResourceUpdateStatus::Unavailable,
                 }) => return false,
-                Err(error) => {
-                    tracing::debug!(jid = %jid, %error, "remote-resource resync attempt failed");
+                Err(_) => {
+                    tracing::debug!(jid = %jid, error_class = "ask_failed", "remote-resource resync attempt failed");
                     return false;
                 }
             }
@@ -1328,6 +1353,31 @@ mod tests {
             request.origin,
             waddle_xmpp::registry::ForceDetachOrigin::RegistryStaleActorRetirement
         );
+    }
+
+    #[tokio::test]
+    async fn remote_resource_update_outcome_labels_are_pinned() {
+        use waddle_xmpp::telemetry::attributes::RemoteResourceUpdateOutcome;
+
+        let guard = waddle_xmpp::telemetry::test_support::acquire().await;
+        for (outcome, label) in [
+            (RemoteResourceUpdateOutcome::Updated, "updated"),
+            (
+                RemoteResourceUpdateOutcome::StaleRegistration,
+                "stale_registration",
+            ),
+            (RemoteResourceUpdateOutcome::Unavailable, "unavailable"),
+            (RemoteResourceUpdateOutcome::AskFailed, "ask_failed"),
+        ] {
+            super::record_remote_resource_update(outcome);
+            assert_eq!(
+                guard.counter_sum(
+                    "waddle.clustering.remote_resource_updates",
+                    &[("outcome", label)],
+                ),
+                Some(1),
+            );
+        }
     }
 
     #[tokio::test]

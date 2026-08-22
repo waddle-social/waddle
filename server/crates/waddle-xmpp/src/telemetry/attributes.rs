@@ -1265,6 +1265,38 @@ impl MetricAttribute for SessionInitFailureReason {
     }
 }
 
+/// `outcome` — result of a clustered remote-resource state update ask.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RemoteResourceUpdateOutcome {
+    Updated,
+    StaleRegistration,
+    Unavailable,
+    AskFailed,
+}
+
+impl RemoteResourceUpdateOutcome {
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Updated => "updated",
+            Self::StaleRegistration => "stale_registration",
+            Self::Unavailable => "unavailable",
+            Self::AskFailed => "ask_failed",
+        }
+    }
+}
+
+impl sealed::Sealed for RemoteResourceUpdateOutcome {}
+impl MetricAttribute for RemoteResourceUpdateOutcome {
+    fn key(&self) -> &'static str {
+        "outcome"
+    }
+
+    fn value(&self) -> &'static str {
+        self.as_str()
+    }
+}
+
 /// `deny_reason` — why a MUC join was refused (#1440). The stanza
 /// error condition alone collapses several very different operational
 /// faults into `resource-constraint`/`internal-server-error`, so every
