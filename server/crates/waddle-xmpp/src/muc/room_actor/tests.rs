@@ -5770,7 +5770,7 @@ async fn pin_commit_pending_keeps_pin_list_until_authorized() {
 }
 
 #[tokio::test]
-async fn leave_retry_with_same_attempt_replays_retained_outcome_once() {
+async fn leave_retry_with_same_attempt_replays_retained_outcome_until_acknowledged() {
     let actor = spawn_room_actor().await;
     let alice = test_full_jid("alice-replay");
     let bob = test_full_jid("bob-replay");
@@ -5810,7 +5810,13 @@ async fn leave_retry_with_same_attempt_replays_retained_outcome_once() {
     assert_eq!(replayed.nick, first.nick);
     assert_eq!(replayed.remaining_occupants, first.remaining_occupants);
     assert_eq!(replayed.affiliation, first.affiliation);
+    assert_eq!(replayed.acknowledge, attempt);
 
+    // Replay is non-destructive; the acknowledgement of the attempt ends it.
+    actor
+        .ask(AckDepartureReceipt { attempt })
+        .await
+        .expect("ack");
     assert!(matches!(
         actor
             .ask(LeaveByRealJid {
