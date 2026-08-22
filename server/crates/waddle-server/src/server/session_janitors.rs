@@ -421,6 +421,25 @@ pub(crate) async fn run_local_muc_departure_sweep(state: &WebSocketState) {
                         }
                         Ok(LeaveDisposition::Superseded) => {
                             crate::metrics::record_local_departure_retry("superseded");
+                            // #1647 (codex round 28): a Superseded answer
+                            // consumed ONE unreplayable receipt (or bounced
+                            // off a tombstoned attempt) — receipts of OTHER
+                            // nicks may still be owed behind it. Keep
+                            // draining (bounded) until the fallback answers
+                            // NotOccupant; a tombstone-only Superseded loop
+                            // terminates at the drain bound.
+                            if drained_receipts < MAX_RECEIPT_DRAIN {
+                                drained_receipts += 1;
+                                item = LocalDepartureItem::RoomDeparture {
+                                    room,
+                                    jid,
+                                    cause,
+                                    selector,
+                                    attempt,
+                                    notified: std::collections::HashSet::new(),
+                                };
+                                continue;
+                            }
                             break;
                         }
                         Ok(LeaveDisposition::Suppressed {
@@ -10034,7 +10053,27 @@ mod local_muc_departure_tests {
                 .expect("new-nick leave"),
             waddle_xmpp::muc::room_actor::LeaveDisposition::Left(_)
         ));
-        // Both replies were lost; the coalescing inventory holds ONE entry
+        join_member(&actor, &jid, "third-nick").await;
+        let third_attempt = waddle_xmpp::muc::room_actor::LeaveAttemptId::generate();
+        assert!(matches!(
+            actor
+                .ask(waddle_xmpp::muc::room_actor::LeaveByRealJid {
+                    sender_jid: jid.clone(),
+                    cause: OccupancyLeaveCause::Explicit,
+                    session: LeaveSessionSelector::Any,
+                    attempt: third_attempt,
+                    origin: waddle_xmpp::muc::room_actor::LeaveOrigin::Fresh,
+                })
+                .await
+                .expect("third-nick leave"),
+            waddle_xmpp::muc::room_actor::LeaveDisposition::Left(_)
+        ));
+        // Another account re-takes the OLDEST nick before the retry: its
+        // receipt is unreplayable (Superseded consumes it), and the drain
+        // must continue past it to the still-owed receipts behind it.
+        let bob = full_jid("bob@example.com/web");
+        join_member(&actor, &bob, "old-nick").await;
+        // Three replies were lost; the coalescing inventory holds ONE entry
         // carrying the newest attempt.
         state.deps.protocol.pending_local_muc_departures.record(
             crate::server::routes::websocket::LocalDepartureItem::RoomDeparture {
@@ -10042,7 +10081,7 @@ mod local_muc_departure_tests {
                 jid: jid.clone(),
                 cause: OccupancyLeaveCause::Explicit,
                 selector: LeaveSessionSelector::Any,
-                attempt: new_attempt,
+                attempt: third_attempt,
                 notified: HashSet::new(),
             },
         );
@@ -10057,7 +10096,7 @@ mod local_muc_departure_tests {
                 .departures
                 .receipts
                 .is_empty(),
-            "every owed receipt is replayed and acknowledged"
+            "every owed receipt is replayed (or consumed as stale) and none is stranded"
         );
         assert_eq!(
             state.deps.protocol.pending_local_muc_departures.len(),
