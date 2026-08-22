@@ -27,7 +27,7 @@ use waddle_xmpp::{
         MucInviteMembershipGrant,
     },
     muc::room_actor::{AffiliationMutationError, ChangeAffiliation, GetSnapshot},
-    muc::room_registry_actor::{DemoteRoomIfExactActor, GetOrCreateRoom, GetRoom},
+    muc::room_registry_actor::{GetOrCreateRoom, GetRoom},
     parser::stanza_to_string,
     pending_delivery::{InsertOutcome, PendingPayload, PendingRow, PendingRowId},
     protocol::handlers::errors::message_error_reply,
@@ -62,44 +62,40 @@ pub(super) async fn recover_actor_after_ambiguous_invite_grant(
     .ok()?
     .ok()?;
     let snapshot = &snapshot;
-    // Demote the exact stale actor, then acquire the successor WITH the live
-    // roster in one registry step. A post-publication `RestoreLiveRoster`
-    // would erase joins/leaves that already projected on a live successor;
-    // if the stale actor was already replaced, the live successor is
-    // authoritative and gets no transplant.
-    let demoted = state
+    // Demote the exact stale actor and publish the successor in ONE registry
+    // turn (no observable "room absent" gap). A post-publication
+    // `RestoreLiveRoster` would erase joins/leaves that already projected on a
+    // live successor; if the stale actor was already replaced, the live
+    // successor is authoritative and gets no transplant.
+    let handoff = state
         .deps
         .protocol
         .room_registry
-        .ask(DemoteRoomIfExactActor {
-            room_jid: room_jid.clone(),
-            actor_ref: stale_actor.clone(),
-        })
-        .await
-        .ok()?;
-    let recovered = if demoted {
-        state
-            .deps
-            .protocol
-            .room_registry
-            .ask(
-                waddle_xmpp::muc::room_registry_actor::GetOrCreateRoomWithLiveRoster {
-                    room_jid: room_jid.clone(),
-                    waddle_id: waddle_xmpp::muc::durable::WaddleId::new(
-                        snapshot.room.waddle_id.clone(),
-                    ),
-                    channel_id: waddle_xmpp::muc::durable::ChannelId::new(
-                        snapshot.room.channel_id.clone(),
-                    ),
-                    config: snapshot.room.config.clone(),
-                    live_room_restore: snapshot.room.clone(),
-                    occupancy_revision: snapshot.occupancy_revision,
-                    departures: snapshot.departures.clone(),
-                },
-            )
-            .await
-            .ok()
-            .map(|acquisition| acquisition.actor_ref)?
+        .ask(
+            waddle_xmpp::muc::room_registry_actor::GetOrCreateRoomWithLiveRoster {
+                room_jid: room_jid.clone(),
+                waddle_id: waddle_xmpp::muc::durable::WaddleId::new(
+                    snapshot.room.waddle_id.clone(),
+                ),
+                channel_id: waddle_xmpp::muc::durable::ChannelId::new(
+                    snapshot.room.channel_id.clone(),
+                ),
+                config: snapshot.room.config.clone(),
+                live_room_restore: snapshot.room.clone(),
+                occupancy_revision: snapshot.occupancy_revision,
+                departures: snapshot.departures.clone(),
+                demote_first: Some(stale_actor.clone()),
+            },
+        )
+        .await;
+    let stale_not_current = matches!(
+        handoff,
+        Err(kameo::error::SendError::HandlerError(
+            waddle_xmpp::muc::room_registry_actor::RoomRegistryError::StaleActorNotCurrent(_),
+        ))
+    );
+    let recovered = if !stale_not_current {
+        handoff.ok().map(|acquisition| acquisition.actor_ref)?
     } else {
         // Demotion refused for one of two reasons, both of which make the
         // stale snapshot non-authoritative: a successor is already live (its

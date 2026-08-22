@@ -169,6 +169,7 @@ pub(crate) async fn ack_departure_receipt(
         room: room.clone(),
         jid: jid.clone(),
         attempt,
+        absent_sweeps: 0,
     });
 }
 
@@ -440,17 +441,26 @@ pub(crate) async fn maybe_evict_empty_room(
     // captured by this leave — a join admitted after the leave bumps the
     // revision and the destroy refuses instead of orphaning the fresh
     // occupant.
-    let destroyed = match RoomRegistry::wrap(state.deps.protocol.room_registry.clone())
-        .destroy_room_if_inactive(
+    // Bounded: a stalled guarded destroy must not keep the leave task (and
+    // its write-ahead retention) open indefinitely; an empty room left behind
+    // is reaped by the registry's inactivity sweep.
+    let destroyed = match tokio::time::timeout(
+        2 * super::LEAVE_ASK_TIMEOUT,
+        RoomRegistry::wrap(state.deps.protocol.room_registry.clone()).destroy_room_if_inactive(
             room_jid.clone(),
             outcome.occupancy_revision,
             SealGuard::EmptyNonPersistent,
-        )
-        .await
+        ),
+    )
+    .await
     {
-        Ok(destroyed) => destroyed,
-        Err(error) => {
+        Ok(Ok(destroyed)) => destroyed,
+        Ok(Err(error)) => {
             warn!(room = %room_jid, error = %error, "Failed guarded destroy of empty room");
+            return false;
+        }
+        Err(_) => {
+            warn!(room = %room_jid, "Guarded destroy of empty room timed out");
             return false;
         }
     };
@@ -1933,14 +1943,13 @@ async fn cleanup_muc_presence_with_origin(
         // Bounded: one wedged room (stuck projection transaction or mailbox)
         // must not stall the sweep of every other room this JID occupies.
         let attempt = waddle_xmpp::muc::room_actor::LeaveAttemptId::generate();
-        let in_flight = LocalDepartureItem::RoomDeparture {
+        let in_flight = LocalDepartureItem::InFlight {
             room: room_jid.clone(),
             jid: jid.clone(),
             cause: OccupancyLeaveCause::Disconnect,
-            selector: LeaveSessionSelector::Any,
             attempt,
         };
-        let in_flight_owned = state
+        state
             .deps
             .protocol
             .pending_local_muc_departures
@@ -1999,14 +2008,14 @@ async fn cleanup_muc_presence_with_origin(
                     &room_actor,
                     &room_jid,
                     jid,
-                    attempt,
+                    outcome.acknowledge,
                 )
                 .await;
                 state
                     .deps
                     .protocol
                     .pending_local_muc_departures
-                    .complete_in_flight(&in_flight, in_flight_owned);
+                    .complete_in_flight(&in_flight);
             }
             Ok(LeaveDisposition::Deferred { watermark }) => {
                 completed = false;
@@ -2017,7 +2026,7 @@ async fn cleanup_muc_presence_with_origin(
                     .deps
                     .protocol
                     .pending_local_muc_departures
-                    .complete_in_flight(&in_flight, in_flight_owned);
+                    .complete_in_flight(&in_flight);
                 state.deps.protocol.pending_local_muc_departures.record(
                     LocalDepartureItem::RoomDeparture {
                         room: room_jid,
@@ -2028,27 +2037,30 @@ async fn cleanup_muc_presence_with_origin(
                     },
                 );
             }
-            Ok(LeaveDisposition::Suppressed { .. }) => {
+            Ok(LeaveDisposition::Suppressed {
+                attempt: acknowledge,
+                ..
+            }) => {
                 ack_departure_receipt(
                     &state.deps.protocol.pending_local_muc_departures,
                     &room_actor,
                     &room_jid,
                     jid,
-                    attempt,
+                    acknowledge,
                 )
                 .await;
                 state
                     .deps
                     .protocol
                     .pending_local_muc_departures
-                    .complete_in_flight(&in_flight, in_flight_owned);
+                    .complete_in_flight(&in_flight);
             }
             Ok(LeaveDisposition::NotOccupant | LeaveDisposition::Superseded) => {
                 state
                     .deps
                     .protocol
                     .pending_local_muc_departures
-                    .complete_in_flight(&in_flight, in_flight_owned);
+                    .complete_in_flight(&in_flight);
             }
             Err(LeaveAskFailure::Timeout) => {
                 // Never enqueued, or enqueued with the reply lost: the retry
@@ -2057,6 +2069,11 @@ async fn cleanup_muc_presence_with_origin(
                 // proves nothing about the seal: retain the departure itself,
                 // not a retirement watch.
                 completed = false;
+                state
+                    .deps
+                    .protocol
+                    .pending_local_muc_departures
+                    .complete_in_flight(&in_flight);
                 state.deps.protocol.pending_local_muc_departures.record(
                     LocalDepartureItem::RoomDeparture {
                         room: room_jid.clone(),
@@ -2070,6 +2087,11 @@ async fn cleanup_muc_presence_with_origin(
             }
             Err(error @ (LeaveAskFailure::Handler(_) | LeaveAskFailure::Transport)) => {
                 completed = false;
+                state
+                    .deps
+                    .protocol
+                    .pending_local_muc_departures
+                    .complete_in_flight(&in_flight);
                 state.deps.protocol.pending_local_muc_departures.record(
                     LocalDepartureItem::ConfirmRetired {
                         room: room_jid.clone(),

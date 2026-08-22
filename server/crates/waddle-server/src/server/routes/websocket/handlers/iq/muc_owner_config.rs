@@ -95,58 +95,47 @@ async fn recover_exact_room_after_ambiguous_config_commit(
     .map_err(|_| "config outcome recovery snapshot timed out".to_string())?
     .map_err(|error| format!("config outcome recovery snapshot failed: {error:?}"))?;
     let recovery_snapshot = &recovery_snapshot;
-    // Demote the exact stale actor, then acquire the successor WITH the live
-    // roster in one registry step: transplanting after publication would let
-    // a join/leave that landed on an already-live successor be overwritten by
-    // the stale snapshot (the registry documents why post-publication merging
-    // is unsafe). If the stale actor was already replaced, the live successor
-    // is authoritative and gets no transplant.
-    let demoted = state
+    // Demote the exact stale actor and publish the successor in ONE registry
+    // turn (no observable "room absent" gap); if the stale actor was already
+    // replaced, the live successor is authoritative and gets no transplant.
+    let handoff = state
         .deps
         .protocol
         .room_registry
         .ask(
-            waddle_xmpp::muc::room_registry_actor::DemoteRoomIfExactActor {
+            waddle_xmpp::muc::room_registry_actor::GetOrCreateRoomWithLiveRoster {
                 room_jid: room_jid.clone(),
-                actor_ref: stale_actor.clone(),
+                waddle_id: waddle_xmpp::muc::durable::WaddleId::new(
+                    recovery_snapshot.room.waddle_id.clone(),
+                ),
+                channel_id: waddle_xmpp::muc::durable::ChannelId::new(
+                    recovery_snapshot.room.channel_id.clone(),
+                ),
+                config: recovery_snapshot.room.config.clone(),
+                live_room_restore: recovery_snapshot.room.clone(),
+                occupancy_revision: recovery_snapshot.occupancy_revision,
+                departures: recovery_snapshot.departures.clone(),
+                demote_first: Some(stale_actor.clone()),
             },
         )
-        .await
-        .map_err(|error| format!("config outcome recovery demotion failed: {error:?}"))?;
-    let recovered_actor = if demoted {
-        state
-            .deps
-            .protocol
-            .room_registry
-            .ask(
-                waddle_xmpp::muc::room_registry_actor::GetOrCreateRoomWithLiveRoster {
-                    room_jid: room_jid.clone(),
-                    waddle_id: waddle_xmpp::muc::durable::WaddleId::new(
-                        recovery_snapshot.room.waddle_id.clone(),
-                    ),
-                    channel_id: waddle_xmpp::muc::durable::ChannelId::new(
-                        recovery_snapshot.room.channel_id.clone(),
-                    ),
-                    config: recovery_snapshot.room.config.clone(),
-                    live_room_restore: recovery_snapshot.room.clone(),
-                    occupancy_revision: recovery_snapshot.occupancy_revision,
-                    departures: recovery_snapshot.departures.clone(),
-                },
-            )
-            .await
-            .map_err(|error| format!("config outcome recovery failed: {error:?}"))?
-            .actor_ref
-    } else {
-        waddle_xmpp::muc::RoomRegistry::wrap(state.deps.protocol.room_registry.clone())
-            .get_or_create_room(
-                room_jid.clone(),
-                recovery_snapshot.room.waddle_id.clone(),
-                recovery_snapshot.room.channel_id.clone(),
-                recovery_snapshot.room.config.clone(),
-            )
-            .await
-            .map_err(|error| format!("config outcome recovery failed: {error:?}"))?
-            .actor_ref
+        .await;
+    let recovered_actor = match handoff {
+        Ok(acquisition) => acquisition.actor_ref,
+        Err(kameo::error::SendError::HandlerError(
+            waddle_xmpp::muc::room_registry_actor::RoomRegistryError::StaleActorNotCurrent(_),
+        )) => {
+            waddle_xmpp::muc::RoomRegistry::wrap(state.deps.protocol.room_registry.clone())
+                .get_or_create_room(
+                    room_jid.clone(),
+                    recovery_snapshot.room.waddle_id.clone(),
+                    recovery_snapshot.room.channel_id.clone(),
+                    recovery_snapshot.room.config.clone(),
+                )
+                .await
+                .map_err(|error| format!("config outcome recovery failed: {error:?}"))?
+                .actor_ref
+        }
+        Err(error) => return Err(format!("config outcome recovery failed: {error:?}")),
     };
     let recovered_snapshot = recovered_actor
         .ask(GetSnapshot)
@@ -768,7 +757,9 @@ pub(super) async fn apply_muc_owner_config(
             if recovered_snapshot.room.config != config {
                 return Err("config update outcome is being reconciled; please retry".to_string());
             }
-            let mut room_with_reconciled_config = snapshot.room.clone();
+            // Seed the reconciled broadcast/voice roster from the recovered
+            // (post-mutation) snapshot, not the caller's pre-mutation copy.
+            let mut room_with_reconciled_config = recovered_snapshot.room.clone();
             room_with_reconciled_config.config = config.clone();
             if let Some(affiliations) = &managed_enforcement_affiliations {
                 for (jid, affiliation) in affiliations {

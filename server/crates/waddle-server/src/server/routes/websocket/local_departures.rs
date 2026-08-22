@@ -17,7 +17,10 @@ use waddle_xmpp::muc::{
 const BACKOFF_BASE: Duration = Duration::from_secs(2);
 const BACKOFF_MAX: Duration = Duration::from_secs(60);
 const STUCK_ATTEMPTS: u32 = 10;
-const IN_FLIGHT_SLACK: Duration = Duration::from_secs(2);
+/// How long a write-ahead [`LocalDepartureItem::InFlight`] entry waits before
+/// the janitor assumes its live task died: generously above one leave ask
+/// (5s) + bounded effects (eviction ≤ 10s) + one acknowledgement ask (5s).
+pub(crate) const IN_FLIGHT_REPLAY_DELAY: Duration = Duration::from_secs(30);
 /// Sweeps an owed acknowledgement outlives a room the registry cannot find:
 /// a live-roster handoff (demote, then publish the successor holding the
 /// transferred receipt) briefly answers "no room" while the receipt is in
@@ -52,10 +55,27 @@ pub enum LocalDepartureItem {
     /// receipt acknowledgement could not be handed to the actor in time: the
     /// receipt must still be dropped, or a later gone-JID leave of the same
     /// cause would replay the already-emitted effects.
+    /// Write-ahead retention for a departure a live task is asking for and
+    /// effecting right now. Keyed apart from `RoomDeparture` so it never
+    /// merges with (or completes away) an older retained responsibility, and
+    /// never hands its attempt to one. If the live task dies before it
+    /// completes the entry, the janitor converts it into a retained retry
+    /// after [`IN_FLIGHT_REPLAY_DELAY`] and replays the receipt.
+    InFlight {
+        room: BareJid,
+        jid: FullJid,
+        cause: OccupancyLeaveCause,
+        attempt: LeaveAttemptId,
+    },
     AckReceipt {
         room: BareJid,
         jid: FullJid,
         attempt: LeaveAttemptId,
+        /// Consecutive sweeps that found no registered room for this ack (a
+        /// live-roster handoff window, or a room gone for good). Separate
+        /// from the generic `attempts` so ask timeouts and `NotAuthoritative`
+        /// answers never consume the absent-room budget.
+        absent_sweeps: u32,
     },
 }
 
@@ -64,6 +84,7 @@ enum LocalDepartureKey {
     FullJidSweep(FullJid),
     RoomScoped(BareJid, FullJid, u8),
     Ack(BareJid, FullJid, LeaveAttemptId),
+    InFlight(BareJid, FullJid, u8),
 }
 
 impl LocalDepartureItem {
@@ -76,9 +97,12 @@ impl LocalDepartureItem {
             | Self::ConfirmRetired {
                 room, jid, cause, ..
             } => LocalDepartureKey::RoomScoped(room.clone(), jid.clone(), cause_key(*cause)),
-            Self::AckReceipt { room, jid, attempt } => {
-                LocalDepartureKey::Ack(room.clone(), jid.clone(), *attempt)
-            }
+            Self::AckReceipt {
+                room, jid, attempt, ..
+            } => LocalDepartureKey::Ack(room.clone(), jid.clone(), *attempt),
+            Self::InFlight {
+                room, jid, cause, ..
+            } => LocalDepartureKey::InFlight(room.clone(), jid.clone(), cause_key(*cause)),
         }
     }
 
@@ -141,6 +165,17 @@ impl LocalDepartureItem {
                 selector: merged_selector,
                 attempt: merged_attempt,
             },
+            (
+                LocalDepartureItem::InFlight {
+                    room, jid, cause, ..
+                },
+                _,
+            ) => LocalDepartureItem::InFlight {
+                room,
+                jid,
+                cause,
+                attempt: merged_attempt,
+            },
             (existing, _) => existing,
         }
     }
@@ -148,15 +183,15 @@ impl LocalDepartureItem {
     fn attempt(&self) -> Option<LeaveAttemptId> {
         match self {
             Self::FullJidSweep { .. } | Self::AckReceipt { .. } => None,
-            Self::RoomDeparture { attempt, .. } | Self::ConfirmRetired { attempt, .. } => {
-                Some(*attempt)
-            }
+            Self::RoomDeparture { attempt, .. }
+            | Self::ConfirmRetired { attempt, .. }
+            | Self::InFlight { attempt, .. } => Some(*attempt),
         }
     }
 
     fn selector(&self) -> Option<LeaveSessionSelector> {
         match self {
-            Self::FullJidSweep { .. } | Self::AckReceipt { .. } => None,
+            Self::FullJidSweep { .. } | Self::AckReceipt { .. } | Self::InFlight { .. } => None,
             Self::RoomDeparture { selector, .. } | Self::ConfirmRetired { selector, .. } => {
                 Some(*selector)
             }
@@ -214,7 +249,7 @@ pub struct PendingLocalMucDepartures {
 #[derive(Debug, Default)]
 struct Inventory {
     entries: HashMap<LocalDepartureKey, PendingLocalDeparture>,
-    counts: [i64; 4],
+    counts: [i64; 5],
 }
 
 const fn kind_slot(item: &LocalDepartureItem) -> usize {
@@ -223,6 +258,7 @@ const fn kind_slot(item: &LocalDepartureItem) -> usize {
         LocalDepartureItem::RoomDeparture { .. } => 1,
         LocalDepartureItem::ConfirmRetired { .. } => 2,
         LocalDepartureItem::AckReceipt { .. } => 3,
+        LocalDepartureItem::InFlight { .. } => 4,
     }
 }
 
@@ -265,6 +301,7 @@ impl Inventory {
             "room_departure",
             "confirm_retired",
             "ack_receipt",
+            "in_flight",
         ]
         .into_iter()
         .zip(self.counts)
@@ -383,37 +420,15 @@ impl PendingLocalMucDepartures {
     }
 
     /// Write-ahead retention for a departure a live task is about to ask for
-    /// and then effect: if that task is cancelled between the actor's commit
-    /// and the fan-out, the janitor replays the retained outcome under the
-    /// same attempt. Due only after one leave bound plus slack, so the live
-    /// task normally completes it first.
-    ///
-    /// Returns whether the entry was created by this call: an entry that
-    /// already existed under the key is an older retained responsibility the
-    /// live task must never complete away.
-    pub fn record_in_flight(&self, item: LocalDepartureItem) -> bool {
-        let key = item.key();
-        let existed = self
-            .entries
-            .lock()
-            .expect("local departure inventory lock")
-            .entries
-            .contains_key(&key);
-        self.record_at(
-            item,
-            Instant::now() + super::LEAVE_ASK_TIMEOUT + IN_FLIGHT_SLACK,
-        );
-        !existed
+    /// and then effect (see [`LocalDepartureItem::InFlight`]).
+    pub fn record_in_flight(&self, item: LocalDepartureItem) {
+        debug_assert!(matches!(item, LocalDepartureItem::InFlight { .. }));
+        self.record_at(item, Instant::now() + IN_FLIGHT_REPLAY_DELAY);
     }
 
-    /// The live task finished its effects: drop the write-ahead entry it
-    /// created, unless a different attempt has since been merged under the
-    /// same key (then that newer responsibility stays). `owned` is what
-    /// [`Self::record_in_flight`] returned.
-    pub fn complete_in_flight(&self, item: &LocalDepartureItem, owned: bool) {
-        if !owned {
-            return;
-        }
+    /// The live task finished its effects: drop its write-ahead entry unless
+    /// a newer attempt has since been merged under the same key.
+    pub fn complete_in_flight(&self, item: &LocalDepartureItem) {
         let mut inventory = self.entries.lock().expect("local departure inventory lock");
         let key = item.key();
         let same_attempt = inventory
@@ -1021,16 +1036,19 @@ mod tests {
             room: room.clone(),
             jid: jid.clone(),
             attempt: first,
+            absent_sweeps: 0,
         });
         pending.record(LocalDepartureItem::AckReceipt {
             room: room.clone(),
             jid: jid.clone(),
             attempt: second,
+            absent_sweeps: 0,
         });
         pending.record(LocalDepartureItem::AckReceipt {
             room,
             jid,
             attempt: second,
+            absent_sweeps: 0,
         });
         assert_eq!(
             pending.len(),

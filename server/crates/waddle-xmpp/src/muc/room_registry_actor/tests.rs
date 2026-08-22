@@ -4521,6 +4521,7 @@ mod ownership_claims_tests {
                 live_room_restore: stale_room,
                 occupancy_revision: source_snapshot.occupancy_revision,
                 departures: Default::default(),
+                demote_first: None,
             })
             .await
             .expect("recover room with typed live roster");
@@ -4547,6 +4548,108 @@ mod ownership_claims_tests {
                 .expect("recovered room exists")
                 .id(),
             acquisition.actor_ref.id()
+        );
+    }
+
+    #[tokio::test]
+    async fn live_roster_handoff_demotes_and_publishes_in_one_registry_turn() {
+        use crate::muc::durable::{ChannelId, WaddleId};
+        use crate::muc::room_actor::{GetSnapshot, JoinAffiliationGrant, JoinWithAffiliation};
+        use crate::Affiliation;
+
+        let registry = spawn_registry().await;
+        let source_jid = test_room_jid("live-roster-source");
+        let source_actor = registry
+            .ask(GetOrCreateRoom {
+                room_jid: source_jid.clone(),
+                waddle_id: "source-waddle".to_string(),
+                channel_id: "source-channel".to_string(),
+                config: RoomConfig {
+                    name: "stale live roster".to_string(),
+                    ..RoomConfig::default()
+                },
+            })
+            .await
+            .expect("create source room")
+            .actor_ref;
+        let member: jid::FullJid = "alice@example.com/web".parse().expect("member full JID");
+        source_actor
+            .ask(JoinWithAffiliation {
+                sender_jid: member.clone(),
+                nick: "alice".to_string(),
+                affiliation_grant: JoinAffiliationGrant::Resolver(Affiliation::Member),
+                local_domain: "example.com".to_string(),
+                admission_revision: 0,
+            })
+            .await
+            .expect("join source room");
+        let source_snapshot = source_actor
+            .ask(GetSnapshot)
+            .await
+            .expect("source snapshot");
+        let stale_room = source_snapshot.room;
+        let source_snapshot_room_for_refusal = stale_room.clone();
+
+        let recovered_jid = source_jid.clone();
+        let acquisition = registry
+            .ask(GetOrCreateRoomWithLiveRoster {
+                room_jid: recovered_jid.clone(),
+                waddle_id: WaddleId::new("typed-waddle".to_string()),
+                channel_id: ChannelId::new("typed-channel".to_string()),
+                config: RoomConfig {
+                    name: "authoritative successor".to_string(),
+                    ..RoomConfig::default()
+                },
+                live_room_restore: stale_room,
+                occupancy_revision: source_snapshot.occupancy_revision,
+                departures: Default::default(),
+                demote_first: Some(source_actor.clone()),
+            })
+            .await
+            .expect("atomic handoff");
+        assert_eq!(acquisition.creation, RoomCreation::Created);
+        let successor = acquisition.actor_ref.clone();
+        assert_ne!(successor.id(), source_actor.id());
+        let registered = registry
+            .ask(GetRoom {
+                room_jid: source_jid.clone(),
+            })
+            .await
+            .expect("get room")
+            .expect("successor is registered without an observable gap");
+        assert_eq!(registered.id(), successor.id());
+        assert!(
+            successor
+                .ask(GetSnapshot)
+                .await
+                .expect("successor snapshot")
+                .room
+                .get_occupant("alice")
+                .is_some(),
+            "the transplanted roster survives the handoff"
+        );
+        // The stale actor is no longer current: a second handoff naming it is
+        // refused instead of transplanting a stale snapshot over the successor.
+        let refused = registry
+            .ask(GetOrCreateRoomWithLiveRoster {
+                room_jid: source_jid.clone(),
+                waddle_id: WaddleId::new("typed-waddle".to_string()),
+                channel_id: ChannelId::new("typed-channel".to_string()),
+                config: RoomConfig::default(),
+                live_room_restore: source_snapshot_room_for_refusal,
+                occupancy_revision: 0,
+                departures: Default::default(),
+                demote_first: Some(source_actor.clone()),
+            })
+            .await;
+        assert!(
+            matches!(
+                refused,
+                Err(kameo::error::SendError::HandlerError(
+                    RoomRegistryError::StaleActorNotCurrent(_)
+                ))
+            ),
+            "got {refused:?}"
         );
     }
 

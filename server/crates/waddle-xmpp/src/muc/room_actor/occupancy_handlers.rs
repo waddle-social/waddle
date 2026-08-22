@@ -357,6 +357,8 @@ pub enum LeaveDisposition {
     Suppressed {
         nick: crate::muc::MucOccupantNick,
         affiliation: crate::types::Affiliation,
+        /// The attempt to acknowledge (see [`super::LeaveOutcome::acknowledge`]).
+        attempt: LeaveAttemptId,
     },
 }
 
@@ -372,7 +374,7 @@ impl kameo::message::Message<LeaveByRealJid> for RoomActor {
         if self.departure_attempt_is_superseded(&msg.sender_jid, msg.attempt) {
             return Ok(LeaveDisposition::Superseded);
         }
-        match self.take_departure_receipt(msg.attempt) {
+        match self.replay_departure_receipt(msg.attempt) {
             // Replay only while the departure is still the latest truth: a
             // newer generation of this full JID (re-entered, even if it left
             // or was removed since) or a re-taken nick makes the retained
@@ -420,7 +422,7 @@ impl kameo::message::Message<LeaveByRealJid> for RoomActor {
             // replay it now: the departure's effects are owed to someone and
             // the receipt is consumed exactly once.
             if msg.origin == LeaveOrigin::RetainedRetry {
-                match self.take_departure_receipt_for_jid(&msg.sender_jid, msg.cause) {
+                match self.replay_departure_receipt_for_jid(&msg.sender_jid, msg.cause) {
                     Some(super::RetainedDeparture::Stale) => {
                         return Ok(LeaveDisposition::Superseded);
                     }
@@ -563,6 +565,7 @@ impl kameo::message::Message<LeaveByRealJid> for RoomActor {
                 occupant_count as i64 - occupant_count_before as i64,
             );
             LeaveDisposition::Left(Box::new(LeaveOutcome {
+                acknowledge: msg.attempt,
                 nick,
                 affiliation,
                 role,
@@ -594,6 +597,7 @@ impl kameo::message::Message<LeaveByRealJid> for RoomActor {
                 LeaveDisposition::Suppressed {
                     nick: durable_nick,
                     affiliation: outcome.affiliation,
+                    attempt: msg.attempt,
                 }
             }
             LeaveDisposition::Left(outcome) => {
@@ -1076,10 +1080,18 @@ fn receipt_nick(receipt: &super::DepartureReceipt) -> &str {
 }
 
 fn receipt_disposition(receipt: super::DepartureReceipt) -> LeaveDisposition {
+    let attempt = receipt.attempt;
     match receipt.outcome {
-        super::DepartureReceiptOutcome::Left(outcome) => LeaveDisposition::Left(outcome),
+        super::DepartureReceiptOutcome::Left(mut outcome) => {
+            outcome.acknowledge = attempt;
+            LeaveDisposition::Left(outcome)
+        }
         super::DepartureReceiptOutcome::Suppressed { nick, affiliation } => {
-            LeaveDisposition::Suppressed { nick, affiliation }
+            LeaveDisposition::Suppressed {
+                nick,
+                affiliation,
+                attempt,
+            }
         }
     }
 }

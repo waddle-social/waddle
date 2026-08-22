@@ -4551,6 +4551,17 @@ async fn old_receipt_is_not_replayed_after_the_jid_rejoined_and_left_again() {
         leave_with_attempt(&actor, alice.clone(), second_attempt).await,
         LeaveDisposition::Left(_)
     ));
+    // Replay is non-destructive: only the acknowledgement drops the receipt.
+    assert!(matches!(
+        leave_with_attempt(&actor, alice.clone(), second_attempt).await,
+        LeaveDisposition::Left(_)
+    ));
+    actor
+        .ask(AckDepartureReceipt {
+            attempt: second_attempt,
+        })
+        .await
+        .expect("ack");
     assert!(matches!(
         leave_with_attempt(&actor, alice, second_attempt).await,
         LeaveDisposition::NotOccupant
@@ -4563,7 +4574,7 @@ async fn old_receipt_is_not_replayed_after_the_jid_rejoined_and_left_again() {
             .departures
             .receipts
             .is_empty(),
-        "the departed-generation tombstone prunes with B's consumed receipt"
+        "the departed-generation tombstone prunes with B's acknowledged receipt"
     );
 }
 
@@ -4780,17 +4791,30 @@ async fn jid_fallback_only_replays_a_receipt_of_the_same_cause() {
         receipts_of(&actor.ask(GetSnapshot).await.expect("snapshot")).len(),
         1
     );
-    // A coalesced explicit RETRY (unknown attempt, same cause) replays it.
-    assert!(matches!(
-        retry_with_attempt_and_cause(
-            &actor,
-            alice.clone(),
-            LeaveAttemptId::generate(),
-            OccupancyLeaveCause::Explicit
-        )
-        .await,
-        LeaveDisposition::Left(_)
-    ));
+    // A coalesced explicit RETRY (unknown attempt, same cause) replays it and
+    // names the receipt's own attempt for acknowledgement.
+    let LeaveDisposition::Left(replayed) = retry_with_attempt_and_cause(
+        &actor,
+        alice.clone(),
+        LeaveAttemptId::generate(),
+        OccupancyLeaveCause::Explicit,
+    )
+    .await
+    else {
+        panic!("coalesced retry replays");
+    };
+    assert_eq!(replayed.acknowledge, explicit_attempt);
+    assert_eq!(
+        receipts_of(&actor.ask(GetSnapshot).await.expect("snapshot")).len(),
+        1,
+        "replay is non-destructive"
+    );
+    actor
+        .ask(AckDepartureReceipt {
+            attempt: replayed.acknowledge,
+        })
+        .await
+        .expect("ack");
     assert!(receipts_of(&actor.ask(GetSnapshot).await.expect("snapshot")).is_empty());
 }
 
@@ -5131,6 +5155,19 @@ async fn unknown_attempt_for_a_gone_session_replays_the_jids_unacknowledged_rece
     let original = leave_with_attempt(&actor, alice.clone(), original_attempt).await;
     assert!(matches!(original, LeaveDisposition::Left(_)));
 
+    let LeaveDisposition::Left(replayed) = retry_with_attempt_and_cause(
+        &actor,
+        alice.clone(),
+        LeaveAttemptId::generate(),
+        crate::muc::durable::OccupancyLeaveCause::Explicit,
+    )
+    .await
+    else {
+        panic!("unknown attempt replays the JID's receipt");
+    };
+    assert_eq!(replayed.acknowledge, original_attempt);
+    // A second retry (its reply may have been lost too) replays again; only
+    // the acknowledgement of the receipt's attempt ends it.
     assert!(matches!(
         retry_with_attempt_and_cause(
             &actor,
@@ -5141,6 +5178,12 @@ async fn unknown_attempt_for_a_gone_session_replays_the_jids_unacknowledged_rece
         .await,
         LeaveDisposition::Left(_)
     ));
+    actor
+        .ask(AckDepartureReceipt {
+            attempt: replayed.acknowledge,
+        })
+        .await
+        .expect("ack");
     assert!(matches!(
         retry_with_attempt_and_cause(
             &actor,
@@ -5303,6 +5346,10 @@ async fn store_less_suppressed_departure_mints_a_receipt_replayed_as_suppressed(
         leave_with_attempt(&actor, alice.clone(), attempt).await,
         LeaveDisposition::Suppressed { ref nick, .. } if nick.as_str() == "alice"
     ));
+    actor
+        .ask(AckDepartureReceipt { attempt })
+        .await
+        .expect("ack");
     assert!(matches!(
         leave_with_attempt(&actor, alice, attempt).await,
         LeaveDisposition::NotOccupant
@@ -5803,6 +5850,7 @@ fn departure_receipts_keep_only_the_newest_generation_per_jid() {
     let bob = test_full_jid_resource("bob", "web");
     let outcome = |nick: &str, revision: u64| {
         super::DepartureReceiptOutcome::Left(Box::new(LeaveOutcome {
+            acknowledge: LeaveAttemptId::generate(),
             nick: nick.to_owned(),
             affiliation: Affiliation::Member,
             role: Role::Participant,

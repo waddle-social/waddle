@@ -2300,14 +2300,13 @@ async fn run_group_dm_leave(
     } else {
         for resource in resources {
             let attempt = waddle_xmpp::muc::room_actor::LeaveAttemptId::generate();
-            let in_flight = crate::server::routes::websocket::LocalDepartureItem::RoomDeparture {
+            let in_flight = crate::server::routes::websocket::LocalDepartureItem::InFlight {
                 room: args.room_jid.clone(),
                 jid: resource.clone(),
                 cause: waddle_xmpp::muc::durable::OccupancyLeaveCause::Administrative,
-                selector: waddle_xmpp::muc::room_actor::LeaveSessionSelector::Any,
                 attempt,
             };
-            let in_flight_owned = pending_local_muc_departures.record_in_flight(in_flight.clone());
+            pending_local_muc_departures.record_in_flight(in_flight.clone());
             match crate::server::routes::websocket::ask_leave_bounded(
                 &actor,
                 LeaveByRealJid {
@@ -2333,29 +2332,33 @@ async fn run_group_dm_leave(
                         &actor,
                         &args.room_jid,
                         &resource,
-                        attempt,
+                        outcome.acknowledge,
                     )
                     .await;
-                    pending_local_muc_departures.complete_in_flight(&in_flight, in_flight_owned);
+                    pending_local_muc_departures.complete_in_flight(&in_flight);
                 }
-                Ok(waddle_xmpp::muc::room_actor::LeaveDisposition::Suppressed { .. }) => {
+                Ok(waddle_xmpp::muc::room_actor::LeaveDisposition::Suppressed {
+                    attempt: acknowledge,
+                    ..
+                }) => {
                     crate::server::routes::websocket::ack_departure_receipt(
                         pending_local_muc_departures,
                         &actor,
                         &args.room_jid,
                         &resource,
-                        attempt,
+                        acknowledge,
                     )
                     .await;
-                    pending_local_muc_departures.complete_in_flight(&in_flight, in_flight_owned);
+                    pending_local_muc_departures.complete_in_flight(&in_flight);
                 }
                 Ok(
                     waddle_xmpp::muc::room_actor::LeaveDisposition::NotOccupant
                     | waddle_xmpp::muc::room_actor::LeaveDisposition::Superseded,
                 ) => {
-                    pending_local_muc_departures.complete_in_flight(&in_flight, in_flight_owned);
+                    pending_local_muc_departures.complete_in_flight(&in_flight);
                 }
                 Ok(waddle_xmpp::muc::room_actor::LeaveDisposition::Deferred { .. }) => {
+                    pending_local_muc_departures.complete_in_flight(&in_flight);
                     pending_local_muc_departures.record(
                         crate::server::routes::websocket::LocalDepartureItem::RoomDeparture {
                             room: args.room_jid.clone(),
@@ -2369,6 +2372,7 @@ async fn run_group_dm_leave(
                 Err(crate::server::routes::websocket::LeaveAskFailure::Timeout) => {
                     // A timeout proves nothing about the actor's seal: retain
                     // the administrative departure itself for the janitor.
+                    pending_local_muc_departures.complete_in_flight(&in_flight);
                     pending_local_muc_departures.record(
                         crate::server::routes::websocket::LocalDepartureItem::RoomDeparture {
                             room: args.room_jid.clone(),
@@ -2382,6 +2386,7 @@ async fn run_group_dm_leave(
                 Err(crate::server::routes::websocket::LeaveAskFailure::Handler(
                     waddle_xmpp::muc::room_actor::RoomActorError::RoomSealed,
                 )) => {
+                    pending_local_muc_departures.complete_in_flight(&in_flight);
                     pending_local_muc_departures.record(
                         crate::server::routes::websocket::LocalDepartureItem::ConfirmRetired {
                             room: args.room_jid.clone(),
@@ -2394,6 +2399,7 @@ async fn run_group_dm_leave(
                     );
                 }
                 Err(_) => {
+                    pending_local_muc_departures.complete_in_flight(&in_flight);
                     pending_local_muc_departures.record(
                         crate::server::routes::websocket::LocalDepartureItem::RoomDeparture {
                             room: args.room_jid.clone(),
@@ -3519,24 +3525,10 @@ async fn recover_actor_with_merged_live_roster(
         .ask(GetSnapshot)
         .await
         .map_err(send_err(snapshot_context))?;
-    let demoted = state
-        .room_registry
-        .ask(
-            waddle_xmpp::muc::room_registry_actor::DemoteRoomIfExactActor {
-                room_jid: room_jid.clone(),
-                actor_ref: stale_actor.clone(),
-            },
-        )
-        .await
-        .map_err(send_err(
-            "room_registry ask DemoteRoomIfExactActor during reconciliation",
-        ))?;
-    if !demoted {
-        return Err(unavailable(
-            "This room changed while its update was being reconciled; please retry.",
-        ));
-    }
-    let recovered = state
+    // Demote the exact stale actor and publish the successor in ONE registry
+    // turn: no cleanup or janitor lookup can observe the room as absent in
+    // between and mistake the handoff for convergence.
+    let recovered = match state
         .room_registry
         .ask(GetOrCreateRoomWithLiveRoster {
             room_jid: room_jid.clone(),
@@ -3546,10 +3538,20 @@ async fn recover_actor_with_merged_live_roster(
             live_room_restore: stale_snapshot.room,
             occupancy_revision: stale_snapshot.occupancy_revision,
             departures: stale_snapshot.departures.clone(),
+            demote_first: Some(stale_actor.clone()),
         })
         .await
-        .map_err(send_err(get_or_create_context))?
-        .actor_ref;
+    {
+        Ok(acquisition) => acquisition.actor_ref,
+        Err(kameo::error::SendError::HandlerError(
+            waddle_xmpp::muc::room_registry_actor::RoomRegistryError::StaleActorNotCurrent(_),
+        )) => {
+            return Err(unavailable(
+                "This room changed while its update was being reconciled; please retry.",
+            ));
+        }
+        Err(error) => return Err(send_err(get_or_create_context)(error)),
+    };
     run_recovery_publication_hook(room_jid, &recovered).await;
     let snapshot = recovered
         .ask(GetSnapshot)
@@ -3565,36 +3567,42 @@ async fn recover_group_dm_actor_after_demote(
     record: &XmppChannelRecord,
     stale_actor: &ActorRef<RoomActor>,
 ) -> Result<ActorRef<RoomActor>, AdminErr> {
-    let demoted = state
+    // Same atomic demote-and-publish as the merged-roster recovery: the
+    // sealed stale actor's final roster is transplanted (its occupancy is
+    // the truth for the successor), affiliations are rehydrated below.
+    let stale_snapshot = stale_actor.ask(GetSnapshot).await.map_err(send_err(
+        "room actor GetSnapshot during group-DM reconciliation",
+    ))?;
+    let actor = match state
         .room_registry
-        .ask(
-            waddle_xmpp::muc::room_registry_actor::DemoteRoomIfExactActor {
-                room_jid: room_jid.clone(),
-                actor_ref: stale_actor.clone(),
-            },
-        )
-        .await
-        .map_err(send_err(
-            "room_registry ask DemoteRoomIfExactActor during reconciliation",
-        ))?;
-    if !demoted {
-        return Err(unavailable(format!(
-            "group-DM reconciliation for {room_jid} lost the exact stale actor"
-        )));
-    }
-    let actor = state
-        .room_registry
-        .ask(GetOrCreateRoom {
+        .ask(GetOrCreateRoomWithLiveRoster {
             room_jid: room_jid.clone(),
-            waddle_id: waddle_xmpp::admin::CHANNEL_TYPE_GROUP_DM.to_string(),
-            channel_id: channel_id.to_string(),
+            waddle_id: waddle_xmpp::muc::durable::WaddleId::new(
+                waddle_xmpp::admin::CHANNEL_TYPE_GROUP_DM.to_string(),
+            ),
+            channel_id: waddle_xmpp::muc::durable::ChannelId::new(channel_id.to_string()),
             config: group_dm_record_config(record),
+            live_room_restore: stale_snapshot.room,
+            occupancy_revision: stale_snapshot.occupancy_revision,
+            departures: stale_snapshot.departures,
+            demote_first: Some(stale_actor.clone()),
         })
         .await
-        .map_err(send_err(
-            "room_registry ask GetOrCreateRoom during reconciliation",
-        ))?
-        .actor_ref;
+    {
+        Ok(acquisition) => acquisition.actor_ref,
+        Err(kameo::error::SendError::HandlerError(
+            waddle_xmpp::muc::room_registry_actor::RoomRegistryError::StaleActorNotCurrent(_),
+        )) => {
+            return Err(unavailable(format!(
+                "group-DM reconciliation for {room_jid} lost the exact stale actor"
+            )));
+        }
+        Err(error) => {
+            return Err(send_err(
+                "room_registry ask GetOrCreateRoomWithLiveRoster during reconciliation",
+            )(error))
+        }
+    };
     hydrate_group_dm_member_affiliations(state, &actor, channel_id).await?;
     Ok(actor)
 }

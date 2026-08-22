@@ -462,6 +462,12 @@ pub struct CancelDestroyCompletionAttempt {
 pub enum RoomRegistryError {
     #[error("room {0} already exists")]
     RoomAlreadyExists(BareJid),
+    /// A live-roster handoff named a stale actor that is no longer the
+    /// registered one (a successor is already live, or the entry was
+    /// retired): the caller's snapshot is not authoritative and must not be
+    /// transplanted.
+    #[error("room {0}: the stale actor is no longer current")]
+    StaleActorNotCurrent(BareJid),
     #[error("room actor state for {0} was lost; explicit destroy/recreate is required")]
     RoomActorStateLost(BareJid),
     /// A request to the registry actor exceeded
@@ -4676,6 +4682,12 @@ pub struct GetOrCreateRoomWithLiveRoster {
     /// The predecessor's unacknowledged departure receipts (see
     /// [`super::room_actor::RestoreLiveRoster`]).
     pub departures: super::room_actor::DepartureLedger,
+    /// Demote this exact stale actor in the SAME registry turn as the
+    /// successor's publication, so no `GetRoom` can observe a gap in which
+    /// the room appears absent (cleanup and the departure janitor treat a
+    /// definitive absence as convergence). `Err(StaleActorNotCurrent)` when
+    /// the registered actor is a different one.
+    pub demote_first: Option<ActorRef<RoomActor>>,
 }
 
 impl kameo::message::Message<GetOrCreateRoom> for RoomRegistryActor {
@@ -4739,6 +4751,18 @@ impl kameo::message::Message<GetOrCreateRoomWithLiveRoster> for RoomRegistryActo
         ctx: &mut Context<Self, Self::Reply>,
     ) -> Self::Reply {
         let room_jid = msg.room_jid;
+        if let Some(stale_actor) = msg.demote_first {
+            let is_current = self
+                .rooms
+                .get(&room_jid)
+                .is_some_and(|entry| entry.actor_ref.id() == stale_actor.id());
+            if !is_current {
+                return ctx.reply(Err(RoomRegistryError::StaleActorNotCurrent(room_jid)));
+            }
+            if let Some(entry) = self.rooms.remove(&room_jid) {
+                self.retire_ownership_lost_entry(&room_jid, entry).await;
+            }
+        }
         if self.destroy_completion_blocks_recreation(&room_jid).await {
             return ctx.reply(Err(RoomRegistryError::OwnershipReconciliationPending(
                 room_jid,

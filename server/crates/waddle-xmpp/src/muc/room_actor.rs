@@ -336,6 +336,12 @@ pub struct JoinOutcome {
 
 #[derive(Debug, Clone)]
 pub struct LeaveOutcome {
+    /// The attempt whose receipt this outcome answers: the caller's own
+    /// attempt, or — when a retained retry replayed a receipt minted under a
+    /// different (coalesced-away) attempt — that receipt's attempt. Callers
+    /// acknowledge THIS id once the effects ran; replay never consumes the
+    /// receipt by itself.
+    pub acknowledge: occupancy_handlers::LeaveAttemptId,
     pub nick: String,
     pub affiliation: Affiliation,
     pub role: Role,
@@ -1300,6 +1306,47 @@ impl RoomActor {
         self.departure_receipts.push_back(receipt);
     }
 
+    /// Replay the receipt of an already-completed attempt WITHOUT consuming
+    /// it: only an answered acknowledgement removes a current receipt (the
+    /// replay's own reply may be lost too). A stale receipt is dropped here.
+    pub(super) fn replay_departure_receipt(
+        &mut self,
+        attempt: occupancy_handlers::LeaveAttemptId,
+    ) -> Option<RetainedDeparture> {
+        let index = self
+            .departure_receipts
+            .iter()
+            .position(|receipt| receipt.attempt == attempt)?;
+        self.replay_departure_receipt_at(index)
+    }
+
+    /// JID-fallback variant of [`Self::replay_departure_receipt`].
+    pub(super) fn replay_departure_receipt_for_jid(
+        &mut self,
+        jid: &FullJid,
+        cause: super::durable::OccupancyLeaveCause,
+    ) -> Option<RetainedDeparture> {
+        let index = self
+            .departure_receipts
+            .iter()
+            .position(|receipt| &receipt.jid == jid && receipt.cause == cause)?;
+        self.replay_departure_receipt_at(index)
+    }
+
+    fn replay_departure_receipt_at(&mut self, index: usize) -> Option<RetainedDeparture> {
+        let receipt = self.departure_receipts.get(index)?;
+        let stale = self
+            .latest_generations
+            .get(&receipt.jid)
+            .is_some_and(|latest| *latest > receipt.generation);
+        if stale {
+            let receipt = self.departure_receipts.remove(index)?;
+            self.prune_departure_state(&receipt.jid);
+            return Some(RetainedDeparture::Stale);
+        }
+        Some(RetainedDeparture::Current(receipt.clone()))
+    }
+
     /// Consume the receipt of an already-completed attempt, if any.
     pub(super) fn take_departure_receipt(
         &mut self,
@@ -1309,20 +1356,6 @@ impl RoomActor {
             .departure_receipts
             .iter()
             .position(|receipt| receipt.attempt == attempt)?;
-        self.take_departure_receipt_at(index)
-    }
-
-    /// Consume the receipt of a full JID whose session is gone, for a retry
-    /// of the same cause whose attempt the actor never saw (coalesced).
-    pub(super) fn take_departure_receipt_for_jid(
-        &mut self,
-        jid: &FullJid,
-        cause: super::durable::OccupancyLeaveCause,
-    ) -> Option<RetainedDeparture> {
-        let index = self
-            .departure_receipts
-            .iter()
-            .position(|receipt| &receipt.jid == jid && receipt.cause == cause)?;
         self.take_departure_receipt_at(index)
     }
 

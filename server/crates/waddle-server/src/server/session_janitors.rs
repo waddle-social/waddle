@@ -317,7 +317,7 @@ pub(crate) async fn run_local_muc_departure_sweep(state: &WebSocketState) {
                                 &actor,
                                 &room,
                                 &jid,
-                                attempt,
+                                outcome.acknowledge,
                             )
                             .await;
                             crate::metrics::record_local_departure_retry("completed");
@@ -354,15 +354,11 @@ pub(crate) async fn run_local_muc_departure_sweep(state: &WebSocketState) {
                             crate::metrics::record_local_departure_retry("superseded");
                             break;
                         }
-                        Ok(LeaveDisposition::Suppressed { nick, affiliation }) => {
-                            routes::websocket::ack_departure_receipt(
-                                &state.deps.protocol.pending_local_muc_departures,
-                                &actor,
-                                &room,
-                                &jid,
-                                attempt,
-                            )
-                            .await;
+                        Ok(LeaveDisposition::Suppressed {
+                            nick,
+                            affiliation,
+                            attempt: acknowledge,
+                        }) => {
                             if matches!(cause, OccupancyLeaveCause::Explicit) {
                                 // Store-less room mid-destroy/dormancy: only
                                 // the leaver's §7.14 self-presence is owed.
@@ -381,6 +377,14 @@ pub(crate) async fn run_local_muc_departure_sweep(state: &WebSocketState) {
                                 );
                             }
                             crate::metrics::record_local_departure_retry("completed");
+                            routes::websocket::ack_departure_receipt(
+                                &state.deps.protocol.pending_local_muc_departures,
+                                &actor,
+                                &room,
+                                &jid,
+                                acknowledge,
+                            )
+                            .await;
                             break;
                         }
                         Err(routes::websocket::LeaveAskFailure::Timeout) => {
@@ -416,17 +420,40 @@ pub(crate) async fn run_local_muc_departure_sweep(state: &WebSocketState) {
                         }
                     }
                 }
-                LocalDepartureItem::AckReceipt { room, jid, attempt } => {
+                LocalDepartureItem::InFlight {
+                    room,
+                    jid,
+                    cause,
+                    attempt,
+                } => {
+                    // The live task never completed its write-ahead entry:
+                    // retry as a retained departure under the same attempt so
+                    // the actor's receipt (if the departure did commit) is
+                    // replayed, or the session is removed if it never was.
+                    item = LocalDepartureItem::RoomDeparture {
+                        room,
+                        jid,
+                        cause,
+                        selector: waddle_xmpp::muc::room_actor::LeaveSessionSelector::Any,
+                        attempt,
+                    };
+                }
+                LocalDepartureItem::AckReceipt {
+                    room,
+                    jid,
+                    attempt,
+                    absent_sweeps,
+                } => {
                     match get_room_actor_result(state, &room).await {
                         // No registered actor: the room is gone for good (drop
                         // the ack) — or a live-roster handoff is carrying the
                         // receipt to a successor that is not published yet, in
                         // which case dropping the ack would let a later retained
-                        // departure replay the receipt. Retry a few sweeps first.
-                        Ok(None)
-                            if pending.attempts >= routes::websocket::ACK_ABSENT_ROOM_RETRIES =>
-                        {
-                            crate::metrics::record_local_departure_retry("acknowledged");
+                        // departure replay the receipt. Retry a few consecutive
+                        // absent-room sweeps first (its own budget: ask
+                        // timeouts and NotAuthoritative answers do not count).
+                        Ok(None) if absent_sweeps >= routes::websocket::ACK_ABSENT_ROOM_RETRIES => {
+                            crate::metrics::record_local_departure_retry("abandoned");
                             break;
                         }
                         Ok(None) => {
@@ -436,7 +463,12 @@ pub(crate) async fn run_local_muc_departure_sweep(state: &WebSocketState) {
                                 .protocol
                                 .pending_local_muc_departures
                                 .requeue_with_backoff(PendingLocalDeparture {
-                                    item: LocalDepartureItem::AckReceipt { room, jid, attempt },
+                                    item: LocalDepartureItem::AckReceipt {
+                                        room,
+                                        jid,
+                                        attempt,
+                                        absent_sweeps: absent_sweeps.saturating_add(1),
+                                    },
                                     attempts: pending.attempts,
                                     not_before: pending.not_before,
                                 });
@@ -456,7 +488,14 @@ pub(crate) async fn run_local_muc_departure_sweep(state: &WebSocketState) {
                                 .protocol
                                 .pending_local_muc_departures
                                 .requeue_with_backoff(PendingLocalDeparture {
-                                    item: LocalDepartureItem::AckReceipt { room, jid, attempt },
+                                    item: LocalDepartureItem::AckReceipt {
+                                        room,
+                                        jid,
+                                        attempt,
+                                        // A registered actor was reached: the
+                                        // absent-room budget starts over.
+                                        absent_sweeps: 0,
+                                    },
                                     attempts: pending.attempts,
                                     not_before: pending.not_before,
                                 });
@@ -8710,6 +8749,7 @@ mod local_muc_departure_tests {
                     room: room.clone(),
                     jid: alice.clone(),
                     attempt,
+                    absent_sweeps: 0,
                 }),
             "the retained item is the acknowledgement itself, not another leave"
         );
@@ -8815,6 +8855,7 @@ mod local_muc_departure_tests {
             room: room.clone(),
             jid: alice.clone(),
             attempt: attempt_a,
+            absent_sweeps: 0,
         };
         let retained_ack = state
             .deps
@@ -8915,6 +8956,7 @@ mod local_muc_departure_tests {
             room: room.clone(),
             jid: alice.clone(),
             attempt: attempt_a,
+            absent_sweeps: 0,
         };
         let retained_ack = state
             .deps
@@ -9011,6 +9053,7 @@ mod local_muc_departure_tests {
                 room: room.clone(),
                 jid: alice.clone(),
                 attempt,
+                absent_sweeps: 0,
             };
             retained_acks.push(
                 state
@@ -9078,6 +9121,7 @@ mod local_muc_departure_tests {
             room: room.clone(),
             jid: alice.clone(),
             attempt,
+            absent_sweeps: 0,
         };
         // Fresh ack, room not registered (handoff window): retained.
         state
@@ -9098,13 +9142,37 @@ mod local_muc_departure_tests {
             .pending_local_muc_departures
             .take_for_test(&ack())
             .expect("retained ack");
+        // Generic retry attempts (ask timeouts, NotAuthoritative answers) do
+        // not consume the absent-room budget.
         state
             .deps
             .protocol
             .pending_local_muc_departures
             .record_pending_for_test(PendingLocalDeparture {
                 item: ack(),
-                attempts: ACK_ABSENT_ROOM_RETRIES,
+                attempts: ACK_ABSENT_ROOM_RETRIES + 5,
+                not_before: std::time::Instant::now(),
+            });
+        run_local_muc_departure_sweep(&state).await;
+        assert_eq!(state.deps.protocol.pending_local_muc_departures.len(), 1);
+        state
+            .deps
+            .protocol
+            .pending_local_muc_departures
+            .take_for_test(&ack())
+            .expect("retained ack");
+        state
+            .deps
+            .protocol
+            .pending_local_muc_departures
+            .record_pending_for_test(PendingLocalDeparture {
+                item: LocalDepartureItem::AckReceipt {
+                    room: room.clone(),
+                    jid: alice.clone(),
+                    attempt,
+                    absent_sweeps: ACK_ABSENT_ROOM_RETRIES,
+                },
+                attempts: 0,
                 not_before: std::time::Instant::now(),
             });
         run_local_muc_departure_sweep(&state).await;
@@ -9129,14 +9197,13 @@ mod local_muc_departure_tests {
         // The explicit-leave task: write-ahead, ask, then it is cancelled
         // before fan-out and acknowledgement.
         let attempt = waddle_xmpp::muc::room_actor::LeaveAttemptId::generate();
-        let in_flight = LocalDepartureItem::RoomDeparture {
+        let in_flight = LocalDepartureItem::InFlight {
             room: room.clone(),
             jid: alice.clone(),
             cause: OccupancyLeaveCause::Explicit,
-            selector: LeaveSessionSelector::Any,
             attempt,
         };
-        let _in_flight_owned = state
+        state
             .deps
             .protocol
             .pending_local_muc_departures
@@ -9203,14 +9270,13 @@ mod local_muc_departure_tests {
         let actor = create_room(state.as_ref(), &room).await;
         join_member(&actor, &alice, "alice").await;
         let attempt = waddle_xmpp::muc::room_actor::LeaveAttemptId::generate();
-        let in_flight = LocalDepartureItem::RoomDeparture {
+        let in_flight = LocalDepartureItem::InFlight {
             room: room.clone(),
             jid: alice.clone(),
             cause: OccupancyLeaveCause::Explicit,
-            selector: LeaveSessionSelector::Any,
             attempt,
         };
-        let in_flight_owned = state
+        state
             .deps
             .protocol
             .pending_local_muc_departures
@@ -9219,15 +9285,33 @@ mod local_muc_departure_tests {
             .deps
             .protocol
             .pending_local_muc_departures
-            .complete_in_flight(&in_flight, in_flight_owned);
+            .complete_in_flight(&in_flight);
         assert_eq!(state.deps.protocol.pending_local_muc_departures.len(), 0);
         // A newer attempt merged under the same key survives completion of
         // the older one.
-        let in_flight_owned = state
+        state
             .deps
             .protocol
             .pending_local_muc_departures
             .record_in_flight(in_flight.clone());
+        state
+            .deps
+            .protocol
+            .pending_local_muc_departures
+            .record_in_flight(LocalDepartureItem::InFlight {
+                room: room.clone(),
+                jid: alice.clone(),
+                cause: OccupancyLeaveCause::Explicit,
+                attempt: waddle_xmpp::muc::room_actor::LeaveAttemptId::generate(),
+            });
+        state
+            .deps
+            .protocol
+            .pending_local_muc_departures
+            .complete_in_flight(&in_flight);
+        assert_eq!(state.deps.protocol.pending_local_muc_departures.len(), 1);
+        // A retained departure under the ROOM-scoped key is never touched by
+        // in-flight bookkeeping.
         state.deps.protocol.pending_local_muc_departures.record(
             LocalDepartureItem::RoomDeparture {
                 room: room.clone(),
@@ -9237,12 +9321,7 @@ mod local_muc_departure_tests {
                 attempt: waddle_xmpp::muc::room_actor::LeaveAttemptId::generate(),
             },
         );
-        state
-            .deps
-            .protocol
-            .pending_local_muc_departures
-            .complete_in_flight(&in_flight, in_flight_owned);
-        assert_eq!(state.deps.protocol.pending_local_muc_departures.len(), 1);
+        assert_eq!(state.deps.protocol.pending_local_muc_departures.len(), 2);
         let _ = actor;
     }
 
@@ -9335,6 +9414,7 @@ mod local_muc_departure_tests {
             LeaveDisposition::Suppressed {
                 ref nick,
                 affiliation: Affiliation::Member,
+                ..
             } if nick.as_str() == "alice"
         ));
         state.deps.protocol.pending_local_muc_departures.record(
@@ -9644,6 +9724,7 @@ mod local_muc_departure_tests {
                 live_room_restore: predecessor_snapshot.room,
                 occupancy_revision: predecessor_snapshot.occupancy_revision,
                 departures: Default::default(),
+                demote_first: None,
             })
             .await
             .expect("spawn successor with live roster")
