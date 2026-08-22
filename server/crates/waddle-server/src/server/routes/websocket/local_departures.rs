@@ -38,6 +38,12 @@ const MAX_FULL_JID_SWEEPS: usize = 50_000;
 pub enum LocalDepartureItem {
     FullJidSweep {
         jid: FullJid,
+        /// The occupancy-order ceiling for the whole redrive, minted when the
+        /// ORIGINAL disconnect cleanup started: a session that (re)joined
+        /// after this attempt is not the sweep's target, so the actor's
+        /// order fence classifies it `Superseded` instead of the sweep
+        /// evicting a live replacement (#1647, codex round 23).
+        attempt: LeaveAttemptId,
     },
     RoomDeparture {
         room: BareJid,
@@ -113,7 +119,7 @@ enum LocalDepartureKey {
 impl LocalDepartureItem {
     fn key(&self) -> LocalDepartureKey {
         match self {
-            Self::FullJidSweep { jid } => LocalDepartureKey::FullJidSweep(jid.clone()),
+            Self::FullJidSweep { jid, .. } => LocalDepartureKey::FullJidSweep(jid.clone()),
             Self::RoomDeparture {
                 room, jid, cause, ..
             }
@@ -217,6 +223,13 @@ impl LocalDepartureItem {
                 attempt: merged_attempt,
                 notified: merged_notified.clone(),
             },
+            // A newer disconnect's ceiling covers the older sweep's rooms
+            // too (their sessions joined even earlier), so the newest
+            // attempt is the right merged fence.
+            (LocalDepartureItem::FullJidSweep { jid, .. }, _) => LocalDepartureItem::FullJidSweep {
+                jid,
+                attempt: merged_attempt,
+            },
             (
                 LocalDepartureItem::EvictEmptyRoom {
                     room,
@@ -237,10 +250,9 @@ impl LocalDepartureItem {
 
     fn attempt(&self) -> Option<LeaveAttemptId> {
         match self {
-            Self::FullJidSweep { .. } | Self::AckReceipt { .. } | Self::EvictEmptyRoom { .. } => {
-                None
-            }
-            Self::RoomDeparture { attempt, .. }
+            Self::AckReceipt { .. } | Self::EvictEmptyRoom { .. } => None,
+            Self::FullJidSweep { attempt, .. }
+            | Self::RoomDeparture { attempt, .. }
             | Self::ConfirmRetired { attempt, .. }
             | Self::InFlight { attempt, .. } => Some(*attempt),
         }
@@ -1202,6 +1214,7 @@ mod tests {
             inventory.record_at(
                 LocalDepartureItem::FullJidSweep {
                     jid: jid(&format!("u{index}@example.com/r")),
+                    attempt: LeaveAttemptId::generate(),
                 },
                 now + Duration::from_secs(index as u64),
             );
@@ -1437,19 +1450,21 @@ mod tests {
         inventory.record_at(
             LocalDepartureItem::FullJidSweep {
                 jid: jid("b@example.com/web"),
+                attempt: LeaveAttemptId::generate(),
             },
             now + Duration::from_secs(2),
         );
         inventory.record_at(
             LocalDepartureItem::FullJidSweep {
                 jid: jid("a@example.com/web"),
+                attempt: LeaveAttemptId::generate(),
             },
             now + Duration::from_secs(1),
         );
         let due = inventory.take_due(now + Duration::from_secs(2));
         assert_eq!(due.len(), 2);
         assert!(
-            matches!(&due[0].item, LocalDepartureItem::FullJidSweep { jid } if jid.as_str() == "a@example.com/web")
+            matches!(&due[0].item, LocalDepartureItem::FullJidSweep { jid, .. } if jid.as_str() == "a@example.com/web")
         );
     }
 }

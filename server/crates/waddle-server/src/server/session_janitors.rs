@@ -128,18 +128,14 @@ pub(crate) async fn run_local_muc_departure_sweep(state: &WebSocketState) {
         let mut item = pending.item;
         loop {
             match item {
-                LocalDepartureItem::FullJidSweep { jid } => {
-                    if state
-                        .deps
-                        .protocol
-                        .connection_registry
-                        .get_entry(&jid)
-                        .is_some()
-                    {
-                        crate::metrics::record_local_departure_retry("skipped_live");
-                        break;
-                    }
-                    match routes::websocket::redrive_local_muc_cleanup(state, &jid).await {
+                LocalDepartureItem::FullJidSweep { jid, attempt } => {
+                    // A live registration of the same full JID does NOT drop
+                    // the sweep: the new connection has not necessarily
+                    // rejoined every room the terminated session occupied.
+                    // The sweep's attempt (minted at the ORIGINAL cleanup) is
+                    // the fence — sessions that (re)joined since are
+                    // `Superseded` by the actor, older occupancies converge.
+                    match routes::websocket::redrive_local_muc_cleanup(state, &jid, attempt).await {
                         routes::websocket::MucCleanupOutcome::Completed => {
                             crate::metrics::record_local_departure_retry("completed");
                         }
@@ -152,7 +148,7 @@ pub(crate) async fn run_local_muc_departure_sweep(state: &WebSocketState) {
                                 .protocol
                                 .pending_local_muc_departures
                                 .requeue_with_backoff(PendingLocalDeparture {
-                                    item: LocalDepartureItem::FullJidSweep { jid },
+                                    item: LocalDepartureItem::FullJidSweep { jid, attempt },
                                     attempts: pending.attempts,
                                     not_before: pending.not_before,
                                 });
@@ -9956,6 +9952,61 @@ mod local_muc_departure_tests {
         assert_eq!(state.deps.protocol.pending_local_muc_departures.len(), 0);
     }
 
+    /// #1647 (codex round 23): a `FullJidSweep` carries the ORIGINAL
+    /// cleanup's attempt as an occupancy-order ceiling. A replacement
+    /// connection's session that joined after the ceiling is `Superseded`
+    /// (kept), while occupancies the terminated session left behind are
+    /// reaped — a live registration is proof of neither.
+    #[tokio::test]
+    async fn full_jid_sweep_fence_keeps_replacement_joins_and_reaps_stale_occupancies() {
+        let store = JanitorProjectionStore::new();
+        let state = clustered_state_with_store(store.clone()).await;
+        let jid = full_jid("alice@example.com/web");
+        let stale_room = room_jid("sweep-fence-stale");
+        let rejoined_room = room_jid("sweep-fence-rejoined");
+        let stale_actor = create_room(state.as_ref(), &stale_room).await;
+        let rejoined_actor = create_room(state.as_ref(), &rejoined_room).await;
+        // The terminated session occupied only the stale room.
+        join_member(&stale_actor, &jid, "alice").await;
+        // The original disconnect cleanup mints the sweep ceiling, then fails
+        // room enumeration (simulated by recording the sweep directly).
+        let attempt = waddle_xmpp::muc::room_actor::LeaveAttemptId::generate();
+        // A replacement connection claims the same full JID and joins a room
+        // AFTER the ceiling.
+        let (tx, _rx) = mpsc::channel(4);
+        register_test_connection(state.as_ref(), &jid, tx).await;
+        join_member(&rejoined_actor, &jid, "alice").await;
+        state.deps.protocol.pending_local_muc_departures.record(
+            crate::server::routes::websocket::LocalDepartureItem::FullJidSweep {
+                jid: jid.clone(),
+                attempt,
+            },
+        );
+
+        run_local_muc_departure_sweep(&state).await;
+
+        assert!(
+            rejoined_actor
+                .ask(GetSnapshot)
+                .await
+                .expect("rejoined snapshot")
+                .room
+                .find_occupant_by_real_jid(&jid)
+                .is_some(),
+            "a session that joined after the sweep ceiling is not the sweep's target"
+        );
+        assert!(
+            stale_actor
+                .ask(GetSnapshot)
+                .await
+                .expect("stale snapshot")
+                .room
+                .find_occupant_by_real_jid(&jid)
+                .is_none(),
+            "the terminated session's occupancy is reaped despite the live registration"
+        );
+    }
+
     /// #1647 (codex P1): a live connection registration must NOT
     /// short-circuit a retained disconnect departure. The janitor hands the
     /// retry to the actor, whose fences classify it: a rejoin newer than the
@@ -10268,17 +10319,25 @@ mod local_muc_departure_tests {
         );
     }
 
+    /// #1647 (codex round 23): the sweep no longer short-circuits on a live
+    /// registration — the ceiling attempt fences instead. A session that
+    /// joined after the ceiling is `Superseded`, the queue converges.
     #[tokio::test]
-    async fn full_jid_sweep_reruns_cleanup_and_converges_without_evicting_replacement() {
+    async fn full_jid_sweep_converges_without_evicting_a_join_newer_than_its_ceiling() {
         let state = create_test_websocket_state().await;
         let room = room_jid("full-jid-sweep");
         let jid = full_jid("alice@example.com/web");
         let actor = create_room(state.as_ref(), &room).await;
-        join_member(&actor, &jid, "alice").await;
+        // The ceiling predates the replacement's join.
+        let attempt = waddle_xmpp::muc::room_actor::LeaveAttemptId::generate();
         let (tx, _rx) = mpsc::channel(4);
         register_test_connection(state.as_ref(), &jid, tx).await;
+        join_member(&actor, &jid, "alice").await;
         state.deps.protocol.pending_local_muc_departures.record(
-            crate::server::routes::websocket::LocalDepartureItem::FullJidSweep { jid: jid.clone() },
+            crate::server::routes::websocket::LocalDepartureItem::FullJidSweep {
+                jid: jid.clone(),
+                attempt,
+            },
         );
 
         run_local_muc_departure_sweep(&state).await;
@@ -10286,12 +10345,12 @@ mod local_muc_departure_tests {
         assert_eq!(
             state.deps.protocol.pending_local_muc_departures.len(),
             0,
-            "a live replacement short-circuits the full-JID sweep"
+            "the superseded sweep converges without a retained retry"
         );
         let snapshot = snapshot_room(state.as_ref(), &room).await.room;
         assert!(
             snapshot.find_occupant_by_real_jid(&jid).is_some(),
-            "the live replacement occupancy must be left intact"
+            "a join newer than the sweep ceiling must be left intact"
         );
     }
 
@@ -10321,6 +10380,7 @@ mod local_muc_departure_tests {
             .record(
                 crate::server::routes::websocket::LocalDepartureItem::FullJidSweep {
                     jid: jid.clone(),
+                    attempt: waddle_xmpp::muc::room_actor::LeaveAttemptId::generate(),
                 },
             );
 
@@ -10355,7 +10415,14 @@ mod local_muc_departure_tests {
             .protocol
             .pending_local_muc_departures
             .record_pending_for_test(crate::server::routes::websocket::PendingLocalDeparture {
-                item: requeued.item,
+                // The restored fixture's join happened just above (a fixture
+                // artifact — production sweeps are minted after the dead
+                // session's joins), so carry the sweep forward with a ceiling
+                // that postdates it.
+                item: crate::server::routes::websocket::LocalDepartureItem::FullJidSweep {
+                    jid: jid.clone(),
+                    attempt: waddle_xmpp::muc::room_actor::LeaveAttemptId::generate(),
+                },
                 attempts: requeued.attempts,
                 // Model the janitor's next pass after the retained item's
                 // backoff has elapsed in the recovered registry fixture.

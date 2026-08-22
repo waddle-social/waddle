@@ -411,12 +411,15 @@ pub async fn cleanup_muc_presence_for_jid(
 }
 
 /// Re-drive the local room traversal after a retained departure becomes due.
-/// The caller has already checked that no same-FullJID replacement is live.
 pub(crate) async fn redrive_local_muc_cleanup(
     state: &WebSocketState,
     jid: &FullJid,
+    attempt: waddle_xmpp::muc::room_actor::LeaveAttemptId,
 ) -> MucCleanupOutcome {
-    if cleanup_muc_presence(state, jid).await {
+    // The redrive re-uses the ORIGINAL sweep's attempt as its occupancy-order
+    // ceiling: sessions that (re)joined since are classified `Superseded` by
+    // the actor instead of being evicted by a late retry (#1647).
+    if cleanup_muc_presence_with_origin(state, jid, None, attempt).await {
         MucCleanupOutcome::Completed
     } else {
         MucCleanupOutcome::Failed
@@ -431,7 +434,14 @@ pub async fn cleanup_muc_presence_for_jid_with_origin(
     jid: &FullJid,
     origin: crate::server::routes::interpret::OrderedRelayRouteOrigin,
 ) -> MucCleanupOutcome {
-    if cleanup_muc_presence_with_origin(state, jid, Some(&origin)).await {
+    if cleanup_muc_presence_with_origin(
+        state,
+        jid,
+        Some(&origin),
+        waddle_xmpp::muc::room_actor::LeaveAttemptId::generate(),
+    )
+    .await
+    {
         MucCleanupOutcome::Completed
     } else {
         MucCleanupOutcome::Failed
@@ -464,7 +474,14 @@ pub(crate) async fn redrive_remote_muc_cleanup(
     state: &WebSocketState,
     jid: &FullJid,
 ) -> MucCleanupOutcome {
-    if cleanup_muc_presence_with_origin(state, jid, None).await {
+    if cleanup_muc_presence_with_origin(
+        state,
+        jid,
+        None,
+        waddle_xmpp::muc::room_actor::LeaveAttemptId::generate(),
+    )
+    .await
+    {
         MucCleanupOutcome::Completed
     } else {
         MucCleanupOutcome::Failed
@@ -1094,8 +1111,13 @@ async fn cleanup_connection_shutdown_inner(
                         .is_some();
                     let cleanup_origin = clustered_cleanup_origin(state, &jid, owner).await;
                     if detach_fail_removed {
-                        cleanup_muc_presence_with_origin(state, &jid, cleanup_origin.as_ref())
-                            .await;
+                        cleanup_muc_presence_with_origin(
+                            state,
+                            &jid,
+                            cleanup_origin.as_ref(),
+                            waddle_xmpp::muc::room_actor::LeaveAttemptId::generate(),
+                        )
+                        .await;
                         // ADR-0017 Phase 1: mirror the unregister into the
                         // actor tree on the SM-detach-failure fallback. This
                         // session is never stored, so no SM-expiry janitor
@@ -1149,7 +1171,13 @@ async fn cleanup_connection_shutdown_inner(
         state.deps.protocol.caps_resolver.drop_resource(&jid);
         info!(jid = %jid, "WebSocket connection unregistered");
         broadcast_unavailable_if_no_replacement(state, &jid, was_presence_available).await;
-        cleanup_muc_presence_with_origin(state, &jid, cleanup_origin.as_ref()).await;
+        cleanup_muc_presence_with_origin(
+            state,
+            &jid,
+            cleanup_origin.as_ref(),
+            waddle_xmpp::muc::room_actor::LeaveAttemptId::generate(),
+        )
+        .await;
         // ADR-0017 Phase 1: mirror the unregister into the actor tree on
         // the dominant disconnect teardown path. Owner-gated (the same token
         // that owned the DashMap entry) so a superseding newcomer that
@@ -1948,7 +1976,13 @@ async fn refuse_detach_without_principal(
         if !replacement_took_over {
             let cleanup_origin = clustered_cleanup_origin(state, jid, &owner).await;
             state.deps.protocol.caps_resolver.drop_resource(jid);
-            cleanup_muc_presence_with_origin(state, jid, cleanup_origin.as_ref()).await;
+            cleanup_muc_presence_with_origin(
+                state,
+                jid,
+                cleanup_origin.as_ref(),
+                waddle_xmpp::muc::room_actor::LeaveAttemptId::generate(),
+            )
+            .await;
             unregister_remote_user_resource_if_owner(state, jid, &owner).await;
         } else {
             debug!(
@@ -2026,13 +2060,20 @@ pub(crate) async fn broadcast_unavailable_if_no_replacement(
 }
 
 async fn cleanup_muc_presence(state: &WebSocketState, jid: &FullJid) -> bool {
-    cleanup_muc_presence_with_origin(state, jid, None).await
+    cleanup_muc_presence_with_origin(
+        state,
+        jid,
+        None,
+        waddle_xmpp::muc::room_actor::LeaveAttemptId::generate(),
+    )
+    .await
 }
 
 async fn cleanup_muc_presence_with_origin(
     state: &WebSocketState,
     jid: &FullJid,
     origin: Option<&crate::server::routes::interpret::OrderedRelayRouteOrigin>,
+    sweep_attempt: waddle_xmpp::muc::room_actor::LeaveAttemptId,
 ) -> bool {
     let mut completed = cleanup_remote_muc_presence(state, jid, origin).await;
 
@@ -2044,11 +2085,12 @@ async fn cleanup_muc_presence_with_origin(
         Err(error) => {
             completed = false;
             warn!(error = %error, "Failed to list room actors");
-            state
-                .deps
-                .protocol
-                .pending_local_muc_departures
-                .record(LocalDepartureItem::FullJidSweep { jid: jid.clone() });
+            state.deps.protocol.pending_local_muc_departures.record(
+                LocalDepartureItem::FullJidSweep {
+                    jid: jid.clone(),
+                    attempt: sweep_attempt,
+                },
+            );
             Vec::new()
         }
     };
@@ -2059,17 +2101,21 @@ async fn cleanup_muc_presence_with_origin(
             Err(error) => {
                 completed = false;
                 warn!(room = %room_jid, error = %error, "Failed to get room actor");
-                state
-                    .deps
-                    .protocol
-                    .pending_local_muc_departures
-                    .record(LocalDepartureItem::FullJidSweep { jid: jid.clone() });
+                state.deps.protocol.pending_local_muc_departures.record(
+                    LocalDepartureItem::FullJidSweep {
+                        jid: jid.clone(),
+                        attempt: sweep_attempt,
+                    },
+                );
                 continue;
             }
         };
         // Bounded: one wedged room (stuck projection transaction or mailbox)
         // must not stall the sweep of every other room this JID occupies.
-        let attempt = waddle_xmpp::muc::room_actor::LeaveAttemptId::generate();
+        // Every room shares the sweep's attempt: it was minted when THIS
+        // cleanup pass (or the original one, on a redrive) started, so a
+        // session that (re)joined since is `Superseded` by the order fence.
+        let attempt = sweep_attempt;
         let in_flight = LocalDepartureItem::InFlight {
             room: room_jid.clone(),
             jid: jid.clone(),
@@ -3955,9 +4001,13 @@ mod local_departure_cleanup_tests {
             .pending_local_muc_departures
             .take_due(Instant::now());
         assert_eq!(due.len(), 1);
-        assert_eq!(
-            due[0].item,
-            LocalDepartureItem::FullJidSweep { jid: jid.clone() }
+        assert!(
+            matches!(
+                &due[0].item,
+                LocalDepartureItem::FullJidSweep { jid: sweep_jid, .. } if sweep_jid == &jid
+            ),
+            "enumeration failure retains a full-JID sweep: {:?}",
+            due[0].item
         );
     }
 

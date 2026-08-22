@@ -138,7 +138,7 @@ fn projection_fingerprint(projection: &RoomProjection) -> serde_json::Value {
 }
 
 /// The fingerprint binds the payload to the COMMITTING fence (owner identity
-/// + claim epoch), not just the operation shape: two nodes can legitimately
+/// and claim epoch), not just the operation shape: two nodes can legitimately
 /// commit byte-identical projections at the same next revision across an
 /// ownership transfer, and ambiguous-commit reconciliation must never mistake
 /// the other owner's row for its own (#1647).

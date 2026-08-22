@@ -526,18 +526,43 @@ pub enum RoomRegistryError {
 
 impl RoomRegistryActor {
     fn destroy_effects(completion: &DestroyCompletion) -> RoomMutationEffects {
-        let recipients = completion
+        let mut by_nick: std::collections::BTreeMap<String, Vec<jid::FullJid>> = completion
             .room
             .occupants
             .values()
-            .map(|occupant| DestroyRecipient {
-                nick: MucOccupantNick::new(occupant.nick.clone())
-                    .expect("nick was previously accepted"),
-                sessions: completion
-                    .room
-                    .get_occupant_sessions(&occupant.nick)
-                    .into_iter()
-                    .collect(),
+            .map(|occupant| {
+                (
+                    occupant.nick.clone(),
+                    completion
+                        .room
+                        .get_occupant_sessions(&occupant.nick)
+                        .into_iter()
+                        .collect(),
+                )
+            })
+            .collect();
+        // #1647: unacknowledged departure receipts belong to sessions that
+        // already left the roster but never saw their leave reply. The
+        // terminal destroy effect is the last chance to settle the owed
+        // self-unavailable (the retained retry later finds the room absent),
+        // so their holders join the durable outbox recipients too.
+        for receipt in &completion.departures.receipts {
+            let nick = match &receipt.outcome {
+                super::room_actor::DepartureReceiptOutcome::Left(outcome) => outcome.nick.clone(),
+                super::room_actor::DepartureReceiptOutcome::Suppressed { nick, .. } => {
+                    nick.as_str().to_owned()
+                }
+            };
+            let sessions = by_nick.entry(nick).or_default();
+            if !sessions.contains(&receipt.jid) {
+                sessions.push(receipt.jid.clone());
+            }
+        }
+        let recipients = by_nick
+            .into_iter()
+            .map(|(nick, sessions)| DestroyRecipient {
+                nick: MucOccupantNick::new(nick).expect("nick was previously accepted"),
+                sessions,
             })
             .collect();
         RoomMutationEffects::destroy(

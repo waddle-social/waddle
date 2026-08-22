@@ -4500,6 +4500,55 @@ mod ownership_claims_tests {
         }
     }
 
+    /// #1647 (codex round 23): the durable destroy outbox must settle owed
+    /// departure receipts — their holders already left the roster, so the
+    /// live-occupant recipients alone would drop their terminal presence.
+    #[test]
+    fn destroy_effects_include_owed_departure_receipt_holders() {
+        let room_jid = test_room_jid("destroy-effects-receipts");
+        let ghost: jid::FullJid = "ghost@example.com/web".parse().expect("ghost full JID");
+        let leave_attempt = crate::muc::room_actor::LeaveAttemptId::generate();
+        let completion = DestroyCompletion {
+            attempt: crate::muc::DestroyAttemptId::generate(),
+            room_jid: room_jid.clone(),
+            room: MucRoom::new(
+                room_jid,
+                "w".to_string(),
+                "c".to_string(),
+                RoomConfig::default(),
+            ),
+            departures: crate::muc::room_actor::DepartureLedger {
+                receipts: vec![crate::muc::room_actor::DepartureReceipt {
+                    attempt: leave_attempt,
+                    jid: ghost.clone(),
+                    cause: crate::muc::durable::OccupancyLeaveCause::Explicit,
+                    generation: leave_attempt.order(),
+                    nick_generation: None,
+                    outcome: crate::muc::room_actor::DepartureReceiptOutcome::Suppressed {
+                        nick: crate::muc::MucOccupantNick::new("ghost".to_string())
+                            .expect("valid nick"),
+                        affiliation: crate::Affiliation::Member,
+                    },
+                }],
+                latest_generations: Vec::new(),
+                superseded_attempts: Vec::new(),
+            },
+            request: crate::muc::DestroyRequest::default(),
+        };
+        let effects = RoomRegistryActor::destroy_effects(&completion);
+        let crate::muc::RoomEffect::DestroyNotification { recipients, .. } = &effects.effects()[0]
+        else {
+            panic!("destroy effects must carry the terminal notification");
+        };
+        assert!(
+            recipients
+                .iter()
+                .any(|recipient| recipient.nick.as_str() == "ghost"
+                    && recipient.sessions == vec![ghost.clone()]),
+            "the owed receipt holder must be a terminal-outbox recipient"
+        );
+    }
+
     #[tokio::test]
     async fn stashed_handoff_spec_restores_the_roster_on_the_next_demand_creation() {
         use crate::muc::room_actor::{GetSnapshot, JoinAffiliationGrant, JoinWithAffiliation};
