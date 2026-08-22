@@ -119,7 +119,7 @@ async fn recover_exact_room_after_ambiguous_config_commit(
                     config: recovery_snapshot.room.config.clone(),
                     live_room_restore: recovery_snapshot.room.clone(),
                     occupancy_revision: recovery_snapshot.occupancy_revision,
-                    departure_receipts: recovery_snapshot.departure_receipts.clone(),
+                    departures: recovery_snapshot.departures.clone(),
                 },
             )
             .await
@@ -227,10 +227,7 @@ impl CancelledOwnerConfigAskRecoveryGuard {
         // at the lifecycle FIFO head (nothing else arms live-origin rows): retry
         // with backoff before giving up.
         let mut lookup_attempt = 0_i64;
-        let lookup: Result<
-            Vec<waddle_xmpp::muc::RoomEffectReservation>,
-            crate::room_effect_outbox::RoomEffectOutboxError,
-        > = loop {
+        loop {
             match if exact {
                 self.outbox
                     .staged_reservation_for(coordinates.lifecycle, coordinates.revision)
@@ -241,7 +238,7 @@ impl CancelledOwnerConfigAskRecoveryGuard {
                     .staged_reservations_up_to(coordinates.lifecycle, coordinates.revision)
                     .await
             } {
-                Ok(reservations) => break Ok(reservations),
+                Ok(reservations) => break reservations,
                 // Retry until the lookup succeeds: the producing process is still
                 // alive, so no other supervisor will ever arm these rows; the backoff
                 // is capped at MAX_RETRY_DELAY_MS and this task is detached.
@@ -258,17 +255,6 @@ impl CancelledOwnerConfigAskRecoveryGuard {
                     tokio::time::sleep(std::time::Duration::from_millis(backoff_ms.max(0) as u64))
                         .await;
                 }
-            }
-        };
-        match lookup {
-            Ok(reservations) => reservations,
-            Err(error) => {
-                tracing::warn!(
-                    room = %self.room_jid,
-                    %error,
-                    "cancelled owner config ask recovery could not load the staged reservation"
-                );
-                Vec::new()
             }
         }
     }

@@ -203,6 +203,9 @@ pub struct MucRoom {
     /// Join watermark for each live occupant session. Replacement rejoins
     /// advance the watermark so deferred cleanup can refuse stale departures.
     pub(super) session_watermarks: HashMap<FullJid, OccupancyWatermark>,
+    /// Process-wide occupancy order at which each session joined (see
+    /// `LeaveAttemptId`); transplanted with the roster.
+    pub(super) session_orders: HashMap<FullJid, super::room_actor::OccupancyOrder>,
     /// Persistent affiliation list (synced with Zanzibar)
     pub(super) affiliation_list: AffiliationList,
     /// Per-nickname occupancy generation, bumped each time a nickname
@@ -297,6 +300,7 @@ impl MucRoom {
             occupants: HashMap::new(),
             occupant_sessions: HashMap::new(),
             session_watermarks: HashMap::new(),
+            session_orders: HashMap::new(),
             affiliation_list: AffiliationList::new(),
             nickname_generation: HashMap::new(),
             generation_floor: u64::try_from(chrono::Utc::now().timestamp_millis()).unwrap_or(0),
@@ -508,6 +512,10 @@ impl MucRoom {
     pub fn add_occupant(&mut self, occupant: Occupant) {
         self.session_watermarks
             .insert(occupant.real_jid.clone(), OccupancyWatermark::initial());
+        self.session_orders.insert(
+            occupant.real_jid.clone(),
+            super::room_actor::next_occupancy_order(),
+        );
         if !self.occupants.contains_key(&occupant.nick) {
             let floor = self.generation_floor;
             let gen = self
@@ -532,6 +540,7 @@ impl MucRoom {
         if let Some(sessions) = self.occupant_sessions.remove(nick) {
             for session in sessions {
                 self.session_watermarks.remove(&session);
+                self.session_orders.remove(&session);
             }
         }
         self.muji_state.remove(nick);
@@ -604,6 +613,7 @@ impl MucRoom {
             }
         }
         self.session_watermarks.remove(jid);
+        self.session_orders.remove(jid);
 
         if sessions.is_empty() {
             self.occupant_sessions.remove(nick);
@@ -627,7 +637,13 @@ impl MucRoom {
     }
 
     pub fn set_session_watermark(&mut self, jid: FullJid, watermark: OccupancyWatermark) {
+        self.session_orders
+            .insert(jid.clone(), super::room_actor::next_occupancy_order());
         self.session_watermarks.insert(jid, watermark);
+    }
+
+    pub fn session_order(&self, jid: &FullJid) -> Option<super::room_actor::OccupancyOrder> {
+        self.session_orders.get(jid).copied()
     }
 
     /// Get the number of occupants.

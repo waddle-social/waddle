@@ -41,12 +41,22 @@ pub enum LocalDepartureItem {
         selector: LeaveSessionSelector,
         attempt: LeaveAttemptId,
     },
+    /// A departure whose reply WAS delivered and whose effects ran, but whose
+    /// receipt acknowledgement could not be handed to the actor in time: the
+    /// receipt must still be dropped, or a later gone-JID leave of the same
+    /// cause would replay the already-emitted effects.
+    AckReceipt {
+        room: BareJid,
+        jid: FullJid,
+        attempt: LeaveAttemptId,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord)]
 enum LocalDepartureKey {
     FullJidSweep(FullJid),
     RoomScoped(BareJid, FullJid, u8),
+    Ack(BareJid, FullJid, LeaveAttemptId),
 }
 
 impl LocalDepartureItem {
@@ -59,6 +69,9 @@ impl LocalDepartureItem {
             | Self::ConfirmRetired {
                 room, jid, cause, ..
             } => LocalDepartureKey::RoomScoped(room.clone(), jid.clone(), cause_key(*cause)),
+            Self::AckReceipt { room, jid, attempt } => {
+                LocalDepartureKey::Ack(room.clone(), jid.clone(), *attempt)
+            }
         }
     }
 
@@ -139,7 +152,7 @@ impl LocalDepartureItem {
 
     fn attempt(&self) -> Option<LeaveAttemptId> {
         match self {
-            Self::FullJidSweep { .. } => None,
+            Self::FullJidSweep { .. } | Self::AckReceipt { .. } => None,
             Self::RoomDeparture { attempt, .. } | Self::ConfirmRetired { attempt, .. } => {
                 Some(*attempt)
             }
@@ -148,7 +161,7 @@ impl LocalDepartureItem {
 
     fn selector(&self) -> Option<LeaveSessionSelector> {
         match self {
-            Self::FullJidSweep { .. } => None,
+            Self::FullJidSweep { .. } | Self::AckReceipt { .. } => None,
             Self::RoomDeparture { selector, .. } | Self::ConfirmRetired { selector, .. } => {
                 Some(*selector)
             }
@@ -206,7 +219,7 @@ pub struct PendingLocalMucDepartures {
 #[derive(Debug, Default)]
 struct Inventory {
     entries: HashMap<LocalDepartureKey, PendingLocalDeparture>,
-    counts: [i64; 3],
+    counts: [i64; 4],
 }
 
 const fn kind_slot(item: &LocalDepartureItem) -> usize {
@@ -214,6 +227,7 @@ const fn kind_slot(item: &LocalDepartureItem) -> usize {
         LocalDepartureItem::FullJidSweep { .. } => 0,
         LocalDepartureItem::RoomDeparture { .. } => 1,
         LocalDepartureItem::ConfirmRetired { .. } => 2,
+        LocalDepartureItem::AckReceipt { .. } => 3,
     }
 }
 
@@ -251,9 +265,14 @@ impl Inventory {
     }
 
     fn record_gauges(&self) {
-        for (kind, value) in ["full_jid_sweep", "room_departure", "confirm_retired"]
-            .into_iter()
-            .zip(self.counts)
+        for (kind, value) in [
+            "full_jid_sweep",
+            "room_departure",
+            "confirm_retired",
+            "ack_receipt",
+        ]
+        .into_iter()
+        .zip(self.counts)
         {
             crate::metrics::record_local_departure_pending(kind, value);
         }
@@ -348,6 +367,16 @@ impl PendingLocalMucDepartures {
         let mut inventory = self.entries.lock().expect("local departure inventory lock");
         inventory.insert(entry);
         inventory.record_gauges();
+    }
+
+    #[cfg(all(test, feature = "clustering"))]
+    pub(crate) fn contains_for_test(&self, item: &LocalDepartureItem) -> bool {
+        self.entries
+            .lock()
+            .expect("local departure inventory lock")
+            .entries
+            .get(&item.key())
+            .is_some_and(|pending| &pending.item == item)
     }
 
     pub fn len(&self) -> usize {
@@ -858,6 +887,42 @@ mod tests {
                 .entries
                 .contains_key(&LocalDepartureKey::FullJidSweep(jid("u0@example.com/r"))),
             "the oldest sweep is the one dropped"
+        );
+    }
+
+    #[test]
+    fn ack_receipts_key_separately_from_departures_and_from_each_other() {
+        let pending = PendingLocalMucDepartures::default();
+        let room: BareJid = "room@muc.example.com".parse().expect("room");
+        let jid: FullJid = "alice@example.com/web".parse().expect("jid");
+        let first = LeaveAttemptId::generate();
+        let second = LeaveAttemptId::generate();
+        pending.record(LocalDepartureItem::RoomDeparture {
+            room: room.clone(),
+            jid: jid.clone(),
+            cause: OccupancyLeaveCause::Explicit,
+            selector: LeaveSessionSelector::Any,
+            attempt: first,
+        });
+        pending.record(LocalDepartureItem::AckReceipt {
+            room: room.clone(),
+            jid: jid.clone(),
+            attempt: first,
+        });
+        pending.record(LocalDepartureItem::AckReceipt {
+            room: room.clone(),
+            jid: jid.clone(),
+            attempt: second,
+        });
+        pending.record(LocalDepartureItem::AckReceipt {
+            room,
+            jid,
+            attempt: second,
+        });
+        assert_eq!(
+            pending.len(),
+            3,
+            "a departure and two distinct acknowledgements; the repeat coalesces"
         );
     }
 

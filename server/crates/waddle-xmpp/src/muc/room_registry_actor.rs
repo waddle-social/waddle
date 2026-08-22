@@ -159,7 +159,7 @@ struct RoomPreparationSpec {
 struct LiveRoomRestore {
     room: MucRoom,
     occupancy_revision: u64,
-    departure_receipts: Vec<super::room_actor::DepartureReceipt>,
+    departures: super::room_actor::DepartureLedger,
 }
 
 enum DemandRoomPreparation {
@@ -1676,7 +1676,7 @@ impl RoomRegistryActor {
                     .ask(RestoreLiveRoster {
                         room: restore.room,
                         occupancy_revision: restore.occupancy_revision,
-                        departure_receipts: restore.departure_receipts,
+                        departures: restore.departures,
                     })
                     .await
                 {
@@ -2220,7 +2220,7 @@ impl RoomRegistryActor {
                         .ask(RestoreLiveRoster {
                             room: restore.room,
                             occupancy_revision: restore.occupancy_revision,
-                            departure_receipts: restore.departure_receipts,
+                            departures: restore.departures,
                         })
                         .mailbox_timeout(ROOM_OWNERSHIP_CALL_TIMEOUT)
                         .reply_timeout(ROOM_OWNERSHIP_CALL_TIMEOUT)
@@ -4675,7 +4675,7 @@ pub struct GetOrCreateRoomWithLiveRoster {
     pub occupancy_revision: u64,
     /// The predecessor's unacknowledged departure receipts (see
     /// [`super::room_actor::RestoreLiveRoster`]).
-    pub departure_receipts: Vec<super::room_actor::DepartureReceipt>,
+    pub departures: super::room_actor::DepartureLedger,
 }
 
 impl kameo::message::Message<GetOrCreateRoom> for RoomRegistryActor {
@@ -4752,7 +4752,7 @@ impl kameo::message::Message<GetOrCreateRoomWithLiveRoster> for RoomRegistryActo
             live_room_restore: Some(LiveRoomRestore {
                 room: msg.live_room_restore,
                 occupancy_revision: msg.occupancy_revision,
-                departure_receipts: msg.departure_receipts,
+                departures: msg.departures,
             }),
         });
         match self

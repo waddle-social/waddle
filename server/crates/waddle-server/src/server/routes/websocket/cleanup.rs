@@ -149,20 +149,41 @@ pub(crate) async fn ask_leave_bounded(
 /// actor drops the departure receipt it retained for lost-reply replay.
 ///
 /// Awaiting mailbox admission is deliberate: dropping a full-mailbox
-/// `try_send` would leave a normal-path receipt replayable. Once this returns
-/// successfully, later leave requests queue behind the acknowledgement.
+/// `try_send` would leave a normal-path receipt replayable. The wait is
+/// bounded by one leave deadline (a wedged room must not stall the caller),
+/// and an acknowledgement that could not be handed over in time becomes a
+/// retained [`LocalDepartureItem::AckReceipt`] the janitor retries: the
+/// effects already ran, so the receipt MUST go, or a later gone-JID leave of
+/// the same cause would replay them.
 pub(crate) async fn ack_departure_receipt(
+    pending: &PendingLocalMucDepartures,
     actor: &kameo::actor::ActorRef<waddle_xmpp::muc::room_actor::RoomActor>,
+    room: &BareJid,
+    jid: &FullJid,
     attempt: waddle_xmpp::muc::room_actor::LeaveAttemptId,
 ) {
-    // Wait for mailbox admission (a dropped ack would leave a stale receipt
-    // that a later unrelated retry could replay), but never longer than one
-    // leave bound: a wedged room must not stall the caller on an ack.
-    let _ = tokio::time::timeout(
+    if try_ack_departure_receipt(actor, attempt).await {
+        return;
+    }
+    pending.record(LocalDepartureItem::AckReceipt {
+        room: room.clone(),
+        jid: jid.clone(),
+        attempt,
+    });
+}
+
+/// One bounded attempt to hand the acknowledgement to the actor; `true` once
+/// it is queued in the mailbox (later leave requests queue behind it).
+pub(crate) async fn try_ack_departure_receipt(
+    actor: &kameo::actor::ActorRef<waddle_xmpp::muc::room_actor::RoomActor>,
+    attempt: waddle_xmpp::muc::room_actor::LeaveAttemptId,
+) -> bool {
+    tokio::time::timeout(
         super::LEAVE_ASK_TIMEOUT,
         actor.tell(waddle_xmpp::muc::room_actor::AckDepartureReceipt { attempt }),
     )
-    .await;
+    .await
+    .is_ok_and(|sent| sent.is_ok())
 }
 
 /// Deliver the XEP-0045 §7.14 self-presence (`<status code='110'/>`) of a
@@ -1931,7 +1952,14 @@ async fn cleanup_muc_presence_with_origin(
         super::muc_call_sfu::unregister_participant_from_room(state, &room_jid, jid);
         match leave_result {
             Ok(LeaveDisposition::Left(outcome)) => {
-                ack_departure_receipt(&room_actor, attempt).await;
+                ack_departure_receipt(
+                    &state.deps.protocol.pending_local_muc_departures,
+                    &room_actor,
+                    &room_jid,
+                    jid,
+                    attempt,
+                )
+                .await;
                 debug!(
                     room = %room_jid,
                     nick = %outcome.nick,
@@ -1966,7 +1994,14 @@ async fn cleanup_muc_presence_with_origin(
                 );
             }
             Ok(LeaveDisposition::Suppressed { .. }) => {
-                ack_departure_receipt(&room_actor, attempt).await;
+                ack_departure_receipt(
+                    &state.deps.protocol.pending_local_muc_departures,
+                    &room_actor,
+                    &room_jid,
+                    jid,
+                    attempt,
+                )
+                .await;
             }
             Ok(LeaveDisposition::NotOccupant | LeaveDisposition::Superseded) => {}
             Err(LeaveAskFailure::Timeout) => {
@@ -3815,7 +3850,8 @@ mod local_departure_cleanup_tests {
                 .ask(GetSnapshot)
                 .await
                 .expect("snapshot after suppressed cleanup")
-                .departure_receipts
+                .departures
+                .receipts
                 .is_empty(),
             "disconnect cleanup acknowledges the suppressed receipt"
         );

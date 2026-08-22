@@ -4519,7 +4519,7 @@ mod ownership_claims_tests {
                 },
                 live_room_restore: stale_room,
                 occupancy_revision: source_snapshot.occupancy_revision,
-                departure_receipts: Vec::new(),
+                departures: Default::default(),
             })
             .await
             .expect("recover room with typed live roster");

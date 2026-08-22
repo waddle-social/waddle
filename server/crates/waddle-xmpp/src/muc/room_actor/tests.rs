@@ -84,7 +84,7 @@ async fn restoring_live_roster_rederives_occupant_authorization() {
         .ask(RestoreLiveRoster {
             room: stale_room,
             occupancy_revision: 0,
-            departure_receipts: Vec::new(),
+            departures: Default::default(),
         })
         .await
         .expect("restore live roster");
@@ -4476,11 +4476,10 @@ async fn leave_with_attempt(
 async fn replayed_receipt_is_superseded_when_the_session_rejoined() {
     let actor = spawn_room_actor().await;
     let alice = test_full_jid("alice");
-    let first_attempt = LeaveAttemptId::generate();
-
     join_as_resolver(&actor, alice.clone(), "alice")
         .await
         .expect("alice joins");
+    let first_attempt = LeaveAttemptId::generate();
     assert!(matches!(
         leave_with_attempt(&actor, alice.clone(), first_attempt).await,
         LeaveDisposition::Left(_)
@@ -4505,12 +4504,10 @@ async fn replayed_receipt_is_superseded_when_the_session_rejoined() {
 async fn old_receipt_is_not_replayed_after_the_jid_rejoined_and_left_again() {
     let actor = spawn_room_actor().await;
     let alice = test_full_jid("alice");
-    let first_attempt = LeaveAttemptId::generate();
-    let second_attempt = LeaveAttemptId::generate();
-
     join_as_resolver(&actor, alice.clone(), "alice")
         .await
         .expect("alice joins");
+    let first_attempt = LeaveAttemptId::generate();
     assert!(matches!(
         leave_with_attempt(&actor, alice.clone(), first_attempt).await,
         LeaveDisposition::Left(_)
@@ -4518,6 +4515,7 @@ async fn old_receipt_is_not_replayed_after_the_jid_rejoined_and_left_again() {
     join_as_resolver(&actor, alice.clone(), "alice")
         .await
         .expect("alice rejoins");
+    let second_attempt = LeaveAttemptId::generate();
     assert!(matches!(
         leave_with_attempt(&actor, alice.clone(), second_attempt).await,
         LeaveDisposition::Left(_)
@@ -4527,8 +4525,8 @@ async fn old_receipt_is_not_replayed_after_the_jid_rejoined_and_left_again() {
         .ask(GetSnapshot)
         .await
         .expect("snapshot after second leave");
-    assert_eq!(snapshot.departure_receipts.len(), 1);
-    assert_eq!(snapshot.departure_receipts[0].attempt, second_attempt);
+    assert_eq!(snapshot.departures.receipts.len(), 1);
+    assert_eq!(snapshot.departures.receipts[0].attempt, second_attempt);
 
     assert!(matches!(
         leave_with_attempt(&actor, alice.clone(), first_attempt).await,
@@ -4547,10 +4545,252 @@ async fn old_receipt_is_not_replayed_after_the_jid_rejoined_and_left_again() {
             .ask(GetSnapshot)
             .await
             .expect("snapshot after replay")
-            .departure_receipts
+            .departures
+            .receipts
             .is_empty(),
         "the departed-generation tombstone prunes with B's consumed receipt"
     );
+}
+
+async fn leave_with_attempt_and_cause(
+    actor: &ActorRef<RoomActor>,
+    jid: FullJid,
+    attempt: LeaveAttemptId,
+    cause: crate::muc::durable::OccupancyLeaveCause,
+) -> LeaveDisposition {
+    actor
+        .ask(LeaveByRealJid {
+            sender_jid: jid,
+            cause,
+            session: LeaveSessionSelector::Any,
+            attempt,
+        })
+        .await
+        .expect("leave ask")
+}
+
+fn receipts_of(actor_snapshot: &RoomSnapshot) -> &[DepartureReceipt] {
+    &actor_snapshot.departures.receipts
+}
+
+#[tokio::test]
+async fn retry_of_an_attempt_older_than_the_live_session_is_superseded() {
+    // join → leave A1 (reply lost) → rejoin → leave A2 (acked) → rejoin →
+    // retry A1: the live session joined after A1 was minted, so A1 must not
+    // evict it even though A1's receipt tombstone was pruned with A2's ack.
+    let actor = spawn_room_actor().await;
+    let alice = test_full_jid("alice");
+    join_as_resolver(&actor, alice.clone(), "alice")
+        .await
+        .expect("alice joins");
+    let first_attempt = LeaveAttemptId::generate();
+    assert!(matches!(
+        leave_with_attempt(&actor, alice.clone(), first_attempt).await,
+        LeaveDisposition::Left(_)
+    ));
+    join_as_resolver(&actor, alice.clone(), "alice")
+        .await
+        .expect("alice rejoins");
+    let second_attempt = LeaveAttemptId::generate();
+    assert!(matches!(
+        leave_with_attempt(&actor, alice.clone(), second_attempt).await,
+        LeaveDisposition::Left(_)
+    ));
+    actor
+        .ask(AckDepartureReceipt {
+            attempt: second_attempt,
+        })
+        .await
+        .expect("ack second departure");
+    let snapshot = actor.ask(GetSnapshot).await.expect("snapshot");
+    assert!(
+        receipts_of(&snapshot).is_empty(),
+        "the acknowledged receipt pruned every tombstone of the JID"
+    );
+    join_as_resolver(&actor, alice.clone(), "alice")
+        .await
+        .expect("alice rejoins again");
+
+    let stale_retry = leave_with_attempt(&actor, alice.clone(), first_attempt).await;
+    assert!(
+        matches!(stale_retry, LeaveDisposition::Superseded),
+        "stale retry must be superseded, got {stale_retry:?}"
+    );
+    let snapshot = actor.ask(GetSnapshot).await.expect("snapshot");
+    assert!(
+        snapshot.room.get_occupant("alice").is_some(),
+        "the live session joined after the stale attempt and must remain"
+    );
+}
+
+#[tokio::test]
+async fn old_receipt_is_not_replayed_after_the_rejoined_session_was_kicked() {
+    let actor = spawn_room_actor().await;
+    let owner = test_full_jid("owner");
+    let alice = test_full_jid("alice");
+    actor
+        .ask(JoinWithAffiliation {
+            sender_jid: owner.clone(),
+            nick: "owner".to_owned(),
+            affiliation_grant: JoinAffiliationGrant::Resolver(Affiliation::Owner),
+            local_domain: "example.com".to_owned(),
+            admission_revision: current_admission_revision(&actor).await,
+        })
+        .await
+        .expect("owner joins");
+    join_as_resolver(&actor, alice.clone(), "alice")
+        .await
+        .expect("alice joins");
+    let lost_attempt = LeaveAttemptId::generate();
+    assert!(matches!(
+        leave_with_attempt(&actor, alice.clone(), lost_attempt).await,
+        LeaveDisposition::Left(_)
+    ));
+    join_as_resolver(&actor, alice.clone(), "alice")
+        .await
+        .expect("alice rejoins");
+    actor
+        .ask(ApplyAdminItems {
+            sender_jid: owner,
+            sender_affiliation: Affiliation::Owner,
+            sender_role: Role::Moderator,
+            items: vec![AdminItem {
+                jid: None,
+                nick: Some("alice".to_string()),
+                affiliation: None,
+                role: Some(Role::None),
+                reason: None,
+            }],
+        })
+        .await
+        .expect("kick alice");
+    let snapshot = actor.ask(GetSnapshot).await.expect("snapshot");
+    assert!(snapshot.room.get_occupant("alice").is_none(), "kicked");
+    assert!(
+        snapshot
+            .departures
+            .latest_generations
+            .iter()
+            .any(|(jid, generation)| {
+                jid == &alice && *generation > snapshot.departures.receipts[0].generation
+            }),
+        "the rejoin advanced the JID's latest generation: {:?}",
+        snapshot.departures
+    );
+
+    let stale_retry = leave_with_attempt(&actor, alice.clone(), lost_attempt).await;
+    assert!(
+        matches!(stale_retry, LeaveDisposition::Superseded),
+        "a newer generation existed (and was removed by moderation): the stale \
+         ordinary departure must not be announced after the 307, got {stale_retry:?}"
+    );
+    assert!(
+        receipts_of(&actor.ask(GetSnapshot).await.expect("snapshot")).is_empty(),
+        "the stale receipt is consumed, not left for a later fallback"
+    );
+}
+
+#[tokio::test]
+async fn jid_fallback_only_replays_a_receipt_of_the_same_cause() {
+    use crate::muc::durable::OccupancyLeaveCause;
+    let actor = spawn_room_actor().await;
+    let alice = test_full_jid("alice");
+    join_as_resolver(&actor, alice.clone(), "alice")
+        .await
+        .expect("alice joins");
+    let explicit_attempt = LeaveAttemptId::generate();
+    assert!(matches!(
+        leave_with_attempt_and_cause(
+            &actor,
+            alice.clone(),
+            explicit_attempt,
+            OccupancyLeaveCause::Explicit
+        )
+        .await,
+        LeaveDisposition::Left(_)
+    ));
+
+    // An administrative leave for the now-absent JID must not consume the
+    // explicit receipt: its caller would run the wrong effect policy and the
+    // explicit retry would find nothing.
+    assert!(matches!(
+        leave_with_attempt_and_cause(
+            &actor,
+            alice.clone(),
+            LeaveAttemptId::generate(),
+            OccupancyLeaveCause::Administrative
+        )
+        .await,
+        LeaveDisposition::NotOccupant
+    ));
+    assert_eq!(
+        receipts_of(&actor.ask(GetSnapshot).await.expect("snapshot")).len(),
+        1,
+        "the explicit receipt stays retained for its own retry"
+    );
+    // A coalesced explicit retry (unknown attempt, same cause) replays it.
+    assert!(matches!(
+        leave_with_attempt_and_cause(
+            &actor,
+            alice.clone(),
+            LeaveAttemptId::generate(),
+            OccupancyLeaveCause::Explicit
+        )
+        .await,
+        LeaveDisposition::Left(_)
+    ));
+    assert!(receipts_of(&actor.ask(GetSnapshot).await.expect("snapshot")).is_empty());
+}
+
+#[tokio::test]
+async fn superseded_attempt_tombstones_survive_live_roster_transfer() {
+    // A (reply lost) is superseded by B (reply lost). After the transfer a
+    // retry of A must not consume B's receipt through the JID fallback.
+    let predecessor = spawn_room_actor().await;
+    let alice = test_full_jid("alice");
+    join_as_resolver(&predecessor, alice.clone(), "alice")
+        .await
+        .expect("alice joins");
+    let attempt_a = LeaveAttemptId::generate();
+    assert!(matches!(
+        leave_with_attempt(&predecessor, alice.clone(), attempt_a).await,
+        LeaveDisposition::Left(_)
+    ));
+    join_as_resolver(&predecessor, alice.clone(), "alice")
+        .await
+        .expect("alice rejoins");
+    let attempt_b = LeaveAttemptId::generate();
+    assert!(matches!(
+        leave_with_attempt(&predecessor, alice.clone(), attempt_b).await,
+        LeaveDisposition::Left(_)
+    ));
+    let snapshot = predecessor.ask(GetSnapshot).await.expect("snapshot");
+    assert_eq!(snapshot.departures.receipts.len(), 1);
+    assert_eq!(snapshot.departures.superseded_attempts.len(), 1);
+
+    let successor = spawn_room_actor().await;
+    successor
+        .ask(RestoreLiveRoster {
+            room: snapshot.room,
+            occupancy_revision: snapshot.occupancy_revision,
+            departures: snapshot.departures,
+        })
+        .await
+        .expect("transfer");
+
+    assert!(matches!(
+        leave_with_attempt(&successor, alice.clone(), attempt_a).await,
+        LeaveDisposition::Superseded
+    ));
+    assert_eq!(
+        receipts_of(&successor.ask(GetSnapshot).await.expect("snapshot")).len(),
+        1,
+        "B's receipt is still owed to B's retry"
+    );
+    assert!(matches!(
+        leave_with_attempt(&successor, alice, attempt_b).await,
+        LeaveDisposition::Left(_)
+    ));
 }
 
 #[tokio::test]
@@ -4558,11 +4798,10 @@ async fn replayed_receipt_is_superseded_when_the_nick_was_retaken() {
     let actor = spawn_room_actor().await;
     let alice = test_full_jid("alice");
     let bob = test_full_jid("bob");
-    let attempt = LeaveAttemptId::generate();
-
     join_as_resolver(&actor, alice.clone(), "alice")
         .await
         .expect("alice joins");
+    let attempt = LeaveAttemptId::generate();
     assert!(matches!(
         leave_with_attempt(&actor, alice.clone(), attempt).await,
         LeaveDisposition::Left(_)
@@ -4590,11 +4829,10 @@ async fn replayed_receipt_is_superseded_when_the_nick_was_retaken() {
 async fn unknown_attempt_for_a_gone_session_replays_the_jids_unacknowledged_receipt_once() {
     let actor = spawn_room_actor().await;
     let alice = test_full_jid("alice");
-    let original_attempt = LeaveAttemptId::generate();
-
     join_as_resolver(&actor, alice.clone(), "alice")
         .await
         .expect("alice joins");
+    let original_attempt = LeaveAttemptId::generate();
     let original = leave_with_attempt(&actor, alice.clone(), original_attempt).await;
     assert!(matches!(original, LeaveDisposition::Left(_)));
 
@@ -4612,11 +4850,10 @@ async fn unknown_attempt_for_a_gone_session_replays_the_jids_unacknowledged_rece
 async fn acknowledged_departure_leaves_no_receipt() {
     let actor = spawn_room_actor().await;
     let alice = test_full_jid("alice");
-    let attempt = LeaveAttemptId::generate();
-
     join_as_resolver(&actor, alice.clone(), "alice")
         .await
         .expect("alice joins");
+    let attempt = LeaveAttemptId::generate();
     assert!(matches!(
         leave_with_attempt(&actor, alice.clone(), attempt).await,
         LeaveDisposition::Left(_)
@@ -4635,7 +4872,8 @@ async fn acknowledged_departure_leaves_no_receipt() {
             .ask(GetSnapshot)
             .await
             .expect("snapshot")
-            .departure_receipts
+            .departures
+            .receipts
             .is_empty(),
         "acknowledged departures do not remain replayable"
     );
@@ -4645,11 +4883,10 @@ async fn acknowledged_departure_leaves_no_receipt() {
 async fn receipts_are_transferred_on_live_roster_restore() {
     let predecessor = spawn_room_actor().await;
     let alice = test_full_jid("alice");
-    let attempt = LeaveAttemptId::generate();
-
     join_as_resolver(&predecessor, alice.clone(), "alice")
         .await
         .expect("alice joins predecessor");
+    let attempt = LeaveAttemptId::generate();
     assert!(matches!(
         leave_with_attempt(&predecessor, alice.clone(), attempt).await,
         LeaveDisposition::Left(_)
@@ -4658,14 +4895,14 @@ async fn receipts_are_transferred_on_live_roster_restore() {
         .ask(GetSnapshot)
         .await
         .expect("predecessor snapshot");
-    assert_eq!(snapshot.departure_receipts.len(), 1);
+    assert_eq!(snapshot.departures.receipts.len(), 1);
 
     let successor = spawn_room_actor().await;
     successor
         .ask(RestoreLiveRoster {
             room: snapshot.room,
             occupancy_revision: snapshot.occupancy_revision,
-            departure_receipts: snapshot.departure_receipts,
+            departures: snapshot.departures,
         })
         .await
         .expect("restore successor live roster");
@@ -4679,35 +4916,37 @@ async fn receipts_are_transferred_on_live_roster_restore() {
 async fn transferred_older_generation_receipt_is_refused() {
     let predecessor = spawn_room_actor().await;
     let alice = test_full_jid("alice");
-    let older_attempt = LeaveAttemptId::generate();
     join_as_resolver(&predecessor, alice.clone(), "alice")
         .await
         .expect("alice joins predecessor");
+    let older_attempt = LeaveAttemptId::generate();
     assert!(matches!(
         leave_with_attempt(&predecessor, alice.clone(), older_attempt).await,
         LeaveDisposition::Left(_)
     ));
     let mut older_snapshot = predecessor.ask(GetSnapshot).await.expect("older snapshot");
-    older_snapshot.departure_receipts[0].generation = OccupancyWatermark::from_revision(1);
+    older_snapshot.departures.receipts[0].generation = OccupancyOrder::from_raw(1);
+    older_snapshot.departures.latest_generations[0].1 = OccupancyOrder::from_raw(1);
 
     let newer_source = spawn_room_actor().await;
-    let newer_attempt = LeaveAttemptId::generate();
     join_as_resolver(&newer_source, alice.clone(), "alice")
         .await
         .expect("alice joins newer source");
+    let newer_attempt = LeaveAttemptId::generate();
     assert!(matches!(
         leave_with_attempt(&newer_source, alice.clone(), newer_attempt).await,
         LeaveDisposition::Left(_)
     ));
     let mut newer_snapshot = newer_source.ask(GetSnapshot).await.expect("newer snapshot");
-    newer_snapshot.departure_receipts[0].generation = OccupancyWatermark::from_revision(2);
+    newer_snapshot.departures.receipts[0].generation = OccupancyOrder::from_raw(2);
+    newer_snapshot.departures.latest_generations[0].1 = OccupancyOrder::from_raw(2);
 
     let successor = spawn_room_actor().await;
     successor
         .ask(RestoreLiveRoster {
             room: newer_snapshot.room,
             occupancy_revision: newer_snapshot.occupancy_revision,
-            departure_receipts: newer_snapshot.departure_receipts,
+            departures: newer_snapshot.departures,
         })
         .await
         .expect("restore newer receipt");
@@ -4715,7 +4954,7 @@ async fn transferred_older_generation_receipt_is_refused() {
         .ask(RestoreLiveRoster {
             room: older_snapshot.room,
             occupancy_revision: older_snapshot.occupancy_revision,
-            departure_receipts: older_snapshot.departure_receipts,
+            departures: older_snapshot.departures,
         })
         .await
         .expect("restore older receipt");
@@ -4724,11 +4963,11 @@ async fn transferred_older_generation_receipt_is_refused() {
         .ask(GetSnapshot)
         .await
         .expect("successor snapshot");
-    assert_eq!(snapshot.departure_receipts.len(), 1);
-    assert_eq!(snapshot.departure_receipts[0].attempt, newer_attempt);
+    assert_eq!(snapshot.departures.receipts.len(), 1);
+    assert_eq!(snapshot.departures.receipts[0].attempt, newer_attempt);
     assert_eq!(
-        snapshot.departure_receipts[0].generation,
-        OccupancyWatermark::from_revision(2)
+        snapshot.departures.receipts[0].generation,
+        OccupancyOrder::from_raw(2)
     );
     assert!(matches!(
         leave_with_attempt(&successor, alice.clone(), older_attempt).await,
@@ -4744,11 +4983,10 @@ async fn transferred_older_generation_receipt_is_refused() {
 async fn store_less_suppressed_departure_mints_a_receipt_replayed_as_suppressed() {
     let actor = spawn_room_actor().await;
     let alice = test_full_jid("alice");
-    let attempt = LeaveAttemptId::generate();
-
     join_as_resolver(&actor, alice.clone(), "alice")
         .await
         .expect("alice joins");
+    let attempt = LeaveAttemptId::generate();
     seal_for_destroy(&actor).await;
     assert!(matches!(
         leave_with_attempt(&actor, alice.clone(), attempt).await,
@@ -5267,36 +5505,40 @@ fn departure_receipts_keep_only_the_newest_generation_per_jid() {
     let alice_first = LeaveAttemptId::generate();
     let alice_second = LeaveAttemptId::generate();
     let bob_attempt = LeaveAttemptId::generate();
-    actor.retain_departure_receipt(
-        alice_first,
-        alice.clone(),
-        OccupancyWatermark::from_revision(1),
-        outcome("alice", 1),
-    );
-    actor.retain_departure_receipt(
-        bob_attempt,
-        bob.clone(),
-        OccupancyWatermark::from_revision(2),
-        outcome("bob", 2),
-    );
-    actor.retain_departure_receipt(
-        alice_second,
-        alice.clone(),
-        OccupancyWatermark::from_revision(3),
-        outcome("alice", 3),
-    );
+    actor.retain_departure_receipt(super::DepartureReceipt {
+        attempt: alice_first,
+        jid: alice.clone(),
+        cause: crate::muc::durable::OccupancyLeaveCause::Explicit,
+        generation: OccupancyOrder::from_raw(1),
+        outcome: outcome("alice", 1),
+    });
+    actor.retain_departure_receipt(super::DepartureReceipt {
+        attempt: bob_attempt,
+        jid: bob.clone(),
+        cause: crate::muc::durable::OccupancyLeaveCause::Explicit,
+        generation: OccupancyOrder::from_raw(2),
+        outcome: outcome("bob", 2),
+    });
+    actor.retain_departure_receipt(super::DepartureReceipt {
+        attempt: alice_second,
+        jid: alice.clone(),
+        cause: crate::muc::durable::OccupancyLeaveCause::Explicit,
+        generation: OccupancyOrder::from_raw(3),
+        outcome: outcome("alice", 3),
+    });
     assert_eq!(actor.departure_receipts.len(), 2, "one receipt per JID");
     assert!(
         actor.take_departure_receipt(alice_first).is_none(),
         "the older departure of the same JID is superseded"
     );
     // An older generation retained late (e.g. transferred) is refused too.
-    actor.retain_departure_receipt(
-        LeaveAttemptId::generate(),
-        alice.clone(),
-        OccupancyWatermark::from_revision(0),
-        outcome("alice", 0),
-    );
+    actor.retain_departure_receipt(super::DepartureReceipt {
+        attempt: LeaveAttemptId::generate(),
+        jid: alice.clone(),
+        cause: crate::muc::durable::OccupancyLeaveCause::Explicit,
+        generation: OccupancyOrder::from_raw(0),
+        outcome: outcome("alice", 0),
+    });
     assert_eq!(actor.departure_receipts.len(), 2);
     assert!(actor.take_departure_receipt(alice_second).is_some());
     assert!(
@@ -5306,7 +5548,7 @@ fn departure_receipts_keep_only_the_newest_generation_per_jid() {
     assert!(actor.take_departure_receipt(bob_attempt).is_some());
     assert!(actor.departure_receipts.is_empty());
     assert!(
-        actor.departed_generations.is_empty(),
+        actor.latest_generations.is_empty(),
         "tombstones prune with the last receipt"
     );
 }
@@ -5810,7 +6052,7 @@ async fn live_roster_transfer_adjusts_occupant_gauge_by_roster_delta() {
         .ask(RestoreLiveRoster {
             room: roster,
             occupancy_revision: 2,
-            departure_receipts: Vec::new(),
+            departures: Default::default(),
         })
         .await
         .expect("transfer");
@@ -5826,7 +6068,7 @@ async fn live_roster_transfer_preserves_actor_room_jid() {
         .ask(RestoreLiveRoster {
             room: foreign_room,
             occupancy_revision: 0,
-            departure_receipts: Vec::new(),
+            departures: Default::default(),
         })
         .await
         .expect("transfer");

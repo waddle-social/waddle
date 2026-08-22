@@ -84,7 +84,7 @@ pub(super) async fn recover_actor_after_ambiguous_invite_grant(
                     config: snapshot.room.config.clone(),
                     live_room_restore: snapshot.room.clone(),
                     occupancy_revision: snapshot.occupancy_revision,
-                    departure_receipts: snapshot.departure_receipts.clone(),
+                    departures: snapshot.departures.clone(),
                 },
             )
             .await

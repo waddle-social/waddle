@@ -1952,8 +1952,14 @@ pub async fn handle_muc_leave(
     .await
     {
         Ok(waddle_xmpp::muc::room_actor::LeaveDisposition::Left(outcome)) => {
-            crate::server::routes::websocket::ack_departure_receipt(&room_actor, leave_attempt)
-                .await;
+            crate::server::routes::websocket::ack_departure_receipt(
+                &state.deps.protocol.pending_local_muc_departures,
+                &room_actor,
+                room_jid,
+                sender_jid,
+                leave_attempt,
+            )
+            .await;
             outcome
         }
         Ok(waddle_xmpp::muc::room_actor::LeaveDisposition::NotOccupant) => {
@@ -1985,8 +1991,14 @@ pub async fn handle_muc_leave(
             return bounce_muc_leave_ownership_unreachable(room_jid, sender_jid, nick);
         }
         Ok(waddle_xmpp::muc::room_actor::LeaveDisposition::Suppressed { affiliation, .. }) => {
-            crate::server::routes::websocket::ack_departure_receipt(&room_actor, leave_attempt)
-                .await;
+            crate::server::routes::websocket::ack_departure_receipt(
+                &state.deps.protocol.pending_local_muc_departures,
+                &room_actor,
+                room_jid,
+                sender_jid,
+                leave_attempt,
+            )
+            .await;
             // Store-less room with a destroy/dormancy in flight: the departure
             // was recorded but nothing fans out. The departing session still
             // gets its XEP-0045 §7.14 self-presence echo (as before #1647).
@@ -3638,7 +3650,8 @@ mod occupancy_projection_handler_tests {
                 .ask(GetSnapshot)
                 .await
                 .expect("snapshot after suppressed leave")
-                .departure_receipts
+                .departures
+                .receipts
                 .is_empty(),
             "the explicit caller acknowledges the suppressed receipt"
         );

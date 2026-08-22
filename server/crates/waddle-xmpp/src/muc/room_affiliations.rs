@@ -146,7 +146,7 @@ impl MucRoom {
                 if !sessions.iter().any(|session| session == &real_jid) {
                     sessions.push(real_jid.clone());
                 }
-                self.session_watermarks.insert(real_jid, watermark);
+                self.set_session_watermark(real_jid, watermark);
                 return self
                     .occupants
                     .get(&nick)
@@ -188,7 +188,7 @@ impl MucRoom {
             .or_insert(floor);
         *gen += 1;
 
-        self.session_watermarks.insert(real_jid.clone(), watermark);
+        self.set_session_watermark(real_jid.clone(), watermark);
         self.occupant_sessions.insert(nick.clone(), vec![real_jid]);
         self.occupants.insert(nick.clone(), occupant);
         self.occupants

@@ -212,7 +212,14 @@ pub(crate) async fn run_local_muc_departure_sweep(state: &WebSocketState) {
                     .await
                     {
                         Ok(LeaveDisposition::Left(outcome)) => {
-                            routes::websocket::ack_departure_receipt(&actor, attempt).await;
+                            routes::websocket::ack_departure_receipt(
+                                &state.deps.protocol.pending_local_muc_departures,
+                                &actor,
+                                &room,
+                                &jid,
+                                attempt,
+                            )
+                            .await;
                             match cause {
                                 OccupancyLeaveCause::Disconnect => {
                                     broadcast_muc_leave_to_remaining(state, &room, &jid, &outcome)
@@ -297,7 +304,14 @@ pub(crate) async fn run_local_muc_departure_sweep(state: &WebSocketState) {
                             break;
                         }
                         Ok(LeaveDisposition::Suppressed { nick, affiliation }) => {
-                            routes::websocket::ack_departure_receipt(&actor, attempt).await;
+                            routes::websocket::ack_departure_receipt(
+                                &state.deps.protocol.pending_local_muc_departures,
+                                &actor,
+                                &room,
+                                &jid,
+                                attempt,
+                            )
+                            .await;
                             if matches!(cause, OccupancyLeaveCause::Explicit) {
                                 // Store-less room mid-destroy/dormancy: only
                                 // the leaver's §7.14 self-presence is owed.
@@ -348,6 +362,35 @@ pub(crate) async fn run_local_muc_departure_sweep(state: &WebSocketState) {
                                 selector,
                                 attempt,
                             };
+                        }
+                    }
+                }
+                LocalDepartureItem::AckReceipt { room, jid, attempt } => {
+                    match get_room_actor_result(state, &room).await {
+                        // No live actor holds a receipt: nothing left to drop.
+                        Ok(None) => {
+                            crate::metrics::record_local_departure_retry("acknowledged");
+                            break;
+                        }
+                        Ok(Some(actor))
+                            if routes::websocket::try_ack_departure_receipt(&actor, attempt)
+                                .await =>
+                        {
+                            crate::metrics::record_local_departure_retry("acknowledged");
+                            break;
+                        }
+                        Ok(Some(_)) | Err(_) => {
+                            crate::metrics::record_local_departure_retry("requeued");
+                            state
+                                .deps
+                                .protocol
+                                .pending_local_muc_departures
+                                .requeue_with_backoff(PendingLocalDeparture {
+                                    item: LocalDepartureItem::AckReceipt { room, jid, attempt },
+                                    attempts: pending.attempts,
+                                    not_before: pending.not_before,
+                                });
+                            break;
                         }
                     }
                 }
@@ -8537,6 +8580,150 @@ mod local_muc_departure_tests {
     }
 
     #[tokio::test]
+    async fn failed_receipt_acknowledgement_is_retained_and_retried_by_the_janitor() {
+        use crate::server::routes::websocket::{ack_departure_receipt, LocalDepartureItem};
+        let store = JanitorProjectionStore::new();
+        let state = clustered_state_with_store(store.clone()).await;
+        let room = room_jid("ack-retry-janitor");
+        let alice = full_jid("alice@example.com/web");
+        let bob = full_jid("bob@example.com/phone");
+        let actor = create_room(state.as_ref(), &room).await;
+        join_member(&actor, &alice, "alice").await;
+        join_member(&actor, &bob, "bob").await;
+        let (bob_tx, mut bob_rx) = mpsc::channel(8);
+        register_test_connection(state.as_ref(), &bob, bob_tx).await;
+        while bob_rx.try_recv().is_ok() {}
+
+        // The departure completes and its effects run on the caller side, but
+        // the acknowledgement cannot be handed to the actor: a stopped actor
+        // stands in for a mailbox that stays saturated past the ack bound.
+        let attempt = waddle_xmpp::muc::room_actor::LeaveAttemptId::generate();
+        let disposition = actor
+            .ask(LeaveByRealJid {
+                sender_jid: alice.clone(),
+                cause: OccupancyLeaveCause::Explicit,
+                session: LeaveSessionSelector::Any,
+                attempt,
+            })
+            .await
+            .expect("leave");
+        assert!(matches!(disposition, LeaveDisposition::Left(_)));
+        let stopped = {
+            let stopped = create_room(state.as_ref(), &room_jid("ack-retry-stopped")).await;
+            stopped.stop_gracefully().await.expect("stop");
+            stopped.wait_for_shutdown().await;
+            stopped
+        };
+        ack_departure_receipt(
+            &state.deps.protocol.pending_local_muc_departures,
+            &stopped,
+            &room,
+            &alice,
+            attempt,
+        )
+        .await;
+        assert_eq!(
+            state.deps.protocol.pending_local_muc_departures.len(),
+            1,
+            "an undeliverable acknowledgement is retained, never dropped"
+        );
+        assert!(
+            state
+                .deps
+                .protocol
+                .pending_local_muc_departures
+                .contains_for_test(&LocalDepartureItem::AckReceipt {
+                    room: room.clone(),
+                    jid: alice.clone(),
+                    attempt,
+                }),
+            "the retained item is the acknowledgement itself, not another leave"
+        );
+        assert_eq!(
+            actor
+                .ask(waddle_xmpp::muc::room_actor::GetSnapshot)
+                .await
+                .expect("snapshot")
+                .departures
+                .receipts
+                .len(),
+            1,
+            "the real actor still holds the un-acknowledged receipt"
+        );
+
+        run_local_muc_departure_sweep(&state).await;
+
+        assert_eq!(
+            state.deps.protocol.pending_local_muc_departures.len(),
+            0,
+            "the janitor hands the acknowledgement to the live actor"
+        );
+        assert!(
+            actor
+                .ask(waddle_xmpp::muc::room_actor::GetSnapshot)
+                .await
+                .expect("snapshot")
+                .departures
+                .receipts
+                .is_empty(),
+            "the receipt is dropped once acknowledged"
+        );
+        // An unrelated later leave of the same gone JID and cause finds nothing
+        // to replay: the handled departure's effects are never emitted twice.
+        let later = actor
+            .ask(LeaveByRealJid {
+                sender_jid: alice.clone(),
+                cause: OccupancyLeaveCause::Explicit,
+                session: LeaveSessionSelector::Any,
+                attempt: waddle_xmpp::muc::room_actor::LeaveAttemptId::generate(),
+            })
+            .await
+            .expect("later leave");
+        assert!(
+            matches!(later, LeaveDisposition::NotOccupant),
+            "got {later:?}"
+        );
+        assert!(
+            bob_rx.try_recv().is_err(),
+            "nothing was broadcast by the acknowledgement path"
+        );
+    }
+
+    #[tokio::test]
+    async fn unacknowledged_receipt_would_replay_for_an_unrelated_leave_without_the_ack() {
+        // Control for the test above: with the receipt still retained, the
+        // unrelated gone-JID leave of the same cause DOES replay it — which is
+        // exactly why a failed acknowledgement must be retried, never dropped.
+        let store = JanitorProjectionStore::new();
+        let state = clustered_state_with_store(store.clone()).await;
+        let room = room_jid("ack-control");
+        let alice = full_jid("alice@example.com/web");
+        let actor = create_room(state.as_ref(), &room).await;
+        join_member(&actor, &alice, "alice").await;
+        let attempt = waddle_xmpp::muc::room_actor::LeaveAttemptId::generate();
+        let first = actor
+            .ask(LeaveByRealJid {
+                sender_jid: alice.clone(),
+                cause: OccupancyLeaveCause::Explicit,
+                session: LeaveSessionSelector::Any,
+                attempt,
+            })
+            .await
+            .expect("leave");
+        assert!(matches!(first, LeaveDisposition::Left(_)));
+        let later = actor
+            .ask(LeaveByRealJid {
+                sender_jid: alice.clone(),
+                cause: OccupancyLeaveCause::Explicit,
+                session: LeaveSessionSelector::Any,
+                attempt: waddle_xmpp::muc::room_actor::LeaveAttemptId::generate(),
+            })
+            .await
+            .expect("later leave");
+        assert!(matches!(later, LeaveDisposition::Left(_)), "got {later:?}");
+    }
+
+    #[tokio::test]
     async fn janitor_suppressed_explicit_replay_unregisters_sfu_exactly_once() {
         let recorder = Arc::new(RecordingSfu::default());
         let state = create_test_websocket_state_with_sfu(recorder.clone()).await;
@@ -8879,7 +9066,7 @@ mod local_muc_departure_tests {
                 config: RoomConfig::default(),
                 live_room_restore: predecessor_snapshot.room,
                 occupancy_revision: predecessor_snapshot.occupancy_revision,
-                departure_receipts: Vec::new(),
+                departures: Default::default(),
             })
             .await
             .expect("spawn successor with live roster")
@@ -8953,7 +9140,7 @@ mod local_muc_departure_tests {
             .ask(RestoreLiveRoster {
                 room: source_snapshot.room,
                 occupancy_revision: source_snapshot.occupancy_revision,
-                departure_receipts: Vec::new(),
+                departures: Default::default(),
             })
             .await
             .expect("restore live roster into inactive actor");

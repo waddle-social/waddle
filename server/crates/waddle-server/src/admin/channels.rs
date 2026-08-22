@@ -2312,7 +2312,14 @@ async fn run_group_dm_leave(
             .await
             {
                 Ok(waddle_xmpp::muc::room_actor::LeaveDisposition::Left(outcome)) => {
-                    crate::server::routes::websocket::ack_departure_receipt(&actor, attempt).await;
+                    crate::server::routes::websocket::ack_departure_receipt(
+                        pending_local_muc_departures,
+                        &actor,
+                        &args.room_jid,
+                        &resource,
+                        attempt,
+                    )
+                    .await;
                     broadcast_group_dm_leave(
                         state,
                         connections,
@@ -2322,7 +2329,14 @@ async fn run_group_dm_leave(
                     );
                 }
                 Ok(waddle_xmpp::muc::room_actor::LeaveDisposition::Suppressed { .. }) => {
-                    crate::server::routes::websocket::ack_departure_receipt(&actor, attempt).await;
+                    crate::server::routes::websocket::ack_departure_receipt(
+                        pending_local_muc_departures,
+                        &actor,
+                        &args.room_jid,
+                        &resource,
+                        attempt,
+                    )
+                    .await;
                 }
                 Ok(
                     waddle_xmpp::muc::room_actor::LeaveDisposition::NotOccupant
@@ -3150,10 +3164,7 @@ impl CancelledConfigAskRecoveryGuard {
             // at the lifecycle FIFO head (nothing else arms live-origin rows): retry
             // with backoff before giving up.
             let mut lookup_attempt = 0_i64;
-            let lookup: Result<
-                Vec<waddle_xmpp::muc::RoomEffectReservation>,
-                crate::room_effect_outbox::RoomEffectOutboxError,
-            > = loop {
+            loop {
                 match if exact {
                     self.outbox
                         .staged_reservation_for(coordinates.lifecycle, coordinates.revision)
@@ -3164,7 +3175,7 @@ impl CancelledConfigAskRecoveryGuard {
                         .staged_reservations_up_to(coordinates.lifecycle, coordinates.revision)
                         .await
                 } {
-                    Ok(reservations) => break Ok(reservations),
+                    Ok(reservations) => break reservations,
                     // Retry until the lookup succeeds: the producing process is still
                     // alive, so no other supervisor will ever arm these rows; the backoff
                     // is capped at MAX_RETRY_DELAY_MS and this task is detached.
@@ -3183,17 +3194,6 @@ impl CancelledConfigAskRecoveryGuard {
                         ))
                         .await;
                     }
-                }
-            };
-            match lookup {
-                Ok(reservations) => reservations,
-                Err(error) => {
-                    tracing::warn!(
-                        room = %self.room_jid,
-                        %error,
-                        "cancelled admin/group-DM config ask recovery could not load the staged reservation"
-                    );
-                    return;
                 }
             }
         } else {
@@ -3531,7 +3531,7 @@ async fn recover_actor_with_merged_live_roster(
             config: spec.config,
             live_room_restore: stale_snapshot.room,
             occupancy_revision: stale_snapshot.occupancy_revision,
-            departure_receipts: stale_snapshot.departure_receipts.clone(),
+            departures: stale_snapshot.departures.clone(),
         })
         .await
         .map_err(send_err(get_or_create_context))?

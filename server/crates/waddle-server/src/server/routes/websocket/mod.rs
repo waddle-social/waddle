@@ -102,7 +102,8 @@ pub(crate) use cleanup::redrive_remote_muc_cleanup;
 pub(crate) use cleanup::redrive_terminal_pending_rows_to_live_resource;
 pub use cleanup::MucCleanupOutcome;
 pub(crate) use cleanup::{
-    ack_departure_receipt, ask_leave_bounded, echo_muc_self_unavailable, LeaveAskFailure,
+    ack_departure_receipt, ask_leave_bounded, echo_muc_self_unavailable, try_ack_departure_receipt,
+    LeaveAskFailure,
 };
 
 /// Upper bound on a single `LeaveByRealJid` ask from the WS/janitor side: a
