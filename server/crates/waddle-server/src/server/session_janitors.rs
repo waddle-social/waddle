@@ -417,9 +417,28 @@ pub(crate) async fn run_local_muc_departure_sweep(state: &WebSocketState) {
                 }
                 LocalDepartureItem::AckReceipt { room, jid, attempt } => {
                     match get_room_actor_result(state, &room).await {
-                        // No live actor holds a receipt: nothing left to drop.
-                        Ok(None) => {
+                        // No registered actor: the room is gone for good (drop
+                        // the ack) — or a live-roster handoff is carrying the
+                        // receipt to a successor that is not published yet, in
+                        // which case dropping the ack would let a later retained
+                        // departure replay the receipt. Retry a few sweeps first.
+                        Ok(None)
+                            if pending.attempts >= routes::websocket::ACK_ABSENT_ROOM_RETRIES =>
+                        {
                             crate::metrics::record_local_departure_retry("acknowledged");
+                            break;
+                        }
+                        Ok(None) => {
+                            crate::metrics::record_local_departure_retry("requeued");
+                            state
+                                .deps
+                                .protocol
+                                .pending_local_muc_departures
+                                .requeue_with_backoff(PendingLocalDeparture {
+                                    item: LocalDepartureItem::AckReceipt { room, jid, attempt },
+                                    attempts: pending.attempts,
+                                    not_before: pending.not_before,
+                                });
                             break;
                         }
                         Ok(Some(actor))
@@ -9042,6 +9061,53 @@ mod local_muc_departure_tests {
             .departures
             .receipts
             .is_empty());
+    }
+
+    #[tokio::test]
+    async fn owed_acknowledgement_for_an_absent_room_is_retried_before_being_dropped() {
+        use crate::server::routes::websocket::{
+            LocalDepartureItem, PendingLocalDeparture, ACK_ABSENT_ROOM_RETRIES,
+        };
+        let store = JanitorProjectionStore::new();
+        let state = clustered_state_with_store(store.clone()).await;
+        let room = room_jid("ack-absent-room");
+        let alice = full_jid("alice@example.com/web");
+        let attempt = waddle_xmpp::muc::room_actor::LeaveAttemptId::generate();
+        let ack = || LocalDepartureItem::AckReceipt {
+            room: room.clone(),
+            jid: alice.clone(),
+            attempt,
+        };
+        // Fresh ack, room not registered (handoff window): retained.
+        state
+            .deps
+            .protocol
+            .pending_local_muc_departures
+            .record(ack());
+        run_local_muc_departure_sweep(&state).await;
+        assert_eq!(
+            state.deps.protocol.pending_local_muc_departures.len(),
+            1,
+            "an absent room does not drop a fresh acknowledgement"
+        );
+        // Past the absent-room budget: dropped (the room is gone for good).
+        state
+            .deps
+            .protocol
+            .pending_local_muc_departures
+            .take_for_test(&ack())
+            .expect("retained ack");
+        state
+            .deps
+            .protocol
+            .pending_local_muc_departures
+            .record_pending_for_test(PendingLocalDeparture {
+                item: ack(),
+                attempts: ACK_ABSENT_ROOM_RETRIES,
+                not_before: std::time::Instant::now(),
+            });
+        run_local_muc_departure_sweep(&state).await;
+        assert_eq!(state.deps.protocol.pending_local_muc_departures.len(), 0);
     }
 
     #[tokio::test]

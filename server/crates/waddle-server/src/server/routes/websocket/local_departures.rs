@@ -17,6 +17,12 @@ use waddle_xmpp::muc::{
 const BACKOFF_BASE: Duration = Duration::from_secs(2);
 const BACKOFF_MAX: Duration = Duration::from_secs(60);
 const STUCK_ATTEMPTS: u32 = 10;
+/// Sweeps an owed acknowledgement outlives a room the registry cannot find:
+/// a live-roster handoff (demote, then publish the successor holding the
+/// transferred receipt) briefly answers "no room" while the receipt is in
+/// flight; a destroyed room never comes back, so the ack is dropped after
+/// this many absent-room sweeps.
+pub(crate) const ACK_ABSENT_ROOM_RETRIES: u32 = 3;
 const MAX_FULL_JID_SWEEPS: usize = 50_000;
 
 #[derive(Debug, Clone, PartialEq, Eq)]

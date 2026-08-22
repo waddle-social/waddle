@@ -116,7 +116,7 @@ pub(crate) use cleanup::{
 };
 pub use connection::router;
 pub(crate) use local_departures::{
-    LocalDepartureItem, PendingLocalDeparture, PendingLocalMucDepartures,
+    LocalDepartureItem, PendingLocalDeparture, PendingLocalMucDepartures, ACK_ABSENT_ROOM_RETRIES,
 };
 pub(crate) use state::ResolvedPrincipal;
 pub use state::{
