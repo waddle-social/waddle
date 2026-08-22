@@ -266,6 +266,37 @@ pub(crate) async fn run_local_muc_departure_sweep(state: &WebSocketState) {
                         crate::metrics::record_local_departure_retry("ack_barrier");
                         break;
                     }
+                    // A LIVE task still owns a departure of this (room, JID):
+                    // retrying now could replay its receipt concurrently with
+                    // its own fan-out and duplicate the departure effects.
+                    // Requeue and let the live task finish (or die — the
+                    // in-flight entry then converts to a retained departure
+                    // and merges with this one).
+                    if state
+                        .deps
+                        .protocol
+                        .pending_local_muc_departures
+                        .in_flight_exists_for(&room, &jid)
+                    {
+                        state
+                            .deps
+                            .protocol
+                            .pending_local_muc_departures
+                            .requeue_with_backoff(PendingLocalDeparture {
+                                item: LocalDepartureItem::RoomDeparture {
+                                    room,
+                                    jid,
+                                    cause,
+                                    selector,
+                                    attempt,
+                                    notified: notified.clone(),
+                                },
+                                attempts: pending.attempts,
+                                not_before: pending.not_before,
+                            });
+                        crate::metrics::record_local_departure_retry("in_flight_barrier");
+                        break;
+                    }
                     match routes::websocket::ask_leave_bounded(
                         &actor,
                         LeaveByRealJid {

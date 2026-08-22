@@ -1087,6 +1087,34 @@ impl PostgresMucRoomStore {
                 // successful cleanup acknowledgement.
                 Ok(CommitReconciliation::Unknown)
             }
+            // An `Activate` is state-idempotent: when the lifecycle already
+            // sits in `active` at the SAME coordinates, the caller's target
+            // state holds whether its own transaction landed or was a no-op.
+            // The stored proof may legitimately belong to a PREDECESSOR
+            // owner's activation (an idempotent re-activate never overwrites
+            // it), so a fence-bound fingerprint mismatch must not report
+            // this success as NotCommitted and refuse a valid active room
+            // (#1647, codex final round).
+            RoomDurableMutation::Activate => Ok(
+                if room_matches
+                    && lifecycle_state
+                        .as_ref()
+                        .is_some_and(|(state, _, revision)| {
+                            *revision == coordinates.revision.as_i64()
+                                && state.as_str() == RoomLifecycleState::Active.as_db_str()
+                        })
+                {
+                    CommitReconciliation::Committed
+                } else if lifecycle_state.is_some() && room_matches {
+                    match exact_intent_reconciled {
+                        Some(true) => CommitReconciliation::Committed,
+                        Some(false) => CommitReconciliation::NotCommitted,
+                        None => CommitReconciliation::Unknown,
+                    }
+                } else {
+                    CommitReconciliation::NotCommitted
+                },
+            ),
             _ => Ok(if lifecycle_state.is_some() && room_matches {
                 match exact_intent_reconciled {
                     Some(true) => CommitReconciliation::Committed,
@@ -4553,6 +4581,87 @@ mod tests {
                 .expect("reconcile mismatched intent"),
             CommitReconciliation::NotCommitted,
             "read-back must reject a different committed mutation at the same durable coordinates"
+        );
+    }
+
+    /// #1647 (codex final round): `Activate` is state-idempotent — when the
+    /// lifecycle already sits in `active` at the same coordinates, an
+    /// ambiguous acknowledgement reconciles as Committed even though the
+    /// stored proof belongs to a predecessor owner's fence (an idempotent
+    /// re-activate never overwrites it).
+    #[tokio::test]
+    async fn ambiguous_idempotent_activate_reconciles_against_a_predecessors_proof() {
+        let _guard = clustering_control_plane_table_lock().lock().await;
+        let Some((store, claim_store, db, me)) = clean_store().await else {
+            return;
+        };
+        let room_jid = unique_room_jid("ambiguous-idempotent-activate");
+        let entity = Entity::new(EntityType::RoomActor, room_jid.to_string());
+        let epoch = claim_store
+            .ensure_claimed(&entity, &me)
+            .await
+            .expect("claim room");
+        let fence = RoomClaimFenceContext::new(entity.clone(), me, epoch);
+        store.record_claim_fence(&room_jid, fence.clone());
+        // The PREDECESSOR owner activated this lifecycle and left its proof.
+        let predecessor_fence =
+            RoomClaimFenceContext::new(entity, node_identity(), ClaimEpoch(epoch.0 + 1));
+        let predecessor_proof =
+            mutation_fingerprint(&predecessor_fence, &RoomDurableMutation::Activate)
+                .expect("predecessor activate proof");
+        let lifecycle = RoomLifecycleId::generate();
+        let revision = RoomRevision::initial();
+        db.guard()
+            .await
+            .expect("guard")
+            .execute(
+                "INSERT INTO clustering_muc_room_lifecycles \
+                 (lifecycle_id, room_jid, revision, state, mutation_fingerprint) \
+                 VALUES (?, ?, ?, ?, ?)",
+                crate::db_params![
+                    lifecycle.to_string(),
+                    room_jid.to_string(),
+                    revision.as_i64(),
+                    RoomLifecycleState::Active.as_db_str(),
+                    predecessor_proof,
+                ],
+            )
+            .await
+            .expect("persist predecessor-activated lifecycle");
+        db.guard()
+            .await
+            .expect("guard")
+            .execute(
+                "INSERT INTO clustering_muc_rooms \
+                 (room_jid, waddle_id, channel_id, config_json, lifecycle_id, revision) \
+                 VALUES (?, ?, ?, ?, ?, ?)",
+                crate::db_params![
+                    room_jid.to_string(),
+                    "w",
+                    "c",
+                    "{}",
+                    lifecycle.to_string(),
+                    revision.as_i64(),
+                ],
+            )
+            .await
+            .expect("persist active room row");
+
+        assert_eq!(
+            store
+                .reconcile_ambiguous_commit(
+                    &room_jid,
+                    &fence,
+                    &RoomDurableMutation::Activate,
+                    RoomCommittedCoordinates {
+                        lifecycle,
+                        revision
+                    },
+                )
+                .await
+                .expect("reconcile idempotent activate"),
+            CommitReconciliation::Committed,
+            "the already-active target state reconciles as committed under any owner's proof"
         );
     }
 

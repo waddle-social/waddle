@@ -638,6 +638,26 @@ impl PendingLocalMucDepartures {
     /// A retained departure retry of the same JID must deliver it FIRST: the
     /// receipt it names was already effected, and a retry's JID fallback
     /// would otherwise consume and replay it.
+    /// Whether a LIVE task currently owns a departure of this (room, JID):
+    /// a retained retry must not run concurrently with it, or the retry's
+    /// receipt replay would duplicate the live task's fan-out (#1647, codex
+    /// final round). In-flight entries convert to retained departures on the
+    /// owner's death, so the barrier always lifts.
+    pub fn in_flight_exists_for(&self, room: &BareJid, jid: &FullJid) -> bool {
+        self.entries
+            .lock()
+            .expect("local departure inventory lock")
+            .entries
+            .keys()
+            .any(|key| {
+                matches!(
+                    key,
+                    LocalDepartureKey::InFlight(in_room, in_jid, _, _)
+                        if in_room == room && in_jid == jid
+                )
+            })
+    }
+
     pub fn pending_ack_for(&self, room: &BareJid, jid: &FullJid) -> Option<LeaveAttemptId> {
         self.entries
             .lock()
