@@ -2010,6 +2010,14 @@ async fn cleanup_muc_presence_with_origin(
             }
             Ok(LeaveDisposition::Deferred { watermark }) => {
                 completed = false;
+                // Replace the write-ahead entry (selector `Any`) with the
+                // watermark-bound deferral the actor answered with, so the
+                // retry targets exactly the sessions that existed now.
+                state
+                    .deps
+                    .protocol
+                    .pending_local_muc_departures
+                    .complete_in_flight(&in_flight, in_flight_owned);
                 state.deps.protocol.pending_local_muc_departures.record(
                     LocalDepartureItem::RoomDeparture {
                         room: room_jid,
