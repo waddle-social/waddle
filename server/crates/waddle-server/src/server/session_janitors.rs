@@ -200,18 +200,19 @@ pub(crate) async fn run_local_muc_departure_sweep(state: &WebSocketState) {
                             break;
                         }
                     };
-                    match actor
-                        .ask(LeaveByRealJid {
+                    match routes::websocket::ask_leave_bounded(
+                        &actor,
+                        LeaveByRealJid {
                             sender_jid: jid.clone(),
                             cause,
                             session: selector,
                             attempt,
-                        })
-                        .mailbox_timeout(routes::websocket::LEAVE_ASK_TIMEOUT)
-                        .reply_timeout(routes::websocket::LEAVE_ASK_TIMEOUT)
-                        .await
+                        },
+                    )
+                    .await
                     {
                         Ok(LeaveDisposition::Left(outcome)) => {
+                            routes::websocket::ack_departure_receipt(&actor, attempt).await;
                             match cause {
                                 OccupancyLeaveCause::Disconnect => {
                                     broadcast_muc_leave_to_remaining(state, &room, &jid, &outcome)
@@ -242,7 +243,11 @@ pub(crate) async fn run_local_muc_departure_sweep(state: &WebSocketState) {
                                     // bounce, so deliver its §7.14 self-echo now
                                     // and fan out to the remaining occupants.
                                     routes::websocket::echo_muc_self_unavailable(
-                                        state, &room, &jid, &outcome,
+                                        state,
+                                        &room,
+                                        &jid,
+                                        &outcome.nick,
+                                        outcome.affiliation,
                                     )
                                     .await;
                                     broadcast_muc_leave_to_remaining(state, &room, &jid, &outcome)
@@ -291,11 +296,24 @@ pub(crate) async fn run_local_muc_departure_sweep(state: &WebSocketState) {
                             crate::metrics::record_local_departure_retry("superseded");
                             break;
                         }
-                        Ok(LeaveDisposition::Suppressed { .. }) => {
+                        Ok(LeaveDisposition::Suppressed { nick, affiliation }) => {
+                            routes::websocket::ack_departure_receipt(&actor, attempt).await;
+                            if matches!(cause, OccupancyLeaveCause::Explicit) {
+                                // Store-less room mid-destroy/dormancy: only
+                                // the leaver's §7.14 self-presence is owed.
+                                routes::websocket::echo_muc_self_unavailable(
+                                    state,
+                                    &room,
+                                    &jid,
+                                    nick.as_str(),
+                                    affiliation,
+                                )
+                                .await;
+                            }
                             crate::metrics::record_local_departure_retry("completed");
                             break;
                         }
-                        Err(kameo::error::SendError::Timeout(_)) => {
+                        Err(routes::websocket::LeaveAskFailure::Timeout) => {
                             // A timeout is not proof of retirement: keep the
                             // departure and back off.
                             state
@@ -8031,8 +8049,8 @@ mod local_muc_departure_tests {
     };
     use waddle_xmpp::muc::room_actor::{
         GetSnapshot, Join, LeaveByRealJid, LeaveDisposition, LeaveSessionSelector,
-        OccupancyWatermark, RestoreLiveRoster, SealGuard, SealIfInactive, SealIfInactiveOutcome,
-        UnsealInactive,
+        OccupancyWatermark, RestoreLiveRoster, SealForDestroy, SealGuard, SealIfInactive,
+        SealIfInactiveOutcome, UnsealInactive,
     };
     use waddle_xmpp::muc::room_registry_actor::{
         CreateRoom, GetOrCreateRoomWithLiveRoster, ReapSealedRoom, WireClusteringClaims,
@@ -8514,6 +8532,77 @@ mod local_muc_departure_tests {
     }
 
     #[tokio::test]
+    async fn janitor_replays_suppressed_explicit_departure_with_self_echo() {
+        let state = create_test_websocket_state().await;
+        let room = room_jid("suppressed-explicit-janitor");
+        let alice = full_jid("alice@example.com/web");
+        let bob = full_jid("bob@example.com/phone");
+        let actor = create_room(state.as_ref(), &room).await;
+        join_member(&actor, &alice, "alice").await;
+        join_member(&actor, &bob, "bob").await;
+
+        let (alice_tx, mut alice_rx) = mpsc::channel(8);
+        let (bob_tx, mut bob_rx) = mpsc::channel(8);
+        register_test_connection(state.as_ref(), &alice, alice_tx).await;
+        register_test_connection(state.as_ref(), &bob, bob_tx).await;
+        while alice_rx.try_recv().is_ok() {}
+        while bob_rx.try_recv().is_ok() {}
+
+        actor
+            .ask(SealForDestroy {
+                attempt: waddle_xmpp::muc::DestroyAttemptId::generate(),
+            })
+            .await
+            .expect("seal destroying");
+        let attempt = waddle_xmpp::muc::room_actor::LeaveAttemptId::generate();
+        assert!(matches!(
+            actor
+                .ask(LeaveByRealJid {
+                    sender_jid: alice.clone(),
+                    cause: OccupancyLeaveCause::Explicit,
+                    session: LeaveSessionSelector::Any,
+                    attempt,
+                })
+                .await
+                .expect("suppressed explicit leave"),
+            LeaveDisposition::Suppressed {
+                ref nick,
+                affiliation: Affiliation::Member,
+            } if nick.as_str() == "alice"
+        ));
+        state.deps.protocol.pending_local_muc_departures.record(
+            crate::server::routes::websocket::LocalDepartureItem::RoomDeparture {
+                room: room.clone(),
+                jid: alice.clone(),
+                cause: OccupancyLeaveCause::Explicit,
+                selector: LeaveSessionSelector::Any,
+                attempt,
+            },
+        );
+
+        run_local_muc_departure_sweep(&state).await;
+
+        let alice_unavailable = alice_rx.try_recv().expect("self unavailable");
+        let xml = crate::server::routes::websocket::stanza_to_xml(&alice_unavailable.stanza);
+        assert!(xml.contains("type='unavailable'"), "{xml}");
+        assert!(xml.contains("status code='110'"), "{xml}");
+        assert!(xml.contains("affiliation='member'"), "{xml}");
+        assert!(
+            alice_rx.try_recv().is_err(),
+            "the replayed receipt must self-echo exactly once"
+        );
+        assert!(
+            bob_rx.try_recv().is_err(),
+            "suppressed replay must not fan out to other occupants"
+        );
+        assert_eq!(
+            state.deps.protocol.pending_local_muc_departures.len(),
+            0,
+            "the replayed suppressed receipt must be consumed"
+        );
+    }
+
+    #[tokio::test]
     async fn second_disconnect_after_rejoin_is_not_superseded_by_the_older_watermark() {
         let store = JanitorProjectionStore::new();
         let state = clustered_state_with_store(store.clone()).await;
@@ -8780,6 +8869,7 @@ mod local_muc_departure_tests {
                 config: RoomConfig::default(),
                 live_room_restore: predecessor_snapshot.room,
                 occupancy_revision: predecessor_snapshot.occupancy_revision,
+                departure_receipts: Vec::new(),
             })
             .await
             .expect("spawn successor with live roster")
@@ -8853,6 +8943,7 @@ mod local_muc_departure_tests {
             .ask(RestoreLiveRoster {
                 room: source_snapshot.room,
                 occupancy_revision: source_snapshot.occupancy_revision,
+                departure_receipts: Vec::new(),
             })
             .await
             .expect("restore live roster into inactive actor");

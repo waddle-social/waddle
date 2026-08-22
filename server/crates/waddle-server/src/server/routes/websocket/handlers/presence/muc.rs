@@ -1940,18 +1940,22 @@ pub async fn handle_muc_leave(
     };
 
     let leave_attempt = waddle_xmpp::muc::room_actor::LeaveAttemptId::generate();
-    let outcome = match room_actor
-        .ask(LeaveByRealJid {
+    let outcome = match crate::server::routes::websocket::ask_leave_bounded(
+        &room_actor,
+        LeaveByRealJid {
             sender_jid: sender_jid.clone(),
             cause: waddle_xmpp::muc::durable::OccupancyLeaveCause::Explicit,
             session: waddle_xmpp::muc::room_actor::LeaveSessionSelector::Any,
             attempt: leave_attempt,
-        })
-        .mailbox_timeout(crate::server::routes::websocket::LEAVE_ASK_TIMEOUT)
-        .reply_timeout(crate::server::routes::websocket::LEAVE_ASK_TIMEOUT)
-        .await
+        },
+    )
+    .await
     {
-        Ok(waddle_xmpp::muc::room_actor::LeaveDisposition::Left(outcome)) => outcome,
+        Ok(waddle_xmpp::muc::room_actor::LeaveDisposition::Left(outcome)) => {
+            crate::server::routes::websocket::ack_departure_receipt(&room_actor, leave_attempt)
+                .await;
+            outcome
+        }
         Ok(waddle_xmpp::muc::room_actor::LeaveDisposition::NotOccupant) => {
             debug!(room = %room_jid, nick = %nick, sender = %sender_jid, "MUC leave for absent occupant");
             // No occupant slot to remove, but a stale SFU
@@ -1980,7 +1984,7 @@ pub async fn handle_muc_leave(
         Ok(waddle_xmpp::muc::room_actor::LeaveDisposition::Deferred { .. }) => {
             return bounce_muc_leave_ownership_unreachable(room_jid, sender_jid, nick);
         }
-        Ok(waddle_xmpp::muc::room_actor::LeaveDisposition::Suppressed { affiliation }) => {
+        Ok(waddle_xmpp::muc::room_actor::LeaveDisposition::Suppressed { affiliation, .. }) => {
             // Store-less room with a destroy/dormancy in flight: the departure
             // was recorded but nothing fans out. The departing session still
             // gets its XEP-0045 §7.14 self-presence echo (as before #1647).
@@ -1995,7 +1999,7 @@ pub async fn handle_muc_leave(
                 affiliation,
             )];
         }
-        Err(kameo::error::SendError::Timeout(_)) => {
+        Err(crate::server::routes::websocket::LeaveAskFailure::Timeout) => {
             // The actor may still complete the departure after this bound:
             // retain it so the janitor replays the outcome (self-echo, fan-out,
             // SFU teardown) under the same attempt id, and bounce wait-class now.
@@ -3726,6 +3730,117 @@ mod occupancy_projection_handler_tests {
             recorder.snapshot().len(),
             1,
             "SFU unregister must happen exactly once"
+        );
+        assert_eq!(state.deps.protocol.pending_local_muc_departures.len(), 0);
+    }
+
+    #[tokio::test]
+    async fn explicit_leave_retry_after_rejoin_does_not_evict_the_new_session() {
+        let recorder = Arc::new(RecordingSfu::default());
+        let state = create_test_websocket_state_with_sfu(recorder.clone()).await;
+        let alice_session = create_test_server_owner_session(state.as_ref(), "alice").await;
+        let room_jid: BareJid = "leave-timeout-rejoin@muc.example.com"
+            .parse()
+            .expect("room jid");
+        let alice: FullJid = "alice@example.com/web".parse().expect("alice jid");
+        let bob: FullJid = "bob@example.com/web".parse().expect("bob jid");
+        let (alice_tx, mut alice_rx) = mpsc::channel(8);
+        let (bob_tx, mut bob_rx) = mpsc::channel(8);
+
+        create_room_with_projection_store(
+            state.as_ref(),
+            &room_jid,
+            ProjectionFailingStore::new(ProjectionFailureMode::LeaveDelay(
+                std::time::Duration::from_secs(6),
+            )),
+        )
+        .await;
+        register_test_connection(state.as_ref(), &alice, alice_tx).await;
+        register_test_connection(state.as_ref(), &bob, bob_tx).await;
+
+        let alice_join = handle_muc_join(
+            state.as_ref(),
+            "example.com",
+            &room_jid,
+            &alice,
+            "alice",
+            None,
+            &Some(alice_session.clone()),
+        )
+        .await;
+        assert!(alice_join
+            .iter()
+            .any(|frame| frame.contains("status code='110'")));
+        let bob_join = handle_muc_join(
+            state.as_ref(),
+            "example.com",
+            &room_jid,
+            &bob,
+            "bob",
+            None,
+            &None,
+        )
+        .await;
+        assert!(bob_join
+            .iter()
+            .any(|frame| frame.contains("status code='110'")));
+        while alice_rx.try_recv().is_ok() {}
+        while bob_rx.try_recv().is_ok() {}
+
+        let leave_frames = handle_muc_leave(state.as_ref(), &room_jid, &alice, "alice", None).await;
+        assert_eq!(leave_frames.len(), 1);
+        assert!(
+            leave_frames[0].contains("resource-constraint"),
+            "the timed-out explicit leave must bounce first: {leave_frames:?}"
+        );
+        assert_eq!(state.deps.protocol.pending_local_muc_departures.len(), 1);
+        assert!(alice_rx.try_recv().is_err());
+        assert!(bob_rx.try_recv().is_err());
+        assert!(
+            recorder.snapshot().is_empty(),
+            "the timed-out first attempt must not unregister SFU participation"
+        );
+
+        tokio::time::sleep(std::time::Duration::from_secs(7)).await;
+
+        let rejoin = handle_muc_join(
+            state.as_ref(),
+            "example.com",
+            &room_jid,
+            &alice,
+            "alice",
+            None,
+            &Some(alice_session),
+        )
+        .await;
+        assert!(
+            rejoin
+                .iter()
+                .any(|frame| frame.contains("status code='110'")),
+            "alice must be able to rejoin before the janitor retry: {rejoin:?}"
+        );
+        while alice_rx.try_recv().is_ok() {}
+        while bob_rx.try_recv().is_ok() {}
+
+        crate::server::session_janitors::run_local_muc_departure_sweep(state.as_ref()).await;
+
+        assert!(
+            alice_rx.try_recv().is_err(),
+            "the superseded retry must not self-echo unavailable to the new session"
+        );
+        assert!(
+            bob_rx.try_recv().is_err(),
+            "the superseded retry must not fan out unavailable to other occupants"
+        );
+        assert!(
+            recorder.snapshot().is_empty(),
+            "the superseded retry must not unregister the rejoined SFU participant"
+        );
+        let room = snapshot_room(state.as_ref(), &room_jid).await.room;
+        assert_eq!(
+            room.find_nick_by_real_jid(&alice),
+            Some("alice"),
+            "alice must remain an occupant after the superseded retry"
         );
         assert_eq!(state.deps.protocol.pending_local_muc_departures.len(), 0);
     }

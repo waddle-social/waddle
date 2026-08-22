@@ -84,6 +84,7 @@ async fn restoring_live_roster_rederives_occupant_authorization() {
         .ask(RestoreLiveRoster {
             room: stale_room,
             occupancy_revision: 0,
+            departure_receipts: Vec::new(),
         })
         .await
         .expect("restore live roster");
@@ -4455,6 +4456,197 @@ async fn join_as_resolver(
         .await
 }
 
+async fn leave_with_attempt(
+    actor: &ActorRef<RoomActor>,
+    jid: FullJid,
+    attempt: LeaveAttemptId,
+) -> LeaveDisposition {
+    actor
+        .ask(LeaveByRealJid {
+            sender_jid: jid,
+            cause: crate::muc::durable::OccupancyLeaveCause::Explicit,
+            session: LeaveSessionSelector::Any,
+            attempt,
+        })
+        .await
+        .expect("leave ask")
+}
+
+#[tokio::test]
+async fn replayed_receipt_is_superseded_when_the_session_rejoined() {
+    let actor = spawn_room_actor().await;
+    let alice = test_full_jid("alice");
+    let first_attempt = LeaveAttemptId::generate();
+
+    join_as_resolver(&actor, alice.clone(), "alice")
+        .await
+        .expect("alice joins");
+    assert!(matches!(
+        leave_with_attempt(&actor, alice.clone(), first_attempt).await,
+        LeaveDisposition::Left(_)
+    ));
+    join_as_resolver(&actor, alice.clone(), "alice")
+        .await
+        .expect("alice rejoins");
+
+    assert!(matches!(
+        leave_with_attempt(&actor, alice.clone(), first_attempt).await,
+        LeaveDisposition::Superseded
+    ));
+    assert_eq!(actor.ask(OccupantCount).await.expect("occupant count"), 1);
+
+    assert!(matches!(
+        leave_with_attempt(&actor, alice, LeaveAttemptId::generate()).await,
+        LeaveDisposition::Left(_)
+    ));
+}
+
+#[tokio::test]
+async fn replayed_receipt_is_superseded_when_the_nick_was_retaken() {
+    let actor = spawn_room_actor().await;
+    let alice = test_full_jid("alice");
+    let bob = test_full_jid("bob");
+    let attempt = LeaveAttemptId::generate();
+
+    join_as_resolver(&actor, alice.clone(), "alice")
+        .await
+        .expect("alice joins");
+    assert!(matches!(
+        leave_with_attempt(&actor, alice.clone(), attempt).await,
+        LeaveDisposition::Left(_)
+    ));
+    join_as_resolver(&actor, bob.clone(), "alice")
+        .await
+        .expect("bob takes alice nick");
+
+    assert!(matches!(
+        leave_with_attempt(&actor, alice, attempt).await,
+        LeaveDisposition::Superseded
+    ));
+    let snapshot = actor.ask(GetSnapshot).await.expect("snapshot");
+    assert_eq!(
+        snapshot
+            .room
+            .get_occupant("alice")
+            .map(|occupant| &occupant.real_jid),
+        Some(&bob),
+        "the retry must not evict the current nick holder"
+    );
+}
+
+#[tokio::test]
+async fn unknown_attempt_for_a_gone_session_replays_the_jids_unacknowledged_receipt_once() {
+    let actor = spawn_room_actor().await;
+    let alice = test_full_jid("alice");
+    let original_attempt = LeaveAttemptId::generate();
+
+    join_as_resolver(&actor, alice.clone(), "alice")
+        .await
+        .expect("alice joins");
+    let original = leave_with_attempt(&actor, alice.clone(), original_attempt).await;
+    assert!(matches!(original, LeaveDisposition::Left(_)));
+
+    assert!(matches!(
+        leave_with_attempt(&actor, alice.clone(), LeaveAttemptId::generate()).await,
+        LeaveDisposition::Left(_)
+    ));
+    assert!(matches!(
+        leave_with_attempt(&actor, alice, LeaveAttemptId::generate()).await,
+        LeaveDisposition::NotOccupant
+    ));
+}
+
+#[tokio::test]
+async fn acknowledged_departure_leaves_no_receipt() {
+    let actor = spawn_room_actor().await;
+    let alice = test_full_jid("alice");
+    let attempt = LeaveAttemptId::generate();
+
+    join_as_resolver(&actor, alice.clone(), "alice")
+        .await
+        .expect("alice joins");
+    assert!(matches!(
+        leave_with_attempt(&actor, alice.clone(), attempt).await,
+        LeaveDisposition::Left(_)
+    ));
+    actor
+        .ask(AckDepartureReceipt { attempt })
+        .await
+        .expect("ack receipt");
+
+    assert!(matches!(
+        leave_with_attempt(&actor, alice.clone(), attempt).await,
+        LeaveDisposition::NotOccupant
+    ));
+    assert!(
+        actor
+            .ask(GetSnapshot)
+            .await
+            .expect("snapshot")
+            .departure_receipts
+            .is_empty(),
+        "acknowledged departures do not remain replayable"
+    );
+}
+
+#[tokio::test]
+async fn receipts_are_transferred_on_live_roster_restore() {
+    let predecessor = spawn_room_actor().await;
+    let alice = test_full_jid("alice");
+    let attempt = LeaveAttemptId::generate();
+
+    join_as_resolver(&predecessor, alice.clone(), "alice")
+        .await
+        .expect("alice joins predecessor");
+    assert!(matches!(
+        leave_with_attempt(&predecessor, alice.clone(), attempt).await,
+        LeaveDisposition::Left(_)
+    ));
+    let snapshot = predecessor
+        .ask(GetSnapshot)
+        .await
+        .expect("predecessor snapshot");
+    assert_eq!(snapshot.departure_receipts.len(), 1);
+
+    let successor = spawn_room_actor().await;
+    successor
+        .ask(RestoreLiveRoster {
+            room: snapshot.room,
+            occupancy_revision: snapshot.occupancy_revision,
+            departure_receipts: snapshot.departure_receipts,
+        })
+        .await
+        .expect("restore successor live roster");
+    assert!(matches!(
+        leave_with_attempt(&successor, alice, attempt).await,
+        LeaveDisposition::Left(_)
+    ));
+}
+
+#[tokio::test]
+async fn store_less_suppressed_departure_mints_a_receipt_replayed_as_suppressed() {
+    let actor = spawn_room_actor().await;
+    let alice = test_full_jid("alice");
+    let attempt = LeaveAttemptId::generate();
+
+    join_as_resolver(&actor, alice.clone(), "alice")
+        .await
+        .expect("alice joins");
+    seal_for_destroy(&actor).await;
+    assert!(matches!(
+        leave_with_attempt(&actor, alice.clone(), attempt).await,
+        LeaveDisposition::Suppressed { ref nick, .. } if nick.as_str() == "alice"
+    ));
+    assert!(matches!(
+        leave_with_attempt(&actor, alice.clone(), attempt).await,
+        LeaveDisposition::Suppressed { ref nick, .. } if nick.as_str() == "alice"
+    ));
+    assert!(matches!(
+        leave_with_attempt(&actor, alice, attempt).await,
+        LeaveDisposition::NotOccupant
+    ));
+}
+
 fn projection_leave_intent_for(intents: &[crate::muc::RoomDurableMutation], jid: &FullJid) -> bool {
     intents.iter().any(|intent| {
         matches!(
@@ -4927,7 +5119,10 @@ async fn leave_retry_with_same_attempt_replays_retained_outcome_once() {
 }
 
 #[test]
-fn departure_receipts_are_bounded_and_expire() {
+fn departure_receipts_are_bounded_and_consumed() {
+    // Receipts are bounded by count only: acknowledged ones are dropped at
+    // once, so the deque holds lost-reply departures, and past the cap the
+    // oldest unacknowledged receipt is evicted.
     let mut actor = RoomActor::new(test_room(), test_secret());
     let newest_attempt = LeaveAttemptId::generate();
     let retained_attempt = LeaveAttemptId::generate();
@@ -4944,9 +5139,11 @@ fn departure_receipts_are_bounded_and_expire() {
         if index == 0 {
             oldest_attempt = Some(attempt);
         }
+        let jid = test_full_jid_resource("leaver", &index.to_string());
         actor.retain_departure_receipt(
             attempt,
-            Box::new(LeaveOutcome {
+            jid,
+            super::DepartureReceiptOutcome::Left(Box::new(LeaveOutcome {
                 nick: format!("nick-{index}"),
                 affiliation: Affiliation::Member,
                 role: Role::Participant,
@@ -4964,7 +5161,7 @@ fn departure_receipts_are_bounded_and_expire() {
                 occupant_count: 1,
                 is_persistent: false,
                 occupancy_revision: index as u64,
-            }),
+            })),
         );
     }
 
@@ -4978,25 +5175,15 @@ fn departure_receipts_are_bounded_and_expire() {
             .is_none(),
         "the oldest receipt must be evicted once the cap is exceeded"
     );
-    assert!(actor
-        .departure_receipts
-        .iter()
-        .any(|receipt| receipt.attempt == retained_attempt));
-    actor
-        .departure_receipts
-        .iter_mut()
-        .find(|receipt| receipt.attempt == newest_attempt)
-        .expect("newest receipt")
-        .completed_at =
-        std::time::Instant::now() - super::occupancy_handlers::DEPARTURE_RECEIPT_TTL;
-    assert!(
-        actor.take_departure_receipt(newest_attempt).is_none(),
-        "an expired receipt must never replay after a quiet period"
-    );
     assert!(
         actor.take_departure_receipt(retained_attempt).is_some(),
-        "a retained receipt inside the TTL must still replay"
+        "a retained receipt must replay exactly once"
     );
+    assert!(
+        actor.take_departure_receipt(retained_attempt).is_none(),
+        "a replayed receipt is consumed"
+    );
+    assert!(actor.take_departure_receipt(newest_attempt).is_some());
 }
 
 #[tokio::test]
@@ -5498,6 +5685,7 @@ async fn live_roster_transfer_adjusts_occupant_gauge_by_roster_delta() {
         .ask(RestoreLiveRoster {
             room: roster,
             occupancy_revision: 2,
+            departure_receipts: Vec::new(),
         })
         .await
         .expect("transfer");
@@ -5513,6 +5701,7 @@ async fn live_roster_transfer_preserves_actor_room_jid() {
         .ask(RestoreLiveRoster {
             room: foreign_room,
             occupancy_revision: 0,
+            departure_receipts: Vec::new(),
         })
         .await
         .expect("transfer");

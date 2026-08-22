@@ -96,12 +96,14 @@ pub(crate) use cleanup::broadcast_unavailable_if_no_replacement;
 pub use cleanup::cleanup_muc_presence_for_jid;
 #[cfg(feature = "clustering")]
 pub use cleanup::cleanup_muc_presence_for_jid_with_origin;
-pub(crate) use cleanup::echo_muc_self_unavailable;
 pub(crate) use cleanup::redrive_local_muc_cleanup;
 #[cfg(feature = "clustering")]
 pub(crate) use cleanup::redrive_remote_muc_cleanup;
 pub(crate) use cleanup::redrive_terminal_pending_rows_to_live_resource;
 pub use cleanup::MucCleanupOutcome;
+pub(crate) use cleanup::{
+    ack_departure_receipt, ask_leave_bounded, echo_muc_self_unavailable, LeaveAskFailure,
+};
 
 /// Upper bound on a single `LeaveByRealJid` ask from the WS/janitor side: a
 /// wedged room must not stall disconnect cleanup, the departure janitor, an

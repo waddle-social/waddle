@@ -73,12 +73,46 @@ impl OccupancyWatermark {
     }
 }
 
-/// A completed departure retained for idempotent attempt replay.
-#[derive(Debug)]
-struct DepartureReceipt {
-    attempt: occupancy_handlers::LeaveAttemptId,
-    completed_at: std::time::Instant,
-    outcome: Box<LeaveOutcome>,
+/// A completed departure retained for idempotent attempt replay. Retained
+/// until the caller acknowledges it ([`AckDepartureReceipt`]) or, for a
+/// caller whose reply was lost, until the retry replays it; transferred with
+/// the live roster so a successor actor can still replay it.
+#[derive(Debug, Clone)]
+pub struct DepartureReceipt {
+    pub attempt: occupancy_handlers::LeaveAttemptId,
+    pub jid: FullJid,
+    pub outcome: DepartureReceiptOutcome,
+}
+
+/// What a retried attempt replays.
+#[derive(Debug, Clone)]
+pub enum DepartureReceiptOutcome {
+    Left(Box<LeaveOutcome>),
+    /// Store-less room with a destroy/dormancy in flight: only the leaver's
+    /// XEP-0045 §7.14 self-presence is owed.
+    Suppressed {
+        nick: crate::muc::MucOccupantNick,
+        affiliation: crate::types::Affiliation,
+    },
+}
+
+/// Fire-and-forget acknowledgement that a `LeaveByRealJid` reply was received
+/// and its effects ran; the actor drops the receipt so only lost-reply
+/// departures stay retained.
+pub struct AckDepartureReceipt {
+    pub attempt: occupancy_handlers::LeaveAttemptId,
+}
+
+impl kameo::message::Message<AckDepartureReceipt> for RoomActor {
+    type Reply = ();
+
+    async fn handle(
+        &mut self,
+        msg: AckDepartureReceipt,
+        _ctx: &mut Context<Self, Self::Reply>,
+    ) -> Self::Reply {
+        let _ = self.take_departure_receipt(msg.attempt);
+    }
 }
 
 /// A durable commit capability for exactly one in-memory projection.
@@ -155,6 +189,8 @@ pub struct RoomSnapshot {
     pub config_revision: u64,
     pub admission_revision: u64,
     pub occupancy_revision: u64,
+    /// Unacknowledged departure receipts, transferred on live-roster recovery.
+    pub departure_receipts: Vec<DepartureReceipt>,
 }
 
 /// Transfer the live, non-durable room state into an authoritative successor.
@@ -164,6 +200,9 @@ pub struct RoomSnapshot {
 pub struct RestoreLiveRoster {
     pub room: MucRoom,
     pub occupancy_revision: u64,
+    /// The predecessor's unacknowledged departure receipts, so a retry that
+    /// lands on the successor can still replay a lost-reply departure.
+    pub departure_receipts: Vec<DepartureReceipt>,
 }
 
 impl kameo::message::Message<RestoreLiveRoster> for RoomActor {
@@ -206,6 +245,9 @@ impl kameo::message::Message<RestoreLiveRoster> for RoomActor {
             self.room.occupant_count() as i64 - occupant_count_before as i64,
         );
         self.occupancy_revision = self.occupancy_revision.max(msg.occupancy_revision);
+        for receipt in msg.departure_receipts {
+            self.retain_departure_receipt(receipt.attempt, receipt.jid, receipt.outcome);
+        }
     }
 }
 
@@ -1143,36 +1185,44 @@ impl RoomActor {
     }
 
     /// Retain a completed departure so a retry of the same attempt (after a
-    /// lost reply) can replay its outcome exactly once.
+    /// lost reply) can replay its outcome exactly once. Bounded by count only:
+    /// acknowledged receipts are dropped immediately, so the deque holds
+    /// lost-reply departures, which are rare.
     pub(super) fn retain_departure_receipt(
         &mut self,
         attempt: occupancy_handlers::LeaveAttemptId,
-        outcome: Box<LeaveOutcome>,
+        jid: FullJid,
+        outcome: DepartureReceiptOutcome,
     ) {
-        let now = std::time::Instant::now();
-        self.expire_departure_receipts(now);
         while self.departure_receipts.len() >= occupancy_handlers::DEPARTURE_RECEIPT_CAP {
             self.departure_receipts.pop_front();
         }
         self.departure_receipts.push_back(DepartureReceipt {
             attempt,
-            completed_at: now,
+            jid,
             outcome,
         });
     }
 
-    fn expire_departure_receipts(&mut self, now: std::time::Instant) {
-        self.departure_receipts.retain(|receipt| {
-            now.duration_since(receipt.completed_at) < occupancy_handlers::DEPARTURE_RECEIPT_TTL
-        });
+    /// Consume the oldest unacknowledged receipt of a full JID, if any.
+    pub(super) fn take_departure_receipt_for_jid(
+        &mut self,
+        jid: &FullJid,
+    ) -> Option<DepartureReceiptOutcome> {
+        let index = self
+            .departure_receipts
+            .iter()
+            .position(|receipt| &receipt.jid == jid)?;
+        self.departure_receipts
+            .remove(index)
+            .map(|receipt| receipt.outcome)
     }
 
     /// Consume the receipt of an already-completed attempt, if any.
     pub(super) fn take_departure_receipt(
         &mut self,
         attempt: occupancy_handlers::LeaveAttemptId,
-    ) -> Option<Box<LeaveOutcome>> {
-        self.expire_departure_receipts(std::time::Instant::now());
+    ) -> Option<DepartureReceiptOutcome> {
         let index = self
             .departure_receipts
             .iter()
@@ -2049,6 +2099,7 @@ impl kameo::message::Message<UpdateGroupDmConfigByMember> for RoomActor {
                 config_revision: self.config_revision,
                 admission_revision: self.admission_revision,
                 occupancy_revision: self.occupancy_revision,
+                departure_receipts: self.departure_receipts.iter().cloned().collect(),
             },
             notification,
             reservation,
@@ -2630,6 +2681,7 @@ impl kameo::message::Message<GetSnapshot> for RoomActor {
             config_revision: self.config_revision,
             admission_revision: self.admission_revision,
             occupancy_revision: self.occupancy_revision,
+            departure_receipts: self.departure_receipts.iter().cloned().collect(),
         })
     }
 }

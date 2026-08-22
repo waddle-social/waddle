@@ -285,11 +285,10 @@ impl LeaveAttemptId {
     }
 }
 
-/// How many completed departures the actor retains for attempt replay and
-/// for how long. A reply that was lost after enqueue is retried on the
-/// janitor's 2s→60s backoff, so minutes of retention cover every retry.
-pub(super) const DEPARTURE_RECEIPT_CAP: usize = 256;
-pub(super) const DEPARTURE_RECEIPT_TTL: std::time::Duration = std::time::Duration::from_secs(600);
+/// Upper bound on retained unacknowledged departure receipts per actor.
+/// Acknowledged ones are dropped at once, so this only bounds lost-reply
+/// departures (rare); the oldest is evicted past the cap.
+pub(super) const DEPARTURE_RECEIPT_CAP: usize = 1024;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum LeaveSessionSelector {
@@ -310,6 +309,7 @@ pub enum LeaveDisposition {
     /// recorded but nothing fans out. Carries the leaver's affiliation so the
     /// XEP-0045 §7.14 self-presence echo can report it.
     Suppressed {
+        nick: crate::muc::MucOccupantNick,
         affiliation: crate::types::Affiliation,
     },
 }
@@ -324,7 +324,25 @@ impl kameo::message::Message<LeaveByRealJid> for RoomActor {
     ) -> Self::Reply {
         let _handler_timer = crate::metrics::MucOccupancyHandlerTimer::start("leave");
         if let Some(receipt) = self.take_departure_receipt(msg.attempt) {
-            return Ok(LeaveDisposition::Left(receipt));
+            // Replay only while the departure is still the latest truth: a
+            // session that re-entered (same full JID) or a nick re-taken makes
+            // the retained outcome stale — replaying it would evict a live
+            // occupant from every client's roster.
+            let receipt_nick = match &receipt {
+                super::DepartureReceiptOutcome::Left(outcome) => outcome.nick.clone(),
+                super::DepartureReceiptOutcome::Suppressed { nick, .. } => nick.as_str().to_owned(),
+            };
+            if self.room.session_watermark(&msg.sender_jid).is_some()
+                || self.room.get_occupant(&receipt_nick).is_some()
+            {
+                return Ok(LeaveDisposition::Superseded);
+            }
+            return Ok(match receipt {
+                super::DepartureReceiptOutcome::Left(outcome) => LeaveDisposition::Left(outcome),
+                super::DepartureReceiptOutcome::Suppressed { nick, affiliation } => {
+                    LeaveDisposition::Suppressed { nick, affiliation }
+                }
+            });
         }
         // Resolve occupancy before consulting the seal: a non-occupant's leave
         // is a pure memory read with nothing to project, and every disconnect
@@ -351,6 +369,30 @@ impl kameo::message::Message<LeaveByRealJid> for RoomActor {
             .collect();
         nicks.sort();
         let Some(nick) = nicks.first().cloned() else {
+            // The session is gone. If a departure of this full JID completed
+            // but its reply was lost (unacknowledged receipt) — possibly under
+            // a different attempt id that a coalesced retry no longer carries —
+            // replay it now: the departure's effects are owed to someone and
+            // the receipt is consumed exactly once.
+            if let Some(receipt) = self.take_departure_receipt_for_jid(&msg.sender_jid) {
+                let receipt_nick = match &receipt {
+                    super::DepartureReceiptOutcome::Left(outcome) => outcome.nick.clone(),
+                    super::DepartureReceiptOutcome::Suppressed { nick, .. } => {
+                        nick.as_str().to_owned()
+                    }
+                };
+                if self.room.get_occupant(&receipt_nick).is_some() {
+                    return Ok(LeaveDisposition::Superseded);
+                }
+                return Ok(match receipt {
+                    super::DepartureReceiptOutcome::Left(outcome) => {
+                        LeaveDisposition::Left(outcome)
+                    }
+                    super::DepartureReceiptOutcome::Suppressed { nick, affiliation } => {
+                        LeaveDisposition::Suppressed { nick, affiliation }
+                    }
+                });
+            }
             return Ok(LeaveDisposition::NotOccupant);
         };
         let Some(occupant) = self.room.get_occupant(&nick) else {
@@ -409,7 +451,7 @@ impl kameo::message::Message<LeaveByRealJid> for RoomActor {
             match self
                 .commit_projection(RoomProjection::OccupancyLeave {
                     occupant: msg.sender_jid.clone(),
-                    nick: durable_nick,
+                    nick: durable_nick.clone(),
                     cause: msg.cause,
                 })
                 .await
@@ -482,11 +524,26 @@ impl kameo::message::Message<LeaveByRealJid> for RoomActor {
             }))
         })
         .map(|disposition| match disposition {
-            LeaveDisposition::Left(outcome) if suppress_effects => LeaveDisposition::Suppressed {
-                affiliation: outcome.affiliation,
-            },
+            LeaveDisposition::Left(outcome) if suppress_effects => {
+                self.retain_departure_receipt(
+                    msg.attempt,
+                    msg.sender_jid.clone(),
+                    super::DepartureReceiptOutcome::Suppressed {
+                        nick: durable_nick.clone(),
+                        affiliation: outcome.affiliation,
+                    },
+                );
+                LeaveDisposition::Suppressed {
+                    nick: durable_nick,
+                    affiliation: outcome.affiliation,
+                }
+            }
             LeaveDisposition::Left(outcome) => {
-                self.retain_departure_receipt(msg.attempt, outcome.clone());
+                self.retain_departure_receipt(
+                    msg.attempt,
+                    msg.sender_jid.clone(),
+                    super::DepartureReceiptOutcome::Left(outcome.clone()),
+                );
                 LeaveDisposition::Left(outcome)
             }
             other => other,

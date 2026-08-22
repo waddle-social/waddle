@@ -119,6 +119,7 @@ async fn recover_exact_room_after_ambiguous_config_commit(
                     config: recovery_snapshot.room.config.clone(),
                     live_room_restore: recovery_snapshot.room.clone(),
                     occupancy_revision: recovery_snapshot.occupancy_revision,
+                    departure_receipts: recovery_snapshot.departure_receipts.clone(),
                 },
             )
             .await
@@ -222,15 +223,37 @@ impl CancelledOwnerConfigAskRecoveryGuard {
         };
         let exact = snapshot.config_revision == self.expected_revision
             && snapshot.room.config == self.intended_config;
-        let lookup = if exact {
-            self.outbox
-                .staged_reservation_for(coordinates.lifecycle, coordinates.revision)
-                .await
-                .map(|reservation| reservation.into_iter().collect())
-        } else {
-            self.outbox
-                .staged_reservations_up_to(coordinates.lifecycle, coordinates.revision)
-                .await
+        // A transient outbox lookup failure must not strand committed inert rows
+        // at the lifecycle FIFO head (nothing else arms live-origin rows): retry
+        // with backoff before giving up.
+        let mut lookup_attempt = 0_i64;
+        let lookup = loop {
+            match if exact {
+                self.outbox
+                    .staged_reservation_for(coordinates.lifecycle, coordinates.revision)
+                    .await
+                    .map(|reservation| reservation.into_iter().collect())
+            } else {
+                self.outbox
+                    .staged_reservations_up_to(coordinates.lifecycle, coordinates.revision)
+                    .await
+            } {
+                Ok(reservations) => break Ok(reservations),
+                Err(error) if lookup_attempt < 5 => {
+                    lookup_attempt += 1;
+                    let backoff_ms = crate::room_effect_outbox::retry_delay_ms(lookup_attempt);
+                    tracing::warn!(
+                        room = %self.room_jid,
+                        %error,
+                        lookup_attempt,
+                        backoff_ms,
+                        "cancelled owner config ask recovery: staged reservation lookup failed; retrying"
+                    );
+                    tokio::time::sleep(std::time::Duration::from_millis(backoff_ms.max(0) as u64))
+                        .await;
+                }
+                Err(error) => break Err(error),
+            }
         };
         match lookup {
             Ok(reservations) => reservations,

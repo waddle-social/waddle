@@ -66,13 +66,18 @@ impl LocalDepartureItem {
         let merged_selector = merge_selectors(existing.item.selector(), self.selector());
         // The attempt follows the broader selector: a newer disconnect (newer
         // watermark or `Any`) is the logical departure the retry must replay.
+        // On equal breadth the NEWEST attempt wins (the later logical
+        // departure); an older completed attempt whose reply was lost is still
+        // recoverable because the actor also replays the full JID's
+        // unacknowledged receipt when the session is gone.
         let incoming_dominates = match (existing.item.selector(), self.selector()) {
+            (Some(LeaveSessionSelector::Any), Some(LeaveSessionSelector::Any)) => true,
             (Some(LeaveSessionSelector::Any), _) => false,
             (_, Some(LeaveSessionSelector::Any)) => true,
             (
                 Some(LeaveSessionSelector::JoinedAtOrBefore(left)),
                 Some(LeaveSessionSelector::JoinedAtOrBefore(right)),
-            ) => right > left,
+            ) => right >= left,
             _ => false,
         };
         let merged_attempt = match (existing.item.attempt(), self.attempt()) {
@@ -760,6 +765,30 @@ mod tests {
                 attempt,
                 ..
             } if watermark == OccupancyWatermark::from_revision(3) && attempt == attempt_a
+        ));
+
+        let inventory = PendingLocalMucDepartures::default();
+        let any_existing_attempt = LeaveAttemptId::generate();
+        let any_incoming_attempt = LeaveAttemptId::generate();
+        inventory.record_at(
+            make_departure(LeaveSessionSelector::Any, any_existing_attempt),
+            now,
+        );
+        inventory.record_at(
+            make_departure(LeaveSessionSelector::Any, any_incoming_attempt),
+            now,
+        );
+        let merged = inventory
+            .take_due(now)
+            .pop()
+            .expect("merged equal any selectors");
+        assert!(matches!(
+            merged.item,
+            LocalDepartureItem::RoomDeparture {
+                selector: LeaveSessionSelector::Any,
+                attempt,
+                ..
+            } if attempt == any_incoming_attempt
         ));
 
         let inventory = PendingLocalMucDepartures::default();

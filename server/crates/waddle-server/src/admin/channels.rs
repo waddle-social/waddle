@@ -2300,18 +2300,19 @@ async fn run_group_dm_leave(
     } else {
         for resource in resources {
             let attempt = waddle_xmpp::muc::room_actor::LeaveAttemptId::generate();
-            match actor
-                .ask(LeaveByRealJid {
+            match crate::server::routes::websocket::ask_leave_bounded(
+                &actor,
+                LeaveByRealJid {
                     sender_jid: resource.clone(),
                     cause: waddle_xmpp::muc::durable::OccupancyLeaveCause::Administrative,
                     session: waddle_xmpp::muc::room_actor::LeaveSessionSelector::Any,
                     attempt,
-                })
-                .mailbox_timeout(crate::server::routes::websocket::LEAVE_ASK_TIMEOUT)
-                .reply_timeout(crate::server::routes::websocket::LEAVE_ASK_TIMEOUT)
-                .await
+                },
+            )
+            .await
             {
                 Ok(waddle_xmpp::muc::room_actor::LeaveDisposition::Left(outcome)) => {
+                    crate::server::routes::websocket::ack_departure_receipt(&actor, attempt).await;
                     broadcast_group_dm_leave(
                         state,
                         connections,
@@ -2336,7 +2337,7 @@ async fn run_group_dm_leave(
                         },
                     );
                 }
-                Err(kameo::error::SendError::Timeout(_)) => {
+                Err(crate::server::routes::websocket::LeaveAskFailure::Timeout) => {
                     // A timeout proves nothing about the actor's seal: retain
                     // the administrative departure itself for the janitor.
                     pending_local_muc_departures.record(
@@ -2349,7 +2350,7 @@ async fn run_group_dm_leave(
                         },
                     );
                 }
-                Err(kameo::error::SendError::HandlerError(
+                Err(crate::server::routes::websocket::LeaveAskFailure::Handler(
                     waddle_xmpp::muc::room_actor::RoomActorError::RoomSealed,
                 )) => {
                     pending_local_muc_departures.record(
@@ -3134,21 +3135,48 @@ impl CancelledConfigAskRecoveryGuard {
             // of this lifecycle up to the latest config commit: each such
             // row describes a durably committed config (arm-by-default) and
             // an unarmed one would head-of-line-block the lifecycle FIFO.
-            let lookup = if snapshot.config_revision == self.expected_revision {
-                self.outbox
-                    .staged_reservation_for(coordinates.lifecycle, coordinates.revision)
-                    .await
-                    .map(|reservation| reservation.into_iter().collect())
-            } else {
+            let exact = snapshot.config_revision == self.expected_revision;
+            if !exact {
                 tracing::warn!(
                     room = %self.room_jid,
                     config_revision = snapshot.config_revision,
                     expected_revision = self.expected_revision,
                     "cancelled admin/group-DM config ask recovery: the intended config was superseded; arming every committed inert row up to the latest config commit"
                 );
-                self.outbox
-                    .staged_reservations_up_to(coordinates.lifecycle, coordinates.revision)
-                    .await
+            }
+            // A transient outbox lookup failure must not strand committed inert rows
+            // at the lifecycle FIFO head (nothing else arms live-origin rows): retry
+            // with backoff before giving up.
+            let mut lookup_attempt = 0_i64;
+            let lookup = loop {
+                match if exact {
+                    self.outbox
+                        .staged_reservation_for(coordinates.lifecycle, coordinates.revision)
+                        .await
+                        .map(|reservation| reservation.into_iter().collect())
+                } else {
+                    self.outbox
+                        .staged_reservations_up_to(coordinates.lifecycle, coordinates.revision)
+                        .await
+                } {
+                    Ok(reservations) => break Ok(reservations),
+                    Err(error) if lookup_attempt < 5 => {
+                        lookup_attempt += 1;
+                        let backoff_ms = crate::room_effect_outbox::retry_delay_ms(lookup_attempt);
+                        tracing::warn!(
+                            room = %self.room_jid,
+                            %error,
+                            lookup_attempt,
+                            backoff_ms,
+                            "cancelled admin/group-DM config ask recovery: staged reservation lookup failed; retrying"
+                        );
+                        tokio::time::sleep(std::time::Duration::from_millis(
+                            backoff_ms.max(0) as u64
+                        ))
+                        .await;
+                    }
+                    Err(error) => break Err(error),
+                }
             };
             match lookup {
                 Ok(reservations) => reservations,
@@ -3496,6 +3524,7 @@ async fn recover_actor_with_merged_live_roster(
             config: spec.config,
             live_room_restore: stale_snapshot.room,
             occupancy_revision: stale_snapshot.occupancy_revision,
+            departure_receipts: stale_snapshot.departure_receipts.clone(),
         })
         .await
         .map_err(send_err(get_or_create_context))?
@@ -7695,6 +7724,97 @@ mod group_dm_durable_reconciliation_tests {
             assert!(
                 std::time::Instant::now() < deadline,
                 "the retried recovery must arm the committed reservation"
+            );
+            tokio::time::sleep(std::time::Duration::from_millis(250)).await;
+        }
+    }
+
+    #[tokio::test]
+    async fn cancelled_config_recovery_retries_a_transient_reservation_lookup_failure() {
+        let websocket_state =
+            crate::server::routes::websocket::tests::create_test_websocket_state().await;
+        let state = websocket_state.deps.app_state.as_ref();
+        let durable_store = TestGroupDmDurableStore::with_outbox(
+            DurableMode::CommitSucceeds,
+            Arc::clone(&websocket_state.deps.protocol.room_effect_outbox),
+        );
+        let claim_store: Arc<dyn ClaimStore> = Arc::new(InProcessClaimStore::new());
+        state
+            .room_registry
+            .ask(WireClusteringClaims {
+                claim_store,
+                node_identity: SharedNodeIdentity::new(NodeIdentity::new(
+                    "group-dm-cancel-lookup-node",
+                    "group-dm-cancel-lookup-epoch",
+                )),
+                durable_store: Some(durable_store),
+                rollout_backoff: None,
+            })
+            .await
+            .expect("wire durable group-DM store");
+
+        let room_jid: BareJid = "group-dm-cancel-lookup@muc.localhost"
+            .parse()
+            .expect("room JID");
+        let member: BareJid = "alice@localhost".parse().expect("member JID");
+        let caller: FullJid = "alice@localhost/web".parse().expect("caller JID");
+        let (_channel_id, actor) =
+            seed_group_dm(state, &room_jid, "Before", std::slice::from_ref(&member)).await;
+        actor
+            .ask(Join {
+                nick: "alice".to_owned(),
+                real_jid: caller.clone(),
+                role: Role::Participant,
+                affiliation: Affiliation::Member,
+            })
+            .await
+            .expect("join group DM");
+
+        let mut updated = actor.ask(GetSnapshot).await.expect("snapshot").room.config;
+        updated.name = "After".to_owned();
+        let applied = actor
+            .ask(waddle_xmpp::muc::room_actor::UpdateGroupDmConfigByMember {
+                config: updated,
+                sender_jid: caller,
+            })
+            .await
+            .expect("config commit");
+        let reservation = applied.reservation.expect("staged config reservation");
+        let key = crate::room_effect_outbox::RoomEffectKey {
+            lifecycle: reservation.lifecycle,
+            revision: reservation.revision,
+            ordinal: reservation.ordinals[0],
+        };
+        websocket_state
+            .deps
+            .protocol
+            .room_effect_outbox
+            .fail_next_staged_reservation_lookup_for_test(
+                reservation.lifecycle,
+                reservation.revision,
+            );
+
+        drop(CommittedAdminConfigReservationGuard::new(
+            websocket_state.as_ref(),
+            Some(reservation),
+        ));
+
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(20);
+        loop {
+            let armed = websocket_state
+                .deps
+                .protocol
+                .room_effect_outbox
+                .find(&key)
+                .await
+                .expect("find staged effect")
+                .is_some_and(|row| row.available_at_ms != i64::MAX);
+            if armed {
+                break;
+            }
+            assert!(
+                std::time::Instant::now() < deadline,
+                "the retried recovery must arm the committed reservation after one lookup failure"
             );
             tokio::time::sleep(std::time::Duration::from_millis(250)).await;
         }

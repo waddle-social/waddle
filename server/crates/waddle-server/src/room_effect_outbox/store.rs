@@ -19,6 +19,13 @@ pub const CLAIM_TIMEOUT_MS: i64 = 300_000;
 pub const HANDLER_GRACE_MS: i64 = 30_000;
 const INERT: i64 = i64::MAX;
 
+#[cfg(test)]
+fn staged_reservation_lookup_failures() -> &'static std::sync::Mutex<HashSet<(String, i64)>> {
+    static FAILURES: std::sync::OnceLock<std::sync::Mutex<HashSet<(String, i64)>>> =
+        std::sync::OnceLock::new();
+    FAILURES.get_or_init(|| std::sync::Mutex::new(HashSet::new()))
+}
+
 pub fn retry_delay_ms(attempt: i64) -> i64 {
     let shift = if attempt <= 1 {
         0
@@ -52,6 +59,19 @@ impl RoomEffectOutboxStore {
     }
     pub fn database(&self) -> &Database {
         &self.db
+    }
+    /// Make the next exact staged-reservation lookup fail. This test seam
+    /// exercises recovery after the database read itself fails.
+    #[cfg(test)]
+    pub fn fail_next_staged_reservation_lookup_for_test(
+        &self,
+        lifecycle: waddle_xmpp::muc::RoomLifecycleId,
+        revision: waddle_xmpp::muc::RoomRevision,
+    ) {
+        staged_reservation_lookup_failures()
+            .lock()
+            .expect("staged reservation lookup-failure lock")
+            .insert((lifecycle.to_string(), revision.as_i64()));
     }
     pub async fn enqueue_in_tx(
         &self,
@@ -132,6 +152,14 @@ impl RoomEffectOutboxStore {
         lifecycle: waddle_xmpp::muc::RoomLifecycleId,
         revision: waddle_xmpp::muc::RoomRevision,
     ) -> Result<Option<RoomEffectReservation>, RoomEffectOutboxError> {
+        #[cfg(test)]
+        if staged_reservation_lookup_failures()
+            .lock()
+            .expect("staged reservation lookup-failure lock")
+            .remove(&(lifecycle.to_string(), revision.as_i64()))
+        {
+            return Err(RoomEffectOutboxError::InvalidPayload);
+        }
         let connection = self.db.guard().await?;
         let mut rows = connection
             .query(

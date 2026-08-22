@@ -109,6 +109,62 @@ fn muji_reflection_rank(muji: &Muji) -> u8 {
 /// staying lit forever after a tab close: other occupants never
 /// received the leave signal, so their client-side
 /// `$mucCallParticipants` never cleared the stale nick.
+/// Why a bounded `LeaveByRealJid` ask produced no disposition.
+#[derive(Debug)]
+pub(crate) enum LeaveAskFailure {
+    /// The whole ask (mailbox admission + reply) exceeded `LEAVE_ASK_TIMEOUT`.
+    /// The actor may or may not have completed the departure: the retry
+    /// carries the same attempt id so a completed one replays its receipt.
+    Timeout,
+    /// The actor answered with a typed error (sealed / ownership).
+    Handler(waddle_xmpp::muc::room_actor::RoomActorError),
+    /// The actor is not running or stopped before replying.
+    Transport,
+}
+
+/// One bounded `LeaveByRealJid` ask: mailbox admission and the reply share a
+/// single `LEAVE_ASK_TIMEOUT` deadline, so a wedged room costs a caller at
+/// most that once.
+pub(crate) async fn ask_leave_bounded(
+    actor: &kameo::actor::ActorRef<waddle_xmpp::muc::room_actor::RoomActor>,
+    message: LeaveByRealJid,
+) -> Result<LeaveDisposition, LeaveAskFailure> {
+    match tokio::time::timeout(
+        super::LEAVE_ASK_TIMEOUT,
+        actor.ask(message).mailbox_timeout(super::LEAVE_ASK_TIMEOUT),
+    )
+    .await
+    {
+        Err(_elapsed) => Err(LeaveAskFailure::Timeout),
+        Ok(Ok(disposition)) => Ok(disposition),
+        Ok(Err(kameo::error::SendError::Timeout(_))) => Err(LeaveAskFailure::Timeout),
+        Ok(Err(kameo::error::SendError::HandlerError(error))) => {
+            Err(LeaveAskFailure::Handler(error))
+        }
+        Ok(Err(_)) => Err(LeaveAskFailure::Transport),
+    }
+}
+
+/// Queue an acknowledgement for a delivered `LeaveByRealJid` reply so the
+/// actor drops the departure receipt it retained for lost-reply replay.
+///
+/// Awaiting mailbox admission is deliberate: dropping a full-mailbox
+/// `try_send` would leave a normal-path receipt replayable. Once this returns
+/// successfully, later leave requests queue behind the acknowledgement.
+pub(crate) async fn ack_departure_receipt(
+    actor: &kameo::actor::ActorRef<waddle_xmpp::muc::room_actor::RoomActor>,
+    attempt: waddle_xmpp::muc::room_actor::LeaveAttemptId,
+) {
+    // Wait for mailbox admission (a dropped ack would leave a stale receipt
+    // that a later unrelated retry could replay), but never longer than one
+    // leave bound: a wedged room must not stall the caller on an ack.
+    let _ = tokio::time::timeout(
+        super::LEAVE_ASK_TIMEOUT,
+        actor.tell(waddle_xmpp::muc::room_actor::AckDepartureReceipt { attempt }),
+    )
+    .await;
+}
+
 /// Deliver the XEP-0045 §7.14 self-presence (`<status code='110'/>`) of a
 /// completed departure to the leaver's own session, for departures whose
 /// reply was lost and that the janitor replayed later.
@@ -116,11 +172,12 @@ pub(crate) async fn echo_muc_self_unavailable(
     state: &WebSocketState,
     room_jid: &BareJid,
     sender_jid: &FullJid,
-    outcome: &LeaveOutcome,
+    nick: &str,
+    affiliation: waddle_xmpp_core::Affiliation,
 ) {
     let from_jid = room_jid
         .clone()
-        .with_resource_str(&outcome.nick)
+        .with_resource_str(nick)
         .unwrap_or_else(|_| sender_jid.clone());
     let sender_bare = sender_jid.to_bare();
     let identity = OccupantIdentity {
@@ -131,7 +188,7 @@ pub(crate) async fn echo_muc_self_unavailable(
     let presence = waddle_xmpp::muc::build_leave_presence(
         &from_jid,
         sender_jid,
-        outcome.affiliation,
+        affiliation,
         waddle_xmpp::muc::MucPresenceStatus::new(true, false),
         &identity,
     );
@@ -1846,16 +1903,16 @@ async fn cleanup_muc_presence_with_origin(
         // Bounded: one wedged room (stuck projection transaction or mailbox)
         // must not stall the sweep of every other room this JID occupies.
         let attempt = waddle_xmpp::muc::room_actor::LeaveAttemptId::generate();
-        let leave_result = room_actor
-            .ask(LeaveByRealJid {
+        let leave_result = ask_leave_bounded(
+            &room_actor,
+            LeaveByRealJid {
                 sender_jid: jid.clone(),
                 cause: OccupancyLeaveCause::Disconnect,
                 session: LeaveSessionSelector::Any,
                 attempt,
-            })
-            .mailbox_timeout(super::LEAVE_ASK_TIMEOUT)
-            .reply_timeout(super::LEAVE_ASK_TIMEOUT)
-            .await;
+            },
+        )
+        .await;
         // SFU teardown runs *after* the room actor has dropped the
         // session so the MUC's view of the world is the leading edge
         // (the membership gate immediately reports the user as a
@@ -1874,6 +1931,7 @@ async fn cleanup_muc_presence_with_origin(
         super::muc_call_sfu::unregister_participant_from_room(state, &room_jid, jid);
         match leave_result {
             Ok(LeaveDisposition::Left(outcome)) => {
+                ack_departure_receipt(&room_actor, attempt).await;
                 debug!(
                     room = %room_jid,
                     nick = %outcome.nick,
@@ -1912,13 +1970,12 @@ async fn cleanup_muc_presence_with_origin(
                 | LeaveDisposition::Superseded
                 | LeaveDisposition::Suppressed { .. },
             ) => {}
-            Err(kameo::error::SendError::Timeout(_)) => {
-                // Mailbox timeout (`Some`): never enqueued. Reply timeout
-                // (`None`): the actor may still complete the departure — the
-                // retry carries the same attempt id so a completed departure
-                // replays its retained outcome instead of `NotOccupant`.
-                // Neither proves anything about the seal: retain the departure
-                // itself, not a retirement watch.
+            Err(LeaveAskFailure::Timeout) => {
+                // Never enqueued, or enqueued with the reply lost: the retry
+                // carries the same attempt id so a completed departure replays
+                // its retained outcome instead of `NotOccupant`. A timeout
+                // proves nothing about the seal: retain the departure itself,
+                // not a retirement watch.
                 completed = false;
                 state.deps.protocol.pending_local_muc_departures.record(
                     LocalDepartureItem::RoomDeparture {
@@ -1931,7 +1988,7 @@ async fn cleanup_muc_presence_with_origin(
                 );
                 warn!(room = %room_jid, jid = %jid, "MUC leave ask timed out on disconnect; retained for retry");
             }
-            Err(error) => {
+            Err(error @ (LeaveAskFailure::Handler(_) | LeaveAskFailure::Transport)) => {
                 completed = false;
                 state.deps.protocol.pending_local_muc_departures.record(
                     LocalDepartureItem::ConfirmRetired {
@@ -3317,6 +3374,7 @@ mod local_departure_cleanup_tests {
         OwnershipUnavailable,
         NotOwner,
         Hang,
+        Delay(Duration),
     }
 
     struct CleanupProjectionStore {
@@ -3424,6 +3482,13 @@ mod local_departure_cleanup_tests {
                         LeaveProjectionMode::Hang => {
                             std::future::pending::<Result<RoomCommitOutcome, RoomCommitError>>()
                                 .await
+                        }
+                        LeaveProjectionMode::Delay(delay) => {
+                            tokio::time::sleep(delay).await;
+                            Ok(RoomCommitOutcome {
+                                coordinates,
+                                reservation: None,
+                            })
                         }
                     },
                     _ => Ok(RoomCommitOutcome {
@@ -3855,5 +3920,167 @@ mod local_departure_cleanup_tests {
         for handle in mailbox_fillers {
             handle.abort();
         }
+    }
+
+    #[tokio::test]
+    async fn ask_leave_bounded_applies_one_deadline_to_mailbox_and_reply() {
+        let store = CleanupProjectionStore::new();
+        let state = clustered_state_with_store(store.clone()).await;
+        let room_jid = room_jid("ask-leave-bounded-deadline");
+        let room_actor = state
+            .deps
+            .protocol
+            .room_registry
+            .ask(CreateRoom {
+                room_jid: room_jid.clone(),
+                waddle_id: "w".to_string(),
+                channel_id: "c".to_string(),
+                config: RoomConfig::default(),
+            })
+            .await
+            .expect("create room");
+        store.set_leave_mode(LeaveProjectionMode::Delay(Duration::from_secs(3)));
+
+        let mut occupants = Vec::new();
+        for index in 0..66_u32 {
+            let jid = full_jid(&format!("user{index}@example.com/web"));
+            join_member(&room_actor, &jid, &format!("user{index}")).await;
+            occupants.push(jid);
+        }
+
+        let wedging_leave = tokio::spawn({
+            let actor = room_actor.clone();
+            let sender_jid = occupants[0].clone();
+            async move {
+                actor
+                    .ask(LeaveByRealJid {
+                        sender_jid,
+                        cause: OccupancyLeaveCause::Disconnect,
+                        session: LeaveSessionSelector::Any,
+                        attempt: waddle_xmpp::muc::room_actor::LeaveAttemptId::generate(),
+                    })
+                    .mailbox_timeout(Duration::from_secs(30))
+                    .reply_timeout(Duration::from_secs(30))
+                    .await
+            }
+        });
+        tokio::time::sleep(Duration::from_millis(100)).await;
+
+        let mut mailbox_fillers = Vec::new();
+        for sender_jid in occupants.iter().skip(1).take(64).cloned() {
+            let actor = room_actor.clone();
+            mailbox_fillers.push(tokio::spawn(async move {
+                actor
+                    .ask(LeaveByRealJid {
+                        sender_jid,
+                        cause: OccupancyLeaveCause::Disconnect,
+                        session: LeaveSessionSelector::Any,
+                        attempt: waddle_xmpp::muc::room_actor::LeaveAttemptId::generate(),
+                    })
+                    .mailbox_timeout(Duration::from_secs(30))
+                    .reply_timeout(Duration::from_secs(30))
+                    .await
+            }));
+        }
+        tokio::time::sleep(Duration::from_millis(100)).await;
+
+        let started = std::time::Instant::now();
+        let result = ask_leave_bounded(
+            &room_actor,
+            LeaveByRealJid {
+                sender_jid: occupants[65].clone(),
+                cause: OccupancyLeaveCause::Disconnect,
+                session: LeaveSessionSelector::Any,
+                attempt: waddle_xmpp::muc::room_actor::LeaveAttemptId::generate(),
+            },
+        )
+        .await;
+        let elapsed = started.elapsed();
+
+        assert!(matches!(result, Err(LeaveAskFailure::Timeout)));
+        assert!(
+            elapsed < Duration::from_secs(6),
+            "the combined ask must time out once, not after stacked mailbox+reply waits: {elapsed:?}"
+        );
+
+        room_actor.kill();
+        room_actor.wait_for_shutdown().await;
+        wedging_leave.abort();
+        for handle in mailbox_fillers {
+            handle.abort();
+        }
+    }
+
+    #[tokio::test]
+    async fn ask_leave_bounded_maps_handler_errors() {
+        let store = CleanupProjectionStore::new();
+        let state = clustered_state_with_store(store.clone()).await;
+        let room_jid = room_jid("ask-leave-bounded-room-sealed");
+        let room_actor = state
+            .deps
+            .protocol
+            .room_registry
+            .ask(CreateRoom {
+                room_jid: room_jid.clone(),
+                waddle_id: "w".to_string(),
+                channel_id: "c".to_string(),
+                config: RoomConfig::default(),
+            })
+            .await
+            .expect("create room");
+        let alice = full_jid("alice@example.com/web");
+        join_member(&room_actor, &alice, "alice").await;
+        store.set_leave_mode(LeaveProjectionMode::NotOwner);
+
+        let result = ask_leave_bounded(
+            &room_actor,
+            LeaveByRealJid {
+                sender_jid: alice,
+                cause: OccupancyLeaveCause::Disconnect,
+                session: LeaveSessionSelector::Any,
+                attempt: waddle_xmpp::muc::room_actor::LeaveAttemptId::generate(),
+            },
+        )
+        .await;
+
+        assert!(matches!(
+            result,
+            Err(LeaveAskFailure::Handler(
+                waddle_xmpp::muc::room_actor::RoomActorError::RoomSealed
+            ))
+        ));
+    }
+
+    #[tokio::test]
+    async fn ask_leave_bounded_maps_stopped_actor_to_transport() {
+        let state = create_test_websocket_state().await;
+        let room_jid = room_jid("ask-leave-bounded-transport");
+        let room_actor = state
+            .deps
+            .protocol
+            .room_registry
+            .ask(CreateRoom {
+                room_jid,
+                waddle_id: "w".to_string(),
+                channel_id: "c".to_string(),
+                config: RoomConfig::default(),
+            })
+            .await
+            .expect("create room");
+        room_actor.kill();
+        room_actor.wait_for_shutdown().await;
+
+        let result = ask_leave_bounded(
+            &room_actor,
+            LeaveByRealJid {
+                sender_jid: full_jid("alice@example.com/web"),
+                cause: OccupancyLeaveCause::Disconnect,
+                session: LeaveSessionSelector::Any,
+                attempt: waddle_xmpp::muc::room_actor::LeaveAttemptId::generate(),
+            },
+        )
+        .await;
+
+        assert!(matches!(result, Err(LeaveAskFailure::Transport)));
     }
 }
