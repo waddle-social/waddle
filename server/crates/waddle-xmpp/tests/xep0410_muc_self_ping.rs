@@ -398,6 +398,7 @@ async fn xep_0410_self_ping_survives_first_session_departure() {
             sender_jid: session("web"),
             cause: waddle_xmpp::muc::durable::OccupancyLeaveCause::Explicit,
             session: waddle_xmpp::muc::room_actor::LeaveSessionSelector::Any,
+            attempt: waddle_xmpp::muc::room_actor::LeaveAttemptId::generate(),
         })
         .await
         .expect("leave first session");

@@ -53,7 +53,7 @@ pub use mediated_invites::{
 };
 pub use occupancy_handlers::{
     ClearMujiPresence, GetActiveMujiSessions, InCallPresenceUpdateOutcome, JoinAffiliationGrant,
-    JoinWithAffiliation, LeaveByRealJid, LeaveDisposition, LeaveSessionSelector,
+    JoinWithAffiliation, LeaveAttemptId, LeaveByRealJid, LeaveDisposition, LeaveSessionSelector,
     MujiPresenceUpdateOutcome, PingSelfCheck, PresenceUpdateData, ReconcileChannelBackedRoom,
     ResolverAffiliationSyncOutcome, SyncResolverAffiliation, UpsertInCallState, UpsertMujiPresence,
 };
@@ -73,6 +73,14 @@ impl OccupancyWatermark {
     }
 }
 
+/// A completed departure retained for idempotent attempt replay.
+#[derive(Debug)]
+struct DepartureReceipt {
+    attempt: occupancy_handlers::LeaveAttemptId,
+    completed_at: std::time::Instant,
+    outcome: Box<LeaveOutcome>,
+}
+
 /// A durable commit capability for exactly one in-memory projection.
 pub(super) enum ProjectionGate {
     Unfenced,
@@ -87,6 +95,20 @@ const fn projection_commit_failure_label(error: &DurablePersistError) -> &'stati
         DurablePersistError::PersistFailed => "persist_failed",
         DurablePersistError::CommitOutcomeUnknown => "commit_outcome_unknown",
     }
+}
+
+/// Test-only observation of projection state at a seam: `pre_commit` fires
+/// inside `commit_projection` BEFORE the durable commit is awaited, `apply`
+/// fires inside `project` immediately before the authorized closure runs.
+/// Tests assert the state carried at `pre_commit` is untouched so a mutation
+/// hoisted above the commit cannot pass.
+#[cfg(test)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ProjectionProbe {
+    pub phase: &'static str,
+    pub occupants: usize,
+    pub sessions: usize,
+    pub pins: usize,
 }
 
 #[derive(Debug, Error, Clone, Copy, PartialEq, Eq)]
@@ -468,6 +490,9 @@ pub struct RoomActor {
     occupancy_revision: u64,
     /// The newest durable revision consumed by an ephemeral projection.
     projected_revision: Option<super::durable::RoomRevision>,
+    /// Completed departures retained for attempt replay (see
+    /// [`occupancy_handlers::LeaveAttemptId`]).
+    departure_receipts: std::collections::VecDeque<DepartureReceipt>,
     /// Why this actor refuses further admissions. Keeping the reason typed
     /// lets the registry distinguish an ordinary inactivity seal, whose
     /// removal must retain exact-release backlog fencing, from a definitive
@@ -510,7 +535,7 @@ pub struct RoomActor {
     /// [`DurableRestoreState`]'s own doc comment.
     restore_state: DurableRestoreState,
     #[cfg(test)]
-    test_projection_apply_hook: Option<std::sync::Arc<dyn Fn() + Send + Sync>>,
+    test_projection_apply_hook: Option<std::sync::Arc<dyn Fn(ProjectionProbe) + Send + Sync>>,
 }
 
 #[derive(PartialEq)]
@@ -684,6 +709,7 @@ impl RoomActor {
             invite_operation_by_invitee: HashMap::new(),
             occupancy_revision: 0,
             projected_revision: None,
+            departure_receipts: std::collections::VecDeque::new(),
             seal_state: RoomSealState::Open,
             occupant_id_secret,
             durable_member_recipients: Vec::new(),
@@ -1053,11 +1079,30 @@ impl RoomActor {
         Ok((Some(commit), outcome.reservation))
     }
 
+    #[cfg(test)]
+    fn projection_probe(&self, phase: &'static str) -> ProjectionProbe {
+        ProjectionProbe {
+            phase,
+            occupants: self.room.occupant_count(),
+            sessions: self
+                .room
+                .occupants
+                .values()
+                .map(|occupant| self.room.get_occupant_sessions(&occupant.nick).len())
+                .sum(),
+            pins: self.room.pinned_entries().len(),
+        }
+    }
+
     pub(super) async fn commit_projection(
         &mut self,
         projection: RoomProjection,
     ) -> Result<ProjectionGate, DurablePersistError> {
         let kind = projection.kind();
+        #[cfg(test)]
+        if let Some(hook) = self.test_projection_apply_hook.clone() {
+            hook(self.projection_probe("pre_commit"));
+        }
         let started = std::time::Instant::now();
         let committed = self
             .commit_durable(
@@ -1097,6 +1142,46 @@ impl RoomActor {
         }
     }
 
+    /// Retain a completed departure so a retry of the same attempt (after a
+    /// lost reply) can replay its outcome exactly once.
+    pub(super) fn retain_departure_receipt(
+        &mut self,
+        attempt: occupancy_handlers::LeaveAttemptId,
+        outcome: Box<LeaveOutcome>,
+    ) {
+        let now = std::time::Instant::now();
+        self.expire_departure_receipts(now);
+        while self.departure_receipts.len() >= occupancy_handlers::DEPARTURE_RECEIPT_CAP {
+            self.departure_receipts.pop_front();
+        }
+        self.departure_receipts.push_back(DepartureReceipt {
+            attempt,
+            completed_at: now,
+            outcome,
+        });
+    }
+
+    fn expire_departure_receipts(&mut self, now: std::time::Instant) {
+        self.departure_receipts.retain(|receipt| {
+            now.duration_since(receipt.completed_at) < occupancy_handlers::DEPARTURE_RECEIPT_TTL
+        });
+    }
+
+    /// Consume the receipt of an already-completed attempt, if any.
+    pub(super) fn take_departure_receipt(
+        &mut self,
+        attempt: occupancy_handlers::LeaveAttemptId,
+    ) -> Option<Box<LeaveOutcome>> {
+        self.expire_departure_receipts(std::time::Instant::now());
+        let index = self
+            .departure_receipts
+            .iter()
+            .position(|receipt| receipt.attempt == attempt)?;
+        self.departure_receipts
+            .remove(index)
+            .map(|receipt| receipt.outcome)
+    }
+
     pub(super) fn project<T>(
         &mut self,
         gate: ProjectionGate,
@@ -1106,7 +1191,7 @@ impl RoomActor {
         let ProjectionGate::Authorized(authorization) = gate else {
             #[cfg(test)]
             if let Some(hook) = self.test_projection_apply_hook.clone() {
-                hook();
+                hook(self.projection_probe("apply"));
             }
             return Ok(apply(self));
         };
@@ -1133,7 +1218,7 @@ impl RoomActor {
         self.projected_revision = Some(commit.revision());
         #[cfg(test)]
         if let Some(hook) = self.test_projection_apply_hook.clone() {
-            hook();
+            hook(self.projection_probe("apply"));
         }
         Ok(apply(self))
     }

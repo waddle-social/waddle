@@ -2299,12 +2299,15 @@ async fn run_group_dm_leave(
         }
     } else {
         for resource in resources {
+            let attempt = waddle_xmpp::muc::room_actor::LeaveAttemptId::generate();
             match actor
                 .ask(LeaveByRealJid {
                     sender_jid: resource.clone(),
                     cause: waddle_xmpp::muc::durable::OccupancyLeaveCause::Administrative,
                     session: waddle_xmpp::muc::room_actor::LeaveSessionSelector::Any,
+                    attempt,
                 })
+                .mailbox_timeout(crate::server::routes::websocket::LEAVE_ASK_TIMEOUT)
                 .reply_timeout(crate::server::routes::websocket::LEAVE_ASK_TIMEOUT)
                 .await
             {
@@ -2329,6 +2332,7 @@ async fn run_group_dm_leave(
                             jid: resource,
                             cause: waddle_xmpp::muc::durable::OccupancyLeaveCause::Administrative,
                             selector: waddle_xmpp::muc::room_actor::LeaveSessionSelector::Any,
+                            attempt,
                         },
                     );
                 }
@@ -2341,6 +2345,7 @@ async fn run_group_dm_leave(
                             jid: resource,
                             cause: waddle_xmpp::muc::durable::OccupancyLeaveCause::Administrative,
                             selector: waddle_xmpp::muc::room_actor::LeaveSessionSelector::Any,
+                            attempt,
                         },
                     );
                 }
@@ -2354,6 +2359,7 @@ async fn run_group_dm_leave(
                             actor: actor.id(),
                             cause: waddle_xmpp::muc::durable::OccupancyLeaveCause::Administrative,
                             selector: waddle_xmpp::muc::room_actor::LeaveSessionSelector::Any,
+                            attempt,
                         },
                     );
                 }
@@ -2364,6 +2370,7 @@ async fn run_group_dm_leave(
                             jid: resource,
                             cause: waddle_xmpp::muc::durable::OccupancyLeaveCause::Administrative,
                             selector: waddle_xmpp::muc::room_actor::LeaveSessionSelector::Any,
+                            attempt,
                         },
                     );
                 }
@@ -3076,20 +3083,40 @@ impl CancelledConfigAskRecoveryGuard {
     }
 
     async fn recover(self) {
-        let snapshot = match self
-            .actor
-            .ask(waddle_xmpp::muc::room_actor::GetSnapshot)
-            .reply_timeout(ADMIN_ROOM_ASK_TIMEOUT)
-            .await
-        {
-            Ok(snapshot) => snapshot,
-            Err(error) => {
-                tracing::warn!(
-                    room = %self.room_jid,
-                    ?error,
-                    "cancelled admin/group-DM config ask recovery could not snapshot the room"
-                );
-                return;
+        // The original actor may be busy past the ask bound: keep retrying
+        // with backoff while it is alive (a committed reservation left inert
+        // would block the lifecycle FIFO, and a members-only flip would stay
+        // applied without its enforcement).
+        let mut timeout_attempt = 0_i64;
+        let snapshot = loop {
+            match self
+                .actor
+                .ask(waddle_xmpp::muc::room_actor::GetSnapshot)
+                .mailbox_timeout(ADMIN_ROOM_ASK_TIMEOUT)
+                .reply_timeout(ADMIN_ROOM_ASK_TIMEOUT)
+                .await
+            {
+                Ok(snapshot) => break snapshot,
+                Err(kameo::error::SendError::Timeout(_)) => {
+                    timeout_attempt = timeout_attempt.saturating_add(1);
+                    let backoff_ms = crate::room_effect_outbox::retry_delay_ms(timeout_attempt);
+                    tracing::warn!(
+                        room = %self.room_jid,
+                        timeout_attempt,
+                        backoff_ms,
+                        "cancelled admin/group-DM config ask recovery snapshot timed out; retrying"
+                    );
+                    tokio::time::sleep(std::time::Duration::from_millis(backoff_ms.max(0) as u64))
+                        .await;
+                }
+                Err(error) => {
+                    tracing::warn!(
+                        room = %self.room_jid,
+                        ?error,
+                        "cancelled admin/group-DM config ask recovery could not snapshot the room"
+                    );
+                    return;
+                }
             }
         };
         let exact_intended_config = snapshot.config_revision == self.expected_revision
@@ -6103,6 +6130,7 @@ mod group_dm_durable_reconciliation_tests {
         AffiliationCommitUnknown,
         ConfigCommitUnknown,
         ProjectionLeaveSecondOwnershipUnavailableOnce,
+        ProjectionLeaveSecondDelayed,
     }
 
     #[derive(Clone)]
@@ -6391,6 +6419,11 @@ mod group_dm_durable_reconciliation_tests {
                 }
                 self.apply_mutation(room_jid, intent);
                 self.record_coordinates(room_jid, coordinates, is_config_commit);
+                if mode == DurableMode::ProjectionLeaveSecondDelayed
+                    && projection_leave_attempt == Some(2)
+                {
+                    tokio::time::sleep(std::time::Duration::from_secs(6)).await;
+                }
                 let pause = { self.commit_pause.lock().expect("commit pause lock").take() };
                 if let Some(pause) = pause {
                     // Each pause has exactly one producer and one test waiter. `notify_one`
@@ -6788,13 +6821,11 @@ mod group_dm_durable_reconciliation_tests {
     }
 
     #[tokio::test]
-    async fn admin_partial_success_converges_via_janitor_and_command_retry_does_not_refanout() {
+    async fn admin_removal_reply_timeout_replays_via_janitor_exactly_once() {
         let websocket_state =
             crate::server::routes::websocket::tests::create_test_websocket_state_sharing_app_room_registry().await;
         let state = websocket_state.deps.app_state.as_ref();
-        let durable_store = TestGroupDmDurableStore::new(
-            DurableMode::ProjectionLeaveSecondOwnershipUnavailableOnce,
-        );
+        let durable_store = TestGroupDmDurableStore::new(DurableMode::ProjectionLeaveSecondDelayed);
         let claim_store: Arc<dyn ClaimStore> = Arc::new(InProcessClaimStore::new());
         state
             .room_registry
@@ -6936,14 +6967,15 @@ mod group_dm_durable_reconciliation_tests {
         );
         let retained = pending.pop().expect("retained departure");
         assert!(matches!(
-            retained.item,
-            crate::server::routes::websocket::LocalDepartureItem::RoomDeparture {
-                ref room,
-                ref jid,
-                cause: waddle_xmpp::muc::durable::OccupancyLeaveCause::Administrative,
-                selector: waddle_xmpp::muc::room_actor::LeaveSessionSelector::Any,
-            } if room == &room_jid && jid == &alice_web
-        ));
+                    retained.item,
+                    crate::server::routes::websocket::LocalDepartureItem::RoomDeparture {
+                        ref room,
+                        ref jid,
+                        cause: waddle_xmpp::muc::durable::OccupancyLeaveCause::Administrative,
+                        selector: waddle_xmpp::muc::room_actor::LeaveSessionSelector::Any,
+                        attempt: _,
+        } if room == &room_jid && jid == &alice_web
+                ));
         websocket_state
             .deps
             .protocol
@@ -7247,7 +7279,7 @@ mod group_dm_durable_reconciliation_tests {
     }
 
     #[tokio::test]
-    async fn cancelled_config_recovery_superseded_config_arms_every_committed_inert_row() {
+    async fn cancelled_config_recovery_arms_matching_reservations() {
         let websocket_state =
             crate::server::routes::websocket::tests::create_test_websocket_state().await;
         let durable_store = TestGroupDmDurableStore::with_outbox(
@@ -7563,7 +7595,7 @@ mod group_dm_durable_reconciliation_tests {
     }
 
     #[tokio::test]
-    async fn cancelled_group_dm_rename_ask_recovers_and_arms_the_committed_reservation() {
+    async fn cancelled_config_recovery_retries_snapshot_timeout_then_arms() {
         let websocket_state =
             crate::server::routes::websocket::tests::create_test_websocket_state().await;
         let state = websocket_state.deps.app_state.as_ref();
@@ -7635,11 +7667,37 @@ mod group_dm_durable_reconciliation_tests {
             ordinal: waddle_xmpp::muc::RoomEffectOrdinal::first(),
         };
 
-        pause.release();
         task.abort();
         let _ = task.await;
 
-        wait_for_room_effect_to_arm(websocket_state.as_ref(), &key).await;
+        // The recovery guard now asks a still-paused actor. Let that first
+        // snapshot ask exceed `ADMIN_ROOM_ASK_TIMEOUT`, then release the
+        // actor so the retry loop can snapshot and arm the reservation.
+        tokio::time::sleep(ADMIN_ROOM_ASK_TIMEOUT + std::time::Duration::from_secs(1)).await;
+        pause.release();
+
+        // The first snapshot ask timed out while the actor was paused; the
+        // recovery retries after `retry_delay_ms(1)` (5s), so arming lands
+        // around 10s after cancellation. Poll well past that.
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(25);
+        loop {
+            let armed = websocket_state
+                .deps
+                .protocol
+                .room_effect_outbox
+                .find(&key)
+                .await
+                .expect("find staged effect")
+                .is_some_and(|row| row.available_at_ms != i64::MAX);
+            if armed {
+                break;
+            }
+            assert!(
+                std::time::Instant::now() < deadline,
+                "the retried recovery must arm the committed reservation"
+            );
+            tokio::time::sleep(std::time::Duration::from_millis(250)).await;
+        }
     }
 
     #[tokio::test]
@@ -7996,7 +8054,8 @@ mod group_dm_durable_reconciliation_tests {
                                         sender_jid: caller.clone(),
                                         cause: waddle_xmpp::muc::durable::OccupancyLeaveCause::Administrative,
                                         session: waddle_xmpp::muc::room_actor::LeaveSessionSelector::Any,
-                                    })
+                                        attempt: waddle_xmpp::muc::room_actor::LeaveAttemptId::generate(),
+})
                                     .await
                                     .expect("leave recovered room"),
                                 waddle_xmpp::muc::room_actor::LeaveDisposition::Left(_)
@@ -8105,7 +8164,8 @@ mod group_dm_durable_reconciliation_tests {
                                         sender_jid: owner.clone(),
                                         cause: waddle_xmpp::muc::durable::OccupancyLeaveCause::Administrative,
                                         session: waddle_xmpp::muc::room_actor::LeaveSessionSelector::Any,
-                                    })
+                                        attempt: waddle_xmpp::muc::room_actor::LeaveAttemptId::generate(),
+})
                                     .await
                                     .expect("leave recovered channel"),
                                 waddle_xmpp::muc::room_actor::LeaveDisposition::Left(_)

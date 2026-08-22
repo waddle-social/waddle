@@ -66,6 +66,7 @@ pub async fn handle_muc_join_with_ordered_relay(
     state: &WebSocketState,
     request: MucJoinRequest<'_>,
 ) -> Vec<String> {
+    let _request_timer = waddle_xmpp::metrics::MucOccupancyHandlerTimer::start("join_request");
     info!(
         room = %request.room_jid,
         nick = %request.nick,
@@ -1835,6 +1836,7 @@ pub async fn handle_muc_leave(
     nick: &str,
     ordered_relay_origin: Option<&crate::server::routes::interpret::OrderedRelayRouteOrigin>,
 ) -> Vec<String> {
+    let _request_timer = waddle_xmpp::metrics::MucOccupancyHandlerTimer::start("leave_request");
     info!(room = %room_jid, nick = %nick, sender = %sender_jid, "MUC leave request");
     #[cfg(not(feature = "clustering"))]
     let _ = ordered_relay_origin;
@@ -1937,12 +1939,15 @@ pub async fn handle_muc_leave(
         )];
     };
 
+    let leave_attempt = waddle_xmpp::muc::room_actor::LeaveAttemptId::generate();
     let outcome = match room_actor
         .ask(LeaveByRealJid {
             sender_jid: sender_jid.clone(),
             cause: waddle_xmpp::muc::durable::OccupancyLeaveCause::Explicit,
             session: waddle_xmpp::muc::room_actor::LeaveSessionSelector::Any,
+            attempt: leave_attempt,
         })
+        .mailbox_timeout(crate::server::routes::websocket::LEAVE_ASK_TIMEOUT)
         .reply_timeout(crate::server::routes::websocket::LEAVE_ASK_TIMEOUT)
         .await
     {
@@ -1989,6 +1994,22 @@ pub async fn handle_muc_leave(
                 sender_jid,
                 affiliation,
             )];
+        }
+        Err(kameo::error::SendError::Timeout(_)) => {
+            // The actor may still complete the departure after this bound:
+            // retain it so the janitor replays the outcome (self-echo, fan-out,
+            // SFU teardown) under the same attempt id, and bounce wait-class now.
+            warn!(room = %room_jid, nick = %nick, sender = %sender_jid, "MUC leave ask timed out; retained for replay");
+            state.deps.protocol.pending_local_muc_departures.record(
+                crate::server::routes::websocket::LocalDepartureItem::RoomDeparture {
+                    room: room_jid.clone(),
+                    jid: sender_jid.clone(),
+                    cause: waddle_xmpp::muc::durable::OccupancyLeaveCause::Explicit,
+                    selector: waddle_xmpp::muc::room_actor::LeaveSessionSelector::Any,
+                    attempt: leave_attempt,
+                },
+            );
+            return bounce_muc_leave_ownership_unreachable(room_jid, sender_jid, nick);
         }
         Err(error) => {
             warn!(room = %room_jid, nick = %nick, sender = %sender_jid, error = ?error, "Failed to leave MUC room");
@@ -3118,7 +3139,7 @@ mod occupancy_projection_handler_tests {
         RoomRevision,
     };
     use waddle_xmpp::muc::room_actor::{
-        GetSnapshot, RestoreDurableRoomState, RoomActor, SealForDestroy,
+        GetSnapshot, RestoreDurableRoomState, RoomActor, SealForDestroy, SyncResolverAffiliation,
     };
     use waddle_xmpp::muc::room_registry_actor::CreateRoom;
     use waddle_xmpp::ownership::{ClaimEpoch, Entity, EntityType, NodeIdentity};
@@ -3127,6 +3148,7 @@ mod occupancy_projection_handler_tests {
     enum ProjectionFailureMode {
         Join,
         Leave,
+        LeaveDelay(std::time::Duration),
     }
 
     struct ProjectionFailingStore {
@@ -3207,17 +3229,25 @@ mod occupancy_projection_handler_tests {
                 }
             };
             Box::pin(async move {
-                let projection_failure = match &intent {
+                match &intent {
                     waddle_xmpp::muc::RoomDurableMutation::Projection(
                         RoomProjection::OccupancyJoin { .. },
-                    ) => failure == ProjectionFailureMode::Join && !allow_join_projection,
+                    ) if failure == ProjectionFailureMode::Join && !allow_join_projection => {
+                        return Err(waddle_xmpp::muc::RoomCommitError::OwnershipUnavailable);
+                    }
                     waddle_xmpp::muc::RoomDurableMutation::Projection(
                         RoomProjection::OccupancyLeave { .. },
-                    ) => failure == ProjectionFailureMode::Leave,
-                    _ => false,
-                };
-                if projection_failure {
-                    return Err(waddle_xmpp::muc::RoomCommitError::OwnershipUnavailable);
+                    ) if failure == ProjectionFailureMode::Leave => {
+                        return Err(waddle_xmpp::muc::RoomCommitError::OwnershipUnavailable);
+                    }
+                    waddle_xmpp::muc::RoomDurableMutation::Projection(
+                        RoomProjection::OccupancyLeave { .. },
+                    ) => {
+                        if let ProjectionFailureMode::LeaveDelay(delay) = failure {
+                            tokio::time::sleep(delay).await;
+                        }
+                    }
+                    _ => {}
                 }
                 Ok(waddle_xmpp::muc::RoomCommitOutcome {
                     coordinates,
@@ -3515,6 +3545,7 @@ mod occupancy_projection_handler_tests {
         let room_jid: BareJid = "suppressed-store-less@muc.example.com"
             .parse()
             .expect("room jid");
+        let alice_session = create_test_server_owner_session(state.as_ref(), "alice").await;
         let alice: FullJid = "alice@example.com/web".parse().expect("alice jid");
         let bob: FullJid = "bob@example.com/web".parse().expect("bob jid");
         let (bob_tx, mut bob_rx) = mpsc::channel(8);
@@ -3534,21 +3565,44 @@ mod occupancy_projection_handler_tests {
             .await
             .expect("create store-less room");
         register_test_connection(state.as_ref(), &bob, bob_tx).await;
-        for (jid, nick) in [(&alice, "alice"), (&bob, "bob")] {
-            let joined = handle_muc_join(
-                state.as_ref(),
-                "example.com",
-                &room_jid,
-                jid,
-                nick,
-                None,
-                &None,
-            )
-            .await;
-            assert!(joined
-                .iter()
-                .any(|frame| frame.contains("status code='110'")));
-        }
+        let alice_join = handle_muc_join(
+            state.as_ref(),
+            "example.com",
+            &room_jid,
+            &alice,
+            "alice",
+            None,
+            &Some(alice_session),
+        )
+        .await;
+        assert!(alice_join
+            .iter()
+            .any(|frame| frame.contains("status code='110'")));
+        actor
+            .ask(SyncResolverAffiliation {
+                jid: alice.to_bare(),
+                affiliation: Affiliation::Owner,
+                expected_admission_revision: actor
+                    .ask(GetSnapshot)
+                    .await
+                    .expect("snapshot before owner grant")
+                    .admission_revision,
+            })
+            .await
+            .expect("grant creator affiliation");
+        let bob_join = handle_muc_join(
+            state.as_ref(),
+            "example.com",
+            &room_jid,
+            &bob,
+            "bob",
+            None,
+            &None,
+        )
+        .await;
+        assert!(bob_join
+            .iter()
+            .any(|frame| frame.contains("status code='110'")));
         while bob_rx.try_recv().is_ok() {}
         actor
             .ask(SealForDestroy {
@@ -3562,10 +3616,161 @@ mod occupancy_projection_handler_tests {
         assert_eq!(frames.len(), 1);
         assert!(frames[0].contains("type='unavailable'"), "{frames:?}");
         assert!(frames[0].contains("status code='110'"), "{frames:?}");
+        assert!(frames[0].contains("affiliation='owner'"), "{frames:?}");
         assert!(
             bob_rx.try_recv().is_err(),
             "suppressed leave must not fan out"
         );
+    }
+
+    #[tokio::test]
+    async fn explicit_leave_reply_timeout_bounces_then_janitor_echoes_self_unavailable_once() {
+        let recorder = Arc::new(RecordingSfu::default());
+        let state = create_test_websocket_state_with_sfu(recorder.clone()).await;
+        let alice_session = create_test_server_owner_session(state.as_ref(), "alice").await;
+        let room_jid: BareJid = "leave-reply-timeout@muc.example.com"
+            .parse()
+            .expect("room jid");
+        let alice: FullJid = "alice@example.com/web".parse().expect("alice jid");
+        let bob: FullJid = "bob@example.com/web".parse().expect("bob jid");
+        let (alice_tx, mut alice_rx) = mpsc::channel(8);
+        let (bob_tx, mut bob_rx) = mpsc::channel(8);
+
+        create_room_with_projection_store(
+            state.as_ref(),
+            &room_jid,
+            ProjectionFailingStore::new(ProjectionFailureMode::LeaveDelay(
+                std::time::Duration::from_secs(6),
+            )),
+        )
+        .await;
+        register_test_connection(state.as_ref(), &alice, alice_tx).await;
+        register_test_connection(state.as_ref(), &bob, bob_tx).await;
+        let alice_join = handle_muc_join(
+            state.as_ref(),
+            "example.com",
+            &room_jid,
+            &alice,
+            "alice",
+            None,
+            &Some(alice_session),
+        )
+        .await;
+        assert!(alice_join
+            .iter()
+            .any(|frame| frame.contains("status code='110'")));
+        let bob_join = handle_muc_join(
+            state.as_ref(),
+            "example.com",
+            &room_jid,
+            &bob,
+            "bob",
+            None,
+            &None,
+        )
+        .await;
+        assert!(bob_join
+            .iter()
+            .any(|frame| frame.contains("status code='110'")));
+        while alice_rx.try_recv().is_ok() {}
+        while bob_rx.try_recv().is_ok() {}
+
+        let responses = handle_muc_leave(state.as_ref(), &room_jid, &alice, "alice", None).await;
+
+        assert_eq!(responses.len(), 1);
+        assert!(
+            responses[0].contains("resource-constraint"),
+            "the timed-out explicit leave must bounce with wait/resource-constraint"
+        );
+        assert_eq!(state.deps.protocol.pending_local_muc_departures.len(), 1);
+        assert!(alice_rx.try_recv().is_err());
+        assert!(bob_rx.try_recv().is_err());
+
+        tokio::time::sleep(std::time::Duration::from_secs(7)).await;
+        crate::server::session_janitors::run_local_muc_departure_sweep(state.as_ref()).await;
+
+        let alice_unavailable = alice_rx.try_recv().expect("self unavailable");
+        let waddle_xmpp::Stanza::Presence(alice_presence) = alice_unavailable.stanza else {
+            panic!("expected self unavailable presence");
+        };
+        assert_eq!(
+            alice_presence.type_,
+            xmpp_parsers::presence::Type::Unavailable
+        );
+        assert!(
+            alice_presence.payloads.iter().any(|payload| {
+                payload
+                    .children()
+                    .any(|child| child.name() == "status" && child.attr("code") == Some("110"))
+            }),
+            "self unavailable must carry MUC self-presence status 110"
+        );
+
+        let bob_unavailable = bob_rx.try_recv().expect("remaining occupant unavailable");
+        let waddle_xmpp::Stanza::Presence(bob_presence) = bob_unavailable.stanza else {
+            panic!("expected fan-out unavailable presence");
+        };
+        assert_eq!(
+            bob_presence.type_,
+            xmpp_parsers::presence::Type::Unavailable
+        );
+        assert!(
+            alice_rx.try_recv().is_err(),
+            "self echo must happen exactly once"
+        );
+        assert!(
+            bob_rx.try_recv().is_err(),
+            "fan-out must happen exactly once"
+        );
+        assert_eq!(
+            recorder.snapshot().len(),
+            1,
+            "SFU unregister must happen exactly once"
+        );
+        assert_eq!(state.deps.protocol.pending_local_muc_departures.len(), 0);
+    }
+
+    #[tokio::test]
+    async fn join_and_leave_requests_record_ws_boundary_duration() {
+        let metrics = waddle_xmpp::telemetry::test_support::acquire().await;
+        let state = create_test_websocket_state().await;
+        let owner_session = create_test_server_owner_session(state.as_ref(), "alice").await;
+        let room_jid: BareJid = "ws-boundary-duration@muc.example.com"
+            .parse()
+            .expect("room jid");
+        let alice: FullJid = "alice@example.com/web".parse().expect("alice jid");
+
+        let joined = handle_muc_join(
+            state.as_ref(),
+            "example.com",
+            &room_jid,
+            &alice,
+            "alice",
+            None,
+            &Some(owner_session),
+        )
+        .await;
+        assert!(joined
+            .iter()
+            .any(|frame| frame.contains("status code='110'")));
+
+        let left = handle_muc_leave(state.as_ref(), &room_jid, &alice, "alice", None).await;
+        assert!(left
+            .iter()
+            .any(|frame| frame.contains("type='unavailable'")));
+
+        assert!(metrics
+            .histogram_count(
+                "waddle.muc.occupancy.handler.duration",
+                &[("op", "join_request")]
+            )
+            .is_some_and(|count| count >= 1));
+        assert!(metrics
+            .histogram_count(
+                "waddle.muc.occupancy.handler.duration",
+                &[("op", "leave_request")]
+            )
+            .is_some_and(|count| count >= 1));
     }
 }
 

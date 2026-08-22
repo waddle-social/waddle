@@ -523,6 +523,7 @@ async fn guarded_destroy_refuses_when_join_landed_after_dormancy_probe() {
             sender_jid: alice,
             cause: crate::muc::durable::OccupancyLeaveCause::Explicit,
             session: crate::muc::room_actor::LeaveSessionSelector::Any,
+            attempt: crate::muc::room_actor::LeaveAttemptId::generate(),
         })
         .await
         .expect("leave");

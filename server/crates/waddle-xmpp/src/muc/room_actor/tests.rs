@@ -397,6 +397,7 @@ async fn join_and_leave_emit_presence_and_occupant_metrics() {
             sender_jid: alice,
             cause: crate::muc::durable::OccupancyLeaveCause::Explicit,
             session: LeaveSessionSelector::Any,
+            attempt: LeaveAttemptId::generate(),
         })
         .await
         .expect("leave is infallible");
@@ -427,6 +428,7 @@ async fn test_leave() {
             sender_jid: test_full_jid("alice"),
             cause: crate::muc::durable::OccupancyLeaveCause::Explicit,
             session: LeaveSessionSelector::Any,
+            attempt: LeaveAttemptId::generate(),
         })
         .await
         .expect("leave should succeed");
@@ -444,6 +446,7 @@ async fn test_leave_unknown_nick() {
             sender_jid: test_full_jid("ghost"),
             cause: crate::muc::durable::OccupancyLeaveCause::Explicit,
             session: LeaveSessionSelector::Any,
+            attempt: LeaveAttemptId::generate(),
         })
         .await
         .expect("leave reply");
@@ -1631,6 +1634,7 @@ async fn leave_by_real_jid_surfaces_is_persistent_true_for_default_rooms() {
             sender_jid: alice,
             cause: crate::muc::durable::OccupancyLeaveCause::Explicit,
             session: LeaveSessionSelector::Any,
+            attempt: LeaveAttemptId::generate(),
         })
         .await
         .map(departed)
@@ -1667,6 +1671,7 @@ async fn leave_by_real_jid_surfaces_is_persistent_false_for_instant_rooms() {
             sender_jid: alice,
             cause: crate::muc::durable::OccupancyLeaveCause::Explicit,
             session: LeaveSessionSelector::Any,
+            attempt: LeaveAttemptId::generate(),
         })
         .await
         .map(departed)
@@ -1759,6 +1764,7 @@ async fn is_dormant_true_after_resolver_derived_member_leaves() {
             sender_jid: alice,
             cause: crate::muc::durable::OccupancyLeaveCause::Explicit,
             session: LeaveSessionSelector::Any,
+            attempt: LeaveAttemptId::generate(),
         })
         .await
         .map(departed)
@@ -1916,6 +1922,7 @@ async fn leave_by_real_jid_removes_every_occupancy_of_the_full_jid() {
             sender_jid: alice.clone(),
             cause: crate::muc::durable::OccupancyLeaveCause::Explicit,
             session: LeaveSessionSelector::Any,
+            attempt: LeaveAttemptId::generate(),
         })
         .await
         .map(departed)
@@ -1957,6 +1964,7 @@ async fn leave_by_real_jid_removes_every_occupancy_of_the_full_jid() {
             sender_jid: alice,
             cause: crate::muc::durable::OccupancyLeaveCause::Explicit,
             session: LeaveSessionSelector::Any,
+            attempt: LeaveAttemptId::generate(),
         })
         .await
         .map(departed)
@@ -1993,6 +2001,7 @@ async fn is_dormant_false_when_explicit_ban_outlives_occupancy() {
             sender_jid: alice,
             cause: crate::muc::durable::OccupancyLeaveCause::Explicit,
             session: LeaveSessionSelector::Any,
+            attempt: LeaveAttemptId::generate(),
         })
         .await
         .map(departed)
@@ -2026,6 +2035,7 @@ async fn is_dormant_true_after_last_occupant_leaves_with_no_stored_state() {
             sender_jid: alice,
             cause: crate::muc::durable::OccupancyLeaveCause::Explicit,
             session: LeaveSessionSelector::Any,
+            attempt: LeaveAttemptId::generate(),
         })
         .await
         .map(departed)
@@ -3185,6 +3195,7 @@ async fn leaving_occupant_clears_muji_state() {
             sender_jid: alice,
             cause: crate::muc::durable::OccupancyLeaveCause::Explicit,
             session: LeaveSessionSelector::Any,
+            attempt: LeaveAttemptId::generate(),
         })
         .await
         .expect("leave");
@@ -3259,6 +3270,7 @@ async fn leaving_originator_session_clears_muji_state_even_with_peer_sessions_re
             sender_jid: desktop.clone(),
             cause: crate::muc::durable::OccupancyLeaveCause::Explicit,
             session: LeaveSessionSelector::Any,
+            attempt: LeaveAttemptId::generate(),
         })
         .await
         .expect("desktop leave");
@@ -3348,6 +3360,7 @@ async fn leaving_non_originator_session_preserves_muji_state() {
             sender_jid: mobile,
             cause: crate::muc::durable::OccupancyLeaveCause::Explicit,
             session: LeaveSessionSelector::Any,
+            attempt: LeaveAttemptId::generate(),
         })
         .await
         .expect("mobile leave");
@@ -3426,6 +3439,7 @@ async fn leaving_one_active_same_nick_session_preserves_sibling_active_muji_stat
             sender_jid: mobile,
             cause: crate::muc::durable::OccupancyLeaveCause::Explicit,
             session: LeaveSessionSelector::Any,
+            attempt: LeaveAttemptId::generate(),
         })
         .await
         .map(departed)
@@ -4386,7 +4400,7 @@ impl kameo::message::Message<SetRoomSealForTest> for RoomActor {
     }
 }
 
-struct SetProjectionApplyHookForTest(std::sync::Arc<dyn Fn() + Send + Sync>);
+struct SetProjectionApplyHookForTest(std::sync::Arc<dyn Fn(super::ProjectionProbe) + Send + Sync>);
 
 impl kameo::message::Message<SetProjectionApplyHookForTest> for RoomActor {
     type Reply = Result<(), std::convert::Infallible>;
@@ -4408,8 +4422,11 @@ async fn install_projection_apply_hook(
     let hook_events = events.clone();
     actor
         .ask(SetProjectionApplyHookForTest(std::sync::Arc::new(
-            move || {
-                hook_events.lock().expect("lock").push("apply".to_owned());
+            move |probe: super::ProjectionProbe| {
+                hook_events.lock().expect("lock").push(format!(
+                    "{}:occupants={}:sessions={}:pins={}",
+                    probe.phase, probe.occupants, probe.sessions, probe.pins
+                ));
             },
         )))
         .await
@@ -4527,6 +4544,7 @@ async fn leave_commits_projection_before_removing_session() {
             sender_jid: alice.clone(),
             cause: crate::muc::durable::OccupancyLeaveCause::Explicit,
             session: LeaveSessionSelector::Any,
+            attempt: LeaveAttemptId::generate(),
         })
         .await
         .expect("leave");
@@ -4554,6 +4572,7 @@ async fn leave_with_lost_claim_keeps_session_and_seals() {
             sender_jid: alice,
             cause: crate::muc::durable::OccupancyLeaveCause::Explicit,
             session: LeaveSessionSelector::Any,
+            attempt: LeaveAttemptId::generate(),
         })
         .await;
 
@@ -4586,6 +4605,7 @@ async fn leave_under_inactive_seal_is_deferred_then_unseal_inactive_retry_leaves
             sender_jid: alice.clone(),
             cause: crate::muc::durable::OccupancyLeaveCause::Disconnect,
             session: LeaveSessionSelector::Any,
+            attempt: LeaveAttemptId::generate(),
         })
         .await
         .expect("deferred leave")
@@ -4601,6 +4621,7 @@ async fn leave_under_inactive_seal_is_deferred_then_unseal_inactive_retry_leaves
                 sender_jid: alice,
                 cause: crate::muc::durable::OccupancyLeaveCause::Disconnect,
                 session: LeaveSessionSelector::JoinedAtOrBefore(watermark),
+                attempt: LeaveAttemptId::generate(),
             })
             .await
             .expect("retried leave"),
@@ -4626,6 +4647,7 @@ async fn leave_under_ownership_lost_seal_is_room_sealed_without_memory_change() 
                 sender_jid: alice,
                 cause: crate::muc::durable::OccupancyLeaveCause::Explicit,
                 session: LeaveSessionSelector::Any,
+                attempt: LeaveAttemptId::generate(),
             })
             .await,
         Err(SendError::HandlerError(RoomActorError::RoomSealed))
@@ -4644,6 +4666,7 @@ async fn leave_unknown_jid_is_not_occupant_without_commit() {
                 sender_jid: test_full_jid("unknown"),
                 cause: crate::muc::durable::OccupancyLeaveCause::Explicit,
                 session: LeaveSessionSelector::Any,
+                attempt: LeaveAttemptId::generate(),
             })
             .await
             .expect("leave"),
@@ -4671,6 +4694,7 @@ async fn non_occupant_leave_under_inactive_and_ownership_lost_seals_is_not_occup
                 sender_jid: test_full_jid("unknown-inactive"),
                 cause: crate::muc::durable::OccupancyLeaveCause::Explicit,
                 session: LeaveSessionSelector::Any,
+                attempt: LeaveAttemptId::generate(),
             })
             .await
             .expect("non-occupant leave"),
@@ -4688,6 +4712,7 @@ async fn non_occupant_leave_under_inactive_and_ownership_lost_seals_is_not_occup
                 sender_jid: test_full_jid("unknown-lost"),
                 cause: crate::muc::durable::OccupancyLeaveCause::Explicit,
                 session: LeaveSessionSelector::Any,
+                attempt: LeaveAttemptId::generate(),
             })
             .await
             .expect("non-occupant leave"),
@@ -4711,9 +4736,14 @@ async fn join_commit_pending_leaves_memory_untouched_until_authorized() {
     for _ in 0..3 {
         tokio::task::yield_now().await;
     }
+    // If the join mutation were hoisted above `commit_projection`, this would
+    // flip to `pre_commit:occupants=1:...` before the durable commit finished.
     assert_eq!(
         projection_event_snapshot(&events),
-        vec!["commit_started:occupancy_join".to_owned()],
+        vec![
+            "pre_commit:occupants=0:sessions=0:pins=0".to_owned(),
+            "commit_started:occupancy_join".to_owned(),
+        ],
         "the in-memory join must not apply while the projection commit is paused"
     );
     pause.release.notify_one();
@@ -4723,9 +4753,10 @@ async fn join_commit_pending_leaves_memory_untouched_until_authorized() {
     assert_eq!(
         projection_event_snapshot(&events),
         vec![
+            "pre_commit:occupants=0:sessions=0:pins=0".to_owned(),
             "commit_started:occupancy_join".to_owned(),
             "commit_finished".to_owned(),
-            "apply".to_owned(),
+            "apply:occupants=0:sessions=0:pins=0".to_owned(),
         ]
     );
     assert_eq!(actor.ask(OccupantCount).await.expect("count"), 1);
@@ -4750,6 +4781,7 @@ async fn leave_commit_pending_keeps_session_until_authorized() {
                 sender_jid: alice,
                 cause: crate::muc::durable::OccupancyLeaveCause::Explicit,
                 session: LeaveSessionSelector::Any,
+                attempt: LeaveAttemptId::generate(),
             })
             .await
     });
@@ -4759,7 +4791,10 @@ async fn leave_commit_pending_keeps_session_until_authorized() {
     }
     assert_eq!(
         projection_event_snapshot(&events),
-        vec!["commit_started:occupancy_leave".to_owned()],
+        vec![
+            "pre_commit:occupants=1:sessions=1:pins=0".to_owned(),
+            "commit_started:occupancy_leave".to_owned(),
+        ],
         "the in-memory leave must not apply while the projection commit is paused"
     );
     pause.release.notify_one();
@@ -4770,9 +4805,10 @@ async fn leave_commit_pending_keeps_session_until_authorized() {
     assert_eq!(
         projection_event_snapshot(&events),
         vec![
+            "pre_commit:occupants=1:sessions=1:pins=0".to_owned(),
             "commit_started:occupancy_leave".to_owned(),
             "commit_finished".to_owned(),
-            "apply".to_owned(),
+            "apply:occupants=1:sessions=1:pins=0".to_owned(),
         ]
     );
     assert_eq!(actor.ask(OccupantCount).await.expect("count"), 0);
@@ -4800,7 +4836,10 @@ async fn pin_commit_pending_keeps_pin_list_until_authorized() {
     }
     assert_eq!(
         projection_event_snapshot(&events),
-        vec!["commit_started:pin".to_owned()],
+        vec![
+            "pre_commit:occupants=0:sessions=0:pins=0".to_owned(),
+            "commit_started:pin".to_owned(),
+        ],
         "the in-memory pin apply must not run while the projection commit is paused"
     );
     pause.release.notify_one();
@@ -4811,12 +4850,153 @@ async fn pin_commit_pending_keeps_pin_list_until_authorized() {
     assert_eq!(
         projection_event_snapshot(&events),
         vec![
+            "pre_commit:occupants=0:sessions=0:pins=0".to_owned(),
             "commit_started:pin".to_owned(),
             "commit_finished".to_owned(),
-            "apply".to_owned(),
+            "apply:occupants=0:sessions=0:pins=0".to_owned(),
         ]
     );
     assert_eq!(actor.ask(GetPinList).await.expect("pins").len(), 1);
+}
+
+#[tokio::test]
+async fn leave_retry_with_same_attempt_replays_retained_outcome_once() {
+    let actor = spawn_room_actor().await;
+    let alice = test_full_jid("alice-replay");
+    let bob = test_full_jid("bob-replay");
+    join_as_resolver(&actor, alice.clone(), "alice")
+        .await
+        .expect("join alice");
+    join_as_resolver(&actor, bob.clone(), "bob")
+        .await
+        .expect("join bob");
+    let attempt = LeaveAttemptId::generate();
+
+    let first = departed(
+        actor
+            .ask(LeaveByRealJid {
+                sender_jid: alice.clone(),
+                cause: crate::muc::durable::OccupancyLeaveCause::Explicit,
+                session: LeaveSessionSelector::Any,
+                attempt,
+            })
+            .await
+            .expect("first leave"),
+    );
+    let replayed = departed(
+        actor
+            .ask(LeaveByRealJid {
+                sender_jid: alice.clone(),
+                cause: crate::muc::durable::OccupancyLeaveCause::Explicit,
+                session: LeaveSessionSelector::Any,
+                attempt,
+            })
+            .await
+            .expect("replayed leave"),
+    );
+
+    assert_eq!(replayed.nick, first.nick);
+    assert_eq!(replayed.remaining_occupants, first.remaining_occupants);
+    assert_eq!(replayed.affiliation, first.affiliation);
+
+    assert!(matches!(
+        actor
+            .ask(LeaveByRealJid {
+                sender_jid: alice.clone(),
+                cause: crate::muc::durable::OccupancyLeaveCause::Explicit,
+                session: LeaveSessionSelector::Any,
+                attempt,
+            })
+            .await
+            .expect("third leave"),
+        LeaveDisposition::NotOccupant
+    ));
+    assert!(matches!(
+        actor
+            .ask(LeaveByRealJid {
+                sender_jid: alice,
+                cause: crate::muc::durable::OccupancyLeaveCause::Explicit,
+                session: LeaveSessionSelector::Any,
+                attempt: LeaveAttemptId::generate(),
+            })
+            .await
+            .expect("different attempt"),
+        LeaveDisposition::NotOccupant
+    ));
+    assert_eq!(actor.ask(OccupantCount).await.expect("count"), 1);
+}
+
+#[test]
+fn departure_receipts_are_bounded_and_expire() {
+    let mut actor = RoomActor::new(test_room(), test_secret());
+    let newest_attempt = LeaveAttemptId::generate();
+    let retained_attempt = LeaveAttemptId::generate();
+    let mut oldest_attempt = None;
+
+    for index in 0..super::occupancy_handlers::DEPARTURE_RECEIPT_CAP + 1 {
+        let attempt = if index == super::occupancy_handlers::DEPARTURE_RECEIPT_CAP {
+            newest_attempt
+        } else if index == super::occupancy_handlers::DEPARTURE_RECEIPT_CAP - 1 {
+            retained_attempt
+        } else {
+            LeaveAttemptId::generate()
+        };
+        if index == 0 {
+            oldest_attempt = Some(attempt);
+        }
+        actor.retain_departure_receipt(
+            attempt,
+            Box::new(LeaveOutcome {
+                nick: format!("nick-{index}"),
+                affiliation: Affiliation::Member,
+                role: Role::Participant,
+                leaving_room_jid: test_room()
+                    .room_jid
+                    .clone()
+                    .with_resource_str(&format!("nick-{index}"))
+                    .expect("nick jid"),
+                remaining_occupants: vec![test_full_jid_resource("remaining", &index.to_string())],
+                removed_last_session: false,
+                cleared_muji_state: false,
+                remaining_muji: None,
+                remaining_muji_sessions: Vec::new(),
+                remaining_nick_real_jid: None,
+                occupant_count: 1,
+                is_persistent: false,
+                occupancy_revision: index as u64,
+            }),
+        );
+    }
+
+    assert_eq!(
+        actor.departure_receipts.len(),
+        super::occupancy_handlers::DEPARTURE_RECEIPT_CAP
+    );
+    assert!(
+        actor
+            .take_departure_receipt(oldest_attempt.expect("oldest attempt"))
+            .is_none(),
+        "the oldest receipt must be evicted once the cap is exceeded"
+    );
+    assert!(actor
+        .departure_receipts
+        .iter()
+        .any(|receipt| receipt.attempt == retained_attempt));
+    actor
+        .departure_receipts
+        .iter_mut()
+        .find(|receipt| receipt.attempt == newest_attempt)
+        .expect("newest receipt")
+        .completed_at =
+        std::time::Instant::now() - super::occupancy_handlers::DEPARTURE_RECEIPT_TTL;
+    assert!(
+        actor.take_departure_receipt(newest_attempt).is_none(),
+        "an expired receipt must never replay after a quiet period"
+    );
+    assert!(
+        actor.take_departure_receipt(retained_attempt).is_some(),
+        "a retained receipt inside the TTL must still replay"
+    );
 }
 
 #[tokio::test]
@@ -4833,6 +5013,7 @@ async fn deferred_leave_watermark_supersedes_after_replacement_rejoin() {
             sender_jid: alice.clone(),
             cause: crate::muc::durable::OccupancyLeaveCause::Disconnect,
             session: LeaveSessionSelector::Any,
+            attempt: LeaveAttemptId::generate(),
         })
         .await
         .expect("deferred leave")
@@ -4851,6 +5032,7 @@ async fn deferred_leave_watermark_supersedes_after_replacement_rejoin() {
                 sender_jid: alice.clone(),
                 cause: crate::muc::durable::OccupancyLeaveCause::Disconnect,
                 session: LeaveSessionSelector::JoinedAtOrBefore(watermark),
+                attempt: LeaveAttemptId::generate(),
             })
             .await
             .expect("stale retry"),
@@ -4863,6 +5045,7 @@ async fn deferred_leave_watermark_supersedes_after_replacement_rejoin() {
                 sender_jid: alice,
                 cause: crate::muc::durable::OccupancyLeaveCause::Disconnect,
                 session: LeaveSessionSelector::Any,
+                attempt: LeaveAttemptId::generate(),
             })
             .await
             .expect("current departure"),
@@ -5403,6 +5586,7 @@ async fn occupancy_handler_duration_is_recorded_for_join_and_leave() {
             sender_jid: alice,
             cause: crate::muc::durable::OccupancyLeaveCause::Explicit,
             session: LeaveSessionSelector::Any,
+            attempt: LeaveAttemptId::generate(),
         })
         .await
         .expect("leave");
@@ -5414,6 +5598,20 @@ async fn occupancy_handler_duration_is_recorded_for_join_and_leave() {
     assert_eq!(
         guard.histogram_count("waddle.muc.occupancy.handler.duration", &[("op", "leave")]),
         Some(1)
+    );
+    assert_eq!(
+        guard.histogram_count(
+            "waddle.muc.occupancy.handler.duration",
+            &[("op", "join_request")]
+        ),
+        Some(0)
+    );
+    assert_eq!(
+        guard.histogram_count(
+            "waddle.muc.occupancy.handler.duration",
+            &[("op", "leave_request")]
+        ),
+        Some(0)
     );
 }
 
@@ -6055,6 +6253,7 @@ async fn leave_under_destroying_seal_is_deferred_without_memory_change() {
                 sender_jid: alice.clone(),
                 cause: crate::muc::durable::OccupancyLeaveCause::Explicit,
                 session: LeaveSessionSelector::Any,
+                attempt: LeaveAttemptId::generate(),
             })
             .await
             .expect("leave ask"),
@@ -6097,6 +6296,7 @@ async fn store_less_leave_under_destroying_seal_is_suppressed_and_recorded() {
                 sender_jid: alice,
                 cause: crate::muc::durable::OccupancyLeaveCause::Explicit,
                 session: LeaveSessionSelector::Any,
+                attempt: LeaveAttemptId::generate(),
             })
             .await
             .expect("leave reply"),
@@ -6127,6 +6327,7 @@ async fn unseal_destroy_then_retried_leave_projects_departure() {
                 sender_jid: alice.clone(),
                 cause: crate::muc::durable::OccupancyLeaveCause::Explicit,
                 session: LeaveSessionSelector::Any,
+                attempt: LeaveAttemptId::generate(),
             })
             .await
             .expect("deferred reply"),
@@ -6139,6 +6340,7 @@ async fn unseal_destroy_then_retried_leave_projects_departure() {
                 sender_jid: alice,
                 cause: crate::muc::durable::OccupancyLeaveCause::Explicit,
                 session: LeaveSessionSelector::Any,
+                attempt: LeaveAttemptId::generate(),
             })
             .await
             .expect("retry reply"),
@@ -6326,6 +6528,7 @@ async fn destroy_seal_defers_leave_handler() {
             sender_jid: test_full_jid("alice"),
             cause: crate::muc::durable::OccupancyLeaveCause::Explicit,
             session: LeaveSessionSelector::Any,
+            attempt: LeaveAttemptId::generate(),
         })
         .await
         .expect("leave reply");
@@ -7322,6 +7525,7 @@ async fn resolver_none_clears_stale_resolver_derived_affiliation_and_join_is_for
             sender_jid: alice.clone(),
             cause: crate::muc::durable::OccupancyLeaveCause::Explicit,
             session: LeaveSessionSelector::Any,
+            attempt: LeaveAttemptId::generate(),
         })
         .await
         .expect("leave");
@@ -7442,6 +7646,7 @@ async fn sync_resolver_affiliation_clears_stale_resolver_derived_member() {
             sender_jid: alice.clone(),
             cause: crate::muc::durable::OccupancyLeaveCause::Explicit,
             session: LeaveSessionSelector::Any,
+            attempt: LeaveAttemptId::generate(),
         })
         .await
         .expect("leave");

@@ -67,6 +67,7 @@ async fn mediated_invite_requires_the_exact_full_jid_to_remain_an_occupant() {
                 sender_jid: inviter.clone(),
                 cause: crate::muc::durable::OccupancyLeaveCause::Explicit,
                 session: LeaveSessionSelector::Any,
+                attempt: LeaveAttemptId::generate(),
             })
             .await
             .expect("leave reply"),

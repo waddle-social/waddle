@@ -90,6 +90,12 @@ pub(super) async fn recover_actor_after_ambiguous_invite_grant(
             .ok()
             .map(|acquisition| acquisition.actor_ref)?
     } else {
+        // Demotion refused for one of two reasons, both of which make the
+        // stale snapshot non-authoritative: a successor is already live (its
+        // roster is the truth), or the registry already retired the entry
+        // after a definitive ownership loss (the durable restore rehydrates
+        // config/subject/affiliations and occupants re-join, exactly as for
+        // any retired actor). Neither case transplants.
         state
             .deps
             .protocol

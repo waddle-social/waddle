@@ -109,6 +109,41 @@ fn muji_reflection_rank(muji: &Muji) -> u8 {
 /// staying lit forever after a tab close: other occupants never
 /// received the leave signal, so their client-side
 /// `$mucCallParticipants` never cleared the stale nick.
+/// Deliver the XEP-0045 §7.14 self-presence (`<status code='110'/>`) of a
+/// completed departure to the leaver's own session, for departures whose
+/// reply was lost and that the janitor replayed later.
+pub(crate) async fn echo_muc_self_unavailable(
+    state: &WebSocketState,
+    room_jid: &BareJid,
+    sender_jid: &FullJid,
+    outcome: &LeaveOutcome,
+) {
+    let from_jid = room_jid
+        .clone()
+        .with_resource_str(&outcome.nick)
+        .unwrap_or_else(|_| sender_jid.clone());
+    let sender_bare = sender_jid.to_bare();
+    let identity = OccupantIdentity {
+        bare_jid: &sender_bare,
+        real_jid: Some(sender_jid),
+        secret: &state.deps.occupant_id_secret,
+    };
+    let presence = waddle_xmpp::muc::build_leave_presence(
+        &from_jid,
+        sender_jid,
+        outcome.affiliation,
+        waddle_xmpp::muc::MucPresenceStatus::new(true, false),
+        &identity,
+    );
+    super::handlers::presence::route_room_presence_to_occupant(
+        state,
+        room_jid,
+        sender_jid,
+        Stanza::Presence(presence),
+    )
+    .await;
+}
+
 pub(crate) async fn broadcast_muc_leave_to_remaining(
     state: &WebSocketState,
     room_jid: &BareJid,
@@ -1810,12 +1845,15 @@ async fn cleanup_muc_presence_with_origin(
         };
         // Bounded: one wedged room (stuck projection transaction or mailbox)
         // must not stall the sweep of every other room this JID occupies.
+        let attempt = waddle_xmpp::muc::room_actor::LeaveAttemptId::generate();
         let leave_result = room_actor
             .ask(LeaveByRealJid {
                 sender_jid: jid.clone(),
                 cause: OccupancyLeaveCause::Disconnect,
                 session: LeaveSessionSelector::Any,
+                attempt,
             })
+            .mailbox_timeout(super::LEAVE_ASK_TIMEOUT)
             .reply_timeout(super::LEAVE_ASK_TIMEOUT)
             .await;
         // SFU teardown runs *after* the room actor has dropped the
@@ -1865,6 +1903,7 @@ async fn cleanup_muc_presence_with_origin(
                         jid: jid.clone(),
                         cause: OccupancyLeaveCause::Disconnect,
                         selector: LeaveSessionSelector::JoinedAtOrBefore(watermark),
+                        attempt,
                     },
                 );
             }
@@ -1874,8 +1913,12 @@ async fn cleanup_muc_presence_with_origin(
                 | LeaveDisposition::Suppressed { .. },
             ) => {}
             Err(kameo::error::SendError::Timeout(_)) => {
-                // A timeout proves nothing about the actor's seal: retain the
-                // departure itself, not a retirement watch.
+                // Mailbox timeout (`Some`): never enqueued. Reply timeout
+                // (`None`): the actor may still complete the departure — the
+                // retry carries the same attempt id so a completed departure
+                // replays its retained outcome instead of `NotOccupant`.
+                // Neither proves anything about the seal: retain the departure
+                // itself, not a retirement watch.
                 completed = false;
                 state.deps.protocol.pending_local_muc_departures.record(
                     LocalDepartureItem::RoomDeparture {
@@ -1883,6 +1926,7 @@ async fn cleanup_muc_presence_with_origin(
                         jid: jid.clone(),
                         cause: OccupancyLeaveCause::Disconnect,
                         selector: LeaveSessionSelector::Any,
+                        attempt,
                     },
                 );
                 warn!(room = %room_jid, jid = %jid, "MUC leave ask timed out on disconnect; retained for retry");
@@ -1896,6 +1940,7 @@ async fn cleanup_muc_presence_with_origin(
                         actor: room_actor.id(),
                         cause: OccupancyLeaveCause::Disconnect,
                         selector: LeaveSessionSelector::Any,
+                        attempt,
                     },
                 );
                 warn!(
@@ -2982,6 +3027,7 @@ mod eviction_tests {
                 sender_jid: alice,
                 cause: waddle_xmpp::muc::durable::OccupancyLeaveCause::Disconnect,
                 session: waddle_xmpp::muc::room_actor::LeaveSessionSelector::Any,
+                attempt: waddle_xmpp::muc::room_actor::LeaveAttemptId::generate(),
             })
             .await
             .expect("leave")
@@ -3040,6 +3086,7 @@ mod eviction_tests {
                 sender_jid: alice,
                 cause: waddle_xmpp::muc::durable::OccupancyLeaveCause::Disconnect,
                 session: waddle_xmpp::muc::room_actor::LeaveSessionSelector::Any,
+                attempt: waddle_xmpp::muc::room_actor::LeaveAttemptId::generate(),
             })
             .await
             .expect("leave")
@@ -3102,6 +3149,7 @@ mod eviction_tests {
                 sender_jid: alice,
                 cause: waddle_xmpp::muc::durable::OccupancyLeaveCause::Disconnect,
                 session: waddle_xmpp::muc::room_actor::LeaveSessionSelector::Any,
+                attempt: waddle_xmpp::muc::room_actor::LeaveAttemptId::generate(),
             })
             .await
             .expect("leave")
@@ -3544,6 +3592,7 @@ mod local_departure_cleanup_tests {
                 jid,
                 cause,
                 selector,
+                ..
             } => {
                 assert_eq!(room, &room_jid);
                 assert_eq!(jid, &alice);
@@ -3622,6 +3671,7 @@ mod local_departure_cleanup_tests {
                 actor,
                 cause,
                 selector,
+                ..
             } => {
                 assert_eq!(room, &room_jid);
                 assert_eq!(jid, &alice);
@@ -3668,7 +3718,7 @@ mod local_departure_cleanup_tests {
     }
 
     #[tokio::test]
-    async fn disconnect_cleanup_leave_ask_timeout_retains_room_departure() {
+    async fn disconnect_cleanup_mailbox_saturation_retains_departure_and_continues() {
         let store = CleanupProjectionStore::new();
         let state = clustered_state_with_store(store.clone()).await;
         let first_room = room_jid("disconnect-timeout-first");
@@ -3717,6 +3767,48 @@ mod local_departure_cleanup_tests {
         let hanging_room = room_order[0].clone();
         let succeeding_room = room_order[1].clone();
         store.set_leave_mode_for_room(&hanging_room, LeaveProjectionMode::Hang);
+        let hanging_actor = if hanging_room == first_room {
+            first_actor.clone()
+        } else {
+            second_actor.clone()
+        };
+
+        let wedging_leave = tokio::spawn({
+            let actor = hanging_actor.clone();
+            let alice = alice.clone();
+            async move {
+                actor
+                    .ask(LeaveByRealJid {
+                        sender_jid: alice,
+                        cause: OccupancyLeaveCause::Disconnect,
+                        session: LeaveSessionSelector::Any,
+                        attempt: waddle_xmpp::muc::room_actor::LeaveAttemptId::generate(),
+                    })
+                    .mailbox_timeout(Duration::from_secs(30))
+                    .reply_timeout(Duration::from_secs(30))
+                    .await
+            }
+        });
+        tokio::time::sleep(Duration::from_millis(100)).await;
+
+        let mut mailbox_fillers = Vec::new();
+        for _ in 0..80 {
+            let actor = hanging_actor.clone();
+            let alice = alice.clone();
+            mailbox_fillers.push(tokio::spawn(async move {
+                actor
+                    .ask(LeaveByRealJid {
+                        sender_jid: alice,
+                        cause: OccupancyLeaveCause::Disconnect,
+                        session: LeaveSessionSelector::Any,
+                        attempt: waddle_xmpp::muc::room_actor::LeaveAttemptId::generate(),
+                    })
+                    .mailbox_timeout(Duration::from_secs(30))
+                    .reply_timeout(Duration::from_secs(30))
+                    .await
+            }));
+        }
+        tokio::time::sleep(Duration::from_millis(100)).await;
 
         assert_eq!(
             cleanup_muc_presence_for_jid(state.as_ref(), &alice).await,
@@ -3728,16 +3820,21 @@ mod local_departure_cleanup_tests {
             .protocol
             .pending_local_muc_departures
             .take_due(Instant::now());
-        assert_eq!(retained.len(), 1, "the timed-out room must be retained");
+        assert_eq!(
+            retained.len(),
+            1,
+            "the mailbox-saturated room must be retained for retry"
+        );
         assert!(matches!(
-            &retained[0].item,
-            LocalDepartureItem::RoomDeparture {
-                room,
-                jid,
-                cause: OccupancyLeaveCause::Disconnect,
-                selector: LeaveSessionSelector::Any,
-            } if room == &hanging_room && jid == &alice
-        ));
+                    &retained[0].item,
+                    LocalDepartureItem::RoomDeparture {
+                        room,
+                        jid,
+                        cause: OccupancyLeaveCause::Disconnect,
+                        selector: LeaveSessionSelector::Any,
+                        attempt: _,
+        } if room == &hanging_room && jid == &alice
+                ));
         assert!(
             (if succeeding_room == first_room {
                 &first_actor
@@ -3750,7 +3847,13 @@ mod local_departure_cleanup_tests {
             .room
             .find_occupant_by_real_jid(&alice)
             .is_none(),
-            "a hung leave in one room must not block cleanup of another room"
+            "a saturated mailbox in one room must not block cleanup of another room"
         );
+
+        hanging_actor.kill();
+        wedging_leave.abort();
+        for handle in mailbox_fillers {
+            handle.abort();
+        }
     }
 }

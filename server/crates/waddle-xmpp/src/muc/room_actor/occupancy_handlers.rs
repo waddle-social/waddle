@@ -267,7 +267,29 @@ pub struct LeaveByRealJid {
     pub sender_jid: FullJid,
     pub cause: OccupancyLeaveCause,
     pub session: LeaveSessionSelector,
+    /// Idempotency key of this logical departure. A caller whose reply timed
+    /// out after the message was enqueued retries with the SAME id: if the
+    /// actor already completed the departure it replays the retained
+    /// [`LeaveOutcome`] (exactly once) instead of answering `NotOccupant`, so
+    /// the departure's effects are never lost.
+    pub attempt: LeaveAttemptId,
 }
+
+/// Idempotency key for one logical `LeaveByRealJid` departure.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct LeaveAttemptId(uuid::Uuid);
+
+impl LeaveAttemptId {
+    pub fn generate() -> Self {
+        Self(uuid::Uuid::now_v7())
+    }
+}
+
+/// How many completed departures the actor retains for attempt replay and
+/// for how long. A reply that was lost after enqueue is retried on the
+/// janitor's 2s→60s backoff, so minutes of retention cover every retry.
+pub(super) const DEPARTURE_RECEIPT_CAP: usize = 256;
+pub(super) const DEPARTURE_RECEIPT_TTL: std::time::Duration = std::time::Duration::from_secs(600);
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum LeaveSessionSelector {
@@ -301,6 +323,9 @@ impl kameo::message::Message<LeaveByRealJid> for RoomActor {
         _ctx: &mut Context<Self, Self::Reply>,
     ) -> Self::Reply {
         let _handler_timer = crate::metrics::MucOccupancyHandlerTimer::start("leave");
+        if let Some(receipt) = self.take_departure_receipt(msg.attempt) {
+            return Ok(LeaveDisposition::Left(receipt));
+        }
         // Resolve occupancy before consulting the seal: a non-occupant's leave
         // is a pure memory read with nothing to project, and every disconnect
         // asks every local room — a sealed room must not mint retained
@@ -460,6 +485,10 @@ impl kameo::message::Message<LeaveByRealJid> for RoomActor {
             LeaveDisposition::Left(outcome) if suppress_effects => LeaveDisposition::Suppressed {
                 affiliation: outcome.affiliation,
             },
+            LeaveDisposition::Left(outcome) => {
+                self.retain_departure_receipt(msg.attempt, outcome.clone());
+                LeaveDisposition::Left(outcome)
+            }
             other => other,
         })
         .map_err(Self::map_projection_refusal)

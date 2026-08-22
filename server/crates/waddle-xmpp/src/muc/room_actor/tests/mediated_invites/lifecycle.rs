@@ -610,6 +610,7 @@ async fn no_grant_operation_does_not_pin_an_otherwise_dormant_room() {
             sender_jid: test_full_jid("inviter"),
             cause: crate::muc::durable::OccupancyLeaveCause::Explicit,
             session: LeaveSessionSelector::Any,
+            attempt: LeaveAttemptId::generate(),
         })
         .await
         .expect("leave room");
