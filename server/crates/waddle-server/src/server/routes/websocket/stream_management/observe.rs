@@ -11,6 +11,16 @@
 //! when that request was sent. Later `<r/>` writes coalesce while one request
 //! remains outstanding; the metric intentionally observes only the oldest.
 //!
+//! `xmpp.sm.handled_progress` counts only live `<a/>` advancement. The `h`
+//! carried by `<resume/>` re-establishes the frontier on restored state and
+//! is deliberately NOT counted as progress: the same logical resume applies
+//! its `h` on both the fast path (`handle_sm_resume`) and the deferred
+//! claim-finalization path (`registration.rs`), so counting either would
+//! double-count against the other. Likewise `xmpp.sm.resume.results` counts
+//! one terminal per resume attempt at `handle_sm_resume`; the rare deferred
+//! claim-finalization flips (expired/truncated/too-high after an optimistic
+//! `Resumed`) are visible in logs but intentionally not re-counted.
+//!
 //! Timeout mapping for this lane:
 //! - `xmpp.sm.drain_timeout` is the graceful-shutdown SM drain deadline.
 //! - `xmpp.sm.send_window_pause_timeouts` is the paused high-watermark
@@ -255,12 +265,15 @@ impl SmResumeTerminal {
             } => vec![ResponseFrame::from(
                 SmFailed::resume_failed("resource-constraint", handled).to_element(),
             )],
+            // `condition()` is `None` only for `ShutdownAbandoned` (matched
+            // above), `Resumed` (the other variant), and `HandledTooHigh` —
+            // whose dedicated arm above requires the fields its constructor
+            // always sets. A field-less `HandledTooHigh` therefore cannot
+            // carry a truthful frame; degrade to the generic internal error
+            // instead of panicking on a proof the type system doesn't hold.
             Self::Failed { .. } => vec![ResponseFrame::from(
-                SmFailed::with_condition(
-                    self.condition()
-                        .expect("non-resumed non-shutdown failures have a condition"),
-                )
-                .to_element(),
+                SmFailed::with_condition(self.condition().unwrap_or("internal-server-error"))
+                    .to_element(),
             )],
             Self::Resumed {
                 stream_id,

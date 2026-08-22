@@ -121,7 +121,7 @@ async fn complete_pending_resume_claim(
                 if acked_from_exclusive != h {
                     let session_id =
                         waddle_xmpp::pending_delivery::SmSessionId::new(stream_id.clone());
-                    if let Err(error) = state
+                    if let Err(_error) = state
                         .deps
                         .protocol
                         .pending_delivery_storage
@@ -132,7 +132,7 @@ async fn complete_pending_resume_claim(
                             session = %session_id,
                             from = acked_from_exclusive,
                             h,
-                            error = %error,
+                            failure = "storage",
                             "pending_delivery delete_acked_in_window failed on resume; \
                              rows will be retried on next session via release_claim"
                         );
@@ -189,8 +189,8 @@ async fn complete_pending_resume_claim(
                 "item-not-found",
             ))
         }
-        Err(error) => {
-            warn!(stream_id = %stream_id, jid = %jid, error = %error, "Failed to complete SM resume claim");
+        Err(_error) => {
+            warn!(stream_id = %stream_id, jid = %jid, failure = "storage", "Failed to complete SM resume claim");
             close_registered_resume_attempt(state, conn, jid, owner).await;
             SmRegistrationFinalization::ReplaceWithFailed(SmFailed::with_condition(
                 "internal-server-error",
@@ -247,8 +247,8 @@ async fn invalidate_older_detached_sessions(
                 cleanup_invalidated_detached_session(state, detached, Some(owner)).await;
             }
         }
-        Err(error) => {
-            warn!(jid = %jid, error = %error, "Failed to invalidate older detached SM sessions for fresh bind");
+        Err(_error) => {
+            warn!(jid = %jid, failure = "storage", "Failed to invalidate older detached SM sessions for fresh bind");
         }
     }
 }

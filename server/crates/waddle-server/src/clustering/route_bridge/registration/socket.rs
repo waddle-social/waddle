@@ -1,6 +1,29 @@
 use super::super::delivery::receiver::{current_claim, user_entity};
 use super::super::*;
 
+#[derive(Clone, Copy, Debug)]
+enum RemoteAskErrorClass {
+    ReplyTimeout,
+    AskFailed,
+    Backend,
+}
+
+impl RemoteAskErrorClass {
+    const fn as_str(self) -> &'static str {
+        match self {
+            Self::ReplyTimeout => "reply_timeout",
+            Self::AskFailed => "ask_failed",
+            Self::Backend => "backend",
+        }
+    }
+}
+
+impl std::fmt::Display for RemoteAskErrorClass {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+
 /// Observe the sender's interpretation of the current state-carrying update
 /// exchange. The separate zero-payload hint layer is tracked by #1661.
 fn record_remote_resource_update(
@@ -131,7 +154,7 @@ where
                 tracing::debug!(
                     jid = %jid,
                     owner_node = %user_owner.as_str(),
-                    error_class = "reply_timeout",
+                    error_class = %RemoteAskErrorClass::ReplyTimeout,
                     "clustered remote-resource register reply timed out; retrying idempotent registration"
                 );
                 tokio::time::sleep(backoff).await;
@@ -229,7 +252,7 @@ impl OrderedRelayDeliveryBridge {
                 tracing::warn!(
                     jid = %jid,
                     owner_node = %user_owner.as_str(),
-                    error_class = "ask_failed",
+                    error_class = %RemoteAskErrorClass::AskFailed,
                     "clustered remote-resource register ask failed"
                 );
                 return RemoteResourceRegisterOutcome::Failed;
@@ -342,7 +365,7 @@ impl OrderedRelayDeliveryBridge {
             Err(_) => {
                 tracing::warn!(
                     jid = %jid,
-                    error_class = "ask_failed",
+                    error_class = %RemoteAskErrorClass::AskFailed,
                     "clustered remote-resource unregister ask failed; no remote cleanup proof"
                 );
                 self.record_pending_remote_socket_unregister(jid, &registration)
@@ -411,7 +434,7 @@ impl OrderedRelayDeliveryBridge {
                 tracing::warn!(
                     jid = %pending.key.jid,
                     owner_node = %pending.user_owner.as_str(),
-                    error_class = "backend",
+                    error_class = %RemoteAskErrorClass::Backend,
                     "clustered remote-resource unregister: claim liveness check failed; \
                      retaining the obligation"
                 );
@@ -513,7 +536,7 @@ impl OrderedRelayDeliveryBridge {
                     tracing::warn!(
                         jid = %pending.key.jid,
                         owner_node = %pending.user_owner.as_str(),
-                        error_class = "ask_failed",
+                        error_class = %RemoteAskErrorClass::AskFailed,
                         "clustered remote-resource unregister retry ask failed"
                     );
                 }
@@ -605,7 +628,7 @@ impl OrderedRelayDeliveryBridge {
                 );
                 tracing::warn!(
                     jid = %jid,
-                    error_class = "ask_failed",
+                    error_class = %RemoteAskErrorClass::AskFailed,
                     "clustered remote-resource state update ask failed; \
                      keeping the socket and scheduling a resync"
                 );
@@ -891,7 +914,7 @@ impl OrderedRelayDeliveryBridge {
                     status: RelayRemoteResourceUpdateStatus::Unavailable,
                 }) => return false,
                 Err(_) => {
-                    tracing::debug!(jid = %jid, error_class = "ask_failed", "remote-resource resync attempt failed");
+                    tracing::debug!(jid = %jid, error_class = %RemoteAskErrorClass::AskFailed, "remote-resource resync attempt failed");
                     return false;
                 }
             }

@@ -119,18 +119,17 @@ fn observe_result<T>(
     observe_mutation(operation, entity, epoch, class, rejection);
 }
 
+// `release()`/`release_many()` cannot observe a not-owned outcome by API
+// shape (`Result<(), _>` — no affected-row signal); only `release_exact`
+// distinguishes `NotOwned`. Their errors still classify through the shared
+// mapping so a typed rejection is never mislabeled as a backend failure.
 fn observe_release_result<T>(
     operation: ClaimOp,
     entity: Option<&Entity>,
     epoch: Option<ClaimEpoch>,
     result: &Result<T, ClaimError>,
 ) {
-    let class = if result.is_ok() {
-        ClaimResult::Ok
-    } else {
-        ClaimResult::Backend
-    };
-    observe_mutation(operation, entity, epoch, class, None);
+    observe_result(operation, entity, epoch, result);
 }
 
 #[async_trait]
