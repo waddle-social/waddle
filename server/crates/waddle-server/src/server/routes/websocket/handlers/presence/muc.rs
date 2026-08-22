@@ -2017,9 +2017,9 @@ pub async fn handle_muc_leave(
             return bounce_muc_leave_ownership_unreachable(room_jid, sender_jid, nick);
         }
         Ok(waddle_xmpp::muc::room_actor::LeaveDisposition::Suppressed {
+            nick: actor_nick,
             affiliation,
             attempt: acknowledge,
-            ..
         }) => {
             crate::server::routes::websocket::acknowledge_in_flight(
                 &state.deps.protocol.pending_local_muc_departures,
@@ -2033,10 +2033,12 @@ pub async fn handle_muc_leave(
             super::super::super::muc_call_sfu::unregister_participant_from_room(
                 state, room_jid, sender_jid,
             );
+            // The actor's typed nickname is authoritative: the request's
+            // `to` JID may carry a nick the sender never held.
             return vec![build_muc_self_unavailable_xml(
                 state,
                 room_jid,
-                nick,
+                actor_nick.as_str(),
                 sender_jid,
                 affiliation,
             )];
@@ -2063,14 +2065,34 @@ pub async fn handle_muc_leave(
             );
             return bounce_muc_leave_ownership_unreachable(room_jid, sender_jid, nick);
         }
-        Err(error) => {
-            // Never enqueued (sealed / transport): nothing to replay.
+        Err(
+            error @ (crate::server::routes::websocket::LeaveAskFailure::Handler(_)
+            | crate::server::routes::websocket::LeaveAskFailure::Transport),
+        ) => {
+            // A sealed answer can follow an ENQUEUED leave whose durable
+            // projection was ambiguous (the actor self-seals with its
+            // pre-commit roster), and a transport failure leaves the same
+            // uncertainty. Mirror the disconnect path: keep a
+            // `ConfirmRetired` responsibility bound to THIS actor so the
+            // janitor replays the departure against the successor after
+            // retirement, instead of dropping the only replay owner.
             state
                 .deps
                 .protocol
                 .pending_local_muc_departures
                 .complete_in_flight(&in_flight);
-            warn!(room = %room_jid, nick = %nick, sender = %sender_jid, error = ?error, "Failed to leave MUC room");
+            state.deps.protocol.pending_local_muc_departures.record(
+                crate::server::routes::websocket::LocalDepartureItem::ConfirmRetired {
+                    room: room_jid.clone(),
+                    jid: sender_jid.clone(),
+                    actor: room_actor.id(),
+                    cause: waddle_xmpp::muc::durable::OccupancyLeaveCause::Explicit,
+                    selector: waddle_xmpp::muc::room_actor::LeaveSessionSelector::Any,
+                    attempt: leave_attempt,
+                    notified: HashSet::new(),
+                },
+            );
+            warn!(room = %room_jid, nick = %nick, sender = %sender_jid, error = ?error, "Failed to leave MUC room; waiting for actor retirement");
             return bounce_muc_leave_ownership_unreachable(room_jid, sender_jid, nick);
         }
     };
@@ -3237,6 +3259,10 @@ mod occupancy_projection_handler_tests {
         Succeed,
         Join,
         Leave,
+        /// The leave projection's durable commit outcome is ambiguous: the
+        /// actor seals itself (the mutation may have committed) and answers
+        /// `RoomActorError::RoomSealed`.
+        LeaveAmbiguous,
         LeaveDelay(std::time::Duration),
     }
 
@@ -3332,6 +3358,11 @@ mod occupancy_projection_handler_tests {
                         RoomProjection::OccupancyLeave { .. },
                     ) if failure == ProjectionFailureMode::Leave => {
                         return Err(waddle_xmpp::muc::RoomCommitError::OwnershipUnavailable);
+                    }
+                    waddle_xmpp::muc::RoomDurableMutation::Projection(
+                        RoomProjection::OccupancyLeave { .. },
+                    ) if failure == ProjectionFailureMode::LeaveAmbiguous => {
+                        return Err(waddle_xmpp::muc::RoomCommitError::CommitOutcomeUnknown);
                     }
                     waddle_xmpp::muc::RoomDurableMutation::Projection(
                         RoomProjection::OccupancyLeave { .. },
@@ -3735,6 +3766,130 @@ mod occupancy_projection_handler_tests {
             );
             tokio::time::sleep(std::time::Duration::from_millis(10)).await;
         }
+    }
+
+    /// #1647 (codex round 22): a sealed answer can follow an ENQUEUED leave
+    /// whose durable projection was ambiguous — the actor self-seals because
+    /// the mutation may have committed. The handler must retain a
+    /// `ConfirmRetired` replay responsibility instead of dropping the only
+    /// owner of the departure's effects.
+    #[tokio::test]
+    async fn explicit_leave_sealed_after_ambiguous_commit_retains_confirm_retired() {
+        let state = create_test_websocket_state().await;
+        let alice_session = create_test_server_owner_session(state.as_ref(), "alice").await;
+        let room_jid: BareJid = "leave-ambiguous-sealed@muc.example.com"
+            .parse()
+            .expect("room jid");
+        let alice: FullJid = "alice@example.com/web".parse().expect("alice jid");
+        create_room_with_projection_store(
+            state.as_ref(),
+            &room_jid,
+            ProjectionFailingStore::new(ProjectionFailureMode::LeaveAmbiguous),
+        )
+        .await;
+        let alice_join = handle_muc_join(
+            state.as_ref(),
+            "example.com",
+            &room_jid,
+            &alice,
+            "alice",
+            None,
+            &Some(alice_session),
+        )
+        .await;
+        assert!(alice_join
+            .iter()
+            .any(|frame| frame.contains("status code='110'")));
+
+        let responses = handle_muc_leave(state.as_ref(), &room_jid, &alice, "alice", None).await;
+        assert_eq!(responses.len(), 1);
+        assert!(
+            responses[0].contains("type='error'"),
+            "the ambiguous-sealed leave bounces wait-class: {responses:?}"
+        );
+
+        let retained = state
+            .deps
+            .protocol
+            .pending_local_muc_departures
+            .take_due(std::time::Instant::now() + std::time::Duration::from_secs(600));
+        assert_eq!(
+            retained.len(),
+            1,
+            "the sealed leave must leave exactly one replay responsibility"
+        );
+        assert!(
+            matches!(
+                &retained[0].item,
+                crate::server::routes::websocket::LocalDepartureItem::ConfirmRetired {
+                    room,
+                    jid,
+                    cause: waddle_xmpp::muc::durable::OccupancyLeaveCause::Explicit,
+                    ..
+                } if room == &room_jid && jid == &alice
+            ),
+            "the retained item follows THIS actor's retirement: {:?}",
+            retained[0].item
+        );
+    }
+
+    /// #1647 (codex round 22): the suppressed-leave self-echo must use the
+    /// actor's authoritative nickname, not whatever nick the request's `to`
+    /// JID carried.
+    #[tokio::test]
+    async fn suppressed_leave_echo_uses_the_actor_nick_not_the_request_nick() {
+        let state = create_test_websocket_state().await;
+        let alice_session = create_test_server_owner_session(state.as_ref(), "alice").await;
+        let room_jid: BareJid = "suppressed-wrong-nick@muc.example.com"
+            .parse()
+            .expect("room jid");
+        let alice: FullJid = "alice@example.com/web".parse().expect("alice jid");
+        let actor = state
+            .deps
+            .protocol
+            .room_registry
+            .ask(CreateRoom {
+                room_jid: room_jid.clone(),
+                waddle_id: "test-waddle".to_string(),
+                channel_id: "test-channel".to_string(),
+                config: waddle_xmpp::muc::RoomConfig {
+                    members_only: false,
+                    ..Default::default()
+                },
+            })
+            .await
+            .expect("create store-less room");
+        let alice_join = handle_muc_join(
+            state.as_ref(),
+            "example.com",
+            &room_jid,
+            &alice,
+            "alice",
+            None,
+            &Some(alice_session),
+        )
+        .await;
+        assert!(alice_join
+            .iter()
+            .any(|frame| frame.contains("status code='110'")));
+        actor
+            .ask(SealForDestroy {
+                attempt: waddle_xmpp::muc::DestroyAttemptId::generate(),
+            })
+            .await
+            .expect("seal destroying");
+
+        let frames = handle_muc_leave(state.as_ref(), &room_jid, &alice, "impostor", None).await;
+        assert_eq!(frames.len(), 1);
+        assert!(frames[0].contains("status code='110'"), "{frames:?}");
+        assert!(
+            frames[0].contains(&format!("{room_jid}/alice")),
+            "the echo is from the nick alice actually held: {frames:?}"
+        );
+        assert!(
+            !frames[0].contains("impostor"),
+            "the request's bogus nick never reaches the wire: {frames:?}"
+        );
     }
 
     #[tokio::test]

@@ -5134,6 +5134,44 @@ async fn acknowledgement_is_refused_by_an_actor_that_lost_ownership() {
     );
 }
 
+/// #1647 (codex round 22): a receipt whose nick was re-taken can never replay
+/// again. The Superseded classification must CONSUME it — otherwise it vetoes
+/// dormancy and sealing (`EffectsOwed`) forever while the janitor has already
+/// dropped its retry responsibility.
+#[tokio::test]
+async fn nick_retaken_supersession_consumes_the_unreplayable_receipt() {
+    let actor = spawn_room_actor_with_store(FakeDurableStore::owned()).await;
+    let alice = test_full_jid("alice");
+    join_as_resolver(&actor, alice.clone(), "shared-nick")
+        .await
+        .expect("alice joins");
+    let attempt = LeaveAttemptId::generate();
+    assert!(matches!(
+        leave_with_attempt(&actor, alice.clone(), attempt).await,
+        LeaveDisposition::Left(_)
+    ));
+    // Another account takes the freed nickname before the retry arrives.
+    let bob = test_full_jid("bob");
+    join_as_resolver(&actor, bob.clone(), "shared-nick")
+        .await
+        .expect("bob re-takes the freed nick");
+
+    assert!(matches!(
+        leave_with_attempt(&actor, alice.clone(), attempt).await,
+        LeaveDisposition::Superseded
+    ));
+    assert!(
+        actor
+            .ask(GetSnapshot)
+            .await
+            .expect("snapshot")
+            .departures
+            .receipts
+            .is_empty(),
+        "the unreplayable receipt is consumed with its Superseded classification"
+    );
+}
+
 #[tokio::test]
 async fn owed_departure_receipts_veto_seal_and_dormancy_until_acknowledged() {
     let actor = spawn_room_actor_with_store(FakeDurableStore::owned()).await;

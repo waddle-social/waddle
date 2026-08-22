@@ -137,8 +137,16 @@ fn projection_fingerprint(projection: &RoomProjection) -> serde_json::Value {
     }
 }
 
-fn mutation_fingerprint(intent: &RoomDurableMutation) -> Result<String, RoomCommitError> {
-    let value = match intent {
+/// The fingerprint binds the payload to the COMMITTING fence (owner identity
+/// + claim epoch), not just the operation shape: two nodes can legitimately
+/// commit byte-identical projections at the same next revision across an
+/// ownership transfer, and ambiguous-commit reconciliation must never mistake
+/// the other owner's row for its own (#1647).
+fn mutation_fingerprint(
+    fence: &RoomClaimFenceContext,
+    intent: &RoomDurableMutation,
+) -> Result<String, RoomCommitError> {
+    let intent_value = match intent {
         RoomDurableMutation::Create {
             waddle_id,
             channel_id,
@@ -220,6 +228,14 @@ fn mutation_fingerprint(intent: &RoomDurableMutation) -> Result<String, RoomComm
             "projection": projection_fingerprint(projection),
         }),
     };
+    let value = serde_json::json!({
+        "fence": {
+            "node_id": fence.owner.node_id,
+            "node_epoch": fence.owner.node_epoch,
+            "claim_epoch": fence.epoch.0,
+        },
+        "intent": intent_value,
+    });
     serde_json::to_string(&value).map_err(|_| commit_database_error())
 }
 
@@ -924,11 +940,11 @@ impl PostgresMucRoomStore {
     async fn reconcile_ambiguous_commit(
         &self,
         room_jid: &BareJid,
-        _fence: &RoomClaimFenceContext,
+        fence: &RoomClaimFenceContext,
         intent: &RoomDurableMutation,
         coordinates: RoomCommittedCoordinates,
     ) -> Result<CommitReconciliation, RoomCommitError> {
-        let expected_fingerprint = mutation_fingerprint(intent)?;
+        let expected_fingerprint = mutation_fingerprint(fence, intent)?;
         let conn = self.db.guard().await.map_err(Self::commit_error)?;
         let mut reconcile_rows = conn
             .query(
@@ -1375,7 +1391,7 @@ impl PostgresMucRoomStore {
         {
             return Err(RoomCommitError::RecreationBlocked);
         }
-        let intent_fingerprint = mutation_fingerprint(intent)?;
+        let intent_fingerprint = mutation_fingerprint(fence, intent)?;
 
         let mut rows = tx
             .query(
@@ -2558,20 +2574,29 @@ mod tests {
             }),
             RoomProjection::Pin(RoomPinProjection::Unpin { target: stanza_id }),
         ];
+        let fence = RoomClaimFenceContext::new(
+            Entity::new(
+                EntityType::RoomActor,
+                "projection-shape@muc.example.com".to_string(),
+            ),
+            node_identity(),
+            ClaimEpoch(1),
+        );
         let fingerprints = projections.map(|projection| {
-            mutation_fingerprint(&RoomDurableMutation::Projection(projection))
+            mutation_fingerprint(&fence, &RoomDurableMutation::Projection(projection))
                 .expect("projection fingerprint")
         });
         assert_eq!(
             fingerprints[0],
-            mutation_fingerprint(&occupancy_join_projection()).expect("repeat join fingerprint"),
+            mutation_fingerprint(&fence, &occupancy_join_projection())
+                .expect("repeat join fingerprint"),
             "the same typed projection must retain its acknowledgement fingerprint"
         );
         let kinds = fingerprints
             .iter()
             .map(|fingerprint| {
                 serde_json::from_str::<serde_json::Value>(fingerprint).expect("fingerprint JSON")
-                    ["projection"]["kind"]
+                    ["intent"]["projection"]["kind"]
                     .as_str()
                     .expect("projection kind")
                     .to_string()
@@ -3369,8 +3394,8 @@ mod tests {
             published,
             "a differently-shaped idempotent retry must keep the published coordinates"
         );
-        let publish_fingerprint =
-            mutation_fingerprint(&RoomDurableMutation::Publish).expect("publish fingerprint");
+        let publish_fingerprint = mutation_fingerprint(&fence, &RoomDurableMutation::Publish)
+            .expect("publish fingerprint");
         let mut fingerprint_rows = db
             .guard()
             .await
@@ -3914,8 +3939,8 @@ mod tests {
             3,
             "idempotent activation must not bump the revision"
         );
-        let activate_fingerprint =
-            mutation_fingerprint(&RoomDurableMutation::Activate).expect("activate fingerprint");
+        let activate_fingerprint = mutation_fingerprint(&fence, &RoomDurableMutation::Activate)
+            .expect("activate fingerprint");
         let mut reactivated_rows = db
             .guard()
             .await
@@ -4100,7 +4125,10 @@ mod tests {
             legacy_row
                 .get::<Option<String>>(0)
                 .expect("legacy activate fingerprint"),
-            Some(activate_fingerprint),
+            Some(
+                mutation_fingerprint(&legacy_null_fence, &RoomDurableMutation::Activate)
+                    .expect("legacy activate fingerprint under its own fence")
+            ),
             "legacy active lifecycle must gain exact-intent proof before an ambiguous activate acknowledgement"
         );
         assert_eq!(
@@ -4468,7 +4496,7 @@ mod tests {
         let lifecycle = RoomLifecycleId::generate();
         let revision = RoomRevision::initial();
         let foreign_fingerprint =
-            mutation_fingerprint(&foreign_intent).expect("fingerprint foreign intent");
+            mutation_fingerprint(&fence, &foreign_intent).expect("fingerprint foreign intent");
         let foreign_config = serde_json::to_string(match &foreign_intent {
             RoomDurableMutation::Create { config, .. } => config,
             _ => unreachable!("foreign intent is a create"),
@@ -4525,6 +4553,66 @@ mod tests {
                 .expect("reconcile mismatched intent"),
             CommitReconciliation::NotCommitted,
             "read-back must reject a different committed mutation at the same durable coordinates"
+        );
+    }
+
+    /// #1647 (codex round 22): two owners can commit byte-identical
+    /// projections at the same next revision across an ownership transfer.
+    /// Reconciliation must never mistake the other owner's row for its own.
+    #[tokio::test]
+    async fn reconciliation_rejects_the_same_intent_committed_under_a_different_fence() {
+        let _guard = clustering_control_plane_table_lock().lock().await;
+        let Some((store, claim_store, db, me)) = clean_store().await else {
+            return;
+        };
+        let room_jid = unique_room_jid("ambiguous-foreign-fence");
+        let entity = Entity::new(EntityType::RoomActor, room_jid.to_string());
+        let epoch = claim_store
+            .ensure_claimed(&entity, &me)
+            .await
+            .expect("claim room");
+        let fence = RoomClaimFenceContext::new(entity.clone(), me, epoch);
+        store.record_claim_fence(&room_jid, fence.clone());
+        let intent = occupancy_join_projection();
+        let foreign_fence =
+            RoomClaimFenceContext::new(entity, node_identity(), ClaimEpoch(epoch.0 + 1));
+        let foreign_fingerprint = mutation_fingerprint(&foreign_fence, &intent)
+            .expect("fingerprint the foreign owner's identical commit");
+        let lifecycle = RoomLifecycleId::generate();
+        let revision = RoomRevision::initial();
+        db.guard()
+            .await
+            .expect("guard")
+            .execute(
+                "INSERT INTO clustering_muc_room_lifecycles \
+                 (lifecycle_id, room_jid, revision, state, mutation_fingerprint) \
+                 VALUES (?, ?, ?, ?, ?)",
+                crate::db_params![
+                    lifecycle.to_string(),
+                    room_jid.to_string(),
+                    revision.as_i64(),
+                    RoomLifecycleState::Active.as_db_str(),
+                    foreign_fingerprint,
+                ],
+            )
+            .await
+            .expect("persist the foreign owner's lifecycle row");
+
+        assert_eq!(
+            store
+                .reconcile_ambiguous_commit(
+                    &room_jid,
+                    &fence,
+                    &intent,
+                    RoomCommittedCoordinates {
+                        lifecycle,
+                        revision
+                    },
+                )
+                .await
+                .expect("reconcile against the foreign owner's identical commit"),
+            CommitReconciliation::NotCommitted,
+            "an identical payload committed under another owner's fence is NOT this owner's commit"
         );
     }
 

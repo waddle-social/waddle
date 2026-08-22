@@ -1347,6 +1347,25 @@ impl RoomActor {
         Some(RetainedDeparture::Current(receipt.clone()))
     }
 
+    /// Remove a receipt that can never replay again (its nick was re-taken,
+    /// or its JID holds a live session): without consumption it would veto
+    /// dormancy and empty-room sealing (`EffectsOwed`) forever, leaking the
+    /// actor and its eviction retry (#1647).
+    pub(super) fn discard_departure_receipt(
+        &mut self,
+        attempt: occupancy_handlers::LeaveAttemptId,
+    ) {
+        if let Some(index) = self
+            .departure_receipts
+            .iter()
+            .position(|receipt| receipt.attempt == attempt)
+        {
+            if let Some(receipt) = self.departure_receipts.remove(index) {
+                self.prune_departure_state(&receipt.jid);
+            }
+        }
+    }
+
     /// Consume the receipt of an already-completed attempt, if any.
     pub(super) fn take_departure_receipt(
         &mut self,

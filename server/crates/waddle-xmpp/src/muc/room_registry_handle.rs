@@ -421,7 +421,7 @@ impl RoomRegistry {
         seal_room_for_destroy_snapshot(
             room_jid: BareJid,
             attempt: super::DestroyAttemptId
-        ) -> super::MucRoom,
+        ) -> super::room_actor::RoomSnapshot,
         "seal_room_for_destroy_snapshot",
         SealRoomForDestroySnapshot { room_jid, attempt }
     );

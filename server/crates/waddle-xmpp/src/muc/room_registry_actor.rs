@@ -431,6 +431,10 @@ pub struct DestroyCompletion {
     pub attempt: super::DestroyAttemptId,
     pub room_jid: BareJid,
     pub room: MucRoom,
+    /// Unacknowledged departure receipts at seal time: their holders left
+    /// the roster but never saw their leave reply, and the terminal destroy
+    /// notification is the effect that settles what they are owed (#1647).
+    pub departures: super::room_actor::DepartureLedger,
     pub request: super::DestroyRequest,
 }
 
@@ -3145,6 +3149,23 @@ impl RoomRegistryActor {
         publication: Result<(ActorRef<RoomActor>, DurableRoomOrigin), RoomPublicationError>,
         registry_ref: ActorRef<Self>,
     ) {
+        // #1647: a demand preparation that fails after an accepted handoff
+        // transition drops its prepared spec — the only copy of the retired
+        // actor's live roster and departure ledger. Inside an open handoff
+        // window, restash it on the pending marker so the next demand
+        // creation adopts it instead of hydrating a rosterless successor.
+        // (A successful publication removed the marker at registration, so
+        // this is a no-op there; adoption is also gated on the room still
+        // being absent, so a durably-published room can never regress.)
+        if publication.is_err() {
+            if let RoomPreparationOrigin::Demand { prepared_spec } = &origin {
+                if prepared_spec.live_room_restore.is_some() {
+                    if let Some(pending) = self.handoff_pending.get_mut(&room_jid) {
+                        pending.stashed_spec = Some(Arc::clone(prepared_spec));
+                    }
+                }
+            }
+        }
         match publication {
             Ok((actor_ref, durable_origin)) => {
                 let creation_handoff_delivered = Self::reply_preparation_success(
@@ -5636,7 +5657,7 @@ impl RoomRegistryActor {
 }
 
 impl kameo::message::Message<SealRoomForDestroySnapshot> for RoomRegistryActor {
-    type Reply = Result<MucRoom, RoomRegistryError>;
+    type Reply = Result<super::room_actor::RoomSnapshot, RoomRegistryError>;
 
     async fn handle(
         &mut self,
@@ -5689,7 +5710,6 @@ impl kameo::message::Message<SealRoomForDestroySnapshot> for RoomRegistryActor {
             .mailbox_timeout(SEAL_ASK_TIMEOUT)
             .reply_timeout(SEAL_ASK_TIMEOUT)
             .await
-            .map(|snapshot| snapshot.room)
             .map_err(|_| RoomRegistryError::OwnershipUnavailable(msg.room_jid))
     }
 }

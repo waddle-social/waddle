@@ -976,10 +976,12 @@ async fn registered_destroy_preseal_can_abort_after_definite_non_delivery() {
             attempt,
         })
         .await
-        .expect("seal and snapshot");
+        .expect("seal and snapshot")
+        .room;
     registry
         .ask(RegisterDestroyCompletion {
             completion: DestroyCompletion {
+                departures: Default::default(),
                 attempt,
                 room_jid: room_jid.clone(),
                 room,
@@ -1027,10 +1029,12 @@ async fn registered_destroy_preseal_reconciles_terminally_after_deadline() {
             attempt,
         })
         .await
-        .expect("seal and snapshot");
+        .expect("seal and snapshot")
+        .room;
     registry
         .ask(RegisterDestroyCompletion {
             completion: DestroyCompletion {
+                departures: Default::default(),
                 attempt,
                 room_jid: room_jid.clone(),
                 room,
@@ -1088,7 +1092,8 @@ async fn delayed_registration_after_the_old_preseal_timer_keeps_the_destroy_seal
             attempt,
         })
         .await
-        .expect("seal and snapshot");
+        .expect("seal and snapshot")
+        .room;
 
     tokio::time::advance(std::time::Duration::from_secs(11)).await;
     tokio::task::yield_now().await;
@@ -1102,6 +1107,7 @@ async fn delayed_registration_after_the_old_preseal_timer_keeps_the_destroy_seal
     registry
         .ask(RegisterDestroyCompletion {
             completion: DestroyCompletion {
+                departures: Default::default(),
                 attempt,
                 room_jid: room_jid.clone(),
                 room,
@@ -1721,6 +1727,7 @@ mod ownership_claims_tests {
         registry
             .ask(RegisterDestroyCompletion {
                 completion: DestroyCompletion {
+                    departures: Default::default(),
                     attempt,
                     room_jid: jid.clone(),
                     room: snapshot.room,
@@ -1881,6 +1888,7 @@ mod ownership_claims_tests {
         registry
             .ask(RegisterDestroyCompletion {
                 completion: DestroyCompletion {
+                    departures: Default::default(),
                     attempt,
                     room_jid: jid.clone(),
                     room: snapshot.room,
@@ -1949,6 +1957,7 @@ mod ownership_claims_tests {
         registry
             .ask(RegisterDestroyCompletion {
                 completion: DestroyCompletion {
+                    departures: Default::default(),
                     attempt,
                     room_jid: jid.clone(),
                     room: snapshot.room,
@@ -2040,6 +2049,7 @@ mod ownership_claims_tests {
             registry
                 .ask(RegisterDestroyCompletion {
                     completion: DestroyCompletion {
+                        departures: Default::default(),
                         attempt,
                         room_jid: room_jid.clone(),
                         room: snapshot.room,
@@ -2108,6 +2118,7 @@ mod ownership_claims_tests {
         registry
             .ask(RegisterDestroyCompletion {
                 completion: DestroyCompletion {
+                    departures: Default::default(),
                     attempt,
                     room_jid: jid,
                     room: snapshot.room,
@@ -2162,6 +2173,7 @@ mod ownership_claims_tests {
         registry
             .ask(RegisterDestroyCompletion {
                 completion: DestroyCompletion {
+                    departures: Default::default(),
                     attempt: first_attempt,
                     room_jid: jid.clone(),
                     room: snapshot.room.clone(),
@@ -2176,6 +2188,7 @@ mod ownership_claims_tests {
         registry
             .ask(RegisterDestroyCompletion {
                 completion: DestroyCompletion {
+                    departures: Default::default(),
                     attempt: second_attempt,
                     room_jid: jid.clone(),
                     room: snapshot.room,
@@ -2239,6 +2252,7 @@ mod ownership_claims_tests {
         registry
             .ask(RegisterDestroyCompletion {
                 completion: DestroyCompletion {
+                    departures: Default::default(),
                     attempt,
                     room_jid: jid.clone(),
                     room: snapshot.room,
@@ -2303,6 +2317,7 @@ mod ownership_claims_tests {
         registry
             .ask(RegisterDestroyCompletion {
                 completion: DestroyCompletion {
+                    departures: Default::default(),
                     attempt,
                     room_jid: room_jid.clone(),
                     room,
@@ -5780,6 +5795,7 @@ mod ownership_claims_tests {
             Some(DestroyCompletion {
                 attempt,
                 room_jid: room_jid.clone(),
+                departures: Default::default(),
                 room: MucRoom::new(
                     room_jid,
                     "w".to_string(),
@@ -6896,6 +6912,7 @@ mod ownership_claims_tests {
         registry
             .ask(RegisterDestroyCompletion {
                 completion: DestroyCompletion {
+                    departures: Default::default(),
                     attempt,
                     room_jid: room_jid.clone(),
                     room: MucRoom::new(
@@ -11415,6 +11432,7 @@ async fn dropped_exact_take_destroy_completion_request_does_not_lose_the_lease()
     registry
         .ask(RegisterDestroyCompletion {
             completion: DestroyCompletion {
+                departures: Default::default(),
                 attempt,
                 room_jid: room_jid.clone(),
                 room: snapshot.room,

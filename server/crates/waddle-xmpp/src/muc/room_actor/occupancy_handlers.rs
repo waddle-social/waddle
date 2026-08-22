@@ -385,6 +385,11 @@ impl kameo::message::Message<LeaveByRealJid> for RoomActor {
                 if self.room.session_watermark(&msg.sender_jid).is_some()
                     || self.nick_retaken(&receipt)
                 {
+                    // The receipt can never replay again (the nick was
+                    // re-taken or the JID is live) — consume it, or it
+                    // vetoes dormancy/sealing (`EffectsOwed`) forever
+                    // while the janitor has already dropped its retry.
+                    self.discard_departure_receipt(receipt.attempt);
                     return Ok(LeaveDisposition::Superseded);
                 }
                 return Ok(receipt_disposition(receipt));
@@ -428,6 +433,10 @@ impl kameo::message::Message<LeaveByRealJid> for RoomActor {
                     }
                     Some(super::RetainedDeparture::Current(receipt)) => {
                         if self.nick_retaken(&receipt) {
+                            // Unreplayable: consume it (see the attempt-keyed
+                            // replay above) instead of leaking an
+                            // `EffectsOwed` veto forever.
+                            self.discard_departure_receipt(receipt.attempt);
                             return Ok(LeaveDisposition::Superseded);
                         }
                         return Ok(receipt_disposition(receipt));

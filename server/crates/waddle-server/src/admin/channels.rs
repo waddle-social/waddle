@@ -3529,9 +3529,25 @@ async fn recover_group_dm_actor_after_demote(
         Err(kameo::error::SendError::HandlerError(
             waddle_xmpp::muc::room_registry_actor::RoomRegistryError::StaleActorNotCurrent(_),
         )) => {
-            return Err(unavailable(format!(
-                "group-DM reconciliation for {room_jid} lost the exact stale actor"
-            )));
+            // A successor was already published: a concurrent join reaped the
+            // sealed stale actor and re-created the room. Follow the CURRENT
+            // actor instead of failing recovery — its durable hydration is
+            // the affiliation truth the caller inspects, and failing here
+            // would repersist a membership whose removal committed. Mirrors
+            // the owner-config recovery's StaleActorNotCurrent fallback.
+            state
+                .room_registry
+                .ask(GetOrCreateRoom {
+                    room_jid: room_jid.clone(),
+                    waddle_id: waddle_xmpp::admin::CHANNEL_TYPE_GROUP_DM.to_string(),
+                    channel_id: channel_id.to_string(),
+                    config: group_dm_record_config(record),
+                })
+                .await
+                .map_err(send_err(
+                    "room_registry ask GetOrCreateRoom following the published successor",
+                ))?
+                .actor_ref
         }
         Err(error) => {
             return Err(send_err(

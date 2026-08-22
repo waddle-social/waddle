@@ -3165,6 +3165,7 @@ mod destroy_completion_tests {
             attempt,
             room_jid: room_jid.clone(),
             room: snapshot.room,
+            departures: snapshot.departures,
             request: DestroyRequest::default(),
         };
         super::super::handlers::iq::muc_owner_moderation::persist_destroy_completion(
