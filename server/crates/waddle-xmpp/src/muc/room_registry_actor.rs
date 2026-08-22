@@ -319,6 +319,11 @@ pub struct RoomRegistryActor {
     /// and lets terminal operations cancel the exact generation before a late
     /// completion can publish it.
     pending_room_preparations: HashMap<BareJid, PendingRoomPreparation>,
+    /// Rooms whose stale actor was retired for a live-roster handoff that
+    /// has not (yet) produced a successor: `GetRoom` answers
+    /// `OwnershipReconciliationPending` instead of an absence until a room
+    /// entry is published again.
+    handoff_pending: HashSet<BareJid>,
     /// Unpublished demand rooms whose durable Create succeeded but whose
     /// terminal cleanup after a lost creator handoff remains uncertain.
     pending_unpublished_destroys:
@@ -577,6 +582,7 @@ impl RoomRegistryActor {
             pending_room_releases: HashMap::new(),
             pending_room_acquisitions: HashMap::new(),
             pending_room_preparations: HashMap::new(),
+            handoff_pending: HashSet::new(),
             pending_unpublished_destroys: HashMap::new(),
             destroy_attempts: HashMap::new(),
             pending_destroy_completions: VecDeque::new(),
@@ -2456,6 +2462,7 @@ impl RoomRegistryActor {
                 claim_fence: claim_fence.clone(),
             },
         );
+        self.handoff_pending.remove(&room_jid);
         self.publish_room_count();
         // The cache is a legacy room-JID fan-out fence. Make it visible only
         // after its matching ready actor and immutable fence are in the
@@ -3745,6 +3752,11 @@ impl kameo::message::Message<GetRoom> for RoomRegistryActor {
             }
             return delegated;
         }
+        if self.handoff_pending.contains(&msg.room_jid) && !self.rooms.contains_key(&msg.room_jid) {
+            return ctx.reply(Err(RoomRegistryError::OwnershipReconciliationPending(
+                msg.room_jid,
+            )));
+        }
         ctx.reply(self.live_room(&msg.room_jid).await)
     }
 }
@@ -4751,7 +4763,7 @@ impl kameo::message::Message<GetOrCreateRoomWithLiveRoster> for RoomRegistryActo
         ctx: &mut Context<Self, Self::Reply>,
     ) -> Self::Reply {
         let room_jid = msg.room_jid;
-        if let Some(stale_actor) = msg.demote_first {
+        if let Some(stale_actor) = &msg.demote_first {
             let is_current = self
                 .rooms
                 .get(&room_jid)
@@ -4759,14 +4771,23 @@ impl kameo::message::Message<GetOrCreateRoomWithLiveRoster> for RoomRegistryActo
             if !is_current {
                 return ctx.reply(Err(RoomRegistryError::StaleActorNotCurrent(room_jid)));
             }
-            if let Some(entry) = self.rooms.remove(&room_jid) {
-                self.retire_ownership_lost_entry(&room_jid, entry).await;
-            }
         }
+        // Every gate that can refuse runs BEFORE the stale actor is retired:
+        // a refused handoff must leave the stale entry (and its ledger) in
+        // place, never an absent room.
         if self.destroy_completion_blocks_recreation(&room_jid).await {
             return ctx.reply(Err(RoomRegistryError::OwnershipReconciliationPending(
                 room_jid,
             )));
+        }
+        if msg.demote_first.is_some() {
+            if let Some(entry) = self.rooms.remove(&room_jid) {
+                self.publish_room_count();
+                // From here until the successor is registered (or a
+                // preparation is pending) the room must not look absent.
+                self.handoff_pending.insert(room_jid.clone());
+                self.retire_ownership_lost_entry(&room_jid, entry).await;
+            }
         }
         let creation_spec = Arc::new(RoomCreationSpec {
             waddle_id: msg.waddle_id.into_string(),
@@ -4779,10 +4800,21 @@ impl kameo::message::Message<GetOrCreateRoomWithLiveRoster> for RoomRegistryActo
                 departures: msg.departures,
             }),
         });
-        match self
+        let transition = self
             .transition_demand_room(room_jid.clone(), creation_spec, ctx.actor_ref().clone())
-            .await
-        {
+            .await;
+        // The successor exists or its preparation is pending: lookups will be
+        // answered by it. A failed transition keeps the marker so lookups
+        // answer "reconciliation pending" (retryable) instead of "absent".
+        if matches!(
+            transition,
+            Ok(DemandRoomTransition::Existing(_))
+                | Ok(DemandRoomTransition::Created(_))
+                | Ok(DemandRoomTransition::Pending(_))
+        ) {
+            self.handoff_pending.remove(&room_jid);
+        }
+        match transition {
             // A live-roster handoff is only valid while the target actor is
             // still unpublished.  Merging into an already-live actor could
             // erase a join or leave that arrived after its publication.

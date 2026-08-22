@@ -173,6 +173,24 @@ pub(crate) async fn ack_departure_receipt(
     });
 }
 
+/// A live task's effects ran: hand its write-ahead entry over to the owed
+/// acknowledgement (atomically, before awaiting the actor), then deliver the
+/// acknowledgement; the owed entry is cleared only on an authoritative answer.
+pub(crate) async fn acknowledge_in_flight(
+    pending: &PendingLocalMucDepartures,
+    actor: &kameo::actor::ActorRef<waddle_xmpp::muc::room_actor::RoomActor>,
+    in_flight: &LocalDepartureItem,
+    acknowledge: waddle_xmpp::muc::room_actor::LeaveAttemptId,
+) {
+    let LocalDepartureItem::InFlight { room, jid, .. } = in_flight else {
+        return;
+    };
+    pending.convert_in_flight_to_ack(in_flight, acknowledge);
+    if try_ack_departure_receipt(actor, acknowledge).await {
+        pending.complete_ack(room, jid, acknowledge);
+    }
+}
+
 /// One bounded attempt to deliver the acknowledgement; `true` only once the
 /// authoritative actor answered that the receipt is dropped. A timeout, a
 /// dead actor, or an actor that lost ownership (its ledger may be on its way
@@ -1954,6 +1972,10 @@ async fn cleanup_muc_presence_with_origin(
             .protocol
             .pending_local_muc_departures
             .record_in_flight(in_flight.clone());
+        let _in_flight_lease = InFlightLease::hold(
+            Arc::clone(&state.deps.protocol.pending_local_muc_departures),
+            in_flight.clone(),
+        );
         let leave_result = ask_leave_bounded(
             &room_actor,
             LeaveByRealJid {
@@ -2003,19 +2025,13 @@ async fn cleanup_muc_presence_with_origin(
                 if !maybe_evict_empty_room(state, &room_jid, &outcome).await {
                     completed = false;
                 }
-                ack_departure_receipt(
+                acknowledge_in_flight(
                     &state.deps.protocol.pending_local_muc_departures,
                     &room_actor,
-                    &room_jid,
-                    jid,
+                    &in_flight,
                     outcome.acknowledge,
                 )
                 .await;
-                state
-                    .deps
-                    .protocol
-                    .pending_local_muc_departures
-                    .complete_in_flight(&in_flight);
             }
             Ok(LeaveDisposition::Deferred { watermark }) => {
                 completed = false;
@@ -2041,19 +2057,13 @@ async fn cleanup_muc_presence_with_origin(
                 attempt: acknowledge,
                 ..
             }) => {
-                ack_departure_receipt(
+                acknowledge_in_flight(
                     &state.deps.protocol.pending_local_muc_departures,
                     &room_actor,
-                    &room_jid,
-                    jid,
+                    &in_flight,
                     acknowledge,
                 )
                 .await;
-                state
-                    .deps
-                    .protocol
-                    .pending_local_muc_departures
-                    .complete_in_flight(&in_flight);
             }
             Ok(LeaveDisposition::NotOccupant | LeaveDisposition::Superseded) => {
                 state

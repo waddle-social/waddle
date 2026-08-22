@@ -9326,6 +9326,94 @@ mod local_muc_departure_tests {
     }
 
     #[tokio::test]
+    async fn task_cancelled_after_effects_leaves_only_an_acknowledgement_to_deliver() {
+        use crate::server::routes::websocket::{LocalDepartureItem, PendingLocalDeparture};
+        let store = JanitorProjectionStore::new();
+        let state = clustered_state_with_store(store.clone()).await;
+        let room = room_jid("cancel-after-effects");
+        let alice = full_jid("alice@example.com/web");
+        let bob = full_jid("bob@example.com/phone");
+        let actor = create_room(state.as_ref(), &room).await;
+        join_member(&actor, &alice, "alice").await;
+        join_member(&actor, &bob, "bob").await;
+        let (bob_tx, mut bob_rx) = mpsc::channel(8);
+        register_test_connection(state.as_ref(), &bob, bob_tx).await;
+        while bob_rx.try_recv().is_ok() {}
+
+        // Live task: write-ahead, ask, effects ran (simulated), then it
+        // converts its entry into the owed ack and dies before awaiting it.
+        let attempt = waddle_xmpp::muc::room_actor::LeaveAttemptId::generate();
+        let in_flight = LocalDepartureItem::InFlight {
+            room: room.clone(),
+            jid: alice.clone(),
+            cause: OccupancyLeaveCause::Explicit,
+            attempt,
+        };
+        state
+            .deps
+            .protocol
+            .pending_local_muc_departures
+            .record_in_flight(in_flight.clone());
+        let LeaveDisposition::Left(outcome) = actor
+            .ask(LeaveByRealJid {
+                sender_jid: alice.clone(),
+                cause: OccupancyLeaveCause::Explicit,
+                session: LeaveSessionSelector::Any,
+                attempt,
+                origin: waddle_xmpp::muc::room_actor::LeaveOrigin::Fresh,
+            })
+            .await
+            .expect("leave")
+        else {
+            panic!("alice leaves");
+        };
+        state
+            .deps
+            .protocol
+            .pending_local_muc_departures
+            .convert_in_flight_to_ack(&in_flight, outcome.acknowledge);
+
+        // Nothing is due yet; then make the owed ack due and sweep.
+        run_local_muc_departure_sweep(&state).await;
+        assert_eq!(state.deps.protocol.pending_local_muc_departures.len(), 1);
+        let ack_item = LocalDepartureItem::AckReceipt {
+            room: room.clone(),
+            jid: alice.clone(),
+            attempt: outcome.acknowledge,
+            absent_sweeps: 0,
+        };
+        let retained = state
+            .deps
+            .protocol
+            .pending_local_muc_departures
+            .take_for_test(&ack_item)
+            .expect("owed ack");
+        state
+            .deps
+            .protocol
+            .pending_local_muc_departures
+            .record_pending_for_test(PendingLocalDeparture {
+                item: retained.item,
+                attempts: retained.attempts,
+                not_before: std::time::Instant::now(),
+            });
+        run_local_muc_departure_sweep(&state).await;
+
+        assert!(
+            bob_rx.try_recv().is_err(),
+            "the completed departure is acknowledged, never replayed"
+        );
+        assert_eq!(state.deps.protocol.pending_local_muc_departures.len(), 0);
+        assert!(actor
+            .ask(waddle_xmpp::muc::room_actor::GetSnapshot)
+            .await
+            .expect("snapshot")
+            .departures
+            .receipts
+            .is_empty());
+    }
+
+    #[tokio::test]
     async fn fresh_leave_never_consumes_an_unacknowledged_receipt_but_a_retained_retry_does() {
         // While an acknowledgement is still in flight (or retained for the
         // janitor), an unrelated fresh leave of the same gone JID and cause

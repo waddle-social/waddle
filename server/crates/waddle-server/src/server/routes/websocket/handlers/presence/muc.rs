@@ -1954,6 +1954,10 @@ pub async fn handle_muc_leave(
         .protocol
         .pending_local_muc_departures
         .record_in_flight(in_flight.clone());
+    let _in_flight_lease = crate::server::routes::websocket::InFlightLease::hold(
+        std::sync::Arc::clone(&state.deps.protocol.pending_local_muc_departures),
+        in_flight.clone(),
+    );
     let outcome = match crate::server::routes::websocket::ask_leave_bounded(
         &room_actor,
         LeaveByRealJid {
@@ -2015,19 +2019,13 @@ pub async fn handle_muc_leave(
             attempt: acknowledge,
             ..
         }) => {
-            crate::server::routes::websocket::ack_departure_receipt(
+            crate::server::routes::websocket::acknowledge_in_flight(
                 &state.deps.protocol.pending_local_muc_departures,
                 &room_actor,
-                room_jid,
-                sender_jid,
+                &in_flight,
                 acknowledge,
             )
             .await;
-            state
-                .deps
-                .protocol
-                .pending_local_muc_departures
-                .complete_in_flight(&in_flight);
             // Store-less room with a destroy/dormancy in flight: the departure
             // was recorded but nothing fans out. The departing session still
             // gets its XEP-0045 §7.14 self-presence echo (as before #1647).
@@ -2108,20 +2106,15 @@ pub async fn handle_muc_leave(
         outcome.affiliation,
     )];
     super::super::super::cleanup::maybe_evict_empty_room(state, room_jid, &outcome).await;
-    // Every effect ran: the receipt is no longer owed to anyone.
-    crate::server::routes::websocket::ack_departure_receipt(
+    // Every effect ran: the write-ahead entry becomes the owed acknowledgement
+    // (atomically) and is cleared only on the actor's authoritative answer.
+    crate::server::routes::websocket::acknowledge_in_flight(
         &state.deps.protocol.pending_local_muc_departures,
         &room_actor,
-        room_jid,
-        sender_jid,
+        &in_flight,
         outcome.acknowledge,
     )
     .await;
-    state
-        .deps
-        .protocol
-        .pending_local_muc_departures
-        .complete_in_flight(&in_flight);
     response
 }
 

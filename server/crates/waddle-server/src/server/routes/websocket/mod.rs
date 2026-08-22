@@ -102,8 +102,8 @@ pub(crate) use cleanup::redrive_remote_muc_cleanup;
 pub(crate) use cleanup::redrive_terminal_pending_rows_to_live_resource;
 pub use cleanup::MucCleanupOutcome;
 pub(crate) use cleanup::{
-    ack_departure_receipt, ask_leave_bounded, echo_muc_self_unavailable, try_ack_departure_receipt,
-    LeaveAskFailure,
+    ack_departure_receipt, acknowledge_in_flight, ask_leave_bounded, echo_muc_self_unavailable,
+    try_ack_departure_receipt, LeaveAskFailure,
 };
 
 /// Upper bound on a single `LeaveByRealJid` ask from the WS/janitor side: a
@@ -116,7 +116,8 @@ pub(crate) use cleanup::{
 };
 pub use connection::router;
 pub(crate) use local_departures::{
-    LocalDepartureItem, PendingLocalDeparture, PendingLocalMucDepartures, ACK_ABSENT_ROOM_RETRIES,
+    InFlightLease, LocalDepartureItem, PendingLocalDeparture, PendingLocalMucDepartures,
+    ACK_ABSENT_ROOM_RETRIES,
 };
 pub(crate) use state::ResolvedPrincipal;
 pub use state::{

@@ -2307,6 +2307,10 @@ async fn run_group_dm_leave(
                 attempt,
             };
             pending_local_muc_departures.record_in_flight(in_flight.clone());
+            let _in_flight_lease = crate::server::routes::websocket::InFlightLease::hold(
+                Arc::clone(pending_local_muc_departures),
+                in_flight.clone(),
+            );
             match crate::server::routes::websocket::ask_leave_bounded(
                 &actor,
                 LeaveByRealJid {
@@ -2327,29 +2331,25 @@ async fn run_group_dm_leave(
                         live_resource_set.contains(&resource),
                         &GroupDmLeaveEffect::from(outcome.as_ref()),
                     );
-                    crate::server::routes::websocket::ack_departure_receipt(
+                    crate::server::routes::websocket::acknowledge_in_flight(
                         pending_local_muc_departures,
                         &actor,
-                        &args.room_jid,
-                        &resource,
+                        &in_flight,
                         outcome.acknowledge,
                     )
                     .await;
-                    pending_local_muc_departures.complete_in_flight(&in_flight);
                 }
                 Ok(waddle_xmpp::muc::room_actor::LeaveDisposition::Suppressed {
                     attempt: acknowledge,
                     ..
                 }) => {
-                    crate::server::routes::websocket::ack_departure_receipt(
+                    crate::server::routes::websocket::acknowledge_in_flight(
                         pending_local_muc_departures,
                         &actor,
-                        &args.room_jid,
-                        &resource,
+                        &in_flight,
                         acknowledge,
                     )
                     .await;
-                    pending_local_muc_departures.complete_in_flight(&in_flight);
                 }
                 Ok(
                     waddle_xmpp::muc::room_actor::LeaveDisposition::NotOccupant

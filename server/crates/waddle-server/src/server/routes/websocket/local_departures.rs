@@ -1,5 +1,6 @@
 //! Retained local responsibility for MUC departures that could not be projected.
 
+use std::sync::Arc;
 use std::{
     collections::HashMap,
     sync::Mutex,
@@ -17,10 +18,13 @@ use waddle_xmpp::muc::{
 const BACKOFF_BASE: Duration = Duration::from_secs(2);
 const BACKOFF_MAX: Duration = Duration::from_secs(60);
 const STUCK_ATTEMPTS: u32 = 10;
-/// How long a write-ahead [`LocalDepartureItem::InFlight`] entry waits before
-/// the janitor assumes its live task died: generously above one leave ask
-/// (5s) + bounded effects (eviction ≤ 10s) + one acknowledgement ask (5s).
+/// How long a write-ahead [`LocalDepartureItem::InFlight`] entry may go
+/// without a lease renewal before the janitor assumes its live task died.
+/// The lease renews every [`IN_FLIGHT_RENEWAL`], so a live task — however long
+/// its fan-out — never lets the deadline lapse; a dead one is replayed within
+/// this delay.
 pub(crate) const IN_FLIGHT_REPLAY_DELAY: Duration = Duration::from_secs(30);
+const IN_FLIGHT_RENEWAL: Duration = Duration::from_secs(10);
 /// Sweeps an owed acknowledgement outlives a room the registry cannot find:
 /// a live-roster handoff (demote, then publish the successor holding the
 /// transferred receipt) briefly answers "no room" while the receipt is in
@@ -56,11 +60,12 @@ pub enum LocalDepartureItem {
     /// receipt must still be dropped, or a later gone-JID leave of the same
     /// cause would replay the already-emitted effects.
     /// Write-ahead retention for a departure a live task is asking for and
-    /// effecting right now. Keyed apart from `RoomDeparture` so it never
-    /// merges with (or completes away) an older retained responsibility, and
-    /// never hands its attempt to one. If the live task dies before it
-    /// completes the entry, the janitor converts it into a retained retry
-    /// after [`IN_FLIGHT_REPLAY_DELAY`] and replays the receipt.
+    /// effecting right now. Keyed per attempt, apart from `RoomDeparture`, so
+    /// it never merges with (or completes away) any other responsibility.
+    /// The live task holds an [`InFlightLease`] that keeps renewing the
+    /// deadline while it runs; if the task dies (lease dropped) the janitor
+    /// converts the entry into a retained retry once [`IN_FLIGHT_REPLAY_DELAY`]
+    /// lapses without renewal and replays the receipt.
     InFlight {
         room: BareJid,
         jid: FullJid,
@@ -84,7 +89,7 @@ enum LocalDepartureKey {
     FullJidSweep(FullJid),
     RoomScoped(BareJid, FullJid, u8),
     Ack(BareJid, FullJid, LeaveAttemptId),
-    InFlight(BareJid, FullJid, u8),
+    InFlight(BareJid, FullJid, u8, LeaveAttemptId),
 }
 
 impl LocalDepartureItem {
@@ -101,8 +106,13 @@ impl LocalDepartureItem {
                 room, jid, attempt, ..
             } => LocalDepartureKey::Ack(room.clone(), jid.clone(), *attempt),
             Self::InFlight {
-                room, jid, cause, ..
-            } => LocalDepartureKey::InFlight(room.clone(), jid.clone(), cause_key(*cause)),
+                room,
+                jid,
+                cause,
+                attempt,
+            } => {
+                LocalDepartureKey::InFlight(room.clone(), jid.clone(), cause_key(*cause), *attempt)
+            }
         }
     }
 
@@ -163,17 +173,6 @@ impl LocalDepartureItem {
                 actor,
                 cause,
                 selector: merged_selector,
-                attempt: merged_attempt,
-            },
-            (
-                LocalDepartureItem::InFlight {
-                    room, jid, cause, ..
-                },
-                _,
-            ) => LocalDepartureItem::InFlight {
-                room,
-                jid,
-                cause,
                 attempt: merged_attempt,
             },
             (existing, _) => existing,
@@ -275,6 +274,12 @@ impl Inventory {
         let removed = self.entries.remove(key)?;
         self.counts[kind_slot(&removed.item)] -= 1;
         Some(removed)
+    }
+
+    fn merge_or_insert(&mut self, entry: PendingLocalDeparture) {
+        if !self.merge_into_existing(entry.clone()) {
+            self.insert(entry);
+        }
     }
 
     /// Merge an incoming item into the entry already held under its key.
@@ -426,19 +431,49 @@ impl PendingLocalMucDepartures {
         self.record_at(item, Instant::now() + IN_FLIGHT_REPLAY_DELAY);
     }
 
-    /// The live task finished its effects: drop its write-ahead entry unless
-    /// a newer attempt has since been merged under the same key.
+    /// The live task is done with this attempt (effects ran and were handed
+    /// over, or the ask never produced a departure): drop its entry.
     pub fn complete_in_flight(&self, item: &LocalDepartureItem) {
         let mut inventory = self.entries.lock().expect("local departure inventory lock");
-        let key = item.key();
-        let same_attempt = inventory
-            .entries
-            .get(&key)
-            .is_some_and(|pending| pending.item.attempt() == item.attempt());
-        if same_attempt {
-            inventory.remove(&key);
+        if inventory.remove(&item.key()).is_some() {
             inventory.record_gauges();
         }
+    }
+
+    /// Push the write-ahead deadline out again: the live task is still
+    /// running (see [`InFlightLease`]).
+    pub fn renew_in_flight(&self, item: &LocalDepartureItem) {
+        let mut inventory = self.entries.lock().expect("local departure inventory lock");
+        if let Some(pending) = inventory.entries.get_mut(&item.key()) {
+            pending.not_before = Instant::now() + IN_FLIGHT_REPLAY_DELAY;
+        }
+    }
+
+    /// The effects ran: atomically turn the write-ahead entry into the owed
+    /// acknowledgement BEFORE the acknowledgement is awaited, so a task
+    /// cancelled between its effects and the actor's answer leaves exactly
+    /// one responsibility (deliver the ack), never a replayable departure.
+    pub fn convert_in_flight_to_ack(&self, item: &LocalDepartureItem, acknowledge: LeaveAttemptId) {
+        let (room, jid) = match item {
+            LocalDepartureItem::InFlight { room, jid, .. } => (room.clone(), jid.clone()),
+            _ => return,
+        };
+        let mut inventory = self.entries.lock().expect("local departure inventory lock");
+        inventory.remove(&item.key());
+        inventory.merge_or_insert(PendingLocalDeparture {
+            item: LocalDepartureItem::AckReceipt {
+                room,
+                jid,
+                attempt: acknowledge,
+                absent_sweeps: 0,
+            },
+            attempts: 0,
+            // Not due before the live task's own acknowledgement attempt
+            // has had its full bound; the janitor picks it up only if that
+            // attempt failed or never finished.
+            not_before: Instant::now() + super::LEAVE_ASK_TIMEOUT + Duration::from_secs(2),
+        });
+        inventory.record_gauges();
     }
 
     /// The acknowledgement still owed for this full JID in this room, if any.
@@ -520,6 +555,35 @@ fn jittered(base: Duration) -> Duration {
         return base;
     }
     base + Duration::from_millis(rand::rng().random_range(0..=spread_ms))
+}
+
+/// Liveness of the task that owns a write-ahead [`LocalDepartureItem::InFlight`]
+/// entry: a background heartbeat renews the entry's deadline while the lease
+/// is held, and stops the moment the lease is dropped — including when the
+/// owning future is cancelled — so the janitor replays only departures whose
+/// task actually died, however long a live fan-out takes.
+pub struct InFlightLease {
+    heartbeat: tokio::task::JoinHandle<()>,
+}
+
+impl InFlightLease {
+    pub fn hold(pending: Arc<PendingLocalMucDepartures>, item: LocalDepartureItem) -> Self {
+        let heartbeat = tokio::spawn(async move {
+            let mut ticks = tokio::time::interval(IN_FLIGHT_RENEWAL);
+            ticks.tick().await;
+            loop {
+                ticks.tick().await;
+                pending.renew_in_flight(&item);
+            }
+        });
+        Self { heartbeat }
+    }
+}
+
+impl Drop for InFlightLease {
+    fn drop(&mut self) {
+        self.heartbeat.abort();
+    }
 }
 
 #[cfg(test)]
@@ -1055,6 +1119,67 @@ mod tests {
             3,
             "a departure and two distinct acknowledgements; the repeat coalesces"
         );
+    }
+
+    #[test]
+    fn in_flight_entries_are_per_attempt_and_renewable() {
+        let pending = PendingLocalMucDepartures::default();
+        let room: BareJid = "room@muc.example.com".parse().expect("room");
+        let jid: FullJid = "alice@example.com/web".parse().expect("jid");
+        let first = LeaveAttemptId::generate();
+        let second = LeaveAttemptId::generate();
+        let in_flight = |attempt| LocalDepartureItem::InFlight {
+            room: room.clone(),
+            jid: jid.clone(),
+            cause: OccupancyLeaveCause::Disconnect,
+            attempt,
+        };
+        pending.record_in_flight(in_flight(first));
+        pending.record_in_flight(in_flight(second));
+        assert_eq!(pending.len(), 2, "two live tasks hold two entries");
+        // Completing one task's entry never touches the other's.
+        pending.complete_in_flight(&in_flight(second));
+        assert_eq!(pending.len(), 1);
+        assert!(pending.contains_for_test(&in_flight(first)));
+        // A renewal pushes the deadline out; the entry is never due while the
+        // lease keeps renewing it.
+        pending.renew_in_flight(&in_flight(first));
+        assert!(pending
+            .take_due(Instant::now() + IN_FLIGHT_REPLAY_DELAY / 2)
+            .is_empty());
+        assert_eq!(
+            pending
+                .take_due(Instant::now() + IN_FLIGHT_REPLAY_DELAY + Duration::from_secs(1))
+                .len(),
+            1,
+            "without renewal the entry goes due after the replay delay"
+        );
+    }
+
+    #[test]
+    fn converting_in_flight_to_ack_leaves_exactly_the_owed_acknowledgement() {
+        let pending = PendingLocalMucDepartures::default();
+        let room: BareJid = "room@muc.example.com".parse().expect("room");
+        let jid: FullJid = "alice@example.com/web".parse().expect("jid");
+        let attempt = LeaveAttemptId::generate();
+        let acknowledge = LeaveAttemptId::generate();
+        let in_flight = LocalDepartureItem::InFlight {
+            room: room.clone(),
+            jid: jid.clone(),
+            cause: OccupancyLeaveCause::Explicit,
+            attempt,
+        };
+        pending.record_in_flight(in_flight.clone());
+        pending.convert_in_flight_to_ack(&in_flight, acknowledge);
+        assert_eq!(pending.len(), 1);
+        assert!(!pending.contains_for_test(&in_flight));
+        assert_eq!(pending.pending_ack_for(&room, &jid), Some(acknowledge));
+        assert!(
+            pending.take_due(Instant::now()).is_empty(),
+            "the owed ack is not due before the live ack attempt's bound"
+        );
+        pending.complete_ack(&room, &jid, acknowledge);
+        assert_eq!(pending.len(), 0);
     }
 
     #[test]
