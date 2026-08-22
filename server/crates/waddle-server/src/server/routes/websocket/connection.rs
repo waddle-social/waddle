@@ -335,6 +335,7 @@ async fn handle_xmpp_websocket(
                 ) {
                     break;
                 }
+                conn.sm_state.note_ack_request_sent();
             }
         } else {
             conn.send_window_pause_deadline = None;

@@ -182,6 +182,88 @@ impl MetricAttribute for SmEvictionPath {
     }
 }
 
+/// `outcome` — how a client XEP-0198 `<a h='N'/>` ack was classified.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SmAckOutcome {
+    /// `h` advanced the handled frontier.
+    Advanced,
+    /// `h` exactly matched the already-confirmed handled frontier.
+    Duplicate,
+    /// `h` regressed behind the already-confirmed handled frontier.
+    Regressed,
+    /// `h` claimed more handled stanzas than the server had sent.
+    TooHigh,
+}
+
+impl sealed::Sealed for SmAckOutcome {}
+impl MetricAttribute for SmAckOutcome {
+    fn key(&self) -> &'static str {
+        "outcome"
+    }
+
+    fn value(&self) -> &'static str {
+        match self {
+            Self::Advanced => "advanced",
+            Self::Duplicate => "duplicate",
+            Self::Regressed => "regressed",
+            Self::TooHigh => "too_high",
+        }
+    }
+}
+
+/// `outcome` — terminal outcome of an XEP-0198 `<resume/>` attempt.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SmResumeOutcome {
+    /// The previous stream resumed successfully.
+    Resumed,
+    /// The client attempted resume after starting a fresh session lifecycle.
+    UnexpectedRequest,
+    /// No resumable session existed for the requested stream id.
+    NotFound,
+    /// Cross-node resume could not reach the claimed owner before the handshake deadline.
+    OwnerUnreachable,
+    /// Graceful shutdown abandoned the attempt before any write-side claim work began.
+    ShutdownAbandoned,
+    /// The authenticated identity did not match the detached session or durable principal.
+    IdentityMismatch,
+    /// The detached replay window no longer covered every stanza the client still needed.
+    ReplayGap,
+    /// The client claimed more handled stanzas than the previous stream had sent.
+    HandledTooHigh,
+    /// The detached session had no durable principal to authorize resume.
+    PrincipalUnavailable,
+    /// The detached snapshot JID diverged from its durable principal.
+    DetachedDivergence,
+    /// A storage-backed dependency was unavailable during resume.
+    Storage,
+    /// The resume path hit an internal registry or server error.
+    Internal,
+}
+
+impl sealed::Sealed for SmResumeOutcome {}
+impl MetricAttribute for SmResumeOutcome {
+    fn key(&self) -> &'static str {
+        "outcome"
+    }
+
+    fn value(&self) -> &'static str {
+        match self {
+            Self::Resumed => "resumed",
+            Self::UnexpectedRequest => "unexpected_request",
+            Self::NotFound => "not_found",
+            Self::OwnerUnreachable => "owner_unreachable",
+            Self::ShutdownAbandoned => "shutdown_abandoned",
+            Self::IdentityMismatch => "identity_mismatch",
+            Self::ReplayGap => "replay_gap",
+            Self::HandledTooHigh => "handled_too_high",
+            Self::PrincipalUnavailable => "principal_unavailable",
+            Self::DetachedDivergence => "detached_divergence",
+            Self::Storage => "storage",
+            Self::Internal => "internal",
+        }
+    }
+}
+
 /// `reason` — why an XEP-0357 push notification was suppressed.
 ///
 /// This is the metric-facing closed set. `waddle-server` converts its
