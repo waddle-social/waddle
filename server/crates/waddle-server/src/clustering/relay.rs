@@ -92,12 +92,60 @@ pub fn relay_name(node_id: &NodeId) -> String {
 ///
 /// The span name is documented in `telemetry::span_noise` and must never
 /// be added to its suppression lists.
-fn relay_dispatch_span(message: &'static str, trace: &RelayTraceContext) -> tracing::Span {
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum RelayDispatchKind {
+    DeliverOrdered,
+    RemoteResourceRegister,
+    RemoteResourceUnregister,
+    RemoteResourceUpdate,
+    RemoteUserSideEffect,
+    RemoteResourceRoute,
+    RemoteResourceFrame,
+    RemoteResourceForceDetach,
+    ResumeSteal,
+    Demote,
+    ReassertMediaGrants,
+}
+
+impl RelayDispatchKind {
+    #[cfg(test)]
+    const ALL: [Self; 11] = [
+        Self::DeliverOrdered,
+        Self::RemoteResourceRegister,
+        Self::RemoteResourceUnregister,
+        Self::RemoteResourceUpdate,
+        Self::RemoteUserSideEffect,
+        Self::RemoteResourceRoute,
+        Self::RemoteResourceFrame,
+        Self::RemoteResourceForceDetach,
+        Self::ResumeSteal,
+        Self::Demote,
+        Self::ReassertMediaGrants,
+    ];
+
+    const fn as_str(self) -> &'static str {
+        match self {
+            Self::DeliverOrdered => "deliver_ordered",
+            Self::RemoteResourceRegister => "remote_resource_register",
+            Self::RemoteResourceUnregister => "remote_resource_unregister",
+            Self::RemoteResourceUpdate => "remote_resource_update",
+            Self::RemoteUserSideEffect => "remote_user_side_effect",
+            Self::RemoteResourceRoute => "remote_resource_route",
+            Self::RemoteResourceFrame => "remote_resource_frame",
+            Self::RemoteResourceForceDetach => "remote_resource_force_detach",
+            Self::ResumeSteal => "resume_steal",
+            Self::Demote => "demote",
+            Self::ReassertMediaGrants => "reassert_media_grants",
+        }
+    }
+}
+
+fn relay_dispatch_span(kind: RelayDispatchKind, trace: &RelayTraceContext) -> tracing::Span {
     let span = tracing::info_span!(
         parent: None,
         "clustering.relay.dispatch",
         otel.kind = "consumer",
-        relay.message = message,
+        relay.message = kind.as_str(),
         jid = tracing::field::Empty,
         stream_id = tracing::field::Empty,
         channel = tracing::field::Empty,
@@ -164,7 +212,7 @@ impl RelayRegistrationTrigger {
 enum RelayRegisterAttempt {
     Registered,
     Cancelled,
-    Failed(String),
+    Failed,
 }
 
 async fn register_relay_actor(
@@ -186,7 +234,7 @@ async fn register_relay_actor(
         result = actor_ref.register(name.to_string()) => result,
     } {
         Ok(()) => RelayRegisterAttempt::Registered,
-        Err(error) => RelayRegisterAttempt::Failed(error.to_string()),
+        Err(_) => RelayRegisterAttempt::Failed,
     }
 }
 
@@ -384,7 +432,7 @@ impl Message<RelayDeliverOrdered> for RelayActor {
         msg: RelayDeliverOrdered,
         ctx: &mut Context<Self, Self::Reply>,
     ) -> Self::Reply {
-        let span = relay_dispatch_span("deliver_ordered", &msg.trace);
+        let span = relay_dispatch_span(RelayDispatchKind::DeliverOrdered, &msg.trace);
         span.record("channel", tracing::field::debug(&msg.envelope.channel));
         span.record("sequence", msg.envelope.sequence.0);
         span.record(
@@ -408,7 +456,9 @@ fn record_ordered_relay_reply(reply: &OrderedRelayReply) {
     match reply {
         OrderedRelayReply::Ack(_) => metrics::record_ordered_relay_ack(),
         OrderedRelayReply::Nack(nack) => {
-            metrics::record_ordered_relay_nack(nack.reason.metric_label());
+            let reason = metrics::OrderedRelayNackMetricReason::from_nack_reason(&nack.reason);
+            debug_assert_eq!(reason.as_str(), nack.reason.metric_label());
+            metrics::record_ordered_relay_nack(reason);
         }
     }
 }
@@ -452,7 +502,7 @@ impl Message<RelayRegisterRemoteUserResource> for RelayActor {
         msg: RelayRegisterRemoteUserResource,
         ctx: &mut Context<Self, Self::Reply>,
     ) -> Self::Reply {
-        let span = relay_dispatch_span("remote_resource_register", &msg.trace);
+        let span = relay_dispatch_span(RelayDispatchKind::RemoteResourceRegister, &msg.trace);
         span.record("jid", tracing::field::display(&msg.jid));
         let bridge = Arc::clone(&self.ordered_delivery_bridge);
         spawn_in_dispatch_span(ctx, span, async move {
@@ -495,7 +545,7 @@ impl Message<RelayUnregisterRemoteUserResource> for RelayActor {
         msg: RelayUnregisterRemoteUserResource,
         ctx: &mut Context<Self, Self::Reply>,
     ) -> Self::Reply {
-        let span = relay_dispatch_span("remote_resource_unregister", &msg.trace);
+        let span = relay_dispatch_span(RelayDispatchKind::RemoteResourceUnregister, &msg.trace);
         span.record("jid", tracing::field::display(&msg.jid));
         let bridge = Arc::clone(&self.ordered_delivery_bridge);
         spawn_in_dispatch_span(ctx, span, async move {
@@ -538,7 +588,7 @@ impl Message<RelayUpdateRemoteUserResource> for RelayActor {
         msg: RelayUpdateRemoteUserResource,
         ctx: &mut Context<Self, Self::Reply>,
     ) -> Self::Reply {
-        let span = relay_dispatch_span("remote_resource_update", &msg.trace);
+        let span = relay_dispatch_span(RelayDispatchKind::RemoteResourceUpdate, &msg.trace);
         span.record("jid", tracing::field::display(&msg.jid));
         let bridge = Arc::clone(&self.ordered_delivery_bridge);
         spawn_in_dispatch_span(ctx, span, async move {
@@ -587,7 +637,7 @@ impl Message<RelayRemoteUserSideEffect> for RelayActor {
         msg: RelayRemoteUserSideEffect,
         ctx: &mut Context<Self, Self::Reply>,
     ) -> Self::Reply {
-        let span = relay_dispatch_span("remote_user_side_effect", &msg.trace);
+        let span = relay_dispatch_span(RelayDispatchKind::RemoteUserSideEffect, &msg.trace);
         span.record("jid", tracing::field::display(&msg.source_jid));
         let bridge = Arc::clone(&self.ordered_delivery_bridge);
         spawn_in_dispatch_span(ctx, span, async move {
@@ -626,7 +676,7 @@ impl Message<RelayRouteRemoteResourceStanza> for RelayActor {
         msg: RelayRouteRemoteResourceStanza,
         ctx: &mut Context<Self, Self::Reply>,
     ) -> Self::Reply {
-        let span = relay_dispatch_span("remote_resource_route", &msg.trace);
+        let span = relay_dispatch_span(RelayDispatchKind::RemoteResourceRoute, &msg.trace);
         span.record("jid", tracing::field::display(&msg.source_jid));
         let bridge = Arc::clone(&self.ordered_delivery_bridge);
         spawn_in_dispatch_span(ctx, span, async move {
@@ -666,7 +716,7 @@ impl Message<RelayDeliverRemoteResourceFrame> for RelayActor {
         msg: RelayDeliverRemoteResourceFrame,
         ctx: &mut Context<Self, Self::Reply>,
     ) -> Self::Reply {
-        let span = relay_dispatch_span("remote_resource_frame", &msg.trace);
+        let span = relay_dispatch_span(RelayDispatchKind::RemoteResourceFrame, &msg.trace);
         span.record("jid", tracing::field::display(&msg.frame.jid));
         let bridge = Arc::clone(&self.ordered_delivery_bridge);
         spawn_in_dispatch_span(ctx, span, async move {
@@ -711,7 +761,7 @@ impl Message<RelayForceDetachRemoteUserResource> for RelayActor {
         msg: RelayForceDetachRemoteUserResource,
         ctx: &mut Context<Self, Self::Reply>,
     ) -> Self::Reply {
-        let span = relay_dispatch_span("remote_resource_force_detach", &msg.trace);
+        let span = relay_dispatch_span(RelayDispatchKind::RemoteResourceForceDetach, &msg.trace);
         span.record("jid", tracing::field::display(&msg.jid));
         let bridge = Arc::clone(&self.ordered_delivery_bridge);
         spawn_in_dispatch_span(ctx, span, async move {
@@ -784,7 +834,7 @@ impl Message<RelayResumeSteal> for RelayActor {
         msg: RelayResumeSteal,
         ctx: &mut Context<Self, Self::Reply>,
     ) -> Self::Reply {
-        let span = relay_dispatch_span("resume_steal", &msg.trace);
+        let span = relay_dispatch_span(RelayDispatchKind::ResumeSteal, &msg.trace);
         span.record("stream_id", tracing::field::display(&msg.stream_id));
         span.record("jid", tracing::field::display(&msg.requester_bare_jid));
         let resume_bridge = Arc::clone(&self.resume_bridge);
@@ -850,7 +900,7 @@ impl Message<Demote> for RelayActor {
     type Reply = DemoteReply;
 
     async fn handle(&mut self, msg: Demote, _ctx: &mut Context<Self, Self::Reply>) -> Self::Reply {
-        let span = relay_dispatch_span("demote", &msg.trace);
+        let span = relay_dispatch_span(RelayDispatchKind::Demote, &msg.trace);
         span.record("entity", tracing::field::debug(&msg.entity));
         async {
             self.room_local_claims.demote(&msg.entity).await;
@@ -921,7 +971,7 @@ impl Message<RelayReassertMediaGrants> for RelayActor {
         msg: RelayReassertMediaGrants,
         ctx: &mut Context<Self, Self::Reply>,
     ) -> Self::Reply {
-        let span = relay_dispatch_span("reassert_media_grants", &msg.trace);
+        let span = relay_dispatch_span(RelayDispatchKind::ReassertMediaGrants, &msg.trace);
         span.record("entity", tracing::field::display(&msg.room));
         span.record("jid", tracing::field::display(msg.participant.to_bare()));
         let bridge = Arc::clone(&self.ordered_delivery_bridge);
@@ -1059,8 +1109,12 @@ pub fn spawn_supervised(
                     actor_ref.kill();
                     return;
                 }
-                RelayRegisterAttempt::Failed(error) => {
-                    tracing::warn!(%name, %error, "clustering relay registration failed; retrying");
+                RelayRegisterAttempt::Failed => {
+                    tracing::warn!(
+                        %name,
+                        failure = "registration",
+                        "clustering relay registration failed; retrying"
+                    );
                     actor_ref.kill();
                     // Cancellation-aware backoff: graceful shutdown must not
                     // wait out the retry delay.
@@ -1124,8 +1178,12 @@ pub fn spawn_supervised(
                             match register_relay_actor(&actor_ref, &name, &stop_token).await {
                                 RelayRegisterAttempt::Registered => {}
                                 RelayRegisterAttempt::Cancelled => return,
-                                RelayRegisterAttempt::Failed(error) => {
-                                    tracing::debug!(%name, %error, "clustering relay periodic re-registration failed");
+                                RelayRegisterAttempt::Failed => {
+                                    tracing::debug!(
+                                        %name,
+                                        failure = "registration",
+                                        "clustering relay periodic re-registration failed"
+                                    );
                                 }
                             }
                         }
@@ -1138,8 +1196,12 @@ pub fn spawn_supervised(
                                         tracing::debug!(%name, "clustering relay re-registered after peer connection");
                                     }
                                     RelayRegisterAttempt::Cancelled => return,
-                                    RelayRegisterAttempt::Failed(error) => {
-                                        tracing::debug!(%name, %error, "clustering relay peer-triggered re-registration failed");
+                                    RelayRegisterAttempt::Failed => {
+                                        tracing::debug!(
+                                            %name,
+                                            failure = "registration",
+                                            "clustering relay peer-triggered re-registration failed"
+                                        );
                                     }
                                 }
                             }
@@ -1354,8 +1416,12 @@ impl RelayHandle {
                     return Ok(remote_ref);
                 }
                 Ok(None) => {}
-                Err(error) => {
-                    tracing::debug!(%name, %error, "clustering relay lookup error; backing off");
+                Err(_) => {
+                    tracing::debug!(
+                        %name,
+                        failure = "lookup",
+                        "clustering relay lookup error; backing off"
+                    );
                 }
             }
             // Back off between attempts only — no trailing sleep after the
@@ -1398,7 +1464,7 @@ impl RelayHandle {
             Err(error) if is_stale_ref_error(&error) => {
                 tracing::debug!(
                     node_id = %self.node_id,
-                    %error,
+                    failure = "stale_ref",
                     "clustering relay ref stale; re-resolving via kademlia"
                 );
                 self.cached = None;

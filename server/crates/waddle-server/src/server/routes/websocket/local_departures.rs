@@ -507,7 +507,9 @@ impl PendingLocalMucDepartures {
             // Warn once when the threshold is crossed; the pending gauge keeps
             // reporting the backlog without a per-retry warning storm.
             warn!(?entry.item, attempts = entry.attempts, "local MUC departure remains pending");
-            crate::metrics::record_local_departure_retry("stuck");
+            crate::metrics::record_local_departure_retry(
+                crate::metrics::LocalDepartureRetryOutcome::Stuck,
+            );
         }
         let mut inventory = self.entries.lock().expect("local departure inventory lock");
         if !inventory.merge_into_existing(entry.clone()) {
@@ -728,7 +730,9 @@ fn evict_oldest_sweep_if_at_cap(inventory: &mut Inventory, cap: usize) {
         cap = inventory.counts[0] + 1,
         "local MUC departure sweep inventory overflow; dropped the oldest sweep's cleanup responsibility"
     );
-    crate::metrics::record_local_departure_retry("overflow");
+    crate::metrics::record_local_departure_retry(
+        crate::metrics::LocalDepartureRetryOutcome::Overflow,
+    );
 }
 
 /// Spread retries that were minted together (a burst of disconnects during

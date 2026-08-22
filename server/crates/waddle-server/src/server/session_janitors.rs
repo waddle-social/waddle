@@ -155,7 +155,9 @@ pub(crate) async fn run_local_muc_departure_sweep(state: &WebSocketState) {
                     .await
                     {
                         routes::websocket::MucCleanupOutcome::Completed => {
-                            crate::metrics::record_local_departure_retry("completed");
+                            crate::metrics::record_local_departure_retry(
+                                crate::metrics::LocalDepartureRetryOutcome::Completed,
+                            );
                         }
                         routes::websocket::MucCleanupOutcome::Failed => {
                             // The cleanup re-recorded whatever it could not
@@ -174,7 +176,9 @@ pub(crate) async fn run_local_muc_departure_sweep(state: &WebSocketState) {
                                     attempts: pending.attempts,
                                     not_before: pending.not_before,
                                 });
-                            crate::metrics::record_local_departure_retry("requeued");
+                            crate::metrics::record_local_departure_retry(
+                                crate::metrics::LocalDepartureRetryOutcome::Requeued,
+                            );
                         }
                     }
                     break;
@@ -196,7 +200,9 @@ pub(crate) async fn run_local_muc_departure_sweep(state: &WebSocketState) {
                     let actor = match get_room_actor_result(state, &room).await {
                         Ok(Some(actor)) => actor,
                         Ok(None) => {
-                            crate::metrics::record_local_departure_retry("actor_gone");
+                            crate::metrics::record_local_departure_retry(
+                                crate::metrics::LocalDepartureRetryOutcome::ActorGone,
+                            );
 
                             break;
                         }
@@ -217,7 +223,9 @@ pub(crate) async fn run_local_muc_departure_sweep(state: &WebSocketState) {
                                     attempts: pending.attempts,
                                     not_before: pending.not_before,
                                 });
-                            crate::metrics::record_local_departure_retry("requeued");
+                            crate::metrics::record_local_departure_retry(
+                                crate::metrics::LocalDepartureRetryOutcome::Requeued,
+                            );
                             break;
                         }
                     };
@@ -240,7 +248,9 @@ pub(crate) async fn run_local_muc_departure_sweep(state: &WebSocketState) {
                                 .protocol
                                 .pending_local_muc_departures
                                 .complete_ack(&room, &jid, ack_attempt);
-                            crate::metrics::record_local_departure_retry("acknowledged");
+                            crate::metrics::record_local_departure_retry(
+                                crate::metrics::LocalDepartureRetryOutcome::Acknowledged,
+                            );
                         } else {
                             ack_blocked = true;
                             break;
@@ -263,7 +273,9 @@ pub(crate) async fn run_local_muc_departure_sweep(state: &WebSocketState) {
                                 attempts: pending.attempts,
                                 not_before: pending.not_before,
                             });
-                        crate::metrics::record_local_departure_retry("ack_barrier");
+                        crate::metrics::record_local_departure_retry(
+                            crate::metrics::LocalDepartureRetryOutcome::AckBarrier,
+                        );
                         break;
                     }
                     // A LIVE task still owns a departure of this (room, JID):
@@ -294,7 +306,9 @@ pub(crate) async fn run_local_muc_departure_sweep(state: &WebSocketState) {
                                 attempts: pending.attempts,
                                 not_before: pending.not_before,
                             });
-                        crate::metrics::record_local_departure_retry("in_flight_barrier");
+                        crate::metrics::record_local_departure_retry(
+                            crate::metrics::LocalDepartureRetryOutcome::InFlightBarrier,
+                        );
                         break;
                     }
                     match routes::websocket::ask_leave_bounded(
@@ -409,7 +423,9 @@ pub(crate) async fn run_local_muc_departure_sweep(state: &WebSocketState) {
                                 outcome.acknowledge,
                             )
                             .await;
-                            crate::metrics::record_local_departure_retry("completed");
+                            crate::metrics::record_local_departure_retry(
+                                crate::metrics::LocalDepartureRetryOutcome::Completed,
+                            );
                             if drained_receipts < MAX_RECEIPT_DRAIN {
                                 drained_receipts += 1;
                                 // Re-drive: another (older-nick) receipt of
@@ -449,7 +465,9 @@ pub(crate) async fn run_local_muc_departure_sweep(state: &WebSocketState) {
                                     attempts: pending.attempts,
                                     not_before: pending.not_before,
                                 });
-                            crate::metrics::record_local_departure_retry("requeued");
+                            crate::metrics::record_local_departure_retry(
+                                crate::metrics::LocalDepartureRetryOutcome::Requeued,
+                            );
                             break;
                         }
                         Ok(LeaveDisposition::Deferred { watermark }) => {
@@ -472,16 +490,22 @@ pub(crate) async fn run_local_muc_departure_sweep(state: &WebSocketState) {
                                     attempts: pending.attempts,
                                     not_before: pending.not_before,
                                 });
-                            crate::metrics::record_local_departure_retry("requeued");
+                            crate::metrics::record_local_departure_retry(
+                                crate::metrics::LocalDepartureRetryOutcome::Requeued,
+                            );
                             break;
                         }
                         Ok(LeaveDisposition::NotOccupant) => {
-                            crate::metrics::record_local_departure_retry("not_occupant");
+                            crate::metrics::record_local_departure_retry(
+                                crate::metrics::LocalDepartureRetryOutcome::NotOccupant,
+                            );
 
                             break;
                         }
                         Ok(LeaveDisposition::Superseded) => {
-                            crate::metrics::record_local_departure_retry("superseded");
+                            crate::metrics::record_local_departure_retry(
+                                crate::metrics::LocalDepartureRetryOutcome::Superseded,
+                            );
                             // #1647 (codex round 28): a Superseded answer
                             // consumed ONE unreplayable receipt (or bounced
                             // off a tombstoned attempt) — receipts of OTHER
@@ -525,7 +549,9 @@ pub(crate) async fn run_local_muc_departure_sweep(state: &WebSocketState) {
                                     state, &room, &jid,
                                 );
                             }
-                            crate::metrics::record_local_departure_retry("completed");
+                            crate::metrics::record_local_departure_retry(
+                                crate::metrics::LocalDepartureRetryOutcome::Completed,
+                            );
                             routes::websocket::ack_departure_receipt(
                                 &state.deps.protocol.pending_local_muc_departures,
                                 &actor,
@@ -555,7 +581,9 @@ pub(crate) async fn run_local_muc_departure_sweep(state: &WebSocketState) {
                                     attempts: pending.attempts,
                                     not_before: pending.not_before,
                                 });
-                            crate::metrics::record_local_departure_retry("requeued");
+                            crate::metrics::record_local_departure_retry(
+                                crate::metrics::LocalDepartureRetryOutcome::Requeued,
+                            );
                             break;
                         }
                         Err(_) => {
@@ -608,14 +636,18 @@ pub(crate) async fn run_local_muc_departure_sweep(state: &WebSocketState) {
                         // Destroyed, already absent, or refused because a
                         // newer join bumped the revision: definitive.
                         Ok(outcome) if outcome.is_definitive() => {
-                            crate::metrics::record_local_departure_retry("completed");
+                            crate::metrics::record_local_departure_retry(
+                                crate::metrics::LocalDepartureRetryOutcome::Completed,
+                            );
                             break;
                         }
                         // Retained by the registry (uncertain durable commit,
                         // release backlog, seal ask failure) or the ask itself
                         // failed: still owed.
                         Ok(_) | Err(_) => {
-                            crate::metrics::record_local_departure_retry("requeued");
+                            crate::metrics::record_local_departure_retry(
+                                crate::metrics::LocalDepartureRetryOutcome::Requeued,
+                            );
                             state
                                 .deps
                                 .protocol
@@ -647,11 +679,15 @@ pub(crate) async fn run_local_muc_departure_sweep(state: &WebSocketState) {
                         // absent-room sweeps first (its own budget: ask
                         // timeouts and NotAuthoritative answers do not count).
                         Ok(None) if absent_sweeps >= routes::websocket::ACK_ABSENT_ROOM_RETRIES => {
-                            crate::metrics::record_local_departure_retry("abandoned");
+                            crate::metrics::record_local_departure_retry(
+                                crate::metrics::LocalDepartureRetryOutcome::Abandoned,
+                            );
                             break;
                         }
                         Ok(None) => {
-                            crate::metrics::record_local_departure_retry("requeued");
+                            crate::metrics::record_local_departure_retry(
+                                crate::metrics::LocalDepartureRetryOutcome::Requeued,
+                            );
                             state
                                 .deps
                                 .protocol
@@ -672,11 +708,15 @@ pub(crate) async fn run_local_muc_departure_sweep(state: &WebSocketState) {
                             if routes::websocket::try_ack_departure_receipt(&actor, attempt)
                                 .await =>
                         {
-                            crate::metrics::record_local_departure_retry("acknowledged");
+                            crate::metrics::record_local_departure_retry(
+                                crate::metrics::LocalDepartureRetryOutcome::Acknowledged,
+                            );
                             break;
                         }
                         Ok(Some(_)) | Err(_) => {
-                            crate::metrics::record_local_departure_retry("requeued");
+                            crate::metrics::record_local_departure_retry(
+                                crate::metrics::LocalDepartureRetryOutcome::Requeued,
+                            );
                             state
                                 .deps
                                 .protocol
@@ -707,7 +747,9 @@ pub(crate) async fn run_local_muc_departure_sweep(state: &WebSocketState) {
                     notified,
                 } => match get_room_actor_result(state, &room).await {
                     Ok(None) => {
-                        crate::metrics::record_local_departure_retry("retired");
+                        crate::metrics::record_local_departure_retry(
+                            crate::metrics::LocalDepartureRetryOutcome::Retired,
+                        );
                         break;
                     }
                     Ok(Some(current)) if current.id() != recorded => {
@@ -721,7 +763,9 @@ pub(crate) async fn run_local_muc_departure_sweep(state: &WebSocketState) {
                         };
                     }
                     Ok(Some(_)) | Err(_) => {
-                        crate::metrics::record_local_departure_retry("awaiting_reap");
+                        crate::metrics::record_local_departure_retry(
+                            crate::metrics::LocalDepartureRetryOutcome::AwaitingReap,
+                        );
                         state
                             .deps
                             .protocol
@@ -1749,7 +1793,10 @@ where
             Err(_) => {
                 node_lifecycle.begin_fenced_recovery();
                 fatal_fence.cancel();
-                crate::clustering::metrics::record_orphan_worker_failure("sweep", "timeout");
+                crate::clustering::metrics::record_orphan_worker_failure(
+                    crate::clustering::metrics::OrphanWorker::Sweep,
+                    crate::clustering::metrics::OrphanWorkerFailureReason::Timeout,
+                );
                 OrphanSweepOutcome::TimedOut
             }
         }
@@ -2442,7 +2489,9 @@ impl OrphanReaperWorkers {
             return false;
         }
         if pending.len() >= ORPHAN_WORK_QUEUE_CAPACITY {
-            crate::clustering::metrics::record_orphan_work_queue_backpressure("sm_hydration");
+            crate::clustering::metrics::record_orphan_work_queue_backpressure(
+                crate::clustering::metrics::OrphanWorkQueue::SmHydration,
+            );
             return false;
         }
         pending.insert(
@@ -2453,7 +2502,10 @@ impl OrphanReaperWorkers {
                 reservation,
             },
         );
-        crate::clustering::metrics::record_orphan_work_queue_depth("sm_hydration", pending.len());
+        crate::clustering::metrics::record_orphan_work_queue_depth(
+            crate::clustering::metrics::OrphanWorkQueue::SmHydration,
+            pending.len(),
+        );
         true
     }
 
@@ -2463,7 +2515,10 @@ impl OrphanReaperWorkers {
             .lock()
             .unwrap_or_else(|e| e.into_inner());
         pending.remove(&entity.id);
-        crate::clustering::metrics::record_orphan_work_queue_depth("sm_hydration", pending.len());
+        crate::clustering::metrics::record_orphan_work_queue_depth(
+            crate::clustering::metrics::OrphanWorkQueue::SmHydration,
+            pending.len(),
+        );
     }
 
     fn enqueue_reserved_hydration(
@@ -2486,7 +2541,9 @@ impl OrphanReaperWorkers {
         match self.hydration_tx.try_send(work) {
             Ok(()) => WorkEnqueueOutcome::Enqueued,
             Err(tokio::sync::mpsc::error::TrySendError::Full(work)) => {
-                crate::clustering::metrics::record_orphan_work_queue_backpressure("sm_hydration");
+                crate::clustering::metrics::record_orphan_work_queue_backpressure(
+                    crate::clustering::metrics::OrphanWorkQueue::SmHydration,
+                );
                 let tx = self.hydration_tx.clone();
                 tokio::spawn(async move {
                     let _ = tx.send(work).await;
@@ -2496,7 +2553,9 @@ impl OrphanReaperWorkers {
             Err(tokio::sync::mpsc::error::TrySendError::Closed(_)) => {
                 // The supervisor snapshots this map when it replaces a dead
                 // worker. Retain the exact work so restart can requeue it.
-                crate::clustering::metrics::record_orphan_work_queue_backpressure("sm_hydration");
+                crate::clustering::metrics::record_orphan_work_queue_backpressure(
+                    crate::clustering::metrics::OrphanWorkQueue::SmHydration,
+                );
                 WorkEnqueueOutcome::RetainedForRestart
             }
         }
@@ -2554,20 +2613,24 @@ impl OrphanReaperWorkers {
             return WorkEnqueueOutcome::AlreadyTracked;
         }
         if pending.len() >= ORPHAN_WORK_QUEUE_CAPACITY {
-            crate::clustering::metrics::record_orphan_work_queue_backpressure("room_release");
+            crate::clustering::metrics::record_orphan_work_queue_backpressure(
+                crate::clustering::metrics::OrphanWorkQueue::RoomRelease,
+            );
             return WorkEnqueueOutcome::Rejected;
         }
         pending.insert(key.clone(), work.clone());
         match self.release_tx.try_send(work) {
             Ok(()) => {
                 crate::clustering::metrics::record_orphan_work_queue_depth(
-                    "room_release",
+                    crate::clustering::metrics::OrphanWorkQueue::RoomRelease,
                     pending.len(),
                 );
                 WorkEnqueueOutcome::Enqueued
             }
             Err(tokio::sync::mpsc::error::TrySendError::Full(work)) => {
-                crate::clustering::metrics::record_orphan_work_queue_backpressure("room_release");
+                crate::clustering::metrics::record_orphan_work_queue_backpressure(
+                    crate::clustering::metrics::OrphanWorkQueue::RoomRelease,
+                );
                 let tx = self.release_tx.clone();
                 tokio::spawn(async move {
                     let _ = tx.send(work).await;
@@ -2577,7 +2640,9 @@ impl OrphanReaperWorkers {
             Err(tokio::sync::mpsc::error::TrySendError::Closed(_)) => {
                 // A closed receiver means the supervisor must restart the
                 // worker. Keep this exact fence in its restart inventory.
-                crate::clustering::metrics::record_orphan_work_queue_backpressure("room_release");
+                crate::clustering::metrics::record_orphan_work_queue_backpressure(
+                    crate::clustering::metrics::OrphanWorkQueue::RoomRelease,
+                );
                 WorkEnqueueOutcome::RetainedForRestart
             }
         }
@@ -2644,7 +2709,7 @@ impl OrphanReaperWorkers {
         }
         debug_assert!(hydration_pending.len() <= ORPHAN_WORK_QUEUE_CAPACITY);
         crate::clustering::metrics::record_orphan_work_queue_depth(
-            "sm_hydration",
+            crate::clustering::metrics::OrphanWorkQueue::SmHydration,
             hydration_pending.len(),
         );
         drop(hydration_pending);
@@ -2658,7 +2723,7 @@ impl OrphanReaperWorkers {
         }
         debug_assert!(release_pending.len() <= ORPHAN_WORK_QUEUE_CAPACITY);
         crate::clustering::metrics::record_orphan_work_queue_depth(
-            "room_release",
+            crate::clustering::metrics::OrphanWorkQueue::RoomRelease,
             release_pending.len(),
         );
     }
@@ -2681,7 +2746,10 @@ impl OrphanReaperWorkers {
         // fence would be worse than violating a defensive debug assertion.
         debug_assert!(handoffs.len() < ORPHAN_WORK_QUEUE_CAPACITY);
         handoffs.insert(key, pending);
-        crate::clustering::metrics::record_orphan_work_queue_depth("room_handoff", handoffs.len());
+        crate::clustering::metrics::record_orphan_work_queue_depth(
+            crate::clustering::metrics::OrphanWorkQueue::RoomHandoff,
+            handoffs.len(),
+        );
     }
 
     fn forget_room_handoff(
@@ -2694,7 +2762,10 @@ impl OrphanReaperWorkers {
             .lock()
             .unwrap_or_else(|e| e.into_inner());
         handoffs.remove(&(room_jid.clone(), claim_fence.clone()));
-        crate::clustering::metrics::record_orphan_work_queue_depth("room_handoff", handoffs.len());
+        crate::clustering::metrics::record_orphan_work_queue_depth(
+            crate::clustering::metrics::OrphanWorkQueue::RoomHandoff,
+            handoffs.len(),
+        );
     }
 
     fn pending_room_handoffs(
@@ -2817,7 +2888,7 @@ impl OrphanReaperSupervisor {
                             hydration_pending.lock().unwrap_or_else(|e| e.into_inner());
                         pending.remove(&key);
                         crate::clustering::metrics::record_orphan_work_queue_depth(
-                            "sm_hydration",
+                            crate::clustering::metrics::OrphanWorkQueue::SmHydration,
                             pending.len(),
                         );
                         info!("orphan reaper: targeted hydration work complete");
@@ -2848,7 +2919,7 @@ impl OrphanReaperSupervisor {
                                     hydration_pending.lock().unwrap_or_else(|e| e.into_inner());
                                 pending.remove(&key);
                                 crate::clustering::metrics::record_orphan_work_queue_depth(
-                                    "sm_hydration",
+                                    crate::clustering::metrics::OrphanWorkQueue::SmHydration,
                                     pending.len(),
                                 );
                             }
@@ -2884,7 +2955,7 @@ impl OrphanReaperSupervisor {
                                     hydration_pending.lock().unwrap_or_else(|e| e.into_inner());
                                 pending.remove(&key);
                                 crate::clustering::metrics::record_orphan_work_queue_depth(
-                                    "sm_hydration",
+                                    crate::clustering::metrics::OrphanWorkQueue::SmHydration,
                                     pending.len(),
                                 );
                             }
@@ -2913,7 +2984,10 @@ impl OrphanReaperSupervisor {
                 .lock()
                 .unwrap_or_else(|e| e.into_inner())
                 .clear();
-            crate::clustering::metrics::record_orphan_work_queue_depth("sm_hydration", 0);
+            crate::clustering::metrics::record_orphan_work_queue_depth(
+                crate::clustering::metrics::OrphanWorkQueue::SmHydration,
+                0,
+            );
         });
 
         let release_cancel = cancel.clone();
@@ -2952,7 +3026,7 @@ impl OrphanReaperSupervisor {
                         let mut pending = release_pending.lock().unwrap_or_else(|e| e.into_inner());
                         pending.remove(&key);
                         crate::clustering::metrics::record_orphan_work_queue_depth(
-                            "room_release",
+                            crate::clustering::metrics::OrphanWorkQueue::RoomRelease,
                             pending.len(),
                         );
                     }
@@ -2976,7 +3050,10 @@ impl OrphanReaperSupervisor {
                 .lock()
                 .unwrap_or_else(|e| e.into_inner())
                 .clear();
-            crate::clustering::metrics::record_orphan_work_queue_depth("room_release", 0);
+            crate::clustering::metrics::record_orphan_work_queue_depth(
+                crate::clustering::metrics::OrphanWorkQueue::RoomRelease,
+                0,
+            );
         });
         Self {
             registry,
@@ -3072,12 +3149,21 @@ impl OrphanReaperSupervisor {
         for (worker, task) in self.tasks.drain(..) {
             if let Err(error) = task.await {
                 let reason = if error.is_panic() {
-                    "panic"
+                    crate::clustering::metrics::OrphanWorkerFailureReason::Panic
                 } else {
-                    "cancelled"
+                    crate::clustering::metrics::OrphanWorkerFailureReason::Cancelled
+                };
+                let worker = match worker {
+                    "sm_hydration" => crate::clustering::metrics::OrphanWorker::SmHydration,
+                    "room_release" => crate::clustering::metrics::OrphanWorker::RoomRelease,
+                    _ => continue,
                 };
                 crate::clustering::metrics::record_orphan_worker_failure(worker, reason);
-                error!(worker, %error, "orphan reaper worker failed");
+                error!(
+                    worker = worker.as_str(),
+                    error_class = "join_failed",
+                    "orphan reaper worker failed"
+                );
             }
         }
         self
@@ -3094,12 +3180,21 @@ impl OrphanReaperSupervisor {
         for (worker, task) in self.tasks.drain(..) {
             if let Err(error) = task.await {
                 let reason = if error.is_panic() {
-                    "panic"
+                    crate::clustering::metrics::OrphanWorkerFailureReason::Panic
                 } else {
-                    "cancelled"
+                    crate::clustering::metrics::OrphanWorkerFailureReason::Cancelled
+                };
+                let worker = match worker {
+                    "sm_hydration" => crate::clustering::metrics::OrphanWorker::SmHydration,
+                    "room_release" => crate::clustering::metrics::OrphanWorker::RoomRelease,
+                    _ => continue,
                 };
                 crate::clustering::metrics::record_orphan_worker_failure(worker, reason);
-                error!(worker, %error, "orphan reaper worker failed");
+                error!(
+                    worker = worker.as_str(),
+                    error_class = "join_failed",
+                    "orphan reaper worker failed"
+                );
             }
         }
         let retirement_results = futures::future::join_all(unwon_reservations.into_iter().map(
@@ -3137,15 +3232,20 @@ impl OrphanReaperSupervisor {
                     Ok(Ok(_)) => {}
                     Ok(Err(error)) => {
                         crate::clustering::metrics::record_orphan_terminal_cleanup_failure(
-                            "sm_hydration",
-                            "error",
+                            crate::clustering::metrics::OrphanTerminalCleanupLane::SmHydration,
+                            crate::clustering::metrics::OrphanTerminalCleanupFailureReason::Error,
                         );
-                        debug!(%error, entity_id = %work.entity.id, "orphan reaper: terminal SM cleanup failed");
+                        let _ = error;
+                        debug!(
+                            error_class = "backend",
+                            entity_id = %work.entity.id,
+                            "orphan reaper: terminal SM cleanup failed"
+                        );
                     }
                     Err(_) => {
                         crate::clustering::metrics::record_orphan_terminal_cleanup_failure(
-                            "sm_hydration",
-                            "timeout",
+                            crate::clustering::metrics::OrphanTerminalCleanupLane::SmHydration,
+                            crate::clustering::metrics::OrphanTerminalCleanupFailureReason::Timeout,
                         );
                         debug!(entity_id = %work.entity.id, "orphan reaper: terminal SM cleanup timed out");
                     }
@@ -3154,7 +3254,10 @@ impl OrphanReaperSupervisor {
             .instrument(span)
         }))
         .await;
-        crate::clustering::metrics::record_orphan_work_queue_depth("sm_hydration", 0);
+        crate::clustering::metrics::record_orphan_work_queue_depth(
+            crate::clustering::metrics::OrphanWorkQueue::SmHydration,
+            0,
+        );
         futures::future::join_all(releases.into_iter().map(|work| {
             let span = orphan_work_span("room_release", &work.sweep_context);
             async move {
@@ -3168,15 +3271,20 @@ impl OrphanReaperSupervisor {
                     Ok(Ok(_)) => {}
                     Ok(Err(error)) => {
                         crate::clustering::metrics::record_orphan_terminal_cleanup_failure(
-                            "room_release",
-                            "error",
+                            crate::clustering::metrics::OrphanTerminalCleanupLane::RoomRelease,
+                            crate::clustering::metrics::OrphanTerminalCleanupFailureReason::Error,
                         );
-                        debug!(%error, entity_id = %work.entity.id, "orphan reaper: terminal exact cleanup failed");
+                        let _ = error;
+                        debug!(
+                            error_class = "backend",
+                            entity_id = %work.entity.id,
+                            "orphan reaper: terminal exact cleanup failed"
+                        );
                     }
                     Err(_) => {
                         crate::clustering::metrics::record_orphan_terminal_cleanup_failure(
-                            "room_release",
-                            "timeout",
+                            crate::clustering::metrics::OrphanTerminalCleanupLane::RoomRelease,
+                            crate::clustering::metrics::OrphanTerminalCleanupFailureReason::Timeout,
                         );
                         debug!(entity_id = %work.entity.id, "orphan reaper: terminal exact cleanup timed out");
                     }
@@ -3185,8 +3293,14 @@ impl OrphanReaperSupervisor {
             .instrument(span)
         }))
         .await;
-        crate::clustering::metrics::record_orphan_work_queue_depth("room_release", 0);
-        crate::clustering::metrics::record_orphan_work_queue_depth("room_handoff", 0);
+        crate::clustering::metrics::record_orphan_work_queue_depth(
+            crate::clustering::metrics::OrphanWorkQueue::RoomRelease,
+            0,
+        );
+        crate::clustering::metrics::record_orphan_work_queue_depth(
+            crate::clustering::metrics::OrphanWorkQueue::RoomHandoff,
+            0,
+        );
         room_handoffs
     }
 
@@ -5144,7 +5258,9 @@ async fn run_orphan_reaper_sweep_with_workers(
             }
             if !workers.has_release_capacity() {
                 room_page_processed = false;
-                crate::clustering::metrics::record_orphan_work_queue_backpressure("room_release");
+                crate::clustering::metrics::record_orphan_work_queue_backpressure(
+                    crate::clustering::metrics::OrphanWorkQueue::RoomRelease,
+                );
                 warn!("orphan reaper: pausing RoomActor steals because exact-release cleanup capacity is exhausted");
                 break;
             }
@@ -5164,7 +5280,9 @@ async fn run_orphan_reaper_sweep_with_workers(
                 Ok(true) => {}
                 Ok(false) => {
                     room_page_processed = false;
-                    crate::clustering::metrics::record_orphan_work_queue_backpressure("room_adoption");
+                    crate::clustering::metrics::record_orphan_work_queue_backpressure(
+                        crate::clustering::metrics::OrphanWorkQueue::RoomAdoption,
+                    );
                     warn!("orphan reaper: pausing RoomActor steals because adoption capacity is exhausted");
                     break;
                 }
@@ -5352,12 +5470,30 @@ async fn run_orphan_reaper_sweep_with_workers(
             sweep_failed = true;
         }
         for (outcome, count) in [
-            ("hydrated", room_hydrated),
-            ("released", room_released),
-            ("already_live", room_already_live),
-            ("pending_retry", room_pending_retry),
-            ("lost_race", room_lost_race),
-            ("failed", room_failed),
+            (
+                crate::clustering::metrics::RoomOrphanReconciliationOutcome::Hydrated,
+                room_hydrated,
+            ),
+            (
+                crate::clustering::metrics::RoomOrphanReconciliationOutcome::Released,
+                room_released,
+            ),
+            (
+                crate::clustering::metrics::RoomOrphanReconciliationOutcome::AlreadyLive,
+                room_already_live,
+            ),
+            (
+                crate::clustering::metrics::RoomOrphanReconciliationOutcome::PendingRetry,
+                room_pending_retry,
+            ),
+            (
+                crate::clustering::metrics::RoomOrphanReconciliationOutcome::LostRace,
+                room_lost_race,
+            ),
+            (
+                crate::clustering::metrics::RoomOrphanReconciliationOutcome::Failed,
+                room_failed,
+            ),
         ] {
             if count > 0 {
                 crate::clustering::metrics::record_room_orphan_reconciliation(outcome, count);

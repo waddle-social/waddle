@@ -130,8 +130,9 @@ pub(crate) async fn run_shutdown_drain<L>(
                 metrics::record_claims_released_on_drain(attempted);
             }
             Err(error) => {
+                let _ = error;
                 tracing::warn!(
-                    %error,
+                    error_class = "backend",
                     count = attempted,
                     "clustering drain: release_many failed; entities remain claimed \
                      (fenced-safe, reclaimed later)"
@@ -222,8 +223,9 @@ impl waddle_xmpp::ownership::RolloutBackoff for PostgresRolloutBackoff {
                 current_generation.as_deref(),
             ),
             Err(error) => {
+                let _ = error;
                 tracing::debug!(
-                    %error,
+                    error_class = "backend",
                     "clustering: current_generation lookup failed; proceeding without backoff"
                 );
                 Duration::ZERO
