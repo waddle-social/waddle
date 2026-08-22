@@ -50,6 +50,29 @@ const ROOM_HEALTH_CHECK_TIMEOUT: Duration = Duration::from_secs(5);
 const USER_HEALTH_CHECK_TIMEOUT: Duration = Duration::from_secs(5);
 const USER_FORCE_DETACH_ACK_TIMEOUT: Duration = Duration::from_secs(2);
 
+#[derive(Clone, Copy, Debug)]
+enum LocalClaimsErrorClass {
+    InvalidEntityId,
+    RegistryUnavailable,
+    MailboxUnavailable,
+}
+
+impl LocalClaimsErrorClass {
+    const fn as_str(self) -> &'static str {
+        match self {
+            Self::InvalidEntityId => "invalid_entity_id",
+            Self::RegistryUnavailable => "registry_unavailable",
+            Self::MailboxUnavailable => "mailbox_unavailable",
+        }
+    }
+}
+
+impl std::fmt::Display for LocalClaimsErrorClass {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+
 /// See the module doc for the construction-order rationale.
 pub struct SmSessionLocalClaims {
     registry: OnceLock<Arc<InMemorySmSessionRegistry>>,
@@ -188,7 +211,7 @@ impl LocallyClaimedEntities for SmSessionLocalClaims {
                     | waddle_xmpp::stream_management::ReclaimedHydrationOutcome::PoisonReleased
                     | waddle_xmpp::stream_management::ReclaimedHydrationOutcome::StaleIdentity,
                 ) => {
-                    if let Err(error) = registry
+                    if let Err(_error) = registry
                         .release_reclaimed_claim(entity, &fence, *reservation)
                         .await
                     {
@@ -198,14 +221,14 @@ impl LocallyClaimedEntities for SmSessionLocalClaims {
                             "sm_session_rehydrate: failed to release reclaimed claim",
                         );
                         tracing::warn!(
+                            error_class = %LocalClaimsErrorClass::RegistryUnavailable,
                             entity_id = %entity.id,
-                            %error,
                             "SmSessionLocalClaims::hydrate_reclaimed: terminal exact release failed; responsibility retained for retry"
                         );
                     }
                 }
                 Ok(_) => {}
-                Err(error) => {
+                Err(_error) => {
                     // Rehydrate failed before ownership transfer: this is not protocol
                     // failure, but it should still export a failed span for incident
                     // detection and operator alerting.
@@ -213,8 +236,8 @@ impl LocallyClaimedEntities for SmSessionLocalClaims {
                         "sm_session_rehydrate: failed to hydrate reclaimed claim",
                     );
                     tracing::warn!(
+                        error_class = %LocalClaimsErrorClass::RegistryUnavailable,
                         entity_id = %entity.id,
-                        %error,
                         "SmSessionLocalClaims::hydrate_reclaimed: registry hydrate_reclaimed failed"
                     );
                     return ReclaimedHydrationHandoff::NotAccepted;
@@ -275,10 +298,10 @@ impl RoomLocalClaims {
         }
         match entity.id.parse::<BareJid>() {
             Ok(jid) => Some(jid),
-            Err(error) => {
+            Err(_error) => {
                 tracing::warn!(
+                    error_class = %LocalClaimsErrorClass::InvalidEntityId,
                     id = %entity.id,
-                    %error,
                     "RoomLocalClaims: entity id is not a valid room JID"
                 );
                 None
@@ -312,9 +335,9 @@ impl LocallyClaimedEntities for RoomLocalClaims {
                     .map(|jid| Entity::new(EntityType::RoomActor, jid.to_string()))
                     .collect()
             }
-            Err(error) => {
+            Err(_error) => {
                 tracing::warn!(
-                    %error,
+                    error_class = %LocalClaimsErrorClass::RegistryUnavailable,
                     "RoomLocalClaims::owned: room registry list_rooms failed; \
                      reporting no owned rooms this interval (fail-safe: a \
                      wedged/unreachable registry cannot report ownership it \
@@ -523,10 +546,10 @@ impl UserLocalClaims {
         }
         match entity.id.parse::<BareJid>() {
             Ok(jid) => Some(jid),
-            Err(error) => {
+            Err(_error) => {
                 tracing::warn!(
+                    error_class = %LocalClaimsErrorClass::InvalidEntityId,
                     id = %entity.id,
-                    %error,
                     "UserLocalClaims: entity id is not a valid user bare JID"
                 );
                 None
@@ -548,7 +571,7 @@ impl UserLocalClaims {
         {
             Ok(Some(actor_ref)) => actor_ref,
             Ok(None) => return Vec::new(),
-            Err(error) => {
+            Err(_error) => {
                 // Missing actor handle after lookup means this claim is no longer
                 // actively represented; demotion continues via best-effort cleanup,
                 // but the span must still record the dependency failure.
@@ -556,8 +579,8 @@ impl UserLocalClaims {
                     "user_local_claims: user registry lookup failed before force-detach",
                 );
                 tracing::warn!(
+                    error_class = %LocalClaimsErrorClass::RegistryUnavailable,
                     jid = %bare_jid,
-                    ?error,
                     "UserLocalClaims::demote: user registry lookup failed before force-detach"
                 );
                 return Vec::new();
@@ -570,7 +593,7 @@ impl UserLocalClaims {
             .await
         {
             Ok(resources) => resources,
-            Err(error) => {
+            Err(_error) => {
                 // Resource enumeration requires a live actor for force-detach;
                 // failure here means an internal path diverged from best-effort
                 // cleanup assumptions.
@@ -578,8 +601,8 @@ impl UserLocalClaims {
                     "user_local_claims: failed to enumerate user actor resources",
                 );
                 tracing::warn!(
+                    error_class = %LocalClaimsErrorClass::RegistryUnavailable,
                     jid = %bare_jid,
-                    ?error,
                     "UserLocalClaims::demote: UserActor resource enumeration failed before force-detach"
                 );
                 Vec::new()
@@ -714,10 +737,10 @@ impl UserLocalClaims {
                         );
                     }
                 },
-                Err(error) => {
+                Err(_error) => {
                     tracing::warn!(
+                        error_class = %LocalClaimsErrorClass::MailboxUnavailable,
                         jid = %jid,
-                        ?error,
                         "UserLocalClaims::demote: force-detach request could not be queued; leaving registry entry for connection-owned cleanup"
                     );
                     // If the detach request cannot be queued, we intentionally defer cleanup,
@@ -771,9 +794,9 @@ impl LocallyClaimedEntities for UserLocalClaims {
                 .into_iter()
                 .map(|jid| Entity::new(EntityType::UserActor, jid.to_string()))
                 .collect(),
-            Err(error) => {
+            Err(_error) => {
                 tracing::warn!(
-                    ?error,
+                    error_class = %LocalClaimsErrorClass::RegistryUnavailable,
                     "UserLocalClaims::owned: user registry list_users failed; \
                      skipping user reconcile this tick (no transport fallback: #1680)"
                 );
@@ -832,13 +855,13 @@ impl LocallyClaimedEntities for UserLocalClaims {
                 );
             }
             Ok(false) => {}
-            Err(error) => {
+            Err(_error) => {
                 // UserActor demotion failed in local-claim cleanup; this is an internal
                 // operation failure and should remain queryable by span status.
                 crate::telemetry::mark_span_error("user_local_claims: user actor demotion failed");
                 tracing::warn!(
+                    error_class = %LocalClaimsErrorClass::RegistryUnavailable,
                     jid = %bare_jid,
-                    ?error,
                     "UserLocalClaims::demote: user registry demotion failed"
                 );
             }
@@ -870,10 +893,10 @@ impl LocallyClaimedEntities for UserLocalClaims {
                 );
                 return false;
             }
-            Err(error) => {
+            Err(_error) => {
                 tracing::warn!(
+                    error_class = %LocalClaimsErrorClass::RegistryUnavailable,
                     jid = %bare_jid,
-                    ?error,
                     "UserLocalClaims::health_check: user registry lookup failed; \
                      reporting UNHEALTHY"
                 );
@@ -915,8 +938,11 @@ impl LocallyClaimedEntities for UserLocalClaims {
             .await
         {
             Ok(users) => users,
-            Err(error) => {
-                tracing::warn!(?error, "UserLocalClaims exact-owner listing failed");
+            Err(_error) => {
+                tracing::warn!(
+                    error_class = %LocalClaimsErrorClass::RegistryUnavailable,
+                    "UserLocalClaims exact-owner listing failed"
+                );
                 return;
             }
         };
@@ -940,13 +966,17 @@ impl LocallyClaimedEntities for UserLocalClaims {
                     );
                 }
                 Ok(None) => {}
-                Err(error) => {
+                Err(_error) => {
                     // Exact-owner demotion failed after ownership check; this is an
                     // internal consistency error during cluster recovery.
                     crate::telemetry::mark_span_error(
                         "user_local_claims: exact-owner demotion failed",
                     );
-                    tracing::warn!(jid = %bare_jid, ?error, "exact-owner UserActor demotion failed");
+                    tracing::warn!(
+                        error_class = %LocalClaimsErrorClass::RegistryUnavailable,
+                        jid = %bare_jid,
+                        "exact-owner UserActor demotion failed"
+                    );
                 }
             }
         }

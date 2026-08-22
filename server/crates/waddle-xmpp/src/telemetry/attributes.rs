@@ -29,6 +29,83 @@ pub trait MetricAttribute: sealed::Sealed {
     }
 }
 
+/// `operation` — the externally requested ownership mutation.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ClaimOp {
+    Acquire,
+    EnsureClaimed,
+    StealStale,
+    StealForResume,
+    Release,
+    ReleaseExact,
+    ReleaseMany,
+}
+
+impl sealed::Sealed for ClaimOp {}
+impl MetricAttribute for ClaimOp {
+    fn key(&self) -> &'static str {
+        "operation"
+    }
+
+    fn value(&self) -> &'static str {
+        match self {
+            Self::Acquire => "acquire",
+            Self::EnsureClaimed => "ensure_claimed",
+            Self::StealStale => "steal_stale",
+            Self::StealForResume => "steal_for_resume",
+            Self::Release => "release",
+            Self::ReleaseExact => "release_exact",
+            Self::ReleaseMany => "release_many",
+        }
+    }
+}
+
+/// `result` — the bounded result class of an ownership mutation.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ClaimResult {
+    Ok,
+    Rejected,
+    Backend,
+}
+
+impl sealed::Sealed for ClaimResult {}
+impl MetricAttribute for ClaimResult {
+    fn key(&self) -> &'static str {
+        "result"
+    }
+
+    fn value(&self) -> &'static str {
+        match self {
+            Self::Ok => "ok",
+            Self::Rejected => "rejected",
+            Self::Backend => "backend",
+        }
+    }
+}
+
+/// `result` — the bounded result class of an advisory ownership fence.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FenceResult {
+    Ok,
+    Rejected,
+    Backend,
+}
+
+impl sealed::Sealed for FenceResult {}
+impl MetricAttribute for FenceResult {
+    fn key(&self) -> &'static str {
+        "result"
+    }
+
+    fn value(&self) -> &'static str {
+        match self {
+            Self::Ok => "ok",
+            Self::Rejected => "rejected",
+            Self::Backend => "backend",
+        }
+    }
+}
+
 /// `kind` — what flavor of message traffic a sample counts.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum MessageKind {

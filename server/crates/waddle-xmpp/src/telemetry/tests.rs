@@ -7,7 +7,227 @@ use super::attributes::{
 };
 use super::test_support;
 use super::validate_metric_name;
+use async_trait::async_trait;
 use std::time::Duration;
+
+#[tokio::test]
+async fn observed_claim_store_exports_one_sample_per_external_operation() {
+    use crate::ownership::{
+        verify_resume_identity, ClaimStore, Entity, EntityType, ExactReleaseOutcome,
+        InProcessClaimStore, NodeIdentity, ObservedClaimStore, StalePredicate,
+    };
+
+    let guard = test_support::acquire().await;
+    let store = ObservedClaimStore::new(InProcessClaimStore::new());
+    let owner = NodeIdentity::new("owner", "epoch-a");
+    let successor = NodeIdentity::new("successor", "epoch-b");
+    let entity = |id| Entity::new(EntityType::SmSession, id);
+
+    let acquired = store
+        .acquire(&entity("acquire"), &owner)
+        .await
+        .expect("acquire");
+    assert!(store.acquire(&entity("acquire"), &successor).await.is_err());
+    let ensured = store
+        .ensure_claimed(&entity("ensure"), &owner)
+        .await
+        .expect("ensure");
+    assert!(store
+        .fence(&entity("ensure"), &owner, ensured)
+        .await
+        .expect("fence"));
+    assert!(!store
+        .fence(&entity("ensure"), &successor, ensured)
+        .await
+        .expect("rejected fence"));
+    let stolen = store
+        .steal_stale(
+            &entity("acquire"),
+            acquired,
+            StalePredicate::OwnerStale,
+            &successor,
+        )
+        .await
+        .expect("steal stale");
+    let jid = "alice@example.com".parse().expect("jid");
+    let proof = verify_resume_identity(&jid, &jid).expect("proof");
+    let resumed = store
+        .steal_for_resume(&entity("acquire"), stolen, proof, &owner)
+        .await
+        .expect("steal for resume");
+    store
+        .release(&entity("missing"), &owner, resumed)
+        .await
+        .expect("release");
+    assert_eq!(
+        store
+            .release_exact(&entity("missing"), &owner, resumed)
+            .await
+            .expect("release exact"),
+        ExactReleaseOutcome::NotOwned
+    );
+    store.release_many(&[], &owner).await.expect("release many");
+
+    for (operation, result) in [
+        ("acquire", "ok"),
+        ("acquire", "rejected"),
+        ("ensure_claimed", "ok"),
+        ("steal_stale", "ok"),
+        ("steal_for_resume", "ok"),
+        ("release", "ok"),
+        ("release_exact", "rejected"),
+        ("release_many", "ok"),
+    ] {
+        assert_eq!(
+            guard.counter_sum(
+                "waddle.clustering.claim.mutations",
+                &[("operation", operation), ("result", result)],
+            ),
+            Some(1),
+            "unexpected sample count for {operation}/{result}"
+        );
+    }
+    assert_eq!(
+        guard.counter_sum("waddle.clustering.fence.results", &[("result", "ok")]),
+        Some(1)
+    );
+    assert_eq!(
+        guard.counter_sum("waddle.clustering.fence.results", &[("result", "rejected")],),
+        Some(1)
+    );
+}
+
+struct AcquireDelegatingClaimStore {
+    inner: crate::ownership::InProcessClaimStore,
+}
+
+#[async_trait]
+impl crate::ownership::ClaimStore for AcquireDelegatingClaimStore {
+    async fn ensure_schema(&self) -> Result<(), crate::ownership::ClaimError> {
+        self.inner.ensure_schema().await
+    }
+
+    async fn acquire(
+        &self,
+        entity: &crate::ownership::Entity,
+        me: &crate::ownership::NodeIdentity,
+    ) -> Result<crate::ownership::ClaimEpoch, crate::ownership::ClaimError> {
+        self.inner.acquire(entity, me).await
+    }
+
+    async fn ensure_claimed(
+        &self,
+        entity: &crate::ownership::Entity,
+        me: &crate::ownership::NodeIdentity,
+    ) -> Result<crate::ownership::ClaimEpoch, crate::ownership::ClaimError> {
+        self.inner.acquire(entity, me).await
+    }
+
+    async fn steal_stale(
+        &self,
+        entity: &crate::ownership::Entity,
+        observed: crate::ownership::ClaimEpoch,
+        staleness: crate::ownership::StalePredicate,
+        me: &crate::ownership::NodeIdentity,
+    ) -> Result<crate::ownership::ClaimEpoch, crate::ownership::ClaimError> {
+        self.inner
+            .steal_stale(entity, observed, staleness, me)
+            .await
+    }
+
+    async fn steal_for_resume(
+        &self,
+        entity: &crate::ownership::Entity,
+        observed: crate::ownership::ClaimEpoch,
+        witness: crate::ownership::ResumeIdentityProof,
+        me: &crate::ownership::NodeIdentity,
+    ) -> Result<crate::ownership::ClaimEpoch, crate::ownership::ClaimError> {
+        self.inner
+            .steal_for_resume(entity, observed, witness, me)
+            .await
+    }
+
+    async fn current_claim(
+        &self,
+        entity: &crate::ownership::Entity,
+    ) -> Result<Option<crate::ownership::ClaimSnapshot>, crate::ownership::ClaimError> {
+        self.inner.current_claim(entity).await
+    }
+
+    async fn current_claim_after_pending_writes(
+        &self,
+        entity: &crate::ownership::Entity,
+    ) -> Result<Option<crate::ownership::ClaimSnapshot>, crate::ownership::ClaimError> {
+        self.inner.current_claim_after_pending_writes(entity).await
+    }
+
+    async fn fence(
+        &self,
+        entity: &crate::ownership::Entity,
+        me: &crate::ownership::NodeIdentity,
+        mine: crate::ownership::ClaimEpoch,
+    ) -> Result<bool, crate::ownership::ClaimError> {
+        self.inner.fence(entity, me, mine).await
+    }
+
+    async fn release(
+        &self,
+        entity: &crate::ownership::Entity,
+        me: &crate::ownership::NodeIdentity,
+        mine: crate::ownership::ClaimEpoch,
+    ) -> Result<(), crate::ownership::ClaimError> {
+        self.inner.release(entity, me, mine).await
+    }
+
+    async fn release_exact(
+        &self,
+        entity: &crate::ownership::Entity,
+        me: &crate::ownership::NodeIdentity,
+        mine: crate::ownership::ClaimEpoch,
+    ) -> Result<crate::ownership::ExactReleaseOutcome, crate::ownership::ClaimError> {
+        self.inner.release_exact(entity, me, mine).await
+    }
+
+    async fn release_many(
+        &self,
+        entities: &[crate::ownership::Entity],
+        me: &crate::ownership::NodeIdentity,
+    ) -> Result<(), crate::ownership::ClaimError> {
+        self.inner.release_many(entities, me).await
+    }
+}
+
+#[tokio::test]
+async fn observed_claim_store_counts_only_the_outer_ensure_claimed_call() {
+    use crate::ownership::{ClaimStore, Entity, EntityType, NodeIdentity, ObservedClaimStore};
+
+    let guard = test_support::acquire().await;
+    let store = ObservedClaimStore::new(AcquireDelegatingClaimStore {
+        inner: crate::ownership::InProcessClaimStore::new(),
+    });
+    let entity = Entity::new(EntityType::SmSession, "nested-ensure");
+    let owner = NodeIdentity::new("owner", "epoch-a");
+
+    store
+        .ensure_claimed(&entity, &owner)
+        .await
+        .expect("ensure claimed");
+
+    assert_eq!(
+        guard.counter_sum(
+            "waddle.clustering.claim.mutations",
+            &[("operation", "ensure_claimed"), ("result", "ok")]
+        ),
+        Some(1)
+    );
+    assert_eq!(
+        guard.counter_sum(
+            "waddle.clustering.claim.mutations",
+            &[("operation", "acquire"), ("result", "ok")]
+        ),
+        Some(0)
+    );
+}
 
 #[tokio::test]
 async fn bounded_flush_exports_shutdown_tail_counter() {
