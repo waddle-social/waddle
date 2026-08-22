@@ -312,6 +312,15 @@ pub(crate) async fn run_local_muc_departure_sweep(state: &WebSocketState) {
                         Ok(LeaveDisposition::Left(outcome)) => {
                             match cause {
                                 OccupancyLeaveCause::Disconnect => {
+                                    // Idempotent SFU teardown: the live task
+                                    // may have died between its leave ask and
+                                    // its own unregister call, leaving the
+                                    // media participant allocated until the
+                                    // SFU's long timeout (#1647, codex
+                                    // closing round).
+                                    routes::websocket::muc_call_sfu::unregister_participant_from_room(
+                                        state, &room, &jid,
+                                    );
                                     broadcast_muc_leave_to_remaining_resumable(
                                         state,
                                         &room,
@@ -420,6 +429,27 @@ pub(crate) async fn run_local_muc_departure_sweep(state: &WebSocketState) {
                                 };
                                 continue;
                             }
+                            // The per-pass bound was reached with receipts
+                            // possibly still owed: requeue for the next sweep
+                            // instead of dropping the responsibility (#1647,
+                            // codex closing round).
+                            state
+                                .deps
+                                .protocol
+                                .pending_local_muc_departures
+                                .requeue_with_backoff(PendingLocalDeparture {
+                                    item: LocalDepartureItem::RoomDeparture {
+                                        room,
+                                        jid,
+                                        cause,
+                                        selector,
+                                        attempt,
+                                        notified: std::collections::HashSet::new(),
+                                    },
+                                    attempts: pending.attempts,
+                                    not_before: pending.not_before,
+                                });
+                            crate::metrics::record_local_departure_retry("requeued");
                             break;
                         }
                         Ok(LeaveDisposition::Deferred { watermark }) => {
