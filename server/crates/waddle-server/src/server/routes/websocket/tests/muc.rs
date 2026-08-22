@@ -144,7 +144,7 @@ async fn muc_join_after_guarded_dormancy_eviction_respawns_room() {
         .expect("create room");
     let probe = actor.ask(IsDormant).await.expect("probe");
     assert!(probe.dormant);
-    let destroyed: bool = state
+    let destroyed = state
         .deps
         .protocol
         .room_registry
@@ -154,7 +154,8 @@ async fn muc_join_after_guarded_dormancy_eviction_respawns_room() {
             guard: SealGuard::Dormant,
         })
         .await
-        .expect("guarded destroy");
+        .expect("guarded destroy")
+        .destroyed();
     assert!(destroyed, "dormant room evicted");
 
     // The join after eviction must succeed against a respawned room.

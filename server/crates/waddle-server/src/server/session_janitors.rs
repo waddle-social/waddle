@@ -494,12 +494,15 @@ pub(crate) async fn run_local_muc_departure_sweep(state: &WebSocketState) {
                     .await
                     {
                         // Destroyed, already absent, or refused because a
-                        // newer join bumped the revision: all definitive.
-                        Ok(_) => {
+                        // newer join bumped the revision: definitive.
+                        Ok(outcome) if outcome.is_definitive() => {
                             crate::metrics::record_local_departure_retry("completed");
                             break;
                         }
-                        Err(_) => {
+                        // Retained by the registry (uncertain durable commit,
+                        // release backlog, seal ask failure) or the ask itself
+                        // failed: still owed.
+                        Ok(_) | Err(_) => {
                             crate::metrics::record_local_departure_retry("requeued");
                             state
                                 .deps
@@ -7289,11 +7292,11 @@ pub(crate) async fn sweep_dormant_rooms_once(
             })
             .await
         {
-            Ok(true) => {
+            Ok(outcome) if outcome.destroyed() => {
                 counts.evicted += 1;
                 debug!(room = %room_jid, "room dormancy janitor: evicted dormant room");
             }
-            Ok(false) => {}
+            Ok(_) => {}
             Err(error) => {
                 counts.failed = true;
                 warn!(
@@ -9990,7 +9993,7 @@ mod local_muc_departure_tests {
             )
             .await
             .expect("destroy dormant room");
-        assert!(destroyed, "the test room should be reapable");
+        assert!(destroyed.destroyed(), "the test room should be reapable");
 
         // The registry retires the actor asynchronously and a requeued item
         // re-arms with a 2s backoff, so converge with a bounded poll.

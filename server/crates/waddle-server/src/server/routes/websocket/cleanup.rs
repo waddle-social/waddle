@@ -504,7 +504,7 @@ pub(crate) fn evict_empty_room_detached(
     let room_jid = room_jid.clone();
     let occupancy_revision = outcome.occupancy_revision;
     tokio::spawn(async move {
-        if let Err(error) = RoomRegistry::wrap(registry)
+        match RoomRegistry::wrap(registry)
             .destroy_room_if_inactive(
                 room_jid.clone(),
                 occupancy_revision,
@@ -512,13 +512,17 @@ pub(crate) fn evict_empty_room_detached(
             )
             .await
         {
-            // The destroy stays owed: retain it for the janitor, which
-            // retries the bounded ask until the registry answers.
-            warn!(room = %room_jid, error = %error, "Detached guarded destroy of empty room failed; retained for retry");
-            pending.record(LocalDepartureItem::EvictEmptyRoom {
-                room: room_jid,
-                occupancy_revision,
-            });
+            Ok(outcome) if outcome.is_definitive() => {}
+            // Retained by the registry, or the ask failed: the destroy stays
+            // owed — retain it for the janitor, which retries the bounded ask
+            // until the registry answers definitively.
+            outcome => {
+                warn!(room = %room_jid, ?outcome, "Detached guarded destroy of empty room not definitive; retained for retry");
+                pending.record(LocalDepartureItem::EvictEmptyRoom {
+                    room: room_jid,
+                    occupancy_revision,
+                });
+            }
         }
     });
 }
@@ -546,6 +550,7 @@ pub(crate) async fn maybe_evict_empty_room(
     room_jid: &BareJid,
     outcome: &LeaveOutcome,
 ) -> bool {
+    let outcome_revision = outcome.occupancy_revision;
     if !(outcome.removed_last_session && outcome.occupant_count == 0 && !outcome.is_persistent) {
         return true;
     }
@@ -567,7 +572,18 @@ pub(crate) async fn maybe_evict_empty_room(
     )
     .await
     {
-        Ok(Ok(destroyed)) => destroyed,
+        Ok(Ok(outcome)) if outcome.is_definitive() => outcome.destroyed(),
+        Ok(Ok(outcome)) => {
+            // Retained by the registry: hand the owed destroy to the janitor.
+            warn!(room = %room_jid, ?outcome, "Guarded destroy of empty room retained; requeued");
+            state.deps.protocol.pending_local_muc_departures.record(
+                LocalDepartureItem::EvictEmptyRoom {
+                    room: room_jid.clone(),
+                    occupancy_revision: outcome_revision,
+                },
+            );
+            return true;
+        }
         Ok(Err(error)) => {
             warn!(room = %room_jid, error = %error, "Failed guarded destroy of empty room");
             return false;

@@ -510,7 +510,7 @@ impl RoomRegistry {
             room_jid: BareJid,
             expected_occupancy_revision: u64,
             guard: SealGuard
-        ) -> bool,
+        ) -> super::room_registry_actor::GuardedDestroyOutcome,
         "destroy_room_if_inactive",
         DestroyRoomIfInactive { room_jid, expected_occupancy_revision, guard }
     );

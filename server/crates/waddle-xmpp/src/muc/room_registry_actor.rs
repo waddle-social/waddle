@@ -5895,6 +5895,28 @@ pub struct DestroyRoomIfInactive {
     pub guard: SealGuard,
 }
 
+/// Typed answer of a guarded destroy, so callers can tell a DEFINITIVE
+/// outcome (destroyed, absent, or refused because occupancy moved) from a
+/// TRANSIENT one that leaves the destroy owed (uncertain durable commit,
+/// release backlog, seal ask failure).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, kameo::Reply)]
+pub enum GuardedDestroyOutcome {
+    Destroyed,
+    Absent,
+    Refused,
+    Retained,
+}
+
+impl GuardedDestroyOutcome {
+    pub fn is_definitive(self) -> bool {
+        !matches!(self, Self::Retained)
+    }
+
+    pub fn destroyed(self) -> bool {
+        matches!(self, Self::Destroyed)
+    }
+}
+
 /// Bound for the in-handler seal ask so a wedged room actor cannot
 /// wedge the whole registry: shorter than
 /// [`ROOM_REGISTRY_REPLY_TIMEOUT`](super::room_registry_handle::ROOM_REGISTRY_REPLY_TIMEOUT)
@@ -5907,7 +5929,7 @@ const SEAL_ASK_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(2);
 const SNAPSHOT_PRESEAL_RECONCILE_DELAY: std::time::Duration = std::time::Duration::from_secs(20);
 
 impl kameo::message::Message<DestroyRoomIfInactive> for RoomRegistryActor {
-    type Reply = bool;
+    type Reply = GuardedDestroyOutcome;
 
     async fn handle(
         &mut self,
@@ -5917,10 +5939,10 @@ impl kameo::message::Message<DestroyRoomIfInactive> for RoomRegistryActor {
         // Preparation is not yet published and therefore cannot have been
         // observed inactive at the supplied occupancy revision.
         if self.pending_room_preparations.contains_key(&msg.room_jid) {
-            return false;
+            return GuardedDestroyOutcome::Refused;
         }
         let Some(entry) = self.rooms.get(&msg.room_jid).cloned() else {
-            return false;
+            return GuardedDestroyOutcome::Absent;
         };
         if !self.has_pending_release_capacity(&msg.room_jid, &entry.claim_fence) {
             // Ordinary inactivity must remain open when there is nowhere to
@@ -5938,7 +5960,7 @@ impl kameo::message::Message<DestroyRoomIfInactive> for RoomRegistryActor {
                 Ok(RoomSealState::OwnershipLost) => {
                     self.evict_ownership_lost_room(&msg.room_jid, entry).await;
                     info!(room = %msg.room_jid, "Evicted non-serving room during inactive-room cleanup");
-                    true
+                    GuardedDestroyOutcome::Destroyed
                 }
                 Ok(
                     RoomSealState::Open
@@ -5946,11 +5968,11 @@ impl kameo::message::Message<DestroyRoomIfInactive> for RoomRegistryActor {
                     | RoomSealState::Destroying { .. },
                 ) => {
                     warn!(room = %msg.room_jid, "Skipping inactive-room seal because exact-release retry backlog is full");
-                    false
+                    GuardedDestroyOutcome::Retained
                 }
                 Err(error) => {
                     warn!(room = %msg.room_jid, error = ?error, "Could not classify room seal while exact-release retry backlog is full");
-                    false
+                    GuardedDestroyOutcome::Retained
                 }
             };
         }
@@ -5967,7 +5989,7 @@ impl kameo::message::Message<DestroyRoomIfInactive> for RoomRegistryActor {
             Ok(SealIfInactiveOutcome::OwnershipLost) => {
                 self.evict_ownership_lost_room(&msg.room_jid, entry).await;
                 info!(room = %msg.room_jid, "Evicted non-serving room during inactive-room cleanup");
-                true
+                GuardedDestroyOutcome::Destroyed
             }
             Ok(SealIfInactiveOutcome::Inactive) => {
                 if let Some(store) = &self.durable_store {
@@ -5993,17 +6015,17 @@ impl kameo::message::Message<DestroyRoomIfInactive> for RoomRegistryActor {
                         if matches!(error, RoomCommitError::NotOwner) {
                             self.evict_ownership_lost_room(&msg.room_jid, entry).await;
                             info!(room = %msg.room_jid, "evicted room after ownership loss during dormancy commit");
-                            return true;
+                            return GuardedDestroyOutcome::Destroyed;
                         }
                         if matches!(error, RoomCommitError::StateMissing) {
                             info!(room = %msg.room_jid, "evicting room after terminal dormancy state miss");
                         } else if matches!(error, RoomCommitError::CommitOutcomeUnknown) {
                             warn!(room = %msg.room_jid, "inactive-room transition has unknown durable commit outcome; retaining seal for reaping");
-                            return false;
+                            return GuardedDestroyOutcome::Retained;
                         } else {
                             let _ = entry.actor_ref.tell(UnsealInactive).await;
                             warn!(room = %msg.room_jid, %error, "durable dormancy commit failed; keeping room active");
-                            return false;
+                            return GuardedDestroyOutcome::Retained;
                         }
                     }
                 }
@@ -6017,14 +6039,14 @@ impl kameo::message::Message<DestroyRoomIfInactive> for RoomRegistryActor {
                 self.release_room_claim(&msg.room_jid, &entry.claim_fence)
                     .await;
                 info!(room = %msg.room_jid, "Destroyed inactive room (guarded)");
-                true
+                GuardedDestroyOutcome::Destroyed
             }
             Ok(SealIfInactiveOutcome::Refused) => {
                 debug!(
                     room = %msg.room_jid,
                     "Guarded destroy refused: room no longer inactive at expected revision"
                 );
-                false
+                GuardedDestroyOutcome::Refused
             }
             Err(error) => {
                 // Never remove on uncertainty. If the seal actually
@@ -6036,7 +6058,7 @@ impl kameo::message::Message<DestroyRoomIfInactive> for RoomRegistryActor {
                     error = ?error,
                     "Guarded destroy seal ask failed; keeping the room"
                 );
-                false
+                GuardedDestroyOutcome::Retained
             }
         }
     }

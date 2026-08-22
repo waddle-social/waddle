@@ -6833,6 +6833,28 @@ mod group_dm_durable_reconciliation_tests {
             outbound_rx.try_recv().is_ok(),
             "leave presence should be sent even when ambiguous leave commit is reconciled"
         );
+        // The recovered successor carries the transplanted roster: the
+        // ordinary leave loop must have removed the leaver's session, not
+        // just the affiliation (the ghost-occupant regression).
+        let successor = state
+            .room_registry
+            .ask(waddle_xmpp::muc::room_registry_actor::GetRoom {
+                room_jid: room_jid.clone(),
+            })
+            .await
+            .expect("successor lookup")
+            .expect("successor registered");
+        let successor_snapshot = successor
+            .ask(waddle_xmpp::muc::room_actor::GetSnapshot)
+            .await
+            .expect("successor snapshot");
+        assert!(
+            successor_snapshot
+                .room
+                .find_occupant_by_real_jid(&caller_full)
+                .is_none(),
+            "the committed ambiguous leave must remove the leaver's session from the successor"
+        );
     }
 
     #[tokio::test]

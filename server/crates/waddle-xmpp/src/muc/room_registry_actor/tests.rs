@@ -488,14 +488,15 @@ async fn guarded_destroy_refuses_when_join_landed_after_dormancy_probe() {
         .expect("interleaved join");
 
     // Janitor half 2: guarded destroy with the stale revision → refused.
-    let destroyed: bool = registry
+    let destroyed = registry
         .ask(DestroyRoomIfInactive {
             room_jid: jid.clone(),
             expected_occupancy_revision: probe.occupancy_revision,
             guard: SealGuard::Dormant,
         })
         .await
-        .expect("guarded destroy ask");
+        .expect("guarded destroy ask")
+        .destroyed();
     assert!(
         !destroyed,
         "a join after the dormancy probe must refuse the guarded destroy \
@@ -530,14 +531,15 @@ async fn guarded_destroy_refuses_when_join_landed_after_dormancy_probe() {
         .expect("leave");
     let probe = actor.ask(IsDormant).await.expect("second probe");
     assert!(probe.dormant, "room is dormant again after the leave");
-    let destroyed: bool = registry
+    let destroyed = registry
         .ask(DestroyRoomIfInactive {
             room_jid: jid.clone(),
             expected_occupancy_revision: probe.occupancy_revision,
             guard: SealGuard::Dormant,
         })
         .await
-        .expect("guarded destroy ask");
+        .expect("guarded destroy ask")
+        .destroyed();
     assert!(destroyed, "an actually-dormant room is destroyed");
     assert!(
         !registry
@@ -575,14 +577,15 @@ async fn sealed_room_refuses_late_join_with_retryable_error() {
     let probe = stale_ref.ask(IsDormant).await.expect("probe");
     assert!(probe.dormant);
 
-    let destroyed: bool = registry
+    let destroyed = registry
         .ask(DestroyRoomIfInactive {
             room_jid: jid.clone(),
             expected_occupancy_revision: probe.occupancy_revision,
             guard: SealGuard::Dormant,
         })
         .await
-        .expect("guarded destroy ask");
+        .expect("guarded destroy ask")
+        .destroyed();
     assert!(destroyed);
 
     let alice: jid::FullJid = "alice@example.com/web".parse().expect("full jid");
@@ -2677,7 +2680,8 @@ mod ownership_claims_tests {
                 guard: crate::muc::room_actor::SealGuard::Dormant,
             })
             .await
-            .expect("guarded eviction"));
+            .expect("guarded eviction")
+            .destroyed());
         assert!(registry
             .ask(GetRoom {
                 room_jid: room_jid.clone(),
@@ -9053,7 +9057,8 @@ mod ownership_claims_tests {
                 guard: SealGuard::Dormant,
             })
             .await
-            .expect("capacity refusal"));
+            .expect("capacity refusal")
+            .destroyed());
         assert!(!acquisition
             .actor_ref
             .ask(IsSealed)
@@ -10895,7 +10900,8 @@ mod ownership_claims_tests {
                 guard: SealGuard::Dormant,
             })
             .await
-            .expect("typed inactive destroy"));
+            .expect("typed inactive destroy")
+            .destroyed());
         actor.wait_for_shutdown().await;
         assert!(
             !actor.is_alive(),
