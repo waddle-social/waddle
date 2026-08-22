@@ -585,11 +585,23 @@ pub(crate) async fn maybe_evict_empty_room(
             return true;
         }
         Ok(Err(error)) => {
-            warn!(room = %room_jid, error = %error, "Failed guarded destroy of empty room");
+            warn!(room = %room_jid, error = %error, "Failed guarded destroy of empty room; retained for retry");
+            state.deps.protocol.pending_local_muc_departures.record(
+                LocalDepartureItem::EvictEmptyRoom {
+                    room: room_jid.clone(),
+                    occupancy_revision: outcome_revision,
+                },
+            );
             return false;
         }
         Err(_) => {
-            warn!(room = %room_jid, "Guarded destroy of empty room timed out");
+            warn!(room = %room_jid, "Guarded destroy of empty room timed out; retained for retry");
+            state.deps.protocol.pending_local_muc_departures.record(
+                LocalDepartureItem::EvictEmptyRoom {
+                    room: room_jid.clone(),
+                    occupancy_revision: outcome_revision,
+                },
+            );
             return false;
         }
     };

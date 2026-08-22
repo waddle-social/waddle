@@ -505,7 +505,7 @@ impl RoomRegistry {
 
     registry_method!(
         /// Destroy a room only if it is still inactive at the expected
-        /// occupancy revision (#1108). Returns whether it was destroyed.
+        /// occupancy revision (#1108). Answers a typed `GuardedDestroyOutcome`.
         destroy_room_if_inactive(
             room_jid: BareJid,
             expected_occupancy_revision: u64,

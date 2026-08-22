@@ -9622,6 +9622,56 @@ mod local_muc_departure_tests {
     }
 
     #[tokio::test]
+    async fn retained_empty_room_eviction_actually_destroys_the_live_empty_room() {
+        use crate::server::routes::websocket::LocalDepartureItem;
+        let state = create_test_websocket_state().await;
+        let room = room_jid("evict-live-empty");
+        let actor = state
+            .deps
+            .protocol
+            .room_registry
+            .ask(CreateRoom {
+                room_jid: room.clone(),
+                waddle_id: "w".to_string(),
+                channel_id: "c".to_string(),
+                config: RoomConfig {
+                    persistent: false,
+                    ..RoomConfig::default()
+                },
+            })
+            .await
+            .expect("create room");
+        let occupancy_revision = actor
+            .ask(GetSnapshot)
+            .await
+            .expect("snapshot")
+            .occupancy_revision;
+        state.deps.protocol.pending_local_muc_departures.record(
+            LocalDepartureItem::EvictEmptyRoom {
+                room: room.clone(),
+                occupancy_revision,
+            },
+        );
+
+        run_local_muc_departure_sweep(&state).await;
+
+        assert_eq!(state.deps.protocol.pending_local_muc_departures.len(), 0);
+        assert!(
+            state
+                .deps
+                .protocol
+                .room_registry
+                .ask(waddle_xmpp::muc::room_registry_actor::GetRoom {
+                    room_jid: room.clone(),
+                })
+                .await
+                .expect("registry lookup")
+                .is_none(),
+            "the retained eviction must actually destroy the empty room"
+        );
+    }
+
+    #[tokio::test]
     async fn retained_empty_room_eviction_converges_when_the_registry_answers() {
         use crate::server::routes::websocket::LocalDepartureItem;
         let state = create_test_websocket_state().await;

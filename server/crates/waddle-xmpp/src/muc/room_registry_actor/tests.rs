@@ -495,11 +495,11 @@ async fn guarded_destroy_refuses_when_join_landed_after_dormancy_probe() {
             guard: SealGuard::Dormant,
         })
         .await
-        .expect("guarded destroy ask")
-        .destroyed();
-    assert!(
-        !destroyed,
-        "a join after the dormancy probe must refuse the guarded destroy \
+        .expect("guarded destroy ask");
+    assert_eq!(
+        destroyed,
+        GuardedDestroyOutcome::Refused,
+        "a join after the dormancy probe must REFUSE the guarded destroy \
          — destroying here orphans the freshly-admitted occupant (#1108)"
     );
     assert!(
@@ -9050,15 +9050,18 @@ mod ownership_claims_tests {
                 .await
                 .expect("fill backlog");
         }
-        assert!(!registry
-            .ask(DestroyRoomIfInactive {
-                room_jid: jid,
-                expected_occupancy_revision: 0,
-                guard: SealGuard::Dormant,
-            })
-            .await
-            .expect("capacity refusal")
-            .destroyed());
+        assert_eq!(
+            registry
+                .ask(DestroyRoomIfInactive {
+                    room_jid: jid,
+                    expected_occupancy_revision: 0,
+                    guard: SealGuard::Dormant,
+                })
+                .await
+                .expect("capacity refusal"),
+            GuardedDestroyOutcome::Retained,
+            "a full release backlog RETAINS the destroy (the janitor requeues it)"
+        );
         assert!(!acquisition
             .actor_ref
             .ask(IsSealed)

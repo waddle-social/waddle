@@ -5888,7 +5888,7 @@ impl kameo::message::Message<DestroyRoomWithAttempt> for RoomRegistryActor {
 /// [`RoomActorError::RoomSealed`](super::room_actor::RoomActorError::RoomSealed)
 /// refusal, which the join path retries through the registry.
 ///
-/// Returns `true` when the room was sealed and removed.
+/// Answers a typed [`GuardedDestroyOutcome`].
 pub struct DestroyRoomIfInactive {
     pub room_jid: BareJid,
     pub expected_occupancy_revision: u64,
