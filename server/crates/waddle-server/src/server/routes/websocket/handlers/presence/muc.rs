@@ -1,5 +1,6 @@
 use super::*;
 use crate::server::routes::websocket::cleanup::get_room_actor_result;
+use std::collections::HashSet;
 
 mod access;
 mod xml;
@@ -1948,7 +1949,7 @@ pub async fn handle_muc_leave(
         jid: sender_jid.clone(),
         cause: waddle_xmpp::muc::durable::OccupancyLeaveCause::Explicit,
         attempt: leave_attempt,
-        notified: Vec::new(),
+        notified: HashSet::new(),
     };
     state
         .deps
@@ -2057,7 +2058,7 @@ pub async fn handle_muc_leave(
                     cause: waddle_xmpp::muc::durable::OccupancyLeaveCause::Explicit,
                     selector: waddle_xmpp::muc::room_actor::LeaveSessionSelector::Any,
                     attempt: leave_attempt,
-                    notified: Vec::new(),
+                    notified: HashSet::new(),
                 },
             );
             return bounce_muc_leave_ownership_unreachable(room_jid, sender_jid, nick);
@@ -2096,9 +2097,11 @@ pub async fn handle_muc_leave(
         sender_jid,
         &outcome,
         Some(super::super::super::cleanup::LeaveFanOutProgress {
-            pending: &state.deps.protocol.pending_local_muc_departures,
-            item: &in_flight,
-            skip: &[],
+            skip: &super::super::super::cleanup::NO_SKIP,
+            record: Some((
+                &state.deps.protocol.pending_local_muc_departures,
+                &in_flight,
+            )),
         }),
     )
     .await;
@@ -2108,9 +2111,11 @@ pub async fn handle_muc_leave(
         sender_jid,
         &outcome,
         Some(super::super::super::cleanup::LeaveFanOutProgress {
-            pending: &state.deps.protocol.pending_local_muc_departures,
-            item: &in_flight,
-            skip: &[],
+            skip: &super::super::super::cleanup::NO_SKIP,
+            record: Some((
+                &state.deps.protocol.pending_local_muc_departures,
+                &in_flight,
+            )),
         }),
     )
     .await;
@@ -2122,7 +2127,9 @@ pub async fn handle_muc_leave(
         sender_jid,
         outcome.affiliation,
     )];
-    super::super::super::cleanup::maybe_evict_empty_room(state, room_jid, &outcome).await;
+    // Eviction is not response-critical: hand it off without awaiting so the
+    // self-presence below is returned before any registry wait.
+    super::super::super::cleanup::evict_empty_room_detached(state, room_jid, &outcome);
     // Every effect ran: the write-ahead entry becomes the owed acknowledgement
     // (atomically) and is cleared only on the actor's authoritative answer.
     crate::server::routes::websocket::acknowledge_in_flight(

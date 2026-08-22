@@ -1,5 +1,6 @@
 //! Retained local responsibility for MUC departures that could not be projected.
 
+use std::collections::HashSet;
 use std::sync::Arc;
 use std::{
     collections::HashMap,
@@ -49,7 +50,7 @@ pub enum LocalDepartureItem {
         /// Remaining occupants that already received this departure's fan-out
         /// (carried over from a died task's write-ahead entry): a resumed
         /// replay skips them instead of announcing the departure twice.
-        notified: Vec<FullJid>,
+        notified: HashSet<FullJid>,
     },
     ConfirmRetired {
         room: BareJid,
@@ -58,6 +59,9 @@ pub enum LocalDepartureItem {
         cause: OccupancyLeaveCause,
         selector: LeaveSessionSelector,
         attempt: LeaveAttemptId,
+        /// Fan-out progress carried through the retirement watch so the
+        /// successor's retry resumes where the dead task stopped.
+        notified: HashSet<FullJid>,
     },
     /// A departure whose reply WAS delivered and whose effects ran, but whose
     /// receipt acknowledgement could not be handed to the actor in time: the
@@ -76,7 +80,7 @@ pub enum LocalDepartureItem {
         cause: OccupancyLeaveCause,
         attempt: LeaveAttemptId,
         /// Per-recipient fan-out progress (see `RoomDeparture::notified`).
-        notified: Vec<FullJid>,
+        notified: HashSet<FullJid>,
     },
     AckReceipt {
         room: BareJid,
@@ -139,14 +143,24 @@ impl LocalDepartureItem {
         };
         let merged_selector = merged_selector.unwrap_or(LeaveSessionSelector::Any);
         let merged_attempt = merged_attempt.unwrap_or_else(LeaveAttemptId::generate);
-        let merged_notified = {
-            let mut notified = existing.item.notified().to_vec();
-            for recipient in self.notified() {
-                if !notified.contains(recipient) {
-                    notified.push(recipient.clone());
-                }
+        // Fan-out progress belongs to ONE attempt: when a newer attempt
+        // supersedes, the older attempt's recipients are not "already
+        // notified" of the new departure (they may have seen a re-join in
+        // between), so only the winning attempt's progress survives.
+        let merged_notified = match (existing.item.attempt(), self.attempt()) {
+            (Some(existing_attempt), Some(incoming_attempt))
+                if existing_attempt == incoming_attempt =>
+            {
+                let mut notified = existing.item.notified().cloned().unwrap_or_default();
+                notified.extend(self.notified().into_iter().flatten().cloned());
+                notified
             }
-            notified
+            (Some(existing_attempt), Some(incoming_attempt))
+                if incoming_attempt > existing_attempt =>
+            {
+                self.notified().cloned().unwrap_or_default()
+            }
+            _ => existing.item.notified().cloned().unwrap_or_default(),
         };
         match (existing.item.clone(), self) {
             (
@@ -161,6 +175,7 @@ impl LocalDepartureItem {
                 cause,
                 selector: merged_selector,
                 attempt: merged_attempt,
+                notified: merged_notified.clone(),
             },
             (
                 LocalDepartureItem::RoomDeparture {
@@ -191,6 +206,7 @@ impl LocalDepartureItem {
                 cause,
                 selector: merged_selector,
                 attempt: merged_attempt,
+                notified: merged_notified.clone(),
             },
             (existing, _) => existing,
         }
@@ -205,10 +221,12 @@ impl LocalDepartureItem {
         }
     }
 
-    fn notified(&self) -> &[FullJid] {
+    fn notified(&self) -> Option<&HashSet<FullJid>> {
         match self {
-            Self::RoomDeparture { notified, .. } | Self::InFlight { notified, .. } => notified,
-            _ => &[],
+            Self::RoomDeparture { notified, .. } | Self::InFlight { notified, .. } => {
+                Some(notified)
+            }
+            _ => None,
         }
     }
 
@@ -466,20 +484,25 @@ impl PendingLocalMucDepartures {
 
     /// One remaining occupant received this departure's fan-out: record it on
     /// the entry so a resumed replay (after the task died mid fan-out) skips
-    /// the recipients already notified.
+    /// the recipients already notified. No-op when the entry is not in the
+    /// inventory (the janitor works on drained items: its own fan-out is not
+    /// resumable, which only costs a repeated `unavailable` if the janitor
+    /// process itself dies mid fan-out).
     pub fn note_notified(&self, item: &LocalDepartureItem, recipient: &FullJid) {
         let mut inventory = self.entries.lock().expect("local departure inventory lock");
         let Some(pending) = inventory.entries.get_mut(&item.key()) else {
             return;
         };
-        match &mut pending.item {
-            LocalDepartureItem::InFlight { notified, .. }
-            | LocalDepartureItem::RoomDeparture { notified, .. }
-                if !notified.contains(recipient) =>
-            {
-                notified.push(recipient.clone());
-            }
-            _ => {}
+        // Progress is only valid for the attempt it was made under: a newer
+        // attempt merged under the same key must not inherit it.
+        if pending.item.attempt() != item.attempt() {
+            return;
+        }
+        if let LocalDepartureItem::InFlight { notified, .. }
+        | LocalDepartureItem::RoomDeparture { notified, .. }
+        | LocalDepartureItem::ConfirmRetired { notified, .. } = &mut pending.item
+        {
+            notified.insert(recipient.clone());
         }
     }
 
@@ -677,7 +700,7 @@ mod tests {
                 cause: OccupancyLeaveCause::Disconnect,
                 selector: LeaveSessionSelector::Any,
                 attempt: LeaveAttemptId::generate(),
-                notified: Vec::new(),
+                notified: HashSet::new(),
             },
             now,
         );
@@ -690,6 +713,7 @@ mod tests {
             cause: OccupancyLeaveCause::Disconnect,
             selector: LeaveSessionSelector::JoinedAtOrBefore(OccupancyWatermark::from_revision(9)),
             attempt: LeaveAttemptId::generate(),
+            notified: HashSet::new(),
         });
         let entry = inventory
             .entries
@@ -722,7 +746,7 @@ mod tests {
             cause: OccupancyLeaveCause::Disconnect,
             selector,
             attempt,
-            notified: Vec::new(),
+            notified: HashSet::new(),
         };
         let attempt_a = LeaveAttemptId::generate();
         let attempt_b = LeaveAttemptId::generate();
@@ -829,6 +853,7 @@ mod tests {
                     OccupancyWatermark::from_revision(11),
                 ),
                 attempt: attempt_b,
+                notified: HashSet::new(),
             },
             now,
         );
@@ -859,7 +884,7 @@ mod tests {
             cause: OccupancyLeaveCause::Disconnect,
             selector,
             attempt: LeaveAttemptId::generate(),
-            notified: Vec::new(),
+            notified: HashSet::new(),
         };
 
         inventory.record_at(
@@ -916,7 +941,7 @@ mod tests {
                 cause: OccupancyLeaveCause::Disconnect,
                 selector: LeaveSessionSelector::Any,
                 attempt: LeaveAttemptId::generate(),
-                notified: Vec::new(),
+                notified: HashSet::new(),
             },
             attempts,
             not_before: due,
@@ -962,7 +987,7 @@ mod tests {
             cause: OccupancyLeaveCause::Disconnect,
             selector,
             attempt,
-            notified: Vec::new(),
+            notified: HashSet::new(),
         };
         let inventory = PendingLocalMucDepartures::default();
         let older = LeaveAttemptId::generate();
@@ -997,7 +1022,7 @@ mod tests {
             cause: OccupancyLeaveCause::Disconnect,
             selector,
             attempt,
-            notified: Vec::new(),
+            notified: HashSet::new(),
         };
 
         let inventory = PendingLocalMucDepartures::default();
@@ -1167,7 +1192,7 @@ mod tests {
             cause: OccupancyLeaveCause::Explicit,
             selector: LeaveSessionSelector::Any,
             attempt: first,
-            notified: Vec::new(),
+            notified: HashSet::new(),
         });
         pending.record(LocalDepartureItem::AckReceipt {
             room: room.clone(),
@@ -1206,7 +1231,7 @@ mod tests {
             jid: jid.clone(),
             cause: OccupancyLeaveCause::Disconnect,
             attempt,
-            notified: Vec::new(),
+            notified: HashSet::new(),
         };
         pending.record_in_flight(in_flight(first));
         pending.record_in_flight(in_flight(second));
@@ -1242,7 +1267,7 @@ mod tests {
             jid: jid.clone(),
             cause: OccupancyLeaveCause::Explicit,
             attempt,
-            notified: Vec::new(),
+            notified: HashSet::new(),
         };
         pending.record_in_flight(in_flight.clone());
         pending.convert_in_flight_to_ack(&in_flight, acknowledge);
@@ -1257,6 +1282,36 @@ mod tests {
         assert_eq!(pending.len(), 0);
     }
 
+    #[test]
+    fn fan_out_progress_is_scoped_to_its_attempt() {
+        let pending = PendingLocalMucDepartures::default();
+        let room: BareJid = "room@muc.example.com".parse().expect("room");
+        let jid: FullJid = "alice@example.com/web".parse().expect("jid");
+        let bob: FullJid = "bob@example.com/phone".parse().expect("bob");
+        let older = LeaveAttemptId::generate();
+        let newer = LeaveAttemptId::generate();
+        let departure = |attempt, notified| LocalDepartureItem::RoomDeparture {
+            room: room.clone(),
+            jid: jid.clone(),
+            cause: OccupancyLeaveCause::Disconnect,
+            selector: LeaveSessionSelector::Any,
+            attempt,
+            notified,
+        };
+        pending.record(departure(older, HashSet::from([bob.clone()])));
+        // Progress recorded for a different attempt than the stored one is
+        // ignored.
+        pending.note_notified(&departure(newer, HashSet::new()), &bob);
+        assert!(pending.contains_for_test(&departure(older, HashSet::from([bob.clone()]))));
+        // A newer attempt merged under the same key starts with ITS progress,
+        // not the older attempt's.
+        pending.record(departure(newer, HashSet::new()));
+        assert!(pending.contains_for_test(&departure(newer, HashSet::new())));
+        // Same attempt re-recorded: progress unions.
+        pending.record(departure(newer, HashSet::from([bob.clone()])));
+        assert!(pending.contains_for_test(&departure(newer, HashSet::from([bob]))));
+    }
+
     #[tokio::test]
     async fn lease_keeps_renewing_until_dropped() {
         let pending = Arc::new(PendingLocalMucDepartures::default());
@@ -1267,7 +1322,7 @@ mod tests {
             jid,
             cause: OccupancyLeaveCause::Explicit,
             attempt: LeaveAttemptId::generate(),
-            notified: Vec::new(),
+            notified: HashSet::new(),
         };
         pending.record_in_flight(item.clone());
         let before = pending.not_before_for_test(&item).expect("entry");
@@ -1276,9 +1331,17 @@ mod tests {
             item.clone(),
             Duration::from_millis(10),
         );
-        tokio::time::sleep(Duration::from_millis(60)).await;
-        let renewed = pending.not_before_for_test(&item).expect("entry");
-        assert!(renewed > before, "a held lease renews the deadline");
+        let deadline = Instant::now() + Duration::from_secs(5);
+        loop {
+            if pending.not_before_for_test(&item).expect("entry") > before {
+                break;
+            }
+            assert!(
+                Instant::now() < deadline,
+                "a held lease renews the deadline"
+            );
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
         drop(lease);
         tokio::time::sleep(Duration::from_millis(30)).await;
         let after_drop = pending.not_before_for_test(&item).expect("entry");

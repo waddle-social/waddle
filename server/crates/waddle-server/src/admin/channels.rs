@@ -21,6 +21,7 @@
 //! `room_registry` (`waddle_xmpp::muc::room_registry_actor::*`), and
 //! `muc_domain` (used to construct fresh room JIDs on `create`).
 
+use std::collections::HashSet;
 use std::{
     collections::BTreeSet,
     sync::{Arc, OnceLock},
@@ -2305,7 +2306,7 @@ async fn run_group_dm_leave(
                 jid: resource.clone(),
                 cause: waddle_xmpp::muc::durable::OccupancyLeaveCause::Administrative,
                 attempt,
-                notified: Vec::new(),
+                notified: HashSet::new(),
             };
             pending_local_muc_departures.record_in_flight(in_flight.clone());
             let _in_flight_lease = crate::server::routes::websocket::InFlightLease::hold(
@@ -2365,7 +2366,7 @@ async fn run_group_dm_leave(
                             cause: waddle_xmpp::muc::durable::OccupancyLeaveCause::Administrative,
                             selector: waddle_xmpp::muc::room_actor::LeaveSessionSelector::Any,
                             attempt,
-                            notified: Vec::new(),
+                            notified: HashSet::new(),
                         },
                     );
                 }
@@ -2380,7 +2381,7 @@ async fn run_group_dm_leave(
                             cause: waddle_xmpp::muc::durable::OccupancyLeaveCause::Administrative,
                             selector: waddle_xmpp::muc::room_actor::LeaveSessionSelector::Any,
                             attempt,
-                            notified: Vec::new(),
+                            notified: HashSet::new(),
                         },
                     );
                 }
@@ -2396,6 +2397,7 @@ async fn run_group_dm_leave(
                             cause: waddle_xmpp::muc::durable::OccupancyLeaveCause::Administrative,
                             selector: waddle_xmpp::muc::room_actor::LeaveSessionSelector::Any,
                             attempt,
+                            notified: HashSet::new(),
                         },
                     );
                 }
@@ -2408,7 +2410,7 @@ async fn run_group_dm_leave(
                             cause: waddle_xmpp::muc::durable::OccupancyLeaveCause::Administrative,
                             selector: waddle_xmpp::muc::room_actor::LeaveSessionSelector::Any,
                             attempt,
-                            notified: Vec::new(),
+                            notified: HashSet::new(),
                         },
                     );
                 }

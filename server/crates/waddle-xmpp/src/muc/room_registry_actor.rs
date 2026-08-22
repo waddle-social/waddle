@@ -843,6 +843,11 @@ impl RoomRegistryActor {
             Some(since) if since.elapsed() < HANDOFF_PENDING_WINDOW => true,
             Some(_) => {
                 self.handoff_pending.remove(room_jid);
+                tracing::warn!(
+                    room = %room_jid,
+                    window_secs = HANDOFF_PENDING_WINDOW.as_secs(),
+                    "live-roster handoff never published a successor; room now reads as absent"
+                );
                 false
             }
             None => false,
@@ -4829,6 +4834,8 @@ impl kameo::message::Message<GetOrCreateRoomWithLiveRoster> for RoomRegistryActo
                 self.publish_room_count();
                 // From here until the successor is registered (or a
                 // preparation is pending) the room must not look absent.
+                self.handoff_pending
+                    .retain(|_, since| since.elapsed() < HANDOFF_PENDING_WINDOW);
                 self.handoff_pending
                     .insert(room_jid.clone(), std::time::Instant::now());
                 self.retire_ownership_lost_entry(&room_jid, entry).await;

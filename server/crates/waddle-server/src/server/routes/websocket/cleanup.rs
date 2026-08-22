@@ -9,6 +9,7 @@ use super::{
     stream_management::sm_show_from_name,
     LocalDepartureItem,
 };
+use std::collections::HashSet;
 use waddle_xmpp::muc::durable::OccupancyLeaveCause;
 use waddle_xmpp::muc::room_actor::{
     LeaveDisposition, LeaveOutcome, LeaveSessionSelector, SealGuard,
@@ -264,9 +265,13 @@ pub(crate) async fn echo_muc_self_unavailable(
 /// the first recipient it did NOT reach (never announcing the departure twice
 /// to the ones it did).
 pub(crate) struct LeaveFanOutProgress<'a> {
-    pub pending: &'a PendingLocalMucDepartures,
-    pub item: &'a LocalDepartureItem,
-    pub skip: &'a [FullJid],
+    /// Recipients already notified by an earlier (died) attempt at this
+    /// departure: skipped.
+    pub skip: &'a HashSet<FullJid>,
+    /// Where to record progress — the live task's own inventory entry. `None`
+    /// for the janitor, whose item is drained from the inventory while it
+    /// runs (its own fan-out is not resumable; it only consumes `skip`).
+    pub record: Option<(&'a PendingLocalMucDepartures, &'a LocalDepartureItem)>,
 }
 
 impl LeaveFanOutProgress<'_> {
@@ -275,9 +280,14 @@ impl LeaveFanOutProgress<'_> {
     }
 
     fn notified(&self, recipient: &FullJid) {
-        self.pending.note_notified(self.item, recipient);
+        if let Some((pending, item)) = self.record {
+            pending.note_notified(item, recipient);
+        }
     }
 }
+
+pub(crate) static NO_SKIP: std::sync::LazyLock<HashSet<FullJid>> =
+    std::sync::LazyLock::new(HashSet::new);
 
 pub(crate) async fn broadcast_muc_leave_to_remaining_resumable(
     state: &WebSocketState,
@@ -493,6 +503,29 @@ pub(crate) async fn redrive_remote_muc_cleanup(
 /// paths intentionally ignore the status because the leave itself has already
 /// succeeded on the wire; failing that response would be worse than letting
 /// the registry janitor catch the room on its next dead-actor sweep.
+/// Response-path variant of [`maybe_evict_empty_room`]: hand the guarded
+/// destroy to the registry without awaiting it, so a handler under the frame
+/// backstop returns its §7.14 self-presence regardless of how long the
+/// eviction takes. The destroy stays revision-guarded; if the registry's
+/// mailbox refuses the request its inactivity sweep reaps the room later.
+pub(crate) fn evict_empty_room_detached(
+    state: &WebSocketState,
+    room_jid: &BareJid,
+    outcome: &LeaveOutcome,
+) {
+    if !(outcome.removed_last_session && outcome.occupant_count == 0 && !outcome.is_persistent) {
+        return;
+    }
+    let request = waddle_xmpp::muc::room_registry_actor::DestroyRoomIfInactive {
+        room_jid: room_jid.clone(),
+        expected_occupancy_revision: outcome.occupancy_revision,
+        guard: SealGuard::EmptyNonPersistent,
+    };
+    if let Err(error) = state.deps.protocol.room_registry.tell(request).try_send() {
+        warn!(room = %room_jid, error = %error, "Deferred guarded destroy of empty room was not accepted; the inactivity sweep reaps it");
+    }
+}
+
 pub(crate) async fn maybe_evict_empty_room(
     state: &WebSocketState,
     room_jid: &BareJid,
@@ -2013,7 +2046,7 @@ async fn cleanup_muc_presence_with_origin(
             jid: jid.clone(),
             cause: OccupancyLeaveCause::Disconnect,
             attempt,
-            notified: Vec::new(),
+            notified: HashSet::new(),
         };
         state
             .deps
@@ -2074,9 +2107,11 @@ async fn cleanup_muc_presence_with_origin(
                     jid,
                     &outcome,
                     Some(LeaveFanOutProgress {
-                        pending: &state.deps.protocol.pending_local_muc_departures,
-                        item: &in_flight,
-                        skip: &[],
+                        skip: &NO_SKIP,
+                        record: Some((
+                            &state.deps.protocol.pending_local_muc_departures,
+                            &in_flight,
+                        )),
                     }),
                 )
                 .await;
@@ -2086,9 +2121,11 @@ async fn cleanup_muc_presence_with_origin(
                     jid,
                     &outcome,
                     Some(LeaveFanOutProgress {
-                        pending: &state.deps.protocol.pending_local_muc_departures,
-                        item: &in_flight,
-                        skip: &[],
+                        skip: &NO_SKIP,
+                        record: Some((
+                            &state.deps.protocol.pending_local_muc_departures,
+                            &in_flight,
+                        )),
                     }),
                 )
                 .await;
@@ -2119,7 +2156,7 @@ async fn cleanup_muc_presence_with_origin(
                         cause: OccupancyLeaveCause::Disconnect,
                         selector: LeaveSessionSelector::JoinedAtOrBefore(watermark),
                         attempt,
-                        notified: Vec::new(),
+                        notified: HashSet::new(),
                     },
                 );
             }
@@ -2160,7 +2197,7 @@ async fn cleanup_muc_presence_with_origin(
                         cause: OccupancyLeaveCause::Disconnect,
                         selector: LeaveSessionSelector::Any,
                         attempt,
-                        notified: Vec::new(),
+                        notified: HashSet::new(),
                     },
                 );
                 warn!(room = %room_jid, jid = %jid, "MUC leave ask timed out on disconnect; retained for retry");
@@ -2180,6 +2217,7 @@ async fn cleanup_muc_presence_with_origin(
                         cause: OccupancyLeaveCause::Disconnect,
                         selector: LeaveSessionSelector::Any,
                         attempt,
+                        notified: HashSet::new(),
                     },
                 );
                 warn!(

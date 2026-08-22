@@ -1,6 +1,7 @@
 use crate::room_policy::RoomRegistryActorPolicy;
 use crate::server::routes;
 use crate::server::routes::websocket::WebSocketState;
+use std::collections::HashSet;
 use std::sync::Arc;
 use std::time::Duration;
 use tracing::{debug, error, info, warn, Instrument};
@@ -266,14 +267,6 @@ pub(crate) async fn run_local_muc_departure_sweep(state: &WebSocketState) {
                     .await
                     {
                         Ok(LeaveDisposition::Left(outcome)) => {
-                            let progress_item = LocalDepartureItem::RoomDeparture {
-                                room: room.clone(),
-                                jid: jid.clone(),
-                                cause,
-                                selector,
-                                attempt,
-                                notified: notified.clone(),
-                            };
                             match cause {
                                 OccupancyLeaveCause::Disconnect => {
                                     broadcast_muc_leave_to_remaining_resumable(
@@ -282,12 +275,8 @@ pub(crate) async fn run_local_muc_departure_sweep(state: &WebSocketState) {
                                         &jid,
                                         &outcome,
                                         Some(LeaveFanOutProgress {
-                                            pending: &state
-                                                .deps
-                                                .protocol
-                                                .pending_local_muc_departures,
-                                            item: &progress_item,
                                             skip: &notified,
+                                            record: None,
                                         }),
                                     )
                                     .await;
@@ -297,12 +286,8 @@ pub(crate) async fn run_local_muc_departure_sweep(state: &WebSocketState) {
                                         &jid,
                                         &outcome,
                                         Some(LeaveFanOutProgress {
-                                            pending: &state
-                                                .deps
-                                                .protocol
-                                                .pending_local_muc_departures,
-                                            item: &progress_item,
                                             skip: &notified,
+                                            record: None,
                                         }),
                                     )
                                     .await;
@@ -341,12 +326,8 @@ pub(crate) async fn run_local_muc_departure_sweep(state: &WebSocketState) {
                                         &jid,
                                         &outcome,
                                         Some(LeaveFanOutProgress {
-                                            pending: &state
-                                                .deps
-                                                .protocol
-                                                .pending_local_muc_departures,
-                                            item: &progress_item,
                                             skip: &notified,
+                                            record: None,
                                         }),
                                     )
                                     .await;
@@ -356,12 +337,8 @@ pub(crate) async fn run_local_muc_departure_sweep(state: &WebSocketState) {
                                         &jid,
                                         &outcome,
                                         Some(LeaveFanOutProgress {
-                                            pending: &state
-                                                .deps
-                                                .protocol
-                                                .pending_local_muc_departures,
-                                            item: &progress_item,
                                             skip: &notified,
+                                            record: None,
                                         }),
                                     )
                                     .await;
@@ -478,6 +455,7 @@ pub(crate) async fn run_local_muc_departure_sweep(state: &WebSocketState) {
                                 cause,
                                 selector,
                                 attempt,
+                                notified: HashSet::new(),
                             };
                         }
                     }
@@ -574,6 +552,7 @@ pub(crate) async fn run_local_muc_departure_sweep(state: &WebSocketState) {
                     cause,
                     selector,
                     attempt,
+                    ..
                 } => match get_room_actor_result(state, &room).await {
                     Ok(None) => {
                         crate::metrics::record_local_departure_retry("retired");
@@ -586,7 +565,7 @@ pub(crate) async fn run_local_muc_departure_sweep(state: &WebSocketState) {
                             cause,
                             selector,
                             attempt,
-                            notified: Vec::new(),
+                            notified: HashSet::new(),
                         };
                     }
                     Ok(Some(_)) | Err(_) => {
@@ -603,6 +582,7 @@ pub(crate) async fn run_local_muc_departure_sweep(state: &WebSocketState) {
                                     cause,
                                     selector,
                                     attempt,
+                                    notified: HashSet::new(),
                                 },
                                 attempts: pending.attempts,
                                 not_before: pending.not_before,
@@ -8262,6 +8242,7 @@ mod local_muc_departure_tests {
     };
     use jid::{BareJid, FullJid};
     use std::collections::HashMap;
+    use std::collections::HashSet;
     use std::sync::{
         atomic::{AtomicUsize, Ordering},
         Arc, Mutex, OnceLock,
@@ -8538,7 +8519,7 @@ mod local_muc_departure_tests {
                 cause: OccupancyLeaveCause::Disconnect,
                 selector: LeaveSessionSelector::Any,
                 attempt: waddle_xmpp::muc::room_actor::LeaveAttemptId::generate(),
-                notified: Vec::new(),
+                notified: HashSet::new(),
             },
         );
 
@@ -8605,7 +8586,7 @@ mod local_muc_departure_tests {
                 cause: OccupancyLeaveCause::Disconnect,
                 selector: LeaveSessionSelector::Any,
                 attempt,
-                notified: Vec::new(),
+                notified: HashSet::new(),
             },
         );
 
@@ -8665,7 +8646,7 @@ mod local_muc_departure_tests {
                 cause: OccupancyLeaveCause::Disconnect,
                 selector: LeaveSessionSelector::Any,
                 attempt: waddle_xmpp::muc::room_actor::LeaveAttemptId::generate(),
-                notified: Vec::new(),
+                notified: HashSet::new(),
             },
         );
 
@@ -8738,7 +8719,7 @@ mod local_muc_departure_tests {
                 cause: OccupancyLeaveCause::Disconnect,
                 selector: LeaveSessionSelector::JoinedAtOrBefore(watermark),
                 attempt: waddle_xmpp::muc::room_actor::LeaveAttemptId::generate(),
-                notified: Vec::new(),
+                notified: HashSet::new(),
             },
         );
 
@@ -8943,7 +8924,7 @@ mod local_muc_departure_tests {
                     cause: OccupancyLeaveCause::Explicit,
                     selector: LeaveSessionSelector::Any,
                     attempt: waddle_xmpp::muc::room_actor::LeaveAttemptId::generate(),
-                    notified: Vec::new(),
+                    notified: HashSet::new(),
                 },
                 attempts: 1,
                 not_before: std::time::Instant::now() - std::time::Duration::from_secs(5),
@@ -9050,7 +9031,7 @@ mod local_muc_departure_tests {
                 cause: OccupancyLeaveCause::Explicit,
                 selector: LeaveSessionSelector::Any,
                 attempt: waddle_xmpp::muc::room_actor::LeaveAttemptId::generate(),
-                notified: Vec::new(),
+                notified: HashSet::new(),
             },
         );
 
@@ -9157,7 +9138,7 @@ mod local_muc_departure_tests {
                 cause: OccupancyLeaveCause::Explicit,
                 selector: LeaveSessionSelector::Any,
                 attempt: waddle_xmpp::muc::room_actor::LeaveAttemptId::generate(),
-                notified: Vec::new(),
+                notified: HashSet::new(),
             },
         );
         assert_eq!(state.deps.protocol.pending_local_muc_departures.len(), 3);
@@ -9274,7 +9255,7 @@ mod local_muc_departure_tests {
             jid: alice.clone(),
             cause: OccupancyLeaveCause::Explicit,
             attempt,
-            notified: Vec::new(),
+            notified: HashSet::new(),
         };
         state
             .deps
@@ -9348,7 +9329,7 @@ mod local_muc_departure_tests {
             jid: alice.clone(),
             cause: OccupancyLeaveCause::Explicit,
             attempt,
-            notified: Vec::new(),
+            notified: HashSet::new(),
         };
         state
             .deps
@@ -9377,7 +9358,7 @@ mod local_muc_departure_tests {
                 jid: alice.clone(),
                 cause: OccupancyLeaveCause::Explicit,
                 attempt: waddle_xmpp::muc::room_actor::LeaveAttemptId::generate(),
-                notified: Vec::new(),
+                notified: HashSet::new(),
             });
         state
             .deps
@@ -9394,7 +9375,7 @@ mod local_muc_departure_tests {
                 cause: OccupancyLeaveCause::Explicit,
                 selector: LeaveSessionSelector::Any,
                 attempt: waddle_xmpp::muc::room_actor::LeaveAttemptId::generate(),
-                notified: Vec::new(),
+                notified: HashSet::new(),
             },
         );
         assert_eq!(state.deps.protocol.pending_local_muc_departures.len(), 2);
@@ -9424,7 +9405,7 @@ mod local_muc_departure_tests {
             jid: alice.clone(),
             cause: OccupancyLeaveCause::Explicit,
             attempt,
-            notified: Vec::new(),
+            notified: HashSet::new(),
         };
         state
             .deps
@@ -9517,14 +9498,14 @@ mod local_muc_departure_tests {
             jid: alice.clone(),
             cause: OccupancyLeaveCause::Disconnect,
             attempt,
-            notified: Vec::new(),
+            notified: HashSet::new(),
         };
         state
             .deps
             .protocol
             .pending_local_muc_departures
             .record_in_flight(in_flight.clone());
-        let left = actor
+        let LeaveDisposition::Left(outcome) = actor
             .ask(LeaveByRealJid {
                 sender_jid: alice.clone(),
                 cause: OccupancyLeaveCause::Disconnect,
@@ -9533,13 +9514,36 @@ mod local_muc_departure_tests {
                 origin: waddle_xmpp::muc::room_actor::LeaveOrigin::Fresh,
             })
             .await
-            .expect("leave");
-        assert!(matches!(left, LeaveDisposition::Left(_)));
-        state
-            .deps
-            .protocol
-            .pending_local_muc_departures
-            .note_notified(&in_flight, &bob);
+            .expect("leave")
+        else {
+            panic!("alice leaves");
+        };
+        // The live task's fan-out reaches bob through the production helper
+        // (recording bob on its entry) and dies before carol: simulated by
+        // skipping carol.
+        let skip_carol = HashSet::from([carol.clone()]);
+        crate::server::routes::websocket::broadcast_muc_leave_to_remaining_resumable(
+            &state,
+            &room,
+            &alice,
+            &outcome,
+            Some(crate::server::routes::websocket::LeaveFanOutProgress {
+                skip: &skip_carol,
+                record: Some((
+                    &state.deps.protocol.pending_local_muc_departures,
+                    &in_flight,
+                )),
+            }),
+        )
+        .await;
+        let first = bob_rx
+            .try_recv()
+            .expect("bob got the live task's unavailable");
+        assert!(matches!(first.stanza, waddle_xmpp::Stanza::Presence(_)));
+        assert!(
+            carol_rx.try_recv().is_err(),
+            "the dead task never reached carol"
+        );
         // Make the write-ahead entry due (lease gone).
         let retained = state
             .deps
@@ -9549,7 +9553,7 @@ mod local_muc_departure_tests {
             .expect("in-flight entry");
         assert!(matches!(
             &retained.item,
-            LocalDepartureItem::InFlight { notified, .. } if notified == &vec![bob.clone()]
+            LocalDepartureItem::InFlight { notified, .. } if notified == &HashSet::from([bob.clone()])
         ));
         state
             .deps
@@ -9676,7 +9680,7 @@ mod local_muc_departure_tests {
                 cause: OccupancyLeaveCause::Explicit,
                 selector: LeaveSessionSelector::Any,
                 attempt,
-                notified: Vec::new(),
+                notified: HashSet::new(),
             },
         );
 
@@ -9742,7 +9746,7 @@ mod local_muc_departure_tests {
                 cause: OccupancyLeaveCause::Disconnect,
                 selector: LeaveSessionSelector::JoinedAtOrBefore(first),
                 attempt: waddle_xmpp::muc::room_actor::LeaveAttemptId::generate(),
-                notified: Vec::new(),
+                notified: HashSet::new(),
             },
         );
         actor
@@ -9786,7 +9790,7 @@ mod local_muc_departure_tests {
                 cause: OccupancyLeaveCause::Disconnect,
                 selector: LeaveSessionSelector::JoinedAtOrBefore(second),
                 attempt: waddle_xmpp::muc::room_actor::LeaveAttemptId::generate(),
-                notified: Vec::new(),
+                notified: HashSet::new(),
             },
         );
 
@@ -9834,7 +9838,7 @@ mod local_muc_departure_tests {
                 cause: OccupancyLeaveCause::Disconnect,
                 selector: LeaveSessionSelector::Any,
                 attempt: waddle_xmpp::muc::room_actor::LeaveAttemptId::generate(),
-                notified: Vec::new(),
+                notified: HashSet::new(),
             },
         );
         state.deps.protocol.pending_local_muc_departures.record(
@@ -9844,7 +9848,7 @@ mod local_muc_departure_tests {
                 cause: OccupancyLeaveCause::Administrative,
                 selector: LeaveSessionSelector::Any,
                 attempt: waddle_xmpp::muc::room_actor::LeaveAttemptId::generate(),
-                notified: Vec::new(),
+                notified: HashSet::new(),
             },
         );
 
@@ -9886,6 +9890,7 @@ mod local_muc_departure_tests {
                 cause: OccupancyLeaveCause::Disconnect,
                 selector: LeaveSessionSelector::Any,
                 attempt: waddle_xmpp::muc::room_actor::LeaveAttemptId::generate(),
+                notified: HashSet::new(),
             },
         );
 
@@ -10000,6 +10005,7 @@ mod local_muc_departure_tests {
                 cause: OccupancyLeaveCause::Disconnect,
                 selector: LeaveSessionSelector::Any,
                 attempt: waddle_xmpp::muc::room_actor::LeaveAttemptId::generate(),
+                notified: HashSet::new(),
             },
         );
 
@@ -10066,7 +10072,7 @@ mod local_muc_departure_tests {
                 cause: OccupancyLeaveCause::Disconnect,
                 selector: LeaveSessionSelector::Any,
                 attempt: waddle_xmpp::muc::room_actor::LeaveAttemptId::generate(),
-                notified: Vec::new(),
+                notified: HashSet::new(),
             },
         );
 
@@ -10245,6 +10251,7 @@ mod local_muc_departure_tests {
                     cause: OccupancyLeaveCause::Disconnect,
                     selector: LeaveSessionSelector::Any,
                     attempt: waddle_xmpp::muc::room_actor::LeaveAttemptId::generate(),
+                    notified: HashSet::new(),
                 },
                 attempts: 10,
                 not_before: Instant::now(),
