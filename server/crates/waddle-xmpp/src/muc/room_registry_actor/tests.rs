@@ -519,16 +519,27 @@ async fn guarded_destroy_refuses_when_join_landed_after_dormancy_probe() {
 
     // After the occupant leaves, a fresh probe + matching revision
     // destroys the actually-dormant room.
+    let attempt = crate::muc::room_actor::LeaveAttemptId::generate();
     actor
         .ask(LeaveByRealJid {
             sender_jid: alice,
             cause: crate::muc::durable::OccupancyLeaveCause::Explicit,
             session: crate::muc::room_actor::LeaveSessionSelector::Any,
-            attempt: crate::muc::room_actor::LeaveAttemptId::generate(),
+            attempt,
             origin: crate::muc::room_actor::LeaveOrigin::Fresh,
         })
         .await
         .expect("leave");
+    // #1647: the leave minted a departure receipt, and an unacknowledged
+    // receipt now legitimately vetoes dormancy. Acknowledge it so this test
+    // keeps pinning ITS fence, not the receipt's.
+    assert_eq!(
+        actor
+            .ask(crate::muc::room_actor::AckDepartureReceipt { attempt })
+            .await
+            .expect("ack ask"),
+        crate::muc::room_actor::AckDepartureOutcome::Acknowledged
+    );
     let probe = actor.ask(IsDormant).await.expect("second probe");
     assert!(probe.dormant, "room is dormant again after the leave");
     let destroyed = registry
@@ -4475,6 +4486,102 @@ mod ownership_claims_tests {
     }
 
     #[tokio::test]
+    async fn stashed_handoff_spec_restores_the_roster_on_the_next_demand_creation() {
+        use crate::muc::room_actor::{GetSnapshot, JoinAffiliationGrant, JoinWithAffiliation};
+        use crate::Affiliation;
+
+        let registry = spawn_registry().await;
+        // Build a live roster to stash (stand-in for the retired actor's
+        // snapshot dropped by a failed post-demote transition).
+        let source_jid = test_room_jid("stash-source");
+        let source_actor = registry
+            .ask(GetOrCreateRoom {
+                room_jid: source_jid,
+                waddle_id: "source-waddle".to_string(),
+                channel_id: "source-channel".to_string(),
+                config: RoomConfig::default(),
+            })
+            .await
+            .expect("create source room")
+            .actor_ref;
+        let member: jid::FullJid = "alice@example.com/web".parse().expect("member full JID");
+        source_actor
+            .ask(JoinWithAffiliation {
+                sender_jid: member.clone(),
+                nick: "alice".to_string(),
+                affiliation_grant: JoinAffiliationGrant::Resolver(Affiliation::Member),
+                local_domain: "example.com".to_string(),
+                admission_revision: 0,
+            })
+            .await
+            .expect("join source room");
+        let source_snapshot = source_actor
+            .ask(GetSnapshot)
+            .await
+            .expect("source snapshot");
+
+        let room_jid = test_room_jid("stash-adopted");
+        let stashed = std::sync::Arc::new(RoomCreationSpec {
+            waddle_id: "stashed-waddle".to_string(),
+            channel_id: "stashed-channel".to_string(),
+            config: RoomConfig {
+                name: "stashed successor".to_string(),
+                ..RoomConfig::default()
+            },
+            initial_affiliations: Vec::new(),
+            live_room_restore: Some(LiveRoomRestore {
+                room: source_snapshot.room,
+                occupancy_revision: source_snapshot.occupancy_revision,
+                departures: Default::default(),
+            }),
+        });
+        registry
+            .ask(MarkHandoffPendingForTest {
+                room_jid: room_jid.clone(),
+                age: std::time::Duration::ZERO,
+                restore: Some(stashed),
+            })
+            .await
+            .expect("stash the failed handoff spec");
+
+        // The next demand creation inside the window adopts the stash: the
+        // retired actor's roster survives the dropped handoff message.
+        let acquisition = registry
+            .ask(GetOrCreateRoom {
+                room_jid: room_jid.clone(),
+                waddle_id: "demand-waddle".to_string(),
+                channel_id: "demand-channel".to_string(),
+                config: RoomConfig::default(),
+            })
+            .await
+            .expect("demand creation adopts the stash");
+        assert_eq!(acquisition.creation, RoomCreation::Created);
+        let snapshot = acquisition
+            .actor_ref
+            .ask(GetSnapshot)
+            .await
+            .expect("adopted snapshot");
+        let restored = snapshot
+            .room
+            .find_occupant_by_real_jid(&member)
+            .expect("the stashed roster is restored");
+        assert_eq!(restored.nick, "alice");
+        assert_eq!(
+            snapshot.room.config.name, "stashed successor",
+            "the stashed spec wins over the rosterless demand spec"
+        );
+        // The registered successor ended the handoff window.
+        let lookup = registry
+            .ask(GetRoom {
+                room_jid: room_jid.clone(),
+            })
+            .await
+            .expect("lookup after adoption")
+            .expect("adopted room exists");
+        assert_eq!(lookup.id(), acquisition.actor_ref.id());
+    }
+
+    #[tokio::test]
     async fn get_or_create_with_live_roster_restores_occupants_from_typed_ids() {
         use crate::muc::durable::{ChannelId, WaddleId};
         use crate::muc::room_actor::{GetSnapshot, JoinAffiliationGrant, JoinWithAffiliation};
@@ -4563,6 +4670,7 @@ mod ownership_claims_tests {
             .ask(MarkHandoffPendingForTest {
                 room_jid: room_jid.clone(),
                 age: std::time::Duration::ZERO,
+                restore: None,
             })
             .await
             .expect("mark");
@@ -4584,6 +4692,7 @@ mod ownership_claims_tests {
             .ask(MarkHandoffPendingForTest {
                 room_jid: room_jid.clone(),
                 age: HANDOFF_PENDING_WINDOW + std::time::Duration::from_secs(1),
+                restore: None,
             })
             .await
             .expect("age the marker");

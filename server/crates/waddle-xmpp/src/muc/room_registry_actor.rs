@@ -285,6 +285,17 @@ enum PendingRoomOwnershipResponsibility<'a> {
 /// See [`RoomRegistryActor::handoff_in_window`].
 pub const HANDOFF_PENDING_WINDOW: std::time::Duration = std::time::Duration::from_secs(60);
 
+/// A retired-but-unpublished handoff. Lookups answer
+/// `OwnershipReconciliationPending` for the bounded window, and a
+/// post-demote transition failure stashes the live-roster creation spec
+/// here so the next demand creation inside the window restores the retired
+/// actor's roster and departure ledger instead of dropping them with the
+/// failed message (#1647).
+struct PendingHandoff {
+    since: std::time::Instant,
+    stashed_spec: Option<Arc<RoomCreationSpec>>,
+}
+
 /// Actor that owns the mapping from room JIDs to per-room actors.
 ///
 /// All room creation, lookup, and destruction flows through this actor,
@@ -326,7 +337,7 @@ pub struct RoomRegistryActor {
     /// has not (yet) produced a successor: `GetRoom` answers
     /// `OwnershipReconciliationPending` instead of an absence until a room
     /// entry is published again.
-    handoff_pending: HashMap<BareJid, std::time::Instant>,
+    handoff_pending: HashMap<BareJid, PendingHandoff>,
     /// Unpublished demand rooms whose durable Create succeeded but whose
     /// terminal cleanup after a lost creator handoff remains uncertain.
     pending_unpublished_destroys:
@@ -840,7 +851,7 @@ impl RoomRegistryActor {
             return false;
         }
         match self.handoff_pending.get(room_jid) {
-            Some(since) if since.elapsed() < HANDOFF_PENDING_WINDOW => true,
+            Some(pending) if pending.since.elapsed() < HANDOFF_PENDING_WINDOW => true,
             Some(_) => {
                 self.handoff_pending.remove(room_jid);
                 tracing::warn!(
@@ -852,6 +863,16 @@ impl RoomRegistryActor {
             }
             None => false,
         }
+    }
+
+    /// A live-roster spec stashed by a failed post-demote transition, if
+    /// still within the handoff window.
+    fn stashed_handoff_spec(&self, room_jid: &BareJid) -> Option<Arc<RoomCreationSpec>> {
+        let pending = self.handoff_pending.get(room_jid)?;
+        if pending.since.elapsed() >= HANDOFF_PENDING_WINDOW {
+            return None;
+        }
+        pending.stashed_spec.clone()
     }
 
     fn publish_room_count(&self) {
@@ -2014,6 +2035,18 @@ impl RoomRegistryActor {
             return Ok(DemandRoomTransition::Existing(actor_ref));
         }
 
+        // A failed post-demote handoff stashed its live-roster spec on the
+        // pending marker. The next demand creation inside the window adopts
+        // it, so the retired actor's roster and departure ledger survive the
+        // dropped message. A caller that brings its own restore is fresher
+        // (a still-live stale actor) and wins. The stash is cleared only by
+        // a registered successor or window expiry, so a failed adoption
+        // leaves it in place for the next retry.
+        let creation_spec = match self.stashed_handoff_spec(&room_jid) {
+            Some(stashed) if creation_spec.live_room_restore.is_none() => stashed,
+            _ => creation_spec,
+        };
+
         match self
             .prepare_demand_room(
                 &room_jid,
@@ -2029,6 +2062,9 @@ impl RoomRegistryActor {
             .await?
         {
             DemandRoomPreparation::Published(actor_ref) => {
+                // A registered successor ends the handoff window (and
+                // retires any adopted stash with it).
+                self.handoff_pending.remove(&room_jid);
                 Ok(DemandRoomTransition::Created(actor_ref))
             }
             DemandRoomPreparation::Pending { guard, claim_fence } => {
@@ -3753,9 +3789,10 @@ pub struct GetRoom {
 /// Test seam: set (or age) the handoff marker for a room as if a handoff had
 /// retired its actor `age` ago without publishing a successor.
 #[cfg(test)]
-pub struct MarkHandoffPendingForTest {
-    pub room_jid: BareJid,
-    pub age: std::time::Duration,
+struct MarkHandoffPendingForTest {
+    room_jid: BareJid,
+    age: std::time::Duration,
+    restore: Option<Arc<RoomCreationSpec>>,
 }
 
 #[cfg(test)]
@@ -3767,8 +3804,13 @@ impl kameo::message::Message<MarkHandoffPendingForTest> for RoomRegistryActor {
         msg: MarkHandoffPendingForTest,
         _ctx: &mut Context<Self, Self::Reply>,
     ) -> Self::Reply {
-        self.handoff_pending
-            .insert(msg.room_jid, std::time::Instant::now() - msg.age);
+        self.handoff_pending.insert(
+            msg.room_jid,
+            PendingHandoff {
+                since: std::time::Instant::now() - msg.age,
+                stashed_spec: msg.restore,
+            },
+        );
     }
 }
 
@@ -4835,9 +4877,14 @@ impl kameo::message::Message<GetOrCreateRoomWithLiveRoster> for RoomRegistryActo
                 // From here until the successor is registered (or a
                 // preparation is pending) the room must not look absent.
                 self.handoff_pending
-                    .retain(|_, since| since.elapsed() < HANDOFF_PENDING_WINDOW);
-                self.handoff_pending
-                    .insert(room_jid.clone(), std::time::Instant::now());
+                    .retain(|_, pending| pending.since.elapsed() < HANDOFF_PENDING_WINDOW);
+                self.handoff_pending.insert(
+                    room_jid.clone(),
+                    PendingHandoff {
+                        since: std::time::Instant::now(),
+                        stashed_spec: None,
+                    },
+                );
                 self.retire_ownership_lost_entry(&room_jid, entry).await;
             }
         }
@@ -4853,8 +4900,22 @@ impl kameo::message::Message<GetOrCreateRoomWithLiveRoster> for RoomRegistryActo
             }),
         });
         let transition = self
-            .transition_demand_room(room_jid.clone(), creation_spec, ctx.actor_ref().clone())
+            .transition_demand_room(
+                room_jid.clone(),
+                Arc::clone(&creation_spec),
+                ctx.actor_ref().clone(),
+            )
             .await;
+        if transition.is_err() {
+            // The demand failed after the stale actor was retired: this
+            // message held the only copy of the retired actor's live roster
+            // and departure ledger. Stash it on the pending marker so the
+            // next demand creation inside the window restores it instead of
+            // hydrating a rosterless room after the marker expires.
+            if let Some(pending) = self.handoff_pending.get_mut(&room_jid) {
+                pending.stashed_spec = Some(Arc::clone(&creation_spec));
+            }
+        }
         // A registered successor clears the marker (so does any later
         // publication). A PENDING preparation keeps it: the preparation may
         // still fail without publishing, and lookups after that must stay
@@ -6047,6 +6108,13 @@ impl kameo::message::Message<DestroyRoomIfInactive> for RoomRegistryActor {
                     "Guarded destroy refused: room no longer inactive at expected revision"
                 );
                 GuardedDestroyOutcome::Refused
+            }
+            Ok(SealIfInactiveOutcome::EffectsOwed) => {
+                debug!(
+                    room = %msg.room_jid,
+                    "Guarded destroy retained: departure receipts still owed"
+                );
+                GuardedDestroyOutcome::Retained
             }
             Err(error) => {
                 // Never remove on uncertainty. If the seal actually

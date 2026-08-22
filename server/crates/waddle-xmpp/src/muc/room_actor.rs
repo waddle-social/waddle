@@ -2655,8 +2655,15 @@ impl kameo::message::Message<IsDormant> for RoomActor {
             // compensation responsibility and must survive both lifecycle
             // guards (the Dormant guard is also protected by the explicit
             // Member affiliation itself).
+            // Unconsumed departure receipts veto dormancy: they are owed
+            // effects, and reaping the actor would strand their replays.
+            // A sealed actor stays dormant unconditionally: sealing now
+            // requires an empty ledger, and a sealed actor refuses the
+            // admissions that could mint new receipts.
             dormant: self.seal_state.is_sealed()
-                || (self.room.is_dormant() && !self.has_lifecycle_fenced_invite_operation()),
+                || (self.room.is_dormant()
+                    && !self.has_lifecycle_fenced_invite_operation()
+                    && self.departure_receipts.is_empty()),
             occupancy_revision: self.occupancy_revision,
         }
     }
@@ -2823,6 +2830,12 @@ pub enum SealIfInactiveOutcome {
     Refused,
     Inactive,
     OwnershipLost,
+    /// The room is inactive but still owes departure effects: unconsumed
+    /// departure receipts are waiting to be acknowledged. Destroying now
+    /// would strand the owed replays (the retained departure would find the
+    /// room absent and drop its 110 self-echo). Not definitive - the caller
+    /// retains its eviction responsibility and retries after the acks drain.
+    EffectsOwed,
 }
 
 impl kameo::message::Message<SealIfInactive> for RoomActor {
@@ -2849,6 +2862,9 @@ impl kameo::message::Message<SealIfInactive> for RoomActor {
                     self.room.occupants.is_empty() && !self.room.config.persistent
                 }
             };
+        if inactive && !self.departure_receipts.is_empty() {
+            return SealIfInactiveOutcome::EffectsOwed;
+        }
         if inactive {
             self.seal_state = RoomSealState::Inactive;
             SealIfInactiveOutcome::Inactive

@@ -169,17 +169,12 @@ pub(crate) async fn run_local_muc_departure_sweep(state: &WebSocketState) {
                     attempt,
                     notified,
                 } => {
-                    if matches!(cause, OccupancyLeaveCause::Disconnect)
-                        && state
-                            .deps
-                            .protocol
-                            .connection_registry
-                            .get_entry(&jid)
-                            .is_some()
-                    {
-                        crate::metrics::record_local_departure_retry("skipped_live");
-                        break;
-                    }
+                    // A reconnected JID does NOT short-circuit the retry:
+                    // the retained attempt predates the rejoin, so the
+                    // actor's own fences classify it (order fence =>
+                    // Superseded; receipt replay => the owed effects) instead
+                    // of the janitor guessing from live-connection state and
+                    // dropping a departure the room never observed.
                     let actor = match get_room_actor_result(state, &room).await {
                         Ok(Some(actor)) => actor,
                         Ok(None) => {
@@ -315,7 +310,7 @@ pub(crate) async fn run_local_muc_departure_sweep(state: &WebSocketState) {
                                         state,
                                         &room,
                                         &jid,
-                                        &outcome.nick,
+                                        &outcome.leaving_room_jid,
                                         outcome.affiliation,
                                     )
                                     .await;
@@ -403,7 +398,7 @@ pub(crate) async fn run_local_muc_departure_sweep(state: &WebSocketState) {
                                     state,
                                     &room,
                                     &jid,
-                                    nick.as_str(),
+                                    &nick.occupant_jid(&room),
                                     affiliation,
                                 )
                                 .await;
@@ -7779,19 +7774,30 @@ mod room_dormancy_tests {
             })
             .await
             .expect("join");
-        assert!(matches!(
+        let waddle_xmpp::muc::room_actor::LeaveDisposition::Left(outcome) = actor
+            .ask(LeaveByRealJid {
+                sender_jid: alice,
+                cause: waddle_xmpp::muc::durable::OccupancyLeaveCause::Disconnect,
+                session: waddle_xmpp::muc::room_actor::LeaveSessionSelector::Any,
+                attempt: waddle_xmpp::muc::room_actor::LeaveAttemptId::generate(),
+                origin: waddle_xmpp::muc::room_actor::LeaveOrigin::Fresh,
+            })
+            .await
+            .expect("leave")
+        else {
+            panic!("occupant leaves");
+        };
+        // #1647: acknowledge the departure receipt — an unacknowledged
+        // receipt now legitimately vetoes dormancy/eviction.
+        assert_eq!(
             actor
-                .ask(LeaveByRealJid {
-                    sender_jid: alice,
-                    cause: waddle_xmpp::muc::durable::OccupancyLeaveCause::Disconnect,
-                    session: waddle_xmpp::muc::room_actor::LeaveSessionSelector::Any,
-                    attempt: waddle_xmpp::muc::room_actor::LeaveAttemptId::generate(),
-                    origin: waddle_xmpp::muc::room_actor::LeaveOrigin::Fresh,
+                .ask(waddle_xmpp::muc::room_actor::AckDepartureReceipt {
+                    attempt: outcome.acknowledge,
                 })
                 .await
-                .expect("leave"),
-            waddle_xmpp::muc::room_actor::LeaveDisposition::Left(_)
-        ));
+                .expect("ack ask"),
+            waddle_xmpp::muc::room_actor::AckDepartureOutcome::Acknowledged
+        );
 
         let counts = sweep_dormant_rooms_once(&state).await;
         assert_eq!(counts.evicted, 1);
@@ -7829,19 +7835,30 @@ mod room_dormancy_tests {
             })
             .await
             .expect("resolver-derived member join");
-        assert!(matches!(
+        let waddle_xmpp::muc::room_actor::LeaveDisposition::Left(outcome) = actor
+            .ask(LeaveByRealJid {
+                sender_jid: alice,
+                cause: waddle_xmpp::muc::durable::OccupancyLeaveCause::Disconnect,
+                session: waddle_xmpp::muc::room_actor::LeaveSessionSelector::Any,
+                attempt: waddle_xmpp::muc::room_actor::LeaveAttemptId::generate(),
+                origin: waddle_xmpp::muc::room_actor::LeaveOrigin::Fresh,
+            })
+            .await
+            .expect("leave")
+        else {
+            panic!("occupant leaves");
+        };
+        // #1647: acknowledge the departure receipt — an unacknowledged
+        // receipt now legitimately vetoes dormancy/eviction.
+        assert_eq!(
             actor
-                .ask(LeaveByRealJid {
-                    sender_jid: alice,
-                    cause: waddle_xmpp::muc::durable::OccupancyLeaveCause::Disconnect,
-                    session: waddle_xmpp::muc::room_actor::LeaveSessionSelector::Any,
-                    attempt: waddle_xmpp::muc::room_actor::LeaveAttemptId::generate(),
-                    origin: waddle_xmpp::muc::room_actor::LeaveOrigin::Fresh,
+                .ask(waddle_xmpp::muc::room_actor::AckDepartureReceipt {
+                    attempt: outcome.acknowledge,
                 })
                 .await
-                .expect("leave"),
-            waddle_xmpp::muc::room_actor::LeaveDisposition::Left(_)
-        ));
+                .expect("ack ask"),
+            waddle_xmpp::muc::room_actor::AckDepartureOutcome::Acknowledged
+        );
 
         let counts = sweep_dormant_rooms_once(&state).await;
         assert_eq!(
@@ -7882,19 +7899,30 @@ mod room_dormancy_tests {
             })
             .await
             .expect("first join");
-        assert!(matches!(
+        let waddle_xmpp::muc::room_actor::LeaveDisposition::Left(outcome) = actor
+            .ask(LeaveByRealJid {
+                sender_jid: alice.clone(),
+                cause: waddle_xmpp::muc::durable::OccupancyLeaveCause::Disconnect,
+                session: waddle_xmpp::muc::room_actor::LeaveSessionSelector::Any,
+                attempt: waddle_xmpp::muc::room_actor::LeaveAttemptId::generate(),
+                origin: waddle_xmpp::muc::room_actor::LeaveOrigin::Fresh,
+            })
+            .await
+            .expect("leave")
+        else {
+            panic!("occupant leaves");
+        };
+        // #1647: acknowledge the departure receipt — an unacknowledged
+        // receipt now legitimately vetoes dormancy/eviction.
+        assert_eq!(
             actor
-                .ask(LeaveByRealJid {
-                    sender_jid: alice.clone(),
-                    cause: waddle_xmpp::muc::durable::OccupancyLeaveCause::Disconnect,
-                    session: waddle_xmpp::muc::room_actor::LeaveSessionSelector::Any,
-                    attempt: waddle_xmpp::muc::room_actor::LeaveAttemptId::generate(),
-                    origin: waddle_xmpp::muc::room_actor::LeaveOrigin::Fresh,
+                .ask(waddle_xmpp::muc::room_actor::AckDepartureReceipt {
+                    attempt: outcome.acknowledge,
                 })
                 .await
-                .expect("leave"),
-            waddle_xmpp::muc::room_actor::LeaveDisposition::Left(_)
-        ));
+                .expect("ack ask"),
+            waddle_xmpp::muc::room_actor::AckDepartureOutcome::Acknowledged
+        );
         let counts = sweep_dormant_rooms_once(&state).await;
         assert_eq!(counts.evicted, 1, "room evicted while dormant");
 
@@ -9928,17 +9956,23 @@ mod local_muc_departure_tests {
         assert_eq!(state.deps.protocol.pending_local_muc_departures.len(), 0);
     }
 
+    /// #1647 (codex P1): a live connection registration must NOT
+    /// short-circuit a retained disconnect departure. The janitor hands the
+    /// retry to the actor, whose fences classify it: a rejoin newer than the
+    /// attempt is `Superseded` (covered by
+    /// `local_departure_sweep_replacement_rejoin_is_superseded_without_sfu_teardown`),
+    /// while a live registration WITHOUT a rejoin still owes the departure
+    /// of the old session — dropping it would leave a ghost occupant.
     #[tokio::test]
-    async fn local_departure_sweep_skips_live_registration_for_disconnect_only() {
+    async fn local_departure_sweep_delivers_disconnect_despite_live_registration() {
         let store = JanitorProjectionStore::new();
         let state = clustered_state_with_store(store.clone()).await;
-        let room = room_jid("skip-live");
+        let room = room_jid("live-not-skipped");
         let jid = full_jid("alice@example.com/web");
         let actor = create_room(state.as_ref(), &room).await;
         join_member(&actor, &jid, "alice").await;
-        // The administrative departure stays deferred while the resource is
-        // live; the disconnect item is superseded by that live registration.
-        store.set_leave_mode(LeaveProjectionMode::OwnershipUnavailable);
+        // The full JID is live-registered (a reconnect), but it never
+        // rejoined the room after the retained attempt was minted.
         let (tx, _rx) = mpsc::channel(4);
         register_test_connection(state.as_ref(), &jid, tx).await;
         state.deps.protocol.pending_local_muc_departures.record(
@@ -9951,38 +9985,24 @@ mod local_muc_departure_tests {
                 notified: HashSet::new(),
             },
         );
-        state.deps.protocol.pending_local_muc_departures.record(
-            crate::server::routes::websocket::LocalDepartureItem::RoomDeparture {
-                room: room.clone(),
-                jid: jid.clone(),
-                cause: OccupancyLeaveCause::Administrative,
-                selector: LeaveSessionSelector::Any,
-                attempt: waddle_xmpp::muc::room_actor::LeaveAttemptId::generate(),
-                notified: HashSet::new(),
-            },
-        );
 
         run_local_muc_departure_sweep(&state).await;
 
+        assert!(
+            actor
+                .ask(GetSnapshot)
+                .await
+                .expect("snapshot")
+                .room
+                .find_occupant_by_real_jid(&jid)
+                .is_none(),
+            "the departed session is removed even though the JID is live-registered"
+        );
         assert_eq!(
             state.deps.protocol.pending_local_muc_departures.len(),
-            1,
-            "the disconnect item is dropped for a live replacement, while the administrative item is retained"
+            0,
+            "the delivered departure (and its acknowledgement) fully converges"
         );
-        // The deferred administrative item re-armed with backoff: look past it.
-        let remaining = state
-            .deps
-            .protocol
-            .pending_local_muc_departures
-            .take_due(Instant::now() + std::time::Duration::from_secs(120));
-        assert_eq!(remaining.len(), 1);
-        assert!(matches!(
-            remaining[0].item,
-            crate::server::routes::websocket::LocalDepartureItem::RoomDeparture {
-                cause: OccupancyLeaveCause::Administrative,
-                ..
-            }
-        ));
     }
 
     #[tokio::test]

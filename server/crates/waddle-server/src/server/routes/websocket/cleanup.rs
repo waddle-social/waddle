@@ -231,13 +231,10 @@ pub(crate) async fn echo_muc_self_unavailable(
     state: &WebSocketState,
     room_jid: &BareJid,
     sender_jid: &FullJid,
-    nick: &str,
+    leaving_room_jid: &FullJid,
     affiliation: waddle_xmpp_core::Affiliation,
 ) {
-    let from_jid = room_jid
-        .clone()
-        .with_resource_str(nick)
-        .unwrap_or_else(|_| sender_jid.clone());
+    let from_jid = leaving_room_jid.clone();
     let sender_bare = sender_jid.to_bare();
     let identity = OccupantIdentity {
         bare_jid: &sender_bare,
@@ -299,10 +296,7 @@ pub(crate) async fn broadcast_muc_leave_to_remaining_resumable(
     if !outcome.removed_last_session {
         return;
     }
-    let from_jid = room_jid
-        .clone()
-        .with_resource_str(&outcome.nick)
-        .unwrap_or_else(|_| sender_jid.clone());
+    let from_jid = outcome.leaving_room_jid.clone();
     let sender_bare = sender_jid.to_bare();
     for occupant_jid in &outcome.remaining_occupants {
         if progress
@@ -349,15 +343,7 @@ pub(crate) async fn broadcast_muc_muji_clear_to_remaining_resumable(
     if outcome.removed_last_session || !outcome.cleared_muji_state {
         return;
     }
-    let from_jid = room_jid
-        .clone()
-        .with_resource_str(&outcome.nick)
-        .unwrap_or_else(|_| {
-            outcome
-                .remaining_nick_real_jid
-                .clone()
-                .unwrap_or_else(|| outcome.leaving_room_jid.clone())
-        });
+    let from_jid = outcome.leaving_room_jid.clone();
     let mut entries = Vec::with_capacity(outcome.remaining_muji_sessions.len() + 1);
     entries.push((leaving_real_jid.clone(), Muji::default()));
     entries.extend(outcome.remaining_muji_sessions.iter().cloned());
@@ -3358,6 +3344,17 @@ mod eviction_tests {
         assert!(outcome.removed_last_session);
         assert_eq!(outcome.occupant_count, 0);
         assert!(!outcome.is_persistent);
+        // #1647: acknowledge the departure receipt — an unacknowledged
+        // receipt now legitimately vetoes the guarded destroy (EffectsOwed).
+        assert_eq!(
+            room_actor
+                .ask(waddle_xmpp::muc::room_actor::AckDepartureReceipt {
+                    attempt: outcome.acknowledge,
+                })
+                .await
+                .expect("ack ask"),
+            waddle_xmpp::muc::room_actor::AckDepartureOutcome::Acknowledged
+        );
 
         maybe_evict_empty_room(&state, &room_jid, &outcome).await;
 

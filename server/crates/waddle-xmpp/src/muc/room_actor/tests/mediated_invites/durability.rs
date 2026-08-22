@@ -54,16 +54,27 @@ async fn unacknowledged_rollback_blocks_dormancy_and_both_seal_guards() {
         })
         .await
         .expect("remove inviter affiliation");
+    let attempt = LeaveAttemptId::generate();
     actor
         .ask(LeaveByRealJid {
             sender_jid: inviter.clone(),
             cause: crate::muc::durable::OccupancyLeaveCause::Explicit,
             session: LeaveSessionSelector::Any,
-            attempt: LeaveAttemptId::generate(),
+            attempt,
             origin: crate::muc::room_actor::LeaveOrigin::Fresh,
         })
         .await
         .expect("leave room");
+    // #1647: the leave minted a departure receipt, and an unacknowledged
+    // receipt now legitimately vetoes dormancy. Acknowledge it so this test
+    // keeps pinning ITS fence, not the receipt's.
+    assert_eq!(
+        actor
+            .ask(AckDepartureReceipt { attempt })
+            .await
+            .expect("ack ask"),
+        AckDepartureOutcome::Acknowledged
+    );
 
     let probe = actor.ask(IsDormant).await.expect("dormancy probe");
     assert!(

@@ -605,16 +605,27 @@ async fn no_grant_operation_does_not_pin_an_otherwise_dormant_room() {
         })
         .await
         .expect("authorize no-grant invite");
+    let attempt = LeaveAttemptId::generate();
     actor
         .ask(LeaveByRealJid {
             sender_jid: test_full_jid("inviter"),
             cause: crate::muc::durable::OccupancyLeaveCause::Explicit,
             session: LeaveSessionSelector::Any,
-            attempt: LeaveAttemptId::generate(),
+            attempt,
             origin: crate::muc::room_actor::LeaveOrigin::Fresh,
         })
         .await
         .expect("leave room");
+    // #1647: the leave minted a departure receipt, and an unacknowledged
+    // receipt now legitimately vetoes dormancy. Acknowledge it so this test
+    // keeps pinning ITS fence, not the receipt's.
+    assert_eq!(
+        actor
+            .ask(AckDepartureReceipt { attempt })
+            .await
+            .expect("ack ask"),
+        AckDepartureOutcome::Acknowledged
+    );
 
     let probe = actor.ask(IsDormant).await.expect("dormancy probe");
     assert!(probe.dormant, "no-grant replay state must not pin the room");

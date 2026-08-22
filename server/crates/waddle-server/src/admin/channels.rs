@@ -2742,7 +2742,6 @@ fn find_occupant_for_full_jid<'a>(
 }
 
 pub(crate) struct GroupDmLeaveEffect {
-    nick: String,
     affiliation: Affiliation,
     leaving_room_jid: FullJid,
     remaining_occupants: Vec<FullJid>,
@@ -2752,7 +2751,6 @@ pub(crate) struct GroupDmLeaveEffect {
 impl From<&waddle_xmpp::muc::room_actor::LeaveOutcome> for GroupDmLeaveEffect {
     fn from(outcome: &waddle_xmpp::muc::room_actor::LeaveOutcome) -> Self {
         Self {
-            nick: outcome.nick.clone(),
             affiliation: outcome.affiliation,
             leaving_room_jid: outcome.leaving_room_jid.clone(),
             remaining_occupants: outcome.remaining_occupants.clone(),
@@ -2768,11 +2766,7 @@ pub(crate) fn broadcast_group_dm_leave(
     notify_self: bool,
     outcome: &GroupDmLeaveEffect,
 ) {
-    let from_jid = outcome
-        .leaving_room_jid
-        .to_bare()
-        .with_resource_str(&outcome.nick)
-        .unwrap_or_else(|_| outcome.leaving_room_jid.clone());
+    let from_jid = outcome.leaving_room_jid.clone();
     let sender_bare = leaving_real_jid.to_bare();
     let identity = OccupantIdentity {
         bare_jid: &sender_bare,

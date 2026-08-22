@@ -1765,17 +1765,28 @@ async fn is_dormant_true_after_resolver_derived_member_leaves() {
         })
         .await
         .expect("resolver-derived member join");
+    let attempt = LeaveAttemptId::generate();
     actor
         .ask(crate::muc::room_actor::LeaveByRealJid {
             sender_jid: alice,
             cause: crate::muc::durable::OccupancyLeaveCause::Explicit,
             session: LeaveSessionSelector::Any,
-            attempt: LeaveAttemptId::generate(),
+            attempt,
             origin: crate::muc::room_actor::LeaveOrigin::Fresh,
         })
         .await
         .map(departed)
         .expect("leave");
+    // #1647: the leave minted a departure receipt, and an unacknowledged
+    // receipt now legitimately vetoes dormancy. Acknowledge it so this test
+    // keeps pinning ITS fence, not the receipt's.
+    assert_eq!(
+        actor
+            .ask(AckDepartureReceipt { attempt })
+            .await
+            .expect("ack ask"),
+        AckDepartureOutcome::Acknowledged
+    );
     assert!(
         actor
             .ask(crate::muc::room_actor::IsDormant)
@@ -2040,17 +2051,28 @@ async fn is_dormant_true_after_last_occupant_leaves_with_no_stored_state() {
         })
         .await
         .expect("join");
+    let attempt = LeaveAttemptId::generate();
     actor
         .ask(crate::muc::room_actor::LeaveByRealJid {
             sender_jid: alice,
             cause: crate::muc::durable::OccupancyLeaveCause::Explicit,
             session: LeaveSessionSelector::Any,
-            attempt: LeaveAttemptId::generate(),
+            attempt,
             origin: crate::muc::room_actor::LeaveOrigin::Fresh,
         })
         .await
         .map(departed)
         .expect("leave");
+    // #1647: the leave minted a departure receipt, and an unacknowledged
+    // receipt now legitimately vetoes dormancy. Acknowledge it so this test
+    // keeps pinning ITS fence, not the receipt's.
+    assert_eq!(
+        actor
+            .ask(AckDepartureReceipt { attempt })
+            .await
+            .expect("ack ask"),
+        AckDepartureOutcome::Acknowledged
+    );
     assert!(
         actor
             .ask(crate::muc::room_actor::IsDormant)
@@ -5109,6 +5131,63 @@ async fn acknowledgement_is_refused_by_an_actor_that_lost_ownership() {
             .await
             .expect("ack ask"),
         AckDepartureOutcome::Acknowledged
+    );
+}
+
+#[tokio::test]
+async fn owed_departure_receipts_veto_seal_and_dormancy_until_acknowledged() {
+    let actor = spawn_room_actor_with_store(FakeDurableStore::owned()).await;
+    let alice = test_full_jid("alice");
+    join_as_resolver(&actor, alice.clone(), "alice")
+        .await
+        .expect("alice joins");
+    let attempt = LeaveAttemptId::generate();
+    let LeaveDisposition::Left(outcome) = leave_with_attempt(&actor, alice.clone(), attempt).await
+    else {
+        panic!("leave must complete");
+    };
+
+    let probe = actor.ask(IsDormant).await.expect("dormancy probe");
+    assert!(
+        !probe.dormant,
+        "an owed departure receipt must veto dormancy: reaping the actor would strand its replay"
+    );
+    assert_eq!(
+        actor
+            .ask(SealIfInactive {
+                expected_occupancy_revision: probe.occupancy_revision,
+                guard: SealGuard::Dormant,
+            })
+            .await
+            .expect("seal ask"),
+        SealIfInactiveOutcome::EffectsOwed,
+        "sealing while a receipt is owed must be retained, not definitive"
+    );
+
+    assert_eq!(
+        actor
+            .ask(AckDepartureReceipt {
+                attempt: outcome.acknowledge,
+            })
+            .await
+            .expect("ack ask"),
+        AckDepartureOutcome::Acknowledged
+    );
+    let probe = actor.ask(IsDormant).await.expect("dormancy probe");
+    assert!(
+        probe.dormant,
+        "the acknowledged ledger clears the dormancy veto"
+    );
+    assert_eq!(
+        actor
+            .ask(SealIfInactive {
+                expected_occupancy_revision: probe.occupancy_revision,
+                guard: SealGuard::Dormant,
+            })
+            .await
+            .expect("seal ask"),
+        SealIfInactiveOutcome::Inactive,
+        "the acknowledged ledger clears the seal veto"
     );
 }
 

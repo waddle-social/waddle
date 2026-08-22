@@ -25,6 +25,15 @@ impl MucOccupantNick {
     pub fn as_str(&self) -> &str {
         &self.0
     }
+
+    /// The occupant's room JID (`room@service/nick`). Infallible: the
+    /// constructor already validated the nick as a JID resource, and
+    /// resource validity is independent of the bare part.
+    pub fn occupant_jid(&self, room: &BareJid) -> FullJid {
+        room.clone()
+            .with_resource_str(&self.0)
+            .expect("MucOccupantNick was validated as a JID resource at construction")
+    }
 }
 
 fn durable_nick_validator_room_jid() -> &'static BareJid {
