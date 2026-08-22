@@ -38,9 +38,11 @@
 //!   the type down into `resume` closes.
 
 pub mod in_process;
+mod observe;
 pub mod resume;
 
 pub use in_process::InProcessClaimStore;
+pub use observe::{observed_claim_store, ObservedClaimStore};
 pub use resume::{verify_resume_identity, ResumeIdentityProof};
 
 use async_trait::async_trait;

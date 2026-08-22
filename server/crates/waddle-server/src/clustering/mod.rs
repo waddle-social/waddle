@@ -1069,7 +1069,9 @@ pub async fn start_if_enabled(
         // construction time. `claim_store_handle` wraps the same `db`
         // clone as `node_lease` — not a second, independent store.
         let claim_store_handle: Arc<dyn waddle_xmpp::ownership::ClaimStore> =
-            Arc::new(claims::PostgresClaimStore::new(db.clone()));
+            waddle_xmpp::ownership::observed_claim_store(claims::PostgresClaimStore::new(
+                db.clone(),
+            ));
         let live_identity = waddle_xmpp::ownership::SharedNodeIdentity::new(node_identity.clone());
         // ADR-0017 Phase 3 Slice 5 (carried debt (b)): construct the real
         // `LocallyClaimedEntities` empty now, hand the same `Arc` to both
@@ -1152,7 +1154,9 @@ pub async fn start_if_enabled(
                 // `clustering_claims` as `claim_store_handle` above —
                 // wraps the same `db` clone, never a second, independent
                 // store.
-                claim_store: Arc::new(claims::PostgresClaimStore::new(db.clone())),
+                claim_store: waddle_xmpp::ownership::observed_claim_store(
+                    claims::PostgresClaimStore::new(db.clone()),
+                ),
                 claim_release_budget: config.node_lease.claim_release_budget,
             },
         ));

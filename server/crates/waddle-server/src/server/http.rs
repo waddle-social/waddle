@@ -514,21 +514,25 @@ async fn create_websocket_state(
     // store/identity pair into UserRegistry that SM sessions and rooms use.
     // A `None` pair (clustering disabled, non-Postgres, or non-clustering
     // build) leaves the registry on its single-node in-process default.
-    #[cfg(feature = "clustering")]
-    if let Some((claim_store, node_identity)) = state.clustering_claims.claim_pair() {
-        if let Err(error) = user_registry
-            .tell(waddle_xmpp::registry::WireUserClusteringClaims {
-                claim_store,
-                node_identity,
-            })
-            .mailbox_timeout(std::time::Duration::from_secs(2))
-            .await
-        {
-            warn!(
-                %error,
-                "failed to wire clustering claims into the user registry"
-            );
-        }
+    let (claim_store, node_identity) = state.clustering_claims.claim_pair().unwrap_or_else(|| {
+        (
+            waddle_xmpp::ownership::observed_claim_store(
+                waddle_xmpp::ownership::InProcessClaimStore::new(),
+            ),
+            waddle_xmpp::ownership::SharedNodeIdentity::new(
+                waddle_xmpp::ownership::NodeIdentity::local(),
+            ),
+        )
+    });
+    if let Err(_error) = user_registry
+        .tell(waddle_xmpp::registry::WireUserClusteringClaims {
+            claim_store,
+            node_identity,
+        })
+        .mailbox_timeout(std::time::Duration::from_secs(2))
+        .await
+    {
+        warn!("failed to wire clustering claims into the user registry");
     }
     #[cfg(feature = "clustering")]
     if let Some(user_local_claims) = &state.clustering_claims.user_local_claims {
@@ -1425,9 +1429,17 @@ async fn create_sm_session_registry(
     // in above, defeating acquire-then-hydrate entirely. A `None` pair
     // (clustering disabled, non-Postgres, or a build without the
     // `clustering` feature) leaves today's single-node default untouched.
-    if let Some((claim_store, node_identity)) = clustering.claim_pair() {
-        sm_session_registry = sm_session_registry.with_claim_store(claim_store, node_identity);
-    }
+    let (claim_store, node_identity) = clustering.claim_pair().unwrap_or_else(|| {
+        (
+            waddle_xmpp::ownership::observed_claim_store(
+                waddle_xmpp::ownership::InProcessClaimStore::new(),
+            ),
+            waddle_xmpp::ownership::SharedNodeIdentity::new(
+                waddle_xmpp::ownership::NodeIdentity::local(),
+            ),
+        )
+    });
+    sm_session_registry = sm_session_registry.with_claim_store(claim_store, node_identity);
     // ADR-0017 Phase 3 Slice 6: wire the cross-node resume live-handshake
     // asker (over `RelayHandle`) alongside the claim store above — both are
     // `None`/absent under the exact same conditions (clustering disabled,
