@@ -2145,7 +2145,7 @@ pub async fn handle_muc_leave(
     let response = vec![build_muc_self_unavailable_xml(
         state,
         room_jid,
-        &outcome.nick,
+        outcome.nick.as_str(),
         sender_jid,
         outcome.affiliation,
     )];

@@ -548,7 +548,9 @@ impl RoomRegistryActor {
         // so their holders join the durable outbox recipients too.
         for receipt in &completion.departures.receipts {
             let nick = match &receipt.outcome {
-                super::room_actor::DepartureReceiptOutcome::Left(outcome) => outcome.nick.clone(),
+                super::room_actor::DepartureReceiptOutcome::Left(outcome) => {
+                    outcome.nick.as_str().to_owned()
+                }
                 super::room_actor::DepartureReceiptOutcome::Suppressed { nick, .. } => {
                     nick.as_str().to_owned()
                 }

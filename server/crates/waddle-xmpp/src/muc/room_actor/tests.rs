@@ -5974,7 +5974,7 @@ fn departure_receipts_keep_only_the_newest_generation_per_jid() {
     let outcome = |nick: &str, revision: u64| {
         super::DepartureReceiptOutcome::Left(Box::new(LeaveOutcome {
             acknowledge: LeaveAttemptId::generate(),
-            nick: nick.to_owned(),
+            nick: crate::muc::MucOccupantNick::new(nick.to_owned()).expect("valid test nick"),
             affiliation: Affiliation::Member,
             role: Role::Participant,
             leaving_room_jid: test_room()

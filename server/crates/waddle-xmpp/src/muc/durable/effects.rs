@@ -36,6 +36,12 @@ impl MucOccupantNick {
     }
 }
 
+impl std::fmt::Display for MucOccupantNick {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.0)
+    }
+}
+
 fn durable_nick_validator_room_jid() -> &'static BareJid {
     static ROOM_JID: OnceLock<BareJid> = OnceLock::new();
     ROOM_JID.get_or_init(|| {

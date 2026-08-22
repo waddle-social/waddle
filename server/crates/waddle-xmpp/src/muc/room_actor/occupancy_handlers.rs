@@ -575,7 +575,11 @@ impl kameo::message::Message<LeaveByRealJid> for RoomActor {
             );
             LeaveDisposition::Left(Box::new(LeaveOutcome {
                 acknowledge: msg.attempt,
-                nick,
+                // Infallible: the join path refuses a nick that does not
+                // validate as a `MucOccupantNick`, so every occupant nick is
+                // re-wrappable.
+                nick: crate::muc::MucOccupantNick::new(nick.clone())
+                    .expect("occupant nicks are validated at join"),
                 affiliation,
                 role,
                 leaving_room_jid,

@@ -667,7 +667,14 @@ fn evict_oldest_sweep_if_at_cap(inventory: &mut Inventory, cap: usize) {
         return;
     };
     inventory.remove(&oldest);
-    warn!("local MUC departure sweep inventory overflow; dropped oldest sweep");
+    let LocalDepartureKey::FullJidSweep(dropped) = &oldest else {
+        unreachable!("the overflow filter only selects full-JID sweeps");
+    };
+    warn!(
+        jid = %dropped,
+        cap = inventory.counts[0] + 1,
+        "local MUC departure sweep inventory overflow; dropped the oldest sweep's cleanup responsibility"
+    );
     crate::metrics::record_local_departure_retry("overflow");
 }
 

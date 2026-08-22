@@ -132,7 +132,7 @@ impl TryFrom<&waddle_xmpp::muc::room_registry_actor::DestroyCompletion>
                 for receipt in &completion.departures.receipts {
                     let nick = match &receipt.outcome {
                         waddle_xmpp::muc::room_actor::DepartureReceiptOutcome::Left(outcome) => {
-                            outcome.nick.clone()
+                            outcome.nick.as_str().to_owned()
                         }
                         waddle_xmpp::muc::room_actor::DepartureReceiptOutcome::Suppressed {
                             nick,

@@ -342,7 +342,7 @@ pub struct LeaveOutcome {
     /// acknowledge THIS id once the effects ran; replay never consumes the
     /// receipt by itself.
     pub acknowledge: occupancy_handlers::LeaveAttemptId,
-    pub nick: String,
+    pub nick: crate::muc::MucOccupantNick,
     pub affiliation: Affiliation,
     pub role: Role,
     pub leaving_room_jid: FullJid,
