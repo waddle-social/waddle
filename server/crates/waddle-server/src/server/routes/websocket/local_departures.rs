@@ -223,9 +223,9 @@ impl LocalDepartureItem {
 
     fn notified(&self) -> Option<&HashSet<FullJid>> {
         match self {
-            Self::RoomDeparture { notified, .. } | Self::InFlight { notified, .. } => {
-                Some(notified)
-            }
+            Self::RoomDeparture { notified, .. }
+            | Self::InFlight { notified, .. }
+            | Self::ConfirmRetired { notified, .. } => Some(notified),
             _ => None,
         }
     }
@@ -448,7 +448,7 @@ impl PendingLocalMucDepartures {
         inventory.record_gauges();
     }
 
-    #[cfg(all(test, feature = "clustering"))]
+    #[cfg(test)]
     pub(crate) fn take_for_test(&self, item: &LocalDepartureItem) -> Option<PendingLocalDeparture> {
         let mut inventory = self.entries.lock().expect("local departure inventory lock");
         let taken = inventory.remove(&item.key());
@@ -1298,10 +1298,11 @@ mod tests {
             attempt,
             notified,
         };
+        let carol: FullJid = "carol@example.com/tablet".parse().expect("carol");
         pending.record(departure(older, HashSet::from([bob.clone()])));
         // Progress recorded for a different attempt than the stored one is
-        // ignored.
-        pending.note_notified(&departure(newer, HashSet::new()), &bob);
+        // ignored — even for a recipient not yet in the stored set.
+        pending.note_notified(&departure(newer, HashSet::new()), &carol);
         assert!(pending.contains_for_test(&departure(older, HashSet::from([bob.clone()]))));
         // A newer attempt merged under the same key starts with ITS progress,
         // not the older attempt's.
@@ -1309,7 +1310,26 @@ mod tests {
         assert!(pending.contains_for_test(&departure(newer, HashSet::new())));
         // Same attempt re-recorded: progress unions.
         pending.record(departure(newer, HashSet::from([bob.clone()])));
-        assert!(pending.contains_for_test(&departure(newer, HashSet::from([bob]))));
+        assert!(pending.contains_for_test(&departure(newer, HashSet::from([bob.clone()]))));
+        // The retirement watch carries progress: a ConfirmRetired merged onto
+        // the same attempt keeps the recipients, and converting back does too.
+        pending.record(LocalDepartureItem::ConfirmRetired {
+            room: room.clone(),
+            jid: jid.clone(),
+            actor: kameo::actor::ActorId::generate(),
+            cause: OccupancyLeaveCause::Disconnect,
+            selector: LeaveSessionSelector::Any,
+            attempt: newer,
+            notified: HashSet::new(),
+        });
+        let retained = pending
+            .take_for_test(&departure(newer, HashSet::new()))
+            .expect("merged retirement watch");
+        assert!(matches!(
+            retained.item,
+            LocalDepartureItem::ConfirmRetired { ref notified, .. }
+                if notified == &HashSet::from([bob])
+        ));
     }
 
     #[tokio::test]

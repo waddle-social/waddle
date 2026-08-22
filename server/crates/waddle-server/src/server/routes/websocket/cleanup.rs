@@ -485,6 +485,37 @@ pub(crate) async fn redrive_remote_muc_cleanup(
     }
 }
 
+/// Response-path variant of [`maybe_evict_empty_room`]: run the guarded
+/// destroy on a detached task so a handler under the frame backstop returns
+/// its §7.14 self-presence without waiting on the registry. The detached ask
+/// keeps the registry handle's bounded mailbox/reply timeouts, so transient
+/// registry saturation resolves by waiting rather than by dropping the
+/// request. The destroy stays revision-guarded.
+pub(crate) fn evict_empty_room_detached(
+    state: &WebSocketState,
+    room_jid: &BareJid,
+    outcome: &LeaveOutcome,
+) {
+    if !(outcome.removed_last_session && outcome.occupant_count == 0 && !outcome.is_persistent) {
+        return;
+    }
+    let registry = state.deps.protocol.room_registry.clone();
+    let room_jid = room_jid.clone();
+    let occupancy_revision = outcome.occupancy_revision;
+    tokio::spawn(async move {
+        if let Err(error) = RoomRegistry::wrap(registry)
+            .destroy_room_if_inactive(
+                room_jid.clone(),
+                occupancy_revision,
+                SealGuard::EmptyNonPersistent,
+            )
+            .await
+        {
+            warn!(room = %room_jid, error = %error, "Detached guarded destroy of empty room failed");
+        }
+    });
+}
+
 /// If `outcome` represents the final occupant leaving a
 /// non-persistent (instant-style) MUC room, dispatch `DestroyRoom`
 /// to the room registry so the per-room `RoomActor` is reaped and
@@ -503,29 +534,6 @@ pub(crate) async fn redrive_remote_muc_cleanup(
 /// paths intentionally ignore the status because the leave itself has already
 /// succeeded on the wire; failing that response would be worse than letting
 /// the registry janitor catch the room on its next dead-actor sweep.
-/// Response-path variant of [`maybe_evict_empty_room`]: hand the guarded
-/// destroy to the registry without awaiting it, so a handler under the frame
-/// backstop returns its §7.14 self-presence regardless of how long the
-/// eviction takes. The destroy stays revision-guarded; if the registry's
-/// mailbox refuses the request its inactivity sweep reaps the room later.
-pub(crate) fn evict_empty_room_detached(
-    state: &WebSocketState,
-    room_jid: &BareJid,
-    outcome: &LeaveOutcome,
-) {
-    if !(outcome.removed_last_session && outcome.occupant_count == 0 && !outcome.is_persistent) {
-        return;
-    }
-    let request = waddle_xmpp::muc::room_registry_actor::DestroyRoomIfInactive {
-        room_jid: room_jid.clone(),
-        expected_occupancy_revision: outcome.occupancy_revision,
-        guard: SealGuard::EmptyNonPersistent,
-    };
-    if let Err(error) = state.deps.protocol.room_registry.tell(request).try_send() {
-        warn!(room = %room_jid, error = %error, "Deferred guarded destroy of empty room was not accepted; the inactivity sweep reaps it");
-    }
-}
-
 pub(crate) async fn maybe_evict_empty_room(
     state: &WebSocketState,
     room_jid: &BareJid,

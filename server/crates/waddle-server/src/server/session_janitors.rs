@@ -1,7 +1,6 @@
 use crate::room_policy::RoomRegistryActorPolicy;
 use crate::server::routes;
 use crate::server::routes::websocket::WebSocketState;
-use std::collections::HashSet;
 use std::sync::Arc;
 use std::time::Duration;
 use tracing::{debug, error, info, warn, Instrument};
@@ -455,7 +454,7 @@ pub(crate) async fn run_local_muc_departure_sweep(state: &WebSocketState) {
                                 cause,
                                 selector,
                                 attempt,
-                                notified: HashSet::new(),
+                                notified,
                             };
                         }
                     }
@@ -552,7 +551,7 @@ pub(crate) async fn run_local_muc_departure_sweep(state: &WebSocketState) {
                     cause,
                     selector,
                     attempt,
-                    ..
+                    notified,
                 } => match get_room_actor_result(state, &room).await {
                     Ok(None) => {
                         crate::metrics::record_local_departure_retry("retired");
@@ -565,7 +564,7 @@ pub(crate) async fn run_local_muc_departure_sweep(state: &WebSocketState) {
                             cause,
                             selector,
                             attempt,
-                            notified: HashSet::new(),
+                            notified,
                         };
                     }
                     Ok(Some(_)) | Err(_) => {
@@ -582,7 +581,7 @@ pub(crate) async fn run_local_muc_departure_sweep(state: &WebSocketState) {
                                     cause,
                                     selector,
                                     attempt,
-                                    notified: HashSet::new(),
+                                    notified,
                                 },
                                 attempts: pending.attempts,
                                 not_before: pending.not_before,
