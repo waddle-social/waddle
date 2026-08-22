@@ -1281,10 +1281,12 @@ impl RoomActor {
 
     /// Retain a completed departure so a retry of the same attempt (after a
     /// lost reply) can replay its outcome exactly once. Acknowledged receipts
-    /// are dropped at once and a newer departure of the same full JID
-    /// supersedes every older receipt of that JID, so the retained set is
-    /// bounded by full JIDs with a lost reply — the same cardinality as the
-    /// caller-side retry inventory — and no owed receipt is ever evicted.
+    /// are dropped at once and a newer departure of the same full JID AND
+    /// nick supersedes every older receipt of that (JID, nick), so the
+    /// retained set is bounded by (full JID, nick) pairs with a lost reply.
+    /// A different-nick departure keeps the older receipt: each nickname's
+    /// unavailable fan-out is independently owed to the remaining occupants
+    /// (#1647, codex round 26).
     pub(super) fn retain_departure_receipt(&mut self, receipt: DepartureReceipt) {
         let superseded = self
             .latest_generations
@@ -1300,7 +1302,7 @@ impl RoomActor {
         let displaced_attempts: Vec<_> = self
             .departure_receipts
             .iter()
-            .filter(|retained| retained.jid == receipt.jid)
+            .filter(|retained| retained.jid == receipt.jid && retained.nick() == receipt.nick())
             .map(|retained| retained.attempt)
             .collect();
         if !displaced_attempts.is_empty() {
@@ -1310,7 +1312,7 @@ impl RoomActor {
                 .extend(displaced_attempts);
         }
         self.departure_receipts
-            .retain(|retained| retained.jid != receipt.jid);
+            .retain(|retained| retained.jid != receipt.jid || retained.nick() != receipt.nick());
         self.latest_generations
             .insert(receipt.jid.clone(), receipt.generation);
         self.departure_receipts.push_back(receipt);

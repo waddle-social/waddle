@@ -44,6 +44,11 @@ pub enum LocalDepartureItem {
         /// order fence classifies it `Superseded` instead of the sweep
         /// evicting a live replacement (#1647, codex round 23).
         attempt: LeaveAttemptId,
+        /// Remote-membership generation watermark captured when the ORIGINAL
+        /// cleanup started: the redrive's remote pass only takes memberships
+        /// below it, so a replacement session's later remote registrations
+        /// are never relayed as this sweep's departures (#1647, round 26).
+        remote_ceiling: u64,
     },
     RoomDeparture {
         room: BareJid,
@@ -223,12 +228,40 @@ impl LocalDepartureItem {
                 attempt: merged_attempt,
                 notified: merged_notified.clone(),
             },
-            // A newer disconnect's ceiling covers the older sweep's rooms
+            // A newer disconnect's ceilings cover the older sweep's rooms
             // too (their sessions joined even earlier), so the newest
-            // attempt is the right merged fence.
-            (LocalDepartureItem::FullJidSweep { jid, .. }, _) => LocalDepartureItem::FullJidSweep {
+            // attempt — and ITS remote watermark — is the right merged fence.
+            (
+                LocalDepartureItem::FullJidSweep {
+                    jid,
+                    attempt: existing_attempt,
+                    remote_ceiling: existing_ceiling,
+                },
+                LocalDepartureItem::FullJidSweep {
+                    attempt: incoming_attempt,
+                    remote_ceiling: incoming_ceiling,
+                    ..
+                },
+            ) => LocalDepartureItem::FullJidSweep {
                 jid,
                 attempt: merged_attempt,
+                remote_ceiling: if incoming_attempt > existing_attempt {
+                    incoming_ceiling
+                } else {
+                    existing_ceiling
+                },
+            },
+            (
+                LocalDepartureItem::FullJidSweep {
+                    jid,
+                    attempt,
+                    remote_ceiling,
+                },
+                _,
+            ) => LocalDepartureItem::FullJidSweep {
+                jid,
+                attempt,
+                remote_ceiling,
             },
             (
                 LocalDepartureItem::EvictEmptyRoom {
@@ -1222,6 +1255,7 @@ mod tests {
                 LocalDepartureItem::FullJidSweep {
                     jid: jid(&format!("u{index}@example.com/r")),
                     attempt: LeaveAttemptId::generate(),
+                    remote_ceiling: u64::MAX,
                 },
                 now + Duration::from_secs(index as u64),
             );
@@ -1458,6 +1492,7 @@ mod tests {
             LocalDepartureItem::FullJidSweep {
                 jid: jid("b@example.com/web"),
                 attempt: LeaveAttemptId::generate(),
+                remote_ceiling: u64::MAX,
             },
             now + Duration::from_secs(2),
         );
@@ -1465,6 +1500,7 @@ mod tests {
             LocalDepartureItem::FullJidSweep {
                 jid: jid("a@example.com/web"),
                 attempt: LeaveAttemptId::generate(),
+                remote_ceiling: u64::MAX,
             },
             now + Duration::from_secs(1),
         );

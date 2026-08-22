@@ -5134,6 +5134,68 @@ async fn acknowledgement_is_refused_by_an_actor_that_lost_ownership() {
     );
 }
 
+/// #1647 (codex round 26): a second departure under a DIFFERENT nick must not
+/// displace the still-owed old-nick receipt — each nickname's unavailable
+/// fan-out is independently owed to the remaining occupants.
+#[tokio::test]
+async fn different_nick_departure_keeps_the_older_owed_receipt() {
+    let actor = spawn_room_actor_with_store(FakeDurableStore::owned()).await;
+    let alice = test_full_jid("alice");
+    join_as_resolver(&actor, alice.clone(), "old-nick")
+        .await
+        .expect("join");
+    let old_attempt = LeaveAttemptId::generate();
+    assert!(matches!(
+        leave_with_attempt(&actor, alice.clone(), old_attempt).await,
+        LeaveDisposition::Left(_)
+    ));
+    // Reply lost; the same JID rejoins under a new nick and leaves again
+    // (reply lost too) before either retry runs.
+    join_as_resolver(&actor, alice.clone(), "new-nick")
+        .await
+        .expect("rejoin");
+    let new_attempt = LeaveAttemptId::generate();
+    assert!(matches!(
+        leave_with_attempt(&actor, alice.clone(), new_attempt).await,
+        LeaveDisposition::Left(_)
+    ));
+    assert_eq!(
+        actor
+            .ask(GetSnapshot)
+            .await
+            .expect("snapshot")
+            .departures
+            .receipts
+            .len(),
+        2,
+        "independently owed nick receipts are both retained"
+    );
+
+    let LeaveDisposition::Left(old_outcome) =
+        leave_with_attempt(&actor, alice.clone(), old_attempt).await
+    else {
+        panic!("the old-nick departure must replay");
+    };
+    assert_eq!(old_outcome.nick.as_str(), "old-nick");
+    let LeaveDisposition::Left(new_outcome) =
+        leave_with_attempt(&actor, alice.clone(), new_attempt).await
+    else {
+        panic!("the new-nick departure must replay");
+    };
+    assert_eq!(new_outcome.nick.as_str(), "new-nick");
+    for acknowledge in [old_outcome.acknowledge, new_outcome.acknowledge] {
+        assert_eq!(
+            actor
+                .ask(AckDepartureReceipt {
+                    attempt: acknowledge,
+                })
+                .await
+                .expect("ack ask"),
+            AckDepartureOutcome::Acknowledged
+        );
+    }
+}
+
 /// #1647 (codex round 25): a lost-reply departure whose JID rejoined under a
 /// DIFFERENT nick still owes the OLD nick's unavailable fan-out — remaining
 /// occupants were never told it left. Only a visible (re-taken) nick makes

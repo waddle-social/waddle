@@ -415,6 +415,7 @@ pub(crate) async fn redrive_local_muc_cleanup(
     state: &WebSocketState,
     jid: &FullJid,
     attempt: waddle_xmpp::muc::room_actor::LeaveAttemptId,
+    remote_ceiling: u64,
 ) -> MucCleanupOutcome {
     // The redrive re-uses the ORIGINAL sweep's attempt as its occupancy-order
     // ceiling: sessions that (re)joined since are classified `Superseded` by
@@ -425,7 +426,7 @@ pub(crate) async fn redrive_local_muc_cleanup(
         jid,
         None,
         attempt,
-        SweepFailureRecording::JanitorRequeues,
+        SweepFailureRecording::JanitorRequeues { remote_ceiling },
     )
     .await
     {
@@ -2091,8 +2092,12 @@ async fn cleanup_muc_presence(state: &WebSocketState, jid: &FullJid) -> bool {
 /// the sweep on every janitor tick during a registry outage (#1647).
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum SweepFailureRecording {
+    /// A fresh cleanup pass: mint the remote-membership ceiling now and
+    /// record a `FullJidSweep` carrying it on enumeration/lookup failure.
     RecordSweep,
-    JanitorRequeues,
+    /// The janitor's redrive of a retained sweep: reuse the ORIGINAL pass's
+    /// remote ceiling and let the janitor requeue on failure.
+    JanitorRequeues { remote_ceiling: u64 },
 }
 
 async fn cleanup_muc_presence_with_origin(
@@ -2102,7 +2107,15 @@ async fn cleanup_muc_presence_with_origin(
     sweep_attempt: waddle_xmpp::muc::room_actor::LeaveAttemptId,
     sweep_recording: SweepFailureRecording,
 ) -> bool {
-    let mut completed = cleanup_remote_muc_presence(state, jid, origin).await;
+    let remote_ceiling = match sweep_recording {
+        SweepFailureRecording::RecordSweep => state
+            .deps
+            .protocol
+            .remote_muc_memberships
+            .generation_watermark(),
+        SweepFailureRecording::JanitorRequeues { remote_ceiling } => remote_ceiling,
+    };
+    let mut completed = cleanup_remote_muc_presence(state, jid, origin, remote_ceiling).await;
 
     let room_jids = match RoomRegistry::wrap(state.deps.protocol.room_registry.clone())
         .list_rooms()
@@ -2117,6 +2130,7 @@ async fn cleanup_muc_presence_with_origin(
                     LocalDepartureItem::FullJidSweep {
                         jid: jid.clone(),
                         attempt: sweep_attempt,
+                        remote_ceiling,
                     },
                 );
             }
@@ -2135,6 +2149,7 @@ async fn cleanup_muc_presence_with_origin(
                         LocalDepartureItem::FullJidSweep {
                             jid: jid.clone(),
                             attempt: sweep_attempt,
+                            remote_ceiling,
                         },
                     );
                 }
@@ -2343,12 +2358,13 @@ async fn cleanup_remote_muc_presence(
     state: &WebSocketState,
     jid: &FullJid,
     cleanup_origin: Option<&crate::server::routes::interpret::OrderedRelayRouteOrigin>,
+    remote_ceiling: u64,
 ) -> bool {
     let memberships = state
         .deps
         .protocol
         .remote_muc_memberships
-        .take_for_occupant(jid);
+        .take_for_occupant_below(jid, remote_ceiling);
     if memberships.is_empty() {
         return true;
     }
@@ -2726,6 +2742,7 @@ async fn cleanup_remote_muc_presence(
     _state: &WebSocketState,
     _jid: &FullJid,
     _cleanup_origin: Option<&crate::server::routes::interpret::OrderedRelayRouteOrigin>,
+    _remote_ceiling: u64,
 ) -> bool {
     true
 }

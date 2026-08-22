@@ -128,14 +128,25 @@ pub(crate) async fn run_local_muc_departure_sweep(state: &WebSocketState) {
         let mut item = pending.item;
         loop {
             match item {
-                LocalDepartureItem::FullJidSweep { jid, attempt } => {
+                LocalDepartureItem::FullJidSweep {
+                    jid,
+                    attempt,
+                    remote_ceiling,
+                } => {
                     // A live registration of the same full JID does NOT drop
                     // the sweep: the new connection has not necessarily
                     // rejoined every room the terminated session occupied.
                     // The sweep's attempt (minted at the ORIGINAL cleanup) is
                     // the fence — sessions that (re)joined since are
                     // `Superseded` by the actor, older occupancies converge.
-                    match routes::websocket::redrive_local_muc_cleanup(state, &jid, attempt).await {
+                    match routes::websocket::redrive_local_muc_cleanup(
+                        state,
+                        &jid,
+                        attempt,
+                        remote_ceiling,
+                    )
+                    .await
+                    {
                         routes::websocket::MucCleanupOutcome::Completed => {
                             crate::metrics::record_local_departure_retry("completed");
                         }
@@ -148,7 +159,11 @@ pub(crate) async fn run_local_muc_departure_sweep(state: &WebSocketState) {
                                 .protocol
                                 .pending_local_muc_departures
                                 .requeue_with_backoff(PendingLocalDeparture {
-                                    item: LocalDepartureItem::FullJidSweep { jid, attempt },
+                                    item: LocalDepartureItem::FullJidSweep {
+                                        jid,
+                                        attempt,
+                                        remote_ceiling,
+                                    },
                                     attempts: pending.attempts,
                                     not_before: pending.not_before,
                                 });
@@ -9980,6 +9995,7 @@ mod local_muc_departure_tests {
             crate::server::routes::websocket::LocalDepartureItem::FullJidSweep {
                 jid: jid.clone(),
                 attempt,
+                remote_ceiling: u64::MAX,
             },
         );
 
@@ -10337,6 +10353,7 @@ mod local_muc_departure_tests {
             crate::server::routes::websocket::LocalDepartureItem::FullJidSweep {
                 jid: jid.clone(),
                 attempt,
+                remote_ceiling: u64::MAX,
             },
         );
 
@@ -10381,6 +10398,7 @@ mod local_muc_departure_tests {
                 crate::server::routes::websocket::LocalDepartureItem::FullJidSweep {
                     jid: jid.clone(),
                     attempt: waddle_xmpp::muc::room_actor::LeaveAttemptId::generate(),
+                    remote_ceiling: u64::MAX,
                 },
             );
 
@@ -10422,6 +10440,7 @@ mod local_muc_departure_tests {
                 item: crate::server::routes::websocket::LocalDepartureItem::FullJidSweep {
                     jid: jid.clone(),
                     attempt: waddle_xmpp::muc::room_actor::LeaveAttemptId::generate(),
+                    remote_ceiling: u64::MAX,
                 },
                 attempts: requeued.attempts,
                 // Model the janitor's next pass after the retained item's
