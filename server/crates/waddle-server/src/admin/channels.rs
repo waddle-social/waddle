@@ -2321,10 +2321,12 @@ async fn run_group_dm_leave(
                         &GroupDmLeaveEffect::from(outcome.as_ref()),
                     );
                 }
+                Ok(waddle_xmpp::muc::room_actor::LeaveDisposition::Suppressed { .. }) => {
+                    crate::server::routes::websocket::ack_departure_receipt(&actor, attempt).await;
+                }
                 Ok(
                     waddle_xmpp::muc::room_actor::LeaveDisposition::NotOccupant
-                    | waddle_xmpp::muc::room_actor::LeaveDisposition::Superseded
-                    | waddle_xmpp::muc::room_actor::LeaveDisposition::Suppressed { .. },
+                    | waddle_xmpp::muc::room_actor::LeaveDisposition::Superseded,
                 ) => {}
                 Ok(waddle_xmpp::muc::room_actor::LeaveDisposition::Deferred { .. }) => {
                     pending_local_muc_departures.record(
@@ -3148,7 +3150,10 @@ impl CancelledConfigAskRecoveryGuard {
             // at the lifecycle FIFO head (nothing else arms live-origin rows): retry
             // with backoff before giving up.
             let mut lookup_attempt = 0_i64;
-            let lookup = loop {
+            let lookup: Result<
+                Vec<waddle_xmpp::muc::RoomEffectReservation>,
+                crate::room_effect_outbox::RoomEffectOutboxError,
+            > = loop {
                 match if exact {
                     self.outbox
                         .staged_reservation_for(coordinates.lifecycle, coordinates.revision)
@@ -3160,7 +3165,10 @@ impl CancelledConfigAskRecoveryGuard {
                         .await
                 } {
                     Ok(reservations) => break Ok(reservations),
-                    Err(error) if lookup_attempt < 5 => {
+                    // Retry until the lookup succeeds: the producing process is still
+                    // alive, so no other supervisor will ever arm these rows; the backoff
+                    // is capped at MAX_RETRY_DELAY_MS and this task is detached.
+                    Err(error) => {
                         lookup_attempt += 1;
                         let backoff_ms = crate::room_effect_outbox::retry_delay_ms(lookup_attempt);
                         tracing::warn!(
@@ -3175,7 +3183,6 @@ impl CancelledConfigAskRecoveryGuard {
                         ))
                         .await;
                     }
-                    Err(error) => break Err(error),
                 }
             };
             match lookup {
@@ -7818,6 +7825,221 @@ mod group_dm_durable_reconciliation_tests {
             );
             tokio::time::sleep(std::time::Duration::from_millis(250)).await;
         }
+    }
+
+    #[tokio::test]
+    async fn cancelled_config_recovery_keeps_retrying_lookup_failures_until_success() {
+        let websocket_state =
+            crate::server::routes::websocket::tests::create_test_websocket_state().await;
+        let durable_store = TestGroupDmDurableStore::with_outbox(
+            DurableMode::CommitSucceeds,
+            Arc::clone(&websocket_state.deps.protocol.room_effect_outbox),
+        );
+        let claim_store: Arc<dyn ClaimStore> = Arc::new(InProcessClaimStore::new());
+        websocket_state
+            .deps
+            .protocol
+            .room_registry
+            .ask(WireClusteringClaims {
+                claim_store,
+                node_identity: SharedNodeIdentity::new(NodeIdentity::new(
+                    "cancelled-config-retry-node",
+                    "cancelled-config-retry-epoch",
+                )),
+                durable_store: Some(durable_store),
+                rollout_backoff: None,
+            })
+            .await
+            .expect("wire durable room registry");
+
+        let room_jid: BareJid = "cancelled-config-retry@muc.example.com"
+            .parse()
+            .expect("room JID");
+        let actor = websocket_state
+            .deps
+            .protocol
+            .room_registry
+            .ask(CreateRoomWithInitialAffiliations {
+                room_jid: room_jid.clone(),
+                waddle_id: waddle_xmpp::muc::durable::WaddleId::new(
+                    "admin-channel-retry-test".to_owned(),
+                ),
+                channel_id: waddle_xmpp::muc::durable::ChannelId::new(
+                    "cancelled-config-retry".to_owned(),
+                ),
+                config: RoomConfig::default(),
+                initial_affiliations: Vec::new(),
+            })
+            .await
+            .expect("create durable room");
+        actor
+            .ask(Join {
+                nick: "alice".to_owned(),
+                real_jid: "alice@example.com/admin".parse().expect("recipient JID"),
+                role: Role::Participant,
+                affiliation: Affiliation::Member,
+            })
+            .await
+            .expect("join config-effect recipient");
+
+        let exact_config = RoomConfig {
+            name: "Exact".to_owned(),
+            ..RoomConfig::default()
+        };
+        let exact_applied = actor
+            .ask(waddle_xmpp::muc::room_actor::UpdateConfig {
+                config: exact_config.clone(),
+                effect_plan: waddle_xmpp::muc::room_actor::ConfigEffectPlan::DirectAudience,
+            })
+            .await
+            .expect("commit exact config");
+        let exact_snapshot = actor.ask(GetSnapshot).await.expect("exact snapshot");
+        let exact_reservation = exact_applied.reservation.expect("exact staged reservation");
+        let exact_key = crate::room_effect_outbox::RoomEffectKey {
+            lifecycle: exact_reservation.lifecycle,
+            revision: exact_reservation.revision,
+            ordinal: exact_reservation.ordinals[0],
+        };
+        let store = Arc::clone(&websocket_state.deps.protocol.room_effect_outbox);
+        store.fail_staged_reservation_lookup_times_for_test(
+            exact_reservation.lifecycle,
+            exact_reservation.revision,
+            2,
+        );
+        let exact_recovery = tokio::spawn({
+            let websocket_state = Arc::clone(&websocket_state);
+            let actor = actor.clone();
+            let room_jid = room_jid.clone();
+            async move {
+                CancelledConfigAskRecoveryGuard::arm_only(
+                    websocket_state.as_ref(),
+                    &actor,
+                    &room_jid,
+                    &exact_config,
+                    exact_snapshot.config_revision,
+                )
+                .recover()
+                .await;
+            }
+        });
+
+        // retry_delay_ms(1) + retry_delay_ms(2) is 5s + 10s. Allow 25s for
+        // those backoffs plus scheduler/database overhead before declaring recovery stuck.
+        let exact_deadline = std::time::Instant::now() + std::time::Duration::from_secs(25);
+        loop {
+            if store
+                .find(&exact_key)
+                .await
+                .expect("find exact staged row")
+                .is_some_and(|row| row.available_at_ms != i64::MAX)
+            {
+                break;
+            }
+            assert!(
+                std::time::Instant::now() < exact_deadline,
+                "the exact recovery must arm after two lookup failures"
+            );
+            tokio::time::sleep(std::time::Duration::from_millis(250)).await;
+        }
+        exact_recovery.await.expect("exact recovery joins");
+
+        let superseded_config = RoomConfig {
+            name: "Superseded".to_owned(),
+            ..RoomConfig::default()
+        };
+        let superseded_applied = actor
+            .ask(waddle_xmpp::muc::room_actor::UpdateConfig {
+                config: superseded_config.clone(),
+                effect_plan: waddle_xmpp::muc::room_actor::ConfigEffectPlan::DirectAudience,
+            })
+            .await
+            .expect("commit superseded config");
+        let superseded_snapshot = actor
+            .ask(GetSnapshot)
+            .await
+            .expect("superseded config snapshot");
+        let superseded_reservation = superseded_applied
+            .reservation
+            .expect("superseded staged reservation");
+        let superseded_key = crate::room_effect_outbox::RoomEffectKey {
+            lifecycle: superseded_reservation.lifecycle,
+            revision: superseded_reservation.revision,
+            ordinal: superseded_reservation.ordinals[0],
+        };
+        let latest_config = RoomConfig {
+            name: "Latest".to_owned(),
+            ..RoomConfig::default()
+        };
+        let latest_applied = actor
+            .ask(waddle_xmpp::muc::room_actor::UpdateConfig {
+                config: latest_config,
+                effect_plan: waddle_xmpp::muc::room_actor::ConfigEffectPlan::DirectAudience,
+            })
+            .await
+            .expect("commit latest config");
+        let latest_reservation = latest_applied
+            .reservation
+            .expect("latest staged reservation");
+        let latest_key = crate::room_effect_outbox::RoomEffectKey {
+            lifecycle: latest_reservation.lifecycle,
+            revision: latest_reservation.revision,
+            ordinal: latest_reservation.ordinals[0],
+        };
+        let latest_snapshot = actor
+            .ask(GetSnapshot)
+            .await
+            .expect("latest config snapshot");
+        assert_eq!(
+            latest_snapshot.config_revision,
+            superseded_snapshot.config_revision + 1,
+            "the latest config must force the superseded recovery branch"
+        );
+        store.fail_staged_reservations_up_to_lookup_times_for_test(
+            latest_reservation.lifecycle,
+            latest_reservation.revision,
+            2,
+        );
+        let superseded_recovery = tokio::spawn({
+            let websocket_state = Arc::clone(&websocket_state);
+            let actor = actor.clone();
+            let room_jid = room_jid.clone();
+            async move {
+                CancelledConfigAskRecoveryGuard::arm_only(
+                    websocket_state.as_ref(),
+                    &actor,
+                    &room_jid,
+                    &superseded_config,
+                    superseded_snapshot.config_revision,
+                )
+                .recover()
+                .await;
+            }
+        });
+
+        let superseded_deadline = std::time::Instant::now() + std::time::Duration::from_secs(25);
+        loop {
+            let superseded_armed = store
+                .find(&superseded_key)
+                .await
+                .expect("find superseded staged row")
+                .is_some_and(|row| row.available_at_ms != i64::MAX);
+            let latest_armed = store
+                .find(&latest_key)
+                .await
+                .expect("find latest staged row")
+                .is_some_and(|row| row.available_at_ms != i64::MAX);
+            if superseded_armed && latest_armed {
+                break;
+            }
+            assert!(
+                std::time::Instant::now() < superseded_deadline,
+                "the superseded recovery must arm every committed inert row after two lookup failures"
+            );
+            tokio::time::sleep(std::time::Duration::from_millis(250)).await;
+        }
+        superseded_recovery
+            .await
+            .expect("superseded recovery joins");
     }
 
     #[tokio::test]

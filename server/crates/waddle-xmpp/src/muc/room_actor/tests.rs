@@ -4502,6 +4502,58 @@ async fn replayed_receipt_is_superseded_when_the_session_rejoined() {
 }
 
 #[tokio::test]
+async fn old_receipt_is_not_replayed_after_the_jid_rejoined_and_left_again() {
+    let actor = spawn_room_actor().await;
+    let alice = test_full_jid("alice");
+    let first_attempt = LeaveAttemptId::generate();
+    let second_attempt = LeaveAttemptId::generate();
+
+    join_as_resolver(&actor, alice.clone(), "alice")
+        .await
+        .expect("alice joins");
+    assert!(matches!(
+        leave_with_attempt(&actor, alice.clone(), first_attempt).await,
+        LeaveDisposition::Left(_)
+    ));
+    join_as_resolver(&actor, alice.clone(), "alice")
+        .await
+        .expect("alice rejoins");
+    assert!(matches!(
+        leave_with_attempt(&actor, alice.clone(), second_attempt).await,
+        LeaveDisposition::Left(_)
+    ));
+
+    let snapshot = actor
+        .ask(GetSnapshot)
+        .await
+        .expect("snapshot after second leave");
+    assert_eq!(snapshot.departure_receipts.len(), 1);
+    assert_eq!(snapshot.departure_receipts[0].attempt, second_attempt);
+
+    assert!(matches!(
+        leave_with_attempt(&actor, alice.clone(), first_attempt).await,
+        LeaveDisposition::NotOccupant | LeaveDisposition::Superseded
+    ));
+    assert!(matches!(
+        leave_with_attempt(&actor, alice.clone(), second_attempt).await,
+        LeaveDisposition::Left(_)
+    ));
+    assert!(matches!(
+        leave_with_attempt(&actor, alice, second_attempt).await,
+        LeaveDisposition::NotOccupant
+    ));
+    assert!(
+        actor
+            .ask(GetSnapshot)
+            .await
+            .expect("snapshot after replay")
+            .departure_receipts
+            .is_empty(),
+        "the departed-generation tombstone prunes with B's consumed receipt"
+    );
+}
+
+#[tokio::test]
 async fn replayed_receipt_is_superseded_when_the_nick_was_retaken() {
     let actor = spawn_room_actor().await;
     let alice = test_full_jid("alice");
@@ -4619,6 +4671,71 @@ async fn receipts_are_transferred_on_live_roster_restore() {
         .expect("restore successor live roster");
     assert!(matches!(
         leave_with_attempt(&successor, alice, attempt).await,
+        LeaveDisposition::Left(_)
+    ));
+}
+
+#[tokio::test]
+async fn transferred_older_generation_receipt_is_refused() {
+    let predecessor = spawn_room_actor().await;
+    let alice = test_full_jid("alice");
+    let older_attempt = LeaveAttemptId::generate();
+    join_as_resolver(&predecessor, alice.clone(), "alice")
+        .await
+        .expect("alice joins predecessor");
+    assert!(matches!(
+        leave_with_attempt(&predecessor, alice.clone(), older_attempt).await,
+        LeaveDisposition::Left(_)
+    ));
+    let mut older_snapshot = predecessor.ask(GetSnapshot).await.expect("older snapshot");
+    older_snapshot.departure_receipts[0].generation = OccupancyWatermark::from_revision(1);
+
+    let newer_source = spawn_room_actor().await;
+    let newer_attempt = LeaveAttemptId::generate();
+    join_as_resolver(&newer_source, alice.clone(), "alice")
+        .await
+        .expect("alice joins newer source");
+    assert!(matches!(
+        leave_with_attempt(&newer_source, alice.clone(), newer_attempt).await,
+        LeaveDisposition::Left(_)
+    ));
+    let mut newer_snapshot = newer_source.ask(GetSnapshot).await.expect("newer snapshot");
+    newer_snapshot.departure_receipts[0].generation = OccupancyWatermark::from_revision(2);
+
+    let successor = spawn_room_actor().await;
+    successor
+        .ask(RestoreLiveRoster {
+            room: newer_snapshot.room,
+            occupancy_revision: newer_snapshot.occupancy_revision,
+            departure_receipts: newer_snapshot.departure_receipts,
+        })
+        .await
+        .expect("restore newer receipt");
+    successor
+        .ask(RestoreLiveRoster {
+            room: older_snapshot.room,
+            occupancy_revision: older_snapshot.occupancy_revision,
+            departure_receipts: older_snapshot.departure_receipts,
+        })
+        .await
+        .expect("restore older receipt");
+
+    let snapshot = successor
+        .ask(GetSnapshot)
+        .await
+        .expect("successor snapshot");
+    assert_eq!(snapshot.departure_receipts.len(), 1);
+    assert_eq!(snapshot.departure_receipts[0].attempt, newer_attempt);
+    assert_eq!(
+        snapshot.departure_receipts[0].generation,
+        OccupancyWatermark::from_revision(2)
+    );
+    assert!(matches!(
+        leave_with_attempt(&successor, alice.clone(), older_attempt).await,
+        LeaveDisposition::NotOccupant | LeaveDisposition::Superseded
+    ));
+    assert!(matches!(
+        leave_with_attempt(&successor, alice, newer_attempt).await,
         LeaveDisposition::Left(_)
     ));
 }
@@ -5119,71 +5236,79 @@ async fn leave_retry_with_same_attempt_replays_retained_outcome_once() {
 }
 
 #[test]
-fn departure_receipts_are_bounded_and_consumed() {
-    // Receipts are bounded by count only: acknowledged ones are dropped at
-    // once, so the deque holds lost-reply departures, and past the cap the
-    // oldest unacknowledged receipt is evicted.
+fn departure_receipts_keep_only_the_newest_generation_per_jid() {
+    // Receipts are uncapped but a newer departure of the same full JID
+    // supersedes every older receipt of that JID, so the retained set is
+    // bounded by full JIDs with a lost reply.
     let mut actor = RoomActor::new(test_room(), test_secret());
-    let newest_attempt = LeaveAttemptId::generate();
-    let retained_attempt = LeaveAttemptId::generate();
-    let mut oldest_attempt = None;
-
-    for index in 0..super::occupancy_handlers::DEPARTURE_RECEIPT_CAP + 1 {
-        let attempt = if index == super::occupancy_handlers::DEPARTURE_RECEIPT_CAP {
-            newest_attempt
-        } else if index == super::occupancy_handlers::DEPARTURE_RECEIPT_CAP - 1 {
-            retained_attempt
-        } else {
-            LeaveAttemptId::generate()
-        };
-        if index == 0 {
-            oldest_attempt = Some(attempt);
-        }
-        let jid = test_full_jid_resource("leaver", &index.to_string());
-        actor.retain_departure_receipt(
-            attempt,
-            jid,
-            super::DepartureReceiptOutcome::Left(Box::new(LeaveOutcome {
-                nick: format!("nick-{index}"),
-                affiliation: Affiliation::Member,
-                role: Role::Participant,
-                leaving_room_jid: test_room()
-                    .room_jid
-                    .clone()
-                    .with_resource_str(&format!("nick-{index}"))
-                    .expect("nick jid"),
-                remaining_occupants: vec![test_full_jid_resource("remaining", &index.to_string())],
-                removed_last_session: false,
-                cleared_muji_state: false,
-                remaining_muji: None,
-                remaining_muji_sessions: Vec::new(),
-                remaining_nick_real_jid: None,
-                occupant_count: 1,
-                is_persistent: false,
-                occupancy_revision: index as u64,
-            })),
-        );
-    }
-
-    assert_eq!(
-        actor.departure_receipts.len(),
-        super::occupancy_handlers::DEPARTURE_RECEIPT_CAP
+    let alice = test_full_jid_resource("alice", "web");
+    let bob = test_full_jid_resource("bob", "web");
+    let outcome = |nick: &str, revision: u64| {
+        super::DepartureReceiptOutcome::Left(Box::new(LeaveOutcome {
+            nick: nick.to_owned(),
+            affiliation: Affiliation::Member,
+            role: Role::Participant,
+            leaving_room_jid: test_room()
+                .room_jid
+                .clone()
+                .with_resource_str(nick)
+                .expect("nick jid"),
+            remaining_occupants: Vec::new(),
+            removed_last_session: true,
+            cleared_muji_state: false,
+            remaining_muji: None,
+            remaining_muji_sessions: Vec::new(),
+            remaining_nick_real_jid: None,
+            occupant_count: 0,
+            is_persistent: false,
+            occupancy_revision: revision,
+        }))
+    };
+    let alice_first = LeaveAttemptId::generate();
+    let alice_second = LeaveAttemptId::generate();
+    let bob_attempt = LeaveAttemptId::generate();
+    actor.retain_departure_receipt(
+        alice_first,
+        alice.clone(),
+        OccupancyWatermark::from_revision(1),
+        outcome("alice", 1),
     );
-    assert!(
-        actor
-            .take_departure_receipt(oldest_attempt.expect("oldest attempt"))
-            .is_none(),
-        "the oldest receipt must be evicted once the cap is exceeded"
+    actor.retain_departure_receipt(
+        bob_attempt,
+        bob.clone(),
+        OccupancyWatermark::from_revision(2),
+        outcome("bob", 2),
     );
-    assert!(
-        actor.take_departure_receipt(retained_attempt).is_some(),
-        "a retained receipt must replay exactly once"
+    actor.retain_departure_receipt(
+        alice_second,
+        alice.clone(),
+        OccupancyWatermark::from_revision(3),
+        outcome("alice", 3),
     );
+    assert_eq!(actor.departure_receipts.len(), 2, "one receipt per JID");
     assert!(
-        actor.take_departure_receipt(retained_attempt).is_none(),
+        actor.take_departure_receipt(alice_first).is_none(),
+        "the older departure of the same JID is superseded"
+    );
+    // An older generation retained late (e.g. transferred) is refused too.
+    actor.retain_departure_receipt(
+        LeaveAttemptId::generate(),
+        alice.clone(),
+        OccupancyWatermark::from_revision(0),
+        outcome("alice", 0),
+    );
+    assert_eq!(actor.departure_receipts.len(), 2);
+    assert!(actor.take_departure_receipt(alice_second).is_some());
+    assert!(
+        actor.take_departure_receipt(alice_second).is_none(),
         "a replayed receipt is consumed"
     );
-    assert!(actor.take_departure_receipt(newest_attempt).is_some());
+    assert!(actor.take_departure_receipt(bob_attempt).is_some());
+    assert!(actor.departure_receipts.is_empty());
+    assert!(
+        actor.departed_generations.is_empty(),
+        "tombstones prune with the last receipt"
+    );
 }
 
 #[tokio::test]

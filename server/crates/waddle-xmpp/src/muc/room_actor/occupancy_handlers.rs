@@ -285,11 +285,6 @@ impl LeaveAttemptId {
     }
 }
 
-/// Upper bound on retained unacknowledged departure receipts per actor.
-/// Acknowledged ones are dropped at once, so this only bounds lost-reply
-/// departures (rare); the oldest is evicted past the cap.
-pub(super) const DEPARTURE_RECEIPT_CAP: usize = 1024;
-
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum LeaveSessionSelector {
     Any,
@@ -323,11 +318,15 @@ impl kameo::message::Message<LeaveByRealJid> for RoomActor {
         _ctx: &mut Context<Self, Self::Reply>,
     ) -> Self::Reply {
         let _handler_timer = crate::metrics::MucOccupancyHandlerTimer::start("leave");
+        if self.departure_attempt_is_superseded(&msg.sender_jid, msg.attempt) {
+            return Ok(LeaveDisposition::Superseded);
+        }
         if let Some(receipt) = self.take_departure_receipt(msg.attempt) {
             // Replay only while the departure is still the latest truth: a
-            // session that re-entered (same full JID) or a nick re-taken makes
-            // the retained outcome stale — replaying it would evict a live
-            // occupant from every client's roster.
+            // session that re-entered (same full JID, even if it left again —
+            // its own receipt superseded this one on retention) or a nick
+            // re-taken makes the retained outcome stale; replaying it would
+            // evict a live occupant from every client's roster.
             let receipt_nick = match &receipt {
                 super::DepartureReceiptOutcome::Left(outcome) => outcome.nick.clone(),
                 super::DepartureReceiptOutcome::Suppressed { nick, .. } => nick.as_str().to_owned(),
@@ -398,6 +397,10 @@ impl kameo::message::Message<LeaveByRealJid> for RoomActor {
         let Some(occupant) = self.room.get_occupant(&nick) else {
             return Ok(LeaveDisposition::NotOccupant);
         };
+        let departing_generation = self
+            .room
+            .session_watermark(&msg.sender_jid)
+            .unwrap_or(OccupancyWatermark::from_revision(self.occupancy_revision));
         let current_watermark = OccupancyWatermark::from_revision(self.occupancy_revision);
         let suppress_effects = match self.seal_state {
             super::RoomSealState::Inactive | super::RoomSealState::Destroying { .. }
@@ -528,6 +531,7 @@ impl kameo::message::Message<LeaveByRealJid> for RoomActor {
                 self.retain_departure_receipt(
                     msg.attempt,
                     msg.sender_jid.clone(),
+                    departing_generation,
                     super::DepartureReceiptOutcome::Suppressed {
                         nick: durable_nick.clone(),
                         affiliation: outcome.affiliation,
@@ -542,6 +546,7 @@ impl kameo::message::Message<LeaveByRealJid> for RoomActor {
                 self.retain_departure_receipt(
                     msg.attempt,
                     msg.sender_jid.clone(),
+                    departing_generation,
                     super::DepartureReceiptOutcome::Left(outcome.clone()),
                 );
                 LeaveDisposition::Left(outcome)

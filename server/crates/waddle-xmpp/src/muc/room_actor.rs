@@ -81,6 +81,10 @@ impl OccupancyWatermark {
 pub struct DepartureReceipt {
     pub attempt: occupancy_handlers::LeaveAttemptId,
     pub jid: FullJid,
+    /// The departed session's join watermark: the receipt is stale (never
+    /// replayed) once a newer generation of this full JID has existed, even
+    /// if that generation has since left too.
+    pub generation: OccupancyWatermark,
     pub outcome: DepartureReceiptOutcome,
 }
 
@@ -246,7 +250,12 @@ impl kameo::message::Message<RestoreLiveRoster> for RoomActor {
         );
         self.occupancy_revision = self.occupancy_revision.max(msg.occupancy_revision);
         for receipt in msg.departure_receipts {
-            self.retain_departure_receipt(receipt.attempt, receipt.jid, receipt.outcome);
+            self.retain_departure_receipt(
+                receipt.attempt,
+                receipt.jid,
+                receipt.generation,
+                receipt.outcome,
+            );
         }
     }
 }
@@ -535,6 +544,16 @@ pub struct RoomActor {
     /// Completed departures retained for attempt replay (see
     /// [`occupancy_handlers::LeaveAttemptId`]).
     departure_receipts: std::collections::VecDeque<DepartureReceipt>,
+    /// Latest departed generation per full JID while a receipt of that JID
+    /// is retained; pruned with the last receipt.
+    departed_generations: std::collections::HashMap<FullJid, OccupancyWatermark>,
+    /// Attempts displaced by a newer retained departure of the same full
+    /// JID. While that newer receipt exists, a late retry of one of these
+    /// attempts must never consume the newer receipt through JID fallback.
+    superseded_departure_attempts: std::collections::HashMap<
+        FullJid,
+        std::collections::HashSet<occupancy_handlers::LeaveAttemptId>,
+    >,
     /// Why this actor refuses further admissions. Keeping the reason typed
     /// lets the registry distinguish an ordinary inactivity seal, whose
     /// removal must retain exact-release backlog fencing, from a definitive
@@ -752,6 +771,8 @@ impl RoomActor {
             occupancy_revision: 0,
             projected_revision: None,
             departure_receipts: std::collections::VecDeque::new(),
+            departed_generations: std::collections::HashMap::new(),
+            superseded_departure_attempts: std::collections::HashMap::new(),
             seal_state: RoomSealState::Open,
             occupant_id_secret,
             durable_member_recipients: Vec::new(),
@@ -1185,40 +1206,54 @@ impl RoomActor {
     }
 
     /// Retain a completed departure so a retry of the same attempt (after a
-    /// lost reply) can replay its outcome exactly once. Bounded by count only:
-    /// acknowledged receipts are dropped immediately, so the deque holds
-    /// lost-reply departures, which are rare.
+    /// lost reply) can replay its outcome exactly once. Acknowledged receipts
+    /// are dropped at once and a newer departure of the same full JID
+    /// supersedes every older receipt of that JID, so the retained set is
+    /// bounded by full JIDs with a lost reply — the same cardinality as the
+    /// caller-side retry inventory — and no owed receipt is ever evicted.
     pub(super) fn retain_departure_receipt(
         &mut self,
         attempt: occupancy_handlers::LeaveAttemptId,
         jid: FullJid,
+        generation: OccupancyWatermark,
         outcome: DepartureReceiptOutcome,
     ) {
-        while self.departure_receipts.len() >= occupancy_handlers::DEPARTURE_RECEIPT_CAP {
-            self.departure_receipts.pop_front();
+        let superseded = self
+            .departed_generations
+            .get(&jid)
+            .is_some_and(|latest| *latest > generation);
+        if superseded {
+            self.superseded_departure_attempts
+                .entry(jid)
+                .or_default()
+                .insert(attempt);
+            return;
         }
+        let displaced_attempts: Vec<_> = self
+            .departure_receipts
+            .iter()
+            .filter(|receipt| receipt.jid == jid)
+            .map(|receipt| receipt.attempt)
+            .collect();
+        if !displaced_attempts.is_empty() {
+            self.superseded_departure_attempts
+                .entry(jid.clone())
+                .or_default()
+                .extend(displaced_attempts);
+        }
+        self.departure_receipts.retain(|receipt| receipt.jid != jid);
+        self.departed_generations.insert(jid.clone(), generation);
         self.departure_receipts.push_back(DepartureReceipt {
             attempt,
             jid,
+            generation,
             outcome,
         });
     }
 
-    /// Consume the oldest unacknowledged receipt of a full JID, if any.
-    pub(super) fn take_departure_receipt_for_jid(
-        &mut self,
-        jid: &FullJid,
-    ) -> Option<DepartureReceiptOutcome> {
-        let index = self
-            .departure_receipts
-            .iter()
-            .position(|receipt| &receipt.jid == jid)?;
-        self.departure_receipts
-            .remove(index)
-            .map(|receipt| receipt.outcome)
-    }
-
-    /// Consume the receipt of an already-completed attempt, if any.
+    /// Consume the receipt of an already-completed attempt, if any. Stale
+    /// receipts (a newer generation of the JID has existed) are dropped and
+    /// reported as superseded.
     pub(super) fn take_departure_receipt(
         &mut self,
         attempt: occupancy_handlers::LeaveAttemptId,
@@ -1227,9 +1262,44 @@ impl RoomActor {
             .departure_receipts
             .iter()
             .position(|receipt| receipt.attempt == attempt)?;
-        self.departure_receipts
-            .remove(index)
-            .map(|receipt| receipt.outcome)
+        let receipt = self.departure_receipts.remove(index)?;
+        self.prune_departed_generation(&receipt.jid);
+        Some(receipt.outcome)
+    }
+
+    /// Consume the receipt of a full JID whose session is gone, if any.
+    pub(super) fn take_departure_receipt_for_jid(
+        &mut self,
+        jid: &FullJid,
+    ) -> Option<DepartureReceiptOutcome> {
+        let index = self
+            .departure_receipts
+            .iter()
+            .position(|receipt| &receipt.jid == jid)?;
+        let receipt = self.departure_receipts.remove(index)?;
+        self.prune_departed_generation(jid);
+        Some(receipt.outcome)
+    }
+
+    fn prune_departed_generation(&mut self, jid: &FullJid) {
+        if !self
+            .departure_receipts
+            .iter()
+            .any(|receipt| &receipt.jid == jid)
+        {
+            self.departed_generations.remove(jid);
+            self.superseded_departure_attempts.remove(jid);
+        }
+    }
+
+    pub(super) fn departure_attempt_is_superseded(
+        &self,
+        jid: &FullJid,
+        attempt: occupancy_handlers::LeaveAttemptId,
+    ) -> bool {
+        self.superseded_departure_attempts
+            .get(jid)
+            .is_some_and(|attempts| attempts.contains(&attempt))
     }
 
     pub(super) fn project<T>(

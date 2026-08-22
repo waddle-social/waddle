@@ -1965,11 +1965,10 @@ async fn cleanup_muc_presence_with_origin(
                     },
                 );
             }
-            Ok(
-                LeaveDisposition::NotOccupant
-                | LeaveDisposition::Superseded
-                | LeaveDisposition::Suppressed { .. },
-            ) => {}
+            Ok(LeaveDisposition::Suppressed { .. }) => {
+                ack_departure_receipt(&room_actor, attempt).await;
+            }
+            Ok(LeaveDisposition::NotOccupant | LeaveDisposition::Superseded) => {}
             Err(LeaveAskFailure::Timeout) => {
                 // Never enqueued, or enqueued with the reply lost: the retry
                 // carries the same attempt id so a completed departure replays
@@ -3780,6 +3779,46 @@ mod local_departure_cleanup_tests {
             "the first attempt unregisters SFU"
         );
         assert_eq!(state.deps.protocol.pending_local_muc_departures.len(), 1);
+    }
+
+    #[tokio::test]
+    async fn suppressed_leave_is_acknowledged_and_leaves_no_receipt() {
+        let state = create_test_websocket_state().await;
+        let room_jid = room_jid("disconnect-suppressed-ack");
+        let room_actor = state
+            .deps
+            .protocol
+            .room_registry
+            .ask(CreateRoom {
+                room_jid: room_jid.clone(),
+                waddle_id: "w".to_string(),
+                channel_id: "c".to_string(),
+                config: RoomConfig::default(),
+            })
+            .await
+            .expect("create store-less room");
+        let alice = full_jid("alice@example.com/web");
+        join_member(&room_actor, &alice, "alice").await;
+        room_actor
+            .ask(waddle_xmpp::muc::room_actor::SealForDestroy {
+                attempt: waddle_xmpp::muc::DestroyAttemptId::generate(),
+            })
+            .await
+            .expect("seal room for destroy");
+
+        assert_eq!(
+            cleanup_muc_presence_for_jid(state.as_ref(), &alice).await,
+            MucCleanupOutcome::Completed
+        );
+        assert!(
+            room_actor
+                .ask(GetSnapshot)
+                .await
+                .expect("snapshot after suppressed cleanup")
+                .departure_receipts
+                .is_empty(),
+            "disconnect cleanup acknowledges the suppressed receipt"
+        );
     }
 
     #[tokio::test]

@@ -1985,6 +1985,8 @@ pub async fn handle_muc_leave(
             return bounce_muc_leave_ownership_unreachable(room_jid, sender_jid, nick);
         }
         Ok(waddle_xmpp::muc::room_actor::LeaveDisposition::Suppressed { affiliation, .. }) => {
+            crate::server::routes::websocket::ack_departure_receipt(&room_actor, leave_attempt)
+                .await;
             // Store-less room with a destroy/dormancy in flight: the departure
             // was recorded but nothing fans out. The departing session still
             // gets its XEP-0045 §7.14 self-presence echo (as before #1647).
@@ -3150,13 +3152,14 @@ mod occupancy_projection_handler_tests {
 
     #[derive(Debug, Clone, Copy, PartialEq, Eq)]
     enum ProjectionFailureMode {
+        Succeed,
         Join,
         Leave,
         LeaveDelay(std::time::Duration),
     }
 
     struct ProjectionFailingStore {
-        failure: ProjectionFailureMode,
+        failure: Mutex<ProjectionFailureMode>,
         lifecycle: RoomLifecycleId,
         next_revision: Mutex<RoomRevision>,
         allowed_join_projections: Mutex<usize>,
@@ -3165,7 +3168,7 @@ mod occupancy_projection_handler_tests {
     impl ProjectionFailingStore {
         fn new(failure: ProjectionFailureMode) -> Arc<Self> {
             Arc::new(Self {
-                failure,
+                failure: Mutex::new(failure),
                 lifecycle: RoomLifecycleId::generate(),
                 next_revision: Mutex::new(RoomRevision::initial()),
                 allowed_join_projections: Mutex::new(0),
@@ -3174,11 +3177,15 @@ mod occupancy_projection_handler_tests {
 
         fn with_join_failure_after(successful_join_projections: usize) -> Arc<Self> {
             Arc::new(Self {
-                failure: ProjectionFailureMode::Join,
+                failure: Mutex::new(ProjectionFailureMode::Join),
                 lifecycle: RoomLifecycleId::generate(),
                 next_revision: Mutex::new(RoomRevision::initial()),
                 allowed_join_projections: Mutex::new(successful_join_projections),
             })
+        }
+
+        fn set_failure(&self, failure: ProjectionFailureMode) {
+            *self.failure.lock().expect("projection failure lock") = failure;
         }
 
         fn next_coordinates(&self) -> waddle_xmpp::muc::RoomCommittedCoordinates {
@@ -3218,7 +3225,7 @@ mod occupancy_projection_handler_tests {
                     Err(waddle_xmpp::muc::RoomCommitError::NotOwner)
                 });
             }
-            let failure = self.failure;
+            let failure = *self.failure.lock().expect("projection failure lock");
             let coordinates = self.next_coordinates();
             let allow_join_projection = {
                 let mut remaining = self
@@ -3251,6 +3258,7 @@ mod occupancy_projection_handler_tests {
                             tokio::time::sleep(delay).await;
                         }
                     }
+                    _ if failure == ProjectionFailureMode::Succeed => {}
                     _ => {}
                 }
                 Ok(waddle_xmpp::muc::RoomCommitOutcome {
@@ -3544,7 +3552,7 @@ mod occupancy_projection_handler_tests {
     }
 
     #[tokio::test]
-    async fn store_less_suppressed_leave_still_echoes_self_unavailable() {
+    async fn suppressed_leave_is_acknowledged_and_leaves_no_receipt() {
         let state = create_test_websocket_state().await;
         let room_jid: BareJid = "suppressed-store-less@muc.example.com"
             .parse()
@@ -3624,6 +3632,15 @@ mod occupancy_projection_handler_tests {
         assert!(
             bob_rx.try_recv().is_err(),
             "suppressed leave must not fan out"
+        );
+        assert!(
+            actor
+                .ask(GetSnapshot)
+                .await
+                .expect("snapshot after suppressed leave")
+                .departure_receipts
+                .is_empty(),
+            "the explicit caller acknowledges the suppressed receipt"
         );
     }
 
@@ -3843,6 +3860,166 @@ mod occupancy_projection_handler_tests {
             "alice must remain an occupant after the superseded retry"
         );
         assert_eq!(state.deps.protocol.pending_local_muc_departures.len(), 0);
+    }
+
+    #[tokio::test]
+    async fn explicit_leave_timeout_then_rejoin_then_leave_then_old_retry_emits_no_stale_presence()
+    {
+        let recorder = Arc::new(RecordingSfu::default());
+        let state = create_test_websocket_state_with_sfu(recorder.clone()).await;
+        let alice_session = create_test_server_owner_session(state.as_ref(), "alice").await;
+        let room_jid: BareJid = "leave-timeout-rejoin-leave@muc.example.com"
+            .parse()
+            .expect("room jid");
+        let alice: FullJid = "alice@example.com/web".parse().expect("alice jid");
+        let bob: FullJid = "bob@example.com/web".parse().expect("bob jid");
+        let (alice_tx, mut alice_rx) = mpsc::channel(8);
+        let (bob_tx, mut bob_rx) = mpsc::channel(8);
+        let store = ProjectionFailingStore::new(ProjectionFailureMode::LeaveDelay(
+            std::time::Duration::from_secs(6),
+        ));
+
+        create_room_with_projection_store(state.as_ref(), &room_jid, store.clone()).await;
+        register_test_connection(state.as_ref(), &alice, alice_tx).await;
+        register_test_connection(state.as_ref(), &bob, bob_tx).await;
+
+        let alice_join = handle_muc_join(
+            state.as_ref(),
+            "example.com",
+            &room_jid,
+            &alice,
+            "alice",
+            None,
+            &Some(alice_session.clone()),
+        )
+        .await;
+        assert!(alice_join
+            .iter()
+            .any(|frame| frame.contains("status code='110'")));
+        let bob_join = handle_muc_join(
+            state.as_ref(),
+            "example.com",
+            &room_jid,
+            &bob,
+            "bob",
+            None,
+            &None,
+        )
+        .await;
+        assert!(bob_join
+            .iter()
+            .any(|frame| frame.contains("status code='110'")));
+        while alice_rx.try_recv().is_ok() {}
+        while bob_rx.try_recv().is_ok() {}
+
+        let first_leave = handle_muc_leave(state.as_ref(), &room_jid, &alice, "alice", None).await;
+        assert_eq!(first_leave.len(), 1);
+        assert!(
+            first_leave[0].contains("resource-constraint"),
+            "the timed-out first leave must bounce first: {first_leave:?}"
+        );
+        assert_eq!(
+            state.deps.protocol.pending_local_muc_departures.len(),
+            1,
+            "the timed-out first leave must stay queued for retry"
+        );
+        assert!(alice_rx.try_recv().is_err());
+        assert!(bob_rx.try_recv().is_err());
+        assert!(
+            recorder.snapshot().is_empty(),
+            "the timed-out first leave must not unregister SFU participation"
+        );
+
+        tokio::time::sleep(std::time::Duration::from_secs(7)).await;
+
+        let rejoin = handle_muc_join(
+            state.as_ref(),
+            "example.com",
+            &room_jid,
+            &alice,
+            "alice",
+            None,
+            &Some(alice_session),
+        )
+        .await;
+        assert!(
+            rejoin
+                .iter()
+                .any(|frame| frame.contains("status code='110'")),
+            "alice must be able to rejoin before replaying the old leave: {rejoin:?}"
+        );
+        while alice_rx.try_recv().is_ok() {}
+        while bob_rx.try_recv().is_ok() {}
+
+        store.set_failure(ProjectionFailureMode::Succeed);
+        let second_leave = handle_muc_leave(state.as_ref(), &room_jid, &alice, "alice", None).await;
+        assert_eq!(second_leave.len(), 1);
+        assert!(
+            second_leave[0].contains("type='unavailable'"),
+            "the second leave must complete normally: {second_leave:?}"
+        );
+        assert!(
+            second_leave[0].contains("status code='110'"),
+            "the second leave must self-echo exactly once via the direct reply: {second_leave:?}"
+        );
+
+        let bob_unavailable = bob_rx.try_recv().expect("second leave fan-out");
+        let waddle_xmpp::Stanza::Presence(bob_presence) = bob_unavailable.stanza else {
+            panic!("expected fan-out unavailable presence");
+        };
+        assert_eq!(
+            bob_presence.type_,
+            xmpp_parsers::presence::Type::Unavailable
+        );
+        assert!(
+            bob_rx.try_recv().is_err(),
+            "bob must receive exactly one unavailable from the second leave"
+        );
+        assert!(
+            alice_rx.try_recv().is_err(),
+            "the second leave must not enqueue an extra websocket self echo"
+        );
+        assert_eq!(
+            recorder.snapshot().len(),
+            1,
+            "the successful second leave must unregister SFU participation exactly once"
+        );
+        assert_eq!(
+            state.deps.protocol.pending_local_muc_departures.len(),
+            1,
+            "only the older timed-out leave should remain queued before the janitor retry"
+        );
+
+        crate::server::session_janitors::run_local_muc_departure_sweep(state.as_ref()).await;
+
+        assert!(
+            alice_rx.try_recv().is_err(),
+            "the old retry must not emit a stale self unavailable after the later successful leave"
+        );
+        assert!(
+            bob_rx.try_recv().is_err(),
+            "the old retry must not emit a stale unavailable to remaining occupants"
+        );
+        assert_eq!(
+            recorder.snapshot().len(),
+            1,
+            "the old retry must not unregister the same SFU participant twice"
+        );
+        assert_eq!(
+            state.deps.protocol.pending_local_muc_departures.len(),
+            0,
+            "the stale retry must converge and drop the retained item"
+        );
+        let room = snapshot_room(state.as_ref(), &room_jid).await.room;
+        assert!(
+            room.find_nick_by_real_jid(&alice).is_none(),
+            "alice must stay absent after the later successful leave and stale retry suppression"
+        );
+        assert_eq!(
+            room.find_nick_by_real_jid(&bob),
+            Some("bob"),
+            "bob must remain present after suppressing the stale retry"
+        );
     }
 
     #[tokio::test]

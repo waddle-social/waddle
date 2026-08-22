@@ -1,5 +1,8 @@
 use std::collections::HashSet;
 
+#[cfg(test)]
+use std::collections::HashMap;
+
 use jid::{BareJid, FullJid};
 use waddle_xmpp::muc::{RoomEffectReservation, RoomEffectStagingClass, RoomMutationEffects};
 
@@ -20,10 +23,22 @@ pub const HANDLER_GRACE_MS: i64 = 30_000;
 const INERT: i64 = i64::MAX;
 
 #[cfg(test)]
-fn staged_reservation_lookup_failures() -> &'static std::sync::Mutex<HashSet<(String, i64)>> {
-    static FAILURES: std::sync::OnceLock<std::sync::Mutex<HashSet<(String, i64)>>> =
+struct StagedReservationLookupFailures {
+    exact: HashMap<(String, i64), usize>,
+    up_to: HashMap<(String, i64), usize>,
+}
+
+#[cfg(test)]
+fn staged_reservation_lookup_failures() -> &'static std::sync::Mutex<StagedReservationLookupFailures>
+{
+    static FAILURES: std::sync::OnceLock<std::sync::Mutex<StagedReservationLookupFailures>> =
         std::sync::OnceLock::new();
-    FAILURES.get_or_init(|| std::sync::Mutex::new(HashSet::new()))
+    FAILURES.get_or_init(|| {
+        std::sync::Mutex::new(StagedReservationLookupFailures {
+            exact: HashMap::new(),
+            up_to: HashMap::new(),
+        })
+    })
 }
 
 pub fn retry_delay_ms(attempt: i64) -> i64 {
@@ -68,10 +83,35 @@ impl RoomEffectOutboxStore {
         lifecycle: waddle_xmpp::muc::RoomLifecycleId,
         revision: waddle_xmpp::muc::RoomRevision,
     ) {
+        self.fail_staged_reservation_lookup_times_for_test(lifecycle, revision, 1);
+    }
+    /// Fail an exact staged-reservation lookup a bounded number of times.
+    #[cfg(test)]
+    pub fn fail_staged_reservation_lookup_times_for_test(
+        &self,
+        lifecycle: waddle_xmpp::muc::RoomLifecycleId,
+        revision: waddle_xmpp::muc::RoomRevision,
+        failures: usize,
+    ) {
         staged_reservation_lookup_failures()
             .lock()
             .expect("staged reservation lookup-failure lock")
-            .insert((lifecycle.to_string(), revision.as_i64()));
+            .exact
+            .insert((lifecycle.to_string(), revision.as_i64()), failures);
+    }
+    /// Fail an up-to staged-reservation lookup a bounded number of times.
+    #[cfg(test)]
+    pub fn fail_staged_reservations_up_to_lookup_times_for_test(
+        &self,
+        lifecycle: waddle_xmpp::muc::RoomLifecycleId,
+        max_revision: waddle_xmpp::muc::RoomRevision,
+        failures: usize,
+    ) {
+        staged_reservation_lookup_failures()
+            .lock()
+            .expect("staged reservation lookup-failure lock")
+            .up_to
+            .insert((lifecycle.to_string(), max_revision.as_i64()), failures);
     }
     pub async fn enqueue_in_tx(
         &self,
@@ -153,11 +193,24 @@ impl RoomEffectOutboxStore {
         revision: waddle_xmpp::muc::RoomRevision,
     ) -> Result<Option<RoomEffectReservation>, RoomEffectOutboxError> {
         #[cfg(test)]
-        if staged_reservation_lookup_failures()
-            .lock()
-            .expect("staged reservation lookup-failure lock")
-            .remove(&(lifecycle.to_string(), revision.as_i64()))
-        {
+        let fail = {
+            let mut failures = staged_reservation_lookup_failures()
+                .lock()
+                .expect("staged reservation lookup-failure lock");
+            let key = (lifecycle.to_string(), revision.as_i64());
+            let fail = failures.exact.get_mut(&key).is_some_and(|remaining| {
+                if *remaining == 0 {
+                    false
+                } else {
+                    *remaining -= 1;
+                    true
+                }
+            });
+            failures.exact.retain(|_, remaining| *remaining > 0);
+            fail
+        };
+        #[cfg(test)]
+        if fail {
             return Err(RoomEffectOutboxError::InvalidPayload);
         }
         let connection = self.db.guard().await?;
@@ -191,6 +244,28 @@ impl RoomEffectOutboxStore {
         lifecycle: waddle_xmpp::muc::RoomLifecycleId,
         max_revision: waddle_xmpp::muc::RoomRevision,
     ) -> Result<Vec<RoomEffectReservation>, RoomEffectOutboxError> {
+        #[cfg(test)]
+        {
+            let fail = {
+                let mut failures = staged_reservation_lookup_failures()
+                    .lock()
+                    .expect("staged reservation lookup-failure lock");
+                let key = (lifecycle.to_string(), max_revision.as_i64());
+                let fail = failures.up_to.get_mut(&key).is_some_and(|remaining| {
+                    if *remaining == 0 {
+                        false
+                    } else {
+                        *remaining -= 1;
+                        true
+                    }
+                });
+                failures.up_to.retain(|_, remaining| *remaining > 0);
+                fail
+            };
+            if fail {
+                return Err(RoomEffectOutboxError::InvalidPayload);
+            }
+        }
         let connection = self.db.guard().await?;
         let mut rows = connection
             .query(

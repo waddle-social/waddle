@@ -309,6 +309,11 @@ pub(crate) async fn run_local_muc_departure_sweep(state: &WebSocketState) {
                                     affiliation,
                                 )
                                 .await;
+                                // Same idempotent teardown the immediate
+                                // explicit path performs.
+                                routes::websocket::muc_call_sfu::unregister_participant_from_room(
+                                    state, &room, &jid,
+                                );
                             }
                             crate::metrics::record_local_departure_retry("completed");
                             break;
@@ -8532,8 +8537,9 @@ mod local_muc_departure_tests {
     }
 
     #[tokio::test]
-    async fn janitor_replays_suppressed_explicit_departure_with_self_echo() {
-        let state = create_test_websocket_state().await;
+    async fn janitor_suppressed_explicit_replay_unregisters_sfu_exactly_once() {
+        let recorder = Arc::new(RecordingSfu::default());
+        let state = create_test_websocket_state_with_sfu(recorder.clone()).await;
         let room = room_jid("suppressed-explicit-janitor");
         let alice = full_jid("alice@example.com/web");
         let bob = full_jid("bob@example.com/phone");
@@ -8600,6 +8606,10 @@ mod local_muc_departure_tests {
             0,
             "the replayed suppressed receipt must be consumed"
         );
+        let unregisters = recorder.snapshot();
+        assert_eq!(unregisters.len(), 1, "suppressed replay unregisters once");
+        assert_eq!(unregisters[0].0.as_str(), room.as_str());
+        assert_eq!(unregisters[0].1.as_livekit_identity(), alice.as_str());
     }
 
     #[tokio::test]

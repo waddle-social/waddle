@@ -227,7 +227,10 @@ impl CancelledOwnerConfigAskRecoveryGuard {
         // at the lifecycle FIFO head (nothing else arms live-origin rows): retry
         // with backoff before giving up.
         let mut lookup_attempt = 0_i64;
-        let lookup = loop {
+        let lookup: Result<
+            Vec<waddle_xmpp::muc::RoomEffectReservation>,
+            crate::room_effect_outbox::RoomEffectOutboxError,
+        > = loop {
             match if exact {
                 self.outbox
                     .staged_reservation_for(coordinates.lifecycle, coordinates.revision)
@@ -239,7 +242,10 @@ impl CancelledOwnerConfigAskRecoveryGuard {
                     .await
             } {
                 Ok(reservations) => break Ok(reservations),
-                Err(error) if lookup_attempt < 5 => {
+                // Retry until the lookup succeeds: the producing process is still
+                // alive, so no other supervisor will ever arm these rows; the backoff
+                // is capped at MAX_RETRY_DELAY_MS and this task is detached.
+                Err(error) => {
                     lookup_attempt += 1;
                     let backoff_ms = crate::room_effect_outbox::retry_delay_ms(lookup_attempt);
                     tracing::warn!(
@@ -252,7 +258,6 @@ impl CancelledOwnerConfigAskRecoveryGuard {
                     tokio::time::sleep(std::time::Duration::from_millis(backoff_ms.max(0) as u64))
                         .await;
                 }
-                Err(error) => break Err(error),
             }
         };
         match lookup {
@@ -1661,6 +1666,289 @@ mod tests {
         })
         .await
         .expect("cancelled owner-config ask must still arm the committed row");
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn cancelled_owner_config_recovery_keeps_retrying_lookup_failures_until_success() {
+        async fn recover_and_wait(
+            guard: super::CancelledOwnerConfigAskRecoveryGuard,
+            store: &crate::room_effect_outbox::RoomEffectOutboxStore,
+            keys: &[RoomEffectKey],
+            context: &'static str,
+        ) {
+            let recovery = tokio::spawn(async move {
+                guard.recover().await;
+            });
+            // Two injected failures back off for 5s then 10s, so a 25s poll
+            // budget leaves room for scheduler jitter while bounding both the
+            // recovery task and the staged-row poll.
+            let armed = tokio::time::timeout(Duration::from_secs(25), async {
+                loop {
+                    let mut armed = true;
+                    for key in keys {
+                        armed &= store
+                            .find(key)
+                            .await
+                            .expect("armed row lookup")
+                            .expect("armed row")
+                            .available_at_ms
+                            != i64::MAX;
+                    }
+                    if armed {
+                        return;
+                    }
+                    tokio::time::sleep(Duration::from_millis(50)).await;
+                }
+            })
+            .await;
+            if armed.is_err() {
+                recovery.abort();
+            }
+            armed.expect(context);
+            tokio::time::timeout(Duration::from_secs(1), recovery)
+                .await
+                .expect(
+                    "cancelled owner-config recovery task must finish after arming the staged rows",
+                )
+                .expect("cancelled owner-config recovery task must not panic");
+        }
+
+        {
+            let state = create_test_websocket_state().await;
+            let durable_store = PausableConfigDurableStore::new(Arc::clone(
+                &state.deps.protocol.room_effect_outbox,
+            ));
+            let claim_store: Arc<dyn ClaimStore> = Arc::new(InProcessClaimStore::new());
+            state
+                .deps
+                .protocol
+                .room_registry
+                .ask(WireClusteringClaims {
+                    claim_store,
+                    node_identity: SharedNodeIdentity::new(NodeIdentity::new(
+                        "owner-config-lookup-retry-exact-node",
+                        "owner-config-lookup-retry-exact-epoch",
+                    )),
+                    durable_store: Some(durable_store.clone()),
+                    rollout_backoff: None,
+                })
+                .await
+                .expect("wire durable owner-config store");
+
+            let room =
+                BareJid::new("owner-config-lookup-retry-exact@muc.example.test").expect("room jid");
+            let room_actor = get_or_create_room_actor(
+                state.as_ref(),
+                &room,
+                waddle_xmpp::muc::RoomConfig::default(),
+                "waddle".to_owned(),
+                "channel".to_owned(),
+            )
+            .await
+            .expect("create room")
+            .actor_ref;
+            room_actor
+                .ask(JoinWithAffiliation {
+                    sender_jid: full_jid("alice@example.test/desktop"),
+                    nick: "alice".to_owned(),
+                    affiliation_grant: JoinAffiliationGrant::Resolver(
+                        waddle_xmpp::Affiliation::Owner,
+                    ),
+                    local_domain: "example.test".to_owned(),
+                    admission_revision: 0,
+                })
+                .await
+                .expect("owner join");
+
+            let intended_config = waddle_xmpp::muc::RoomConfig {
+                name: "After".to_owned(),
+                ..waddle_xmpp::muc::RoomConfig::default()
+            };
+            let intended_applied = room_actor
+                .ask(UpdateConfig {
+                    config: intended_config.clone(),
+                    effect_plan: ConfigEffectPlan::DirectAudience,
+                })
+                .await
+                .expect("commit intended config");
+            let intended_snapshot = room_actor
+                .ask(GetSnapshot)
+                .await
+                .expect("intended snapshot");
+            let intended_reservation = intended_applied
+                .reservation
+                .expect("intended staged reservation");
+            let intended_key = RoomEffectKey {
+                lifecycle: intended_reservation.lifecycle,
+                revision: intended_reservation.revision,
+                ordinal: intended_reservation.ordinals[0],
+            };
+            let store = state.deps.protocol.room_effect_outbox.as_ref();
+            assert_eq!(
+                store
+                    .find(&intended_key)
+                    .await
+                    .expect("intended staged row lookup")
+                    .expect("intended staged row")
+                    .available_at_ms,
+                i64::MAX,
+                "the intended config row starts inert"
+            );
+            store.fail_staged_reservation_lookup_times_for_test(
+                intended_reservation.lifecycle,
+                intended_reservation.revision,
+                2,
+            );
+
+            let recovery = super::CancelledOwnerConfigAskRecoveryGuard::arm_only(
+                state.as_ref(),
+                &room_actor,
+                &room,
+                &intended_config,
+                intended_snapshot.config_revision,
+            );
+
+            recover_and_wait(
+                recovery,
+                store,
+                &[intended_key],
+                "cancelled owner-config recovery must retry exact staged-reservation lookups until the row arms",
+            )
+            .await;
+        }
+
+        {
+            let state = create_test_websocket_state().await;
+            let durable_store = PausableConfigDurableStore::new(Arc::clone(
+                &state.deps.protocol.room_effect_outbox,
+            ));
+            let claim_store: Arc<dyn ClaimStore> = Arc::new(InProcessClaimStore::new());
+            state
+                .deps
+                .protocol
+                .room_registry
+                .ask(WireClusteringClaims {
+                    claim_store,
+                    node_identity: SharedNodeIdentity::new(NodeIdentity::new(
+                        "owner-config-lookup-retry-superseded-node",
+                        "owner-config-lookup-retry-superseded-epoch",
+                    )),
+                    durable_store: Some(durable_store.clone()),
+                    rollout_backoff: None,
+                })
+                .await
+                .expect("wire durable owner-config store");
+
+            let room = BareJid::new("owner-config-lookup-retry-superseded@muc.example.test")
+                .expect("room jid");
+            let room_actor = get_or_create_room_actor(
+                state.as_ref(),
+                &room,
+                waddle_xmpp::muc::RoomConfig::default(),
+                "waddle".to_owned(),
+                "channel".to_owned(),
+            )
+            .await
+            .expect("create room")
+            .actor_ref;
+            room_actor
+                .ask(JoinWithAffiliation {
+                    sender_jid: full_jid("alice@example.test/desktop"),
+                    nick: "alice".to_owned(),
+                    affiliation_grant: JoinAffiliationGrant::Resolver(
+                        waddle_xmpp::Affiliation::Owner,
+                    ),
+                    local_domain: "example.test".to_owned(),
+                    admission_revision: 0,
+                })
+                .await
+                .expect("owner join");
+
+            let intended_config = waddle_xmpp::muc::RoomConfig {
+                name: "After".to_owned(),
+                ..waddle_xmpp::muc::RoomConfig::default()
+            };
+            let intended_applied = room_actor
+                .ask(UpdateConfig {
+                    config: intended_config.clone(),
+                    effect_plan: ConfigEffectPlan::DirectAudience,
+                })
+                .await
+                .expect("commit intended config");
+            let intended_snapshot = room_actor
+                .ask(GetSnapshot)
+                .await
+                .expect("intended snapshot");
+            let intended_reservation = intended_applied
+                .reservation
+                .expect("intended staged reservation");
+            let intended_key = RoomEffectKey {
+                lifecycle: intended_reservation.lifecycle,
+                revision: intended_reservation.revision,
+                ordinal: intended_reservation.ordinals[0],
+            };
+
+            let latest_applied = room_actor
+                .ask(UpdateConfig {
+                    config: waddle_xmpp::muc::RoomConfig {
+                        name: "Latest".to_owned(),
+                        ..waddle_xmpp::muc::RoomConfig::default()
+                    },
+                    effect_plan: ConfigEffectPlan::DirectAudience,
+                })
+                .await
+                .expect("commit latest config");
+            let latest_reservation = latest_applied
+                .reservation
+                .expect("latest staged reservation");
+            let latest_key = RoomEffectKey {
+                lifecycle: latest_reservation.lifecycle,
+                revision: latest_reservation.revision,
+                ordinal: latest_reservation.ordinals[0],
+            };
+            let store = state.deps.protocol.room_effect_outbox.as_ref();
+            assert_eq!(
+                store
+                    .find(&intended_key)
+                    .await
+                    .expect("intended staged row lookup")
+                    .expect("intended staged row")
+                    .available_at_ms,
+                i64::MAX,
+                "the intended config row starts inert"
+            );
+            assert_eq!(
+                store
+                    .find(&latest_key)
+                    .await
+                    .expect("latest staged row lookup")
+                    .expect("latest staged row")
+                    .available_at_ms,
+                i64::MAX,
+                "the superseding config row starts inert"
+            );
+            store.fail_staged_reservations_up_to_lookup_times_for_test(
+                latest_reservation.lifecycle,
+                latest_reservation.revision,
+                2,
+            );
+
+            let recovery = super::CancelledOwnerConfigAskRecoveryGuard::arm_only(
+                state.as_ref(),
+                &room_actor,
+                &room,
+                &intended_config,
+                intended_snapshot.config_revision,
+            );
+
+            recover_and_wait(
+                recovery,
+                store,
+                &[intended_key, latest_key],
+                "cancelled owner-config recovery must retry superseded staged-reservation lookups until every committed row arms",
+            )
+            .await;
+        }
     }
 
     #[tokio::test(flavor = "current_thread")]
