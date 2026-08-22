@@ -5134,6 +5134,91 @@ async fn acknowledgement_is_refused_by_an_actor_that_lost_ownership() {
     );
 }
 
+/// #1647 (codex round 29): a tombstoned attempt must not block a retained
+/// retry's JID fallback — the tombstone only says THIS attempt was displaced,
+/// while receipts of other nicks may still be owed behind it.
+#[tokio::test]
+async fn tombstoned_retained_retry_still_drains_other_owed_receipts() {
+    let actor = spawn_room_actor_with_store(FakeDurableStore::owned()).await;
+    let alice = test_full_jid("alice");
+    join_as_resolver(&actor, alice.clone(), "nick-a")
+        .await
+        .expect("join a");
+    let a1 = LeaveAttemptId::generate();
+    assert!(matches!(
+        leave_with_attempt(&actor, alice.clone(), a1).await,
+        LeaveDisposition::Left(_)
+    ));
+    join_as_resolver(&actor, alice.clone(), "nick-b")
+        .await
+        .expect("join b");
+    let b1 = LeaveAttemptId::generate();
+    assert!(matches!(
+        leave_with_attempt(&actor, alice.clone(), b1).await,
+        LeaveDisposition::Left(_)
+    ));
+    // A second same-nick departure displaces a1's receipt (a1 is tombstoned).
+    join_as_resolver(&actor, alice.clone(), "nick-a")
+        .await
+        .expect("rejoin a");
+    let a2 = LeaveAttemptId::generate();
+    assert!(matches!(
+        leave_with_attempt(&actor, alice.clone(), a2).await,
+        LeaveDisposition::Left(_)
+    ));
+
+    // A coalesced retained retry carrying the TOMBSTONED attempt must still
+    // drain the owed receipts through the JID fallback...
+    let retry = |attempt| {
+        let actor = actor.clone();
+        let alice = alice.clone();
+        async move {
+            actor
+                .ask(crate::muc::room_actor::LeaveByRealJid {
+                    sender_jid: alice,
+                    cause: crate::muc::durable::OccupancyLeaveCause::Explicit,
+                    session: LeaveSessionSelector::Any,
+                    attempt,
+                    origin: crate::muc::room_actor::LeaveOrigin::RetainedRetry,
+                })
+                .await
+                .expect("retained retry")
+        }
+    };
+    for _ in 0..2 {
+        let disposition = retry(a1).await;
+        let LeaveDisposition::Left(outcome) = disposition else {
+            panic!("the tombstoned retry must fall back to an owed receipt: {disposition:?}");
+        };
+        assert_eq!(
+            actor
+                .ask(AckDepartureReceipt {
+                    attempt: outcome.acknowledge,
+                })
+                .await
+                .expect("ack"),
+            AckDepartureOutcome::Acknowledged
+        );
+    }
+    // ...and once everything is drained the retry terminates (the ledger is
+    // empty, so the JID's tombstones were pruned with its last receipt —
+    // NotOccupant — or, had any tombstone survived, Superseded).
+    assert!(matches!(
+        retry(a1).await,
+        LeaveDisposition::Superseded | LeaveDisposition::NotOccupant
+    ));
+    assert!(
+        actor
+            .ask(GetSnapshot)
+            .await
+            .expect("snapshot")
+            .departures
+            .receipts
+            .is_empty(),
+        "no receipt is stranded behind the tombstone"
+    );
+}
+
 /// #1647 (codex round 27): the session's occupancy order is minted BEFORE the
 /// join projection awaits. A disconnect cleanup racing a blocked projection
 /// mints its leave attempt during the await — that attempt targets this join

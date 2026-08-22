@@ -1288,10 +1288,26 @@ impl RoomActor {
     /// unavailable fan-out is independently owed to the remaining occupants
     /// (#1647, codex round 26).
     pub(super) fn retain_departure_receipt(&mut self, receipt: DepartureReceipt) {
-        let superseded = self
-            .latest_generations
-            .get(&receipt.jid)
-            .is_some_and(|latest| *latest > receipt.generation);
+        // The same nick-aware rule as `replay_departure_receipt_at`: a newer
+        // per-JID generation alone does not supersede — a transferred (or
+        // late-minted) receipt whose NICK generation has not moved still owes
+        // its unavailable fan-out (#1647, codex round 29). An existing
+        // same-nick receipt with a NEWER generation always wins, though: an
+        // older transferred copy must never displace it.
+        let displaced_by_newer_same_nick = self.departure_receipts.iter().any(|retained| {
+            retained.jid == receipt.jid
+                && retained.nick() == receipt.nick()
+                && retained.generation > receipt.generation
+        });
+        let superseded = displaced_by_newer_same_nick
+            || (self
+                .latest_generations
+                .get(&receipt.jid)
+                .is_some_and(|latest| *latest > receipt.generation)
+                && self
+                    .room
+                    .current_nickname_generation(receipt.nick().as_str())
+                    != receipt.nick_generation);
         if superseded {
             self.superseded_departure_attempts
                 .entry(receipt.jid)

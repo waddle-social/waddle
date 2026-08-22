@@ -223,20 +223,39 @@ impl CancelledOwnerConfigAskRecoveryGuard {
         };
         let exact = snapshot.config_revision == self.expected_revision
             && snapshot.room.config == self.intended_config;
+        // Non-exact: the snapshot moved past this ask's commit, so its own row
+        // (if it landed) is strictly OLDER than the snapshot's latest config
+        // commit. Arm only rows BELOW that latest revision — the latest row
+        // belongs to a different, LIVE handler (it produced the very snapshot
+        // we just read) whose fused enforcement commit must remain the one to
+        // arm it; arming it here would let its config notification drain
+        // before its removals/voice effects (#1647, codex round 29). Rows
+        // below the latest that belong to other askers are covered by those
+        // askers' own cancellation guards.
+        let inexact_bound = if exact {
+            None
+        } else {
+            match waddle_xmpp::muc::RoomRevision::from_stored(coordinates.revision.as_i64() - 1) {
+                Some(bound) => Some(bound),
+                // The latest config commit is the lifecycle's first revision:
+                // there is nothing older this recovery could own.
+                None => return Vec::new(),
+            }
+        };
         // A transient outbox lookup failure must not strand committed inert rows
         // at the lifecycle FIFO head (nothing else arms live-origin rows): retry
         // with backoff before giving up.
         let mut lookup_attempt = 0_i64;
         loop {
-            match if exact {
+            match if let Some(bound) = inexact_bound {
+                self.outbox
+                    .staged_reservations_up_to(coordinates.lifecycle, bound)
+                    .await
+            } else {
                 self.outbox
                     .staged_reservation_for(coordinates.lifecycle, coordinates.revision)
                     .await
                     .map(|reservation| reservation.into_iter().collect())
-            } else {
-                self.outbox
-                    .staged_reservations_up_to(coordinates.lifecycle, coordinates.revision)
-                    .await
             } {
                 Ok(reservations) => break reservations,
                 // Retry until the lookup succeeds: the producing process is still
@@ -1942,15 +1961,27 @@ mod tests {
             recover_and_wait(
                 recovery,
                 store,
-                &[intended_key, latest_key],
-                "cancelled owner-config recovery must retry superseded staged-reservation lookups until every committed row arms",
+                &[intended_key],
+                "cancelled owner-config recovery must retry superseded staged-reservation lookups until its own committed row arms",
             )
             .await;
+            // #1647 (codex round 29): the LATEST config row belongs to its
+            // own (live) asker — this recovery must not arm it early.
+            assert_eq!(
+                store
+                    .find(&latest_key)
+                    .await
+                    .expect("latest staged row lookup")
+                    .expect("latest staged row")
+                    .available_at_ms,
+                i64::MAX,
+                "the latest config row is owned by its own asker's guard, not this recovery"
+            );
         }
     }
 
     #[tokio::test(flavor = "current_thread")]
-    async fn cancelled_owner_config_recovery_superseded_config_arms_every_committed_inert_row() {
+    async fn cancelled_owner_config_recovery_arms_only_rows_below_the_latest_config() {
         let state = create_test_websocket_state().await;
         let durable_store =
             PausableConfigDurableStore::new(Arc::clone(&state.deps.protocol.room_effect_outbox));
@@ -2078,21 +2109,28 @@ mod tests {
                     .expect("intended armed row")
                     .available_at_ms
                     != i64::MAX;
-                let latest_armed = store
-                    .find(&latest_key)
-                    .await
-                    .expect("latest armed row lookup")
-                    .expect("latest armed row")
-                    .available_at_ms
-                    != i64::MAX;
-                if intended_armed && latest_armed {
+                if intended_armed {
                     return;
                 }
                 tokio::time::sleep(Duration::from_millis(50)).await;
             }
         })
         .await
-        .expect("cancelled owner-config recovery must arm every committed inert row through the latest config revision");
+        .expect("cancelled owner-config recovery must arm its own committed inert row");
+        // #1647 (codex round 29): the LATEST config row belongs to its own
+        // (live) asker, whose fused enforcement commit arms it — recovering
+        // an OLDER superseded ask must not arm it early, or that update's
+        // config notification could drain before its removals/voice effects.
+        assert_eq!(
+            store
+                .find(&latest_key)
+                .await
+                .expect("latest staged row lookup")
+                .expect("latest staged row")
+                .available_at_ms,
+            i64::MAX,
+            "the latest config row stays inert for its own asker"
+        );
     }
 
     #[tokio::test(flavor = "current_thread")]

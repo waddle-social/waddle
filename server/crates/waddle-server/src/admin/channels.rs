@@ -3464,6 +3464,7 @@ async fn recover_actor_with_merged_live_roster(
     // Demote the exact stale actor and publish the successor in ONE registry
     // turn: no cleanup or janitor lookup can observe the room as absent in
     // between and mistake the handoff for convergence.
+    let fallback_config = spec.config.clone();
     let recovered = match state
         .room_registry
         .ask(GetOrCreateRoomWithLiveRoster {
@@ -3482,9 +3483,24 @@ async fn recover_actor_with_merged_live_roster(
         Err(kameo::error::SendError::HandlerError(
             waddle_xmpp::muc::room_registry_actor::RoomRegistryError::StaleActorNotCurrent(_),
         )) => {
-            return Err(unavailable(
-                "This room changed while its update was being reconciled; please retry.",
-            ));
+            // A successor was already published (a concurrent join reaped the
+            // sealed stale actor and re-created the room). Follow the CURRENT
+            // actor instead of failing recovery: bailing out here would
+            // leave the committed staged row with no arming owner — the
+            // caller has already disarmed its cancellation guard — blocking
+            // the room's effect FIFO until this process dies (#1647, codex
+            // round 29). Mirrors the group-DM and owner-config fallbacks.
+            state
+                .room_registry
+                .ask(GetOrCreateRoom {
+                    room_jid: room_jid.clone(),
+                    waddle_id: spec.waddle_id.to_string(),
+                    channel_id: spec.channel_id.to_string(),
+                    config: fallback_config,
+                })
+                .await
+                .map_err(send_err(get_or_create_context))?
+                .actor_ref
         }
         Err(error) => return Err(send_err(get_or_create_context)(error)),
     };

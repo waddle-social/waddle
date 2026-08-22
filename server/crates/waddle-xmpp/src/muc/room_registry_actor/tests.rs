@@ -4549,6 +4549,98 @@ mod ownership_claims_tests {
         );
     }
 
+    /// #1647 (codex round 29): a live-roster transfer must not drop a
+    /// still-owed different-nick receipt just because the JID's per-JID
+    /// generation moved (a rejoin under a new nick) — absorption applies the
+    /// same nick-aware supersession as replay.
+    #[tokio::test]
+    async fn live_roster_transfer_preserves_a_different_nick_owed_receipt() {
+        use crate::muc::durable::{ChannelId, WaddleId};
+        use crate::muc::room_actor::{
+            GetSnapshot, JoinAffiliationGrant, JoinWithAffiliation, LeaveAttemptId, LeaveByRealJid,
+            LeaveDisposition, LeaveOrigin, LeaveSessionSelector,
+        };
+        use crate::Affiliation;
+
+        let registry = spawn_registry().await;
+        let source_jid = test_room_jid("receipt-transfer-source");
+        let source_actor = registry
+            .ask(GetOrCreateRoom {
+                room_jid: source_jid,
+                waddle_id: "w".to_string(),
+                channel_id: "c".to_string(),
+                config: RoomConfig::default(),
+            })
+            .await
+            .expect("create source room")
+            .actor_ref;
+        let alice: jid::FullJid = "alice@example.com/web".parse().expect("full JID");
+        let join = |nick: &str, admission_revision: u64| JoinWithAffiliation {
+            sender_jid: alice.clone(),
+            nick: nick.to_string(),
+            affiliation_grant: JoinAffiliationGrant::Resolver(Affiliation::Member),
+            local_domain: "example.com".to_string(),
+            admission_revision,
+        };
+        source_actor
+            .ask(join("old-nick", 0))
+            .await
+            .expect("join old");
+        let attempt = LeaveAttemptId::generate();
+        assert!(matches!(
+            source_actor
+                .ask(LeaveByRealJid {
+                    sender_jid: alice.clone(),
+                    cause: crate::muc::durable::OccupancyLeaveCause::Explicit,
+                    session: LeaveSessionSelector::Any,
+                    attempt,
+                    origin: LeaveOrigin::Fresh,
+                })
+                .await
+                .expect("old-nick leave"),
+            LeaveDisposition::Left(_)
+        ));
+        // The reply was lost; the JID rejoins under a NEW nick (its per-JID
+        // generation moves past the receipt's).
+        let admission_revision = source_actor
+            .ask(GetSnapshot)
+            .await
+            .expect("pre-rejoin snapshot")
+            .admission_revision;
+        source_actor
+            .ask(join("new-nick", admission_revision))
+            .await
+            .expect("rejoin");
+        let source_snapshot = source_actor.ask(GetSnapshot).await.expect("snapshot");
+        assert_eq!(source_snapshot.departures.receipts.len(), 1);
+
+        let recovered_jid = test_room_jid("receipt-transfer-recovered");
+        let acquisition = registry
+            .ask(GetOrCreateRoomWithLiveRoster {
+                room_jid: recovered_jid,
+                waddle_id: WaddleId::new("w".to_string()),
+                channel_id: ChannelId::new("c".to_string()),
+                config: RoomConfig::default(),
+                live_room_restore: source_snapshot.room,
+                occupancy_revision: source_snapshot.occupancy_revision,
+                departures: source_snapshot.departures,
+                demote_first: None,
+            })
+            .await
+            .expect("transfer roster");
+        let transferred = acquisition
+            .actor_ref
+            .ask(GetSnapshot)
+            .await
+            .expect("successor snapshot");
+        assert_eq!(
+            transferred.departures.receipts.len(),
+            1,
+            "the still-owed old-nick receipt survives the transfer"
+        );
+        assert_eq!(transferred.departures.receipts[0].attempt, attempt);
+    }
+
     #[tokio::test]
     async fn stashed_handoff_spec_restores_the_roster_on_the_next_demand_creation() {
         use crate::muc::room_actor::{GetSnapshot, JoinAffiliationGrant, JoinWithAffiliation};

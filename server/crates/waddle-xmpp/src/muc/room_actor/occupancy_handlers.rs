@@ -379,7 +379,14 @@ impl kameo::message::Message<LeaveByRealJid> for RoomActor {
         _ctx: &mut Context<Self, Self::Reply>,
     ) -> Self::Reply {
         let _handler_timer = crate::metrics::MucOccupancyHandlerTimer::start("leave");
-        if self.departure_attempt_is_superseded(&msg.sender_jid, msg.attempt) {
+        // A tombstoned attempt never processes a fresh leave (it must not
+        // evict a session that displaced it), but a RETAINED RETRY still
+        // falls through to the JID fallback below: the tombstone only says
+        // THIS attempt is dead, not that nothing is owed — a coalesced retry
+        // can carry a displaced attempt while another nick's receipt is
+        // still owed behind it (#1647, codex round 29).
+        let attempt_superseded = self.departure_attempt_is_superseded(&msg.sender_jid, msg.attempt);
+        if attempt_superseded && msg.origin != LeaveOrigin::RetainedRetry {
             return Ok(LeaveDisposition::Superseded);
         }
         match self.replay_departure_receipt(msg.attempt) {
@@ -455,8 +462,19 @@ impl kameo::message::Message<LeaveByRealJid> for RoomActor {
                     None => {}
                 }
             }
-            return Ok(LeaveDisposition::NotOccupant);
+            return Ok(if attempt_superseded {
+                LeaveDisposition::Superseded
+            } else {
+                LeaveDisposition::NotOccupant
+            });
         };
+        // A tombstoned attempt (displaced by a newer departure) never
+        // processes an actual leave: evicting the displacing departure's
+        // replacement session is exactly what the tombstone forbids. The
+        // retained-retry fallback above already drained anything owed.
+        if attempt_superseded {
+            return Ok(LeaveDisposition::Superseded);
+        }
         let Some(occupant) = self.room.get_occupant(&nick) else {
             return Ok(LeaveDisposition::NotOccupant);
         };
