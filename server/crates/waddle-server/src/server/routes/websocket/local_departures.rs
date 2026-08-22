@@ -358,6 +358,14 @@ impl PendingLocalMucDepartures {
     }
 
     #[cfg(all(test, feature = "clustering"))]
+    pub(crate) fn take_for_test(&self, item: &LocalDepartureItem) -> Option<PendingLocalDeparture> {
+        let mut inventory = self.entries.lock().expect("local departure inventory lock");
+        let taken = inventory.remove(&item.key());
+        inventory.record_gauges();
+        taken
+    }
+
+    #[cfg(all(test, feature = "clustering"))]
     pub(crate) fn contains_for_test(&self, item: &LocalDepartureItem) -> bool {
         self.entries
             .lock()

@@ -452,6 +452,7 @@ impl kameo::message::Message<LeaveByRealJid> for RoomActor {
             .room
             .session_order(&msg.sender_jid)
             .unwrap_or_else(next_occupancy_order);
+        let departing_nick_generation = self.room.current_nickname_generation(&nick);
         let current_watermark = OccupancyWatermark::from_revision(self.occupancy_revision);
         let suppress_effects = match self.seal_state {
             super::RoomSealState::Inactive | super::RoomSealState::Destroying { .. }
@@ -584,6 +585,7 @@ impl kameo::message::Message<LeaveByRealJid> for RoomActor {
                     jid: msg.sender_jid.clone(),
                     cause: msg.cause,
                     generation: departing_generation,
+                    nick_generation: departing_nick_generation,
                     outcome: super::DepartureReceiptOutcome::Suppressed {
                         nick: durable_nick.clone(),
                         affiliation: outcome.affiliation,
@@ -600,6 +602,7 @@ impl kameo::message::Message<LeaveByRealJid> for RoomActor {
                     jid: msg.sender_jid.clone(),
                     cause: msg.cause,
                     generation: departing_generation,
+                    nick_generation: departing_nick_generation,
                     outcome: super::DepartureReceiptOutcome::Left(outcome.clone()),
                 });
                 LeaveDisposition::Left(outcome)
@@ -1037,17 +1040,20 @@ impl RoomActor {
     /// new resource. Replaying would announce a live occupant's departure.
     /// Sibling sessions of the same bare JID that still held the nick when
     /// the departure completed (`removed_last_session == false`) are the
-    /// normal multi-resource case and never make the receipt stale.
+    /// normal multi-resource case — but only while the nick is still that
+    /// same generation: once the siblings left too and the nick was retaken
+    /// (even by the same account), the captured roster/Muji state is stale.
     fn nick_retaken(&self, receipt: &super::DepartureReceipt) -> bool {
         let freed_nick = match &receipt.outcome {
             super::DepartureReceiptOutcome::Left(outcome) => outcome.removed_last_session,
             super::DepartureReceiptOutcome::Suppressed { .. } => false,
         };
-        self.room
-            .get_occupant(receipt_nick(receipt))
-            .is_some_and(|occupant| {
-                freed_nick || occupant.real_jid.to_bare() != receipt.jid.to_bare()
-            })
+        let nick = receipt_nick(receipt);
+        self.room.get_occupant(nick).is_some_and(|occupant| {
+            freed_nick
+                || occupant.real_jid.to_bare() != receipt.jid.to_bare()
+                || self.room.current_nickname_generation(nick) != receipt.nick_generation
+        })
     }
 }
 

@@ -89,6 +89,10 @@ pub struct DepartureReceipt {
     /// stale (never replayed) once a newer generation of this full JID has
     /// existed, even if that generation has since left or was removed.
     pub generation: occupancy_handlers::OccupancyOrder,
+    /// The nick's per-nickname occupancy generation when the departure
+    /// completed: a non-final departure (siblings kept the nick) is only
+    /// replayable while that same generation still holds the nick.
+    pub nick_generation: Option<u64>,
     pub outcome: DepartureReceiptOutcome,
 }
 

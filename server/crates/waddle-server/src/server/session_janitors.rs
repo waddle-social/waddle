@@ -113,12 +113,17 @@ pub(crate) async fn run_local_muc_departure_sweep(state: &WebSocketState) {
     use waddle_xmpp::muc::durable::OccupancyLeaveCause;
     use waddle_xmpp::muc::room_actor::{LeaveByRealJid, LeaveDisposition};
 
-    for pending in state
+    let mut batch = state
         .deps
         .protocol
         .pending_local_muc_departures
-        .take_due_bounded(std::time::Instant::now(), LOCAL_MUC_DEPARTURE_SWEEP_BUDGET)
-    {
+        .take_due_bounded(std::time::Instant::now(), LOCAL_MUC_DEPARTURE_SWEEP_BUDGET);
+    // Owed acknowledgements run before any departure retry of this pass: a
+    // drained acknowledgement is invisible to the barrier below (it scans the
+    // inventory), and an acknowledgement that fails here is requeued, where
+    // the barrier does see it.
+    batch.sort_by_key(|pending| !matches!(pending.item, LocalDepartureItem::AckReceipt { .. }));
+    for pending in batch {
         let mut item = pending.item;
         loop {
             match item {
@@ -201,10 +206,13 @@ pub(crate) async fn run_local_muc_departure_sweep(state: &WebSocketState) {
                         }
                     };
                     // Acknowledgement barrier: an owed acknowledgement for this
-                    // JID names a receipt whose effects already ran. Deliver it
+                    // JID names a receipt whose effects already ran. Deliver
+                    // EVERY one (the actor keeps one receipt per JID, so the
+                    // live one may sit behind a superseded attempt's ack)
                     // before this retry may fall back to the JID's receipt, or
                     // the retry would replay those effects.
-                    if let Some(ack_attempt) = state
+                    let mut ack_blocked = false;
+                    while let Some(ack_attempt) = state
                         .deps
                         .protocol
                         .pending_local_muc_departures
@@ -218,24 +226,28 @@ pub(crate) async fn run_local_muc_departure_sweep(state: &WebSocketState) {
                                 .complete_ack(&room, &jid, ack_attempt);
                             crate::metrics::record_local_departure_retry("acknowledged");
                         } else {
-                            state
-                                .deps
-                                .protocol
-                                .pending_local_muc_departures
-                                .requeue_with_backoff(PendingLocalDeparture {
-                                    item: LocalDepartureItem::RoomDeparture {
-                                        room,
-                                        jid,
-                                        cause,
-                                        selector,
-                                        attempt,
-                                    },
-                                    attempts: pending.attempts,
-                                    not_before: pending.not_before,
-                                });
-                            crate::metrics::record_local_departure_retry("ack_barrier");
+                            ack_blocked = true;
                             break;
                         }
+                    }
+                    if ack_blocked {
+                        state
+                            .deps
+                            .protocol
+                            .pending_local_muc_departures
+                            .requeue_with_backoff(PendingLocalDeparture {
+                                item: LocalDepartureItem::RoomDeparture {
+                                    room,
+                                    jid,
+                                    cause,
+                                    selector,
+                                    attempt,
+                                },
+                                attempts: pending.attempts,
+                                not_before: pending.not_before,
+                            });
+                        crate::metrics::record_local_departure_retry("ack_barrier");
+                        break;
                     }
                     match routes::websocket::ask_leave_bounded(
                         &actor,
@@ -8734,7 +8746,9 @@ mod local_muc_departure_tests {
 
     #[tokio::test]
     async fn owed_acknowledgement_is_delivered_before_a_later_retained_departure_can_replay() {
-        use crate::server::routes::websocket::{ack_departure_receipt, LocalDepartureItem};
+        use crate::server::routes::websocket::{
+            ack_departure_receipt, LocalDepartureItem, PendingLocalDeparture,
+        };
         let store = JanitorProjectionStore::new();
         let state = clustered_state_with_store(store.clone()).await;
         let room = room_jid("ack-barrier");
@@ -8773,16 +8787,45 @@ mod local_muc_departure_tests {
         )
         .await;
         // Departure B: a later same-cause leave whose ask timed out is
-        // retained and due now, ahead of the backed-off acknowledgement.
-        state.deps.protocol.pending_local_muc_departures.record(
-            LocalDepartureItem::RoomDeparture {
-                room: room.clone(),
-                jid: alice.clone(),
-                cause: OccupancyLeaveCause::Explicit,
-                selector: LeaveSessionSelector::Any,
-                attempt: waddle_xmpp::muc::room_actor::LeaveAttemptId::generate(),
-            },
-        );
+        // retained and due now. Its deadline is EARLIER than the
+        // acknowledgement's, so by deadline order it would be processed first
+        // in this pass — the pass must still deliver the owed acknowledgement
+        // ahead of it.
+        let ack_item = LocalDepartureItem::AckReceipt {
+            room: room.clone(),
+            jid: alice.clone(),
+            attempt: attempt_a,
+        };
+        let retained_ack = state
+            .deps
+            .protocol
+            .pending_local_muc_departures
+            .take_for_test(&ack_item)
+            .expect("retained ack");
+        state
+            .deps
+            .protocol
+            .pending_local_muc_departures
+            .record_pending_for_test(PendingLocalDeparture {
+                item: LocalDepartureItem::RoomDeparture {
+                    room: room.clone(),
+                    jid: alice.clone(),
+                    cause: OccupancyLeaveCause::Explicit,
+                    selector: LeaveSessionSelector::Any,
+                    attempt: waddle_xmpp::muc::room_actor::LeaveAttemptId::generate(),
+                },
+                attempts: 1,
+                not_before: std::time::Instant::now() - std::time::Duration::from_secs(5),
+            });
+        state
+            .deps
+            .protocol
+            .pending_local_muc_departures
+            .record_pending_for_test(PendingLocalDeparture {
+                item: retained_ack.item,
+                attempts: retained_ack.attempts,
+                not_before: std::time::Instant::now(),
+            });
         assert_eq!(state.deps.protocol.pending_local_muc_departures.len(), 2);
 
         run_local_muc_departure_sweep(&state).await;
@@ -8795,6 +8838,202 @@ mod local_muc_departure_tests {
             state.deps.protocol.pending_local_muc_departures.len(),
             0,
             "the acknowledgement was delivered first and B converged as NotOccupant"
+        );
+        assert!(actor
+            .ask(waddle_xmpp::muc::room_actor::GetSnapshot)
+            .await
+            .expect("snapshot")
+            .departures
+            .receipts
+            .is_empty());
+    }
+
+    #[tokio::test]
+    async fn barrier_delivers_a_backed_off_acknowledgement_before_a_due_departure_retry() {
+        use crate::server::routes::websocket::{
+            ack_departure_receipt, LocalDepartureItem, PendingLocalDeparture,
+        };
+        let store = JanitorProjectionStore::new();
+        let state = clustered_state_with_store(store.clone()).await;
+        let room = room_jid("ack-barrier-backed-off");
+        let alice = full_jid("alice@example.com/web");
+        let bob = full_jid("bob@example.com/phone");
+        let actor = create_room(state.as_ref(), &room).await;
+        join_member(&actor, &alice, "alice").await;
+        join_member(&actor, &bob, "bob").await;
+        let (bob_tx, mut bob_rx) = mpsc::channel(8);
+        register_test_connection(state.as_ref(), &bob, bob_tx).await;
+        while bob_rx.try_recv().is_ok() {}
+
+        let attempt_a = waddle_xmpp::muc::room_actor::LeaveAttemptId::generate();
+        let first = actor
+            .ask(LeaveByRealJid {
+                sender_jid: alice.clone(),
+                cause: OccupancyLeaveCause::Explicit,
+                session: LeaveSessionSelector::Any,
+                attempt: attempt_a,
+                origin: waddle_xmpp::muc::room_actor::LeaveOrigin::Fresh,
+            })
+            .await
+            .expect("leave A");
+        assert!(matches!(first, LeaveDisposition::Left(_)));
+        let stopped =
+            create_room(state.as_ref(), &room_jid("ack-barrier-backed-off-stopped")).await;
+        stopped.stop_gracefully().await.expect("stop");
+        stopped.wait_for_shutdown().await;
+        ack_departure_receipt(
+            &state.deps.protocol.pending_local_muc_departures,
+            &stopped,
+            &room,
+            &alice,
+            attempt_a,
+        )
+        .await;
+        // The acknowledgement is backed off (not due); only the departure
+        // retry is due. The barrier alone must deliver the acknowledgement.
+        let ack_item = LocalDepartureItem::AckReceipt {
+            room: room.clone(),
+            jid: alice.clone(),
+            attempt: attempt_a,
+        };
+        let retained_ack = state
+            .deps
+            .protocol
+            .pending_local_muc_departures
+            .take_for_test(&ack_item)
+            .expect("retained ack");
+        state
+            .deps
+            .protocol
+            .pending_local_muc_departures
+            .record_pending_for_test(PendingLocalDeparture {
+                item: retained_ack.item,
+                attempts: retained_ack.attempts,
+                not_before: std::time::Instant::now() + std::time::Duration::from_secs(3600),
+            });
+        state.deps.protocol.pending_local_muc_departures.record(
+            LocalDepartureItem::RoomDeparture {
+                room: room.clone(),
+                jid: alice.clone(),
+                cause: OccupancyLeaveCause::Explicit,
+                selector: LeaveSessionSelector::Any,
+                attempt: waddle_xmpp::muc::room_actor::LeaveAttemptId::generate(),
+            },
+        );
+
+        run_local_muc_departure_sweep(&state).await;
+
+        assert!(
+            bob_rx.try_recv().is_err(),
+            "the departure retry must not replay A's effects"
+        );
+        assert_eq!(
+            state.deps.protocol.pending_local_muc_departures.len(),
+            0,
+            "the barrier delivered the backed-off acknowledgement and B converged"
+        );
+        assert!(actor
+            .ask(waddle_xmpp::muc::room_actor::GetSnapshot)
+            .await
+            .expect("snapshot")
+            .departures
+            .receipts
+            .is_empty());
+    }
+
+    #[tokio::test]
+    async fn barrier_clears_every_owed_acknowledgement_not_just_one() {
+        use crate::server::routes::websocket::{
+            ack_departure_receipt, LocalDepartureItem, PendingLocalDeparture,
+        };
+        let store = JanitorProjectionStore::new();
+        let state = clustered_state_with_store(store.clone()).await;
+        let room = room_jid("ack-barrier-multi");
+        let alice = full_jid("alice@example.com/web");
+        let bob = full_jid("bob@example.com/phone");
+        let actor = create_room(state.as_ref(), &room).await;
+        join_member(&actor, &alice, "alice").await;
+        join_member(&actor, &bob, "bob").await;
+        let (bob_tx, mut bob_rx) = mpsc::channel(8);
+        register_test_connection(state.as_ref(), &bob, bob_tx).await;
+        while bob_rx.try_recv().is_ok() {}
+
+        let stopped = create_room(state.as_ref(), &room_jid("ack-barrier-multi-stopped")).await;
+        stopped.stop_gracefully().await.expect("stop");
+        stopped.wait_for_shutdown().await;
+        // Two departures of the same JID (leave, rejoin, leave), both acks
+        // retained: the actor keeps only the newer receipt, so the stale ack
+        // is a no-op and the live one must still be delivered before any
+        // departure retry.
+        let mut retained_acks = Vec::new();
+        for _ in 0..2 {
+            let attempt = waddle_xmpp::muc::room_actor::LeaveAttemptId::generate();
+            let left = actor
+                .ask(LeaveByRealJid {
+                    sender_jid: alice.clone(),
+                    cause: OccupancyLeaveCause::Explicit,
+                    session: LeaveSessionSelector::Any,
+                    attempt,
+                    origin: waddle_xmpp::muc::room_actor::LeaveOrigin::Fresh,
+                })
+                .await
+                .expect("leave");
+            assert!(matches!(left, LeaveDisposition::Left(_)));
+            ack_departure_receipt(
+                &state.deps.protocol.pending_local_muc_departures,
+                &stopped,
+                &room,
+                &alice,
+                attempt,
+            )
+            .await;
+            let ack_item = LocalDepartureItem::AckReceipt {
+                room: room.clone(),
+                jid: alice.clone(),
+                attempt,
+            };
+            retained_acks.push(
+                state
+                    .deps
+                    .protocol
+                    .pending_local_muc_departures
+                    .take_for_test(&ack_item)
+                    .expect("retained ack"),
+            );
+            if retained_acks.len() == 1 {
+                join_member(&actor, &alice, "alice").await;
+                while bob_rx.try_recv().is_ok() {}
+            }
+        }
+        for retained in retained_acks {
+            state
+                .deps
+                .protocol
+                .pending_local_muc_departures
+                .record_pending_for_test(PendingLocalDeparture {
+                    item: retained.item,
+                    attempts: retained.attempts,
+                    not_before: std::time::Instant::now() + std::time::Duration::from_secs(3600),
+                });
+        }
+        state.deps.protocol.pending_local_muc_departures.record(
+            LocalDepartureItem::RoomDeparture {
+                room: room.clone(),
+                jid: alice.clone(),
+                cause: OccupancyLeaveCause::Explicit,
+                selector: LeaveSessionSelector::Any,
+                attempt: waddle_xmpp::muc::room_actor::LeaveAttemptId::generate(),
+            },
+        );
+        assert_eq!(state.deps.protocol.pending_local_muc_departures.len(), 3);
+
+        run_local_muc_departure_sweep(&state).await;
+
+        assert!(bob_rx.try_recv().is_err(), "no replayed departure effects");
+        assert_eq!(
+            state.deps.protocol.pending_local_muc_departures.len(),
+            0,
+            "both acknowledgements delivered, departure converged"
         );
         assert!(actor
             .ask(waddle_xmpp::muc::room_actor::GetSnapshot)

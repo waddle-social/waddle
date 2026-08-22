@@ -4929,6 +4929,84 @@ async fn replayed_final_departure_is_superseded_when_the_same_account_retook_the
 }
 
 #[tokio::test]
+async fn coalesced_retry_is_superseded_when_the_same_account_retook_the_freed_nick() {
+    // Same as above through the janitor's real path after attempt coalescing:
+    // the retry carries an attempt the actor never saw, so it reaches the
+    // JID fallback — which must apply the same freed-nick rule.
+    let actor = spawn_room_actor().await;
+    let web = test_full_jid_resource("alice", "web");
+    let web2 = test_full_jid_resource("alice", "web2");
+    join_as_resolver(&actor, web.clone(), "alice")
+        .await
+        .expect("web joins");
+    let LeaveDisposition::Left(first) =
+        leave_with_attempt(&actor, web.clone(), LeaveAttemptId::generate()).await
+    else {
+        panic!("web leaves");
+    };
+    assert!(first.removed_last_session);
+    join_as_resolver(&actor, web2.clone(), "alice")
+        .await
+        .expect("web2 retakes the nick");
+
+    let replay = retry_with_attempt_and_cause(
+        &actor,
+        web,
+        LeaveAttemptId::generate(),
+        crate::muc::durable::OccupancyLeaveCause::Explicit,
+    )
+    .await;
+    assert!(
+        matches!(replay, LeaveDisposition::Superseded),
+        "the JID fallback applies the freed-nick rule, got {replay:?}"
+    );
+    assert!(actor
+        .ask(GetSnapshot)
+        .await
+        .expect("snapshot")
+        .room
+        .get_occupant("alice")
+        .is_some());
+}
+
+#[tokio::test]
+async fn non_final_receipt_is_superseded_once_the_sibling_left_and_the_nick_was_retaken() {
+    // web and mobile share "alice"; web's NON-final departure loses its
+    // reply. mobile then leaves, and alice rejoins on web2 (a new nick
+    // generation). web's receipt captured the old generation's roster/Muji
+    // state and must not be replayed over the new one.
+    let actor = spawn_room_actor().await;
+    let web = test_full_jid_resource("alice", "web");
+    let mobile = test_full_jid_resource("alice", "mobile");
+    let web2 = test_full_jid_resource("alice", "web2");
+    join_as_resolver(&actor, web.clone(), "alice")
+        .await
+        .expect("web joins");
+    join_as_resolver(&actor, mobile.clone(), "alice")
+        .await
+        .expect("mobile joins");
+    let attempt = LeaveAttemptId::generate();
+    let LeaveDisposition::Left(first) = leave_with_attempt(&actor, web.clone(), attempt).await
+    else {
+        panic!("web leaves");
+    };
+    assert!(!first.removed_last_session);
+    assert!(matches!(
+        leave_with_attempt(&actor, mobile, LeaveAttemptId::generate()).await,
+        LeaveDisposition::Left(_)
+    ));
+    join_as_resolver(&actor, web2, "alice")
+        .await
+        .expect("web2 retakes the nick");
+
+    let replay = leave_with_attempt(&actor, web, attempt).await;
+    assert!(
+        matches!(replay, LeaveDisposition::Superseded),
+        "a new nick generation supersedes the non-final receipt, got {replay:?}"
+    );
+}
+
+#[tokio::test]
 async fn replayed_receipt_is_superseded_when_the_nick_was_retaken() {
     let actor = spawn_room_actor().await;
     let alice = test_full_jid("alice");
@@ -5669,6 +5747,7 @@ fn departure_receipts_keep_only_the_newest_generation_per_jid() {
         attempt: alice_first,
         jid: alice.clone(),
         cause: crate::muc::durable::OccupancyLeaveCause::Explicit,
+        nick_generation: None,
         generation: OccupancyOrder::from_raw(1),
         outcome: outcome("alice", 1),
     });
@@ -5676,6 +5755,7 @@ fn departure_receipts_keep_only_the_newest_generation_per_jid() {
         attempt: bob_attempt,
         jid: bob.clone(),
         cause: crate::muc::durable::OccupancyLeaveCause::Explicit,
+        nick_generation: None,
         generation: OccupancyOrder::from_raw(2),
         outcome: outcome("bob", 2),
     });
@@ -5683,6 +5763,7 @@ fn departure_receipts_keep_only_the_newest_generation_per_jid() {
         attempt: alice_second,
         jid: alice.clone(),
         cause: crate::muc::durable::OccupancyLeaveCause::Explicit,
+        nick_generation: None,
         generation: OccupancyOrder::from_raw(3),
         outcome: outcome("alice", 3),
     });
@@ -5696,6 +5777,7 @@ fn departure_receipts_keep_only_the_newest_generation_per_jid() {
         attempt: LeaveAttemptId::generate(),
         jid: alice.clone(),
         cause: crate::muc::durable::OccupancyLeaveCause::Explicit,
+        nick_generation: None,
         generation: OccupancyOrder::from_raw(0),
         outcome: outcome("alice", 0),
     });
