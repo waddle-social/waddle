@@ -128,22 +128,38 @@ pub enum DepartureReceiptOutcome {
     },
 }
 
-/// Fire-and-forget acknowledgement that a `LeaveByRealJid` reply was received
-/// and its effects ran; the actor drops the receipt so only lost-reply
-/// departures stay retained.
+/// Acknowledgement that a `LeaveByRealJid` reply was received and its effects
+/// ran; the actor drops the receipt so only lost-reply departures stay
+/// retained. Answered (not fire-and-forget) so the caller knows the receipt
+/// is gone — mailbox admission alone would let a handoff snapshot queued
+/// ahead of the acknowledgement carry the receipt to a successor.
 pub struct AckDepartureReceipt {
     pub attempt: occupancy_handlers::LeaveAttemptId,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, kameo::Reply)]
+pub enum AckDepartureOutcome {
+    /// The receipt (if any) is dropped on the authoritative actor.
+    Acknowledged,
+    /// This actor lost ownership (handoff in progress or done): its ledger
+    /// may already have been copied to a successor, so the acknowledgement
+    /// must be retained and delivered to whoever the registry names next.
+    NotAuthoritative,
+}
+
 impl kameo::message::Message<AckDepartureReceipt> for RoomActor {
-    type Reply = ();
+    type Reply = AckDepartureOutcome;
 
     async fn handle(
         &mut self,
         msg: AckDepartureReceipt,
         _ctx: &mut Context<Self, Self::Reply>,
     ) -> Self::Reply {
+        if self.seal_state == RoomSealState::OwnershipLost {
+            return AckDepartureOutcome::NotAuthoritative;
+        }
         let _ = self.take_departure_receipt(msg.attempt);
+        AckDepartureOutcome::Acknowledged
     }
 }
 

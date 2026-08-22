@@ -76,7 +76,6 @@ async fn recover_exact_room_after_ambiguous_config_commit(
     state: &WebSocketState,
     room_jid: &BareJid,
     stale_actor: &kameo::actor::ActorRef<waddle_xmpp::muc::room_actor::RoomActor>,
-    recovery_snapshot: &waddle_xmpp::muc::room_actor::RoomSnapshot,
 ) -> Result<
     (
         kameo::actor::ActorRef<waddle_xmpp::muc::room_actor::RoomActor>,
@@ -84,6 +83,18 @@ async fn recover_exact_room_after_ambiguous_config_commit(
     ),
     String,
 > {
+    // Snapshot the stale actor NOW, not from the caller's pre-mutation copy:
+    // joins/leaves that projected through it after that copy would otherwise
+    // be rolled back by the transplant. The ambiguous commit sealed the actor
+    // (ownership lost), so this snapshot is its final state.
+    let recovery_snapshot = tokio::time::timeout(
+        crate::server::routes::websocket::LEAVE_ASK_TIMEOUT,
+        stale_actor.ask(waddle_xmpp::muc::room_actor::GetSnapshot),
+    )
+    .await
+    .map_err(|_| "config outcome recovery snapshot timed out".to_string())?
+    .map_err(|error| format!("config outcome recovery snapshot failed: {error:?}"))?;
+    let recovery_snapshot = &recovery_snapshot;
     // Demote the exact stale actor, then acquire the successor WITH the live
     // roster in one registry step: transplanting after publication would let
     // a join/leave that landed on an already-live successor be overwritten by
@@ -752,13 +763,8 @@ pub(super) async fn apply_muc_owner_config(
         )) => {
             cancelled_commit_recovery.disarm();
             let (recovered_actor, recovered_snapshot) =
-                recover_exact_room_after_ambiguous_config_commit(
-                    state,
-                    room_jid,
-                    &room_actor,
-                    &snapshot,
-                )
-                .await?;
+                recover_exact_room_after_ambiguous_config_commit(state, room_jid, &room_actor)
+                    .await?;
             if recovered_snapshot.room.config != config {
                 return Err("config update outcome is being reconciled; please retry".to_string());
             }

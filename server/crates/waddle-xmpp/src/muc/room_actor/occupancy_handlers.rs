@@ -1044,16 +1044,27 @@ impl RoomActor {
     /// same generation: once the siblings left too and the nick was retaken
     /// (even by the same account), the captured roster/Muji state is stale.
     fn nick_retaken(&self, receipt: &super::DepartureReceipt) -> bool {
-        let freed_nick = match &receipt.outcome {
-            super::DepartureReceiptOutcome::Left(outcome) => outcome.removed_last_session,
-            super::DepartureReceiptOutcome::Suppressed { .. } => false,
-        };
         let nick = receipt_nick(receipt);
-        self.room.get_occupant(nick).is_some_and(|occupant| {
-            freed_nick
-                || occupant.real_jid.to_bare() != receipt.jid.to_bare()
-                || self.room.current_nickname_generation(nick) != receipt.nick_generation
-        })
+        let holder = self.room.get_occupant(nick);
+        let same_generation_and_account = |occupant: &crate::muc::room::Occupant| {
+            occupant.real_jid.to_bare() == receipt.jid.to_bare()
+                && self.room.current_nickname_generation(nick) == receipt.nick_generation
+        };
+        match &receipt.outcome {
+            // A non-final departure captured its siblings' roster/Muji state:
+            // replayable only while those siblings (same account, same nick
+            // generation) still hold the nick — an absent nick means they
+            // left too and the captured state would resurrect it.
+            super::DepartureReceiptOutcome::Left(outcome) if !outcome.removed_last_session => {
+                !holder.is_some_and(same_generation_and_account)
+            }
+            // The departure freed the nick: anyone holding it now is a newer
+            // generation (the same account on a new resource included).
+            super::DepartureReceiptOutcome::Left(_) => holder.is_some(),
+            super::DepartureReceiptOutcome::Suppressed { .. } => {
+                holder.is_some_and(|occupant| !same_generation_and_account(occupant))
+            }
+        }
     }
 }
 

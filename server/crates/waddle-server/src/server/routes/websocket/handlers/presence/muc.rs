@@ -1940,6 +1940,21 @@ pub async fn handle_muc_leave(
     };
 
     let leave_attempt = waddle_xmpp::muc::room_actor::LeaveAttemptId::generate();
+    // Write-ahead: if this task is cancelled after the actor dropped the
+    // occupancy but before the fan-out below, the janitor replays the retained
+    // outcome under this attempt. Completed once the effects ran.
+    let in_flight = crate::server::routes::websocket::LocalDepartureItem::RoomDeparture {
+        room: room_jid.clone(),
+        jid: sender_jid.clone(),
+        cause: waddle_xmpp::muc::durable::OccupancyLeaveCause::Explicit,
+        selector: waddle_xmpp::muc::room_actor::LeaveSessionSelector::Any,
+        attempt: leave_attempt,
+    };
+    let in_flight_owned = state
+        .deps
+        .protocol
+        .pending_local_muc_departures
+        .record_in_flight(in_flight.clone());
     let outcome = match crate::server::routes::websocket::ask_leave_bounded(
         &room_actor,
         LeaveByRealJid {
@@ -1952,18 +1967,13 @@ pub async fn handle_muc_leave(
     )
     .await
     {
-        Ok(waddle_xmpp::muc::room_actor::LeaveDisposition::Left(outcome)) => {
-            crate::server::routes::websocket::ack_departure_receipt(
-                &state.deps.protocol.pending_local_muc_departures,
-                &room_actor,
-                room_jid,
-                sender_jid,
-                leave_attempt,
-            )
-            .await;
-            outcome
-        }
+        Ok(waddle_xmpp::muc::room_actor::LeaveDisposition::Left(outcome)) => outcome,
         Ok(waddle_xmpp::muc::room_actor::LeaveDisposition::NotOccupant) => {
+            state
+                .deps
+                .protocol
+                .pending_local_muc_departures
+                .complete_in_flight(&in_flight, in_flight_owned);
             debug!(room = %room_jid, nick = %nick, sender = %sender_jid, "MUC leave for absent occupant");
             // No occupant slot to remove, but a stale SFU
             // participant could still exist — clear it.
@@ -1979,6 +1989,11 @@ pub async fn handle_muc_leave(
             )];
         }
         Ok(waddle_xmpp::muc::room_actor::LeaveDisposition::Superseded) => {
+            state
+                .deps
+                .protocol
+                .pending_local_muc_departures
+                .complete_in_flight(&in_flight, in_flight_owned);
             debug!(room = %room_jid, nick = %nick, sender = %sender_jid, "MUC leave superseded by a replacement session");
             return vec![build_muc_self_unavailable_xml(
                 state,
@@ -1989,6 +2004,11 @@ pub async fn handle_muc_leave(
             )];
         }
         Ok(waddle_xmpp::muc::room_actor::LeaveDisposition::Deferred { .. }) => {
+            state
+                .deps
+                .protocol
+                .pending_local_muc_departures
+                .complete_in_flight(&in_flight, in_flight_owned);
             return bounce_muc_leave_ownership_unreachable(room_jid, sender_jid, nick);
         }
         Ok(waddle_xmpp::muc::room_actor::LeaveDisposition::Suppressed { affiliation, .. }) => {
@@ -2000,6 +2020,11 @@ pub async fn handle_muc_leave(
                 leave_attempt,
             )
             .await;
+            state
+                .deps
+                .protocol
+                .pending_local_muc_departures
+                .complete_in_flight(&in_flight, in_flight_owned);
             // Store-less room with a destroy/dormancy in flight: the departure
             // was recorded but nothing fans out. The departing session still
             // gets its XEP-0045 §7.14 self-presence echo (as before #1647).
@@ -2031,6 +2056,12 @@ pub async fn handle_muc_leave(
             return bounce_muc_leave_ownership_unreachable(room_jid, sender_jid, nick);
         }
         Err(error) => {
+            // Never enqueued (sealed / transport): nothing to replay.
+            state
+                .deps
+                .protocol
+                .pending_local_muc_departures
+                .complete_in_flight(&in_flight, in_flight_owned);
             warn!(room = %room_jid, nick = %nick, sender = %sender_jid, error = ?error, "Failed to leave MUC room");
             return bounce_muc_leave_ownership_unreachable(room_jid, sender_jid, nick);
         }
@@ -2069,6 +2100,20 @@ pub async fn handle_muc_leave(
         outcome.affiliation,
     )];
     super::super::super::cleanup::maybe_evict_empty_room(state, room_jid, &outcome).await;
+    // Every effect ran: the receipt is no longer owed to anyone.
+    crate::server::routes::websocket::ack_departure_receipt(
+        &state.deps.protocol.pending_local_muc_departures,
+        &room_actor,
+        room_jid,
+        sender_jid,
+        leave_attempt,
+    )
+    .await;
+    state
+        .deps
+        .protocol
+        .pending_local_muc_departures
+        .complete_in_flight(&in_flight, in_flight_owned);
     response
 }
 

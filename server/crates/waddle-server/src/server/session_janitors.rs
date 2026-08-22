@@ -262,14 +262,6 @@ pub(crate) async fn run_local_muc_departure_sweep(state: &WebSocketState) {
                     .await
                     {
                         Ok(LeaveDisposition::Left(outcome)) => {
-                            routes::websocket::ack_departure_receipt(
-                                &state.deps.protocol.pending_local_muc_departures,
-                                &actor,
-                                &room,
-                                &jid,
-                                attempt,
-                            )
-                            .await;
                             match cause {
                                 OccupancyLeaveCause::Disconnect => {
                                     broadcast_muc_leave_to_remaining(state, &room, &jid, &outcome)
@@ -319,6 +311,15 @@ pub(crate) async fn run_local_muc_departure_sweep(state: &WebSocketState) {
                                     let _ = maybe_evict_empty_room(state, &room, &outcome).await;
                                 }
                             }
+                            // Effects ran: only now is the receipt no longer owed.
+                            routes::websocket::ack_departure_receipt(
+                                &state.deps.protocol.pending_local_muc_departures,
+                                &actor,
+                                &room,
+                                &jid,
+                                attempt,
+                            )
+                            .await;
                             crate::metrics::record_local_departure_retry("completed");
                             break;
                         }
@@ -9108,6 +9109,141 @@ mod local_muc_departure_tests {
             });
         run_local_muc_departure_sweep(&state).await;
         assert_eq!(state.deps.protocol.pending_local_muc_departures.len(), 0);
+    }
+
+    #[tokio::test]
+    async fn write_ahead_departure_is_replayed_when_the_live_task_dies_before_its_effects() {
+        use crate::server::routes::websocket::{LocalDepartureItem, PendingLocalDeparture};
+        let store = JanitorProjectionStore::new();
+        let state = clustered_state_with_store(store.clone()).await;
+        let room = room_jid("write-ahead-replay");
+        let alice = full_jid("alice@example.com/web");
+        let bob = full_jid("bob@example.com/phone");
+        let actor = create_room(state.as_ref(), &room).await;
+        join_member(&actor, &alice, "alice").await;
+        join_member(&actor, &bob, "bob").await;
+        let (bob_tx, mut bob_rx) = mpsc::channel(8);
+        register_test_connection(state.as_ref(), &bob, bob_tx).await;
+        while bob_rx.try_recv().is_ok() {}
+
+        // The explicit-leave task: write-ahead, ask, then it is cancelled
+        // before fan-out and acknowledgement.
+        let attempt = waddle_xmpp::muc::room_actor::LeaveAttemptId::generate();
+        let in_flight = LocalDepartureItem::RoomDeparture {
+            room: room.clone(),
+            jid: alice.clone(),
+            cause: OccupancyLeaveCause::Explicit,
+            selector: LeaveSessionSelector::Any,
+            attempt,
+        };
+        let _in_flight_owned = state
+            .deps
+            .protocol
+            .pending_local_muc_departures
+            .record_in_flight(in_flight.clone());
+        let left = actor
+            .ask(LeaveByRealJid {
+                sender_jid: alice.clone(),
+                cause: OccupancyLeaveCause::Explicit,
+                session: LeaveSessionSelector::Any,
+                attempt,
+                origin: waddle_xmpp::muc::room_actor::LeaveOrigin::Fresh,
+            })
+            .await
+            .expect("leave");
+        assert!(matches!(left, LeaveDisposition::Left(_)));
+        assert!(
+            bob_rx.try_recv().is_err(),
+            "no effects ran: the task died before fan-out"
+        );
+        // Not due yet (the live task normally completes it first).
+        run_local_muc_departure_sweep(&state).await;
+        assert_eq!(state.deps.protocol.pending_local_muc_departures.len(), 1);
+        assert!(bob_rx.try_recv().is_err());
+        // Make it due: the janitor replays the retained outcome.
+        let retained = state
+            .deps
+            .protocol
+            .pending_local_muc_departures
+            .take_for_test(&in_flight)
+            .expect("write-ahead entry");
+        state
+            .deps
+            .protocol
+            .pending_local_muc_departures
+            .record_pending_for_test(PendingLocalDeparture {
+                item: retained.item,
+                attempts: retained.attempts,
+                not_before: std::time::Instant::now(),
+            });
+        run_local_muc_departure_sweep(&state).await;
+
+        let unavailable = bob_rx.try_recv().expect("replayed unavailable reaches bob");
+        let waddle_xmpp::Stanza::Presence(presence) = unavailable.stanza else {
+            panic!("expected presence broadcast");
+        };
+        assert_eq!(presence.type_, xmpp_parsers::presence::Type::Unavailable);
+        assert_eq!(state.deps.protocol.pending_local_muc_departures.len(), 0);
+        assert!(actor
+            .ask(waddle_xmpp::muc::room_actor::GetSnapshot)
+            .await
+            .expect("snapshot")
+            .departures
+            .receipts
+            .is_empty());
+    }
+
+    #[tokio::test]
+    async fn completed_explicit_leave_leaves_no_write_ahead_entry() {
+        use crate::server::routes::websocket::LocalDepartureItem;
+        let store = JanitorProjectionStore::new();
+        let state = clustered_state_with_store(store.clone()).await;
+        let room = room_jid("write-ahead-complete");
+        let alice = full_jid("alice@example.com/web");
+        let actor = create_room(state.as_ref(), &room).await;
+        join_member(&actor, &alice, "alice").await;
+        let attempt = waddle_xmpp::muc::room_actor::LeaveAttemptId::generate();
+        let in_flight = LocalDepartureItem::RoomDeparture {
+            room: room.clone(),
+            jid: alice.clone(),
+            cause: OccupancyLeaveCause::Explicit,
+            selector: LeaveSessionSelector::Any,
+            attempt,
+        };
+        let in_flight_owned = state
+            .deps
+            .protocol
+            .pending_local_muc_departures
+            .record_in_flight(in_flight.clone());
+        state
+            .deps
+            .protocol
+            .pending_local_muc_departures
+            .complete_in_flight(&in_flight, in_flight_owned);
+        assert_eq!(state.deps.protocol.pending_local_muc_departures.len(), 0);
+        // A newer attempt merged under the same key survives completion of
+        // the older one.
+        let in_flight_owned = state
+            .deps
+            .protocol
+            .pending_local_muc_departures
+            .record_in_flight(in_flight.clone());
+        state.deps.protocol.pending_local_muc_departures.record(
+            LocalDepartureItem::RoomDeparture {
+                room: room.clone(),
+                jid: alice.clone(),
+                cause: OccupancyLeaveCause::Explicit,
+                selector: LeaveSessionSelector::Any,
+                attempt: waddle_xmpp::muc::room_actor::LeaveAttemptId::generate(),
+            },
+        );
+        state
+            .deps
+            .protocol
+            .pending_local_muc_departures
+            .complete_in_flight(&in_flight, in_flight_owned);
+        assert_eq!(state.deps.protocol.pending_local_muc_departures.len(), 1);
+        let _ = actor;
     }
 
     #[tokio::test]

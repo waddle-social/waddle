@@ -50,8 +50,18 @@ pub(super) async fn recover_actor_after_ambiguous_invite_grant(
     state: &WebSocketState,
     room_jid: &jid::BareJid,
     stale_actor: &kameo::actor::ActorRef<waddle_xmpp::muc::room_actor::RoomActor>,
-    snapshot: &waddle_xmpp::muc::room_actor::RoomSnapshot,
 ) -> Option<kameo::actor::ActorRef<waddle_xmpp::muc::room_actor::RoomActor>> {
+    // Snapshot the stale actor NOW (it is sealed by the ambiguous commit):
+    // a caller's pre-grant copy would roll back joins/leaves that projected
+    // through the actor since.
+    let snapshot = tokio::time::timeout(
+        crate::server::routes::websocket::LEAVE_ASK_TIMEOUT,
+        stale_actor.ask(waddle_xmpp::muc::room_actor::GetSnapshot),
+    )
+    .await
+    .ok()?
+    .ok()?;
+    let snapshot = &snapshot;
     // Demote the exact stale actor, then acquire the successor WITH the live
     // roster in one registry step. A post-publication `RestoreLiveRoster`
     // would erase joins/leaves that already projected on a live successor;
@@ -326,13 +336,9 @@ pub(super) async fn handle_muc_mediated_invite(
                         AffiliationMutationError::CommitOutcomeUnknown
                     )
                 ) {
-                    if let Some(recovered_actor) = recover_actor_after_ambiguous_invite_grant(
-                        state,
-                        &room_jid,
-                        &room_actor,
-                        &snapshot,
-                    )
-                    .await
+                    if let Some(recovered_actor) =
+                        recover_actor_after_ambiguous_invite_grant(state, &room_jid, &room_actor)
+                            .await
                     {
                         if let Some(channel_id) = waddle_xmpp::parse_managed_room_jid(&room_jid) {
                             if let Ok(
@@ -992,16 +998,11 @@ mod tests {
 
         join_member(&stale_actor, &alice, "alice").await;
         join_member(&successor, &bob, "bob").await;
-        let stale_snapshot = stale_actor.ask(GetSnapshot).await.expect("stale snapshot");
 
-        let recovered = recover_actor_after_ambiguous_invite_grant(
-            state.as_ref(),
-            &room_jid,
-            &stale_actor,
-            &stale_snapshot,
-        )
-        .await
-        .expect("live successor should be returned");
+        let recovered =
+            recover_actor_after_ambiguous_invite_grant(state.as_ref(), &room_jid, &stale_actor)
+                .await
+                .expect("live successor should be returned");
 
         assert_eq!(recovered.id(), successor.id());
         let recovered_snapshot = recovered
@@ -1036,16 +1037,11 @@ mod tests {
         let alice: jid::FullJid = "alice@example.com/web".parse().expect("alice jid");
 
         join_member(&stale_actor, &alice, "alice").await;
-        let stale_snapshot = stale_actor.ask(GetSnapshot).await.expect("stale snapshot");
 
-        let recovered = recover_actor_after_ambiguous_invite_grant(
-            state.as_ref(),
-            &room_jid,
-            &stale_actor,
-            &stale_snapshot,
-        )
-        .await
-        .expect("fresh actor should be recovered");
+        let recovered =
+            recover_actor_after_ambiguous_invite_grant(state.as_ref(), &room_jid, &stale_actor)
+                .await
+                .expect("fresh actor should be recovered");
 
         assert_ne!(recovered.id(), stale_actor.id());
         let recovered_snapshot = recovered

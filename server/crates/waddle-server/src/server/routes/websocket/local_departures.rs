@@ -17,6 +17,7 @@ use waddle_xmpp::muc::{
 const BACKOFF_BASE: Duration = Duration::from_secs(2);
 const BACKOFF_MAX: Duration = Duration::from_secs(60);
 const STUCK_ATTEMPTS: u32 = 10;
+const IN_FLIGHT_SLACK: Duration = Duration::from_secs(2);
 /// Sweeps an owed acknowledgement outlives a room the registry cannot find:
 /// a live-roster handoff (demote, then publish the successor holding the
 /// transferred receipt) briefly answers "no room" while the receipt is in
@@ -379,6 +380,50 @@ impl PendingLocalMucDepartures {
             .entries
             .get(&item.key())
             .is_some_and(|pending| &pending.item == item)
+    }
+
+    /// Write-ahead retention for a departure a live task is about to ask for
+    /// and then effect: if that task is cancelled between the actor's commit
+    /// and the fan-out, the janitor replays the retained outcome under the
+    /// same attempt. Due only after one leave bound plus slack, so the live
+    /// task normally completes it first.
+    ///
+    /// Returns whether the entry was created by this call: an entry that
+    /// already existed under the key is an older retained responsibility the
+    /// live task must never complete away.
+    pub fn record_in_flight(&self, item: LocalDepartureItem) -> bool {
+        let key = item.key();
+        let existed = self
+            .entries
+            .lock()
+            .expect("local departure inventory lock")
+            .entries
+            .contains_key(&key);
+        self.record_at(
+            item,
+            Instant::now() + super::LEAVE_ASK_TIMEOUT + IN_FLIGHT_SLACK,
+        );
+        !existed
+    }
+
+    /// The live task finished its effects: drop the write-ahead entry it
+    /// created, unless a different attempt has since been merged under the
+    /// same key (then that newer responsibility stays). `owned` is what
+    /// [`Self::record_in_flight`] returned.
+    pub fn complete_in_flight(&self, item: &LocalDepartureItem, owned: bool) {
+        if !owned {
+            return;
+        }
+        let mut inventory = self.entries.lock().expect("local departure inventory lock");
+        let key = item.key();
+        let same_attempt = inventory
+            .entries
+            .get(&key)
+            .is_some_and(|pending| pending.item.attempt() == item.attempt());
+        if same_attempt {
+            inventory.remove(&key);
+            inventory.record_gauges();
+        }
     }
 
     /// The acknowledgement still owed for this full JID in this room, if any.

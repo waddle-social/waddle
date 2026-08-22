@@ -5007,6 +5007,88 @@ async fn non_final_receipt_is_superseded_once_the_sibling_left_and_the_nick_was_
 }
 
 #[tokio::test]
+async fn non_final_receipt_is_superseded_once_the_sibling_left_even_without_a_retake() {
+    // web's non-final departure captured mobile's roster/Muji state; mobile
+    // then leaves finally. With the nick absent, replaying web's receipt
+    // would resurrect the nick's stale available state.
+    let actor = spawn_room_actor().await;
+    let web = test_full_jid_resource("alice", "web");
+    let mobile = test_full_jid_resource("alice", "mobile");
+    join_as_resolver(&actor, web.clone(), "alice")
+        .await
+        .expect("web joins");
+    join_as_resolver(&actor, mobile.clone(), "alice")
+        .await
+        .expect("mobile joins");
+    let attempt = LeaveAttemptId::generate();
+    let LeaveDisposition::Left(first) = leave_with_attempt(&actor, web.clone(), attempt).await
+    else {
+        panic!("web leaves");
+    };
+    assert!(!first.removed_last_session);
+    assert!(matches!(
+        leave_with_attempt(&actor, mobile, LeaveAttemptId::generate()).await,
+        LeaveDisposition::Left(_)
+    ));
+
+    let replay = leave_with_attempt(&actor, web, attempt).await;
+    assert!(
+        matches!(replay, LeaveDisposition::Superseded),
+        "an absent nick supersedes a non-final receipt, got {replay:?}"
+    );
+}
+
+#[tokio::test]
+async fn acknowledgement_is_refused_by_an_actor_that_lost_ownership() {
+    // After an ambiguous commit the actor is sealed OwnershipLost and its
+    // ledger may already be on its way to a successor: it must not claim to
+    // have dropped the receipt.
+    let actor = spawn_room_actor_with_store(FakeDurableStore::owned()).await;
+    let alice = test_full_jid("alice");
+    join_as_resolver(&actor, alice.clone(), "alice")
+        .await
+        .expect("alice joins");
+    let attempt = LeaveAttemptId::generate();
+    assert!(matches!(
+        leave_with_attempt(&actor, alice.clone(), attempt).await,
+        LeaveDisposition::Left(_)
+    ));
+    actor
+        .ask(SetRoomSealForTest(RoomSealState::OwnershipLost))
+        .await
+        .expect("test seal");
+    assert_eq!(
+        actor
+            .ask(AckDepartureReceipt { attempt })
+            .await
+            .expect("ack ask"),
+        AckDepartureOutcome::NotAuthoritative
+    );
+    assert_eq!(
+        actor
+            .ask(GetSnapshot)
+            .await
+            .expect("snapshot")
+            .departures
+            .receipts
+            .len(),
+        1,
+        "the receipt stays in the ledger for the successor"
+    );
+    actor
+        .ask(SetRoomSealForTest(RoomSealState::Open))
+        .await
+        .expect("test seal");
+    assert_eq!(
+        actor
+            .ask(AckDepartureReceipt { attempt })
+            .await
+            .expect("ack ask"),
+        AckDepartureOutcome::Acknowledged
+    );
+}
+
+#[tokio::test]
 async fn replayed_receipt_is_superseded_when_the_nick_was_retaken() {
     let actor = spawn_room_actor().await;
     let alice = test_full_jid("alice");

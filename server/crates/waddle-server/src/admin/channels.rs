@@ -2300,6 +2300,14 @@ async fn run_group_dm_leave(
     } else {
         for resource in resources {
             let attempt = waddle_xmpp::muc::room_actor::LeaveAttemptId::generate();
+            let in_flight = crate::server::routes::websocket::LocalDepartureItem::RoomDeparture {
+                room: args.room_jid.clone(),
+                jid: resource.clone(),
+                cause: waddle_xmpp::muc::durable::OccupancyLeaveCause::Administrative,
+                selector: waddle_xmpp::muc::room_actor::LeaveSessionSelector::Any,
+                attempt,
+            };
+            let in_flight_owned = pending_local_muc_departures.record_in_flight(in_flight.clone());
             match crate::server::routes::websocket::ask_leave_bounded(
                 &actor,
                 LeaveByRealJid {
@@ -2313,6 +2321,13 @@ async fn run_group_dm_leave(
             .await
             {
                 Ok(waddle_xmpp::muc::room_actor::LeaveDisposition::Left(outcome)) => {
+                    broadcast_group_dm_leave(
+                        state,
+                        connections,
+                        &resource,
+                        live_resource_set.contains(&resource),
+                        &GroupDmLeaveEffect::from(outcome.as_ref()),
+                    );
                     crate::server::routes::websocket::ack_departure_receipt(
                         pending_local_muc_departures,
                         &actor,
@@ -2321,13 +2336,7 @@ async fn run_group_dm_leave(
                         attempt,
                     )
                     .await;
-                    broadcast_group_dm_leave(
-                        state,
-                        connections,
-                        &resource,
-                        live_resource_set.contains(&resource),
-                        &GroupDmLeaveEffect::from(outcome.as_ref()),
-                    );
+                    pending_local_muc_departures.complete_in_flight(&in_flight, in_flight_owned);
                 }
                 Ok(waddle_xmpp::muc::room_actor::LeaveDisposition::Suppressed { .. }) => {
                     crate::server::routes::websocket::ack_departure_receipt(
@@ -2338,11 +2347,14 @@ async fn run_group_dm_leave(
                         attempt,
                     )
                     .await;
+                    pending_local_muc_departures.complete_in_flight(&in_flight, in_flight_owned);
                 }
                 Ok(
                     waddle_xmpp::muc::room_actor::LeaveDisposition::NotOccupant
                     | waddle_xmpp::muc::room_actor::LeaveDisposition::Superseded,
-                ) => {}
+                ) => {
+                    pending_local_muc_departures.complete_in_flight(&in_flight, in_flight_owned);
+                }
                 Ok(waddle_xmpp::muc::room_actor::LeaveDisposition::Deferred { .. }) => {
                     pending_local_muc_departures.record(
                         crate::server::routes::websocket::LocalDepartureItem::RoomDeparture {

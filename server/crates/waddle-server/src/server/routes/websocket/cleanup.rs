@@ -172,18 +172,27 @@ pub(crate) async fn ack_departure_receipt(
     });
 }
 
-/// One bounded attempt to hand the acknowledgement to the actor; `true` once
-/// it is queued in the mailbox (later leave requests queue behind it).
+/// One bounded attempt to deliver the acknowledgement; `true` only once the
+/// authoritative actor answered that the receipt is dropped. A timeout, a
+/// dead actor, or an actor that lost ownership (its ledger may be on its way
+/// to a successor) all leave the acknowledgement owed.
 pub(crate) async fn try_ack_departure_receipt(
     actor: &kameo::actor::ActorRef<waddle_xmpp::muc::room_actor::RoomActor>,
     attempt: waddle_xmpp::muc::room_actor::LeaveAttemptId,
 ) -> bool {
-    tokio::time::timeout(
-        super::LEAVE_ASK_TIMEOUT,
-        actor.tell(waddle_xmpp::muc::room_actor::AckDepartureReceipt { attempt }),
+    matches!(
+        tokio::time::timeout(
+            super::LEAVE_ASK_TIMEOUT,
+            actor
+                .ask(waddle_xmpp::muc::room_actor::AckDepartureReceipt { attempt })
+                .mailbox_timeout(super::LEAVE_ASK_TIMEOUT)
+                .reply_timeout(super::LEAVE_ASK_TIMEOUT),
+        )
+        .await,
+        Ok(Ok(
+            waddle_xmpp::muc::room_actor::AckDepartureOutcome::Acknowledged
+        ))
     )
-    .await
-    .is_ok_and(|sent| sent.is_ok())
 }
 
 /// Deliver the XEP-0045 §7.14 self-presence (`<status code='110'/>`) of a
@@ -1924,6 +1933,18 @@ async fn cleanup_muc_presence_with_origin(
         // Bounded: one wedged room (stuck projection transaction or mailbox)
         // must not stall the sweep of every other room this JID occupies.
         let attempt = waddle_xmpp::muc::room_actor::LeaveAttemptId::generate();
+        let in_flight = LocalDepartureItem::RoomDeparture {
+            room: room_jid.clone(),
+            jid: jid.clone(),
+            cause: OccupancyLeaveCause::Disconnect,
+            selector: LeaveSessionSelector::Any,
+            attempt,
+        };
+        let in_flight_owned = state
+            .deps
+            .protocol
+            .pending_local_muc_departures
+            .record_in_flight(in_flight.clone());
         let leave_result = ask_leave_bounded(
             &room_actor,
             LeaveByRealJid {
@@ -1953,14 +1974,6 @@ async fn cleanup_muc_presence_with_origin(
         super::muc_call_sfu::unregister_participant_from_room(state, &room_jid, jid);
         match leave_result {
             Ok(LeaveDisposition::Left(outcome)) => {
-                ack_departure_receipt(
-                    &state.deps.protocol.pending_local_muc_departures,
-                    &room_actor,
-                    &room_jid,
-                    jid,
-                    attempt,
-                )
-                .await;
                 debug!(
                     room = %room_jid,
                     nick = %outcome.nick,
@@ -1981,6 +1994,19 @@ async fn cleanup_muc_presence_with_origin(
                 if !maybe_evict_empty_room(state, &room_jid, &outcome).await {
                     completed = false;
                 }
+                ack_departure_receipt(
+                    &state.deps.protocol.pending_local_muc_departures,
+                    &room_actor,
+                    &room_jid,
+                    jid,
+                    attempt,
+                )
+                .await;
+                state
+                    .deps
+                    .protocol
+                    .pending_local_muc_departures
+                    .complete_in_flight(&in_flight, in_flight_owned);
             }
             Ok(LeaveDisposition::Deferred { watermark }) => {
                 completed = false;
@@ -2003,8 +2029,19 @@ async fn cleanup_muc_presence_with_origin(
                     attempt,
                 )
                 .await;
+                state
+                    .deps
+                    .protocol
+                    .pending_local_muc_departures
+                    .complete_in_flight(&in_flight, in_flight_owned);
             }
-            Ok(LeaveDisposition::NotOccupant | LeaveDisposition::Superseded) => {}
+            Ok(LeaveDisposition::NotOccupant | LeaveDisposition::Superseded) => {
+                state
+                    .deps
+                    .protocol
+                    .pending_local_muc_departures
+                    .complete_in_flight(&in_flight, in_flight_owned);
+            }
             Err(LeaveAskFailure::Timeout) => {
                 // Never enqueued, or enqueued with the reply lost: the retry
                 // carries the same attempt id so a completed departure replays
