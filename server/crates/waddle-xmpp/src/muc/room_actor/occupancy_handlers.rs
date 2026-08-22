@@ -381,7 +381,7 @@ impl kameo::message::Message<LeaveByRealJid> for RoomActor {
             Some(super::RetainedDeparture::Stale) => return Ok(LeaveDisposition::Superseded),
             Some(super::RetainedDeparture::Current(receipt)) => {
                 if self.room.session_watermark(&msg.sender_jid).is_some()
-                    || self.nick_retaken_by_other(&receipt)
+                    || self.nick_retaken(&receipt)
                 {
                     return Ok(LeaveDisposition::Superseded);
                 }
@@ -425,7 +425,7 @@ impl kameo::message::Message<LeaveByRealJid> for RoomActor {
                         return Ok(LeaveDisposition::Superseded);
                     }
                     Some(super::RetainedDeparture::Current(receipt)) => {
-                        if self.nick_retaken_by_other(&receipt) {
+                        if self.nick_retaken(&receipt) {
                             return Ok(LeaveDisposition::Superseded);
                         }
                         return Ok(receipt_disposition(receipt));
@@ -1031,15 +1031,23 @@ impl kameo::message::Message<SyncResolverAffiliation> for RoomActor {
 }
 
 impl RoomActor {
-    /// The departed nick is now held by a DIFFERENT bare JID: replaying the
-    /// departure would announce that occupant's unavailability. Sibling
-    /// sessions of the same bare JID still holding the nick are the normal
-    /// multi-resource case (`removed_last_session == false`) and never make
-    /// the receipt stale.
-    fn nick_retaken_by_other(&self, receipt: &super::DepartureReceipt) -> bool {
+    /// The departed nick is held by someone the departure did not account
+    /// for: a different bare JID, or ANY occupant when the departure freed
+    /// the nick (`removed_last_session`) — e.g. the same account back on a
+    /// new resource. Replaying would announce a live occupant's departure.
+    /// Sibling sessions of the same bare JID that still held the nick when
+    /// the departure completed (`removed_last_session == false`) are the
+    /// normal multi-resource case and never make the receipt stale.
+    fn nick_retaken(&self, receipt: &super::DepartureReceipt) -> bool {
+        let freed_nick = match &receipt.outcome {
+            super::DepartureReceiptOutcome::Left(outcome) => outcome.removed_last_session,
+            super::DepartureReceiptOutcome::Suppressed { .. } => false,
+        };
         self.room
             .get_occupant(receipt_nick(receipt))
-            .is_some_and(|occupant| occupant.real_jid.to_bare() != receipt.jid.to_bare())
+            .is_some_and(|occupant| {
+                freed_nick || occupant.real_jid.to_bare() != receipt.jid.to_bare()
+            })
     }
 }
 

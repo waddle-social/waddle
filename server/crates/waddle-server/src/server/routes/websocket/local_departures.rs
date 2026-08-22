@@ -367,6 +367,33 @@ impl PendingLocalMucDepartures {
             .is_some_and(|pending| &pending.item == item)
     }
 
+    /// The acknowledgement still owed for this full JID in this room, if any.
+    /// A retained departure retry of the same JID must deliver it FIRST: the
+    /// receipt it names was already effected, and a retry's JID fallback
+    /// would otherwise consume and replay it.
+    pub fn pending_ack_for(&self, room: &BareJid, jid: &FullJid) -> Option<LeaveAttemptId> {
+        self.entries
+            .lock()
+            .expect("local departure inventory lock")
+            .entries
+            .keys()
+            .find_map(|key| match key {
+                LocalDepartureKey::Ack(ack_room, ack_jid, attempt)
+                    if ack_room == room && ack_jid == jid =>
+                {
+                    Some(*attempt)
+                }
+                _ => None,
+            })
+    }
+
+    /// Drop a retained acknowledgement once the actor accepted it.
+    pub fn complete_ack(&self, room: &BareJid, jid: &FullJid, attempt: LeaveAttemptId) {
+        let mut inventory = self.entries.lock().expect("local departure inventory lock");
+        inventory.remove(&LocalDepartureKey::Ack(room.clone(), jid.clone(), attempt));
+        inventory.record_gauges();
+    }
+
     pub fn len(&self) -> usize {
         self.entries
             .lock()

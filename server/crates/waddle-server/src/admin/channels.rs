@@ -3639,13 +3639,12 @@ async fn reconcile_ambiguous_group_dm_rename_commit(
     .await?;
     if snapshot.room.config == *intended_config {
         let reservation = if let Some(coordinates) = snapshot.config_durable_coordinates {
-            crate::room_effect_outbox::RoomEffectOutboxStore::new(state.db_pool.global().clone())
-                .await
-                .map_err(|error| {
-                    internal_err(format!(
-                        "group-DM reservation store initialization failed: {error}"
-                    ))
-                })?
+            // The shared outbox store (no per-request schema round-trip that
+            // could fail ahead of the retained-arming safety net below).
+            websocket_state
+                .deps
+                .protocol
+                .room_effect_outbox
                 .staged_reservation_for(coordinates.lifecycle, coordinates.revision)
                 .await
                 .map_err(|error| {
@@ -4188,25 +4187,23 @@ async fn run_update(
                 ));
             }
             let reservation = if let Some(coordinates) = snapshot.config_durable_coordinates {
-                crate::room_effect_outbox::RoomEffectOutboxStore::new(
-                    state.db_pool.global().clone(),
-                )
-                .await
-                .map_err(|error| {
-                    internal_err(format!(
-                        "channel reservation store initialization failed: {error}"
-                    ))
-                })?
-                .staged_reservation_for(coordinates.lifecycle, coordinates.revision)
-                .await
-                .map_err(|error| {
-                    websocket_state
-                        .deps
-                        .protocol
-                        .room_effect_arm_supervisor
-                        .retain_staged_reservation_arming(args.channel_jid.clone(), coordinates);
-                    internal_err(format!("channel reservation recovery failed: {error}"))
-                })?
+                websocket_state
+                    .deps
+                    .protocol
+                    .room_effect_outbox
+                    .staged_reservation_for(coordinates.lifecycle, coordinates.revision)
+                    .await
+                    .map_err(|error| {
+                        websocket_state
+                            .deps
+                            .protocol
+                            .room_effect_arm_supervisor
+                            .retain_staged_reservation_arming(
+                                args.channel_jid.clone(),
+                                coordinates,
+                            );
+                        internal_err(format!("channel reservation recovery failed: {error}"))
+                    })?
             } else {
                 None
             };

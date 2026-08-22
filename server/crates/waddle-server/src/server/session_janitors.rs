@@ -200,6 +200,43 @@ pub(crate) async fn run_local_muc_departure_sweep(state: &WebSocketState) {
                             break;
                         }
                     };
+                    // Acknowledgement barrier: an owed acknowledgement for this
+                    // JID names a receipt whose effects already ran. Deliver it
+                    // before this retry may fall back to the JID's receipt, or
+                    // the retry would replay those effects.
+                    if let Some(ack_attempt) = state
+                        .deps
+                        .protocol
+                        .pending_local_muc_departures
+                        .pending_ack_for(&room, &jid)
+                    {
+                        if routes::websocket::try_ack_departure_receipt(&actor, ack_attempt).await {
+                            state
+                                .deps
+                                .protocol
+                                .pending_local_muc_departures
+                                .complete_ack(&room, &jid, ack_attempt);
+                            crate::metrics::record_local_departure_retry("acknowledged");
+                        } else {
+                            state
+                                .deps
+                                .protocol
+                                .pending_local_muc_departures
+                                .requeue_with_backoff(PendingLocalDeparture {
+                                    item: LocalDepartureItem::RoomDeparture {
+                                        room,
+                                        jid,
+                                        cause,
+                                        selector,
+                                        attempt,
+                                    },
+                                    attempts: pending.attempts,
+                                    not_before: pending.not_before,
+                                });
+                            crate::metrics::record_local_departure_retry("ack_barrier");
+                            break;
+                        }
+                    }
                     match routes::websocket::ask_leave_bounded(
                         &actor,
                         LeaveByRealJid {
@@ -8693,6 +8730,79 @@ mod local_muc_departure_tests {
             bob_rx.try_recv().is_err(),
             "nothing was broadcast by the acknowledgement path"
         );
+    }
+
+    #[tokio::test]
+    async fn owed_acknowledgement_is_delivered_before_a_later_retained_departure_can_replay() {
+        use crate::server::routes::websocket::{ack_departure_receipt, LocalDepartureItem};
+        let store = JanitorProjectionStore::new();
+        let state = clustered_state_with_store(store.clone()).await;
+        let room = room_jid("ack-barrier");
+        let alice = full_jid("alice@example.com/web");
+        let bob = full_jid("bob@example.com/phone");
+        let actor = create_room(state.as_ref(), &room).await;
+        join_member(&actor, &alice, "alice").await;
+        join_member(&actor, &bob, "bob").await;
+        let (bob_tx, mut bob_rx) = mpsc::channel(8);
+        register_test_connection(state.as_ref(), &bob, bob_tx).await;
+        while bob_rx.try_recv().is_ok() {}
+
+        // Departure A: reply delivered, effects ran, acknowledgement failed
+        // (stopped actor stands in for a saturated mailbox) and is retained.
+        let attempt_a = waddle_xmpp::muc::room_actor::LeaveAttemptId::generate();
+        let first = actor
+            .ask(LeaveByRealJid {
+                sender_jid: alice.clone(),
+                cause: OccupancyLeaveCause::Explicit,
+                session: LeaveSessionSelector::Any,
+                attempt: attempt_a,
+                origin: waddle_xmpp::muc::room_actor::LeaveOrigin::Fresh,
+            })
+            .await
+            .expect("leave A");
+        assert!(matches!(first, LeaveDisposition::Left(_)));
+        let stopped = create_room(state.as_ref(), &room_jid("ack-barrier-stopped")).await;
+        stopped.stop_gracefully().await.expect("stop");
+        stopped.wait_for_shutdown().await;
+        ack_departure_receipt(
+            &state.deps.protocol.pending_local_muc_departures,
+            &stopped,
+            &room,
+            &alice,
+            attempt_a,
+        )
+        .await;
+        // Departure B: a later same-cause leave whose ask timed out is
+        // retained and due now, ahead of the backed-off acknowledgement.
+        state.deps.protocol.pending_local_muc_departures.record(
+            LocalDepartureItem::RoomDeparture {
+                room: room.clone(),
+                jid: alice.clone(),
+                cause: OccupancyLeaveCause::Explicit,
+                selector: LeaveSessionSelector::Any,
+                attempt: waddle_xmpp::muc::room_actor::LeaveAttemptId::generate(),
+            },
+        );
+        assert_eq!(state.deps.protocol.pending_local_muc_departures.len(), 2);
+
+        run_local_muc_departure_sweep(&state).await;
+
+        assert!(
+            bob_rx.try_recv().is_err(),
+            "A's already-emitted effects must not be replayed through B's retry"
+        );
+        assert_eq!(
+            state.deps.protocol.pending_local_muc_departures.len(),
+            0,
+            "the acknowledgement was delivered first and B converged as NotOccupant"
+        );
+        assert!(actor
+            .ask(waddle_xmpp::muc::room_actor::GetSnapshot)
+            .await
+            .expect("snapshot")
+            .departures
+            .receipts
+            .is_empty());
     }
 
     #[tokio::test]

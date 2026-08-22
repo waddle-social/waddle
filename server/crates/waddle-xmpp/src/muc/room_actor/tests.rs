@@ -4885,6 +4885,50 @@ async fn receipt_replays_while_a_sibling_session_still_holds_the_nick() {
 }
 
 #[tokio::test]
+async fn replayed_final_departure_is_superseded_when_the_same_account_retook_the_nick() {
+    // alice/web was the only session on "alice"; its departure freed the nick
+    // (reply lost). alice reconnects on a NEW resource and rejoins the nick:
+    // the retained retry for /web must not announce alice's departure.
+    let actor = spawn_room_actor().await;
+    let web = test_full_jid_resource("alice", "web");
+    let web2 = test_full_jid_resource("alice", "web2");
+    join_as_resolver(&actor, web.clone(), "alice")
+        .await
+        .expect("web joins");
+    let attempt = LeaveAttemptId::generate();
+    let LeaveDisposition::Left(first) = leave_with_attempt(&actor, web.clone(), attempt).await
+    else {
+        panic!("web leaves");
+    };
+    assert!(first.removed_last_session);
+    join_as_resolver(&actor, web2.clone(), "alice")
+        .await
+        .expect("web2 retakes the nick");
+
+    let replay = retry_with_attempt_and_cause(
+        &actor,
+        web,
+        attempt,
+        crate::muc::durable::OccupancyLeaveCause::Disconnect,
+    )
+    .await;
+    assert!(
+        matches!(replay, LeaveDisposition::Superseded),
+        "a freed nick now held by anyone supersedes the receipt, got {replay:?}"
+    );
+    assert!(
+        actor
+            .ask(GetSnapshot)
+            .await
+            .expect("snapshot")
+            .room
+            .get_occupant("alice")
+            .is_some(),
+        "web2 keeps the nick"
+    );
+}
+
+#[tokio::test]
 async fn replayed_receipt_is_superseded_when_the_nick_was_retaken() {
     let actor = spawn_room_actor().await;
     let alice = test_full_jid("alice");
