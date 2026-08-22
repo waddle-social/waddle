@@ -17,11 +17,16 @@ use super::{RoomEffectOrdinal, RoomLifecycleId, RoomRevision};
 #[serde(try_from = "String")]
 pub struct MucOccupantNick(String);
 
+/// The storage boundary rejected a malformed occupant nickname.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
+#[error("invalid MUC occupant nickname")]
+pub struct InvalidMucOccupantNick;
+
 impl TryFrom<String> for MucOccupantNick {
-    type Error = String;
+    type Error = InvalidMucOccupantNick;
 
     fn try_from(value: String) -> Result<Self, Self::Error> {
-        Self::new(value).ok_or_else(|| "invalid MUC occupant nickname".to_string())
+        Self::new(value).ok_or(InvalidMucOccupantNick)
     }
 }
 

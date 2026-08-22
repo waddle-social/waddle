@@ -5134,6 +5134,63 @@ async fn acknowledgement_is_refused_by_an_actor_that_lost_ownership() {
     );
 }
 
+/// #1647 (codex round 27): the session's occupancy order is minted BEFORE the
+/// join projection awaits. A disconnect cleanup racing a blocked projection
+/// mints its leave attempt during the await — that attempt targets this join
+/// and must not be `Superseded` by an order assigned at apply time.
+#[tokio::test]
+async fn cleanup_attempt_minted_during_a_blocked_join_still_removes_the_occupant() {
+    let store = FakeDurableStore::owned();
+    let actor = spawn_room_actor_with_store(store.clone()).await;
+    let alice = test_full_jid("alice");
+    let admission_revision = current_admission_revision(&actor).await;
+    let pause = store.pause_next_projection_commit();
+    let join_actor = actor.clone();
+    let join_alice = alice.clone();
+    let join = tokio::spawn(async move {
+        join_actor
+            .ask(JoinWithAffiliation {
+                sender_jid: join_alice,
+                nick: "alice".to_string(),
+                affiliation_grant: JoinAffiliationGrant::Resolver(Affiliation::Member),
+                local_domain: "example.com".to_string(),
+                admission_revision,
+            })
+            .await
+    });
+    pause.entered.notified().await;
+    // The WS backstop cancelled the join waiter; disconnect cleanup mints its
+    // leave attempt NOW, while the join projection is still blocked.
+    let attempt = LeaveAttemptId::generate();
+    pause.release.notify_one();
+    join.await.expect("join task").expect("join applies");
+
+    let disposition = actor
+        .ask(LeaveByRealJid {
+            sender_jid: alice.clone(),
+            cause: crate::muc::durable::OccupancyLeaveCause::Disconnect,
+            session: LeaveSessionSelector::Any,
+            attempt,
+            origin: crate::muc::room_actor::LeaveOrigin::Fresh,
+        })
+        .await
+        .expect("cleanup leave");
+    assert!(
+        matches!(disposition, LeaveDisposition::Left(_)),
+        "the cleanup attempt targets the join it raced, not a newer session: {disposition:?}"
+    );
+    assert!(
+        actor
+            .ask(GetSnapshot)
+            .await
+            .expect("snapshot")
+            .room
+            .find_occupant_by_real_jid(&alice)
+            .is_none(),
+        "no ghost occupant survives the raced cleanup"
+    );
+}
+
 /// #1647 (codex round 26): a second departure under a DIFFERENT nick must not
 /// displace the still-owed old-nick receipt — each nickname's unavailable
 /// fan-out is independently owed to the remaining occupants.

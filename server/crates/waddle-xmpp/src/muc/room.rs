@@ -646,6 +646,14 @@ impl MucRoom {
         self.session_orders.get(jid).copied()
     }
 
+    /// Install an occupancy order captured BEFORE the join's durable
+    /// projection awaited: a cleanup attempt minted while the projection was
+    /// blocked must classify this session as its target, not as a newer
+    /// replacement (#1647, codex round 27).
+    pub fn set_session_order(&mut self, jid: &FullJid, order: super::room_actor::OccupancyOrder) {
+        self.session_orders.insert(jid.clone(), order);
+    }
+
     /// Get the number of occupants.
     pub fn occupant_count(&self) -> usize {
         self.occupants.len()

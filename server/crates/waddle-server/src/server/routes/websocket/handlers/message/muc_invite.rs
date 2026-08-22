@@ -54,13 +54,37 @@ pub(super) async fn recover_actor_after_ambiguous_invite_grant(
     // Snapshot the stale actor NOW (it is sealed by the ambiguous commit):
     // a caller's pre-grant copy would roll back joins/leaves that projected
     // through the actor since.
-    let snapshot = tokio::time::timeout(
+    let snapshot = match tokio::time::timeout(
         crate::server::routes::websocket::LEAVE_ASK_TIMEOUT,
         stale_actor.ask(waddle_xmpp::muc::room_actor::GetSnapshot),
     )
     .await
-    .ok()?
-    .ok()?;
+    {
+        Ok(Ok(snapshot)) => snapshot,
+        // The sealed stale actor is already gone (reaped by a concurrent
+        // join's recreation) or unresponsive: there is nothing to
+        // transplant. Follow the registry's CURRENT successor instead of
+        // abandoning recovery — the durable membership already committed,
+        // and giving up here would strand the invite's remaining effects
+        // behind an unretryable "already a member" conflict (#1647, codex
+        // round 27).
+        _ => {
+            let current = state
+                .deps
+                .protocol
+                .room_registry
+                .ask(waddle_xmpp::muc::room_registry_actor::GetRoom {
+                    room_jid: room_jid.clone(),
+                })
+                .await
+                .ok()
+                .flatten()?;
+            if current.id() == stale_actor.id() {
+                return None;
+            }
+            return Some(current);
+        }
+    };
     let snapshot = &snapshot;
     // Demote the exact stale actor and publish the successor in ONE registry
     // turn (no observable "room absent" gap). A post-publication

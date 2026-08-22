@@ -217,6 +217,13 @@ impl kameo::message::Message<JoinWithAffiliation> for RoomActor {
         let Some(durable_nick) = crate::muc::durable::MucOccupantNick::new(msg.nick.clone()) else {
             return Err(RoomActorError::NickAlreadyInUse(msg.nick));
         };
+        // The session's occupancy order is minted BEFORE the durable commit
+        // awaits: a disconnect cleanup racing a blocked projection (the WS
+        // backstop cancelled the waiter, the actor kept running) mints its
+        // leave attempt during this await, and that attempt must post-date
+        // the join it targets — not be `Superseded` by an order assigned
+        // when the projection finally applied (#1647, codex round 27).
+        let join_order = next_occupancy_order();
         let gate = self
             .commit_projection(RoomProjection::OccupancyJoin {
                 occupant: msg.sender_jid.clone(),
@@ -238,6 +245,7 @@ impl kameo::message::Message<JoinWithAffiliation> for RoomActor {
                     joined_at,
                 )
                 .clone();
+            actor.room.set_session_order(&joined_jid, join_order);
             actor.note_session_joined(&joined_jid);
             let new_occupant_affiliation = new_occupant.affiliation;
             let new_occupant_role = new_occupant.role;
