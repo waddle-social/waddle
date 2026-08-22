@@ -282,6 +282,9 @@ enum PendingRoomOwnershipResponsibility<'a> {
     ReclaimedReservation(&'a BareJid),
 }
 
+/// See [`RoomRegistryActor::handoff_in_window`].
+pub const HANDOFF_PENDING_WINDOW: std::time::Duration = std::time::Duration::from_secs(60);
+
 /// Actor that owns the mapping from room JIDs to per-room actors.
 ///
 /// All room creation, lookup, and destruction flows through this actor,
@@ -323,7 +326,7 @@ pub struct RoomRegistryActor {
     /// has not (yet) produced a successor: `GetRoom` answers
     /// `OwnershipReconciliationPending` instead of an absence until a room
     /// entry is published again.
-    handoff_pending: HashSet<BareJid>,
+    handoff_pending: HashMap<BareJid, std::time::Instant>,
     /// Unpublished demand rooms whose durable Create succeeded but whose
     /// terminal cleanup after a lost creator handoff remains uncertain.
     pending_unpublished_destroys:
@@ -582,7 +585,7 @@ impl RoomRegistryActor {
             pending_room_releases: HashMap::new(),
             pending_room_acquisitions: HashMap::new(),
             pending_room_preparations: HashMap::new(),
-            handoff_pending: HashSet::new(),
+            handoff_pending: HashMap::new(),
             pending_unpublished_destroys: HashMap::new(),
             destroy_attempts: HashMap::new(),
             pending_destroy_completions: VecDeque::new(),
@@ -827,6 +830,25 @@ impl RoomRegistryActor {
     /// those, so the published value is exact (#1415 review — the gauge
     /// was previously wired only into the test-only legacy registry and
     /// never emitted in production).
+    /// A live-roster handoff retired this room's actor and no successor is
+    /// registered yet. Bounded: a handoff whose successor never materialises
+    /// (its preparation failed) degrades to an ordinary absence after
+    /// [`HANDOFF_PENDING_WINDOW`] instead of wedging lookups forever.
+    fn handoff_in_window(&mut self, room_jid: &BareJid) -> bool {
+        if self.rooms.contains_key(room_jid) {
+            self.handoff_pending.remove(room_jid);
+            return false;
+        }
+        match self.handoff_pending.get(room_jid) {
+            Some(since) if since.elapsed() < HANDOFF_PENDING_WINDOW => true,
+            Some(_) => {
+                self.handoff_pending.remove(room_jid);
+                false
+            }
+            None => false,
+        }
+    }
+
     fn publish_room_count(&self) {
         crate::metrics::publish_muc_rooms_active(self.rooms.len() as i64);
     }
@@ -3723,6 +3745,28 @@ pub struct GetRoom {
     pub room_jid: BareJid,
 }
 
+/// Test seam: set (or age) the handoff marker for a room as if a handoff had
+/// retired its actor `age` ago without publishing a successor.
+#[cfg(test)]
+pub struct MarkHandoffPendingForTest {
+    pub room_jid: BareJid,
+    pub age: std::time::Duration,
+}
+
+#[cfg(test)]
+impl kameo::message::Message<MarkHandoffPendingForTest> for RoomRegistryActor {
+    type Reply = ();
+
+    async fn handle(
+        &mut self,
+        msg: MarkHandoffPendingForTest,
+        _ctx: &mut Context<Self, Self::Reply>,
+    ) -> Self::Reply {
+        self.handoff_pending
+            .insert(msg.room_jid, std::time::Instant::now() - msg.age);
+    }
+}
+
 impl kameo::message::Message<GetRoom> for RoomRegistryActor {
     type Reply = DelegatedReply<Result<Option<ActorRef<RoomActor>>, RoomRegistryError>>;
 
@@ -3752,7 +3796,7 @@ impl kameo::message::Message<GetRoom> for RoomRegistryActor {
             }
             return delegated;
         }
-        if self.handoff_pending.contains(&msg.room_jid) && !self.rooms.contains_key(&msg.room_jid) {
+        if self.handoff_in_window(&msg.room_jid) {
             return ctx.reply(Err(RoomRegistryError::OwnershipReconciliationPending(
                 msg.room_jid,
             )));
@@ -4785,7 +4829,8 @@ impl kameo::message::Message<GetOrCreateRoomWithLiveRoster> for RoomRegistryActo
                 self.publish_room_count();
                 // From here until the successor is registered (or a
                 // preparation is pending) the room must not look absent.
-                self.handoff_pending.insert(room_jid.clone());
+                self.handoff_pending
+                    .insert(room_jid.clone(), std::time::Instant::now());
                 self.retire_ownership_lost_entry(&room_jid, entry).await;
             }
         }
@@ -4803,14 +4848,13 @@ impl kameo::message::Message<GetOrCreateRoomWithLiveRoster> for RoomRegistryActo
         let transition = self
             .transition_demand_room(room_jid.clone(), creation_spec, ctx.actor_ref().clone())
             .await;
-        // The successor exists or its preparation is pending: lookups will be
-        // answered by it. A failed transition keeps the marker so lookups
-        // answer "reconciliation pending" (retryable) instead of "absent".
+        // A registered successor clears the marker (so does any later
+        // publication). A PENDING preparation keeps it: the preparation may
+        // still fail without publishing, and lookups after that must stay
+        // retryable for the bounded window rather than read as an absence.
         if matches!(
             transition,
-            Ok(DemandRoomTransition::Existing(_))
-                | Ok(DemandRoomTransition::Created(_))
-                | Ok(DemandRoomTransition::Pending(_))
+            Ok(DemandRoomTransition::Existing(_)) | Ok(DemandRoomTransition::Created(_))
         ) {
             self.handoff_pending.remove(&room_jid);
         }

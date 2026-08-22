@@ -1948,6 +1948,7 @@ pub async fn handle_muc_leave(
         jid: sender_jid.clone(),
         cause: waddle_xmpp::muc::durable::OccupancyLeaveCause::Explicit,
         attempt: leave_attempt,
+        notified: Vec::new(),
     };
     state
         .deps
@@ -2024,8 +2025,7 @@ pub async fn handle_muc_leave(
                 &room_actor,
                 &in_flight,
                 acknowledge,
-            )
-            .await;
+            );
             // Store-less room with a destroy/dormancy in flight: the departure
             // was recorded but nothing fans out. The departing session still
             // gets its XEP-0045 §7.14 self-presence echo (as before #1647).
@@ -2057,6 +2057,7 @@ pub async fn handle_muc_leave(
                     cause: waddle_xmpp::muc::durable::OccupancyLeaveCause::Explicit,
                     selector: waddle_xmpp::muc::room_actor::LeaveSessionSelector::Any,
                     attempt: leave_attempt,
+                    notified: Vec::new(),
                 },
             );
             return bounce_muc_leave_ownership_unreachable(room_jid, sender_jid, nick);
@@ -2089,12 +2090,28 @@ pub async fn handle_muc_leave(
     // is used by `cleanup_muc_presence` for unclean disconnects, so
     // both the explicit-leave path and the tab-close path produce the
     // same wire shape.
-    super::super::super::cleanup::broadcast_muc_leave_to_remaining(
-        state, room_jid, sender_jid, &outcome,
+    super::super::super::cleanup::broadcast_muc_leave_to_remaining_resumable(
+        state,
+        room_jid,
+        sender_jid,
+        &outcome,
+        Some(super::super::super::cleanup::LeaveFanOutProgress {
+            pending: &state.deps.protocol.pending_local_muc_departures,
+            item: &in_flight,
+            skip: &[],
+        }),
     )
     .await;
-    super::super::super::cleanup::broadcast_muc_muji_clear_to_remaining(
-        state, room_jid, sender_jid, &outcome,
+    super::super::super::cleanup::broadcast_muc_muji_clear_to_remaining_resumable(
+        state,
+        room_jid,
+        sender_jid,
+        &outcome,
+        Some(super::super::super::cleanup::LeaveFanOutProgress {
+            pending: &state.deps.protocol.pending_local_muc_departures,
+            item: &in_flight,
+            skip: &[],
+        }),
     )
     .await;
 
@@ -2113,8 +2130,7 @@ pub async fn handle_muc_leave(
         &room_actor,
         &in_flight,
         outcome.acknowledge,
-    )
-    .await;
+    );
     response
 }
 
@@ -3692,16 +3708,26 @@ mod occupancy_projection_handler_tests {
             bob_rx.try_recv().is_err(),
             "suppressed leave must not fan out"
         );
-        assert!(
-            actor
+        // The acknowledgement is delivered by a detached task after the handler
+        // returned: wait for it.
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        loop {
+            let receipts = actor
                 .ask(GetSnapshot)
                 .await
                 .expect("snapshot after suppressed leave")
                 .departures
                 .receipts
-                .is_empty(),
-            "the explicit caller acknowledges the suppressed receipt"
-        );
+                .len();
+            if receipts == 0 {
+                break;
+            }
+            assert!(
+                std::time::Instant::now() < deadline,
+                "the explicit caller acknowledges the suppressed receipt"
+            );
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
     }
 
     #[tokio::test]
@@ -4044,11 +4070,18 @@ mod occupancy_projection_handler_tests {
             1,
             "the successful second leave must unregister SFU participation exactly once"
         );
-        assert_eq!(
-            state.deps.protocol.pending_local_muc_departures.len(),
-            1,
-            "only the older timed-out leave should remain queued before the janitor retry"
-        );
+        // The newer leave's acknowledgement is delivered by a detached task:
+        // wait until only the older timed-out leave remains queued.
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        while state.deps.protocol.pending_local_muc_departures.len() != 1 {
+            assert!(
+                std::time::Instant::now() < deadline,
+                "only the older timed-out leave should remain queued before the janitor retry, \
+                 got {}",
+                state.deps.protocol.pending_local_muc_departures.len()
+            );
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
 
         crate::server::session_janitors::run_local_muc_departure_sweep(state.as_ref()).await;
 

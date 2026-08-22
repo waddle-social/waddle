@@ -112,7 +112,8 @@ pub(crate) use cleanup::{
 pub(crate) const LEAVE_ASK_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);
 pub(crate) use cleanup::TerminalRedriveOutcome;
 pub(crate) use cleanup::{
-    broadcast_muc_leave_to_remaining, broadcast_muc_muji_clear_to_remaining, maybe_evict_empty_room,
+    broadcast_muc_leave_to_remaining_resumable, broadcast_muc_muji_clear_to_remaining_resumable,
+    maybe_evict_empty_room, LeaveFanOutProgress,
 };
 pub use connection::router;
 pub(crate) use local_departures::{

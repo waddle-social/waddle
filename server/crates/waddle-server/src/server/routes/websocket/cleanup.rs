@@ -176,8 +176,8 @@ pub(crate) async fn ack_departure_receipt(
 /// A live task's effects ran: hand its write-ahead entry over to the owed
 /// acknowledgement (atomically, before awaiting the actor), then deliver the
 /// acknowledgement; the owed entry is cleared only on an authoritative answer.
-pub(crate) async fn acknowledge_in_flight(
-    pending: &PendingLocalMucDepartures,
+pub(crate) fn acknowledge_in_flight(
+    pending: &Arc<PendingLocalMucDepartures>,
     actor: &kameo::actor::ActorRef<waddle_xmpp::muc::room_actor::RoomActor>,
     in_flight: &LocalDepartureItem,
     acknowledge: waddle_xmpp::muc::room_actor::LeaveAttemptId,
@@ -185,10 +185,19 @@ pub(crate) async fn acknowledge_in_flight(
     let LocalDepartureItem::InFlight { room, jid, .. } = in_flight else {
         return;
     };
+    // Synchronous handover first: from here the only responsibility is the
+    // acknowledgement, which is delivered by a detached task so the caller
+    // (a WS handler under the frame backstop, a cleanup task) returns its own
+    // response/effects immediately and cannot be cancelled mid-ack.
     pending.convert_in_flight_to_ack(in_flight, acknowledge);
-    if try_ack_departure_receipt(actor, acknowledge).await {
-        pending.complete_ack(room, jid, acknowledge);
-    }
+    let pending = Arc::clone(pending);
+    let actor = actor.clone();
+    let (room, jid) = (room.clone(), jid.clone());
+    tokio::spawn(async move {
+        if try_ack_departure_receipt(&actor, acknowledge).await {
+            pending.complete_ack(&room, &jid, acknowledge);
+        }
+    });
 }
 
 /// One bounded attempt to deliver the acknowledgement; `true` only once the
@@ -250,11 +259,32 @@ pub(crate) async fn echo_muc_self_unavailable(
     .await;
 }
 
-pub(crate) async fn broadcast_muc_leave_to_remaining(
+/// Per-recipient progress of a departure's fan-out, recorded on the
+/// retained inventory entry so a task that dies mid fan-out is resumed from
+/// the first recipient it did NOT reach (never announcing the departure twice
+/// to the ones it did).
+pub(crate) struct LeaveFanOutProgress<'a> {
+    pub pending: &'a PendingLocalMucDepartures,
+    pub item: &'a LocalDepartureItem,
+    pub skip: &'a [FullJid],
+}
+
+impl LeaveFanOutProgress<'_> {
+    fn already_notified(&self, recipient: &FullJid) -> bool {
+        self.skip.contains(recipient)
+    }
+
+    fn notified(&self, recipient: &FullJid) {
+        self.pending.note_notified(self.item, recipient);
+    }
+}
+
+pub(crate) async fn broadcast_muc_leave_to_remaining_resumable(
     state: &WebSocketState,
     room_jid: &BareJid,
     sender_jid: &FullJid,
     outcome: &LeaveOutcome,
+    progress: Option<LeaveFanOutProgress<'_>>,
 ) {
     if !outcome.removed_last_session {
         return;
@@ -265,6 +295,12 @@ pub(crate) async fn broadcast_muc_leave_to_remaining(
         .unwrap_or_else(|_| sender_jid.clone());
     let sender_bare = sender_jid.to_bare();
     for occupant_jid in &outcome.remaining_occupants {
+        if progress
+            .as_ref()
+            .is_some_and(|progress| progress.already_notified(occupant_jid))
+        {
+            continue;
+        }
         let identity = OccupantIdentity {
             bare_jid: &sender_bare,
             real_jid: Some(sender_jid),
@@ -284,19 +320,21 @@ pub(crate) async fn broadcast_muc_leave_to_remaining(
             Stanza::Presence(presence),
         )
         .await;
+        if let Some(progress) = progress.as_ref() {
+            progress.notified(occupant_jid);
+        }
     }
 }
 
-/// Broadcast canonical available room/nick presence after one
-/// resource's Muji state changes while another same-nick session
-/// remains. Sibling Muji state is emitted under the exact full JID
-/// that owns it so resource-scoped XEP-0272 preparing state stays
-/// attributable.
-pub(crate) async fn broadcast_muc_muji_clear_to_remaining(
+/// The leave fan-out (last session) and the Muji-clear fan-out (siblings
+/// remain) are mutually exclusive for one departure, so one progress list
+/// serves whichever runs.
+pub(crate) async fn broadcast_muc_muji_clear_to_remaining_resumable(
     state: &WebSocketState,
     room_jid: &BareJid,
     leaving_real_jid: &FullJid,
     outcome: &LeaveOutcome,
+    progress: Option<LeaveFanOutProgress<'_>>,
 ) {
     if outcome.removed_last_session || !outcome.cleared_muji_state {
         return;
@@ -315,6 +353,12 @@ pub(crate) async fn broadcast_muc_muji_clear_to_remaining(
     entries.extend(outcome.remaining_muji_sessions.iter().cloned());
     entries.sort_by_key(|(owner_jid, muji)| (muji_reflection_rank(muji), owner_jid.to_string()));
     for occupant_jid in &outcome.remaining_occupants {
+        if progress
+            .as_ref()
+            .is_some_and(|progress| progress.already_notified(occupant_jid))
+        {
+            continue;
+        }
         for (owner_jid, muji) in &entries {
             let owner_bare = owner_jid.to_bare();
             let identity = OccupantIdentity {
@@ -341,6 +385,9 @@ pub(crate) async fn broadcast_muc_muji_clear_to_remaining(
                 Stanza::Presence(presence),
             )
             .await;
+        }
+        if let Some(progress) = progress.as_ref() {
+            progress.notified(occupant_jid);
         }
     }
 }
@@ -1966,6 +2013,7 @@ async fn cleanup_muc_presence_with_origin(
             jid: jid.clone(),
             cause: OccupancyLeaveCause::Disconnect,
             attempt,
+            notified: Vec::new(),
         };
         state
             .deps
@@ -2020,8 +2068,30 @@ async fn cleanup_muc_presence_with_origin(
                 // (`handle_muc_leave`) calls the same helper, so the
                 // wire shape is identical regardless of how the
                 // session ended.
-                broadcast_muc_leave_to_remaining(state, &room_jid, jid, &outcome).await;
-                broadcast_muc_muji_clear_to_remaining(state, &room_jid, jid, &outcome).await;
+                broadcast_muc_leave_to_remaining_resumable(
+                    state,
+                    &room_jid,
+                    jid,
+                    &outcome,
+                    Some(LeaveFanOutProgress {
+                        pending: &state.deps.protocol.pending_local_muc_departures,
+                        item: &in_flight,
+                        skip: &[],
+                    }),
+                )
+                .await;
+                broadcast_muc_muji_clear_to_remaining_resumable(
+                    state,
+                    &room_jid,
+                    jid,
+                    &outcome,
+                    Some(LeaveFanOutProgress {
+                        pending: &state.deps.protocol.pending_local_muc_departures,
+                        item: &in_flight,
+                        skip: &[],
+                    }),
+                )
+                .await;
                 if !maybe_evict_empty_room(state, &room_jid, &outcome).await {
                     completed = false;
                 }
@@ -2030,8 +2100,7 @@ async fn cleanup_muc_presence_with_origin(
                     &room_actor,
                     &in_flight,
                     outcome.acknowledge,
-                )
-                .await;
+                );
             }
             Ok(LeaveDisposition::Deferred { watermark }) => {
                 completed = false;
@@ -2050,6 +2119,7 @@ async fn cleanup_muc_presence_with_origin(
                         cause: OccupancyLeaveCause::Disconnect,
                         selector: LeaveSessionSelector::JoinedAtOrBefore(watermark),
                         attempt,
+                        notified: Vec::new(),
                     },
                 );
             }
@@ -2062,8 +2132,7 @@ async fn cleanup_muc_presence_with_origin(
                     &room_actor,
                     &in_flight,
                     acknowledge,
-                )
-                .await;
+                );
             }
             Ok(LeaveDisposition::NotOccupant | LeaveDisposition::Superseded) => {
                 state
@@ -2091,6 +2160,7 @@ async fn cleanup_muc_presence_with_origin(
                         cause: OccupancyLeaveCause::Disconnect,
                         selector: LeaveSessionSelector::Any,
                         attempt,
+                        notified: Vec::new(),
                     },
                 );
                 warn!(room = %room_jid, jid = %jid, "MUC leave ask timed out on disconnect; retained for retry");
@@ -3926,16 +3996,26 @@ mod local_departure_cleanup_tests {
             cleanup_muc_presence_for_jid(state.as_ref(), &alice).await,
             MucCleanupOutcome::Completed
         );
-        assert!(
-            room_actor
+        // The acknowledgement is delivered by a detached task after the
+        // cleanup returned: wait for it.
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        loop {
+            let receipts = room_actor
                 .ask(GetSnapshot)
                 .await
                 .expect("snapshot after suppressed cleanup")
                 .departures
                 .receipts
-                .is_empty(),
-            "disconnect cleanup acknowledges the suppressed receipt"
-        );
+                .len();
+            if receipts == 0 {
+                break;
+            }
+            assert!(
+                std::time::Instant::now() < deadline,
+                "disconnect cleanup acknowledges the suppressed receipt"
+            );
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
     }
 
     #[tokio::test]
@@ -4049,15 +4129,15 @@ mod local_departure_cleanup_tests {
             "the mailbox-saturated room must be retained for retry"
         );
         assert!(matches!(
-                    &retained[0].item,
-                    LocalDepartureItem::RoomDeparture {
-                        room,
-                        jid,
-                        cause: OccupancyLeaveCause::Disconnect,
-                        selector: LeaveSessionSelector::Any,
-                        attempt: _,
-        } if room == &hanging_room && jid == &alice
-                ));
+            &retained[0].item,
+            LocalDepartureItem::RoomDeparture {
+                room,
+                jid,
+                cause: OccupancyLeaveCause::Disconnect,
+                selector: LeaveSessionSelector::Any,
+                ..
+            } if room == &hanging_room && jid == &alice
+        ));
         assert!(
             (if succeeding_room == first_room {
                 &first_actor

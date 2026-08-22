@@ -2305,6 +2305,7 @@ async fn run_group_dm_leave(
                 jid: resource.clone(),
                 cause: waddle_xmpp::muc::durable::OccupancyLeaveCause::Administrative,
                 attempt,
+                notified: Vec::new(),
             };
             pending_local_muc_departures.record_in_flight(in_flight.clone());
             let _in_flight_lease = crate::server::routes::websocket::InFlightLease::hold(
@@ -2336,8 +2337,7 @@ async fn run_group_dm_leave(
                         &actor,
                         &in_flight,
                         outcome.acknowledge,
-                    )
-                    .await;
+                    );
                 }
                 Ok(waddle_xmpp::muc::room_actor::LeaveDisposition::Suppressed {
                     attempt: acknowledge,
@@ -2348,8 +2348,7 @@ async fn run_group_dm_leave(
                         &actor,
                         &in_flight,
                         acknowledge,
-                    )
-                    .await;
+                    );
                 }
                 Ok(
                     waddle_xmpp::muc::room_actor::LeaveDisposition::NotOccupant
@@ -2366,6 +2365,7 @@ async fn run_group_dm_leave(
                             cause: waddle_xmpp::muc::durable::OccupancyLeaveCause::Administrative,
                             selector: waddle_xmpp::muc::room_actor::LeaveSessionSelector::Any,
                             attempt,
+                            notified: Vec::new(),
                         },
                     );
                 }
@@ -2380,6 +2380,7 @@ async fn run_group_dm_leave(
                             cause: waddle_xmpp::muc::durable::OccupancyLeaveCause::Administrative,
                             selector: waddle_xmpp::muc::room_actor::LeaveSessionSelector::Any,
                             attempt,
+                            notified: Vec::new(),
                         },
                     );
                 }
@@ -2407,6 +2408,7 @@ async fn run_group_dm_leave(
                             cause: waddle_xmpp::muc::durable::OccupancyLeaveCause::Administrative,
                             selector: waddle_xmpp::muc::room_actor::LeaveSessionSelector::Any,
                             attempt,
+                            notified: Vec::new(),
                         },
                     );
                 }
@@ -7035,15 +7037,15 @@ mod group_dm_durable_reconciliation_tests {
         );
         let retained = pending.pop().expect("retained departure");
         assert!(matches!(
-                    retained.item,
-                    crate::server::routes::websocket::LocalDepartureItem::RoomDeparture {
-                        ref room,
-                        ref jid,
-                        cause: waddle_xmpp::muc::durable::OccupancyLeaveCause::Administrative,
-                        selector: waddle_xmpp::muc::room_actor::LeaveSessionSelector::Any,
-                        attempt: _,
-        } if room == &room_jid && jid == &alice_web
-                ));
+            retained.item,
+            crate::server::routes::websocket::LocalDepartureItem::RoomDeparture {
+                ref room,
+                ref jid,
+                cause: waddle_xmpp::muc::durable::OccupancyLeaveCause::Administrative,
+                selector: waddle_xmpp::muc::room_actor::LeaveSessionSelector::Any,
+                ..
+            } if room == &room_jid && jid == &alice_web
+        ));
         websocket_state
             .deps
             .protocol

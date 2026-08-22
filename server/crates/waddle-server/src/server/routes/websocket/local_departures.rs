@@ -46,6 +46,10 @@ pub enum LocalDepartureItem {
         /// Idempotency key replayed on retry so a departure the actor already
         /// completed (reply lost) yields its retained outcome, not `NotOccupant`.
         attempt: LeaveAttemptId,
+        /// Remaining occupants that already received this departure's fan-out
+        /// (carried over from a died task's write-ahead entry): a resumed
+        /// replay skips them instead of announcing the departure twice.
+        notified: Vec<FullJid>,
     },
     ConfirmRetired {
         room: BareJid,
@@ -71,6 +75,8 @@ pub enum LocalDepartureItem {
         jid: FullJid,
         cause: OccupancyLeaveCause,
         attempt: LeaveAttemptId,
+        /// Per-recipient fan-out progress (see `RoomDeparture::notified`).
+        notified: Vec<FullJid>,
     },
     AckReceipt {
         room: BareJid,
@@ -110,6 +116,7 @@ impl LocalDepartureItem {
                 jid,
                 cause,
                 attempt,
+                ..
             } => {
                 LocalDepartureKey::InFlight(room.clone(), jid.clone(), cause_key(*cause), *attempt)
             }
@@ -132,6 +139,15 @@ impl LocalDepartureItem {
         };
         let merged_selector = merged_selector.unwrap_or(LeaveSessionSelector::Any);
         let merged_attempt = merged_attempt.unwrap_or_else(LeaveAttemptId::generate);
+        let merged_notified = {
+            let mut notified = existing.item.notified().to_vec();
+            for recipient in self.notified() {
+                if !notified.contains(recipient) {
+                    notified.push(recipient.clone());
+                }
+            }
+            notified
+        };
         match (existing.item.clone(), self) {
             (
                 LocalDepartureItem::RoomDeparture {
@@ -157,6 +173,7 @@ impl LocalDepartureItem {
                 cause,
                 selector: merged_selector,
                 attempt: merged_attempt,
+                notified: merged_notified,
             },
             (
                 LocalDepartureItem::ConfirmRetired {
@@ -185,6 +202,13 @@ impl LocalDepartureItem {
             Self::RoomDeparture { attempt, .. }
             | Self::ConfirmRetired { attempt, .. }
             | Self::InFlight { attempt, .. } => Some(*attempt),
+        }
+    }
+
+    fn notified(&self) -> &[FullJid] {
+        match self {
+            Self::RoomDeparture { notified, .. } | Self::InFlight { notified, .. } => notified,
+            _ => &[],
         }
     }
 
@@ -414,7 +438,7 @@ impl PendingLocalMucDepartures {
         taken
     }
 
-    #[cfg(all(test, feature = "clustering"))]
+    #[cfg(test)]
     pub(crate) fn contains_for_test(&self, item: &LocalDepartureItem) -> bool {
         self.entries
             .lock()
@@ -438,6 +462,35 @@ impl PendingLocalMucDepartures {
         if inventory.remove(&item.key()).is_some() {
             inventory.record_gauges();
         }
+    }
+
+    /// One remaining occupant received this departure's fan-out: record it on
+    /// the entry so a resumed replay (after the task died mid fan-out) skips
+    /// the recipients already notified.
+    pub fn note_notified(&self, item: &LocalDepartureItem, recipient: &FullJid) {
+        let mut inventory = self.entries.lock().expect("local departure inventory lock");
+        let Some(pending) = inventory.entries.get_mut(&item.key()) else {
+            return;
+        };
+        match &mut pending.item {
+            LocalDepartureItem::InFlight { notified, .. }
+            | LocalDepartureItem::RoomDeparture { notified, .. }
+                if !notified.contains(recipient) =>
+            {
+                notified.push(recipient.clone());
+            }
+            _ => {}
+        }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn not_before_for_test(&self, item: &LocalDepartureItem) -> Option<Instant> {
+        self.entries
+            .lock()
+            .expect("local departure inventory lock")
+            .entries
+            .get(&item.key())
+            .map(|pending| pending.not_before)
     }
 
     /// Push the write-ahead deadline out again: the live task is still
@@ -566,10 +619,23 @@ pub struct InFlightLease {
     heartbeat: tokio::task::JoinHandle<()>,
 }
 
+const _: () = assert!(
+    IN_FLIGHT_RENEWAL.as_millis() * 2 <= IN_FLIGHT_REPLAY_DELAY.as_millis(),
+    "a live task must renew well inside the replay delay"
+);
+
 impl InFlightLease {
     pub fn hold(pending: Arc<PendingLocalMucDepartures>, item: LocalDepartureItem) -> Self {
+        Self::hold_every(pending, item, IN_FLIGHT_RENEWAL)
+    }
+
+    pub(crate) fn hold_every(
+        pending: Arc<PendingLocalMucDepartures>,
+        item: LocalDepartureItem,
+        renewal: Duration,
+    ) -> Self {
         let heartbeat = tokio::spawn(async move {
-            let mut ticks = tokio::time::interval(IN_FLIGHT_RENEWAL);
+            let mut ticks = tokio::time::interval(renewal);
             ticks.tick().await;
             loop {
                 ticks.tick().await;
@@ -611,6 +677,7 @@ mod tests {
                 cause: OccupancyLeaveCause::Disconnect,
                 selector: LeaveSessionSelector::Any,
                 attempt: LeaveAttemptId::generate(),
+                notified: Vec::new(),
             },
             now,
         );
@@ -655,6 +722,7 @@ mod tests {
             cause: OccupancyLeaveCause::Disconnect,
             selector,
             attempt,
+            notified: Vec::new(),
         };
         let attempt_a = LeaveAttemptId::generate();
         let attempt_b = LeaveAttemptId::generate();
@@ -791,6 +859,7 @@ mod tests {
             cause: OccupancyLeaveCause::Disconnect,
             selector,
             attempt: LeaveAttemptId::generate(),
+            notified: Vec::new(),
         };
 
         inventory.record_at(
@@ -847,6 +916,7 @@ mod tests {
                 cause: OccupancyLeaveCause::Disconnect,
                 selector: LeaveSessionSelector::Any,
                 attempt: LeaveAttemptId::generate(),
+                notified: Vec::new(),
             },
             attempts,
             not_before: due,
@@ -892,6 +962,7 @@ mod tests {
             cause: OccupancyLeaveCause::Disconnect,
             selector,
             attempt,
+            notified: Vec::new(),
         };
         let inventory = PendingLocalMucDepartures::default();
         let older = LeaveAttemptId::generate();
@@ -926,6 +997,7 @@ mod tests {
             cause: OccupancyLeaveCause::Disconnect,
             selector,
             attempt,
+            notified: Vec::new(),
         };
 
         let inventory = PendingLocalMucDepartures::default();
@@ -1095,6 +1167,7 @@ mod tests {
             cause: OccupancyLeaveCause::Explicit,
             selector: LeaveSessionSelector::Any,
             attempt: first,
+            notified: Vec::new(),
         });
         pending.record(LocalDepartureItem::AckReceipt {
             room: room.clone(),
@@ -1133,6 +1206,7 @@ mod tests {
             jid: jid.clone(),
             cause: OccupancyLeaveCause::Disconnect,
             attempt,
+            notified: Vec::new(),
         };
         pending.record_in_flight(in_flight(first));
         pending.record_in_flight(in_flight(second));
@@ -1168,6 +1242,7 @@ mod tests {
             jid: jid.clone(),
             cause: OccupancyLeaveCause::Explicit,
             attempt,
+            notified: Vec::new(),
         };
         pending.record_in_flight(in_flight.clone());
         pending.convert_in_flight_to_ack(&in_flight, acknowledge);
@@ -1180,6 +1255,39 @@ mod tests {
         );
         pending.complete_ack(&room, &jid, acknowledge);
         assert_eq!(pending.len(), 0);
+    }
+
+    #[tokio::test]
+    async fn lease_keeps_renewing_until_dropped() {
+        let pending = Arc::new(PendingLocalMucDepartures::default());
+        let room: BareJid = "room@muc.example.com".parse().expect("room");
+        let jid: FullJid = "alice@example.com/web".parse().expect("jid");
+        let item = LocalDepartureItem::InFlight {
+            room,
+            jid,
+            cause: OccupancyLeaveCause::Explicit,
+            attempt: LeaveAttemptId::generate(),
+            notified: Vec::new(),
+        };
+        pending.record_in_flight(item.clone());
+        let before = pending.not_before_for_test(&item).expect("entry");
+        let lease = InFlightLease::hold_every(
+            Arc::clone(&pending),
+            item.clone(),
+            Duration::from_millis(10),
+        );
+        tokio::time::sleep(Duration::from_millis(60)).await;
+        let renewed = pending.not_before_for_test(&item).expect("entry");
+        assert!(renewed > before, "a held lease renews the deadline");
+        drop(lease);
+        tokio::time::sleep(Duration::from_millis(30)).await;
+        let after_drop = pending.not_before_for_test(&item).expect("entry");
+        tokio::time::sleep(Duration::from_millis(40)).await;
+        assert_eq!(
+            pending.not_before_for_test(&item).expect("entry"),
+            after_drop,
+            "a dropped lease stops renewing"
+        );
     }
 
     #[test]

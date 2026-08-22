@@ -4552,6 +4552,50 @@ mod ownership_claims_tests {
     }
 
     #[tokio::test]
+    async fn failed_handoff_keeps_lookups_retryable_for_a_bounded_window() {
+        let registry = spawn_registry().await;
+        let room_jid = test_room_jid("handoff-window");
+        registry
+            .ask(MarkHandoffPendingForTest {
+                room_jid: room_jid.clone(),
+                age: std::time::Duration::ZERO,
+            })
+            .await
+            .expect("mark");
+        let lookup = registry
+            .ask(GetRoom {
+                room_jid: room_jid.clone(),
+            })
+            .await;
+        assert!(
+            matches!(
+                lookup,
+                Err(kameo::error::SendError::HandlerError(
+                    RoomRegistryError::OwnershipReconciliationPending(_)
+                ))
+            ),
+            "inside the window the room is reconciling, not absent: {lookup:?}"
+        );
+        registry
+            .ask(MarkHandoffPendingForTest {
+                room_jid: room_jid.clone(),
+                age: HANDOFF_PENDING_WINDOW + std::time::Duration::from_secs(1),
+            })
+            .await
+            .expect("age the marker");
+        let lookup = registry
+            .ask(GetRoom {
+                room_jid: room_jid.clone(),
+            })
+            .await
+            .expect("lookup");
+        assert!(
+            lookup.is_none(),
+            "past the window a handoff without a successor is an ordinary absence"
+        );
+    }
+
+    #[tokio::test]
     async fn live_roster_handoff_demotes_and_publishes_in_one_registry_turn() {
         use crate::muc::durable::{ChannelId, WaddleId};
         use crate::muc::room_actor::{GetSnapshot, JoinAffiliationGrant, JoinWithAffiliation};
