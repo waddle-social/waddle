@@ -54,7 +54,7 @@ pub use mediated_invites::{
 pub use occupancy_handlers::{
     next_occupancy_order, ClearMujiPresence, GetActiveMujiSessions, InCallPresenceUpdateOutcome,
     JoinAffiliationGrant, JoinWithAffiliation, LeaveAttemptId, LeaveByRealJid, LeaveDisposition,
-    LeaveSessionSelector, MujiPresenceUpdateOutcome, OccupancyOrder, PingSelfCheck,
+    LeaveOrigin, LeaveSessionSelector, MujiPresenceUpdateOutcome, OccupancyOrder, PingSelfCheck,
     PresenceUpdateData, ReconcileChannelBackedRoom, ResolverAffiliationSyncOutcome,
     SyncResolverAffiliation, UpsertInCallState, UpsertMujiPresence,
 };
@@ -1362,8 +1362,33 @@ impl RoomActor {
                 .or_default()
                 .extend(attempts);
         }
+        let transferred_jids: Vec<FullJid> = ledger
+            .receipts
+            .iter()
+            .map(|receipt| receipt.jid.clone())
+            .collect();
         for receipt in ledger.receipts {
             self.retain_departure_receipt(receipt);
+        }
+        // A transferred receipt refused as superseded leaves no receipt to
+        // prune the JID's tombstones with later; drop them now.
+        for jid in transferred_jids {
+            self.prune_departure_state(&jid);
+        }
+        let orphaned: Vec<FullJid> = self
+            .latest_generations
+            .keys()
+            .chain(self.superseded_departure_attempts.keys())
+            .filter(|jid| {
+                !self
+                    .departure_receipts
+                    .iter()
+                    .any(|receipt| &receipt.jid == *jid)
+            })
+            .cloned()
+            .collect();
+        for jid in orphaned {
+            self.prune_departure_state(&jid);
         }
     }
 

@@ -77,28 +77,16 @@ impl LocalDepartureItem {
 
     fn merge_with_existing(self, existing: &PendingLocalDeparture) -> Self {
         let merged_selector = merge_selectors(existing.item.selector(), self.selector());
-        // The attempt follows the broader selector: a newer disconnect (newer
-        // watermark or `Any`) is the logical departure the retry must replay.
-        // On equal breadth the NEWEST attempt wins (the later logical
-        // departure); an older completed attempt whose reply was lost is still
-        // recoverable because the actor also replays the full JID's
-        // unacknowledged receipt when the session is gone.
-        let incoming_dominates = match (existing.item.selector(), self.selector()) {
-            (Some(LeaveSessionSelector::Any), Some(LeaveSessionSelector::Any)) => true,
-            (Some(LeaveSessionSelector::Any), _) => false,
-            (_, Some(LeaveSessionSelector::Any)) => true,
-            (
-                Some(LeaveSessionSelector::JoinedAtOrBefore(left)),
-                Some(LeaveSessionSelector::JoinedAtOrBefore(right)),
-            ) => right >= left,
-            _ => false,
-        };
+        // The NEWEST attempt always wins: the actor refuses an attempt minted
+        // before the live session joined (`Superseded`), so a merged item that
+        // widens to `Any` must carry an attempt at least as new as the session
+        // it now targets. An older completed attempt whose reply was lost is
+        // still recoverable because the actor replays the full JID's
+        // unacknowledged receipt of the same cause when the session is gone.
         let merged_attempt = match (existing.item.attempt(), self.attempt()) {
-            (Some(existing_attempt), Some(incoming_attempt)) => Some(if incoming_dominates {
-                incoming_attempt
-            } else {
-                existing_attempt
-            }),
+            (Some(existing_attempt), Some(incoming_attempt)) => {
+                Some(existing_attempt.max(incoming_attempt))
+            }
             (existing_attempt, incoming_attempt) => existing_attempt.or(incoming_attempt),
         };
         let merged_selector = merged_selector.unwrap_or(LeaveSessionSelector::Any);
@@ -548,14 +536,14 @@ mod tests {
         let merged = inventory
             .take_due(now)
             .pop()
-            .expect("older watermark keeps existing attempt");
+            .expect("older watermark keeps existing selector, newest attempt");
         assert!(matches!(
             merged.item,
             LocalDepartureItem::RoomDeparture {
                 selector: LeaveSessionSelector::JoinedAtOrBefore(watermark),
                 attempt,
                 ..
-            } if watermark == OccupancyWatermark::from_revision(3) && attempt == attempt_a
+            } if watermark == OccupancyWatermark::from_revision(3) && attempt == attempt_c
         ));
 
         inventory.record_at(
@@ -587,14 +575,14 @@ mod tests {
         let merged = inventory
             .take_due(now)
             .pop()
-            .expect("existing any keeps attempt");
+            .expect("existing any keeps selector, newest attempt");
         assert!(matches!(
             merged.item,
             LocalDepartureItem::RoomDeparture {
                 selector: LeaveSessionSelector::Any,
                 attempt,
                 ..
-            } if attempt == attempt_a
+            } if attempt == attempt_b
         ));
 
         inventory.record_at(departure(LeaveSessionSelector::Any, attempt_a), now);
@@ -621,7 +609,7 @@ mod tests {
                 selector: LeaveSessionSelector::Any,
                 attempt,
                 ..
-            } if merged_room == room && merged_jid == jid && attempt == attempt_a
+            } if merged_room == room && merged_jid == jid && attempt == attempt_b
         ));
     }
 
@@ -725,7 +713,45 @@ mod tests {
     }
 
     #[test]
-    fn record_merge_keeps_attempt_of_dominating_selector() {
+    fn record_merge_widening_to_any_adopts_the_newest_attempt() {
+        // Regression: an older `Any` entry merged with a newer deferred
+        // disconnect must not keep the older attempt — the actor would refuse
+        // it as `Superseded` against the session that joined in between and
+        // the janitor would drop the only responsibility for that session.
+        let room = room("merge-any-newest");
+        let jid = jid("alice@example.com/web");
+        let now = Instant::now();
+        let make_departure = |selector, attempt| LocalDepartureItem::RoomDeparture {
+            room: room.clone(),
+            jid: jid.clone(),
+            cause: OccupancyLeaveCause::Disconnect,
+            selector,
+            attempt,
+        };
+        let inventory = PendingLocalMucDepartures::default();
+        let older = LeaveAttemptId::generate();
+        let newer = LeaveAttemptId::generate();
+        inventory.record_at(make_departure(LeaveSessionSelector::Any, older), now);
+        inventory.record_at(
+            make_departure(
+                LeaveSessionSelector::JoinedAtOrBefore(OccupancyWatermark::from_revision(5)),
+                newer,
+            ),
+            now,
+        );
+        let merged = inventory.take_due(now).pop().expect("merged");
+        assert!(matches!(
+            merged.item,
+            LocalDepartureItem::RoomDeparture {
+                selector: LeaveSessionSelector::Any,
+                attempt,
+                ..
+            } if attempt == newer
+        ));
+    }
+
+    #[test]
+    fn record_merge_keeps_newest_attempt_for_every_selector_outcome() {
         let room = room("merge-attempt");
         let jid = jid("alice@example.com/web");
         let now = Instant::now();
@@ -793,7 +819,7 @@ mod tests {
                 selector: LeaveSessionSelector::JoinedAtOrBefore(watermark),
                 attempt,
                 ..
-            } if watermark == OccupancyWatermark::from_revision(3) && attempt == attempt_a
+            } if watermark == OccupancyWatermark::from_revision(3) && attempt == attempt_c
         ));
 
         let inventory = PendingLocalMucDepartures::default();
@@ -846,10 +872,11 @@ mod tests {
             make_departure(LeaveSessionSelector::Any, existing_any_attempt),
             now,
         );
+        let incoming_deferred_attempt = LeaveAttemptId::generate();
         inventory.record_at(
             make_departure(
                 LeaveSessionSelector::JoinedAtOrBefore(OccupancyWatermark::from_revision(9)),
-                LeaveAttemptId::generate(),
+                incoming_deferred_attempt,
             ),
             now,
         );
@@ -863,7 +890,7 @@ mod tests {
                 selector: LeaveSessionSelector::Any,
                 attempt,
                 ..
-            } if attempt == existing_any_attempt
+            } if attempt == incoming_deferred_attempt
         ));
     }
 

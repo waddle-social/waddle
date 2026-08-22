@@ -207,6 +207,7 @@ pub(crate) async fn run_local_muc_departure_sweep(state: &WebSocketState) {
                             cause,
                             session: selector,
                             attempt,
+                            origin: waddle_xmpp::muc::room_actor::LeaveOrigin::RetainedRetry,
                         },
                     )
                     .await
@@ -7592,6 +7593,7 @@ mod room_dormancy_tests {
                     cause: waddle_xmpp::muc::durable::OccupancyLeaveCause::Disconnect,
                     session: waddle_xmpp::muc::room_actor::LeaveSessionSelector::Any,
                     attempt: waddle_xmpp::muc::room_actor::LeaveAttemptId::generate(),
+                    origin: waddle_xmpp::muc::room_actor::LeaveOrigin::Fresh,
                 })
                 .await
                 .expect("leave"),
@@ -7641,6 +7643,7 @@ mod room_dormancy_tests {
                     cause: waddle_xmpp::muc::durable::OccupancyLeaveCause::Disconnect,
                     session: waddle_xmpp::muc::room_actor::LeaveSessionSelector::Any,
                     attempt: waddle_xmpp::muc::room_actor::LeaveAttemptId::generate(),
+                    origin: waddle_xmpp::muc::room_actor::LeaveOrigin::Fresh,
                 })
                 .await
                 .expect("leave"),
@@ -7693,6 +7696,7 @@ mod room_dormancy_tests {
                     cause: waddle_xmpp::muc::durable::OccupancyLeaveCause::Disconnect,
                     session: waddle_xmpp::muc::room_actor::LeaveSessionSelector::Any,
                     attempt: waddle_xmpp::muc::room_actor::LeaveAttemptId::generate(),
+                    origin: waddle_xmpp::muc::room_actor::LeaveOrigin::Fresh,
                 })
                 .await
                 .expect("leave"),
@@ -8604,6 +8608,7 @@ mod local_muc_departure_tests {
                 cause: OccupancyLeaveCause::Explicit,
                 session: LeaveSessionSelector::Any,
                 attempt,
+                origin: waddle_xmpp::muc::room_actor::LeaveOrigin::Fresh,
             })
             .await
             .expect("leave");
@@ -8676,6 +8681,7 @@ mod local_muc_departure_tests {
                 cause: OccupancyLeaveCause::Explicit,
                 session: LeaveSessionSelector::Any,
                 attempt: waddle_xmpp::muc::room_actor::LeaveAttemptId::generate(),
+                origin: waddle_xmpp::muc::room_actor::LeaveOrigin::Fresh,
             })
             .await
             .expect("later leave");
@@ -8690,13 +8696,13 @@ mod local_muc_departure_tests {
     }
 
     #[tokio::test]
-    async fn unacknowledged_receipt_would_replay_for_an_unrelated_leave_without_the_ack() {
-        // Control for the test above: with the receipt still retained, the
-        // unrelated gone-JID leave of the same cause DOES replay it — which is
-        // exactly why a failed acknowledgement must be retried, never dropped.
+    async fn fresh_leave_never_consumes_an_unacknowledged_receipt_but_a_retained_retry_does() {
+        // While an acknowledgement is still in flight (or retained for the
+        // janitor), an unrelated fresh leave of the same gone JID and cause
+        // must find nothing to replay; only a retained retry may consume it.
         let store = JanitorProjectionStore::new();
         let state = clustered_state_with_store(store.clone()).await;
-        let room = room_jid("ack-control");
+        let room = room_jid("ack-window");
         let alice = full_jid("alice@example.com/web");
         let actor = create_room(state.as_ref(), &room).await;
         join_member(&actor, &alice, "alice").await;
@@ -8707,20 +8713,36 @@ mod local_muc_departure_tests {
                 cause: OccupancyLeaveCause::Explicit,
                 session: LeaveSessionSelector::Any,
                 attempt,
+                origin: waddle_xmpp::muc::room_actor::LeaveOrigin::Fresh,
             })
             .await
             .expect("leave");
         assert!(matches!(first, LeaveDisposition::Left(_)));
-        let later = actor
+        let fresh_later = actor
             .ask(LeaveByRealJid {
                 sender_jid: alice.clone(),
                 cause: OccupancyLeaveCause::Explicit,
                 session: LeaveSessionSelector::Any,
                 attempt: waddle_xmpp::muc::room_actor::LeaveAttemptId::generate(),
+                origin: waddle_xmpp::muc::room_actor::LeaveOrigin::Fresh,
             })
             .await
-            .expect("later leave");
-        assert!(matches!(later, LeaveDisposition::Left(_)), "got {later:?}");
+            .expect("later fresh leave");
+        assert!(
+            matches!(fresh_later, LeaveDisposition::NotOccupant),
+            "got {fresh_later:?}"
+        );
+        let retry = actor
+            .ask(LeaveByRealJid {
+                sender_jid: alice.clone(),
+                cause: OccupancyLeaveCause::Explicit,
+                session: LeaveSessionSelector::Any,
+                attempt: waddle_xmpp::muc::room_actor::LeaveAttemptId::generate(),
+                origin: waddle_xmpp::muc::room_actor::LeaveOrigin::RetainedRetry,
+            })
+            .await
+            .expect("retained retry");
+        assert!(matches!(retry, LeaveDisposition::Left(_)), "got {retry:?}");
     }
 
     #[tokio::test]
@@ -8755,6 +8777,7 @@ mod local_muc_departure_tests {
                     cause: OccupancyLeaveCause::Explicit,
                     session: LeaveSessionSelector::Any,
                     attempt,
+                    origin: waddle_xmpp::muc::room_actor::LeaveOrigin::Fresh,
                 })
                 .await
                 .expect("suppressed explicit leave"),
@@ -8820,6 +8843,7 @@ mod local_muc_departure_tests {
                 cause: OccupancyLeaveCause::Disconnect,
                 session: LeaveSessionSelector::Any,
                 attempt: waddle_xmpp::muc::room_actor::LeaveAttemptId::generate(),
+                origin: waddle_xmpp::muc::room_actor::LeaveOrigin::Fresh,
             })
             .await
             .expect("first disconnect")
@@ -8858,6 +8882,7 @@ mod local_muc_departure_tests {
                 cause: OccupancyLeaveCause::Disconnect,
                 session: LeaveSessionSelector::Any,
                 attempt: waddle_xmpp::muc::room_actor::LeaveAttemptId::generate(),
+                origin: waddle_xmpp::muc::room_actor::LeaveOrigin::Fresh,
             })
             .await
             .expect("second disconnect")
@@ -9036,6 +9061,7 @@ mod local_muc_departure_tests {
                     cause: OccupancyLeaveCause::Disconnect,
                     session: LeaveSessionSelector::Any,
                     attempt: waddle_xmpp::muc::room_actor::LeaveAttemptId::generate(),
+                    origin: waddle_xmpp::muc::room_actor::LeaveOrigin::Fresh,
                 })
                 .await,
             Err(kameo::error::SendError::HandlerError(

@@ -1947,6 +1947,7 @@ pub async fn handle_muc_leave(
             cause: waddle_xmpp::muc::durable::OccupancyLeaveCause::Explicit,
             session: waddle_xmpp::muc::room_actor::LeaveSessionSelector::Any,
             attempt: leave_attempt,
+            origin: waddle_xmpp::muc::room_actor::LeaveOrigin::Fresh,
         },
     )
     .await

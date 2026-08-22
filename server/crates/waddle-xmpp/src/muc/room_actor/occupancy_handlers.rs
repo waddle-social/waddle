@@ -278,6 +278,22 @@ pub struct LeaveByRealJid {
     /// [`LeaveOutcome`] (exactly once) instead of answering `NotOccupant`, so
     /// the departure's effects are never lost.
     pub attempt: LeaveAttemptId,
+    /// Whether this ask is a retained retry of an earlier departure. Only a
+    /// retry may consume the full JID's unacknowledged receipt by JID
+    /// fallback (its own attempt may have been coalesced away); a fresh ask
+    /// for a gone session is simply `NotOccupant`, so a receipt whose
+    /// acknowledgement is still in flight can never be replayed by an
+    /// unrelated later leave.
+    pub origin: LeaveOrigin,
+}
+
+/// Provenance of a `LeaveByRealJid` ask.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LeaveOrigin {
+    /// A first attempt (explicit leave, disconnect cleanup, admin removal).
+    Fresh,
+    /// A retry of a retained departure responsibility (janitor).
+    RetainedRetry,
 }
 
 /// Idempotency key for one logical `LeaveByRealJid` departure, minted from
@@ -365,7 +381,7 @@ impl kameo::message::Message<LeaveByRealJid> for RoomActor {
             Some(super::RetainedDeparture::Stale) => return Ok(LeaveDisposition::Superseded),
             Some(super::RetainedDeparture::Current(receipt)) => {
                 if self.room.session_watermark(&msg.sender_jid).is_some()
-                    || self.room.get_occupant(receipt_nick(&receipt)).is_some()
+                    || self.nick_retaken_by_other(&receipt)
                 {
                     return Ok(LeaveDisposition::Superseded);
                 }
@@ -403,17 +419,19 @@ impl kameo::message::Message<LeaveByRealJid> for RoomActor {
             // a different attempt id that a coalesced retry no longer carries —
             // replay it now: the departure's effects are owed to someone and
             // the receipt is consumed exactly once.
-            match self.take_departure_receipt_for_jid(&msg.sender_jid, msg.cause) {
-                Some(super::RetainedDeparture::Stale) => {
-                    return Ok(LeaveDisposition::Superseded);
-                }
-                Some(super::RetainedDeparture::Current(receipt)) => {
-                    if self.room.get_occupant(receipt_nick(&receipt)).is_some() {
+            if msg.origin == LeaveOrigin::RetainedRetry {
+                match self.take_departure_receipt_for_jid(&msg.sender_jid, msg.cause) {
+                    Some(super::RetainedDeparture::Stale) => {
                         return Ok(LeaveDisposition::Superseded);
                     }
-                    return Ok(receipt_disposition(receipt));
+                    Some(super::RetainedDeparture::Current(receipt)) => {
+                        if self.nick_retaken_by_other(&receipt) {
+                            return Ok(LeaveDisposition::Superseded);
+                        }
+                        return Ok(receipt_disposition(receipt));
+                    }
+                    None => {}
                 }
-                None => {}
             }
             return Ok(LeaveDisposition::NotOccupant);
         };
@@ -1009,6 +1027,19 @@ impl kameo::message::Message<SyncResolverAffiliation> for RoomActor {
         ResolverAffiliationSyncOutcome::Applied {
             admission_revision: self.admission_revision,
         }
+    }
+}
+
+impl RoomActor {
+    /// The departed nick is now held by a DIFFERENT bare JID: replaying the
+    /// departure would announce that occupant's unavailability. Sibling
+    /// sessions of the same bare JID still holding the nick are the normal
+    /// multi-resource case (`removed_last_session == false`) and never make
+    /// the receipt stale.
+    fn nick_retaken_by_other(&self, receipt: &super::DepartureReceipt) -> bool {
+        self.room
+            .get_occupant(receipt_nick(receipt))
+            .is_some_and(|occupant| occupant.real_jid.to_bare() != receipt.jid.to_bare())
     }
 }
 

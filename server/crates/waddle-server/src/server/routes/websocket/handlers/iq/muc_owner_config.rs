@@ -793,13 +793,28 @@ pub(super) async fn apply_muc_owner_config(
             recovered_broadcast_room = Some(room_with_reconciled_config);
             room_actor = recovered_actor;
             if let Some(coordinates) = recovered_snapshot.config_durable_coordinates {
-                config_reservation = state
+                config_reservation = match state
                     .deps
                     .protocol
                     .room_effect_outbox
                     .staged_reservation_for(coordinates.lifecycle, coordinates.revision)
                     .await
-                    .map_err(|error| format!("config reservation recovery failed: {error}"))?;
+                {
+                    Ok(reservation) => reservation,
+                    // The commit is durable and its coordinates are known: a
+                    // transient lookup failure must not strand the inert row
+                    // at the lifecycle FIFO head (nothing else arms live-origin
+                    // rows). Hand the arming to a retained retry and fail the
+                    // request.
+                    Err(error) => {
+                        state
+                            .deps
+                            .protocol
+                            .room_effect_arm_supervisor
+                            .retain_staged_reservation_arming(room_jid.clone(), coordinates);
+                        return Err(format!("config reservation recovery failed: {error}"));
+                    }
+                };
             }
             recovered_snapshot.config_revision
         }

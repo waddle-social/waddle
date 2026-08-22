@@ -1931,6 +1931,7 @@ async fn cleanup_muc_presence_with_origin(
                 cause: OccupancyLeaveCause::Disconnect,
                 session: LeaveSessionSelector::Any,
                 attempt,
+                origin: waddle_xmpp::muc::room_actor::LeaveOrigin::Fresh,
             },
         )
         .await;
@@ -3119,6 +3120,7 @@ mod eviction_tests {
                 cause: waddle_xmpp::muc::durable::OccupancyLeaveCause::Disconnect,
                 session: waddle_xmpp::muc::room_actor::LeaveSessionSelector::Any,
                 attempt: waddle_xmpp::muc::room_actor::LeaveAttemptId::generate(),
+                origin: waddle_xmpp::muc::room_actor::LeaveOrigin::Fresh,
             })
             .await
             .expect("leave")
@@ -3178,6 +3180,7 @@ mod eviction_tests {
                 cause: waddle_xmpp::muc::durable::OccupancyLeaveCause::Disconnect,
                 session: waddle_xmpp::muc::room_actor::LeaveSessionSelector::Any,
                 attempt: waddle_xmpp::muc::room_actor::LeaveAttemptId::generate(),
+                origin: waddle_xmpp::muc::room_actor::LeaveOrigin::Fresh,
             })
             .await
             .expect("leave")
@@ -3241,6 +3244,7 @@ mod eviction_tests {
                 cause: waddle_xmpp::muc::durable::OccupancyLeaveCause::Disconnect,
                 session: waddle_xmpp::muc::room_actor::LeaveSessionSelector::Any,
                 attempt: waddle_xmpp::muc::room_actor::LeaveAttemptId::generate(),
+                origin: waddle_xmpp::muc::room_actor::LeaveOrigin::Fresh,
             })
             .await
             .expect("leave")
@@ -3923,6 +3927,7 @@ mod local_departure_cleanup_tests {
                         cause: OccupancyLeaveCause::Disconnect,
                         session: LeaveSessionSelector::Any,
                         attempt: waddle_xmpp::muc::room_actor::LeaveAttemptId::generate(),
+                        origin: waddle_xmpp::muc::room_actor::LeaveOrigin::Fresh,
                     })
                     .mailbox_timeout(Duration::from_secs(30))
                     .reply_timeout(Duration::from_secs(30))
@@ -3942,6 +3947,7 @@ mod local_departure_cleanup_tests {
                         cause: OccupancyLeaveCause::Disconnect,
                         session: LeaveSessionSelector::Any,
                         attempt: waddle_xmpp::muc::room_actor::LeaveAttemptId::generate(),
+                        origin: waddle_xmpp::muc::room_actor::LeaveOrigin::Fresh,
                     })
                     .mailbox_timeout(Duration::from_secs(30))
                     .reply_timeout(Duration::from_secs(30))
@@ -4033,6 +4039,7 @@ mod local_departure_cleanup_tests {
                         cause: OccupancyLeaveCause::Disconnect,
                         session: LeaveSessionSelector::Any,
                         attempt: waddle_xmpp::muc::room_actor::LeaveAttemptId::generate(),
+                        origin: waddle_xmpp::muc::room_actor::LeaveOrigin::Fresh,
                     })
                     .mailbox_timeout(Duration::from_secs(30))
                     .reply_timeout(Duration::from_secs(30))
@@ -4051,6 +4058,7 @@ mod local_departure_cleanup_tests {
                         cause: OccupancyLeaveCause::Disconnect,
                         session: LeaveSessionSelector::Any,
                         attempt: waddle_xmpp::muc::room_actor::LeaveAttemptId::generate(),
+                        origin: waddle_xmpp::muc::room_actor::LeaveOrigin::Fresh,
                     })
                     .mailbox_timeout(Duration::from_secs(30))
                     .reply_timeout(Duration::from_secs(30))
@@ -4067,6 +4075,7 @@ mod local_departure_cleanup_tests {
                 cause: OccupancyLeaveCause::Disconnect,
                 session: LeaveSessionSelector::Any,
                 attempt: waddle_xmpp::muc::room_actor::LeaveAttemptId::generate(),
+                origin: waddle_xmpp::muc::room_actor::LeaveOrigin::Fresh,
             },
         )
         .await;
@@ -4114,6 +4123,7 @@ mod local_departure_cleanup_tests {
                 cause: OccupancyLeaveCause::Disconnect,
                 session: LeaveSessionSelector::Any,
                 attempt: waddle_xmpp::muc::room_actor::LeaveAttemptId::generate(),
+                origin: waddle_xmpp::muc::room_actor::LeaveOrigin::Fresh,
             },
         )
         .await;
@@ -4152,6 +4162,7 @@ mod local_departure_cleanup_tests {
                 cause: OccupancyLeaveCause::Disconnect,
                 session: LeaveSessionSelector::Any,
                 attempt: waddle_xmpp::muc::room_actor::LeaveAttemptId::generate(),
+                origin: waddle_xmpp::muc::room_actor::LeaveOrigin::Fresh,
             },
         )
         .await;

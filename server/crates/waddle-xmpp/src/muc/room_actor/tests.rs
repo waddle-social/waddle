@@ -399,6 +399,7 @@ async fn join_and_leave_emit_presence_and_occupant_metrics() {
             cause: crate::muc::durable::OccupancyLeaveCause::Explicit,
             session: LeaveSessionSelector::Any,
             attempt: LeaveAttemptId::generate(),
+            origin: crate::muc::room_actor::LeaveOrigin::Fresh,
         })
         .await
         .expect("leave is infallible");
@@ -430,6 +431,7 @@ async fn test_leave() {
             cause: crate::muc::durable::OccupancyLeaveCause::Explicit,
             session: LeaveSessionSelector::Any,
             attempt: LeaveAttemptId::generate(),
+            origin: crate::muc::room_actor::LeaveOrigin::Fresh,
         })
         .await
         .expect("leave should succeed");
@@ -448,6 +450,7 @@ async fn test_leave_unknown_nick() {
             cause: crate::muc::durable::OccupancyLeaveCause::Explicit,
             session: LeaveSessionSelector::Any,
             attempt: LeaveAttemptId::generate(),
+            origin: crate::muc::room_actor::LeaveOrigin::Fresh,
         })
         .await
         .expect("leave reply");
@@ -1636,6 +1639,7 @@ async fn leave_by_real_jid_surfaces_is_persistent_true_for_default_rooms() {
             cause: crate::muc::durable::OccupancyLeaveCause::Explicit,
             session: LeaveSessionSelector::Any,
             attempt: LeaveAttemptId::generate(),
+            origin: crate::muc::room_actor::LeaveOrigin::Fresh,
         })
         .await
         .map(departed)
@@ -1673,6 +1677,7 @@ async fn leave_by_real_jid_surfaces_is_persistent_false_for_instant_rooms() {
             cause: crate::muc::durable::OccupancyLeaveCause::Explicit,
             session: LeaveSessionSelector::Any,
             attempt: LeaveAttemptId::generate(),
+            origin: crate::muc::room_actor::LeaveOrigin::Fresh,
         })
         .await
         .map(departed)
@@ -1766,6 +1771,7 @@ async fn is_dormant_true_after_resolver_derived_member_leaves() {
             cause: crate::muc::durable::OccupancyLeaveCause::Explicit,
             session: LeaveSessionSelector::Any,
             attempt: LeaveAttemptId::generate(),
+            origin: crate::muc::room_actor::LeaveOrigin::Fresh,
         })
         .await
         .map(departed)
@@ -1924,6 +1930,7 @@ async fn leave_by_real_jid_removes_every_occupancy_of_the_full_jid() {
             cause: crate::muc::durable::OccupancyLeaveCause::Explicit,
             session: LeaveSessionSelector::Any,
             attempt: LeaveAttemptId::generate(),
+            origin: crate::muc::room_actor::LeaveOrigin::Fresh,
         })
         .await
         .map(departed)
@@ -1966,6 +1973,7 @@ async fn leave_by_real_jid_removes_every_occupancy_of_the_full_jid() {
             cause: crate::muc::durable::OccupancyLeaveCause::Explicit,
             session: LeaveSessionSelector::Any,
             attempt: LeaveAttemptId::generate(),
+            origin: crate::muc::room_actor::LeaveOrigin::Fresh,
         })
         .await
         .map(departed)
@@ -2003,6 +2011,7 @@ async fn is_dormant_false_when_explicit_ban_outlives_occupancy() {
             cause: crate::muc::durable::OccupancyLeaveCause::Explicit,
             session: LeaveSessionSelector::Any,
             attempt: LeaveAttemptId::generate(),
+            origin: crate::muc::room_actor::LeaveOrigin::Fresh,
         })
         .await
         .map(departed)
@@ -2037,6 +2046,7 @@ async fn is_dormant_true_after_last_occupant_leaves_with_no_stored_state() {
             cause: crate::muc::durable::OccupancyLeaveCause::Explicit,
             session: LeaveSessionSelector::Any,
             attempt: LeaveAttemptId::generate(),
+            origin: crate::muc::room_actor::LeaveOrigin::Fresh,
         })
         .await
         .map(departed)
@@ -3197,6 +3207,7 @@ async fn leaving_occupant_clears_muji_state() {
             cause: crate::muc::durable::OccupancyLeaveCause::Explicit,
             session: LeaveSessionSelector::Any,
             attempt: LeaveAttemptId::generate(),
+            origin: crate::muc::room_actor::LeaveOrigin::Fresh,
         })
         .await
         .expect("leave");
@@ -3272,6 +3283,7 @@ async fn leaving_originator_session_clears_muji_state_even_with_peer_sessions_re
             cause: crate::muc::durable::OccupancyLeaveCause::Explicit,
             session: LeaveSessionSelector::Any,
             attempt: LeaveAttemptId::generate(),
+            origin: crate::muc::room_actor::LeaveOrigin::Fresh,
         })
         .await
         .expect("desktop leave");
@@ -3362,6 +3374,7 @@ async fn leaving_non_originator_session_preserves_muji_state() {
             cause: crate::muc::durable::OccupancyLeaveCause::Explicit,
             session: LeaveSessionSelector::Any,
             attempt: LeaveAttemptId::generate(),
+            origin: crate::muc::room_actor::LeaveOrigin::Fresh,
         })
         .await
         .expect("mobile leave");
@@ -3441,6 +3454,7 @@ async fn leaving_one_active_same_nick_session_preserves_sibling_active_muji_stat
             cause: crate::muc::durable::OccupancyLeaveCause::Explicit,
             session: LeaveSessionSelector::Any,
             attempt: LeaveAttemptId::generate(),
+            origin: crate::muc::room_actor::LeaveOrigin::Fresh,
         })
         .await
         .map(departed)
@@ -4467,6 +4481,7 @@ async fn leave_with_attempt(
             cause: crate::muc::durable::OccupancyLeaveCause::Explicit,
             session: LeaveSessionSelector::Any,
             attempt,
+            origin: crate::muc::room_actor::LeaveOrigin::Fresh,
         })
         .await
         .expect("leave ask")
@@ -4564,9 +4579,30 @@ async fn leave_with_attempt_and_cause(
             cause,
             session: LeaveSessionSelector::Any,
             attempt,
+            origin: crate::muc::room_actor::LeaveOrigin::Fresh,
         })
         .await
         .expect("leave ask")
+}
+
+/// A janitor-style retained retry: the only origin allowed to consume the
+/// full JID's unacknowledged receipt when its own attempt is unknown.
+async fn retry_with_attempt_and_cause(
+    actor: &ActorRef<RoomActor>,
+    jid: FullJid,
+    attempt: LeaveAttemptId,
+    cause: crate::muc::durable::OccupancyLeaveCause,
+) -> LeaveDisposition {
+    actor
+        .ask(LeaveByRealJid {
+            sender_jid: jid,
+            cause,
+            session: LeaveSessionSelector::Any,
+            attempt,
+            origin: LeaveOrigin::RetainedRetry,
+        })
+        .await
+        .expect("retry ask")
 }
 
 fn receipts_of(actor_snapshot: &RoomSnapshot) -> &[DepartureReceipt] {
@@ -4714,7 +4750,7 @@ async fn jid_fallback_only_replays_a_receipt_of_the_same_cause() {
     // explicit receipt: its caller would run the wrong effect policy and the
     // explicit retry would find nothing.
     assert!(matches!(
-        leave_with_attempt_and_cause(
+        retry_with_attempt_and_cause(
             &actor,
             alice.clone(),
             LeaveAttemptId::generate(),
@@ -4728,9 +4764,25 @@ async fn jid_fallback_only_replays_a_receipt_of_the_same_cause() {
         1,
         "the explicit receipt stays retained for its own retry"
     );
-    // A coalesced explicit retry (unknown attempt, same cause) replays it.
+    // A FRESH explicit leave of the gone JID never consumes it either: the
+    // receipt may belong to a departure whose acknowledgement is in flight.
     assert!(matches!(
         leave_with_attempt_and_cause(
+            &actor,
+            alice.clone(),
+            LeaveAttemptId::generate(),
+            OccupancyLeaveCause::Explicit
+        )
+        .await,
+        LeaveDisposition::NotOccupant
+    ));
+    assert_eq!(
+        receipts_of(&actor.ask(GetSnapshot).await.expect("snapshot")).len(),
+        1
+    );
+    // A coalesced explicit RETRY (unknown attempt, same cause) replays it.
+    assert!(matches!(
+        retry_with_attempt_and_cause(
             &actor,
             alice.clone(),
             LeaveAttemptId::generate(),
@@ -4794,6 +4846,45 @@ async fn superseded_attempt_tombstones_survive_live_roster_transfer() {
 }
 
 #[tokio::test]
+async fn receipt_replays_while_a_sibling_session_still_holds_the_nick() {
+    // alice/desktop and alice/mobile share nick "alice". desktop's departure
+    // (removed_last_session == false) completes with a lost reply; mobile
+    // still holding the nick is the normal multi-resource case and must not
+    // make desktop's retained outcome look like a retaken nick.
+    let actor = spawn_room_actor().await;
+    let desktop = test_full_jid_resource("alice", "desktop");
+    let mobile = test_full_jid_resource("alice", "mobile");
+    join_as_resolver(&actor, desktop.clone(), "alice")
+        .await
+        .expect("desktop joins");
+    join_as_resolver(&actor, mobile.clone(), "alice")
+        .await
+        .expect("mobile joins");
+    let attempt = LeaveAttemptId::generate();
+    let LeaveDisposition::Left(first) = leave_with_attempt(&actor, desktop.clone(), attempt).await
+    else {
+        panic!("desktop leaves");
+    };
+    assert!(!first.removed_last_session);
+
+    let replay = leave_with_attempt(&actor, desktop.clone(), attempt).await;
+    assert!(
+        matches!(&replay, LeaveDisposition::Left(outcome) if !outcome.removed_last_session),
+        "the exact-attempt retry replays the non-final departure, got {replay:?}"
+    );
+    assert!(
+        actor
+            .ask(GetSnapshot)
+            .await
+            .expect("snapshot")
+            .room
+            .get_occupant("alice")
+            .is_some(),
+        "mobile keeps the nick"
+    );
+}
+
+#[tokio::test]
 async fn replayed_receipt_is_superseded_when_the_nick_was_retaken() {
     let actor = spawn_room_actor().await;
     let alice = test_full_jid("alice");
@@ -4837,11 +4928,23 @@ async fn unknown_attempt_for_a_gone_session_replays_the_jids_unacknowledged_rece
     assert!(matches!(original, LeaveDisposition::Left(_)));
 
     assert!(matches!(
-        leave_with_attempt(&actor, alice.clone(), LeaveAttemptId::generate()).await,
+        retry_with_attempt_and_cause(
+            &actor,
+            alice.clone(),
+            LeaveAttemptId::generate(),
+            crate::muc::durable::OccupancyLeaveCause::Explicit
+        )
+        .await,
         LeaveDisposition::Left(_)
     ));
     assert!(matches!(
-        leave_with_attempt(&actor, alice, LeaveAttemptId::generate()).await,
+        retry_with_attempt_and_cause(
+            &actor,
+            alice,
+            LeaveAttemptId::generate(),
+            crate::muc::durable::OccupancyLeaveCause::Explicit
+        )
+        .await,
         LeaveDisposition::NotOccupant
     ));
 }
@@ -5092,6 +5195,7 @@ async fn leave_commits_projection_before_removing_session() {
             cause: crate::muc::durable::OccupancyLeaveCause::Explicit,
             session: LeaveSessionSelector::Any,
             attempt: LeaveAttemptId::generate(),
+            origin: crate::muc::room_actor::LeaveOrigin::Fresh,
         })
         .await
         .expect("leave");
@@ -5120,6 +5224,7 @@ async fn leave_with_lost_claim_keeps_session_and_seals() {
             cause: crate::muc::durable::OccupancyLeaveCause::Explicit,
             session: LeaveSessionSelector::Any,
             attempt: LeaveAttemptId::generate(),
+            origin: crate::muc::room_actor::LeaveOrigin::Fresh,
         })
         .await;
 
@@ -5153,6 +5258,7 @@ async fn leave_under_inactive_seal_is_deferred_then_unseal_inactive_retry_leaves
             cause: crate::muc::durable::OccupancyLeaveCause::Disconnect,
             session: LeaveSessionSelector::Any,
             attempt: LeaveAttemptId::generate(),
+            origin: crate::muc::room_actor::LeaveOrigin::Fresh,
         })
         .await
         .expect("deferred leave")
@@ -5169,6 +5275,7 @@ async fn leave_under_inactive_seal_is_deferred_then_unseal_inactive_retry_leaves
                 cause: crate::muc::durable::OccupancyLeaveCause::Disconnect,
                 session: LeaveSessionSelector::JoinedAtOrBefore(watermark),
                 attempt: LeaveAttemptId::generate(),
+                origin: crate::muc::room_actor::LeaveOrigin::Fresh,
             })
             .await
             .expect("retried leave"),
@@ -5195,6 +5302,7 @@ async fn leave_under_ownership_lost_seal_is_room_sealed_without_memory_change() 
                 cause: crate::muc::durable::OccupancyLeaveCause::Explicit,
                 session: LeaveSessionSelector::Any,
                 attempt: LeaveAttemptId::generate(),
+                origin: crate::muc::room_actor::LeaveOrigin::Fresh,
             })
             .await,
         Err(SendError::HandlerError(RoomActorError::RoomSealed))
@@ -5214,6 +5322,7 @@ async fn leave_unknown_jid_is_not_occupant_without_commit() {
                 cause: crate::muc::durable::OccupancyLeaveCause::Explicit,
                 session: LeaveSessionSelector::Any,
                 attempt: LeaveAttemptId::generate(),
+                origin: crate::muc::room_actor::LeaveOrigin::Fresh,
             })
             .await
             .expect("leave"),
@@ -5242,6 +5351,7 @@ async fn non_occupant_leave_under_inactive_and_ownership_lost_seals_is_not_occup
                 cause: crate::muc::durable::OccupancyLeaveCause::Explicit,
                 session: LeaveSessionSelector::Any,
                 attempt: LeaveAttemptId::generate(),
+                origin: crate::muc::room_actor::LeaveOrigin::Fresh,
             })
             .await
             .expect("non-occupant leave"),
@@ -5260,6 +5370,7 @@ async fn non_occupant_leave_under_inactive_and_ownership_lost_seals_is_not_occup
                 cause: crate::muc::durable::OccupancyLeaveCause::Explicit,
                 session: LeaveSessionSelector::Any,
                 attempt: LeaveAttemptId::generate(),
+                origin: crate::muc::room_actor::LeaveOrigin::Fresh,
             })
             .await
             .expect("non-occupant leave"),
@@ -5329,6 +5440,7 @@ async fn leave_commit_pending_keeps_session_until_authorized() {
                 cause: crate::muc::durable::OccupancyLeaveCause::Explicit,
                 session: LeaveSessionSelector::Any,
                 attempt: LeaveAttemptId::generate(),
+                origin: crate::muc::room_actor::LeaveOrigin::Fresh,
             })
             .await
     });
@@ -5426,6 +5538,7 @@ async fn leave_retry_with_same_attempt_replays_retained_outcome_once() {
                 cause: crate::muc::durable::OccupancyLeaveCause::Explicit,
                 session: LeaveSessionSelector::Any,
                 attempt,
+                origin: crate::muc::room_actor::LeaveOrigin::Fresh,
             })
             .await
             .expect("first leave"),
@@ -5437,6 +5550,7 @@ async fn leave_retry_with_same_attempt_replays_retained_outcome_once() {
                 cause: crate::muc::durable::OccupancyLeaveCause::Explicit,
                 session: LeaveSessionSelector::Any,
                 attempt,
+                origin: crate::muc::room_actor::LeaveOrigin::Fresh,
             })
             .await
             .expect("replayed leave"),
@@ -5453,6 +5567,7 @@ async fn leave_retry_with_same_attempt_replays_retained_outcome_once() {
                 cause: crate::muc::durable::OccupancyLeaveCause::Explicit,
                 session: LeaveSessionSelector::Any,
                 attempt,
+                origin: crate::muc::room_actor::LeaveOrigin::Fresh,
             })
             .await
             .expect("third leave"),
@@ -5465,6 +5580,7 @@ async fn leave_retry_with_same_attempt_replays_retained_outcome_once() {
                 cause: crate::muc::durable::OccupancyLeaveCause::Explicit,
                 session: LeaveSessionSelector::Any,
                 attempt: LeaveAttemptId::generate(),
+                origin: crate::muc::room_actor::LeaveOrigin::Fresh,
             })
             .await
             .expect("different attempt"),
@@ -5568,6 +5684,7 @@ async fn deferred_leave_watermark_supersedes_after_replacement_rejoin() {
             cause: crate::muc::durable::OccupancyLeaveCause::Disconnect,
             session: LeaveSessionSelector::Any,
             attempt: LeaveAttemptId::generate(),
+            origin: crate::muc::room_actor::LeaveOrigin::Fresh,
         })
         .await
         .expect("deferred leave")
@@ -5587,6 +5704,7 @@ async fn deferred_leave_watermark_supersedes_after_replacement_rejoin() {
                 cause: crate::muc::durable::OccupancyLeaveCause::Disconnect,
                 session: LeaveSessionSelector::JoinedAtOrBefore(watermark),
                 attempt: LeaveAttemptId::generate(),
+                origin: crate::muc::room_actor::LeaveOrigin::Fresh,
             })
             .await
             .expect("stale retry"),
@@ -5600,6 +5718,7 @@ async fn deferred_leave_watermark_supersedes_after_replacement_rejoin() {
                 cause: crate::muc::durable::OccupancyLeaveCause::Disconnect,
                 session: LeaveSessionSelector::Any,
                 attempt: LeaveAttemptId::generate(),
+                origin: crate::muc::room_actor::LeaveOrigin::Fresh,
             })
             .await
             .expect("current departure"),
@@ -6143,6 +6262,7 @@ async fn occupancy_handler_duration_is_recorded_for_join_and_leave() {
             cause: crate::muc::durable::OccupancyLeaveCause::Explicit,
             session: LeaveSessionSelector::Any,
             attempt: LeaveAttemptId::generate(),
+            origin: crate::muc::room_actor::LeaveOrigin::Fresh,
         })
         .await
         .expect("leave");
@@ -6810,6 +6930,7 @@ async fn leave_under_destroying_seal_is_deferred_without_memory_change() {
                 cause: crate::muc::durable::OccupancyLeaveCause::Explicit,
                 session: LeaveSessionSelector::Any,
                 attempt: LeaveAttemptId::generate(),
+                origin: crate::muc::room_actor::LeaveOrigin::Fresh,
             })
             .await
             .expect("leave ask"),
@@ -6853,6 +6974,7 @@ async fn store_less_leave_under_destroying_seal_is_suppressed_and_recorded() {
                 cause: crate::muc::durable::OccupancyLeaveCause::Explicit,
                 session: LeaveSessionSelector::Any,
                 attempt: LeaveAttemptId::generate(),
+                origin: crate::muc::room_actor::LeaveOrigin::Fresh,
             })
             .await
             .expect("leave reply"),
@@ -6884,6 +7006,7 @@ async fn unseal_destroy_then_retried_leave_projects_departure() {
                 cause: crate::muc::durable::OccupancyLeaveCause::Explicit,
                 session: LeaveSessionSelector::Any,
                 attempt: LeaveAttemptId::generate(),
+                origin: crate::muc::room_actor::LeaveOrigin::Fresh,
             })
             .await
             .expect("deferred reply"),
@@ -6897,6 +7020,7 @@ async fn unseal_destroy_then_retried_leave_projects_departure() {
                 cause: crate::muc::durable::OccupancyLeaveCause::Explicit,
                 session: LeaveSessionSelector::Any,
                 attempt: LeaveAttemptId::generate(),
+                origin: crate::muc::room_actor::LeaveOrigin::Fresh,
             })
             .await
             .expect("retry reply"),
@@ -7085,6 +7209,7 @@ async fn destroy_seal_defers_leave_handler() {
             cause: crate::muc::durable::OccupancyLeaveCause::Explicit,
             session: LeaveSessionSelector::Any,
             attempt: LeaveAttemptId::generate(),
+            origin: crate::muc::room_actor::LeaveOrigin::Fresh,
         })
         .await
         .expect("leave reply");
@@ -8082,6 +8207,7 @@ async fn resolver_none_clears_stale_resolver_derived_affiliation_and_join_is_for
             cause: crate::muc::durable::OccupancyLeaveCause::Explicit,
             session: LeaveSessionSelector::Any,
             attempt: LeaveAttemptId::generate(),
+            origin: crate::muc::room_actor::LeaveOrigin::Fresh,
         })
         .await
         .expect("leave");
@@ -8203,6 +8329,7 @@ async fn sync_resolver_affiliation_clears_stale_resolver_derived_member() {
             cause: crate::muc::durable::OccupancyLeaveCause::Explicit,
             session: LeaveSessionSelector::Any,
             attempt: LeaveAttemptId::generate(),
+            origin: crate::muc::room_actor::LeaveOrigin::Fresh,
         })
         .await
         .expect("leave");

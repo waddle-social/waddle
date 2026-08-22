@@ -60,6 +60,7 @@ async fn unacknowledged_rollback_blocks_dormancy_and_both_seal_guards() {
             cause: crate::muc::durable::OccupancyLeaveCause::Explicit,
             session: LeaveSessionSelector::Any,
             attempt: LeaveAttemptId::generate(),
+            origin: crate::muc::room_actor::LeaveOrigin::Fresh,
         })
         .await
         .expect("leave room");
@@ -354,6 +355,7 @@ async fn rollback_persist_failure_retains_the_exact_token_and_reservation_for_re
             cause: crate::muc::durable::OccupancyLeaveCause::Explicit,
             session: LeaveSessionSelector::Any,
             attempt: LeaveAttemptId::generate(),
+            origin: crate::muc::room_actor::LeaveOrigin::Fresh,
         })
         .await
         .expect("leave while rollback remains prepared");

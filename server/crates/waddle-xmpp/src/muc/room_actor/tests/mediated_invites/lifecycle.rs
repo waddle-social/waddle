@@ -611,6 +611,7 @@ async fn no_grant_operation_does_not_pin_an_otherwise_dormant_room() {
             cause: crate::muc::durable::OccupancyLeaveCause::Explicit,
             session: LeaveSessionSelector::Any,
             attempt: LeaveAttemptId::generate(),
+            origin: crate::muc::room_actor::LeaveOrigin::Fresh,
         })
         .await
         .expect("leave room");
