@@ -113,7 +113,7 @@ struct RoomCreationSpec {
     channel_id: String,
     config: RoomConfig,
     initial_affiliations: Vec<super::durable::AffiliationEntry>,
-    live_room_restore: Option<MucRoom>,
+    live_room_restore: Option<LiveRoomRestore>,
 }
 
 impl PartialEq for RoomCreationSpec {
@@ -152,7 +152,14 @@ struct RoomPreparationSpec {
     channel_id: String,
     config: RoomConfig,
     initial_affiliations: Vec<super::durable::AffiliationEntry>,
-    live_room_restore: Option<MucRoom>,
+    live_room_restore: Option<LiveRoomRestore>,
+}
+
+#[derive(Clone)]
+struct LiveRoomRestore {
+    room: MucRoom,
+    occupancy_revision: u64,
+    departures: super::room_actor::DepartureLedger,
 }
 
 enum DemandRoomPreparation {
@@ -275,6 +282,20 @@ enum PendingRoomOwnershipResponsibility<'a> {
     ReclaimedReservation(&'a BareJid),
 }
 
+/// See [`RoomRegistryActor::handoff_in_window`].
+pub const HANDOFF_PENDING_WINDOW: std::time::Duration = std::time::Duration::from_secs(60);
+
+/// A retired-but-unpublished handoff. Lookups answer
+/// `OwnershipReconciliationPending` for the bounded window, and a
+/// post-demote transition failure stashes the live-roster creation spec
+/// here so the next demand creation inside the window restores the retired
+/// actor's roster and departure ledger instead of dropping them with the
+/// failed message (#1647).
+struct PendingHandoff {
+    since: std::time::Instant,
+    stashed_spec: Option<Arc<RoomCreationSpec>>,
+}
+
 /// Actor that owns the mapping from room JIDs to per-room actors.
 ///
 /// All room creation, lookup, and destruction flows through this actor,
@@ -312,6 +333,11 @@ pub struct RoomRegistryActor {
     /// and lets terminal operations cancel the exact generation before a late
     /// completion can publish it.
     pending_room_preparations: HashMap<BareJid, PendingRoomPreparation>,
+    /// Rooms whose stale actor was retired for a live-roster handoff that
+    /// has not (yet) produced a successor: `GetRoom` answers
+    /// `OwnershipReconciliationPending` instead of an absence until a room
+    /// entry is published again.
+    handoff_pending: HashMap<BareJid, PendingHandoff>,
     /// Unpublished demand rooms whose durable Create succeeded but whose
     /// terminal cleanup after a lost creator handoff remains uncertain.
     pending_unpublished_destroys:
@@ -405,6 +431,10 @@ pub struct DestroyCompletion {
     pub attempt: super::DestroyAttemptId,
     pub room_jid: BareJid,
     pub room: MucRoom,
+    /// Unacknowledged departure receipts at seal time: their holders left
+    /// the roster but never saw their leave reply, and the terminal destroy
+    /// notification is the effect that settles what they are owed (#1647).
+    pub departures: super::room_actor::DepartureLedger,
     pub request: super::DestroyRequest,
 }
 
@@ -455,6 +485,12 @@ pub struct CancelDestroyCompletionAttempt {
 pub enum RoomRegistryError {
     #[error("room {0} already exists")]
     RoomAlreadyExists(BareJid),
+    /// A live-roster handoff named a stale actor that is no longer the
+    /// registered one (a successor is already live, or the entry was
+    /// retired): the caller's snapshot is not authoritative and must not be
+    /// transplanted.
+    #[error("room {0}: the stale actor is no longer current")]
+    StaleActorNotCurrent(BareJid),
     #[error("room actor state for {0} was lost; explicit destroy/recreate is required")]
     RoomActorStateLost(BareJid),
     /// A request to the registry actor exceeded
@@ -490,19 +526,41 @@ pub enum RoomRegistryError {
 
 impl RoomRegistryActor {
     fn destroy_effects(completion: &DestroyCompletion) -> RoomMutationEffects {
-        let recipients = completion
-            .room
-            .occupants
-            .values()
-            .map(|occupant| DestroyRecipient {
-                nick: MucOccupantNick::new(occupant.nick.clone())
-                    .expect("nick was previously accepted"),
-                sessions: completion
-                    .room
-                    .get_occupant_sessions(&occupant.nick)
-                    .into_iter()
-                    .collect(),
-            })
+        let mut by_nick: std::collections::BTreeMap<MucOccupantNick, Vec<jid::FullJid>> =
+            completion
+                .room
+                .occupants
+                .values()
+                .map(|occupant| {
+                    (
+                        MucOccupantNick::new(occupant.nick.clone())
+                            .expect("nick was previously accepted"),
+                        completion
+                            .room
+                            .get_occupant_sessions(&occupant.nick)
+                            .into_iter()
+                            .collect(),
+                    )
+                })
+                .collect();
+        // #1647: unacknowledged departure receipts belong to sessions that
+        // already left the roster but never saw their leave reply. The
+        // terminal destroy effect is the last chance to settle the owed
+        // self-unavailable (the retained retry later finds the room absent),
+        // so their holders join the durable outbox recipients too.
+        for receipt in &completion.departures.receipts {
+            let nick = match &receipt.outcome {
+                super::room_actor::DepartureReceiptOutcome::Left(outcome) => outcome.nick.clone(),
+                super::room_actor::DepartureReceiptOutcome::Suppressed { nick, .. } => nick.clone(),
+            };
+            let sessions = by_nick.entry(nick).or_default();
+            if !sessions.contains(&receipt.jid) {
+                sessions.push(receipt.jid.clone());
+            }
+        }
+        let recipients = by_nick
+            .into_iter()
+            .map(|(nick, sessions)| DestroyRecipient { nick, sessions })
             .collect();
         RoomMutationEffects::destroy(
             completion.room_jid.clone(),
@@ -564,6 +622,7 @@ impl RoomRegistryActor {
             pending_room_releases: HashMap::new(),
             pending_room_acquisitions: HashMap::new(),
             pending_room_preparations: HashMap::new(),
+            handoff_pending: HashMap::new(),
             pending_unpublished_destroys: HashMap::new(),
             destroy_attempts: HashMap::new(),
             pending_destroy_completions: VecDeque::new(),
@@ -808,6 +867,40 @@ impl RoomRegistryActor {
     /// those, so the published value is exact (#1415 review — the gauge
     /// was previously wired only into the test-only legacy registry and
     /// never emitted in production).
+    /// A live-roster handoff retired this room's actor and no successor is
+    /// registered yet. Bounded: a handoff whose successor never materialises
+    /// (its preparation failed) degrades to an ordinary absence after
+    /// [`HANDOFF_PENDING_WINDOW`] instead of wedging lookups forever.
+    fn handoff_in_window(&mut self, room_jid: &BareJid) -> bool {
+        if self.rooms.contains_key(room_jid) {
+            self.handoff_pending.remove(room_jid);
+            return false;
+        }
+        match self.handoff_pending.get(room_jid) {
+            Some(pending) if pending.since.elapsed() < HANDOFF_PENDING_WINDOW => true,
+            Some(_) => {
+                self.handoff_pending.remove(room_jid);
+                tracing::warn!(
+                    room = %room_jid,
+                    window_secs = HANDOFF_PENDING_WINDOW.as_secs(),
+                    "live-roster handoff never published a successor; room now reads as absent"
+                );
+                false
+            }
+            None => false,
+        }
+    }
+
+    /// A live-roster spec stashed by a failed post-demote transition, if
+    /// still within the handoff window.
+    fn stashed_handoff_spec(&self, room_jid: &BareJid) -> Option<Arc<RoomCreationSpec>> {
+        let pending = self.handoff_pending.get(room_jid)?;
+        if pending.since.elapsed() >= HANDOFF_PENDING_WINDOW {
+            return None;
+        }
+        pending.stashed_spec.clone()
+    }
+
     fn publish_room_count(&self) {
         crate::metrics::publish_muc_rooms_active(self.rooms.len() as i64);
     }
@@ -1664,8 +1757,15 @@ impl RoomRegistryActor {
         // preparation barrier so that restore cannot overwrite the live
         // roster between preparation and publication.
         if self.durable_store.is_none() {
-            if let Some(room) = live_room_restore {
-                if let Err(error) = actor_ref.ask(RestoreLiveRoster { room }).await {
+            if let Some(restore) = live_room_restore {
+                if let Err(error) = actor_ref
+                    .ask(RestoreLiveRoster {
+                        room: restore.room,
+                        occupancy_revision: restore.occupancy_revision,
+                        departures: restore.departures,
+                    })
+                    .await
+                {
                     warn!(
                         room = %room_jid,
                         %error,
@@ -1961,6 +2061,18 @@ impl RoomRegistryActor {
             return Ok(DemandRoomTransition::Existing(actor_ref));
         }
 
+        // A failed post-demote handoff stashed its live-roster spec on the
+        // pending marker. The next demand creation inside the window adopts
+        // it, so the retired actor's roster and departure ledger survive the
+        // dropped message. A caller that brings its own restore is fresher
+        // (a still-live stale actor) and wins. The stash is cleared only by
+        // a registered successor or window expiry, so a failed adoption
+        // leaves it in place for the next retry.
+        let creation_spec = match self.stashed_handoff_spec(&room_jid) {
+            Some(stashed) if creation_spec.live_room_restore.is_none() => stashed,
+            _ => creation_spec,
+        };
+
         match self
             .prepare_demand_room(
                 &room_jid,
@@ -1976,6 +2088,9 @@ impl RoomRegistryActor {
             .await?
         {
             DemandRoomPreparation::Published(actor_ref) => {
+                // A registered successor ends the handoff window (and
+                // retires any adopted stash with it).
+                self.handoff_pending.remove(&room_jid);
                 Ok(DemandRoomTransition::Created(actor_ref))
             }
             DemandRoomPreparation::Pending { guard, claim_fence } => {
@@ -2201,9 +2316,13 @@ impl RoomRegistryActor {
             // complete, so callers can never discover a roster-less actor
             // and post-publication joins/leaves are never overwritten.
             let readiness = match (readiness, live_room_restore) {
-                (ready @ Some(Ok(DurableRestoreReadiness::Ready(_))), Some(room)) => {
+                (ready @ Some(Ok(DurableRestoreReadiness::Ready(_))), Some(restore)) => {
                     match actor_ref
-                        .ask(RestoreLiveRoster { room })
+                        .ask(RestoreLiveRoster {
+                            room: restore.room,
+                            occupancy_revision: restore.occupancy_revision,
+                            departures: restore.departures,
+                        })
                         .mailbox_timeout(ROOM_OWNERSHIP_CALL_TIMEOUT)
                         .reply_timeout(ROOM_OWNERSHIP_CALL_TIMEOUT)
                         .await
@@ -2432,6 +2551,7 @@ impl RoomRegistryActor {
                 claim_fence: claim_fence.clone(),
             },
         );
+        self.handoff_pending.remove(&room_jid);
         self.publish_room_count();
         // The cache is a legacy room-JID fan-out fence. Make it visible only
         // after its matching ready actor and immutable fence are in the
@@ -3051,6 +3171,23 @@ impl RoomRegistryActor {
         publication: Result<(ActorRef<RoomActor>, DurableRoomOrigin), RoomPublicationError>,
         registry_ref: ActorRef<Self>,
     ) {
+        // #1647: a demand preparation that fails after an accepted handoff
+        // transition drops its prepared spec — the only copy of the retired
+        // actor's live roster and departure ledger. Inside an open handoff
+        // window, restash it on the pending marker so the next demand
+        // creation adopts it instead of hydrating a rosterless successor.
+        // (A successful publication removed the marker at registration, so
+        // this is a no-op there; adoption is also gated on the room still
+        // being absent, so a durably-published room can never regress.)
+        if publication.is_err() {
+            if let RoomPreparationOrigin::Demand { prepared_spec } = &origin {
+                if prepared_spec.live_room_restore.is_some() {
+                    if let Some(pending) = self.handoff_pending.get_mut(&room_jid) {
+                        pending.stashed_spec = Some(Arc::clone(prepared_spec));
+                    }
+                }
+            }
+        }
         match publication {
             Ok((actor_ref, durable_origin)) => {
                 let creation_handoff_delivered = Self::reply_preparation_success(
@@ -3692,6 +3829,34 @@ pub struct GetRoom {
     pub room_jid: BareJid,
 }
 
+/// Test seam: set (or age) the handoff marker for a room as if a handoff had
+/// retired its actor `age` ago without publishing a successor.
+#[cfg(test)]
+struct MarkHandoffPendingForTest {
+    room_jid: BareJid,
+    age: std::time::Duration,
+    restore: Option<Arc<RoomCreationSpec>>,
+}
+
+#[cfg(test)]
+impl kameo::message::Message<MarkHandoffPendingForTest> for RoomRegistryActor {
+    type Reply = ();
+
+    async fn handle(
+        &mut self,
+        msg: MarkHandoffPendingForTest,
+        _ctx: &mut Context<Self, Self::Reply>,
+    ) -> Self::Reply {
+        self.handoff_pending.insert(
+            msg.room_jid,
+            PendingHandoff {
+                since: std::time::Instant::now() - msg.age,
+                stashed_spec: msg.restore,
+            },
+        );
+    }
+}
+
 impl kameo::message::Message<GetRoom> for RoomRegistryActor {
     type Reply = DelegatedReply<Result<Option<ActorRef<RoomActor>>, RoomRegistryError>>;
 
@@ -3720,6 +3885,11 @@ impl kameo::message::Message<GetRoom> for RoomRegistryActor {
                     .push(RoomPreparationWaiter::Lookup { reply });
             }
             return delegated;
+        }
+        if self.handoff_in_window(&msg.room_jid) {
+            return ctx.reply(Err(RoomRegistryError::OwnershipReconciliationPending(
+                msg.room_jid,
+            )));
         }
         ctx.reply(self.live_room(&msg.room_jid).await)
     }
@@ -4654,6 +4824,16 @@ pub struct GetOrCreateRoomWithLiveRoster {
     pub channel_id: ChannelId,
     pub config: RoomConfig,
     pub live_room_restore: MucRoom,
+    pub occupancy_revision: u64,
+    /// The predecessor's unacknowledged departure receipts (see
+    /// [`super::room_actor::RestoreLiveRoster`]).
+    pub departures: super::room_actor::DepartureLedger,
+    /// Demote this exact stale actor in the SAME registry turn as the
+    /// successor's publication, so no `GetRoom` can observe a gap in which
+    /// the room appears absent (cleanup and the departure janitor treat a
+    /// definitive absence as convergence). `Err(StaleActorNotCurrent)` when
+    /// the registered actor is a different one.
+    pub demote_first: Option<ActorRef<RoomActor>>,
 }
 
 impl kameo::message::Message<GetOrCreateRoom> for RoomRegistryActor {
@@ -4717,22 +4897,79 @@ impl kameo::message::Message<GetOrCreateRoomWithLiveRoster> for RoomRegistryActo
         ctx: &mut Context<Self, Self::Reply>,
     ) -> Self::Reply {
         let room_jid = msg.room_jid;
+        if let Some(stale_actor) = &msg.demote_first {
+            let is_current = self
+                .rooms
+                .get(&room_jid)
+                .is_some_and(|entry| entry.actor_ref.id() == stale_actor.id());
+            if !is_current {
+                return ctx.reply(Err(RoomRegistryError::StaleActorNotCurrent(room_jid)));
+            }
+        }
+        // Every gate that can refuse runs BEFORE the stale actor is retired:
+        // a refused handoff must leave the stale entry (and its ledger) in
+        // place, never an absent room.
         if self.destroy_completion_blocks_recreation(&room_jid).await {
             return ctx.reply(Err(RoomRegistryError::OwnershipReconciliationPending(
                 room_jid,
             )));
+        }
+        if msg.demote_first.is_some() {
+            if let Some(entry) = self.rooms.remove(&room_jid) {
+                self.publish_room_count();
+                // From here until the successor is registered (or a
+                // preparation is pending) the room must not look absent.
+                self.handoff_pending
+                    .retain(|_, pending| pending.since.elapsed() < HANDOFF_PENDING_WINDOW);
+                self.handoff_pending.insert(
+                    room_jid.clone(),
+                    PendingHandoff {
+                        since: std::time::Instant::now(),
+                        stashed_spec: None,
+                    },
+                );
+                self.retire_ownership_lost_entry(&room_jid, entry).await;
+            }
         }
         let creation_spec = Arc::new(RoomCreationSpec {
             waddle_id: msg.waddle_id.into_string(),
             channel_id: msg.channel_id.into_string(),
             config: msg.config,
             initial_affiliations: Vec::new(),
-            live_room_restore: Some(msg.live_room_restore),
+            live_room_restore: Some(LiveRoomRestore {
+                room: msg.live_room_restore,
+                occupancy_revision: msg.occupancy_revision,
+                departures: msg.departures,
+            }),
         });
-        match self
-            .transition_demand_room(room_jid.clone(), creation_spec, ctx.actor_ref().clone())
-            .await
-        {
+        let transition = self
+            .transition_demand_room(
+                room_jid.clone(),
+                Arc::clone(&creation_spec),
+                ctx.actor_ref().clone(),
+            )
+            .await;
+        if transition.is_err() {
+            // The demand failed after the stale actor was retired: this
+            // message held the only copy of the retired actor's live roster
+            // and departure ledger. Stash it on the pending marker so the
+            // next demand creation inside the window restores it instead of
+            // hydrating a rosterless room after the marker expires.
+            if let Some(pending) = self.handoff_pending.get_mut(&room_jid) {
+                pending.stashed_spec = Some(Arc::clone(&creation_spec));
+            }
+        }
+        // A registered successor clears the marker (so does any later
+        // publication). A PENDING preparation keeps it: the preparation may
+        // still fail without publishing, and lookups after that must stay
+        // retryable for the bounded window rather than read as an absence.
+        if matches!(
+            transition,
+            Ok(DemandRoomTransition::Existing(_)) | Ok(DemandRoomTransition::Created(_))
+        ) {
+            self.handoff_pending.remove(&room_jid);
+        }
+        match transition {
             // A live-roster handoff is only valid while the target actor is
             // still unpublished.  Merging into an already-live actor could
             // erase a join or leave that arrived after its publication.
@@ -5442,7 +5679,7 @@ impl RoomRegistryActor {
 }
 
 impl kameo::message::Message<SealRoomForDestroySnapshot> for RoomRegistryActor {
-    type Reply = Result<MucRoom, RoomRegistryError>;
+    type Reply = Result<super::room_actor::RoomSnapshot, RoomRegistryError>;
 
     async fn handle(
         &mut self,
@@ -5495,7 +5732,6 @@ impl kameo::message::Message<SealRoomForDestroySnapshot> for RoomRegistryActor {
             .mailbox_timeout(SEAL_ASK_TIMEOUT)
             .reply_timeout(SEAL_ASK_TIMEOUT)
             .await
-            .map(|snapshot| snapshot.room)
             .map_err(|_| RoomRegistryError::OwnershipUnavailable(msg.room_jid))
     }
 }
@@ -5755,11 +5991,33 @@ impl kameo::message::Message<DestroyRoomWithAttempt> for RoomRegistryActor {
 /// [`RoomActorError::RoomSealed`](super::room_actor::RoomActorError::RoomSealed)
 /// refusal, which the join path retries through the registry.
 ///
-/// Returns `true` when the room was sealed and removed.
+/// Answers a typed [`GuardedDestroyOutcome`].
 pub struct DestroyRoomIfInactive {
     pub room_jid: BareJid,
     pub expected_occupancy_revision: u64,
     pub guard: SealGuard,
+}
+
+/// Typed answer of a guarded destroy, so callers can tell a DEFINITIVE
+/// outcome (destroyed, absent, or refused because occupancy moved) from a
+/// TRANSIENT one that leaves the destroy owed (uncertain durable commit,
+/// release backlog, seal ask failure).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, kameo::Reply)]
+pub enum GuardedDestroyOutcome {
+    Destroyed,
+    Absent,
+    Refused,
+    Retained,
+}
+
+impl GuardedDestroyOutcome {
+    pub fn is_definitive(self) -> bool {
+        !matches!(self, Self::Retained)
+    }
+
+    pub fn destroyed(self) -> bool {
+        matches!(self, Self::Destroyed)
+    }
 }
 
 /// Bound for the in-handler seal ask so a wedged room actor cannot
@@ -5774,7 +6032,7 @@ const SEAL_ASK_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(2);
 const SNAPSHOT_PRESEAL_RECONCILE_DELAY: std::time::Duration = std::time::Duration::from_secs(20);
 
 impl kameo::message::Message<DestroyRoomIfInactive> for RoomRegistryActor {
-    type Reply = bool;
+    type Reply = GuardedDestroyOutcome;
 
     async fn handle(
         &mut self,
@@ -5784,10 +6042,10 @@ impl kameo::message::Message<DestroyRoomIfInactive> for RoomRegistryActor {
         // Preparation is not yet published and therefore cannot have been
         // observed inactive at the supplied occupancy revision.
         if self.pending_room_preparations.contains_key(&msg.room_jid) {
-            return false;
+            return GuardedDestroyOutcome::Refused;
         }
         let Some(entry) = self.rooms.get(&msg.room_jid).cloned() else {
-            return false;
+            return GuardedDestroyOutcome::Absent;
         };
         if !self.has_pending_release_capacity(&msg.room_jid, &entry.claim_fence) {
             // Ordinary inactivity must remain open when there is nowhere to
@@ -5805,7 +6063,7 @@ impl kameo::message::Message<DestroyRoomIfInactive> for RoomRegistryActor {
                 Ok(RoomSealState::OwnershipLost) => {
                     self.evict_ownership_lost_room(&msg.room_jid, entry).await;
                     info!(room = %msg.room_jid, "Evicted non-serving room during inactive-room cleanup");
-                    true
+                    GuardedDestroyOutcome::Destroyed
                 }
                 Ok(
                     RoomSealState::Open
@@ -5813,11 +6071,11 @@ impl kameo::message::Message<DestroyRoomIfInactive> for RoomRegistryActor {
                     | RoomSealState::Destroying { .. },
                 ) => {
                     warn!(room = %msg.room_jid, "Skipping inactive-room seal because exact-release retry backlog is full");
-                    false
+                    GuardedDestroyOutcome::Retained
                 }
                 Err(error) => {
                     warn!(room = %msg.room_jid, error = ?error, "Could not classify room seal while exact-release retry backlog is full");
-                    false
+                    GuardedDestroyOutcome::Retained
                 }
             };
         }
@@ -5834,7 +6092,7 @@ impl kameo::message::Message<DestroyRoomIfInactive> for RoomRegistryActor {
             Ok(SealIfInactiveOutcome::OwnershipLost) => {
                 self.evict_ownership_lost_room(&msg.room_jid, entry).await;
                 info!(room = %msg.room_jid, "Evicted non-serving room during inactive-room cleanup");
-                true
+                GuardedDestroyOutcome::Destroyed
             }
             Ok(SealIfInactiveOutcome::Inactive) => {
                 if let Some(store) = &self.durable_store {
@@ -5860,17 +6118,17 @@ impl kameo::message::Message<DestroyRoomIfInactive> for RoomRegistryActor {
                         if matches!(error, RoomCommitError::NotOwner) {
                             self.evict_ownership_lost_room(&msg.room_jid, entry).await;
                             info!(room = %msg.room_jid, "evicted room after ownership loss during dormancy commit");
-                            return true;
+                            return GuardedDestroyOutcome::Destroyed;
                         }
                         if matches!(error, RoomCommitError::StateMissing) {
                             info!(room = %msg.room_jid, "evicting room after terminal dormancy state miss");
                         } else if matches!(error, RoomCommitError::CommitOutcomeUnknown) {
                             warn!(room = %msg.room_jid, "inactive-room transition has unknown durable commit outcome; retaining seal for reaping");
-                            return false;
+                            return GuardedDestroyOutcome::Retained;
                         } else {
                             let _ = entry.actor_ref.tell(UnsealInactive).await;
                             warn!(room = %msg.room_jid, %error, "durable dormancy commit failed; keeping room active");
-                            return false;
+                            return GuardedDestroyOutcome::Retained;
                         }
                     }
                 }
@@ -5884,14 +6142,21 @@ impl kameo::message::Message<DestroyRoomIfInactive> for RoomRegistryActor {
                 self.release_room_claim(&msg.room_jid, &entry.claim_fence)
                     .await;
                 info!(room = %msg.room_jid, "Destroyed inactive room (guarded)");
-                true
+                GuardedDestroyOutcome::Destroyed
             }
             Ok(SealIfInactiveOutcome::Refused) => {
                 debug!(
                     room = %msg.room_jid,
                     "Guarded destroy refused: room no longer inactive at expected revision"
                 );
-                false
+                GuardedDestroyOutcome::Refused
+            }
+            Ok(SealIfInactiveOutcome::EffectsOwed) => {
+                debug!(
+                    room = %msg.room_jid,
+                    "Guarded destroy retained: departure receipts still owed"
+                );
+                GuardedDestroyOutcome::Retained
             }
             Err(error) => {
                 // Never remove on uncertainty. If the seal actually
@@ -5903,7 +6168,7 @@ impl kameo::message::Message<DestroyRoomIfInactive> for RoomRegistryActor {
                     error = ?error,
                     "Guarded destroy seal ask failed; keeping the room"
                 );
-                false
+                GuardedDestroyOutcome::Retained
             }
         }
     }

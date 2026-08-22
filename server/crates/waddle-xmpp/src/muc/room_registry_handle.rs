@@ -421,7 +421,7 @@ impl RoomRegistry {
         seal_room_for_destroy_snapshot(
             room_jid: BareJid,
             attempt: super::DestroyAttemptId
-        ) -> super::MucRoom,
+        ) -> super::room_actor::RoomSnapshot,
         "seal_room_for_destroy_snapshot",
         SealRoomForDestroySnapshot { room_jid, attempt }
     );
@@ -505,12 +505,12 @@ impl RoomRegistry {
 
     registry_method!(
         /// Destroy a room only if it is still inactive at the expected
-        /// occupancy revision (#1108). Returns whether it was destroyed.
+        /// occupancy revision (#1108). Answers a typed `GuardedDestroyOutcome`.
         destroy_room_if_inactive(
             room_jid: BareJid,
             expected_occupancy_revision: u64,
             guard: SealGuard
-        ) -> bool,
+        ) -> super::room_registry_actor::GuardedDestroyOutcome,
         "destroy_room_if_inactive",
         DestroyRoomIfInactive { room_jid, expected_occupancy_revision, guard }
     );

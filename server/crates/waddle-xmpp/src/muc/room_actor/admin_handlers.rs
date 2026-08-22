@@ -1205,6 +1205,7 @@ impl kameo::message::Message<EnforceMembersOnlyAffiliations> for RoomActor {
             reservation
         };
         self.room = staged_room;
+        self.config_durable_coordinates = self.durable_coordinates;
         if needs_rehydration {
             // R1: see `RoomActor::refresh_durable_recipients_from_source`.
             self.refresh_durable_recipients_from_source().await;

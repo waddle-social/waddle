@@ -8,9 +8,27 @@ use crate::types::{Affiliation, Role, Voice};
 
 use super::{RoomEffectOrdinal, RoomLifecycleId, RoomRevision};
 
-/// A validated room nickname carried by a durable effect.
-#[derive(Debug, Clone, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
+/// A validated room nickname carried by a durable effect. Deserialization
+/// re-validates (`try_from`), so a malformed stored nickname is rejected at
+/// the storage boundary instead of silently degrading the occupant identity.
+#[derive(
+    Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord, serde::Serialize, serde::Deserialize,
+)]
+#[serde(try_from = "String")]
 pub struct MucOccupantNick(String);
+
+/// The storage boundary rejected a malformed occupant nickname.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
+#[error("invalid MUC occupant nickname")]
+pub struct InvalidMucOccupantNick;
+
+impl TryFrom<String> for MucOccupantNick {
+    type Error = InvalidMucOccupantNick;
+
+    fn try_from(value: String) -> Result<Self, Self::Error> {
+        Self::new(value).ok_or(InvalidMucOccupantNick)
+    }
+}
 
 impl MucOccupantNick {
     pub fn new(value: String) -> Option<Self> {
@@ -24,6 +42,21 @@ impl MucOccupantNick {
 
     pub fn as_str(&self) -> &str {
         &self.0
+    }
+
+    /// The occupant's room JID (`room@service/nick`). Infallible: the
+    /// constructor already validated the nick as a JID resource, and
+    /// resource validity is independent of the bare part.
+    pub fn occupant_jid(&self, room: &BareJid) -> FullJid {
+        room.clone()
+            .with_resource_str(&self.0)
+            .expect("MucOccupantNick was validated as a JID resource at construction")
+    }
+}
+
+impl std::fmt::Display for MucOccupantNick {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.0)
     }
 }
 

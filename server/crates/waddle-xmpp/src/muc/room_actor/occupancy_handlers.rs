@@ -5,10 +5,14 @@ use kameo::message::Context;
 
 use super::{
     affiliation_overflows_full_room, JoinDenialReason, JoinExistingOccupant, JoinOutcome,
-    LeaveOutcome, PresenceUpdateOutcome, RoomActor, RoomActorError,
+    LeaveOutcome, OccupancyWatermark, PresenceUpdateOutcome, ProjectionGate, RoomActor,
+    RoomActorError,
 };
 use crate::muc::{
-    durable::{ChannelId, RoomDurableMutation, WaddleId},
+    durable::{
+        ChannelId, OccupancyLeaveCause, RoomDurableMutation, RoomProjection, RoomProjectionKind,
+        WaddleId,
+    },
     RoomConfig,
 };
 use crate::types::Affiliation;
@@ -49,6 +53,7 @@ impl kameo::message::Message<JoinWithAffiliation> for RoomActor {
         msg: JoinWithAffiliation,
         _ctx: &mut Context<Self, Self::Reply>,
     ) -> Self::Reply {
+        let _handler_timer = crate::metrics::MucOccupancyHandlerTimer::start("join");
         // #1108: a caller holding a stale ActorRef must retry through the
         // registry. For an inactivity seal this also re-checks ownership so
         // the seal can strengthen to OwnershipLost before the reaper runs.
@@ -207,74 +212,212 @@ impl kameo::message::Message<JoinWithAffiliation> for RoomActor {
             })
             .collect();
 
-        let occupant_count_before = self.room.occupant_count();
-        let new_occupant = self.room.add_occupant_with_affiliation(
-            msg.sender_jid,
-            msg.nick.clone(),
-            Some(msg.local_domain.as_str()),
-        );
-        let new_occupant_affiliation = new_occupant.affiliation;
-        let new_occupant_role = new_occupant.role;
-        let occupant_count = self.room.occupant_count();
-        // Observability (#1320): every accepted join is a MUC presence
-        // event; the pod-wide occupant gauge advances only when the
-        // occupant set actually grew (multi-session joins / rejoins add a
-        // session, not an occupant, so the diff is 0).
-        crate::metrics::record_muc_presence("join");
-        crate::metrics::adjust_muc_occupant_total(
-            occupant_count as i64 - occupant_count_before as i64,
-        );
-        let room_jid = self.room.room_jid.clone();
-        if matches!(msg.affiliation_grant, JoinAffiliationGrant::Resolver(_))
-            && !resolver_join_advanced_admission_revision
-        {
-            // A successful resolver-backed admission is itself a freshness
-            // boundary, even when the affiliation was already identical. A
-            // delayed rejection repair captured before this join must not
-            // retain the same revision and demote the occupant just admitted.
-            self.advance_member_admission_revision(&joining_bare_jid);
-        }
-        // #1108: every successful admission bumps the occupancy
-        // revision so a dormancy probe taken before this join can no
-        // longer authorize a destroy.
-        self.occupancy_revision = self.occupancy_revision.saturating_add(1);
-
-        let subject_state = self.room.subject.clone();
-
-        Ok(JoinOutcome {
-            existing_occupants,
-            new_occupant_affiliation,
-            new_occupant_role,
-            occupant_count,
-            room_jid,
-            is_same_bare_multi_session_join,
-            is_existing_session_rejoin,
-            subject_state,
+        // Resolver cache updates deliberately precede this commit so a
+        // revocation is visible to the admission checks even during outage.
+        let Some(durable_nick) = crate::muc::durable::MucOccupantNick::new(msg.nick.clone()) else {
+            return Err(RoomActorError::NickAlreadyInUse(msg.nick));
+        };
+        // The session's occupancy order is minted BEFORE the durable commit
+        // awaits: a disconnect cleanup racing a blocked projection (the WS
+        // backstop cancelled the waiter, the actor kept running) mints its
+        // leave attempt during this await, and that attempt must post-date
+        // the join it targets — not be `Superseded` by an order assigned
+        // when the projection finally applied (#1647, codex round 27).
+        let join_order = next_occupancy_order();
+        let gate = self
+            .commit_projection(RoomProjection::OccupancyJoin {
+                occupant: msg.sender_jid.clone(),
+                nick: durable_nick,
+            })
+            .await
+            .map_err(Self::map_projection_commit_error)?;
+        self.project(gate, RoomProjectionKind::OccupancyJoin, |actor| {
+            let occupant_count_before = actor.room.occupant_count();
+            let joined_at =
+                OccupancyWatermark::from_revision(actor.occupancy_revision.saturating_add(1));
+            let joined_jid = msg.sender_jid.clone();
+            let new_occupant = actor
+                .room
+                .add_occupant_with_affiliation(
+                    msg.sender_jid,
+                    msg.nick.clone(),
+                    Some(msg.local_domain.as_str()),
+                    joined_at,
+                )
+                .clone();
+            actor.room.set_session_order(&joined_jid, join_order);
+            actor.note_session_joined(&joined_jid);
+            let new_occupant_affiliation = new_occupant.affiliation;
+            let new_occupant_role = new_occupant.role;
+            let occupant_count = actor.room.occupant_count();
+            crate::metrics::record_muc_presence("join");
+            crate::metrics::adjust_muc_occupant_total(
+                occupant_count as i64 - occupant_count_before as i64,
+            );
+            let room_jid = actor.room.room_jid.clone();
+            if matches!(msg.affiliation_grant, JoinAffiliationGrant::Resolver(_))
+                && !resolver_join_advanced_admission_revision
+            {
+                actor.advance_member_admission_revision(&joining_bare_jid);
+            }
+            actor.occupancy_revision = actor.occupancy_revision.saturating_add(1);
+            JoinOutcome {
+                existing_occupants,
+                new_occupant_affiliation,
+                new_occupant_role,
+                occupant_count,
+                room_jid,
+                is_same_bare_multi_session_join,
+                is_existing_session_rejoin,
+                subject_state: actor.room.subject.clone(),
+            }
         })
+        .map_err(Self::map_projection_refusal)
     }
 }
 
 pub struct LeaveByRealJid {
     pub sender_jid: FullJid,
+    pub cause: OccupancyLeaveCause,
+    pub session: LeaveSessionSelector,
+    /// Idempotency key of this logical departure. A caller whose reply timed
+    /// out after the message was enqueued retries with the SAME id: if the
+    /// actor already completed the departure it replays the retained
+    /// [`LeaveOutcome`] (exactly once) instead of answering `NotOccupant`, so
+    /// the departure's effects are never lost.
+    pub attempt: LeaveAttemptId,
+    /// Whether this ask is a retained retry of an earlier departure. Only a
+    /// retry may consume the full JID's unacknowledged receipt by JID
+    /// fallback (its own attempt may have been coalesced away); a fresh ask
+    /// for a gone session is simply `NotOccupant`, so a receipt whose
+    /// acknowledgement is still in flight can never be replayed by an
+    /// unrelated later leave.
+    pub origin: LeaveOrigin,
+}
+
+/// Provenance of a `LeaveByRealJid` ask.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LeaveOrigin {
+    /// A first attempt (explicit leave, disconnect cleanup, admin removal).
+    Fresh,
+    /// A retry of a retained departure responsibility (janitor).
+    RetainedRetry,
+}
+
+/// Idempotency key for one logical `LeaveByRealJid` departure, minted from
+/// the process-wide occupancy order so the actor can tell whether a session
+/// existed when the attempt was first issued: a session that joined AFTER
+/// the attempt was minted is never the attempt's target (`Superseded`),
+/// which makes late retries safe against any number of rejoins.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
+pub struct LeaveAttemptId(OccupancyOrder);
+
+impl LeaveAttemptId {
+    pub fn generate() -> Self {
+        Self(next_occupancy_order())
+    }
+
+    /// Position of this attempt in the process-wide occupancy order.
+    pub fn order(self) -> OccupancyOrder {
+        self.0
+    }
+}
+
+/// A position in the process-wide monotonic occupancy order shared by session
+/// joins and leave attempts. Unlike the room's occupancy watermark it advances
+/// on every join in every room (memory-only rooms included), so comparing two
+/// positions always tells which event came first.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
+pub struct OccupancyOrder(u64);
+
+impl OccupancyOrder {
+    #[cfg(test)]
+    pub const fn from_raw(order: u64) -> Self {
+        Self(order)
+    }
+}
+
+static OCCUPANCY_ORDER: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
+
+/// Mint the next position in the process-wide occupancy order.
+pub fn next_occupancy_order() -> OccupancyOrder {
+    OccupancyOrder(OCCUPANCY_ORDER.fetch_add(1, std::sync::atomic::Ordering::SeqCst))
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LeaveSessionSelector {
+    Any,
+    JoinedAtOrBefore(OccupancyWatermark),
+}
+
+#[derive(Debug, kameo::Reply)]
+pub enum LeaveDisposition {
+    Left(Box<LeaveOutcome>),
+    NotOccupant,
+    Superseded,
+    Deferred {
+        watermark: OccupancyWatermark,
+    },
+    /// The departure changed local state but must not emit leave effects.
+    /// Store-less room with a destroy/dormancy in flight: the departure was
+    /// recorded but nothing fans out. Carries the leaver's affiliation so the
+    /// XEP-0045 §7.14 self-presence echo can report it.
+    Suppressed {
+        nick: crate::muc::MucOccupantNick,
+        affiliation: crate::types::Affiliation,
+        /// The attempt to acknowledge (see [`super::LeaveOutcome::acknowledge`]).
+        attempt: LeaveAttemptId,
+    },
 }
 
 impl kameo::message::Message<LeaveByRealJid> for RoomActor {
-    type Reply = Result<Option<LeaveOutcome>, Infallible>;
+    type Reply = Result<LeaveDisposition, RoomActorError>;
 
     async fn handle(
         &mut self,
         msg: LeaveByRealJid,
         _ctx: &mut Context<Self, Self::Reply>,
     ) -> Self::Reply {
-        // A terminal destroy may still fail its durable commit and reopen
-        // this exact actor.  Record a queued departure in that narrow state
-        // so reopening cannot resurrect a dead session, but continue to
-        // suppress the LeaveOutcome: callers must not fan it out while the
-        // terminal result is unresolved.
-        let suppress_effects = matches!(self.seal_state, super::RoomSealState::Destroying { .. });
-        if !suppress_effects && !self.effectful_work_is_permitted().await {
-            return Ok(None);
+        let _handler_timer = crate::metrics::MucOccupancyHandlerTimer::start("leave");
+        // A tombstoned attempt never processes a fresh leave (it must not
+        // evict a session that displaced it), but a RETAINED RETRY still
+        // falls through to the JID fallback below: the tombstone only says
+        // THIS attempt is dead, not that nothing is owed — a coalesced retry
+        // can carry a displaced attempt while another nick's receipt is
+        // still owed behind it (#1647, codex round 29).
+        let attempt_superseded = self.departure_attempt_is_superseded(&msg.sender_jid, msg.attempt);
+        if attempt_superseded && msg.origin != LeaveOrigin::RetainedRetry {
+            return Ok(LeaveDisposition::Superseded);
         }
+        match self.replay_departure_receipt(msg.attempt) {
+            // Replay only while the departure is still the latest truth: a
+            // newer generation of this full JID (re-entered, even if it left
+            // or was removed since) or a re-taken nick makes the retained
+            // outcome stale; replaying it would evict a live occupant from
+            // every client's roster or repeat a removal already announced.
+            Some(super::RetainedDeparture::Stale) => return Ok(LeaveDisposition::Superseded),
+            Some(super::RetainedDeparture::Current(receipt)) => {
+                // A live session of this JID does NOT suppress the replay by
+                // itself: a rejoin under a DIFFERENT nick never announced the
+                // old nick's departure, so remaining occupants still owe its
+                // unavailable fan-out. Only a re-taken nick (the same JID's
+                // same-nick rejoin included — the departure freed it, so any
+                // holder is a newer generation) makes the receipt
+                // unreplayable; consume it then, or it vetoes
+                // dormancy/sealing (`EffectsOwed`) forever while the janitor
+                // has already dropped its retry.
+                if self.nick_retaken(&receipt) {
+                    self.discard_departure_receipt(receipt.attempt);
+                    return Ok(LeaveDisposition::Superseded);
+                }
+                return Ok(receipt_disposition(receipt));
+            }
+            None => {}
+        }
+        // Resolve occupancy before consulting the seal: a non-occupant's leave
+        // is a pure memory read with nothing to project, and every disconnect
+        // asks every local room — a sealed room must not mint retained
+        // departures for sessions it never held.
         // #1107: collect EVERY nick this full JID occupies. Post-#1107
         // the join path refuses a second nick for the same full JID, so
         // this is normally a single entry — but pre-existing ghost
@@ -296,19 +439,91 @@ impl kameo::message::Message<LeaveByRealJid> for RoomActor {
             .collect();
         nicks.sort();
         let Some(nick) = nicks.first().cloned() else {
-            return Ok(None);
+            // The session is gone. If a departure of this full JID completed
+            // but its reply was lost (unacknowledged receipt) — possibly under
+            // a different attempt id that a coalesced retry no longer carries —
+            // replay it now: the departure's effects are owed to someone and
+            // the receipt is consumed exactly once.
+            if msg.origin == LeaveOrigin::RetainedRetry {
+                match self.replay_departure_receipt_for_jid(&msg.sender_jid, msg.cause) {
+                    Some(super::RetainedDeparture::Stale) => {
+                        return Ok(LeaveDisposition::Superseded);
+                    }
+                    Some(super::RetainedDeparture::Current(receipt)) => {
+                        if self.nick_retaken(&receipt) {
+                            // Unreplayable: consume it (see the attempt-keyed
+                            // replay above) instead of leaking an
+                            // `EffectsOwed` veto forever.
+                            self.discard_departure_receipt(receipt.attempt);
+                            return Ok(LeaveDisposition::Superseded);
+                        }
+                        return Ok(receipt_disposition(receipt));
+                    }
+                    None => {}
+                }
+            }
+            return Ok(if attempt_superseded {
+                LeaveDisposition::Superseded
+            } else {
+                LeaveDisposition::NotOccupant
+            });
         };
+        // A tombstoned attempt (displaced by a newer departure) never
+        // processes an actual leave: evicting the displacing departure's
+        // replacement session is exactly what the tombstone forbids. The
+        // retained-retry fallback above already drained anything owed.
+        if attempt_superseded {
+            return Ok(LeaveDisposition::Superseded);
+        }
         let Some(occupant) = self.room.get_occupant(&nick) else {
-            return Ok(None);
+            return Ok(LeaveDisposition::NotOccupant);
+        };
+        // A session that joined after this attempt was minted is not the
+        // attempt's target: a late retry (lost reply, then rejoin) must never
+        // evict the live successor session, whatever selector it carries.
+        if self
+            .room
+            .session_order(&msg.sender_jid)
+            .is_some_and(|joined_order| joined_order > msg.attempt.order())
+        {
+            return Ok(LeaveDisposition::Superseded);
+        }
+        let departing_generation = self
+            .room
+            .session_order(&msg.sender_jid)
+            .unwrap_or_else(next_occupancy_order);
+        let departing_nick_generation = self.room.current_nickname_generation(&nick);
+        let current_watermark = OccupancyWatermark::from_revision(self.occupancy_revision);
+        let suppress_effects = match self.seal_state {
+            super::RoomSealState::Inactive | super::RoomSealState::Destroying { .. }
+                if self.durable_store.is_none() =>
+            {
+                true
+            }
+            super::RoomSealState::Inactive | super::RoomSealState::Destroying { .. } => {
+                return Ok(LeaveDisposition::Deferred {
+                    watermark: current_watermark,
+                });
+            }
+            super::RoomSealState::OwnershipLost => return Err(RoomActorError::RoomSealed),
+            super::RoomSealState::Open => false,
+        };
+        if matches!(
+            msg.session,
+            LeaveSessionSelector::JoinedAtOrBefore(watermark)
+                if self
+                    .room
+                    .session_watermark(&msg.sender_jid)
+                    .is_some_and(|current| current > watermark)
+        ) {
+            return Ok(LeaveDisposition::Superseded);
         };
         let affiliation = occupant.affiliation;
         let role = occupant.role;
-        let leaving_room_jid = self
-            .room
-            .room_jid
-            .clone()
-            .with_resource_str(&nick)
-            .expect("nick was previously accepted as resource");
+        let Ok(leaving_room_jid) = self.room.room_jid.clone().with_resource_str(&nick) else {
+            tracing::warn!(room = %self.room.room_jid, %nick, "occupant state contains an invalid nickname");
+            return Ok(LeaveDisposition::NotOccupant);
+        };
         let remaining_occupants: Vec<FullJid> = self
             .room
             .occupants
@@ -321,67 +536,126 @@ impl kameo::message::Message<LeaveByRealJid> for RoomActor {
             .muji_state
             .get(&nick)
             .is_some_and(|entries| entries.contains_key(&msg.sender_jid));
+        let Some(durable_nick) = crate::muc::durable::MucOccupantNick::new(nick.clone()) else {
+            tracing::warn!(room = %self.room.room_jid, %nick, "occupant state contains a non-durable nickname");
+            return Ok(LeaveDisposition::NotOccupant);
+        };
+        let gate = if suppress_effects {
+            ProjectionGate::Unfenced
+        } else {
+            match self
+                .commit_projection(RoomProjection::OccupancyLeave {
+                    occupant: msg.sender_jid.clone(),
+                    nick: durable_nick.clone(),
+                    cause: msg.cause,
+                })
+                .await
+            {
+                Ok(gate) => gate,
+                Err(
+                    super::DurablePersistError::OwnershipUnavailable
+                    | super::DurablePersistError::PersistFailed,
+                ) => {
+                    return Ok(LeaveDisposition::Deferred {
+                        watermark: current_watermark,
+                    });
+                }
+                Err(
+                    super::DurablePersistError::NotOwner
+                    | super::DurablePersistError::CommitOutcomeUnknown,
+                ) => {
+                    return Err(RoomActorError::RoomSealed);
+                }
+            }
+        };
         let occupant_count_before = self.room.occupant_count();
-        let removed_last_session = self
-            .room
-            .remove_occupant_session(&nick, &msg.sender_jid)
-            .unwrap_or(false);
-        // Reap any additional (ghost) occupancies of the same full JID.
-        // The outcome describes the primary nick; ghost occupancies are
-        // bug states that were never legitimately visible, so they are
-        // removed silently to make count and fan-out set correct.
-        for ghost_nick in nicks.iter().skip(1) {
-            self.room
-                .remove_occupant_session(ghost_nick, &msg.sender_jid);
-        }
-        let remaining_muji = if removed_last_session {
-            None
-        } else {
-            self.room.muji_for_nick(&nick)
-        };
-        let remaining_muji_sessions = if removed_last_session {
-            Vec::new()
-        } else {
-            self.room.muji_sessions_for_nick(&nick)
-        };
-        let remaining_nick_real_jid = if removed_last_session {
-            None
-        } else {
-            self.room
-                .get_occupant(&nick)
-                .map(|occupant| occupant.real_jid.clone())
-        };
-        let occupant_count = self.room.occupant_count();
-        // Observability (#1320): a processed leave is a MUC presence
-        // event; the occupant gauge decreases only when this leave
-        // removed the occupant's final session.
-        crate::metrics::record_muc_presence("leave");
-        crate::metrics::adjust_muc_occupant_total(
-            occupant_count as i64 - occupant_count_before as i64,
-        );
-        let is_persistent = self.room.config.persistent;
-        let occupancy_revision = self.occupancy_revision;
-        let outcome = LeaveOutcome {
-            nick,
-            affiliation,
-            role,
-            leaving_room_jid,
-            remaining_occupants,
-            removed_last_session,
-            cleared_muji_state,
-            remaining_muji,
-            remaining_muji_sessions,
-            remaining_nick_real_jid,
-            occupant_count,
-            is_persistent,
-            occupancy_revision,
-        };
-
-        if suppress_effects {
-            Ok(None)
-        } else {
-            Ok(Some(outcome))
-        }
+        self.project(gate, RoomProjectionKind::OccupancyLeave, |actor| {
+            let removed_last_session = actor
+                .room
+                .remove_occupant_session(&nick, &msg.sender_jid)
+                .unwrap_or(false);
+            for ghost_nick in nicks.iter().skip(1) {
+                actor
+                    .room
+                    .remove_occupant_session(ghost_nick, &msg.sender_jid);
+            }
+            let remaining_muji = if removed_last_session {
+                None
+            } else {
+                actor.room.muji_for_nick(&nick)
+            };
+            let remaining_muji_sessions = if removed_last_session {
+                Vec::new()
+            } else {
+                actor.room.muji_sessions_for_nick(&nick)
+            };
+            let remaining_nick_real_jid = if removed_last_session {
+                None
+            } else {
+                actor
+                    .room
+                    .get_occupant(&nick)
+                    .map(|occupant| occupant.real_jid.clone())
+            };
+            let occupant_count = actor.room.occupant_count();
+            crate::metrics::record_muc_presence("leave");
+            crate::metrics::adjust_muc_occupant_total(
+                occupant_count as i64 - occupant_count_before as i64,
+            );
+            LeaveDisposition::Left(Box::new(LeaveOutcome {
+                acknowledge: msg.attempt,
+                // Infallible: the join path refuses a nick that does not
+                // validate as a `MucOccupantNick`, so every occupant nick is
+                // re-wrappable.
+                nick: crate::muc::MucOccupantNick::new(nick.clone())
+                    .expect("occupant nicks are validated at join"),
+                affiliation,
+                role,
+                leaving_room_jid,
+                remaining_occupants,
+                removed_last_session,
+                cleared_muji_state,
+                remaining_muji,
+                remaining_muji_sessions,
+                remaining_nick_real_jid,
+                occupant_count,
+                is_persistent: actor.room.config.persistent,
+                occupancy_revision: actor.occupancy_revision,
+            }))
+        })
+        .map(|disposition| match disposition {
+            LeaveDisposition::Left(outcome) if suppress_effects => {
+                self.retain_departure_receipt(super::DepartureReceipt {
+                    attempt: msg.attempt,
+                    jid: msg.sender_jid.clone(),
+                    cause: msg.cause,
+                    generation: departing_generation,
+                    nick_generation: departing_nick_generation,
+                    outcome: super::DepartureReceiptOutcome::Suppressed {
+                        nick: durable_nick.clone(),
+                        affiliation: outcome.affiliation,
+                    },
+                });
+                LeaveDisposition::Suppressed {
+                    nick: durable_nick,
+                    affiliation: outcome.affiliation,
+                    attempt: msg.attempt,
+                }
+            }
+            LeaveDisposition::Left(outcome) => {
+                self.retain_departure_receipt(super::DepartureReceipt {
+                    attempt: msg.attempt,
+                    jid: msg.sender_jid.clone(),
+                    cause: msg.cause,
+                    generation: departing_generation,
+                    nick_generation: departing_nick_generation,
+                    outcome: super::DepartureReceiptOutcome::Left(outcome.clone()),
+                });
+                LeaveDisposition::Left(outcome)
+            }
+            other => other,
+        })
+        .map_err(Self::map_projection_refusal)
     }
 }
 
@@ -801,6 +1075,62 @@ impl kameo::message::Message<SyncResolverAffiliation> for RoomActor {
         }
         ResolverAffiliationSyncOutcome::Applied {
             admission_revision: self.admission_revision,
+        }
+    }
+}
+
+impl RoomActor {
+    /// The departed nick is held by someone the departure did not account
+    /// for: a different bare JID, or ANY occupant when the departure freed
+    /// the nick (`removed_last_session`) — e.g. the same account back on a
+    /// new resource. Replaying would announce a live occupant's departure.
+    /// Sibling sessions of the same bare JID that still held the nick when
+    /// the departure completed (`removed_last_session == false`) are the
+    /// normal multi-resource case — but only while the nick is still that
+    /// same generation: once the siblings left too and the nick was retaken
+    /// (even by the same account), the captured roster/Muji state is stale.
+    fn nick_retaken(&self, receipt: &super::DepartureReceipt) -> bool {
+        let nick = receipt_nick(receipt);
+        let holder = self.room.get_occupant(nick);
+        let same_generation_and_account = |occupant: &crate::muc::room::Occupant| {
+            occupant.real_jid.to_bare() == receipt.jid.to_bare()
+                && self.room.current_nickname_generation(nick) == receipt.nick_generation
+        };
+        match &receipt.outcome {
+            // A non-final departure captured its siblings' roster/Muji state:
+            // replayable only while those siblings (same account, same nick
+            // generation) still hold the nick — an absent nick means they
+            // left too and the captured state would resurrect it.
+            super::DepartureReceiptOutcome::Left(outcome) if !outcome.removed_last_session => {
+                !holder.is_some_and(same_generation_and_account)
+            }
+            // The departure freed the nick: anyone holding it now is a newer
+            // generation (the same account on a new resource included).
+            super::DepartureReceiptOutcome::Left(_) => holder.is_some(),
+            super::DepartureReceiptOutcome::Suppressed { .. } => {
+                holder.is_some_and(|occupant| !same_generation_and_account(occupant))
+            }
+        }
+    }
+}
+
+fn receipt_nick(receipt: &super::DepartureReceipt) -> &str {
+    receipt.nick().as_str()
+}
+
+fn receipt_disposition(receipt: super::DepartureReceipt) -> LeaveDisposition {
+    let attempt = receipt.attempt;
+    match receipt.outcome {
+        super::DepartureReceiptOutcome::Left(mut outcome) => {
+            outcome.acknowledge = attempt;
+            LeaveDisposition::Left(outcome)
+        }
+        super::DepartureReceiptOutcome::Suppressed { nick, affiliation } => {
+            LeaveDisposition::Suppressed {
+                nick,
+                affiliation,
+                attempt,
+            }
         }
     }
 }

@@ -166,15 +166,6 @@ pub(super) async fn handle_group_dm_mediated_invite(
             "Invitee is already a group-DM member.",
         )]);
     }
-    let Ok(pre_grant_snapshot) = room_actor.ask(GetSnapshot).await else {
-        return Some(vec![error_reply(
-            incoming,
-            bound_jid,
-            ingress_effect_capture,
-            GroupDmInviteError::InternalServerError,
-            "Internal server error.",
-        )]);
-    };
 
     let requested_access =
         waddle_xmpp::xep::xep_waddle_group_dm::history_access_from_mediated_invite(&inbound_invite)
@@ -247,7 +238,6 @@ pub(super) async fn handle_group_dm_mediated_invite(
                         state,
                         &room_jid,
                         &room_actor,
-                        &pre_grant_snapshot,
                     )
                     .await
                 else {

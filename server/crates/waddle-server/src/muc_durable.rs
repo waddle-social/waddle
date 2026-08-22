@@ -55,7 +55,7 @@ use waddle_xmpp::muc::affiliation::AffiliationEntry;
 use waddle_xmpp::muc::durable::{
     AffiliationEntry as DurableAffiliationEntry, RoomCommitDatabaseError, RoomCommitError,
     RoomCommitFuture, RoomCommitOutcome, RoomCommittedCoordinates, RoomDurableMutation,
-    RoomMutationEffects,
+    RoomMutationEffects, RoomPinProjection, RoomProjection,
 };
 use waddle_xmpp::muc::{
     DestroyAttemptId, DurableRoomState, MucDurableFuture, MucDurableStore, RoomClaimFenceContext,
@@ -105,8 +105,48 @@ fn persisted_affiliation_fingerprint(entry: &DurableAffiliationEntry) -> serde_j
     })
 }
 
-fn mutation_fingerprint(intent: &RoomDurableMutation) -> Result<String, RoomCommitError> {
-    let value = match intent {
+fn projection_fingerprint(projection: &RoomProjection) -> serde_json::Value {
+    match projection {
+        RoomProjection::OccupancyJoin { occupant, nick } => serde_json::json!({
+            "kind": "occupancy_join",
+            "occupant": occupant.to_string(),
+            "nick": nick.as_str(),
+        }),
+        RoomProjection::OccupancyLeave {
+            occupant,
+            nick,
+            cause,
+        } => serde_json::json!({
+            "kind": "occupancy_leave",
+            "occupant": occupant.to_string(),
+            "nick": nick.as_str(),
+            "cause": match cause {
+                waddle_xmpp::muc::durable::OccupancyLeaveCause::Explicit => "explicit",
+                waddle_xmpp::muc::durable::OccupancyLeaveCause::Disconnect => "disconnect",
+                waddle_xmpp::muc::durable::OccupancyLeaveCause::Administrative => "administrative",
+            },
+        }),
+        RoomProjection::Pin(RoomPinProjection::Pin { target }) => serde_json::json!({
+            "kind": "pin",
+            "target": target.id.as_str(),
+        }),
+        RoomProjection::Pin(RoomPinProjection::Unpin { target }) => serde_json::json!({
+            "kind": "unpin",
+            "target": target.id.as_str(),
+        }),
+    }
+}
+
+/// The fingerprint binds the payload to the COMMITTING fence (owner identity
+/// and claim epoch), not just the operation shape: two nodes can legitimately
+/// commit byte-identical projections at the same next revision across an
+/// ownership transfer, and ambiguous-commit reconciliation must never mistake
+/// the other owner's row for its own (#1647).
+fn mutation_fingerprint(
+    fence: &RoomClaimFenceContext,
+    intent: &RoomDurableMutation,
+) -> Result<String, RoomCommitError> {
+    let intent_value = match intent {
         RoomDurableMutation::Create {
             waddle_id,
             channel_id,
@@ -183,7 +223,19 @@ fn mutation_fingerprint(intent: &RoomDurableMutation) -> Result<String, RoomComm
         }),
         RoomDurableMutation::Dormancy => serde_json::json!({ "kind": "dormancy" }),
         RoomDurableMutation::Activate => serde_json::json!({ "kind": "activate" }),
+        RoomDurableMutation::Projection(projection) => serde_json::json!({
+            "kind": "projection",
+            "projection": projection_fingerprint(projection),
+        }),
     };
+    let value = serde_json::json!({
+        "fence": {
+            "node_id": fence.owner.node_id,
+            "node_epoch": fence.owner.node_epoch,
+            "claim_epoch": fence.epoch.0,
+        },
+        "intent": intent_value,
+    });
     serde_json::to_string(&value).map_err(|_| commit_database_error())
 }
 
@@ -341,6 +393,8 @@ impl PostgresMucRoomStore {
                 channel_id   TEXT NOT NULL,
                 config_json  TEXT NOT NULL,
                 subject_json TEXT,
+                config_lifecycle_id TEXT,
+                config_revision BIGINT,
                 updated_at   TIMESTAMPTZ NOT NULL DEFAULT now()
             )
             "#,
@@ -389,6 +443,80 @@ impl PostgresMucRoomStore {
                 ) THEN
                     CREATE INDEX clustering_muc_room_affiliations_room_jid_idx
                         ON clustering_muc_room_affiliations (room_jid);
+                END IF;
+            END $$
+            "#,
+            (),
+        )
+        .await?;
+        tx.execute(
+            r#"
+            DO $$
+            BEGIN
+                IF NOT EXISTS (
+                    SELECT 1
+                    FROM pg_attribute
+                    WHERE attrelid = 'clustering_muc_rooms'::regclass
+                      AND attname = 'config_lifecycle_id'
+                      AND NOT attisdropped
+                ) THEN
+                    ALTER TABLE clustering_muc_rooms ADD COLUMN config_lifecycle_id TEXT;
+                END IF;
+            END $$
+            "#,
+            (),
+        )
+        .await?;
+        tx.execute(
+            r#"
+            DO $$
+            BEGIN
+                IF NOT EXISTS (
+                    SELECT 1
+                    FROM pg_attribute
+                    WHERE attrelid = 'clustering_muc_rooms'::regclass
+                      AND attname = 'config_revision'
+                      AND NOT attisdropped
+                ) THEN
+                    ALTER TABLE clustering_muc_rooms ADD COLUMN config_revision BIGINT;
+                END IF;
+            END $$
+            "#,
+            (),
+        )
+        .await?;
+        tx.execute(
+            r#"
+            DO $$
+            BEGIN
+                IF NOT EXISTS (
+                    SELECT 1
+                    FROM pg_constraint
+                    WHERE conname = 'clustering_muc_rooms_config_lifecycle_pairing'
+                      AND conrelid = 'clustering_muc_rooms'::regclass
+                ) THEN
+                    ALTER TABLE clustering_muc_rooms
+                        ADD CONSTRAINT clustering_muc_rooms_config_lifecycle_pairing
+                        CHECK ((config_lifecycle_id IS NULL) = (config_revision IS NULL));
+                END IF;
+            END $$
+            "#,
+            (),
+        )
+        .await?;
+        tx.execute(
+            r#"
+            DO $$
+            BEGIN
+                IF NOT EXISTS (
+                    SELECT 1
+                    FROM pg_constraint
+                    WHERE conname = 'clustering_muc_rooms_config_revision_min'
+                      AND conrelid = 'clustering_muc_rooms'::regclass
+                ) THEN
+                    ALTER TABLE clustering_muc_rooms
+                        ADD CONSTRAINT clustering_muc_rooms_config_revision_min
+                        CHECK (config_revision IS NULL OR config_revision >= 1);
                 END IF;
             END $$
             "#,
@@ -812,11 +940,11 @@ impl PostgresMucRoomStore {
     async fn reconcile_ambiguous_commit(
         &self,
         room_jid: &BareJid,
-        _fence: &RoomClaimFenceContext,
+        fence: &RoomClaimFenceContext,
         intent: &RoomDurableMutation,
         coordinates: RoomCommittedCoordinates,
     ) -> Result<CommitReconciliation, RoomCommitError> {
-        let expected_fingerprint = mutation_fingerprint(intent)?;
+        let expected_fingerprint = mutation_fingerprint(fence, intent)?;
         let conn = self.db.guard().await.map_err(Self::commit_error)?;
         let mut reconcile_rows = conn
             .query(
@@ -959,6 +1087,34 @@ impl PostgresMucRoomStore {
                 // successful cleanup acknowledgement.
                 Ok(CommitReconciliation::Unknown)
             }
+            // An `Activate` is state-idempotent: when the lifecycle already
+            // sits in `active` at the SAME coordinates, the caller's target
+            // state holds whether its own transaction landed or was a no-op.
+            // The stored proof may legitimately belong to a PREDECESSOR
+            // owner's activation (an idempotent re-activate never overwrites
+            // it), so a fence-bound fingerprint mismatch must not report
+            // this success as NotCommitted and refuse a valid active room
+            // (#1647, codex final round).
+            RoomDurableMutation::Activate => Ok(
+                if room_matches
+                    && lifecycle_state
+                        .as_ref()
+                        .is_some_and(|(state, _, revision)| {
+                            *revision == coordinates.revision.as_i64()
+                                && state.as_str() == RoomLifecycleState::Active.as_db_str()
+                        })
+                {
+                    CommitReconciliation::Committed
+                } else if lifecycle_state.is_some() && room_matches {
+                    match exact_intent_reconciled {
+                        Some(true) => CommitReconciliation::Committed,
+                        Some(false) => CommitReconciliation::NotCommitted,
+                        None => CommitReconciliation::Unknown,
+                    }
+                } else {
+                    CommitReconciliation::NotCommitted
+                },
+            ),
             _ => Ok(if lifecycle_state.is_some() && room_matches {
                 match exact_intent_reconciled {
                     Some(true) => CommitReconciliation::Committed,
@@ -1263,7 +1419,7 @@ impl PostgresMucRoomStore {
         {
             return Err(RoomCommitError::RecreationBlocked);
         }
-        let intent_fingerprint = mutation_fingerprint(intent)?;
+        let intent_fingerprint = mutation_fingerprint(fence, intent)?;
 
         let mut rows = tx
             .query(
@@ -1680,8 +1836,8 @@ impl PostgresMucRoomStore {
                 let config_json =
                     serde_json::to_string(config).map_err(|_| commit_database_error())?;
                 tx.execute(
-                    "INSERT INTO clustering_muc_rooms (room_jid, waddle_id, channel_id, config_json, lifecycle_id, revision) VALUES (?, ?, ?, ?, ?, ?)",
-                    crate::db_params![room_jid.to_string(), waddle_id.as_str().to_string(), channel_id.as_str().to_string(), config_json, lifecycle.to_string(), next_revision.as_i64()],
+                    "INSERT INTO clustering_muc_rooms (room_jid, waddle_id, channel_id, config_json, lifecycle_id, revision, config_lifecycle_id, config_revision) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+                    crate::db_params![room_jid.to_string(), waddle_id.as_str().to_string(), channel_id.as_str().to_string(), config_json, lifecycle.to_string(), next_revision.as_i64(), lifecycle.to_string(), next_revision.as_i64()],
                 ).await.map_err(Self::commit_error)?;
                 for entry in initial_affiliations {
                     Self::write_commit_affiliation(&mut tx, room_jid, entry).await?;
@@ -1695,8 +1851,8 @@ impl PostgresMucRoomStore {
                 let config_json =
                     serde_json::to_string(config).map_err(|_| commit_database_error())?;
                 let affected = tx.execute(
-                    "UPDATE clustering_muc_rooms SET waddle_id = ?, channel_id = ?, config_json = ?, lifecycle_id = ?, revision = ?, updated_at = now() WHERE room_jid = ?",
-                    crate::db_params![waddle_id.as_str().to_string(), channel_id.as_str().to_string(), config_json, lifecycle.to_string(), next_revision.as_i64(), room_jid.to_string()],
+                    "UPDATE clustering_muc_rooms SET waddle_id = ?, channel_id = ?, config_json = ?, lifecycle_id = ?, revision = ?, config_lifecycle_id = ?, config_revision = ?, updated_at = now() WHERE room_jid = ?",
+                    crate::db_params![waddle_id.as_str().to_string(), channel_id.as_str().to_string(), config_json, lifecycle.to_string(), next_revision.as_i64(), lifecycle.to_string(), next_revision.as_i64(), room_jid.to_string()],
                 ).await.map_err(Self::commit_error)?;
                 if affected == 0 {
                     return Err(RoomCommitError::StateMissing);
@@ -1731,9 +1887,18 @@ impl PostgresMucRoomStore {
             } => {
                 let config_json =
                     serde_json::to_string(config).map_err(|_| commit_database_error())?;
-                tx.execute("UPDATE clustering_muc_rooms SET config_json = ?, lifecycle_id = ?, revision = ?, updated_at = now() WHERE room_jid = ?", crate::db_params![config_json, lifecycle.to_string(), next_revision.as_i64(), room_jid.to_string()]).await.map_err(Self::commit_error)?;
+                let affected = tx.execute("UPDATE clustering_muc_rooms SET config_json = ?, lifecycle_id = ?, revision = ?, config_lifecycle_id = ?, config_revision = ?, updated_at = now() WHERE room_jid = ?", crate::db_params![config_json, lifecycle.to_string(), next_revision.as_i64(), lifecycle.to_string(), next_revision.as_i64(), room_jid.to_string()]).await.map_err(Self::commit_error)?;
+                if affected == 0 {
+                    return Err(RoomCommitError::StateMissing);
+                }
                 for entry in affiliations {
                     Self::write_commit_affiliation(&mut tx, room_jid, entry).await?;
+                }
+            }
+            RoomDurableMutation::Projection(_) => {
+                let affected = tx.execute("UPDATE clustering_muc_rooms SET lifecycle_id = ?, revision = ?, updated_at = now() WHERE room_jid = ?", crate::db_params![lifecycle.to_string(), next_revision.as_i64(), room_jid.to_string()]).await.map_err(Self::commit_error)?;
+                if affected == 0 {
+                    return Err(RoomCommitError::StateMissing);
                 }
             }
             RoomDurableMutation::Destroy { .. }
@@ -1913,7 +2078,7 @@ impl PostgresMucRoomStore {
     ) -> Result<Option<DurableRoomState>, XmppError> {
         let mut room_rows = tx
             .query(
-                "SELECT waddle_id, channel_id, config_json, subject_json, lifecycle_id, revision FROM \
+                "SELECT waddle_id, channel_id, config_json, subject_json, lifecycle_id, revision, config_lifecycle_id, config_revision FROM \
                  clustering_muc_rooms WHERE room_jid = ?",
                 crate::db_params![room_jid.to_string()],
             )
@@ -1928,6 +2093,8 @@ impl PostgresMucRoomStore {
         let subject_json: Option<String> = row.get(3).map_err(db_err)?;
         let lifecycle_id: Option<String> = row.get(4).map_err(db_err)?;
         let revision: Option<i64> = row.get(5).map_err(db_err)?;
+        let config_lifecycle_id: Option<String> = row.get(6).map_err(db_err)?;
+        let config_revision: Option<i64> = row.get(7).map_err(db_err)?;
         let config: RoomConfig = serde_json::from_str(&config_json).map_err(|error| {
             XmppError::internal(format!("durable room config decode failed: {error}"))
         })?;
@@ -1986,6 +2153,27 @@ impl PostgresMucRoomStore {
                         })?;
                     let revision = RoomRevision::from_stored(revision).ok_or_else(|| {
                         XmppError::internal("durable room revision decode failed".to_string())
+                    })?;
+                    Ok::<RoomCommittedCoordinates, XmppError>(RoomCommittedCoordinates {
+                        lifecycle,
+                        revision,
+                    })
+                })
+                .transpose()?,
+            config_coordinates: config_lifecycle_id
+                .zip(config_revision)
+                .map(|(lifecycle_id, revision)| {
+                    let lifecycle = uuid::Uuid::parse_str(&lifecycle_id)
+                        .map(RoomLifecycleId::from_uuid)
+                        .map_err(|_| {
+                            XmppError::internal(
+                                "durable room config lifecycle decode failed".to_string(),
+                            )
+                        })?;
+                    let revision = RoomRevision::from_stored(revision).ok_or_else(|| {
+                        XmppError::internal(
+                            "durable room config revision decode failed".to_string(),
+                        )
                     })?;
                     Ok::<RoomCommittedCoordinates, XmppError>(RoomCommittedCoordinates {
                         lifecycle,
@@ -2302,13 +2490,17 @@ mod tests {
     use kameo::{actor::Spawn, error::SendError};
     use std::io;
     use std::sync::Arc;
-    use waddle_xmpp::muc::durable::{ChannelId, WaddleId};
+    use waddle_xmpp::muc::durable::{
+        ChannelId, MucOccupantNick, OccupancyLeaveCause, RoomPinProjection, RoomProjection,
+        WaddleId,
+    };
     use waddle_xmpp::muc::room_actor::{
         GetSnapshot, RestoreDurableRoomState, RoomActor, SetSubject, SetSubjectError,
     };
     use waddle_xmpp::muc::RoomSubjectTexts;
     use waddle_xmpp::muc::{
-        MucRoom, RoomConfig, RoomLifecycleState, RoomMutationEffects, RoomRevision,
+        MucConfigStatusCode, MucRoom, RoomConfig, RoomLifecycleState, RoomMutationEffects,
+        RoomRevision,
     };
     use waddle_xmpp::ownership::{ClaimStore, NodeIdentity, StalePredicate};
     use waddle_xmpp::xep::xep0421::OccupantIdSecret;
@@ -2318,6 +2510,131 @@ mod tests {
             uuid::Uuid::new_v4().to_string(),
             uuid::Uuid::new_v4().to_string(),
         )
+    }
+
+    fn occupancy_join_projection() -> RoomDurableMutation {
+        RoomDurableMutation::Projection(RoomProjection::OccupancyJoin {
+            occupant: "alice@example.com/desktop".parse().expect("valid full JID"),
+            nick: MucOccupantNick::new("alice".to_string()).expect("valid nick"),
+        })
+    }
+
+    struct ProjectionTestRoom {
+        store: PostgresMucRoomStore,
+        db: Database,
+        room_jid: BareJid,
+        fence: RoomClaimFenceContext,
+        create: RoomCommitOutcome,
+    }
+
+    async fn projection_test_room(prefix: &str) -> Option<ProjectionTestRoom> {
+        let (store, claim_store, db, me) = clean_store().await?;
+        let room_jid = unique_room_jid(prefix);
+        let entity = Entity::new(EntityType::RoomActor, room_jid.to_string());
+        let epoch = claim_store
+            .ensure_claimed(&entity, &me)
+            .await
+            .expect("claim room");
+        let fence = RoomClaimFenceContext::new(entity, me.clone(), epoch);
+        store.record_claim_fence(&room_jid, fence.clone());
+        let create = store
+            .commit_room_mutation(
+                &room_jid,
+                &fence,
+                RoomDurableMutation::Create {
+                    waddle_id: waddle_id("waddle-projection-test"),
+                    channel_id: channel_id("channel-projection-test"),
+                    config: RoomConfig::default(),
+                    initial_affiliations: vec![],
+                },
+                RoomMutationEffects::none(),
+            )
+            .await
+            .expect("create room");
+        Some(ProjectionTestRoom {
+            store,
+            db,
+            room_jid,
+            fence,
+            create,
+        })
+    }
+
+    fn projection_config_intent(name: &str) -> RoomDurableMutation {
+        RoomDurableMutation::Config {
+            config: RoomConfig {
+                name: name.to_string(),
+                ..RoomConfig::default()
+            },
+            waddle_id: waddle_id("waddle-projection-test"),
+            channel_id: channel_id("channel-projection-test"),
+        }
+    }
+
+    fn projection_config_effects(room_jid: BareJid) -> RoomMutationEffects {
+        RoomMutationEffects::config(
+            room_jid,
+            vec![MucConfigStatusCode::NonPrivacyConfigurationChange],
+            vec![],
+        )
+    }
+
+    #[test]
+    fn projection_fingerprints_are_stable_and_distinct() {
+        let occupant: jid::FullJid = "alice@example.com/desktop".parse().expect("valid full JID");
+        let nick = MucOccupantNick::new("alice".to_string()).expect("valid nick");
+        let stanza_id = waddle_xmpp_core::xep0359::StanzaId::new(
+            "archive-1",
+            "muc.example.com".parse().expect("valid assigning JID"),
+        );
+        let projections = [
+            RoomProjection::OccupancyJoin {
+                occupant: occupant.clone(),
+                nick: nick.clone(),
+            },
+            RoomProjection::OccupancyLeave {
+                occupant,
+                nick,
+                cause: OccupancyLeaveCause::Explicit,
+            },
+            RoomProjection::Pin(RoomPinProjection::Pin {
+                target: stanza_id.clone(),
+            }),
+            RoomProjection::Pin(RoomPinProjection::Unpin { target: stanza_id }),
+        ];
+        let fence = RoomClaimFenceContext::new(
+            Entity::new(
+                EntityType::RoomActor,
+                "projection-shape@muc.example.com".to_string(),
+            ),
+            node_identity(),
+            ClaimEpoch(1),
+        );
+        let fingerprints = projections.map(|projection| {
+            mutation_fingerprint(&fence, &RoomDurableMutation::Projection(projection))
+                .expect("projection fingerprint")
+        });
+        assert_eq!(
+            fingerprints[0],
+            mutation_fingerprint(&fence, &occupancy_join_projection())
+                .expect("repeat join fingerprint"),
+            "the same typed projection must retain its acknowledgement fingerprint"
+        );
+        let kinds = fingerprints
+            .iter()
+            .map(|fingerprint| {
+                serde_json::from_str::<serde_json::Value>(fingerprint).expect("fingerprint JSON")
+                    ["intent"]["projection"]["kind"]
+                    .as_str()
+                    .expect("projection kind")
+                    .to_string()
+            })
+            .collect::<std::collections::HashSet<_>>();
+        assert_eq!(
+            kinds.len(),
+            4,
+            "each projection kind needs its own fingerprint"
+        );
     }
 
     async fn live_stealer(db: &crate::db::Database) -> NodeIdentity {
@@ -3105,8 +3422,8 @@ mod tests {
             published,
             "a differently-shaped idempotent retry must keep the published coordinates"
         );
-        let publish_fingerprint =
-            mutation_fingerprint(&RoomDurableMutation::Publish).expect("publish fingerprint");
+        let publish_fingerprint = mutation_fingerprint(&fence, &RoomDurableMutation::Publish)
+            .expect("publish fingerprint");
         let mut fingerprint_rows = db
             .guard()
             .await
@@ -3650,8 +3967,8 @@ mod tests {
             3,
             "idempotent activation must not bump the revision"
         );
-        let activate_fingerprint =
-            mutation_fingerprint(&RoomDurableMutation::Activate).expect("activate fingerprint");
+        let activate_fingerprint = mutation_fingerprint(&fence, &RoomDurableMutation::Activate)
+            .expect("activate fingerprint");
         let mut reactivated_rows = db
             .guard()
             .await
@@ -3836,7 +4153,10 @@ mod tests {
             legacy_row
                 .get::<Option<String>>(0)
                 .expect("legacy activate fingerprint"),
-            Some(activate_fingerprint),
+            Some(
+                mutation_fingerprint(&legacy_null_fence, &RoomDurableMutation::Activate)
+                    .expect("legacy activate fingerprint under its own fence")
+            ),
             "legacy active lifecycle must gain exact-intent proof before an ambiguous activate acknowledgement"
         );
         assert_eq!(
@@ -4204,7 +4524,7 @@ mod tests {
         let lifecycle = RoomLifecycleId::generate();
         let revision = RoomRevision::initial();
         let foreign_fingerprint =
-            mutation_fingerprint(&foreign_intent).expect("fingerprint foreign intent");
+            mutation_fingerprint(&fence, &foreign_intent).expect("fingerprint foreign intent");
         let foreign_config = serde_json::to_string(match &foreign_intent {
             RoomDurableMutation::Create { config, .. } => config,
             _ => unreachable!("foreign intent is a create"),
@@ -4261,6 +4581,147 @@ mod tests {
                 .expect("reconcile mismatched intent"),
             CommitReconciliation::NotCommitted,
             "read-back must reject a different committed mutation at the same durable coordinates"
+        );
+    }
+
+    /// #1647 (codex final round): `Activate` is state-idempotent — when the
+    /// lifecycle already sits in `active` at the same coordinates, an
+    /// ambiguous acknowledgement reconciles as Committed even though the
+    /// stored proof belongs to a predecessor owner's fence (an idempotent
+    /// re-activate never overwrites it).
+    #[tokio::test]
+    async fn ambiguous_idempotent_activate_reconciles_against_a_predecessors_proof() {
+        let _guard = clustering_control_plane_table_lock().lock().await;
+        let Some((store, claim_store, db, me)) = clean_store().await else {
+            return;
+        };
+        let room_jid = unique_room_jid("ambiguous-idempotent-activate");
+        let entity = Entity::new(EntityType::RoomActor, room_jid.to_string());
+        let epoch = claim_store
+            .ensure_claimed(&entity, &me)
+            .await
+            .expect("claim room");
+        let fence = RoomClaimFenceContext::new(entity.clone(), me, epoch);
+        store.record_claim_fence(&room_jid, fence.clone());
+        // The PREDECESSOR owner activated this lifecycle and left its proof.
+        let predecessor_fence =
+            RoomClaimFenceContext::new(entity, node_identity(), ClaimEpoch(epoch.0 + 1));
+        let predecessor_proof =
+            mutation_fingerprint(&predecessor_fence, &RoomDurableMutation::Activate)
+                .expect("predecessor activate proof");
+        let lifecycle = RoomLifecycleId::generate();
+        let revision = RoomRevision::initial();
+        db.guard()
+            .await
+            .expect("guard")
+            .execute(
+                "INSERT INTO clustering_muc_room_lifecycles \
+                 (lifecycle_id, room_jid, revision, state, mutation_fingerprint) \
+                 VALUES (?, ?, ?, ?, ?)",
+                crate::db_params![
+                    lifecycle.to_string(),
+                    room_jid.to_string(),
+                    revision.as_i64(),
+                    RoomLifecycleState::Active.as_db_str(),
+                    predecessor_proof,
+                ],
+            )
+            .await
+            .expect("persist predecessor-activated lifecycle");
+        db.guard()
+            .await
+            .expect("guard")
+            .execute(
+                "INSERT INTO clustering_muc_rooms \
+                 (room_jid, waddle_id, channel_id, config_json, lifecycle_id, revision) \
+                 VALUES (?, ?, ?, ?, ?, ?)",
+                crate::db_params![
+                    room_jid.to_string(),
+                    "w",
+                    "c",
+                    "{}",
+                    lifecycle.to_string(),
+                    revision.as_i64(),
+                ],
+            )
+            .await
+            .expect("persist active room row");
+
+        assert_eq!(
+            store
+                .reconcile_ambiguous_commit(
+                    &room_jid,
+                    &fence,
+                    &RoomDurableMutation::Activate,
+                    RoomCommittedCoordinates {
+                        lifecycle,
+                        revision
+                    },
+                )
+                .await
+                .expect("reconcile idempotent activate"),
+            CommitReconciliation::Committed,
+            "the already-active target state reconciles as committed under any owner's proof"
+        );
+    }
+
+    /// #1647 (codex round 22): two owners can commit byte-identical
+    /// projections at the same next revision across an ownership transfer.
+    /// Reconciliation must never mistake the other owner's row for its own.
+    #[tokio::test]
+    async fn reconciliation_rejects_the_same_intent_committed_under_a_different_fence() {
+        let _guard = clustering_control_plane_table_lock().lock().await;
+        let Some((store, claim_store, db, me)) = clean_store().await else {
+            return;
+        };
+        let room_jid = unique_room_jid("ambiguous-foreign-fence");
+        let entity = Entity::new(EntityType::RoomActor, room_jid.to_string());
+        let epoch = claim_store
+            .ensure_claimed(&entity, &me)
+            .await
+            .expect("claim room");
+        let fence = RoomClaimFenceContext::new(entity.clone(), me, epoch);
+        store.record_claim_fence(&room_jid, fence.clone());
+        let intent = occupancy_join_projection();
+        let foreign_fence =
+            RoomClaimFenceContext::new(entity, node_identity(), ClaimEpoch(epoch.0 + 1));
+        let foreign_fingerprint = mutation_fingerprint(&foreign_fence, &intent)
+            .expect("fingerprint the foreign owner's identical commit");
+        let lifecycle = RoomLifecycleId::generate();
+        let revision = RoomRevision::initial();
+        db.guard()
+            .await
+            .expect("guard")
+            .execute(
+                "INSERT INTO clustering_muc_room_lifecycles \
+                 (lifecycle_id, room_jid, revision, state, mutation_fingerprint) \
+                 VALUES (?, ?, ?, ?, ?)",
+                crate::db_params![
+                    lifecycle.to_string(),
+                    room_jid.to_string(),
+                    revision.as_i64(),
+                    RoomLifecycleState::Active.as_db_str(),
+                    foreign_fingerprint,
+                ],
+            )
+            .await
+            .expect("persist the foreign owner's lifecycle row");
+
+        assert_eq!(
+            store
+                .reconcile_ambiguous_commit(
+                    &room_jid,
+                    &fence,
+                    &intent,
+                    RoomCommittedCoordinates {
+                        lifecycle,
+                        revision
+                    },
+                )
+                .await
+                .expect("reconcile against the foreign owner's identical commit"),
+            CommitReconciliation::NotCommitted,
+            "an identical payload committed under another owner's fence is NOT this owner's commit"
         );
     }
 
@@ -5092,6 +5553,760 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn projection_commit_bumps_head_without_advancing_config_coordinates() {
+        let _guard = clustering_control_plane_table_lock().lock().await;
+        let Some((store, claim_store, _db, me)) = clean_store().await else {
+            return;
+        };
+        let room_jid = unique_room_jid("lane-1647-projection");
+        let entity = Entity::new(EntityType::RoomActor, room_jid.to_string());
+        let epoch = claim_store
+            .ensure_claimed(&entity, &me)
+            .await
+            .expect("claim");
+        let fence = RoomClaimFenceContext::new(entity, me, epoch);
+        store.record_claim_fence(&room_jid, fence.clone());
+
+        let create = store
+            .commit_room_mutation(
+                &room_jid,
+                &fence,
+                RoomDurableMutation::Create {
+                    waddle_id: waddle_id("waddle-projection"),
+                    channel_id: channel_id("channel-projection"),
+                    config: RoomConfig::default(),
+                    initial_affiliations: vec![],
+                },
+                RoomMutationEffects::none(),
+            )
+            .await
+            .expect("create room");
+        let projection = store
+            .commit_room_mutation(
+                &room_jid,
+                &fence,
+                occupancy_join_projection(),
+                RoomMutationEffects::none(),
+            )
+            .await
+            .expect("commit projection");
+
+        assert_eq!(projection.coordinates.revision.as_i64(), 2);
+        let state = store
+            .load_room_state_fenced(&room_jid, &fence)
+            .await
+            .expect("load state")
+            .expect("stored room");
+        assert_eq!(state.coordinates, Some(projection.coordinates));
+        assert_eq!(state.config_coordinates, Some(create.coordinates));
+    }
+
+    #[tokio::test]
+    async fn projection_commit_on_dormant_lifecycle_is_state_missing() {
+        let _guard = clustering_control_plane_table_lock().lock().await;
+        let Some((store, claim_store, _db, me)) = clean_store().await else {
+            return;
+        };
+        let room_jid = unique_room_jid("lane-1647-projection-dormant");
+        let entity = Entity::new(EntityType::RoomActor, room_jid.to_string());
+        let epoch = claim_store
+            .ensure_claimed(&entity, &me)
+            .await
+            .expect("claim");
+        let fence = RoomClaimFenceContext::new(entity, me, epoch);
+        store.record_claim_fence(&room_jid, fence.clone());
+        store
+            .commit_room_mutation(
+                &room_jid,
+                &fence,
+                RoomDurableMutation::Create {
+                    waddle_id: waddle_id("waddle-projection-dormant"),
+                    channel_id: channel_id("channel-projection-dormant"),
+                    config: RoomConfig::default(),
+                    initial_affiliations: vec![],
+                },
+                RoomMutationEffects::none(),
+            )
+            .await
+            .expect("create room");
+        store
+            .commit_room_mutation(
+                &room_jid,
+                &fence,
+                RoomDurableMutation::Dormancy,
+                RoomMutationEffects::none(),
+            )
+            .await
+            .expect("make room dormant");
+
+        assert!(matches!(
+            store
+                .commit_room_mutation(
+                    &room_jid,
+                    &fence,
+                    occupancy_join_projection(),
+                    RoomMutationEffects::none(),
+                )
+                .await,
+            Err(RoomCommitError::StateMissing)
+        ));
+    }
+
+    #[tokio::test]
+    async fn projection_commit_is_rejected_when_claim_is_lost() {
+        let _guard = clustering_control_plane_table_lock().lock().await;
+        let Some((store, claim_store, _db, me)) = clean_store().await else {
+            return;
+        };
+        let room_jid = unique_room_jid("lane-1647-projection-lost-claim");
+        let entity = Entity::new(EntityType::RoomActor, room_jid.to_string());
+        let epoch = claim_store
+            .ensure_claimed(&entity, &me)
+            .await
+            .expect("claim");
+        let fence = RoomClaimFenceContext::new(entity.clone(), me.clone(), epoch);
+        store.record_claim_fence(&room_jid, fence.clone());
+        claim_store
+            .release(&entity, &me, epoch)
+            .await
+            .expect("release claim");
+
+        assert!(matches!(
+            store
+                .commit_room_mutation(
+                    &room_jid,
+                    &fence,
+                    occupancy_join_projection(),
+                    RoomMutationEffects::none(),
+                )
+                .await,
+            Err(RoomCommitError::NotOwner)
+        ));
+    }
+
+    #[tokio::test]
+    async fn members_only_enforcement_updates_config_coordinates() {
+        let _guard = clustering_control_plane_table_lock().lock().await;
+        let Some((store, claim_store, _db, me)) = clean_store().await else {
+            return;
+        };
+        let room_jid = unique_room_jid("lane-1647-members-only-coordinates");
+        let entity = Entity::new(EntityType::RoomActor, room_jid.to_string());
+        let epoch = claim_store
+            .ensure_claimed(&entity, &me)
+            .await
+            .expect("claim");
+        let fence = RoomClaimFenceContext::new(entity, me, epoch);
+        store.record_claim_fence(&room_jid, fence.clone());
+        store
+            .commit_room_mutation(
+                &room_jid,
+                &fence,
+                RoomDurableMutation::Create {
+                    waddle_id: waddle_id("waddle-members-only"),
+                    channel_id: channel_id("channel-members-only"),
+                    config: RoomConfig::default(),
+                    initial_affiliations: vec![],
+                },
+                RoomMutationEffects::none(),
+            )
+            .await
+            .expect("create room");
+        let config = RoomConfig {
+            members_only: true,
+            ..Default::default()
+        };
+        let enforcement = store
+            .commit_room_mutation(
+                &room_jid,
+                &fence,
+                RoomDurableMutation::MembersOnlyEnforcement {
+                    config,
+                    affiliations: vec![],
+                },
+                RoomMutationEffects::none(),
+            )
+            .await
+            .expect("enforce members-only");
+
+        let state = store
+            .load_room_state_fenced(&room_jid, &fence)
+            .await
+            .expect("load state")
+            .expect("stored room");
+        assert_eq!(state.config_coordinates, Some(enforcement.coordinates));
+    }
+
+    #[tokio::test]
+    async fn projection_commit_follows_claim_then_lifecycle_lock_order_and_bumps_revision() {
+        let _guard = clustering_control_plane_table_lock().lock().await;
+        let Some(room) = projection_test_room("lane-1647-projection-lock-order").await else {
+            return;
+        };
+        let ProjectionTestRoom {
+            store,
+            db,
+            room_jid,
+            fence,
+            create,
+            ..
+        } = room;
+        let store = Arc::new(store);
+        let mut claim_blocker = db.begin().await.expect("begin claim blocker");
+        let mut claim_rows = claim_blocker
+            .query(
+                "SELECT 1 FROM clustering_claims WHERE entity = ? FOR UPDATE",
+                crate::db_params![room_entity_key(&room_jid)],
+            )
+            .await
+            .expect("lock claim");
+        assert!(claim_rows.next().await.expect("claim row").is_some());
+        drop(claim_rows);
+        let mut lifecycle_blocker = db.begin().await.expect("begin lifecycle blocker");
+        let mut lifecycle_rows = lifecycle_blocker
+            .query(
+                "SELECT 1 FROM clustering_muc_room_lifecycles WHERE room_jid = ? FOR UPDATE",
+                crate::db_params![room_jid.to_string()],
+            )
+            .await
+            .expect("lock lifecycle");
+        assert!(lifecycle_rows
+            .next()
+            .await
+            .expect("lifecycle row")
+            .is_some());
+        drop(lifecycle_rows);
+
+        let projection = tokio::spawn({
+            let store = Arc::clone(&store);
+            let room_jid = room_jid.clone();
+            let fence = fence.clone();
+            async move {
+                store
+                    .commit_room_mutation(
+                        &room_jid,
+                        &fence,
+                        occupancy_join_projection(),
+                        RoomMutationEffects::none(),
+                    )
+                    .await
+            }
+        });
+        wait_for_lock_waiter(&db, "FOR SHARE").await;
+        assert!(
+            !projection.is_finished(),
+            "projection must acquire its claim share lock before touching the lifecycle"
+        );
+        claim_blocker.commit().await.expect("release claim blocker");
+        wait_for_lock_waiter(
+            &db,
+            "SELECT lifecycle_id, revision, state, mutation_fingerprint",
+        )
+        .await;
+        assert!(
+            !projection.is_finished(),
+            "projection must block on the lifecycle only after its claim share lock succeeds"
+        );
+        lifecycle_blocker
+            .commit()
+            .await
+            .expect("release lifecycle blocker");
+        let projection = projection
+            .await
+            .expect("projection task")
+            .expect("projection commit");
+        assert_eq!(
+            projection.coordinates.revision,
+            create.coordinates.revision.next().expect("second revision")
+        );
+    }
+
+    #[tokio::test]
+    async fn projection_commit_on_tombstoned_lifecycle_is_rejected() {
+        let _guard = clustering_control_plane_table_lock().lock().await;
+        let Some(room) = projection_test_room("lane-1647-projection-tombstone").await else {
+            return;
+        };
+        let destroy = room
+            .store
+            .commit_room_mutation(
+                &room.room_jid,
+                &room.fence,
+                RoomDurableMutation::Destroy {
+                    completion_attempt: None,
+                },
+                RoomMutationEffects::none(),
+            )
+            .await
+            .expect("destroy room");
+        assert!(matches!(
+            room.store
+                .commit_room_mutation(
+                    &room.room_jid,
+                    &room.fence,
+                    occupancy_join_projection(),
+                    RoomMutationEffects::none(),
+                )
+                .await,
+            Err(RoomCommitError::StateMissing)
+        ));
+        let conn = room.db.guard().await.expect("guard");
+        let mut rows = conn
+            .query(
+                "SELECT revision FROM clustering_muc_room_lifecycles WHERE lifecycle_id = ?",
+                crate::db_params![destroy.coordinates.lifecycle.to_string()],
+            )
+            .await
+            .expect("query tombstone revision");
+        let revision: i64 = rows
+            .next()
+            .await
+            .expect("read tombstone revision")
+            .expect("tombstone row")
+            .get(0)
+            .expect("decode tombstone revision");
+        assert_eq!(revision, destroy.coordinates.revision.as_i64());
+    }
+
+    #[tokio::test]
+    async fn projection_fingerprint_reconciles_lost_ack() {
+        let _guard = clustering_control_plane_table_lock().lock().await;
+        let Some(room) = projection_test_room("lane-1647-projection-lost-ack").await else {
+            return;
+        };
+        let intent = occupancy_join_projection();
+        let committed = room
+            .store
+            .commit_room_mutation(
+                &room.room_jid,
+                &room.fence,
+                intent.clone(),
+                RoomMutationEffects::none(),
+            )
+            .await
+            .expect("commit projection before simulated acknowledgement loss");
+        assert_eq!(
+            room.store
+                .reconcile_ambiguous_commit(
+                    &room.room_jid,
+                    &room.fence,
+                    &intent,
+                    committed.coordinates,
+                )
+                .await
+                .expect("reconcile lost projection acknowledgement"),
+            CommitReconciliation::Committed
+        );
+    }
+
+    #[tokio::test]
+    async fn projection_bump_does_not_strand_pending_config_effect_rows() {
+        let _guard = clustering_control_plane_table_lock().lock().await;
+        let Some(room) = projection_test_room("lane-1647-projection-outbox").await else {
+            return;
+        };
+        let config = room
+            .store
+            .commit_room_mutation(
+                &room.room_jid,
+                &room.fence,
+                projection_config_intent("with pending effect"),
+                projection_config_effects(room.room_jid.clone()),
+            )
+            .await
+            .expect("commit config with effects");
+        let reservation = config.reservation.clone().expect("config reservation");
+        let projection = room
+            .store
+            .commit_room_mutation(
+                &room.room_jid,
+                &room.fence,
+                occupancy_join_projection(),
+                RoomMutationEffects::none(),
+            )
+            .await
+            .expect("projection after config");
+        let state = room
+            .store
+            .load_room_state_fenced(&room.room_jid, &room.fence)
+            .await
+            .expect("load room")
+            .expect("stored room");
+        assert_eq!(state.coordinates, Some(projection.coordinates));
+        assert_eq!(state.config_coordinates, Some(config.coordinates));
+        assert_eq!(
+            room.store
+                .room_effect_outbox
+                .staged_reservation_for(config.coordinates.lifecycle, config.coordinates.revision)
+                .await
+                .expect("find staged config reservation"),
+            Some(reservation.clone())
+        );
+        room.store
+            .room_effect_outbox
+            .arm_reservation(&reservation, crate::time::now_ms())
+            .await
+            .expect("arm config reservation");
+        assert!(
+            room.store
+                .room_effect_outbox
+                .claim_due_head(crate::time::now_ms(), 8)
+                .await
+                .expect("claim due config effect")
+                .into_iter()
+                .any(
+                    |claim| claim.row.key.lifecycle == config.coordinates.lifecycle
+                        && claim.row.key.revision == config.coordinates.revision
+                ),
+            "a projection head bump must not make an earlier config effect unclaimable"
+        );
+    }
+
+    #[tokio::test]
+    async fn config_coordinates_persist_and_restore_across_retirement() {
+        let _guard = clustering_control_plane_table_lock().lock().await;
+        let Some(room) = projection_test_room("lane-1647-config-coordinates").await else {
+            return;
+        };
+        let config = room
+            .store
+            .commit_room_mutation(
+                &room.room_jid,
+                &room.fence,
+                projection_config_intent("durable config coordinates"),
+                RoomMutationEffects::none(),
+            )
+            .await
+            .expect("commit config");
+        let projection = room
+            .store
+            .commit_room_mutation(
+                &room.room_jid,
+                &room.fence,
+                occupancy_join_projection(),
+                RoomMutationEffects::none(),
+            )
+            .await
+            .expect("commit projection");
+        let restored = room
+            .store
+            .load_room_state_fenced(&room.room_jid, &room.fence)
+            .await
+            .expect("restore durable room")
+            .expect("durable room exists");
+        assert_eq!(restored.config_coordinates, Some(config.coordinates));
+        assert_eq!(restored.coordinates, Some(projection.coordinates));
+    }
+
+    #[tokio::test]
+    async fn create_seeds_config_coordinates() {
+        let _guard = clustering_control_plane_table_lock().lock().await;
+        let Some(room) = projection_test_room("lane-1647-create-config-coordinates").await else {
+            return;
+        };
+        let state = room
+            .store
+            .load_room_state_fenced(&room.room_jid, &room.fence)
+            .await
+            .expect("load created room")
+            .expect("created room");
+        assert_eq!(state.coordinates, Some(room.create.coordinates));
+        assert_eq!(state.config_coordinates, Some(room.create.coordinates));
+    }
+
+    #[tokio::test]
+    async fn concurrent_same_room_projections_serialize_into_distinct_revisions() {
+        let _guard = clustering_control_plane_table_lock().lock().await;
+        let Some(room) = projection_test_room("lane-1647-projection-fan-in").await else {
+            return;
+        };
+        let store = Arc::new(room.store);
+        let barrier = Arc::new(tokio::sync::Barrier::new(16));
+        let mut tasks = Vec::new();
+        for _ in 0..16 {
+            let store = Arc::clone(&store);
+            let barrier = Arc::clone(&barrier);
+            let room_jid = room.room_jid.clone();
+            let fence = room.fence.clone();
+            tasks.push(tokio::spawn(async move {
+                barrier.wait().await;
+                tokio::time::timeout(std::time::Duration::from_secs(30), async move {
+                    store
+                        .commit_room_mutation(
+                            &room_jid,
+                            &fence,
+                            occupancy_join_projection(),
+                            RoomMutationEffects::none(),
+                        )
+                        .await
+                })
+                .await
+            }));
+        }
+        let mut revisions = Vec::new();
+        for task in tasks {
+            let committed = task
+                .await
+                .expect("projection task")
+                .expect("projection must not time out")
+                .expect("projection commit");
+            revisions.push(committed.coordinates.revision.as_i64());
+        }
+        revisions.sort_unstable();
+        assert_eq!(revisions, (2..=17).collect::<Vec<_>>());
+    }
+
+    #[tokio::test]
+    async fn projection_commit_racing_destroy_either_orders_cleanly() {
+        let _guard = clustering_control_plane_table_lock().lock().await;
+        let Some(room) = projection_test_room("lane-1647-projection-destroy-race").await else {
+            return;
+        };
+        let store = Arc::new(room.store);
+        let barrier = Arc::new(tokio::sync::Barrier::new(2));
+        let projection = tokio::spawn({
+            let store = Arc::clone(&store);
+            let barrier = Arc::clone(&barrier);
+            let room_jid = room.room_jid.clone();
+            let fence = room.fence.clone();
+            async move {
+                barrier.wait().await;
+                tokio::time::timeout(std::time::Duration::from_secs(30), async move {
+                    store
+                        .commit_room_mutation(
+                            &room_jid,
+                            &fence,
+                            occupancy_join_projection(),
+                            RoomMutationEffects::none(),
+                        )
+                        .await
+                })
+                .await
+            }
+        });
+        let destroy = tokio::spawn({
+            let store = Arc::clone(&store);
+            let barrier = Arc::clone(&barrier);
+            let room_jid = room.room_jid.clone();
+            let fence = room.fence.clone();
+            async move {
+                barrier.wait().await;
+                tokio::time::timeout(std::time::Duration::from_secs(30), async move {
+                    store
+                        .commit_room_mutation(
+                            &room_jid,
+                            &fence,
+                            RoomDurableMutation::Destroy {
+                                completion_attempt: None,
+                            },
+                            RoomMutationEffects::none(),
+                        )
+                        .await
+                })
+                .await
+            }
+        });
+        let projection = projection
+            .await
+            .expect("projection task")
+            .expect("projection must not time out");
+        let destroy = destroy
+            .await
+            .expect("destroy task")
+            .expect("destroy must not time out")
+            .expect("destroy commit");
+        match projection {
+            Ok(projection) => assert!(
+                projection.coordinates.revision < destroy.coordinates.revision,
+                "a successful projection must precede the destroy tombstone"
+            ),
+            Err(RoomCommitError::StateMissing) => {}
+            Err(error) => panic!("projection race returned unexpected error: {error:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn recreated_lifecycle_rejects_projection_under_old_lifecycle_coordinates() {
+        let _guard = clustering_control_plane_table_lock().lock().await;
+        let Some(room) = projection_test_room("lane-1647-old-projection-coordinates").await else {
+            return;
+        };
+        let old_projection = room
+            .store
+            .commit_room_mutation(
+                &room.room_jid,
+                &room.fence,
+                occupancy_join_projection(),
+                RoomMutationEffects::none(),
+            )
+            .await
+            .expect("commit old lifecycle projection");
+        room.store
+            .commit_room_mutation(
+                &room.room_jid,
+                &room.fence,
+                RoomDurableMutation::Destroy {
+                    completion_attempt: None,
+                },
+                RoomMutationEffects::none(),
+            )
+            .await
+            .expect("destroy old lifecycle");
+        let recreated = room
+            .store
+            .commit_room_mutation(
+                &room.room_jid,
+                &room.fence,
+                RoomDurableMutation::Create {
+                    waddle_id: waddle_id("waddle-projection-test"),
+                    channel_id: channel_id("channel-projection-test"),
+                    config: RoomConfig::default(),
+                    initial_affiliations: vec![],
+                },
+                RoomMutationEffects::none(),
+            )
+            .await
+            .expect("recreate room");
+        assert_ne!(
+            recreated.coordinates.lifecycle, old_projection.coordinates.lifecycle,
+            "recreation must mint a new lifecycle"
+        );
+        assert_ne!(
+            room.store
+                .reconcile_ambiguous_commit(
+                    &room.room_jid,
+                    &room.fence,
+                    &occupancy_join_projection(),
+                    old_projection.coordinates,
+                )
+                .await
+                .expect("reconcile old lifecycle projection"),
+            CommitReconciliation::Committed,
+            "an old lifecycle coordinate never reconciles as committed against the recreated lifecycle (Unknown/NotCommitted both fail closed; the actor-level ForeignCapability check refuses the capability)"
+        );
+    }
+
+    #[tokio::test]
+    async fn destroy_supersedes_pending_effects_after_projection_gaps() {
+        let _guard = clustering_control_plane_table_lock().lock().await;
+        let Some(room) = projection_test_room("lane-1647-projection-destroy-effects").await else {
+            return;
+        };
+        let config = room
+            .store
+            .commit_room_mutation(
+                &room.room_jid,
+                &room.fence,
+                projection_config_intent("pending before destroy"),
+                projection_config_effects(room.room_jid.clone()),
+            )
+            .await
+            .expect("commit config effect");
+        for _ in 0..3 {
+            room.store
+                .commit_room_mutation(
+                    &room.room_jid,
+                    &room.fence,
+                    occupancy_join_projection(),
+                    RoomMutationEffects::none(),
+                )
+                .await
+                .expect("commit projection gap");
+        }
+        let destroy = room
+            .store
+            .commit_room_mutation(
+                &room.room_jid,
+                &room.fence,
+                RoomDurableMutation::Destroy {
+                    completion_attempt: None,
+                },
+                RoomMutationEffects::none(),
+            )
+            .await
+            .expect("destroy after projection gaps");
+        assert_eq!(
+            destroy.coordinates.revision.as_i64(),
+            config.coordinates.revision.as_i64() + 4
+        );
+        assert!(
+            room.store
+                .room_effect_outbox
+                .reservation_for_revision(config.coordinates.lifecycle, config.coordinates.revision)
+                .await
+                .expect("query pending config effect")
+                .is_none(),
+            "destroy must remove unleased non-terminal effects despite intervening projections"
+        );
+    }
+
+    #[tokio::test]
+    async fn members_only_fused_path_recovers_across_projection_bump() {
+        let _guard = clustering_control_plane_table_lock().lock().await;
+        let Some(room) = projection_test_room("lane-1647-members-only-projection").await else {
+            return;
+        };
+        let config = RoomConfig {
+            members_only: true,
+            ..Default::default()
+        };
+        let enforcement = room
+            .store
+            .commit_room_mutation(
+                &room.room_jid,
+                &room.fence,
+                RoomDurableMutation::MembersOnlyEnforcement {
+                    config,
+                    affiliations: vec![],
+                },
+                RoomMutationEffects::members_only_enforcement(
+                    room.room_jid.clone(),
+                    vec![],
+                    vec![],
+                    vec![],
+                    vec![],
+                    vec![MucConfigStatusCode::NonPrivacyConfigurationChange],
+                    vec![],
+                ),
+            )
+            .await
+            .expect("commit members-only enforcement");
+        let projection = room
+            .store
+            .commit_room_mutation(
+                &room.room_jid,
+                &room.fence,
+                occupancy_join_projection(),
+                RoomMutationEffects::none(),
+            )
+            .await
+            .expect("projection after enforcement");
+        let state = room
+            .store
+            .load_room_state_fenced(&room.room_jid, &room.fence)
+            .await
+            .expect("load room")
+            .expect("stored room");
+        assert_eq!(state.coordinates, Some(projection.coordinates));
+        assert_eq!(state.config_coordinates, Some(enforcement.coordinates));
+        assert_eq!(
+            room.store
+                .room_effect_outbox
+                .reservation_for_revision(
+                    enforcement.coordinates.lifecycle,
+                    state
+                        .config_coordinates
+                        .expect("config coordinates")
+                        .revision,
+                )
+                .await
+                .expect("recover members-only reservation"),
+            enforcement.reservation,
+            "members-only recovery must look up effects by config coordinates, not the head"
+        );
+    }
+
+    #[tokio::test]
     async fn open_blocks_until_the_muc_schema_advisory_lock_is_released() {
         let _guard = clustering_control_plane_table_lock().lock().await;
         let Some(db) = fresh_muc_schema_database().await else {
@@ -5188,7 +6403,12 @@ mod tests {
                 "lifecycle check constraint {constraint} must exist"
             );
         }
-        for column in ["lifecycle_id", "revision"] {
+        for column in [
+            "lifecycle_id",
+            "revision",
+            "config_lifecycle_id",
+            "config_revision",
+        ] {
             assert_eq!(
                 column_nullability(&db, "clustering_muc_rooms", column).await,
                 Some("YES".to_string()),
@@ -5198,6 +6418,8 @@ mod tests {
         for constraint in [
             "clustering_muc_rooms_lifecycle_pairing",
             "clustering_muc_rooms_revision_min",
+            "clustering_muc_rooms_config_lifecycle_pairing",
+            "clustering_muc_rooms_config_revision_min",
         ] {
             assert!(
                 named_check_exists(&db, "clustering_muc_rooms", constraint).await,

@@ -42,6 +42,7 @@ use crate::XmppError;
 
 mod effects;
 pub mod lifecycle;
+pub mod projection;
 
 pub use effects::{
     AdminPresenceKind, DestroyPassword, DestroyReason, DestroyRecipient, MucOccupantNick,
@@ -49,20 +50,23 @@ pub use effects::{
     RoomEffectStagingClass, RoomMutationEffects,
 };
 pub use lifecycle::{
-    DestroyAttemptId, EphemeralProjectionAuthorization, RoomCommittedCoordinates, RoomEffectIntent,
-    RoomEffectOrdinal, RoomLifecycleId, RoomLifecycleState, RoomMutationCommit, RoomRevision,
+    DestroyAttemptId, EphemeralProjectionAuthorization, NotAProjectionCommit, RoomCommitKind,
+    RoomCommittedCoordinates, RoomEffectIntent, RoomEffectOrdinal, RoomLifecycleId,
+    RoomLifecycleState, RoomMutationCommit, RoomRevision,
 };
+pub use projection::{OccupancyLeaveCause, RoomPinProjection, RoomProjection, RoomProjectionKind};
 
 pub(crate) fn mint_room_mutation_commit(
     fence: RoomClaimFenceContext,
     coordinates: RoomCommittedCoordinates,
+    kind: RoomCommitKind,
 ) -> RoomMutationCommit {
-    lifecycle::mint_room_mutation_commit(fence, coordinates)
+    lifecycle::mint_room_mutation_commit(fence, coordinates, kind)
 }
 
 pub(crate) fn authorize_ephemeral_projection(
     commit: RoomMutationCommit,
-) -> EphemeralProjectionAuthorization {
+) -> Result<EphemeralProjectionAuthorization, NotAProjectionCommit> {
     lifecycle::authorize_ephemeral_projection(commit)
 }
 
@@ -186,6 +190,18 @@ pub enum RoomDurableMutation {
     },
     Dormancy,
     Activate,
+    /// Commit a claim-fenced lifecycle revision that authorizes one deferred
+    /// in-memory projection (#1647). Carries no authoritative room state.
+    Projection(RoomProjection),
+}
+
+impl RoomCommitKind {
+    pub(crate) const fn of(intent: &RoomDurableMutation) -> Self {
+        match intent {
+            RoomDurableMutation::Projection(projection) => Self::Projection(projection.kind()),
+            _ => Self::State,
+        }
+    }
 }
 
 /// Sanitized database failure marker for room commits.
@@ -269,6 +285,12 @@ impl RoomClaimFenceContext {
 #[derive(Debug, Clone)]
 pub struct DurableRoomState {
     pub coordinates: Option<RoomCommittedCoordinates>,
+    /// Coordinates of the last config-effect-producing commit (`Create`,
+    /// `Config`, `MembersOnlyEnforcement`). Distinct from the lifecycle head
+    /// so outbox config recovery survives actor retirement even when later
+    /// non-config commits (subject, affiliations, #1647 projections) advance
+    /// the head (#1647).
+    pub config_coordinates: Option<RoomCommittedCoordinates>,
     pub waddle_id: String,
     pub channel_id: String,
     pub config: RoomConfig,

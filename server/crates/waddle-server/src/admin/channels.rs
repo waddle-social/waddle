@@ -21,6 +21,7 @@
 //! `room_registry` (`waddle_xmpp::muc::room_registry_actor::*`), and
 //! `muc_domain` (used to construct fresh room JIDs on `create`).
 
+use std::collections::HashSet;
 use std::{
     collections::BTreeSet,
     sync::{Arc, OnceLock},
@@ -470,17 +471,27 @@ pub async fn register(
     }
     {
         let state = Arc::clone(&app_state);
+        let websocket_state = Arc::clone(&websocket_state);
         let connections = Arc::clone(&connection_registry);
         let user_registry = user_registry.clone();
         let sm_sessions = Arc::clone(&sm_session_registry);
         registry
             .register(NODE_GROUP_DM_LEAVE, "Leave group DM", move |ctx| {
                 let state = Arc::clone(&state);
+                let websocket_state = Arc::clone(&websocket_state);
                 let connections = Arc::clone(&connections);
                 let user_registry = user_registry.clone();
                 let sm_sessions = Arc::clone(&sm_sessions);
                 async move {
-                    handle_group_dm_leave(ctx, state, connections, user_registry, sm_sessions).await
+                    handle_group_dm_leave(
+                        ctx,
+                        state,
+                        websocket_state,
+                        connections,
+                        user_registry,
+                        sm_sessions,
+                    )
+                    .await
                 }
             })
             .await;
@@ -629,6 +640,7 @@ async fn handle_group_dm_create(ctx: CommandContext, state: Arc<AppState>) -> Co
 async fn handle_group_dm_leave(
     ctx: CommandContext,
     state: Arc<AppState>,
+    websocket_state: Arc<WebSocketState>,
     connections: Arc<ConnectionRegistry>,
     user_registry: ActorRef<waddle_xmpp::registry::UserRegistryActor>,
     sm_sessions: Arc<InMemorySmSessionRegistry>,
@@ -651,6 +663,7 @@ async fn handle_group_dm_leave(
     };
     match run_group_dm_leave(
         &state,
+        &websocket_state.deps.protocol.pending_local_muc_departures,
         &connections,
         &user_registry,
         &sm_sessions,
@@ -2138,6 +2151,7 @@ async fn run_group_dm_create(
 
 async fn run_group_dm_leave(
     state: &AppState,
+    pending_local_muc_departures: &Arc<crate::server::routes::websocket::PendingLocalMucDepartures>,
     connections: &ConnectionRegistry,
     user_registry: &ActorRef<waddle_xmpp::registry::UserRegistryActor>,
     sm_sessions: &InMemorySmSessionRegistry,
@@ -2164,7 +2178,7 @@ async fn run_group_dm_leave(
     }
 
     let caller_bare = caller_full_jid.to_bare();
-    let actor = state
+    let mut actor = state
         .room_registry
         .ask(GetRoom {
             room_jid: args.room_jid.clone(),
@@ -2183,10 +2197,6 @@ async fn run_group_dm_leave(
         })
         .await
         .map_err(send_err("room actor GetAffiliation"))?;
-    let pre_leave_snapshot = actor
-        .ask(GetSnapshot)
-        .await
-        .map_err(send_err("room actor GetSnapshot"))?;
     let left = pre_leave_affiliation >= Affiliation::Member;
     if !left {
         return Ok(GroupDmLeaveResult {
@@ -2212,8 +2222,6 @@ async fn run_group_dm_leave(
     }
     resources.sort();
     resources.dedup();
-    let mut reconciled_leave_effects = None;
-
     delete_group_dm_member_tuple(state, &channel_id, &caller_bare)
         .await
         .map_err(|error| Box::new(CommandResult::Error(error)))?;
@@ -2232,7 +2240,7 @@ async fn run_group_dm_leave(
             kameo::error::SendError::HandlerError(
                 waddle_xmpp::muc::room_actor::AffiliationMutationError::CommitOutcomeUnknown,
             ) => {
-                !reconcile_ambiguous_group_dm_leave(
+                match reconcile_ambiguous_group_dm_leave(
                     state,
                     &args.room_jid,
                     &channel_id,
@@ -2241,6 +2249,17 @@ async fn run_group_dm_leave(
                     &caller_bare,
                 )
                 .await
+                {
+                    Some(recovered) => {
+                        // The successor carries the transplanted roster, so
+                        // the ordinary occupancy-leave loop below removes the
+                        // leaver's sessions with the full retained-retry
+                        // machinery — no synthesized effects.
+                        actor = recovered;
+                        false
+                    }
+                    None => true,
+                }
             }
             _ => true,
         };
@@ -2254,52 +2273,126 @@ async fn run_group_dm_leave(
             )
             .await;
         }
-        if matches!(
-            error,
-            kameo::error::SendError::HandlerError(
-                waddle_xmpp::muc::room_actor::AffiliationMutationError::CommitOutcomeUnknown
-            )
-        ) && !should_restore_membership
-        {
-            // Recovery replaces the actor from durable state, which has no
-            // live roster. Preserve the pre-recovery roster and synthesize
-            // the same unavailable effects only after the exact leave is
-            // proven committed.
-            reconciled_leave_effects = Some(group_dm_leave_effects_from_snapshot(
-                &pre_leave_snapshot.room,
-                &resources,
-            ));
-        }
         if should_restore_membership {
             return Err(send_err("room actor ChangeAffiliation")(error));
         }
     }
-    if let Some(effects) = reconciled_leave_effects {
-        for (resource, effect) in effects {
-            broadcast_group_dm_leave(
-                state,
-                connections,
-                &resource,
-                live_resource_set.contains(&resource),
-                &effect,
-            );
-        }
-    } else {
+    {
         for resource in resources {
-            if let Some(outcome) = actor
-                .ask(LeaveByRealJid {
+            let attempt = waddle_xmpp::muc::room_actor::LeaveAttemptId::generate();
+            let in_flight = crate::server::routes::websocket::LocalDepartureItem::InFlight {
+                room: args.room_jid.clone(),
+                jid: resource.clone(),
+                cause: waddle_xmpp::muc::durable::OccupancyLeaveCause::Administrative,
+                attempt,
+                notified: HashSet::new(),
+            };
+            pending_local_muc_departures.record_in_flight(in_flight.clone());
+            let _in_flight_lease = crate::server::routes::websocket::InFlightLease::hold(
+                Arc::clone(pending_local_muc_departures),
+                in_flight.clone(),
+            );
+            match crate::server::routes::websocket::ask_leave_bounded(
+                &actor,
+                LeaveByRealJid {
                     sender_jid: resource.clone(),
-                })
-                .await
-                .map_err(send_err("room actor LeaveByRealJid"))?
+                    cause: waddle_xmpp::muc::durable::OccupancyLeaveCause::Administrative,
+                    session: waddle_xmpp::muc::room_actor::LeaveSessionSelector::Any,
+                    attempt,
+                    origin: waddle_xmpp::muc::room_actor::LeaveOrigin::Fresh,
+                },
+            )
+            .await
             {
-                broadcast_group_dm_leave(
-                    state,
-                    connections,
-                    &resource,
-                    live_resource_set.contains(&resource),
-                    &GroupDmLeaveEffect::from(&outcome),
-                );
+                Ok(waddle_xmpp::muc::room_actor::LeaveDisposition::Left(outcome)) => {
+                    broadcast_group_dm_leave(
+                        state,
+                        connections,
+                        &resource,
+                        live_resource_set.contains(&resource),
+                        &GroupDmLeaveEffect::from(outcome.as_ref()),
+                    );
+                    crate::server::routes::websocket::acknowledge_in_flight(
+                        pending_local_muc_departures,
+                        &actor,
+                        &in_flight,
+                        outcome.acknowledge,
+                    );
+                }
+                Ok(waddle_xmpp::muc::room_actor::LeaveDisposition::Suppressed {
+                    attempt: acknowledge,
+                    ..
+                }) => {
+                    crate::server::routes::websocket::acknowledge_in_flight(
+                        pending_local_muc_departures,
+                        &actor,
+                        &in_flight,
+                        acknowledge,
+                    );
+                }
+                Ok(
+                    waddle_xmpp::muc::room_actor::LeaveDisposition::NotOccupant
+                    | waddle_xmpp::muc::room_actor::LeaveDisposition::Superseded,
+                ) => {
+                    pending_local_muc_departures.complete_in_flight(&in_flight);
+                }
+                Ok(waddle_xmpp::muc::room_actor::LeaveDisposition::Deferred { .. }) => {
+                    pending_local_muc_departures.complete_in_flight(&in_flight);
+                    pending_local_muc_departures.record(
+                        crate::server::routes::websocket::LocalDepartureItem::RoomDeparture {
+                            room: args.room_jid.clone(),
+                            jid: resource,
+                            cause: waddle_xmpp::muc::durable::OccupancyLeaveCause::Administrative,
+                            selector: waddle_xmpp::muc::room_actor::LeaveSessionSelector::Any,
+                            attempt,
+                            notified: HashSet::new(),
+                        },
+                    );
+                }
+                Err(crate::server::routes::websocket::LeaveAskFailure::Timeout) => {
+                    // A timeout proves nothing about the actor's seal: retain
+                    // the administrative departure itself for the janitor.
+                    pending_local_muc_departures.complete_in_flight(&in_flight);
+                    pending_local_muc_departures.record(
+                        crate::server::routes::websocket::LocalDepartureItem::RoomDeparture {
+                            room: args.room_jid.clone(),
+                            jid: resource,
+                            cause: waddle_xmpp::muc::durable::OccupancyLeaveCause::Administrative,
+                            selector: waddle_xmpp::muc::room_actor::LeaveSessionSelector::Any,
+                            attempt,
+                            notified: HashSet::new(),
+                        },
+                    );
+                }
+                Err(crate::server::routes::websocket::LeaveAskFailure::Handler(
+                    waddle_xmpp::muc::room_actor::RoomActorError::RoomSealed,
+                )) => {
+                    pending_local_muc_departures.complete_in_flight(&in_flight);
+                    pending_local_muc_departures.record(
+                        crate::server::routes::websocket::LocalDepartureItem::ConfirmRetired {
+                            room: args.room_jid.clone(),
+                            jid: resource,
+                            actor: actor.id(),
+                            cause: waddle_xmpp::muc::durable::OccupancyLeaveCause::Administrative,
+                            selector: waddle_xmpp::muc::room_actor::LeaveSessionSelector::Any,
+                            attempt,
+                            notified: HashSet::new(),
+                        },
+                    );
+                }
+                Err(_) => {
+                    pending_local_muc_departures.complete_in_flight(&in_flight);
+                    pending_local_muc_departures.record(
+                        crate::server::routes::websocket::LocalDepartureItem::RoomDeparture {
+                            room: args.room_jid.clone(),
+                            jid: resource,
+                            cause: waddle_xmpp::muc::durable::OccupancyLeaveCause::Administrative,
+                            selector: waddle_xmpp::muc::room_actor::LeaveSessionSelector::Any,
+                            attempt,
+                            notified: HashSet::new(),
+                        },
+                    );
+                }
             }
         }
     }
@@ -2390,6 +2483,7 @@ async fn run_group_dm_rename(
             cancelled_commit_recovery.disarm();
             let Some(recovered) = reconcile_ambiguous_group_dm_rename_commit(
                 state,
+                websocket_state,
                 &args.room_jid,
                 &channel_id,
                 &record,
@@ -2647,8 +2741,7 @@ fn find_occupant_for_full_jid<'a>(
     })
 }
 
-struct GroupDmLeaveEffect {
-    nick: String,
+pub(crate) struct GroupDmLeaveEffect {
     affiliation: Affiliation,
     leaving_room_jid: FullJid,
     remaining_occupants: Vec<FullJid>,
@@ -2658,7 +2751,6 @@ struct GroupDmLeaveEffect {
 impl From<&waddle_xmpp::muc::room_actor::LeaveOutcome> for GroupDmLeaveEffect {
     fn from(outcome: &waddle_xmpp::muc::room_actor::LeaveOutcome) -> Self {
         Self {
-            nick: outcome.nick.clone(),
             affiliation: outcome.affiliation,
             leaving_room_jid: outcome.leaving_room_jid.clone(),
             remaining_occupants: outcome.remaining_occupants.clone(),
@@ -2667,59 +2759,14 @@ impl From<&waddle_xmpp::muc::room_actor::LeaveOutcome> for GroupDmLeaveEffect {
     }
 }
 
-fn group_dm_leave_effects_from_snapshot(
-    room: &waddle_xmpp::muc::MucRoom,
-    resources: &[FullJid],
-) -> Vec<(FullJid, GroupDmLeaveEffect)> {
-    let mut room = room.clone();
-    let mut effects = Vec::new();
-    for resource in resources {
-        let Some(occupant) = room.find_occupant_by_real_jid(resource).cloned() else {
-            continue;
-        };
-        let sessions = room.get_occupant_sessions(&occupant.nick);
-        if !sessions.iter().any(|session| session == resource) {
-            continue;
-        }
-        let remaining_occupants = room
-            .occupants
-            .values()
-            .flat_map(|occupant| room.get_occupant_sessions(&occupant.nick))
-            .filter(|session| session != resource)
-            .collect();
-        let removed_last_session = room
-            .remove_occupant_session(&occupant.nick, resource)
-            .expect("occupant session was present in the snapshot");
-        let leaving_room_jid = room
-            .room_jid
-            .with_resource_str(&occupant.nick)
-            .expect("accepted MUC nick is a valid resource");
-        effects.push((
-            resource.clone(),
-            GroupDmLeaveEffect {
-                nick: occupant.nick,
-                affiliation: occupant.affiliation,
-                leaving_room_jid,
-                remaining_occupants,
-                removed_last_session,
-            },
-        ));
-    }
-    effects
-}
-
-fn broadcast_group_dm_leave(
+pub(crate) fn broadcast_group_dm_leave(
     state: &AppState,
     connections: &ConnectionRegistry,
     leaving_real_jid: &FullJid,
     notify_self: bool,
     outcome: &GroupDmLeaveEffect,
 ) {
-    let from_jid = outcome
-        .leaving_room_jid
-        .to_bare()
-        .with_resource_str(&outcome.nick)
-        .unwrap_or_else(|_| outcome.leaving_room_jid.clone());
+    let from_jid = outcome.leaving_room_jid.clone();
     let sender_bare = leaving_real_jid.to_bare();
     let identity = OccupantIdentity {
         bare_jid: &sender_bare,
@@ -3009,73 +3056,123 @@ impl CancelledConfigAskRecoveryGuard {
     }
 
     async fn recover(self) {
-        let snapshot = match self
-            .actor
-            .ask(waddle_xmpp::muc::room_actor::GetSnapshot)
-            .reply_timeout(ADMIN_ROOM_ASK_TIMEOUT)
-            .await
-        {
-            Ok(snapshot) => snapshot,
-            Err(error) => {
-                tracing::warn!(
-                    room = %self.room_jid,
-                    ?error,
-                    "cancelled admin/group-DM config ask recovery could not snapshot the room"
-                );
-                return;
-            }
-        };
-        let exact_intended_config = snapshot.config_revision == self.expected_revision
-            && snapshot.room.config == self.intended_config;
-        let recovered_reservation = if let Some(coordinates) = snapshot.durable_coordinates {
-            let revision_offset = snapshot
-                .config_revision
-                .saturating_sub(self.expected_revision);
-            let Some(reconciled_revision) = (snapshot.config_revision >= self.expected_revision)
-                .then(|| {
-                    i64::try_from(revision_offset).ok().and_then(|offset| {
-                        coordinates
-                            .revision
-                            .as_i64()
-                            .checked_sub(offset)
-                            .and_then(waddle_xmpp::muc::RoomRevision::from_stored)
-                    })
-                })
-                .flatten()
-            else {
-                return;
-            };
+        // The original actor may be busy past the ask bound: keep retrying
+        // with backoff while it is alive (a committed reservation left inert
+        // would block the lifecycle FIFO, and a members-only flip would stay
+        // applied without its enforcement).
+        let mut timeout_attempt = 0_i64;
+        let snapshot = loop {
             match self
-                .outbox
-                .staged_reservation_for(coordinates.lifecycle, reconciled_revision)
+                .actor
+                .ask(waddle_xmpp::muc::room_actor::GetSnapshot)
+                .mailbox_timeout(ADMIN_ROOM_ASK_TIMEOUT)
+                .reply_timeout(ADMIN_ROOM_ASK_TIMEOUT)
                 .await
             {
-                Ok(reservation) => reservation,
+                Ok(snapshot) => break snapshot,
+                Err(kameo::error::SendError::Timeout(_)) => {
+                    timeout_attempt = timeout_attempt.saturating_add(1);
+                    let backoff_ms = crate::room_effect_outbox::retry_delay_ms(timeout_attempt);
+                    tracing::warn!(
+                        room = %self.room_jid,
+                        timeout_attempt,
+                        backoff_ms,
+                        "cancelled admin/group-DM config ask recovery snapshot timed out; retrying"
+                    );
+                    tokio::time::sleep(std::time::Duration::from_millis(backoff_ms.max(0) as u64))
+                        .await;
+                }
                 Err(error) => {
                     tracing::warn!(
                         room = %self.room_jid,
-                        %error,
-                        "cancelled admin/group-DM config ask recovery could not load the staged reservation"
+                        ?error,
+                        "cancelled admin/group-DM config ask recovery could not snapshot the room"
                     );
                     return;
                 }
             }
+        };
+        let exact_intended_config = snapshot.config_revision == self.expected_revision
+            && snapshot.room.config == self.intended_config;
+        let recovered_reservations: Vec<waddle_xmpp::muc::RoomEffectReservation> = if let Some(
+            coordinates,
+        ) =
+            snapshot.config_durable_coordinates
+        {
+            // The durable config coordinates identify the LAST config commit
+            // exactly. If a later config commit already superseded the
+            // intended one, no arithmetic on lifecycle revisions can single
+            // out the intended row (projections, subject and affiliation
+            // commits also advance the head) — so arm EVERY still-inert row
+            // of this lifecycle up to the latest config commit: each such
+            // row describes a durably committed config (arm-by-default) and
+            // an unarmed one would head-of-line-block the lifecycle FIFO.
+            let exact = snapshot.config_revision == self.expected_revision;
+            if !exact {
+                tracing::warn!(
+                    room = %self.room_jid,
+                    config_revision = snapshot.config_revision,
+                    expected_revision = self.expected_revision,
+                    "cancelled admin/group-DM config ask recovery: the intended config was superseded; arming every committed inert row up to the latest config commit"
+                );
+            }
+            // A transient outbox lookup failure must not strand committed inert rows
+            // at the lifecycle FIFO head (nothing else arms live-origin rows): retry
+            // with backoff before giving up.
+            let mut lookup_attempt = 0_i64;
+            loop {
+                match if exact {
+                    self.outbox
+                        .staged_reservation_for(coordinates.lifecycle, coordinates.revision)
+                        .await
+                        .map(|reservation| reservation.into_iter().collect())
+                } else {
+                    self.outbox
+                        .staged_reservations_up_to(coordinates.lifecycle, coordinates.revision)
+                        .await
+                } {
+                    Ok(reservations) => break reservations,
+                    // Retry until the lookup succeeds: the producing process is still
+                    // alive, so no other supervisor will ever arm these rows; the backoff
+                    // is capped at MAX_RETRY_DELAY_MS and this task is detached.
+                    Err(error) => {
+                        lookup_attempt += 1;
+                        let backoff_ms = crate::room_effect_outbox::retry_delay_ms(lookup_attempt);
+                        tracing::warn!(
+                            room = %self.room_jid,
+                            %error,
+                            lookup_attempt,
+                            backoff_ms,
+                            "cancelled admin/group-DM config ask recovery: staged reservation lookup failed; retrying"
+                        );
+                        tokio::time::sleep(std::time::Duration::from_millis(
+                            backoff_ms.max(0) as u64
+                        ))
+                        .await;
+                    }
+                }
+            }
         } else {
-            None
+            Vec::new()
         };
         match &self.action {
             CancelledConfigAskRecoveryAction::ArmReservation { arm_supervisor } => {
-                if let Some(reservation) = recovered_reservation {
+                for reservation in recovered_reservations {
                     arm_supervisor.clone().arm(reservation);
                 }
             }
             CancelledConfigAskRecoveryAction::DeferMembersOnly(seed) => {
                 if exact_intended_config {
                     seed.clone()
-                        .run(self.actor.clone(), recovered_reservation)
+                        .run(
+                            self.actor.clone(),
+                            recovered_reservations.into_iter().next(),
+                        )
                         .await;
-                } else if let Some(reservation) = recovered_reservation {
-                    seed.arm_supervisor.clone().arm(reservation);
+                } else {
+                    for reservation in recovered_reservations {
+                        seed.arm_supervisor.clone().arm(reservation);
+                    }
                 }
             }
         }
@@ -3360,40 +3457,53 @@ async fn recover_actor_with_merged_live_roster(
     // snapshot after it is inherently racy. Capture the live roster first;
     // unlike the prior fallback, an unreadable actor is a visible recovery
     // failure rather than permission to replay an older caller snapshot.
-    let stale_room = stale_actor
+    let stale_snapshot = stale_actor
         .ask(GetSnapshot)
         .await
-        .map(|snapshot| snapshot.room)
         .map_err(send_err(snapshot_context))?;
-    let demoted = state
-        .room_registry
-        .ask(
-            waddle_xmpp::muc::room_registry_actor::DemoteRoomIfExactActor {
-                room_jid: room_jid.clone(),
-                actor_ref: stale_actor.clone(),
-            },
-        )
-        .await
-        .map_err(send_err(
-            "room_registry ask DemoteRoomIfExactActor during reconciliation",
-        ))?;
-    if !demoted {
-        return Err(unavailable(
-            "This room changed while its update was being reconciled; please retry.",
-        ));
-    }
-    let recovered = state
+    // Demote the exact stale actor and publish the successor in ONE registry
+    // turn: no cleanup or janitor lookup can observe the room as absent in
+    // between and mistake the handoff for convergence.
+    let fallback_config = spec.config.clone();
+    let recovered = match state
         .room_registry
         .ask(GetOrCreateRoomWithLiveRoster {
             room_jid: room_jid.clone(),
             waddle_id: waddle_xmpp::muc::durable::WaddleId::new(spec.waddle_id.to_string()),
             channel_id: waddle_xmpp::muc::durable::ChannelId::new(spec.channel_id.to_string()),
             config: spec.config,
-            live_room_restore: stale_room,
+            live_room_restore: stale_snapshot.room,
+            occupancy_revision: stale_snapshot.occupancy_revision,
+            departures: stale_snapshot.departures.clone(),
+            demote_first: Some(stale_actor.clone()),
         })
         .await
-        .map_err(send_err(get_or_create_context))?
-        .actor_ref;
+    {
+        Ok(acquisition) => acquisition.actor_ref,
+        Err(kameo::error::SendError::HandlerError(
+            waddle_xmpp::muc::room_registry_actor::RoomRegistryError::StaleActorNotCurrent(_),
+        )) => {
+            // A successor was already published (a concurrent join reaped the
+            // sealed stale actor and re-created the room). Follow the CURRENT
+            // actor instead of failing recovery: bailing out here would
+            // leave the committed staged row with no arming owner — the
+            // caller has already disarmed its cancellation guard — blocking
+            // the room's effect FIFO until this process dies (#1647, codex
+            // round 29). Mirrors the group-DM and owner-config fallbacks.
+            state
+                .room_registry
+                .ask(GetOrCreateRoom {
+                    room_jid: room_jid.clone(),
+                    waddle_id: spec.waddle_id.to_string(),
+                    channel_id: spec.channel_id.to_string(),
+                    config: fallback_config,
+                })
+                .await
+                .map_err(send_err(get_or_create_context))?
+                .actor_ref
+        }
+        Err(error) => return Err(send_err(get_or_create_context)(error)),
+    };
     run_recovery_publication_hook(room_jid, &recovered).await;
     let snapshot = recovered
         .ask(GetSnapshot)
@@ -3409,40 +3519,66 @@ async fn recover_group_dm_actor_after_demote(
     record: &XmppChannelRecord,
     stale_actor: &ActorRef<RoomActor>,
 ) -> Result<ActorRef<RoomActor>, AdminErr> {
-    let demoted = state
+    // Same atomic demote-and-publish as the merged-roster recovery: the
+    // sealed stale actor's final roster is transplanted (its occupancy is
+    // the truth for the successor), affiliations are rehydrated below.
+    let stale_snapshot = stale_actor.ask(GetSnapshot).await.map_err(send_err(
+        "room actor GetSnapshot during group-DM reconciliation",
+    ))?;
+    let actor = match state
         .room_registry
-        .ask(
-            waddle_xmpp::muc::room_registry_actor::DemoteRoomIfExactActor {
-                room_jid: room_jid.clone(),
-                actor_ref: stale_actor.clone(),
-            },
-        )
-        .await
-        .map_err(send_err(
-            "room_registry ask DemoteRoomIfExactActor during reconciliation",
-        ))?;
-    if !demoted {
-        return Err(unavailable(format!(
-            "group-DM reconciliation for {room_jid} lost the exact stale actor"
-        )));
-    }
-    let actor = state
-        .room_registry
-        .ask(GetOrCreateRoom {
+        .ask(GetOrCreateRoomWithLiveRoster {
             room_jid: room_jid.clone(),
-            waddle_id: waddle_xmpp::admin::CHANNEL_TYPE_GROUP_DM.to_string(),
-            channel_id: channel_id.to_string(),
+            waddle_id: waddle_xmpp::muc::durable::WaddleId::new(
+                waddle_xmpp::admin::CHANNEL_TYPE_GROUP_DM.to_string(),
+            ),
+            channel_id: waddle_xmpp::muc::durable::ChannelId::new(channel_id.to_string()),
             config: group_dm_record_config(record),
+            live_room_restore: stale_snapshot.room,
+            occupancy_revision: stale_snapshot.occupancy_revision,
+            departures: stale_snapshot.departures,
+            demote_first: Some(stale_actor.clone()),
         })
         .await
-        .map_err(send_err(
-            "room_registry ask GetOrCreateRoom during reconciliation",
-        ))?
-        .actor_ref;
+    {
+        Ok(acquisition) => acquisition.actor_ref,
+        Err(kameo::error::SendError::HandlerError(
+            waddle_xmpp::muc::room_registry_actor::RoomRegistryError::StaleActorNotCurrent(_),
+        )) => {
+            // A successor was already published: a concurrent join reaped the
+            // sealed stale actor and re-created the room. Follow the CURRENT
+            // actor instead of failing recovery — its durable hydration is
+            // the affiliation truth the caller inspects, and failing here
+            // would repersist a membership whose removal committed. Mirrors
+            // the owner-config recovery's StaleActorNotCurrent fallback.
+            state
+                .room_registry
+                .ask(GetOrCreateRoom {
+                    room_jid: room_jid.clone(),
+                    waddle_id: waddle_xmpp::admin::CHANNEL_TYPE_GROUP_DM.to_string(),
+                    channel_id: channel_id.to_string(),
+                    config: group_dm_record_config(record),
+                })
+                .await
+                .map_err(send_err(
+                    "room_registry ask GetOrCreateRoom following the published successor",
+                ))?
+                .actor_ref
+        }
+        Err(error) => {
+            return Err(send_err(
+                "room_registry ask GetOrCreateRoomWithLiveRoster during reconciliation",
+            )(error))
+        }
+    };
     hydrate_group_dm_member_affiliations(state, &actor, channel_id).await?;
     Ok(actor)
 }
 
+/// `Some(successor)` when the ambiguous leave commit is proven durable: the
+/// successor carries the transplanted live roster (the leaver's sessions
+/// included), so the caller MUST still run the ordinary occupancy-leave path
+/// against it — reconciliation only settles the affiliation.
 async fn reconcile_ambiguous_group_dm_leave(
     state: &AppState,
     room_jid: &BareJid,
@@ -3450,19 +3586,20 @@ async fn reconcile_ambiguous_group_dm_leave(
     record: &XmppChannelRecord,
     stale_actor: &ActorRef<RoomActor>,
     caller_bare: &BareJid,
-) -> bool {
+) -> Option<ActorRef<RoomActor>> {
     let Ok(actor) =
         recover_group_dm_actor_after_demote(state, room_jid, channel_id, record, stale_actor).await
     else {
-        return false;
+        return None;
     };
-    actor
+    let committed = actor
         .ask(GetAffiliation {
             jid: caller_bare.clone(),
         })
         .await
         .map(|affiliation| affiliation == Affiliation::None)
-        .unwrap_or(false)
+        .unwrap_or(false);
+    committed.then_some(actor)
 }
 
 struct RecoveredGroupDmRenameCommit {
@@ -3473,6 +3610,7 @@ struct RecoveredGroupDmRenameCommit {
 
 async fn reconcile_ambiguous_group_dm_rename_commit(
     state: &AppState,
+    websocket_state: &WebSocketState,
     room_jid: &BareJid,
     channel_id: &str,
     record: &XmppChannelRecord,
@@ -3493,17 +3631,23 @@ async fn reconcile_ambiguous_group_dm_rename_commit(
     )
     .await?;
     if snapshot.room.config == *intended_config {
-        let reservation = if let Some(coordinates) = snapshot.durable_coordinates {
-            crate::room_effect_outbox::RoomEffectOutboxStore::new(state.db_pool.global().clone())
-                .await
-                .map_err(|error| {
-                    internal_err(format!(
-                        "group-DM reservation store initialization failed: {error}"
-                    ))
-                })?
+        let reservation = if let Some(coordinates) = snapshot.config_durable_coordinates {
+            // The shared outbox store (no per-request schema round-trip that
+            // could fail ahead of the retained-arming safety net below).
+            websocket_state
+                .deps
+                .protocol
+                .room_effect_outbox
                 .staged_reservation_for(coordinates.lifecycle, coordinates.revision)
                 .await
                 .map_err(|error| {
+                    // Durable commit with known coordinates: hand the arming
+                    // to a retained retry rather than stranding the inert row.
+                    websocket_state
+                        .deps
+                        .protocol
+                        .room_effect_arm_supervisor
+                        .retain_staged_reservation_arming(room_jid.clone(), coordinates);
                     internal_err(format!("group-DM reservation recovery failed: {error}"))
                 })?
         } else {
@@ -4035,21 +4179,24 @@ async fn run_update(
                     "This channel update outcome is being reconciled; please retry.",
                 ));
             }
-            let reservation = if let Some(coordinates) = snapshot.durable_coordinates {
-                crate::room_effect_outbox::RoomEffectOutboxStore::new(
-                    state.db_pool.global().clone(),
-                )
-                .await
-                .map_err(|error| {
-                    internal_err(format!(
-                        "channel reservation store initialization failed: {error}"
-                    ))
-                })?
-                .staged_reservation_for(coordinates.lifecycle, coordinates.revision)
-                .await
-                .map_err(|error| {
-                    internal_err(format!("channel reservation recovery failed: {error}"))
-                })?
+            let reservation = if let Some(coordinates) = snapshot.config_durable_coordinates {
+                websocket_state
+                    .deps
+                    .protocol
+                    .room_effect_outbox
+                    .staged_reservation_for(coordinates.lifecycle, coordinates.revision)
+                    .await
+                    .map_err(|error| {
+                        websocket_state
+                            .deps
+                            .protocol
+                            .room_effect_arm_supervisor
+                            .retain_staged_reservation_arming(
+                                args.channel_jid.clone(),
+                                coordinates,
+                            );
+                        internal_err(format!("channel reservation recovery failed: {error}"))
+                    })?
             } else {
                 None
             };
@@ -5993,14 +6140,19 @@ mod group_dm_durable_reconciliation_tests {
     use crate::server::AppState;
     use kameo::actor::Spawn;
     use std::collections::HashMap;
-    use std::sync::{Arc, Mutex};
+    use std::sync::{
+        atomic::{AtomicUsize, Ordering},
+        Arc, Mutex,
+    };
     use tokio::sync::mpsc;
     use waddle_xmpp::muc::durable::{
         DurableRoomState, MucDurableFuture, MucDurableStore, RoomCommitDatabaseError,
         RoomCommitError, RoomCommitFuture, RoomCommittedCoordinates, RoomDurableMutation,
         RoomLifecycleId, RoomRevision,
     };
-    use waddle_xmpp::muc::room_actor::Join;
+    use waddle_xmpp::muc::room_actor::{
+        GetSnapshot, Join, JoinAffiliationGrant, JoinWithAffiliation,
+    };
     use waddle_xmpp::muc::room_registry_actor::{
         CreateRoomWithInitialAffiliations, WireClusteringClaims,
     };
@@ -6018,6 +6170,8 @@ mod group_dm_durable_reconciliation_tests {
         DestroyFails,
         AffiliationCommitUnknown,
         ConfigCommitUnknown,
+        ProjectionLeaveSecondOwnershipUnavailableOnce,
+        ProjectionLeaveSecondDelayed,
     }
 
     #[derive(Clone)]
@@ -6060,6 +6214,7 @@ mod group_dm_durable_reconciliation_tests {
         fences: Mutex<HashMap<BareJid, waddle_xmpp::muc::RoomClaimFenceContext>>,
         coordinates: Mutex<HashMap<BareJid, (RoomLifecycleId, i64)>>,
         commit_pause: Mutex<Option<CommitPause>>,
+        projection_leave_attempts: AtomicUsize,
     }
 
     impl TestGroupDmDurableStore {
@@ -6085,6 +6240,7 @@ mod group_dm_durable_reconciliation_tests {
                 fences: Mutex::new(HashMap::new()),
                 coordinates: Mutex::new(HashMap::new()),
                 commit_pause: Mutex::new(None),
+                projection_leave_attempts: AtomicUsize::new(0),
             })
         }
 
@@ -6120,6 +6276,7 @@ mod group_dm_durable_reconciliation_tests {
                         room_jid.clone(),
                         DurableRoomState {
                             coordinates: None,
+                            config_coordinates: None,
                             waddle_id: waddle_id.into_string(),
                             channel_id: channel_id.into_string(),
                             config,
@@ -6153,7 +6310,8 @@ mod group_dm_durable_reconciliation_tests {
                         );
                     }
                 }
-                RoomDurableMutation::Config { config, .. } => {
+                RoomDurableMutation::Config { config, .. }
+                | RoomDurableMutation::MembersOnlyEnforcement { config, .. } => {
                     let mut states = self.states.lock().expect("states lock");
                     let state = states.get_mut(room_jid).expect("room state present");
                     state.config = config;
@@ -6165,9 +6323,17 @@ mod group_dm_durable_reconciliation_tests {
             }
         }
 
-        fn record_coordinates(&self, room_jid: &BareJid, coordinates: RoomCommittedCoordinates) {
+        fn record_coordinates(
+            &self,
+            room_jid: &BareJid,
+            coordinates: RoomCommittedCoordinates,
+            is_config_commit: bool,
+        ) {
             if let Some(state) = self.states.lock().expect("states lock").get_mut(room_jid) {
                 state.coordinates = Some(coordinates);
+                if is_config_commit {
+                    state.config_coordinates = Some(coordinates);
+                }
             }
         }
 
@@ -6212,6 +6378,17 @@ mod group_dm_durable_reconciliation_tests {
             let exact = self.exact_fence_matches(room_jid, fence);
             let mode = self.mode;
             let coordinates = self.next_coordinates(room_jid);
+            let projection_leave_attempt = matches!(
+                &intent,
+                RoomDurableMutation::Projection(
+                    waddle_xmpp::muc::durable::RoomProjection::OccupancyLeave { .. }
+                )
+            )
+            .then(|| {
+                self.projection_leave_attempts
+                    .fetch_add(1, Ordering::SeqCst)
+                    + 1
+            });
             Box::pin(async move {
                 if !exact {
                     return Err(RoomCommitError::NotOwner);
@@ -6270,8 +6447,24 @@ mod group_dm_durable_reconciliation_tests {
                 } else {
                     None
                 };
+                let is_config_commit = matches!(
+                    &intent,
+                    RoomDurableMutation::Create { .. }
+                        | RoomDurableMutation::Config { .. }
+                        | RoomDurableMutation::MembersOnlyEnforcement { .. }
+                );
+                if mode == DurableMode::ProjectionLeaveSecondOwnershipUnavailableOnce
+                    && projection_leave_attempt == Some(2)
+                {
+                    return Err(RoomCommitError::OwnershipUnavailable);
+                }
                 self.apply_mutation(room_jid, intent);
-                self.record_coordinates(room_jid, coordinates);
+                self.record_coordinates(room_jid, coordinates, is_config_commit);
+                if mode == DurableMode::ProjectionLeaveSecondDelayed
+                    && projection_leave_attempt == Some(2)
+                {
+                    tokio::time::sleep(std::time::Duration::from_secs(6)).await;
+                }
                 let pause = { self.commit_pause.lock().expect("commit pause lock").take() };
                 if let Some(pause) = pause {
                     // Each pause has exactly one producer and one test waiter. `notify_one`
@@ -6624,9 +6817,12 @@ mod group_dm_durable_reconciliation_tests {
             .await
             .expect("register live caller resource");
         let sm_sessions = InMemorySmSessionRegistry::new();
+        let pending_local_muc_departures =
+            Arc::new(crate::server::routes::websocket::PendingLocalMucDepartures::default());
 
         let result = run_group_dm_leave(
             &state,
+            &pending_local_muc_departures,
             &connections,
             &user_registry,
             &sm_sessions,
@@ -6663,6 +6859,425 @@ mod group_dm_durable_reconciliation_tests {
             outbound_rx.try_recv().is_ok(),
             "leave presence should be sent even when ambiguous leave commit is reconciled"
         );
+        // The recovered successor carries the transplanted roster: the
+        // ordinary leave loop must have removed the leaver's session, not
+        // just the affiliation (the ghost-occupant regression).
+        let successor = state
+            .room_registry
+            .ask(waddle_xmpp::muc::room_registry_actor::GetRoom {
+                room_jid: room_jid.clone(),
+            })
+            .await
+            .expect("successor lookup")
+            .expect("successor registered");
+        let successor_snapshot = successor
+            .ask(waddle_xmpp::muc::room_actor::GetSnapshot)
+            .await
+            .expect("successor snapshot");
+        assert!(
+            successor_snapshot
+                .room
+                .find_occupant_by_real_jid(&caller_full)
+                .is_none(),
+            "the committed ambiguous leave must remove the leaver's session from the successor"
+        );
+    }
+
+    #[tokio::test]
+    async fn admin_removal_reply_timeout_replays_via_janitor_exactly_once() {
+        let websocket_state =
+            crate::server::routes::websocket::tests::create_test_websocket_state_sharing_app_room_registry().await;
+        let state = websocket_state.deps.app_state.as_ref();
+        let durable_store = TestGroupDmDurableStore::new(DurableMode::ProjectionLeaveSecondDelayed);
+        let claim_store: Arc<dyn ClaimStore> = Arc::new(InProcessClaimStore::new());
+        state
+            .room_registry
+            .ask(WireClusteringClaims {
+                claim_store,
+                node_identity: SharedNodeIdentity::new(NodeIdentity::new(
+                    "group-dm-admin-partial-node",
+                    "group-dm-admin-partial-epoch",
+                )),
+                durable_store: Some(durable_store),
+                rollout_backoff: None,
+            })
+            .await
+            .expect("wire durable group-DM store");
+
+        let room_jid: BareJid = "group-dm-admin-partial@muc.localhost"
+            .parse()
+            .expect("room JID");
+        let member: BareJid = "alice@localhost".parse().expect("member JID");
+        let recipient_bare: BareJid = "bob@localhost".parse().expect("recipient JID");
+        let alice_phone: FullJid = "alice@localhost/phone".parse().expect("alice phone JID");
+        let alice_web: FullJid = "alice@localhost/web".parse().expect("alice web JID");
+        let bob_phone: FullJid = "bob@localhost/phone".parse().expect("bob phone JID");
+        let (_channel_id, actor) = seed_group_dm(
+            state,
+            &room_jid,
+            "Leave",
+            &[member.clone(), recipient_bare.clone()],
+        )
+        .await;
+        actor
+            .ask(JoinWithAffiliation {
+                sender_jid: alice_phone.clone(),
+                nick: "alice".to_string(),
+                affiliation_grant: JoinAffiliationGrant::Resolver(Affiliation::Member),
+                local_domain: "localhost".to_string(),
+                admission_revision: actor
+                    .ask(GetSnapshot)
+                    .await
+                    .expect("snapshot before alice phone join")
+                    .admission_revision,
+            })
+            .await
+            .expect("join alice phone");
+        actor
+            .ask(JoinWithAffiliation {
+                sender_jid: alice_web.clone(),
+                nick: "alice".to_string(),
+                affiliation_grant: JoinAffiliationGrant::Resolver(Affiliation::Member),
+                local_domain: "localhost".to_string(),
+                admission_revision: actor
+                    .ask(GetSnapshot)
+                    .await
+                    .expect("snapshot before alice web join")
+                    .admission_revision,
+            })
+            .await
+            .expect("join alice web");
+        actor
+            .ask(JoinWithAffiliation {
+                sender_jid: bob_phone.clone(),
+                nick: "bob".to_string(),
+                affiliation_grant: JoinAffiliationGrant::Resolver(Affiliation::Member),
+                local_domain: "localhost".to_string(),
+                admission_revision: actor
+                    .ask(GetSnapshot)
+                    .await
+                    .expect("snapshot before bob join")
+                    .admission_revision,
+            })
+            .await
+            .expect("join bob");
+
+        let (alice_phone_tx, mut alice_phone_rx) = mpsc::channel(8);
+        crate::server::routes::websocket::tests::register_test_connection(
+            websocket_state.as_ref(),
+            &alice_phone,
+            alice_phone_tx,
+        )
+        .await;
+        let (alice_web_tx, mut alice_web_rx) = mpsc::channel(8);
+        crate::server::routes::websocket::tests::register_test_connection(
+            websocket_state.as_ref(),
+            &alice_web,
+            alice_web_tx,
+        )
+        .await;
+        let (bob_tx, mut bob_rx) = mpsc::channel(8);
+        crate::server::routes::websocket::tests::register_test_connection(
+            websocket_state.as_ref(),
+            &bob_phone,
+            bob_tx,
+        )
+        .await;
+
+        let result = run_group_dm_leave(
+            state,
+            &websocket_state.deps.protocol.pending_local_muc_departures,
+            websocket_state.deps.protocol.connection_registry.as_ref(),
+            &websocket_state.deps.protocol.user_registry,
+            websocket_state.deps.protocol.sm_session_registry.as_ref(),
+            &alice_web,
+            &GroupDmLeaveArgs {
+                room_jid: room_jid.clone(),
+            },
+        )
+        .await
+        .unwrap_or_else(|_| panic!("leave result"));
+        assert!(result.left, "membership removal still succeeds");
+
+        let alice_phone_leave = alice_phone_rx
+            .try_recv()
+            .expect("the first resource receives its self unavailable");
+        let waddle_xmpp::Stanza::Presence(alice_phone_presence) = alice_phone_leave.stanza else {
+            panic!("expected presence broadcast for the first resource");
+        };
+        assert_eq!(
+            alice_phone_presence.type_,
+            xmpp_parsers::presence::Type::Unavailable
+        );
+        assert!(
+            alice_web_rx.try_recv().is_err(),
+            "the deferred second resource must not receive an unavailable yet"
+        );
+        assert!(
+            bob_rx.try_recv().is_err(),
+            "the room must not fan out the final leave before the deferred retry converges"
+        );
+
+        let mut pending = websocket_state
+            .deps
+            .protocol
+            .pending_local_muc_departures
+            .take_due(std::time::Instant::now());
+        assert_eq!(
+            pending.len(),
+            1,
+            "exactly one deferred administrative item is retained"
+        );
+        let retained = pending.pop().expect("retained departure");
+        assert!(matches!(
+            retained.item,
+            crate::server::routes::websocket::LocalDepartureItem::RoomDeparture {
+                ref room,
+                ref jid,
+                cause: waddle_xmpp::muc::durable::OccupancyLeaveCause::Administrative,
+                selector: waddle_xmpp::muc::room_actor::LeaveSessionSelector::Any,
+                ..
+            } if room == &room_jid && jid == &alice_web
+        ));
+        websocket_state
+            .deps
+            .protocol
+            .pending_local_muc_departures
+            .requeue_with_backoff(retained);
+        assert!(
+            websocket_state
+                .deps
+                .protocol
+                .connection_registry
+                .get_entry(&alice_web)
+                .is_some(),
+            "the deferred administrative resource stays live while retained for janitor retry"
+        );
+
+        // The requeue backoff is 2s plus up to 25% jitter: wait past the maximum.
+        tokio::time::sleep(std::time::Duration::from_secs(3)).await;
+        crate::server::session_janitors::run_local_muc_departure_sweep(websocket_state.as_ref())
+            .await;
+
+        let alice_web_leave = alice_web_rx
+            .try_recv()
+            .expect("the janitor must self-notify the deferred live resource");
+        let waddle_xmpp::Stanza::Presence(alice_web_presence) = alice_web_leave.stanza else {
+            panic!("expected janitor self unavailable");
+        };
+        assert_eq!(
+            alice_web_presence.type_,
+            xmpp_parsers::presence::Type::Unavailable
+        );
+        let bob_leave = bob_rx
+            .try_recv()
+            .expect("the janitor must fan out the final administrative leave once");
+        let waddle_xmpp::Stanza::Presence(bob_presence) = bob_leave.stanza else {
+            panic!("expected janitor fan-out unavailable");
+        };
+        assert_eq!(
+            bob_presence.type_,
+            xmpp_parsers::presence::Type::Unavailable
+        );
+        assert!(
+            alice_phone_rx.try_recv().is_err(),
+            "the already-left first resource must not be notified twice"
+        );
+        assert!(
+            alice_web_rx.try_recv().is_err() && bob_rx.try_recv().is_err(),
+            "the janitor retry must emit exactly one group-DM leave shape"
+        );
+        assert_eq!(
+            websocket_state
+                .deps
+                .protocol
+                .pending_local_muc_departures
+                .len(),
+            0,
+            "the deferred administrative item converges once the retry commits"
+        );
+
+        let second = run_group_dm_leave(
+            state,
+            &websocket_state.deps.protocol.pending_local_muc_departures,
+            websocket_state.deps.protocol.connection_registry.as_ref(),
+            &websocket_state.deps.protocol.user_registry,
+            websocket_state.deps.protocol.sm_session_registry.as_ref(),
+            &alice_web,
+            &GroupDmLeaveArgs { room_jid },
+        )
+        .await
+        .unwrap_or_else(|_| panic!("second leave result"));
+        assert!(
+            !second.left,
+            "retrying the command after convergence exits early"
+        );
+        assert!(
+            alice_phone_rx.try_recv().is_err()
+                && alice_web_rx.try_recv().is_err()
+                && bob_rx.try_recv().is_err(),
+            "the command retry must not refan out any leave presence"
+        );
+    }
+
+    #[tokio::test]
+    async fn group_dm_rename_ambiguous_commit_lookup_failure_hands_the_row_to_retained_recovery() {
+        let websocket_state =
+            crate::server::routes::websocket::tests::create_test_websocket_state().await;
+        let state = websocket_state.deps.app_state.as_ref();
+        let durable_store = TestGroupDmDurableStore::with_outbox(
+            DurableMode::ConfigCommitUnknown,
+            Arc::clone(&websocket_state.deps.protocol.room_effect_outbox),
+        );
+        let claim_store: Arc<dyn ClaimStore> = Arc::new(InProcessClaimStore::new());
+        state
+            .room_registry
+            .ask(WireClusteringClaims {
+                claim_store,
+                node_identity: SharedNodeIdentity::new(NodeIdentity::new(
+                    "group-dm-lookup-fail-node",
+                    "group-dm-lookup-fail-epoch",
+                )),
+                durable_store: Some(durable_store.clone()),
+                rollout_backoff: None,
+            })
+            .await
+            .expect("wire durable group-DM store");
+
+        let room_jid: BareJid = "group-dm-lookup-fail@muc.localhost"
+            .parse()
+            .expect("room JID");
+        let member: BareJid = "alice@localhost".parse().expect("member JID");
+        let caller: FullJid = "alice@localhost/web".parse().expect("caller JID");
+        let (channel_id, actor) =
+            seed_group_dm(state, &room_jid, "Before", std::slice::from_ref(&member)).await;
+        let initial_coordinates = *durable_store
+            .coordinates
+            .lock()
+            .expect("coordinates lock")
+            .get(&room_jid)
+            .expect("initial committed coordinates");
+        websocket_state
+            .deps
+            .protocol
+            .room_registry
+            .ask(waddle_xmpp::muc::room_registry_actor::CreateRoom {
+                room_jid: room_jid.clone(),
+                waddle_id: "group-dm-lookup-fail".to_owned(),
+                channel_id: "group-dm-lookup-fail".to_owned(),
+                config: RoomConfig::default(),
+            })
+            .await
+            .expect("make recovered room locally drainable");
+        let connection = websocket_state
+            .deps
+            .protocol
+            .room_effect_outbox
+            .database()
+            .guard()
+            .await
+            .expect("effect database connection");
+        connection
+            .execute(
+                "CREATE TABLE IF NOT EXISTS clustering_muc_room_lifecycles (lifecycle_id TEXT NOT NULL, room_jid TEXT NOT NULL, revision BIGINT NOT NULL, state TEXT NOT NULL)",
+                (),
+            )
+            .await
+            .expect("create lifecycle table");
+        connection
+            .execute(
+                "INSERT INTO clustering_muc_room_lifecycles (lifecycle_id, room_jid, revision, state) VALUES (?, ?, ?, ?)",
+                crate::db_params![
+                    initial_coordinates.0.to_string(),
+                    room_jid.to_string(),
+                    initial_coordinates.1,
+                    waddle_xmpp::muc::RoomLifecycleState::Active.as_db_str(),
+                ],
+            )
+            .await
+            .expect("insert initial lifecycle");
+        actor
+            .ask(Join {
+                nick: "alice".to_owned(),
+                real_jid: caller.clone(),
+                role: Role::Participant,
+                affiliation: Affiliation::Member,
+            })
+            .await
+            .expect("join group DM");
+        let (sender, _receiver) = mpsc::channel(1);
+        crate::server::routes::websocket::tests::register_test_connection(
+            websocket_state.as_ref(),
+            &caller,
+            sender,
+        )
+        .await;
+
+        // The rename commits durably but its acknowledgement is lost, and the
+        // exact reservation lookup during reconciliation fails transiently:
+        // the committed row must still be armed by the retained recovery —
+        // nothing else arms live-origin rows.
+        let committed_before = *durable_store
+            .coordinates
+            .lock()
+            .expect("coordinates lock")
+            .get(&room_jid)
+            .expect("committed coordinates after join");
+        let config_lifecycle = committed_before.0;
+        let config_revision = waddle_xmpp::muc::RoomRevision::from_stored(committed_before.1 + 1)
+            .expect("next revision");
+        websocket_state
+            .deps
+            .protocol
+            .room_effect_outbox
+            .fail_next_staged_reservation_lookup_for_test(config_lifecycle, config_revision);
+
+        let connections = ConnectionRegistry::new();
+        let result = run_group_dm_rename(
+            state,
+            websocket_state.as_ref(),
+            &connections,
+            &caller,
+            &GroupDmRenameArgs {
+                room_jid: room_jid.clone(),
+                name: Some("After".to_owned()),
+            },
+        )
+        .await;
+        assert!(
+            result.is_err(),
+            "the transient lookup failure surfaces to the caller; the committed row is recovered \
+             out of band"
+        );
+        let _ = channel_id;
+
+        let key = crate::room_effect_outbox::RoomEffectKey {
+            lifecycle: config_lifecycle,
+            revision: config_revision,
+            ordinal: waddle_xmpp::muc::RoomEffectOrdinal::first(),
+        };
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(20);
+        loop {
+            let row = websocket_state
+                .deps
+                .protocol
+                .room_effect_outbox
+                .find(&key)
+                .await
+                .expect("find staged effect");
+            if row
+                .as_ref()
+                .is_some_and(|row| row.available_at_ms != i64::MAX)
+            {
+                break;
+            }
+            assert!(
+                std::time::Instant::now() < deadline,
+                "the retained recovery must arm the committed rename reservation after the \
+                 lookup failure; row = {row:?}"
+            );
+            tokio::time::sleep(std::time::Duration::from_millis(250)).await;
+        }
     }
 
     #[tokio::test]
@@ -6887,6 +7502,224 @@ mod group_dm_durable_reconciliation_tests {
     }
 
     #[tokio::test]
+    async fn cancelled_config_recovery_arms_matching_reservations() {
+        let websocket_state =
+            crate::server::routes::websocket::tests::create_test_websocket_state().await;
+        let durable_store = TestGroupDmDurableStore::with_outbox(
+            DurableMode::CommitSucceeds,
+            Arc::clone(&websocket_state.deps.protocol.room_effect_outbox),
+        );
+        let claim_store: Arc<dyn ClaimStore> = Arc::new(InProcessClaimStore::new());
+        websocket_state
+            .deps
+            .protocol
+            .room_registry
+            .ask(WireClusteringClaims {
+                claim_store,
+                node_identity: SharedNodeIdentity::new(NodeIdentity::new(
+                    "cancelled-config-recovery-node",
+                    "cancelled-config-recovery-epoch",
+                )),
+                durable_store: Some(durable_store),
+                rollout_backoff: None,
+            })
+            .await
+            .expect("wire durable room registry");
+
+        let room_jid: BareJid = "cancelled-config-recovery@muc.example.com"
+            .parse()
+            .expect("room JID");
+        let actor = websocket_state
+            .deps
+            .protocol
+            .room_registry
+            .ask(CreateRoomWithInitialAffiliations {
+                room_jid: room_jid.clone(),
+                waddle_id: waddle_xmpp::muc::durable::WaddleId::new(
+                    "admin-channel-test".to_owned(),
+                ),
+                channel_id: waddle_xmpp::muc::durable::ChannelId::new(
+                    "cancelled-config-recovery".to_owned(),
+                ),
+                config: RoomConfig::default(),
+                initial_affiliations: Vec::new(),
+            })
+            .await
+            .expect("create durable room");
+        let recipient: FullJid = "alice@example.com/admin".parse().expect("recipient JID");
+        actor
+            .ask(Join {
+                nick: "alice".to_owned(),
+                real_jid: recipient,
+                role: Role::Participant,
+                affiliation: Affiliation::Member,
+            })
+            .await
+            .expect("join config-effect recipient");
+        let updated_config = RoomConfig {
+            name: "After".to_owned(),
+            ..RoomConfig::default()
+        };
+        let applied = actor
+            .ask(waddle_xmpp::muc::room_actor::UpdateConfig {
+                config: updated_config.clone(),
+                effect_plan: waddle_xmpp::muc::room_actor::ConfigEffectPlan::DirectAudience,
+            })
+            .await
+            .expect("commit config");
+        let superseded_snapshot = actor.ask(GetSnapshot).await.expect("config snapshot");
+        let superseded_reservation = applied.reservation.expect("staged config reservation");
+        let superseded_key = crate::room_effect_outbox::RoomEffectKey {
+            lifecycle: superseded_reservation.lifecycle,
+            revision: superseded_reservation.revision,
+            ordinal: superseded_reservation.ordinals[0],
+        };
+        let latest_config = RoomConfig {
+            name: "Latest".to_owned(),
+            ..RoomConfig::default()
+        };
+        let latest_applied = actor
+            .ask(waddle_xmpp::muc::room_actor::UpdateConfig {
+                config: latest_config.clone(),
+                effect_plan: waddle_xmpp::muc::room_actor::ConfigEffectPlan::DirectAudience,
+            })
+            .await
+            .expect("commit latest config");
+        let latest_reservation = latest_applied
+            .reservation
+            .expect("latest staged config reservation");
+        let latest_key = crate::room_effect_outbox::RoomEffectKey {
+            lifecycle: latest_reservation.lifecycle,
+            revision: latest_reservation.revision,
+            ordinal: latest_reservation.ordinals[0],
+        };
+        let store = websocket_state.deps.protocol.room_effect_outbox.as_ref();
+        assert_eq!(
+            store
+                .find(&superseded_key)
+                .await
+                .expect("superseded staged row lookup")
+                .expect("superseded staged row")
+                .available_at_ms,
+            i64::MAX,
+            "the superseded config row starts inert"
+        );
+        assert_eq!(
+            store
+                .find(&latest_key)
+                .await
+                .expect("latest staged row lookup")
+                .expect("latest staged row")
+                .available_at_ms,
+            i64::MAX,
+            "the latest config row starts inert"
+        );
+
+        CancelledConfigAskRecoveryGuard::arm_only(
+            websocket_state.as_ref(),
+            &actor,
+            &room_jid,
+            &updated_config,
+            superseded_snapshot.config_revision,
+        )
+        .recover()
+        .await;
+        wait_for_room_effect_to_arm(websocket_state.as_ref(), &superseded_key).await;
+        wait_for_room_effect_to_arm(websocket_state.as_ref(), &latest_key).await;
+
+        let exact_room_jid: BareJid = "cancelled-config-recovery-exact@muc.example.com"
+            .parse()
+            .expect("exact room JID");
+        let exact_actor = websocket_state
+            .deps
+            .protocol
+            .room_registry
+            .ask(CreateRoomWithInitialAffiliations {
+                room_jid: exact_room_jid.clone(),
+                waddle_id: waddle_xmpp::muc::durable::WaddleId::new(
+                    "admin-channel-test-exact".to_owned(),
+                ),
+                channel_id: waddle_xmpp::muc::durable::ChannelId::new(
+                    "cancelled-config-recovery-exact".to_owned(),
+                ),
+                config: RoomConfig::default(),
+                initial_affiliations: Vec::new(),
+            })
+            .await
+            .expect("create durable exact room");
+        exact_actor
+            .ask(Join {
+                nick: "alice".to_owned(),
+                real_jid: "alice@example.com/exact"
+                    .parse()
+                    .expect("exact recipient JID"),
+                role: Role::Participant,
+                affiliation: Affiliation::Member,
+            })
+            .await
+            .expect("join exact config recipient");
+        let previous_exact_config = RoomConfig {
+            name: "Earlier".to_owned(),
+            ..RoomConfig::default()
+        };
+        let previous_exact = exact_actor
+            .ask(waddle_xmpp::muc::room_actor::UpdateConfig {
+                config: previous_exact_config,
+                effect_plan: waddle_xmpp::muc::room_actor::ConfigEffectPlan::DirectAudience,
+            })
+            .await
+            .expect("commit earlier exact config");
+        let previous_exact_reservation = previous_exact
+            .reservation
+            .expect("earlier exact staged reservation");
+        let previous_exact_key = crate::room_effect_outbox::RoomEffectKey {
+            lifecycle: previous_exact_reservation.lifecycle,
+            revision: previous_exact_reservation.revision,
+            ordinal: previous_exact_reservation.ordinals[0],
+        };
+        let exact_config = RoomConfig {
+            name: "Exact".to_owned(),
+            ..RoomConfig::default()
+        };
+        let exact_applied = exact_actor
+            .ask(waddle_xmpp::muc::room_actor::UpdateConfig {
+                config: exact_config.clone(),
+                effect_plan: waddle_xmpp::muc::room_actor::ConfigEffectPlan::DirectAudience,
+            })
+            .await
+            .expect("commit exact config");
+        let exact_snapshot = exact_actor.ask(GetSnapshot).await.expect("exact snapshot");
+        let exact_reservation = exact_applied
+            .reservation
+            .expect("exact staged config reservation");
+        let exact_key = crate::room_effect_outbox::RoomEffectKey {
+            lifecycle: exact_reservation.lifecycle,
+            revision: exact_reservation.revision,
+            ordinal: exact_reservation.ordinals[0],
+        };
+        CancelledConfigAskRecoveryGuard::arm_only(
+            websocket_state.as_ref(),
+            &exact_actor,
+            &exact_room_jid,
+            &exact_config,
+            exact_snapshot.config_revision,
+        )
+        .recover()
+        .await;
+        wait_for_room_effect_to_arm(websocket_state.as_ref(), &exact_key).await;
+        assert_eq!(
+            store
+                .find(&previous_exact_key)
+                .await
+                .expect("previous exact staged row lookup")
+                .expect("previous exact staged row")
+                .available_at_ms,
+            i64::MAX,
+            "the exact branch still arms only its exact config row"
+        );
+    }
+
+    #[tokio::test]
     async fn cancelled_group_dm_member_config_arms_its_committed_reservation() {
         let websocket_state =
             crate::server::routes::websocket::tests::create_test_websocket_state().await;
@@ -6985,7 +7818,7 @@ mod group_dm_durable_reconciliation_tests {
     }
 
     #[tokio::test]
-    async fn cancelled_group_dm_rename_ask_recovers_and_arms_the_committed_reservation() {
+    async fn cancelled_config_recovery_retries_snapshot_timeout_then_arms() {
         let websocket_state =
             crate::server::routes::websocket::tests::create_test_websocket_state().await;
         let state = websocket_state.deps.app_state.as_ref();
@@ -7057,11 +7890,343 @@ mod group_dm_durable_reconciliation_tests {
             ordinal: waddle_xmpp::muc::RoomEffectOrdinal::first(),
         };
 
-        pause.release();
         task.abort();
         let _ = task.await;
 
-        wait_for_room_effect_to_arm(websocket_state.as_ref(), &key).await;
+        // The recovery guard now asks a still-paused actor. Let that first
+        // snapshot ask exceed `ADMIN_ROOM_ASK_TIMEOUT`, then release the
+        // actor so the retry loop can snapshot and arm the reservation.
+        tokio::time::sleep(ADMIN_ROOM_ASK_TIMEOUT + std::time::Duration::from_secs(1)).await;
+        pause.release();
+
+        // The first snapshot ask timed out while the actor was paused; the
+        // recovery retries after `retry_delay_ms(1)` (5s), so arming lands
+        // around 10s after cancellation. Poll well past that.
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(25);
+        loop {
+            let armed = websocket_state
+                .deps
+                .protocol
+                .room_effect_outbox
+                .find(&key)
+                .await
+                .expect("find staged effect")
+                .is_some_and(|row| row.available_at_ms != i64::MAX);
+            if armed {
+                break;
+            }
+            assert!(
+                std::time::Instant::now() < deadline,
+                "the retried recovery must arm the committed reservation"
+            );
+            tokio::time::sleep(std::time::Duration::from_millis(250)).await;
+        }
+    }
+
+    #[tokio::test]
+    async fn cancelled_config_recovery_retries_a_transient_reservation_lookup_failure() {
+        let websocket_state =
+            crate::server::routes::websocket::tests::create_test_websocket_state().await;
+        let state = websocket_state.deps.app_state.as_ref();
+        let durable_store = TestGroupDmDurableStore::with_outbox(
+            DurableMode::CommitSucceeds,
+            Arc::clone(&websocket_state.deps.protocol.room_effect_outbox),
+        );
+        let claim_store: Arc<dyn ClaimStore> = Arc::new(InProcessClaimStore::new());
+        state
+            .room_registry
+            .ask(WireClusteringClaims {
+                claim_store,
+                node_identity: SharedNodeIdentity::new(NodeIdentity::new(
+                    "group-dm-cancel-lookup-node",
+                    "group-dm-cancel-lookup-epoch",
+                )),
+                durable_store: Some(durable_store),
+                rollout_backoff: None,
+            })
+            .await
+            .expect("wire durable group-DM store");
+
+        let room_jid: BareJid = "group-dm-cancel-lookup@muc.localhost"
+            .parse()
+            .expect("room JID");
+        let member: BareJid = "alice@localhost".parse().expect("member JID");
+        let caller: FullJid = "alice@localhost/web".parse().expect("caller JID");
+        let (_channel_id, actor) =
+            seed_group_dm(state, &room_jid, "Before", std::slice::from_ref(&member)).await;
+        actor
+            .ask(Join {
+                nick: "alice".to_owned(),
+                real_jid: caller.clone(),
+                role: Role::Participant,
+                affiliation: Affiliation::Member,
+            })
+            .await
+            .expect("join group DM");
+
+        let mut updated = actor.ask(GetSnapshot).await.expect("snapshot").room.config;
+        updated.name = "After".to_owned();
+        let applied = actor
+            .ask(waddle_xmpp::muc::room_actor::UpdateGroupDmConfigByMember {
+                config: updated,
+                sender_jid: caller,
+            })
+            .await
+            .expect("config commit");
+        let reservation = applied.reservation.expect("staged config reservation");
+        let key = crate::room_effect_outbox::RoomEffectKey {
+            lifecycle: reservation.lifecycle,
+            revision: reservation.revision,
+            ordinal: reservation.ordinals[0],
+        };
+        websocket_state
+            .deps
+            .protocol
+            .room_effect_outbox
+            .fail_next_staged_reservation_lookup_for_test(
+                reservation.lifecycle,
+                reservation.revision,
+            );
+
+        drop(CommittedAdminConfigReservationGuard::new(
+            websocket_state.as_ref(),
+            Some(reservation),
+        ));
+
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(20);
+        loop {
+            let armed = websocket_state
+                .deps
+                .protocol
+                .room_effect_outbox
+                .find(&key)
+                .await
+                .expect("find staged effect")
+                .is_some_and(|row| row.available_at_ms != i64::MAX);
+            if armed {
+                break;
+            }
+            assert!(
+                std::time::Instant::now() < deadline,
+                "the retried recovery must arm the committed reservation after one lookup failure"
+            );
+            tokio::time::sleep(std::time::Duration::from_millis(250)).await;
+        }
+    }
+
+    #[tokio::test]
+    async fn cancelled_config_recovery_keeps_retrying_lookup_failures_until_success() {
+        let websocket_state =
+            crate::server::routes::websocket::tests::create_test_websocket_state().await;
+        let durable_store = TestGroupDmDurableStore::with_outbox(
+            DurableMode::CommitSucceeds,
+            Arc::clone(&websocket_state.deps.protocol.room_effect_outbox),
+        );
+        let claim_store: Arc<dyn ClaimStore> = Arc::new(InProcessClaimStore::new());
+        websocket_state
+            .deps
+            .protocol
+            .room_registry
+            .ask(WireClusteringClaims {
+                claim_store,
+                node_identity: SharedNodeIdentity::new(NodeIdentity::new(
+                    "cancelled-config-retry-node",
+                    "cancelled-config-retry-epoch",
+                )),
+                durable_store: Some(durable_store),
+                rollout_backoff: None,
+            })
+            .await
+            .expect("wire durable room registry");
+
+        let room_jid: BareJid = "cancelled-config-retry@muc.example.com"
+            .parse()
+            .expect("room JID");
+        let actor = websocket_state
+            .deps
+            .protocol
+            .room_registry
+            .ask(CreateRoomWithInitialAffiliations {
+                room_jid: room_jid.clone(),
+                waddle_id: waddle_xmpp::muc::durable::WaddleId::new(
+                    "admin-channel-retry-test".to_owned(),
+                ),
+                channel_id: waddle_xmpp::muc::durable::ChannelId::new(
+                    "cancelled-config-retry".to_owned(),
+                ),
+                config: RoomConfig::default(),
+                initial_affiliations: Vec::new(),
+            })
+            .await
+            .expect("create durable room");
+        actor
+            .ask(Join {
+                nick: "alice".to_owned(),
+                real_jid: "alice@example.com/admin".parse().expect("recipient JID"),
+                role: Role::Participant,
+                affiliation: Affiliation::Member,
+            })
+            .await
+            .expect("join config-effect recipient");
+
+        let exact_config = RoomConfig {
+            name: "Exact".to_owned(),
+            ..RoomConfig::default()
+        };
+        let exact_applied = actor
+            .ask(waddle_xmpp::muc::room_actor::UpdateConfig {
+                config: exact_config.clone(),
+                effect_plan: waddle_xmpp::muc::room_actor::ConfigEffectPlan::DirectAudience,
+            })
+            .await
+            .expect("commit exact config");
+        let exact_snapshot = actor.ask(GetSnapshot).await.expect("exact snapshot");
+        let exact_reservation = exact_applied.reservation.expect("exact staged reservation");
+        let exact_key = crate::room_effect_outbox::RoomEffectKey {
+            lifecycle: exact_reservation.lifecycle,
+            revision: exact_reservation.revision,
+            ordinal: exact_reservation.ordinals[0],
+        };
+        let store = Arc::clone(&websocket_state.deps.protocol.room_effect_outbox);
+        store.fail_staged_reservation_lookup_times_for_test(
+            exact_reservation.lifecycle,
+            exact_reservation.revision,
+            2,
+        );
+        let exact_recovery = tokio::spawn({
+            let websocket_state = Arc::clone(&websocket_state);
+            let actor = actor.clone();
+            let room_jid = room_jid.clone();
+            async move {
+                CancelledConfigAskRecoveryGuard::arm_only(
+                    websocket_state.as_ref(),
+                    &actor,
+                    &room_jid,
+                    &exact_config,
+                    exact_snapshot.config_revision,
+                )
+                .recover()
+                .await;
+            }
+        });
+
+        // retry_delay_ms(1) + retry_delay_ms(2) is 5s + 10s. Allow 25s for
+        // those backoffs plus scheduler/database overhead before declaring recovery stuck.
+        let exact_deadline = std::time::Instant::now() + std::time::Duration::from_secs(25);
+        loop {
+            if store
+                .find(&exact_key)
+                .await
+                .expect("find exact staged row")
+                .is_some_and(|row| row.available_at_ms != i64::MAX)
+            {
+                break;
+            }
+            assert!(
+                std::time::Instant::now() < exact_deadline,
+                "the exact recovery must arm after two lookup failures"
+            );
+            tokio::time::sleep(std::time::Duration::from_millis(250)).await;
+        }
+        exact_recovery.await.expect("exact recovery joins");
+
+        let superseded_config = RoomConfig {
+            name: "Superseded".to_owned(),
+            ..RoomConfig::default()
+        };
+        let superseded_applied = actor
+            .ask(waddle_xmpp::muc::room_actor::UpdateConfig {
+                config: superseded_config.clone(),
+                effect_plan: waddle_xmpp::muc::room_actor::ConfigEffectPlan::DirectAudience,
+            })
+            .await
+            .expect("commit superseded config");
+        let superseded_snapshot = actor
+            .ask(GetSnapshot)
+            .await
+            .expect("superseded config snapshot");
+        let superseded_reservation = superseded_applied
+            .reservation
+            .expect("superseded staged reservation");
+        let superseded_key = crate::room_effect_outbox::RoomEffectKey {
+            lifecycle: superseded_reservation.lifecycle,
+            revision: superseded_reservation.revision,
+            ordinal: superseded_reservation.ordinals[0],
+        };
+        let latest_config = RoomConfig {
+            name: "Latest".to_owned(),
+            ..RoomConfig::default()
+        };
+        let latest_applied = actor
+            .ask(waddle_xmpp::muc::room_actor::UpdateConfig {
+                config: latest_config,
+                effect_plan: waddle_xmpp::muc::room_actor::ConfigEffectPlan::DirectAudience,
+            })
+            .await
+            .expect("commit latest config");
+        let latest_reservation = latest_applied
+            .reservation
+            .expect("latest staged reservation");
+        let latest_key = crate::room_effect_outbox::RoomEffectKey {
+            lifecycle: latest_reservation.lifecycle,
+            revision: latest_reservation.revision,
+            ordinal: latest_reservation.ordinals[0],
+        };
+        let latest_snapshot = actor
+            .ask(GetSnapshot)
+            .await
+            .expect("latest config snapshot");
+        assert_eq!(
+            latest_snapshot.config_revision,
+            superseded_snapshot.config_revision + 1,
+            "the latest config must force the superseded recovery branch"
+        );
+        store.fail_staged_reservations_up_to_lookup_times_for_test(
+            latest_reservation.lifecycle,
+            latest_reservation.revision,
+            2,
+        );
+        let superseded_recovery = tokio::spawn({
+            let websocket_state = Arc::clone(&websocket_state);
+            let actor = actor.clone();
+            let room_jid = room_jid.clone();
+            async move {
+                CancelledConfigAskRecoveryGuard::arm_only(
+                    websocket_state.as_ref(),
+                    &actor,
+                    &room_jid,
+                    &superseded_config,
+                    superseded_snapshot.config_revision,
+                )
+                .recover()
+                .await;
+            }
+        });
+
+        let superseded_deadline = std::time::Instant::now() + std::time::Duration::from_secs(25);
+        loop {
+            let superseded_armed = store
+                .find(&superseded_key)
+                .await
+                .expect("find superseded staged row")
+                .is_some_and(|row| row.available_at_ms != i64::MAX);
+            let latest_armed = store
+                .find(&latest_key)
+                .await
+                .expect("find latest staged row")
+                .is_some_and(|row| row.available_at_ms != i64::MAX);
+            if superseded_armed && latest_armed {
+                break;
+            }
+            assert!(
+                std::time::Instant::now() < superseded_deadline,
+                "the superseded recovery must arm every committed inert row after two lookup failures"
+            );
+            tokio::time::sleep(std::time::Duration::from_millis(250)).await;
+        }
+        superseded_recovery
+            .await
+            .expect("superseded recovery joins");
     }
 
     #[tokio::test]
@@ -7412,13 +8577,19 @@ mod group_dm_durable_reconciliation_tests {
                     let joiner = joiner.clone();
                     Box::pin(async move {
                         assert!(
-                            actor
-                                .ask(LeaveByRealJid {
-                                    sender_jid: caller.clone(),
-                                })
-                                .await
-                                .expect("leave recovered room")
-                                .is_some(),
+                            matches!(
+                                actor
+                                    .ask(LeaveByRealJid {
+                                        sender_jid: caller.clone(),
+                                        cause: waddle_xmpp::muc::durable::OccupancyLeaveCause::Administrative,
+                                        session: waddle_xmpp::muc::room_actor::LeaveSessionSelector::Any,
+                                        attempt: waddle_xmpp::muc::room_actor::LeaveAttemptId::generate(),
+                                        origin: waddle_xmpp::muc::room_actor::LeaveOrigin::Fresh,
+})
+                                    .await
+                                    .expect("leave recovered room"),
+                                waddle_xmpp::muc::room_actor::LeaveDisposition::Left(_)
+                            ),
                             "seeded caller must be able to leave the recovered actor"
                         );
                         actor
@@ -7517,13 +8688,19 @@ mod group_dm_durable_reconciliation_tests {
                     let joiner = joiner.clone();
                     Box::pin(async move {
                         assert!(
-                            actor
-                                .ask(LeaveByRealJid {
-                                    sender_jid: owner.clone(),
-                                })
-                                .await
-                                .expect("leave recovered channel")
-                                .is_some(),
+                            matches!(
+                                actor
+                                    .ask(LeaveByRealJid {
+                                        sender_jid: owner.clone(),
+                                        cause: waddle_xmpp::muc::durable::OccupancyLeaveCause::Administrative,
+                                        session: waddle_xmpp::muc::room_actor::LeaveSessionSelector::Any,
+                                        attempt: waddle_xmpp::muc::room_actor::LeaveAttemptId::generate(),
+                                        origin: waddle_xmpp::muc::room_actor::LeaveOrigin::Fresh,
+})
+                                    .await
+                                    .expect("leave recovered channel"),
+                                waddle_xmpp::muc::room_actor::LeaveDisposition::Left(_)
+                            ),
                             "seeded owner must be able to leave the recovered actor"
                         );
                         actor
@@ -7615,6 +8792,17 @@ mod group_dm_durable_reconciliation_tests {
             ],
         )
         .await;
+        // The caller's join commits a #1647 occupancy projection revision, so
+        // read the seeded coordinates only after it.
+        actor
+            .ask(Join {
+                nick: "alice".to_owned(),
+                real_jid: caller.clone(),
+                role: Role::Moderator,
+                affiliation: Affiliation::Admin,
+            })
+            .await
+            .expect("join caller");
         let seeded_coordinates = *durable_store
             .coordinates
             .lock()
@@ -7628,15 +8816,6 @@ mod group_dm_durable_reconciliation_tests {
             seeded_coordinates.1 + 1,
         )
         .await;
-        actor
-            .ask(Join {
-                nick: "alice".to_owned(),
-                real_jid: caller.clone(),
-                role: Role::Moderator,
-                affiliation: Affiliation::Admin,
-            })
-            .await
-            .expect("join caller");
         let (sender, mut receiver) = mpsc::channel(4);
         crate::server::routes::websocket::tests::register_test_connection(
             websocket_state.as_ref(),

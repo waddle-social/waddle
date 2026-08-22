@@ -73,6 +73,7 @@ mod frame_backstop;
 pub(crate) mod interpret_loop;
 pub(crate) mod link_preview_refs;
 pub(crate) mod link_preview_telemetry;
+mod local_departures;
 pub(crate) mod muc_call_sfu;
 pub(crate) mod muc_invites;
 mod outbound;
@@ -95,12 +96,30 @@ pub(crate) use cleanup::broadcast_unavailable_if_no_replacement;
 pub use cleanup::cleanup_muc_presence_for_jid;
 #[cfg(feature = "clustering")]
 pub use cleanup::cleanup_muc_presence_for_jid_with_origin;
+pub(crate) use cleanup::redrive_local_muc_cleanup;
 #[cfg(feature = "clustering")]
 pub(crate) use cleanup::redrive_remote_muc_cleanup;
 pub(crate) use cleanup::redrive_terminal_pending_rows_to_live_resource;
 pub use cleanup::MucCleanupOutcome;
+pub(crate) use cleanup::{
+    ack_departure_receipt, acknowledge_in_flight, ask_leave_bounded, echo_muc_self_unavailable,
+    try_ack_departure_receipt, LeaveAskFailure,
+};
+
+/// Upper bound on a single `LeaveByRealJid` ask from the WS/janitor side: a
+/// wedged room must not stall disconnect cleanup, the departure janitor, an
+/// administrative removal, or an explicit leave's wait-class bounce.
+pub(crate) const LEAVE_ASK_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);
 pub(crate) use cleanup::TerminalRedriveOutcome;
+pub(crate) use cleanup::{
+    broadcast_muc_leave_to_remaining_resumable, broadcast_muc_muji_clear_to_remaining_resumable,
+    maybe_evict_empty_room, LeaveFanOutProgress,
+};
 pub use connection::router;
+pub(crate) use local_departures::{
+    InFlightLease, LocalDepartureItem, PendingLocalDeparture, PendingLocalMucDepartures,
+    ACK_ABSENT_ROOM_RETRIES,
+};
 pub(crate) use state::ResolvedPrincipal;
 pub use state::{
     default_link_preview_resolve_permits, ActiveCallThread, DmCallThreadKey, DmPairKey, DmPinStore,
@@ -117,6 +136,7 @@ pub(crate) use muc_call_sfu::{
     note_participant_left_by_call_id, note_participant_left_from_webhook,
     observe_participant_sids_from_webhook,
 };
+
 pub(crate) use transport_xml::{
     build_iq_error_xml_typed, build_iq_error_xml_with_payload, build_iq_result_xml, element_to_xml,
     iq_to_xml, stanza_to_xml,

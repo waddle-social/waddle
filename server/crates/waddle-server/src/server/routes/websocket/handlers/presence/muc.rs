@@ -1,5 +1,6 @@
 use super::*;
 use crate::server::routes::websocket::cleanup::get_room_actor_result;
+use std::collections::HashSet;
 
 mod access;
 mod xml;
@@ -66,6 +67,7 @@ pub async fn handle_muc_join_with_ordered_relay(
     state: &WebSocketState,
     request: MucJoinRequest<'_>,
 ) -> Vec<String> {
+    let _request_timer = waddle_xmpp::metrics::MucOccupancyHandlerTimer::start("join_request");
     info!(
         room = %request.room_jid,
         nick = %request.nick,
@@ -1835,6 +1837,7 @@ pub async fn handle_muc_leave(
     nick: &str,
     ordered_relay_origin: Option<&crate::server::routes::interpret::OrderedRelayRouteOrigin>,
 ) -> Vec<String> {
+    let _request_timer = waddle_xmpp::metrics::MucOccupancyHandlerTimer::start("leave_request");
     info!(room = %room_jid, nick = %nick, sender = %sender_jid, "MUC leave request");
     #[cfg(not(feature = "clustering"))]
     let _ = ordered_relay_origin;
@@ -1937,14 +1940,45 @@ pub async fn handle_muc_leave(
         )];
     };
 
-    let outcome = match room_actor
-        .ask(LeaveByRealJid {
+    let leave_attempt = waddle_xmpp::muc::room_actor::LeaveAttemptId::generate();
+    // Write-ahead: if this task is cancelled after the actor dropped the
+    // occupancy but before the fan-out below, the janitor replays the retained
+    // outcome under this attempt. Completed once the effects ran.
+    let in_flight = crate::server::routes::websocket::LocalDepartureItem::InFlight {
+        room: room_jid.clone(),
+        jid: sender_jid.clone(),
+        cause: waddle_xmpp::muc::durable::OccupancyLeaveCause::Explicit,
+        attempt: leave_attempt,
+        notified: HashSet::new(),
+    };
+    state
+        .deps
+        .protocol
+        .pending_local_muc_departures
+        .record_in_flight(in_flight.clone());
+    let _in_flight_lease = crate::server::routes::websocket::InFlightLease::hold(
+        std::sync::Arc::clone(&state.deps.protocol.pending_local_muc_departures),
+        in_flight.clone(),
+    );
+    let outcome = match crate::server::routes::websocket::ask_leave_bounded(
+        &room_actor,
+        LeaveByRealJid {
             sender_jid: sender_jid.clone(),
-        })
-        .await
+            cause: waddle_xmpp::muc::durable::OccupancyLeaveCause::Explicit,
+            session: waddle_xmpp::muc::room_actor::LeaveSessionSelector::Any,
+            attempt: leave_attempt,
+            origin: waddle_xmpp::muc::room_actor::LeaveOrigin::Fresh,
+        },
+    )
+    .await
     {
-        Ok(Some(outcome)) => outcome,
-        Ok(None) => {
+        Ok(waddle_xmpp::muc::room_actor::LeaveDisposition::Left(outcome)) => outcome,
+        Ok(waddle_xmpp::muc::room_actor::LeaveDisposition::NotOccupant) => {
+            state
+                .deps
+                .protocol
+                .pending_local_muc_departures
+                .complete_in_flight(&in_flight);
             debug!(room = %room_jid, nick = %nick, sender = %sender_jid, "MUC leave for absent occupant");
             // No occupant slot to remove, but a stale SFU
             // participant could still exist — clear it.
@@ -1959,8 +1993,13 @@ pub async fn handle_muc_leave(
                 Affiliation::None,
             )];
         }
-        Err(error) => {
-            warn!(room = %room_jid, nick = %nick, sender = %sender_jid, error = ?error, "Failed to leave MUC room");
+        Ok(waddle_xmpp::muc::room_actor::LeaveDisposition::Superseded) => {
+            state
+                .deps
+                .protocol
+                .pending_local_muc_departures
+                .complete_in_flight(&in_flight);
+            debug!(room = %room_jid, nick = %nick, sender = %sender_jid, "MUC leave superseded by a replacement session");
             return vec![build_muc_self_unavailable_xml(
                 state,
                 room_jid,
@@ -1968,6 +2007,93 @@ pub async fn handle_muc_leave(
                 sender_jid,
                 Affiliation::None,
             )];
+        }
+        Ok(waddle_xmpp::muc::room_actor::LeaveDisposition::Deferred { .. }) => {
+            state
+                .deps
+                .protocol
+                .pending_local_muc_departures
+                .complete_in_flight(&in_flight);
+            return bounce_muc_leave_ownership_unreachable(room_jid, sender_jid, nick);
+        }
+        Ok(waddle_xmpp::muc::room_actor::LeaveDisposition::Suppressed {
+            nick: actor_nick,
+            affiliation,
+            attempt: acknowledge,
+        }) => {
+            crate::server::routes::websocket::acknowledge_in_flight(
+                &state.deps.protocol.pending_local_muc_departures,
+                &room_actor,
+                &in_flight,
+                acknowledge,
+            );
+            // Store-less room with a destroy/dormancy in flight: the departure
+            // was recorded but nothing fans out. The departing session still
+            // gets its XEP-0045 §7.14 self-presence echo (as before #1647).
+            super::super::super::muc_call_sfu::unregister_participant_from_room(
+                state, room_jid, sender_jid,
+            );
+            // The actor's typed nickname is authoritative: the request's
+            // `to` JID may carry a nick the sender never held.
+            return vec![build_muc_self_unavailable_xml(
+                state,
+                room_jid,
+                actor_nick.as_str(),
+                sender_jid,
+                affiliation,
+            )];
+        }
+        Err(crate::server::routes::websocket::LeaveAskFailure::Timeout) => {
+            // The actor may still complete the departure after this bound:
+            // retain it so the janitor replays the outcome (self-echo, fan-out,
+            // SFU teardown) under the same attempt id, and bounce wait-class now.
+            warn!(room = %room_jid, nick = %nick, sender = %sender_jid, "MUC leave ask timed out; retained for replay");
+            state
+                .deps
+                .protocol
+                .pending_local_muc_departures
+                .complete_in_flight(&in_flight);
+            state.deps.protocol.pending_local_muc_departures.record(
+                crate::server::routes::websocket::LocalDepartureItem::RoomDeparture {
+                    room: room_jid.clone(),
+                    jid: sender_jid.clone(),
+                    cause: waddle_xmpp::muc::durable::OccupancyLeaveCause::Explicit,
+                    selector: waddle_xmpp::muc::room_actor::LeaveSessionSelector::Any,
+                    attempt: leave_attempt,
+                    notified: HashSet::new(),
+                },
+            );
+            return bounce_muc_leave_ownership_unreachable(room_jid, sender_jid, nick);
+        }
+        Err(
+            error @ (crate::server::routes::websocket::LeaveAskFailure::Handler(_)
+            | crate::server::routes::websocket::LeaveAskFailure::Transport),
+        ) => {
+            // A sealed answer can follow an ENQUEUED leave whose durable
+            // projection was ambiguous (the actor self-seals with its
+            // pre-commit roster), and a transport failure leaves the same
+            // uncertainty. Mirror the disconnect path: keep a
+            // `ConfirmRetired` responsibility bound to THIS actor so the
+            // janitor replays the departure against the successor after
+            // retirement, instead of dropping the only replay owner.
+            state
+                .deps
+                .protocol
+                .pending_local_muc_departures
+                .complete_in_flight(&in_flight);
+            state.deps.protocol.pending_local_muc_departures.record(
+                crate::server::routes::websocket::LocalDepartureItem::ConfirmRetired {
+                    room: room_jid.clone(),
+                    jid: sender_jid.clone(),
+                    actor: room_actor.id(),
+                    cause: waddle_xmpp::muc::durable::OccupancyLeaveCause::Explicit,
+                    selector: waddle_xmpp::muc::room_actor::LeaveSessionSelector::Any,
+                    attempt: leave_attempt,
+                    notified: HashSet::new(),
+                },
+            );
+            warn!(room = %room_jid, nick = %nick, sender = %sender_jid, error = ?error, "Failed to leave MUC room; waiting for actor retirement");
+            return bounce_muc_leave_ownership_unreachable(room_jid, sender_jid, nick);
         }
     };
 
@@ -1987,23 +2113,53 @@ pub async fn handle_muc_leave(
     // is used by `cleanup_muc_presence` for unclean disconnects, so
     // both the explicit-leave path and the tab-close path produce the
     // same wire shape.
-    super::super::super::cleanup::broadcast_muc_leave_to_remaining(
-        state, room_jid, sender_jid, &outcome,
+    super::super::super::cleanup::broadcast_muc_leave_to_remaining_resumable(
+        state,
+        room_jid,
+        sender_jid,
+        &outcome,
+        Some(super::super::super::cleanup::LeaveFanOutProgress {
+            skip: &super::super::super::cleanup::NO_SKIP,
+            record: Some((
+                &state.deps.protocol.pending_local_muc_departures,
+                &in_flight,
+            )),
+        }),
     )
     .await;
-    super::super::super::cleanup::broadcast_muc_muji_clear_to_remaining(
-        state, room_jid, sender_jid, &outcome,
+    super::super::super::cleanup::broadcast_muc_muji_clear_to_remaining_resumable(
+        state,
+        room_jid,
+        sender_jid,
+        &outcome,
+        Some(super::super::super::cleanup::LeaveFanOutProgress {
+            skip: &super::super::super::cleanup::NO_SKIP,
+            record: Some((
+                &state.deps.protocol.pending_local_muc_departures,
+                &in_flight,
+            )),
+        }),
     )
     .await;
 
     let response = vec![build_muc_self_unavailable_xml(
         state,
         room_jid,
-        &outcome.nick,
+        outcome.nick.as_str(),
         sender_jid,
         outcome.affiliation,
     )];
-    super::super::super::cleanup::maybe_evict_empty_room(state, room_jid, &outcome).await;
+    // Eviction is not response-critical: hand it off without awaiting so the
+    // self-presence below is returned before any registry wait.
+    super::super::super::cleanup::evict_empty_room_detached(state, room_jid, &outcome);
+    // Every effect ran: the write-ahead entry becomes the owed acknowledgement
+    // (atomically) and is cleared only on the actor's authoritative answer.
+    crate::server::routes::websocket::acknowledge_in_flight(
+        &state.deps.protocol.pending_local_muc_departures,
+        &room_actor,
+        &in_flight,
+        outcome.acknowledge,
+    );
     response
 }
 
@@ -3073,6 +3229,1095 @@ mod resolver_sync_retry_tests {
             Affiliation::Member,
         );
         assert_eq!(old_store.checks(), 1);
+    }
+}
+
+#[cfg(test)]
+mod occupancy_projection_handler_tests {
+    use super::*;
+    use crate::server::routes::websocket::tests::{
+        create_test_server_owner_session, create_test_websocket_state,
+        create_test_websocket_state_with_sfu, register_test_connection, snapshot_room,
+        RecordingSfu,
+    };
+    use kameo::actor::ActorRef;
+    use std::str::FromStr;
+    use std::sync::{Arc, Mutex};
+    use tokio::sync::mpsc;
+    use waddle_xmpp::muc::durable::{
+        MucDurableFuture, MucDurableStore, RoomClaimFenceContext, RoomLifecycleId, RoomProjection,
+        RoomRevision,
+    };
+    use waddle_xmpp::muc::room_actor::{
+        GetSnapshot, RestoreDurableRoomState, RoomActor, SealForDestroy, SyncResolverAffiliation,
+    };
+    use waddle_xmpp::muc::room_registry_actor::CreateRoom;
+    use waddle_xmpp::ownership::{ClaimEpoch, Entity, EntityType, NodeIdentity};
+
+    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+    enum ProjectionFailureMode {
+        Succeed,
+        Join,
+        Leave,
+        /// The leave projection's durable commit outcome is ambiguous: the
+        /// actor seals itself (the mutation may have committed) and answers
+        /// `RoomActorError::RoomSealed`.
+        LeaveAmbiguous,
+        LeaveDelay(std::time::Duration),
+    }
+
+    struct ProjectionFailingStore {
+        failure: Mutex<ProjectionFailureMode>,
+        lifecycle: RoomLifecycleId,
+        next_revision: Mutex<RoomRevision>,
+        allowed_join_projections: Mutex<usize>,
+    }
+
+    impl ProjectionFailingStore {
+        fn new(failure: ProjectionFailureMode) -> Arc<Self> {
+            Arc::new(Self {
+                failure: Mutex::new(failure),
+                lifecycle: RoomLifecycleId::generate(),
+                next_revision: Mutex::new(RoomRevision::initial()),
+                allowed_join_projections: Mutex::new(0),
+            })
+        }
+
+        fn with_join_failure_after(successful_join_projections: usize) -> Arc<Self> {
+            Arc::new(Self {
+                failure: Mutex::new(ProjectionFailureMode::Join),
+                lifecycle: RoomLifecycleId::generate(),
+                next_revision: Mutex::new(RoomRevision::initial()),
+                allowed_join_projections: Mutex::new(successful_join_projections),
+            })
+        }
+
+        fn set_failure(&self, failure: ProjectionFailureMode) {
+            *self.failure.lock().expect("projection failure lock") = failure;
+        }
+
+        fn next_coordinates(&self) -> waddle_xmpp::muc::RoomCommittedCoordinates {
+            let mut revision = self.next_revision.lock().expect("revision lock");
+            let current = *revision;
+            *revision = revision.next().expect("test revisions must not overflow");
+            waddle_xmpp::muc::RoomCommittedCoordinates {
+                lifecycle: self.lifecycle,
+                revision: current,
+            }
+        }
+    }
+
+    impl MucDurableStore for ProjectionFailingStore {
+        fn load_room_state_fenced<'a>(
+            &'a self,
+            room_jid: &'a BareJid,
+            fence: &'a RoomClaimFenceContext,
+        ) -> MucDurableFuture<'a, Option<waddle_xmpp::muc::durable::DurableRoomState>> {
+            let validation = validate_projection_test_claim_fence(room_jid, fence);
+            Box::pin(async move {
+                validation?;
+                Ok(None)
+            })
+        }
+
+        fn commit_room_mutation<'a>(
+            &'a self,
+            room_jid: &'a BareJid,
+            fence: &'a RoomClaimFenceContext,
+            intent: waddle_xmpp::muc::RoomDurableMutation,
+            _effects: waddle_xmpp::muc::RoomMutationEffects,
+        ) -> waddle_xmpp::muc::RoomCommitFuture<'a> {
+            if let Err(error) = validate_projection_test_claim_fence(room_jid, fence) {
+                return Box::pin(async move {
+                    let _ = error;
+                    Err(waddle_xmpp::muc::RoomCommitError::NotOwner)
+                });
+            }
+            let failure = *self.failure.lock().expect("projection failure lock");
+            let coordinates = self.next_coordinates();
+            let allow_join_projection = {
+                let mut remaining = self
+                    .allowed_join_projections
+                    .lock()
+                    .expect("join projection allowance lock");
+                if *remaining > 0 {
+                    *remaining -= 1;
+                    true
+                } else {
+                    false
+                }
+            };
+            Box::pin(async move {
+                match &intent {
+                    waddle_xmpp::muc::RoomDurableMutation::Projection(
+                        RoomProjection::OccupancyJoin { .. },
+                    ) if failure == ProjectionFailureMode::Join && !allow_join_projection => {
+                        return Err(waddle_xmpp::muc::RoomCommitError::OwnershipUnavailable);
+                    }
+                    waddle_xmpp::muc::RoomDurableMutation::Projection(
+                        RoomProjection::OccupancyLeave { .. },
+                    ) if failure == ProjectionFailureMode::Leave => {
+                        return Err(waddle_xmpp::muc::RoomCommitError::OwnershipUnavailable);
+                    }
+                    waddle_xmpp::muc::RoomDurableMutation::Projection(
+                        RoomProjection::OccupancyLeave { .. },
+                    ) if failure == ProjectionFailureMode::LeaveAmbiguous => {
+                        return Err(waddle_xmpp::muc::RoomCommitError::CommitOutcomeUnknown);
+                    }
+                    waddle_xmpp::muc::RoomDurableMutation::Projection(
+                        RoomProjection::OccupancyLeave { .. },
+                    ) => {
+                        if let ProjectionFailureMode::LeaveDelay(delay) = failure {
+                            tokio::time::sleep(delay).await;
+                        }
+                    }
+                    _ if failure == ProjectionFailureMode::Succeed => {}
+                    _ => {}
+                }
+                Ok(waddle_xmpp::muc::RoomCommitOutcome {
+                    coordinates,
+                    reservation: None,
+                })
+            })
+        }
+
+        fn check_fenced_fanout<'a>(&'a self, _room_jid: &'a BareJid) -> MucDurableFuture<'a, bool> {
+            Box::pin(async { Ok(true) })
+        }
+
+        fn check_exact_claim_fence<'a>(
+            &'a self,
+            room_jid: &'a BareJid,
+            fence: &'a RoomClaimFenceContext,
+        ) -> MucDurableFuture<'a, bool> {
+            let matches = fence == &projection_test_claim_fence(room_jid);
+            Box::pin(async move { Ok(matches) })
+        }
+    }
+
+    fn projection_test_claim_fence(room_jid: &BareJid) -> RoomClaimFenceContext {
+        RoomClaimFenceContext::new(
+            Entity::new(EntityType::RoomActor, room_jid.to_string()),
+            NodeIdentity::local(),
+            ClaimEpoch(1),
+        )
+    }
+
+    fn validate_projection_test_claim_fence(
+        room_jid: &BareJid,
+        fence: &RoomClaimFenceContext,
+    ) -> Result<(), waddle_xmpp::XmppError> {
+        if fence == &projection_test_claim_fence(room_jid) {
+            Ok(())
+        } else {
+            Err(waddle_xmpp::XmppError::internal(
+                "unexpected room claim fence in occupancy projection handler test",
+            ))
+        }
+    }
+
+    async fn create_room_with_projection_store(
+        state: &WebSocketState,
+        room_jid: &BareJid,
+        store: Arc<ProjectionFailingStore>,
+    ) -> ActorRef<RoomActor> {
+        let actor = state
+            .deps
+            .protocol
+            .room_registry
+            .ask(CreateRoom {
+                room_jid: room_jid.clone(),
+                waddle_id: "test-waddle".to_string(),
+                channel_id: "test-channel".to_string(),
+                config: waddle_xmpp::muc::RoomConfig {
+                    members_only: false,
+                    ..Default::default()
+                },
+            })
+            .await
+            .expect("create room");
+        actor
+            .ask(RestoreDurableRoomState {
+                store: store as Arc<dyn MucDurableStore>,
+                claim_fence: projection_test_claim_fence(room_jid),
+            })
+            .await
+            .expect("install projection test durable store");
+        actor
+    }
+
+    #[tokio::test]
+    async fn join_projection_commit_failure_bounces_resource_constraint_without_broadcast() {
+        let state = create_test_websocket_state().await;
+        let owner_session = create_test_server_owner_session(state.as_ref(), "owner").await;
+        let room_jid: BareJid = "join-projection-failure@muc.example.com"
+            .parse()
+            .expect("room jid");
+        let owner: FullJid = "owner@example.com/web".parse().expect("owner jid");
+        let bob: FullJid = "bob@example.com/web".parse().expect("bob jid");
+        let alice: FullJid = "alice@example.com/web".parse().expect("alice jid");
+        let (bob_tx, mut bob_rx) = mpsc::channel(8);
+
+        create_room_with_projection_store(
+            state.as_ref(),
+            &room_jid,
+            ProjectionFailingStore::with_join_failure_after(2),
+        )
+        .await;
+        register_test_connection(state.as_ref(), &bob, bob_tx).await;
+
+        let owner_join = handle_muc_join(
+            state.as_ref(),
+            "example.com",
+            &room_jid,
+            &owner,
+            "owner",
+            None,
+            &Some(owner_session),
+        )
+        .await;
+        assert!(
+            owner_join
+                .iter()
+                .any(|frame| frame.contains("status code='110'")),
+            "owner join must succeed so the room exists for the failed admission: {owner_join:?}"
+        );
+        let bob_join = handle_muc_join(
+            state.as_ref(),
+            "example.com",
+            &room_jid,
+            &bob,
+            "bob",
+            None,
+            &None,
+        )
+        .await;
+        assert!(
+            bob_join
+                .iter()
+                .any(|frame| frame.contains("status code='110'")),
+            "bob join must succeed so another occupant could observe a stray broadcast"
+        );
+        while bob_rx.try_recv().is_ok() {}
+
+        let responses = handle_muc_join(
+            state.as_ref(),
+            "example.com",
+            &room_jid,
+            &alice,
+            "alice",
+            None,
+            &None,
+        )
+        .await;
+
+        assert_eq!(responses.len(), 1);
+        let denial = Element::from_str(&responses[0]).expect("join denial XML");
+        assert_eq!(denial.name(), "presence");
+        assert_eq!(denial.attr("type"), Some("error"));
+        assert!(
+            responses[0].contains("resource-constraint"),
+            "projection refusal must surface the generic wait/resource-constraint bounce"
+        );
+        assert!(
+            bob_rx.try_recv().is_err(),
+            "other occupants must not see a rejected join projection"
+        );
+        let room = snapshot_room(state.as_ref(), &room_jid).await.room;
+        assert!(
+            room.find_nick_by_real_jid(&alice).is_none(),
+            "the failed join must not materialize the rejected occupant"
+        );
+    }
+
+    #[tokio::test]
+    async fn explicit_leave_deferred_bounces_resource_constraint_and_keeps_occupancy() {
+        let recorder = Arc::new(RecordingSfu::default());
+        let state = create_test_websocket_state_with_sfu(recorder.clone()).await;
+        let alice_session = create_test_server_owner_session(state.as_ref(), "alice").await;
+        let room_jid: BareJid = "leave-projection-deferred@muc.example.com"
+            .parse()
+            .expect("room jid");
+        let alice: FullJid = "alice@example.com/web".parse().expect("alice jid");
+        let bob: FullJid = "bob@example.com/web".parse().expect("bob jid");
+        let (bob_tx, mut bob_rx) = mpsc::channel(8);
+
+        create_room_with_projection_store(
+            state.as_ref(),
+            &room_jid,
+            ProjectionFailingStore::new(ProjectionFailureMode::Leave),
+        )
+        .await;
+        register_test_connection(state.as_ref(), &bob, bob_tx).await;
+        let alice_join = handle_muc_join(
+            state.as_ref(),
+            "example.com",
+            &room_jid,
+            &alice,
+            "alice",
+            None,
+            &Some(alice_session),
+        )
+        .await;
+        assert!(
+            alice_join
+                .iter()
+                .any(|frame| frame.contains("status code='110'")),
+            "alice join must succeed before the deferred leave: {alice_join:?}"
+        );
+        let bob_join = handle_muc_join(
+            state.as_ref(),
+            "example.com",
+            &room_jid,
+            &bob,
+            "bob",
+            None,
+            &None,
+        )
+        .await;
+        assert!(
+            bob_join
+                .iter()
+                .any(|frame| frame.contains("status code='110'")),
+            "bob join must succeed before observing the failed leave"
+        );
+        while bob_rx.try_recv().is_ok() {}
+
+        let responses = handle_muc_leave(state.as_ref(), &room_jid, &alice, "alice", None).await;
+
+        assert_eq!(responses.len(), 1);
+        let denial = Element::from_str(&responses[0]).expect("leave denial XML");
+        assert_eq!(denial.name(), "presence");
+        assert_eq!(denial.attr("type"), Some("error"));
+        assert!(
+            responses[0].contains("resource-constraint"),
+            "a deferred explicit leave must bounce with wait/resource-constraint"
+        );
+        assert!(
+            bob_rx.try_recv().is_err(),
+            "remaining occupants must not see unavailable when projection commit defers"
+        );
+        assert!(
+            recorder.snapshot().is_empty(),
+            "the explicit-leave failure path must not unregister SFU participation"
+        );
+        let room = snapshot_room(state.as_ref(), &room_jid).await.room;
+        assert_eq!(
+            room.find_nick_by_real_jid(&alice),
+            Some("alice"),
+            "deferred leave keeps the occupant in the room"
+        );
+    }
+
+    #[tokio::test]
+    async fn explicit_leave_not_occupant_keeps_todays_self_unavailable() {
+        let state = create_test_websocket_state().await;
+        let room_jid: BareJid = "leave-not-occupant@muc.example.com"
+            .parse()
+            .expect("room jid");
+        let bob: FullJid = "bob@example.com/web".parse().expect("bob jid");
+        let alice: FullJid = "alice@example.com/web".parse().expect("alice jid");
+
+        let actor = state
+            .deps
+            .protocol
+            .room_registry
+            .ask(CreateRoom {
+                room_jid: room_jid.clone(),
+                waddle_id: "test-waddle".to_string(),
+                channel_id: "test-channel".to_string(),
+                config: waddle_xmpp::muc::RoomConfig {
+                    members_only: false,
+                    ..Default::default()
+                },
+            })
+            .await
+            .expect("create room");
+        let bob_join = handle_muc_join(
+            state.as_ref(),
+            "example.com",
+            &room_jid,
+            &bob,
+            "bob",
+            None,
+            &None,
+        )
+        .await;
+        assert!(
+            bob_join
+                .iter()
+                .any(|frame| frame.contains("status code='110'")),
+            "seed occupant join must succeed: {bob_join:?}"
+        );
+
+        let responses = handle_muc_leave(state.as_ref(), &room_jid, &alice, "alice", None).await;
+
+        assert_eq!(responses.len(), 1);
+        let unavailable = Element::from_str(&responses[0]).expect("self unavailable XML");
+        assert_eq!(unavailable.name(), "presence");
+        assert_eq!(unavailable.attr("type"), Some("unavailable"));
+        assert!(unavailable
+            .get_child("error", waddle_xmpp::ns::JABBER_CLIENT)
+            .is_none());
+        let snapshot = actor.ask(GetSnapshot).await.expect("room snapshot");
+        assert_eq!(snapshot.room.find_nick_by_real_jid(&bob), Some("bob"));
+        assert!(snapshot.room.find_nick_by_real_jid(&alice).is_none());
+    }
+
+    #[tokio::test]
+    async fn suppressed_leave_is_acknowledged_and_leaves_no_receipt() {
+        let state = create_test_websocket_state().await;
+        let room_jid: BareJid = "suppressed-store-less@muc.example.com"
+            .parse()
+            .expect("room jid");
+        let alice_session = create_test_server_owner_session(state.as_ref(), "alice").await;
+        let alice: FullJid = "alice@example.com/web".parse().expect("alice jid");
+        let bob: FullJid = "bob@example.com/web".parse().expect("bob jid");
+        let (bob_tx, mut bob_rx) = mpsc::channel(8);
+        let actor = state
+            .deps
+            .protocol
+            .room_registry
+            .ask(CreateRoom {
+                room_jid: room_jid.clone(),
+                waddle_id: "test-waddle".to_string(),
+                channel_id: "test-channel".to_string(),
+                config: waddle_xmpp::muc::RoomConfig {
+                    members_only: false,
+                    ..Default::default()
+                },
+            })
+            .await
+            .expect("create store-less room");
+        register_test_connection(state.as_ref(), &bob, bob_tx).await;
+        let alice_join = handle_muc_join(
+            state.as_ref(),
+            "example.com",
+            &room_jid,
+            &alice,
+            "alice",
+            None,
+            &Some(alice_session),
+        )
+        .await;
+        assert!(alice_join
+            .iter()
+            .any(|frame| frame.contains("status code='110'")));
+        actor
+            .ask(SyncResolverAffiliation {
+                jid: alice.to_bare(),
+                affiliation: Affiliation::Owner,
+                expected_admission_revision: actor
+                    .ask(GetSnapshot)
+                    .await
+                    .expect("snapshot before owner grant")
+                    .admission_revision,
+            })
+            .await
+            .expect("grant creator affiliation");
+        let bob_join = handle_muc_join(
+            state.as_ref(),
+            "example.com",
+            &room_jid,
+            &bob,
+            "bob",
+            None,
+            &None,
+        )
+        .await;
+        assert!(bob_join
+            .iter()
+            .any(|frame| frame.contains("status code='110'")));
+        while bob_rx.try_recv().is_ok() {}
+        actor
+            .ask(SealForDestroy {
+                attempt: waddle_xmpp::muc::DestroyAttemptId::generate(),
+            })
+            .await
+            .expect("seal destroying");
+
+        let frames = handle_muc_leave(state.as_ref(), &room_jid, &alice, "alice", None).await;
+
+        assert_eq!(frames.len(), 1);
+        assert!(frames[0].contains("type='unavailable'"), "{frames:?}");
+        assert!(frames[0].contains("status code='110'"), "{frames:?}");
+        assert!(frames[0].contains("affiliation='owner'"), "{frames:?}");
+        assert!(
+            bob_rx.try_recv().is_err(),
+            "suppressed leave must not fan out"
+        );
+        // The acknowledgement is delivered by a detached task after the handler
+        // returned: wait for it.
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        loop {
+            let receipts = actor
+                .ask(GetSnapshot)
+                .await
+                .expect("snapshot after suppressed leave")
+                .departures
+                .receipts
+                .len();
+            if receipts == 0 {
+                break;
+            }
+            assert!(
+                std::time::Instant::now() < deadline,
+                "the explicit caller acknowledges the suppressed receipt"
+            );
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+    }
+
+    /// #1647 (codex round 22): a sealed answer can follow an ENQUEUED leave
+    /// whose durable projection was ambiguous — the actor self-seals because
+    /// the mutation may have committed. The handler must retain a
+    /// `ConfirmRetired` replay responsibility instead of dropping the only
+    /// owner of the departure's effects.
+    #[tokio::test]
+    async fn explicit_leave_sealed_after_ambiguous_commit_retains_confirm_retired() {
+        let state = create_test_websocket_state().await;
+        let alice_session = create_test_server_owner_session(state.as_ref(), "alice").await;
+        let room_jid: BareJid = "leave-ambiguous-sealed@muc.example.com"
+            .parse()
+            .expect("room jid");
+        let alice: FullJid = "alice@example.com/web".parse().expect("alice jid");
+        create_room_with_projection_store(
+            state.as_ref(),
+            &room_jid,
+            ProjectionFailingStore::new(ProjectionFailureMode::LeaveAmbiguous),
+        )
+        .await;
+        let alice_join = handle_muc_join(
+            state.as_ref(),
+            "example.com",
+            &room_jid,
+            &alice,
+            "alice",
+            None,
+            &Some(alice_session),
+        )
+        .await;
+        assert!(alice_join
+            .iter()
+            .any(|frame| frame.contains("status code='110'")));
+
+        let responses = handle_muc_leave(state.as_ref(), &room_jid, &alice, "alice", None).await;
+        assert_eq!(responses.len(), 1);
+        assert!(
+            responses[0].contains("type='error'"),
+            "the ambiguous-sealed leave bounces wait-class: {responses:?}"
+        );
+
+        let retained = state
+            .deps
+            .protocol
+            .pending_local_muc_departures
+            .take_due(std::time::Instant::now() + std::time::Duration::from_secs(600));
+        assert_eq!(
+            retained.len(),
+            1,
+            "the sealed leave must leave exactly one replay responsibility"
+        );
+        assert!(
+            matches!(
+                &retained[0].item,
+                crate::server::routes::websocket::LocalDepartureItem::ConfirmRetired {
+                    room,
+                    jid,
+                    cause: waddle_xmpp::muc::durable::OccupancyLeaveCause::Explicit,
+                    ..
+                } if room == &room_jid && jid == &alice
+            ),
+            "the retained item follows THIS actor's retirement: {:?}",
+            retained[0].item
+        );
+    }
+
+    /// #1647 (codex round 22): the suppressed-leave self-echo must use the
+    /// actor's authoritative nickname, not whatever nick the request's `to`
+    /// JID carried.
+    #[tokio::test]
+    async fn suppressed_leave_echo_uses_the_actor_nick_not_the_request_nick() {
+        let state = create_test_websocket_state().await;
+        let alice_session = create_test_server_owner_session(state.as_ref(), "alice").await;
+        let room_jid: BareJid = "suppressed-wrong-nick@muc.example.com"
+            .parse()
+            .expect("room jid");
+        let alice: FullJid = "alice@example.com/web".parse().expect("alice jid");
+        let actor = state
+            .deps
+            .protocol
+            .room_registry
+            .ask(CreateRoom {
+                room_jid: room_jid.clone(),
+                waddle_id: "test-waddle".to_string(),
+                channel_id: "test-channel".to_string(),
+                config: waddle_xmpp::muc::RoomConfig {
+                    members_only: false,
+                    ..Default::default()
+                },
+            })
+            .await
+            .expect("create store-less room");
+        let alice_join = handle_muc_join(
+            state.as_ref(),
+            "example.com",
+            &room_jid,
+            &alice,
+            "alice",
+            None,
+            &Some(alice_session),
+        )
+        .await;
+        assert!(alice_join
+            .iter()
+            .any(|frame| frame.contains("status code='110'")));
+        actor
+            .ask(SealForDestroy {
+                attempt: waddle_xmpp::muc::DestroyAttemptId::generate(),
+            })
+            .await
+            .expect("seal destroying");
+
+        let frames = handle_muc_leave(state.as_ref(), &room_jid, &alice, "impostor", None).await;
+        assert_eq!(frames.len(), 1);
+        assert!(frames[0].contains("status code='110'"), "{frames:?}");
+        assert!(
+            frames[0].contains(&format!("{room_jid}/alice")),
+            "the echo is from the nick alice actually held: {frames:?}"
+        );
+        assert!(
+            !frames[0].contains("impostor"),
+            "the request's bogus nick never reaches the wire: {frames:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn explicit_leave_reply_timeout_bounces_then_janitor_echoes_self_unavailable_once() {
+        let recorder = Arc::new(RecordingSfu::default());
+        let state = create_test_websocket_state_with_sfu(recorder.clone()).await;
+        let alice_session = create_test_server_owner_session(state.as_ref(), "alice").await;
+        let room_jid: BareJid = "leave-reply-timeout@muc.example.com"
+            .parse()
+            .expect("room jid");
+        let alice: FullJid = "alice@example.com/web".parse().expect("alice jid");
+        let bob: FullJid = "bob@example.com/web".parse().expect("bob jid");
+        let (alice_tx, mut alice_rx) = mpsc::channel(8);
+        let (bob_tx, mut bob_rx) = mpsc::channel(8);
+
+        create_room_with_projection_store(
+            state.as_ref(),
+            &room_jid,
+            ProjectionFailingStore::new(ProjectionFailureMode::LeaveDelay(
+                std::time::Duration::from_secs(6),
+            )),
+        )
+        .await;
+        register_test_connection(state.as_ref(), &alice, alice_tx).await;
+        register_test_connection(state.as_ref(), &bob, bob_tx).await;
+        let alice_join = handle_muc_join(
+            state.as_ref(),
+            "example.com",
+            &room_jid,
+            &alice,
+            "alice",
+            None,
+            &Some(alice_session),
+        )
+        .await;
+        assert!(alice_join
+            .iter()
+            .any(|frame| frame.contains("status code='110'")));
+        let bob_join = handle_muc_join(
+            state.as_ref(),
+            "example.com",
+            &room_jid,
+            &bob,
+            "bob",
+            None,
+            &None,
+        )
+        .await;
+        assert!(bob_join
+            .iter()
+            .any(|frame| frame.contains("status code='110'")));
+        while alice_rx.try_recv().is_ok() {}
+        while bob_rx.try_recv().is_ok() {}
+
+        let responses = handle_muc_leave(state.as_ref(), &room_jid, &alice, "alice", None).await;
+
+        assert_eq!(responses.len(), 1);
+        assert!(
+            responses[0].contains("resource-constraint"),
+            "the timed-out explicit leave must bounce with wait/resource-constraint"
+        );
+        assert_eq!(state.deps.protocol.pending_local_muc_departures.len(), 1);
+        assert!(alice_rx.try_recv().is_err());
+        assert!(bob_rx.try_recv().is_err());
+
+        tokio::time::sleep(std::time::Duration::from_secs(7)).await;
+        crate::server::session_janitors::run_local_muc_departure_sweep(state.as_ref()).await;
+
+        let alice_unavailable = alice_rx.try_recv().expect("self unavailable");
+        let waddle_xmpp::Stanza::Presence(alice_presence) = alice_unavailable.stanza else {
+            panic!("expected self unavailable presence");
+        };
+        assert_eq!(
+            alice_presence.type_,
+            xmpp_parsers::presence::Type::Unavailable
+        );
+        assert!(
+            alice_presence.payloads.iter().any(|payload| {
+                payload
+                    .children()
+                    .any(|child| child.name() == "status" && child.attr("code") == Some("110"))
+            }),
+            "self unavailable must carry MUC self-presence status 110"
+        );
+
+        let bob_unavailable = bob_rx.try_recv().expect("remaining occupant unavailable");
+        let waddle_xmpp::Stanza::Presence(bob_presence) = bob_unavailable.stanza else {
+            panic!("expected fan-out unavailable presence");
+        };
+        assert_eq!(
+            bob_presence.type_,
+            xmpp_parsers::presence::Type::Unavailable
+        );
+        assert!(
+            alice_rx.try_recv().is_err(),
+            "self echo must happen exactly once"
+        );
+        assert!(
+            bob_rx.try_recv().is_err(),
+            "fan-out must happen exactly once"
+        );
+        assert_eq!(
+            recorder.snapshot().len(),
+            1,
+            "SFU unregister must happen exactly once"
+        );
+        assert_eq!(state.deps.protocol.pending_local_muc_departures.len(), 0);
+    }
+
+    #[tokio::test]
+    async fn explicit_leave_retry_after_rejoin_does_not_evict_the_new_session() {
+        let recorder = Arc::new(RecordingSfu::default());
+        let state = create_test_websocket_state_with_sfu(recorder.clone()).await;
+        let alice_session = create_test_server_owner_session(state.as_ref(), "alice").await;
+        let room_jid: BareJid = "leave-timeout-rejoin@muc.example.com"
+            .parse()
+            .expect("room jid");
+        let alice: FullJid = "alice@example.com/web".parse().expect("alice jid");
+        let bob: FullJid = "bob@example.com/web".parse().expect("bob jid");
+        let (alice_tx, mut alice_rx) = mpsc::channel(8);
+        let (bob_tx, mut bob_rx) = mpsc::channel(8);
+
+        create_room_with_projection_store(
+            state.as_ref(),
+            &room_jid,
+            ProjectionFailingStore::new(ProjectionFailureMode::LeaveDelay(
+                std::time::Duration::from_secs(6),
+            )),
+        )
+        .await;
+        register_test_connection(state.as_ref(), &alice, alice_tx).await;
+        register_test_connection(state.as_ref(), &bob, bob_tx).await;
+
+        let alice_join = handle_muc_join(
+            state.as_ref(),
+            "example.com",
+            &room_jid,
+            &alice,
+            "alice",
+            None,
+            &Some(alice_session.clone()),
+        )
+        .await;
+        assert!(alice_join
+            .iter()
+            .any(|frame| frame.contains("status code='110'")));
+        let bob_join = handle_muc_join(
+            state.as_ref(),
+            "example.com",
+            &room_jid,
+            &bob,
+            "bob",
+            None,
+            &None,
+        )
+        .await;
+        assert!(bob_join
+            .iter()
+            .any(|frame| frame.contains("status code='110'")));
+        while alice_rx.try_recv().is_ok() {}
+        while bob_rx.try_recv().is_ok() {}
+
+        let leave_frames = handle_muc_leave(state.as_ref(), &room_jid, &alice, "alice", None).await;
+        assert_eq!(leave_frames.len(), 1);
+        assert!(
+            leave_frames[0].contains("resource-constraint"),
+            "the timed-out explicit leave must bounce first: {leave_frames:?}"
+        );
+        assert_eq!(state.deps.protocol.pending_local_muc_departures.len(), 1);
+        assert!(alice_rx.try_recv().is_err());
+        assert!(bob_rx.try_recv().is_err());
+        assert!(
+            recorder.snapshot().is_empty(),
+            "the timed-out first attempt must not unregister SFU participation"
+        );
+
+        tokio::time::sleep(std::time::Duration::from_secs(7)).await;
+
+        let rejoin = handle_muc_join(
+            state.as_ref(),
+            "example.com",
+            &room_jid,
+            &alice,
+            "alice",
+            None,
+            &Some(alice_session),
+        )
+        .await;
+        assert!(
+            rejoin
+                .iter()
+                .any(|frame| frame.contains("status code='110'")),
+            "alice must be able to rejoin before the janitor retry: {rejoin:?}"
+        );
+        while alice_rx.try_recv().is_ok() {}
+        while bob_rx.try_recv().is_ok() {}
+
+        crate::server::session_janitors::run_local_muc_departure_sweep(state.as_ref()).await;
+
+        assert!(
+            alice_rx.try_recv().is_err(),
+            "the superseded retry must not self-echo unavailable to the new session"
+        );
+        assert!(
+            bob_rx.try_recv().is_err(),
+            "the superseded retry must not fan out unavailable to other occupants"
+        );
+        assert!(
+            recorder.snapshot().is_empty(),
+            "the superseded retry must not unregister the rejoined SFU participant"
+        );
+        let room = snapshot_room(state.as_ref(), &room_jid).await.room;
+        assert_eq!(
+            room.find_nick_by_real_jid(&alice),
+            Some("alice"),
+            "alice must remain an occupant after the superseded retry"
+        );
+        assert_eq!(state.deps.protocol.pending_local_muc_departures.len(), 0);
+    }
+
+    #[tokio::test]
+    async fn explicit_leave_timeout_then_rejoin_then_leave_then_old_retry_emits_no_stale_presence()
+    {
+        let recorder = Arc::new(RecordingSfu::default());
+        let state = create_test_websocket_state_with_sfu(recorder.clone()).await;
+        let alice_session = create_test_server_owner_session(state.as_ref(), "alice").await;
+        let room_jid: BareJid = "leave-timeout-rejoin-leave@muc.example.com"
+            .parse()
+            .expect("room jid");
+        let alice: FullJid = "alice@example.com/web".parse().expect("alice jid");
+        let bob: FullJid = "bob@example.com/web".parse().expect("bob jid");
+        let (alice_tx, mut alice_rx) = mpsc::channel(8);
+        let (bob_tx, mut bob_rx) = mpsc::channel(8);
+        let store = ProjectionFailingStore::new(ProjectionFailureMode::LeaveDelay(
+            std::time::Duration::from_secs(6),
+        ));
+
+        create_room_with_projection_store(state.as_ref(), &room_jid, store.clone()).await;
+        register_test_connection(state.as_ref(), &alice, alice_tx).await;
+        register_test_connection(state.as_ref(), &bob, bob_tx).await;
+
+        let alice_join = handle_muc_join(
+            state.as_ref(),
+            "example.com",
+            &room_jid,
+            &alice,
+            "alice",
+            None,
+            &Some(alice_session.clone()),
+        )
+        .await;
+        assert!(alice_join
+            .iter()
+            .any(|frame| frame.contains("status code='110'")));
+        let bob_join = handle_muc_join(
+            state.as_ref(),
+            "example.com",
+            &room_jid,
+            &bob,
+            "bob",
+            None,
+            &None,
+        )
+        .await;
+        assert!(bob_join
+            .iter()
+            .any(|frame| frame.contains("status code='110'")));
+        while alice_rx.try_recv().is_ok() {}
+        while bob_rx.try_recv().is_ok() {}
+
+        let first_leave = handle_muc_leave(state.as_ref(), &room_jid, &alice, "alice", None).await;
+        assert_eq!(first_leave.len(), 1);
+        assert!(
+            first_leave[0].contains("resource-constraint"),
+            "the timed-out first leave must bounce first: {first_leave:?}"
+        );
+        assert_eq!(
+            state.deps.protocol.pending_local_muc_departures.len(),
+            1,
+            "the timed-out first leave must stay queued for retry"
+        );
+        assert!(alice_rx.try_recv().is_err());
+        assert!(bob_rx.try_recv().is_err());
+        assert!(
+            recorder.snapshot().is_empty(),
+            "the timed-out first leave must not unregister SFU participation"
+        );
+
+        tokio::time::sleep(std::time::Duration::from_secs(7)).await;
+
+        let rejoin = handle_muc_join(
+            state.as_ref(),
+            "example.com",
+            &room_jid,
+            &alice,
+            "alice",
+            None,
+            &Some(alice_session),
+        )
+        .await;
+        assert!(
+            rejoin
+                .iter()
+                .any(|frame| frame.contains("status code='110'")),
+            "alice must be able to rejoin before replaying the old leave: {rejoin:?}"
+        );
+        while alice_rx.try_recv().is_ok() {}
+        while bob_rx.try_recv().is_ok() {}
+
+        store.set_failure(ProjectionFailureMode::Succeed);
+        let second_leave = handle_muc_leave(state.as_ref(), &room_jid, &alice, "alice", None).await;
+        assert_eq!(second_leave.len(), 1);
+        assert!(
+            second_leave[0].contains("type='unavailable'"),
+            "the second leave must complete normally: {second_leave:?}"
+        );
+        assert!(
+            second_leave[0].contains("status code='110'"),
+            "the second leave must self-echo exactly once via the direct reply: {second_leave:?}"
+        );
+
+        let bob_unavailable = bob_rx.try_recv().expect("second leave fan-out");
+        let waddle_xmpp::Stanza::Presence(bob_presence) = bob_unavailable.stanza else {
+            panic!("expected fan-out unavailable presence");
+        };
+        assert_eq!(
+            bob_presence.type_,
+            xmpp_parsers::presence::Type::Unavailable
+        );
+        assert!(
+            bob_rx.try_recv().is_err(),
+            "bob must receive exactly one unavailable from the second leave"
+        );
+        assert!(
+            alice_rx.try_recv().is_err(),
+            "the second leave must not enqueue an extra websocket self echo"
+        );
+        assert_eq!(
+            recorder.snapshot().len(),
+            1,
+            "the successful second leave must unregister SFU participation exactly once"
+        );
+        // The newer leave's acknowledgement is delivered by a detached task:
+        // wait until only the older timed-out leave remains queued.
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        while state.deps.protocol.pending_local_muc_departures.len() != 1 {
+            assert!(
+                std::time::Instant::now() < deadline,
+                "only the older timed-out leave should remain queued before the janitor retry, \
+                 got {}",
+                state.deps.protocol.pending_local_muc_departures.len()
+            );
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+
+        crate::server::session_janitors::run_local_muc_departure_sweep(state.as_ref()).await;
+
+        assert!(
+            alice_rx.try_recv().is_err(),
+            "the old retry must not emit a stale self unavailable after the later successful leave"
+        );
+        assert!(
+            bob_rx.try_recv().is_err(),
+            "the old retry must not emit a stale unavailable to remaining occupants"
+        );
+        assert_eq!(
+            recorder.snapshot().len(),
+            1,
+            "the old retry must not unregister the same SFU participant twice"
+        );
+        assert_eq!(
+            state.deps.protocol.pending_local_muc_departures.len(),
+            0,
+            "the stale retry must converge and drop the retained item"
+        );
+        let room = snapshot_room(state.as_ref(), &room_jid).await.room;
+        assert!(
+            room.find_nick_by_real_jid(&alice).is_none(),
+            "alice must stay absent after the later successful leave and stale retry suppression"
+        );
+        assert_eq!(
+            room.find_nick_by_real_jid(&bob),
+            Some("bob"),
+            "bob must remain present after suppressing the stale retry"
+        );
+    }
+
+    #[tokio::test]
+    async fn join_and_leave_requests_record_ws_boundary_duration() {
+        let metrics = waddle_xmpp::telemetry::test_support::acquire().await;
+        let state = create_test_websocket_state().await;
+        let owner_session = create_test_server_owner_session(state.as_ref(), "alice").await;
+        let room_jid: BareJid = "ws-boundary-duration@muc.example.com"
+            .parse()
+            .expect("room jid");
+        let alice: FullJid = "alice@example.com/web".parse().expect("alice jid");
+
+        let joined = handle_muc_join(
+            state.as_ref(),
+            "example.com",
+            &room_jid,
+            &alice,
+            "alice",
+            None,
+            &Some(owner_session),
+        )
+        .await;
+        assert!(joined
+            .iter()
+            .any(|frame| frame.contains("status code='110'")));
+
+        let left = handle_muc_leave(state.as_ref(), &room_jid, &alice, "alice", None).await;
+        assert!(left
+            .iter()
+            .any(|frame| frame.contains("type='unavailable'")));
+
+        assert!(metrics
+            .histogram_count(
+                "waddle.muc.occupancy.handler.duration",
+                &[("op", "join_request")]
+            )
+            .is_some_and(|count| count >= 1));
+        assert!(metrics
+            .histogram_count(
+                "waddle.muc.occupancy.handler.duration",
+                &[("op", "leave_request")]
+            )
+            .is_some_and(|count| count >= 1));
     }
 }
 

@@ -61,13 +61,18 @@ async fn mediated_invite_authorization_grants_member_only_when_the_actor_creates
 #[tokio::test]
 async fn mediated_invite_requires_the_exact_full_jid_to_remain_an_occupant() {
     let (actor, inviter, invitee) = joined_members_only_invite_actor().await;
-    actor
-        .ask(LeaveByRealJid {
-            sender_jid: inviter.clone(),
-        })
-        .await
-        .expect("leave reply")
-        .expect("departed occupant");
+    let _ = departed(
+        actor
+            .ask(LeaveByRealJid {
+                sender_jid: inviter.clone(),
+                cause: crate::muc::durable::OccupancyLeaveCause::Explicit,
+                session: LeaveSessionSelector::Any,
+                attempt: LeaveAttemptId::generate(),
+                origin: crate::muc::room_actor::LeaveOrigin::Fresh,
+            })
+            .await
+            .expect("leave reply"),
+    );
 
     assert!(matches!(
         actor

@@ -488,7 +488,7 @@ async fn guarded_destroy_refuses_when_join_landed_after_dormancy_probe() {
         .expect("interleaved join");
 
     // Janitor half 2: guarded destroy with the stale revision → refused.
-    let destroyed: bool = registry
+    let destroyed = registry
         .ask(DestroyRoomIfInactive {
             room_jid: jid.clone(),
             expected_occupancy_revision: probe.occupancy_revision,
@@ -496,9 +496,10 @@ async fn guarded_destroy_refuses_when_join_landed_after_dormancy_probe() {
         })
         .await
         .expect("guarded destroy ask");
-    assert!(
-        !destroyed,
-        "a join after the dormancy probe must refuse the guarded destroy \
+    assert_eq!(
+        destroyed,
+        GuardedDestroyOutcome::Refused,
+        "a join after the dormancy probe must REFUSE the guarded destroy \
          — destroying here orphans the freshly-admitted occupant (#1108)"
     );
     assert!(
@@ -518,21 +519,38 @@ async fn guarded_destroy_refuses_when_join_landed_after_dormancy_probe() {
 
     // After the occupant leaves, a fresh probe + matching revision
     // destroys the actually-dormant room.
+    let attempt = crate::muc::room_actor::LeaveAttemptId::generate();
     actor
-        .ask(LeaveByRealJid { sender_jid: alice })
+        .ask(LeaveByRealJid {
+            sender_jid: alice,
+            cause: crate::muc::durable::OccupancyLeaveCause::Explicit,
+            session: crate::muc::room_actor::LeaveSessionSelector::Any,
+            attempt,
+            origin: crate::muc::room_actor::LeaveOrigin::Fresh,
+        })
         .await
-        .expect("leave")
-        .expect("outcome");
+        .expect("leave");
+    // #1647: the leave minted a departure receipt, and an unacknowledged
+    // receipt now legitimately vetoes dormancy. Acknowledge it so this test
+    // keeps pinning ITS fence, not the receipt's.
+    assert_eq!(
+        actor
+            .ask(crate::muc::room_actor::AckDepartureReceipt { attempt })
+            .await
+            .expect("ack ask"),
+        crate::muc::room_actor::AckDepartureOutcome::Acknowledged
+    );
     let probe = actor.ask(IsDormant).await.expect("second probe");
     assert!(probe.dormant, "room is dormant again after the leave");
-    let destroyed: bool = registry
+    let destroyed = registry
         .ask(DestroyRoomIfInactive {
             room_jid: jid.clone(),
             expected_occupancy_revision: probe.occupancy_revision,
             guard: SealGuard::Dormant,
         })
         .await
-        .expect("guarded destroy ask");
+        .expect("guarded destroy ask")
+        .destroyed();
     assert!(destroyed, "an actually-dormant room is destroyed");
     assert!(
         !registry
@@ -570,14 +588,15 @@ async fn sealed_room_refuses_late_join_with_retryable_error() {
     let probe = stale_ref.ask(IsDormant).await.expect("probe");
     assert!(probe.dormant);
 
-    let destroyed: bool = registry
+    let destroyed = registry
         .ask(DestroyRoomIfInactive {
             room_jid: jid.clone(),
             expected_occupancy_revision: probe.occupancy_revision,
             guard: SealGuard::Dormant,
         })
         .await
-        .expect("guarded destroy ask");
+        .expect("guarded destroy ask")
+        .destroyed();
     assert!(destroyed);
 
     let alice: jid::FullJid = "alice@example.com/web".parse().expect("full jid");
@@ -957,10 +976,12 @@ async fn registered_destroy_preseal_can_abort_after_definite_non_delivery() {
             attempt,
         })
         .await
-        .expect("seal and snapshot");
+        .expect("seal and snapshot")
+        .room;
     registry
         .ask(RegisterDestroyCompletion {
             completion: DestroyCompletion {
+                departures: Default::default(),
                 attempt,
                 room_jid: room_jid.clone(),
                 room,
@@ -1008,10 +1029,12 @@ async fn registered_destroy_preseal_reconciles_terminally_after_deadline() {
             attempt,
         })
         .await
-        .expect("seal and snapshot");
+        .expect("seal and snapshot")
+        .room;
     registry
         .ask(RegisterDestroyCompletion {
             completion: DestroyCompletion {
+                departures: Default::default(),
                 attempt,
                 room_jid: room_jid.clone(),
                 room,
@@ -1069,7 +1092,8 @@ async fn delayed_registration_after_the_old_preseal_timer_keeps_the_destroy_seal
             attempt,
         })
         .await
-        .expect("seal and snapshot");
+        .expect("seal and snapshot")
+        .room;
 
     tokio::time::advance(std::time::Duration::from_secs(11)).await;
     tokio::task::yield_now().await;
@@ -1083,6 +1107,7 @@ async fn delayed_registration_after_the_old_preseal_timer_keeps_the_destroy_seal
     registry
         .ask(RegisterDestroyCompletion {
             completion: DestroyCompletion {
+                departures: Default::default(),
                 attempt,
                 room_jid: room_jid.clone(),
                 room,
@@ -1452,8 +1477,9 @@ mod ownership_claims_tests {
         DurableRoomState, MucDurableFuture, MucDurableStore, RoomClaimFenceContext,
     };
     use crate::muc::room_actor::{
-        GetAffiliation, GetConfig, IsSealed, JoinAffiliationGrant, JoinWithAffiliation,
-        ResolverAffiliationSyncOutcome, SyncResolverAffiliation, UpdateConfig,
+        GetAffiliation, GetConfig, GetRoomSealState, GetSnapshot, IsSealed, JoinAffiliationGrant,
+        JoinWithAffiliation, PingSelfCheck, ResolverAffiliationSyncOutcome, RoomActorError,
+        SyncResolverAffiliation, UpdateConfig,
     };
     use crate::ownership::{
         ClaimEpoch, ClaimError, ClaimSnapshot, ClaimStore, Entity, EntityType, InProcessClaimStore,
@@ -1701,6 +1727,7 @@ mod ownership_claims_tests {
         registry
             .ask(RegisterDestroyCompletion {
                 completion: DestroyCompletion {
+                    departures: Default::default(),
                     attempt,
                     room_jid: jid.clone(),
                     room: snapshot.room,
@@ -1861,6 +1888,7 @@ mod ownership_claims_tests {
         registry
             .ask(RegisterDestroyCompletion {
                 completion: DestroyCompletion {
+                    departures: Default::default(),
                     attempt,
                     room_jid: jid.clone(),
                     room: snapshot.room,
@@ -1929,6 +1957,7 @@ mod ownership_claims_tests {
         registry
             .ask(RegisterDestroyCompletion {
                 completion: DestroyCompletion {
+                    departures: Default::default(),
                     attempt,
                     room_jid: jid.clone(),
                     room: snapshot.room,
@@ -2020,6 +2049,7 @@ mod ownership_claims_tests {
             registry
                 .ask(RegisterDestroyCompletion {
                     completion: DestroyCompletion {
+                        departures: Default::default(),
                         attempt,
                         room_jid: room_jid.clone(),
                         room: snapshot.room,
@@ -2088,6 +2118,7 @@ mod ownership_claims_tests {
         registry
             .ask(RegisterDestroyCompletion {
                 completion: DestroyCompletion {
+                    departures: Default::default(),
                     attempt,
                     room_jid: jid,
                     room: snapshot.room,
@@ -2142,6 +2173,7 @@ mod ownership_claims_tests {
         registry
             .ask(RegisterDestroyCompletion {
                 completion: DestroyCompletion {
+                    departures: Default::default(),
                     attempt: first_attempt,
                     room_jid: jid.clone(),
                     room: snapshot.room.clone(),
@@ -2156,6 +2188,7 @@ mod ownership_claims_tests {
         registry
             .ask(RegisterDestroyCompletion {
                 completion: DestroyCompletion {
+                    departures: Default::default(),
                     attempt: second_attempt,
                     room_jid: jid.clone(),
                     room: snapshot.room,
@@ -2219,6 +2252,7 @@ mod ownership_claims_tests {
         registry
             .ask(RegisterDestroyCompletion {
                 completion: DestroyCompletion {
+                    departures: Default::default(),
                     attempt,
                     room_jid: jid.clone(),
                     room: snapshot.room,
@@ -2283,6 +2317,7 @@ mod ownership_claims_tests {
         registry
             .ask(RegisterDestroyCompletion {
                 completion: DestroyCompletion {
+                    departures: Default::default(),
                     attempt,
                     room_jid: room_jid.clone(),
                     room,
@@ -2671,7 +2706,8 @@ mod ownership_claims_tests {
                 guard: crate::muc::room_actor::SealGuard::Dormant,
             })
             .await
-            .expect("guarded eviction"));
+            .expect("guarded eviction")
+            .destroyed());
         assert!(registry
             .ask(GetRoom {
                 room_jid: room_jid.clone(),
@@ -3652,6 +3688,7 @@ mod ownership_claims_tests {
         block_next_config_save: AtomicBool,
         config_save_started: Option<Arc<tokio::sync::Notify>>,
         allow_config_save: Option<Arc<tokio::sync::Notify>>,
+        lose_projection_persist_ownership_once: AtomicBool,
         block_create_for: Option<BareJid>,
         create_started: Option<Arc<tokio::sync::Notify>>,
         allow_create: Option<Arc<tokio::sync::Notify>>,
@@ -3682,6 +3719,12 @@ mod ownership_claims_tests {
         /// be visible from the real durable store before publication.
         persisted_room_states: Mutex<HashMap<BareJid, DurableRoomState>>,
         preparing_rooms: Mutex<HashMap<BareJid, crate::muc::RoomCommittedCoordinates>>,
+        recorded_commits: Mutex<
+            Vec<(
+                crate::muc::RoomDurableMutation,
+                crate::muc::RoomCommittedCoordinates,
+            )>,
+        >,
         lifecycle: std::sync::OnceLock<crate::muc::RoomLifecycleId>,
         next_revision: AtomicUsize,
     }
@@ -3754,6 +3797,20 @@ mod ownership_claims_tests {
                     .expect("positive revision"),
             }
         }
+
+        fn set_lose_projection_persist_ownership_once(&self) {
+            self.lose_projection_persist_ownership_once
+                .store(true, Ordering::SeqCst);
+        }
+
+        fn recorded_commits(
+            &self,
+        ) -> Vec<(
+            crate::muc::RoomDurableMutation,
+            crate::muc::RoomCommittedCoordinates,
+        )> {
+            self.recorded_commits.lock().expect("lock").clone()
+        }
     }
 
     impl MucDurableStore for RecordingDurableStore {
@@ -3792,6 +3849,7 @@ mod ownership_claims_tests {
                     initial_affiliations,
                 } => Some(DurableRoomState {
                     coordinates: None,
+                    config_coordinates: None,
                     waddle_id: waddle_id.as_str().to_string(),
                     channel_id: channel_id.as_str().to_string(),
                     config: config.clone(),
@@ -3840,6 +3898,11 @@ mod ownership_claims_tests {
             let destroy_intents = &self.destroy_intents;
             let destroy_effects = &self.destroy_effects;
             let coordinates = self.next_commit_coordinates();
+            let projection_persist_lost =
+                matches!(&intent, crate::muc::RoomDurableMutation::Projection(_))
+                    && self
+                        .lose_projection_persist_ownership_once
+                        .swap(false, Ordering::SeqCst);
             Box::pin(async move {
                 if block_create {
                     if let Some(started) = create_started {
@@ -3864,6 +3927,9 @@ mod ownership_claims_tests {
                         }
                         _ => crate::muc::RoomCommitError::OwnershipUnavailable,
                     })?;
+                if projection_persist_lost {
+                    return Err(crate::muc::RoomCommitError::NotOwner);
+                }
                 if block {
                     let claim_fences = Arc::clone(&store.exact_claim_fences);
                     let stale_rejected = Arc::clone(&store.stale_config_save_rejected);
@@ -3948,6 +4014,55 @@ mod ownership_claims_tests {
                         .expect("lock")
                         .insert(room_jid.clone(), created_state);
                 }
+                if let Some(state) = store
+                    .persisted_room_states
+                    .lock()
+                    .expect("lock")
+                    .get_mut(room_jid)
+                {
+                    state.coordinates = Some(coordinates);
+                    match &intent {
+                        crate::muc::RoomDurableMutation::Config { config, .. }
+                        | crate::muc::RoomDurableMutation::MembersOnlyEnforcement {
+                            config, ..
+                        } => {
+                            state.config = config.clone();
+                            state.config_coordinates = Some(coordinates);
+                        }
+                        crate::muc::RoomDurableMutation::Affiliation(entry) => {
+                            state
+                                .affiliations
+                                .retain(|current| current.jid != entry.jid);
+                            if let Some(affiliation) = entry.affiliation {
+                                state.affiliations.push(
+                                    crate::muc::affiliation::AffiliationEntry::new(
+                                        entry.jid.clone(),
+                                        affiliation,
+                                    ),
+                                );
+                            }
+                        }
+                        crate::muc::RoomDurableMutation::AffiliationBatch(entries) => {
+                            for entry in entries {
+                                state
+                                    .affiliations
+                                    .retain(|current| current.jid != entry.jid);
+                                if let Some(affiliation) = entry.affiliation {
+                                    state.affiliations.push(
+                                        crate::muc::affiliation::AffiliationEntry::new(
+                                            entry.jid.clone(),
+                                            affiliation,
+                                        ),
+                                    );
+                                }
+                            }
+                        }
+                        crate::muc::RoomDurableMutation::Create { .. } => {
+                            state.config_coordinates = Some(coordinates);
+                        }
+                        _ => {}
+                    }
+                }
                 if creates {
                     store
                         .preparing_rooms
@@ -3972,6 +4087,11 @@ mod ownership_claims_tests {
                         .expect("preparing rooms")
                         .insert(room_jid.clone(), coordinates);
                 }
+                store
+                    .recorded_commits
+                    .lock()
+                    .expect("lock")
+                    .push((intent, coordinates));
                 Ok(crate::muc::RoomCommitOutcome {
                     coordinates,
                     reservation: None,
@@ -4322,6 +4442,7 @@ mod ownership_claims_tests {
     fn restored_room_snapshot(name: &str) -> DurableRoomState {
         DurableRoomState {
             coordinates: None,
+            config_coordinates: None,
             waddle_id: "restored-waddle".to_string(),
             channel_id: "restored-channel".to_string(),
             config: RoomConfig {
@@ -4379,6 +4500,243 @@ mod ownership_claims_tests {
         }
     }
 
+    /// #1647 (codex round 23): the durable destroy outbox must settle owed
+    /// departure receipts — their holders already left the roster, so the
+    /// live-occupant recipients alone would drop their terminal presence.
+    #[test]
+    fn destroy_effects_include_owed_departure_receipt_holders() {
+        let room_jid = test_room_jid("destroy-effects-receipts");
+        let ghost: jid::FullJid = "ghost@example.com/web".parse().expect("ghost full JID");
+        let leave_attempt = crate::muc::room_actor::LeaveAttemptId::generate();
+        let completion = DestroyCompletion {
+            attempt: crate::muc::DestroyAttemptId::generate(),
+            room_jid: room_jid.clone(),
+            room: MucRoom::new(
+                room_jid,
+                "w".to_string(),
+                "c".to_string(),
+                RoomConfig::default(),
+            ),
+            departures: crate::muc::room_actor::DepartureLedger {
+                receipts: vec![crate::muc::room_actor::DepartureReceipt {
+                    attempt: leave_attempt,
+                    jid: ghost.clone(),
+                    cause: crate::muc::durable::OccupancyLeaveCause::Explicit,
+                    generation: leave_attempt.order(),
+                    nick_generation: None,
+                    outcome: crate::muc::room_actor::DepartureReceiptOutcome::Suppressed {
+                        nick: crate::muc::MucOccupantNick::new("ghost".to_string())
+                            .expect("valid nick"),
+                        affiliation: crate::Affiliation::Member,
+                    },
+                }],
+                latest_generations: Vec::new(),
+                superseded_attempts: Vec::new(),
+            },
+            request: crate::muc::DestroyRequest::default(),
+        };
+        let effects = RoomRegistryActor::destroy_effects(&completion);
+        let crate::muc::RoomEffect::DestroyNotification { recipients, .. } = &effects.effects()[0]
+        else {
+            panic!("destroy effects must carry the terminal notification");
+        };
+        assert!(
+            recipients
+                .iter()
+                .any(|recipient| recipient.nick.as_str() == "ghost"
+                    && recipient.sessions == vec![ghost.clone()]),
+            "the owed receipt holder must be a terminal-outbox recipient"
+        );
+    }
+
+    /// #1647 (codex round 29): a live-roster transfer must not drop a
+    /// still-owed different-nick receipt just because the JID's per-JID
+    /// generation moved (a rejoin under a new nick) — absorption applies the
+    /// same nick-aware supersession as replay.
+    #[tokio::test]
+    async fn live_roster_transfer_preserves_a_different_nick_owed_receipt() {
+        use crate::muc::durable::{ChannelId, WaddleId};
+        use crate::muc::room_actor::{
+            GetSnapshot, JoinAffiliationGrant, JoinWithAffiliation, LeaveAttemptId, LeaveByRealJid,
+            LeaveDisposition, LeaveOrigin, LeaveSessionSelector,
+        };
+        use crate::Affiliation;
+
+        let registry = spawn_registry().await;
+        let source_jid = test_room_jid("receipt-transfer-source");
+        let source_actor = registry
+            .ask(GetOrCreateRoom {
+                room_jid: source_jid,
+                waddle_id: "w".to_string(),
+                channel_id: "c".to_string(),
+                config: RoomConfig::default(),
+            })
+            .await
+            .expect("create source room")
+            .actor_ref;
+        let alice: jid::FullJid = "alice@example.com/web".parse().expect("full JID");
+        let join = |nick: &str, admission_revision: u64| JoinWithAffiliation {
+            sender_jid: alice.clone(),
+            nick: nick.to_string(),
+            affiliation_grant: JoinAffiliationGrant::Resolver(Affiliation::Member),
+            local_domain: "example.com".to_string(),
+            admission_revision,
+        };
+        source_actor
+            .ask(join("old-nick", 0))
+            .await
+            .expect("join old");
+        let attempt = LeaveAttemptId::generate();
+        assert!(matches!(
+            source_actor
+                .ask(LeaveByRealJid {
+                    sender_jid: alice.clone(),
+                    cause: crate::muc::durable::OccupancyLeaveCause::Explicit,
+                    session: LeaveSessionSelector::Any,
+                    attempt,
+                    origin: LeaveOrigin::Fresh,
+                })
+                .await
+                .expect("old-nick leave"),
+            LeaveDisposition::Left(_)
+        ));
+        // The reply was lost; the JID rejoins under a NEW nick (its per-JID
+        // generation moves past the receipt's).
+        let admission_revision = source_actor
+            .ask(GetSnapshot)
+            .await
+            .expect("pre-rejoin snapshot")
+            .admission_revision;
+        source_actor
+            .ask(join("new-nick", admission_revision))
+            .await
+            .expect("rejoin");
+        let source_snapshot = source_actor.ask(GetSnapshot).await.expect("snapshot");
+        assert_eq!(source_snapshot.departures.receipts.len(), 1);
+
+        let recovered_jid = test_room_jid("receipt-transfer-recovered");
+        let acquisition = registry
+            .ask(GetOrCreateRoomWithLiveRoster {
+                room_jid: recovered_jid,
+                waddle_id: WaddleId::new("w".to_string()),
+                channel_id: ChannelId::new("c".to_string()),
+                config: RoomConfig::default(),
+                live_room_restore: source_snapshot.room,
+                occupancy_revision: source_snapshot.occupancy_revision,
+                departures: source_snapshot.departures,
+                demote_first: None,
+            })
+            .await
+            .expect("transfer roster");
+        let transferred = acquisition
+            .actor_ref
+            .ask(GetSnapshot)
+            .await
+            .expect("successor snapshot");
+        assert_eq!(
+            transferred.departures.receipts.len(),
+            1,
+            "the still-owed old-nick receipt survives the transfer"
+        );
+        assert_eq!(transferred.departures.receipts[0].attempt, attempt);
+    }
+
+    #[tokio::test]
+    async fn stashed_handoff_spec_restores_the_roster_on_the_next_demand_creation() {
+        use crate::muc::room_actor::{GetSnapshot, JoinAffiliationGrant, JoinWithAffiliation};
+        use crate::Affiliation;
+
+        let registry = spawn_registry().await;
+        // Build a live roster to stash (stand-in for the retired actor's
+        // snapshot dropped by a failed post-demote transition).
+        let source_jid = test_room_jid("stash-source");
+        let source_actor = registry
+            .ask(GetOrCreateRoom {
+                room_jid: source_jid,
+                waddle_id: "source-waddle".to_string(),
+                channel_id: "source-channel".to_string(),
+                config: RoomConfig::default(),
+            })
+            .await
+            .expect("create source room")
+            .actor_ref;
+        let member: jid::FullJid = "alice@example.com/web".parse().expect("member full JID");
+        source_actor
+            .ask(JoinWithAffiliation {
+                sender_jid: member.clone(),
+                nick: "alice".to_string(),
+                affiliation_grant: JoinAffiliationGrant::Resolver(Affiliation::Member),
+                local_domain: "example.com".to_string(),
+                admission_revision: 0,
+            })
+            .await
+            .expect("join source room");
+        let source_snapshot = source_actor
+            .ask(GetSnapshot)
+            .await
+            .expect("source snapshot");
+
+        let room_jid = test_room_jid("stash-adopted");
+        let stashed = std::sync::Arc::new(RoomCreationSpec {
+            waddle_id: "stashed-waddle".to_string(),
+            channel_id: "stashed-channel".to_string(),
+            config: RoomConfig {
+                name: "stashed successor".to_string(),
+                ..RoomConfig::default()
+            },
+            initial_affiliations: Vec::new(),
+            live_room_restore: Some(LiveRoomRestore {
+                room: source_snapshot.room,
+                occupancy_revision: source_snapshot.occupancy_revision,
+                departures: Default::default(),
+            }),
+        });
+        registry
+            .ask(MarkHandoffPendingForTest {
+                room_jid: room_jid.clone(),
+                age: std::time::Duration::ZERO,
+                restore: Some(stashed),
+            })
+            .await
+            .expect("stash the failed handoff spec");
+
+        // The next demand creation inside the window adopts the stash: the
+        // retired actor's roster survives the dropped handoff message.
+        let acquisition = registry
+            .ask(GetOrCreateRoom {
+                room_jid: room_jid.clone(),
+                waddle_id: "demand-waddle".to_string(),
+                channel_id: "demand-channel".to_string(),
+                config: RoomConfig::default(),
+            })
+            .await
+            .expect("demand creation adopts the stash");
+        assert_eq!(acquisition.creation, RoomCreation::Created);
+        let snapshot = acquisition
+            .actor_ref
+            .ask(GetSnapshot)
+            .await
+            .expect("adopted snapshot");
+        let restored = snapshot
+            .room
+            .find_occupant_by_real_jid(&member)
+            .expect("the stashed roster is restored");
+        assert_eq!(restored.nick, "alice");
+        assert_eq!(
+            snapshot.room.config.name, "stashed successor",
+            "the stashed spec wins over the rosterless demand spec"
+        );
+        // The registered successor ended the handoff window.
+        let lookup = registry
+            .ask(GetRoom {
+                room_jid: room_jid.clone(),
+            })
+            .await
+            .expect("lookup after adoption")
+            .expect("adopted room exists");
+        assert_eq!(lookup.id(), acquisition.actor_ref.id());
+    }
+
     #[tokio::test]
     async fn get_or_create_with_live_roster_restores_occupants_from_typed_ids() {
         use crate::muc::durable::{ChannelId, WaddleId};
@@ -4411,11 +4769,11 @@ mod ownership_claims_tests {
             })
             .await
             .expect("join source room");
-        let stale_room = source_actor
+        let source_snapshot = source_actor
             .ask(GetSnapshot)
             .await
-            .expect("source snapshot")
-            .room;
+            .expect("source snapshot");
+        let stale_room = source_snapshot.room;
 
         let recovered_jid = test_room_jid("live-roster-recovered");
         let acquisition = registry
@@ -4428,6 +4786,9 @@ mod ownership_claims_tests {
                     ..RoomConfig::default()
                 },
                 live_room_restore: stale_room,
+                occupancy_revision: source_snapshot.occupancy_revision,
+                departures: Default::default(),
+                demote_first: None,
             })
             .await
             .expect("recover room with typed live roster");
@@ -4454,6 +4815,154 @@ mod ownership_claims_tests {
                 .expect("recovered room exists")
                 .id(),
             acquisition.actor_ref.id()
+        );
+    }
+
+    #[tokio::test]
+    async fn failed_handoff_keeps_lookups_retryable_for_a_bounded_window() {
+        let registry = spawn_registry().await;
+        let room_jid = test_room_jid("handoff-window");
+        registry
+            .ask(MarkHandoffPendingForTest {
+                room_jid: room_jid.clone(),
+                age: std::time::Duration::ZERO,
+                restore: None,
+            })
+            .await
+            .expect("mark");
+        let lookup = registry
+            .ask(GetRoom {
+                room_jid: room_jid.clone(),
+            })
+            .await;
+        assert!(
+            matches!(
+                lookup,
+                Err(kameo::error::SendError::HandlerError(
+                    RoomRegistryError::OwnershipReconciliationPending(_)
+                ))
+            ),
+            "inside the window the room is reconciling, not absent: {lookup:?}"
+        );
+        registry
+            .ask(MarkHandoffPendingForTest {
+                room_jid: room_jid.clone(),
+                age: HANDOFF_PENDING_WINDOW + std::time::Duration::from_secs(1),
+                restore: None,
+            })
+            .await
+            .expect("age the marker");
+        let lookup = registry
+            .ask(GetRoom {
+                room_jid: room_jid.clone(),
+            })
+            .await
+            .expect("lookup");
+        assert!(
+            lookup.is_none(),
+            "past the window a handoff without a successor is an ordinary absence"
+        );
+    }
+
+    #[tokio::test]
+    async fn live_roster_handoff_demotes_and_publishes_in_one_registry_turn() {
+        use crate::muc::durable::{ChannelId, WaddleId};
+        use crate::muc::room_actor::{GetSnapshot, JoinAffiliationGrant, JoinWithAffiliation};
+        use crate::Affiliation;
+
+        let registry = spawn_registry().await;
+        let source_jid = test_room_jid("live-roster-source");
+        let source_actor = registry
+            .ask(GetOrCreateRoom {
+                room_jid: source_jid.clone(),
+                waddle_id: "source-waddle".to_string(),
+                channel_id: "source-channel".to_string(),
+                config: RoomConfig {
+                    name: "stale live roster".to_string(),
+                    ..RoomConfig::default()
+                },
+            })
+            .await
+            .expect("create source room")
+            .actor_ref;
+        let member: jid::FullJid = "alice@example.com/web".parse().expect("member full JID");
+        source_actor
+            .ask(JoinWithAffiliation {
+                sender_jid: member.clone(),
+                nick: "alice".to_string(),
+                affiliation_grant: JoinAffiliationGrant::Resolver(Affiliation::Member),
+                local_domain: "example.com".to_string(),
+                admission_revision: 0,
+            })
+            .await
+            .expect("join source room");
+        let source_snapshot = source_actor
+            .ask(GetSnapshot)
+            .await
+            .expect("source snapshot");
+        let stale_room = source_snapshot.room;
+        let source_snapshot_room_for_refusal = stale_room.clone();
+
+        let recovered_jid = source_jid.clone();
+        let acquisition = registry
+            .ask(GetOrCreateRoomWithLiveRoster {
+                room_jid: recovered_jid.clone(),
+                waddle_id: WaddleId::new("typed-waddle".to_string()),
+                channel_id: ChannelId::new("typed-channel".to_string()),
+                config: RoomConfig {
+                    name: "authoritative successor".to_string(),
+                    ..RoomConfig::default()
+                },
+                live_room_restore: stale_room,
+                occupancy_revision: source_snapshot.occupancy_revision,
+                departures: Default::default(),
+                demote_first: Some(source_actor.clone()),
+            })
+            .await
+            .expect("atomic handoff");
+        assert_eq!(acquisition.creation, RoomCreation::Created);
+        let successor = acquisition.actor_ref.clone();
+        assert_ne!(successor.id(), source_actor.id());
+        let registered = registry
+            .ask(GetRoom {
+                room_jid: source_jid.clone(),
+            })
+            .await
+            .expect("get room")
+            .expect("successor is registered without an observable gap");
+        assert_eq!(registered.id(), successor.id());
+        assert!(
+            successor
+                .ask(GetSnapshot)
+                .await
+                .expect("successor snapshot")
+                .room
+                .get_occupant("alice")
+                .is_some(),
+            "the transplanted roster survives the handoff"
+        );
+        // The stale actor is no longer current: a second handoff naming it is
+        // refused instead of transplanting a stale snapshot over the successor.
+        let refused = registry
+            .ask(GetOrCreateRoomWithLiveRoster {
+                room_jid: source_jid.clone(),
+                waddle_id: WaddleId::new("typed-waddle".to_string()),
+                channel_id: ChannelId::new("typed-channel".to_string()),
+                config: RoomConfig::default(),
+                live_room_restore: source_snapshot_room_for_refusal,
+                occupancy_revision: 0,
+                departures: Default::default(),
+                demote_first: Some(source_actor.clone()),
+            })
+            .await;
+        assert!(
+            matches!(
+                refused,
+                Err(kameo::error::SendError::HandlerError(
+                    RoomRegistryError::StaleActorNotCurrent(_)
+                ))
+            ),
+            "got {refused:?}"
         );
     }
 
@@ -5427,6 +5936,7 @@ mod ownership_claims_tests {
             Some(DestroyCompletion {
                 attempt,
                 room_jid: room_jid.clone(),
+                departures: Default::default(),
                 room: MucRoom::new(
                     room_jid,
                     "w".to_string(),
@@ -6543,6 +7053,7 @@ mod ownership_claims_tests {
         registry
             .ask(RegisterDestroyCompletion {
                 completion: DestroyCompletion {
+                    departures: Default::default(),
                     attempt,
                     room_jid: room_jid.clone(),
                     room: MucRoom::new(
@@ -6929,6 +7440,7 @@ mod ownership_claims_tests {
         let durable_store = Arc::new(RecordingDurableStore {
             load_result: Some(DurableRoomState {
                 coordinates: None,
+                config_coordinates: None,
                 waddle_id: "restored-waddle".to_string(),
                 channel_id: "restored-channel".to_string(),
                 config: restored_config.clone(),
@@ -7192,6 +7704,7 @@ mod ownership_claims_tests {
     fn reclaimed_snapshot(name: &str) -> DurableRoomState {
         DurableRoomState {
             coordinates: None,
+            config_coordinates: None,
             waddle_id: "reclaimed-waddle".to_string(),
             channel_id: "reclaimed-channel".to_string(),
             config: RoomConfig {
@@ -8804,14 +9317,18 @@ mod ownership_claims_tests {
                 .await
                 .expect("fill backlog");
         }
-        assert!(!registry
-            .ask(DestroyRoomIfInactive {
-                room_jid: jid,
-                expected_occupancy_revision: 0,
-                guard: SealGuard::Dormant,
-            })
-            .await
-            .expect("capacity refusal"));
+        assert_eq!(
+            registry
+                .ask(DestroyRoomIfInactive {
+                    room_jid: jid,
+                    expected_occupancy_revision: 0,
+                    guard: SealGuard::Dormant,
+                })
+                .await
+                .expect("capacity refusal"),
+            GuardedDestroyOutcome::Retained,
+            "a full release backlog RETAINS the destroy (the janitor requeues it)"
+        );
         assert!(!acquisition
             .actor_ref
             .ask(IsSealed)
@@ -10653,7 +11170,8 @@ mod ownership_claims_tests {
                 guard: SealGuard::Dormant,
             })
             .await
-            .expect("typed inactive destroy"));
+            .expect("typed inactive destroy")
+            .destroyed());
         actor.wait_for_shutdown().await;
         assert!(
             !actor.is_alive(),
@@ -10883,6 +11401,154 @@ mod ownership_claims_tests {
             .is_none());
         assert!(durable_store.current_claim_fence(&room_jid).is_none());
     }
+
+    #[tokio::test]
+    async fn claim_loss_during_join_projection_reaps_actor_and_successor_accepts_rejoin() {
+        let registry = spawn_registry().await;
+        let claim_store = Arc::new(InProcessClaimStore::new());
+        let durable_store = Arc::new(RecordingDurableStore::default());
+        wire_recording_store_with_claims(
+            &registry,
+            Arc::clone(&claim_store) as Arc<dyn ClaimStore>,
+            SharedNodeIdentity::new(this_identity()),
+            Arc::clone(&durable_store),
+        )
+        .await;
+
+        let room_jid = test_room_jid("join-projection-claim-loss");
+        let actor = registry
+            .ask(GetOrCreateRoom {
+                room_jid: room_jid.clone(),
+                waddle_id: "w".to_string(),
+                channel_id: "c".to_string(),
+                config: RoomConfig::default(),
+            })
+            .await
+            .expect("create room")
+            .actor_ref;
+        let alice: jid::FullJid = "alice@example.com/web".parse().expect("alice jid");
+        let bob: jid::FullJid = "bob@example.com/phone".parse().expect("bob jid");
+
+        actor
+            .ask(JoinWithAffiliation {
+                sender_jid: alice.clone(),
+                nick: "alice".to_string(),
+                affiliation_grant: JoinAffiliationGrant::Resolver(Affiliation::Member),
+                local_domain: "example.com".to_string(),
+                admission_revision: 0,
+            })
+            .await
+            .expect("alice join");
+        let old_head = actor
+            .ask(GetSnapshot)
+            .await
+            .expect("pre-loss snapshot")
+            .durable_coordinates
+            .expect("durable head after alice join");
+
+        durable_store.set_lose_projection_persist_ownership_once();
+        let failed_join = actor
+            .ask(JoinWithAffiliation {
+                sender_jid: bob.clone(),
+                nick: "bob".to_string(),
+                affiliation_grant: JoinAffiliationGrant::Resolver(Affiliation::Member),
+                local_domain: "example.com".to_string(),
+                admission_revision: 0,
+            })
+            .await;
+        assert!(matches!(
+            failed_join,
+            Err(SendError::HandlerError(RoomActorError::RoomSealed))
+        ));
+        assert_eq!(
+            actor.ask(GetRoomSealState).await.expect("seal state"),
+            crate::muc::room_actor::RoomSealState::OwnershipLost,
+            "projection ownership loss must seal the actor definitively"
+        );
+
+        assert!(registry
+            .ask(ReapSealedRoom {
+                room_jid: room_jid.clone(),
+            })
+            .await
+            .expect("reap sealed predecessor"));
+        actor.wait_for_shutdown().await;
+        assert!(!actor.is_alive(), "the sealed predecessor must be retired");
+
+        let successor = registry
+            .ask(GetOrCreateRoom {
+                room_jid: room_jid.clone(),
+                waddle_id: "w".to_string(),
+                channel_id: "c".to_string(),
+                config: RoomConfig::default(),
+            })
+            .await
+            .expect("restore successor")
+            .actor_ref;
+        assert_ne!(
+            successor.id(),
+            actor.id(),
+            "a successor actor must replace the sealed one"
+        );
+        let restored_snapshot = successor.ask(GetSnapshot).await.expect("restored snapshot");
+        assert_eq!(
+            restored_snapshot.durable_coordinates,
+            Some(old_head),
+            "the successor must restore from the durable head left by alice's join"
+        );
+        assert!(matches!(
+            successor
+                .ask(PingSelfCheck {
+                    nick: "alice".to_string(),
+                    sender_jid: alice.clone(),
+                })
+                .await,
+            Err(SendError::HandlerError(RoomActorError::OccupantNotFound(_)))
+        ));
+
+        successor
+            .ask(JoinWithAffiliation {
+                sender_jid: bob.clone(),
+                nick: "bob".to_string(),
+                affiliation_grant: JoinAffiliationGrant::Resolver(Affiliation::Member),
+                local_domain: "example.com".to_string(),
+                admission_revision: 0,
+            })
+            .await
+            .expect("bob rejoin on successor");
+        successor
+            .ask(JoinWithAffiliation {
+                sender_jid: alice.clone(),
+                nick: "alice".to_string(),
+                affiliation_grant: JoinAffiliationGrant::Resolver(Affiliation::Member),
+                local_domain: "example.com".to_string(),
+                admission_revision: 0,
+            })
+            .await
+            .expect("alice rejoin on successor");
+
+        let new_head = successor
+            .ask(GetSnapshot)
+            .await
+            .expect("post-rejoin snapshot")
+            .durable_coordinates
+            .expect("durable head after successor rejoins");
+        assert!(
+            new_head.revision > old_head.revision,
+            "the successor rejoins must advance the projection head"
+        );
+        assert!(matches!(
+            durable_store
+                .recorded_commits()
+                .last(),
+            Some((
+                crate::muc::RoomDurableMutation::Projection(
+                    crate::muc::durable::RoomProjection::OccupancyJoin { .. }
+                ),
+                coordinates,
+            )) if *coordinates == new_head
+        ));
+    }
 }
 
 #[tokio::test]
@@ -10907,6 +11573,7 @@ async fn dropped_exact_take_destroy_completion_request_does_not_lose_the_lease()
     registry
         .ask(RegisterDestroyCompletion {
             completion: DestroyCompletion {
+                departures: Default::default(),
                 attempt,
                 room_jid: room_jid.clone(),
                 room: snapshot.room,

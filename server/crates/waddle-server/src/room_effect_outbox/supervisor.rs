@@ -95,6 +95,53 @@ impl RoomEffectArmSupervisor {
             .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(Arc::downgrade(state));
     }
 
+    /// Retain the arming of a row whose commit was confirmed durable but whose
+    /// exact reservation lookup failed transiently (ambiguous-commit
+    /// reconciliation). Nothing else arms live-origin rows, so the lookup is
+    /// retried with capped backoff until it answers: the row is armed when
+    /// still staged, and the responsibility ends once it is no longer
+    /// staged (armed or consumed by someone else).
+    pub fn retain_staged_reservation_arming(
+        &self,
+        room_jid: jid::BareJid,
+        coordinates: waddle_xmpp::muc::RoomCommittedCoordinates,
+    ) {
+        let supervisor = self.clone();
+        self.runtime.spawn(async move {
+            let mut attempt = 0_i64;
+            loop {
+                match supervisor
+                    .store
+                    .staged_reservation_for(coordinates.lifecycle, coordinates.revision)
+                    .await
+                {
+                    Ok(Some(reservation)) => {
+                        supervisor.arm(reservation);
+                        return;
+                    }
+                    Ok(None) => return,
+                    Err(error) => {
+                        attempt = attempt.saturating_add(1);
+                        let backoff_ms = super::store::retry_delay_ms(attempt);
+                        tracing::warn!(
+                            room = %room_jid,
+                            lifecycle = %coordinates.lifecycle,
+                            revision = coordinates.revision.as_i64(),
+                            %error,
+                            attempt,
+                            backoff_ms,
+                            "retained reservation arming: staged reservation lookup failed; retrying"
+                        );
+                        tokio::time::sleep(std::time::Duration::from_millis(
+                            backoff_ms.max(0) as u64,
+                        ))
+                        .await;
+                    }
+                }
+            }
+        });
+    }
+
     pub fn arm(&self, reservation: RoomEffectReservation) {
         {
             let mut state = self

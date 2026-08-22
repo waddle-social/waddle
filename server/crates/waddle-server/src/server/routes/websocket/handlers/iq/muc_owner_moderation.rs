@@ -58,7 +58,7 @@ struct PersistedDestroyCompletion {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 struct PersistedDestroyRecipient {
-    nick: String,
+    nick: waddle_xmpp::muc::MucOccupantNick,
     sessions: Vec<FullJid>,
 }
 
@@ -69,7 +69,7 @@ struct DestroyCompletionSnapshot {
     lifecycle: Option<waddle_xmpp::muc::RoomLifecycleId>,
     request: DestroyRequest,
     members: Vec<BareJid>,
-    recipients: Vec<(String, Vec<FullJid>)>,
+    recipients: Vec<(waddle_xmpp::muc::MucOccupantNick, Vec<FullJid>)>,
 }
 
 pub(crate) struct LeasedDestroyCompletion {
@@ -108,19 +108,51 @@ impl TryFrom<&waddle_xmpp::muc::room_registry_actor::DestroyCompletion>
                 .filter(|entry| entry.affiliation >= waddle_xmpp::Affiliation::Member)
                 .map(|entry| entry.jid)
                 .collect(),
-            recipients: completion
-                .room
-                .occupants
-                .values()
-                .map(|occupant| PersistedDestroyRecipient {
-                    nick: occupant.nick.clone(),
-                    sessions: completion
-                        .room
-                        .get_occupant_sessions(&occupant.nick)
-                        .into_iter()
-                        .collect(),
-                })
-                .collect(),
+            recipients: {
+                let mut by_nick: std::collections::BTreeMap<
+                    waddle_xmpp::muc::MucOccupantNick,
+                    Vec<FullJid>,
+                > = completion
+                    .room
+                    .occupants
+                    .values()
+                    .map(|occupant| {
+                        (
+                            waddle_xmpp::muc::MucOccupantNick::new(occupant.nick.clone())
+                                .expect("occupant nicks are validated at join"),
+                            completion
+                                .room
+                                .get_occupant_sessions(&occupant.nick)
+                                .into_iter()
+                                .collect(),
+                        )
+                    })
+                    .collect();
+                // #1647: receipt holders already left the roster, but their
+                // leave reply was lost. The terminal destroy notification is
+                // the effect that settles their owed self-unavailable —
+                // without it, the retained retry later finds the room absent
+                // and the leaver's session never learns it left.
+                for receipt in &completion.departures.receipts {
+                    let nick = match &receipt.outcome {
+                        waddle_xmpp::muc::room_actor::DepartureReceiptOutcome::Left(outcome) => {
+                            outcome.nick.clone()
+                        }
+                        waddle_xmpp::muc::room_actor::DepartureReceiptOutcome::Suppressed {
+                            nick,
+                            ..
+                        } => nick.clone(),
+                    };
+                    let sessions = by_nick.entry(nick).or_default();
+                    if !sessions.contains(&receipt.jid) {
+                        sessions.push(receipt.jid.clone());
+                    }
+                }
+                by_nick
+                    .into_iter()
+                    .map(|(nick, sessions)| PersistedDestroyRecipient { nick, sessions })
+                    .collect()
+            },
         })
     }
 }
@@ -469,7 +501,7 @@ async fn complete_destroy_snapshot(
             };
             let presence = build_destroy_notification(
                 &room_jid,
-                &nick,
+                nick.as_str(),
                 &session_jid,
                 &snapshot.request,
                 // This loop sends only a destroyed occupant's own final
@@ -1250,7 +1282,7 @@ pub(super) async fn handle_muc_owner_and_moderation_iq(
             // occupant the terminal destroy removes is notified.
             let destroy_request = parse_destroy_request(iq).unwrap_or_default();
             let attempt = waddle_xmpp::muc::DestroyAttemptId::generate();
-            let room = match RoomRegistry::wrap(state.deps.protocol.room_registry.clone())
+            let snapshot = match RoomRegistry::wrap(state.deps.protocol.room_registry.clone())
                 .seal_room_for_destroy_snapshot(room_jid.clone(), attempt)
                 .await
             {
@@ -1284,7 +1316,8 @@ pub(super) async fn handle_muc_owner_and_moderation_iq(
             let completion = waddle_xmpp::muc::room_registry_actor::DestroyCompletion {
                 attempt,
                 room_jid: room_jid.clone(),
-                room,
+                room: snapshot.room,
+                departures: snapshot.departures,
                 request: destroy_request,
             };
             if persist_destroy_completion(state, &completion)
@@ -1932,6 +1965,53 @@ mod destroy_completion_tests {
         }
     }
 
+    /// #1647 (codex round 22): a receipt holder left the roster but never saw
+    /// its leave reply. The persisted destroy recipients must include it so
+    /// the terminal notification settles the owed self-unavailable.
+    #[test]
+    fn persisted_destroy_recipients_include_owed_departure_receipt_holders() {
+        let room_jid: BareJid = "receipts@muc.example.com".parse().expect("valid bare JID");
+        let ghost: FullJid = "ghost@example.com/web".parse().expect("valid full JID");
+        let leave_attempt = waddle_xmpp::muc::room_actor::LeaveAttemptId::generate();
+        let completion = waddle_xmpp::muc::room_registry_actor::DestroyCompletion {
+            attempt: waddle_xmpp::muc::DestroyAttemptId::generate(),
+            room_jid: room_jid.clone(),
+            room: waddle_xmpp::muc::MucRoom::new(
+                room_jid,
+                "w".to_string(),
+                "c".to_string(),
+                waddle_xmpp::muc::RoomConfig::default(),
+            ),
+            departures: waddle_xmpp::muc::room_actor::DepartureLedger {
+                receipts: vec![waddle_xmpp::muc::room_actor::DepartureReceipt {
+                    attempt: leave_attempt,
+                    jid: ghost.clone(),
+                    cause: waddle_xmpp::muc::durable::OccupancyLeaveCause::Explicit,
+                    generation: leave_attempt.order(),
+                    nick_generation: None,
+                    outcome: waddle_xmpp::muc::room_actor::DepartureReceiptOutcome::Suppressed {
+                        nick: waddle_xmpp::muc::MucOccupantNick::new("ghost".to_string())
+                            .expect("valid nick"),
+                        affiliation: waddle_xmpp::Affiliation::Member,
+                    },
+                }],
+                latest_generations: Vec::new(),
+                superseded_attempts: Vec::new(),
+            },
+            request: DestroyRequest::default(),
+        };
+        let persisted =
+            PersistedDestroyCompletion::try_from(&completion).expect("persist completion");
+        assert!(
+            persisted
+                .recipients
+                .iter()
+                .any(|recipient| recipient.nick.as_str() == "ghost"
+                    && recipient.sessions == vec![ghost.clone()]),
+            "the owed receipt holder must be a destroy-notification recipient"
+        );
+    }
+
     #[test]
     fn persisted_muc_destroy_completion_requires_its_exact_attempt_identity() {
         let matching = waddle_xmpp::muc::DestroyAttemptId::generate();
@@ -1989,7 +2069,7 @@ mod destroy_completion_tests {
                 "member-b@example.com".parse().expect("valid member jid"),
             ],
             recipients: vec![(
-                "nick".to_string(),
+                waddle_xmpp::muc::MucOccupantNick::new("nick".to_string()).expect("valid nick"),
                 vec![
                     "member-a@example.com/phone"
                         .parse()
@@ -2103,7 +2183,8 @@ mod destroy_completion_tests {
             .global_actor()
             .ask(DbExecute {
                 sql: "CREATE TABLE IF NOT EXISTS clustering_muc_rooms ( \
-                      room_jid TEXT NOT NULL, lifecycle_id TEXT NOT NULL, revision BIGINT NOT NULL \
+                      room_jid TEXT NOT NULL, lifecycle_id TEXT NOT NULL, revision BIGINT NOT NULL, \
+                      config_lifecycle_id TEXT, config_revision BIGINT \
                       )"
                 .to_string(),
                 params: vec![],
@@ -2390,7 +2471,10 @@ mod destroy_completion_tests {
             lifecycle: Some(success_lifecycle),
             request: DestroyRequest::default(),
             members: Vec::new(),
-            recipients: vec![("owner".to_string(), vec![inline_session.clone()])],
+            recipients: vec![(
+                waddle_xmpp::muc::MucOccupantNick::new("owner".to_string()).expect("valid nick"),
+                vec![inline_session.clone()],
+            )],
         };
         let success_reservation = enqueue_terminal_effect(
             success_state.as_ref(),
@@ -2510,7 +2594,10 @@ mod destroy_completion_tests {
             lifecycle: Some(lifecycle),
             request: DestroyRequest::default(),
             members: Vec::new(),
-            recipients: vec![("owner".to_string(), vec![inline_session.clone()])],
+            recipients: vec![(
+                waddle_xmpp::muc::MucOccupantNick::new("owner".to_string()).expect("valid nick"),
+                vec![inline_session.clone()],
+            )],
         };
         insert_tombstoned_lifecycle(state.as_ref(), &room_jid, lifecycle).await;
 

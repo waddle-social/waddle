@@ -13,8 +13,9 @@ use thiserror::Error;
 
 use super::affiliation::AffiliationEntry;
 use super::durable::{
-    authorize_ephemeral_projection, mint_room_mutation_commit, ChannelId, RoomCommitError,
-    RoomDurableMutation, RoomMutationCommit, WaddleId,
+    authorize_ephemeral_projection, mint_room_mutation_commit, ChannelId,
+    EphemeralProjectionAuthorization, RoomCommitError, RoomDurableMutation, RoomMutationCommit,
+    RoomProjection, RoomProjectionKind, WaddleId,
 };
 use super::pin::{PinStateChange, PinnedEntry};
 use super::{MucRoom, OccupantVoiceChange, RoomConfig, RoomSubjectTexts, SubjectState};
@@ -51,11 +52,166 @@ pub use mediated_invites::{
     PrepareMediatedInviteGrantRollback,
 };
 pub use occupancy_handlers::{
-    ClearMujiPresence, GetActiveMujiSessions, InCallPresenceUpdateOutcome, JoinAffiliationGrant,
-    JoinWithAffiliation, LeaveByRealJid, MujiPresenceUpdateOutcome, PingSelfCheck,
+    next_occupancy_order, ClearMujiPresence, GetActiveMujiSessions, InCallPresenceUpdateOutcome,
+    JoinAffiliationGrant, JoinWithAffiliation, LeaveAttemptId, LeaveByRealJid, LeaveDisposition,
+    LeaveOrigin, LeaveSessionSelector, MujiPresenceUpdateOutcome, OccupancyOrder, PingSelfCheck,
     PresenceUpdateData, ReconcileChannelBackedRoom, ResolverAffiliationSyncOutcome,
     SyncResolverAffiliation, UpsertInCallState, UpsertMujiPresence,
 };
+
+/// A local occupancy generation used to avoid removing a replacement session
+/// while retrying a previously deferred departure.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub struct OccupancyWatermark(pub(crate) u64);
+
+impl OccupancyWatermark {
+    pub const fn initial() -> Self {
+        Self(0)
+    }
+
+    pub const fn from_revision(revision: u64) -> Self {
+        Self(revision)
+    }
+}
+
+/// A completed departure retained for idempotent attempt replay. Retained
+/// until the caller acknowledges it ([`AckDepartureReceipt`]) or, for a
+/// caller whose reply was lost, until the retry replays it; transferred with
+/// the live roster so a successor actor can still replay it.
+#[derive(Debug, Clone)]
+pub struct DepartureReceipt {
+    pub attempt: occupancy_handlers::LeaveAttemptId,
+    pub jid: FullJid,
+    /// The departure's cause: an unknown-attempt fallback only replays a
+    /// receipt of the same cause, so the caller runs the right effect policy.
+    pub cause: super::durable::OccupancyLeaveCause,
+    /// The departed session's position in the occupancy order: the receipt is
+    /// stale (never replayed) once a newer generation of this full JID has
+    /// existed, even if that generation has since left or was removed.
+    pub generation: occupancy_handlers::OccupancyOrder,
+    /// The nick's per-nickname occupancy generation when the departure
+    /// completed: a non-final departure (siblings kept the nick) is only
+    /// replayable while that same generation still holds the nick.
+    pub nick_generation: Option<u64>,
+    pub outcome: DepartureReceiptOutcome,
+}
+
+impl DepartureReceipt {
+    /// The nickname the departure vacated (typed at the source).
+    pub fn nick(&self) -> &crate::muc::MucOccupantNick {
+        match &self.outcome {
+            DepartureReceiptOutcome::Left(outcome) => &outcome.nick,
+            DepartureReceiptOutcome::Suppressed { nick, .. } => nick,
+        }
+    }
+}
+
+/// A consumed departure receipt: replayable, or superseded by a newer
+/// generation of the same full JID (joined since, whether it left, was
+/// removed, or is still present).
+#[derive(Debug)]
+pub(super) enum RetainedDeparture {
+    Current(DepartureReceipt),
+    Stale,
+}
+
+/// Everything a successor needs to keep replaying lost-reply departures
+/// correctly after a live-roster transfer: the receipts, the latest known
+/// generation per full JID (advanced by every join and departure), and the
+/// attempts that were superseded by a newer departure.
+#[derive(Debug, Clone, Default)]
+pub struct DepartureLedger {
+    pub receipts: Vec<DepartureReceipt>,
+    pub latest_generations: Vec<(FullJid, occupancy_handlers::OccupancyOrder)>,
+    pub superseded_attempts: Vec<(FullJid, Vec<occupancy_handlers::LeaveAttemptId>)>,
+}
+
+/// What a retried attempt replays.
+#[derive(Debug, Clone)]
+pub enum DepartureReceiptOutcome {
+    Left(Box<LeaveOutcome>),
+    /// Store-less room with a destroy/dormancy in flight: only the leaver's
+    /// XEP-0045 §7.14 self-presence is owed.
+    Suppressed {
+        nick: crate::muc::MucOccupantNick,
+        affiliation: crate::types::Affiliation,
+    },
+}
+
+/// Acknowledgement that a `LeaveByRealJid` reply was received and its effects
+/// ran; the actor drops the receipt so only lost-reply departures stay
+/// retained. Answered (not fire-and-forget) so the caller knows the receipt
+/// is gone — mailbox admission alone would let a handoff snapshot queued
+/// ahead of the acknowledgement carry the receipt to a successor.
+pub struct AckDepartureReceipt {
+    pub attempt: occupancy_handlers::LeaveAttemptId,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, kameo::Reply)]
+pub enum AckDepartureOutcome {
+    /// The receipt (if any) is dropped on the authoritative actor.
+    Acknowledged,
+    /// This actor lost ownership (handoff in progress or done): its ledger
+    /// may already have been copied to a successor, so the acknowledgement
+    /// must be retained and delivered to whoever the registry names next.
+    NotAuthoritative,
+}
+
+impl kameo::message::Message<AckDepartureReceipt> for RoomActor {
+    type Reply = AckDepartureOutcome;
+
+    async fn handle(
+        &mut self,
+        msg: AckDepartureReceipt,
+        _ctx: &mut Context<Self, Self::Reply>,
+    ) -> Self::Reply {
+        if self.seal_state == RoomSealState::OwnershipLost {
+            return AckDepartureOutcome::NotAuthoritative;
+        }
+        let _ = self.take_departure_receipt(msg.attempt);
+        AckDepartureOutcome::Acknowledged
+    }
+}
+
+/// A durable commit capability for exactly one in-memory projection.
+pub(super) enum ProjectionGate {
+    Unfenced,
+    Authorized(EphemeralProjectionAuthorization),
+}
+
+/// Bounded outcome label for a failed projection commit.
+const fn projection_commit_failure_label(error: &DurablePersistError) -> &'static str {
+    match error {
+        DurablePersistError::NotOwner => "not_owner",
+        DurablePersistError::OwnershipUnavailable => "ownership_unavailable",
+        DurablePersistError::PersistFailed => "persist_failed",
+        DurablePersistError::CommitOutcomeUnknown => "commit_outcome_unknown",
+    }
+}
+
+/// Test-only observation of projection state at a seam: `pre_commit` fires
+/// inside `commit_projection` BEFORE the durable commit is awaited, `apply`
+/// fires inside `project` immediately before the authorized closure runs.
+/// Tests assert the state carried at `pre_commit` is untouched so a mutation
+/// hoisted above the commit cannot pass.
+#[cfg(test)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ProjectionProbe {
+    pub phase: &'static str,
+    pub occupants: usize,
+    pub sessions: usize,
+    pub pins: usize,
+}
+
+#[derive(Debug, Error, Clone, Copy, PartialEq, Eq)]
+pub enum ProjectionRefusal {
+    #[error("projection capability was minted under a different fence or lifecycle coordinates")]
+    ForeignCapability,
+    #[error("projection capability revision was already projected")]
+    RevisionAlreadyProjected,
+    #[error("projection capability was minted for a different projection kind")]
+    WrongProjectionKind,
+}
 pub use snapshot_handlers::{
     BuildGroupchatBroadcast, GetNicknameGeneration, GetRoomSnapshot, GroupchatBroadcastResult,
     RoomChainOccupant, RoomChainSnapshot,
@@ -90,6 +246,9 @@ pub struct RoomSnapshot {
     pub config_durable_coordinates: Option<super::durable::RoomCommittedCoordinates>,
     pub config_revision: u64,
     pub admission_revision: u64,
+    pub occupancy_revision: u64,
+    /// Lost-reply departure state, transferred on live-roster recovery.
+    pub departures: DepartureLedger,
 }
 
 /// Transfer the live, non-durable room state into an authoritative successor.
@@ -98,6 +257,10 @@ pub struct RoomSnapshot {
 /// are restored.
 pub struct RestoreLiveRoster {
     pub room: MucRoom,
+    pub occupancy_revision: u64,
+    /// The predecessor's lost-reply departure state, so a retry that lands on
+    /// the successor replays (or refuses) exactly as the predecessor would.
+    pub departures: DepartureLedger,
 }
 
 impl kameo::message::Message<RestoreLiveRoster> for RoomActor {
@@ -108,10 +271,15 @@ impl kameo::message::Message<RestoreLiveRoster> for RoomActor {
         msg: RestoreLiveRoster,
         _ctx: &mut Context<Self, Self::Reply>,
     ) -> Self::Reply {
+        let occupant_count_before = self.room.occupant_count();
         let config = self.room.config.clone();
         let subject = self.room.subject.clone();
         let affiliations = self.room.affiliation_list.clone();
         let mut restored = msg.room;
+        // The transplant restores THIS room's live roster; its identity is
+        // never the restored value's (durable commits key their claim fence
+        // by the actor's room JID).
+        restored.room_jid = self.room.room_jid.clone();
         restored.config = config;
         restored.subject = subject;
         restored.affiliation_list = affiliations;
@@ -129,6 +297,13 @@ impl kameo::message::Message<RestoreLiveRoster> for RoomActor {
             }
         }
         self.room = restored;
+        // The predecessor's `Drop` releases its occupants from the pod-wide
+        // gauge; the transplanted roster is this actor's to account for now.
+        crate::metrics::adjust_muc_occupant_total(
+            self.room.occupant_count() as i64 - occupant_count_before as i64,
+        );
+        self.occupancy_revision = self.occupancy_revision.max(msg.occupancy_revision);
+        self.absorb_departure_ledger(msg.departures);
     }
 }
 
@@ -171,7 +346,13 @@ pub struct JoinOutcome {
 
 #[derive(Debug, Clone)]
 pub struct LeaveOutcome {
-    pub nick: String,
+    /// The attempt whose receipt this outcome answers: the caller's own
+    /// attempt, or — when a retained retry replayed a receipt minted under a
+    /// different (coalesced-away) attempt — that receipt's attempt. Callers
+    /// acknowledge THIS id once the effects ran; replay never consumes the
+    /// receipt by itself.
+    pub acknowledge: occupancy_handlers::LeaveAttemptId,
+    pub nick: crate::muc::MucOccupantNick,
     pub affiliation: Affiliation,
     pub role: Role,
     pub leaving_room_jid: FullJid,
@@ -411,6 +592,22 @@ pub struct RoomActor {
     /// makes the probe's revision stale, closing the probe→destroy
     /// TOCTOU that orphaned freshly-admitted occupants.
     occupancy_revision: u64,
+    /// The newest durable revision consumed by an ephemeral projection.
+    projected_revision: Option<super::durable::RoomRevision>,
+    /// Completed departures retained for attempt replay (see
+    /// [`occupancy_handlers::LeaveAttemptId`]).
+    departure_receipts: std::collections::VecDeque<DepartureReceipt>,
+    /// Latest known generation per full JID (advanced by every join and every
+    /// departure) while a receipt of that JID is retained; pruned with the
+    /// last receipt.
+    latest_generations: std::collections::HashMap<FullJid, occupancy_handlers::OccupancyOrder>,
+    /// Attempts displaced by a newer retained departure of the same full
+    /// JID. While that newer receipt exists, a late retry of one of these
+    /// attempts must never consume the newer receipt through JID fallback.
+    superseded_departure_attempts: std::collections::HashMap<
+        FullJid,
+        std::collections::HashSet<occupancy_handlers::LeaveAttemptId>,
+    >,
     /// Why this actor refuses further admissions. Keeping the reason typed
     /// lets the registry distinguish an ordinary inactivity seal, whose
     /// removal must retain exact-release backlog fencing, from a definitive
@@ -452,6 +649,8 @@ pub struct RoomActor {
     /// actor incarnation's durable restore genuinely completed. See
     /// [`DurableRestoreState`]'s own doc comment.
     restore_state: DurableRestoreState,
+    #[cfg(test)]
+    test_projection_apply_hook: Option<std::sync::Arc<dyn Fn(ProjectionProbe) + Send + Sync>>,
 }
 
 #[derive(PartialEq)]
@@ -624,6 +823,10 @@ impl RoomActor {
             invite_operations: HashMap::new(),
             invite_operation_by_invitee: HashMap::new(),
             occupancy_revision: 0,
+            projected_revision: None,
+            departure_receipts: std::collections::VecDeque::new(),
+            latest_generations: std::collections::HashMap::new(),
+            superseded_departure_attempts: std::collections::HashMap::new(),
             seal_state: RoomSealState::Open,
             occupant_id_secret,
             durable_member_recipients: Vec::new(),
@@ -631,6 +834,8 @@ impl RoomActor {
             durable_store: None,
             durable_claim_fence: None,
             restore_state: DurableRestoreState::Ready(DurableRoomOrigin::New),
+            #[cfg(test)]
+            test_projection_apply_hook: None,
         }
     }
 
@@ -641,6 +846,8 @@ impl RoomActor {
     fn install_durable_room_state(&mut self, state: super::durable::DurableRoomState) {
         let previous_admission_state = self.admission_policy_snapshot();
         self.durable_coordinates = state.coordinates;
+        self.config_durable_coordinates = state.config_coordinates;
+        self.projected_revision = state.coordinates.map(|coordinates| coordinates.revision);
         self.room.waddle_id = state.waddle_id;
         self.room.channel_id = state.channel_id;
         self.replace_config(state.config);
@@ -979,14 +1186,393 @@ impl RoomActor {
             .durable_claim_fence
             .clone()
             .ok_or(DurablePersistError::OwnershipUnavailable)?;
+        let kind = super::durable::RoomCommitKind::of(&intent);
         let outcome = store
             .commit_room_mutation(&self.room.room_jid, &fence, intent, effects)
             .await
             .map_err(|error| self.classify_durable_persist_error(error))?;
-        let commit = mint_room_mutation_commit(fence, outcome.coordinates);
+        let commit = mint_room_mutation_commit(fence, outcome.coordinates, kind);
         self.durable_coordinates = Some(outcome.coordinates);
-        let _ = authorize_ephemeral_projection(commit.clone());
         Ok((Some(commit), outcome.reservation))
+    }
+
+    #[cfg(test)]
+    fn projection_probe(&self, phase: &'static str) -> ProjectionProbe {
+        ProjectionProbe {
+            phase,
+            occupants: self.room.occupant_count(),
+            sessions: self
+                .room
+                .occupants
+                .values()
+                .map(|occupant| self.room.get_occupant_sessions(&occupant.nick).len())
+                .sum(),
+            pins: self.room.pinned_entries().len(),
+        }
+    }
+
+    pub(super) async fn commit_projection(
+        &mut self,
+        projection: RoomProjection,
+    ) -> Result<ProjectionGate, DurablePersistError> {
+        let kind = projection.kind();
+        #[cfg(test)]
+        if let Some(hook) = self.test_projection_apply_hook.clone() {
+            hook(self.projection_probe("pre_commit"));
+        }
+        let started = std::time::Instant::now();
+        let committed = self
+            .commit_durable(
+                RoomDurableMutation::Projection(projection),
+                super::RoomMutationEffects::none(),
+            )
+            .await;
+        crate::metrics::record_muc_projection_commit_duration(
+            kind.as_str(),
+            started.elapsed().as_secs_f64(),
+        );
+        let (commit, _) = match committed {
+            Ok(committed) => committed,
+            Err(error) => {
+                crate::metrics::record_muc_projection_commit(
+                    kind.as_str(),
+                    projection_commit_failure_label(&error),
+                );
+                return Err(error);
+            }
+        };
+        match commit {
+            None => {
+                crate::metrics::record_muc_projection_commit(kind.as_str(), "unfenced");
+                Ok(ProjectionGate::Unfenced)
+            }
+            Some(commit) => match authorize_ephemeral_projection(commit) {
+                Ok(authorization) => {
+                    crate::metrics::record_muc_projection_commit(kind.as_str(), "ok");
+                    Ok(ProjectionGate::Authorized(authorization))
+                }
+                Err(_) => {
+                    crate::metrics::record_muc_projection_commit(kind.as_str(), "not_projection");
+                    Err(DurablePersistError::PersistFailed)
+                }
+            },
+        }
+    }
+
+    /// Record that a session of `jid` joined at `generation`: every retained
+    /// departure receipt of that JID is now stale, whatever happens to the
+    /// new session later (leave, kick, ban, transfer).
+    pub(super) fn note_session_joined(&mut self, jid: &FullJid) {
+        let Some(generation) = self.room.session_order(jid) else {
+            return;
+        };
+        if self
+            .departure_receipts
+            .iter()
+            .any(|receipt| &receipt.jid == jid)
+        {
+            let latest = self
+                .latest_generations
+                .entry(jid.clone())
+                .or_insert(generation);
+            *latest = (*latest).max(generation);
+        }
+    }
+
+    /// Retain a completed departure so a retry of the same attempt (after a
+    /// lost reply) can replay its outcome exactly once. Acknowledged receipts
+    /// are dropped at once and a newer departure of the same full JID AND
+    /// nick supersedes every older receipt of that (JID, nick), so the
+    /// retained set is bounded by (full JID, nick) pairs with a lost reply.
+    /// A different-nick departure keeps the older receipt: each nickname's
+    /// unavailable fan-out is independently owed to the remaining occupants
+    /// (#1647, codex round 26).
+    pub(super) fn retain_departure_receipt(&mut self, receipt: DepartureReceipt) {
+        // The same nick-aware rule as `replay_departure_receipt_at`: a newer
+        // per-JID generation alone does not supersede — a transferred (or
+        // late-minted) receipt whose NICK generation has not moved still owes
+        // its unavailable fan-out (#1647, codex round 29). An existing
+        // same-nick receipt with a NEWER generation always wins, though: an
+        // older transferred copy must never displace it.
+        let displaced_by_newer_same_nick = self.departure_receipts.iter().any(|retained| {
+            retained.jid == receipt.jid
+                && retained.nick() == receipt.nick()
+                && retained.generation > receipt.generation
+        });
+        let superseded = displaced_by_newer_same_nick
+            || (self
+                .latest_generations
+                .get(&receipt.jid)
+                .is_some_and(|latest| *latest > receipt.generation)
+                && self
+                    .room
+                    .current_nickname_generation(receipt.nick().as_str())
+                    != receipt.nick_generation);
+        if superseded {
+            self.superseded_departure_attempts
+                .entry(receipt.jid)
+                .or_default()
+                .insert(receipt.attempt);
+            return;
+        }
+        let displaced_attempts: Vec<_> = self
+            .departure_receipts
+            .iter()
+            .filter(|retained| retained.jid == receipt.jid && retained.nick() == receipt.nick())
+            .map(|retained| retained.attempt)
+            .collect();
+        if !displaced_attempts.is_empty() {
+            self.superseded_departure_attempts
+                .entry(receipt.jid.clone())
+                .or_default()
+                .extend(displaced_attempts);
+        }
+        self.departure_receipts
+            .retain(|retained| retained.jid != receipt.jid || retained.nick() != receipt.nick());
+        self.latest_generations
+            .insert(receipt.jid.clone(), receipt.generation);
+        self.departure_receipts.push_back(receipt);
+    }
+
+    /// Replay the receipt of an already-completed attempt WITHOUT consuming
+    /// it: only an answered acknowledgement removes a current receipt (the
+    /// replay's own reply may be lost too). A stale receipt is dropped here.
+    pub(super) fn replay_departure_receipt(
+        &mut self,
+        attempt: occupancy_handlers::LeaveAttemptId,
+    ) -> Option<RetainedDeparture> {
+        let index = self
+            .departure_receipts
+            .iter()
+            .position(|receipt| receipt.attempt == attempt)?;
+        self.replay_departure_receipt_at(index)
+    }
+
+    /// JID-fallback variant of [`Self::replay_departure_receipt`].
+    pub(super) fn replay_departure_receipt_for_jid(
+        &mut self,
+        jid: &FullJid,
+        cause: super::durable::OccupancyLeaveCause,
+    ) -> Option<RetainedDeparture> {
+        let index = self
+            .departure_receipts
+            .iter()
+            .position(|receipt| &receipt.jid == jid && receipt.cause == cause)?;
+        self.replay_departure_receipt_at(index)
+    }
+
+    fn replay_departure_receipt_at(&mut self, index: usize) -> Option<RetainedDeparture> {
+        let receipt = self.departure_receipts.get(index)?;
+        // A newer generation of this full JID alone does not stale the
+        // receipt: a rejoin under a DIFFERENT nick never announced the old
+        // nick's departure, so remaining occupants still owe its unavailable
+        // fan-out (#1647, codex round 25). The receipt only becomes
+        // unreplayable when its NICK's state moved on too — a same-nick
+        // rejoin (kicked since or not) bumped the nickname generation, and
+        // whatever the occupants last saw of that nick already supersedes
+        // the retained announcement.
+        let newer_generation = self
+            .latest_generations
+            .get(&receipt.jid)
+            .is_some_and(|latest| *latest > receipt.generation);
+        let nick_state_moved = self
+            .room
+            .current_nickname_generation(receipt.nick().as_str())
+            != receipt.nick_generation;
+        let stale = newer_generation && nick_state_moved;
+        if stale {
+            let receipt = self.departure_receipts.remove(index)?;
+            self.prune_departure_state(&receipt.jid);
+            return Some(RetainedDeparture::Stale);
+        }
+        Some(RetainedDeparture::Current(receipt.clone()))
+    }
+
+    /// Remove a receipt that can never replay again (its nick was re-taken,
+    /// or its JID holds a live session): without consumption it would veto
+    /// dormancy and empty-room sealing (`EffectsOwed`) forever, leaking the
+    /// actor and its eviction retry (#1647).
+    pub(super) fn discard_departure_receipt(
+        &mut self,
+        attempt: occupancy_handlers::LeaveAttemptId,
+    ) {
+        if let Some(index) = self
+            .departure_receipts
+            .iter()
+            .position(|receipt| receipt.attempt == attempt)
+        {
+            if let Some(receipt) = self.departure_receipts.remove(index) {
+                self.prune_departure_state(&receipt.jid);
+            }
+        }
+    }
+
+    /// Consume the receipt of an already-completed attempt, if any.
+    pub(super) fn take_departure_receipt(
+        &mut self,
+        attempt: occupancy_handlers::LeaveAttemptId,
+    ) -> Option<RetainedDeparture> {
+        let index = self
+            .departure_receipts
+            .iter()
+            .position(|receipt| receipt.attempt == attempt)?;
+        self.take_departure_receipt_at(index)
+    }
+
+    /// Staleness is decided BEFORE the JID's tombstones are pruned with its
+    /// last receipt, or a stale receipt would look current.
+    fn take_departure_receipt_at(&mut self, index: usize) -> Option<RetainedDeparture> {
+        let receipt = self.departure_receipts.remove(index)?;
+        let stale = self
+            .latest_generations
+            .get(&receipt.jid)
+            .is_some_and(|latest| *latest > receipt.generation);
+        self.prune_departure_state(&receipt.jid);
+        Some(if stale {
+            RetainedDeparture::Stale
+        } else {
+            RetainedDeparture::Current(receipt)
+        })
+    }
+
+    fn prune_departure_state(&mut self, jid: &FullJid) {
+        if !self
+            .departure_receipts
+            .iter()
+            .any(|receipt| &receipt.jid == jid)
+        {
+            self.latest_generations.remove(jid);
+            self.superseded_departure_attempts.remove(jid);
+        }
+    }
+
+    pub(super) fn departure_ledger(&self) -> DepartureLedger {
+        DepartureLedger {
+            receipts: self.departure_receipts.iter().cloned().collect(),
+            latest_generations: self
+                .latest_generations
+                .iter()
+                .map(|(jid, generation)| (jid.clone(), *generation))
+                .collect(),
+            superseded_attempts: self
+                .superseded_departure_attempts
+                .iter()
+                .map(|(jid, attempts)| (jid.clone(), attempts.iter().copied().collect()))
+                .collect(),
+        }
+    }
+
+    /// Merge a predecessor's ledger: generations take the max, superseded
+    /// attempts union, receipts go through the same supersession gate.
+    pub(super) fn absorb_departure_ledger(&mut self, ledger: DepartureLedger) {
+        for (jid, generation) in ledger.latest_generations {
+            let latest = self.latest_generations.entry(jid).or_insert(generation);
+            *latest = (*latest).max(generation);
+        }
+        for (jid, attempts) in ledger.superseded_attempts {
+            self.superseded_departure_attempts
+                .entry(jid)
+                .or_default()
+                .extend(attempts);
+        }
+        let transferred_jids: Vec<FullJid> = ledger
+            .receipts
+            .iter()
+            .map(|receipt| receipt.jid.clone())
+            .collect();
+        for receipt in ledger.receipts {
+            self.retain_departure_receipt(receipt);
+        }
+        // A transferred receipt refused as superseded leaves no receipt to
+        // prune the JID's tombstones with later; drop them now.
+        for jid in transferred_jids {
+            self.prune_departure_state(&jid);
+        }
+        let orphaned: Vec<FullJid> = self
+            .latest_generations
+            .keys()
+            .chain(self.superseded_departure_attempts.keys())
+            .filter(|jid| {
+                !self
+                    .departure_receipts
+                    .iter()
+                    .any(|receipt| &receipt.jid == *jid)
+            })
+            .cloned()
+            .collect();
+        for jid in orphaned {
+            self.prune_departure_state(&jid);
+        }
+    }
+
+    pub(super) fn departure_attempt_is_superseded(
+        &self,
+        jid: &FullJid,
+        attempt: occupancy_handlers::LeaveAttemptId,
+    ) -> bool {
+        self.superseded_departure_attempts
+            .get(jid)
+            .is_some_and(|attempts| attempts.contains(&attempt))
+    }
+
+    pub(super) fn project<T>(
+        &mut self,
+        gate: ProjectionGate,
+        expected: RoomProjectionKind,
+        apply: impl FnOnce(&mut Self) -> T,
+    ) -> Result<T, ProjectionRefusal> {
+        let ProjectionGate::Authorized(authorization) = gate else {
+            #[cfg(test)]
+            if let Some(hook) = self.test_projection_apply_hook.clone() {
+                hook(self.projection_probe("apply"));
+            }
+            return Ok(apply(self));
+        };
+        let (commit, kind) = authorization.consume();
+        if kind != expected {
+            crate::metrics::record_muc_projection_refused("wrong_kind");
+            tracing::warn!(room = %self.room.room_jid, "refusing projection with wrong kind");
+            return Err(ProjectionRefusal::WrongProjectionKind);
+        }
+        if self.durable_claim_fence.as_ref() != Some(commit.fence())
+            || self.durable_coordinates != Some(commit.coordinates())
+        {
+            self.seal_state = RoomSealState::OwnershipLost;
+            crate::metrics::record_muc_projection_refused("foreign_capability");
+            return Err(ProjectionRefusal::ForeignCapability);
+        }
+        if self
+            .projected_revision
+            .is_some_and(|revision| revision >= commit.revision())
+        {
+            crate::metrics::record_muc_projection_refused("revision_already_projected");
+            return Err(ProjectionRefusal::RevisionAlreadyProjected);
+        }
+        self.projected_revision = Some(commit.revision());
+        #[cfg(test)]
+        if let Some(hook) = self.test_projection_apply_hook.clone() {
+            hook(self.projection_probe("apply"));
+        }
+        Ok(apply(self))
+    }
+
+    pub(super) fn map_projection_commit_error(error: DurablePersistError) -> RoomActorError {
+        match error {
+            DurablePersistError::NotOwner | DurablePersistError::CommitOutcomeUnknown => {
+                RoomActorError::RoomSealed
+            }
+            DurablePersistError::OwnershipUnavailable | DurablePersistError::PersistFailed => {
+                RoomActorError::OwnershipUnavailable
+            }
+        }
+    }
+
+    pub(super) fn map_projection_refusal(refusal: ProjectionRefusal) -> RoomActorError {
+        match refusal {
+            ProjectionRefusal::ForeignCapability => RoomActorError::RoomSealed,
+            ProjectionRefusal::RevisionAlreadyProjected
+            | ProjectionRefusal::WrongProjectionKind => RoomActorError::OwnershipUnavailable,
+        }
     }
 
     /// Replace config only after restoring cross-field privacy invariants.
@@ -1436,33 +2022,34 @@ impl kameo::message::Message<Join> for RoomActor {
         if self.room.get_occupant(&msg.nick).is_some() {
             return Err(RoomActorError::NickAlreadyInUse(msg.nick));
         }
-        self.room.add_occupant(super::Occupant {
-            real_jid: msg.real_jid,
-            nick: msg.nick,
-            role: msg.role,
-            affiliation: msg.affiliation,
-            is_remote: false,
-            home_server: None,
-        });
-        self.occupancy_revision = self.occupancy_revision.saturating_add(1);
-        Ok(())
-    }
-}
-
-/// Remove an occupant from the room.
-pub struct Leave {
-    pub nick: String,
-}
-
-impl kameo::message::Message<Leave> for RoomActor {
-    type Reply = Result<(), RoomActorError>;
-
-    async fn handle(&mut self, msg: Leave, _ctx: &mut Context<Self, Self::Reply>) -> Self::Reply {
-        self.reject_sealed_effects().await?;
-        self.room
-            .remove_occupant(&msg.nick)
-            .map(|_| ())
-            .ok_or(RoomActorError::OccupantNotFound(msg.nick))
+        let Some(durable_nick) = super::durable::MucOccupantNick::new(msg.nick.clone()) else {
+            return Err(RoomActorError::NickAlreadyInUse(msg.nick));
+        };
+        let gate = self
+            .commit_projection(RoomProjection::OccupancyJoin {
+                occupant: msg.real_jid.clone(),
+                nick: durable_nick,
+            })
+            .await
+            .map_err(Self::map_projection_commit_error)?;
+        self.project(gate, RoomProjectionKind::OccupancyJoin, |actor| {
+            actor.room.add_occupant(super::Occupant {
+                real_jid: msg.real_jid.clone(),
+                nick: msg.nick.clone(),
+                role: msg.role,
+                affiliation: msg.affiliation,
+                is_remote: false,
+                home_server: None,
+            });
+            let joined_at =
+                OccupancyWatermark::from_revision(actor.occupancy_revision.saturating_add(1));
+            actor
+                .room
+                .set_session_watermark(msg.real_jid.clone(), joined_at);
+            actor.note_session_joined(&msg.real_jid);
+            actor.occupancy_revision = actor.occupancy_revision.saturating_add(1);
+        })
+        .map_err(Self::map_projection_refusal)
     }
 }
 
@@ -1796,6 +2383,8 @@ impl kameo::message::Message<UpdateGroupDmConfigByMember> for RoomActor {
                 config_durable_coordinates: self.config_durable_coordinates,
                 config_revision: self.config_revision,
                 admission_revision: self.admission_revision,
+                occupancy_revision: self.occupancy_revision,
+                departures: self.departure_ledger(),
             },
             notification,
             reservation,
@@ -1894,15 +2483,32 @@ impl kameo::message::Message<ApplyPin> for RoomActor {
         // is an externally visible effect. Refuse both while sealed so the
         // interpreter cannot announce a pin the actor did not retain.
         self.reject_sealed_effects().await?;
-        match msg.change {
+        let projection = match &msg.change {
             PinStateChange::Pin(entry) => {
-                self.room.upsert_pin(entry);
+                RoomProjection::Pin(super::durable::RoomPinProjection::Pin {
+                    target: entry.target_stanza_id.clone(),
+                })
             }
             PinStateChange::Unpin { target_stanza_id } => {
-                self.room.remove_pin_by_target(&target_stanza_id);
+                RoomProjection::Pin(super::durable::RoomPinProjection::Unpin {
+                    target: target_stanza_id.clone(),
+                })
             }
-        }
-        Ok(())
+        };
+        let expected = projection.kind();
+        let gate = self
+            .commit_projection(projection)
+            .await
+            .map_err(Self::map_projection_commit_error)?;
+        self.project(gate, expected, |actor| match msg.change {
+            PinStateChange::Pin(entry) => {
+                actor.room.upsert_pin(entry);
+            }
+            PinStateChange::Unpin { target_stanza_id } => {
+                actor.room.remove_pin_by_target(&target_stanza_id);
+            }
+        })
+        .map_err(Self::map_projection_refusal)
     }
 }
 
@@ -2109,8 +2715,15 @@ impl kameo::message::Message<IsDormant> for RoomActor {
             // compensation responsibility and must survive both lifecycle
             // guards (the Dormant guard is also protected by the explicit
             // Member affiliation itself).
+            // Unconsumed departure receipts veto dormancy: they are owed
+            // effects, and reaping the actor would strand their replays.
+            // A sealed actor stays dormant unconditionally: sealing now
+            // requires an empty ledger, and a sealed actor refuses the
+            // admissions that could mint new receipts.
             dormant: self.seal_state.is_sealed()
-                || (self.room.is_dormant() && !self.has_lifecycle_fenced_invite_operation()),
+                || (self.room.is_dormant()
+                    && !self.has_lifecycle_fenced_invite_operation()
+                    && self.departure_receipts.is_empty()),
             occupancy_revision: self.occupancy_revision,
         }
     }
@@ -2277,6 +2890,12 @@ pub enum SealIfInactiveOutcome {
     Refused,
     Inactive,
     OwnershipLost,
+    /// The room is inactive but still owes departure effects: unconsumed
+    /// departure receipts are waiting to be acknowledged. Destroying now
+    /// would strand the owed replays (the retained departure would find the
+    /// room absent and drop its 110 self-echo). Not definitive - the caller
+    /// retains its eviction responsibility and retries after the acks drain.
+    EffectsOwed,
 }
 
 impl kameo::message::Message<SealIfInactive> for RoomActor {
@@ -2303,6 +2922,9 @@ impl kameo::message::Message<SealIfInactive> for RoomActor {
                     self.room.occupants.is_empty() && !self.room.config.persistent
                 }
             };
+        if inactive && !self.departure_receipts.is_empty() {
+            return SealIfInactiveOutcome::EffectsOwed;
+        }
         if inactive {
             self.seal_state = RoomSealState::Inactive;
             SealIfInactiveOutcome::Inactive
@@ -2359,6 +2981,8 @@ impl kameo::message::Message<GetSnapshot> for RoomActor {
             config_durable_coordinates: self.config_durable_coordinates,
             config_revision: self.config_revision,
             admission_revision: self.admission_revision,
+            occupancy_revision: self.occupancy_revision,
+            departures: self.departure_ledger(),
         })
     }
 }

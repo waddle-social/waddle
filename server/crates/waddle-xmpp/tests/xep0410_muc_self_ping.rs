@@ -396,10 +396,16 @@ async fn xep_0410_self_ping_survives_first_session_departure() {
     let outcome = actor
         .ask(waddle_xmpp::muc::room_actor::LeaveByRealJid {
             sender_jid: session("web"),
+            cause: waddle_xmpp::muc::durable::OccupancyLeaveCause::Explicit,
+            session: waddle_xmpp::muc::room_actor::LeaveSessionSelector::Any,
+            attempt: waddle_xmpp::muc::room_actor::LeaveAttemptId::generate(),
+            origin: waddle_xmpp::muc::room_actor::LeaveOrigin::Fresh,
         })
         .await
-        .expect("leave first session")
-        .expect("web session was joined");
+        .expect("leave first session");
+    let waddle_xmpp::muc::room_actor::LeaveDisposition::Left(outcome) = outcome else {
+        panic!("web session was joined");
+    };
     assert!(
         !outcome.removed_last_session,
         "mobile is still joined after web leaves"

@@ -448,6 +448,28 @@ impl Drop for ResolverAffiliationSyncWorker {
 mod resolver_affiliation_sync_scheduler_tests {
     use super::*;
 
+    /// #1647 (codex round 26): a retained sweep's remote pass only takes
+    /// memberships that existed when the ORIGINAL cleanup started — a
+    /// replacement session's later registration survives the redrive.
+    #[test]
+    fn take_for_occupant_below_spares_memberships_registered_after_the_ceiling() {
+        let memberships = RemoteMucMemberships::default();
+        let occupant: FullJid = "alice@example.com/web".parse().expect("occupant");
+        let old_room: BareJid = "old@muc.remote.example".parse().expect("room");
+        let new_room: BareJid = "new@muc.remote.example".parse().expect("room");
+        memberships.record_join(&occupant, &old_room, "alice");
+        let ceiling = memberships.generation_watermark();
+        memberships.record_join(&occupant, &new_room, "alice");
+
+        let taken = memberships.take_for_occupant_below(&occupant, ceiling);
+        assert_eq!(taken.len(), 1, "only the pre-ceiling membership is taken");
+        assert_eq!(taken[0].room, old_room);
+        assert!(
+            memberships.contains(&occupant, &new_room),
+            "the replacement's later registration is untouched"
+        );
+    }
+
     #[test]
     fn scheduler_keeps_one_worker_and_replaces_its_pending_verdict() {
         let scheduler = Arc::new(ResolverAffiliationSyncScheduler::default());
@@ -866,7 +888,24 @@ impl RemoteMucMemberships {
         occupants
     }
 
+    /// Every generation minted so far is strictly below this watermark, so a
+    /// cleanup pass can bound its take to the memberships that existed when
+    /// it started — a replacement session's later registrations are not the
+    /// dead session's responsibility (#1647).
+    pub fn generation_watermark(&self) -> u64 {
+        self.next_generation
+            .load(std::sync::atomic::Ordering::Relaxed)
+    }
+
     pub fn take_for_occupant(&self, occupant: &FullJid) -> Vec<RemoteMucMembershipSnapshot> {
+        self.take_for_occupant_below(occupant, u64::MAX)
+    }
+
+    pub fn take_for_occupant_below(
+        &self,
+        occupant: &FullJid,
+        generation_ceiling: u64,
+    ) -> Vec<RemoteMucMembershipSnapshot> {
         let snapshots: Vec<RemoteMucMembershipSnapshot> = self
             .entries
             .iter()
@@ -878,6 +917,9 @@ impl RemoteMucMemberships {
                 let RemoteMucMembershipEntry::Active(membership) = entry.value() else {
                     return None;
                 };
+                if membership.generation >= generation_ceiling {
+                    return None;
+                }
                 Some(RemoteMucMembershipSnapshot {
                     occupant: entry_occupant.clone(),
                     room: room.clone(),
@@ -1359,6 +1401,8 @@ pub struct ProtocolServices {
     /// presence to the authoritative remote RoomActor even though no local
     /// RoomActor exists to discover by registry scan.
     pub remote_muc_memberships: Arc<RemoteMucMemberships>,
+    /// Local departures retained until the owning room actor can project them.
+    pub pending_local_muc_departures: Arc<super::PendingLocalMucDepartures>,
     /// At most one detached resolver-affiliation repair per room/member pair.
     /// Rejected joins coalesce here instead of spawning unbounded retry tasks.
     pub resolver_affiliation_syncs: Arc<ResolverAffiliationSyncScheduler>,

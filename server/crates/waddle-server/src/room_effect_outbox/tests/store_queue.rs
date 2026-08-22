@@ -356,6 +356,155 @@ async fn reservation_lookup_includes_handler_window_and_leased_rows_until_they_d
 }
 
 #[tokio::test]
+async fn staged_reservations_up_to_returns_inert_non_terminal_rows_oldest_first() {
+    let (_db, store) = store_with_db("room-effect-staged-up-to").await;
+    let lifecycle = lifecycle();
+    let revisions = [3_i64, 4, 5, 6, 9]
+        .into_iter()
+        .map(|stored| RoomRevision::from_stored(stored).expect("positive revision"))
+        .collect::<Vec<_>>();
+
+    let mut tx = store.database().begin().await.expect("transaction");
+    let revision_three = store
+        .enqueue_in_tx(
+            &mut tx,
+            RoomEffectEnqueue {
+                lifecycle,
+                revision: revisions[0],
+                effects: &config_effects(),
+                origin: &origin(),
+                producing_node: &producing_node(),
+                now_ms: 10,
+            },
+        )
+        .await
+        .expect("enqueue revision 3");
+    let armed_revision = store
+        .enqueue_in_tx(
+            &mut tx,
+            RoomEffectEnqueue {
+                lifecycle,
+                revision: revisions[1],
+                effects: &config_effects(),
+                origin: &origin(),
+                producing_node: &producing_node(),
+                now_ms: 11,
+            },
+        )
+        .await
+        .expect("enqueue revision 4");
+    let revision_five = store
+        .enqueue_in_tx(
+            &mut tx,
+            RoomEffectEnqueue {
+                lifecycle,
+                revision: revisions[2],
+                effects: &config_effects(),
+                origin: &origin(),
+                producing_node: &producing_node(),
+                now_ms: 12,
+            },
+        )
+        .await
+        .expect("enqueue revision 5");
+    let terminal_revision = store
+        .enqueue_in_tx(
+            &mut tx,
+            RoomEffectEnqueue {
+                lifecycle,
+                revision: revisions[3],
+                effects: &destroy_effects(),
+                origin: &origin(),
+                producing_node: &producing_node(),
+                now_ms: 13,
+            },
+        )
+        .await
+        .expect("enqueue revision 6");
+    let above_bound = store
+        .enqueue_in_tx(
+            &mut tx,
+            RoomEffectEnqueue {
+                lifecycle,
+                revision: revisions[4],
+                effects: &config_effects(),
+                origin: &origin(),
+                producing_node: &producing_node(),
+                now_ms: 14,
+            },
+        )
+        .await
+        .expect("enqueue revision 9");
+    tx.commit().await.expect("commit");
+
+    store
+        .arm_reservation(&armed_revision, 20)
+        .await
+        .expect("arm revision 4");
+
+    let recovered = store
+        .staged_reservations_up_to(
+            lifecycle,
+            RoomRevision::from_stored(8).expect("positive bound revision"),
+        )
+        .await
+        .expect("lookup staged reservations up to bound");
+
+    assert_eq!(
+        recovered,
+        vec![
+            waddle_xmpp::muc::RoomEffectReservation {
+                lifecycle,
+                revision: revisions[0],
+                ordinals: revision_three.ordinals,
+            },
+            waddle_xmpp::muc::RoomEffectReservation {
+                lifecycle,
+                revision: revisions[2],
+                ordinals: revision_five.ordinals,
+            },
+        ]
+    );
+    assert!(
+        recovered.iter().all(|reservation| {
+            reservation
+                .ordinals
+                .windows(2)
+                .all(|window| window[0].as_i64() < window[1].as_i64())
+        }),
+        "each revision group must preserve ascending ordinals"
+    );
+    assert_eq!(
+        store
+            .find(&RoomEffectKey {
+                lifecycle,
+                revision: terminal_revision.revision,
+                ordinal: terminal_revision.ordinals[0],
+            })
+            .await
+            .expect("find terminal row")
+            .expect("terminal row")
+            .available_at_ms,
+        i64::MAX,
+        "terminal rows remain inert but are excluded from staged recovery"
+    );
+    assert_eq!(
+        store
+            .find(&RoomEffectKey {
+                lifecycle,
+                revision: above_bound.revision,
+                ordinal: above_bound.ordinals[0],
+            })
+            .await
+            .expect("find above-bound row")
+            .expect("above-bound row")
+            .available_at_ms,
+        i64::MAX,
+        "rows above the bound remain inert but are excluded from staged recovery"
+    );
+}
+
+#[tokio::test]
 async fn infrastructure_transient_release_keeps_effect_for_a_later_drain() {
     let (_db, store) = store_with_db("room-effect-infrastructure-retry").await;
     let lifecycle = lifecycle();

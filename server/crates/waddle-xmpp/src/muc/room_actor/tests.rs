@@ -81,7 +81,11 @@ async fn restoring_live_roster_rederives_occupant_authorization() {
     let actor = RoomActor::spawn(RoomActor::new(authoritative_room, test_secret()));
 
     actor
-        .ask(RestoreLiveRoster { room: stale_room })
+        .ask(RestoreLiveRoster {
+            room: stale_room,
+            occupancy_revision: 0,
+            departures: Default::default(),
+        })
         .await
         .expect("restore live roster");
 
@@ -103,6 +107,13 @@ async fn current_admission_revision(actor: &ActorRef<RoomActor>) -> u64 {
         .admission_revision
 }
 
+fn departed(disposition: LeaveDisposition) -> LeaveOutcome {
+    match disposition {
+        LeaveDisposition::Left(outcome) => *outcome,
+        other => panic!("expected an applied departure, got {other:?}"),
+    }
+}
+
 #[test]
 fn durable_restore_only_advances_for_admission_policy_changes() {
     let mut actor = RoomActor::new(test_room(), test_secret());
@@ -114,6 +125,7 @@ fn durable_restore_only_advances_for_admission_policy_changes() {
     };
     actor.install_durable_room_state(crate::muc::durable::DurableRoomState {
         coordinates: None,
+        config_coordinates: None,
         waddle_id: "waddle-1".to_string(),
         channel_id: "channel-1".to_string(),
         config: cosmetic_config,
@@ -129,6 +141,7 @@ fn durable_restore_only_advances_for_admission_policy_changes() {
     admission_config.members_only = false;
     actor.install_durable_room_state(crate::muc::durable::DurableRoomState {
         coordinates: None,
+        config_coordinates: None,
         waddle_id: "waddle-1".to_string(),
         channel_id: "channel-1".to_string(),
         config: admission_config,
@@ -293,7 +306,7 @@ async fn test_join_with_admin_affiliation_allowed_when_room_full() {
 
     actor
         .ask(JoinWithAffiliation {
-            sender_jid: alice,
+            sender_jid: alice.clone(),
             nick: "alice".to_string(),
             affiliation_grant: JoinAffiliationGrant::Resolver(Affiliation::Member),
             local_domain: "example.com".to_string(),
@@ -381,7 +394,13 @@ async fn join_and_leave_emit_presence_and_occupant_metrics() {
     );
 
     actor
-        .ask(LeaveByRealJid { sender_jid: alice })
+        .ask(LeaveByRealJid {
+            sender_jid: alice,
+            cause: crate::muc::durable::OccupancyLeaveCause::Explicit,
+            session: LeaveSessionSelector::Any,
+            attempt: LeaveAttemptId::generate(),
+            origin: crate::muc::room_actor::LeaveOrigin::Fresh,
+        })
         .await
         .expect("leave is infallible");
 
@@ -407,8 +426,12 @@ async fn test_leave() {
         .expect("join");
 
     actor
-        .ask(Leave {
-            nick: "alice".to_string(),
+        .ask(LeaveByRealJid {
+            sender_jid: test_full_jid("alice"),
+            cause: crate::muc::durable::OccupancyLeaveCause::Explicit,
+            session: LeaveSessionSelector::Any,
+            attempt: LeaveAttemptId::generate(),
+            origin: crate::muc::room_actor::LeaveOrigin::Fresh,
         })
         .await
         .expect("leave should succeed");
@@ -422,15 +445,16 @@ async fn test_leave_unknown_nick() {
     let actor = spawn_room_actor().await;
 
     let result = actor
-        .ask(Leave {
-            nick: "ghost".to_string(),
+        .ask(LeaveByRealJid {
+            sender_jid: test_full_jid("ghost"),
+            cause: crate::muc::durable::OccupancyLeaveCause::Explicit,
+            session: LeaveSessionSelector::Any,
+            attempt: LeaveAttemptId::generate(),
+            origin: crate::muc::room_actor::LeaveOrigin::Fresh,
         })
-        .await;
-    assert!(matches!(
-        result,
-        Err(SendError::HandlerError(RoomActorError::OccupantNotFound(nick)))
-            if nick == "ghost"
-    ));
+        .await
+        .expect("leave reply");
+    assert!(matches!(result, LeaveDisposition::NotOccupant));
 }
 
 #[tokio::test]
@@ -1610,10 +1634,16 @@ async fn leave_by_real_jid_surfaces_is_persistent_true_for_default_rooms() {
         .expect("join");
 
     let outcome = actor
-        .ask(crate::muc::room_actor::LeaveByRealJid { sender_jid: alice })
+        .ask(crate::muc::room_actor::LeaveByRealJid {
+            sender_jid: alice,
+            cause: crate::muc::durable::OccupancyLeaveCause::Explicit,
+            session: LeaveSessionSelector::Any,
+            attempt: LeaveAttemptId::generate(),
+            origin: crate::muc::room_actor::LeaveOrigin::Fresh,
+        })
         .await
-        .expect("leave")
-        .expect("outcome");
+        .map(departed)
+        .expect("leave");
     assert!(
         outcome.is_persistent,
         "default RoomConfig is persistent (Waddle channel shape) — \
@@ -1642,10 +1672,16 @@ async fn leave_by_real_jid_surfaces_is_persistent_false_for_instant_rooms() {
         .expect("join");
 
     let outcome = actor
-        .ask(crate::muc::room_actor::LeaveByRealJid { sender_jid: alice })
+        .ask(crate::muc::room_actor::LeaveByRealJid {
+            sender_jid: alice,
+            cause: crate::muc::durable::OccupancyLeaveCause::Explicit,
+            session: LeaveSessionSelector::Any,
+            attempt: LeaveAttemptId::generate(),
+            origin: crate::muc::room_actor::LeaveOrigin::Fresh,
+        })
         .await
-        .expect("leave")
-        .expect("outcome");
+        .map(departed)
+        .expect("leave");
     assert!(
         !outcome.is_persistent,
         "instant rooms (XEP-0045 §10.1.3) report is_persistent=false \
@@ -1729,11 +1765,28 @@ async fn is_dormant_true_after_resolver_derived_member_leaves() {
         })
         .await
         .expect("resolver-derived member join");
+    let attempt = LeaveAttemptId::generate();
     actor
-        .ask(crate::muc::room_actor::LeaveByRealJid { sender_jid: alice })
+        .ask(crate::muc::room_actor::LeaveByRealJid {
+            sender_jid: alice,
+            cause: crate::muc::durable::OccupancyLeaveCause::Explicit,
+            session: LeaveSessionSelector::Any,
+            attempt,
+            origin: crate::muc::room_actor::LeaveOrigin::Fresh,
+        })
         .await
-        .expect("leave")
-        .expect("outcome");
+        .map(departed)
+        .expect("leave");
+    // #1647: the leave minted a departure receipt, and an unacknowledged
+    // receipt now legitimately vetoes dormancy. Acknowledge it so this test
+    // keeps pinning ITS fence, not the receipt's.
+    assert_eq!(
+        actor
+            .ask(AckDepartureReceipt { attempt })
+            .await
+            .expect("ack ask"),
+        AckDepartureOutcome::Acknowledged
+    );
     assert!(
         actor
             .ask(crate::muc::room_actor::IsDormant)
@@ -1885,10 +1938,14 @@ async fn leave_by_real_jid_removes_every_occupancy_of_the_full_jid() {
     let outcome = actor
         .ask(crate::muc::room_actor::LeaveByRealJid {
             sender_jid: alice.clone(),
+            cause: crate::muc::durable::OccupancyLeaveCause::Explicit,
+            session: LeaveSessionSelector::Any,
+            attempt: LeaveAttemptId::generate(),
+            origin: crate::muc::room_actor::LeaveOrigin::Fresh,
         })
         .await
-        .expect("leave")
-        .expect("outcome");
+        .map(departed)
+        .expect("leave");
 
     assert_eq!(
         outcome.occupant_count, 1,
@@ -1922,10 +1979,16 @@ async fn leave_by_real_jid_removes_every_occupancy_of_the_full_jid() {
         .expect("rejoin");
     assert_eq!(actor.ask(OccupantCount).await.expect("count"), 2);
     actor
-        .ask(crate::muc::room_actor::LeaveByRealJid { sender_jid: alice })
+        .ask(crate::muc::room_actor::LeaveByRealJid {
+            sender_jid: alice,
+            cause: crate::muc::durable::OccupancyLeaveCause::Explicit,
+            session: LeaveSessionSelector::Any,
+            attempt: LeaveAttemptId::generate(),
+            origin: crate::muc::room_actor::LeaveOrigin::Fresh,
+        })
         .await
-        .expect("second leave")
-        .expect("outcome");
+        .map(departed)
+        .expect("second leave");
     assert_eq!(actor.ask(OccupantCount).await.expect("count"), 1);
 }
 
@@ -1954,10 +2017,16 @@ async fn is_dormant_false_when_explicit_ban_outlives_occupancy() {
         .await
         .expect("ban");
     actor
-        .ask(crate::muc::room_actor::LeaveByRealJid { sender_jid: alice })
+        .ask(crate::muc::room_actor::LeaveByRealJid {
+            sender_jid: alice,
+            cause: crate::muc::durable::OccupancyLeaveCause::Explicit,
+            session: LeaveSessionSelector::Any,
+            attempt: LeaveAttemptId::generate(),
+            origin: crate::muc::room_actor::LeaveOrigin::Fresh,
+        })
         .await
-        .expect("leave")
-        .expect("outcome");
+        .map(departed)
+        .expect("leave");
     assert!(
         !actor
             .ask(crate::muc::room_actor::IsDormant)
@@ -1982,11 +2051,28 @@ async fn is_dormant_true_after_last_occupant_leaves_with_no_stored_state() {
         })
         .await
         .expect("join");
+    let attempt = LeaveAttemptId::generate();
     actor
-        .ask(crate::muc::room_actor::LeaveByRealJid { sender_jid: alice })
+        .ask(crate::muc::room_actor::LeaveByRealJid {
+            sender_jid: alice,
+            cause: crate::muc::durable::OccupancyLeaveCause::Explicit,
+            session: LeaveSessionSelector::Any,
+            attempt,
+            origin: crate::muc::room_actor::LeaveOrigin::Fresh,
+        })
         .await
-        .expect("leave")
-        .expect("outcome");
+        .map(departed)
+        .expect("leave");
+    // #1647: the leave minted a departure receipt, and an unacknowledged
+    // receipt now legitimately vetoes dormancy. Acknowledge it so this test
+    // keeps pinning ITS fence, not the receipt's.
+    assert_eq!(
+        actor
+            .ask(AckDepartureReceipt { attempt })
+            .await
+            .expect("ack ask"),
+        AckDepartureOutcome::Acknowledged
+    );
     assert!(
         actor
             .ask(crate::muc::room_actor::IsDormant)
@@ -3138,7 +3224,13 @@ async fn leaving_occupant_clears_muji_state() {
 
     // Alice leaves; carol joins after.
     actor
-        .ask(crate::muc::room_actor::LeaveByRealJid { sender_jid: alice })
+        .ask(crate::muc::room_actor::LeaveByRealJid {
+            sender_jid: alice,
+            cause: crate::muc::durable::OccupancyLeaveCause::Explicit,
+            session: LeaveSessionSelector::Any,
+            attempt: LeaveAttemptId::generate(),
+            origin: crate::muc::room_actor::LeaveOrigin::Fresh,
+        })
         .await
         .expect("leave");
     let join_outcome = actor
@@ -3210,10 +3302,14 @@ async fn leaving_originator_session_clears_muji_state_even_with_peer_sessions_re
     let leave_outcome = actor
         .ask(crate::muc::room_actor::LeaveByRealJid {
             sender_jid: desktop.clone(),
+            cause: crate::muc::durable::OccupancyLeaveCause::Explicit,
+            session: LeaveSessionSelector::Any,
+            attempt: LeaveAttemptId::generate(),
+            origin: crate::muc::room_actor::LeaveOrigin::Fresh,
         })
         .await
         .expect("desktop leave");
-    let leave_outcome = leave_outcome.expect("alice present");
+    let leave_outcome = departed(leave_outcome);
     assert!(
         !leave_outcome.removed_last_session,
         "mobile is still in the room, so alice's nick is not vacated"
@@ -3295,7 +3391,13 @@ async fn leaving_non_originator_session_preserves_muji_state() {
 
     // Mobile (NOT the originator) disconnects.
     actor
-        .ask(crate::muc::room_actor::LeaveByRealJid { sender_jid: mobile })
+        .ask(crate::muc::room_actor::LeaveByRealJid {
+            sender_jid: mobile,
+            cause: crate::muc::durable::OccupancyLeaveCause::Explicit,
+            session: LeaveSessionSelector::Any,
+            attempt: LeaveAttemptId::generate(),
+            origin: crate::muc::room_actor::LeaveOrigin::Fresh,
+        })
         .await
         .expect("mobile leave");
 
@@ -3369,10 +3471,16 @@ async fn leaving_one_active_same_nick_session_preserves_sibling_active_muji_stat
         .expect("mobile is an occupant");
 
     let leave_outcome = actor
-        .ask(crate::muc::room_actor::LeaveByRealJid { sender_jid: mobile })
+        .ask(crate::muc::room_actor::LeaveByRealJid {
+            sender_jid: mobile,
+            cause: crate::muc::durable::OccupancyLeaveCause::Explicit,
+            session: LeaveSessionSelector::Any,
+            attempt: LeaveAttemptId::generate(),
+            origin: crate::muc::room_actor::LeaveOrigin::Fresh,
+        })
         .await
-        .expect("mobile leave")
-        .expect("alice present");
+        .map(departed)
+        .expect("mobile leave");
 
     assert!(leave_outcome.cleared_muji_state);
     assert!(
@@ -3736,6 +3844,7 @@ struct FakeDurableStore {
     commit_outcome_unknown: bool,
     commit_config_outcome_unknown: bool,
     lose_config_persist_ownership: bool,
+    lose_projection_persist_ownership: bool,
     lose_restore_ownership: bool,
     load_calls: std::sync::atomic::AtomicUsize,
     save_calls: std::sync::atomic::AtomicUsize,
@@ -3745,6 +3854,28 @@ struct FakeDurableStore {
         std::sync::Mutex<std::collections::HashMap<BareJid, crate::muc::RoomClaimFenceContext>>,
     lifecycle: std::sync::OnceLock<crate::muc::RoomLifecycleId>,
     next_revision: std::sync::atomic::AtomicUsize,
+    replay_last_coordinates: std::sync::atomic::AtomicBool,
+    last_coordinates: std::sync::Mutex<Option<crate::muc::RoomCommittedCoordinates>>,
+    recorded_intents: std::sync::Mutex<Vec<crate::muc::RoomDurableMutation>>,
+    recorded_projection_revisions: std::sync::Mutex<Vec<crate::muc::RoomRevision>>,
+    commit_events: std::sync::Arc<std::sync::Mutex<Vec<String>>>,
+    projection_pause: std::sync::Mutex<Option<ProjectionCommitPause>>,
+    restored_state: std::sync::Mutex<Option<crate::muc::durable::DurableRoomState>>,
+}
+
+#[derive(Clone)]
+struct ProjectionCommitPause {
+    entered: std::sync::Arc<tokio::sync::Notify>,
+    release: std::sync::Arc<tokio::sync::Notify>,
+}
+
+impl ProjectionCommitPause {
+    fn new() -> Self {
+        Self {
+            entered: std::sync::Arc::new(tokio::sync::Notify::new()),
+            release: std::sync::Arc::new(tokio::sync::Notify::new()),
+        }
+    }
 }
 
 impl FakeDurableStore {
@@ -3768,6 +3899,14 @@ impl FakeDurableStore {
     fn deposed() -> std::sync::Arc<Self> {
         Self::with_established_test_fence(std::sync::Arc::new(Self {
             fenced: std::sync::Mutex::new(Some(false)),
+            ..Default::default()
+        }))
+    }
+
+    fn deposed_on_projection() -> std::sync::Arc<Self> {
+        Self::with_established_test_fence(std::sync::Arc::new(Self {
+            fenced: std::sync::Mutex::new(Some(true)),
+            lose_projection_persist_ownership: true,
             ..Default::default()
         }))
     }
@@ -3839,6 +3978,44 @@ impl FakeDurableStore {
         *self.fenced.lock().expect("lock") = fenced;
     }
 
+    fn set_replay_last_coordinates(&self, replay: bool) {
+        self.replay_last_coordinates
+            .store(replay, std::sync::atomic::Ordering::SeqCst);
+    }
+
+    fn recorded_intents(&self) -> Vec<crate::muc::RoomDurableMutation> {
+        self.recorded_intents.lock().expect("lock").clone()
+    }
+
+    fn recorded_projection_revisions(&self) -> Vec<crate::muc::RoomRevision> {
+        self.recorded_projection_revisions
+            .lock()
+            .expect("lock")
+            .clone()
+    }
+
+    fn commit_events(&self) -> std::sync::Arc<std::sync::Mutex<Vec<String>>> {
+        self.commit_events.clone()
+    }
+
+    fn pause_next_projection_commit(&self) -> ProjectionCommitPause {
+        let pause = ProjectionCommitPause::new();
+        *self.projection_pause.lock().expect("lock") = Some(pause.clone());
+        pause
+    }
+
+    fn set_restored_coordinates(&self, coordinates: crate::muc::RoomCommittedCoordinates) {
+        *self.restored_state.lock().expect("lock") = Some(crate::muc::durable::DurableRoomState {
+            coordinates: Some(coordinates),
+            config_coordinates: None,
+            waddle_id: "waddle-1".to_owned(),
+            channel_id: "channel-1".to_owned(),
+            config: RoomConfig::default(),
+            subject: None,
+            affiliations: Vec::new(),
+        });
+    }
+
     fn next_commit_coordinates(&self) -> crate::muc::RoomCommittedCoordinates {
         let lifecycle = *self
             .lifecycle
@@ -3875,11 +4052,27 @@ impl crate::muc::durable::MucDurableStore for FakeDurableStore {
         }
         self.save_calls
             .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        self.recorded_intents
+            .lock()
+            .expect("lock")
+            .push(intent.clone());
         let established =
             self.established_fences.lock().expect("lock").get(room_jid) == Some(fence);
         let fenced = *self.fenced.lock().expect("lock");
         let lose_ownership = matches!(intent, crate::muc::RoomDurableMutation::Config { .. })
             && self.lose_config_persist_ownership;
+        // Projection commits (#1647) carry no effects by construction and are
+        // observed through `recorded_intents`; `saved_effects` keeps describing
+        // state commits only so positional fixtures stay meaningful.
+        let is_projection = matches!(intent, crate::muc::RoomDurableMutation::Projection(_));
+        let projection_kind = match &intent {
+            crate::muc::RoomDurableMutation::Projection(projection) => Some(projection.kind()),
+            _ => None,
+        };
+        let projection_pause = is_projection
+            .then(|| self.projection_pause.lock().expect("lock").take())
+            .flatten();
+        let lose_projection_ownership = is_projection && self.lose_projection_persist_ownership;
         let config_commit = matches!(&intent, crate::muc::RoomDurableMutation::Config { .. });
         let committed_affiliations = match intent {
             crate::muc::RoomDurableMutation::Affiliation(entry)
@@ -3898,11 +4091,29 @@ impl crate::muc::durable::MucDurableStore for FakeDurableStore {
         };
         let saved_affiliations = &self.saved_affiliations;
         let saved_effects = &self.saved_effects;
+        let commit_events = self.commit_events.clone();
         let committed_room = room_jid.clone();
         let fail = self.fail_persist;
         let commit_outcome_unknown =
             self.commit_outcome_unknown || (self.commit_config_outcome_unknown && config_commit);
-        let coordinates = self.next_commit_coordinates();
+        let coordinates = if self
+            .replay_last_coordinates
+            .load(std::sync::atomic::Ordering::SeqCst)
+        {
+            self.last_coordinates
+                .lock()
+                .expect("lock")
+                .unwrap_or_else(|| self.next_commit_coordinates())
+        } else {
+            self.next_commit_coordinates()
+        };
+        *self.last_coordinates.lock().expect("lock") = Some(coordinates);
+        if is_projection {
+            self.recorded_projection_revisions
+                .lock()
+                .expect("lock")
+                .push(coordinates.revision);
+        }
         let reservation =
             (!effects.effects().is_empty()).then(|| crate::muc::RoomEffectReservation {
                 lifecycle: coordinates.lifecycle,
@@ -3915,13 +4126,25 @@ impl crate::muc::durable::MucDurableStore for FakeDurableStore {
                     .collect(),
             });
         Box::pin(async move {
+            if let Some(pause) = projection_pause {
+                commit_events.lock().expect("lock").push(format!(
+                    "commit_started:{}",
+                    projection_kind.expect("kind").as_str()
+                ));
+                pause.entered.notify_one();
+                pause.release.notified().await;
+                commit_events
+                    .lock()
+                    .expect("lock")
+                    .push("commit_finished".to_owned());
+            }
             if !established {
                 Err(crate::muc::RoomCommitError::OwnershipUnavailable)
             } else if fenced == Some(false) {
                 Err(crate::muc::RoomCommitError::NotOwner)
             } else if fenced.is_none() {
                 Err(crate::muc::RoomCommitError::OwnershipUnavailable)
-            } else if lose_ownership {
+            } else if lose_ownership || lose_projection_ownership {
                 Err(crate::muc::RoomCommitError::NotOwner)
             } else if commit_outcome_unknown {
                 Err(crate::muc::RoomCommitError::CommitOutcomeUnknown)
@@ -3939,7 +4162,9 @@ impl crate::muc::durable::MucDurableStore for FakeDurableStore {
                         )
                     }),
                 );
-                saved_effects.lock().expect("lock").push(effects);
+                if !is_projection {
+                    saved_effects.lock().expect("lock").push(effects);
+                }
                 Ok(crate::muc::RoomCommitOutcome {
                     coordinates,
                     reservation,
@@ -3959,12 +4184,13 @@ impl crate::muc::durable::MucDurableStore for FakeDurableStore {
             .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
         let lose_ownership = self.lose_restore_ownership;
         let entity = fence.entity.clone();
+        let restored_state = self.restored_state.lock().expect("lock").clone();
         Box::pin(async move {
             validation?;
             if lose_ownership {
                 Err(crate::XmppError::OwnershipLost { entity })
             } else {
-                Ok(None)
+                Ok(restored_state)
             }
         })
     }
@@ -4153,6 +4379,2593 @@ async fn spawn_room_actor_with_config_and_store(
     actor
 }
 
+fn test_pinned_entry(id: &str) -> PinnedEntry {
+    use crate::muc::pin::PinPreview;
+
+    let room_jid: BareJid = "testroom@muc.example.com".parse().expect("valid jid");
+    PinnedEntry {
+        target_stanza_id: waddle_xmpp_core::xep0359::StanzaId::new(
+            id.to_owned(),
+            jid::Jid::from(room_jid),
+        ),
+        pinner_jid: "admin@example.com".parse().expect("valid jid"),
+        pinned_at: chrono::Utc::now(),
+        preview: PinPreview::new(
+            "alice@example.com".parse().expect("valid jid"),
+            None,
+            "important",
+            chrono::Utc::now(),
+        ),
+    }
+}
+
+struct GetProjectionTestState;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct ProjectionTestState {
+    occupancy_revision: u64,
+    projected_revision: Option<crate::muc::RoomRevision>,
+}
+
+impl kameo::message::Message<GetProjectionTestState> for RoomActor {
+    type Reply = Result<ProjectionTestState, std::convert::Infallible>;
+
+    async fn handle(
+        &mut self,
+        _msg: GetProjectionTestState,
+        _ctx: &mut kameo::message::Context<Self, Self::Reply>,
+    ) -> Self::Reply {
+        Ok(ProjectionTestState {
+            occupancy_revision: self.occupancy_revision,
+            projected_revision: self.projected_revision,
+        })
+    }
+}
+
+struct SetRoomSealForTest(RoomSealState);
+
+impl kameo::message::Message<SetRoomSealForTest> for RoomActor {
+    type Reply = Result<(), std::convert::Infallible>;
+
+    async fn handle(
+        &mut self,
+        msg: SetRoomSealForTest,
+        _ctx: &mut kameo::message::Context<Self, Self::Reply>,
+    ) -> Self::Reply {
+        self.seal_state = msg.0;
+        Ok(())
+    }
+}
+
+struct SetProjectionApplyHookForTest(std::sync::Arc<dyn Fn(super::ProjectionProbe) + Send + Sync>);
+
+impl kameo::message::Message<SetProjectionApplyHookForTest> for RoomActor {
+    type Reply = Result<(), std::convert::Infallible>;
+
+    async fn handle(
+        &mut self,
+        msg: SetProjectionApplyHookForTest,
+        _ctx: &mut kameo::message::Context<Self, Self::Reply>,
+    ) -> Self::Reply {
+        self.test_projection_apply_hook = Some(msg.0);
+        Ok(())
+    }
+}
+
+async fn install_projection_apply_hook(
+    actor: &ActorRef<RoomActor>,
+    events: std::sync::Arc<std::sync::Mutex<Vec<String>>>,
+) {
+    let hook_events = events.clone();
+    actor
+        .ask(SetProjectionApplyHookForTest(std::sync::Arc::new(
+            move |probe: super::ProjectionProbe| {
+                hook_events.lock().expect("lock").push(format!(
+                    "{}:occupants={}:sessions={}:pins={}",
+                    probe.phase, probe.occupants, probe.sessions, probe.pins
+                ));
+            },
+        )))
+        .await
+        .expect("install apply hook");
+}
+
+fn projection_event_snapshot(
+    events: &std::sync::Arc<std::sync::Mutex<Vec<String>>>,
+) -> Vec<String> {
+    events.lock().expect("lock").clone()
+}
+
+async fn join_as_resolver(
+    actor: &ActorRef<RoomActor>,
+    jid: FullJid,
+    nick: &str,
+) -> Result<JoinOutcome, SendError<JoinWithAffiliation, RoomActorError>> {
+    actor
+        .ask(JoinWithAffiliation {
+            sender_jid: jid,
+            nick: nick.to_owned(),
+            affiliation_grant: JoinAffiliationGrant::Resolver(Affiliation::Member),
+            local_domain: "example.com".to_owned(),
+            admission_revision: current_admission_revision(actor).await,
+        })
+        .await
+}
+
+async fn leave_with_attempt(
+    actor: &ActorRef<RoomActor>,
+    jid: FullJid,
+    attempt: LeaveAttemptId,
+) -> LeaveDisposition {
+    actor
+        .ask(LeaveByRealJid {
+            sender_jid: jid,
+            cause: crate::muc::durable::OccupancyLeaveCause::Explicit,
+            session: LeaveSessionSelector::Any,
+            attempt,
+            origin: crate::muc::room_actor::LeaveOrigin::Fresh,
+        })
+        .await
+        .expect("leave ask")
+}
+
+#[tokio::test]
+async fn replayed_receipt_is_superseded_when_the_session_rejoined() {
+    let actor = spawn_room_actor().await;
+    let alice = test_full_jid("alice");
+    join_as_resolver(&actor, alice.clone(), "alice")
+        .await
+        .expect("alice joins");
+    let first_attempt = LeaveAttemptId::generate();
+    assert!(matches!(
+        leave_with_attempt(&actor, alice.clone(), first_attempt).await,
+        LeaveDisposition::Left(_)
+    ));
+    join_as_resolver(&actor, alice.clone(), "alice")
+        .await
+        .expect("alice rejoins");
+
+    assert!(matches!(
+        leave_with_attempt(&actor, alice.clone(), first_attempt).await,
+        LeaveDisposition::Superseded
+    ));
+    assert_eq!(actor.ask(OccupantCount).await.expect("occupant count"), 1);
+
+    assert!(matches!(
+        leave_with_attempt(&actor, alice, LeaveAttemptId::generate()).await,
+        LeaveDisposition::Left(_)
+    ));
+}
+
+#[tokio::test]
+async fn old_receipt_is_not_replayed_after_the_jid_rejoined_and_left_again() {
+    let actor = spawn_room_actor().await;
+    let alice = test_full_jid("alice");
+    join_as_resolver(&actor, alice.clone(), "alice")
+        .await
+        .expect("alice joins");
+    let first_attempt = LeaveAttemptId::generate();
+    assert!(matches!(
+        leave_with_attempt(&actor, alice.clone(), first_attempt).await,
+        LeaveDisposition::Left(_)
+    ));
+    join_as_resolver(&actor, alice.clone(), "alice")
+        .await
+        .expect("alice rejoins");
+    let second_attempt = LeaveAttemptId::generate();
+    assert!(matches!(
+        leave_with_attempt(&actor, alice.clone(), second_attempt).await,
+        LeaveDisposition::Left(_)
+    ));
+
+    let snapshot = actor
+        .ask(GetSnapshot)
+        .await
+        .expect("snapshot after second leave");
+    assert_eq!(snapshot.departures.receipts.len(), 1);
+    assert_eq!(snapshot.departures.receipts[0].attempt, second_attempt);
+
+    assert!(matches!(
+        leave_with_attempt(&actor, alice.clone(), first_attempt).await,
+        LeaveDisposition::NotOccupant | LeaveDisposition::Superseded
+    ));
+    assert!(matches!(
+        leave_with_attempt(&actor, alice.clone(), second_attempt).await,
+        LeaveDisposition::Left(_)
+    ));
+    // Replay is non-destructive: only the acknowledgement drops the receipt.
+    assert!(matches!(
+        leave_with_attempt(&actor, alice.clone(), second_attempt).await,
+        LeaveDisposition::Left(_)
+    ));
+    actor
+        .ask(AckDepartureReceipt {
+            attempt: second_attempt,
+        })
+        .await
+        .expect("ack");
+    assert!(matches!(
+        leave_with_attempt(&actor, alice, second_attempt).await,
+        LeaveDisposition::NotOccupant
+    ));
+    assert!(
+        actor
+            .ask(GetSnapshot)
+            .await
+            .expect("snapshot after replay")
+            .departures
+            .receipts
+            .is_empty(),
+        "the departed-generation tombstone prunes with B's acknowledged receipt"
+    );
+}
+
+async fn leave_with_attempt_and_cause(
+    actor: &ActorRef<RoomActor>,
+    jid: FullJid,
+    attempt: LeaveAttemptId,
+    cause: crate::muc::durable::OccupancyLeaveCause,
+) -> LeaveDisposition {
+    actor
+        .ask(LeaveByRealJid {
+            sender_jid: jid,
+            cause,
+            session: LeaveSessionSelector::Any,
+            attempt,
+            origin: crate::muc::room_actor::LeaveOrigin::Fresh,
+        })
+        .await
+        .expect("leave ask")
+}
+
+/// A janitor-style retained retry: the only origin allowed to consume the
+/// full JID's unacknowledged receipt when its own attempt is unknown.
+async fn retry_with_attempt_and_cause(
+    actor: &ActorRef<RoomActor>,
+    jid: FullJid,
+    attempt: LeaveAttemptId,
+    cause: crate::muc::durable::OccupancyLeaveCause,
+) -> LeaveDisposition {
+    actor
+        .ask(LeaveByRealJid {
+            sender_jid: jid,
+            cause,
+            session: LeaveSessionSelector::Any,
+            attempt,
+            origin: LeaveOrigin::RetainedRetry,
+        })
+        .await
+        .expect("retry ask")
+}
+
+fn receipts_of(actor_snapshot: &RoomSnapshot) -> &[DepartureReceipt] {
+    &actor_snapshot.departures.receipts
+}
+
+#[tokio::test]
+async fn retry_of_an_attempt_older_than_the_live_session_is_superseded() {
+    // join → leave A1 (reply lost) → rejoin → leave A2 (acked) → rejoin →
+    // retry A1: the live session joined after A1 was minted, so A1 must not
+    // evict it even though A1's receipt tombstone was pruned with A2's ack.
+    let actor = spawn_room_actor().await;
+    let alice = test_full_jid("alice");
+    join_as_resolver(&actor, alice.clone(), "alice")
+        .await
+        .expect("alice joins");
+    let first_attempt = LeaveAttemptId::generate();
+    assert!(matches!(
+        leave_with_attempt(&actor, alice.clone(), first_attempt).await,
+        LeaveDisposition::Left(_)
+    ));
+    join_as_resolver(&actor, alice.clone(), "alice")
+        .await
+        .expect("alice rejoins");
+    let second_attempt = LeaveAttemptId::generate();
+    assert!(matches!(
+        leave_with_attempt(&actor, alice.clone(), second_attempt).await,
+        LeaveDisposition::Left(_)
+    ));
+    actor
+        .ask(AckDepartureReceipt {
+            attempt: second_attempt,
+        })
+        .await
+        .expect("ack second departure");
+    let snapshot = actor.ask(GetSnapshot).await.expect("snapshot");
+    assert!(
+        receipts_of(&snapshot).is_empty(),
+        "the acknowledged receipt pruned every tombstone of the JID"
+    );
+    join_as_resolver(&actor, alice.clone(), "alice")
+        .await
+        .expect("alice rejoins again");
+
+    let stale_retry = leave_with_attempt(&actor, alice.clone(), first_attempt).await;
+    assert!(
+        matches!(stale_retry, LeaveDisposition::Superseded),
+        "stale retry must be superseded, got {stale_retry:?}"
+    );
+    let snapshot = actor.ask(GetSnapshot).await.expect("snapshot");
+    assert!(
+        snapshot.room.get_occupant("alice").is_some(),
+        "the live session joined after the stale attempt and must remain"
+    );
+}
+
+#[tokio::test]
+async fn old_receipt_is_not_replayed_after_the_rejoined_session_was_kicked() {
+    let actor = spawn_room_actor().await;
+    let owner = test_full_jid("owner");
+    let alice = test_full_jid("alice");
+    actor
+        .ask(JoinWithAffiliation {
+            sender_jid: owner.clone(),
+            nick: "owner".to_owned(),
+            affiliation_grant: JoinAffiliationGrant::Resolver(Affiliation::Owner),
+            local_domain: "example.com".to_owned(),
+            admission_revision: current_admission_revision(&actor).await,
+        })
+        .await
+        .expect("owner joins");
+    join_as_resolver(&actor, alice.clone(), "alice")
+        .await
+        .expect("alice joins");
+    let lost_attempt = LeaveAttemptId::generate();
+    assert!(matches!(
+        leave_with_attempt(&actor, alice.clone(), lost_attempt).await,
+        LeaveDisposition::Left(_)
+    ));
+    join_as_resolver(&actor, alice.clone(), "alice")
+        .await
+        .expect("alice rejoins");
+    actor
+        .ask(ApplyAdminItems {
+            sender_jid: owner,
+            sender_affiliation: Affiliation::Owner,
+            sender_role: Role::Moderator,
+            items: vec![AdminItem {
+                jid: None,
+                nick: Some("alice".to_string()),
+                affiliation: None,
+                role: Some(Role::None),
+                reason: None,
+            }],
+        })
+        .await
+        .expect("kick alice");
+    let snapshot = actor.ask(GetSnapshot).await.expect("snapshot");
+    assert!(snapshot.room.get_occupant("alice").is_none(), "kicked");
+    assert!(
+        snapshot
+            .departures
+            .latest_generations
+            .iter()
+            .any(|(jid, generation)| {
+                jid == &alice && *generation > snapshot.departures.receipts[0].generation
+            }),
+        "the rejoin advanced the JID's latest generation: {:?}",
+        snapshot.departures
+    );
+
+    let stale_retry = leave_with_attempt(&actor, alice.clone(), lost_attempt).await;
+    assert!(
+        matches!(stale_retry, LeaveDisposition::Superseded),
+        "a newer generation existed (and was removed by moderation): the stale \
+         ordinary departure must not be announced after the 307, got {stale_retry:?}"
+    );
+    assert!(
+        receipts_of(&actor.ask(GetSnapshot).await.expect("snapshot")).is_empty(),
+        "the stale receipt is consumed, not left for a later fallback"
+    );
+}
+
+#[tokio::test]
+async fn jid_fallback_only_replays_a_receipt_of_the_same_cause() {
+    use crate::muc::durable::OccupancyLeaveCause;
+    let actor = spawn_room_actor().await;
+    let alice = test_full_jid("alice");
+    join_as_resolver(&actor, alice.clone(), "alice")
+        .await
+        .expect("alice joins");
+    let explicit_attempt = LeaveAttemptId::generate();
+    assert!(matches!(
+        leave_with_attempt_and_cause(
+            &actor,
+            alice.clone(),
+            explicit_attempt,
+            OccupancyLeaveCause::Explicit
+        )
+        .await,
+        LeaveDisposition::Left(_)
+    ));
+
+    // An administrative leave for the now-absent JID must not consume the
+    // explicit receipt: its caller would run the wrong effect policy and the
+    // explicit retry would find nothing.
+    assert!(matches!(
+        retry_with_attempt_and_cause(
+            &actor,
+            alice.clone(),
+            LeaveAttemptId::generate(),
+            OccupancyLeaveCause::Administrative
+        )
+        .await,
+        LeaveDisposition::NotOccupant
+    ));
+    assert_eq!(
+        receipts_of(&actor.ask(GetSnapshot).await.expect("snapshot")).len(),
+        1,
+        "the explicit receipt stays retained for its own retry"
+    );
+    // A FRESH explicit leave of the gone JID never consumes it either: the
+    // receipt may belong to a departure whose acknowledgement is in flight.
+    assert!(matches!(
+        leave_with_attempt_and_cause(
+            &actor,
+            alice.clone(),
+            LeaveAttemptId::generate(),
+            OccupancyLeaveCause::Explicit
+        )
+        .await,
+        LeaveDisposition::NotOccupant
+    ));
+    assert_eq!(
+        receipts_of(&actor.ask(GetSnapshot).await.expect("snapshot")).len(),
+        1
+    );
+    // A coalesced explicit RETRY (unknown attempt, same cause) replays it and
+    // names the receipt's own attempt for acknowledgement.
+    let LeaveDisposition::Left(replayed) = retry_with_attempt_and_cause(
+        &actor,
+        alice.clone(),
+        LeaveAttemptId::generate(),
+        OccupancyLeaveCause::Explicit,
+    )
+    .await
+    else {
+        panic!("coalesced retry replays");
+    };
+    assert_eq!(replayed.acknowledge, explicit_attempt);
+    assert_eq!(
+        receipts_of(&actor.ask(GetSnapshot).await.expect("snapshot")).len(),
+        1,
+        "replay is non-destructive"
+    );
+    actor
+        .ask(AckDepartureReceipt {
+            attempt: replayed.acknowledge,
+        })
+        .await
+        .expect("ack");
+    assert!(receipts_of(&actor.ask(GetSnapshot).await.expect("snapshot")).is_empty());
+}
+
+#[tokio::test]
+async fn superseded_attempt_tombstones_survive_live_roster_transfer() {
+    // A (reply lost) is superseded by B (reply lost). After the transfer a
+    // retry of A must not consume B's receipt through the JID fallback.
+    let predecessor = spawn_room_actor().await;
+    let alice = test_full_jid("alice");
+    join_as_resolver(&predecessor, alice.clone(), "alice")
+        .await
+        .expect("alice joins");
+    let attempt_a = LeaveAttemptId::generate();
+    assert!(matches!(
+        leave_with_attempt(&predecessor, alice.clone(), attempt_a).await,
+        LeaveDisposition::Left(_)
+    ));
+    join_as_resolver(&predecessor, alice.clone(), "alice")
+        .await
+        .expect("alice rejoins");
+    let attempt_b = LeaveAttemptId::generate();
+    assert!(matches!(
+        leave_with_attempt(&predecessor, alice.clone(), attempt_b).await,
+        LeaveDisposition::Left(_)
+    ));
+    let snapshot = predecessor.ask(GetSnapshot).await.expect("snapshot");
+    assert_eq!(snapshot.departures.receipts.len(), 1);
+    assert_eq!(snapshot.departures.superseded_attempts.len(), 1);
+
+    let successor = spawn_room_actor().await;
+    successor
+        .ask(RestoreLiveRoster {
+            room: snapshot.room,
+            occupancy_revision: snapshot.occupancy_revision,
+            departures: snapshot.departures,
+        })
+        .await
+        .expect("transfer");
+
+    assert!(matches!(
+        leave_with_attempt(&successor, alice.clone(), attempt_a).await,
+        LeaveDisposition::Superseded
+    ));
+    assert_eq!(
+        receipts_of(&successor.ask(GetSnapshot).await.expect("snapshot")).len(),
+        1,
+        "B's receipt is still owed to B's retry"
+    );
+    assert!(matches!(
+        leave_with_attempt(&successor, alice, attempt_b).await,
+        LeaveDisposition::Left(_)
+    ));
+}
+
+#[tokio::test]
+async fn receipt_replays_while_a_sibling_session_still_holds_the_nick() {
+    // alice/desktop and alice/mobile share nick "alice". desktop's departure
+    // (removed_last_session == false) completes with a lost reply; mobile
+    // still holding the nick is the normal multi-resource case and must not
+    // make desktop's retained outcome look like a retaken nick.
+    let actor = spawn_room_actor().await;
+    let desktop = test_full_jid_resource("alice", "desktop");
+    let mobile = test_full_jid_resource("alice", "mobile");
+    join_as_resolver(&actor, desktop.clone(), "alice")
+        .await
+        .expect("desktop joins");
+    join_as_resolver(&actor, mobile.clone(), "alice")
+        .await
+        .expect("mobile joins");
+    let attempt = LeaveAttemptId::generate();
+    let LeaveDisposition::Left(first) = leave_with_attempt(&actor, desktop.clone(), attempt).await
+    else {
+        panic!("desktop leaves");
+    };
+    assert!(!first.removed_last_session);
+
+    let replay = leave_with_attempt(&actor, desktop.clone(), attempt).await;
+    assert!(
+        matches!(&replay, LeaveDisposition::Left(outcome) if !outcome.removed_last_session),
+        "the exact-attempt retry replays the non-final departure, got {replay:?}"
+    );
+    assert!(
+        actor
+            .ask(GetSnapshot)
+            .await
+            .expect("snapshot")
+            .room
+            .get_occupant("alice")
+            .is_some(),
+        "mobile keeps the nick"
+    );
+}
+
+#[tokio::test]
+async fn replayed_final_departure_is_superseded_when_the_same_account_retook_the_nick() {
+    // alice/web was the only session on "alice"; its departure freed the nick
+    // (reply lost). alice reconnects on a NEW resource and rejoins the nick:
+    // the retained retry for /web must not announce alice's departure.
+    let actor = spawn_room_actor().await;
+    let web = test_full_jid_resource("alice", "web");
+    let web2 = test_full_jid_resource("alice", "web2");
+    join_as_resolver(&actor, web.clone(), "alice")
+        .await
+        .expect("web joins");
+    let attempt = LeaveAttemptId::generate();
+    let LeaveDisposition::Left(first) = leave_with_attempt(&actor, web.clone(), attempt).await
+    else {
+        panic!("web leaves");
+    };
+    assert!(first.removed_last_session);
+    join_as_resolver(&actor, web2.clone(), "alice")
+        .await
+        .expect("web2 retakes the nick");
+
+    let replay = retry_with_attempt_and_cause(
+        &actor,
+        web,
+        attempt,
+        crate::muc::durable::OccupancyLeaveCause::Disconnect,
+    )
+    .await;
+    assert!(
+        matches!(replay, LeaveDisposition::Superseded),
+        "a freed nick now held by anyone supersedes the receipt, got {replay:?}"
+    );
+    assert!(
+        actor
+            .ask(GetSnapshot)
+            .await
+            .expect("snapshot")
+            .room
+            .get_occupant("alice")
+            .is_some(),
+        "web2 keeps the nick"
+    );
+}
+
+#[tokio::test]
+async fn coalesced_retry_is_superseded_when_the_same_account_retook_the_freed_nick() {
+    // Same as above through the janitor's real path after attempt coalescing:
+    // the retry carries an attempt the actor never saw, so it reaches the
+    // JID fallback — which must apply the same freed-nick rule.
+    let actor = spawn_room_actor().await;
+    let web = test_full_jid_resource("alice", "web");
+    let web2 = test_full_jid_resource("alice", "web2");
+    join_as_resolver(&actor, web.clone(), "alice")
+        .await
+        .expect("web joins");
+    let LeaveDisposition::Left(first) =
+        leave_with_attempt(&actor, web.clone(), LeaveAttemptId::generate()).await
+    else {
+        panic!("web leaves");
+    };
+    assert!(first.removed_last_session);
+    join_as_resolver(&actor, web2.clone(), "alice")
+        .await
+        .expect("web2 retakes the nick");
+
+    let replay = retry_with_attempt_and_cause(
+        &actor,
+        web,
+        LeaveAttemptId::generate(),
+        crate::muc::durable::OccupancyLeaveCause::Explicit,
+    )
+    .await;
+    assert!(
+        matches!(replay, LeaveDisposition::Superseded),
+        "the JID fallback applies the freed-nick rule, got {replay:?}"
+    );
+    assert!(actor
+        .ask(GetSnapshot)
+        .await
+        .expect("snapshot")
+        .room
+        .get_occupant("alice")
+        .is_some());
+}
+
+#[tokio::test]
+async fn non_final_receipt_is_superseded_once_the_sibling_left_and_the_nick_was_retaken() {
+    // web and mobile share "alice"; web's NON-final departure loses its
+    // reply. mobile then leaves, and alice rejoins on web2 (a new nick
+    // generation). web's receipt captured the old generation's roster/Muji
+    // state and must not be replayed over the new one.
+    let actor = spawn_room_actor().await;
+    let web = test_full_jid_resource("alice", "web");
+    let mobile = test_full_jid_resource("alice", "mobile");
+    let web2 = test_full_jid_resource("alice", "web2");
+    join_as_resolver(&actor, web.clone(), "alice")
+        .await
+        .expect("web joins");
+    join_as_resolver(&actor, mobile.clone(), "alice")
+        .await
+        .expect("mobile joins");
+    let attempt = LeaveAttemptId::generate();
+    let LeaveDisposition::Left(first) = leave_with_attempt(&actor, web.clone(), attempt).await
+    else {
+        panic!("web leaves");
+    };
+    assert!(!first.removed_last_session);
+    assert!(matches!(
+        leave_with_attempt(&actor, mobile, LeaveAttemptId::generate()).await,
+        LeaveDisposition::Left(_)
+    ));
+    join_as_resolver(&actor, web2, "alice")
+        .await
+        .expect("web2 retakes the nick");
+
+    let replay = leave_with_attempt(&actor, web, attempt).await;
+    assert!(
+        matches!(replay, LeaveDisposition::Superseded),
+        "a new nick generation supersedes the non-final receipt, got {replay:?}"
+    );
+}
+
+#[tokio::test]
+async fn non_final_receipt_is_superseded_once_the_sibling_left_even_without_a_retake() {
+    // web's non-final departure captured mobile's roster/Muji state; mobile
+    // then leaves finally. With the nick absent, replaying web's receipt
+    // would resurrect the nick's stale available state.
+    let actor = spawn_room_actor().await;
+    let web = test_full_jid_resource("alice", "web");
+    let mobile = test_full_jid_resource("alice", "mobile");
+    join_as_resolver(&actor, web.clone(), "alice")
+        .await
+        .expect("web joins");
+    join_as_resolver(&actor, mobile.clone(), "alice")
+        .await
+        .expect("mobile joins");
+    let attempt = LeaveAttemptId::generate();
+    let LeaveDisposition::Left(first) = leave_with_attempt(&actor, web.clone(), attempt).await
+    else {
+        panic!("web leaves");
+    };
+    assert!(!first.removed_last_session);
+    assert!(matches!(
+        leave_with_attempt(&actor, mobile, LeaveAttemptId::generate()).await,
+        LeaveDisposition::Left(_)
+    ));
+
+    let replay = leave_with_attempt(&actor, web, attempt).await;
+    assert!(
+        matches!(replay, LeaveDisposition::Superseded),
+        "an absent nick supersedes a non-final receipt, got {replay:?}"
+    );
+}
+
+#[tokio::test]
+async fn acknowledgement_is_refused_by_an_actor_that_lost_ownership() {
+    // After an ambiguous commit the actor is sealed OwnershipLost and its
+    // ledger may already be on its way to a successor: it must not claim to
+    // have dropped the receipt.
+    let actor = spawn_room_actor_with_store(FakeDurableStore::owned()).await;
+    let alice = test_full_jid("alice");
+    join_as_resolver(&actor, alice.clone(), "alice")
+        .await
+        .expect("alice joins");
+    let attempt = LeaveAttemptId::generate();
+    assert!(matches!(
+        leave_with_attempt(&actor, alice.clone(), attempt).await,
+        LeaveDisposition::Left(_)
+    ));
+    actor
+        .ask(SetRoomSealForTest(RoomSealState::OwnershipLost))
+        .await
+        .expect("test seal");
+    assert_eq!(
+        actor
+            .ask(AckDepartureReceipt { attempt })
+            .await
+            .expect("ack ask"),
+        AckDepartureOutcome::NotAuthoritative
+    );
+    assert_eq!(
+        actor
+            .ask(GetSnapshot)
+            .await
+            .expect("snapshot")
+            .departures
+            .receipts
+            .len(),
+        1,
+        "the receipt stays in the ledger for the successor"
+    );
+    actor
+        .ask(SetRoomSealForTest(RoomSealState::Open))
+        .await
+        .expect("test seal");
+    assert_eq!(
+        actor
+            .ask(AckDepartureReceipt { attempt })
+            .await
+            .expect("ack ask"),
+        AckDepartureOutcome::Acknowledged
+    );
+}
+
+/// #1647 (codex round 29): a tombstoned attempt must not block a retained
+/// retry's JID fallback — the tombstone only says THIS attempt was displaced,
+/// while receipts of other nicks may still be owed behind it.
+#[tokio::test]
+async fn tombstoned_retained_retry_still_drains_other_owed_receipts() {
+    let actor = spawn_room_actor_with_store(FakeDurableStore::owned()).await;
+    let alice = test_full_jid("alice");
+    join_as_resolver(&actor, alice.clone(), "nick-a")
+        .await
+        .expect("join a");
+    let a1 = LeaveAttemptId::generate();
+    assert!(matches!(
+        leave_with_attempt(&actor, alice.clone(), a1).await,
+        LeaveDisposition::Left(_)
+    ));
+    join_as_resolver(&actor, alice.clone(), "nick-b")
+        .await
+        .expect("join b");
+    let b1 = LeaveAttemptId::generate();
+    assert!(matches!(
+        leave_with_attempt(&actor, alice.clone(), b1).await,
+        LeaveDisposition::Left(_)
+    ));
+    // A second same-nick departure displaces a1's receipt (a1 is tombstoned).
+    join_as_resolver(&actor, alice.clone(), "nick-a")
+        .await
+        .expect("rejoin a");
+    let a2 = LeaveAttemptId::generate();
+    assert!(matches!(
+        leave_with_attempt(&actor, alice.clone(), a2).await,
+        LeaveDisposition::Left(_)
+    ));
+
+    // A coalesced retained retry carrying the TOMBSTONED attempt must still
+    // drain the owed receipts through the JID fallback...
+    let retry = |attempt| {
+        let actor = actor.clone();
+        let alice = alice.clone();
+        async move {
+            actor
+                .ask(crate::muc::room_actor::LeaveByRealJid {
+                    sender_jid: alice,
+                    cause: crate::muc::durable::OccupancyLeaveCause::Explicit,
+                    session: LeaveSessionSelector::Any,
+                    attempt,
+                    origin: crate::muc::room_actor::LeaveOrigin::RetainedRetry,
+                })
+                .await
+                .expect("retained retry")
+        }
+    };
+    for _ in 0..2 {
+        let disposition = retry(a1).await;
+        let LeaveDisposition::Left(outcome) = disposition else {
+            panic!("the tombstoned retry must fall back to an owed receipt: {disposition:?}");
+        };
+        assert_eq!(
+            actor
+                .ask(AckDepartureReceipt {
+                    attempt: outcome.acknowledge,
+                })
+                .await
+                .expect("ack"),
+            AckDepartureOutcome::Acknowledged
+        );
+    }
+    // ...and once everything is drained the retry terminates (the ledger is
+    // empty, so the JID's tombstones were pruned with its last receipt —
+    // NotOccupant — or, had any tombstone survived, Superseded).
+    assert!(matches!(
+        retry(a1).await,
+        LeaveDisposition::Superseded | LeaveDisposition::NotOccupant
+    ));
+    assert!(
+        actor
+            .ask(GetSnapshot)
+            .await
+            .expect("snapshot")
+            .departures
+            .receipts
+            .is_empty(),
+        "no receipt is stranded behind the tombstone"
+    );
+}
+
+/// #1647 (codex round 27): the session's occupancy order is minted BEFORE the
+/// join projection awaits. A disconnect cleanup racing a blocked projection
+/// mints its leave attempt during the await — that attempt targets this join
+/// and must not be `Superseded` by an order assigned at apply time.
+#[tokio::test]
+async fn cleanup_attempt_minted_during_a_blocked_join_still_removes_the_occupant() {
+    let store = FakeDurableStore::owned();
+    let actor = spawn_room_actor_with_store(store.clone()).await;
+    let alice = test_full_jid("alice");
+    let admission_revision = current_admission_revision(&actor).await;
+    let pause = store.pause_next_projection_commit();
+    let join_actor = actor.clone();
+    let join_alice = alice.clone();
+    let join = tokio::spawn(async move {
+        join_actor
+            .ask(JoinWithAffiliation {
+                sender_jid: join_alice,
+                nick: "alice".to_string(),
+                affiliation_grant: JoinAffiliationGrant::Resolver(Affiliation::Member),
+                local_domain: "example.com".to_string(),
+                admission_revision,
+            })
+            .await
+    });
+    pause.entered.notified().await;
+    // The WS backstop cancelled the join waiter; disconnect cleanup mints its
+    // leave attempt NOW, while the join projection is still blocked.
+    let attempt = LeaveAttemptId::generate();
+    pause.release.notify_one();
+    join.await.expect("join task").expect("join applies");
+
+    let disposition = actor
+        .ask(LeaveByRealJid {
+            sender_jid: alice.clone(),
+            cause: crate::muc::durable::OccupancyLeaveCause::Disconnect,
+            session: LeaveSessionSelector::Any,
+            attempt,
+            origin: crate::muc::room_actor::LeaveOrigin::Fresh,
+        })
+        .await
+        .expect("cleanup leave");
+    assert!(
+        matches!(disposition, LeaveDisposition::Left(_)),
+        "the cleanup attempt targets the join it raced, not a newer session: {disposition:?}"
+    );
+    assert!(
+        actor
+            .ask(GetSnapshot)
+            .await
+            .expect("snapshot")
+            .room
+            .find_occupant_by_real_jid(&alice)
+            .is_none(),
+        "no ghost occupant survives the raced cleanup"
+    );
+}
+
+/// #1647 (codex round 26): a second departure under a DIFFERENT nick must not
+/// displace the still-owed old-nick receipt — each nickname's unavailable
+/// fan-out is independently owed to the remaining occupants.
+#[tokio::test]
+async fn different_nick_departure_keeps_the_older_owed_receipt() {
+    let actor = spawn_room_actor_with_store(FakeDurableStore::owned()).await;
+    let alice = test_full_jid("alice");
+    join_as_resolver(&actor, alice.clone(), "old-nick")
+        .await
+        .expect("join");
+    let old_attempt = LeaveAttemptId::generate();
+    assert!(matches!(
+        leave_with_attempt(&actor, alice.clone(), old_attempt).await,
+        LeaveDisposition::Left(_)
+    ));
+    // Reply lost; the same JID rejoins under a new nick and leaves again
+    // (reply lost too) before either retry runs.
+    join_as_resolver(&actor, alice.clone(), "new-nick")
+        .await
+        .expect("rejoin");
+    let new_attempt = LeaveAttemptId::generate();
+    assert!(matches!(
+        leave_with_attempt(&actor, alice.clone(), new_attempt).await,
+        LeaveDisposition::Left(_)
+    ));
+    assert_eq!(
+        actor
+            .ask(GetSnapshot)
+            .await
+            .expect("snapshot")
+            .departures
+            .receipts
+            .len(),
+        2,
+        "independently owed nick receipts are both retained"
+    );
+
+    let LeaveDisposition::Left(old_outcome) =
+        leave_with_attempt(&actor, alice.clone(), old_attempt).await
+    else {
+        panic!("the old-nick departure must replay");
+    };
+    assert_eq!(old_outcome.nick.as_str(), "old-nick");
+    let LeaveDisposition::Left(new_outcome) =
+        leave_with_attempt(&actor, alice.clone(), new_attempt).await
+    else {
+        panic!("the new-nick departure must replay");
+    };
+    assert_eq!(new_outcome.nick.as_str(), "new-nick");
+    for acknowledge in [old_outcome.acknowledge, new_outcome.acknowledge] {
+        assert_eq!(
+            actor
+                .ask(AckDepartureReceipt {
+                    attempt: acknowledge,
+                })
+                .await
+                .expect("ack ask"),
+            AckDepartureOutcome::Acknowledged
+        );
+    }
+}
+
+/// #1647 (codex round 25): a lost-reply departure whose JID rejoined under a
+/// DIFFERENT nick still owes the OLD nick's unavailable fan-out — remaining
+/// occupants were never told it left. Only a visible (re-taken) nick makes
+/// the receipt unreplayable.
+#[tokio::test]
+async fn different_nick_rejoin_replays_the_old_nick_departure() {
+    let actor = spawn_room_actor_with_store(FakeDurableStore::owned()).await;
+    let alice = test_full_jid("alice");
+    join_as_resolver(&actor, alice.clone(), "old-nick")
+        .await
+        .expect("join");
+    let attempt = LeaveAttemptId::generate();
+    assert!(matches!(
+        leave_with_attempt(&actor, alice.clone(), attempt).await,
+        LeaveDisposition::Left(_)
+    ));
+    // The reply was lost; the same JID rejoins under a NEW nick first.
+    join_as_resolver(&actor, alice.clone(), "new-nick")
+        .await
+        .expect("rejoin under a different nick");
+
+    let LeaveDisposition::Left(outcome) = leave_with_attempt(&actor, alice.clone(), attempt).await
+    else {
+        panic!("the old-nick departure must replay its retained outcome");
+    };
+    assert_eq!(
+        outcome.nick.as_str(),
+        "old-nick",
+        "the replay announces the nick the departure vacated"
+    );
+    assert_eq!(
+        actor
+            .ask(AckDepartureReceipt {
+                attempt: outcome.acknowledge,
+            })
+            .await
+            .expect("ack ask"),
+        AckDepartureOutcome::Acknowledged
+    );
+    assert!(
+        actor
+            .ask(GetSnapshot)
+            .await
+            .expect("snapshot")
+            .room
+            .find_occupant_by_real_jid(&alice)
+            .is_some(),
+        "the replay never touches the live new-nick session"
+    );
+}
+
+/// #1647 (codex round 22): a receipt whose nick was re-taken can never replay
+/// again. The Superseded classification must CONSUME it — otherwise it vetoes
+/// dormancy and sealing (`EffectsOwed`) forever while the janitor has already
+/// dropped its retry responsibility.
+#[tokio::test]
+async fn nick_retaken_supersession_consumes_the_unreplayable_receipt() {
+    let actor = spawn_room_actor_with_store(FakeDurableStore::owned()).await;
+    let alice = test_full_jid("alice");
+    join_as_resolver(&actor, alice.clone(), "shared-nick")
+        .await
+        .expect("alice joins");
+    let attempt = LeaveAttemptId::generate();
+    assert!(matches!(
+        leave_with_attempt(&actor, alice.clone(), attempt).await,
+        LeaveDisposition::Left(_)
+    ));
+    // Another account takes the freed nickname before the retry arrives.
+    let bob = test_full_jid("bob");
+    join_as_resolver(&actor, bob.clone(), "shared-nick")
+        .await
+        .expect("bob re-takes the freed nick");
+
+    assert!(matches!(
+        leave_with_attempt(&actor, alice.clone(), attempt).await,
+        LeaveDisposition::Superseded
+    ));
+    assert!(
+        actor
+            .ask(GetSnapshot)
+            .await
+            .expect("snapshot")
+            .departures
+            .receipts
+            .is_empty(),
+        "the unreplayable receipt is consumed with its Superseded classification"
+    );
+}
+
+#[tokio::test]
+async fn owed_departure_receipts_veto_seal_and_dormancy_until_acknowledged() {
+    let actor = spawn_room_actor_with_store(FakeDurableStore::owned()).await;
+    let alice = test_full_jid("alice");
+    join_as_resolver(&actor, alice.clone(), "alice")
+        .await
+        .expect("alice joins");
+    let attempt = LeaveAttemptId::generate();
+    let LeaveDisposition::Left(outcome) = leave_with_attempt(&actor, alice.clone(), attempt).await
+    else {
+        panic!("leave must complete");
+    };
+
+    let probe = actor.ask(IsDormant).await.expect("dormancy probe");
+    assert!(
+        !probe.dormant,
+        "an owed departure receipt must veto dormancy: reaping the actor would strand its replay"
+    );
+    assert_eq!(
+        actor
+            .ask(SealIfInactive {
+                expected_occupancy_revision: probe.occupancy_revision,
+                guard: SealGuard::Dormant,
+            })
+            .await
+            .expect("seal ask"),
+        SealIfInactiveOutcome::EffectsOwed,
+        "sealing while a receipt is owed must be retained, not definitive"
+    );
+
+    assert_eq!(
+        actor
+            .ask(AckDepartureReceipt {
+                attempt: outcome.acknowledge,
+            })
+            .await
+            .expect("ack ask"),
+        AckDepartureOutcome::Acknowledged
+    );
+    let probe = actor.ask(IsDormant).await.expect("dormancy probe");
+    assert!(
+        probe.dormant,
+        "the acknowledged ledger clears the dormancy veto"
+    );
+    assert_eq!(
+        actor
+            .ask(SealIfInactive {
+                expected_occupancy_revision: probe.occupancy_revision,
+                guard: SealGuard::Dormant,
+            })
+            .await
+            .expect("seal ask"),
+        SealIfInactiveOutcome::Inactive,
+        "the acknowledged ledger clears the seal veto"
+    );
+}
+
+#[tokio::test]
+async fn replayed_receipt_is_superseded_when_the_nick_was_retaken() {
+    let actor = spawn_room_actor().await;
+    let alice = test_full_jid("alice");
+    let bob = test_full_jid("bob");
+    join_as_resolver(&actor, alice.clone(), "alice")
+        .await
+        .expect("alice joins");
+    let attempt = LeaveAttemptId::generate();
+    assert!(matches!(
+        leave_with_attempt(&actor, alice.clone(), attempt).await,
+        LeaveDisposition::Left(_)
+    ));
+    join_as_resolver(&actor, bob.clone(), "alice")
+        .await
+        .expect("bob takes alice nick");
+
+    assert!(matches!(
+        leave_with_attempt(&actor, alice, attempt).await,
+        LeaveDisposition::Superseded
+    ));
+    let snapshot = actor.ask(GetSnapshot).await.expect("snapshot");
+    assert_eq!(
+        snapshot
+            .room
+            .get_occupant("alice")
+            .map(|occupant| &occupant.real_jid),
+        Some(&bob),
+        "the retry must not evict the current nick holder"
+    );
+}
+
+#[tokio::test]
+async fn unknown_attempt_for_a_gone_session_replays_the_jids_unacknowledged_receipt_once() {
+    let actor = spawn_room_actor().await;
+    let alice = test_full_jid("alice");
+    join_as_resolver(&actor, alice.clone(), "alice")
+        .await
+        .expect("alice joins");
+    let original_attempt = LeaveAttemptId::generate();
+    let original = leave_with_attempt(&actor, alice.clone(), original_attempt).await;
+    assert!(matches!(original, LeaveDisposition::Left(_)));
+
+    let LeaveDisposition::Left(replayed) = retry_with_attempt_and_cause(
+        &actor,
+        alice.clone(),
+        LeaveAttemptId::generate(),
+        crate::muc::durable::OccupancyLeaveCause::Explicit,
+    )
+    .await
+    else {
+        panic!("unknown attempt replays the JID's receipt");
+    };
+    assert_eq!(replayed.acknowledge, original_attempt);
+    // A second retry (its reply may have been lost too) replays again; only
+    // the acknowledgement of the receipt's attempt ends it.
+    assert!(matches!(
+        retry_with_attempt_and_cause(
+            &actor,
+            alice.clone(),
+            LeaveAttemptId::generate(),
+            crate::muc::durable::OccupancyLeaveCause::Explicit
+        )
+        .await,
+        LeaveDisposition::Left(_)
+    ));
+    actor
+        .ask(AckDepartureReceipt {
+            attempt: replayed.acknowledge,
+        })
+        .await
+        .expect("ack");
+    assert!(matches!(
+        retry_with_attempt_and_cause(
+            &actor,
+            alice,
+            LeaveAttemptId::generate(),
+            crate::muc::durable::OccupancyLeaveCause::Explicit
+        )
+        .await,
+        LeaveDisposition::NotOccupant
+    ));
+}
+
+#[tokio::test]
+async fn acknowledged_departure_leaves_no_receipt() {
+    let actor = spawn_room_actor().await;
+    let alice = test_full_jid("alice");
+    join_as_resolver(&actor, alice.clone(), "alice")
+        .await
+        .expect("alice joins");
+    let attempt = LeaveAttemptId::generate();
+    assert!(matches!(
+        leave_with_attempt(&actor, alice.clone(), attempt).await,
+        LeaveDisposition::Left(_)
+    ));
+    actor
+        .ask(AckDepartureReceipt { attempt })
+        .await
+        .expect("ack receipt");
+
+    assert!(matches!(
+        leave_with_attempt(&actor, alice.clone(), attempt).await,
+        LeaveDisposition::NotOccupant
+    ));
+    assert!(
+        actor
+            .ask(GetSnapshot)
+            .await
+            .expect("snapshot")
+            .departures
+            .receipts
+            .is_empty(),
+        "acknowledged departures do not remain replayable"
+    );
+}
+
+#[tokio::test]
+async fn receipts_are_transferred_on_live_roster_restore() {
+    let predecessor = spawn_room_actor().await;
+    let alice = test_full_jid("alice");
+    join_as_resolver(&predecessor, alice.clone(), "alice")
+        .await
+        .expect("alice joins predecessor");
+    let attempt = LeaveAttemptId::generate();
+    assert!(matches!(
+        leave_with_attempt(&predecessor, alice.clone(), attempt).await,
+        LeaveDisposition::Left(_)
+    ));
+    let snapshot = predecessor
+        .ask(GetSnapshot)
+        .await
+        .expect("predecessor snapshot");
+    assert_eq!(snapshot.departures.receipts.len(), 1);
+
+    let successor = spawn_room_actor().await;
+    successor
+        .ask(RestoreLiveRoster {
+            room: snapshot.room,
+            occupancy_revision: snapshot.occupancy_revision,
+            departures: snapshot.departures,
+        })
+        .await
+        .expect("restore successor live roster");
+    assert!(matches!(
+        leave_with_attempt(&successor, alice, attempt).await,
+        LeaveDisposition::Left(_)
+    ));
+}
+
+#[tokio::test]
+async fn transferred_older_generation_receipt_is_refused() {
+    let predecessor = spawn_room_actor().await;
+    let alice = test_full_jid("alice");
+    join_as_resolver(&predecessor, alice.clone(), "alice")
+        .await
+        .expect("alice joins predecessor");
+    let older_attempt = LeaveAttemptId::generate();
+    assert!(matches!(
+        leave_with_attempt(&predecessor, alice.clone(), older_attempt).await,
+        LeaveDisposition::Left(_)
+    ));
+    let mut older_snapshot = predecessor.ask(GetSnapshot).await.expect("older snapshot");
+    older_snapshot.departures.receipts[0].generation = OccupancyOrder::from_raw(1);
+    older_snapshot.departures.latest_generations[0].1 = OccupancyOrder::from_raw(1);
+
+    let newer_source = spawn_room_actor().await;
+    join_as_resolver(&newer_source, alice.clone(), "alice")
+        .await
+        .expect("alice joins newer source");
+    let newer_attempt = LeaveAttemptId::generate();
+    assert!(matches!(
+        leave_with_attempt(&newer_source, alice.clone(), newer_attempt).await,
+        LeaveDisposition::Left(_)
+    ));
+    let mut newer_snapshot = newer_source.ask(GetSnapshot).await.expect("newer snapshot");
+    newer_snapshot.departures.receipts[0].generation = OccupancyOrder::from_raw(2);
+    newer_snapshot.departures.latest_generations[0].1 = OccupancyOrder::from_raw(2);
+
+    let successor = spawn_room_actor().await;
+    successor
+        .ask(RestoreLiveRoster {
+            room: newer_snapshot.room,
+            occupancy_revision: newer_snapshot.occupancy_revision,
+            departures: newer_snapshot.departures,
+        })
+        .await
+        .expect("restore newer receipt");
+    successor
+        .ask(RestoreLiveRoster {
+            room: older_snapshot.room,
+            occupancy_revision: older_snapshot.occupancy_revision,
+            departures: older_snapshot.departures,
+        })
+        .await
+        .expect("restore older receipt");
+
+    let snapshot = successor
+        .ask(GetSnapshot)
+        .await
+        .expect("successor snapshot");
+    assert_eq!(snapshot.departures.receipts.len(), 1);
+    assert_eq!(snapshot.departures.receipts[0].attempt, newer_attempt);
+    assert_eq!(
+        snapshot.departures.receipts[0].generation,
+        OccupancyOrder::from_raw(2)
+    );
+    assert!(matches!(
+        leave_with_attempt(&successor, alice.clone(), older_attempt).await,
+        LeaveDisposition::NotOccupant | LeaveDisposition::Superseded
+    ));
+    assert!(matches!(
+        leave_with_attempt(&successor, alice, newer_attempt).await,
+        LeaveDisposition::Left(_)
+    ));
+}
+
+#[tokio::test]
+async fn store_less_suppressed_departure_mints_a_receipt_replayed_as_suppressed() {
+    let actor = spawn_room_actor().await;
+    let alice = test_full_jid("alice");
+    join_as_resolver(&actor, alice.clone(), "alice")
+        .await
+        .expect("alice joins");
+    let attempt = LeaveAttemptId::generate();
+    seal_for_destroy(&actor).await;
+    assert!(matches!(
+        leave_with_attempt(&actor, alice.clone(), attempt).await,
+        LeaveDisposition::Suppressed { ref nick, .. } if nick.as_str() == "alice"
+    ));
+    assert!(matches!(
+        leave_with_attempt(&actor, alice.clone(), attempt).await,
+        LeaveDisposition::Suppressed { ref nick, .. } if nick.as_str() == "alice"
+    ));
+    actor
+        .ask(AckDepartureReceipt { attempt })
+        .await
+        .expect("ack");
+    assert!(matches!(
+        leave_with_attempt(&actor, alice, attempt).await,
+        LeaveDisposition::NotOccupant
+    ));
+}
+
+fn projection_leave_intent_for(intents: &[crate::muc::RoomDurableMutation], jid: &FullJid) -> bool {
+    intents.iter().any(|intent| {
+        matches!(
+            intent,
+            crate::muc::RoomDurableMutation::Projection(
+                crate::muc::durable::RoomProjection::OccupancyLeave { occupant, .. }
+            ) if occupant == jid
+        )
+    })
+}
+
+#[tokio::test]
+async fn join_with_lost_claim_projects_nothing() {
+    let store = FakeDurableStore::deposed_on_projection();
+    let actor = spawn_room_actor_with_store(store).await;
+    let before = actor.ask(GetProjectionTestState).await.expect("state");
+    let alice = test_full_jid("alice");
+
+    let result = join_as_resolver(&actor, alice.clone(), "alice").await;
+
+    assert!(matches!(
+        result,
+        Err(SendError::HandlerError(RoomActorError::RoomSealed))
+    ));
+    let snapshot = actor.ask(GetSnapshot).await.expect("snapshot");
+    assert_eq!(snapshot.room.occupant_count(), 0);
+    assert_eq!(
+        actor
+            .ask(GetProjectionTestState)
+            .await
+            .expect("state")
+            .occupancy_revision,
+        before.occupancy_revision
+    );
+    assert_eq!(
+        actor.ask(GetRoomSealState).await.expect("seal"),
+        RoomSealState::OwnershipLost
+    );
+    // Resolver cache writes intentionally precede the projection commit so a
+    // revocation is visible to admission checks even while the store is down.
+    assert_eq!(
+        snapshot.room.get_affiliation(&alice.to_bare()),
+        Affiliation::Member
+    );
+}
+
+#[tokio::test]
+async fn join_with_transient_store_failure_bounces_without_memory_change() {
+    let actor = spawn_room_actor_with_store(FakeDurableStore::owned_but_persist_fails()).await;
+    let before = actor.ask(GetProjectionTestState).await.expect("state");
+
+    let result = join_as_resolver(&actor, test_full_jid("alice"), "alice").await;
+
+    assert!(matches!(
+        result,
+        Err(SendError::HandlerError(
+            RoomActorError::OwnershipUnavailable
+        ))
+    ));
+    assert_eq!(actor.ask(OccupantCount).await.expect("count"), 0);
+    assert_eq!(
+        actor
+            .ask(GetProjectionTestState)
+            .await
+            .expect("state")
+            .occupancy_revision,
+        before.occupancy_revision
+    );
+    assert_eq!(
+        actor.ask(GetRoomSealState).await.expect("seal"),
+        RoomSealState::Open
+    );
+}
+
+#[tokio::test]
+async fn leave_commits_projection_before_removing_session() {
+    let store = FakeDurableStore::owned();
+    let actor = spawn_room_actor_with_store(store.clone()).await;
+    let alice = test_full_jid("alice");
+    join_as_resolver(&actor, alice.clone(), "alice")
+        .await
+        .expect("join");
+    let before = store.recorded_intents().len();
+
+    let result = actor
+        .ask(LeaveByRealJid {
+            sender_jid: alice.clone(),
+            cause: crate::muc::durable::OccupancyLeaveCause::Explicit,
+            session: LeaveSessionSelector::Any,
+            attempt: LeaveAttemptId::generate(),
+            origin: crate::muc::room_actor::LeaveOrigin::Fresh,
+        })
+        .await
+        .expect("leave");
+
+    assert!(matches!(result, LeaveDisposition::Left(_)));
+    assert!(projection_leave_intent_for(
+        &store.recorded_intents()[before..],
+        &alice
+    ));
+    assert_eq!(actor.ask(OccupantCount).await.expect("count"), 0);
+}
+
+#[tokio::test]
+async fn leave_with_lost_claim_keeps_session_and_seals() {
+    let store = FakeDurableStore::owned();
+    let actor = spawn_room_actor_with_store(store.clone()).await;
+    let alice = test_full_jid("alice");
+    join_as_resolver(&actor, alice.clone(), "alice")
+        .await
+        .expect("join");
+    store.set_fenced(Some(false));
+
+    let result = actor
+        .ask(LeaveByRealJid {
+            sender_jid: alice,
+            cause: crate::muc::durable::OccupancyLeaveCause::Explicit,
+            session: LeaveSessionSelector::Any,
+            attempt: LeaveAttemptId::generate(),
+            origin: crate::muc::room_actor::LeaveOrigin::Fresh,
+        })
+        .await;
+
+    assert!(matches!(
+        result,
+        Err(SendError::HandlerError(RoomActorError::RoomSealed))
+    ));
+    assert_eq!(actor.ask(OccupantCount).await.expect("count"), 1);
+    assert_eq!(
+        actor.ask(GetRoomSealState).await.expect("seal"),
+        RoomSealState::OwnershipLost
+    );
+}
+
+#[tokio::test]
+async fn leave_under_inactive_seal_is_deferred_then_unseal_inactive_retry_leaves() {
+    let store = FakeDurableStore::owned();
+    let actor = spawn_room_actor_with_store(store).await;
+    let alice = test_full_jid("alice");
+    join_as_resolver(&actor, alice.clone(), "alice")
+        .await
+        .expect("join");
+    actor
+        .ask(SetRoomSealForTest(RoomSealState::Inactive))
+        .await
+        .expect("test seal");
+
+    let watermark = match actor
+        .ask(LeaveByRealJid {
+            sender_jid: alice.clone(),
+            cause: crate::muc::durable::OccupancyLeaveCause::Disconnect,
+            session: LeaveSessionSelector::Any,
+            attempt: LeaveAttemptId::generate(),
+            origin: crate::muc::room_actor::LeaveOrigin::Fresh,
+        })
+        .await
+        .expect("deferred leave")
+    {
+        LeaveDisposition::Deferred { watermark } => watermark,
+        other => panic!("expected deferred leave, got {other:?}"),
+    };
+    assert_eq!(actor.ask(OccupantCount).await.expect("count"), 1);
+    assert!(actor.ask(UnsealInactive).await.expect("unseal"));
+    assert!(matches!(
+        actor
+            .ask(LeaveByRealJid {
+                sender_jid: alice,
+                cause: crate::muc::durable::OccupancyLeaveCause::Disconnect,
+                session: LeaveSessionSelector::JoinedAtOrBefore(watermark),
+                attempt: LeaveAttemptId::generate(),
+                origin: crate::muc::room_actor::LeaveOrigin::Fresh,
+            })
+            .await
+            .expect("retried leave"),
+        LeaveDisposition::Left(_)
+    ));
+}
+
+#[tokio::test]
+async fn leave_under_ownership_lost_seal_is_room_sealed_without_memory_change() {
+    let actor = spawn_room_actor_with_store(FakeDurableStore::owned()).await;
+    let alice = test_full_jid("alice");
+    join_as_resolver(&actor, alice.clone(), "alice")
+        .await
+        .expect("join");
+    actor
+        .ask(SetRoomSealForTest(RoomSealState::OwnershipLost))
+        .await
+        .expect("test seal");
+
+    assert!(matches!(
+        actor
+            .ask(LeaveByRealJid {
+                sender_jid: alice,
+                cause: crate::muc::durable::OccupancyLeaveCause::Explicit,
+                session: LeaveSessionSelector::Any,
+                attempt: LeaveAttemptId::generate(),
+                origin: crate::muc::room_actor::LeaveOrigin::Fresh,
+            })
+            .await,
+        Err(SendError::HandlerError(RoomActorError::RoomSealed))
+    ));
+    assert_eq!(actor.ask(OccupantCount).await.expect("count"), 1);
+}
+
+#[tokio::test]
+async fn leave_unknown_jid_is_not_occupant_without_commit() {
+    let store = FakeDurableStore::owned();
+    let actor = spawn_room_actor_with_store(store.clone()).await;
+
+    assert!(matches!(
+        actor
+            .ask(LeaveByRealJid {
+                sender_jid: test_full_jid("unknown"),
+                cause: crate::muc::durable::OccupancyLeaveCause::Explicit,
+                session: LeaveSessionSelector::Any,
+                attempt: LeaveAttemptId::generate(),
+                origin: crate::muc::room_actor::LeaveOrigin::Fresh,
+            })
+            .await
+            .expect("leave"),
+        LeaveDisposition::NotOccupant
+    ));
+    assert!(!store
+        .recorded_intents()
+        .iter()
+        .any(|intent| matches!(intent, crate::muc::RoomDurableMutation::Projection(_))));
+}
+
+#[tokio::test]
+async fn non_occupant_leave_under_inactive_and_ownership_lost_seals_is_not_occupant_without_commit()
+{
+    let store = FakeDurableStore::owned();
+    let actor = spawn_room_actor_with_store(store.clone()).await;
+    actor
+        .ask(SetRoomSealForTest(RoomSealState::Inactive))
+        .await
+        .expect("seal inactive");
+
+    assert!(matches!(
+        actor
+            .ask(LeaveByRealJid {
+                sender_jid: test_full_jid("unknown-inactive"),
+                cause: crate::muc::durable::OccupancyLeaveCause::Explicit,
+                session: LeaveSessionSelector::Any,
+                attempt: LeaveAttemptId::generate(),
+                origin: crate::muc::room_actor::LeaveOrigin::Fresh,
+            })
+            .await
+            .expect("non-occupant leave"),
+        LeaveDisposition::NotOccupant
+    ));
+    assert!(store.recorded_intents().is_empty());
+
+    actor
+        .ask(SetRoomSealForTest(RoomSealState::OwnershipLost))
+        .await
+        .expect("seal ownership lost");
+    assert!(matches!(
+        actor
+            .ask(LeaveByRealJid {
+                sender_jid: test_full_jid("unknown-lost"),
+                cause: crate::muc::durable::OccupancyLeaveCause::Explicit,
+                session: LeaveSessionSelector::Any,
+                attempt: LeaveAttemptId::generate(),
+                origin: crate::muc::room_actor::LeaveOrigin::Fresh,
+            })
+            .await
+            .expect("non-occupant leave"),
+        LeaveDisposition::NotOccupant
+    ));
+    assert!(store.recorded_intents().is_empty());
+}
+
+#[tokio::test]
+async fn join_commit_pending_leaves_memory_untouched_until_authorized() {
+    let store = FakeDurableStore::owned();
+    let actor = spawn_room_actor_with_store(store.clone()).await;
+    let events = store.commit_events();
+    install_projection_apply_hook(&actor, events.clone()).await;
+    let pause = store.pause_next_projection_commit();
+    let join_actor = actor.clone();
+    let join = tokio::spawn(async move {
+        join_as_resolver(&join_actor, test_full_jid("pending-join"), "pending").await
+    });
+    pause.entered.notified().await;
+    for _ in 0..3 {
+        tokio::task::yield_now().await;
+    }
+    // If the join mutation were hoisted above `commit_projection`, this would
+    // flip to `pre_commit:occupants=1:...` before the durable commit finished.
+    assert_eq!(
+        projection_event_snapshot(&events),
+        vec![
+            "pre_commit:occupants=0:sessions=0:pins=0".to_owned(),
+            "commit_started:occupancy_join".to_owned(),
+        ],
+        "the in-memory join must not apply while the projection commit is paused"
+    );
+    pause.release.notify_one();
+    join.await
+        .expect("join task")
+        .expect("join after authorization");
+    assert_eq!(
+        projection_event_snapshot(&events),
+        vec![
+            "pre_commit:occupants=0:sessions=0:pins=0".to_owned(),
+            "commit_started:occupancy_join".to_owned(),
+            "commit_finished".to_owned(),
+            "apply:occupants=0:sessions=0:pins=0".to_owned(),
+        ]
+    );
+    assert_eq!(actor.ask(OccupantCount).await.expect("count"), 1);
+}
+
+#[tokio::test]
+async fn leave_commit_pending_keeps_session_until_authorized() {
+    let store = FakeDurableStore::owned();
+    let actor = spawn_room_actor_with_store(store.clone()).await;
+    let alice = test_full_jid("pending-leave");
+    join_as_resolver(&actor, alice.clone(), "alice")
+        .await
+        .expect("join");
+    let events = store.commit_events();
+    events.lock().expect("lock").clear();
+    install_projection_apply_hook(&actor, events.clone()).await;
+    let pause = store.pause_next_projection_commit();
+    let leave_actor = actor.clone();
+    let leave = tokio::spawn(async move {
+        leave_actor
+            .ask(LeaveByRealJid {
+                sender_jid: alice,
+                cause: crate::muc::durable::OccupancyLeaveCause::Explicit,
+                session: LeaveSessionSelector::Any,
+                attempt: LeaveAttemptId::generate(),
+                origin: crate::muc::room_actor::LeaveOrigin::Fresh,
+            })
+            .await
+    });
+    pause.entered.notified().await;
+    for _ in 0..3 {
+        tokio::task::yield_now().await;
+    }
+    assert_eq!(
+        projection_event_snapshot(&events),
+        vec![
+            "pre_commit:occupants=1:sessions=1:pins=0".to_owned(),
+            "commit_started:occupancy_leave".to_owned(),
+        ],
+        "the in-memory leave must not apply while the projection commit is paused"
+    );
+    pause.release.notify_one();
+    assert!(matches!(
+        leave.await.expect("leave task").expect("leave"),
+        LeaveDisposition::Left(_)
+    ));
+    assert_eq!(
+        projection_event_snapshot(&events),
+        vec![
+            "pre_commit:occupants=1:sessions=1:pins=0".to_owned(),
+            "commit_started:occupancy_leave".to_owned(),
+            "commit_finished".to_owned(),
+            "apply:occupants=1:sessions=1:pins=0".to_owned(),
+        ]
+    );
+    assert_eq!(actor.ask(OccupantCount).await.expect("count"), 0);
+}
+
+#[tokio::test]
+async fn pin_commit_pending_keeps_pin_list_until_authorized() {
+    let store = FakeDurableStore::owned();
+    let actor = spawn_room_actor_with_store(store.clone()).await;
+    let events = store.commit_events();
+    install_projection_apply_hook(&actor, events.clone()).await;
+    let pause = store.pause_next_projection_commit();
+    let pin_actor = actor.clone();
+    let pin = test_pinned_entry("pending-pin");
+    let apply = tokio::spawn(async move {
+        pin_actor
+            .ask(ApplyPin {
+                change: PinStateChange::Pin(pin),
+            })
+            .await
+    });
+    pause.entered.notified().await;
+    for _ in 0..3 {
+        tokio::task::yield_now().await;
+    }
+    assert_eq!(
+        projection_event_snapshot(&events),
+        vec![
+            "pre_commit:occupants=0:sessions=0:pins=0".to_owned(),
+            "commit_started:pin".to_owned(),
+        ],
+        "the in-memory pin apply must not run while the projection commit is paused"
+    );
+    pause.release.notify_one();
+    apply
+        .await
+        .expect("pin task")
+        .expect("pin after authorization");
+    assert_eq!(
+        projection_event_snapshot(&events),
+        vec![
+            "pre_commit:occupants=0:sessions=0:pins=0".to_owned(),
+            "commit_started:pin".to_owned(),
+            "commit_finished".to_owned(),
+            "apply:occupants=0:sessions=0:pins=0".to_owned(),
+        ]
+    );
+    assert_eq!(actor.ask(GetPinList).await.expect("pins").len(), 1);
+}
+
+#[tokio::test]
+async fn leave_retry_with_same_attempt_replays_retained_outcome_until_acknowledged() {
+    let actor = spawn_room_actor().await;
+    let alice = test_full_jid("alice-replay");
+    let bob = test_full_jid("bob-replay");
+    join_as_resolver(&actor, alice.clone(), "alice")
+        .await
+        .expect("join alice");
+    join_as_resolver(&actor, bob.clone(), "bob")
+        .await
+        .expect("join bob");
+    let attempt = LeaveAttemptId::generate();
+
+    let first = departed(
+        actor
+            .ask(LeaveByRealJid {
+                sender_jid: alice.clone(),
+                cause: crate::muc::durable::OccupancyLeaveCause::Explicit,
+                session: LeaveSessionSelector::Any,
+                attempt,
+                origin: crate::muc::room_actor::LeaveOrigin::Fresh,
+            })
+            .await
+            .expect("first leave"),
+    );
+    let replayed = departed(
+        actor
+            .ask(LeaveByRealJid {
+                sender_jid: alice.clone(),
+                cause: crate::muc::durable::OccupancyLeaveCause::Explicit,
+                session: LeaveSessionSelector::Any,
+                attempt,
+                origin: crate::muc::room_actor::LeaveOrigin::Fresh,
+            })
+            .await
+            .expect("replayed leave"),
+    );
+
+    assert_eq!(replayed.nick, first.nick);
+    assert_eq!(replayed.remaining_occupants, first.remaining_occupants);
+    assert_eq!(replayed.affiliation, first.affiliation);
+    assert_eq!(replayed.acknowledge, attempt);
+
+    // Replay is non-destructive; the acknowledgement of the attempt ends it.
+    actor
+        .ask(AckDepartureReceipt { attempt })
+        .await
+        .expect("ack");
+    assert!(matches!(
+        actor
+            .ask(LeaveByRealJid {
+                sender_jid: alice.clone(),
+                cause: crate::muc::durable::OccupancyLeaveCause::Explicit,
+                session: LeaveSessionSelector::Any,
+                attempt,
+                origin: crate::muc::room_actor::LeaveOrigin::Fresh,
+            })
+            .await
+            .expect("third leave"),
+        LeaveDisposition::NotOccupant
+    ));
+    assert!(matches!(
+        actor
+            .ask(LeaveByRealJid {
+                sender_jid: alice,
+                cause: crate::muc::durable::OccupancyLeaveCause::Explicit,
+                session: LeaveSessionSelector::Any,
+                attempt: LeaveAttemptId::generate(),
+                origin: crate::muc::room_actor::LeaveOrigin::Fresh,
+            })
+            .await
+            .expect("different attempt"),
+        LeaveDisposition::NotOccupant
+    ));
+    assert_eq!(actor.ask(OccupantCount).await.expect("count"), 1);
+}
+
+#[test]
+fn departure_receipts_keep_only_the_newest_generation_per_jid() {
+    // Receipts are uncapped but a newer departure of the same full JID
+    // supersedes every older receipt of that JID, so the retained set is
+    // bounded by full JIDs with a lost reply.
+    let mut actor = RoomActor::new(test_room(), test_secret());
+    let alice = test_full_jid_resource("alice", "web");
+    let bob = test_full_jid_resource("bob", "web");
+    let outcome = |nick: &str, revision: u64| {
+        super::DepartureReceiptOutcome::Left(Box::new(LeaveOutcome {
+            acknowledge: LeaveAttemptId::generate(),
+            nick: crate::muc::MucOccupantNick::new(nick.to_owned()).expect("valid test nick"),
+            affiliation: Affiliation::Member,
+            role: Role::Participant,
+            leaving_room_jid: test_room()
+                .room_jid
+                .clone()
+                .with_resource_str(nick)
+                .expect("nick jid"),
+            remaining_occupants: Vec::new(),
+            removed_last_session: true,
+            cleared_muji_state: false,
+            remaining_muji: None,
+            remaining_muji_sessions: Vec::new(),
+            remaining_nick_real_jid: None,
+            occupant_count: 0,
+            is_persistent: false,
+            occupancy_revision: revision,
+        }))
+    };
+    let alice_first = LeaveAttemptId::generate();
+    let alice_second = LeaveAttemptId::generate();
+    let bob_attempt = LeaveAttemptId::generate();
+    actor.retain_departure_receipt(super::DepartureReceipt {
+        attempt: alice_first,
+        jid: alice.clone(),
+        cause: crate::muc::durable::OccupancyLeaveCause::Explicit,
+        nick_generation: None,
+        generation: OccupancyOrder::from_raw(1),
+        outcome: outcome("alice", 1),
+    });
+    actor.retain_departure_receipt(super::DepartureReceipt {
+        attempt: bob_attempt,
+        jid: bob.clone(),
+        cause: crate::muc::durable::OccupancyLeaveCause::Explicit,
+        nick_generation: None,
+        generation: OccupancyOrder::from_raw(2),
+        outcome: outcome("bob", 2),
+    });
+    actor.retain_departure_receipt(super::DepartureReceipt {
+        attempt: alice_second,
+        jid: alice.clone(),
+        cause: crate::muc::durable::OccupancyLeaveCause::Explicit,
+        nick_generation: None,
+        generation: OccupancyOrder::from_raw(3),
+        outcome: outcome("alice", 3),
+    });
+    assert_eq!(actor.departure_receipts.len(), 2, "one receipt per JID");
+    assert!(
+        actor.take_departure_receipt(alice_first).is_none(),
+        "the older departure of the same JID is superseded"
+    );
+    // An older generation retained late (e.g. transferred) is refused too.
+    actor.retain_departure_receipt(super::DepartureReceipt {
+        attempt: LeaveAttemptId::generate(),
+        jid: alice.clone(),
+        cause: crate::muc::durable::OccupancyLeaveCause::Explicit,
+        nick_generation: None,
+        generation: OccupancyOrder::from_raw(0),
+        outcome: outcome("alice", 0),
+    });
+    assert_eq!(actor.departure_receipts.len(), 2);
+    assert!(actor.take_departure_receipt(alice_second).is_some());
+    assert!(
+        actor.take_departure_receipt(alice_second).is_none(),
+        "a replayed receipt is consumed"
+    );
+    assert!(actor.take_departure_receipt(bob_attempt).is_some());
+    assert!(actor.departure_receipts.is_empty());
+    assert!(
+        actor.latest_generations.is_empty(),
+        "tombstones prune with the last receipt"
+    );
+}
+
+#[tokio::test]
+async fn deferred_leave_watermark_supersedes_after_replacement_rejoin() {
+    let store = FakeDurableStore::owned();
+    let actor = spawn_room_actor_with_store(store.clone()).await;
+    let alice = test_full_jid("alice");
+    join_as_resolver(&actor, alice.clone(), "alice")
+        .await
+        .expect("join");
+    store.set_fenced(None);
+    let watermark = match actor
+        .ask(LeaveByRealJid {
+            sender_jid: alice.clone(),
+            cause: crate::muc::durable::OccupancyLeaveCause::Disconnect,
+            session: LeaveSessionSelector::Any,
+            attempt: LeaveAttemptId::generate(),
+            origin: crate::muc::room_actor::LeaveOrigin::Fresh,
+        })
+        .await
+        .expect("deferred leave")
+    {
+        LeaveDisposition::Deferred { watermark } => watermark,
+        other => panic!("expected deferred leave, got {other:?}"),
+    };
+    store.set_fenced(Some(true));
+    join_as_resolver(&actor, alice.clone(), "alice")
+        .await
+        .expect("replacement rejoin");
+
+    assert!(matches!(
+        actor
+            .ask(LeaveByRealJid {
+                sender_jid: alice.clone(),
+                cause: crate::muc::durable::OccupancyLeaveCause::Disconnect,
+                session: LeaveSessionSelector::JoinedAtOrBefore(watermark),
+                attempt: LeaveAttemptId::generate(),
+                origin: crate::muc::room_actor::LeaveOrigin::Fresh,
+            })
+            .await
+            .expect("stale retry"),
+        LeaveDisposition::Superseded
+    ));
+    assert_eq!(actor.ask(OccupantCount).await.expect("count"), 1);
+    assert!(matches!(
+        actor
+            .ask(LeaveByRealJid {
+                sender_jid: alice,
+                cause: crate::muc::durable::OccupancyLeaveCause::Disconnect,
+                session: LeaveSessionSelector::Any,
+                attempt: LeaveAttemptId::generate(),
+                origin: crate::muc::room_actor::LeaveOrigin::Fresh,
+            })
+            .await
+            .expect("current departure"),
+        LeaveDisposition::Left(_)
+    ));
+}
+
+#[tokio::test]
+async fn legacy_join_is_gated_by_projection_commit() {
+    let actor = spawn_room_actor_with_store(FakeDurableStore::deposed()).await;
+
+    assert!(matches!(
+        actor
+            .ask(Join {
+                nick: "alice".to_owned(),
+                real_jid: test_full_jid("alice"),
+                role: Role::Participant,
+                affiliation: Affiliation::Member,
+            })
+            .await,
+        Err(SendError::HandlerError(RoomActorError::RoomSealed))
+    ));
+    assert_eq!(actor.ask(OccupantCount).await.expect("count"), 0);
+}
+
+#[tokio::test]
+async fn pin_commits_projection_before_storing() {
+    let store = FakeDurableStore::owned();
+    let actor = spawn_room_actor_with_store(store.clone()).await;
+    let pin = test_pinned_entry("pin");
+
+    actor
+        .ask(ApplyPin {
+            change: PinStateChange::Pin(pin.clone()),
+        })
+        .await
+        .expect("pin");
+
+    assert!(matches!(
+        store.recorded_intents().last(),
+        Some(crate::muc::RoomDurableMutation::Projection(
+            crate::muc::durable::RoomProjection::Pin(
+                crate::muc::durable::RoomPinProjection::Pin { target }
+            )
+        )) if target == &pin.target_stanza_id
+    ));
+    assert_eq!(actor.ask(GetPinList).await.expect("pins"), vec![pin]);
+}
+
+#[tokio::test]
+async fn pin_with_lost_claim_is_not_stored() {
+    let actor = spawn_room_actor_with_store(FakeDurableStore::deposed()).await;
+
+    assert!(matches!(
+        actor
+            .ask(ApplyPin {
+                change: PinStateChange::Pin(test_pinned_entry("pin")),
+            })
+            .await,
+        Err(SendError::HandlerError(RoomActorError::RoomSealed))
+    ));
+    assert!(actor.ask(GetPinList).await.expect("pins").is_empty());
+}
+
+#[tokio::test]
+async fn unpin_commits_projection_before_removing() {
+    let store = FakeDurableStore::owned();
+    let actor = spawn_room_actor_with_store(store.clone()).await;
+    let pin = test_pinned_entry("pin");
+    actor
+        .ask(ApplyPin {
+            change: PinStateChange::Pin(pin.clone()),
+        })
+        .await
+        .expect("seed pin");
+    let before = store.recorded_intents().len();
+
+    actor
+        .ask(ApplyPin {
+            change: PinStateChange::Unpin {
+                target_stanza_id: pin.target_stanza_id.clone(),
+            },
+        })
+        .await
+        .expect("unpin");
+
+    assert!(matches!(
+        store.recorded_intents()[before..].first(),
+        Some(crate::muc::RoomDurableMutation::Projection(
+            crate::muc::durable::RoomProjection::Pin(
+                crate::muc::durable::RoomPinProjection::Unpin { target }
+            )
+        )) if target == &pin.target_stanza_id
+    ));
+    assert!(actor.ask(GetPinList).await.expect("pins").is_empty());
+}
+
+async fn simulate_crash_after_projection_commit(
+    store: std::sync::Arc<FakeDurableStore>,
+) -> crate::muc::RoomCommittedCoordinates {
+    let mut actor = RoomActor::new(test_room(), test_secret());
+    let fence = test_claim_fence(&actor.room.room_jid);
+    <FakeDurableStore as crate::muc::durable::MucDurableStore>::establish_claim_fence(
+        &*store,
+        &actor.room.room_jid,
+        fence.clone(),
+    );
+    actor.durable_store = Some(store.clone());
+    actor.durable_claim_fence = Some(fence);
+    let gate = actor
+        .commit_projection(crate::muc::durable::RoomProjection::OccupancyJoin {
+            occupant: test_full_jid("alice"),
+            nick: crate::muc::durable::MucOccupantNick::new("alice".to_owned())
+                .expect("valid nick"),
+        })
+        .await
+        .expect("projection commit");
+    drop(gate);
+    store
+        .last_coordinates
+        .lock()
+        .expect("lock")
+        .expect("projection head")
+}
+
+#[tokio::test]
+async fn crash_between_commit_and_projection_resyncs_from_durable_head() {
+    let store = FakeDurableStore::owned();
+    let head = simulate_crash_after_projection_commit(store.clone()).await;
+    store.set_restored_coordinates(head);
+
+    let successor = spawn_room_actor_with_store(store.clone()).await;
+    let snapshot = successor.ask(GetSnapshot).await.expect("snapshot");
+    let projection = successor
+        .ask(GetProjectionTestState)
+        .await
+        .expect("projection state");
+    assert_eq!(snapshot.room.occupant_count(), 0);
+    assert_eq!(snapshot.durable_coordinates, Some(head));
+    assert_eq!(projection.projected_revision, Some(head.revision));
+    assert!(matches!(
+        store.recorded_intents().last(),
+        Some(crate::muc::RoomDurableMutation::Projection(_))
+    ));
+}
+
+#[tokio::test]
+async fn retired_occupant_self_ping_fails_and_rejoin_projects_again() {
+    let store = FakeDurableStore::owned();
+    let head = simulate_crash_after_projection_commit(store.clone()).await;
+    store.set_restored_coordinates(head);
+    let successor = spawn_room_actor_with_store(store.clone()).await;
+    let alice = test_full_jid("alice");
+
+    assert!(matches!(
+        successor
+            .ask(PingSelfCheck {
+                nick: "alice".to_owned(),
+                sender_jid: alice.clone(),
+            })
+            .await,
+        Err(SendError::HandlerError(RoomActorError::OccupantNotFound(_)))
+    ));
+    join_as_resolver(&successor, alice, "alice")
+        .await
+        .expect("rejoin");
+    let rejoin_head = successor
+        .ask(GetSnapshot)
+        .await
+        .expect("snapshot")
+        .durable_coordinates
+        .expect("coordinates");
+    assert!(rejoin_head.revision > head.revision);
+}
+
+#[test]
+fn restore_resets_projected_revision_to_head() {
+    let mut actor = RoomActor::new(test_room(), test_secret());
+    let coordinates = crate::muc::RoomCommittedCoordinates {
+        lifecycle: crate::muc::RoomLifecycleId::generate(),
+        revision: crate::muc::RoomRevision::from_stored(7).expect("revision"),
+    };
+    actor.projected_revision = Some(crate::muc::RoomRevision::from_stored(3).expect("revision"));
+    actor.install_durable_room_state(crate::muc::durable::DurableRoomState {
+        coordinates: Some(coordinates),
+        config_coordinates: None,
+        waddle_id: "waddle-1".to_owned(),
+        channel_id: "channel-1".to_owned(),
+        config: RoomConfig::default(),
+        subject: None,
+        affiliations: Vec::new(),
+    });
+    assert_eq!(actor.projected_revision, Some(coordinates.revision));
+}
+
+#[test]
+fn restore_installs_config_coordinates() {
+    let mut actor = RoomActor::new(test_room(), test_secret());
+    let coordinates = crate::muc::RoomCommittedCoordinates {
+        lifecycle: crate::muc::RoomLifecycleId::generate(),
+        revision: crate::muc::RoomRevision::from_stored(7).expect("revision"),
+    };
+    let config_coordinates = crate::muc::RoomCommittedCoordinates {
+        lifecycle: coordinates.lifecycle,
+        revision: crate::muc::RoomRevision::from_stored(5).expect("revision"),
+    };
+
+    actor.install_durable_room_state(crate::muc::durable::DurableRoomState {
+        coordinates: Some(coordinates),
+        config_coordinates: Some(config_coordinates),
+        waddle_id: "waddle-1".to_owned(),
+        channel_id: "channel-1".to_owned(),
+        config: RoomConfig::default(),
+        subject: None,
+        affiliations: Vec::new(),
+    });
+
+    assert_eq!(actor.config_durable_coordinates, Some(config_coordinates));
+}
+
+#[tokio::test]
+async fn members_only_enforcement_advances_config_coordinates() {
+    let store = FakeDurableStore::owned();
+    let actor = spawn_room_actor_with_config_and_store(
+        RoomConfig {
+            members_only: false,
+            ..RoomConfig::default()
+        },
+        store,
+    )
+    .await;
+    let alice = test_full_jid("alice");
+    join_as_resolver(&actor, alice.clone(), "alice")
+        .await
+        .expect("join");
+
+    let mut config = actor.ask(GetConfig).await.expect("current config");
+    config.members_only = true;
+    let update = actor
+        .ask(UpdateConfig {
+            config,
+            effect_plan: ConfigEffectPlan::ManagedMembersOnlyFallback,
+        })
+        .await
+        .expect("stage members-only fallback");
+    let before = actor
+        .ask(GetSnapshot)
+        .await
+        .expect("snapshot before enforcement");
+    let fallback = update
+        .reservation
+        .expect("managed members-only stages a fallback reservation");
+
+    actor
+        .ask(EnforceMembersOnlyAffiliations {
+            affiliations: vec![(alice.to_bare(), Affiliation::Member)],
+            fallback_reservation: Some(fallback),
+            config_status_codes: update
+                .notification
+                .expect("managed members-only notification")
+                .status_codes,
+        })
+        .await
+        .expect("members-only enforcement");
+
+    let after = actor
+        .ask(GetSnapshot)
+        .await
+        .expect("snapshot after enforcement");
+    assert_ne!(
+        after.durable_coordinates, before.durable_coordinates,
+        "the enforcement commit must advance the durable head"
+    );
+    assert_eq!(
+        after.config_durable_coordinates, after.durable_coordinates,
+        "members-only enforcement must retarget config recovery to its own durable head"
+    );
+}
+
+#[tokio::test]
+async fn join_commits_projection_revision_before_admitting_occupant() {
+    let store = FakeDurableStore::owned();
+    let actor = spawn_room_actor_with_store(store.clone()).await;
+    let alice = test_full_jid("alice");
+
+    actor
+        .ask(JoinWithAffiliation {
+            sender_jid: alice.clone(),
+            nick: "alice".to_owned(),
+            affiliation_grant: JoinAffiliationGrant::Resolver(Affiliation::Member),
+            local_domain: "example.com".to_owned(),
+            admission_revision: current_admission_revision(&actor).await,
+        })
+        .await
+        .expect("projection-authorized join");
+
+    assert!(matches!(
+        store.recorded_intents().last(),
+        Some(crate::muc::RoomDurableMutation::Projection(
+            crate::muc::durable::RoomProjection::OccupancyJoin { occupant, nick }
+        )) if occupant == &alice && nick.as_str() == "alice"
+    ));
+    let snapshot = actor.ask(GetSnapshot).await.expect("snapshot");
+    assert_eq!(snapshot.room.occupant_count(), 1);
+    assert_eq!(
+        snapshot.durable_coordinates,
+        store.last_coordinates.lock().expect("lock").to_owned()
+    );
+}
+
+#[tokio::test]
+async fn replayed_projection_authorization_is_refused() {
+    let store = FakeDurableStore::owned();
+    let actor = spawn_room_actor_with_store(store.clone()).await;
+    actor
+        .ask(ApplyPin {
+            change: PinStateChange::Pin(test_pinned_entry("first")),
+        })
+        .await
+        .expect("first projection");
+    store.set_replay_last_coordinates(true);
+
+    let result = actor
+        .ask(ApplyPin {
+            change: PinStateChange::Pin(test_pinned_entry("replayed")),
+        })
+        .await;
+    assert!(matches!(
+        result,
+        Err(SendError::HandlerError(
+            RoomActorError::OwnershipUnavailable
+        ))
+    ));
+    assert_eq!(actor.ask(GetPinList).await.expect("pins").len(), 1);
+    assert!(matches!(
+        actor.ask(GetRoomSealState).await.expect("seal"),
+        RoomSealState::Open
+    ));
+}
+
+#[tokio::test]
+async fn store_less_rooms_project_without_authorization() {
+    let actor = spawn_room_actor().await;
+    actor
+        .ask(ApplyPin {
+            change: PinStateChange::Pin(test_pinned_entry("local")),
+        })
+        .await
+        .expect("store-less pin projection");
+    assert_eq!(actor.ask(GetPinList).await.expect("pins").len(), 1);
+}
+
+#[test]
+fn foreign_projection_authorization_seals_actor() {
+    let mut actor = RoomActor::new(test_room(), test_secret());
+    let coordinates = crate::muc::RoomCommittedCoordinates {
+        lifecycle: crate::muc::RoomLifecycleId::generate(),
+        revision: crate::muc::RoomRevision::initial(),
+    };
+    let fence = test_claim_fence(&actor.room.room_jid);
+    actor.durable_claim_fence = Some(fence.clone());
+    actor.durable_coordinates = Some(coordinates);
+    let mut foreign_fence = fence;
+    foreign_fence.epoch = crate::ownership::ClaimEpoch(2);
+    let commit = crate::muc::durable::mint_room_mutation_commit(
+        foreign_fence,
+        coordinates,
+        crate::muc::durable::RoomCommitKind::Projection(
+            crate::muc::durable::RoomProjectionKind::OccupancyJoin,
+        ),
+    );
+    let authorization = crate::muc::durable::authorize_ephemeral_projection(commit)
+        .expect("projection authorization");
+
+    let mut applied = false;
+    assert_eq!(
+        actor.project(
+            ProjectionGate::Authorized(authorization),
+            crate::muc::durable::RoomProjectionKind::OccupancyJoin,
+            |_| applied = true,
+        ),
+        Err(ProjectionRefusal::ForeignCapability),
+    );
+    assert!(
+        !applied,
+        "a foreign capability must never run its projection"
+    );
+    assert_eq!(actor.seal_state, RoomSealState::OwnershipLost);
+    assert_eq!(actor.room.occupant_count(), 0);
+}
+
+#[test]
+fn projection_kind_mismatch_is_refused_without_sealing() {
+    let mut actor = RoomActor::new(test_room(), test_secret());
+    let coordinates = crate::muc::RoomCommittedCoordinates {
+        lifecycle: crate::muc::RoomLifecycleId::generate(),
+        revision: crate::muc::RoomRevision::initial(),
+    };
+    let fence = test_claim_fence(&actor.room.room_jid);
+    actor.durable_claim_fence = Some(fence.clone());
+    actor.durable_coordinates = Some(coordinates);
+    let commit = crate::muc::durable::mint_room_mutation_commit(
+        fence,
+        coordinates,
+        crate::muc::durable::RoomCommitKind::Projection(
+            crate::muc::durable::RoomProjectionKind::Pin,
+        ),
+    );
+    let authorization = crate::muc::durable::authorize_ephemeral_projection(commit)
+        .expect("projection authorization");
+
+    let projected_revision_before = actor.projected_revision;
+    let mut applied = false;
+    assert_eq!(
+        actor.project(
+            ProjectionGate::Authorized(authorization),
+            crate::muc::durable::RoomProjectionKind::OccupancyJoin,
+            |_| applied = true,
+        ),
+        Err(ProjectionRefusal::WrongProjectionKind),
+    );
+    assert!(
+        !applied,
+        "a mismatched capability must never run its projection"
+    );
+    assert_eq!(actor.seal_state, RoomSealState::Open);
+    assert_eq!(actor.projected_revision, projected_revision_before);
+}
+
+#[tokio::test]
+async fn live_roster_transfer_adjusts_occupant_gauge_by_roster_delta() {
+    let _guard = crate::telemetry::test_support::acquire().await;
+    let actor = spawn_room_actor().await;
+    let before = crate::metrics::muc_occupant_total_for_test();
+    let mut roster = test_room();
+    for (nick, jid) in [
+        ("alice", test_full_jid("transfer-alice")),
+        ("bob", test_full_jid("transfer-bob")),
+    ] {
+        roster.add_occupant(crate::muc::Occupant {
+            real_jid: jid,
+            nick: nick.to_owned(),
+            role: Role::Participant,
+            affiliation: Affiliation::Member,
+            is_remote: false,
+            home_server: None,
+        });
+    }
+    actor
+        .ask(RestoreLiveRoster {
+            room: roster,
+            occupancy_revision: 2,
+            departures: Default::default(),
+        })
+        .await
+        .expect("transfer");
+    assert_eq!(crate::metrics::muc_occupant_total_for_test(), before + 2);
+}
+
+#[tokio::test]
+async fn live_roster_transfer_preserves_actor_room_jid() {
+    let actor = spawn_room_actor().await;
+    let mut foreign_room = test_room();
+    foreign_room.room_jid = "other@muc.example.com".parse().expect("jid");
+    actor
+        .ask(RestoreLiveRoster {
+            room: foreign_room,
+            occupancy_revision: 0,
+            departures: Default::default(),
+        })
+        .await
+        .expect("transfer");
+    assert_eq!(
+        actor
+            .ask(GetSnapshot)
+            .await
+            .expect("snapshot")
+            .room
+            .room_jid,
+        test_room().room_jid
+    );
+}
+
+#[tokio::test]
+async fn projection_commit_failure_is_counted_with_outcome_label() {
+    let guard = crate::telemetry::test_support::acquire().await;
+    let failed = spawn_room_actor_with_store(FakeDurableStore::owned_but_persist_fails()).await;
+    assert!(
+        join_as_resolver(&failed, test_full_jid("metric-failed"), "failed")
+            .await
+            .is_err()
+    );
+    assert_eq!(
+        guard.counter_sum(
+            "waddle.muc.projection.commit",
+            &[
+                ("projection", "occupancy_join"),
+                ("outcome", "persist_failed")
+            ],
+        ),
+        Some(1)
+    );
+
+    let succeeded = spawn_room_actor_with_store(FakeDurableStore::owned()).await;
+    join_as_resolver(&succeeded, test_full_jid("metric-ok"), "ok")
+        .await
+        .expect("successful join");
+    assert_eq!(
+        guard.counter_sum(
+            "waddle.muc.projection.commit",
+            &[("projection", "occupancy_join"), ("outcome", "ok")],
+        ),
+        Some(1)
+    );
+
+    let unfenced = spawn_room_actor().await;
+    join_as_resolver(&unfenced, test_full_jid("metric-local"), "local")
+        .await
+        .expect("store-less join");
+    assert_eq!(
+        guard.counter_sum(
+            "waddle.muc.projection.commit",
+            &[("projection", "occupancy_join"), ("outcome", "unfenced")],
+        ),
+        Some(1)
+    );
+}
+
+#[tokio::test]
+async fn occupancy_handler_duration_is_recorded_for_join_and_leave() {
+    let guard = crate::telemetry::test_support::acquire().await;
+    let actor = spawn_room_actor().await;
+    let alice = test_full_jid("handler-duration");
+
+    join_as_resolver(&actor, alice.clone(), "alice")
+        .await
+        .expect("join");
+    actor
+        .ask(LeaveByRealJid {
+            sender_jid: alice,
+            cause: crate::muc::durable::OccupancyLeaveCause::Explicit,
+            session: LeaveSessionSelector::Any,
+            attempt: LeaveAttemptId::generate(),
+            origin: crate::muc::room_actor::LeaveOrigin::Fresh,
+        })
+        .await
+        .expect("leave");
+
+    assert_eq!(
+        guard.histogram_count("waddle.muc.occupancy.handler.duration", &[("op", "join")]),
+        Some(1)
+    );
+    assert_eq!(
+        guard.histogram_count("waddle.muc.occupancy.handler.duration", &[("op", "leave")]),
+        Some(1)
+    );
+    assert_eq!(
+        guard.histogram_count(
+            "waddle.muc.occupancy.handler.duration",
+            &[("op", "join_request")]
+        ),
+        Some(0)
+    );
+    assert_eq!(
+        guard.histogram_count(
+            "waddle.muc.occupancy.handler.duration",
+            &[("op", "leave_request")]
+        ),
+        Some(0)
+    );
+}
+
+#[tokio::test]
+async fn concurrent_joins_to_one_room_serialize_into_distinct_revisions_through_the_actor() {
+    let store = FakeDurableStore::owned();
+    let actor = spawn_room_actor_with_store(store.clone()).await;
+    let joins = (0..16).map(|index| {
+        let actor = actor.clone();
+        tokio::spawn(async move {
+            join_as_resolver(
+                &actor,
+                test_full_jid(&format!("concurrent-{index}")),
+                &format!("nick-{index}"),
+            )
+            .await
+        })
+    });
+    for join in joins {
+        join.await
+            .expect("join task")
+            .expect("serialized join should succeed");
+    }
+    let mut revisions = store.recorded_projection_revisions();
+    revisions.sort_unstable();
+    assert_eq!(revisions.len(), 16);
+    assert!(revisions
+        .iter()
+        .zip(1_i64..=16)
+        .all(|(actual, expected)| actual.as_i64() == expected));
+    let snapshot = actor.ask(GetSnapshot).await.expect("snapshot");
+    assert_eq!(snapshot.room.occupant_count(), 16);
+    assert_eq!(
+        actor
+            .ask(GetProjectionTestState)
+            .await
+            .expect("projection state")
+            .projected_revision,
+        snapshot
+            .durable_coordinates
+            .map(|coordinates| coordinates.revision)
+    );
+}
+
 async fn seal_for_destroy(actor: &ActorRef<RoomActor>) {
     actor
         .ask(SealForDestroy {
@@ -4303,6 +7116,7 @@ impl crate::muc::durable::MucDurableStore for FlakyThenRecoveringStore {
             } else {
                 Ok(Some(crate::muc::durable::DurableRoomState {
                     coordinates: None,
+                    config_coordinates: None,
                     waddle_id: "waddle-1".to_string(),
                     channel_id: "channel-1".to_string(),
                     config: RoomConfig {
@@ -4722,7 +7536,7 @@ async fn destroy_seal_blocks_members_only_enforcement() {
 }
 
 #[tokio::test]
-async fn destroy_seal_retains_leave_without_emitting_effects_before_unseal() {
+async fn leave_under_destroying_seal_is_deferred_without_memory_change() {
     let store = FakeDurableStore::owned();
     let actor = spawn_room_actor_with_store(store).await;
     let alice = test_full_jid("alice");
@@ -4743,18 +7557,23 @@ async fn destroy_seal_retains_leave_without_emitting_effects_before_unseal() {
         .await
         .expect("pre-seal for destroy");
 
-    assert!(
+    assert!(matches!(
         actor
-            .ask(LeaveByRealJid { sender_jid: alice })
+            .ask(LeaveByRealJid {
+                sender_jid: alice.clone(),
+                cause: crate::muc::durable::OccupancyLeaveCause::Explicit,
+                session: LeaveSessionSelector::Any,
+                attempt: LeaveAttemptId::generate(),
+                origin: crate::muc::room_actor::LeaveOrigin::Fresh,
+            })
             .await
-            .expect("leave ask")
-            .is_none(),
-        "a sealed actor must not emit leave effects from a queued session departure"
-    );
+            .expect("leave ask"),
+        LeaveDisposition::Deferred { .. }
+    ));
     assert_eq!(
         actor.ask(OccupantCount).await.expect("occupant count"),
-        0,
-        "a destroy that reopens must not restore a session that departed while sealed"
+        1,
+        "durable departures wait for a projection commit while the destroy is unresolved"
     );
     assert!(actor
         .ask(UnsealDestroy { attempt })
@@ -4762,9 +7581,86 @@ async fn destroy_seal_retains_leave_without_emitting_effects_before_unseal() {
         .expect("matching unseal reply"));
     assert_eq!(
         actor.ask(OccupantCount).await.expect("occupant count"),
-        0,
-        "unsealing a failed destroy retains the departure reconciliation"
+        1,
+        "unsealing does not apply a deferred departure until it is retried"
     );
+}
+
+#[tokio::test]
+async fn store_less_leave_under_destroying_seal_is_suppressed_and_recorded() {
+    let actor = spawn_room_actor().await;
+    let alice = test_full_jid("alice");
+    actor
+        .ask(Join {
+            nick: "alice".to_owned(),
+            real_jid: alice.clone(),
+            role: Role::Participant,
+            affiliation: Affiliation::Member,
+        })
+        .await
+        .expect("join");
+    seal_for_destroy(&actor).await;
+
+    assert!(matches!(
+        actor
+            .ask(LeaveByRealJid {
+                sender_jid: alice,
+                cause: crate::muc::durable::OccupancyLeaveCause::Explicit,
+                session: LeaveSessionSelector::Any,
+                attempt: LeaveAttemptId::generate(),
+                origin: crate::muc::room_actor::LeaveOrigin::Fresh,
+            })
+            .await
+            .expect("leave reply"),
+        LeaveDisposition::Suppressed { .. }
+    ));
+    assert_eq!(actor.ask(OccupantCount).await.expect("count"), 0);
+}
+
+#[tokio::test]
+async fn unseal_destroy_then_retried_leave_projects_departure() {
+    let store = FakeDurableStore::owned();
+    let actor = spawn_room_actor_with_store(store).await;
+    let alice = test_full_jid("alice");
+    actor
+        .ask(Join {
+            nick: "alice".to_owned(),
+            real_jid: alice.clone(),
+            role: Role::Participant,
+            affiliation: Affiliation::Member,
+        })
+        .await
+        .expect("join");
+    let attempt = crate::muc::DestroyAttemptId::generate();
+    actor.ask(SealForDestroy { attempt }).await.expect("seal");
+    assert!(matches!(
+        actor
+            .ask(LeaveByRealJid {
+                sender_jid: alice.clone(),
+                cause: crate::muc::durable::OccupancyLeaveCause::Explicit,
+                session: LeaveSessionSelector::Any,
+                attempt: LeaveAttemptId::generate(),
+                origin: crate::muc::room_actor::LeaveOrigin::Fresh,
+            })
+            .await
+            .expect("deferred reply"),
+        LeaveDisposition::Deferred { .. }
+    ));
+    assert!(actor.ask(UnsealDestroy { attempt }).await.expect("unseal"));
+    assert!(matches!(
+        actor
+            .ask(LeaveByRealJid {
+                sender_jid: alice,
+                cause: crate::muc::durable::OccupancyLeaveCause::Explicit,
+                session: LeaveSessionSelector::Any,
+                attempt: LeaveAttemptId::generate(),
+                origin: crate::muc::room_actor::LeaveOrigin::Fresh,
+            })
+            .await
+            .expect("retry reply"),
+        LeaveDisposition::Left(_)
+    ));
+    assert_eq!(actor.ask(OccupantCount).await.expect("count"), 0);
 }
 
 #[tokio::test]
@@ -4925,7 +7821,7 @@ async fn destroy_seal_blocks_in_call_state_updates() {
 }
 
 #[tokio::test]
-async fn destroy_seal_blocks_legacy_leave_handler() {
+async fn destroy_seal_defers_leave_handler() {
     let store = FakeDurableStore::owned();
     let actor = spawn_room_actor_with_store(store).await;
 
@@ -4942,23 +7838,20 @@ async fn destroy_seal_blocks_legacy_leave_handler() {
     seal_for_destroy(&actor).await;
 
     let leave = actor
-        .ask(Leave {
-            nick: "alice".to_string(),
+        .ask(LeaveByRealJid {
+            sender_jid: test_full_jid("alice"),
+            cause: crate::muc::durable::OccupancyLeaveCause::Explicit,
+            session: LeaveSessionSelector::Any,
+            attempt: LeaveAttemptId::generate(),
+            origin: crate::muc::room_actor::LeaveOrigin::Fresh,
         })
-        .await;
-    assert!(
-        matches!(
-            leave,
-            Err(SendError::HandlerError(
-                RoomActorError::OwnershipUnavailable
-            ))
-        ),
-        "a sealed actor must reject the legacy leave mutation path: {leave:?}"
-    );
+        .await
+        .expect("leave reply");
+    assert!(matches!(leave, LeaveDisposition::Deferred { .. }));
     assert_eq!(
         actor.ask(OccupantCount).await.expect("occupant count"),
         1,
-        "refused legacy leave must not remove the occupant"
+        "a deferred leave must not remove the occupant"
     );
 }
 
@@ -5374,8 +8267,8 @@ async fn role_only_admin_items_stay_direct_without_an_outbox_reservation() {
     );
     assert_eq!(
         store.save_call_count(),
-        0,
-        "no durable affiliation commit is needed"
+        1,
+        "the join projection commits once; the role-only change adds no durable commit"
     );
     assert!(
         store.saved_effects().is_empty(),
@@ -5943,8 +8836,12 @@ async fn resolver_none_clears_stale_resolver_derived_affiliation_and_join_is_for
         .await
         .expect("resolver-derived member joins the members-only room");
     actor
-        .ask(Leave {
-            nick: "alice".to_string(),
+        .ask(LeaveByRealJid {
+            sender_jid: alice.clone(),
+            cause: crate::muc::durable::OccupancyLeaveCause::Explicit,
+            session: LeaveSessionSelector::Any,
+            attempt: LeaveAttemptId::generate(),
+            origin: crate::muc::room_actor::LeaveOrigin::Fresh,
         })
         .await
         .expect("leave");
@@ -6052,7 +8949,7 @@ async fn sync_resolver_affiliation_clears_stale_resolver_derived_member() {
     // Seed a resolver-derived Member entry, then leave the room.
     actor
         .ask(JoinWithAffiliation {
-            sender_jid: alice,
+            sender_jid: alice.clone(),
             nick: "alice".to_string(),
             affiliation_grant: JoinAffiliationGrant::Resolver(Affiliation::Member),
             local_domain: "example.com".to_string(),
@@ -6061,8 +8958,12 @@ async fn sync_resolver_affiliation_clears_stale_resolver_derived_member() {
         .await
         .expect("resolver-derived member joins the members-only room");
     actor
-        .ask(Leave {
-            nick: "alice".to_string(),
+        .ask(LeaveByRealJid {
+            sender_jid: alice.clone(),
+            cause: crate::muc::durable::OccupancyLeaveCause::Explicit,
+            session: LeaveSessionSelector::Any,
+            attempt: LeaveAttemptId::generate(),
+            origin: crate::muc::room_actor::LeaveOrigin::Fresh,
         })
         .await
         .expect("leave");

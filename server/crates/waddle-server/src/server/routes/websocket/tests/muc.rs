@@ -144,7 +144,7 @@ async fn muc_join_after_guarded_dormancy_eviction_respawns_room() {
         .expect("create room");
     let probe = actor.ask(IsDormant).await.expect("probe");
     assert!(probe.dormant);
-    let destroyed: bool = state
+    let destroyed = state
         .deps
         .protocol
         .room_registry
@@ -154,7 +154,8 @@ async fn muc_join_after_guarded_dormancy_eviction_respawns_room() {
             guard: SealGuard::Dormant,
         })
         .await
-        .expect("guarded destroy");
+        .expect("guarded destroy")
+        .destroyed();
     assert!(destroyed, "dormant room evicted");
 
     // The join after eviction must succeed against a respawned room.
@@ -253,6 +254,8 @@ async fn ordinary_join_coalesces_with_restoring_room_without_create_permission()
         started: Arc<tokio::sync::Notify>,
         allow: Arc<tokio::sync::Notify>,
         snapshot: DurableRoomState,
+        lifecycle: std::sync::OnceLock<waddle_xmpp::muc::RoomLifecycleId>,
+        next_revision: std::sync::atomic::AtomicI64,
     }
 
     impl MucDurableStore for BlockingExistingRoomStore {
@@ -286,11 +289,21 @@ async fn ordinary_join_coalesces_with_restoring_room_without_create_permission()
                     Err(waddle_xmpp::muc::RoomCommitError::NotOwner)
                 });
             }
+            // Every commit advances the revision, as the real store does:
+            // #1647 projection capabilities are one-use per revision.
+            let revision = self
+                .next_revision
+                .fetch_add(1, std::sync::atomic::Ordering::SeqCst)
+                + 1;
+            let lifecycle = *self
+                .lifecycle
+                .get_or_init(waddle_xmpp::muc::RoomLifecycleId::generate);
             Box::pin(async move {
                 Ok(waddle_xmpp::muc::RoomCommitOutcome {
                     coordinates: waddle_xmpp::muc::RoomCommittedCoordinates {
-                        lifecycle: waddle_xmpp::muc::RoomLifecycleId::generate(),
-                        revision: waddle_xmpp::muc::RoomRevision::initial(),
+                        lifecycle,
+                        revision: waddle_xmpp::muc::RoomRevision::from_stored(revision)
+                            .expect("positive revision"),
                     },
                     reservation: None,
                 })
@@ -326,6 +339,7 @@ async fn ordinary_join_coalesces_with_restoring_room_without_create_permission()
         allow: Arc::clone(&allow),
         snapshot: DurableRoomState {
             coordinates: None,
+            config_coordinates: None,
             waddle_id: "restored-waddle".to_string(),
             channel_id: "restored-channel".to_string(),
             config: waddle_xmpp::muc::RoomConfig {
@@ -340,6 +354,8 @@ async fn ordinary_join_coalesces_with_restoring_room_without_create_permission()
                 Affiliation::Owner,
             )],
         },
+        lifecycle: std::sync::OnceLock::new(),
+        next_revision: std::sync::atomic::AtomicI64::new(0),
     });
     state
         .deps
@@ -3728,6 +3744,8 @@ async fn standard_muc_owner_config_reconciles_ambiguous_members_only_commit_befo
             &self,
             room_jid: &BareJid,
             intent: waddle_xmpp::muc::RoomDurableMutation,
+            coordinates: waddle_xmpp::muc::RoomCommittedCoordinates,
+            is_config_commit: bool,
         ) {
             match intent {
                 waddle_xmpp::muc::RoomDurableMutation::Create {
@@ -3740,6 +3758,7 @@ async fn standard_muc_owner_config_reconciles_ambiguous_members_only_commit_befo
                         room_jid.clone(),
                         DurableRoomState {
                             coordinates: None,
+                            config_coordinates: None,
                             waddle_id: waddle_id.into_string(),
                             channel_id: channel_id.into_string(),
                             config,
@@ -3758,7 +3777,10 @@ async fn standard_muc_owner_config_reconciles_ambiguous_members_only_commit_befo
                         },
                     );
                 }
-                waddle_xmpp::muc::RoomDurableMutation::Config { config, .. } => {
+                waddle_xmpp::muc::RoomDurableMutation::Config { config, .. }
+                | waddle_xmpp::muc::RoomDurableMutation::MembersOnlyEnforcement {
+                    config, ..
+                } => {
                     if let Some(state) = self.states.lock().expect("states lock").get_mut(room_jid)
                     {
                         state.config = config;
@@ -3781,6 +3803,12 @@ async fn standard_muc_owner_config_reconciles_ambiguous_members_only_commit_befo
                     }
                 }
                 _ => {}
+            }
+            if let Some(state) = self.states.lock().expect("states lock").get_mut(room_jid) {
+                state.coordinates = Some(coordinates);
+                if is_config_commit {
+                    state.config_coordinates = Some(coordinates);
+                }
             }
         }
     }
@@ -3822,9 +3850,18 @@ async fn standard_muc_owner_config_reconciles_ambiguous_members_only_commit_befo
                 if !matches {
                     return Err(waddle_xmpp::muc::RoomCommitError::NotOwner);
                 }
+                let is_config_commit = matches!(
+                    &intent,
+                    waddle_xmpp::muc::RoomDurableMutation::Create { .. }
+                        | waddle_xmpp::muc::RoomDurableMutation::Config { .. }
+                        | waddle_xmpp::muc::RoomDurableMutation::MembersOnlyEnforcement { .. }
+                );
+                // Only the owner-config commit is ambiguous (as on main); the
+                // follow-up enforcement commit must succeed so the handler's
+                // reconciliation is what this test exercises.
                 let ambiguous_config =
                     matches!(intent, waddle_xmpp::muc::RoomDurableMutation::Config { .. });
-                self.apply_mutation(room_jid, intent);
+                self.apply_mutation(room_jid, intent, coordinates, is_config_commit);
                 if ambiguous_config {
                     Err(waddle_xmpp::muc::RoomCommitError::CommitOutcomeUnknown)
                 } else {

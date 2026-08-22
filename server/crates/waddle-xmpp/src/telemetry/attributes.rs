@@ -80,6 +80,8 @@ pub enum Janitor {
     UserActorReaper,
     /// Remote MUC membership reconciliation (clustering).
     RemoteMucMembership,
+    /// Retained local MUC departure reconciliation.
+    LocalMucDeparture,
 }
 
 impl sealed::Sealed for Janitor {}
@@ -100,6 +102,7 @@ impl MetricAttribute for Janitor {
             Self::RoomDormancy => "room_dormancy",
             Self::UserActorReaper => "user_actor_reaper",
             Self::RemoteMucMembership => "remote_muc_membership",
+            Self::LocalMucDeparture => "local_muc_departure",
         }
     }
 }
