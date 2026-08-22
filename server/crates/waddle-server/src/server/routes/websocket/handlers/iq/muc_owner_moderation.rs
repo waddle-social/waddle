@@ -58,7 +58,7 @@ struct PersistedDestroyCompletion {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 struct PersistedDestroyRecipient {
-    nick: String,
+    nick: waddle_xmpp::muc::MucOccupantNick,
     sessions: Vec<FullJid>,
 }
 
@@ -69,7 +69,7 @@ struct DestroyCompletionSnapshot {
     lifecycle: Option<waddle_xmpp::muc::RoomLifecycleId>,
     request: DestroyRequest,
     members: Vec<BareJid>,
-    recipients: Vec<(String, Vec<FullJid>)>,
+    recipients: Vec<(waddle_xmpp::muc::MucOccupantNick, Vec<FullJid>)>,
 }
 
 pub(crate) struct LeasedDestroyCompletion {
@@ -109,13 +109,17 @@ impl TryFrom<&waddle_xmpp::muc::room_registry_actor::DestroyCompletion>
                 .map(|entry| entry.jid)
                 .collect(),
             recipients: {
-                let mut by_nick: std::collections::BTreeMap<String, Vec<FullJid>> = completion
+                let mut by_nick: std::collections::BTreeMap<
+                    waddle_xmpp::muc::MucOccupantNick,
+                    Vec<FullJid>,
+                > = completion
                     .room
                     .occupants
                     .values()
                     .map(|occupant| {
                         (
-                            occupant.nick.clone(),
+                            waddle_xmpp::muc::MucOccupantNick::new(occupant.nick.clone())
+                                .expect("occupant nicks are validated at join"),
                             completion
                                 .room
                                 .get_occupant_sessions(&occupant.nick)
@@ -132,12 +136,12 @@ impl TryFrom<&waddle_xmpp::muc::room_registry_actor::DestroyCompletion>
                 for receipt in &completion.departures.receipts {
                     let nick = match &receipt.outcome {
                         waddle_xmpp::muc::room_actor::DepartureReceiptOutcome::Left(outcome) => {
-                            outcome.nick.as_str().to_owned()
+                            outcome.nick.clone()
                         }
                         waddle_xmpp::muc::room_actor::DepartureReceiptOutcome::Suppressed {
                             nick,
                             ..
-                        } => nick.as_str().to_owned(),
+                        } => nick.clone(),
                     };
                     let sessions = by_nick.entry(nick).or_default();
                     if !sessions.contains(&receipt.jid) {
@@ -497,7 +501,7 @@ async fn complete_destroy_snapshot(
             };
             let presence = build_destroy_notification(
                 &room_jid,
-                &nick,
+                nick.as_str(),
                 &session_jid,
                 &snapshot.request,
                 // This loop sends only a destroyed occupant's own final
@@ -2002,7 +2006,7 @@ mod destroy_completion_tests {
             persisted
                 .recipients
                 .iter()
-                .any(|recipient| recipient.nick == "ghost"
+                .any(|recipient| recipient.nick.as_str() == "ghost"
                     && recipient.sessions == vec![ghost.clone()]),
             "the owed receipt holder must be a destroy-notification recipient"
         );
@@ -2065,7 +2069,7 @@ mod destroy_completion_tests {
                 "member-b@example.com".parse().expect("valid member jid"),
             ],
             recipients: vec![(
-                "nick".to_string(),
+                waddle_xmpp::muc::MucOccupantNick::new("nick".to_string()).expect("valid nick"),
                 vec![
                     "member-a@example.com/phone"
                         .parse()
@@ -2467,7 +2471,10 @@ mod destroy_completion_tests {
             lifecycle: Some(success_lifecycle),
             request: DestroyRequest::default(),
             members: Vec::new(),
-            recipients: vec![("owner".to_string(), vec![inline_session.clone()])],
+            recipients: vec![(
+                waddle_xmpp::muc::MucOccupantNick::new("owner".to_string()).expect("valid nick"),
+                vec![inline_session.clone()],
+            )],
         };
         let success_reservation = enqueue_terminal_effect(
             success_state.as_ref(),
@@ -2587,7 +2594,10 @@ mod destroy_completion_tests {
             lifecycle: Some(lifecycle),
             request: DestroyRequest::default(),
             members: Vec::new(),
-            recipients: vec![("owner".to_string(), vec![inline_session.clone()])],
+            recipients: vec![(
+                waddle_xmpp::muc::MucOccupantNick::new("owner".to_string()).expect("valid nick"),
+                vec![inline_session.clone()],
+            )],
         };
         insert_tombstoned_lifecycle(state.as_ref(), &room_jid, lifecycle).await;
 

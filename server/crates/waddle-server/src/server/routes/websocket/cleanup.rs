@@ -418,8 +418,17 @@ pub(crate) async fn redrive_local_muc_cleanup(
 ) -> MucCleanupOutcome {
     // The redrive re-uses the ORIGINAL sweep's attempt as its occupancy-order
     // ceiling: sessions that (re)joined since are classified `Superseded` by
-    // the actor instead of being evicted by a late retry (#1647).
-    if cleanup_muc_presence_with_origin(state, jid, None, attempt).await {
+    // the actor instead of being evicted by a late retry (#1647). Failures
+    // do not re-record the sweep — the janitor requeues it with backoff.
+    if cleanup_muc_presence_with_origin(
+        state,
+        jid,
+        None,
+        attempt,
+        SweepFailureRecording::JanitorRequeues,
+    )
+    .await
+    {
         MucCleanupOutcome::Completed
     } else {
         MucCleanupOutcome::Failed
@@ -439,6 +448,7 @@ pub async fn cleanup_muc_presence_for_jid_with_origin(
         jid,
         Some(&origin),
         waddle_xmpp::muc::room_actor::LeaveAttemptId::generate(),
+        SweepFailureRecording::RecordSweep,
     )
     .await
     {
@@ -479,6 +489,7 @@ pub(crate) async fn redrive_remote_muc_cleanup(
         jid,
         None,
         waddle_xmpp::muc::room_actor::LeaveAttemptId::generate(),
+        SweepFailureRecording::RecordSweep,
     )
     .await
     {
@@ -1116,6 +1127,7 @@ async fn cleanup_connection_shutdown_inner(
                             &jid,
                             cleanup_origin.as_ref(),
                             waddle_xmpp::muc::room_actor::LeaveAttemptId::generate(),
+                            SweepFailureRecording::RecordSweep,
                         )
                         .await;
                         // ADR-0017 Phase 1: mirror the unregister into the
@@ -1176,6 +1188,7 @@ async fn cleanup_connection_shutdown_inner(
             &jid,
             cleanup_origin.as_ref(),
             waddle_xmpp::muc::room_actor::LeaveAttemptId::generate(),
+            SweepFailureRecording::RecordSweep,
         )
         .await;
         // ADR-0017 Phase 1: mirror the unregister into the actor tree on
@@ -1981,6 +1994,7 @@ async fn refuse_detach_without_principal(
                 jid,
                 cleanup_origin.as_ref(),
                 waddle_xmpp::muc::room_actor::LeaveAttemptId::generate(),
+                SweepFailureRecording::RecordSweep,
             )
             .await;
             unregister_remote_user_resource_if_owner(state, jid, &owner).await;
@@ -2065,8 +2079,20 @@ async fn cleanup_muc_presence(state: &WebSocketState, jid: &FullJid) -> bool {
         jid,
         None,
         waddle_xmpp::muc::room_actor::LeaveAttemptId::generate(),
+        SweepFailureRecording::RecordSweep,
     )
     .await
+}
+
+/// Whether an enumeration/lookup failure records a `FullJidSweep`. The
+/// janitor's redrive passes `JanitorRequeues`: it already holds the drained
+/// sweep and requeues it WITH BACKOFF on failure — re-recording from inside
+/// the redrive would merge an immediate deadline over that backoff and spin
+/// the sweep on every janitor tick during a registry outage (#1647).
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum SweepFailureRecording {
+    RecordSweep,
+    JanitorRequeues,
 }
 
 async fn cleanup_muc_presence_with_origin(
@@ -2074,6 +2100,7 @@ async fn cleanup_muc_presence_with_origin(
     jid: &FullJid,
     origin: Option<&crate::server::routes::interpret::OrderedRelayRouteOrigin>,
     sweep_attempt: waddle_xmpp::muc::room_actor::LeaveAttemptId,
+    sweep_recording: SweepFailureRecording,
 ) -> bool {
     let mut completed = cleanup_remote_muc_presence(state, jid, origin).await;
 
@@ -2085,12 +2112,14 @@ async fn cleanup_muc_presence_with_origin(
         Err(error) => {
             completed = false;
             warn!(error = %error, "Failed to list room actors");
-            state.deps.protocol.pending_local_muc_departures.record(
-                LocalDepartureItem::FullJidSweep {
-                    jid: jid.clone(),
-                    attempt: sweep_attempt,
-                },
-            );
+            if sweep_recording == SweepFailureRecording::RecordSweep {
+                state.deps.protocol.pending_local_muc_departures.record(
+                    LocalDepartureItem::FullJidSweep {
+                        jid: jid.clone(),
+                        attempt: sweep_attempt,
+                    },
+                );
+            }
             Vec::new()
         }
     };
@@ -2101,12 +2130,14 @@ async fn cleanup_muc_presence_with_origin(
             Err(error) => {
                 completed = false;
                 warn!(room = %room_jid, error = %error, "Failed to get room actor");
-                state.deps.protocol.pending_local_muc_departures.record(
-                    LocalDepartureItem::FullJidSweep {
-                        jid: jid.clone(),
-                        attempt: sweep_attempt,
-                    },
-                );
+                if sweep_recording == SweepFailureRecording::RecordSweep {
+                    state.deps.protocol.pending_local_muc_departures.record(
+                        LocalDepartureItem::FullJidSweep {
+                            jid: jid.clone(),
+                            attempt: sweep_attempt,
+                        },
+                    );
+                }
                 continue;
             }
         };

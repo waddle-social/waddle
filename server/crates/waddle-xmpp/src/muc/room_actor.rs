@@ -96,6 +96,16 @@ pub struct DepartureReceipt {
     pub outcome: DepartureReceiptOutcome,
 }
 
+impl DepartureReceipt {
+    /// The nickname the departure vacated (typed at the source).
+    pub fn nick(&self) -> &crate::muc::MucOccupantNick {
+        match &self.outcome {
+            DepartureReceiptOutcome::Left(outcome) => &outcome.nick,
+            DepartureReceiptOutcome::Suppressed { nick, .. } => nick,
+        }
+    }
+}
+
 /// A consumed departure receipt: replayable, or superseded by a newer
 /// generation of the same full JID (joined since, whether it left, was
 /// removed, or is still present).
@@ -1335,10 +1345,23 @@ impl RoomActor {
 
     fn replay_departure_receipt_at(&mut self, index: usize) -> Option<RetainedDeparture> {
         let receipt = self.departure_receipts.get(index)?;
-        let stale = self
+        // A newer generation of this full JID alone does not stale the
+        // receipt: a rejoin under a DIFFERENT nick never announced the old
+        // nick's departure, so remaining occupants still owe its unavailable
+        // fan-out (#1647, codex round 25). The receipt only becomes
+        // unreplayable when its NICK's state moved on too — a same-nick
+        // rejoin (kicked since or not) bumped the nickname generation, and
+        // whatever the occupants last saw of that nick already supersedes
+        // the retained announcement.
+        let newer_generation = self
             .latest_generations
             .get(&receipt.jid)
             .is_some_and(|latest| *latest > receipt.generation);
+        let nick_state_moved = self
+            .room
+            .current_nickname_generation(receipt.nick().as_str())
+            != receipt.nick_generation;
+        let stale = newer_generation && nick_state_moved;
         if stale {
             let receipt = self.departure_receipts.remove(index)?;
             self.prune_departure_state(&receipt.jid);

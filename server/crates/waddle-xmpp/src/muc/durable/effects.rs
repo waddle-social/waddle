@@ -8,9 +8,22 @@ use crate::types::{Affiliation, Role, Voice};
 
 use super::{RoomEffectOrdinal, RoomLifecycleId, RoomRevision};
 
-/// A validated room nickname carried by a durable effect.
-#[derive(Debug, Clone, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
+/// A validated room nickname carried by a durable effect. Deserialization
+/// re-validates (`try_from`), so a malformed stored nickname is rejected at
+/// the storage boundary instead of silently degrading the occupant identity.
+#[derive(
+    Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord, serde::Serialize, serde::Deserialize,
+)]
+#[serde(try_from = "String")]
 pub struct MucOccupantNick(String);
+
+impl TryFrom<String> for MucOccupantNick {
+    type Error = String;
+
+    fn try_from(value: String) -> Result<Self, Self::Error> {
+        Self::new(value).ok_or_else(|| "invalid MUC occupant nickname".to_string())
+    }
+}
 
 impl MucOccupantNick {
     pub fn new(value: String) -> Option<Self> {

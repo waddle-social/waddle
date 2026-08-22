@@ -5134,6 +5134,57 @@ async fn acknowledgement_is_refused_by_an_actor_that_lost_ownership() {
     );
 }
 
+/// #1647 (codex round 25): a lost-reply departure whose JID rejoined under a
+/// DIFFERENT nick still owes the OLD nick's unavailable fan-out — remaining
+/// occupants were never told it left. Only a visible (re-taken) nick makes
+/// the receipt unreplayable.
+#[tokio::test]
+async fn different_nick_rejoin_replays_the_old_nick_departure() {
+    let actor = spawn_room_actor_with_store(FakeDurableStore::owned()).await;
+    let alice = test_full_jid("alice");
+    join_as_resolver(&actor, alice.clone(), "old-nick")
+        .await
+        .expect("join");
+    let attempt = LeaveAttemptId::generate();
+    assert!(matches!(
+        leave_with_attempt(&actor, alice.clone(), attempt).await,
+        LeaveDisposition::Left(_)
+    ));
+    // The reply was lost; the same JID rejoins under a NEW nick first.
+    join_as_resolver(&actor, alice.clone(), "new-nick")
+        .await
+        .expect("rejoin under a different nick");
+
+    let LeaveDisposition::Left(outcome) = leave_with_attempt(&actor, alice.clone(), attempt).await
+    else {
+        panic!("the old-nick departure must replay its retained outcome");
+    };
+    assert_eq!(
+        outcome.nick.as_str(),
+        "old-nick",
+        "the replay announces the nick the departure vacated"
+    );
+    assert_eq!(
+        actor
+            .ask(AckDepartureReceipt {
+                attempt: outcome.acknowledge,
+            })
+            .await
+            .expect("ack ask"),
+        AckDepartureOutcome::Acknowledged
+    );
+    assert!(
+        actor
+            .ask(GetSnapshot)
+            .await
+            .expect("snapshot")
+            .room
+            .find_occupant_by_real_jid(&alice)
+            .is_some(),
+        "the replay never touches the live new-nick session"
+    );
+}
+
 /// #1647 (codex round 22): a receipt whose nick was re-taken can never replay
 /// again. The Superseded classification must CONSUME it — otherwise it vetoes
 /// dormancy and sealing (`EffectsOwed`) forever while the janitor has already

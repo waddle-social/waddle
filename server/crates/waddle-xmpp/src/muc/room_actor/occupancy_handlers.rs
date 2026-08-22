@@ -382,13 +382,16 @@ impl kameo::message::Message<LeaveByRealJid> for RoomActor {
             // every client's roster or repeat a removal already announced.
             Some(super::RetainedDeparture::Stale) => return Ok(LeaveDisposition::Superseded),
             Some(super::RetainedDeparture::Current(receipt)) => {
-                if self.room.session_watermark(&msg.sender_jid).is_some()
-                    || self.nick_retaken(&receipt)
-                {
-                    // The receipt can never replay again (the nick was
-                    // re-taken or the JID is live) — consume it, or it
-                    // vetoes dormancy/sealing (`EffectsOwed`) forever
-                    // while the janitor has already dropped its retry.
+                // A live session of this JID does NOT suppress the replay by
+                // itself: a rejoin under a DIFFERENT nick never announced the
+                // old nick's departure, so remaining occupants still owe its
+                // unavailable fan-out. Only a re-taken nick (the same JID's
+                // same-nick rejoin included — the departure freed it, so any
+                // holder is a newer generation) makes the receipt
+                // unreplayable; consume it then, or it vetoes
+                // dormancy/sealing (`EffectsOwed`) forever while the janitor
+                // has already dropped its retry.
+                if self.nick_retaken(&receipt) {
                     self.discard_departure_receipt(receipt.attempt);
                     return Ok(LeaveDisposition::Superseded);
                 }
@@ -1086,10 +1089,7 @@ impl RoomActor {
 }
 
 fn receipt_nick(receipt: &super::DepartureReceipt) -> &str {
-    match &receipt.outcome {
-        super::DepartureReceiptOutcome::Left(outcome) => outcome.nick.as_str(),
-        super::DepartureReceiptOutcome::Suppressed { nick, .. } => nick.as_str(),
-    }
+    receipt.nick().as_str()
 }
 
 fn receipt_disposition(receipt: super::DepartureReceipt) -> LeaveDisposition {
