@@ -72,7 +72,8 @@ pub fn delivered_message_kind(stanza: &Stanza) -> Option<MessageKind> {
 /// Count one delivered message on the kind-labeled flagship counter.
 /// The retired `waddle_messages_total` / `waddle_messages_per_second`
 /// text names keep answering via the Mimir alias recording rules
-/// (#1330 contract phase).
+/// (#1330 contract phase). This is queue admission for local delivery,
+/// not XEP-0198 handled-count progress.
 pub fn record_delivered_message(kind: MessageKind) {
     crate::counter_add!(
         "waddle.messages.delivered",

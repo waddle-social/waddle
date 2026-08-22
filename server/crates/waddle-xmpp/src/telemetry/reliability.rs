@@ -12,7 +12,7 @@
 use super::attributes::{
     IngressAliasOutcome, IngressCandidateOutcome, IngressDecisionClass, IngressGcOutcome,
     IngressRetryOutcome, IngressSkipReason, Janitor, PushRetryReason, PushSuppressReason,
-    SmEvictionPath, SweepOutcome,
+    SmAckOutcome, SmEvictionPath, SmResumeOutcome, SweepOutcome,
 };
 
 /// One table entry: a private `mod <helper> { fn add(count) }` holding
@@ -82,6 +82,64 @@ fn add_sm_unacked_evicted(count: u64, path: SmEvictionPath) {
 /// enumerated outbound path that caused it.
 pub fn increment_sm_unacked_evicted(path: SmEvictionPath) {
     add_sm_unacked_evicted(1, path);
+}
+
+fn add_sm_acks(count: u64, outcome: SmAckOutcome) {
+    crate::counter_add!(
+        "xmpp.sm.acks",
+        "{ack}",
+        "Client XEP-0198 <a/> acknowledgements received by outcome.",
+        count,
+        outcome,
+    );
+}
+
+/// Count one client XEP-0198 `<a/>` acknowledgement by outcome.
+pub fn increment_sm_ack(outcome: SmAckOutcome) {
+    add_sm_acks(1, outcome);
+}
+
+fn add_sm_resume_results(count: u64, outcome: SmResumeOutcome) {
+    crate::counter_add!(
+        "xmpp.sm.resume.results",
+        "{attempt}",
+        "Terminal XEP-0198 resume attempts by outcome.",
+        count,
+        outcome,
+    );
+}
+
+/// Count one terminal XEP-0198 resume attempt by outcome.
+pub fn increment_sm_resume_result(outcome: SmResumeOutcome) {
+    add_sm_resume_results(1, outcome);
+}
+
+fn add_sm_handled_progress_inner(count: u64) {
+    crate::counter_add!(
+        "xmpp.sm.handled_progress",
+        "{stanza}",
+        "XEP-0198 handled-count progress accepted from client acknowledgements.",
+        count,
+    );
+}
+
+/// Add the wrap-aware number of newly acknowledged stanzas from a client
+/// XEP-0198 `<a/>`.
+pub fn add_sm_handled_progress(count: u64) {
+    add_sm_handled_progress_inner(count);
+}
+
+/// Record the latency from the oldest outstanding XEP-0198 `<r/>` request to
+/// the first `<a/>` that covers its outbound frontier.
+pub fn record_sm_request_latency_ms(latency_ms: f64) {
+    crate::histogram_record!(
+        "xmpp.sm.request.latency",
+        "ms",
+        "Latency from the oldest outstanding XEP-0198 <r/> request to the <a/> \
+         that covers its requested outbound frontier. Later requests coalesce \
+         while one remains outstanding.",
+        latency_ms,
+    );
 }
 
 reliability_counters! {
@@ -857,6 +915,44 @@ mod tests {
             guard.counter_sum("xmpp.sm.unacked_evicted", &[("path", "batch")]),
             Some(1),
             "path-labeled sm eviction counter double-counted"
+        );
+    }
+
+    #[tokio::test]
+    async fn sm_ack_resume_progress_and_latency_helpers_emit() {
+        let guard = setup().await;
+
+        increment_sm_ack(SmAckOutcome::Advanced);
+        increment_sm_ack(SmAckOutcome::TooHigh);
+        increment_sm_resume_result(SmResumeOutcome::Resumed);
+        increment_sm_resume_result(SmResumeOutcome::Storage);
+        add_sm_handled_progress(7);
+        record_sm_request_latency_ms(12.5);
+
+        assert_eq!(
+            guard.counter_sum("xmpp.sm.acks", &[("outcome", "advanced")]),
+            Some(1)
+        );
+        assert_eq!(
+            guard.counter_sum("xmpp.sm.acks", &[("outcome", "too_high")]),
+            Some(1)
+        );
+        assert_eq!(
+            guard.counter_sum("xmpp.sm.resume.results", &[("outcome", "resumed")]),
+            Some(1)
+        );
+        assert_eq!(
+            guard.counter_sum("xmpp.sm.resume.results", &[("outcome", "storage")]),
+            Some(1)
+        );
+        assert_eq!(guard.counter_sum("xmpp.sm.handled_progress", &[]), Some(7));
+        assert_eq!(
+            guard.histogram_count("xmpp.sm.request.latency", &[]),
+            Some(1)
+        );
+        assert_eq!(
+            guard.metric_unit("xmpp.sm.request.latency"),
+            Some("ms".to_string())
         );
     }
 

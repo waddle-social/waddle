@@ -7685,6 +7685,7 @@ async fn presence_broadcast_to_detached_available_subscriber_replays_on_resume()
 
 #[tokio::test]
 async fn sm_resume_with_unknown_stream_id_fails() {
+    let metrics = waddle_xmpp::telemetry::test_support::acquire().await;
     let state = create_test_websocket_state().await;
     let mut conn = WsConnState::new();
     let jid: FullJid = "alice@example.com/web".parse().expect("jid");
@@ -7701,6 +7702,11 @@ async fn sm_resume_with_unknown_stream_id_fails() {
     assert!(conn.phase.is_authenticated());
     assert!(!conn.phase.is_ready());
     assert!(!conn.phase.is_resumed());
+    assert_eq!(
+        metrics.counter_sum("xmpp.sm.resume.results", &[("outcome", "not_found")]),
+        Some(1),
+        "one failed resume attempt must emit exactly one not_found result"
+    );
 }
 
 #[tokio::test]

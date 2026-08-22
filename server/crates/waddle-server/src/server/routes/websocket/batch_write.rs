@@ -419,6 +419,7 @@ where
                     | SendWindowOutcome::TimedOut => unreachable!("send outcome only"),
                 };
             }
+            conn.sm_state.note_ack_request_sent();
             // Give already-arrived inbound frames a chance to land:
             // `<a/>` acks shrink the unacked queue mid-flood instead
             // of waiting for the whole batch to finish.
@@ -503,6 +504,7 @@ where
     {
         return outcome;
     }
+    conn.sm_state.note_ack_request_sent();
     loop {
         if !batch_authoritative(authority) {
             return SendWindowOutcome::AuthorityRevoked;
@@ -571,6 +573,7 @@ where
                         {
                             return outcome;
                         }
+                        conn.sm_state.note_ack_request_sent();
                     }
                     if conn.phase.is_closing() {
                         return SendWindowOutcome::TransportClosed;
