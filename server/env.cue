@@ -455,6 +455,8 @@ schema.#Project & {
 					modules_yaml="$(mktemp)"
 					published_values="$(mktemp).yaml"
 					published_render="$(mktemp)"
+					telemetry_render="$(mktemp)"
+					telemetry_empty_render="$(mktemp)"
 					lineage_default_render="$(mktemp)"
 					lineage_cluster_render="$(mktemp)"
 					missing_uuid_stderr="$(mktemp)"
@@ -594,6 +596,76 @@ schema.#Project & {
 					  --namespace waddle \
 					  --set spicedb.enabled=false \
 					  "${chart_secret_args[@]}" > "${chart_render}"
+					configmap_env_value() {
+					  local render_file="$1"
+					  local key="$2"
+					  yq -r "select(.kind == \"ConfigMap\") | .data.${key} // \"\"" "${render_file}"
+					}
+					configmap_has_key() {
+					  local render_file="$1"
+					  local key="$2"
+					  yq -e "select(.kind == \"ConfigMap\") | .data | has(\"${key}\")" "${render_file}" > /dev/null
+					}
+					helm template waddle-server charts/waddle-server \
+					  --namespace waddle \
+					  --set spicedb.enabled=false \
+					  --set-string telemetry.otlpEndpoint=http://otel-sentinel:4317 \
+					  --set-string telemetry.serviceName=sentinel-service-name \
+					  --set-string telemetry.serviceVersion=sentinel-service-version \
+					  --set-string telemetry.deploymentEnvironment=sentinel-deployment-environment \
+					  --set-string telemetry.tracesSampler=parentbased_traceidratio \
+					  --set telemetry.tracesSamplerArg=0 \
+					  --set-string config.corsOrigins=https://sentinel.example \
+					  "${chart_secret_args[@]}" > "${telemetry_render}"
+					helm template waddle-server charts/waddle-server \
+					  --namespace waddle \
+					  --set spicedb.enabled=false \
+					  --set-string telemetry.otlpEndpoint= \
+					  --set-string telemetry.serviceName= \
+					  --set-string telemetry.serviceVersion= \
+					  --set-string telemetry.deploymentEnvironment= \
+					  --set-string telemetry.tracesSampler= \
+					  --set-string telemetry.tracesSamplerArg= \
+					  --set-string config.corsOrigins= \
+					  "${chart_secret_args[@]}" > "${telemetry_empty_render}"
+
+					if [ "$(configmap_env_value "${telemetry_render}" OTEL_EXPORTER_OTLP_ENDPOINT)" != "http://otel-sentinel:4317" ]; then
+					  echo "telemetry.otlpEndpoint must render OTEL_EXPORTER_OTLP_ENDPOINT with the configured value" >&2
+					  exit 1
+					fi
+					if [ "$(configmap_env_value "${telemetry_render}" OTEL_SERVICE_NAME)" != "sentinel-service-name" ]; then
+					  echo "telemetry.serviceName must render OTEL_SERVICE_NAME with the configured value" >&2
+					  exit 1
+					fi
+					if [ "$(configmap_env_value "${telemetry_render}" OTEL_SERVICE_VERSION)" != "sentinel-service-version" ]; then
+					  echo "telemetry.serviceVersion must render OTEL_SERVICE_VERSION with the configured value" >&2
+					  exit 1
+					fi
+					if [ "$(configmap_env_value "${telemetry_render}" OTEL_RESOURCE_ATTRIBUTES)" != "deployment.environment=sentinel-deployment-environment" ]; then
+					  echo "telemetry.deploymentEnvironment must render OTEL_RESOURCE_ATTRIBUTES=deployment.environment=<value>" >&2
+					  exit 1
+					fi
+					if [ "$(configmap_env_value "${telemetry_render}" OTEL_TRACES_SAMPLER)" != "parentbased_traceidratio" ]; then
+					  echo "telemetry.tracesSampler must render OTEL_TRACES_SAMPLER with the configured value" >&2
+					  exit 1
+					fi
+					if [ "$(configmap_env_value "${telemetry_render}" OTEL_TRACES_SAMPLER_ARG)" != "0" ]; then
+					  echo "telemetry.tracesSamplerArg must render OTEL_TRACES_SAMPLER_ARG even when the configured value is numeric 0" >&2
+					  exit 1
+					fi
+					if [ "$(configmap_env_value "${telemetry_render}" WADDLE_CORS_ORIGINS)" != "https://sentinel.example" ]; then
+					  echo "config.corsOrigins must render WADDLE_CORS_ORIGINS with the configured value" >&2
+					  exit 1
+					fi
+
+					for omitted_render in "${chart_render}" "${telemetry_empty_render}"; do
+					  for omitted_key in OTEL_EXPORTER_OTLP_ENDPOINT OTEL_SERVICE_NAME OTEL_SERVICE_VERSION OTEL_RESOURCE_ATTRIBUTES OTEL_TRACES_SAMPLER OTEL_TRACES_SAMPLER_ARG WADDLE_CORS_ORIGINS; do
+					    if configmap_has_key "${omitted_render}" "${omitted_key}"; then
+					      echo "${omitted_key} must be omitted entirely from the ConfigMap when its chart value is unset or empty" >&2
+					      exit 1
+					    fi
+					  done
+					done
 
 					if helm template waddle-server charts/waddle-server \
 					  --namespace waddle \
