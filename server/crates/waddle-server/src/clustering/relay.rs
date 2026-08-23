@@ -108,21 +108,6 @@ enum RelayDispatchKind {
 }
 
 impl RelayDispatchKind {
-    #[cfg(test)]
-    const ALL: [Self; 11] = [
-        Self::DeliverOrdered,
-        Self::RemoteResourceRegister,
-        Self::RemoteResourceUnregister,
-        Self::RemoteResourceUpdate,
-        Self::RemoteUserSideEffect,
-        Self::RemoteResourceRoute,
-        Self::RemoteResourceFrame,
-        Self::RemoteResourceForceDetach,
-        Self::ResumeSteal,
-        Self::Demote,
-        Self::ReassertMediaGrants,
-    ];
-
     const fn as_str(self) -> &'static str {
         match self {
             Self::DeliverOrdered => "deliver_ordered",

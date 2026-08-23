@@ -288,10 +288,29 @@ async fn relay_dispatch_span_is_a_root_even_inside_an_active_span() {
     );
 }
 
+// Lives here rather than as a `#[cfg(test)]` item in relay.rs: the
+// `delegated_relay_replies_go_through_the_dispatch_span_helper` guard treats
+// everything after the file's first `#[cfg(test)]` as test code, so a
+// test-gated item up in the production section would silently shrink the
+// segment it audits.
+const ALL_DISPATCH_KINDS: [RelayDispatchKind; 11] = [
+    RelayDispatchKind::DeliverOrdered,
+    RelayDispatchKind::RemoteResourceRegister,
+    RelayDispatchKind::RemoteResourceUnregister,
+    RelayDispatchKind::RemoteResourceUpdate,
+    RelayDispatchKind::RemoteUserSideEffect,
+    RelayDispatchKind::RemoteResourceRoute,
+    RelayDispatchKind::RemoteResourceFrame,
+    RelayDispatchKind::RemoteResourceForceDetach,
+    RelayDispatchKind::ResumeSteal,
+    RelayDispatchKind::Demote,
+    RelayDispatchKind::ReassertMediaGrants,
+];
+
 #[test]
 fn relay_dispatch_kind_strings_are_pinned() {
     assert_eq!(
-        RelayDispatchKind::ALL.map(RelayDispatchKind::as_str),
+        ALL_DISPATCH_KINDS.map(RelayDispatchKind::as_str),
         [
             "deliver_ordered",
             "remote_resource_register",
