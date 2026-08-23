@@ -96,14 +96,23 @@ groups:
     - name: waddle-janitors
       rules:
         - alert: JanitorHeartbeatStale
-          expr: min by (janitor) (increase(waddle_janitor_sweeps_total[30m])) == 0
+          expr: sum by (janitor, instance) (increase(waddle_janitor_sweeps_total[30m])) == 0
           for: 30m
           labels:
             severity: warning
             team: waddle
           annotations:
-            runbook: Every janitor loop records a sweep heartbeat on every tick (intervals 30s-300s), so at least 6 sweeps are expected per 30m per janitor. Zero increase over 30m sustained for 30m means the named loop is wedged, not idle. The series only exists once the dual-emit release (PR 1418) is deployed - before that this rule has nothing to evaluate.
+            runbook: Sum across the outcome label because a heartbeat means the janitor loop ran regardless of whether the sweep completed or failed. Zero increase over 30m sustained for 30m means the named loop is wedged on the named instance, not idle. Sweep counters are created only when incremented, so a janitor wedged before its first-ever tick on a fresh pod emits no series and is invisible to this rule; this is deliberate because repository telemetry rules forbid zero-registering counters read by alerts using == 0.
             summary: A janitor loop stopped emitting sweep heartbeats - the loop is wedged, not idle.
+        - alert: JanitorHeartbeatAbsent
+          expr: group by (instance) (target_info{job="waddle-server"}) unless group by (instance) (waddle_janitor_sweeps_total)
+          for: 30m
+          labels:
+            severity: warning
+            team: waddle
+          annotations:
+            runbook: A live waddle-server pod exports OTLP resource info but no janitor sweep series at all, so the janitor subsystem never started ticking on that pod (boot wedge).
+            summary: A waddle-server pod never emitted janitor sweep heartbeats - the janitor subsystem is boot-wedged.
     - name: waddle-calls
       rules:
         - alert: CallSetupFailureRate
