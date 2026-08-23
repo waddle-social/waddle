@@ -404,6 +404,7 @@ pub(super) async fn handle_sm_stanza(
     sm: SmStanza,
     state: &WebSocketState,
     ctx: SmCtx<'_>,
+    finalized_resume_outcome: &mut Option<waddle_xmpp::telemetry::attributes::SmResumeOutcome>,
 ) -> Vec<ResponseFrame> {
     use waddle_xmpp::stream_management::SmAck;
 
@@ -422,7 +423,9 @@ pub(super) async fn handle_sm_stanza(
             SmAck::new(ctx.sm_state.get_inbound_count()).to_xml(),
         )],
         SmStanza::Ack(ack) => apply_sm_ack(state, ctx.sm_state, ctx.phase, ack.h).await,
-        SmStanza::Resume(resume) => handle_sm_resume(resume, state, ctx).await,
+        SmStanza::Resume(resume) => {
+            handle_sm_resume(resume, state, ctx, finalized_resume_outcome).await
+        }
         // Server-origin nonzas should never arrive from a client. Ignore.
         SmStanza::Enabled(_) | SmStanza::Resumed(_) | SmStanza::Failed(_) => vec![],
     }
@@ -741,9 +744,24 @@ async fn handle_sm_resume(
     resume: SmResume,
     state: &WebSocketState,
     ctx: SmCtx<'_>,
+    finalized_resume_outcome: &mut Option<waddle_xmpp::telemetry::attributes::SmResumeOutcome>,
 ) -> Vec<ResponseFrame> {
     let terminal = handle_sm_resume_terminal(resume, state, ctx).await;
     observe::observe_sm_resume(&terminal);
+    // Terminal results are recorded only once the frame carrying them is
+    // written (the main loop consumes this slot after the batch write).
+    // Two exceptions record immediately here:
+    // - `ShutdownAbandoned` deliberately produces no frames — the attempt
+    //   is terminal server-side with nothing to write-gate on;
+    // - a preliminary `Resumed` stays un-staged: claim finalization decides
+    //   the real terminal and stages it (`registration.rs`).
+    match terminal.outcome() {
+        observe::SmResumeOutcome::Resumed => {}
+        observe::SmResumeOutcome::ShutdownAbandoned => {
+            observe::observe_sm_resume_finalized(observe::SmResumeOutcome::ShutdownAbandoned);
+        }
+        outcome => *finalized_resume_outcome = Some(outcome),
+    }
     terminal.into_frames()
 }
 

@@ -1510,14 +1510,18 @@ async fn handle_inbound_text(
         },
     )
     .await;
+    // The terminal resume frame is always frame 0 of its batch, and the
+    // writer sends frames in order — any written frame means the terminal
+    // reached the wire. Record the staged result exactly then, even when a
+    // LATER frame of the same batch broke the transport; and never when the
+    // batch died before its first write.
+    if write_report.written_frame_count > 0 {
+        if let Some(outcome) = conn.pending_finalized_resume_outcome.take() {
+            super::stream_management::observe_sm_resume_finalized(outcome);
+        }
+    }
     match write_report.outcome {
         BatchWriteOutcome::Continue => {
-            // The batch carrying the finalized resume terminal reached the
-            // wire — record the attempt's result now (never earlier: every
-            // upstream authority gate can still drop the batch unwritten).
-            if let Some(outcome) = conn.pending_finalized_resume_outcome.take() {
-                super::stream_management::observe_sm_resume_finalized(outcome);
-            }
             conn.commit_server_stream_open_response();
             conn.publish_pending_sm_enable(state.as_ref());
             let accepted_frame_indices: Vec<_> = (0..responses.frames.len()).collect();

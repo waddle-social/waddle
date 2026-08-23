@@ -1630,11 +1630,13 @@ impl InMemorySmSessionRegistry {
                 }
                 return Ok(ClaimSessionOutcome::LostClaim);
             }
-            Ok(Err(ClaimError::Backend(detail))) => {
-                return Err(SmRegistryError::StorageUnavailable(format!(
-                    "claim_session: ClaimStore ensure_claimed backend failure; \
-                     retaining acquisition responsibility for read-only reconciliation: {detail}"
-                )));
+            Ok(Err(ClaimError::Backend(_detail))) => {
+                // Backend diagnostics are dropped here (typed-error rule);
+                // acquisition responsibility is retained for read-only
+                // reconciliation exactly as for other ambiguous failures.
+                return Err(SmRegistryError::StorageUnavailable(
+                    super::traits::StorageOutageCause::Backend,
+                ));
             }
             Ok(Err(other)) => {
                 return Err(SmRegistryError::Internal(format!(
@@ -1643,12 +1645,13 @@ impl InMemorySmSessionRegistry {
                 )));
             }
             Err(_timeout) => {
-                return Err(SmRegistryError::StorageUnavailable(format!(
-                    "claim_session: ClaimStore ensure_claimed timed out after \
-                     {CLAIM_CALL_UNDER_SHARD_LOCK_TIMEOUT:?} while holding this stream's \
-                     shard lock (FIX 5); resume attempt fails rather than stalling every \
-                     other stream id sharing this lock"
-                )));
+                // FIX 5: a hung ensure_claimed fails this resume attempt
+                // typed (bounded by CLAIM_CALL_UNDER_SHARD_LOCK_TIMEOUT)
+                // rather than stalling every stream id sharing this shard
+                // lock.
+                return Err(SmRegistryError::StorageUnavailable(
+                    super::traits::StorageOutageCause::Timeout,
+                ));
             }
         };
         let Some(publication_guard) = self.node_identity.guard_if_current(&identity).await else {

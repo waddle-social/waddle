@@ -19,12 +19,32 @@ pub enum SmRegistryError {
     /// A storage-backed dependency (claim store, database) was unavailable
     /// or timed out — an infrastructure outage, not a registry logic error.
     /// Telemetry maps this to the `storage` resume outcome so incidents are
-    /// not folded into generic `internal` counts.
-    #[error("Storage-backed dependency unavailable: {0}")]
-    StorageUnavailable(String),
+    /// not folded into generic `internal` counts. Carries only the closed
+    /// cause; backend diagnostics are dropped at construction (typed-error
+    /// rule), never forwarded through this boundary.
+    #[error("Storage-backed dependency unavailable ({0})")]
+    StorageUnavailable(StorageOutageCause),
 
     #[error("Internal error: {0}")]
     Internal(String),
+}
+
+/// Closed cause for [`SmRegistryError::StorageUnavailable`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum StorageOutageCause {
+    /// The storage backend reported a failure.
+    Backend,
+    /// The storage call exceeded its bounded deadline.
+    Timeout,
+}
+
+impl std::fmt::Display for StorageOutageCause {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(match self {
+            Self::Backend => "backend",
+            Self::Timeout => "timeout",
+        })
+    }
 }
 
 /// One exact SM replay entry deleted by a tombstone scrub.
