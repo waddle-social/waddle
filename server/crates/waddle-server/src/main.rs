@@ -2,8 +2,22 @@ use anyhow::{Context, Result};
 use tracing::info;
 use waddle_server::{config, config::ServerConfig, db, server, telemetry};
 
-#[tokio::main]
-async fn main() -> Result<()> {
+/// Tokio's default 2 MiB worker stack is no longer enough for the deepest
+/// protocol futures (a debug/ci-test-profile session-initiate rewrite
+/// overflows it and aborts the whole process — every connected socket then
+/// resets without a close handshake; first tripped on CI by the #1702
+/// merge). 8 MiB matches the platform main-thread default and keeps
+/// headroom; the real long-term fix is boxing the fattest handler futures.
+fn main() -> Result<()> {
+    tokio::runtime::Builder::new_multi_thread()
+        .enable_all()
+        .thread_stack_size(8 * 1024 * 1024)
+        .build()
+        .context("build tokio runtime")?
+        .block_on(async_main())
+}
+
+async fn async_main() -> Result<()> {
     // Install the ring crypto provider for rustls (required for XMPP TLS)
     rustls::crypto::ring::default_provider()
         .install_default()
