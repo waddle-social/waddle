@@ -215,7 +215,9 @@ extraSecretChecksum: ""
 
 telemetry:
   otlpEndpoint: ""
-  serviceName: waddle-server
+  # Omit OTEL_SERVICE_NAME by default so the server's built-in
+  # `waddle-server` fallback remains the single source of truth.
+  serviceName: ""
   serviceVersion: ""
   # deployment.environment resource attribute (e.g. "production").
   # Rendered as the standard OTEL_RESOURCE_ATTRIBUTES env var and

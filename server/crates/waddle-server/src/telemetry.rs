@@ -554,7 +554,97 @@ pub fn shutdown(metrics_flush: MetricsFlush) {
 }
 #[cfg(test)]
 mod tests {
+    use opentelemetry::trace::TracerProvider as _;
     use opentelemetry::Key;
+    use opentelemetry_appender_tracing::layer::OpenTelemetryTracingBridge;
+    use opentelemetry_sdk::{
+        logs::{BatchConfigBuilder as LogBatchConfigBuilder, BatchLogProcessor, SdkLoggerProvider},
+        metrics::{
+            data::ResourceMetrics, exporter::PushMetricExporter, PeriodicReader, SdkMeterProvider,
+            Temporality,
+        },
+        trace::{
+            BatchConfigBuilder as TraceBatchConfigBuilder, BatchSpanProcessor, SdkTracerProvider,
+            SpanExporter,
+        },
+    };
+    use std::{
+        sync::{
+            atomic::{AtomicUsize, Ordering},
+            Arc,
+        },
+        time::{Duration, Instant},
+    };
+    use tracing_subscriber::{layer::SubscriberExt, Layer as _};
+
+    #[derive(Debug)]
+    struct FailingSpanExporter {
+        exports: Arc<AtomicUsize>,
+    }
+
+    impl SpanExporter for FailingSpanExporter {
+        fn export(
+            &self,
+            _batch: Vec<opentelemetry_sdk::trace::SpanData>,
+        ) -> impl std::future::Future<Output = opentelemetry_sdk::error::OTelSdkResult> + Send
+        {
+            self.exports.fetch_add(1, Ordering::SeqCst);
+            std::future::ready(Err(opentelemetry_sdk::error::OTelSdkError::Timeout(
+                Duration::from_millis(1),
+            )))
+        }
+    }
+
+    #[derive(Debug)]
+    struct FailingLogExporter {
+        exports: Arc<AtomicUsize>,
+    }
+
+    impl opentelemetry_sdk::logs::LogExporter for FailingLogExporter {
+        fn export(
+            &self,
+            _batch: opentelemetry_sdk::logs::LogBatch<'_>,
+        ) -> impl std::future::Future<Output = opentelemetry_sdk::error::OTelSdkResult> + Send
+        {
+            self.exports.fetch_add(1, Ordering::SeqCst);
+            std::future::ready(Err(opentelemetry_sdk::error::OTelSdkError::Timeout(
+                Duration::from_millis(1),
+            )))
+        }
+    }
+
+    #[derive(Debug)]
+    struct FailingMetricExporter {
+        exports: Arc<AtomicUsize>,
+    }
+
+    impl PushMetricExporter for FailingMetricExporter {
+        fn export(
+            &self,
+            _metrics: &ResourceMetrics,
+        ) -> impl std::future::Future<Output = opentelemetry_sdk::error::OTelSdkResult> + Send
+        {
+            self.exports.fetch_add(1, Ordering::SeqCst);
+            std::future::ready(Err(opentelemetry_sdk::error::OTelSdkError::Timeout(
+                Duration::from_millis(1),
+            )))
+        }
+
+        fn force_flush(&self) -> opentelemetry_sdk::error::OTelSdkResult {
+            Ok(())
+        }
+
+        fn shutdown_with_timeout(
+            &self,
+            _timeout: Duration,
+        ) -> opentelemetry_sdk::error::OTelSdkResult {
+            Ok(())
+        }
+
+        fn temporality(&self) -> Temporality {
+            Temporality::Cumulative
+        }
+    }
 
     #[test]
     fn test_build_resource() {
@@ -746,5 +836,147 @@ mod tests {
         // invalid form, this test panics here instead of at process init
         // in production.
         let _filter = super::log_bridge_filter();
+    }
+
+    async fn telemetry_outage_child() {
+        use waddle_xmpp::ownership::{
+            ClaimStore, Entity, EntityType, InProcessClaimStore, NodeIdentity, ObservedClaimStore,
+        };
+
+        let _metrics_guard = waddle_xmpp::prometheus::metrics_test_lock().lock().await;
+        let trace_exports = Arc::new(AtomicUsize::new(0));
+        let log_exports = Arc::new(AtomicUsize::new(0));
+        let metric_exports = Arc::new(AtomicUsize::new(0));
+
+        let trace_exporter = FailingSpanExporter {
+            exports: trace_exports.clone(),
+        };
+        let trace_provider = SdkTracerProvider::builder()
+            .with_span_processor(
+                BatchSpanProcessor::builder(trace_exporter)
+                    .with_batch_config(
+                        TraceBatchConfigBuilder::default()
+                            .with_scheduled_delay(Duration::from_millis(10))
+                            .with_max_queue_size(32)
+                            .with_max_export_batch_size(1)
+                            .build(),
+                    )
+                    .build(),
+            )
+            .build();
+        let tracer = trace_provider.tracer("telemetry-outage-test");
+
+        let metric_exporter = FailingMetricExporter {
+            exports: metric_exports.clone(),
+        };
+        let meter_provider = SdkMeterProvider::builder()
+            .with_reader(
+                PeriodicReader::builder(metric_exporter)
+                    .with_interval(Duration::from_millis(10))
+                    .build(),
+            )
+            .build();
+        opentelemetry::global::set_meter_provider(meter_provider.clone());
+
+        let log_exporter = FailingLogExporter {
+            exports: log_exports.clone(),
+        };
+        let logger_provider = SdkLoggerProvider::builder()
+            .with_log_processor(
+                BatchLogProcessor::builder(log_exporter)
+                    .with_batch_config(
+                        LogBatchConfigBuilder::default()
+                            .with_scheduled_delay(Duration::from_millis(10))
+                            .with_max_queue_size(32)
+                            .with_max_export_batch_size(1)
+                            .build(),
+                    )
+                    .build(),
+            )
+            .build();
+
+        let subscriber = tracing_subscriber::registry()
+            .with(tracing_subscriber::filter::LevelFilter::DEBUG)
+            .with(tracing_opentelemetry::layer().with_tracer(tracer))
+            .with(
+                OpenTelemetryTracingBridge::new(&logger_provider)
+                    .with_filter(super::log_bridge_filter()),
+            );
+        let _subscriber = tracing::subscriber::set_default(subscriber);
+
+        let store = ObservedClaimStore::new(InProcessClaimStore::new());
+        let entity = Entity::new(EntityType::SmSession, "telemetry-outage-test");
+        let owner = NodeIdentity::new("node-a", "epoch-a");
+
+        let elapsed = {
+            let operation_span = tracing::info_span!("claim_mutation_outage_test");
+            let _entered = operation_span.enter();
+            let started = Instant::now();
+            let acquired =
+                tokio::time::timeout(Duration::from_millis(250), store.acquire(&entity, &owner))
+                    .await
+                    .expect("claim mutation must complete within the bound")
+                    .expect("claim mutation must succeed despite exporter outage");
+            assert_eq!(
+                acquired.0, 0,
+                "first in-process claim epoch should stay unchanged"
+            );
+            started.elapsed()
+        };
+
+        assert!(
+            elapsed < Duration::from_millis(250),
+            "claim mutation took too long with exporters failing: {elapsed:?}"
+        );
+        let deadline = Instant::now() + Duration::from_secs(2);
+        while Instant::now() < deadline
+            && (trace_exports.load(Ordering::SeqCst) == 0
+                || log_exports.load(Ordering::SeqCst) == 0
+                || metric_exports.load(Ordering::SeqCst) == 0)
+        {
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        assert!(
+            trace_exports.load(Ordering::SeqCst) > 0,
+            "trace batch processor never invoked the failing OTLP exporter"
+        );
+        assert!(
+            log_exports.load(Ordering::SeqCst) > 0,
+            "log batch processor never invoked the failing OTLP exporter"
+        );
+        assert!(
+            metric_exports.load(Ordering::SeqCst) > 0,
+            "metric periodic reader never invoked the failing OTLP exporter"
+        );
+
+        let _ = trace_provider.shutdown();
+        let _ = logger_provider.shutdown();
+        let _ = meter_provider.shutdown();
+    }
+
+    #[test]
+    fn telemetry_outage_does_not_block_claim_mutation_logic() {
+        const CHILD_ENV: &str = "WADDLE_TELEMETRY_OUTAGE_CHILD";
+        if std::env::var_os(CHILD_ENV).is_some() {
+            tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .expect("build current-thread runtime")
+                .block_on(telemetry_outage_child());
+            return;
+        }
+
+        let status =
+            std::process::Command::new(std::env::current_exe().expect("current test binary"))
+                .arg("--exact")
+                .arg("telemetry::tests::telemetry_outage_does_not_block_claim_mutation_logic")
+                .arg("--nocapture")
+                .env(CHILD_ENV, "1")
+                .status()
+                .expect("spawn isolated telemetry outage child process");
+        assert!(
+            status.success(),
+            "isolated telemetry outage child failed: {status}"
+        );
     }
 }
