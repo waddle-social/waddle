@@ -350,7 +350,10 @@ impl InMemorySmSessionRegistry {
                 .current_claim(&entity)
                 .await
                 .map_err(|e| match e {
-                    crate::ownership::ClaimError::Backend(_) => {
+                    // Poisoned = persistently broken store: storage health,
+                    // same classification as the ownership decorator.
+                    crate::ownership::ClaimError::Backend(_)
+                    | crate::ownership::ClaimError::Poisoned => {
                         SmRegistryError::StorageUnavailable(
                             super::traits::StorageOutageCause::Backend,
                         )
@@ -975,7 +978,10 @@ impl InMemorySmSessionRegistry {
             .current_claim(entity)
             .await
             .map_err(|e| match e {
-                crate::ownership::ClaimError::Backend(_) => {
+                // Poisoned = persistently broken store: storage health,
+                // same classification as the ownership decorator.
+                crate::ownership::ClaimError::Backend(_)
+                | crate::ownership::ClaimError::Poisoned => {
                     SmRegistryError::StorageUnavailable(super::traits::StorageOutageCause::Backend)
                 }
                 other => SmRegistryError::Internal(other.to_string()),

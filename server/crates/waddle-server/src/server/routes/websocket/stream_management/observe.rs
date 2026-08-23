@@ -340,14 +340,17 @@ impl SmResumeTerminal {
 /// Record the terminal resume result once the transmitted response is
 /// decided (claim finalization) — the preliminary `Resumed` from
 /// `handle_sm_resume` is provisional until then. See the module doc.
-pub(in crate::server::routes::websocket) fn observe_sm_resume_finalized(outcome: SmResumeOutcome) {
+pub(in crate::server::routes::websocket) fn observe_sm_resume_finalized(
+    outcome: SmResumeOutcome,
+    stream_id: Option<&str>,
+) {
     reliability::increment_sm_resume_result(outcome);
     if matches!(outcome, SmResumeOutcome::Resumed) {
         // Definitive success marker, emitted only after the terminal frame
         // reached the wire. The delivery-reliability dashboard matches the
         // exact `SM resumed` substring; the provisional acceptance log above
         // deliberately does not contain it.
-        info!("SM resumed");
+        info!(stream_id = stream_id.unwrap_or("<unset>"), "SM resumed");
     }
 }
 
@@ -371,7 +374,11 @@ pub(super) fn observe_sm_resume(terminal: &SmResumeTerminal) {
                 info!(stream_id = %stream_id, outcome = ?outcome, "SM resume rejected: unexpected request");
             }
             SmResumeOutcome::NotFound => {
-                info!(stream_id = %stream_id, outcome = ?outcome, "SM resume rejected: session not found or expired");
+                if matches!(source, SmResumeSource::CrossNode) {
+                    info!(stream_id = %stream_id, outcome = ?outcome, source = source.as_str(), "SM resume rejected: cross-node session not found or expired");
+                } else {
+                    info!(stream_id = %stream_id, outcome = ?outcome, source = source.as_str(), "SM resume rejected: session not found or expired");
+                }
             }
             SmResumeOutcome::OwnerUnreachable
             | SmResumeOutcome::Storage
@@ -582,7 +589,7 @@ mod tests {
             None,
             "preliminary resumed terminal must not count before claim finalization"
         );
-        observe_sm_resume_finalized(SmResumeOutcome::Resumed);
+        observe_sm_resume_finalized(SmResumeOutcome::Resumed, Some("stream-resumed"));
 
         provider
             .force_flush()

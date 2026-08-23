@@ -758,7 +758,7 @@ async fn handle_sm_resume(
     match terminal.outcome() {
         observe::SmResumeOutcome::Resumed => {}
         observe::SmResumeOutcome::ShutdownAbandoned => {
-            observe::observe_sm_resume_finalized(observe::SmResumeOutcome::ShutdownAbandoned);
+            observe::observe_sm_resume_finalized(observe::SmResumeOutcome::ShutdownAbandoned, None);
         }
         outcome => *finalized_resume_outcome = Some(outcome),
     }
