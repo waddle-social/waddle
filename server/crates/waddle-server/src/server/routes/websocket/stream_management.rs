@@ -881,9 +881,18 @@ async fn handle_sm_resume_terminal(
                         SmResumeOutcome::Storage,
                     );
                 }
-                Some(CrossNodeAttemptOutcome::Completed(Ok(CrossNodeResumeOutcome::NotFound)))
-                | None => {
+                Some(CrossNodeAttemptOutcome::Completed(Ok(CrossNodeResumeOutcome::NotFound))) => {
                     return SmResumeTerminal::failed_cross_node(
+                        waddle_xmpp::pending_delivery::SmSessionId::new(resume.previd),
+                        SmResumeOutcome::NotFound,
+                    );
+                }
+                // `None` means the cross-node path was never entered (no
+                // authenticated bare JID to verify against) — a LOCAL miss.
+                // Marking it cross-node would miscount the clustering
+                // dashboard's cross-node rejection panel.
+                None => {
+                    return SmResumeTerminal::failed(
                         waddle_xmpp::pending_delivery::SmSessionId::new(resume.previd),
                         SmResumeOutcome::NotFound,
                     );

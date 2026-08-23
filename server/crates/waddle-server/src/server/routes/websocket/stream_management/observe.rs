@@ -342,7 +342,7 @@ impl SmResumeTerminal {
 /// `handle_sm_resume` is provisional until then. See the module doc.
 pub(in crate::server::routes::websocket) fn observe_sm_resume_finalized(
     outcome: SmResumeOutcome,
-    stream_id: Option<&str>,
+    stream_id: Option<&SmSessionId>,
 ) {
     reliability::increment_sm_resume_result(outcome);
     if matches!(outcome, SmResumeOutcome::Resumed) {
@@ -350,7 +350,10 @@ pub(in crate::server::routes::websocket) fn observe_sm_resume_finalized(
         // reached the wire. The delivery-reliability dashboard matches the
         // exact `SM resumed` substring; the provisional acceptance log above
         // deliberately does not contain it.
-        info!(stream_id = stream_id.unwrap_or("<unset>"), "SM resumed");
+        info!(
+            stream_id = stream_id.map(SmSessionId::as_str).unwrap_or("<unset>"),
+            "SM resumed"
+        );
     }
 }
 
@@ -589,7 +592,10 @@ mod tests {
             None,
             "preliminary resumed terminal must not count before claim finalization"
         );
-        observe_sm_resume_finalized(SmResumeOutcome::Resumed, Some("stream-resumed"));
+        observe_sm_resume_finalized(
+            SmResumeOutcome::Resumed,
+            Some(&SmSessionId::new("stream-resumed")),
+        );
 
         provider
             .force_flush()
