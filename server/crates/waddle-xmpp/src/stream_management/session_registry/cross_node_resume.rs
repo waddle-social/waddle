@@ -345,11 +345,18 @@ impl InMemorySmSessionRegistry {
     ) -> Result<CrossNodeResumeStage, SmRegistryError> {
         let entity = Entity::new(EntityType::SmSession, stream_id.to_string());
 
-        let Some(snapshot) = self
-            .claim_store
-            .current_claim(&entity)
-            .await
-            .map_err(|e| SmRegistryError::Internal(e.to_string()))?
+        let Some(snapshot) =
+            self.claim_store
+                .current_claim(&entity)
+                .await
+                .map_err(|e| match e {
+                    crate::ownership::ClaimError::Backend(_) => {
+                        SmRegistryError::StorageUnavailable(
+                            super::traits::StorageOutageCause::Backend,
+                        )
+                    }
+                    other => SmRegistryError::Internal(other.to_string()),
+                })?
         else {
             // FIX C: no claim at all does not mean nothing to resume — a
             // persisted snapshot can outlive its claim (this node's own
@@ -967,8 +974,12 @@ impl InMemorySmSessionRegistry {
             .claim_store
             .current_claim(entity)
             .await
-            .map_err(|e| SmRegistryError::Internal(e.to_string()))?
-        {
+            .map_err(|e| match e {
+                crate::ownership::ClaimError::Backend(_) => {
+                    SmRegistryError::StorageUnavailable(super::traits::StorageOutageCause::Backend)
+                }
+                other => SmRegistryError::Internal(other.to_string()),
+            })? {
             None => Ok(CrossNodeResumeOutcome::NotFound),
             Some(snapshot) if !snapshot.owner_lease_fresh => Ok(CrossNodeResumeOutcome::NotFound),
             Some(_) => Ok(CrossNodeResumeOutcome::OwnerUnreachable),
@@ -983,10 +994,12 @@ impl InMemorySmSessionRegistry {
             return Ok(None);
         };
         let session_id = crate::pending_delivery::SmSessionId::new(stream_id.to_string());
-        storage
-            .get_session(&session_id)
-            .await
-            .map_err(|e| SmRegistryError::Internal(e.to_string()))
+        // Durable-session reads are storage-backed by definition; a failed
+        // read during a cross-node resume is a database incident, not a
+        // registry logic error.
+        storage.get_session(&session_id).await.map_err(|_e| {
+            SmRegistryError::StorageUnavailable(super::traits::StorageOutageCause::Backend)
+        })
     }
 }
 

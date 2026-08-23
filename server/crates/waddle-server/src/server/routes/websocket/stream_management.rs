@@ -860,7 +860,7 @@ async fn handle_sm_resume_terminal(
                 Some(CrossNodeAttemptOutcome::Completed(Ok(
                     CrossNodeResumeOutcome::NotAuthorized,
                 ))) => {
-                    return SmResumeTerminal::failed(
+                    return SmResumeTerminal::failed_cross_node(
                         waddle_xmpp::pending_delivery::SmSessionId::new(resume.previd),
                         SmResumeOutcome::IdentityMismatch,
                     );
@@ -868,7 +868,7 @@ async fn handle_sm_resume_terminal(
                 Some(CrossNodeAttemptOutcome::Completed(Ok(
                     CrossNodeResumeOutcome::OwnerUnreachable,
                 ))) => {
-                    return SmResumeTerminal::failed(
+                    return SmResumeTerminal::failed_cross_node(
                         waddle_xmpp::pending_delivery::SmSessionId::new(resume.previd),
                         SmResumeOutcome::OwnerUnreachable,
                     );
@@ -876,14 +876,14 @@ async fn handle_sm_resume_terminal(
                 Some(CrossNodeAttemptOutcome::Completed(Ok(
                     CrossNodeResumeOutcome::StorageUnavailable,
                 ))) => {
-                    return SmResumeTerminal::failed(
+                    return SmResumeTerminal::failed_cross_node(
                         waddle_xmpp::pending_delivery::SmSessionId::new(resume.previd),
                         SmResumeOutcome::Storage,
                     );
                 }
                 Some(CrossNodeAttemptOutcome::Completed(Ok(CrossNodeResumeOutcome::NotFound)))
                 | None => {
-                    return SmResumeTerminal::failed(
+                    return SmResumeTerminal::failed_cross_node(
                         waddle_xmpp::pending_delivery::SmSessionId::new(resume.previd),
                         SmResumeOutcome::NotFound,
                     );
@@ -891,13 +891,13 @@ async fn handle_sm_resume_terminal(
                 Some(CrossNodeAttemptOutcome::Completed(Err(
                     waddle_xmpp::stream_management::SmRegistryError::StorageUnavailable(_),
                 ))) => {
-                    return SmResumeTerminal::failed(
+                    return SmResumeTerminal::failed_cross_node(
                         waddle_xmpp::pending_delivery::SmSessionId::new(resume.previd),
                         SmResumeOutcome::Storage,
                     );
                 }
                 Some(CrossNodeAttemptOutcome::Completed(Err(_))) => {
-                    return SmResumeTerminal::failed(
+                    return SmResumeTerminal::failed_cross_node(
                         waddle_xmpp::pending_delivery::SmSessionId::new(resume.previd),
                         SmResumeOutcome::Internal,
                     );
@@ -918,7 +918,7 @@ async fn handle_sm_resume_terminal(
                     // -disconnects mid-hold is observed at the next loop
                     // iteration (the WS read arm); the hold itself is
                     // already bounded by FIX 1's budget regardless.
-                    return SmResumeTerminal::failed(
+                    return SmResumeTerminal::failed_cross_node(
                         waddle_xmpp::pending_delivery::SmSessionId::new(resume.previd),
                         SmResumeOutcome::ShutdownAbandoned,
                     );
