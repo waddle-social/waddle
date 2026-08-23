@@ -275,10 +275,8 @@ async fn create_owned_room_and_lifecycle(state: &WebSocketState) -> RoomLifecycl
 async fn recv_outbound(rx: &mut mpsc::Receiver<OutboundStanza>) -> OutboundStanza {
     // Positive waits stay generous: CI's loaded nextest workers stretched a
     // 1s bound past its margin (drain passes hold 5s enqueue timeouts ahead
-    // of the frame under test), and 15s still tripped on loaded runners
-    // (PR #1708: three timeouts at this bound while the test passes locally
-    // in ~6s).
-    tokio::time::timeout(Duration::from_secs(30), rx.recv())
+    // of the frame under test).
+    tokio::time::timeout(Duration::from_secs(15), rx.recv())
         .await
         .expect("outbound receive timeout")
         .expect("outbound stanza")
@@ -2153,6 +2151,19 @@ async fn superseded_mid_pass_renewal_aborts_delivery_and_unblocks_terminal_drain
     assert_eq!(
         first_summary.stale, 1,
         "mid-pass supersession should abort the obsolete row as stale"
+    );
+    // #1705 regression: whichever renewal checkpoint detected the
+    // supersession (pre-render or mid-roster), the abort must have deleted
+    // the still-token-owned superseded predecessor — a retained
+    // superseded+leased row blocks the lifecycle FIFO and starves the
+    // terminal drain below.
+    assert!(
+        store
+            .find(&config_key)
+            .await
+            .expect("find superseded config row")
+            .is_none(),
+        "the aborted superseded predecessor must be deleted, not retained as a FIFO head"
     );
 
     let (terminal_tx, mut terminal_rx) = mpsc::channel::<OutboundStanza>(4);

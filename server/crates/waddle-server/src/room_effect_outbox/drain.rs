@@ -432,7 +432,17 @@ async fn drain_claimed(
             // Same condition as a failed revalidate: another holder owns
             // delivery now — report it identically so sweep telemetry (and
             // tests) see one disposition for a lost lease regardless of
-            // which checkpoint detected it.
+            // which checkpoint detected it. Mirror the pre-render branch's
+            // token-gated complete(): a mid-pass supersession leaves this
+            // row `superseded` while THIS drain still holds its exact lease
+            // token, and without the delete the dead predecessor keeps
+            // blocking the lifecycle FIFO (and the terminal live-lease
+            // fence) until a reaper expires it — the #1705 recurring
+            // terminal-drain starvation. A stolen lease makes the delete a
+            // token-mismatch no-op, exactly like the pre-render branch.
+            let _ = store
+                .complete(&claimed.row.key, &claimed.lease_token)
+                .await?;
             return Ok(ClaimDisposition::Stale);
         }
         if initiator == Some(&recipient) {
