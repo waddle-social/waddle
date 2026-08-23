@@ -45,6 +45,89 @@ impl std::fmt::Display for ClaimRejection {
     }
 }
 
+/// Emits a `cancelled` fence sample if the caller's deadline drops the
+/// in-flight fence future before the store answers (room publication and SM
+/// hydration both bound this call with `tokio::time::timeout`). Without the
+/// guard, exactly the outage samples this family exists to expose would be
+/// the ones never recorded.
+struct FenceCancellationGuard {
+    armed: bool,
+}
+
+impl FenceCancellationGuard {
+    fn new() -> Self {
+        Self { armed: true }
+    }
+
+    fn disarm(mut self) {
+        self.armed = false;
+    }
+}
+
+impl Drop for FenceCancellationGuard {
+    fn drop(&mut self) {
+        if !self.armed {
+            return;
+        }
+        crate::counter_add!(
+            "waddle.clustering.fence.results",
+            "{check}",
+            "Advisory ownership fence checks by bounded result.",
+            1,
+            FenceResult::Cancelled,
+        );
+        tracing::debug!(
+            result = %FenceResult::Cancelled.value(),
+            "ownership fence cancelled at the caller's deadline"
+        );
+    }
+}
+
+/// Mutation counterpart of [`FenceCancellationGuard`]. Cancellations count
+/// as `backend` rather than a dedicated label value: `operation x result`
+/// already sits at the documented series ceiling, and a store that missed
+/// the caller's deadline is a storage-health event either way; the tracing
+/// observation carries the closed `cancelled` marker.
+struct MutationCancellationGuard {
+    operation: ClaimOp,
+    armed: bool,
+}
+
+impl MutationCancellationGuard {
+    fn new(operation: ClaimOp) -> Self {
+        Self {
+            operation,
+            armed: true,
+        }
+    }
+
+    fn disarm(mut self) {
+        self.armed = false;
+    }
+}
+
+impl Drop for MutationCancellationGuard {
+    fn drop(&mut self) {
+        if !self.armed {
+            return;
+        }
+        crate::counter_add!(
+            "waddle.clustering.claim.mutations",
+            "{mutation}",
+            "External ownership claim mutation attempts by operation and bounded result.",
+            1,
+            self.operation,
+            ClaimResult::Backend,
+        );
+        tracing::debug!(
+            operation = %self.operation.value(),
+            result = %ClaimResult::Backend.value(),
+            cancelled = true,
+            "ownership claim mutation cancelled at the caller's deadline"
+        );
+    }
+}
+
 /// Observes a concrete claim store without changing its ownership semantics.
 pub struct ObservedClaimStore<S> {
     inner: S,
@@ -139,7 +222,9 @@ impl<S: ClaimStore> ClaimStore for ObservedClaimStore<S> {
     }
 
     async fn acquire(&self, entity: &Entity, me: &NodeIdentity) -> Result<ClaimEpoch, ClaimError> {
+        let guard = MutationCancellationGuard::new(ClaimOp::Acquire);
         let result = self.inner.acquire(entity, me).await;
+        guard.disarm();
         observe_result(ClaimOp::Acquire, Some(entity), None, &result);
         result
     }
@@ -149,7 +234,9 @@ impl<S: ClaimStore> ClaimStore for ObservedClaimStore<S> {
         entity: &Entity,
         me: &NodeIdentity,
     ) -> Result<ClaimEpoch, ClaimError> {
+        let guard = MutationCancellationGuard::new(ClaimOp::EnsureClaimed);
         let result = self.inner.ensure_claimed(entity, me).await;
+        guard.disarm();
         observe_result(ClaimOp::EnsureClaimed, Some(entity), None, &result);
         result
     }
@@ -161,10 +248,12 @@ impl<S: ClaimStore> ClaimStore for ObservedClaimStore<S> {
         staleness: StalePredicate,
         me: &NodeIdentity,
     ) -> Result<ClaimEpoch, ClaimError> {
+        let guard = MutationCancellationGuard::new(ClaimOp::StealStale);
         let result = self
             .inner
             .steal_stale(entity, observed, staleness, me)
             .await;
+        guard.disarm();
         observe_result(ClaimOp::StealStale, Some(entity), Some(observed), &result);
         result
     }
@@ -176,10 +265,12 @@ impl<S: ClaimStore> ClaimStore for ObservedClaimStore<S> {
         witness: ResumeIdentityProof,
         me: &NodeIdentity,
     ) -> Result<ClaimEpoch, ClaimError> {
+        let guard = MutationCancellationGuard::new(ClaimOp::StealForResume);
         let result = self
             .inner
             .steal_for_resume(entity, observed, witness, me)
             .await;
+        guard.disarm();
         observe_result(
             ClaimOp::StealForResume,
             Some(entity),
@@ -206,7 +297,9 @@ impl<S: ClaimStore> ClaimStore for ObservedClaimStore<S> {
         me: &NodeIdentity,
         mine: ClaimEpoch,
     ) -> Result<bool, ClaimError> {
+        let guard = FenceCancellationGuard::new();
         let result = self.inner.fence(entity, me, mine).await;
+        guard.disarm();
         let (class, rejection) = match &result {
             Ok(true) => (FenceResult::Ok, None),
             Ok(false) => (FenceResult::Rejected, Some(ClaimRejection::NotOwned)),
@@ -236,7 +329,9 @@ impl<S: ClaimStore> ClaimStore for ObservedClaimStore<S> {
         me: &NodeIdentity,
         mine: ClaimEpoch,
     ) -> Result<(), ClaimError> {
+        let guard = MutationCancellationGuard::new(ClaimOp::Release);
         let result = self.inner.release(entity, me, mine).await;
+        guard.disarm();
         observe_release_result(ClaimOp::Release, Some(entity), Some(mine), &result);
         result
     }
@@ -247,7 +342,9 @@ impl<S: ClaimStore> ClaimStore for ObservedClaimStore<S> {
         me: &NodeIdentity,
         mine: ClaimEpoch,
     ) -> Result<ExactReleaseOutcome, ClaimError> {
+        let guard = MutationCancellationGuard::new(ClaimOp::ReleaseExact);
         let result = self.inner.release_exact(entity, me, mine).await;
+        guard.disarm();
         match &result {
             Ok(ExactReleaseOutcome::Released) => observe_mutation(
                 ClaimOp::ReleaseExact,
@@ -278,7 +375,9 @@ impl<S: ClaimStore> ClaimStore for ObservedClaimStore<S> {
     }
 
     async fn release_many(&self, entities: &[Entity], me: &NodeIdentity) -> Result<(), ClaimError> {
+        let guard = MutationCancellationGuard::new(ClaimOp::ReleaseMany);
         let result = self.inner.release_many(entities, me).await;
+        guard.disarm();
         observe_release_result(ClaimOp::ReleaseMany, None, None, &result);
         result
     }
@@ -306,5 +405,129 @@ mod tests {
             assert_eq!(result, ClaimResult::Rejected);
             assert!(detail.is_some());
         }
+    }
+
+    #[tokio::test]
+    async fn cancelled_calls_emit_bounded_samples() {
+        use super::super::EntityType;
+
+        struct PendingStore;
+
+        #[async_trait]
+        impl ClaimStore for PendingStore {
+            async fn ensure_schema(&self) -> Result<(), ClaimError> {
+                std::future::pending().await
+            }
+            async fn acquire(
+                &self,
+                _entity: &Entity,
+                _me: &NodeIdentity,
+            ) -> Result<ClaimEpoch, ClaimError> {
+                std::future::pending().await
+            }
+            async fn ensure_claimed(
+                &self,
+                _entity: &Entity,
+                _me: &NodeIdentity,
+            ) -> Result<ClaimEpoch, ClaimError> {
+                std::future::pending().await
+            }
+            async fn steal_stale(
+                &self,
+                _entity: &Entity,
+                _observed: ClaimEpoch,
+                _staleness: StalePredicate,
+                _me: &NodeIdentity,
+            ) -> Result<ClaimEpoch, ClaimError> {
+                std::future::pending().await
+            }
+            async fn steal_for_resume(
+                &self,
+                _entity: &Entity,
+                _observed: ClaimEpoch,
+                _witness: ResumeIdentityProof,
+                _me: &NodeIdentity,
+            ) -> Result<ClaimEpoch, ClaimError> {
+                std::future::pending().await
+            }
+            async fn current_claim(
+                &self,
+                _entity: &Entity,
+            ) -> Result<Option<ClaimSnapshot>, ClaimError> {
+                std::future::pending().await
+            }
+            async fn current_claim_after_pending_writes(
+                &self,
+                _entity: &Entity,
+            ) -> Result<Option<ClaimSnapshot>, ClaimError> {
+                std::future::pending().await
+            }
+            async fn fence(
+                &self,
+                _entity: &Entity,
+                _me: &NodeIdentity,
+                _mine: ClaimEpoch,
+            ) -> Result<bool, ClaimError> {
+                std::future::pending().await
+            }
+            async fn release(
+                &self,
+                _entity: &Entity,
+                _me: &NodeIdentity,
+                _mine: ClaimEpoch,
+            ) -> Result<(), ClaimError> {
+                std::future::pending().await
+            }
+            async fn release_exact(
+                &self,
+                _entity: &Entity,
+                _me: &NodeIdentity,
+                _mine: ClaimEpoch,
+            ) -> Result<ExactReleaseOutcome, ClaimError> {
+                std::future::pending().await
+            }
+            async fn release_many(
+                &self,
+                _entities: &[Entity],
+                _me: &NodeIdentity,
+            ) -> Result<(), ClaimError> {
+                std::future::pending().await
+            }
+        }
+
+        let metrics = crate::telemetry::test_support::acquire().await;
+        let store = ObservedClaimStore::new(PendingStore);
+        let entity = Entity::new(EntityType::SmSession, "cancelled-observation");
+        let me = NodeIdentity::new("node", "incarnation");
+
+        let fence = tokio::time::timeout(
+            std::time::Duration::from_millis(10),
+            store.fence(&entity, &me, ClaimEpoch(1)),
+        )
+        .await;
+        assert!(fence.is_err(), "pending fence must hit the deadline");
+        assert_eq!(
+            metrics.counter_sum(
+                "waddle.clustering.fence.results",
+                &[("result", "cancelled")]
+            ),
+            Some(1),
+            "a deadline-dropped fence must record a cancelled sample"
+        );
+
+        let acquire = tokio::time::timeout(
+            std::time::Duration::from_millis(10),
+            store.acquire(&entity, &me),
+        )
+        .await;
+        assert!(acquire.is_err(), "pending acquire must hit the deadline");
+        assert_eq!(
+            metrics.counter_sum(
+                "waddle.clustering.claim.mutations",
+                &[("operation", "acquire"), ("result", "backend")]
+            ),
+            Some(1),
+            "a deadline-dropped mutation must record a backend sample"
+        );
     }
 }

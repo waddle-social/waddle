@@ -89,6 +89,9 @@ pub enum FenceResult {
     Ok,
     Rejected,
     Backend,
+    /// The caller's deadline dropped the fence future before the store
+    /// answered — the outage sample the family exists to expose.
+    Cancelled,
 }
 
 impl sealed::Sealed for FenceResult {}
@@ -102,6 +105,7 @@ impl MetricAttribute for FenceResult {
             Self::Ok => "ok",
             Self::Rejected => "rejected",
             Self::Backend => "backend",
+            Self::Cancelled => "cancelled",
         }
     }
 }
