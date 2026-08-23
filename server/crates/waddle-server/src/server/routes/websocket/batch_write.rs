@@ -573,7 +573,6 @@ where
                         {
                             return outcome;
                         }
-                        conn.sm_state.note_ack_request_sent();
                     }
                     if conn.phase.is_closing() {
                         return SendWindowOutcome::TransportClosed;
@@ -596,6 +595,7 @@ where
                         {
                             return outcome;
                         }
+                        conn.sm_state.note_ack_request_sent();
                     }
                 } else if is_client_sm_request(text.as_str()) {
                     if !batch_authoritative(authority) {

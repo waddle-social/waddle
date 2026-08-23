@@ -138,6 +138,9 @@ async fn complete_pending_resume_claim(
                         );
                     }
                 }
+                super::observe::observe_sm_resume_finalized(
+                    super::observe::SmResumeOutcome::Resumed,
+                );
                 SmRegistrationFinalization::ReplaceWithResumed {
                     resumed: SmResumed::new(stream_id.clone(), conn.sm_state.get_inbound_count()),
                     replay_after_h: h,
@@ -154,6 +157,7 @@ async fn complete_pending_resume_claim(
                 "SM resume claim gained a replay gap before completion"
             );
             reset_registered_resume_attempt(state, conn, jid, owner).await;
+            super::observe::observe_sm_resume_finalized(super::observe::SmResumeOutcome::ReplayGap);
             SmRegistrationFinalization::ReplaceWithFailed(SmFailed::resume_failed(
                 "resource-constraint",
                 detached.inbound_count,
@@ -169,6 +173,9 @@ async fn complete_pending_resume_claim(
                 "SM resume claim completed with handled count too high"
             );
             close_registered_resume_attempt(state, conn, jid, owner).await;
+            super::observe::observe_sm_resume_finalized(
+                super::observe::SmResumeOutcome::HandledTooHigh,
+            );
             SmRegistrationFinalization::ReplaceWithHandledCountTooHigh {
                 acknowledged,
                 send_count: detached.outbound_count,
@@ -178,6 +185,7 @@ async fn complete_pending_resume_claim(
             warn!(stream_id = %stream_id, jid = %jid, "SM resume claim expired before completion");
             cleanup_invalidated_detached_session(state, detached, Some(owner)).await;
             close_registered_resume_attempt(state, conn, jid, owner).await;
+            super::observe::observe_sm_resume_finalized(super::observe::SmResumeOutcome::NotFound);
             SmRegistrationFinalization::ReplaceWithFailed(SmFailed::with_condition(
                 "item-not-found",
             ))
@@ -185,6 +193,7 @@ async fn complete_pending_resume_claim(
         Ok(None) => {
             warn!(stream_id = %stream_id, jid = %jid, "SM resume claim disappeared before completion");
             close_registered_resume_attempt(state, conn, jid, owner).await;
+            super::observe::observe_sm_resume_finalized(super::observe::SmResumeOutcome::NotFound);
             SmRegistrationFinalization::ReplaceWithFailed(SmFailed::with_condition(
                 "item-not-found",
             ))
@@ -192,6 +201,7 @@ async fn complete_pending_resume_claim(
         Err(_error) => {
             warn!(stream_id = %stream_id, jid = %jid, failure = "storage", "Failed to complete SM resume claim");
             close_registered_resume_attempt(state, conn, jid, owner).await;
+            super::observe::observe_sm_resume_finalized(super::observe::SmResumeOutcome::Storage);
             SmRegistrationFinalization::ReplaceWithFailed(SmFailed::with_condition(
                 "internal-server-error",
             ))

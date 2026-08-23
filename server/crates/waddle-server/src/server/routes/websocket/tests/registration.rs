@@ -578,6 +578,7 @@ async fn authority_revoked_after_resume_finalization_restores_detached_session_o
 async fn replay_gap_during_resume_finalization_clears_blocklist_interest_for_fresh_bind() {
     use waddle_xmpp::stream_management::{DetachedSession, DEFAULT_MAX_UNACKED_QUEUE_SIZE};
 
+    let metrics = waddle_xmpp::telemetry::test_support::acquire().await;
     let state = create_test_websocket_state().await;
     let mut conn = WsConnState::new();
     let jid: FullJid = "alice@example.com/web".parse().expect("jid");
@@ -666,6 +667,20 @@ async fn replay_gap_during_resume_finalization_clears_blocklist_interest_for_fre
     assert!(
         !conn.blocklist_interested,
         "failed resume reset must not make the following fresh bind blocklist-interested"
+    );
+    // The attempt's terminal resume result is decided here, at claim
+    // finalization — the flip to a replay gap must count as `replay_gap`
+    // and the earlier provisional acceptance must never have counted as
+    // `resumed`.
+    assert_eq!(
+        metrics.counter_sum("xmpp.sm.resume.results", &[("outcome", "replay_gap")]),
+        Some(1)
+    );
+    assert_eq!(
+        metrics
+            .counter_sum("xmpp.sm.resume.results", &[("outcome", "resumed")])
+            .unwrap_or(0),
+        0
     );
 }
 

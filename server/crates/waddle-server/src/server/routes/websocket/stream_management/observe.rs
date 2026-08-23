@@ -16,10 +16,14 @@
 //! is deliberately NOT counted as progress: the same logical resume applies
 //! its `h` on both the fast path (`handle_sm_resume`) and the deferred
 //! claim-finalization path (`registration.rs`), so counting either would
-//! double-count against the other. Likewise `xmpp.sm.resume.results` counts
-//! one terminal per resume attempt at `handle_sm_resume`; the rare deferred
-//! claim-finalization flips (expired/truncated/too-high after an optimistic
-//! `Resumed`) are visible in logs but intentionally not re-counted.
+//! double-count against the other. `xmpp.sm.resume.results` records exactly
+//! one terminal per resume attempt: failures at `handle_sm_resume` count
+//! immediately, but a preliminary `Resumed` is NOT counted there — claim
+//! finalization (`registration.rs`) can still flip the attempt to a wire
+//! `<failed/>`/stream error, so the success (or the flip's failure outcome)
+//! is recorded by [`observe_sm_resume_finalized`] once the transmitted
+//! response is decided. An attempt whose connection dies between the two
+//! stages records nothing — the wire never carried a terminal either.
 //!
 //! Timeout mapping for this lane:
 //! - `xmpp.sm.drain_timeout` is the graceful-shutdown SM drain deadline.
@@ -292,8 +296,17 @@ impl SmResumeTerminal {
     }
 }
 
+/// Record the terminal resume result once the transmitted response is
+/// decided (claim finalization) — the preliminary `Resumed` from
+/// `handle_sm_resume` is provisional until then. See the module doc.
+pub(super) fn observe_sm_resume_finalized(outcome: SmResumeOutcome) {
+    reliability::increment_sm_resume_result(outcome);
+}
+
 pub(super) fn observe_sm_resume(terminal: &SmResumeTerminal) {
-    reliability::increment_sm_resume_result(terminal.outcome());
+    if !matches!(terminal.outcome(), SmResumeOutcome::Resumed) {
+        reliability::increment_sm_resume_result(terminal.outcome());
+    }
 
     match terminal {
         SmResumeTerminal::Failed {
@@ -350,7 +363,7 @@ pub(super) fn observe_sm_resume(terminal: &SmResumeTerminal) {
             replay,
             ..
         } => {
-            info!(stream_id, outcome = ?SmResumeOutcome::Resumed, jid = %jid, replay = replay.len(), "SM resumed");
+            info!(stream_id, outcome = ?SmResumeOutcome::Resumed, jid = %jid, replay = replay.len(), "SM resume accepted; awaiting claim finalization");
         }
     }
 }
@@ -496,6 +509,12 @@ mod tests {
             resumed_jid,
             replay,
         ));
+        assert_eq!(
+            metrics.counter_sum("xmpp.sm.resume.results", &[("outcome", "resumed")]),
+            None,
+            "preliminary resumed terminal must not count before claim finalization"
+        );
+        observe_sm_resume_finalized(SmResumeOutcome::Resumed);
 
         provider
             .force_flush()
@@ -524,7 +543,7 @@ mod tests {
         }
         let logs = String::from_utf8(buffer.lock().expect("capture buffer lock").clone())
             .expect("captured logs are UTF-8");
-        assert!(logs.contains("SM resumed"), "{logs}");
+        assert!(logs.contains("SM resume accepted"), "{logs}");
         assert!(
             !logs.contains(sentinel_origin_id),
             "origin-id must stay out of telemetry logs: {logs}"

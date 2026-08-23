@@ -1044,6 +1044,26 @@ mod tests {
     }
 
     #[test]
+    fn ack_request_tracking_rearms_for_a_second_round_after_fulfillment() {
+        // Regression for the multi-round send-window pause recovery: a
+        // partial ack fulfills the first request, and the follow-up `<r/>`
+        // the server writes while still paused must re-arm tracking so the
+        // next covering ack produces a second latency sample.
+        let mut state = StreamManagementState::with_config(1000, 3);
+        state.enable("latency-rounds".to_string(), true, Some(300));
+        state.outbound_count = 5;
+        state.note_ack_request_sent_at(Instant::now() - std::time::Duration::from_millis(20));
+        assert!(state.fulfill_oldest_ack_request_latency_ms(5).is_some());
+
+        state.outbound_count = 9;
+        state.note_ack_request_sent_at(Instant::now() - std::time::Duration::from_millis(10));
+        assert!(
+            state.fulfill_oldest_ack_request_latency_ms(9).is_some(),
+            "a re-sent request after fulfillment must be tracked as a fresh round"
+        );
+    }
+
+    #[test]
     fn handled_progress_wraps_across_u32_boundary() {
         let last_acked = u32::MAX;
         let h = 1_u32;
