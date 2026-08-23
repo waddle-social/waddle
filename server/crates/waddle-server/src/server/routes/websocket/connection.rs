@@ -1397,6 +1397,10 @@ async fn handle_inbound_text(
             {
                 super::stream_management::observe_sm_resume_finalized(
                     waddle_xmpp::telemetry::attributes::SmResumeOutcome::Internal,
+                    conn.pending_resume_stream_id
+                        .as_deref()
+                        .map(waddle_xmpp::pending_delivery::SmSessionId::new)
+                        .as_ref(),
                 );
             }
             let _ = close_ws_connection(
@@ -1517,7 +1521,14 @@ async fn handle_inbound_text(
     // batch died before its first write.
     if write_report.written_frame_count > 0 {
         if let Some(outcome) = conn.pending_finalized_resume_outcome.take() {
-            super::stream_management::observe_sm_resume_finalized(outcome);
+            super::stream_management::observe_sm_resume_finalized(
+                outcome,
+                conn.sm_state
+                    .stream_id
+                    .as_deref()
+                    .map(waddle_xmpp::pending_delivery::SmSessionId::new)
+                    .as_ref(),
+            );
         }
     }
     match write_report.outcome {

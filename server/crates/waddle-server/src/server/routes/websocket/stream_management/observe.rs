@@ -121,10 +121,29 @@ pub(super) fn observe_sm_ack(observation: SmAckObservation) {
     }
 }
 
+/// Where the failed resume attempt was adjudicated. Closed dimension kept
+/// on the terminal LOG (not the metric): the clustering dashboard's
+/// `SM resume (failed|rejected): cross-node` panel depends on the marker.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum SmResumeSource {
+    Local,
+    CrossNode,
+}
+
+impl SmResumeSource {
+    const fn as_str(self) -> &'static str {
+        match self {
+            Self::Local => "local",
+            Self::CrossNode => "cross_node",
+        }
+    }
+}
+
 #[derive(Debug)]
 pub(super) enum SmResumeTerminal {
     Failed {
         stream_id: SmSessionId,
+        source: SmResumeSource,
         outcome: SmResumeOutcome,
         jid: Option<FullJid>,
         client_h: Option<u32>,
@@ -142,8 +161,21 @@ pub(super) enum SmResumeTerminal {
 
 impl SmResumeTerminal {
     pub(super) fn failed(stream_id: SmSessionId, outcome: SmResumeOutcome) -> Self {
+        Self::failed_from(stream_id, outcome, SmResumeSource::Local)
+    }
+
+    pub(super) fn failed_cross_node(stream_id: SmSessionId, outcome: SmResumeOutcome) -> Self {
+        Self::failed_from(stream_id, outcome, SmResumeSource::CrossNode)
+    }
+
+    fn failed_from(
+        stream_id: SmSessionId,
+        outcome: SmResumeOutcome,
+        source: SmResumeSource,
+    ) -> Self {
         Self::Failed {
             stream_id,
+            source,
             outcome,
             jid: None,
             client_h: None,
@@ -156,6 +188,7 @@ impl SmResumeTerminal {
     pub(super) fn identity_mismatch(stream_id: SmSessionId, resumed_jid: FullJid) -> Self {
         Self::Failed {
             stream_id,
+            source: SmResumeSource::Local,
             outcome: SmResumeOutcome::IdentityMismatch,
             jid: Some(resumed_jid),
             client_h: None,
@@ -174,6 +207,7 @@ impl SmResumeTerminal {
     ) -> Self {
         Self::Failed {
             stream_id,
+            source: SmResumeSource::Local,
             outcome: SmResumeOutcome::ReplayGap,
             jid: Some(jid),
             client_h: Some(client_h),
@@ -190,6 +224,7 @@ impl SmResumeTerminal {
     ) -> Self {
         Self::Failed {
             stream_id,
+            source: SmResumeSource::Local,
             outcome: SmResumeOutcome::HandledTooHigh,
             jid: None,
             client_h: Some(acknowledged),
@@ -202,6 +237,7 @@ impl SmResumeTerminal {
     pub(super) fn detached_divergence(stream_id: SmSessionId, detached_jid: FullJid) -> Self {
         Self::Failed {
             stream_id,
+            source: SmResumeSource::Local,
             outcome: SmResumeOutcome::DetachedDivergence,
             jid: Some(detached_jid),
             client_h: None,
@@ -304,8 +340,21 @@ impl SmResumeTerminal {
 /// Record the terminal resume result once the transmitted response is
 /// decided (claim finalization) — the preliminary `Resumed` from
 /// `handle_sm_resume` is provisional until then. See the module doc.
-pub(in crate::server::routes::websocket) fn observe_sm_resume_finalized(outcome: SmResumeOutcome) {
+pub(in crate::server::routes::websocket) fn observe_sm_resume_finalized(
+    outcome: SmResumeOutcome,
+    stream_id: Option<&SmSessionId>,
+) {
     reliability::increment_sm_resume_result(outcome);
+    if matches!(outcome, SmResumeOutcome::Resumed) {
+        // Definitive success marker, emitted only after the terminal frame
+        // reached the wire. The delivery-reliability dashboard matches the
+        // exact `SM resumed` substring; the provisional acceptance log above
+        // deliberately does not contain it.
+        info!(
+            stream_id = stream_id.map(SmSessionId::as_str).unwrap_or("<unset>"),
+            "SM resumed"
+        );
+    }
 }
 
 /// Log the resume terminal. Deliberately does NOT touch
@@ -317,6 +366,7 @@ pub(super) fn observe_sm_resume(terminal: &SmResumeTerminal) {
         SmResumeTerminal::Failed {
             stream_id,
             outcome,
+            source,
             jid,
             client_h,
             replay_gap_through,
@@ -327,19 +377,33 @@ pub(super) fn observe_sm_resume(terminal: &SmResumeTerminal) {
                 info!(stream_id = %stream_id, outcome = ?outcome, "SM resume rejected: unexpected request");
             }
             SmResumeOutcome::NotFound => {
-                info!(stream_id = %stream_id, outcome = ?outcome, "SM resume rejected: session not found or expired");
+                if matches!(source, SmResumeSource::CrossNode) {
+                    info!(stream_id = %stream_id, outcome = ?outcome, source = source.as_str(), "SM resume rejected: cross-node session not found or expired");
+                } else {
+                    info!(stream_id = %stream_id, outcome = ?outcome, source = source.as_str(), "SM resume rejected: session not found or expired");
+                }
             }
             SmResumeOutcome::OwnerUnreachable
             | SmResumeOutcome::Storage
             | SmResumeOutcome::Internal
             | SmResumeOutcome::PrincipalUnavailable => {
-                warn!(stream_id = %stream_id, outcome = ?outcome, "SM resume failed");
+                // The `cross-node` marker is load-bearing: the clustering
+                // dashboard counts `SM resume (failed|rejected): cross-node`.
+                if matches!(source, SmResumeSource::CrossNode) {
+                    warn!(stream_id = %stream_id, outcome = ?outcome, source = source.as_str(), "SM resume failed: cross-node attempt");
+                } else {
+                    warn!(stream_id = %stream_id, outcome = ?outcome, source = source.as_str(), "SM resume failed");
+                }
             }
             SmResumeOutcome::ShutdownAbandoned => {
                 info!(stream_id = %stream_id, outcome = ?outcome, "SM resume abandoned: graceful shutdown in progress");
             }
             SmResumeOutcome::IdentityMismatch | SmResumeOutcome::DetachedDivergence => {
-                warn!(stream_id = %stream_id, outcome = ?outcome, resumed_jid = ?jid, "SM resume rejected: identity mismatch");
+                if matches!(source, SmResumeSource::CrossNode) {
+                    warn!(stream_id = %stream_id, outcome = ?outcome, resumed_jid = ?jid, source = source.as_str(), "SM resume rejected: cross-node identity mismatch");
+                } else {
+                    warn!(stream_id = %stream_id, outcome = ?outcome, resumed_jid = ?jid, source = source.as_str(), "SM resume rejected: identity mismatch");
+                }
             }
             SmResumeOutcome::ReplayGap => {
                 warn!(
@@ -528,7 +592,10 @@ mod tests {
             None,
             "preliminary resumed terminal must not count before claim finalization"
         );
-        observe_sm_resume_finalized(SmResumeOutcome::Resumed);
+        observe_sm_resume_finalized(
+            SmResumeOutcome::Resumed,
+            Some(&SmSessionId::new("stream-resumed")),
+        );
 
         provider
             .force_flush()

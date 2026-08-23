@@ -152,7 +152,9 @@ fn classify_error(error: &ClaimError) -> (ClaimResult, Option<ClaimRejection>) {
         ClaimError::Backend(_) => (ClaimResult::Backend, None),
         ClaimError::AlreadyClaimed => (ClaimResult::Rejected, Some(ClaimRejection::AlreadyClaimed)),
         ClaimError::Conflict => (ClaimResult::Rejected, Some(ClaimRejection::Conflict)),
-        ClaimError::Poisoned => (ClaimResult::Rejected, Some(ClaimRejection::Poisoned)),
+        // A poisoned store mutex is a persistently broken store, not
+        // ordinary claim contention — it must surface in backend health.
+        ClaimError::Poisoned => (ClaimResult::Backend, Some(ClaimRejection::Poisoned)),
         ClaimError::SmSessionExcludedFromStealIntent => (
             ClaimResult::Rejected,
             Some(ClaimRejection::ExcludedFromStealIntent),
@@ -304,8 +306,14 @@ impl<S: ClaimStore> ClaimStore for ObservedClaimStore<S> {
         let (class, rejection) = match &result {
             Ok(true) => (FenceResult::Ok, None),
             Ok(false) => (FenceResult::Rejected, Some(ClaimRejection::NotOwned)),
-            Err(ClaimError::Backend(_)) => (FenceResult::Backend, None),
-            Err(error) => (FenceResult::Rejected, classify_error(error).1),
+            Err(error) => {
+                let (class, rejection) = classify_error(error);
+                let class = match class {
+                    ClaimResult::Backend => FenceResult::Backend,
+                    _ => FenceResult::Rejected,
+                };
+                (class, rejection)
+            }
         };
         crate::counter_add!(
             "waddle.clustering.fence.results",
@@ -394,10 +402,15 @@ mod tests {
             classify_error(&ClaimError::Backend("secret".into())).0,
             ClaimResult::Backend
         );
+        // A poisoned store mutex is a persistently broken store: backend
+        // health, not claim contention.
+        assert_eq!(
+            classify_error(&ClaimError::Poisoned),
+            (ClaimResult::Backend, Some(ClaimRejection::Poisoned))
+        );
         for error in [
             ClaimError::AlreadyClaimed,
             ClaimError::Conflict,
-            ClaimError::Poisoned,
             ClaimError::SmSessionExcludedFromStealIntent,
             ClaimError::Draining,
             ClaimError::AuthorityDisabled,
