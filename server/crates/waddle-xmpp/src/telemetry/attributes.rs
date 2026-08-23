@@ -29,6 +29,87 @@ pub trait MetricAttribute: sealed::Sealed {
     }
 }
 
+/// `operation` — the externally requested ownership mutation.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ClaimOp {
+    Acquire,
+    EnsureClaimed,
+    StealStale,
+    StealForResume,
+    Release,
+    ReleaseExact,
+    ReleaseMany,
+}
+
+impl sealed::Sealed for ClaimOp {}
+impl MetricAttribute for ClaimOp {
+    fn key(&self) -> &'static str {
+        "operation"
+    }
+
+    fn value(&self) -> &'static str {
+        match self {
+            Self::Acquire => "acquire",
+            Self::EnsureClaimed => "ensure_claimed",
+            Self::StealStale => "steal_stale",
+            Self::StealForResume => "steal_for_resume",
+            Self::Release => "release",
+            Self::ReleaseExact => "release_exact",
+            Self::ReleaseMany => "release_many",
+        }
+    }
+}
+
+/// `result` — the bounded result class of an ownership mutation.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ClaimResult {
+    Ok,
+    Rejected,
+    Backend,
+}
+
+impl sealed::Sealed for ClaimResult {}
+impl MetricAttribute for ClaimResult {
+    fn key(&self) -> &'static str {
+        "result"
+    }
+
+    fn value(&self) -> &'static str {
+        match self {
+            Self::Ok => "ok",
+            Self::Rejected => "rejected",
+            Self::Backend => "backend",
+        }
+    }
+}
+
+/// `result` — the bounded result class of an advisory ownership fence.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FenceResult {
+    Ok,
+    Rejected,
+    Backend,
+    /// The caller's deadline dropped the fence future before the store
+    /// answered — the outage sample the family exists to expose.
+    Cancelled,
+}
+
+impl sealed::Sealed for FenceResult {}
+impl MetricAttribute for FenceResult {
+    fn key(&self) -> &'static str {
+        "result"
+    }
+
+    fn value(&self) -> &'static str {
+        match self {
+            Self::Ok => "ok",
+            Self::Rejected => "rejected",
+            Self::Backend => "backend",
+            Self::Cancelled => "cancelled",
+        }
+    }
+}
+
 /// `kind` — what flavor of message traffic a sample counts.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum MessageKind {
@@ -179,6 +260,88 @@ impl MetricAttribute for SmEvictionPath {
 
     fn value(&self) -> &'static str {
         self.as_str()
+    }
+}
+
+/// `outcome` — how a client XEP-0198 `<a h='N'/>` ack was classified.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SmAckOutcome {
+    /// `h` advanced the handled frontier.
+    Advanced,
+    /// `h` exactly matched the already-confirmed handled frontier.
+    Duplicate,
+    /// `h` regressed behind the already-confirmed handled frontier.
+    Regressed,
+    /// `h` claimed more handled stanzas than the server had sent.
+    TooHigh,
+}
+
+impl sealed::Sealed for SmAckOutcome {}
+impl MetricAttribute for SmAckOutcome {
+    fn key(&self) -> &'static str {
+        "outcome"
+    }
+
+    fn value(&self) -> &'static str {
+        match self {
+            Self::Advanced => "advanced",
+            Self::Duplicate => "duplicate",
+            Self::Regressed => "regressed",
+            Self::TooHigh => "too_high",
+        }
+    }
+}
+
+/// `outcome` — terminal outcome of an XEP-0198 `<resume/>` attempt.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SmResumeOutcome {
+    /// The previous stream resumed successfully.
+    Resumed,
+    /// The client attempted resume after starting a fresh session lifecycle.
+    UnexpectedRequest,
+    /// No resumable session existed for the requested stream id.
+    NotFound,
+    /// Cross-node resume could not reach the claimed owner before the handshake deadline.
+    OwnerUnreachable,
+    /// Graceful shutdown abandoned the attempt before any write-side claim work began.
+    ShutdownAbandoned,
+    /// The authenticated identity did not match the detached session or durable principal.
+    IdentityMismatch,
+    /// The detached replay window no longer covered every stanza the client still needed.
+    ReplayGap,
+    /// The client claimed more handled stanzas than the previous stream had sent.
+    HandledTooHigh,
+    /// The detached session had no durable principal to authorize resume.
+    PrincipalUnavailable,
+    /// The detached snapshot JID diverged from its durable principal.
+    DetachedDivergence,
+    /// A storage-backed dependency was unavailable during resume.
+    Storage,
+    /// The resume path hit an internal registry or server error.
+    Internal,
+}
+
+impl sealed::Sealed for SmResumeOutcome {}
+impl MetricAttribute for SmResumeOutcome {
+    fn key(&self) -> &'static str {
+        "outcome"
+    }
+
+    fn value(&self) -> &'static str {
+        match self {
+            Self::Resumed => "resumed",
+            Self::UnexpectedRequest => "unexpected_request",
+            Self::NotFound => "not_found",
+            Self::OwnerUnreachable => "owner_unreachable",
+            Self::ShutdownAbandoned => "shutdown_abandoned",
+            Self::IdentityMismatch => "identity_mismatch",
+            Self::ReplayGap => "replay_gap",
+            Self::HandledTooHigh => "handled_too_high",
+            Self::PrincipalUnavailable => "principal_unavailable",
+            Self::DetachedDivergence => "detached_divergence",
+            Self::Storage => "storage",
+            Self::Internal => "internal",
+        }
     }
 }
 
@@ -1103,6 +1266,38 @@ impl MetricAttribute for SessionInitFailureReason {
             Self::BlocklistLoad => "blocklist_load",
             Self::AuthoritativeRegistration => "authoritative_registration",
         }
+    }
+}
+
+/// `outcome` — result of a clustered remote-resource state update ask.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RemoteResourceUpdateOutcome {
+    Updated,
+    StaleRegistration,
+    Unavailable,
+    AskFailed,
+}
+
+impl RemoteResourceUpdateOutcome {
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Updated => "updated",
+            Self::StaleRegistration => "stale_registration",
+            Self::Unavailable => "unavailable",
+            Self::AskFailed => "ask_failed",
+        }
+    }
+}
+
+impl sealed::Sealed for RemoteResourceUpdateOutcome {}
+impl MetricAttribute for RemoteResourceUpdateOutcome {
+    fn key(&self) -> &'static str {
+        "outcome"
+    }
+
+    fn value(&self) -> &'static str {
+        self.as_str()
     }
 }
 

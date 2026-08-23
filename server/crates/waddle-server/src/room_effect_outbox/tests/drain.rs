@@ -2152,6 +2152,19 @@ async fn superseded_mid_pass_renewal_aborts_delivery_and_unblocks_terminal_drain
         first_summary.stale, 1,
         "mid-pass supersession should abort the obsolete row as stale"
     );
+    // #1705 regression: whichever renewal checkpoint detected the
+    // supersession (pre-render or mid-roster), the abort must have deleted
+    // the still-token-owned superseded predecessor — a retained
+    // superseded+leased row blocks the lifecycle FIFO and starves the
+    // terminal drain below.
+    assert!(
+        store
+            .find(&config_key)
+            .await
+            .expect("find superseded config row")
+            .is_none(),
+        "the aborted superseded predecessor must be deleted, not retained as a FIFO head"
+    );
 
     let (terminal_tx, mut terminal_rx) = mpsc::channel::<OutboundStanza>(4);
     register_test_connection(state.as_ref(), &terminal_recipient, terminal_tx).await;

@@ -184,6 +184,7 @@ where
                 ) {
                     return false;
                 }
+                conn.sm_state.note_ack_request_sent();
             }
             sent
         }

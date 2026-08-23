@@ -376,6 +376,7 @@ async fn handle_xmpp_frame_impl(
         pending_resume_stream_id,
         pending_resume_h,
         pending_resume_claim,
+        pending_finalized_resume_outcome,
         #[cfg(test)]
         pre_final_principal_recheck_test_hook,
         suppress_sm_record_next_batch,
@@ -417,7 +418,12 @@ async fn handle_xmpp_frame_impl(
                 blocklist_interested,
                 pending_sm_enable_commit,
             };
-            return match await_control_stage(admission, handle_sm_stanza(sm, state, ctx)).await {
+            return match await_control_stage(
+                admission,
+                handle_sm_stanza(sm, state, ctx, pending_finalized_resume_outcome),
+            )
+            .await
+            {
                 Ok(responses) => responses.into(),
                 Err(terminal) => {
                     *inbound_frame_terminal = Some(terminal);

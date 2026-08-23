@@ -442,7 +442,7 @@ pub(super) async fn register_bound_connection_after_frame_with_admission(
         }
     }
 
-    let sm_finalization = finalize_sm_after_registry_registration(state, conn, &jid, &owner).await;
+    let sm_report = finalize_sm_after_registry_registration(state, conn, &jid, &owner).await;
     #[cfg(test)]
     if let Some((reached, release)) = conn.post_sm_finalization_test_hook.take() {
         reached.notify_one();
@@ -454,8 +454,14 @@ pub(super) async fn register_bound_connection_after_frame_with_admission(
         // registry owner here would make outer shutdown cleanup skip detach
         // and lose that recovered queue. Preserve the owner and let the
         // normal cleanup path re-store the live session before unregister.
+        // The finalized resume result is deliberately NOT recorded on this
+        // path: the client never receives the finalized response.
         return RegistrationAfterFrame::AuthorityRevokedAfterSmFinalization;
     }
+    // Not recorded yet: the writer's own authority preflight can still drop
+    // the response batch. The main loop records this only after the batch
+    // carrying the terminal frame is actually written.
+    conn.pending_finalized_resume_outcome = sm_report.resume_outcome;
     info!(
         jid = %jid,
         resumed = conn.phase.is_resumed(),
@@ -463,7 +469,7 @@ pub(super) async fn register_bound_connection_after_frame_with_admission(
         "WebSocket connection registered"
     );
 
-    RegistrationAfterFrame::Registered(sm_finalization)
+    RegistrationAfterFrame::Registered(sm_report.finalization)
 }
 
 #[cfg(feature = "clustering")]

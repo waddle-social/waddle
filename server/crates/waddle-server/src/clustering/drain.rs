@@ -49,6 +49,25 @@ use super::self_fence::run_shutdown_drain_with_heartbeat;
 /// whole per-entity release budget.
 const MARK_DRAINING_BOUND: Duration = Duration::from_secs(2);
 
+#[derive(Clone, Copy, Debug)]
+enum DrainErrorClass {
+    Backend,
+}
+
+impl DrainErrorClass {
+    const fn as_str(self) -> &'static str {
+        match self {
+            Self::Backend => "backend",
+        }
+    }
+}
+
+impl std::fmt::Display for DrainErrorClass {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+
 /// Run the Slice 10 graceful drain sequence to completion (or until
 /// `budget` is exhausted) for every locally-owned, eligible entity. Called
 /// exactly once per fence/shutdown, from every ordinary-shutdown branch in
@@ -129,9 +148,9 @@ pub(crate) async fn run_shutdown_drain<L>(
             Ok(()) => {
                 metrics::record_claims_released_on_drain(attempted);
             }
-            Err(error) => {
+            Err(_error) => {
                 tracing::warn!(
-                    %error,
+                    error_class = %DrainErrorClass::Backend,
                     count = attempted,
                     "clustering drain: release_many failed; entities remain claimed \
                      (fenced-safe, reclaimed later)"
@@ -221,9 +240,9 @@ impl waddle_xmpp::ownership::RolloutBackoff for PostgresRolloutBackoff {
                 self.pod_template_hash.as_deref(),
                 current_generation.as_deref(),
             ),
-            Err(error) => {
+            Err(_error) => {
                 tracing::debug!(
-                    %error,
+                    error_class = %DrainErrorClass::Backend,
                     "clustering: current_generation lookup failed; proceeding without backoff"
                 );
                 Duration::ZERO

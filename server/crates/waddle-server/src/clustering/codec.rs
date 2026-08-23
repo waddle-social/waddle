@@ -62,14 +62,16 @@ pub enum RemoteCodecError {
 
 impl RemoteCodecError {
     /// Stable low-cardinality label for the drop metrics.
-    fn reason(&self) -> &'static str {
+    fn reason(&self) -> metrics::RemoteCodecDropReason {
         match self {
-            RemoteCodecError::Serialize(_) => "serialize",
-            RemoteCodecError::TooLarge { .. } => "too_large",
-            RemoteCodecError::TooDeep { .. } => "too_deep",
-            RemoteCodecError::TooManyAttributes { .. } => "too_many_attributes",
-            RemoteCodecError::Malformed(_) => "malformed",
-            RemoteCodecError::NotAStanza { .. } => "not_a_stanza",
+            RemoteCodecError::Serialize(_) => metrics::RemoteCodecDropReason::Serialize,
+            RemoteCodecError::TooLarge { .. } => metrics::RemoteCodecDropReason::TooLarge,
+            RemoteCodecError::TooDeep { .. } => metrics::RemoteCodecDropReason::TooDeep,
+            RemoteCodecError::TooManyAttributes { .. } => {
+                metrics::RemoteCodecDropReason::TooManyAttributes
+            }
+            RemoteCodecError::Malformed(_) => metrics::RemoteCodecDropReason::Malformed,
+            RemoteCodecError::NotAStanza { .. } => metrics::RemoteCodecDropReason::NotAStanza,
         }
     }
 }
@@ -216,7 +218,7 @@ impl PartialEq for RemoteElement {
 impl Serialize for RemoteElement {
     fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
         let xml = waddle_xmpp::parser::element_to_string(&self.0).map_err(|error| {
-            metrics::record_remote_codec_drop("serialize");
+            metrics::record_remote_codec_drop(metrics::RemoteCodecDropReason::Serialize);
             S::Error::custom(error)
         })?;
         serializer.serialize_str(&xml)

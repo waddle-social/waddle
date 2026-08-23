@@ -22,10 +22,208 @@
 use opentelemetry::metrics::{Counter, Gauge, Histogram, Meter};
 use std::sync::OnceLock;
 
+use super::ordered_relay::{OrderedRelayClaimRole, OrderedRelayNackReason};
+
 static METER: OnceLock<Meter> = OnceLock::new();
 
 fn meter() -> &'static Meter {
     METER.get_or_init(|| opentelemetry::global::meter("waddle-clustering"))
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RemoteCodecDropReason {
+    TooLarge,
+    TooDeep,
+    TooManyAttributes,
+    Malformed,
+    NotAStanza,
+    Serialize,
+}
+
+impl RemoteCodecDropReason {
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::TooLarge => "too_large",
+            Self::TooDeep => "too_deep",
+            Self::TooManyAttributes => "too_many_attributes",
+            Self::Malformed => "malformed",
+            Self::NotAStanza => "not_a_stanza",
+            Self::Serialize => "serialize",
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum OrderedRelayNackMetricReason {
+    Gap,
+    InFlight,
+    NotOwnerOrigin,
+    NotOwnerSender,
+    NotOwnerTarget,
+    Unreachable,
+    TargetUnavailable,
+    ParseFailure,
+    UnsupportedEnvelope,
+    Backpressure,
+    MaybeCommitted,
+    Diverted,
+}
+
+impl OrderedRelayNackMetricReason {
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Gap => "gap",
+            Self::InFlight => "in_flight",
+            Self::NotOwnerOrigin => "not_owner_origin",
+            Self::NotOwnerSender => "not_owner_sender",
+            Self::NotOwnerTarget => "not_owner_target",
+            Self::Unreachable => "unreachable",
+            Self::TargetUnavailable => "target_unavailable",
+            Self::ParseFailure => "parse_failure",
+            Self::UnsupportedEnvelope => "unsupported_envelope",
+            Self::Backpressure => "backpressure",
+            Self::MaybeCommitted => "maybe_committed",
+            Self::Diverted => "diverted",
+        }
+    }
+
+    #[must_use]
+    pub const fn from_nack_reason(reason: &OrderedRelayNackReason) -> Self {
+        match reason {
+            OrderedRelayNackReason::Gap { .. } => Self::Gap,
+            OrderedRelayNackReason::InFlight => Self::InFlight,
+            OrderedRelayNackReason::NotOwner {
+                role: OrderedRelayClaimRole::Origin,
+            } => Self::NotOwnerOrigin,
+            OrderedRelayNackReason::NotOwner {
+                role: OrderedRelayClaimRole::Sender,
+            } => Self::NotOwnerSender,
+            OrderedRelayNackReason::NotOwner {
+                role: OrderedRelayClaimRole::Target,
+            } => Self::NotOwnerTarget,
+            OrderedRelayNackReason::Unreachable => Self::Unreachable,
+            OrderedRelayNackReason::TargetUnavailable => Self::TargetUnavailable,
+            OrderedRelayNackReason::ParseFailure => Self::ParseFailure,
+            OrderedRelayNackReason::UnsupportedEnvelope => Self::UnsupportedEnvelope,
+            OrderedRelayNackReason::Backpressure => Self::Backpressure,
+            OrderedRelayNackReason::MaybeCommitted => Self::MaybeCommitted,
+            OrderedRelayNackReason::Diverted(_) => Self::Diverted,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum OrphanWorkQueue {
+    SmHydration,
+    RoomRelease,
+    RoomHandoff,
+    RoomAdoption,
+}
+
+impl OrphanWorkQueue {
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::SmHydration => "sm_hydration",
+            Self::RoomRelease => "room_release",
+            Self::RoomHandoff => "room_handoff",
+            Self::RoomAdoption => "room_adoption",
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum OrphanWorker {
+    Sweep,
+    SmHydration,
+    RoomRelease,
+}
+
+impl OrphanWorker {
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Sweep => "sweep",
+            Self::SmHydration => "sm_hydration",
+            Self::RoomRelease => "room_release",
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum OrphanWorkerFailureReason {
+    Timeout,
+    Panic,
+    Cancelled,
+}
+
+impl OrphanWorkerFailureReason {
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Timeout => "timeout",
+            Self::Panic => "panic",
+            Self::Cancelled => "cancelled",
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum OrphanTerminalCleanupLane {
+    SmHydration,
+    RoomRelease,
+}
+
+impl OrphanTerminalCleanupLane {
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::SmHydration => "sm_hydration",
+            Self::RoomRelease => "room_release",
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum OrphanTerminalCleanupFailureReason {
+    Error,
+    Timeout,
+}
+
+impl OrphanTerminalCleanupFailureReason {
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Error => "error",
+            Self::Timeout => "timeout",
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RoomOrphanReconciliationOutcome {
+    Hydrated,
+    Released,
+    AlreadyLive,
+    PendingRetry,
+    LostRace,
+    Failed,
+}
+
+impl RoomOrphanReconciliationOutcome {
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Hydrated => "hydrated",
+            Self::Released => "released",
+            Self::AlreadyLive => "already_live",
+            Self::PendingRetry => "pending_retry",
+            Self::LostRace => "lost_race",
+            Self::Failed => "failed",
+        }
+    }
 }
 
 /// Set the current number of connected swarm peers.
@@ -85,7 +283,7 @@ pub fn record_allowlist_size(count: i64) {
 /// failure). `reason` is a stable low-cardinality label
 /// (`too_large`/`too_deep`/`too_many_attributes`/`malformed`/`not_a_stanza`/
 /// `serialize`).
-pub fn record_remote_codec_drop(reason: &'static str) {
+pub fn record_remote_codec_drop(reason: RemoteCodecDropReason) {
     static C: OnceLock<Counter<u64>> = OnceLock::new();
     C.get_or_init(|| {
         meter()
@@ -94,7 +292,10 @@ pub fn record_remote_codec_drop(reason: &'static str) {
             .with_unit("{payload}")
             .build()
     })
-    .add(1, &[opentelemetry::KeyValue::new("reason", reason)]);
+    .add(
+        1,
+        &[opentelemetry::KeyValue::new("reason", reason.as_str())],
+    );
 }
 
 /// Count a supervised relay-actor respawn (unexpected stop + mandatory
@@ -126,7 +327,7 @@ pub fn record_ordered_relay_ack() {
 
 /// Count ordered relay NACKs produced by the Slice 2 receiver substrate.
 /// `reason` is a stable low-cardinality label.
-pub fn record_ordered_relay_nack(reason: &'static str) {
+pub fn record_ordered_relay_nack(reason: OrderedRelayNackMetricReason) {
     static C: OnceLock<Counter<u64>> = OnceLock::new();
     C.get_or_init(|| {
         meter()
@@ -135,7 +336,10 @@ pub fn record_ordered_relay_nack(reason: &'static str) {
             .with_unit("{reply}")
             .build()
     })
-    .add(1, &[opentelemetry::KeyValue::new("reason", reason)]);
+    .add(
+        1,
+        &[opentelemetry::KeyValue::new("reason", reason.as_str())],
+    );
 }
 
 /// Set the current age (in milliseconds) since this node's last
@@ -236,19 +440,22 @@ pub fn record_claims_released_on_drain(count: u64) {
 /// degrades the "~1 move per entity per deploy" property until the
 /// abandoned claim's lease naturally lapses. First caller:
 /// `clustering::drain::run_shutdown_drain`.
+fn add_claims_abandoned_on_drain(count: u64) {
+    waddle_xmpp::counter_add!(
+        "waddle.clustering.claims_abandoned_on_drain",
+        "{claim}",
+        "Claims left held (not released) when a graceful drain's budget overran or a \
+         per-entity seal/release failed -- alert on any nonzero value",
+        count,
+    );
+}
+
 pub fn record_claims_abandoned_on_drain(count: u64) {
-    static C: OnceLock<Counter<u64>> = OnceLock::new();
-    C.get_or_init(|| {
-        meter()
-            .u64_counter("waddle.clustering.claims_abandoned_on_drain")
-            .with_description(
-                "Claims left held (not released) when a graceful drain's budget overran or a \
-                 per-entity seal/release failed — alert on any nonzero value",
-            )
-            .with_unit("{claim}")
-            .build()
-    })
-    .add(count, &[]);
+    add_claims_abandoned_on_drain(count);
+}
+
+pub fn register_clustering_counters() {
+    add_claims_abandoned_on_drain(0);
 }
 
 /// Count bounded proactive `RoomActor` orphan-reconciliation outcomes.
@@ -256,7 +463,7 @@ pub fn record_claims_abandoned_on_drain(count: u64) {
 /// `pending_retry`, `lost_race`, or `failed`; callers
 /// aggregate a whole sweep before recording, avoiding per-room warning noise
 /// after a node loss.
-pub fn record_room_orphan_reconciliation(outcome: &'static str, count: u64) {
+pub fn record_room_orphan_reconciliation(outcome: RoomOrphanReconciliationOutcome, count: u64) {
     static C: OnceLock<Counter<u64>> = OnceLock::new();
     C.get_or_init(|| {
         meter()
@@ -265,7 +472,10 @@ pub fn record_room_orphan_reconciliation(outcome: &'static str, count: u64) {
             .with_unit("{claim}")
             .build()
     })
-    .add(count, &[opentelemetry::KeyValue::new("outcome", outcome)]);
+    .add(
+        count,
+        &[opentelemetry::KeyValue::new("outcome", outcome.as_str())],
+    );
 }
 
 pub fn record_room_orphan_pending_backlog(depth: usize, oldest_age_ms: u64) {
@@ -292,7 +502,7 @@ pub fn record_room_orphan_pending_backlog(depth: usize, oldest_age_ms: u64) {
 
 /// Report the bounded orphan-reaper work queues. `queue` is the stable
 /// low-cardinality value `sm_hydration`, `room_release`, or `room_handoff`.
-pub fn record_orphan_work_queue_depth(queue: &'static str, depth: usize) {
+pub fn record_orphan_work_queue_depth(queue: OrphanWorkQueue, depth: usize) {
     static G: OnceLock<Gauge<u64>> = OnceLock::new();
     G.get_or_init(|| {
         meter()
@@ -303,7 +513,7 @@ pub fn record_orphan_work_queue_depth(queue: &'static str, depth: usize) {
     })
     .record(
         depth as u64,
-        &[opentelemetry::KeyValue::new("queue", queue)],
+        &[opentelemetry::KeyValue::new("queue", queue.as_str())],
     );
 }
 
@@ -312,7 +522,7 @@ pub fn record_orphan_work_queue_depth(queue: &'static str, depth: usize) {
 /// `room_release`, or `room_adoption`. A nonzero value means ownership
 /// remains fenced-safe but recovery is deferred to a later sweep or
 /// node-incarnation expiry.
-pub fn record_orphan_work_queue_backpressure(queue: &'static str) {
+pub fn record_orphan_work_queue_backpressure(queue: OrphanWorkQueue) {
     static C: OnceLock<Counter<u64>> = OnceLock::new();
     C.get_or_init(|| {
         meter()
@@ -321,10 +531,10 @@ pub fn record_orphan_work_queue_backpressure(queue: &'static str) {
             .with_unit("{item}")
             .build()
     })
-    .add(1, &[opentelemetry::KeyValue::new("queue", queue)]);
+    .add(1, &[opentelemetry::KeyValue::new("queue", queue.as_str())]);
 }
 
-pub fn record_orphan_worker_failure(worker: &'static str, reason: &'static str) {
+pub fn record_orphan_worker_failure(worker: OrphanWorker, reason: OrphanWorkerFailureReason) {
     static C: OnceLock<Counter<u64>> = OnceLock::new();
     C.get_or_init(|| {
         meter()
@@ -336,8 +546,8 @@ pub fn record_orphan_worker_failure(worker: &'static str, reason: &'static str) 
     .add(
         1,
         &[
-            opentelemetry::KeyValue::new("worker", worker),
-            opentelemetry::KeyValue::new("reason", reason),
+            opentelemetry::KeyValue::new("worker", worker.as_str()),
+            opentelemetry::KeyValue::new("reason", reason.as_str()),
         ],
     );
 }
@@ -347,7 +557,10 @@ pub fn record_orphan_worker_failure(worker: &'static str, reason: &'static str) 
 /// `room_release`; `reason` is `error` or `timeout`. Unlike queue depth, this
 /// remains actionable after the terminal carrier has consumed its local work
 /// inventory.
-pub fn record_orphan_terminal_cleanup_failure(lane: &'static str, reason: &'static str) {
+pub fn record_orphan_terminal_cleanup_failure(
+    lane: OrphanTerminalCleanupLane,
+    reason: OrphanTerminalCleanupFailureReason,
+) {
     static C: OnceLock<Counter<u64>> = OnceLock::new();
     C.get_or_init(|| {
         meter()
@@ -359,8 +572,8 @@ pub fn record_orphan_terminal_cleanup_failure(lane: &'static str, reason: &'stat
     .add(
         1,
         &[
-            opentelemetry::KeyValue::new("lane", lane),
-            opentelemetry::KeyValue::new("reason", reason),
+            opentelemetry::KeyValue::new("lane", lane.as_str()),
+            opentelemetry::KeyValue::new("reason", reason.as_str()),
         ],
     );
 }
@@ -395,6 +608,11 @@ pub fn record_sm_orphan_candidate_page(candidates: usize, has_more: bool, quaran
 
 #[cfg(test)]
 mod tests {
+    use super::{
+        OrderedRelayNackMetricReason, OrphanTerminalCleanupFailureReason,
+        OrphanTerminalCleanupLane, OrphanWorkQueue, OrphanWorker, OrphanWorkerFailureReason,
+        RemoteCodecDropReason, RoomOrphanReconciliationOutcome,
+    };
     use waddle_xmpp::telemetry::test_support;
 
     /// Exported (name, unit) pairs for every clustering instrument.
@@ -444,22 +662,28 @@ mod tests {
         super::record_routing_table_size(1);
         super::record_bootstrap_dial();
         super::record_allowlist_size(1);
-        super::record_remote_codec_drop("malformed");
+        super::record_remote_codec_drop(RemoteCodecDropReason::Malformed);
         super::record_relay_respawn();
         super::record_ordered_relay_ack();
-        super::record_ordered_relay_nack("malformed");
+        super::record_ordered_relay_nack(OrderedRelayNackMetricReason::ParseFailure);
         super::record_node_heartbeat_age_ms(1.0);
         super::record_node_heartbeat_write_latency_ms(1.0);
         super::record_peers_revoked(1);
         super::record_drain_duration_ms(1.0);
         super::record_claims_released_on_drain(1);
         super::record_claims_abandoned_on_drain(1);
-        super::record_room_orphan_reconciliation("released", 1);
+        super::record_room_orphan_reconciliation(RoomOrphanReconciliationOutcome::Released, 1);
         super::record_room_orphan_pending_backlog(1, 1);
-        super::record_orphan_work_queue_depth("room_release", 1);
-        super::record_orphan_work_queue_backpressure("room_release");
-        super::record_orphan_worker_failure("room_release", "error");
-        super::record_orphan_terminal_cleanup_failure("room_release", "error");
+        super::record_orphan_work_queue_depth(OrphanWorkQueue::RoomRelease, 1);
+        super::record_orphan_work_queue_backpressure(OrphanWorkQueue::RoomRelease);
+        super::record_orphan_worker_failure(
+            OrphanWorker::RoomRelease,
+            OrphanWorkerFailureReason::Timeout,
+        );
+        super::record_orphan_terminal_cleanup_failure(
+            OrphanTerminalCleanupLane::RoomRelease,
+            OrphanTerminalCleanupFailureReason::Error,
+        );
         super::record_sm_orphan_candidate_page(1, false, 1);
     }
 
@@ -511,6 +735,190 @@ mod tests {
                      instrument instead so OTLP→Prometheus does not double it"
                 );
             }
+        }
+    }
+
+    #[tokio::test]
+    async fn claims_abandoned_on_drain_is_zero_registered() {
+        let guard = test_support::acquire().await;
+        super::register_clustering_counters();
+
+        assert_eq!(
+            guard.counter_sum("waddle.clustering.claims_abandoned_on_drain", &[]),
+            Some(0),
+        );
+        assert_eq!(
+            guard
+                .metric_unit("waddle.clustering.claims_abandoned_on_drain")
+                .as_deref(),
+            Some("{claim}"),
+        );
+    }
+
+    #[tokio::test]
+    async fn legacy_clustering_label_values_stay_byte_identical() {
+        let guard = test_support::acquire().await;
+
+        for reason in [
+            RemoteCodecDropReason::TooLarge,
+            RemoteCodecDropReason::TooDeep,
+            RemoteCodecDropReason::TooManyAttributes,
+            RemoteCodecDropReason::Malformed,
+            RemoteCodecDropReason::NotAStanza,
+            RemoteCodecDropReason::Serialize,
+        ] {
+            super::record_remote_codec_drop(reason);
+        }
+        for reason in [
+            OrderedRelayNackMetricReason::Gap,
+            OrderedRelayNackMetricReason::InFlight,
+            OrderedRelayNackMetricReason::NotOwnerOrigin,
+            OrderedRelayNackMetricReason::NotOwnerSender,
+            OrderedRelayNackMetricReason::NotOwnerTarget,
+            OrderedRelayNackMetricReason::Unreachable,
+            OrderedRelayNackMetricReason::TargetUnavailable,
+            OrderedRelayNackMetricReason::ParseFailure,
+            OrderedRelayNackMetricReason::UnsupportedEnvelope,
+            OrderedRelayNackMetricReason::Backpressure,
+            OrderedRelayNackMetricReason::MaybeCommitted,
+            OrderedRelayNackMetricReason::Diverted,
+        ] {
+            super::record_ordered_relay_nack(reason);
+        }
+        for queue in [
+            OrphanWorkQueue::SmHydration,
+            OrphanWorkQueue::RoomRelease,
+            OrphanWorkQueue::RoomHandoff,
+            OrphanWorkQueue::RoomAdoption,
+        ] {
+            super::record_orphan_work_queue_depth(queue, 1);
+            super::record_orphan_work_queue_backpressure(queue);
+        }
+        for worker in [
+            OrphanWorker::Sweep,
+            OrphanWorker::SmHydration,
+            OrphanWorker::RoomRelease,
+        ] {
+            super::record_orphan_worker_failure(worker, OrphanWorkerFailureReason::Timeout);
+        }
+        for lane in [
+            OrphanTerminalCleanupLane::SmHydration,
+            OrphanTerminalCleanupLane::RoomRelease,
+        ] {
+            super::record_orphan_terminal_cleanup_failure(
+                lane,
+                OrphanTerminalCleanupFailureReason::Error,
+            );
+        }
+        for outcome in [
+            RoomOrphanReconciliationOutcome::Hydrated,
+            RoomOrphanReconciliationOutcome::Released,
+            RoomOrphanReconciliationOutcome::AlreadyLive,
+            RoomOrphanReconciliationOutcome::PendingRetry,
+            RoomOrphanReconciliationOutcome::LostRace,
+            RoomOrphanReconciliationOutcome::Failed,
+        ] {
+            super::record_room_orphan_reconciliation(outcome, 1);
+        }
+
+        let codec_labels: Vec<Vec<(String, String)>> = guard
+            .counter_samples("waddle.clustering.remote_codec_drops")
+            .expect("codec samples")
+            .into_iter()
+            .map(|(_, attrs)| attrs)
+            .collect();
+        for label in [
+            "too_large",
+            "too_deep",
+            "too_many_attributes",
+            "malformed",
+            "not_a_stanza",
+            "serialize",
+        ] {
+            assert!(codec_labels.contains(&vec![("reason".to_string(), label.to_string())]));
+        }
+
+        let nack_labels: Vec<Vec<(String, String)>> = guard
+            .counter_samples("waddle.clustering.ordered_relay_nacks")
+            .expect("nack samples")
+            .into_iter()
+            .map(|(_, attrs)| attrs)
+            .collect();
+        for label in [
+            "gap",
+            "in_flight",
+            "not_owner_origin",
+            "not_owner_sender",
+            "not_owner_target",
+            "unreachable",
+            "target_unavailable",
+            "parse_failure",
+            "unsupported_envelope",
+            "backpressure",
+            "maybe_committed",
+            "diverted",
+        ] {
+            assert!(nack_labels.contains(&vec![("reason".to_string(), label.to_string())]));
+        }
+
+        let queue_labels: Vec<Vec<(String, String)>> = guard
+            .counter_samples("waddle.clustering.orphan_work_queue_backpressure")
+            .expect("queue samples")
+            .into_iter()
+            .map(|(_, attrs)| attrs)
+            .collect();
+        for label in [
+            "sm_hydration",
+            "room_release",
+            "room_handoff",
+            "room_adoption",
+        ] {
+            assert!(queue_labels.contains(&vec![("queue".to_string(), label.to_string())]));
+        }
+
+        let worker_labels: Vec<Vec<(String, String)>> = guard
+            .counter_samples("waddle.clustering.orphan_worker_failures")
+            .expect("worker samples")
+            .into_iter()
+            .map(|(_, attrs)| attrs)
+            .collect();
+        for worker in ["sweep", "sm_hydration", "room_release"] {
+            assert!(worker_labels.contains(&vec![
+                ("reason".to_string(), "timeout".to_string()),
+                ("worker".to_string(), worker.to_string()),
+            ]));
+        }
+
+        let terminal_labels: Vec<Vec<(String, String)>> = guard
+            .counter_samples("waddle.clustering.orphan_terminal_cleanup_failures")
+            .expect("terminal cleanup samples")
+            .into_iter()
+            .map(|(_, attrs)| attrs)
+            .collect();
+        for lane in ["sm_hydration", "room_release"] {
+            assert!(terminal_labels.contains(&vec![
+                ("lane".to_string(), lane.to_string()),
+                ("reason".to_string(), "error".to_string()),
+            ]));
+        }
+
+        let reconciliation_labels: Vec<Vec<(String, String)>> = guard
+            .counter_samples("waddle.clustering.room_orphan_reconciliations")
+            .expect("reconciliation samples")
+            .into_iter()
+            .map(|(_, attrs)| attrs)
+            .collect();
+        for outcome in [
+            "hydrated",
+            "released",
+            "already_live",
+            "pending_retry",
+            "lost_race",
+            "failed",
+        ] {
+            assert!(
+                reconciliation_labels.contains(&vec![("outcome".to_string(), outcome.to_string())])
+            );
         }
     }
 }

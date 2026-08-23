@@ -7685,6 +7685,7 @@ async fn presence_broadcast_to_detached_available_subscriber_replays_on_resume()
 
 #[tokio::test]
 async fn sm_resume_with_unknown_stream_id_fails() {
+    let metrics = waddle_xmpp::telemetry::test_support::acquire().await;
     let state = create_test_websocket_state().await;
     let mut conn = WsConnState::new();
     let jid: FullJid = "alice@example.com/web".parse().expect("jid");
@@ -7701,6 +7702,21 @@ async fn sm_resume_with_unknown_stream_id_fails() {
     assert!(conn.phase.is_authenticated());
     assert!(!conn.phase.is_ready());
     assert!(!conn.phase.is_resumed());
+    // Write-gated accounting: the failure is staged for the main loop to
+    // record once the batch carrying the <failed/> frame is written; frame
+    // handling alone must not have counted it.
+    assert_eq!(
+        conn.pending_finalized_resume_outcome,
+        Some(waddle_xmpp::telemetry::attributes::SmResumeOutcome::NotFound),
+        "one failed resume attempt must stage exactly one not_found result"
+    );
+    assert_eq!(
+        metrics
+            .counter_sum("xmpp.sm.resume.results", &[("outcome", "not_found")])
+            .unwrap_or(0),
+        0,
+        "no resume result may be recorded before the terminal frame write"
+    );
 }
 
 #[tokio::test]

@@ -3,6 +3,8 @@ use super::{
     frame::{ResponseFrame, StreamErrorFrame},
     transport_xml::websocket_stream_close_element,
 };
+mod observe;
+use observe::{apply_sm_ack_observation, observe_sm_ack, SmAckObservation};
 
 /// Operation-owned resume claim.  Dropping an uncommitted guard returns the
 /// frozen snapshot to the registry without creating server-local claim state.
@@ -305,6 +307,7 @@ mod shadow_enrollment_tests {
 
 mod registration;
 
+pub(super) use observe::observe_sm_resume_finalized;
 pub(super) use registration::{
     finalize_sm_after_registry_registration, SmRegistrationFinalization,
 };
@@ -401,6 +404,7 @@ pub(super) async fn handle_sm_stanza(
     sm: SmStanza,
     state: &WebSocketState,
     ctx: SmCtx<'_>,
+    finalized_resume_outcome: &mut Option<waddle_xmpp::telemetry::attributes::SmResumeOutcome>,
 ) -> Vec<ResponseFrame> {
     use waddle_xmpp::stream_management::SmAck;
 
@@ -419,7 +423,9 @@ pub(super) async fn handle_sm_stanza(
             SmAck::new(ctx.sm_state.get_inbound_count()).to_xml(),
         )],
         SmStanza::Ack(ack) => apply_sm_ack(state, ctx.sm_state, ctx.phase, ack.h).await,
-        SmStanza::Resume(resume) => handle_sm_resume(resume, state, ctx).await,
+        SmStanza::Resume(resume) => {
+            handle_sm_resume(resume, state, ctx, finalized_resume_outcome).await
+        }
         // Server-origin nonzas should never arrive from a client. Ignore.
         SmStanza::Enabled(_) | SmStanza::Resumed(_) | SmStanza::Failed(_) => vec![],
     }
@@ -468,78 +474,77 @@ pub(super) async fn apply_sm_ack(
     phase: &mut ConnectionPhase,
     h: u32,
 ) -> Vec<ResponseFrame> {
-    // Ordering matters: the regress check MUST run before the exceeds
-    // check. `ack_exceeds_outbound` is an exact mod-2^32 window from
-    // last_acked, which classifies the regressed half-space as
-    // "outside the window" too — a stale mod-behind `h` must stay an
-    // ignored no-op rather than be reclassified as too-high.
-    if sm_state.ack_regresses_last_acked(h) {
-        // Stale or garbage `h` behind the confirmed window: ignore it
-        // entirely. Acknowledging would corrupt last_acked, and the
-        // numeric range-delete below would wipe every pending row.
-        warn!(
-            stream_id = %sm_state.stream_id.as_deref().unwrap_or("<unset>"),
-            client_h = h,
-            last_acked = sm_state.last_acked,
-            "SM ack ignored: handled count regressed behind last_acked"
-        );
-        return vec![];
-    }
-    if sm_state.ack_exceeds_outbound(h) {
-        let send_count = sm_state.outbound_count;
-        info!(
-            stream_id = %sm_state.stream_id.as_deref().unwrap_or("<unset>"),
-            client_h = h,
+    let observation = apply_sm_ack_observation(sm_state, h);
+    observe_sm_ack(observation);
+
+    match observation {
+        SmAckObservation::Regressed => {
+            warn!(
+                stream_id = %sm_state.stream_id.as_deref().unwrap_or("<unset>"),
+                outcome = ?observation.outcome(),
+                client_h = h,
+                last_acked = sm_state.last_acked,
+                "SM ack ignored: handled count regressed behind last_acked"
+            );
+            vec![]
+        }
+        SmAckObservation::TooHigh {
+            acknowledged,
             send_count,
-            "SM ack rejected: handled count too high"
-        );
-        *phase = ConnectionPhase::closing(phase.bound_jid().cloned());
-        return vec![
-            ResponseFrame::from(StreamErrorFrame::HandledCountTooHigh {
-                acknowledged: h,
+        } => {
+            info!(
+                stream_id = %sm_state.stream_id.as_deref().unwrap_or("<unset>"),
+                outcome = ?observation.outcome(),
+                client_h = acknowledged,
                 send_count,
-            }),
-            ResponseFrame::from(websocket_stream_close_element()),
-        ];
-    }
-    // Capture the PRE-acknowledge floor: the newly-acknowledged rows
-    // are exactly the mod-2^32 window (last_acked, h], and the delete
-    // below must be wrap-aware — a numeric `<= h` delete on a
-    // wrap-spanning ack would strand the pre-wrap rows near u32::MAX
-    // claimed, to be released later by the claim-expiry janitor as
-    // duplicates (review F4).
-    let acked_from_exclusive = sm_state.last_acked;
-    sm_state.acknowledge(h);
-    if let Some(stream_id) = sm_state.stream_id.clone() {
-        let session_id = waddle_xmpp::pending_delivery::SmSessionId::new(stream_id);
-        match state
-            .deps
-            .protocol
-            .pending_delivery_storage
-            .delete_acked_in_window(&session_id, acked_from_exclusive, h)
-            .await
-        {
-            Ok(removed) if removed > 0 => {
-                debug!(
-                    session = %session_id,
-                    h,
-                    removed,
-                    "pending_delivery rows cleared by SM ack"
-                );
+                "SM ack rejected: handled count too high"
+            );
+            *phase = ConnectionPhase::closing(phase.bound_jid().cloned());
+            vec![
+                ResponseFrame::from(StreamErrorFrame::HandledCountTooHigh {
+                    acknowledged,
+                    send_count,
+                }),
+                ResponseFrame::from(websocket_stream_close_element()),
+            ]
+        }
+        SmAckObservation::Duplicate { .. } => vec![],
+        SmAckObservation::Advanced {
+            acked_from_exclusive,
+            ..
+        } => {
+            if let Some(stream_id) = sm_state.stream_id.clone() {
+                let session_id = waddle_xmpp::pending_delivery::SmSessionId::new(stream_id);
+                match state
+                    .deps
+                    .protocol
+                    .pending_delivery_storage
+                    .delete_acked_in_window(&session_id, acked_from_exclusive, h)
+                    .await
+                {
+                    Ok(removed) if removed > 0 => {
+                        debug!(
+                            session = %session_id,
+                            h,
+                            removed,
+                            "pending_delivery rows cleared by SM ack"
+                        );
+                    }
+                    Ok(_) => {}
+                    Err(_) => {
+                        warn!(
+                            session = %session_id,
+                            h,
+                            failure = "storage",
+                            "pending_delivery delete_acked_in_window failed; rows \
+                             will be retried on next session via release_claim"
+                        );
+                    }
+                }
             }
-            Ok(_) => {}
-            Err(error) => {
-                warn!(
-                    session = %session_id,
-                    h,
-                    error = %error,
-                    "pending_delivery delete_acked_in_window failed; rows \
-                     will be retried on next session via release_claim"
-                );
-            }
+            vec![]
         }
     }
-    vec![]
 }
 
 async fn handle_sm_enable(
@@ -739,10 +744,34 @@ async fn handle_sm_resume(
     resume: SmResume,
     state: &WebSocketState,
     ctx: SmCtx<'_>,
+    finalized_resume_outcome: &mut Option<waddle_xmpp::telemetry::attributes::SmResumeOutcome>,
 ) -> Vec<ResponseFrame> {
-    use waddle_xmpp::stream_management::{
-        stamp_replay_delay, CrossNodeResumeOutcome, SmFailed, SmResumed,
-    };
+    let terminal = handle_sm_resume_terminal(resume, state, ctx).await;
+    observe::observe_sm_resume(&terminal);
+    // Terminal results are recorded only once the frame carrying them is
+    // written (the main loop consumes this slot after the batch write).
+    // Two exceptions record immediately here:
+    // - `ShutdownAbandoned` deliberately produces no frames — the attempt
+    //   is terminal server-side with nothing to write-gate on;
+    // - a preliminary `Resumed` stays un-staged: claim finalization decides
+    //   the real terminal and stages it (`registration.rs`).
+    match terminal.outcome() {
+        observe::SmResumeOutcome::Resumed => {}
+        observe::SmResumeOutcome::ShutdownAbandoned => {
+            observe::observe_sm_resume_finalized(observe::SmResumeOutcome::ShutdownAbandoned);
+        }
+        outcome => *finalized_resume_outcome = Some(outcome),
+    }
+    terminal.into_frames()
+}
+
+async fn handle_sm_resume_terminal(
+    resume: SmResume,
+    state: &WebSocketState,
+    ctx: SmCtx<'_>,
+) -> observe::SmResumeTerminal {
+    use observe::{SmResumeOutcome, SmResumeTerminal};
+    use waddle_xmpp::stream_management::{stamp_replay_delay, CrossNodeResumeOutcome};
 
     let SmCtx {
         phase,
@@ -769,9 +798,10 @@ async fn handle_sm_resume(
     // Stream resumption is only legal before this transport has established a
     // fresh SASL/bind lifecycle of its own.
     if !phase.allows_stream_management_resume() {
-        return vec![ResponseFrame::from(
-            SmFailed::with_condition("unexpected-request").to_element(),
-        )];
+        return SmResumeTerminal::failed(
+            waddle_xmpp::pending_delivery::SmSessionId::new(resume.previd),
+            SmResumeOutcome::UnexpectedRequest,
+        );
     }
 
     let detached = match state
@@ -830,62 +860,47 @@ async fn handle_sm_resume(
                 Some(CrossNodeAttemptOutcome::Completed(Ok(
                     CrossNodeResumeOutcome::NotAuthorized,
                 ))) => {
-                    warn!(
-                        stream_id = %resume.previd,
-                        "SM resume rejected: cross-node identity mismatch"
+                    return SmResumeTerminal::failed(
+                        waddle_xmpp::pending_delivery::SmSessionId::new(resume.previd),
+                        SmResumeOutcome::IdentityMismatch,
                     );
-                    return vec![ResponseFrame::from(
-                        SmFailed::with_condition("not-authorized").to_element(),
-                    )];
                 }
                 Some(CrossNodeAttemptOutcome::Completed(Ok(
                     CrossNodeResumeOutcome::OwnerUnreachable,
                 ))) => {
-                    // Phase plan's XEP fact-check note: `resource-constraint`
-                    // is a valid generic RFC 6120 condition under XEP-0198's
-                    // "MUST be one of the stanza error conditions defined in
-                    // RFC 6120" rule, but is "our chosen condition" for this
-                    // case, not one XEP-0198 itself demonstrates.
-                    warn!(
-                        stream_id = %resume.previd,
-                        "SM resume rejected: cross-node owner unreachable within the \
-                         resume-handshake window"
+                    return SmResumeTerminal::failed(
+                        waddle_xmpp::pending_delivery::SmSessionId::new(resume.previd),
+                        SmResumeOutcome::OwnerUnreachable,
                     );
-                    return vec![ResponseFrame::from(
-                        SmFailed::with_condition("resource-constraint").to_element(),
-                    )];
                 }
                 Some(CrossNodeAttemptOutcome::Completed(Ok(
                     CrossNodeResumeOutcome::StorageUnavailable,
                 ))) => {
-                    warn!(
-                        stream_id = %resume.previd,
-                        "SM resume rejected: transient storage failure after winning the \
-                         cross-node claim; claim released for retry"
+                    return SmResumeTerminal::failed(
+                        waddle_xmpp::pending_delivery::SmSessionId::new(resume.previd),
+                        SmResumeOutcome::Storage,
                     );
-                    return vec![ResponseFrame::from(
-                        SmFailed::with_condition("internal-server-error").to_element(),
-                    )];
                 }
                 Some(CrossNodeAttemptOutcome::Completed(Ok(CrossNodeResumeOutcome::NotFound)))
                 | None => {
-                    info!(
-                        stream_id = %resume.previd,
-                        "SM resume rejected: session not found or expired"
+                    return SmResumeTerminal::failed(
+                        waddle_xmpp::pending_delivery::SmSessionId::new(resume.previd),
+                        SmResumeOutcome::NotFound,
                     );
-                    return vec![ResponseFrame::from(
-                        SmFailed::with_condition("item-not-found").to_element(),
-                    )];
                 }
-                Some(CrossNodeAttemptOutcome::Completed(Err(error))) => {
-                    warn!(
-                        stream_id = %resume.previd,
-                        %error,
-                        "SM resume failed: cross-node registry error"
+                Some(CrossNodeAttemptOutcome::Completed(Err(
+                    waddle_xmpp::stream_management::SmRegistryError::StorageUnavailable(_),
+                ))) => {
+                    return SmResumeTerminal::failed(
+                        waddle_xmpp::pending_delivery::SmSessionId::new(resume.previd),
+                        SmResumeOutcome::Storage,
                     );
-                    return vec![ResponseFrame::from(
-                        SmFailed::with_condition("internal-server-error").to_element(),
-                    )];
+                }
+                Some(CrossNodeAttemptOutcome::Completed(Err(_))) => {
+                    return SmResumeTerminal::failed(
+                        waddle_xmpp::pending_delivery::SmSessionId::new(resume.previd),
+                        SmResumeOutcome::Internal,
+                    );
                 }
                 Some(CrossNodeAttemptOutcome::ShutdownAbandoned) => {
                     // FIX 3: cancellation won the race before the attempt
@@ -903,19 +918,26 @@ async fn handle_sm_resume(
                     // -disconnects mid-hold is observed at the next loop
                     // iteration (the WS read arm); the hold itself is
                     // already bounded by FIX 1's budget regardless.
-                    info!(
-                        stream_id = %resume.previd,
-                        "SM resume abandoned: graceful shutdown in progress"
+                    return SmResumeTerminal::failed(
+                        waddle_xmpp::pending_delivery::SmSessionId::new(resume.previd),
+                        SmResumeOutcome::ShutdownAbandoned,
                     );
-                    return vec![];
                 }
             }
         }
-        Err(e) => {
-            warn!(stream_id = %resume.previd, error = %e, "SM resume failed: registry error");
-            return vec![ResponseFrame::from(
-                SmFailed::with_condition("internal-server-error").to_element(),
-            )];
+        // Claim-store backend outages and timeouts are a storage incident,
+        // not a registry logic error — keep them out of `internal`.
+        Err(waddle_xmpp::stream_management::SmRegistryError::StorageUnavailable(_)) => {
+            return SmResumeTerminal::failed(
+                waddle_xmpp::pending_delivery::SmSessionId::new(resume.previd),
+                SmResumeOutcome::Storage,
+            );
+        }
+        Err(_) => {
+            return SmResumeTerminal::failed(
+                waddle_xmpp::pending_delivery::SmSessionId::new(resume.previd),
+                SmResumeOutcome::Internal,
+            );
         }
     };
 
@@ -933,16 +955,17 @@ async fn handle_sm_resume(
         Ok(Some(principal)) => principal,
         Ok(None) => {
             claim_guard.release().await;
-            return vec![ResponseFrame::from(
-                SmFailed::with_condition("not-authorized").to_element(),
-            )];
+            return SmResumeTerminal::failed(
+                waddle_xmpp::pending_delivery::SmSessionId::new(resume.previd),
+                SmResumeOutcome::PrincipalUnavailable,
+            );
         }
-        Err(error) => {
-            warn!(stream_id = %resume.previd, %error, "SM resume principal lookup unavailable");
+        Err(_) => {
             claim_guard.release().await;
-            return vec![ResponseFrame::from(
-                SmFailed::with_condition("internal-server-error").to_element(),
-            )];
+            return SmResumeTerminal::failed(
+                waddle_xmpp::pending_delivery::SmSessionId::new(resume.previd),
+                SmResumeOutcome::Storage,
+            );
         }
     };
 
@@ -954,33 +977,39 @@ async fn handle_sm_resume(
         .await;
     match early_resolution {
         crate::auth::session::PrincipalResolution::Resolved(_) => {}
-        crate::auth::session::PrincipalResolution::Missing
-        | crate::auth::session::PrincipalResolution::Mismatched => {
+        crate::auth::session::PrincipalResolution::Missing => {
             claim_guard.release().await;
-            return vec![ResponseFrame::from(
-                SmFailed::with_condition("not-authorized").to_element(),
-            )];
+            return SmResumeTerminal::failed(
+                waddle_xmpp::pending_delivery::SmSessionId::new(resume.previd),
+                SmResumeOutcome::PrincipalUnavailable,
+            );
         }
-        crate::auth::session::PrincipalResolution::StorageError(error) => {
-            warn!(stream_id = %resume.previd, %error, "SM resume principal resolution unavailable");
+        // A durable row exists but its auth context diverged (context
+        // version, auth epoch, or JID): an identity mismatch, not an
+        // unavailable principal. Same `not-authorized` wire condition.
+        crate::auth::session::PrincipalResolution::Mismatched => {
             claim_guard.release().await;
-            return vec![ResponseFrame::from(
-                SmFailed::with_condition("internal-server-error").to_element(),
-            )];
+            return SmResumeTerminal::failed(
+                waddle_xmpp::pending_delivery::SmSessionId::new(resume.previd),
+                SmResumeOutcome::IdentityMismatch,
+            );
+        }
+        crate::auth::session::PrincipalResolution::StorageError(_) => {
+            claim_guard.release().await;
+            return SmResumeTerminal::failed(
+                waddle_xmpp::pending_delivery::SmSessionId::new(resume.previd),
+                SmResumeOutcome::Storage,
+            );
         }
     }
 
     if let ConnectionPhase::Authenticated { bare_jid } = phase {
         if detached.jid.to_bare() != *bare_jid {
-            warn!(
-                current_jid = %bare_jid,
-                resumed_jid = %detached.jid,
-                "SM resume rejected due to authenticated identity mismatch"
-            );
             claim_guard.release().await;
-            return vec![ResponseFrame::from(
-                SmFailed::with_condition("not-authorized").to_element(),
-            )];
+            return SmResumeTerminal::identity_mismatch(
+                waddle_xmpp::pending_delivery::SmSessionId::new(resume.previd),
+                detached.jid.clone(),
+            );
         }
     }
 
@@ -993,35 +1022,24 @@ async fn handle_sm_resume(
     // reclassified as a handled-count-too-high stream error; an
     // ahead-of-window `h` passes it and hits the too-high error below.
     if !detached.can_resume_from(resume.h) {
-        warn!(
-            stream_id = %resume.previd,
-            jid = %detached.jid,
-            client_h = resume.h,
-            replay_gap_through = ?detached.replay_gap_through,
-            "SM resume rejected: replay window no longer contains every stanza required by client h"
-        );
         claim_guard.release().await;
-        return vec![ResponseFrame::from(
-            SmFailed::resume_failed("resource-constraint", detached.inbound_count).to_element(),
-        )];
+        return SmResumeTerminal::replay_gap(
+            waddle_xmpp::pending_delivery::SmSessionId::new(resume.previd),
+            detached.inbound_count,
+            detached.jid.clone(),
+            resume.h,
+            detached.replay_gap_through,
+        );
     }
 
     if detached.handled_count_exceeds_outbound(resume.h) {
         claim_guard.release().await;
         *phase = ConnectionPhase::closing(None);
-        info!(
-            stream_id = %resume.previd,
-            client_h = resume.h,
-            send_count = detached.outbound_count,
-            "SM resume rejected: handled count too high"
+        return SmResumeTerminal::handled_too_high(
+            waddle_xmpp::pending_delivery::SmSessionId::new(resume.previd),
+            resume.h,
+            detached.outbound_count,
         );
-        return vec![
-            ResponseFrame::from(StreamErrorFrame::HandledCountTooHigh {
-                acknowledged: resume.h,
-                send_count: detached.outbound_count,
-            }),
-            ResponseFrame::from(websocket_stream_close_element()),
-        ];
     }
 
     #[cfg(test)]
@@ -1040,19 +1058,28 @@ async fn handle_sm_resume(
         .await
     {
         crate::auth::session::PrincipalResolution::Resolved(session) => session,
-        crate::auth::session::PrincipalResolution::Missing
-        | crate::auth::session::PrincipalResolution::Mismatched => {
+        crate::auth::session::PrincipalResolution::Missing => {
             claim_guard.release().await;
-            return vec![ResponseFrame::from(
-                SmFailed::with_condition("not-authorized").to_element(),
-            )];
+            return SmResumeTerminal::failed(
+                waddle_xmpp::pending_delivery::SmSessionId::new(resume.previd),
+                SmResumeOutcome::PrincipalUnavailable,
+            );
         }
-        crate::auth::session::PrincipalResolution::StorageError(error) => {
-            warn!(stream_id = %resume.previd, %error, "SM final principal recheck unavailable");
+        // Mirror of the early resolution: diverged durable principal =
+        // identity mismatch (same wire condition).
+        crate::auth::session::PrincipalResolution::Mismatched => {
             claim_guard.release().await;
-            return vec![ResponseFrame::from(
-                SmFailed::with_condition("internal-server-error").to_element(),
-            )];
+            return SmResumeTerminal::failed(
+                waddle_xmpp::pending_delivery::SmSessionId::new(resume.previd),
+                SmResumeOutcome::IdentityMismatch,
+            );
+        }
+        crate::auth::session::PrincipalResolution::StorageError(_) => {
+            claim_guard.release().await;
+            return SmResumeTerminal::failed(
+                waddle_xmpp::pending_delivery::SmSessionId::new(resume.previd),
+                SmResumeOutcome::Storage,
+            );
         }
     };
 
@@ -1060,15 +1087,11 @@ async fn handle_sm_resume(
     // they cannot diverge today; this gate turns that invariant into an
     // enforced precondition of the commit below rather than an assumption.
     if detached.jid.to_bare() != *principal.bare_jid() {
-        warn!(
-            stream_id = %resume.previd,
-            detached_jid = %detached.jid,
-            "SM resume rejected: detached snapshot JID diverged from durable principal"
-        );
         claim_guard.release().await;
-        return vec![ResponseFrame::from(
-            SmFailed::with_condition("not-authorized").to_element(),
-        )];
+        return SmResumeTerminal::detached_divergence(
+            waddle_xmpp::pending_delivery::SmSessionId::new(resume.previd),
+            detached.jid.clone(),
+        );
     }
 
     // Commit the staged snapshot only after the durable recheck succeeds.
@@ -1082,7 +1105,7 @@ async fn handle_sm_resume(
         if superseded.native_resume_only && superseded.id != resumed_session.id {
             let actor = state.deps.auth_state.session_manager.actor_ref();
             tokio::spawn(async move {
-                if let Err(error) = actor
+                if actor
                     .ask(crate::db::actor::DbExecute {
                         sql: format!(
                             "DELETE FROM sessions WHERE id = ? AND token_hash LIKE '{}:%'",
@@ -1091,8 +1114,12 @@ async fn handle_sm_resume(
                         params: vec![crate::db::Value::from(superseded.id.clone())],
                     })
                     .await
+                    .is_err()
                 {
-                    warn!(%error, "failed to delete superseded native-resume session row");
+                    warn!(
+                        failure = "storage",
+                        "failed to delete superseded native-resume session row"
+                    );
                 }
             });
         }
@@ -1132,17 +1159,10 @@ async fn handle_sm_resume(
             ))
         })
         .collect();
-    info!(
-        stream_id = %resume.previd,
-        jid = %detached.jid,
-        replay = replay.len(),
-        "SM resumed"
-    );
-
-    let mut responses = Vec::with_capacity(replay.len() + 1);
-    responses.push(ResponseFrame::from(
-        SmResumed::new(resume.previd, sm_state.get_inbound_count()).to_element(),
-    ));
-    responses.extend(replay);
-    responses
+    SmResumeTerminal::resumed(
+        waddle_xmpp::pending_delivery::SmSessionId::new(resume.previd),
+        sm_state.get_inbound_count(),
+        detached.jid,
+        replay,
+    )
 }

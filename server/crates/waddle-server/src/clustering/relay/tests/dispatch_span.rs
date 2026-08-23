@@ -36,7 +36,7 @@ fn relay_dispatch_span_joins_a_propagated_sender_trace() {
     let encoded = rmp_serde::to_vec_named(&trace).expect("trace context encodes");
     let decoded: RelayTraceContext =
         rmp_serde::from_slice(&encoded).expect("trace context decodes");
-    let dispatch = relay_dispatch_span("cross_node_check", &decoded);
+    let dispatch = relay_dispatch_span(RelayDispatchKind::DeliverOrdered, &decoded);
     drop(dispatch);
     drop(sender);
 
@@ -266,8 +266,12 @@ async fn delegated_relay_ask_records_the_dispatch_span() {
 async fn relay_dispatch_span_is_a_root_even_inside_an_active_span() {
     let spans = waddle_xmpp::telemetry::test_support::acquire_spans();
     let outer = tracing::info_span!("actor.handle_message");
-    let dispatch =
-        outer.in_scope(|| relay_dispatch_span("root_check", &RelayTraceContext::default()));
+    let dispatch = outer.in_scope(|| {
+        relay_dispatch_span(
+            RelayDispatchKind::DeliverOrdered,
+            &RelayTraceContext::default(),
+        )
+    });
     drop(dispatch);
     drop(outer);
 
@@ -281,5 +285,44 @@ async fn relay_dispatch_span_is_a_root_even_inside_an_active_span() {
         opentelemetry::trace::SpanId::INVALID,
         "the dispatch span must root a fresh trace, not inherit the \
          active (suppressed) actor span as its parent"
+    );
+}
+
+// Lives here rather than as a `#[cfg(test)]` item in relay.rs: the
+// `delegated_relay_replies_go_through_the_dispatch_span_helper` guard treats
+// everything after the file's first `#[cfg(test)]` as test code, so a
+// test-gated item up in the production section would silently shrink the
+// segment it audits.
+const ALL_DISPATCH_KINDS: [RelayDispatchKind; 11] = [
+    RelayDispatchKind::DeliverOrdered,
+    RelayDispatchKind::RemoteResourceRegister,
+    RelayDispatchKind::RemoteResourceUnregister,
+    RelayDispatchKind::RemoteResourceUpdate,
+    RelayDispatchKind::RemoteUserSideEffect,
+    RelayDispatchKind::RemoteResourceRoute,
+    RelayDispatchKind::RemoteResourceFrame,
+    RelayDispatchKind::RemoteResourceForceDetach,
+    RelayDispatchKind::ResumeSteal,
+    RelayDispatchKind::Demote,
+    RelayDispatchKind::ReassertMediaGrants,
+];
+
+#[test]
+fn relay_dispatch_kind_strings_are_pinned() {
+    assert_eq!(
+        ALL_DISPATCH_KINDS.map(RelayDispatchKind::as_str),
+        [
+            "deliver_ordered",
+            "remote_resource_register",
+            "remote_resource_unregister",
+            "remote_resource_update",
+            "remote_user_side_effect",
+            "remote_resource_route",
+            "remote_resource_frame",
+            "remote_resource_force_detach",
+            "resume_steal",
+            "demote",
+            "reassert_media_grants",
+        ]
     );
 }

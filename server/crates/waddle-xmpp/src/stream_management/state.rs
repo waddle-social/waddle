@@ -65,6 +65,9 @@ pub struct StreamManagementState {
     /// because `replay_gap_through` permanently outruns the client's
     /// last-acked `h`.
     last_request_outbound_count: u32,
+    /// Oldest outstanding XEP-0198 `<r/>` request, if any. Later
+    /// `<r/>` writes coalesce while one request is still outstanding.
+    oldest_outstanding_request: Option<OutstandingAckRequest>,
     /// Highest evicted outbound sequence not yet covered by a client ack.
     replay_gap_through: Option<u32>,
     /// Maximum resumption timeout in seconds
@@ -99,6 +102,12 @@ pub struct StreamManagementState {
     last_eviction_warn: Option<Instant>,
     /// When this SM state was created
     created_at: Instant,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct OutstandingAckRequest {
+    sent_at: Instant,
+    outbound_count: u32,
 }
 
 /// Coalescing window for the unacked-queue eviction warning (issue #1219).
@@ -156,6 +165,7 @@ impl StreamManagementState {
             outbound_count: 0,
             last_acked: 0,
             last_request_outbound_count: 0,
+            oldest_outstanding_request: None,
             replay_gap_through: None,
             max_resume_time: None,
             unacked_queue: UnackedQueue::new(DEFAULT_MAX_UNACKED_QUEUE_SIZE),
@@ -180,6 +190,7 @@ impl StreamManagementState {
             outbound_count: 0,
             last_acked: 0,
             last_request_outbound_count: 0,
+            oldest_outstanding_request: None,
             replay_gap_through: None,
             max_resume_time: None,
             unacked_queue: UnackedQueue::new(max_queue_size),
@@ -200,6 +211,7 @@ impl StreamManagementState {
         self.resumable = resumable;
         self.max_resume_time = max_time;
         self.shadow_ordinal = ShadowOrdinal::ZERO;
+        self.oldest_outstanding_request = None;
     }
 
     /// Increment the inbound stanza count (stanzas received from client).
@@ -300,6 +312,37 @@ impl StreamManagementState {
         // The window just shrank — release the send-window pause latch if it
         // fell back to the low watermark (issue #1219).
         self.refresh_send_window_pause();
+    }
+
+    /// Mark that an XEP-0198 `<r/>` was successfully written on the wire.
+    /// Later requests coalesce while one remains outstanding.
+    pub fn note_ack_request_sent(&mut self) {
+        self.note_ack_request_sent_at(Instant::now());
+    }
+
+    fn note_ack_request_sent_at(&mut self, sent_at: Instant) {
+        if self.oldest_outstanding_request.is_none() {
+            self.oldest_outstanding_request = Some(OutstandingAckRequest {
+                sent_at,
+                outbound_count: self.outbound_count,
+            });
+        }
+    }
+
+    /// Clear any outstanding `<r/>` latency tracking state.
+    pub fn clear_ack_request_tracking(&mut self) {
+        self.oldest_outstanding_request = None;
+    }
+
+    /// Return the latency, in milliseconds, for the oldest outstanding
+    /// `<r/>` if `h` covers the outbound frontier it observed.
+    pub fn fulfill_oldest_ack_request_latency_ms(&mut self, h: u32) -> Option<f64> {
+        let outstanding = self.oldest_outstanding_request?;
+        if sequence_gt(outstanding.outbound_count, h) {
+            return None;
+        }
+        self.oldest_outstanding_request = None;
+        Some(outstanding.sent_at.elapsed().as_secs_f64() * 1_000.0)
     }
 
     /// Whether a client `<a h='N'/>` claims more stanzas handled than
@@ -461,12 +504,13 @@ impl StreamManagementState {
     /// Carbons opt-in is per-stream, so XEP-0198 resumption must preserve
     /// it — storing it on the detached session is what makes that possible.
     pub fn to_detached_session(
-        &self,
+        &mut self,
         snapshot: DetachedSessionSnapshot,
     ) -> Option<DetachedSession> {
         if !self.is_resumable() {
             return None;
         }
+        self.clear_ack_request_tracking();
 
         Some(DetachedSession {
             stream_id: self.stream_id.clone()?,
@@ -509,6 +553,7 @@ impl StreamManagementState {
         // doesn't immediately re-request — give it ack_threshold of
         // headroom like a freshly-enabled session would have.
         self.last_request_outbound_count = session.outbound_count;
+        self.oldest_outstanding_request = None;
         self.replay_gap_through = session.replay_gap_through;
         self.max_resume_time = session.max_resume_time;
 
@@ -972,5 +1017,56 @@ mod tests {
                 "a non-resumable stream is never send-window paced (n={n})"
             );
         }
+    }
+
+    #[test]
+    fn ack_request_latency_tracks_only_the_oldest_outstanding_request() {
+        let mut state = StreamManagementState::with_config(1000, 3);
+        state.enable("latency".to_string(), true, Some(300));
+        state.outbound_count = 5;
+        state.note_ack_request_sent_at(Instant::now() - std::time::Duration::from_millis(50));
+
+        state.outbound_count = 7;
+        state.note_ack_request_sent_at(Instant::now());
+
+        assert!(
+            state.fulfill_oldest_ack_request_latency_ms(4).is_none(),
+            "acks below the request frontier must keep the request outstanding"
+        );
+        let latency_ms = state
+            .fulfill_oldest_ack_request_latency_ms(5)
+            .expect("ack at the request frontier should satisfy the oldest request");
+        assert!(latency_ms >= 1.0);
+        assert!(
+            state.fulfill_oldest_ack_request_latency_ms(7).is_none(),
+            "later requests intentionally coalesce into the oldest outstanding one"
+        );
+    }
+
+    #[test]
+    fn ack_request_tracking_rearms_for_a_second_round_after_fulfillment() {
+        // Regression for the multi-round send-window pause recovery: a
+        // partial ack fulfills the first request, and the follow-up `<r/>`
+        // the server writes while still paused must re-arm tracking so the
+        // next covering ack produces a second latency sample.
+        let mut state = StreamManagementState::with_config(1000, 3);
+        state.enable("latency-rounds".to_string(), true, Some(300));
+        state.outbound_count = 5;
+        state.note_ack_request_sent_at(Instant::now() - std::time::Duration::from_millis(20));
+        assert!(state.fulfill_oldest_ack_request_latency_ms(5).is_some());
+
+        state.outbound_count = 9;
+        state.note_ack_request_sent_at(Instant::now() - std::time::Duration::from_millis(10));
+        assert!(
+            state.fulfill_oldest_ack_request_latency_ms(9).is_some(),
+            "a re-sent request after fulfillment must be tracked as a fresh round"
+        );
+    }
+
+    #[test]
+    fn handled_progress_wraps_across_u32_boundary() {
+        let last_acked = u32::MAX;
+        let h = 1_u32;
+        assert_eq!(u64::from(h.wrapping_sub(last_acked)), 2);
     }
 }

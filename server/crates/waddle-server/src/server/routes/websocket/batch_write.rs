@@ -64,6 +64,11 @@ pub(super) enum BatchWriteOutcome {
 pub(super) struct BatchWriteReport {
     pub(super) outcome: BatchWriteOutcome,
     pub(super) accepted_frame_indices: Vec<usize>,
+    /// Frames of this batch that were actually written to the transport
+    /// (a prefix of the batch: frame 0 first). Distinct from
+    /// `accepted_frame_indices`, which tracks frames recorded/retained for
+    /// XEP-0198 replay whether or not they reached the wire.
+    pub(super) written_frame_count: usize,
 }
 
 /// Normal upper bound on frames the mid-batch drain may park in
@@ -237,12 +242,14 @@ where
 {
     let total_frames = frames.len();
     let mut accepted_frame_indices = Vec::new();
+    let mut written_frame_count = 0usize;
     let mut frames = frames.into_iter().enumerate();
     if !batch_authoritative(authority) {
         accepted_frame_indices.extend(record_remaining_for_replay_indexed(conn, frames, policy));
         return BatchWriteReport {
             outcome: BatchWriteOutcome::AuthorityRevoked,
             accepted_frame_indices,
+            written_frame_count,
         };
     }
     // Send-window pacing applies ONLY before frames that would actually grow
@@ -264,6 +271,7 @@ where
             return BatchWriteReport {
                 outcome: BatchWriteOutcome::AuthorityRevoked,
                 accepted_frame_indices,
+                written_frame_count,
             };
         }
         let frame_xml = frame.clone().into_serialized_xml();
@@ -290,6 +298,7 @@ where
                     return BatchWriteReport {
                         outcome: BatchWriteOutcome::DeferredCapExhausted,
                         accepted_frame_indices,
+                        written_frame_count,
                     };
                 }
                 SendWindowOutcome::TransportClosed | SendWindowOutcome::TimedOut => {
@@ -304,6 +313,7 @@ where
                     return BatchWriteReport {
                         outcome: BatchWriteOutcome::TransportClosed,
                         accepted_frame_indices,
+                        written_frame_count,
                     };
                 }
                 SendWindowOutcome::AuthorityRevoked => {
@@ -318,6 +328,7 @@ where
                     return BatchWriteReport {
                         outcome: BatchWriteOutcome::AuthorityRevoked,
                         accepted_frame_indices,
+                        written_frame_count,
                     };
                 }
             }
@@ -345,6 +356,7 @@ where
             return BatchWriteReport {
                 outcome: BatchWriteOutcome::AuthorityRevoked,
                 accepted_frame_indices,
+                written_frame_count,
             };
         }
         if let Err(outcome) = send_window_message(
@@ -362,6 +374,7 @@ where
                     BatchWriteReport {
                         outcome: BatchWriteOutcome::TransportClosed,
                         accepted_frame_indices,
+                        written_frame_count,
                     }
                 }
                 SendWindowOutcome::AuthorityRevoked => {
@@ -373,6 +386,7 @@ where
                     BatchWriteReport {
                         outcome: BatchWriteOutcome::AuthorityRevoked,
                         accepted_frame_indices,
+                        written_frame_count,
                     }
                 }
                 SendWindowOutcome::Recovered
@@ -380,6 +394,7 @@ where
                 | SendWindowOutcome::TimedOut => unreachable!("send outcome only"),
             };
         }
+        written_frame_count += 1;
         if request_ack {
             if !batch_authoritative(authority) {
                 accepted_frame_indices
@@ -387,6 +402,7 @@ where
                 return BatchWriteReport {
                     outcome: BatchWriteOutcome::AuthorityRevoked,
                     accepted_frame_indices,
+                    written_frame_count,
                 };
             }
             if let Err(outcome) = send_window_message(
@@ -404,6 +420,7 @@ where
                         BatchWriteReport {
                             outcome: BatchWriteOutcome::TransportClosed,
                             accepted_frame_indices,
+                            written_frame_count,
                         }
                     }
                     SendWindowOutcome::AuthorityRevoked => {
@@ -412,6 +429,7 @@ where
                         BatchWriteReport {
                             outcome: BatchWriteOutcome::AuthorityRevoked,
                             accepted_frame_indices,
+                            written_frame_count,
                         }
                     }
                     SendWindowOutcome::Recovered
@@ -419,6 +437,7 @@ where
                     | SendWindowOutcome::TimedOut => unreachable!("send outcome only"),
                 };
             }
+            conn.sm_state.note_ack_request_sent();
             // Give already-arrived inbound frames a chance to land:
             // `<a/>` acks shrink the unacked queue mid-flood instead
             // of waiting for the whole batch to finish.
@@ -430,6 +449,7 @@ where
                     return BatchWriteReport {
                         outcome: BatchWriteOutcome::TransportClosed,
                         accepted_frame_indices,
+                        written_frame_count,
                     };
                 }
                 DrainSignal::AuthorityRevoked => {
@@ -438,6 +458,7 @@ where
                     return BatchWriteReport {
                         outcome: BatchWriteOutcome::AuthorityRevoked,
                         accepted_frame_indices,
+                        written_frame_count,
                     };
                 }
             }
@@ -446,6 +467,7 @@ where
     BatchWriteReport {
         outcome: BatchWriteOutcome::Continue,
         accepted_frame_indices: (0..total_frames).collect(),
+        written_frame_count,
     }
 }
 
@@ -503,6 +525,7 @@ where
     {
         return outcome;
     }
+    conn.sm_state.note_ack_request_sent();
     loop {
         if !batch_authoritative(authority) {
             return SendWindowOutcome::AuthorityRevoked;
@@ -593,6 +616,7 @@ where
                         {
                             return outcome;
                         }
+                        conn.sm_state.note_ack_request_sent();
                     }
                 } else if is_client_sm_request(text.as_str()) {
                     if !batch_authoritative(authority) {

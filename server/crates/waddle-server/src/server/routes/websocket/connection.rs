@@ -335,6 +335,7 @@ async fn handle_xmpp_websocket(
                 ) {
                     break;
                 }
+                conn.sm_state.note_ack_request_sent();
             }
         } else {
             conn.send_window_pause_deadline = None;
@@ -1381,13 +1382,23 @@ async fn handle_inbound_text(
             let stream_error = build_internal_server_error_stream_error(
                 "Session initialization failed; please reconnect.",
             );
-            let _ = send_ws_text_frames_with_authority(
+            let send_outcome = send_ws_text_frames_with_authority(
                 ws_sender,
                 [stream_error, websocket_stream_close_xml()],
                 "Failed to send session-init stream error",
                 (admission_permit, shutdown_token),
             )
             .await;
+            // A registration abort (actor busy/failed) can kill a resume
+            // whose provisional acceptance was never counted; the stream
+            // error just written IS that attempt's wire terminal.
+            if matches!(send_outcome, AuthoritySendOutcome::Sent)
+                && conn.pending_resume_stream_id.is_some()
+            {
+                super::stream_management::observe_sm_resume_finalized(
+                    waddle_xmpp::telemetry::attributes::SmResumeOutcome::Internal,
+                );
+            }
             let _ = close_ws_connection(
                 ws_sender,
                 "Failed to send WebSocket close frame after session-init error",
@@ -1499,6 +1510,16 @@ async fn handle_inbound_text(
         },
     )
     .await;
+    // The terminal resume frame is always frame 0 of its batch, and the
+    // writer sends frames in order — any written frame means the terminal
+    // reached the wire. Record the staged result exactly then, even when a
+    // LATER frame of the same batch broke the transport; and never when the
+    // batch died before its first write.
+    if write_report.written_frame_count > 0 {
+        if let Some(outcome) = conn.pending_finalized_resume_outcome.take() {
+            super::stream_management::observe_sm_resume_finalized(outcome);
+        }
+    }
     match write_report.outcome {
         BatchWriteOutcome::Continue => {
             conn.commit_server_stream_open_response();

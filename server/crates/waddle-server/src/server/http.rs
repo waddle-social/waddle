@@ -514,9 +514,12 @@ async fn create_websocket_state(
     // store/identity pair into UserRegistry that SM sessions and rooms use.
     // A `None` pair (clustering disabled, non-Postgres, or non-clustering
     // build) leaves the registry on its single-node in-process default.
-    #[cfg(feature = "clustering")]
+    // The single-node default is already observed: the registry constructs
+    // its own ObservedClaimStore-wrapped InProcessClaimStore, so no
+    // unconditional re-wiring is needed here (re-wiring after spawn races
+    // hydration; #1648 review).
     if let Some((claim_store, node_identity)) = state.clustering_claims.claim_pair() {
-        if let Err(error) = user_registry
+        if let Err(_error) = user_registry
             .tell(waddle_xmpp::registry::WireUserClusteringClaims {
                 claim_store,
                 node_identity,
@@ -524,10 +527,7 @@ async fn create_websocket_state(
             .mailbox_timeout(std::time::Duration::from_secs(2))
             .await
         {
-            warn!(
-                %error,
-                "failed to wire clustering claims into the user registry"
-            );
+            warn!("failed to wire clustering claims into the user registry");
         }
     }
     #[cfg(feature = "clustering")]
@@ -1425,6 +1425,8 @@ async fn create_sm_session_registry(
     // in above, defeating acquire-then-hydrate entirely. A `None` pair
     // (clustering disabled, non-Postgres, or a build without the
     // `clustering` feature) leaves today's single-node default untouched.
+    // The registry's own single-node default is already an
+    // ObservedClaimStore-wrapped InProcessClaimStore (#1648).
     if let Some((claim_store, node_identity)) = clustering.claim_pair() {
         sm_session_registry = sm_session_registry.with_claim_store(claim_store, node_identity);
     }
