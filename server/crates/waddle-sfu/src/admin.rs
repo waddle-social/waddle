@@ -1,12 +1,15 @@
 //! LiveKit admin REST client.
 //!
 //! Talks the Twirp JSON protocol exposed by LiveKit's `RoomService`:
-//! `POST /twirp/livekit.RoomService/{RemoveParticipant,DeleteRoom}`.
-//! Authentication is an HS256-signed admin JWT carrying
-//! `video.roomAdmin = true`, room-scoped for least-privilege.
-//! `RemoveParticipant` and `DeleteRoom` are both gated on `roomAdmin`
-//! per LiveKit's docs; `roomCreate` is for `CreateRoom`, which this
-//! client never calls, so the grant intentionally omits it.
+//! `POST /twirp/livekit.RoomService/{ListRooms,ListParticipants,`
+//! `RemoveParticipant,UpdateParticipant,DeleteRoom}`.
+//! Authentication is an HS256-signed admin JWT. LiveKit's
+//! `RoomService` requires `roomCreate` for `DeleteRoom`, room-scoped
+//! `roomAdmin` for participant operations, and `roomList` for
+//! `ListRooms`; `DeleteRoom` is gated by
+//! `pkg/service/roomservice.go`'s `EnsureCreatePermission`. Tokens
+//! are minted per operation so those grants do not leak across
+//! control-plane calls.
 //!
 //! Idempotency: LiveKit returns Twirp `not_found` (HTTP 404 or a 4xx
 //! whose envelope's `code` is `"not_found"`) when the participant or
@@ -20,6 +23,7 @@
 
 use std::future::Future;
 use std::pin::Pin;
+use std::sync::Arc;
 use std::time::Duration as StdDuration;
 
 use chrono::{Duration, Utc};
@@ -43,6 +47,26 @@ const ADMIN_JWT_TTL: Duration = Duration::seconds(60);
 /// fire-and-forget from the teardown hot path: a stuck SFU must not
 /// leak runtime tasks indefinitely.
 const ADMIN_HTTP_TIMEOUT: StdDuration = StdDuration::from_secs(5);
+
+/// LiveKit control-plane operation reported to [`AdminCallObserver`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AdminOp {
+    DeleteRoom,
+    RemoveParticipant,
+    UpdateParticipant,
+    ListRooms,
+    RoomOccupancy,
+}
+
+/// Observer for final LiveKit admin failures after idempotent
+/// `not_found` responses have been normalized to success.
+pub trait AdminCallObserver: Send + Sync + 'static {
+    fn admin_call_failed(&self, op: AdminOp);
+}
+
+impl AdminCallObserver for () {
+    fn admin_call_failed(&self, _op: AdminOp) {}
+}
 
 /// LiveKit's own view of who is connected to a room.
 ///
@@ -171,12 +195,13 @@ pub trait LiveKitAdmin: Send + Sync + 'static {
 
 /// Production admin client. Holds a long-lived `reqwest::Client` so
 /// connection pool + TLS state are reused across teardowns.
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub(crate) struct ReqwestLiveKitAdmin {
     http: reqwest::Client,
     base_url: Url,
     api_key: ApiKey,
     api_secret: ApiSecret,
+    observer: Arc<dyn AdminCallObserver>,
 }
 
 impl ReqwestLiveKitAdmin {
@@ -187,6 +212,15 @@ impl ReqwestLiveKitAdmin {
         base_url: Url,
         api_key: ApiKey,
         api_secret: ApiSecret,
+    ) -> Result<Self, SfuError> {
+        Self::new_with_observer(base_url, api_key, api_secret, Arc::new(()))
+    }
+
+    pub(crate) fn new_with_observer(
+        base_url: Url,
+        api_key: ApiKey,
+        api_secret: ApiSecret,
+        observer: Arc<dyn AdminCallObserver>,
     ) -> Result<Self, SfuError> {
         let http = reqwest::Client::builder()
             .timeout(ADMIN_HTTP_TIMEOUT)
@@ -204,6 +238,7 @@ impl ReqwestLiveKitAdmin {
             base_url,
             api_key,
             api_secret,
+            observer,
         })
     }
 
@@ -211,6 +246,16 @@ impl ReqwestLiveKitAdmin {
         self.mint_token(AdminGrant {
             room: Some(room.as_str().to_string()),
             room_admin: true,
+            room_create: false,
+            room_list: false,
+        })
+    }
+
+    fn mint_delete_room_token(&self, room: &CallId) -> Result<String, SfuError> {
+        self.mint_token(AdminGrant {
+            room: Some(room.as_str().to_string()),
+            room_admin: true,
+            room_create: true,
             room_list: false,
         })
     }
@@ -219,6 +264,7 @@ impl ReqwestLiveKitAdmin {
         self.mint_token(AdminGrant {
             room: None,
             room_admin: false,
+            room_create: false,
             room_list: true,
         })
     }
@@ -244,6 +290,13 @@ impl ReqwestLiveKitAdmin {
             .map_err(SfuError::JwtSigning)
     }
 
+    fn observe<T>(&self, op: AdminOp, result: Result<T, SfuError>) -> Result<T, SfuError> {
+        if result.is_err() {
+            self.observer.admin_call_failed(op);
+        }
+        result
+    }
+
     async fn post<B: Serialize>(
         &self,
         room: &CallId,
@@ -251,6 +304,25 @@ impl ReqwestLiveKitAdmin {
         body: &B,
     ) -> Result<(), SfuError> {
         let token = self.mint_admin_token(room)?;
+        self.post_with_token(token, path, body).await
+    }
+
+    async fn post_delete<B: Serialize>(
+        &self,
+        room: &CallId,
+        path: &str,
+        body: &B,
+    ) -> Result<(), SfuError> {
+        let token = self.mint_delete_room_token(room)?;
+        self.post_with_token(token, path, body).await
+    }
+
+    async fn post_with_token<B: Serialize>(
+        &self,
+        token: String,
+        path: &str,
+        body: &B,
+    ) -> Result<(), SfuError> {
         let url = self.base_url.join(path).map_err(SfuError::AdminUrl)?;
         let resp = self
             .http
@@ -264,25 +336,8 @@ impl ReqwestLiveKitAdmin {
         if status.is_success() {
             return Ok(());
         }
-        // LiveKit Twirp returns either HTTP 404 or a 4xx with a JSON
-        // envelope whose `code` is exactly `"not_found"` when the
-        // participant or room is already gone. Both shapes are the
-        // teardown idempotency contract: the desired post-condition
-        // (gone) already holds, so map them to `Ok(())`. The body
-        // match parses the envelope explicitly (not a substring test)
-        // so an unrelated error whose human-readable `msg` happens to
-        // contain "not found" still surfaces as a failure.
-        if status == reqwest::StatusCode::NOT_FOUND {
-            return Ok(());
-        }
         let body = resp.text().await.unwrap_or_default();
-        if status.is_client_error() && is_twirp_not_found(&body) {
-            return Ok(());
-        }
-        Err(SfuError::AdminCallFailed {
-            status: status.as_u16(),
-            body: truncate(body, 256),
-        })
+        normalize_empty_response(status, body)
     }
 
     /// Like [`Self::post`] but deserializes the response body. Returns
@@ -329,32 +384,36 @@ impl LiveKitAdmin for ReqwestLiveKitAdmin {
         &self,
     ) -> Pin<Box<dyn Future<Output = Result<Vec<ListedRoom>, SfuError>> + Send + '_>> {
         Box::pin(async move {
-            let token = self.mint_list_rooms_token()?;
-            let url = self
-                .base_url
-                .join("twirp/livekit.RoomService/ListRooms")
-                .map_err(SfuError::AdminUrl)?;
-            let response = self
-                .http
-                .post(url)
-                .bearer_auth(token)
-                .json(&ListRoomsRequest::default())
-                .send()
-                .await
-                .map_err(SfuError::AdminRequest)?;
-            let status = response.status();
-            if status.is_success() {
-                let response = response
-                    .json::<ListRoomsResponse>()
+            let result = async {
+                let token = self.mint_list_rooms_token()?;
+                let url = self
+                    .base_url
+                    .join("twirp/livekit.RoomService/ListRooms")
+                    .map_err(SfuError::AdminUrl)?;
+                let response = self
+                    .http
+                    .post(url)
+                    .bearer_auth(token)
+                    .json(&ListRoomsRequest::default())
+                    .send()
                     .await
                     .map_err(SfuError::AdminRequest)?;
-                return Ok(response.rooms);
+                let status = response.status();
+                if status.is_success() {
+                    let response = response
+                        .json::<ListRoomsResponse>()
+                        .await
+                        .map_err(SfuError::AdminRequest)?;
+                    return Ok(response.rooms);
+                }
+                let body = response.text().await.unwrap_or_default();
+                Err(SfuError::AdminCallFailed {
+                    status: status.as_u16(),
+                    body: truncate(body, 256),
+                })
             }
-            let body = response.text().await.unwrap_or_default();
-            Err(SfuError::AdminCallFailed {
-                status: status.as_u16(),
-                body: truncate(body, 256),
-            })
+            .await;
+            self.observe(AdminOp::ListRooms, result)
         })
     }
 
@@ -368,8 +427,10 @@ impl LiveKitAdmin for ReqwestLiveKitAdmin {
             identity: identity.as_livekit_identity(),
         };
         Box::pin(async move {
-            self.post(room, "twirp/livekit.RoomService/RemoveParticipant", &body)
-                .await
+            let result = self
+                .post(room, "twirp/livekit.RoomService/RemoveParticipant", &body)
+                .await;
+            self.observe(AdminOp::RemoveParticipant, result)
         })
     }
 
@@ -381,8 +442,10 @@ impl LiveKitAdmin for ReqwestLiveKitAdmin {
             room: room.as_str().to_string(),
         };
         Box::pin(async move {
-            self.post(room, "twirp/livekit.RoomService/DeleteRoom", &body)
-                .await
+            let result = self
+                .post_delete(room, "twirp/livekit.RoomService/DeleteRoom", &body)
+                .await;
+            self.observe(AdminOp::DeleteRoom, result)
         })
     }
 
@@ -398,8 +461,10 @@ impl LiveKitAdmin for ReqwestLiveKitAdmin {
             permission: ParticipantPermission::from_capabilities(capabilities),
         };
         Box::pin(async move {
-            self.post(room, "twirp/livekit.RoomService/UpdateParticipant", &body)
-                .await
+            let result = self
+                .post(room, "twirp/livekit.RoomService/UpdateParticipant", &body)
+                .await;
+            self.observe(AdminOp::UpdateParticipant, result)
         })
     }
 
@@ -411,29 +476,33 @@ impl LiveKitAdmin for ReqwestLiveKitAdmin {
             room: room.as_str().to_string(),
         };
         Box::pin(async move {
-            let resp: Option<ListParticipantsResponse> = self
-                .post_returning(room, "twirp/livekit.RoomService/ListParticipants", &body)
-                .await?;
-            // `None` => room not found on LiveKit => nobody connected.
-            let Some(resp) = resp else {
-                return Ok(RoomOccupancy::default());
-            };
-            // LiveKit identities are the stringified FullJids we minted
-            // into the JWT `sub`. Parse each back into a typed
-            // [`Identity`]; anything that does not round-trip is a
-            // participant we did not issue (egress recorder, SIP,
-            // ingress). It can never be a ghost of ours, but it IS
-            // occupancy — count it rather than dropping it.
-            let mut occupancy = RoomOccupancy::default();
-            for participant in resp.participants {
-                match participant.identity.parse::<jid::FullJid>() {
-                    Ok(jid) => occupancy
-                        .waddle
-                        .push((Identity::from_jid(jid), participant.sid)),
-                    Err(_) => occupancy.foreign += 1,
+            let result = async {
+                let resp: Option<ListParticipantsResponse> = self
+                    .post_returning(room, "twirp/livekit.RoomService/ListParticipants", &body)
+                    .await?;
+                // `None` => room not found on LiveKit => nobody connected.
+                let Some(resp) = resp else {
+                    return Ok(RoomOccupancy::default());
+                };
+                // LiveKit identities are the stringified FullJids we minted
+                // into the JWT `sub`. Parse each back into a typed
+                // [`Identity`]; anything that does not round-trip is a
+                // participant we did not issue (egress recorder, SIP,
+                // ingress). It can never be a ghost of ours, but it IS
+                // occupancy — count it rather than dropping it.
+                let mut occupancy = RoomOccupancy::default();
+                for participant in resp.participants {
+                    match participant.identity.parse::<jid::FullJid>() {
+                        Ok(jid) => occupancy
+                            .waddle
+                            .push((Identity::from_jid(jid), participant.sid)),
+                        Err(_) => occupancy.foreign += 1,
+                    }
                 }
+                Ok(occupancy)
             }
-            Ok(occupancy)
+            .await;
+            self.observe(AdminOp::RoomOccupancy, result)
         })
     }
 }
@@ -486,6 +555,11 @@ struct AdminGrant {
     #[serde(rename = "roomAdmin")]
     #[serde(skip_serializing_if = "std::ops::Not::not")]
     room_admin: bool,
+    /// `DeleteRoom` is gated by `EnsureCreatePermission` in
+    /// livekit-server's `pkg/service/roomservice.go`.
+    #[serde(rename = "roomCreate")]
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    room_create: bool,
     #[serde(rename = "roomList")]
     #[serde(skip_serializing_if = "std::ops::Not::not")]
     room_list: bool,
@@ -639,6 +713,18 @@ fn is_twirp_not_found(body: &str) -> bool {
         .is_some_and(|c| c == "not_found")
 }
 
+fn normalize_empty_response(status: reqwest::StatusCode, body: String) -> Result<(), SfuError> {
+    if status == reqwest::StatusCode::NOT_FOUND
+        || (status.is_client_error() && is_twirp_not_found(&body))
+    {
+        return Ok(());
+    }
+    Err(SfuError::AdminCallFailed {
+        status: status.as_u16(),
+        body: truncate(body, 256),
+    })
+}
+
 fn truncate(mut s: String, max: usize) -> String {
     if s.len() <= max {
         return s;
@@ -660,7 +746,136 @@ fn truncate(mut s: String, max: usize) -> String {
 
 #[cfg(test)]
 mod tests {
+    use std::sync::Mutex;
+
+    use jsonwebtoken::{decode, DecodingKey, Validation};
+    use serde::Deserialize;
+
     use super::*;
+
+    #[derive(Deserialize)]
+    struct DecodedAdminClaims {
+        video: serde_json::Value,
+    }
+
+    fn decode_grant(token: &str) -> serde_json::Value {
+        let mut validation = Validation::new(jsonwebtoken::Algorithm::HS256);
+        validation.validate_exp = false;
+        validation.required_spec_claims.clear();
+        decode::<DecodedAdminClaims>(
+            token,
+            &DecodingKey::from_secret(b"test-secret-test-secret-test-secret"),
+            &validation,
+        )
+        .expect("admin token decodes")
+        .claims
+        .video
+    }
+
+    fn test_admin() -> ReqwestLiveKitAdmin {
+        ReqwestLiveKitAdmin::new(
+            Url::parse("http://127.0.0.1/").expect("base URL"),
+            ApiKey::new("test-key".to_owned()),
+            ApiSecret::from_text("test-secret-test-secret-test-secret").expect("API secret"),
+        )
+        .expect("admin client")
+    }
+
+    #[derive(Default)]
+    struct RecordingObserver(Mutex<Vec<AdminOp>>);
+
+    impl AdminCallObserver for RecordingObserver {
+        fn admin_call_failed(&self, op: AdminOp) {
+            self.0.lock().expect("observer lock").push(op);
+        }
+    }
+
+    fn test_admin_with_observer(
+        base_url: Url,
+        observer: Arc<dyn AdminCallObserver>,
+    ) -> ReqwestLiveKitAdmin {
+        ReqwestLiveKitAdmin::new_with_observer(
+            base_url,
+            ApiKey::new("test-key".to_owned()),
+            ApiSecret::from_text("test-secret-test-secret-test-secret").expect("API secret"),
+            observer,
+        )
+        .expect("admin client")
+    }
+
+    #[test]
+    fn observer_records_final_admin_error() {
+        let observer = Arc::new(RecordingObserver::default());
+        let admin = test_admin_with_observer(
+            Url::parse("http://127.0.0.1/").expect("base URL"),
+            observer.clone(),
+        );
+
+        let result = normalize_empty_response(
+            reqwest::StatusCode::INTERNAL_SERVER_ERROR,
+            "boom".to_owned(),
+        );
+        assert!(admin.observe(AdminOp::RemoveParticipant, result).is_err());
+        assert_eq!(
+            observer.0.lock().expect("observer lock").as_slice(),
+            &[AdminOp::RemoveParticipant]
+        );
+    }
+
+    #[test]
+    fn observer_ignores_not_found_normalized_to_success() {
+        let observer = Arc::new(RecordingObserver::default());
+        let admin = test_admin_with_observer(
+            Url::parse("http://127.0.0.1/").expect("base URL"),
+            observer.clone(),
+        );
+
+        let result = normalize_empty_response(reqwest::StatusCode::NOT_FOUND, String::new());
+        assert!(admin.observe(AdminOp::DeleteRoom, result).is_ok());
+        assert!(observer.0.lock().expect("observer lock").is_empty());
+    }
+
+    #[test]
+    fn delete_room_token_carries_create_and_auditing_grants() {
+        let admin = test_admin();
+        let room = CallId::new("room@muc.example.com".to_owned()).expect("call ID");
+
+        let grant = decode_grant(&admin.mint_delete_room_token(&room).expect("token"));
+
+        assert_eq!(
+            grant,
+            serde_json::json!({
+                "room": "room@muc.example.com",
+                "roomAdmin": true,
+                "roomCreate": true,
+            })
+        );
+    }
+
+    #[test]
+    fn participant_operation_token_omits_create_grant() {
+        let admin = test_admin();
+        let room = CallId::new("room@muc.example.com".to_owned()).expect("call ID");
+
+        let grant = decode_grant(&admin.mint_admin_token(&room).expect("token"));
+
+        assert_eq!(
+            grant,
+            serde_json::json!({
+                "room": "room@muc.example.com",
+                "roomAdmin": true,
+            })
+        );
+    }
+
+    #[test]
+    fn list_rooms_token_carries_only_list_grant() {
+        let admin = test_admin();
+
+        let grant = decode_grant(&admin.mint_list_rooms_token().expect("token"));
+
+        assert_eq!(grant, serde_json::json!({ "roomList": true }));
+    }
 
     #[test]
     fn admin_base_url_swaps_wss_to_https() {
@@ -791,6 +1006,7 @@ mod tests {
             serde_json::to_value(AdminGrant {
                 room: None,
                 room_admin: false,
+                room_create: false,
                 room_list: true,
             })
             .expect("grant serializes"),

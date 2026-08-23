@@ -33,7 +33,7 @@ mod token;
 mod turn;
 mod webhook;
 
-pub use admin::{ListedRoom, LiveKitAdmin, RoomOccupancy};
+pub use admin::{AdminCallObserver, AdminOp, ListedRoom, LiveKitAdmin, RoomOccupancy};
 pub use call::{
     CallGeneration, CallId, CallState, CallTeardownIntentLite, Identity, MediaCapabilities,
     ObservedCallSids, ParticipantSid, RoomSid, SessionBinding, SessionScopedTeardown,
