@@ -83,11 +83,14 @@ impl Drop for FenceCancellationGuard {
     }
 }
 
-/// Mutation counterpart of [`FenceCancellationGuard`]. Cancellations count
-/// as `backend` rather than a dedicated label value: `operation x result`
-/// already sits at the documented series ceiling, and a store that missed
-/// the caller's deadline is a storage-health event either way; the tracing
-/// observation carries the closed `cancelled` marker.
+/// Mutation counterpart of [`FenceCancellationGuard`]. A dropped mutation
+/// future records into a dedicated one-dimension cancellation counter
+/// instead of a `claim.mutations` result: `operation x result` already sits
+/// at the documented series ceiling, and the decorator cannot distinguish a
+/// caller deadline (storage stalled) from a lifecycle cancellation token
+/// (healthy shutdown/worker restart racing an in-flight call) — classifying
+/// either as `backend` would pollute the ownership-health signal, so the
+/// counter stays provenance-neutral.
 struct MutationCancellationGuard {
     operation: ClaimOp,
     armed: bool,
@@ -112,18 +115,16 @@ impl Drop for MutationCancellationGuard {
             return;
         }
         crate::counter_add!(
-            "waddle.clustering.claim.mutations",
+            "waddle.clustering.claim.cancellations",
             "{mutation}",
-            "External ownership claim mutation attempts by operation and bounded result.",
+            "Ownership claim mutations whose in-flight future was dropped \
+             (caller deadline or lifecycle cancellation) before the store answered.",
             1,
             self.operation,
-            ClaimResult::Backend,
         );
         tracing::debug!(
             operation = %self.operation.value(),
-            result = %ClaimResult::Backend.value(),
-            cancelled = true,
-            "ownership claim mutation cancelled at the caller's deadline"
+            "ownership claim mutation future dropped before the store answered"
         );
     }
 }
@@ -523,11 +524,21 @@ mod tests {
         assert!(acquire.is_err(), "pending acquire must hit the deadline");
         assert_eq!(
             metrics.counter_sum(
-                "waddle.clustering.claim.mutations",
-                &[("operation", "acquire"), ("result", "backend")]
+                "waddle.clustering.claim.cancellations",
+                &[("operation", "acquire")]
             ),
             Some(1),
-            "a deadline-dropped mutation must record a backend sample"
+            "a dropped mutation future must record a cancellation sample"
+        );
+        assert_eq!(
+            metrics
+                .counter_sum(
+                    "waddle.clustering.claim.mutations",
+                    &[("operation", "acquire"), ("result", "backend")]
+                )
+                .unwrap_or(0),
+            0,
+            "a dropped future must never masquerade as a backend failure"
         );
     }
 }
