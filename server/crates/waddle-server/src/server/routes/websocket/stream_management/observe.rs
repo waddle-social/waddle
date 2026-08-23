@@ -308,11 +308,11 @@ pub(in crate::server::routes::websocket) fn observe_sm_resume_finalized(outcome:
     reliability::increment_sm_resume_result(outcome);
 }
 
+/// Log the resume terminal. Deliberately does NOT touch
+/// `xmpp.sm.resume.results`: every outcome is recorded through
+/// [`observe_sm_resume_finalized`] — write-gated by the caller for framed
+/// terminals, immediate only for the frameless `ShutdownAbandoned`.
 pub(super) fn observe_sm_resume(terminal: &SmResumeTerminal) {
-    if !matches!(terminal.outcome(), SmResumeOutcome::Resumed) {
-        reliability::increment_sm_resume_result(terminal.outcome());
-    }
-
     match terminal {
         SmResumeTerminal::Failed {
             stream_id,
@@ -504,9 +504,18 @@ mod tests {
 
         let sentinel_origin_id = "sentinel-origin-id-sm-observe";
         let resumed_jid: FullJid = "alice@example.com/web".parse().expect("jid");
-        let replay = vec![ResponseFrame::from(format!(
-            "<message xmlns='jabber:client'><origin-id xmlns='urn:xmpp:sid:0' id='{sentinel_origin_id}'/></message>"
-        ))];
+        let replay = vec![ResponseFrame::from(
+            minidom::Element::builder("message", "jabber:client")
+                .append(
+                    minidom::Element::builder("origin-id", "urn:xmpp:sid:0")
+                        .attr(
+                            minidom::rxml::xml_ncname!("id").to_owned(),
+                            sentinel_origin_id,
+                        )
+                        .build(),
+                )
+                .build(),
+        )];
 
         observe_sm_resume(&SmResumeTerminal::resumed(
             SmSessionId::new("stream-resumed"),

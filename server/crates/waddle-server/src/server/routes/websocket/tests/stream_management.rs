@@ -7702,10 +7702,20 @@ async fn sm_resume_with_unknown_stream_id_fails() {
     assert!(conn.phase.is_authenticated());
     assert!(!conn.phase.is_ready());
     assert!(!conn.phase.is_resumed());
+    // Write-gated accounting: the failure is staged for the main loop to
+    // record once the batch carrying the <failed/> frame is written; frame
+    // handling alone must not have counted it.
     assert_eq!(
-        metrics.counter_sum("xmpp.sm.resume.results", &[("outcome", "not_found")]),
-        Some(1),
-        "one failed resume attempt must emit exactly one not_found result"
+        conn.pending_finalized_resume_outcome,
+        Some(waddle_xmpp::telemetry::attributes::SmResumeOutcome::NotFound),
+        "one failed resume attempt must stage exactly one not_found result"
+    );
+    assert_eq!(
+        metrics
+            .counter_sum("xmpp.sm.resume.results", &[("outcome", "not_found")])
+            .unwrap_or(0),
+        0,
+        "no resume result may be recorded before the terminal frame write"
     );
 }
 
