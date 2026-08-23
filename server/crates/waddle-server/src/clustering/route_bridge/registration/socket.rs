@@ -894,10 +894,15 @@ impl OrderedRelayDeliveryBridge {
             {
                 Ok(RelayRemoteResourceUpdateReply {
                     status: RelayRemoteResourceUpdateStatus::Updated,
-                }) => {}
+                }) => record_remote_resource_update(
+                    waddle_xmpp::telemetry::attributes::RemoteResourceUpdateOutcome::Updated,
+                ),
                 Ok(RelayRemoteResourceUpdateReply {
                     status: RelayRemoteResourceUpdateStatus::StaleRegistration,
                 }) => {
+                    record_remote_resource_update(
+                        waddle_xmpp::telemetry::attributes::RemoteResourceUpdateOutcome::StaleRegistration,
+                    );
                     // Proven stale: the owner's mirror is a DIFFERENT
                     // registration, so the refresh path's re-registration
                     // displaces that foreign mirror — never this socket.
@@ -912,8 +917,16 @@ impl OrderedRelayDeliveryBridge {
                 }
                 Ok(RelayRemoteResourceUpdateReply {
                     status: RelayRemoteResourceUpdateStatus::Unavailable,
-                }) => return false,
+                }) => {
+                    record_remote_resource_update(
+                        waddle_xmpp::telemetry::attributes::RemoteResourceUpdateOutcome::Unavailable,
+                    );
+                    return false;
+                }
                 Err(_) => {
+                    record_remote_resource_update(
+                        waddle_xmpp::telemetry::attributes::RemoteResourceUpdateOutcome::AskFailed,
+                    );
                     tracing::debug!(jid = %jid, error_class = %RemoteAskErrorClass::AskFailed, "remote-resource resync attempt failed");
                     return false;
                 }

@@ -46,12 +46,23 @@ async fn unregister_remote_user_resource_if_owner(
 /// that claim under the stream registry lock, returns the typed final
 /// XEP-0198 outcome, and invalidates superseded detached sessions for fresh
 /// binds.
+/// The finalized XEP-0198 response plus the terminal resume result to
+/// record once the caller has revalidated node authority. Emitting the
+/// result before that final check would count a `resumed` (or a flip's
+/// failure) the client never receives when authority is revoked in the
+/// post-finalization window.
+pub(in crate::server::routes::websocket) struct SmFinalizationReport {
+    pub(in crate::server::routes::websocket) finalization: SmRegistrationFinalization,
+    pub(in crate::server::routes::websocket) resume_outcome:
+        Option<waddle_xmpp::telemetry::attributes::SmResumeOutcome>,
+}
+
 pub(in crate::server::routes::websocket) async fn finalize_sm_after_registry_registration(
     state: &WebSocketState,
     conn: &mut WsConnState,
     jid: &FullJid,
     owner: &Arc<std::sync::atomic::AtomicBool>,
-) -> SmRegistrationFinalization {
+) -> SmFinalizationReport {
     if let Some(stream_id) = conn.pending_resume_stream_id.take() {
         return complete_pending_resume_claim(state, conn, jid, owner, stream_id).await;
     }
@@ -60,7 +71,10 @@ pub(in crate::server::routes::websocket) async fn finalize_sm_after_registry_reg
         invalidate_older_detached_sessions(state, jid, owner).await;
     }
 
-    SmRegistrationFinalization::KeepExistingResponses
+    SmFinalizationReport {
+        finalization: SmRegistrationFinalization::KeepExistingResponses,
+        resume_outcome: None,
+    }
 }
 
 pub(in crate::server::routes::websocket) enum SmRegistrationFinalization {
@@ -82,7 +96,7 @@ async fn complete_pending_resume_claim(
     jid: &FullJid,
     owner: &Arc<std::sync::atomic::AtomicBool>,
     stream_id: String,
-) -> SmRegistrationFinalization {
+) -> SmFinalizationReport {
     let resume_h = conn.pending_resume_h.take();
     let completion = match resume_h {
         Some(h) => {
@@ -103,6 +117,7 @@ async fn complete_pending_resume_claim(
         }
     };
     let completion_reached_terminal_boundary = completion.is_ok();
+    let mut resume_outcome = None;
     let finalization = match completion {
         Ok(Some(SmClaimCompletion::Resumed(detached))) => match resume_h {
             Some(h) => {
@@ -138,9 +153,7 @@ async fn complete_pending_resume_claim(
                         );
                     }
                 }
-                super::observe::observe_sm_resume_finalized(
-                    super::observe::SmResumeOutcome::Resumed,
-                );
+                resume_outcome = Some(super::observe::SmResumeOutcome::Resumed);
                 SmRegistrationFinalization::ReplaceWithResumed {
                     resumed: SmResumed::new(stream_id.clone(), conn.sm_state.get_inbound_count()),
                     replay_after_h: h,
@@ -157,7 +170,7 @@ async fn complete_pending_resume_claim(
                 "SM resume claim gained a replay gap before completion"
             );
             reset_registered_resume_attempt(state, conn, jid, owner).await;
-            super::observe::observe_sm_resume_finalized(super::observe::SmResumeOutcome::ReplayGap);
+            resume_outcome = Some(super::observe::SmResumeOutcome::ReplayGap);
             SmRegistrationFinalization::ReplaceWithFailed(SmFailed::resume_failed(
                 "resource-constraint",
                 detached.inbound_count,
@@ -173,9 +186,7 @@ async fn complete_pending_resume_claim(
                 "SM resume claim completed with handled count too high"
             );
             close_registered_resume_attempt(state, conn, jid, owner).await;
-            super::observe::observe_sm_resume_finalized(
-                super::observe::SmResumeOutcome::HandledTooHigh,
-            );
+            resume_outcome = Some(super::observe::SmResumeOutcome::HandledTooHigh);
             SmRegistrationFinalization::ReplaceWithHandledCountTooHigh {
                 acknowledged,
                 send_count: detached.outbound_count,
@@ -185,7 +196,7 @@ async fn complete_pending_resume_claim(
             warn!(stream_id = %stream_id, jid = %jid, "SM resume claim expired before completion");
             cleanup_invalidated_detached_session(state, detached, Some(owner)).await;
             close_registered_resume_attempt(state, conn, jid, owner).await;
-            super::observe::observe_sm_resume_finalized(super::observe::SmResumeOutcome::NotFound);
+            resume_outcome = Some(super::observe::SmResumeOutcome::NotFound);
             SmRegistrationFinalization::ReplaceWithFailed(SmFailed::with_condition(
                 "item-not-found",
             ))
@@ -193,7 +204,7 @@ async fn complete_pending_resume_claim(
         Ok(None) => {
             warn!(stream_id = %stream_id, jid = %jid, "SM resume claim disappeared before completion");
             close_registered_resume_attempt(state, conn, jid, owner).await;
-            super::observe::observe_sm_resume_finalized(super::observe::SmResumeOutcome::NotFound);
+            resume_outcome = Some(super::observe::SmResumeOutcome::NotFound);
             SmRegistrationFinalization::ReplaceWithFailed(SmFailed::with_condition(
                 "item-not-found",
             ))
@@ -201,7 +212,7 @@ async fn complete_pending_resume_claim(
         Err(_error) => {
             warn!(stream_id = %stream_id, jid = %jid, failure = "storage", "Failed to complete SM resume claim");
             close_registered_resume_attempt(state, conn, jid, owner).await;
-            super::observe::observe_sm_resume_finalized(super::observe::SmResumeOutcome::Storage);
+            resume_outcome = Some(super::observe::SmResumeOutcome::Storage);
             SmRegistrationFinalization::ReplaceWithFailed(SmFailed::with_condition(
                 "internal-server-error",
             ))
@@ -214,7 +225,10 @@ async fn complete_pending_resume_claim(
             drop(guard);
         }
     }
-    finalization
+    SmFinalizationReport {
+        finalization,
+        resume_outcome,
+    }
 }
 
 async fn invalidate_older_detached_sessions(

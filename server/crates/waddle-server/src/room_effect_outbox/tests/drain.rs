@@ -275,8 +275,10 @@ async fn create_owned_room_and_lifecycle(state: &WebSocketState) -> RoomLifecycl
 async fn recv_outbound(rx: &mut mpsc::Receiver<OutboundStanza>) -> OutboundStanza {
     // Positive waits stay generous: CI's loaded nextest workers stretched a
     // 1s bound past its margin (drain passes hold 5s enqueue timeouts ahead
-    // of the frame under test).
-    tokio::time::timeout(Duration::from_secs(15), rx.recv())
+    // of the frame under test), and 15s still tripped on loaded runners
+    // (PR #1708: three timeouts at this bound while the test passes locally
+    // in ~6s).
+    tokio::time::timeout(Duration::from_secs(30), rx.recv())
         .await
         .expect("outbound receive timeout")
         .expect("outbound stanza")

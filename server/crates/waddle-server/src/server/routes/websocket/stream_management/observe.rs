@@ -304,7 +304,7 @@ impl SmResumeTerminal {
 /// Record the terminal resume result once the transmitted response is
 /// decided (claim finalization) — the preliminary `Resumed` from
 /// `handle_sm_resume` is provisional until then. See the module doc.
-pub(super) fn observe_sm_resume_finalized(outcome: SmResumeOutcome) {
+pub(in crate::server::routes::websocket) fn observe_sm_resume_finalized(outcome: SmResumeOutcome) {
     reliability::increment_sm_resume_result(outcome);
 }
 

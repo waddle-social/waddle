@@ -307,6 +307,7 @@ mod shadow_enrollment_tests {
 
 mod registration;
 
+pub(super) use observe::observe_sm_resume_finalized;
 pub(super) use registration::{
     finalize_sm_after_registry_registration, SmRegistrationFinalization,
 };
@@ -942,12 +943,21 @@ async fn handle_sm_resume_terminal(
         .await;
     match early_resolution {
         crate::auth::session::PrincipalResolution::Resolved(_) => {}
-        crate::auth::session::PrincipalResolution::Missing
-        | crate::auth::session::PrincipalResolution::Mismatched => {
+        crate::auth::session::PrincipalResolution::Missing => {
             claim_guard.release().await;
             return SmResumeTerminal::failed(
                 waddle_xmpp::pending_delivery::SmSessionId::new(resume.previd),
                 SmResumeOutcome::PrincipalUnavailable,
+            );
+        }
+        // A durable row exists but its auth context diverged (context
+        // version, auth epoch, or JID): an identity mismatch, not an
+        // unavailable principal. Same `not-authorized` wire condition.
+        crate::auth::session::PrincipalResolution::Mismatched => {
+            claim_guard.release().await;
+            return SmResumeTerminal::failed(
+                waddle_xmpp::pending_delivery::SmSessionId::new(resume.previd),
+                SmResumeOutcome::IdentityMismatch,
             );
         }
         crate::auth::session::PrincipalResolution::StorageError(_) => {
@@ -1014,12 +1024,20 @@ async fn handle_sm_resume_terminal(
         .await
     {
         crate::auth::session::PrincipalResolution::Resolved(session) => session,
-        crate::auth::session::PrincipalResolution::Missing
-        | crate::auth::session::PrincipalResolution::Mismatched => {
+        crate::auth::session::PrincipalResolution::Missing => {
             claim_guard.release().await;
             return SmResumeTerminal::failed(
                 waddle_xmpp::pending_delivery::SmSessionId::new(resume.previd),
                 SmResumeOutcome::PrincipalUnavailable,
+            );
+        }
+        // Mirror of the early resolution: diverged durable principal =
+        // identity mismatch (same wire condition).
+        crate::auth::session::PrincipalResolution::Mismatched => {
+            claim_guard.release().await;
+            return SmResumeTerminal::failed(
+                waddle_xmpp::pending_delivery::SmSessionId::new(resume.previd),
+                SmResumeOutcome::IdentityMismatch,
             );
         }
         crate::auth::session::PrincipalResolution::StorageError(_) => {
