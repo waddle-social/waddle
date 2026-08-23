@@ -34,6 +34,7 @@
 
 use jid::FullJid;
 use tracing::{info, warn};
+use waddle_xmpp::pending_delivery::SmSessionId;
 
 use super::super::{
     frame::{ResponseFrame, StreamErrorFrame},
@@ -123,7 +124,7 @@ pub(super) fn observe_sm_ack(observation: SmAckObservation) {
 #[derive(Debug)]
 pub(super) enum SmResumeTerminal {
     Failed {
-        stream_id: String,
+        stream_id: SmSessionId,
         outcome: SmResumeOutcome,
         jid: Option<FullJid>,
         client_h: Option<u32>,
@@ -132,7 +133,7 @@ pub(super) enum SmResumeTerminal {
         send_count: Option<u32>,
     },
     Resumed {
-        stream_id: String,
+        stream_id: SmSessionId,
         handled: u32,
         jid: FullJid,
         replay: Vec<ResponseFrame>,
@@ -140,7 +141,7 @@ pub(super) enum SmResumeTerminal {
 }
 
 impl SmResumeTerminal {
-    pub(super) fn failed(stream_id: String, outcome: SmResumeOutcome) -> Self {
+    pub(super) fn failed(stream_id: SmSessionId, outcome: SmResumeOutcome) -> Self {
         Self::Failed {
             stream_id,
             outcome,
@@ -152,7 +153,7 @@ impl SmResumeTerminal {
         }
     }
 
-    pub(super) fn identity_mismatch(stream_id: String, resumed_jid: FullJid) -> Self {
+    pub(super) fn identity_mismatch(stream_id: SmSessionId, resumed_jid: FullJid) -> Self {
         Self::Failed {
             stream_id,
             outcome: SmResumeOutcome::IdentityMismatch,
@@ -165,7 +166,7 @@ impl SmResumeTerminal {
     }
 
     pub(super) fn replay_gap(
-        stream_id: String,
+        stream_id: SmSessionId,
         handled: u32,
         jid: FullJid,
         client_h: u32,
@@ -182,7 +183,11 @@ impl SmResumeTerminal {
         }
     }
 
-    pub(super) fn handled_too_high(stream_id: String, acknowledged: u32, send_count: u32) -> Self {
+    pub(super) fn handled_too_high(
+        stream_id: SmSessionId,
+        acknowledged: u32,
+        send_count: u32,
+    ) -> Self {
         Self::Failed {
             stream_id,
             outcome: SmResumeOutcome::HandledTooHigh,
@@ -194,7 +199,7 @@ impl SmResumeTerminal {
         }
     }
 
-    pub(super) fn detached_divergence(stream_id: String, detached_jid: FullJid) -> Self {
+    pub(super) fn detached_divergence(stream_id: SmSessionId, detached_jid: FullJid) -> Self {
         Self::Failed {
             stream_id,
             outcome: SmResumeOutcome::DetachedDivergence,
@@ -207,7 +212,7 @@ impl SmResumeTerminal {
     }
 
     pub(super) fn resumed(
-        stream_id: String,
+        stream_id: SmSessionId,
         handled: u32,
         jid: FullJid,
         replay: Vec<ResponseFrame>,
@@ -287,7 +292,7 @@ impl SmResumeTerminal {
             } => {
                 let mut responses = Vec::with_capacity(replay.len() + 1);
                 responses.push(ResponseFrame::from(
-                    SmResumed::new(stream_id, handled).to_element(),
+                    SmResumed::new(stream_id.as_str().to_owned(), handled).to_element(),
                 ));
                 responses.extend(replay);
                 responses
@@ -319,26 +324,26 @@ pub(super) fn observe_sm_resume(terminal: &SmResumeTerminal) {
             ..
         } => match outcome {
             SmResumeOutcome::UnexpectedRequest => {
-                info!(stream_id, outcome = ?outcome, "SM resume rejected: unexpected request");
+                info!(stream_id = %stream_id, outcome = ?outcome, "SM resume rejected: unexpected request");
             }
             SmResumeOutcome::NotFound => {
-                info!(stream_id, outcome = ?outcome, "SM resume rejected: session not found or expired");
+                info!(stream_id = %stream_id, outcome = ?outcome, "SM resume rejected: session not found or expired");
             }
             SmResumeOutcome::OwnerUnreachable
             | SmResumeOutcome::Storage
             | SmResumeOutcome::Internal
             | SmResumeOutcome::PrincipalUnavailable => {
-                warn!(stream_id, outcome = ?outcome, "SM resume failed");
+                warn!(stream_id = %stream_id, outcome = ?outcome, "SM resume failed");
             }
             SmResumeOutcome::ShutdownAbandoned => {
-                info!(stream_id, outcome = ?outcome, "SM resume abandoned: graceful shutdown in progress");
+                info!(stream_id = %stream_id, outcome = ?outcome, "SM resume abandoned: graceful shutdown in progress");
             }
             SmResumeOutcome::IdentityMismatch | SmResumeOutcome::DetachedDivergence => {
-                warn!(stream_id, outcome = ?outcome, resumed_jid = ?jid, "SM resume rejected: identity mismatch");
+                warn!(stream_id = %stream_id, outcome = ?outcome, resumed_jid = ?jid, "SM resume rejected: identity mismatch");
             }
             SmResumeOutcome::ReplayGap => {
                 warn!(
-                    stream_id,
+                    stream_id = %stream_id,
                     outcome = ?outcome,
                     jid = ?jid,
                     client_h = ?client_h,
@@ -348,7 +353,7 @@ pub(super) fn observe_sm_resume(terminal: &SmResumeTerminal) {
             }
             SmResumeOutcome::HandledTooHigh => {
                 info!(
-                    stream_id,
+                    stream_id = %stream_id,
                     outcome = ?outcome,
                     client_h = ?client_h,
                     send_count = ?send_count,
@@ -363,7 +368,7 @@ pub(super) fn observe_sm_resume(terminal: &SmResumeTerminal) {
             replay,
             ..
         } => {
-            info!(stream_id, outcome = ?SmResumeOutcome::Resumed, jid = %jid, replay = replay.len(), "SM resume accepted; awaiting claim finalization");
+            info!(stream_id = %stream_id, outcome = ?SmResumeOutcome::Resumed, jid = %jid, replay = replay.len(), "SM resume accepted; awaiting claim finalization");
         }
     }
 }
@@ -504,7 +509,7 @@ mod tests {
         ))];
 
         observe_sm_resume(&SmResumeTerminal::resumed(
-            "stream-resumed".to_string(),
+            SmSessionId::new("stream-resumed"),
             7,
             resumed_jid,
             replay,

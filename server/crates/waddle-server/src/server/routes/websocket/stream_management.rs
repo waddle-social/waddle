@@ -779,7 +779,10 @@ async fn handle_sm_resume_terminal(
     // Stream resumption is only legal before this transport has established a
     // fresh SASL/bind lifecycle of its own.
     if !phase.allows_stream_management_resume() {
-        return SmResumeTerminal::failed(resume.previd, SmResumeOutcome::UnexpectedRequest);
+        return SmResumeTerminal::failed(
+            waddle_xmpp::pending_delivery::SmSessionId::new(resume.previd),
+            SmResumeOutcome::UnexpectedRequest,
+        );
     }
 
     let detached = match state
@@ -839,7 +842,7 @@ async fn handle_sm_resume_terminal(
                     CrossNodeResumeOutcome::NotAuthorized,
                 ))) => {
                     return SmResumeTerminal::failed(
-                        resume.previd,
+                        waddle_xmpp::pending_delivery::SmSessionId::new(resume.previd),
                         SmResumeOutcome::IdentityMismatch,
                     );
                 }
@@ -847,21 +850,30 @@ async fn handle_sm_resume_terminal(
                     CrossNodeResumeOutcome::OwnerUnreachable,
                 ))) => {
                     return SmResumeTerminal::failed(
-                        resume.previd,
+                        waddle_xmpp::pending_delivery::SmSessionId::new(resume.previd),
                         SmResumeOutcome::OwnerUnreachable,
                     );
                 }
                 Some(CrossNodeAttemptOutcome::Completed(Ok(
                     CrossNodeResumeOutcome::StorageUnavailable,
                 ))) => {
-                    return SmResumeTerminal::failed(resume.previd, SmResumeOutcome::Storage);
+                    return SmResumeTerminal::failed(
+                        waddle_xmpp::pending_delivery::SmSessionId::new(resume.previd),
+                        SmResumeOutcome::Storage,
+                    );
                 }
                 Some(CrossNodeAttemptOutcome::Completed(Ok(CrossNodeResumeOutcome::NotFound)))
                 | None => {
-                    return SmResumeTerminal::failed(resume.previd, SmResumeOutcome::NotFound);
+                    return SmResumeTerminal::failed(
+                        waddle_xmpp::pending_delivery::SmSessionId::new(resume.previd),
+                        SmResumeOutcome::NotFound,
+                    );
                 }
                 Some(CrossNodeAttemptOutcome::Completed(Err(_))) => {
-                    return SmResumeTerminal::failed(resume.previd, SmResumeOutcome::Internal);
+                    return SmResumeTerminal::failed(
+                        waddle_xmpp::pending_delivery::SmSessionId::new(resume.previd),
+                        SmResumeOutcome::Internal,
+                    );
                 }
                 Some(CrossNodeAttemptOutcome::ShutdownAbandoned) => {
                     // FIX 3: cancellation won the race before the attempt
@@ -880,14 +892,17 @@ async fn handle_sm_resume_terminal(
                     // iteration (the WS read arm); the hold itself is
                     // already bounded by FIX 1's budget regardless.
                     return SmResumeTerminal::failed(
-                        resume.previd,
+                        waddle_xmpp::pending_delivery::SmSessionId::new(resume.previd),
                         SmResumeOutcome::ShutdownAbandoned,
                     );
                 }
             }
         }
         Err(_) => {
-            return SmResumeTerminal::failed(resume.previd, SmResumeOutcome::Internal);
+            return SmResumeTerminal::failed(
+                waddle_xmpp::pending_delivery::SmSessionId::new(resume.previd),
+                SmResumeOutcome::Internal,
+            );
         }
     };
 
@@ -905,11 +920,17 @@ async fn handle_sm_resume_terminal(
         Ok(Some(principal)) => principal,
         Ok(None) => {
             claim_guard.release().await;
-            return SmResumeTerminal::failed(resume.previd, SmResumeOutcome::PrincipalUnavailable);
+            return SmResumeTerminal::failed(
+                waddle_xmpp::pending_delivery::SmSessionId::new(resume.previd),
+                SmResumeOutcome::PrincipalUnavailable,
+            );
         }
         Err(_) => {
             claim_guard.release().await;
-            return SmResumeTerminal::failed(resume.previd, SmResumeOutcome::Storage);
+            return SmResumeTerminal::failed(
+                waddle_xmpp::pending_delivery::SmSessionId::new(resume.previd),
+                SmResumeOutcome::Storage,
+            );
         }
     };
 
@@ -924,18 +945,27 @@ async fn handle_sm_resume_terminal(
         crate::auth::session::PrincipalResolution::Missing
         | crate::auth::session::PrincipalResolution::Mismatched => {
             claim_guard.release().await;
-            return SmResumeTerminal::failed(resume.previd, SmResumeOutcome::PrincipalUnavailable);
+            return SmResumeTerminal::failed(
+                waddle_xmpp::pending_delivery::SmSessionId::new(resume.previd),
+                SmResumeOutcome::PrincipalUnavailable,
+            );
         }
         crate::auth::session::PrincipalResolution::StorageError(_) => {
             claim_guard.release().await;
-            return SmResumeTerminal::failed(resume.previd, SmResumeOutcome::Storage);
+            return SmResumeTerminal::failed(
+                waddle_xmpp::pending_delivery::SmSessionId::new(resume.previd),
+                SmResumeOutcome::Storage,
+            );
         }
     }
 
     if let ConnectionPhase::Authenticated { bare_jid } = phase {
         if detached.jid.to_bare() != *bare_jid {
             claim_guard.release().await;
-            return SmResumeTerminal::identity_mismatch(resume.previd, detached.jid.clone());
+            return SmResumeTerminal::identity_mismatch(
+                waddle_xmpp::pending_delivery::SmSessionId::new(resume.previd),
+                detached.jid.clone(),
+            );
         }
     }
 
@@ -950,7 +980,7 @@ async fn handle_sm_resume_terminal(
     if !detached.can_resume_from(resume.h) {
         claim_guard.release().await;
         return SmResumeTerminal::replay_gap(
-            resume.previd,
+            waddle_xmpp::pending_delivery::SmSessionId::new(resume.previd),
             detached.inbound_count,
             detached.jid.clone(),
             resume.h,
@@ -962,7 +992,7 @@ async fn handle_sm_resume_terminal(
         claim_guard.release().await;
         *phase = ConnectionPhase::closing(None);
         return SmResumeTerminal::handled_too_high(
-            resume.previd,
+            waddle_xmpp::pending_delivery::SmSessionId::new(resume.previd),
             resume.h,
             detached.outbound_count,
         );
@@ -987,11 +1017,17 @@ async fn handle_sm_resume_terminal(
         crate::auth::session::PrincipalResolution::Missing
         | crate::auth::session::PrincipalResolution::Mismatched => {
             claim_guard.release().await;
-            return SmResumeTerminal::failed(resume.previd, SmResumeOutcome::PrincipalUnavailable);
+            return SmResumeTerminal::failed(
+                waddle_xmpp::pending_delivery::SmSessionId::new(resume.previd),
+                SmResumeOutcome::PrincipalUnavailable,
+            );
         }
         crate::auth::session::PrincipalResolution::StorageError(_) => {
             claim_guard.release().await;
-            return SmResumeTerminal::failed(resume.previd, SmResumeOutcome::Storage);
+            return SmResumeTerminal::failed(
+                waddle_xmpp::pending_delivery::SmSessionId::new(resume.previd),
+                SmResumeOutcome::Storage,
+            );
         }
     };
 
@@ -1000,7 +1036,10 @@ async fn handle_sm_resume_terminal(
     // enforced precondition of the commit below rather than an assumption.
     if detached.jid.to_bare() != *principal.bare_jid() {
         claim_guard.release().await;
-        return SmResumeTerminal::detached_divergence(resume.previd, detached.jid.clone());
+        return SmResumeTerminal::detached_divergence(
+            waddle_xmpp::pending_delivery::SmSessionId::new(resume.previd),
+            detached.jid.clone(),
+        );
     }
 
     // Commit the staged snapshot only after the durable recheck succeeds.
@@ -1069,7 +1108,7 @@ async fn handle_sm_resume_terminal(
         })
         .collect();
     SmResumeTerminal::resumed(
-        resume.previd,
+        waddle_xmpp::pending_delivery::SmSessionId::new(resume.previd),
         sm_state.get_inbound_count(),
         detached.jid,
         replay,
