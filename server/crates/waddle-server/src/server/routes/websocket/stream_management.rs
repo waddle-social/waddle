@@ -870,6 +870,14 @@ async fn handle_sm_resume_terminal(
                         SmResumeOutcome::NotFound,
                     );
                 }
+                Some(CrossNodeAttemptOutcome::Completed(Err(
+                    waddle_xmpp::stream_management::SmRegistryError::StorageUnavailable(_),
+                ))) => {
+                    return SmResumeTerminal::failed(
+                        waddle_xmpp::pending_delivery::SmSessionId::new(resume.previd),
+                        SmResumeOutcome::Storage,
+                    );
+                }
                 Some(CrossNodeAttemptOutcome::Completed(Err(_))) => {
                     return SmResumeTerminal::failed(
                         waddle_xmpp::pending_delivery::SmSessionId::new(resume.previd),
@@ -898,6 +906,14 @@ async fn handle_sm_resume_terminal(
                     );
                 }
             }
+        }
+        // Claim-store backend outages and timeouts are a storage incident,
+        // not a registry logic error — keep them out of `internal`.
+        Err(waddle_xmpp::stream_management::SmRegistryError::StorageUnavailable(_)) => {
+            return SmResumeTerminal::failed(
+                waddle_xmpp::pending_delivery::SmSessionId::new(resume.previd),
+                SmResumeOutcome::Storage,
+            );
         }
         Err(_) => {
             return SmResumeTerminal::failed(

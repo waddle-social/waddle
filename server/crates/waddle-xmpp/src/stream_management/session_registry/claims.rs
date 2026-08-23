@@ -1630,6 +1630,12 @@ impl InMemorySmSessionRegistry {
                 }
                 return Ok(ClaimSessionOutcome::LostClaim);
             }
+            Ok(Err(ClaimError::Backend(detail))) => {
+                return Err(SmRegistryError::StorageUnavailable(format!(
+                    "claim_session: ClaimStore ensure_claimed backend failure; \
+                     retaining acquisition responsibility for read-only reconciliation: {detail}"
+                )));
+            }
             Ok(Err(other)) => {
                 return Err(SmRegistryError::Internal(format!(
                     "claim_session: ClaimStore ensure_claimed returned an ambiguous failure; \
@@ -1637,7 +1643,7 @@ impl InMemorySmSessionRegistry {
                 )));
             }
             Err(_timeout) => {
-                return Err(SmRegistryError::Internal(format!(
+                return Err(SmRegistryError::StorageUnavailable(format!(
                     "claim_session: ClaimStore ensure_claimed timed out after \
                      {CLAIM_CALL_UNDER_SHARD_LOCK_TIMEOUT:?} while holding this stream's \
                      shard lock (FIX 5); resume attempt fails rather than stalling every \

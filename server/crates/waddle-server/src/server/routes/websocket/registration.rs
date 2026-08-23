@@ -458,9 +458,10 @@ pub(super) async fn register_bound_connection_after_frame_with_admission(
         // path: the client never receives the finalized response.
         return RegistrationAfterFrame::AuthorityRevokedAfterSmFinalization;
     }
-    if let Some(outcome) = sm_report.resume_outcome {
-        super::stream_management::observe_sm_resume_finalized(outcome);
-    }
+    // Not recorded yet: the writer's own authority preflight can still drop
+    // the response batch. The main loop records this only after the batch
+    // carrying the terminal frame is actually written.
+    conn.pending_finalized_resume_outcome = sm_report.resume_outcome;
     info!(
         jid = %jid,
         resumed = conn.phase.is_resumed(),

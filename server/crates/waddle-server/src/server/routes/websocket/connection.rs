@@ -1382,13 +1382,23 @@ async fn handle_inbound_text(
             let stream_error = build_internal_server_error_stream_error(
                 "Session initialization failed; please reconnect.",
             );
-            let _ = send_ws_text_frames_with_authority(
+            let send_outcome = send_ws_text_frames_with_authority(
                 ws_sender,
                 [stream_error, websocket_stream_close_xml()],
                 "Failed to send session-init stream error",
                 (admission_permit, shutdown_token),
             )
             .await;
+            // A registration abort (actor busy/failed) can kill a resume
+            // whose provisional acceptance was never counted; the stream
+            // error just written IS that attempt's wire terminal.
+            if matches!(send_outcome, AuthoritySendOutcome::Sent)
+                && conn.pending_resume_stream_id.is_some()
+            {
+                super::stream_management::observe_sm_resume_finalized(
+                    waddle_xmpp::telemetry::attributes::SmResumeOutcome::Internal,
+                );
+            }
             let _ = close_ws_connection(
                 ws_sender,
                 "Failed to send WebSocket close frame after session-init error",
@@ -1502,6 +1512,12 @@ async fn handle_inbound_text(
     .await;
     match write_report.outcome {
         BatchWriteOutcome::Continue => {
+            // The batch carrying the finalized resume terminal reached the
+            // wire — record the attempt's result now (never earlier: every
+            // upstream authority gate can still drop the batch unwritten).
+            if let Some(outcome) = conn.pending_finalized_resume_outcome.take() {
+                super::stream_management::observe_sm_resume_finalized(outcome);
+            }
             conn.commit_server_stream_open_response();
             conn.publish_pending_sm_enable(state.as_ref());
             let accepted_frame_indices: Vec<_> = (0..responses.frames.len()).collect();

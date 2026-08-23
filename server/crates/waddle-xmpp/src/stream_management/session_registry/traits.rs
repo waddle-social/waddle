@@ -16,6 +16,13 @@ pub enum SmRegistryError {
     #[error("Registry at capacity")]
     AtCapacity,
 
+    /// A storage-backed dependency (claim store, database) was unavailable
+    /// or timed out — an infrastructure outage, not a registry logic error.
+    /// Telemetry maps this to the `storage` resume outcome so incidents are
+    /// not folded into generic `internal` counts.
+    #[error("Storage-backed dependency unavailable: {0}")]
+    StorageUnavailable(String),
+
     #[error("Internal error: {0}")]
     Internal(String),
 }
