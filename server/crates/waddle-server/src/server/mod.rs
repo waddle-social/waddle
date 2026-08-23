@@ -254,40 +254,30 @@ pub async fn start_with_config(
     // or a build without the `clustering` feature) leaves the registry's
     // single-node defaults (`InProcessClaimStore`, no durable store)
     // untouched — today's behavior, unchanged.
-    let ((claim_store, node_identity), durable_store, rollout_backoff) =
-        if let Some((claim_store, node_identity)) = clustering_handles.claim_pair() {
-            #[cfg(feature = "clustering")]
-            let (durable_store, rollout_backoff) = (
-                clustering_handles.muc_durable_store.clone(),
-                clustering_handles.node_lease.clone().map(|node_lease| {
-                    Arc::new(crate::clustering::drain::PostgresRolloutBackoff::new(
-                        node_lease,
-                        clustering_handles.pod_template_hash.clone(),
-                    )) as Arc<dyn waddle_xmpp::ownership::RolloutBackoff>
-                }),
-            );
-            #[cfg(not(feature = "clustering"))]
-            let (durable_store, rollout_backoff) = (None, None);
-            ((claim_store, node_identity), durable_store, rollout_backoff)
-        } else {
-            (
-                (
-                    waddle_xmpp::ownership::observed_claim_store(
-                        waddle_xmpp::ownership::InProcessClaimStore::new(),
-                    ),
-                    waddle_xmpp::ownership::SharedNodeIdentity::new(
-                        waddle_xmpp::ownership::NodeIdentity::local(),
-                    ),
-                ),
-                None,
-                None,
-            )
-        };
-    room_registry_handle
-        .wire_clustering_claims(claim_store, node_identity, durable_store, rollout_backoff)
-        .await;
+    // The registry's single-node default is already an
+    // ObservedClaimStore-wrapped InProcessClaimStore (#1648), so no
+    // unconditional re-wiring: re-wiring a spawned registry races its
+    // hydration and is only warranted when a real clustered pair exists.
     #[cfg(feature = "clustering")]
-    if clustering_handles.claim_pair().is_some() {
+    if let Some((claim_store, node_identity)) = clustering_handles.claim_pair() {
+        // ADR-0017 Phase 3 Slice 10: rollout-aware acquire placement for
+        // the room re-election path — `None` (no backoff) whenever the
+        // node-lease handle itself is unavailable, mirroring every other
+        // `clustering_handles.*` optional-field fallback in this block.
+        let rollout_backoff = clustering_handles.node_lease.clone().map(|node_lease| {
+            Arc::new(crate::clustering::drain::PostgresRolloutBackoff::new(
+                node_lease,
+                clustering_handles.pod_template_hash.clone(),
+            )) as Arc<dyn waddle_xmpp::ownership::RolloutBackoff>
+        });
+        room_registry_handle
+            .wire_clustering_claims(
+                claim_store,
+                node_identity,
+                clustering_handles.muc_durable_store.clone(),
+                rollout_backoff,
+            )
+            .await;
         if let Some(room_local_claims) = &clustering_handles.room_local_claims {
             room_local_claims.wire(room_registry_handle.clone());
         }

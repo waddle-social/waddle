@@ -638,7 +638,7 @@ impl RoomRegistryActor {
             muc_domain,
             occupant_id_secret,
             membership_source: None,
-            claim_store: Arc::new(InProcessClaimStore::new()),
+            claim_store: crate::ownership::observed_claim_store(InProcessClaimStore::new()),
             node_identity: SharedNodeIdentity::new(NodeIdentity::local()),
             durable_store: None,
             rollout_backoff: None,

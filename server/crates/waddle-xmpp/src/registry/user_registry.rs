@@ -143,7 +143,7 @@ impl UserRegistryActor {
         Self {
             users: HashMap::new(),
             poisoned_users: HashSet::new(),
-            claim_store: Arc::new(InProcessClaimStore::new()),
+            claim_store: crate::ownership::observed_claim_store(InProcessClaimStore::new()),
             node_identity: SharedNodeIdentity::new(NodeIdentity::local()),
             terminal_claim_releases: Vec::new(),
             pending_unregisters: Vec::new(),
