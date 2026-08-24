@@ -28,7 +28,7 @@ use rustls_acme::tower::TowerHttp01ChallengeService;
 use std::future::IntoFuture as _;
 use std::sync::Arc;
 use tower_http::{compression::CompressionLayer, trace::TraceLayer};
-use tracing::{error, info, warn};
+use tracing::{info, warn};
 use waddle_xmpp::mam::{MamStorage, SqlxMamStorage};
 use waddle_xmpp::registry::ConnectionRegistry;
 
@@ -701,12 +701,6 @@ async fn create_websocket_state(
                     // the async `SfuReconciler` the webhook route's
                     // background reconciliation task drives.
                     let sfu_concrete = std::sync::Arc::new(sfu_impl);
-                    let probe_sfu = Arc::clone(&sfu_concrete);
-                    tokio::spawn(async move {
-                        if let Err(error) = probe_sfu.probe_admin().await {
-                            error!(%error, "LiveKit admin startup probe failed");
-                        }
-                    });
                     let sfu: std::sync::Arc<dyn waddle_sfu::SfuService> = sfu_concrete.clone();
                     let reconciler: std::sync::Arc<dyn waddle_sfu::SfuReconciler> = sfu_concrete;
                     waddle_xmpp::protocol::handlers::register_call_handlers(

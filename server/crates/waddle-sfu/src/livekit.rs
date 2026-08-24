@@ -1011,11 +1011,6 @@ impl LiveKitSfu {
         Ok(Self::with_admin(config, Arc::new(admin)))
     }
 
-    /// One-shot control-plane probe used during server startup.
-    pub async fn probe_admin(&self) -> Result<(), SfuError> {
-        self.admin.list_rooms().await.map(|_| ())
-    }
-
     /// Build with a caller-supplied admin client. Used by tests to
     /// inject a recording mock without standing up an HTTP server;
     /// production code goes through [`Self::new`] which constructs a
