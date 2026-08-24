@@ -160,14 +160,13 @@ groups:
             runbook: 'DeleteRoom returned 401 in production when the admin JWT omitted `roomCreate` (#1622); that outage measured 86-132 failures/day (3.6-5.5/h) against a healthy baseline of 0, and a broken ListRooms would add ~60/h from the 60s webhook reconciler. The >= 3 per 1h threshold is unreachable by a single transient timeout but is crossed within the hour by any real control-plane break. Break the series down by `op` first, then inspect the matching admin-call errors in waddle-server logs. Failures are observed on the real SFU-driven operations only - there is no startup probe (removed after the #1714 review).'
             summary: LiveKit admin control-plane calls are failing - the SFU control plane is broken.
         - alert: LiveKitAdminCallFailingSustained
-          expr: sum by (op) (increase(waddle_call_admin_call_failed_total[1h])) > 0
-          for: 3h
+          expr: sum by (op) (increase(waddle_call_admin_call_failed_total[24h])) >= 3
           labels:
             severity: warning
             team: waddle
           annotations:
-            runbook: 'Low-volume companion to LiveKitAdminCallFailing: an operation issued fewer than three times per hour (DeleteRoom on a quiet day, RemoveParticipant, UpdateParticipant) can fail on every call without ever crossing the >= 3 per 1h threshold. This rule fires when at least one failure lands in every rolling hour for three consecutive hours - a single transient timeout satisfies the expression for at most one hour and cannot page, while any persistent per-operation break does. Break down by `op`, then read the matching admin-call errors in waddle-server logs.'
-            summary: A LiveKit admin operation has failed in every hour for 3h - a low-volume control-plane break.
+            runbook: 'Low-volume companion to LiveKitAdminCallFailing: an operation issued fewer than three times per hour (DeleteRoom on a quiet day, RemoveParticipant, UpdateParticipant) can fail on every call without ever crossing the >= 3 per 1h threshold, and event-driven operations may be spaced more than an hour apart, so no per-hour condition with a for timer can hold across the gaps. Count over a full day instead: three failures in any rolling 24h page regardless of spacing, while one or two transient timeouts per day do not. Break down by `op`, then read the matching admin-call errors in waddle-server logs.'
+            summary: A LiveKit admin operation failed three times within 24h - a low-volume control-plane break.
     - name: waddle-ingress-shadow
       rules:
         - alert: IngressShadowNotEnabled
