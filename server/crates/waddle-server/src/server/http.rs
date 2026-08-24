@@ -28,7 +28,7 @@ use rustls_acme::tower::TowerHttp01ChallengeService;
 use std::future::IntoFuture as _;
 use std::sync::Arc;
 use tower_http::{compression::CompressionLayer, trace::TraceLayer};
-use tracing::{error, info, warn};
+use tracing::{info, warn};
 use waddle_xmpp::mam::{MamStorage, SqlxMamStorage};
 use waddle_xmpp::registry::ConnectionRegistry;
 
