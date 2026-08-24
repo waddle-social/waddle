@@ -151,6 +151,14 @@ groups:
           annotations:
             runbook: 'Calls are being set up but no LiveKit webhook has been accepted in 6h - the ingestion path is dark, not idle (the `setup.ok` arm is what distinguishes the two). Check the SFU webhook configuration points at /api/v1/livekit/webhook, that the route still returns 200 (its request span carries http.route), and that the SFU is not returning SERVICE_UNAVAILABLE because no SFU is configured on this pod. Every accepted delivery also logs one "LiveKit webhook accepted" line with its `call.id`. The webhook family is zero-registered at startup (#1436), so the `received` series exists from the first scrape; the `or vector(0)` stays as belt-and-braces for a pod whose OTLP export is itself broken (an empty vector would otherwise stop the rule evaluating - exactly the outage it exists to catch).'
             summary: No LiveKit webhook has been accepted in 6h despite active calls - participant cleanup is dark.
+        - alert: LiveKitAdminCallFailing
+          expr: sum by (op) (increase(waddle_call_admin_call_failed_total[30m])) > 0
+          labels:
+            severity: warning
+            team: waddle
+          annotations:
+            runbook: 'DeleteRoom returned 401 in production when the admin JWT omitted `roomCreate` (#1622). Any sustained nonzero value here means the LiveKit SFU control plane is broken - break the series down by `op` first, then inspect the matching admin-call errors in waddle-server logs.'
+            summary: LiveKit admin control-plane calls are failing - the SFU control plane is broken.
     - name: waddle-ingress-shadow
       rules:
         - alert: IngressShadowNotEnabled

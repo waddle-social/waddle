@@ -19,7 +19,9 @@ use futures::{stream, StreamExt};
 use tokio::runtime::Handle;
 use tokio::sync::Semaphore;
 
-use crate::admin::{admin_base_url_from_ws, ListedRoomName, LiveKitAdmin, ReqwestLiveKitAdmin};
+use crate::admin::{
+    admin_base_url_from_ws, AdminCallObserver, ListedRoomName, LiveKitAdmin, ReqwestLiveKitAdmin,
+};
 use crate::call::{
     CallGeneration, CallId, CallState, CallTeardownIntentLite, Identity, MediaCapabilities,
     ObservedCallSids, ParticipantSid, RoomSid, SessionBinding, SessionScopedTeardown,
@@ -992,6 +994,26 @@ impl LiveKitSfu {
             config.api_secret.clone(),
         )?;
         Ok(Self::with_admin(config, Arc::new(admin)))
+    }
+
+    /// Build the production admin client with a typed failure observer.
+    pub fn new_with_observer(
+        config: SfuConfig,
+        observer: Arc<dyn AdminCallObserver>,
+    ) -> Result<Self, SfuError> {
+        let admin_base = admin_base_url_from_ws(&config.ws_url)?;
+        let admin = ReqwestLiveKitAdmin::new_with_observer(
+            admin_base,
+            config.api_key.clone(),
+            config.api_secret.clone(),
+            observer,
+        )?;
+        Ok(Self::with_admin(config, Arc::new(admin)))
+    }
+
+    /// One-shot control-plane probe used during server startup.
+    pub async fn probe_admin(&self) -> Result<(), SfuError> {
+        self.admin.list_rooms().await.map(|_| ())
     }
 
     /// Build with a caller-supplied admin client. Used by tests to

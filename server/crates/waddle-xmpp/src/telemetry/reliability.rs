@@ -300,6 +300,7 @@ pub fn register_reliability_counters() {
     }
     super::push_pipeline::register_pipeline_stages();
     super::call::register_call_setup_counters();
+    super::call::register_admin_call_failed_counter();
 }
 
 // The push helpers below are hand-written rather than table rows
@@ -744,6 +745,7 @@ mod tests {
             .chain(REGISTERED_PUSH_COUNTERS.iter().copied())
             .chain(["xmpp.push.outbox_retry_scheduled", "xmpp.push.suppressed"])
             .chain([
+                "waddle.call.admin.call_failed",
                 "waddle.call.setup.attempted",
                 "waddle.call.setup.ok",
                 "waddle.call.setup.failed",
@@ -878,6 +880,16 @@ mod tests {
                 ),
                 Some(0),
                 "call setup failure reason not registered"
+            );
+        }
+        for op in crate::telemetry::attributes::AdminOp::ALL {
+            assert_eq!(
+                guard.counter_sum(
+                    "waddle.call.admin.call_failed",
+                    &[("op", MetricAttribute::value(&op))]
+                ),
+                Some(0),
+                "admin call op not registered"
             );
         }
     }

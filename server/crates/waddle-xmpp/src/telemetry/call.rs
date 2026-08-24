@@ -2,7 +2,9 @@
 //! the protocol-layer Jingle handler and the server-side Muji gate so
 //! one family is never emitted from divergent macro sites.
 
-use super::attributes::{CallControlRateLimitedSurface, CallSetupFailureReason, SfuDenialReason};
+use super::attributes::{
+    AdminOp, CallControlRateLimitedSurface, CallSetupFailureReason, SfuDenialReason,
+};
 
 /// Count a minted LiveKit SFU token.
 pub fn increment_sfu_token_minted() {
@@ -23,6 +25,29 @@ pub fn increment_sfu_token_denied(reason: SfuDenialReason) {
         1,
         reason,
     );
+}
+
+fn add_admin_call_failed(count: u64, op: AdminOp) {
+    crate::counter_add!(
+        "waddle.call.admin.call_failed",
+        "1",
+        "LiveKit admin control-plane calls that failed after final normalization, by operation.",
+        count,
+        op,
+    );
+}
+
+/// Count a failed LiveKit admin control-plane call by operation.
+pub fn increment_admin_call_failed(op: AdminOp) {
+    add_admin_call_failed(1, op);
+}
+
+/// `add(0)` the admin-failure family so fresh pods export every
+/// alertable operation series before the first real failure.
+pub(super) fn register_admin_call_failed_counter() {
+    for op in AdminOp::ALL {
+        add_admin_call_failed(0, op);
+    }
 }
 
 /// Count one Jingle `session-initiate` entering call setup (#1452).
@@ -368,7 +393,7 @@ pub fn add_reconcile_occupancy_failures(count: u64) {
 }
 #[cfg(test)]
 mod pending_call_setup_route_tests {
-    use super::PendingCallSetupRoute;
+    use super::{increment_admin_call_failed, AdminOp, PendingCallSetupRoute};
 
     #[tokio::test(flavor = "current_thread")]
     async fn an_unclosed_dropped_ticket_counts_route_abandoned_once() {
@@ -424,6 +449,16 @@ mod pending_call_setup_route_tests {
                 )
                 .unwrap_or(0),
             0
+        );
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn admin_call_failure_helper_emits_with_typed_op() {
+        let metrics = crate::telemetry::test_support::acquire().await;
+        increment_admin_call_failed(AdminOp::DeleteRoom);
+        assert_eq!(
+            metrics.counter_sum("waddle.call.admin.call_failed", &[("op", "delete_room")]),
+            Some(1)
         );
     }
 }

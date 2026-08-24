@@ -28,7 +28,7 @@ use rustls_acme::tower::TowerHttp01ChallengeService;
 use std::future::IntoFuture as _;
 use std::sync::Arc;
 use tower_http::{compression::CompressionLayer, trace::TraceLayer};
-use tracing::{info, warn};
+use tracing::{error, info, warn};
 use waddle_xmpp::mam::{MamStorage, SqlxMamStorage};
 use waddle_xmpp::registry::ConnectionRegistry;
 
@@ -57,6 +57,32 @@ pub(crate) struct HttpServerDeps {
 }
 
 const HTTP_FORCED_EXIT_MARGIN: std::time::Duration = std::time::Duration::from_secs(1);
+
+#[derive(Debug)]
+struct LiveKitAdminFailureObserver;
+
+impl waddle_sfu::AdminCallObserver for LiveKitAdminFailureObserver {
+    fn admin_call_failed(&self, op: waddle_sfu::AdminOp) {
+        let op = match op {
+            waddle_sfu::AdminOp::DeleteRoom => {
+                waddle_xmpp::telemetry::attributes::AdminOp::DeleteRoom
+            }
+            waddle_sfu::AdminOp::RemoveParticipant => {
+                waddle_xmpp::telemetry::attributes::AdminOp::RemoveParticipant
+            }
+            waddle_sfu::AdminOp::UpdateParticipant => {
+                waddle_xmpp::telemetry::attributes::AdminOp::UpdateParticipant
+            }
+            waddle_sfu::AdminOp::ListRooms => {
+                waddle_xmpp::telemetry::attributes::AdminOp::ListRooms
+            }
+            waddle_sfu::AdminOp::RoomOccupancy => {
+                waddle_xmpp::telemetry::attributes::AdminOp::RoomOccupancy
+            }
+        };
+        waddle_xmpp::telemetry::call::increment_admin_call_failed(op);
+    }
+}
 
 async fn await_http_server_or_forced_exit<F, T>(
     server: F,
@@ -620,7 +646,10 @@ async fn create_websocket_state(
         Ok(Some(sfu_config)) => {
             let turn_tls_port = sfu_config.turn_tls_port;
             let turn_udp_port = sfu_config.turn_udp_port;
-            match waddle_sfu::LiveKitSfu::new(sfu_config) {
+            match waddle_sfu::LiveKitSfu::new_with_observer(
+                sfu_config,
+                Arc::new(LiveKitAdminFailureObserver),
+            ) {
                 Ok(sfu_impl) => {
                     let sink_store = Arc::clone(&call_teardown_outbox);
                     let failure_sink: waddle_sfu::TeardownFailureSink = Arc::new(move |lite| {
@@ -672,6 +701,12 @@ async fn create_websocket_state(
                     // the async `SfuReconciler` the webhook route's
                     // background reconciliation task drives.
                     let sfu_concrete = std::sync::Arc::new(sfu_impl);
+                    let probe_sfu = Arc::clone(&sfu_concrete);
+                    tokio::spawn(async move {
+                        if let Err(error) = probe_sfu.probe_admin().await {
+                            error!(%error, "LiveKit admin startup probe failed");
+                        }
+                    });
                     let sfu: std::sync::Arc<dyn waddle_sfu::SfuService> = sfu_concrete.clone();
                     let reconciler: std::sync::Arc<dyn waddle_sfu::SfuReconciler> = sfu_concrete;
                     waddle_xmpp::protocol::handlers::register_call_handlers(
@@ -1618,5 +1653,23 @@ mod shutdown_bound_tests {
         .await;
 
         assert_eq!(outcome, Some(7));
+    }
+}
+
+#[cfg(test)]
+mod admin_failure_observer_tests {
+    use super::LiveKitAdminFailureObserver;
+
+    #[tokio::test]
+    async fn observer_emits_admin_failure_counter() {
+        let metrics = waddle_xmpp::telemetry::test_support::acquire().await;
+        waddle_sfu::AdminCallObserver::admin_call_failed(
+            &LiveKitAdminFailureObserver,
+            waddle_sfu::AdminOp::ListRooms,
+        );
+        assert_eq!(
+            metrics.counter_sum("waddle.call.admin.call_failed", &[("op", "list_rooms")]),
+            Some(1)
+        );
     }
 }

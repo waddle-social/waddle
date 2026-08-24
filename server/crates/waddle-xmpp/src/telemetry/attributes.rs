@@ -1173,6 +1173,44 @@ impl MetricAttribute for CallControlRateLimitedSurface {
     }
 }
 
+/// `op` — which LiveKit admin control-plane operation failed.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AdminOp {
+    DeleteRoom,
+    RemoveParticipant,
+    UpdateParticipant,
+    ListRooms,
+    RoomOccupancy,
+}
+
+impl AdminOp {
+    /// Every allowed value. Startup zero-registration iterates this so
+    /// every admin-failure series exists before the first real error.
+    pub const ALL: [Self; 5] = [
+        Self::DeleteRoom,
+        Self::RemoveParticipant,
+        Self::UpdateParticipant,
+        Self::ListRooms,
+        Self::RoomOccupancy,
+    ];
+}
+
+impl sealed::Sealed for AdminOp {}
+impl MetricAttribute for AdminOp {
+    fn key(&self) -> &'static str {
+        "op"
+    }
+    fn value(&self) -> &'static str {
+        match self {
+            Self::DeleteRoom => "delete_room",
+            Self::RemoveParticipant => "remove_participant",
+            Self::UpdateParticipant => "update_participant",
+            Self::ListRooms => "list_rooms",
+            Self::RoomOccupancy => "room_occupancy",
+        }
+    }
+}
+
 /// `stage` — where in the push-notification pipeline a sample was
 /// taken (#531). One variant per observable pipeline transition.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
