@@ -152,21 +152,13 @@ groups:
             runbook: 'Calls are being set up but no LiveKit webhook has been accepted in 6h - the ingestion path is dark, not idle (the `setup.ok` arm is what distinguishes the two). Check the SFU webhook configuration points at /api/v1/livekit/webhook, that the route still returns 200 (its request span carries http.route), and that the SFU is not returning SERVICE_UNAVAILABLE because no SFU is configured on this pod. Every accepted delivery also logs one "LiveKit webhook accepted" line with its `call.id`. The webhook family is zero-registered at startup (#1436), so the `received` series exists from the first scrape; the `or vector(0)` stays as belt-and-braces for a pod whose OTLP export is itself broken (an empty vector would otherwise stop the rule evaluating - exactly the outage it exists to catch).'
             summary: No LiveKit webhook has been accepted in 6h despite active calls - participant cleanup is dark.
         - alert: LiveKitAdminCallFailing
-          expr: sum by (op) (increase(waddle_call_admin_call_failed_total[1h])) >= 3
+          expr: max_over_time((sum by (op) (increase(waddle_call_admin_call_failed_total[24h])))[1h:5m]) >= 3
           labels:
             severity: warning
             team: waddle
           annotations:
-            runbook: 'DeleteRoom returned 401 in production when the admin JWT omitted `roomCreate` (#1622); that outage measured 86-132 failures/day (3.6-5.5/h) against a healthy baseline of 0, and a broken ListRooms would add ~60/h from the 60s webhook reconciler. The >= 3 per 1h threshold is unreachable by a single transient timeout but is crossed within the hour by any real control-plane break. Break the series down by `op` first, then inspect the matching admin-call errors in waddle-server logs. Failures are observed on the real SFU-driven operations only - there is no startup probe (removed after the #1714 review).'
-            summary: LiveKit admin control-plane calls are failing - the SFU control plane is broken.
-        - alert: LiveKitAdminCallFailingSustained
-          expr: sum by (op) (increase(waddle_call_admin_call_failed_total[24h])) >= 3
-          labels:
-            severity: warning
-            team: waddle
-          annotations:
-            runbook: 'Low-volume companion to LiveKitAdminCallFailing: an operation issued fewer than three times per hour (DeleteRoom on a quiet day, RemoveParticipant, UpdateParticipant) can fail on every call without ever crossing the >= 3 per 1h threshold, and event-driven operations may be spaced more than an hour apart, so no per-hour condition with a for timer can hold across the gaps. Count over a full day instead: three failures in any rolling 24h page regardless of spacing, while one or two transient timeouts per day do not. Break down by `op`, then read the matching admin-call errors in waddle-server logs.'
-            summary: A LiveKit admin operation failed three times within 24h - a low-volume control-plane break.
+            runbook: 'DeleteRoom returned 401 in production when the admin JWT omitted `roomCreate` (#1622); that outage measured 86-132 failures/day (3.6-5.5/h) against a healthy baseline of 0. Fires on the third failed call of one operation within a rolling 24h: for a bursty break that is the same instant a per-hour rule would fire, and for a sparse event-driven operation (RemoveParticipant, UpdateParticipant, DeleteRoom on a quiet day) it is the only shape that survives call gaps longer than an hour. One or two transient timeouts per day never page. The outer max_over_time over the last hour latches a hit so three failures spread across the window edges (t=0, 12h, 23h59m) stay active well past the notification policy group_wait instead of resolving after a single scrape. Break down by `op`, then read the matching admin-call errors in waddle-server logs. Failures are observed on the real SFU-driven operations only - there is no startup probe (removed after the #1714 review).'
+            summary: A LiveKit admin operation failed three times within 24h - the SFU control plane is broken.
     - name: waddle-ingress-shadow
       rules:
         - alert: IngressShadowNotEnabled
