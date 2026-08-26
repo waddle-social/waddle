@@ -7,7 +7,7 @@ import type { ChatShellState } from "@/shell/state";
 import type { WaddleSession } from "@/lib/server-auth";
 import { jidDomain } from "@/lib/xmpp-client";
 import { matchLocation, navigate, type RouteMatch } from "@/router";
-import { resolveChannelBySlug } from "@/shell/route-helpers";
+import { resolveChannelBySlug, resolveRoomByDmUsername } from "@/shell/route-helpers";
 import type { ActiveRightPanel } from "@/shell/controllers/use-thread-panels";
 import type { ExtensionRouteKey } from "@/shell/controllers/use-extension-routes";
 import type { ChannelLoadIntent } from "@/channels/room-access";
@@ -275,6 +275,30 @@ export function useRouteSync(deps: RouteSyncDeps) {
       if (username) {
         const domain = session.value ? jidDomain(session.value.jid) : "";
         if (!domain) return;
+        const collidingRoom = resolveRoomByDmUsername(username, waddles.channels.value);
+        if (collidingRoom) {
+          dmConversations.forgetPeer(`${username}@${domain}`);
+          if (collidingRoom.isGroupDm && collidingRoom.jid) {
+            const groupMatch = {
+              id: "groupDmRoom" as const,
+              params: { roomJid: collidingRoom.jid },
+              search: match.search,
+            };
+            navigate(groupMatch, { replace: true });
+            await applyRouteTarget(groupMatch, requestId, options);
+            return;
+          }
+          if (!collidingRoom.isGroupDm) {
+            const channelMatch = {
+              id: "channel" as const,
+              params: { channelId: collidingRoom.id },
+              search: match.search,
+            };
+            navigate(channelMatch, { replace: true });
+            await applyRouteTarget(channelMatch, requestId, options);
+            return;
+          }
+        }
         await openDm(`${username}@${domain}`);
         if (requestId !== routeRequestId) return;
       }

@@ -6,9 +6,11 @@ import type { useXmppRosterContacts } from "@/contacts/roster";
 import type { ChatShellState } from "@/shell/state";
 import type { BrowserXmppClient } from "@/lib/xmpp-client";
 import type { WaddleSession } from "@/lib/server-auth";
-import { barePeerJid, jidLocalpart } from "@/lib/xmpp-client";
+import { barePeerJid, jidDomain, jidLocalpart } from "@/lib/xmpp-client";
 import { groupDmSpawnPayloadFromDm } from "@/dms/group-dm-spawn";
+import { resolveRoomByDmUsername } from "@/shell/route-helpers";
 import type { ExtensionRouteKey } from "@/shell/controllers/use-extension-routes";
+import type { ChannelLoadIntent } from "@/channels/room-access";
 
 interface DmSyncDeps {
   ui: ChatShellState;
@@ -22,6 +24,10 @@ interface DmSyncDeps {
   activeExtensionRouteKey: Ref<ExtensionRouteKey | null>;
   clearPendingChannelRoomJidSelection: () => void;
   selectGroupDm: (roomJid: string, options?: { updateUrl?: boolean }) => Promise<boolean>;
+  selectChannel: (
+    channelId: string,
+    options?: { roomJid?: string; surface?: "channels" | "dms"; intent?: ChannelLoadIntent },
+  ) => Promise<void>;
 }
 
 /**
@@ -42,13 +48,43 @@ export function useDmSync(deps: DmSyncDeps) {
     activeExtensionRouteKey,
     clearPendingChannelRoomJidSelection,
     selectGroupDm,
+    selectChannel,
   } = deps;
 
   watch(() => ui.showNewGroupDm.value, (open) => {
     if (!open) ui.groupDmSeedPeerJid.value = null;
   });
 
+  watch(
+    () => waddles.channels.value,
+    (rooms) => {
+      const domain = selfDomain.value.toLowerCase();
+      if (!domain) return;
+      for (const conversation of [...dmConversations.conversations.value]) {
+        if (jidDomain(conversation.peerJid).toLowerCase() !== domain) continue;
+        const room = resolveRoomByDmUsername(jidLocalpart(conversation.peerJid), rooms);
+        if (!room) continue;
+        if (conversation.lastMessageAt || conversation.lastMessageBody) continue;
+        dmConversations.forgetPeer(conversation.peerJid);
+      }
+    },
+    { deep: true },
+  );
+
   async function handleOpenDm(peerJid: string) {
+    const collidingRoom = resolveRoomByDmUsername(jidLocalpart(peerJid), waddles.channels.value);
+    const isUserDomainPeer = jidDomain(peerJid).toLowerCase() === selfDomain.value.toLowerCase();
+    if (collidingRoom && isUserDomainPeer) {
+      dmConversations.forgetPeer(peerJid);
+      if (collidingRoom.isGroupDm && collidingRoom.jid) {
+        await selectGroupDm(collidingRoom.jid);
+        return;
+      }
+      if (!collidingRoom.isGroupDm) {
+        await selectChannel(collidingRoom.id, collidingRoom.jid ? { roomJid: collidingRoom.jid } : undefined);
+        return;
+      }
+    }
     clearPendingChannelRoomJidSelection();
     ui.activePage.value = "chat";
     ui.sidebarMode.value = "dms";

@@ -273,6 +273,7 @@ export function useChatAppController() {
     activeExtensionRouteKey,
     clearPendingChannelRoomJidSelection: roomSync.clearPendingChannelRoomJidSelection,
     selectGroupDm: roomSync.selectGroupDm,
+    selectChannel: roomSync.selectChannel,
   });
 
   const panels = useThreadPanels({
