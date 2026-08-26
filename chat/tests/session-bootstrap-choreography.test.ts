@@ -115,6 +115,7 @@ function makeHarness(options: {
       groupDms: ref([]),
       activeChannelId: ref<string | null>(null),
       isLoadingStructure: ref(false),
+      hasLoadedStructure: ref(false),
       loadStructure: mock(async () => {}),
       clearData: mock(() => {}),
     },

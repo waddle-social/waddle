@@ -59,16 +59,18 @@ export function useDmSync(deps: DmSyncDeps) {
     const domain = selfDomain.value.toLowerCase();
     if (!domain) return;
     const rooms = waddles.channels.value;
-    for (const conversation of [...dmConversations.conversations.value]) {
-      if (jidDomain(conversation.peerJid).toLowerCase() !== domain) continue;
+    const stale = dmConversations.conversations.value.filter((conversation) => {
+      if (jidDomain(conversation.peerJid).toLowerCase() !== domain) return false;
       if (conversation.peerJid.toLowerCase() === (dmConversations.activePeerJid.value ?? "").toLowerCase()) {
         // Skip the open conversation so a roster/threads click on a real
         // never-messaged 1:1 is not deleted mid-open (#917).
-        continue;
+        return false;
       }
       const room = resolveRoomByDmUsername(jidLocalpart(conversation.peerJid), rooms);
-      if (!room) continue;
-      if (conversation.lastMessageAt || conversation.lastMessageBody) continue;
+      if (!room) return false;
+      return !conversation.lastMessageAt && !conversation.lastMessageBody;
+    });
+    for (const conversation of stale) {
       dmConversations.forgetPeer(conversation.peerJid);
     }
   }

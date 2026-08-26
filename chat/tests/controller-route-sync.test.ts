@@ -109,10 +109,12 @@ function makeHarness(overrides: { openDm?: (peerJid: string) => Promise<void> } 
   const clearPendingChannelRoomJidSelection = mock(() => {});
   const clearPendingChannelRoute = mock(() => {});
 
+  const hasLoadedStructure = ref(true);
   const waddles = {
     activeChannelId,
     channels,
     reloadChannelMembers,
+    hasLoadedStructure,
   } as unknown as ReturnType<typeof useWaddleDirectory>;
   const messaging = {
     clearMessages,
@@ -176,6 +178,7 @@ function makeHarness(overrides: { openDm?: (peerJid: string) => Promise<void> } 
     forgetPeer,
     conversations,
     channels,
+    hasLoadedStructure,
     clearPendingChannelRoomJidSelection,
   };
 }
@@ -356,6 +359,21 @@ describe("useRouteSync applyRouteTarget", () => {
       else (globalThis as Record<string, unknown>).window = previousWindow;
       h.scope.stop();
     }
+  });
+
+  test("dm username does not open a 1:1 before structure discovery succeeds", async () => {
+    const h = makeHarness();
+    h.hasLoadedStructure.value = false;
+
+    await h.routeSync.applyRouteTarget({
+      id: "dm",
+      params: { username: "chat" },
+      search: { thread: [], pinned: false },
+    } as RouteMatch, h.routeSync.beginRouteRequest());
+
+    expect(h.openDm).not.toHaveBeenCalled();
+    expect(h.forgetPeer).not.toHaveBeenCalled();
+    h.scope.stop();
   });
 
   test("dm route with pinned search activates the pinned panel", async () => {

@@ -283,6 +283,9 @@ export function useRouteSync(deps: RouteSyncDeps) {
       if (username) {
         const domain = session.value ? jidDomain(session.value.jid) : "";
         if (!domain) return;
+        // Failed disco must not invent username@user-domain (Greptile P1).
+        // Connection lifecycle parks `/dm/:username` until this is true.
+        if (waddles.hasLoadedStructure?.value === false) return;
         const collidingRoom = resolveRoomByDmUsername(username, waddles.channels.value);
         if (collidingRoom) {
           forgetEmptyCollidingDm(`${username}@${domain}`);
