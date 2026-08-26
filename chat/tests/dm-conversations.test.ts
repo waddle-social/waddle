@@ -82,6 +82,15 @@ describe("useDirectMessageConversations", () => {
     expect(composable.conversations.value).toHaveLength(1);
   });
 
+  test("forgetPeer drops a conversation and clears it when active", async () => {
+    const { composable } = makeComposable();
+    await composable.openDm("chat@example.com");
+    expect(composable.conversations.value).toHaveLength(1);
+    composable.forgetPeer("chat@example.com");
+    expect(composable.conversations.value).toHaveLength(0);
+    expect(composable.activePeerJid.value).toBeNull();
+  });
+
   test("openDm refreshes per-peer call activity for hard-reload recovery", async () => {
     const client = makeClient();
     const { composable } = makeComposable({ client });

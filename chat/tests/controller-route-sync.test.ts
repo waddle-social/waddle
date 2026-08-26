@@ -1,5 +1,5 @@
 import { describe, expect, mock, test } from "bun:test";
-import { computed, effectScope, ref } from "vue";
+import { computed, effectScope, nextTick, ref } from "vue";
 import { useChatShellState } from "../src/shell/state";
 import {
   applyMatchToShellState,
@@ -109,10 +109,12 @@ function makeHarness(overrides: { openDm?: (peerJid: string) => Promise<void> } 
   const clearPendingChannelRoomJidSelection = mock(() => {});
   const clearPendingChannelRoute = mock(() => {});
 
+  const hasLoadedStructure = ref(true);
   const waddles = {
     activeChannelId,
     channels,
     reloadChannelMembers,
+    hasLoadedStructure,
   } as unknown as ReturnType<typeof useWaddleDirectory>;
   const messaging = {
     clearMessages,
@@ -122,8 +124,16 @@ function makeHarness(overrides: { openDm?: (peerJid: string) => Promise<void> } 
   const dmMessaging = {
     backfillThread: dmBackfill,
   } as unknown as ReturnType<typeof useDirectMessages>;
+  const forgetPeer = mock(() => {});
+  const conversations = ref<Array<{
+    peerJid: string;
+    lastMessageAt?: string;
+    lastMessageBody?: string;
+  }>>([]);
   const dmConversations = {
     closeDm,
+    forgetPeer,
+    conversations,
   } as unknown as ReturnType<typeof useDirectMessageConversations>;
 
   const scope = effectScope();
@@ -164,6 +174,11 @@ function makeHarness(overrides: { openDm?: (peerJid: string) => Promise<void> } 
     dmBackfill,
     reloadChannelMembers,
     openDm,
+    selectGroupDm,
+    forgetPeer,
+    conversations,
+    channels,
+    hasLoadedStructure,
     clearPendingChannelRoomJidSelection,
   };
 }
@@ -201,6 +216,163 @@ describe("useRouteSync applyRouteTarget", () => {
     expect(h.activeRightPanel.value).toBe("thread");
     // Dedup: the stack repeats t1 but each thread backfills once.
     expect(h.dmBackfill).toHaveBeenCalledTimes(2);
+    h.scope.stop();
+  });
+
+  test("dm username that matches a community channel redirects to the channel route", async () => {
+    const h = makeHarness();
+    h.channels.value = [
+      { id: "general", name: "General", spaceId: "space-1" },
+      { id: "chat", name: "Chat", spaceId: "space-1", jid: "chat@muc.example.com" },
+    ];
+
+    await h.routeSync.applyRouteTarget({
+      id: "dm",
+      params: { username: "chat" },
+      search: { thread: [], pinned: false },
+    } as RouteMatch, h.routeSync.beginRouteRequest());
+
+    expect(h.openDm).not.toHaveBeenCalled();
+    expect(h.forgetPeer).toHaveBeenCalledWith("chat@example.com");
+    expect(h.activeChannelId.value).toBe("chat");
+    expect(h.ui.sidebarMode.value).toBe("channels");
+    expect(h.loadMessages).toHaveBeenCalledWith(
+      "space-1",
+      "chat",
+      0,
+      [],
+      { intent: "automatic" },
+    );
+    h.scope.stop();
+  });
+
+  test("dm username that matches a group DM redirects to the group-DM room", async () => {
+    const h = makeHarness();
+    h.channels.value = [
+      { id: "general", name: "General", spaceId: "space-1" },
+      {
+        id: "group-dm-abc",
+        name: "crew",
+        jid: "group-dm-abc@muc.example.com",
+        isGroupDm: true,
+      },
+    ];
+
+    await h.routeSync.applyRouteTarget({
+      id: "dm",
+      params: { username: "group-dm-abc" },
+      search: { thread: ["t1"], pinned: false },
+    } as RouteMatch, h.routeSync.beginRouteRequest());
+
+    expect(h.openDm).not.toHaveBeenCalled();
+    expect(h.forgetPeer).toHaveBeenCalledWith("group-dm-abc@example.com");
+    expect(h.selectGroupDm).toHaveBeenCalledWith("group-dm-abc@muc.example.com", {
+      updateUrl: false,
+      intent: "automatic",
+    });
+    expect(h.ui.sidebarMode.value).toBe("dms");
+    h.scope.stop();
+  });
+
+  test("dm username match is case-insensitive", async () => {
+    const h = makeHarness();
+    h.channels.value = [
+      { id: "chat", name: "Chat", spaceId: "space-1", jid: "chat@muc.example.com" },
+    ];
+
+    await h.routeSync.applyRouteTarget({
+      id: "dm",
+      params: { username: "Chat" },
+      search: { thread: [], pinned: false },
+    } as RouteMatch, h.routeSync.beginRouteRequest());
+
+    expect(h.openDm).not.toHaveBeenCalled();
+    expect(h.activeChannelId.value).toBe("chat");
+    h.scope.stop();
+  });
+
+  test("colliding dm route keeps a history-bearing 1:1 in the store", async () => {
+    const h = makeHarness();
+    h.conversations.value = [{
+      peerJid: "chat@example.com",
+      lastMessageAt: "2026-08-26T12:00:00.000Z",
+    }];
+    h.channels.value = [
+      { id: "chat", name: "Chat", spaceId: "space-1", jid: "chat@muc.example.com" },
+    ];
+
+    await h.routeSync.applyRouteTarget({
+      id: "dm",
+      params: { username: "chat" },
+      search: { thread: [], pinned: false },
+    } as RouteMatch, h.routeSync.beginRouteRequest());
+
+    expect(h.openDm).not.toHaveBeenCalled();
+    expect(h.forgetPeer).not.toHaveBeenCalled();
+    expect(h.activeChannelId.value).toBe("chat");
+    h.scope.stop();
+  });
+
+  test("late channel catalog fill redirects an open /dm/:username collision", async () => {
+    const previousWindow = (globalThis as Record<string, unknown>).window;
+    const location = { pathname: "/dm/chat", search: "", hash: "" };
+    (globalThis as Record<string, unknown>).window = {
+      location,
+      history: {
+        replaceState(_state: unknown, _title: string, url?: string) {
+          if (!url) return;
+          const [path, search] = url.split("?");
+          location.pathname = path ?? "/";
+          location.search = search ? `?${search}` : "";
+        },
+        pushState(_state: unknown, _title: string, url?: string) {
+          if (!url) return;
+          const [path, search] = url.split("?");
+          location.pathname = path ?? "/";
+          location.search = search ? `?${search}` : "";
+        },
+      },
+      addEventListener() {},
+      removeEventListener() {},
+    };
+    const h = makeHarness();
+    try {
+      await h.routeSync.applyRouteTarget({
+        id: "dm",
+        params: { username: "chat" },
+        search: { thread: [], pinned: false },
+      } as RouteMatch, h.routeSync.beginRouteRequest());
+      expect(h.openDm).toHaveBeenCalledWith("chat@example.com");
+
+      h.openDm.mockClear();
+      h.channels.value = [
+        { id: "general", name: "General", spaceId: "space-1" },
+        { id: "chat", name: "Chat", spaceId: "space-1", jid: "chat@muc.example.com" },
+      ];
+      await nextTick();
+      await Promise.resolve();
+
+      expect(h.openDm).not.toHaveBeenCalled();
+      expect(h.activeChannelId.value).toBe("chat");
+    } finally {
+      if (previousWindow === undefined) delete (globalThis as Record<string, unknown>).window;
+      else (globalThis as Record<string, unknown>).window = previousWindow;
+      h.scope.stop();
+    }
+  });
+
+  test("dm username does not open a 1:1 before structure discovery succeeds", async () => {
+    const h = makeHarness();
+    h.hasLoadedStructure.value = false;
+
+    await h.routeSync.applyRouteTarget({
+      id: "dm",
+      params: { username: "chat" },
+      search: { thread: [], pinned: false },
+    } as RouteMatch, h.routeSync.beginRouteRequest());
+
+    expect(h.openDm).not.toHaveBeenCalled();
+    expect(h.forgetPeer).not.toHaveBeenCalled();
     h.scope.stop();
   });
 

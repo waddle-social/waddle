@@ -1,4 +1,4 @@
-import { type ComputedRef, onMounted, onUnmounted, type Ref } from "vue";
+import { type ComputedRef, onMounted, onUnmounted, type Ref, watch } from "vue";
 import type { useChannelMessages } from "@/channels/messages";
 import type { useDirectMessageConversations } from "@/dms/conversations";
 import type { useDirectMessages } from "@/dms/messages";
@@ -7,7 +7,7 @@ import type { ChatShellState } from "@/shell/state";
 import type { WaddleSession } from "@/lib/server-auth";
 import { jidDomain } from "@/lib/xmpp-client";
 import { matchLocation, navigate, type RouteMatch } from "@/router";
-import { resolveChannelBySlug } from "@/shell/route-helpers";
+import { resolveChannelBySlug, resolveRoomByDmUsername } from "@/shell/route-helpers";
 import type { ActiveRightPanel } from "@/shell/controllers/use-thread-panels";
 import type { ExtensionRouteKey } from "@/shell/controllers/use-extension-routes";
 import type { ChannelLoadIntent } from "@/channels/room-access";
@@ -210,6 +210,14 @@ export function useRouteSync(deps: RouteSyncDeps) {
     }
   }
 
+  function forgetEmptyCollidingDm(peerJid: string) {
+    const existing = dmConversations.conversations.value.find(
+      (conversation) => conversation.peerJid.toLowerCase() === peerJid.toLowerCase(),
+    );
+    if (existing?.lastMessageAt || existing?.lastMessageBody) return;
+    dmConversations.forgetPeer(peerJid);
+  }
+
   function onPopState() {
     // applyRouteTarget is the single state-from-match handler — it
     // covers every route id and is the only place that mutates
@@ -275,6 +283,33 @@ export function useRouteSync(deps: RouteSyncDeps) {
       if (username) {
         const domain = session.value ? jidDomain(session.value.jid) : "";
         if (!domain) return;
+        // Failed disco must not invent username@user-domain (Greptile P1).
+        // Connection lifecycle parks `/dm/:username` until this is true.
+        if (waddles.hasLoadedStructure?.value === false) return;
+        const collidingRoom = resolveRoomByDmUsername(username, waddles.channels.value);
+        if (collidingRoom) {
+          forgetEmptyCollidingDm(`${username}@${domain}`);
+          if (collidingRoom.isGroupDm && collidingRoom.jid) {
+            const groupMatch = {
+              id: "groupDmRoom" as const,
+              params: { roomJid: collidingRoom.jid },
+              search: match.search,
+            };
+            navigate(groupMatch, { replace: true });
+            await applyRouteTarget(groupMatch, requestId, options);
+            return;
+          }
+          if (!collidingRoom.isGroupDm) {
+            const channelMatch = {
+              id: "channel" as const,
+              params: { channelId: collidingRoom.id },
+              search: match.search,
+            };
+            navigate(channelMatch, { replace: true });
+            await applyRouteTarget(channelMatch, requestId, options);
+            return;
+          }
+        }
         await openDm(`${username}@${domain}`);
         if (requestId !== routeRequestId) return;
       }
@@ -408,6 +443,28 @@ export function useRouteSync(deps: RouteSyncDeps) {
       void messaging.backfillThread(threadId);
     }
   }
+
+  watch(
+    () => waddles.channels.value,
+    async (rooms) => {
+      if (rooms.length === 0 || isApplyingRoute.value) return;
+      if (typeof window === "undefined") return;
+      const match = matchLocation(window.location.pathname, window.location.search);
+      if (match.id !== "dm") return;
+      const username = match.params.username.replace(/^@/, "").trim();
+      if (!resolveRoomByDmUsername(username, rooms)) return;
+      const requestId = beginRouteRequest();
+      isApplyingRoute.value = true;
+      try {
+        await applyRouteTarget(match, requestId);
+      } finally {
+        if (isCurrentRouteRequest(requestId)) {
+          isApplyingRoute.value = false;
+        }
+      }
+    },
+    { deep: true },
+  );
 
   onMounted(() => {
     window.addEventListener("popstate", onPopState);

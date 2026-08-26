@@ -46,6 +46,7 @@ export function useWaddleDirectory(
   const selectedSpaceId: Ref<string | null> = ref(null);
 
   const isLoadingStructure = ref(false);
+  const hasLoadedStructure = ref(false);
   const isSubmitting = ref(false);
 
   let spaceRequestId = 0;
@@ -228,6 +229,7 @@ export function useWaddleDirectory(
           autojoin: topology.rooms.find((room) => room.jid === channel.jid)?.autojoin,
         }));
       channels.value = allRooms;
+      hasLoadedStructure.value = true;
 
       if (opts?.noChannelSelect) {
         activeChannelId.value = null;
@@ -563,6 +565,7 @@ export function useWaddleDirectory(
     spacesServiceJid.value = null;
     activeChannelId.value = null;
     selectedSpaceId.value = null;
+    hasLoadedStructure.value = false;
   }
 
   return {
@@ -576,6 +579,7 @@ export function useWaddleDirectory(
     activeSpaceId,
     activeChannelId,
     isLoadingStructure,
+    hasLoadedStructure,
     isSubmitting,
     editWaddleForm,
     createChannelForm,

@@ -6,9 +6,11 @@ import type { useXmppRosterContacts } from "@/contacts/roster";
 import type { ChatShellState } from "@/shell/state";
 import type { BrowserXmppClient } from "@/lib/xmpp-client";
 import type { WaddleSession } from "@/lib/server-auth";
-import { barePeerJid, jidLocalpart } from "@/lib/xmpp-client";
+import { barePeerJid, jidDomain, jidLocalpart } from "@/lib/xmpp-client";
 import { groupDmSpawnPayloadFromDm } from "@/dms/group-dm-spawn";
+import { resolveRoomByDmUsername } from "@/shell/route-helpers";
 import type { ExtensionRouteKey } from "@/shell/controllers/use-extension-routes";
+import type { ChannelLoadIntent } from "@/channels/room-access";
 
 interface DmSyncDeps {
   ui: ChatShellState;
@@ -22,6 +24,10 @@ interface DmSyncDeps {
   activeExtensionRouteKey: Ref<ExtensionRouteKey | null>;
   clearPendingChannelRoomJidSelection: () => void;
   selectGroupDm: (roomJid: string, options?: { updateUrl?: boolean }) => Promise<boolean>;
+  selectChannel: (
+    channelId: string,
+    options?: { roomJid?: string; surface?: "channels" | "dms"; intent?: ChannelLoadIntent },
+  ) => Promise<void>;
 }
 
 /**
@@ -42,13 +48,45 @@ export function useDmSync(deps: DmSyncDeps) {
     activeExtensionRouteKey,
     clearPendingChannelRoomJidSelection,
     selectGroupDm,
+    selectChannel,
   } = deps;
 
   watch(() => ui.showNewGroupDm.value, (open) => {
     if (!open) ui.groupDmSeedPeerJid.value = null;
   });
 
+  function forgetEmptyCollidingUserDomainDms() {
+    const domain = selfDomain.value.toLowerCase();
+    if (!domain) return;
+    const rooms = waddles.channels.value;
+    const stale = dmConversations.conversations.value.filter((conversation) => {
+      if (jidDomain(conversation.peerJid).toLowerCase() !== domain) return false;
+      if (conversation.peerJid.toLowerCase() === (dmConversations.activePeerJid.value ?? "").toLowerCase()) {
+        // Skip the open conversation so a roster/threads click on a real
+        // never-messaged 1:1 is not deleted mid-open (#917).
+        return false;
+      }
+      const room = resolveRoomByDmUsername(jidLocalpart(conversation.peerJid), rooms);
+      if (!room) return false;
+      return !conversation.lastMessageAt && !conversation.lastMessageBody;
+    });
+    for (const conversation of stale) {
+      dmConversations.forgetPeer(conversation.peerJid);
+    }
+  }
+
+  watch(
+    [() => waddles.channels.value, () => dmConversations.conversations.value],
+    () => {
+      forgetEmptyCollidingUserDomainDms();
+    },
+    { deep: true },
+  );
+
   async function handleOpenDm(peerJid: string) {
+    // Full JIDs are not slug-ambiguous: a user-domain partner whose node
+    // matches a channel id is still a 1:1 (#917). Room-wins applies only
+    // to `/dm/:username` and the New DM username field.
     clearPendingChannelRoomJidSelection();
     ui.activePage.value = "chat";
     ui.sidebarMode.value = "dms";
@@ -69,6 +107,15 @@ export function useDmSync(deps: DmSyncDeps) {
 
   async function handleNewDm(username: string) {
     if (!selfDomain.value) return;
+    const collidingRoom = resolveRoomByDmUsername(username, waddles.channels.value);
+    if (collidingRoom?.isGroupDm && collidingRoom.jid) {
+      await selectGroupDm(collidingRoom.jid);
+      return;
+    }
+    if (collidingRoom && !collidingRoom.isGroupDm) {
+      await selectChannel(collidingRoom.id, collidingRoom.jid ? { roomJid: collidingRoom.jid } : undefined);
+      return;
+    }
     await handleOpenDm(`${username}@${selfDomain.value}`);
   }
 

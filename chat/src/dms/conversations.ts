@@ -177,6 +177,14 @@ export function useDirectMessageConversations(
     return created;
   }
 
+  function forgetPeer(peerJid: string) {
+    const key = conversationKeyFor(peerJid);
+    const next = conversations.value.filter((conversation) => conversation.peerJid !== key);
+    if (next.length === conversations.value.length) return;
+    conversations.value = next;
+    if (activePeerJid.value === key) activePeerJid.value = null;
+  }
+
   function rememberRead(peerJid: string, lastMessageAt?: string) {
     const bare = barePeerJid(peerJid);
     const readAt = Math.max(
@@ -500,6 +508,7 @@ export function useDirectMessageConversations(
     totalUnreadCount,
     openDm,
     closeDm,
+    forgetPeer,
     hydrateFromInbox,
     onInboxPush,
     markRead,
