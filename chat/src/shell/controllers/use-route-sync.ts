@@ -1,4 +1,4 @@
-import { type ComputedRef, onMounted, onUnmounted, type Ref } from "vue";
+import { type ComputedRef, onMounted, onUnmounted, type Ref, watch } from "vue";
 import type { useChannelMessages } from "@/channels/messages";
 import type { useDirectMessageConversations } from "@/dms/conversations";
 import type { useDirectMessages } from "@/dms/messages";
@@ -210,6 +210,14 @@ export function useRouteSync(deps: RouteSyncDeps) {
     }
   }
 
+  function forgetEmptyCollidingDm(peerJid: string) {
+    const existing = dmConversations.conversations.value.find(
+      (conversation) => conversation.peerJid.toLowerCase() === peerJid.toLowerCase(),
+    );
+    if (existing?.lastMessageAt || existing?.lastMessageBody) return;
+    dmConversations.forgetPeer(peerJid);
+  }
+
   function onPopState() {
     // applyRouteTarget is the single state-from-match handler — it
     // covers every route id and is the only place that mutates
@@ -277,7 +285,7 @@ export function useRouteSync(deps: RouteSyncDeps) {
         if (!domain) return;
         const collidingRoom = resolveRoomByDmUsername(username, waddles.channels.value);
         if (collidingRoom) {
-          dmConversations.forgetPeer(`${username}@${domain}`);
+          forgetEmptyCollidingDm(`${username}@${domain}`);
           if (collidingRoom.isGroupDm && collidingRoom.jid) {
             const groupMatch = {
               id: "groupDmRoom" as const,
@@ -432,6 +440,28 @@ export function useRouteSync(deps: RouteSyncDeps) {
       void messaging.backfillThread(threadId);
     }
   }
+
+  watch(
+    () => waddles.channels.value,
+    async (rooms) => {
+      if (rooms.length === 0 || isApplyingRoute.value) return;
+      if (typeof window === "undefined") return;
+      const match = matchLocation(window.location.pathname, window.location.search);
+      if (match.id !== "dm") return;
+      const username = match.params.username.replace(/^@/, "").trim();
+      if (!resolveRoomByDmUsername(username, rooms)) return;
+      const requestId = beginRouteRequest();
+      isApplyingRoute.value = true;
+      try {
+        await applyRouteTarget(match, requestId);
+      } finally {
+        if (isCurrentRouteRequest(requestId)) {
+          isApplyingRoute.value = false;
+        }
+      }
+    },
+    { deep: true },
+  );
 
   onMounted(() => {
     window.addEventListener("popstate", onPopState);

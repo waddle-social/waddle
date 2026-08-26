@@ -23,6 +23,7 @@ describe("resolveRoomByDmUsername", () => {
     ];
     expect(resolveRoomByDmUsername("chat", channels)?.id).toBe("chat");
     expect(resolveRoomByDmUsername("@chat", channels)?.id).toBe("chat");
+    expect(resolveRoomByDmUsername("Chat", channels)?.id).toBe("chat");
     expect(resolveRoomByDmUsername("bob", channels)).toBeUndefined();
   });
 });

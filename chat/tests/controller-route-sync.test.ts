@@ -1,5 +1,5 @@
 import { describe, expect, mock, test } from "bun:test";
-import { computed, effectScope, ref } from "vue";
+import { computed, effectScope, nextTick, ref } from "vue";
 import { useChatShellState } from "../src/shell/state";
 import {
   applyMatchToShellState,
@@ -123,9 +123,15 @@ function makeHarness(overrides: { openDm?: (peerJid: string) => Promise<void> } 
     backfillThread: dmBackfill,
   } as unknown as ReturnType<typeof useDirectMessages>;
   const forgetPeer = mock(() => {});
+  const conversations = ref<Array<{
+    peerJid: string;
+    lastMessageAt?: string;
+    lastMessageBody?: string;
+  }>>([]);
   const dmConversations = {
     closeDm,
     forgetPeer,
+    conversations,
   } as unknown as ReturnType<typeof useDirectMessageConversations>;
 
   const scope = effectScope();
@@ -168,6 +174,7 @@ function makeHarness(overrides: { openDm?: (peerJid: string) => Promise<void> } 
     openDm,
     selectGroupDm,
     forgetPeer,
+    conversations,
     channels,
     clearPendingChannelRoomJidSelection,
   };
@@ -262,6 +269,93 @@ describe("useRouteSync applyRouteTarget", () => {
     });
     expect(h.ui.sidebarMode.value).toBe("dms");
     h.scope.stop();
+  });
+
+  test("dm username match is case-insensitive", async () => {
+    const h = makeHarness();
+    h.channels.value = [
+      { id: "chat", name: "Chat", spaceId: "space-1", jid: "chat@muc.example.com" },
+    ];
+
+    await h.routeSync.applyRouteTarget({
+      id: "dm",
+      params: { username: "Chat" },
+      search: { thread: [], pinned: false },
+    } as RouteMatch, h.routeSync.beginRouteRequest());
+
+    expect(h.openDm).not.toHaveBeenCalled();
+    expect(h.activeChannelId.value).toBe("chat");
+    h.scope.stop();
+  });
+
+  test("colliding dm route keeps a history-bearing 1:1 in the store", async () => {
+    const h = makeHarness();
+    h.conversations.value = [{
+      peerJid: "chat@example.com",
+      lastMessageAt: "2026-08-26T12:00:00.000Z",
+    }];
+    h.channels.value = [
+      { id: "chat", name: "Chat", spaceId: "space-1", jid: "chat@muc.example.com" },
+    ];
+
+    await h.routeSync.applyRouteTarget({
+      id: "dm",
+      params: { username: "chat" },
+      search: { thread: [], pinned: false },
+    } as RouteMatch, h.routeSync.beginRouteRequest());
+
+    expect(h.openDm).not.toHaveBeenCalled();
+    expect(h.forgetPeer).not.toHaveBeenCalled();
+    expect(h.activeChannelId.value).toBe("chat");
+    h.scope.stop();
+  });
+
+  test("late channel catalog fill redirects an open /dm/:username collision", async () => {
+    const previousWindow = (globalThis as Record<string, unknown>).window;
+    const location = { pathname: "/dm/chat", search: "", hash: "" };
+    (globalThis as Record<string, unknown>).window = {
+      location,
+      history: {
+        replaceState(_state: unknown, _title: string, url?: string) {
+          if (!url) return;
+          const [path, search] = url.split("?");
+          location.pathname = path ?? "/";
+          location.search = search ? `?${search}` : "";
+        },
+        pushState(_state: unknown, _title: string, url?: string) {
+          if (!url) return;
+          const [path, search] = url.split("?");
+          location.pathname = path ?? "/";
+          location.search = search ? `?${search}` : "";
+        },
+      },
+      addEventListener() {},
+      removeEventListener() {},
+    };
+    const h = makeHarness();
+    try {
+      await h.routeSync.applyRouteTarget({
+        id: "dm",
+        params: { username: "chat" },
+        search: { thread: [], pinned: false },
+      } as RouteMatch, h.routeSync.beginRouteRequest());
+      expect(h.openDm).toHaveBeenCalledWith("chat@example.com");
+
+      h.openDm.mockClear();
+      h.channels.value = [
+        { id: "general", name: "General", spaceId: "space-1" },
+        { id: "chat", name: "Chat", spaceId: "space-1", jid: "chat@muc.example.com" },
+      ];
+      await nextTick();
+      await Promise.resolve();
+
+      expect(h.openDm).not.toHaveBeenCalled();
+      expect(h.activeChannelId.value).toBe("chat");
+    } finally {
+      if (previousWindow === undefined) delete (globalThis as Record<string, unknown>).window;
+      else (globalThis as Record<string, unknown>).window = previousWindow;
+      h.scope.stop();
+    }
   });
 
   test("dm route with pinned search activates the pinned panel", async () => {
