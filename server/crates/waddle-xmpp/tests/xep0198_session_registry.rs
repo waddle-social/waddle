@@ -60,6 +60,20 @@ fn chat_stanza(to: &FullJid, body: &str) -> Stanza {
     Stanza::Message(message)
 }
 
+fn queued_stanza_xml(id: &str, body: &str) -> String {
+    let mut message = Message::new(None::<Jid>);
+    message.id = Some(xmpp_parsers::message::Id(id.to_string()));
+    message
+        .bodies
+        .insert(xmpp_parsers::message::Lang::new(), body.to_string());
+    let element = Stanza::Message(message).to_element();
+    let mut buffer = Vec::new();
+    element
+        .write_to(&mut buffer)
+        .expect("serialize queued stanza");
+    String::from_utf8(buffer).expect("queued stanza xml is utf-8")
+}
+
 struct BlockingFirstAtomicStore {
     inner: InMemorySmPersistence,
     first_store_seen: AtomicBool,
@@ -540,8 +554,7 @@ async fn xep0198_release_claim_moves_expired_session_to_promotion() {
     let mut session = expiring_detached_session(stream_id, jid.as_str());
     session.unacked_stanzas.push(DetachedUnackedStanza {
         sequence: 11,
-        stanza_xml: "<message xmlns='jabber:client' id='queued'><body>queued</body></message>"
-            .to_string(),
+        stanza_xml: queued_stanza_xml("queued", "queued"),
         original_receipt_at: chrono::Utc::now(),
     });
     registry
@@ -648,8 +661,7 @@ async fn xep0198_deferred_release_moves_expired_session_to_promotion() {
     let mut session = expiring_detached_session(stream_id, jid.as_str());
     session.unacked_stanzas.push(DetachedUnackedStanza {
         sequence: 11,
-        stanza_xml: "<message xmlns='jabber:client' id='deferred'><body>queued</body></message>"
-            .to_string(),
+        stanza_xml: queued_stanza_xml("deferred", "queued"),
         original_receipt_at: chrono::Utc::now(),
     });
     registry
@@ -784,8 +796,7 @@ async fn xep0198_expired_claim_handoff_recovers_after_restart_before_confirmatio
     let mut session = expiring_detached_session(stream_id, jid.as_str());
     session.unacked_stanzas.push(DetachedUnackedStanza {
         sequence: 11,
-        stanza_xml: "<message xmlns='jabber:client' id='restart'><body>queued</body></message>"
-            .to_string(),
+        stanza_xml: queued_stanza_xml("restart", "queued"),
         original_receipt_at: chrono::Utc::now(),
     });
     registry
@@ -1517,8 +1528,7 @@ async fn xep0198_shutdown_drain_leases_expired_claimed_promotion_payload() {
     let mut session = expiring_detached_session(stream_id, jid.as_str());
     session.unacked_stanzas.push(DetachedUnackedStanza {
         sequence: 11,
-        stanza_xml: "<message xmlns='jabber:client' id='queued'><body>queued</body></message>"
-            .to_string(),
+        stanza_xml: queued_stanza_xml("queued", "queued"),
         original_receipt_at: chrono::Utc::now(),
     });
     registry

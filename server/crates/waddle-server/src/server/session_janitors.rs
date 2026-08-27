@@ -7095,17 +7095,34 @@ async fn run_graceful_shutdown_drain(
             );
             break;
         }
-        let drained = match websocket_state
-            .deps
-            .protocol
-            .sm_session_registry
-            .drain_all_for_shutdown()
-            .await
+        // If the remaining shutdown budget expires mid-batch, dropping the
+        // future is safe: `DrainedSessionBatch::Drop` restores unprocessed
+        // sessions and `PendingPromotionRetryLease::Drop` restores any leased
+        // retry payload back into the registry for next-startup retry.
+        let drain_budget = drain_deadline.saturating_duration_since(std::time::Instant::now());
+        let drained = match tokio::time::timeout(
+            drain_budget,
+            websocket_state
+                .deps
+                .protocol
+                .sm_session_registry
+                .drain_all_for_shutdown(),
+        )
+        .await
         {
-            Ok(s) => s,
-            Err(error) => {
+            Ok(Ok(s)) => s,
+            Ok(Err(error)) => {
                 warn!(error = %error, "Graceful shutdown: drain_all_for_shutdown failed");
                 break;
+            }
+            Err(_) => {
+                warn!(
+                    remaining_ms = drain_budget.as_millis(),
+                    "Graceful shutdown: drain_all_for_shutdown exceeded the remaining shutdown budget"
+                );
+                // Re-enter at the deadline check so timeout telemetry and
+                // abandonment accounting stay centralized above.
+                continue;
             }
         };
         let release_retry_budget =
@@ -11132,7 +11149,7 @@ mod remote_muc_reconciler_tests {
 
 #[cfg(all(test, feature = "clustering"))]
 mod graceful_shutdown_drain_tests {
-    use super::run_graceful_shutdown_drain;
+    use super::{run_graceful_shutdown_drain, HangingSmReadPersistence};
     use crate::ingress_shadow::{
         IngressShadowHandle, IngressShadowSubmission, IngressShadowTestTaskKind,
     };
@@ -11321,5 +11338,82 @@ mod graceful_shutdown_drain_tests {
         )
         .await
         .expect("shutdown deadline should stop the held shadow work");
+    }
+
+    #[tokio::test]
+    async fn graceful_shutdown_times_out_stalled_promotion_retry_and_restores_it() {
+        use waddle_xmpp::ownership::{ClaimStore, InProcessClaimStore, SharedNodeIdentity};
+
+        let metrics = waddle_xmpp::telemetry::test_support::acquire().await;
+        let persistence = Arc::new(HangingSmReadPersistence::default());
+        let storage: Arc<dyn waddle_xmpp::stream_management::persistence::SmPersistenceStorage> =
+            persistence.clone();
+        let claim_store = Arc::new(InProcessClaimStore::new());
+        let claims: Arc<dyn ClaimStore> = claim_store.clone();
+        let sm_registry = Arc::new(
+            InMemorySmSessionRegistry::new()
+                .with_persistence(storage)
+                .with_claim_store(
+                    claims,
+                    SharedNodeIdentity::new(NodeIdentity::new("sm-node", "shutdown-timeout")),
+                ),
+        );
+        let state = create_test_websocket_state_with_sm_registry_and_ingress_shadow(
+            Arc::clone(&sm_registry),
+            IngressShadowHandle::spawn_test_worker(8, 1, |_, _| async move {}),
+        )
+        .await;
+        let stream_id = "shutdown-hung-promotion-retry";
+        let mut session = detached_session(
+            stream_id,
+            "romeo@example.com/phone".parse().expect("full jid"),
+        );
+        session.max_resume_time = Some(1);
+        sm_registry
+            .store_session(session)
+            .await
+            .expect("store detached session");
+        sm_registry
+            .claim_session(stream_id)
+            .await
+            .expect("claim session")
+            .expect("session exists");
+        tokio::time::sleep(Duration::from_secs(2)).await;
+        sm_registry
+            .release_claim(stream_id)
+            .await
+            .expect("release expired claim into promotion retry");
+
+        let drain_token = tokio_util::sync::CancellationToken::new();
+        let drain_notify = Arc::new(Notify::new());
+        let started = Instant::now();
+        let drain_task = tokio::spawn(run_graceful_shutdown_drain(
+            Arc::clone(&state),
+            drain_token.clone(),
+            Arc::clone(&drain_notify),
+            Duration::from_millis(75),
+        ));
+
+        drain_token.cancel();
+        tokio::time::timeout(Duration::from_secs(1), persistence.read_started.notified())
+            .await
+            .expect("stalled promotion retry should start a persistence read");
+        tokio::time::timeout(Duration::from_millis(400), drain_notify.notified())
+            .await
+            .expect("shutdown drain should stop once the SM drain budget expires");
+        drain_task.await.expect("graceful drain task");
+
+        assert!(
+            started.elapsed() < Duration::from_millis(300),
+            "the shutdown drain must re-check its deadline instead of hanging on stalled promotion retry IO"
+        );
+        assert_eq!(metrics.counter_sum("xmpp.sm.drain_timeout", &[]), Some(1));
+        assert_eq!(
+            sm_registry
+                .live_session_ids()
+                .expect("live inventory after timeout"),
+            vec![stream_id.to_string()],
+            "dropping the timed-out drain future must restore the parked promotion retry"
+        );
     }
 }

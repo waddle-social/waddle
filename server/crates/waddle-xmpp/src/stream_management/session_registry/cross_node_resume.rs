@@ -1556,6 +1556,62 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn repair_demotion_clears_promotion_parked_after_exact_release_transfer() {
+        let registry = InMemorySmSessionRegistry::with_capacity(1);
+        let entity = Entity::new(
+            EntityType::SmSession,
+            "repair-demotion-clears-late-promotion".to_string(),
+        );
+        let reservation = registry
+            .reserve_reclaimed_claim_capacity(&entity)
+            .expect("reserve reclaimed repair capacity");
+        let fence = SmClaimFence::new(
+            crate::ownership::NodeIdentity::new("repair-node", "repair-incarnation"),
+            ClaimEpoch(7),
+        );
+        assert!(registry
+            .transfer_reclaimed_claim_to_exact_release(&entity, &fence, reservation)
+            .expect("transfer repair fence to exact release"));
+
+        // The cancelled-resume guard does not take the stream shard. Model
+        // it winning after the repair transfer released its map locks but
+        // before `prepare_failed_local_claim_release` forgets local state.
+        let jid: jid::FullJid = "alice@example.com/phone".parse().expect("valid jid");
+        let mut session = make_test_placeholder_session(&entity.id, &jid);
+        session.max_resume_time = Some(1);
+        session.detached_at = std::time::Instant::now() - Duration::from_secs(120);
+        registry
+            .claimed_sessions
+            .write()
+            .expect("claimed sessions")
+            .insert(entity.id.clone(), session);
+        assert!(registry.defer_claimed_resume_release(&entity.id));
+
+        let stream_lock = registry.stream_lock(&entity.id).expect("stream lock");
+        let _stream_guard = stream_lock.lock().await;
+        registry.forget_claim_locally_locked(&entity.id, Some(&fence));
+
+        assert!(registry
+            .drain_expired()
+            .await
+            .expect("drain after repair demotion")
+            .is_empty());
+        assert!(registry
+            .live_session_ids()
+            .expect("live inventory after repair demotion")
+            .is_empty());
+        assert_eq!(
+            registry.pending_claim_release_count(),
+            1,
+            "repair demotion must preserve its exact terminal release responsibility"
+        );
+        assert!(
+            !registry.defer_claimed_resume_release(&entity.id),
+            "a late cancelled-resume transition must observe Missing and not re-park"
+        );
+    }
+
+    #[tokio::test]
     async fn definitive_lost_claim_returns_not_found_without_repair() {
         let claim_store: Arc<dyn ClaimStore> = Arc::new(InProcessClaimStore::new());
         let entity = Entity::new(EntityType::SmSession, "definitive-lost-claim".to_string());

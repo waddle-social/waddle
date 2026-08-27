@@ -869,18 +869,23 @@ impl InMemorySmSessionRegistry {
         stream_id: &str,
         preserve_terminal_release: Option<&super::super::persistence::SmClaimFence>,
     ) {
-        // Both maps must clear in ONE critical section, in the same
-        // sessions-then-claimed order as `defer_claimed_resume_release`'s
-        // tuple lock: that handback runs from a sync `Drop` with no shard
-        // lock, and if it interleaved between two separate removals here it
-        // could move the snapshot from `claimed_sessions` back into
-        // `sessions` AFTER this demotion already swept `sessions` —
-        // republishing a detached session whose claim Postgres reassigned.
-        if let (Ok(mut sessions), Ok(mut claimed)) =
-            (self.sessions.write(), self.claimed_sessions.write())
-        {
+        // Clear every resumable/promotion view in ONE critical section, in
+        // the same lock order as `transition_claimed_resume_release`:
+        // sessions -> claimed_sessions -> pending_promotions ->
+        // pending_promotion_retries. A late cancelled-resume guard can park
+        // an expired snapshot into the promotion maps; if demotion cleared
+        // only sessions/claimed, the next janitor drain could still lease
+        // and promote a payload this node no longer owns.
+        if let (Ok(mut sessions), Ok(mut claimed), Ok(mut promotions), Ok(mut retries)) = (
+            self.sessions.write(),
+            self.claimed_sessions.write(),
+            self.pending_promotions.write(),
+            self.pending_promotion_retries.write(),
+        ) {
             sessions.remove(stream_id);
             claimed.remove(stream_id);
+            promotions.remove(stream_id);
+            retries.remove(stream_id);
         }
         // A reservation/acquisition/lookup represents an ownership CAS that
         // may still be in flight outside this shard. Preserve that ambiguous,

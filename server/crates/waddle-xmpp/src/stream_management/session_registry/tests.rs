@@ -684,6 +684,108 @@ async fn local_demotion_discards_hydration_from_an_older_reclaim_generation() {
 }
 
 #[tokio::test]
+async fn local_demotion_clears_parked_expired_claim_promotion_before_drain() {
+    let registry = InMemorySmSessionRegistry::new();
+    let stream_id = "demoted-parked-expired-promotion";
+    registry
+        .store_session(make_test_session(stream_id))
+        .await
+        .expect("store session");
+    assert!(registry
+        .claim_session(stream_id)
+        .await
+        .expect("claim session")
+        .is_some());
+    {
+        let mut claimed = registry
+            .claimed_sessions
+            .write()
+            .expect("claimed_sessions lock");
+        let session = claimed.get_mut(stream_id).expect("claimed entry");
+        session.max_resume_time = Some(1);
+        session.detached_at = Instant::now() - Duration::from_secs(120);
+        assert!(session.is_expired());
+    }
+
+    assert!(registry.defer_claimed_resume_release(stream_id));
+    assert_eq!(registry.pending_claim_release_count(), 0);
+
+    registry.forget_claim_locally(stream_id).await;
+
+    assert!(registry
+        .drain_expired()
+        .await
+        .expect("drain after demotion")
+        .is_empty());
+    assert!(registry
+        .live_session_ids()
+        .expect("live inventory after demotion")
+        .is_empty());
+    assert_eq!(
+        registry.pending_claim_release_count(),
+        0,
+        "demotion must not duplicate terminal release responsibility for a lost fence"
+    );
+}
+
+#[tokio::test]
+async fn local_demotion_discards_in_flight_promotion_retry_restore() {
+    let registry = InMemorySmSessionRegistry::new();
+    let stream_id = "demoted-in-flight-promotion-retry";
+    registry
+        .store_session(make_test_session(stream_id))
+        .await
+        .expect("store session");
+    assert!(registry
+        .claim_session(stream_id)
+        .await
+        .expect("claim session")
+        .is_some());
+    {
+        let mut claimed = registry
+            .claimed_sessions
+            .write()
+            .expect("claimed_sessions lock");
+        let session = claimed.get_mut(stream_id).expect("claimed entry");
+        session.max_resume_time = Some(1);
+        session.detached_at = Instant::now() - Duration::from_secs(120);
+        assert!(session.is_expired());
+    }
+
+    assert!(registry.defer_claimed_resume_release(stream_id));
+    let leased = registry
+        .pending_promotion_retries
+        .write()
+        .expect("pending_promotion_retries lock")
+        .remove(stream_id)
+        .expect("leased retry payload");
+    assert!(registry
+        .pending_promotions
+        .read()
+        .expect("pending_promotions lock")
+        .contains(stream_id));
+
+    registry.forget_claim_locally(stream_id).await;
+
+    assert_eq!(
+        registry
+            .retain_pending_promotion_for_retry(leased)
+            .expect("restore cancelled lease after demotion"),
+        super::PendingPromotionRetryRetention::NotTracked,
+        "without a surviving marker, a cancelled retry lease must discard rather than resurrect"
+    );
+    assert!(registry
+        .live_session_ids()
+        .expect("live inventory after demotion")
+        .is_empty());
+    assert!(registry
+        .drain_expired()
+        .await
+        .expect("drain after demotion")
+        .is_empty());
+}
+
+#[tokio::test]
 async fn active_fence_readmission_publishes_a_demotion_safe_reservation() {
     let registry = InMemorySmSessionRegistry::with_capacity(1);
     let entity = crate::ownership::Entity::new(
@@ -7056,4 +7158,50 @@ async fn stale_deferred_release_keeps_existing_promotion_ownership() {
         .await
         .expect("claim after stale guard")
         .is_some());
+}
+
+#[tokio::test]
+async fn stale_deferred_release_after_local_demotion_falls_back_without_reparking() {
+    let registry = InMemorySmSessionRegistry::new();
+    let stream_id = "stale-defer-after-demotion";
+    registry
+        .store_session(make_test_session(stream_id))
+        .await
+        .expect("store session");
+    assert!(registry
+        .claim_session(stream_id)
+        .await
+        .expect("claim session")
+        .is_some());
+    {
+        let mut claimed = registry
+            .claimed_sessions
+            .write()
+            .expect("claimed_sessions lock");
+        let session = claimed.get_mut(stream_id).expect("claimed entry");
+        session.max_resume_time = Some(1);
+        session.detached_at = Instant::now() - Duration::from_secs(120);
+        assert!(session.is_expired());
+    }
+
+    registry.forget_claim_locally(stream_id).await;
+
+    assert!(
+        !registry.defer_claimed_resume_release(stream_id),
+        "once demotion removes the claimed snapshot, the late cancelled-resume path must use the missing fallback"
+    );
+    assert!(!registry
+        .pending_promotions
+        .read()
+        .expect("pending promotions")
+        .contains(stream_id));
+    assert!(!registry
+        .pending_promotion_retries
+        .read()
+        .expect("pending promotion retries")
+        .contains_key(stream_id));
+    assert!(registry
+        .live_session_ids()
+        .expect("live inventory after late stale defer")
+        .is_empty());
 }
