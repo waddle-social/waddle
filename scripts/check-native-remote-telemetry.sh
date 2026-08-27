@@ -81,6 +81,7 @@ cargo_path_dependencies() {
       section = $0
       gsub(/^[[:space:]]*\[/, "", section)
       sub(/\].*$/, "", section)
+      gsub(/[[:space:]]+/, "", section)
       active = section == "dependencies" || section == "build-dependencies" || section ~ /^target\..*\.(dependencies|build-dependencies)$/ || section ~ /^(dependencies|build-dependencies)\.[^.]+$/ || section ~ /^target\..*\.(dependencies|build-dependencies)\.[^.]+$/
     }
     active && $0 !~ /^[[:space:]]*#/ {
@@ -109,6 +110,7 @@ cargo_workspace_inherited_dependencies() {
       section = $0
       gsub(/^[[:space:]]*\[/, "", section)
       sub(/\].*$/, "", section)
+      gsub(/[[:space:]]+/, "", section)
       active = section == "dependencies" || section == "build-dependencies" || section ~ /^target\..*\.(dependencies|build-dependencies)$/
       inline_name = ""
       if (section ~ /^(dependencies|build-dependencies)\.("[^"]+"|\047[^\047]+\047|[^.]+)$/ || section ~ /^target\..*\.(dependencies|build-dependencies)\.("[^"]+"|\047[^\047]+\047|[^.]+)$/) {
@@ -135,7 +137,7 @@ cargo_workspace_inherited_dependencies() {
 cargo_workspace_root_manifest() {
   local dir="$1"
   while [[ -n "$dir" && "$dir" != "/" ]]; do
-    if [[ -f "${dir}/Cargo.toml" ]] && grep -Eq '^[[:space:]]*\[workspace\]' "${dir}/Cargo.toml"; then
+    if [[ -f "${dir}/Cargo.toml" ]] && grep -Eq '^[[:space:]]*\[[[:space:]]*workspace[[:space:]]*\]' "${dir}/Cargo.toml"; then
       printf '%s\n' "${dir}/Cargo.toml"
       return 0
     fi
@@ -154,6 +156,7 @@ cargo_workspace_dependency_path() {
       section = $0
       gsub(/^[[:space:]]*\[/, "", section)
       sub(/\].*$/, "", section)
+      gsub(/[[:space:]]+/, "", section)
       active = section == "workspace.dependencies"
       inline = section == "workspace.dependencies." name || section == "workspace.dependencies.\"" name "\"" || section == "workspace.dependencies.\047" name "\047"
     }

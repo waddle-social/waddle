@@ -504,6 +504,48 @@ members = ["crates/*"]
     }
   }, CHECKER_TIMEOUT_MS);
 
+  test("synthetic whitespace-padded TOML headers still reach closure discovery", () => {
+    const root = mkdtempSync(resolve(tmpdir(), "waddle-native-telemetry-"));
+    try {
+      writeAndroidFixture(root);
+      writeAppleFixture(root);
+      writeWasmFixture(root, { generatedJs: "export {};\n" });
+      writeSharedClientFixture(root, {
+        clientCargoToml: `
+[package]
+name = "waddle-xmpp-client"
+
+[dependencies ]
+tracing = "0.1"
+waddle-xmpp-core = { path = "../waddle-xmpp-core" }
+
+[ target . 'cfg(unix)' . dependencies ]
+waddle-xmpp-telemetry-helper = { workspace = true }
+`,
+      });
+      writeFixtureFile(
+        root,
+        "server/Cargo.toml",
+        `
+[ workspace ]
+members = ["crates/*"]
+
+[ workspace . dependencies ]
+waddle-xmpp-telemetry-helper = { path = "crates/waddle-xmpp-telemetry-helper" }
+`,
+      );
+      writeSharedClientPathDependencyFixture(root);
+
+      for (const mode of ["--apple", "--android", "--wasm"] as const) {
+        const result = runChecker([mode], root);
+        expect(result.status).toBe(1);
+        expect(result.stderr).toContain(`${mode.slice(2)} dependency`);
+      }
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  }, CHECKER_TIMEOUT_MS);
+
   test("synthetic shared client exporter init is rejected in apple mode", () => {
     const root = mkdtempSync(resolve(tmpdir(), "waddle-native-telemetry-"));
     try {
