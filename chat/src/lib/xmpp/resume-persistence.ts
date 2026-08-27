@@ -324,7 +324,7 @@ export function createLocalStorageResumePersistence(
       if (disposed) return;
       gcSmOwnerSlots(smAccountKeyPrefix);
       if (!canPersistSmOwnerSlot(smAccountKeyPrefix, smKey)) {
-        reportStorageQuotaFailure("sm-resume");
+        reportStorageOwnerSlotLimit("sm-resume");
         return;
       }
       const envelope: PersistedSmEnvelope = {
@@ -1473,4 +1473,8 @@ function reportStorageWriteFailure(area: StorageArea): void {
 
 function reportStorageQuotaFailure(area: StorageArea): void {
   reportError({ kind: "storage.quota", reason: "quota-exceeded", area });
+}
+
+function reportStorageOwnerSlotLimit(area: StorageArea): void {
+  reportError({ kind: "storage.quota", reason: "owner-slot-limit", area });
 }

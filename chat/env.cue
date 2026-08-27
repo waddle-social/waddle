@@ -39,11 +39,7 @@ let _NativeTelemetryContractInputs = [
 	"../apps/android/gradle/libs.versions.toml",
 	"../apps/android/settings.gradle.kts",
 	"../scripts/check-native-remote-telemetry.sh",
-	"../server/crates/waddle-xmpp-client/**",
-	"../server/crates/waddle-xmpp-client-ffi/**",
-	"../server/crates/waddle-xmpp-core/**",
-	"../server/crates/waddle-xmpp-client-wasm/Cargo.toml",
-	"../server/crates/waddle-xmpp-client-wasm/src/**",
+	"../server/crates/**",
 	"../server/wasm-pkg/waddle-xmpp-client-wasm/**",
 ]
 

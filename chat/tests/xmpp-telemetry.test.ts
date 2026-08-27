@@ -1060,8 +1060,8 @@ describe("telemetry module no-op behaviour", () => {
       type: "measurement",
       payload: {
         type: "chat.xmpp.message.acked.latency_ms",
-        values: { latency_ms: 12, constructor: 5, __proto__: 7 },
-        context: { kind: "room", constructor: "x", __proto__: "y", toString: "z" },
+        values: { latency_ms: 12, constructor: 5, ["__proto__"]: 7 },
+        context: { kind: "room", constructor: "x", ["__proto__"]: "y", toString: "z" },
       },
       meta: {},
     } as never) as unknown as {

@@ -24,6 +24,25 @@ function writeFixtureFile(root: string, relativePath: string, contents: string) 
   writeFileSync(path, contents);
 }
 
+function writeSharedClientPathDependencyFixture(root: string) {
+  writeFixtureFile(
+    root,
+    "server/crates/waddle-xmpp-telemetry-helper/Cargo.toml",
+    `
+[package]
+name = "waddle-xmpp-telemetry-helper"
+
+[dependencies]
+opentelemetry-otlp = "0.1"
+`,
+  );
+  writeFixtureFile(
+    root,
+    "server/crates/waddle-xmpp-telemetry-helper/src/lib.rs",
+    'pub fn helper() { let _collector = "https://telemetry.example/v1/traces"; }\n',
+  );
+}
+
 function writeSharedClientFixture(root: string, overrides?: {
   clientCargoToml?: string;
   clientSrc?: string;
@@ -107,6 +126,11 @@ function writeAndroidFixture(root: string, overrides?: {
     root,
     "apps/android/settings.gradle.kts",
     overrides?.settingsGradle ?? 'rootProject.name = "fixture"\ninclude(":app")\ninclude(":core:client")\n',
+  );
+  writeFixtureFile(
+    root,
+    "apps/android/app/src/main/AndroidManifest.xml",
+    "<manifest package=\"social.waddle.fixture\" />\n",
   );
   writeFixtureFile(
     root,
@@ -298,6 +322,33 @@ telemetrySdk = { id = "io.sentry.android.gradle", version = "5.0.0" }
     }
   }, CHECKER_TIMEOUT_MS);
 
+  test("synthetic extra Android module with a collector endpoint is rejected", () => {
+    const root = mkdtempSync(resolve(tmpdir(), "waddle-native-telemetry-"));
+    try {
+      writeSharedClientFixture(root);
+      writeAndroidFixture(root, {
+        settingsGradle: `
+rootProject.name = "fixture"
+include(":app")
+include(":core:client")
+include(":feature:x")
+`,
+      });
+      writeFixtureFile(root, "apps/android/feature/x/build.gradle.kts", "plugins {}\n");
+      writeFixtureFile(
+        root,
+        "apps/android/feature/x/src/main/kotlin/X.kt",
+        'const val COLLECTOR = "https://telemetry.example/v1/traces"\n',
+      );
+
+      const result = runChecker(["--android"], root);
+      expect(result.status).toBe(1);
+      expect(result.stderr).toContain("android exporter");
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  }, CHECKER_TIMEOUT_MS);
+
   test("synthetic shared client telemetry dependency is rejected in android mode", () => {
     const root = mkdtempSync(resolve(tmpdir(), "waddle-native-telemetry-"));
     try {
@@ -317,6 +368,75 @@ waddle-xmpp-core = { path = "../waddle-xmpp-core" }
       const result = runChecker(["--android"], root);
       expect(result.status).toBe(1);
       expect(result.stderr).toContain("android dependency");
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  }, CHECKER_TIMEOUT_MS);
+
+  test("synthetic shared-client path dependency closure is rejected in every native mode", () => {
+    const root = mkdtempSync(resolve(tmpdir(), "waddle-native-telemetry-"));
+    try {
+      writeAndroidFixture(root);
+      writeAppleFixture(root);
+      writeWasmFixture(root, { generatedJs: "export {};\n" });
+      writeSharedClientFixture(root, {
+        clientCargoToml: `
+[package]
+name = "waddle-xmpp-client"
+
+[dependencies]
+tracing = "0.1"
+waddle-xmpp-core = { path = "../waddle-xmpp-core" }
+waddle-xmpp-telemetry-helper = { path = "../waddle-xmpp-telemetry-helper" }
+`,
+      });
+      writeSharedClientPathDependencyFixture(root);
+
+      for (const mode of ["--apple", "--android", "--wasm"] as const) {
+        const result = runChecker([mode], root);
+        expect(result.status).toBe(1);
+        expect(result.stderr).toContain(`${mode.slice(2)} dependency`);
+      }
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  }, CHECKER_TIMEOUT_MS);
+
+  test("synthetic workspace-inherited local dependency is rejected in every native mode", () => {
+    const root = mkdtempSync(resolve(tmpdir(), "waddle-native-telemetry-"));
+    try {
+      writeAndroidFixture(root);
+      writeAppleFixture(root);
+      writeWasmFixture(root, { generatedJs: "export {};\n" });
+      writeSharedClientFixture(root, {
+        clientCargoToml: `
+[package]
+name = "waddle-xmpp-client"
+
+[dependencies]
+tracing = "0.1"
+waddle-xmpp-core = { path = "../waddle-xmpp-core" }
+waddle-xmpp-telemetry-helper = { workspace = true }
+`,
+      });
+      writeFixtureFile(
+        root,
+        "server/Cargo.toml",
+        `
+[workspace]
+members = ["crates/*"]
+
+[workspace.dependencies]
+waddle-xmpp-telemetry-helper = { path = "crates/waddle-xmpp-telemetry-helper" }
+`,
+      );
+      writeSharedClientPathDependencyFixture(root);
+
+      for (const mode of ["--apple", "--android", "--wasm"] as const) {
+        const result = runChecker([mode], root);
+        expect(result.status).toBe(1);
+        expect(result.stderr).toContain(`${mode.slice(2)} dependency`);
+      }
     } finally {
       rmSync(root, { recursive: true, force: true });
     }

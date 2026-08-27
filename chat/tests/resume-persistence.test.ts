@@ -11,6 +11,7 @@
  * the last tab left off.
  */
 import { afterAll, afterEach, beforeAll, describe, expect, test } from "bun:test";
+import { __setFaroForTesting } from "../src/lib/telemetry";
 import { ReconnectCatchup } from "../src/lib/xmpp/reconnect-catchup";
 import { BrowserXmppClient } from "../src/lib/xmpp/client";
 import { applyResumeStateToWasmConfig } from "../src/lib/xmpp/client-connection";
@@ -74,11 +75,30 @@ afterAll(() => {
 
 afterEach(() => {
   const g = globalThis as ShimmedGlobal;
+  __setFaroForTesting(null);
   if (g.window?.[WINDOW_SENTINEL]) {
     g.window.localStorage.clear();
     g.window.sessionStorage.clear();
   }
 });
+
+function createTelemetryErrorStub() {
+  const errors: Array<{
+    error: Error;
+    options?: { type?: string; context?: Record<string, string> };
+  }> = [];
+  return {
+    errors,
+    api: {
+      pushError: (
+        error: Error,
+        options?: { type?: string; context?: Record<string, string> },
+      ) => {
+        errors.push({ error, options });
+      },
+    },
+  };
+}
 
 function installNavigationTiming(type: string | null): () => void {
   const original = Object.getOwnPropertyDescriptor(globalThis, "performance");
@@ -1441,6 +1461,8 @@ describe("createLocalStorageResumePersistence — localStorage adapter", () => {
 
   test("a full owner window preserves existing tails and fails closed for a new owner", () => {
     const account = "alice@example.com";
+    const stub = createTelemetryErrorStub();
+    __setFaroForTesting(stub as never);
     const current = createLocalStorageResumePersistence(account, "bounded-current");
     current.saveSm({ previd: "before-update", inboundH: 1, outboundH: 2 });
     for (let index = 1; index < 64; index += 1) {
@@ -1458,6 +1480,47 @@ describe("createLocalStorageResumePersistence — localStorage adapter", () => {
     expect(current.loadSm()).toEqual({ previd: "after-update", inboundH: 3, outboundH: 4 });
     expect(overflow.loadSm()).toBeNull();
     expect(window.localStorage.length).toBe(64);
+    expect(stub.errors).toContainEqual({
+      error: expect.objectContaining({ message: "storage.quota.owner-slot-limit" }),
+      options: {
+        type: "storage.quota",
+        context: {
+          kind: "storage.quota",
+          reason: "owner-slot-limit",
+          area: "sm-resume",
+        },
+      },
+    });
+  });
+
+  test("real localStorage quota errors still emit quota-exceeded", () => {
+    const stub = createTelemetryErrorStub();
+    __setFaroForTesting(stub as never);
+    const persistence = createLocalStorageResumePersistence("alice@example.com", "quota-owner");
+    const originalSetItem = window.localStorage.setItem;
+    window.localStorage.setItem = () => {
+      const error = new Error("quota");
+      error.name = "QuotaExceededError";
+      throw error;
+    };
+
+    try {
+      persistence.saveSm({ previd: "quota-stream", inboundH: 1, outboundH: 2 });
+    } finally {
+      window.localStorage.setItem = originalSetItem;
+    }
+
+    expect(stub.errors).toContainEqual({
+      error: expect.objectContaining({ message: "storage.quota.quota-exceeded" }),
+      options: {
+        type: "storage.quota",
+        context: {
+          kind: "storage.quota",
+          reason: "quota-exceeded",
+          area: "sm-resume",
+        },
+      },
+    });
   });
 
   test("consumed owner markers share the bounded owner window and preserve live tails", () => {

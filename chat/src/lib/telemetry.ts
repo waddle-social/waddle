@@ -393,8 +393,8 @@ export function handleUnhandledRejectionEvent(event: { reason?: unknown }): void
  * (installed in `src/vue-app.ts`). Shares the loop guard + flood dedupe
  * with the window-level handlers.
  */
-export function reportVueError(): void {
-  reportGlobalError("vue-render-error", undefined);
+export function reportVueError(error: unknown): void {
+  reportGlobalError("vue-render-error", error);
 }
 
 function reportGlobalError(

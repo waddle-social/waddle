@@ -303,6 +303,38 @@ describe("vue app errorHandler", () => {
     });
   });
 
+  test("reports distinct Vue errors separately inside the dedupe window", () => {
+    const app = appWithHandler();
+    const originalConsoleError = console.error;
+    console.error = () => undefined;
+
+    try {
+      app.config.errorHandler!(new Error("first render failure"), null, "render function");
+      app.config.errorHandler!(new Error("second render failure"), null, "render function");
+    } finally {
+      console.error = originalConsoleError;
+    }
+
+    expect(stub.errors).toHaveLength(2);
+    expect(stub.errors[0]!.error.message).toBe("vue-render-error.unexpected");
+    expect(stub.errors[1]!.error.message).toBe("vue-render-error.unexpected");
+  });
+
+  test("dedupes the same Vue error inside the dedupe window", () => {
+    const app = appWithHandler();
+    const originalConsoleError = console.error;
+    console.error = () => undefined;
+
+    try {
+      app.config.errorHandler!(new Error("same render failure"), null, "render function");
+      app.config.errorHandler!(new Error("same render failure"), null, "render function");
+    } finally {
+      console.error = originalConsoleError;
+    }
+
+    expect(stub.errors).toHaveLength(1);
+  });
+
   test("does not attach the component name when the instance exposes one", () => {
     const app = appWithHandler();
     const instance = { $options: { name: "GifPicker" } };

@@ -78,6 +78,7 @@ export type XmppOperationReason =
 type StorageFailureReason =
   | "read-failed"
   | "write-failed"
+  | "owner-slot-limit"
   | "quota-exceeded"
   | "stale-entries-pruned";
 

@@ -11,9 +11,7 @@ on:
       - scripts/build-xcframework.sh
       - server/Cargo.lock
       - server/Cargo.toml
-      - server/crates/waddle-xmpp-client/**
-      - server/crates/waddle-xmpp-client-ffi/**
-      - server/crates/waddle-xmpp-core/**
+      - server/crates/**
       - server/rust-toolchain.toml
   workflow_dispatch: {}
 

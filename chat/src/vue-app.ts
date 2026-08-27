@@ -20,6 +20,6 @@ export default (app: App) => {
   // console.error for devtools and send only a canonical code to Faro.
   app.config.errorHandler = (err) => {
     console.error(err);
-    reportVueError();
+    reportVueError(err);
   };
 };
