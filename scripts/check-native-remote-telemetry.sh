@@ -111,16 +111,18 @@ cargo_workspace_inherited_dependencies() {
       sub(/\].*$/, "", section)
       active = section == "dependencies" || section == "build-dependencies" || section ~ /^target\..*\.(dependencies|build-dependencies)$/
       inline_name = ""
-      if (section ~ /^(dependencies|build-dependencies)\.[^.]+$/ || section ~ /^target\..*\.(dependencies|build-dependencies)\.[^.]+$/) {
+      if (section ~ /^(dependencies|build-dependencies)\.("[^"]+"|\047[^\047]+\047|[^.]+)$/ || section ~ /^target\..*\.(dependencies|build-dependencies)\.("[^"]+"|\047[^\047]+\047|[^.]+)$/) {
         inline_name = section
-        sub(/^.*\./, "", inline_name)
+        sub(/^(.*\.)?(dependencies|build-dependencies)\./, "", inline_name)
+        gsub(/^["\047]|["\047]$/, "", inline_name)
       }
     }
     $0 ~ /^[[:space:]]*#/ { next }
-    active && $0 ~ /^[[:space:]]*[A-Za-z0-9_-]+([[:space:]]*=[[:space:]]*\{[^}]*workspace[[:space:]]*=[[:space:]]*true|\.workspace[[:space:]]*=[[:space:]]*true)/ {
+    active && $0 ~ /^[[:space:]]*("[^"]+"|\047[^\047]+\047|[A-Za-z0-9_-]+)([[:space:]]*=[[:space:]]*\{[^}]*workspace[[:space:]]*=[[:space:]]*true|\.workspace[[:space:]]*=[[:space:]]*true)/ {
       name = $0
       sub(/^[[:space:]]*/, "", name)
       sub(/[[:space:]]*(=|\.workspace).*$/, "", name)
+      gsub(/^["\047]|["\047]$/, "", name)
       print name
     }
     inline_name != "" && $0 ~ /^[[:space:]]*workspace[[:space:]]*=[[:space:]]*true/ {
@@ -153,10 +155,18 @@ cargo_workspace_dependency_path() {
       gsub(/^[[:space:]]*\[/, "", section)
       sub(/\].*$/, "", section)
       active = section == "workspace.dependencies"
-      inline = section == "workspace.dependencies." name
+      inline = section == "workspace.dependencies." name || section == "workspace.dependencies.\"" name "\"" || section == "workspace.dependencies.\047" name "\047"
     }
     $0 ~ /^[[:space:]]*#/ { next }
-    (active && index($0, name) == match($0, /[A-Za-z0-9_-]+/) && substr($0, RSTART, RLENGTH) == name) || inline {
+    active {
+      key = $0
+      sub(/^[[:space:]]*/, "", key)
+      sub(/[[:space:]]*=.*$/, "", key)
+      gsub(/^["\047]|["\047]$/, "", key)
+      entry = key == name
+    }
+    !active { entry = 0 }
+    entry || inline {
       if (match($0, /path[[:space:]]*=[[:space:]]*"[^"]+"/)) {
         value = substr($0, RSTART, RLENGTH)
         sub(/^[^"]*"/, "", value)
