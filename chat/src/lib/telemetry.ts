@@ -492,9 +492,12 @@ function sanitizeTracePayload(payload: unknown, trustedOrigins: Set<string>): vo
 function sanitizeMeasurementPayload(payload: unknown): FaroMeasurementPayload {
   const measurement = isRecord(payload) ? payload as FaroMeasurementPayload : undefined;
   if (!measurement) return droppedMeasurementPayload();
-  const schema = measurement.type
-    ? SAFE_MEASUREMENT_SCHEMAS[measurement.type as keyof typeof SAFE_MEASUREMENT_SCHEMAS]
-    : undefined;
+  // Own-property lookups only: prototype keys ("__proto__", "constructor",
+  // "toString") must be unknown types, not inherited members.
+  const schema =
+    typeof measurement.type === "string" && Object.hasOwn(SAFE_MEASUREMENT_SCHEMAS, measurement.type)
+      ? SAFE_MEASUREMENT_SCHEMAS[measurement.type as keyof typeof SAFE_MEASUREMENT_SCHEMAS]
+      : undefined;
   if (!schema) {
     return droppedMeasurementPayload();
   }
@@ -538,8 +541,10 @@ function sanitizeMeasurementContext(
   if (!isStringRecord(context)) return undefined;
 
   const sanitized = Object.fromEntries(
-    Object.entries(context).filter(([key, value]) =>
-      key in allowedContext && allowedContext[key as keyof typeof allowedContext].includes(value),
+    Object.entries(context).filter(
+      ([key, value]) =>
+        Object.hasOwn(allowedContext, key) &&
+        allowedContext[key as keyof typeof allowedContext].includes(value),
     ),
   );
   return Object.keys(sanitized).length > 0 ? sanitized : undefined;
