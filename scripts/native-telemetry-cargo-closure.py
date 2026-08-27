@@ -1,6 +1,11 @@
 #!/usr/bin/env python3
-"""Print the manifests and source directories in a Cargo local dependency closure."""
+"""Print the manifests and crate directories in a Cargo local dependency closure.
 
+Repository and workspace Cargo configuration is included. CARGO_HOME
+configuration is intentionally outside this checker's scope.
+"""
+
+import os
 import sys
 from pathlib import Path
 
@@ -33,20 +38,25 @@ class CargoClosure:
     def __init__(self):
         self.documents = {}
         self.visited = set()
+        self.visited_configs = set()
+        self.visited_override_manifests = set()
         self.paths = []
+        self.repository_root = Path(
+            os.environ.get("WADDLE_NATIVE_TELEMETRY_ROOT", Path.cwd())
+        ).resolve()
 
-    def load(self, manifest):
-        manifest = manifest.resolve()
-        if manifest in self.documents:
-            return self.documents[manifest]
+    def load(self, path, description="Cargo manifest"):
+        path = path.resolve()
+        if path in self.documents:
+            return self.documents[path]
         try:
-            with manifest.open("rb") as source:
+            with path.open("rb") as source:
                 document = tomllib.load(source)
         except (OSError, tomllib.TOMLDecodeError) as error:
             raise ClosureError(
-                "failed to parse Cargo manifest {0}: {1}".format(manifest, error)
+                "failed to parse {0} {1}: {2}".format(description, path, error)
             ) from error
-        self.documents[manifest] = document
+        self.documents[path] = document
         return document
 
     def dependency_tables(self, document):
@@ -107,13 +117,85 @@ class CargoClosure:
                     if workspace_path is not None:
                         yield workspace_path
 
+    def override_dependency_dirs(self, declaring_file, document, relative_root=None):
+        if relative_root is None:
+            relative_root = declaring_file.parent
+        patch = document.get("patch")
+        if isinstance(patch, dict):
+            for source in patch.values():
+                if not isinstance(source, dict):
+                    continue
+                for specification in source.values():
+                    if not isinstance(specification, dict):
+                        continue
+                    dependency_path = specification.get("path")
+                    if isinstance(dependency_path, str):
+                        yield (relative_root / dependency_path).resolve()
+
+        replacements = document.get("replace")
+        if isinstance(replacements, dict):
+            for specification in replacements.values():
+                if not isinstance(specification, dict):
+                    continue
+                dependency_path = specification.get("path")
+                if isinstance(dependency_path, str):
+                    yield (relative_root / dependency_path).resolve()
+
+    def root_override_manifest(self, manifest):
+        workspace = self.workspace_manifest(manifest.parent)
+        if workspace is not None:
+            return workspace
+        return manifest, self.load(manifest)
+
+    def visit_root_overrides(self, manifest):
+        override_manifest, document = self.root_override_manifest(manifest)
+        if override_manifest in self.visited_override_manifests:
+            return
+        self.visited_override_manifests.add(override_manifest)
+        for dependency_dir in self.override_dependency_dirs(
+            override_manifest, document
+        ):
+            self.visit(dependency_dir / "Cargo.toml")
+
+    def cargo_config_paths(self, crate_dir):
+        directory = crate_dir.resolve()
+        while True:
+            config = directory / ".cargo" / "config.toml"
+            if config.is_file():
+                yield config.resolve()
+            if directory == self.repository_root or directory.parent == directory:
+                return
+            directory = directory.parent
+
+    def config_override_dependency_dirs(self, config, document):
+        relative_root = config.parent.parent
+        paths = document.get("paths")
+        if isinstance(paths, list):
+            for dependency_path in paths:
+                if isinstance(dependency_path, str):
+                    yield (relative_root / dependency_path).resolve()
+        yield from self.override_dependency_dirs(config, document, relative_root)
+
+    def visit_cargo_configs(self, crate_dir):
+        for config in self.cargo_config_paths(crate_dir):
+            if config in self.visited_configs:
+                continue
+            self.visited_configs.add(config)
+            document = self.load(config, "Cargo config")
+            for dependency_dir in self.config_override_dependency_dirs(
+                config, document
+            ):
+                self.visit(dependency_dir / "Cargo.toml")
+
     def visit(self, manifest):
         manifest = manifest.resolve()
         if manifest in self.visited:
             return
         document = self.load(manifest)
         self.visited.add(manifest)
-        self.paths.extend((manifest, manifest.parent / "src"))
+        self.paths.extend((manifest, manifest.parent))
+        self.visit_root_overrides(manifest)
+        self.visit_cargo_configs(manifest.parent)
         for dependency_dir in self.local_dependency_dirs(manifest, document):
             self.visit(dependency_dir / "Cargo.toml")
 

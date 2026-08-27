@@ -32,6 +32,7 @@ let _WasmBuildInputs = list.Concat([_WasmSourceInputs, [
 ]])
 
 let _NativeTelemetryContractInputs = [
+	"../.cargo/**",
 	"env.cue",
 	"package.json",
 	"tests/native-telemetry-off.test.ts",
@@ -41,7 +42,9 @@ let _NativeTelemetryContractInputs = [
 	"../apps/android/settings.gradle.kts",
 	"../scripts/check-native-remote-telemetry.sh",
 	"../scripts/native-telemetry-cargo-closure.py",
+	"../server/.cargo/**",
 	"../server/crates/**",
+	"../server/crates/**/.cargo/**",
 	"../server/wasm-pkg/waddle-xmpp-client-wasm/**",
 ]
 

@@ -27,6 +27,20 @@ collector_pattern='COLLECTOR_(URL|ENDPOINT)|TELEMETRY_(URL|ENDPOINT|COLLECTOR)|O
 native_dependency_pattern='(^|[^[:alnum:]_])(sentry|crashlytics|firebase([_-]analytics)?|datadog|newrelic|mixpanel|amplitude|posthog|bugsnag|telemetrydeck|faro|otlp|opentelemetry([_-]otlp)?|tracing[_-](opentelemetry|subscriber))([^[:alnum:]_]|$)'
 native_exporter_pattern="tracing_subscriber|set_global_default|install_batch|install_simple|sentry::init|Sentry\\.init|SentrySDK\\.start|FirebaseApp\\.configure|FirebaseApp\\.initializeApp|Crashlytics|FirebaseCrashlytics|FirebaseAnalytics|Datadog|NewRelic|OpenTelemetry|Otlp|OTLP|BatchSpanProcessor|SimpleSpanProcessor|TracerProvider|opentelemetry_otlp|tracing_opentelemetry|${collector_pattern}"
 
+find_python_311() {
+  local candidate
+  for candidate in python3 python3.13 python3.12 python3.11; do
+    if ! command -v "$candidate" >/dev/null 2>&1; then
+      continue
+    fi
+    if "$candidate" -c 'import sys; raise SystemExit(0 if sys.version_info >= (3, 11) else 1)' >/dev/null 2>&1; then
+      printf '%s\n' "$candidate"
+      return 0
+    fi
+  done
+  return 1
+}
+
 require_file() {
   local rel="$1"
   if [[ ! -f "${repo_root}/${rel}" ]]; then
@@ -58,7 +72,7 @@ check_absent() {
       failed=1
     fi
   else
-    if grep -ERniI -- "$pattern" "${existing[@]}" >"$output_file" 2>/dev/null; then
+    if grep -ERniI --exclude-dir=target --exclude-dir=.git -- "$pattern" "${existing[@]}" >"$output_file" 2>/dev/null; then
       echo "[fail] $label matched pattern: $pattern" >&2
       cat "$output_file" >&2
       failed=1
@@ -68,11 +82,12 @@ check_absent() {
 }
 
 discover_cargo_closure_paths() {
-  if ! command -v python3 >/dev/null 2>&1; then
+  local python_bin
+  if ! python_bin="$(find_python_311)"; then
     echo "[fail] python3 3.11 or newer is required for Cargo closure discovery" >&2
     return 1
   fi
-  python3 "${script_dir}/native-telemetry-cargo-closure.py" "$@"
+  "$python_bin" "${script_dir}/native-telemetry-cargo-closure.py" "$@"
 }
 
 android_module_source_sets() {

@@ -3,14 +3,17 @@ name: waddle-apple-pullrequest
 on:
   pull_request:
     paths:
+      - .cargo/**
       - .github/workflows/waddle-apple-pullrequest.yml
       - apps/apple/**
       - scripts/check-native-remote-telemetry.sh
       - scripts/native-telemetry-cargo-closure.py
       - scripts/build-xcframework.sh
+      - server/.cargo/**
       - server/Cargo.lock
       - server/Cargo.toml
       - server/crates/**
+      - server/crates/**/.cargo/**
       - server/rust-toolchain.toml
   workflow_dispatch: {}
 

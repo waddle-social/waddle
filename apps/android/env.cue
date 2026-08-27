@@ -29,10 +29,13 @@ let _NamespaceAndroidCache = schema.#Contributor & {
 // Shared Rust FFI surface: any change to the client crates retriggers the
 // Android pipelines, mirroring the hand-maintained Apple workflow filters.
 let _ffiInputs = [
+	"../../.cargo/**",
+	"../../server/.cargo/**",
 	"../../server/Cargo.toml",
 	"../../server/Cargo.lock",
 	"../../server/rust-toolchain.toml",
 	"../../server/crates/**",
+	"../../server/crates/**/.cargo/**",
 	"../../scripts/build-android-rust.sh",
 	"../../scripts/check-android-ffi-bindings.sh",
 ]

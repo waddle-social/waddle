@@ -402,6 +402,152 @@ waddle-xmpp-telemetry-helper = { path = "../waddle-xmpp-telemetry-helper" }
     }
   }, CHECKER_TIMEOUT_MS);
 
+  test("synthetic workspace root crates.io patch is rejected in every native mode", () => {
+    const root = mkdtempSync(resolve(tmpdir(), "waddle-native-telemetry-"));
+    try {
+      writeAndroidFixture(root);
+      writeAppleFixture(root);
+      writeWasmFixture(root, { generatedJs: "export {};\n" });
+      writeSharedClientFixture(root, {
+        clientCargoToml: `
+[package]
+name = "waddle-xmpp-client"
+
+[dependencies]
+waddle-xmpp-core = { path = "../waddle-xmpp-core" }
+waddle-xmpp-telemetry-helper = "0.1"
+`,
+      });
+      writeFixtureFile(
+        root,
+        "server/Cargo.toml",
+        `
+[workspace]
+members = ["crates/*"]
+
+[patch.crates-io]
+waddle-xmpp-telemetry-helper = { path = "crates/waddle-xmpp-telemetry-helper" }
+`,
+      );
+      writeSharedClientPathDependencyFixture(root);
+
+      for (const mode of ["--apple", "--android", "--wasm"] as const) {
+        const result = runChecker([mode], root);
+        expect(result.status).toBe(1);
+        expect(result.stderr).toContain(`${mode.slice(2)} dependency`);
+      }
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  }, CHECKER_TIMEOUT_MS);
+
+  test("synthetic workspace root git-source patch is rejected in every native mode", () => {
+    const root = mkdtempSync(resolve(tmpdir(), "waddle-native-telemetry-"));
+    try {
+      writeAndroidFixture(root);
+      writeAppleFixture(root);
+      writeWasmFixture(root, { generatedJs: "export {};\n" });
+      writeFixtureFile(
+        root,
+        "server/Cargo.toml",
+        `
+[workspace]
+members = ["crates/*"]
+
+[patch."https://github.com/example/telemetry"]
+waddle-xmpp-telemetry-helper = { path = "crates/waddle-xmpp-telemetry-helper" }
+`,
+      );
+      writeSharedClientPathDependencyFixture(root);
+
+      for (const mode of ["--apple", "--android", "--wasm"] as const) {
+        const result = runChecker([mode], root);
+        expect(result.status).toBe(1);
+        expect(result.stderr).toContain(`${mode.slice(2)} dependency`);
+      }
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  }, CHECKER_TIMEOUT_MS);
+
+  test("synthetic workspace root replacement is rejected in every native mode", () => {
+    const root = mkdtempSync(resolve(tmpdir(), "waddle-native-telemetry-"));
+    try {
+      writeAndroidFixture(root);
+      writeAppleFixture(root);
+      writeWasmFixture(root, { generatedJs: "export {};\n" });
+      writeFixtureFile(
+        root,
+        "server/Cargo.toml",
+        `
+[workspace]
+members = ["crates/*"]
+
+[replace]
+"foo:0.1.0" = { path = "crates/waddle-xmpp-telemetry-helper" }
+`,
+      );
+      writeSharedClientPathDependencyFixture(root);
+
+      for (const mode of ["--apple", "--android", "--wasm"] as const) {
+        const result = runChecker([mode], root);
+        expect(result.status).toBe(1);
+        expect(result.stderr).toContain(`${mode.slice(2)} dependency`);
+      }
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  }, CHECKER_TIMEOUT_MS);
+
+  test("synthetic Cargo config paths override is rejected in every native mode", () => {
+    const root = mkdtempSync(resolve(tmpdir(), "waddle-native-telemetry-"));
+    try {
+      writeAndroidFixture(root);
+      writeAppleFixture(root);
+      writeWasmFixture(root, { generatedJs: "export {};\n" });
+      writeFixtureFile(
+        root,
+        "server/.cargo/config.toml",
+        'paths = ["crates/waddle-xmpp-telemetry-helper"]\n',
+      );
+      writeSharedClientPathDependencyFixture(root);
+
+      for (const mode of ["--apple", "--android", "--wasm"] as const) {
+        const result = runChecker([mode], root);
+        expect(result.status).toBe(1);
+        expect(result.stderr).toContain(`${mode.slice(2)} dependency`);
+      }
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  }, CHECKER_TIMEOUT_MS);
+
+  test("synthetic Cargo config patch is rejected in every native mode", () => {
+    const root = mkdtempSync(resolve(tmpdir(), "waddle-native-telemetry-"));
+    try {
+      writeAndroidFixture(root);
+      writeAppleFixture(root);
+      writeWasmFixture(root, { generatedJs: "export {};\n" });
+      writeFixtureFile(
+        root,
+        "server/.cargo/config.toml",
+        `
+[patch.crates-io]
+waddle-xmpp-telemetry-helper = { path = "crates/waddle-xmpp-telemetry-helper" }
+`,
+      );
+      writeSharedClientPathDependencyFixture(root);
+
+      for (const mode of ["--apple", "--android", "--wasm"] as const) {
+        const result = runChecker([mode], root);
+        expect(result.status).toBe(1);
+        expect(result.stderr).toContain(`${mode.slice(2)} dependency`);
+      }
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  }, CHECKER_TIMEOUT_MS);
+
   test("synthetic workspace-inherited local dependency is rejected in every native mode", () => {
     const root = mkdtempSync(resolve(tmpdir(), "waddle-native-telemetry-"));
     try {
@@ -683,6 +829,66 @@ local-helper = { path = "../local-helper" }
       const result = runChecker(["--apple"], root);
       expect(result.status).toBe(1);
       expect(result.stderr).toContain("apple exporter");
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  }, CHECKER_TIMEOUT_MS);
+
+  test("synthetic shared client lib target outside src is rejected", () => {
+    const root = mkdtempSync(resolve(tmpdir(), "waddle-native-telemetry-"));
+    try {
+      writeAppleFixture(root);
+      writeSharedClientFixture(root, {
+        clientCargoToml: `
+[package]
+name = "waddle-xmpp-client"
+
+[lib]
+path = "ffi/lib.rs"
+
+[dependencies]
+waddle-xmpp-core = { path = "../waddle-xmpp-core" }
+`,
+      });
+      writeFixtureFile(
+        root,
+        "server/crates/waddle-xmpp-client/ffi/lib.rs",
+        "pub fn install_exporter() { tracing_subscriber::fmt().init(); }\n",
+      );
+
+      const result = runChecker(["--apple"], root);
+      expect(result.status).toBe(1);
+      expect(result.stderr).toContain("apple exporter");
+      expect(result.stderr).toContain("ffi/lib.rs");
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  }, CHECKER_TIMEOUT_MS);
+
+  test("synthetic shared client build script collector is rejected", () => {
+    const root = mkdtempSync(resolve(tmpdir(), "waddle-native-telemetry-"));
+    try {
+      writeWasmFixture(root, { generatedJs: "export {};\n" });
+      writeSharedClientFixture(root, {
+        clientCargoToml: `
+[package]
+name = "waddle-xmpp-client"
+build = "build.rs"
+
+[dependencies]
+waddle-xmpp-core = { path = "../waddle-xmpp-core" }
+`,
+      });
+      writeFixtureFile(
+        root,
+        "server/crates/waddle-xmpp-client/build.rs",
+        'fn main() { let _collector = "https://telemetry.example/v1/traces"; }\n',
+      );
+
+      const result = runChecker(["--wasm"], root);
+      expect(result.status).toBe(1);
+      expect(result.stderr).toContain("wasm exporter");
+      expect(result.stderr).toContain("build.rs");
     } finally {
       rmSync(root, { recursive: true, force: true });
     }

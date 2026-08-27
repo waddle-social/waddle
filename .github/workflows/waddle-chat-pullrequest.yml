@@ -65,6 +65,7 @@ on:
     - server/Cargo.toml
     - server/Cargo.toml/**
     - server/crates/**
+    - server/crates/**/.cargo/**
     - server/crates/waddle-xmpp-client-wasm/**
     - server/crates/waddle-xmpp-client-wasm/Cargo.toml
     - server/crates/waddle-xmpp-client-wasm/Cargo.toml/**
