@@ -641,6 +641,81 @@ async fn xep0198_release_claim_moves_expired_session_to_promotion() {
 }
 
 #[tokio::test]
+async fn xep0198_expired_claim_promotion_rehydrates_durable_only_unacked_stanzas() {
+    use waddle_xmpp::ownership::{
+        ClaimStore, InProcessClaimStore, NodeIdentity, SharedNodeIdentity,
+    };
+    use waddle_xmpp::stream_management::DetachedUnackedStanza;
+
+    let persistence = Arc::new(InMemorySmPersistence::new());
+    let storage: Arc<dyn SmPersistenceStorage> = persistence.clone();
+    let claims: Arc<dyn ClaimStore> = Arc::new(InProcessClaimStore::new());
+    let registry = InMemorySmSessionRegistry::new()
+        .with_persistence(storage)
+        .with_claim_store(
+            claims,
+            SharedNodeIdentity::new(NodeIdentity::new("sm-node", "durable-authority")),
+        );
+    let stream_id = "stream-expiring-claim-durable-ahead";
+    let jid: FullJid = "alice@example.test/durable-ahead"
+        .parse()
+        .expect("valid jid");
+    let first_receipt = chrono::Utc::now() - chrono::Duration::seconds(2);
+    let second_receipt = chrono::Utc::now() - chrono::Duration::seconds(1);
+    let mut session = expiring_detached_session(stream_id, jid.as_str());
+    session.unacked_stanzas.push(DetachedUnackedStanza {
+        sequence: 11,
+        stanza_xml: queued_stanza_xml("queued-11", "first"),
+        original_receipt_at: first_receipt,
+    });
+    registry
+        .store_session(session)
+        .await
+        .expect("store expiring detached session");
+    registry
+        .claim_session(stream_id)
+        .await
+        .expect("claim session")
+        .expect("session exists");
+
+    persistence
+        .append_unacked(PersistedUnackedStanza {
+            stream_id: SmSessionId::new(stream_id),
+            sequence: 12,
+            stanza: Box::new(chat_stanza(&jid, "durable only")),
+            original_receipt_at: second_receipt,
+        })
+        .await
+        .expect("commit detached routing update before claimed clone is republished");
+
+    tokio::time::sleep(Duration::from_secs(2)).await;
+    registry
+        .release_claim(stream_id)
+        .await
+        .expect("release expired claim");
+
+    let drained = registry.drain_expired().await.expect("drain expired claim");
+    assert_eq!(drained.len(), 1);
+    assert_eq!(
+        drained[0]
+            .unacked_stanzas
+            .iter()
+            .map(|entry| entry.sequence)
+            .collect::<Vec<_>>(),
+        vec![11, 12],
+        "durable storage is authoritative once its session snapshot exists"
+    );
+    assert_eq!(
+        drained[0].unacked_stanzas[0].original_receipt_at,
+        first_receipt
+    );
+    assert_eq!(
+        drained[0].unacked_stanzas[1].original_receipt_at,
+        second_receipt
+    );
+}
+
+#[tokio::test]
 async fn xep0198_deferred_release_moves_expired_session_to_promotion() {
     use waddle_xmpp::ownership::{
         ClaimStore, Entity, EntityType, InProcessClaimStore, NodeIdentity, SharedNodeIdentity,

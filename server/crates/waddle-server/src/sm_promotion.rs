@@ -543,6 +543,10 @@ impl<'a> PromotionSessionGuard<'a> {
         &self.session
     }
 
+    pub(crate) fn session_mut(&mut self) -> &mut DetachedSession {
+        &mut self.session
+    }
+
     pub(crate) fn complete(&mut self) {
         self.armed = false;
     }

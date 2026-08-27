@@ -1378,13 +1378,42 @@ impl InMemorySmSessionRegistry {
         if let Some(storage) = &self.persistence {
             let session_id = crate::pending_delivery::SmSessionId::new(session.stream_id.clone());
             match storage.get_session(&session_id).await {
-                Ok(Some(_)) => match storage.list_unacked(&session_id).await {
+                Ok(Some(persisted)) => match storage.list_unacked(&session_id).await {
                     Ok(rows) => {
-                        let durable: std::collections::HashSet<u32> =
-                            rows.iter().map(|row| row.sequence).collect();
-                        session
-                            .unacked_stanzas
-                            .retain(|entry| durable.contains(&entry.sequence));
+                        match super::persistence_codec::persisted_to_detached(&persisted, &rows) {
+                            Ok(durable_session) => {
+                                let durable = durable_session
+                                    .unacked_stanzas
+                                    .iter()
+                                    .map(|entry| entry.sequence)
+                                    .collect::<std::collections::HashSet<_>>();
+                                session
+                                    .unacked_stanzas
+                                    .retain(|entry| durable.contains(&entry.sequence));
+                                let present = session
+                                    .unacked_stanzas
+                                    .iter()
+                                    .map(|entry| entry.sequence)
+                                    .collect::<std::collections::HashSet<_>>();
+                                session.unacked_stanzas.extend(
+                                    durable_session
+                                        .unacked_stanzas
+                                        .into_iter()
+                                        .filter(|entry| !present.contains(&entry.sequence)),
+                                );
+                                session.unacked_stanzas.sort_by_key(|entry| {
+                                    entry.sequence.wrapping_sub(session.last_acked)
+                                });
+                            }
+                            Err(error) => {
+                                debug!(
+                                    stream_id = %session.stream_id,
+                                    error = %error,
+                                    "reinsert_for_retry: durable unacked hydration failed; keeping \
+                                     the in-memory queue verbatim (at-least-once)"
+                                );
+                            }
+                        }
                     }
                     Err(error) => {
                         debug!(
