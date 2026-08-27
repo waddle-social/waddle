@@ -655,7 +655,12 @@ members = ["crates/*"]
   }, CHECKER_TIMEOUT_MS);
 
   test("synthetic Cargo config local source mechanisms are rejected in wasm mode", () => {
-    const shapes = [
+    const shapes: Array<{
+      name: string;
+      config: string;
+      writeSource: (root: string) => void;
+      expectMessage?: string;
+    }> = [
       {
         name: "directory source",
         config: '[source.vendor]\ndirectory = "vendor"\n',
@@ -722,7 +727,7 @@ git = "file:crates/waddle-xmpp-telemetry-helper"
 
         const result = runChecker(["--wasm"], root);
         expect(result.status, shape.name).toBe(1);
-        expect(result.stderr, shape.name).toContain("wasm dependency");
+        expect(result.stderr, shape.name).toContain(shape.expectMessage ?? "wasm dependency");
       } finally {
         rmSync(root, { recursive: true, force: true });
       }
