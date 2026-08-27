@@ -23,7 +23,7 @@ case "${mode}" in
 esac
 
 failed=0
-collector_pattern='COLLECTOR_(URL|ENDPOINT)|TELEMETRY_(URL|ENDPOINT|COLLECTOR)|OTEL_EXPORTER|OTEL_ENDPOINT|SENTRY_DSN|FARO_URL|https?://[^"[:space:]]*(telemetry|collector|/v1/traces|/v1/metrics|/collect)'
+collector_pattern='COLLECTOR_(URL|ENDPOINT)|TELEMETRY_(URL|ENDPOINT|COLLECTOR)|OTEL_EXPORTER|OTEL_ENDPOINT|SENTRY_DSN|FARO_URL|https?://[^"[:space:]]{0,160}(telemetry|collector|/v1/traces|/v1/metrics|/collect)'
 native_dependency_pattern='sentry|crashlytics|firebase|firebase-analytics|datadog|newrelic|mixpanel|amplitude|posthog|bugsnag|telemetrydeck|faro|otlp|opentelemetry|tracing-opentelemetry|tracing-subscriber'
 native_exporter_pattern="tracing_subscriber|set_global_default|install_batch|install_simple|sentry::init|Sentry\\.init|SentrySDK\\.start|FirebaseApp\\.configure|FirebaseApp\\.initializeApp|Crashlytics|FirebaseCrashlytics|FirebaseAnalytics|Datadog|NewRelic|OpenTelemetry|Otlp|OTLP|BatchSpanProcessor|SimpleSpanProcessor|TracerProvider|opentelemetry_otlp|tracing_opentelemetry|${collector_pattern}"
 
@@ -58,7 +58,7 @@ check_absent() {
       failed=1
     fi
   else
-    if grep -ERni -- "$pattern" "${existing[@]}" >"$output_file" 2>/dev/null; then
+    if grep -ERniI -- "$pattern" "${existing[@]}" >"$output_file" 2>/dev/null; then
       echo "[fail] $label matched pattern: $pattern" >&2
       cat "$output_file" >&2
       failed=1

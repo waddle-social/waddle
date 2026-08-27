@@ -184,24 +184,29 @@ function writeAppleFixture(root: string, overrides?: {
   }
 }
 
+// The checker shells out to grep over the shared client crates; BSD grep on
+// macOS is an order of magnitude slower than GNU grep, so give each
+// invocation room beyond Bun's 5 s default.
+const CHECKER_TIMEOUT_MS = 60_000;
+
 describe("native remote telemetry contract", () => {
   test("WASM/browser surfaces remain free of remote telemetry exporters", () => {
     const result = runChecker(["--wasm"]);
     expect(result.status).toBe(0);
     expect(result.stdout.trim()).toContain("native remote telemetry contract OK: wasm");
-  });
+  }, CHECKER_TIMEOUT_MS);
 
   test("checker validates every native surface in one pass", () => {
     const result = runChecker(["--all"]);
     expect(result.status).toBe(0);
     expect(result.stdout.trim()).toContain("native remote telemetry contract OK: all");
-  });
+  }, CHECKER_TIMEOUT_MS);
 
   test("checker rejects unknown modes", () => {
     const result = runChecker(["--bogus"]);
     expect(result.status).toBe(2);
     expect(result.stderr).toContain("--apple|--android|--wasm|--all");
-  });
+  }, CHECKER_TIMEOUT_MS);
 
   test("synthetic wasm fixture fails when a remote telemetry subscriber is added", () => {
     const root = mkdtempSync(resolve(tmpdir(), "waddle-native-telemetry-"));
@@ -223,7 +228,7 @@ tracing-subscriber = "0.3"
     } finally {
       rmSync(root, { recursive: true, force: true });
     }
-  });
+  }, CHECKER_TIMEOUT_MS);
 
   test("synthetic android fixture fails when crashlytics is added", () => {
     const root = mkdtempSync(resolve(tmpdir(), "waddle-native-telemetry-"));
@@ -239,7 +244,7 @@ tracing-subscriber = "0.3"
     } finally {
       rmSync(root, { recursive: true, force: true });
     }
-  });
+  }, CHECKER_TIMEOUT_MS);
 
   test("synthetic apple bootstrap outside the known app files is rejected", () => {
     const root = mkdtempSync(resolve(tmpdir(), "waddle-native-telemetry-"));
@@ -254,7 +259,7 @@ tracing-subscriber = "0.3"
     } finally {
       rmSync(root, { recursive: true, force: true });
     }
-  });
+  }, CHECKER_TIMEOUT_MS);
 
   test("synthetic generic collector configuration is rejected", () => {
     const root = mkdtempSync(resolve(tmpdir(), "waddle-native-telemetry-"));
@@ -270,7 +275,7 @@ tracing-subscriber = "0.3"
     } finally {
       rmSync(root, { recursive: true, force: true });
     }
-  });
+  }, CHECKER_TIMEOUT_MS);
 
   test("synthetic Android version-catalog telemetry alias is rejected", () => {
     const root = mkdtempSync(resolve(tmpdir(), "waddle-native-telemetry-"));
@@ -291,7 +296,7 @@ telemetrySdk = { id = "io.sentry.android.gradle", version = "5.0.0" }
     } finally {
       rmSync(root, { recursive: true, force: true });
     }
-  });
+  }, CHECKER_TIMEOUT_MS);
 
   test("synthetic shared client telemetry dependency is rejected in android mode", () => {
     const root = mkdtempSync(resolve(tmpdir(), "waddle-native-telemetry-"));
@@ -315,7 +320,7 @@ waddle-xmpp-core = { path = "../waddle-xmpp-core" }
     } finally {
       rmSync(root, { recursive: true, force: true });
     }
-  });
+  }, CHECKER_TIMEOUT_MS);
 
   test("synthetic shared client exporter init is rejected in apple mode", () => {
     const root = mkdtempSync(resolve(tmpdir(), "waddle-native-telemetry-"));
@@ -333,7 +338,7 @@ waddle-xmpp-core = { path = "../waddle-xmpp-core" }
     } finally {
       rmSync(root, { recursive: true, force: true });
     }
-  });
+  }, CHECKER_TIMEOUT_MS);
 
   test("synthetic generated wasm glue with a collector beacon is rejected", () => {
     const root = mkdtempSync(resolve(tmpdir(), "waddle-native-telemetry-"));
