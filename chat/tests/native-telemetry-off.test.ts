@@ -668,11 +668,18 @@ members = ["crates/*"]
         },
       },
       {
-        name: "local registry source",
+        name: "local registry source with archived crate",
         config: '[source.local]\nlocal-registry = "registry"\n',
         writeSource(root: string) {
-          writeFixtureFile(root, "server/registry/index/metadata", "opentelemetry-otlp\n");
+          // A real local registry keeps sources inside compressed *.crate
+          // archives the scanner cannot read; the closure must fail closed
+          // even though nothing in plain text mentions telemetry.
+          writeFixtureFile(root, "server/registry/index/he/lp/helper", "{}\n");
+          const archive = Bun.gzipSync(new TextEncoder().encode("helper-0.1.0/Cargo.toml"));
+          mkdirSync(resolve(root, "server/registry"), { recursive: true });
+          writeFileSync(resolve(root, "server/registry/helper-0.1.0.crate"), archive);
         },
+        expectMessage: "uninspected *.crate archive",
       },
       {
         name: "replace-with chain",

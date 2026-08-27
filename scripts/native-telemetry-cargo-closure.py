@@ -301,6 +301,19 @@ class CargoClosure:
             for child in sorted(source_dir.iterdir()):
                 if child.is_dir() and (child / "Cargo.toml").is_file():
                     self.visit(child / "Cargo.toml")
+        elif kind == "local-registry":
+            # Local registries store crate sources as compressed *.crate
+            # archives that the pattern scan cannot read; fail closed rather
+            # than report the registry as covered.
+            archives = sorted(source_dir.rglob("*.crate"))
+            if archives:
+                raise ClosureError(
+                    "Cargo config {0} local registry {1} contains {2} uninspected "
+                    "*.crate archive(s) (first: {3}); local registries are not "
+                    "supported by the native telemetry contract".format(
+                        config, source_dir, len(archives), archives[0]
+                    )
+                )
 
     def visit_cargo_configs(self, crate_dir):
         for config in self.cargo_config_paths(crate_dir):
