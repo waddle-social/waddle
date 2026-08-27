@@ -242,16 +242,16 @@ describe("OfflineSendQueue drain ordering", () => {
   test("ack removes the persisted copy and reports queue depth + latency", async () => {
     const { queue, events } = createQueue();
     const depths: Array<{ kind: "room" | "dm"; persisted: number; inflight: number }> = [];
-    const acked: Array<{ id: string; kind: "room" | "dm" }> = [];
+    const acked: Array<{ kind: "room" | "dm" }> = [];
     events.on("queueDepthChange", (depth) => depths.push(depth));
-    events.on("messageAcked", (id, meta) => acked.push({ id, kind: meta.kind }));
+    events.on("messageAcked", (meta) => acked.push({ kind: meta.kind }));
 
     queue.queueDirectMessage("bob@example.com", "hello", { id: "dm-1" });
     await queue.flushDirect();
     queue.handleAck("dm-1");
 
     expect(listQueuedMessages(SCOPE)).toHaveLength(0);
-    expect(acked).toEqual([{ id: "dm-1", kind: "dm" }]);
+    expect(acked).toEqual([{ kind: "dm" }]);
     expect(depths.slice(-2)).toEqual([
       { kind: "dm", persisted: 0, inflight: 0 },
       { kind: "room", persisted: 0, inflight: 0 },

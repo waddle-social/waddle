@@ -26,9 +26,6 @@ export type CallLifecyclePayload = {
 type Attempt = {
   sid: string;
   callKind: CallKind;
-  /** LiveKit room name when known — lets the lifecycle event carry the
-   *  cross-surface call_id even if the call never connects (#1452). */
-  roomName: string | null;
   accepted: boolean;
   acceptedAtMs: number | null;
   maxRttMs: number | null;
@@ -104,17 +101,15 @@ export function reconnectCountBucket(count: number): CallReconnectCountBucket {
 export function resumeCallAttempt(
   sid: string,
   callKind: CallKind,
-  roomName?: string | null,
 ): void {
   if (!sid) return;
   emittedSids.delete(sid);
-  beginCallAttempt(sid, callKind, roomName);
+  beginCallAttempt(sid, callKind);
 }
 
 export function beginCallAttempt(
   sid: string,
   callKind: CallKind,
-  roomName?: string | null,
 ): void {
   if (!sid) return;
   if (emittedSids.has(sid)) return;
@@ -126,13 +121,10 @@ export function beginCallAttempt(
     });
   }
   const existing = attempts.get(sid);
-  if (existing) {
-    existing.roomName ??= roomName ?? null;
-  } else {
+  if (!existing) {
     attempts.set(sid, {
       sid,
       callKind,
-      roomName: roomName ?? null,
       accepted: false,
       acceptedAtMs: null,
       maxRttMs: null,
@@ -217,7 +209,7 @@ export function finishCallAttempt(
   markEmitted(sid);
   attempts.delete(sid);
   if (currentSid === sid) currentSid = null;
-  reportCallLifecycle(payload, attempt.roomName);
+  reportCallLifecycle(payload);
   return payload;
 }
 
@@ -225,46 +217,38 @@ export function finishCallAttempt(
 export function reportDeclinedCallAttempt(
   sid: string,
   callKind: CallKind = "dm",
-  roomName?: string | null,
 ): void {
   if (!sid || attempts.has(sid) || emittedSids.has(sid)) return;
   markEmitted(sid);
-  reportCallLifecycle(
-    {
-      setupOutcome: "declined",
-      endReason: "hangup",
-      durationBucket: "none",
-      callKind,
-      rttBand: "unknown",
-      packetLossBand: "unknown",
-      connectionQuality: "unknown",
-      reconnectCount: "none",
-    },
-    roomName,
-  );
+  reportCallLifecycle({
+    setupOutcome: "declined",
+    endReason: "hangup",
+    durationBucket: "none",
+    callKind,
+    rttBand: "unknown",
+    packetLossBand: "unknown",
+    connectionQuality: "unknown",
+    reconnectCount: "none",
+  });
 }
 
 /** Emit a failed setup that ended before it could occupy the call store. */
 export function reportFailedCallAttempt(
   sid: string,
   callKind: CallKind,
-  roomName?: string | null,
 ): void {
   if (!sid || attempts.has(sid) || emittedSids.has(sid)) return;
   markEmitted(sid);
-  reportCallLifecycle(
-    {
-      setupOutcome: "failed",
-      endReason: "error",
-      durationBucket: "none",
-      callKind,
-      rttBand: "unknown",
-      packetLossBand: "unknown",
-      connectionQuality: "unknown",
-      reconnectCount: "none",
-    },
-    roomName,
-  );
+  reportCallLifecycle({
+    setupOutcome: "failed",
+    endReason: "error",
+    durationBucket: "none",
+    callKind,
+    rttBand: "unknown",
+    packetLossBand: "unknown",
+    connectionQuality: "unknown",
+    reconnectCount: "none",
+  });
 }
 
 function currentAttempt(): Attempt | undefined {

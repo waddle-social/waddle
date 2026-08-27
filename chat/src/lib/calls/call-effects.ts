@@ -10,15 +10,6 @@ import {
   isSameCallBareJid,
 } from "./tie-break";
 import type { CallEvent, CallState } from "./types";
-import { dmCallRoomName } from "./call-correlation";
-import { barePeerJid } from "../xmpp/jid";
-
-/** The 1:1 LiveKit room name for an inbound propose: the proposer is
- *  the Jingle initiator, so `{proposer_bare}::{sid}` matches the
- *  server-side `scoped_call_id` (#1452 correlation). */
-function dmRoomNameFromEvent(event: { from: string; sid: string }): string {
-  return dmCallRoomName(barePeerJid(event.from) || event.from, event.sid);
-}
 import {
   reportDeclinedCallAttempt,
   reportFailedCallAttempt,
@@ -78,11 +69,11 @@ export async function handleCallEventSideEffect(
         await outboundCalls.retractTieBreak(sender, event.from, prev.sid);
         acceptIncomingTieBreakPropose(event);
       } else {
-        reportDeclinedCallAttempt(event.sid, "dm", dmRoomNameFromEvent(event));
+        reportDeclinedCallAttempt(event.sid, "dm");
         await outboundCalls.rejectTieBreak(sender, event.from, event.sid);
       }
     } catch (err) {
-      reportFailedCallAttempt(event.sid, "dm", dmRoomNameFromEvent(event));
+      reportFailedCallAttempt(event.sid, "dm");
       reportCallError(err);
     }
     return;
@@ -105,7 +96,7 @@ export async function handleCallEventSideEffect(
         .sessionTerminate(sender, prev.peer, prev.sid, "expired")
         .catch((err) => reportCallError(err));
     } catch (err) {
-      reportFailedCallAttempt(event.sid, "dm", dmRoomNameFromEvent(event));
+      reportFailedCallAttempt(event.sid, "dm");
       failCallState(err, prev.sid);
     }
     return;
@@ -123,7 +114,7 @@ export async function handleCallEventSideEffect(
     prev.phase !== "idle" &&
     prev.phase !== "ended"
   ) {
-    reportDeclinedCallAttempt(event.sid, "dm", dmRoomNameFromEvent(event));
+    reportDeclinedCallAttempt(event.sid, "dm");
     try {
       await outboundCalls.reject(sender, event.from, event.sid);
     } catch (err) {

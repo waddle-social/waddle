@@ -102,8 +102,7 @@ describe("$callMediaIssues store", () => {
         type: "call.media",
         context: expect.objectContaining({
           kind: "call.media",
-          recoverable: "true",
-          media_kind: "mic",
+          mediaKind: "mic",
           reason: "denied",
         }),
       },
@@ -111,8 +110,7 @@ describe("$callMediaIssues store", () => {
         type: "call.media",
         context: expect.objectContaining({
           kind: "call.media",
-          recoverable: "true",
-          media_kind: "cam",
+          mediaKind: "cam",
           reason: "missing",
         }),
       },

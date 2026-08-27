@@ -316,8 +316,7 @@ export function useDirectMessages(
   async function loadMessages(peerJid: string, unreadAtLoad = 0) {
     messageSearch.reset();
     return withSpan(
-      "xmpp.initial_render",
-      { "conversation.kind": "dm" },
+      { kind: "initial-render", conversation: "dm" },
       () => paging.loadMessages(peerJid, unreadAtLoad),
     );
   }

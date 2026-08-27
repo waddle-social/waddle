@@ -69,10 +69,11 @@ export function createServerAuth(serverBaseUrl: string) {
 
       if (!response.ok) {
         const err = new Error(`Failed to load session (${response.status})`);
-        reportError("http.fetch", err, {
-          recoverable: false,
-          detail: "GET /api/auth/session",
+        reportError({
+          kind: "http.fetch",
+          operation: "auth-session-get",
           status: response.status,
+          recoverable: false,
         });
         throw err;
       }
@@ -100,10 +101,11 @@ export function createServerAuth(serverBaseUrl: string) {
       if (response.status === 401 || response.status === 404) return;
 
       const err = new Error(`Failed to log out (${response.status})`);
-      reportError("http.fetch", err, {
-        recoverable: true,
-        detail: "POST /api/auth/logout",
+      reportError({
+        kind: "http.fetch",
+        operation: "auth-logout-post",
         status: response.status,
+        recoverable: true,
       });
       throw err;
     },

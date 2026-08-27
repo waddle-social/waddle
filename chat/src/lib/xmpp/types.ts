@@ -169,10 +169,6 @@ export interface XmppErrorEvent {
   condition?: string;
   /** RFC 6120 §8.3.2 `type` attribute of a received error stanza. */
   errorType?: XmppStanzaErrorType;
-  /** Server-provided `<text/>` of a received error stanza. */
-  errorText?: string;
-  /** Denied MUC room node only; never the domain, resource, or full room JID. */
-  roomLocalpart?: string;
   /** XEP-0198 stream-management extension detail when a stream error carries one. */
   streamManagementError?: {
     kind: "handled-count-too-high";

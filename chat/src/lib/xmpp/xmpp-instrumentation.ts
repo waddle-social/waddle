@@ -7,7 +7,6 @@
  * without any beacon traffic.
  */
 import type { BrowserXmppClient } from "@/lib/xmpp-client";
-import type { ErrorKind } from "@/lib/telemetry";
 import {
   XMPP_ERROR_CONDITIONS,
   XMPP_STREAM_ERROR_CONDITIONS,
@@ -27,25 +26,20 @@ import {
   reportStatusChange,
   reportStreamManagement,
   markErrorReportedToTelemetry,
-  setXmppResourceForTelemetry,
 } from "@/lib/telemetry";
+import type {
+  TelemetryErrorObservation,
+  XmppCondition,
+  XmppOperationReason,
+  XmppStreamReason,
+} from "@/lib/telemetry-observations";
 
-const ERROR_KIND_MAP: Record<XmppErrorKind, ErrorKind> = {
-  "stream": "xmpp.stream",
-  "auth": "xmpp.auth",
-  "connect-timeout": "xmpp.disconnect",
-  "history": "xmpp.stream",
-  "member-query": "xmpp.stream",
-  "muc-join": "xmpp.stream",
-  "muc-join-timeout": "xmpp.disconnect",
-};
 export function installInstrumentation(client: BrowserXmppClient): void {
-  setXmppResourceForTelemetry(client.xmppResource);
-  client.onMessageAcked((id, meta) => {
-    reportMessageAcked({ id, kind: meta.kind, latencyMs: meta.latencyMs });
+  client.onMessageAcked((meta) => {
+    reportMessageAcked({ kind: meta.kind, latencyMs: meta.latencyMs });
   });
-  client.onMessageDeliveryFailed((id, meta) => {
-    reportMessageFailed({ id, kind: meta.kind });
+  client.onMessageDeliveryFailed((meta) => {
+    reportMessageFailed({ kind: meta.kind });
   });
   client.onSessionLifecycle((event) => {
     reportSessionLifecycle({ type: event.type });
@@ -57,44 +51,18 @@ export function installInstrumentation(client: BrowserXmppClient): void {
     });
   });
   client.onSendEnqueued((info) => {
-    reportSendEnqueued({ kind: info.kind, reason: info.reason });
+    reportSendEnqueued({ kind: info.kind, reason: telemetryEnqueueReason(info.reason) });
   });
   client.onQueueDepthChange((depth) => {
     reportQueueDepthChange(depth);
   });
   client.onError((event) => {
-    const kind = ERROR_KIND_MAP[event.kind];
-    const condition = telemetryCondition(event.kind, event.condition);
-    const detail = telemetryErrorDetail(event, condition);
-    const streamDetail = event.kind === "stream"
-      ? telemetryStreamSourceDetail(event.detail, detail)
-      : undefined;
-    const smCounts = event.kind === "stream"
-      ? telemetryStreamManagementCounts(event)
-      : undefined;
-    const errorSource = telemetryErrorSource(event.kind, condition);
     const isRoomJoinFailure = event.kind === "muc-join"
       || event.kind === "muc-join-timeout";
     if (isRoomJoinFailure && event.cause !== undefined) {
       markErrorReportedToTelemetry(event.cause);
     }
-    const cause = new Error(
-      detail,
-      event.cause === undefined ? undefined : { cause: event.cause },
-    );
-    reportError(kind, cause, {
-      recoverable: event.recoverable,
-      detail,
-      ...(condition ? { condition } : {}),
-      ...(event.errorType ? { errorType: event.errorType } : {}),
-      ...(event.kind !== "muc-join" && event.errorText ? { errorText: event.errorText } : {}),
-      ...(event.kind === "muc-join" && event.roomLocalpart
-        ? { roomLocalpart: event.roomLocalpart }
-        : {}),
-      ...(errorSource ? { errorSource } : {}),
-      ...(streamDetail ? { streamDetail } : {}),
-      ...(smCounts ?? {}),
-    });
+    reportError(telemetryErrorObservation(event));
   });
   // Background-tab RESULT_CODE_HUNG investigation (observe-only). These
   // pair with the page-global longtask/heap/visibility signals installed
@@ -105,7 +73,10 @@ export function installInstrumentation(client: BrowserXmppClient): void {
   client.onStreamManagement((event) => reportStreamManagement(event));
 }
 
-function telemetryErrorDetail(event: XmppErrorEvent, condition: string | undefined): string {
+function telemetryErrorDetail(
+  event: XmppErrorEvent,
+  condition: XmppCondition | undefined,
+): XmppStreamReason | XmppOperationReason | "auth-error" | "connect-timeout" | "room-self-presence-timeout" {
   switch (event.kind) {
     case "auth":
       return "auth-error";
@@ -131,7 +102,7 @@ function telemetryErrorDetail(event: XmppErrorEvent, condition: string | undefin
   }
 }
 
-function telemetryStreamFallbackDetail(detail: string): string {
+function telemetryStreamFallbackDetail(detail: string): XmppStreamReason {
   const normalized = detail.trim().toLowerCase();
   if (!normalized || normalized === "stream error") return "stream-error";
   if (normalized === "handled-count-too-high") return "stream-handled-count-too-high";
@@ -155,20 +126,9 @@ function telemetryStreamFallbackDetail(detail: string): string {
   return "stream-error";
 }
 
-function telemetryStreamSourceDetail(detail: string, telemetryDetail: string): string | undefined {
-  const trimmed = detail.trim();
-  if (!trimmed || trimmed.toLowerCase() === "stream error" || trimmed === telemetryDetail) {
-    return undefined;
-  }
-  return trimmed;
-}
-
-function telemetryStreamManagementCounts(event: XmppErrorEvent): Record<string, string> | undefined {
+function telemetryStreamManagementCounts(event: XmppErrorEvent): { h: number; sendCount: number } | undefined {
   if (event.streamManagementError?.kind !== "handled-count-too-high") return undefined;
-  return {
-    smH: String(event.streamManagementError.h),
-    smSendCount: String(event.streamManagementError.sendCount),
-  };
+  return { h: event.streamManagementError.h, sendCount: event.streamManagementError.sendCount };
 }
 
 /** Attribute the failure: a condition means the server answered with an
@@ -177,17 +137,97 @@ function telemetryStreamManagementCounts(event: XmppErrorEvent): Record<string, 
  * unattributed rather than guessed. */
 function telemetryErrorSource(
   kind: XmppErrorKind,
-  condition: string | undefined,
+  condition: XmppCondition | undefined,
 ): "server" | "local-timeout" | undefined {
   if (condition) return "server";
   if (kind === "connect-timeout" || kind === "muc-join-timeout") return "local-timeout";
   return undefined;
 }
 
-function telemetryCondition(kind: XmppErrorKind, condition: string | undefined): string | undefined {
+function telemetryCondition(kind: XmppErrorKind, condition: string | undefined): XmppCondition | undefined {
   if (!condition) return undefined;
   const normalized = condition.trim().toLowerCase();
   if (!normalized) return undefined;
   const allowed = kind === "stream" ? XMPP_STREAM_ERROR_CONDITIONS : XMPP_ERROR_CONDITIONS;
-  return allowed.has(normalized) ? normalized : "unknown";
+  return (allowed.has(normalized) ? normalized : "unknown") as XmppCondition;
+}
+
+function telemetryEnqueueReason(reason: string): "offline" | "disposed" | "destroying" | "no-client" | "reconnecting" | "not-ready" {
+  switch (reason) {
+    case "offline":
+    case "disposed":
+    case "destroying":
+    case "no-client":
+    case "reconnecting":
+      return reason;
+    default:
+      return "not-ready";
+  }
+}
+
+function telemetryErrorObservation(event: XmppErrorEvent): TelemetryErrorObservation {
+  const condition = telemetryCondition(event.kind, event.condition);
+  const reason = telemetryErrorDetail(event, condition);
+  const errorSource = telemetryErrorSource(event.kind, condition);
+  switch (event.kind) {
+    case "stream": {
+      const streamManagementCounts = telemetryStreamManagementCounts(event);
+      return {
+        kind: "xmpp.stream",
+        reason: reason as XmppStreamReason,
+        recoverable: event.recoverable,
+        ...(condition ? { condition } : {}),
+        ...(event.errorType ? { errorType: event.errorType } : {}),
+        ...(errorSource ? { errorSource } : {}),
+        ...(streamManagementCounts ? { sm: streamManagementCounts } : {}),
+      } satisfies TelemetryErrorObservation;
+    }
+    case "auth":
+      return {
+        kind: "xmpp.auth",
+        reason: "auth-error",
+        recoverable: event.recoverable,
+      } satisfies TelemetryErrorObservation;
+    case "connect-timeout":
+      return {
+        kind: "xmpp.disconnect",
+        reason: "connect-timeout",
+        recoverable: event.recoverable,
+        errorSource: "local-timeout",
+      } satisfies TelemetryErrorObservation;
+    case "muc-join-timeout":
+      return {
+        kind: "xmpp.disconnect",
+        reason: "room-self-presence-timeout",
+        recoverable: event.recoverable,
+        errorSource: "local-timeout",
+      } satisfies TelemetryErrorObservation;
+    case "history":
+      return {
+        kind: "xmpp.history",
+        reason: reason as XmppOperationReason,
+        recoverable: event.recoverable,
+        ...(condition ? { condition } : {}),
+        ...(event.errorType ? { errorType: event.errorType } : {}),
+        ...(errorSource ? { errorSource } : {}),
+      } satisfies TelemetryErrorObservation;
+    case "member-query":
+      return {
+        kind: "xmpp.member-query",
+        reason: reason as XmppOperationReason,
+        recoverable: event.recoverable,
+        ...(condition ? { condition } : {}),
+        ...(event.errorType ? { errorType: event.errorType } : {}),
+        ...(errorSource ? { errorSource } : {}),
+      } satisfies TelemetryErrorObservation;
+    case "muc-join":
+      return {
+        kind: "xmpp.muc-join",
+        reason: reason as XmppOperationReason,
+        recoverable: event.recoverable,
+        ...(condition ? { condition } : {}),
+        ...(event.errorType ? { errorType: event.errorType } : {}),
+        ...(errorSource ? { errorSource } : {}),
+      } satisfies TelemetryErrorObservation;
+  }
 }

@@ -8,7 +8,6 @@ import {
 } from "@/lib/calls/call-store";
 import type { CallWireSender } from "@/lib/calls/outbound";
 import { useCallEngine } from "@/lib/calls/use-call-engine";
-import { adoptCallCorrelationId, clearCallCorrelationId } from "@/lib/calls/call-correlation";
 import {
   iceServerBundleFromExternalServices,
   type IceServerBundle,
@@ -82,12 +81,6 @@ watch(
       // fetch would otherwise open a LiveKit session against a stale join/sid.
       const current = state.value;
       if (current.phase !== "active" || current.sid !== sid) return;
-      // Adopt the call correlation id BEFORE the connect attempt, not on
-      // the connected event alone: a failed join must still stamp its
-      // lifecycle/failure events with the call's id (#1452). The promise
-      // is kept so the failure path can await the adoption — a fast
-      // connect failure must not emit its telemetry before the id lands.
-      const correlationAdopted = adoptCallCorrelationId(current.join.room);
       await engine.connect(current.join, {
         ...current.media,
         iceServers: iceServerBundle.servers,
@@ -108,9 +101,6 @@ watch(
       // fatal — it surfaces as the non-blocking media notice instead and
       // never reaches this catch. Run the full hangup path so
       // SFU/session/Muji presence state rolls back before the slot goes.
-      // Await the in-flight adoption first: clearing (below) bumps the
-      // epoch, and the failure telemetry emitted here must carry the id.
-      await correlationAdopted;
       // Media first, protocol second (#1446): release any capture the
       // partial join grabbed, with the bounded wire teardown running
       // concurrently in the background — neither stalls the other.
@@ -118,11 +108,6 @@ watch(
       void tearDownActiveCall(getSender(), "gone").catch(reportCallError);
       await engineDisconnected.catch(reportCallError);
       reportCallError(err);
-      // A connect() failure before a room exists never emits the engine's
-      // `disconnected` event, so the disconnected-handler cleanup does not
-      // run — clear the correlation id here (after the failure telemetry
-      // above, which must still carry it) or it would stamp later calls.
-      clearCallCorrelationId();
     } finally {
       $callConnecting.set(false);
     }

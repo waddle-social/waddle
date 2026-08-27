@@ -5,13 +5,17 @@ on:
     branches:
       - main
     paths:
+      - .cargo/**
       - .github/workflows/waddle-apple-default.yml
       - apps/apple/**
+      - scripts/check-native-remote-telemetry.sh
+      - scripts/native-telemetry-cargo-closure.py
       - scripts/build-xcframework.sh
+      - server/.cargo/**
       - server/Cargo.lock
       - server/Cargo.toml
-      - server/crates/waddle-xmpp-client/**
-      - server/crates/waddle-xmpp-client-ffi/**
+      - server/crates/**
+      - server/crates/**/.cargo/**
       - server/rust-toolchain.toml
   workflow_dispatch: {}
 
@@ -31,6 +35,12 @@ jobs:
         uses: actions/checkout@v4
       - name: Install Rust targets
         run: rustup target add aarch64-apple-darwin x86_64-apple-darwin aarch64-apple-ios aarch64-apple-ios-sim x86_64-apple-ios
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - name: Check native telemetry contract
+        run: bash scripts/check-native-remote-telemetry.sh --apple
       - name: Build XMPP client XCFramework
         run: bash scripts/build-xcframework.sh --debug
       - name: Build macOS app

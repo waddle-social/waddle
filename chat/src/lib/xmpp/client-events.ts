@@ -143,11 +143,14 @@ export type ClientEvents = {
   // hooks (see docs/planning/hung-tab-investigation.md); the client
   // stays telemetry-agnostic — xmpp-instrumentation.ts binds these to
   // the Faro report* sink.
-  messageAcked: [id: string, meta: { kind: "room" | "dm"; latencyMs: number }];
-  messageDeliveryFailed: [id: string, meta: { kind: "room" | "dm" }];
+  messageAcked: [meta: { kind: "room" | "dm"; latencyMs: number }];
+  messageDeliveryFailed: [meta: { kind: "room" | "dm" }];
   sessionLifecycleHook: [event: SessionLifecycleEvent];
   statusHook: [status: XmppStatusSnapshot, meta: { reconnectDurationMs?: number }];
-  sendEnqueued: [info: { kind: "room" | "dm"; reason: string }];
+  sendEnqueued: [info: {
+    kind: "room" | "dm";
+    reason: "offline" | "disposed" | "destroying" | "no-client" | "reconnecting" | "not-ready";
+  }];
   queueDepthChange: [depth: { kind: "room" | "dm"; persisted: number; inflight: number }];
   error: [event: XmppErrorEvent];
   reconnectScheduled: [info: { attempt: number; delayMs: number }];

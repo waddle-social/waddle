@@ -514,7 +514,7 @@ type OfflineSendQueueDeps = {
   canUseConnectedSession: () => boolean;
   roomIsReady: (roomJid: string) => boolean;
   /** Why a send is being queued right now ("offline", "reconnecting", …). */
-  enqueueReason: () => string;
+  enqueueReason: () => "offline" | "disposed" | "destroying" | "no-client" | "reconnecting" | "not-ready";
   emitStatus: (snapshot: XmppStatusSnapshot) => void;
   currentStatus?: () => XmppStatusSnapshot | null;
   /** Known nick → bare-JID mentions for a room, merged into queued room sends. */
@@ -691,7 +691,7 @@ export class OfflineSendQueue {
     const pending = this.pendingSendAt.get(id);
     if (pending) {
       this.pendingSendAt.delete(id);
-      this.deps.events.emitSafe("messageAcked", id, { kind: pending.kind, latencyMs: performance.now() - pending.at });
+      this.deps.events.emitSafe("messageAcked", { kind: pending.kind, latencyMs: performance.now() - pending.at });
     }
     if (wasQueued) this.emitQueueDepth();
   }
@@ -707,7 +707,7 @@ export class OfflineSendQueue {
     const pending = this.pendingSendAt.get(id);
     if (pending) {
       this.pendingSendAt.delete(id);
-      this.deps.events.emitSafe("messageDeliveryFailed", id, { kind: pending.kind });
+      this.deps.events.emitSafe("messageDeliveryFailed", { kind: pending.kind });
     }
     if (wasQueued) this.emitQueueDepth();
   }
@@ -722,7 +722,7 @@ export class OfflineSendQueue {
     const pending = this.pendingSendAt.get(id);
     if (pending) {
       this.pendingSendAt.delete(id);
-      this.deps.events.emitSafe("messageDeliveryFailed", id, { kind: pending.kind });
+      this.deps.events.emitSafe("messageDeliveryFailed", { kind: pending.kind });
     }
     this.emitQueueDepth();
   }

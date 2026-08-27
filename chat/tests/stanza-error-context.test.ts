@@ -1,14 +1,13 @@
 /**
  * Unit tests for the shared stanza-error context extractor
  * (`src/lib/xmpp/stanza-error-context.ts`): the wasm bridge's structured
- * `Error` rejections, the legacy object shapes, errorType validation, and
- * the telemetry length cap on server-provided error text.
+ * `Error` rejections, the legacy object shapes, and errorType validation.
  */
 import { describe, expect, test } from "bun:test";
 import { stanzaErrorContext } from "../src/lib/xmpp/stanza-error-context";
 
 describe("stanzaErrorContext", () => {
-  test("reads condition, errorType, and text off a structured Error rejection", () => {
+  test("reads condition and errorType off a structured Error rejection", () => {
     const rejection = Object.assign(
       new Error("server returned a stanza error: cancel: item-not-found"),
       { condition: "item-not-found", errorType: "cancel", text: "no such room" },
@@ -16,7 +15,6 @@ describe("stanzaErrorContext", () => {
     expect(stanzaErrorContext(rejection)).toEqual({
       condition: "item-not-found",
       errorType: "cancel",
-      errorText: "no such room",
     });
   });
 
@@ -30,14 +28,6 @@ describe("stanzaErrorContext", () => {
     expect(
       stanzaErrorContext({ condition: "forbidden", errorType: "bogus" }),
     ).toEqual({ condition: "forbidden" });
-  });
-
-  test("truncates oversized server error text for the beacon", () => {
-    const context = stanzaErrorContext({
-      condition: "resource-constraint",
-      text: "x".repeat(10_000),
-    });
-    expect(context.errorText).toHaveLength(256);
   });
 
   test("yields an empty context for strings and unshaped rejections", () => {

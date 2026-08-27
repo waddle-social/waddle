@@ -7,6 +7,11 @@ on:
     paths:
     - .cargo/**
     - .github/workflows/waddle-chat-pullrequest.yml
+    - apps/android/**/build.gradle.kts
+    - apps/android/gradle/libs.versions.toml
+    - apps/android/gradle/libs.versions.toml/**
+    - apps/android/settings.gradle.kts
+    - apps/android/settings.gradle.kts/**
     - apps/apple/Waddle/Assets.xcassets/AccentColor.colorset/Contents.json
     - apps/apple/Waddle/Assets.xcassets/AccentColor.colorset/Contents.json/**
     - bun.lock
@@ -33,6 +38,8 @@ on:
     - chat/src/styles/global/tokens.css
     - chat/src/styles/global/tokens.css/**
     - chat/tests/**
+    - chat/tests/native-telemetry-off.test.ts
+    - chat/tests/native-telemetry-off.test.ts/**
     - chat/tsconfig.json
     - chat/tsconfig.json/**
     - chat/wrangler.jsonc
@@ -46,18 +53,28 @@ on:
     - flake.nix/**
     - package.json
     - package.json/**
+    - scripts/check-native-remote-telemetry.sh
+    - scripts/check-native-remote-telemetry.sh/**
     - scripts/generate-design-tokens.mjs
     - scripts/generate-design-tokens.mjs/**
+    - scripts/native-telemetry-cargo-closure.py
+    - scripts/native-telemetry-cargo-closure.py/**
     - server/.cargo/**
     - server/Cargo.lock
     - server/Cargo.lock/**
     - server/Cargo.toml
     - server/Cargo.toml/**
+    - server/crates/**
+    - server/crates/**/.cargo/**
     - server/crates/waddle-xmpp-client-wasm/**
+    - server/crates/waddle-xmpp-client-wasm/Cargo.toml
+    - server/crates/waddle-xmpp-client-wasm/Cargo.toml/**
+    - server/crates/waddle-xmpp-client-wasm/src/**
     - server/crates/waddle-xmpp-client/**
     - server/crates/waddle-xmpp-core/**
     - server/rust-toolchain.toml
     - server/rust-toolchain.toml/**
+    - server/wasm-pkg/waddle-xmpp-client-wasm/**
     - website/src/styles/global/brand-palette.css
     - website/src/styles/global/brand-palette.css/**
 concurrency:

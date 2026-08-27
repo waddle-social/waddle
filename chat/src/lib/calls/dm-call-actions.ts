@@ -149,7 +149,7 @@ export function resumeDmCallActivity(options: {
     join: activity.join,
     initiator: selfFullJid,
   });
-  resumeCallAttempt(activity.sid, "dm", activity.join?.room ?? null);
+  resumeCallAttempt(activity.sid, "dm");
   markCallAttemptAccepted(activity.sid);
   return true;
 }

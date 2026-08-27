@@ -210,6 +210,29 @@ describe("XMPP page lifecycle", () => {
     dispose();
   });
 
+  test("the production reporter drops a throwing Faro event sink", () => {
+    const target = new LifecycleTarget();
+    __setFaroForTesting({
+      api: {
+        pushEvent: () => { throw new Error("collector unavailable"); },
+      },
+    } as never);
+    const suspendCall = mock(() => undefined);
+    const dispose = installXmppPagehideLifecycle(
+      target as unknown as Window,
+      () => ({
+        prepareForPageHide: () => { throw new Error("client fault"); },
+        resumeAfterPageShow: () => undefined,
+      }),
+      suspendCall,
+      reportXmppPageLifecycleFailure,
+    );
+
+    expect(() => target.dispatch("pagehide", false)).not.toThrow();
+    expect(suspendCall).toHaveBeenCalledTimes(1);
+    dispose();
+  });
+
   test("forwards every lifecycle failure once through the production Faro reporter", () => {
     const target = new LifecycleTarget();
     const events: Array<{ name: string; attributes?: Record<string, string> }> = [];

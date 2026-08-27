@@ -116,11 +116,8 @@ function readQueue(accountKey: string): PersistedQueuedMessage[] {
     // Storage read failure usually means corrupt JSON or privacy-mode
     // localStorage. Surface to Faro but keep the app working — we just
     // treat it as an empty queue.
-    reportError("storage.read", err, {
-      recoverable: true,
-      detail: "outbound-queue read failed",
-      storage_area: "outbound-queue",
-    });
+    void err;
+    reportError({ kind: "storage.read", reason: "read-failed", area: "outbound-queue" });
     return [];
   }
 }
@@ -168,10 +165,11 @@ function pruneStaleEntries(
     // Best-effort prune; surface to Faro but still hand back the
     // pruned list to the caller so the stale entries are not used
     // in this session even if persistence couldn't be updated.
-    reportError("storage.write", err, {
-      recoverable: true,
-      detail: "outbound-queue prune failed",
-      storage_area: "outbound-queue",
+    void err;
+    reportError({
+      kind: "storage.write",
+      reason: "write-failed",
+      area: "outbound-queue",
       dropped,
     });
     return fresh;
@@ -181,10 +179,10 @@ function pruneStaleEntries(
   // existing `ErrorKind` (we wrote the pruned snapshot back), and
   // `recoverable: true` keeps this in the informational tier rather
   // than alerting on it.
-  reportError("storage.write", new Error("queue ttl prune"), {
-    recoverable: true,
-    detail: `pruned ${dropped} stale queued message(s)`,
-    storage_area: "outbound-queue",
+  reportError({
+    kind: "storage.write",
+    reason: "stale-entries-pruned",
+    area: "outbound-queue",
     dropped,
   });
   return fresh;
@@ -213,11 +211,11 @@ function writeQueue(accountKey: string, messages: PersistedQueuedMessage[]): voi
     // Still worth reporting: localStorage quota errors are a leading cause
     // of silent message-loss across reloads.
     const name = err instanceof Error ? err.name : "";
-    const kind = name === "QuotaExceededError" ? "storage.quota" : "storage.write";
-    reportError(kind, err, {
-      recoverable: true,
-      detail: "outbound-queue write failed",
-      storage_area: "outbound-queue",
+    void err;
+    reportError({
+      kind: name === "QuotaExceededError" ? "storage.quota" : "storage.write",
+      reason: name === "QuotaExceededError" ? "quota-exceeded" : "write-failed",
+      area: "outbound-queue",
       queueSize: messages.length,
     });
   }

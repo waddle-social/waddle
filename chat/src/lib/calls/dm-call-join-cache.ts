@@ -137,11 +137,8 @@ function readEntries(selfBareJid: string): CachedDmCallJoin[] {
       .map((entry) => isCachedDmCallJoin(entry) ? normalizeEntry(entry) : null)
       .filter((entry): entry is CachedDmCallJoin => !!entry);
   } catch (err) {
-    reportError("storage.read", err, {
-      recoverable: true,
-      detail: "dm call join cache read failed",
-      storage_area: "dm-call-join-cache",
-    });
+    void err;
+    reportError({ kind: "storage.read", reason: "read-failed", area: "dm-call-join-cache" });
     return [];
   }
 }
@@ -157,11 +154,8 @@ function writeEntries(selfBareJid: string, entries: CachedDmCallJoin[]): void {
     }
     s.setItem(key, JSON.stringify(entries));
   } catch (err) {
-    reportError("storage.write", err, {
-      recoverable: true,
-      detail: "dm call join cache write failed",
-      storage_area: "dm-call-join-cache",
-    });
+    void err;
+    reportError({ kind: "storage.write", reason: "write-failed", area: "dm-call-join-cache" });
   }
 }
 
@@ -171,11 +165,8 @@ function removeKey(key: string): void {
   try {
     s.removeItem(key);
   } catch (err) {
-    reportError("storage.write", err, {
-      recoverable: true,
-      detail: "dm call join cache clear failed",
-      storage_area: "dm-call-join-cache",
-    });
+    void err;
+    reportError({ kind: "storage.write", reason: "write-failed", area: "dm-call-join-cache" });
   }
 }
 

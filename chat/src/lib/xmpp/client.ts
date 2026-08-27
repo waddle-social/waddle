@@ -424,11 +424,6 @@ function fallbackUuid(randomBytes?: Uint8Array): string {
   return `${hex.slice(0, 4).join("")}-${hex.slice(4, 6).join("")}-${hex.slice(6, 8).join("")}-${hex.slice(8, 10).join("")}-${hex.slice(10).join("")}`;
 }
 
-/** For tests only — prove the no-randomUUID path remains UUID-shaped. */
-export function __createFallbackXmppResourceForTesting(bytes: Uint8Array): string {
-  return `web-${fallbackUuid(bytes)}`;
-}
-
 async function loadWasmModule(): Promise<WasmModule> {
   if (!wasmModulePromise) {
     wasmModulePromise = import("@waddle/xmpp-client-wasm").then(async (mod) => {
@@ -891,7 +886,6 @@ export class BrowserXmppClient {
       recoverable: !terminalAuthorizationCondition,
       detail: `room join rejected — ${room}`,
       cause: rejection,
-      roomLocalpart: jidLocalpart(room),
       ...stanzaErrorContext({
         condition: presence.error_condition,
         errorType: presence.error_type,
@@ -938,11 +932,14 @@ export class BrowserXmppClient {
   setSessionLifecycleHandler(h: (event: SessionLifecycleEvent) => void) { this.events.set("sessionLifecycle", h); }
   setCatchupFailureHandler(h: (failure: CatchupConversationFailure) => void) { this.events.set("catchupFailure", h); }
 
-  onMessageAcked(hook: (id: string, meta: { kind: "room" | "dm"; latencyMs: number }) => void) { this.events.on("messageAcked", hook); }
-  onMessageDeliveryFailed(hook: (id: string, meta: { kind: "room" | "dm" }) => void) { this.events.on("messageDeliveryFailed", hook); }
+  onMessageAcked(hook: (meta: { kind: "room" | "dm"; latencyMs: number }) => void) { this.events.on("messageAcked", hook); }
+  onMessageDeliveryFailed(hook: (meta: { kind: "room" | "dm" }) => void) { this.events.on("messageDeliveryFailed", hook); }
   onSessionLifecycle(hook: (event: SessionLifecycleEvent) => void) { this.events.on("sessionLifecycleHook", hook); }
   onStatus(hook: (status: XmppStatusSnapshot, meta: { reconnectDurationMs?: number }) => void) { this.events.on("statusHook", hook); }
-  onSendEnqueued(hook: (info: { kind: "room" | "dm"; reason: string }) => void) { this.events.on("sendEnqueued", hook); }
+  onSendEnqueued(hook: (info: {
+    kind: "room" | "dm";
+    reason: "offline" | "disposed" | "destroying" | "no-client" | "reconnecting" | "not-ready";
+  }) => void) { this.events.on("sendEnqueued", hook); }
   onQueueDepthChange(hook: (depth: { kind: "room" | "dm"; persisted: number; inflight: number }) => void) { this.events.on("queueDepthChange", hook); }
   onError(hook: (event: XmppErrorEvent) => void) { this.events.on("error", hook); }
   listRoomAccessRequirements(): ReadonlyArray<Extract<RoomAccessChangedEvent, { state: "required" }>> {
@@ -1249,8 +1246,7 @@ export class BrowserXmppClient {
     this.disarmOnlineRecovery();
     this.clearReconnectTimer();
     this.connectPromise = withSpan(
-      "xmpp.connect",
-      { "waddle.xmpp.transport": "websocket" },
+      { kind: "xmpp-connect" },
       () => new Promise<void>((resolve, reject) => {
         const timeout = setTimeout(() => {
           // C1: the connect budget measures to session-ready, not to
@@ -1739,8 +1735,7 @@ export class BrowserXmppClient {
     this.dispatchFocusedRoomHandlers();
     try {
       await withSpan(
-        "xmpp.room_switch",
-        { "conversation.kind": "room" },
+        { kind: "room-switch" },
         () => this.ensureJoined(nextRoom),
       );
     } catch (err) {
@@ -1761,7 +1756,7 @@ export class BrowserXmppClient {
     return this.canUseConnectedSession() && this.currentRoom === roomJid && this.joinedMucReady.has(this.roomJoinKey(roomJid));
   }
 
-  private enqueueReason(): string {
+  private enqueueReason(): "offline" | "disposed" | "destroying" | "no-client" | "reconnecting" | "not-ready" {
     if (browserOffline()) return "offline";
     if (this.disposed) return "disposed";
     if (this.destroying) return "destroying";

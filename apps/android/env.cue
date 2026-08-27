@@ -29,21 +29,27 @@ let _NamespaceAndroidCache = schema.#Contributor & {
 // Shared Rust FFI surface: any change to the client crates retriggers the
 // Android pipelines, mirroring the hand-maintained Apple workflow filters.
 let _ffiInputs = [
+	"../../.cargo/**",
+	"../../server/.cargo/**",
 	"../../server/Cargo.toml",
 	"../../server/Cargo.lock",
 	"../../server/rust-toolchain.toml",
-	"../../server/crates/waddle-xmpp-client/**",
-	"../../server/crates/waddle-xmpp-client-ffi/**",
+	"../../server/crates/**",
+	"../../server/crates/**/.cargo/**",
 	"../../scripts/build-android-rust.sh",
 	"../../scripts/check-android-ffi-bindings.sh",
 ]
 
 let _gradleInputs = [
+	"**/build.gradle.kts",
 	"settings.gradle.kts",
 	"build.gradle.kts",
+	"gradle/libs.versions.toml",
 	"gradle.properties",
 	"gradle/**",
 	"gradlew",
+	"**/src",
+	"**/src/**",
 	"app/**",
 	"core/client/build.gradle.kts",
 	"core/client/consumer-rules.pro",
@@ -86,14 +92,14 @@ schema.#Project & {
 				manual:        true
 			}
 			provider: github: permissions: contents: "write"
-			"tasks": [tasks.checkBindingsDrift, tasks.lint, tasks.test, tasks.publishDebugApk]
+			"tasks": [tasks.checkBindingsDrift, tasks.telemetryContract, tasks.lint, tasks.test, tasks.publishDebugApk]
 		}
 		pullRequest: {
 			when: {
 				pullRequest: true
 			}
 			provider: github: permissions: contents: "read"
-			"tasks": [tasks.checkCiDrift, tasks.checkBindingsDrift, tasks.lint, tasks.test, tasks.build]
+			"tasks": [tasks.checkCiDrift, tasks.checkBindingsDrift, tasks.telemetryContract, tasks.lint, tasks.test, tasks.build]
 		}
 		// Instrumented suite on a headless GMD ATD emulator. Runs as its
 		// own parallel PR job so a flaky emulator never delays unit-test
@@ -146,6 +152,17 @@ schema.#Project & {
 			command: "cuenv"
 			args: ["sync", "ci", "--check", "-p", "."]
 			inputs: ["env.cue", "../../.github/workflows/waddle-android-*.yml"]
+		}
+
+		telemetryContract: schema.#Task & {
+			command: "bash"
+			args: ["../../scripts/check-native-remote-telemetry.sh", "--android"]
+			inputs: list.Concat([_gradleInputs, _ffiInputs, [
+				"env.cue",
+				"../../flake.nix",
+				"../../scripts/check-native-remote-telemetry.sh",
+				"../../scripts/native-telemetry-cargo-closure.py",
+			]])
 		}
 
 		build: schema.#Task & {

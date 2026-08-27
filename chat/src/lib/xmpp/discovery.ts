@@ -8,6 +8,7 @@ import type {
   DiscoveredTopology,
   RoomCatalogFingerprintField,
 } from "./types";
+import type { XmppCondition, XmppStreamReason } from "../telemetry-observations";
 import { bareJidKey, barePeerJid, jidDomain, jidLocalpart } from "./jid";
 import { FIELD_PIN_PERMISSION } from "./protocol-helpers";
 import { stanzaErrorContext } from "./stanza-error-context";
@@ -221,10 +222,10 @@ function logDiscoFailure(kind: "info" | "items" | "pubsub", to: string, node: st
     // channels fail to render — keep them structured so consumers can
     // grep / aggregate by `to`.
     console.warn(`[disco] ${kind} timeout`, { to: err.to, node: err.node });
-    const detail = `disco-${kind}-timeout`;
-    reportError("xmpp.stream", new Error(detail), {
+    reportError({
+      kind: "xmpp.stream",
+      reason: `disco-${kind}-timeout`,
       recoverable: true,
-      detail,
       errorSource: "local-timeout",
     });
     return;
@@ -242,12 +243,12 @@ function logDiscoFailure(kind: "info" | "items" | "pubsub", to: string, node: st
   // high-cardinality `disco-*-*` details. The beacon exception is a
   // fresh Error carrying only the detail — never the raw rejection,
   // whose message embeds the uncapped server `<text/>`.
-  const condition = XMPP_ERROR_CONDITIONS.has(context.condition) ? context.condition : "unknown";
-  const detail = `disco-${kind}-${condition}`;
-  reportError("xmpp.stream", new Error(detail), {
+  const condition = (XMPP_ERROR_CONDITIONS.has(context.condition) ? context.condition : "unknown") as XmppCondition;
+  reportError({
+    kind: "xmpp.stream",
+    reason: `disco-${kind}-${condition}` as XmppStreamReason,
     recoverable: true,
-    detail,
-    ...context,
+    ...(context.errorType ? { errorType: context.errorType } : {}),
     condition,
     errorSource: "server",
   });
