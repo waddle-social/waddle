@@ -953,6 +953,138 @@ describe("telemetry module no-op behaviour", () => {
       peer: ":jid",
     });
   });
+
+  test("transport sanitizer projects measurements to a closed allowlist", () => {
+    const sanitized = __sanitizeFaroTransportItemForTesting({
+      type: "measurement",
+      payload: {
+        type: "chat.xmpp.catchup",
+        values: {
+          conversations: 2,
+          processed_conversations: 1,
+          pages: 4,
+          page_failures: 2,
+          messages: 12,
+          duration_ms: 89.4,
+          hidden_ms: 0,
+          inp: 91,
+          largest_shift_value: 0.42,
+          nan_value: Number.NaN,
+          infinity_value: Number.POSITIVE_INFINITY,
+        },
+        context: {
+          visibility: "visible",
+          hidden_bucket: "visible",
+          outcome: "aborted",
+          id: "v4-1234-unsafe",
+          rating: "good",
+          navigation_type: "navigate",
+          navigation_entry_id: "nav-123",
+          largest_shift_target: "#chat > .message:nth-child(7)",
+          interaction_target: "button[data-room='secret']",
+          element: "img[alt='alice@example.com']",
+          unknown_key: "secret",
+        },
+      },
+      meta: {},
+    } as never) as unknown as {
+      payload: {
+        type: string;
+        values: Record<string, number>;
+        context?: Record<string, string>;
+      };
+    };
+
+    expect(sanitized.payload).toEqual({
+      type: "chat.xmpp.catchup",
+      values: {
+        conversations: 2,
+        processed_conversations: 1,
+        pages: 4,
+        page_failures: 2,
+        messages: 12,
+        duration_ms: 89.4,
+        hidden_ms: 0,
+      },
+      context: {
+        visibility: "visible",
+        hidden_bucket: "visible",
+        outcome: "aborted",
+      },
+    });
+  });
+
+  test("transport sanitizer redacts unallowlisted measurement types", () => {
+    const sanitized = __sanitizeFaroTransportItemForTesting({
+      type: "measurement",
+      payload: {
+        type: "web-vitals",
+        values: {
+          lcp: 2_500,
+          delta: 125,
+        },
+        context: {
+          id: "v4-generated-id",
+          element: "#composer button.send",
+        },
+      },
+      meta: {},
+    } as never) as unknown as {
+      payload: {
+        type: string;
+        values: Record<string, number>;
+        context?: Record<string, string>;
+      };
+    };
+
+    expect(sanitized.payload).toEqual({
+      type: "chat.telemetry.measurement.dropped",
+      values: { count: 1 },
+    });
+  });
+
+  test("transport sanitizer drops hostile values under allowlisted measurement context keys", () => {
+    const sanitized = __sanitizeFaroTransportItemForTesting({
+      type: "measurement",
+      payload: {
+        type: "chat.xmpp.catchup",
+        values: {
+          conversations: 1,
+          processed_conversations: 1,
+          pages: 1,
+          page_failures: 0,
+          messages: 1,
+          duration_ms: 10,
+          hidden_ms: 10,
+        },
+        context: {
+          visibility: "alice@example.com/desktop",
+          hidden_bucket: "#composer button.send",
+          outcome: "https://telemetry.example/collect",
+        },
+      },
+      meta: {},
+    } as never) as unknown as {
+      payload: {
+        type: string;
+        values: Record<string, number>;
+        context?: Record<string, string>;
+      };
+    };
+
+    expect(sanitized.payload).toEqual({
+      type: "chat.xmpp.catchup",
+      values: {
+        conversations: 1,
+        processed_conversations: 1,
+        pages: 1,
+        page_failures: 0,
+        messages: 1,
+        duration_ms: 10,
+        hidden_ms: 10,
+      },
+    });
+  });
 });
 
 describe("BrowserXmppClient telemetry hooks", () => {

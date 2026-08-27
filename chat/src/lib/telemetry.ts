@@ -115,6 +115,7 @@ const REDACTED_SPAN_PORT = 0;
 const FARO_CSP_INSTRUMENTATION = "@grafana/faro-web-sdk:instrumentation-csp";
 const FARO_GLOBAL_ERROR_INSTRUMENTATION = "@grafana/faro-web-sdk:instrumentation-errors";
 const FARO_NAVIGATION_INSTRUMENTATION = "@grafana/faro-web-sdk:instrumentation-navigation";
+const FARO_WEB_VITALS_INSTRUMENTATION = "@grafana/faro-web-sdk:instrumentation-web-vitals";
 const FARO_TRACE_EVENT_PREFIX = "faro.tracing.";
 const SPAN_URL_ATTRIBUTE_KEYS = ["http.url", "url.full"] as const;
 const SPAN_ENDPOINT_ATTRIBUTE_KEYS = [
@@ -141,6 +142,73 @@ const SENSITIVE_ERROR_CONTEXT_KEYS = new Set([
   "key",
   "storagekey",
 ]);
+const DROPPED_MEASUREMENT_TYPE = "chat.telemetry.measurement.dropped";
+const SAFE_MEASUREMENT_SCHEMAS = {
+  "chat.client.heap": {
+    context: {
+      hidden_bucket: ["visible", "lt_1m", "1m_5m", "5m_15m", "15m_1h", "gt_1h"],
+      visibility: ["visible", "hidden"],
+    },
+    values: ["used_mb", "total_mb", "limit_mb", "hidden_ms"],
+  },
+  "chat.client.longtask.duration_ms": {
+    context: {
+      hidden_bucket: ["visible", "lt_1m", "1m_5m", "5m_15m", "15m_1h", "gt_1h"],
+      visibility: ["visible", "hidden"],
+    },
+    values: ["duration_ms", "hidden_ms"],
+  },
+  "chat.xmpp.catchup": {
+    context: {
+      hidden_bucket: ["visible", "lt_1m", "1m_5m", "5m_15m", "15m_1h", "gt_1h"],
+      outcome: ["completed", "aborted", "failed"],
+      visibility: ["visible", "hidden"],
+    },
+    values: [
+      "conversations",
+      "processed_conversations",
+      "pages",
+      "page_failures",
+      "messages",
+      "duration_ms",
+      "hidden_ms",
+    ],
+  },
+  "chat.xmpp.message.acked.latency_ms": {
+    context: {
+      kind: ["room", "dm"],
+    },
+    values: ["latency_ms"],
+  },
+  "chat.xmpp.queue.depth": {
+    context: {
+      kind: ["room", "dm"],
+    },
+    values: ["persisted", "inflight"],
+  },
+  "chat.xmpp.reconnect.attempt": {
+    context: {
+      hidden_bucket: ["visible", "lt_1m", "1m_5m", "5m_15m", "15m_1h", "gt_1h"],
+      visibility: ["visible", "hidden"],
+    },
+    values: ["count", "attempt", "delay_ms", "hidden_ms"],
+  },
+  "chat.xmpp.reconnect.duration_ms": {
+    context: {},
+    values: ["duration_ms"],
+  },
+  "chat.xmpp.resume_drain": {
+    context: {
+      hidden_bucket: ["visible", "lt_1m", "1m_5m", "5m_15m", "15m_1h", "gt_1h"],
+      visibility: ["visible", "hidden"],
+    },
+    values: ["buffered", "duration_ms", "hidden_ms"],
+  },
+} as const satisfies Record<string, {
+  context: Readonly<Record<string, readonly string[]>>;
+  values: readonly string[];
+}>;
+const MAX_SAFE_TELEMETRY_MEASUREMENT_VALUE = 1_000_000_000;
 const XMPP_RESOURCE_PATTERN = /web-[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}/gi;
 
 type SpanAttributeValue = string | number;
@@ -179,6 +247,11 @@ type FaroTracePayload = {
       spans?: OtelSpan[];
     }>;
   }>;
+};
+type FaroMeasurementPayload = {
+  context?: Record<string, string>;
+  type?: string;
+  values?: Record<string, unknown>;
 };
 
 /**
@@ -367,6 +440,11 @@ function sanitizeTransportPayload(item: TransportItem): void {
     return;
   }
 
+  if (item.type === "measurement") {
+    item.payload = sanitizeMeasurementPayload(item.payload) as TransportItem["payload"];
+    return;
+  }
+
   if (item.type === "event") {
     sanitizeEventPayload(item.payload, trustedSpanOriginsForTransport());
   }
@@ -409,6 +487,68 @@ function sanitizeTracePayload(payload: unknown, trustedOrigins: Set<string>): vo
       }
     }
   }
+}
+
+function sanitizeMeasurementPayload(payload: unknown): FaroMeasurementPayload {
+  const measurement = isRecord(payload) ? payload as FaroMeasurementPayload : undefined;
+  if (!measurement) return droppedMeasurementPayload();
+  const schema = measurement.type
+    ? SAFE_MEASUREMENT_SCHEMAS[measurement.type as keyof typeof SAFE_MEASUREMENT_SCHEMAS]
+    : undefined;
+  if (!schema) {
+    return droppedMeasurementPayload();
+  }
+
+  const context = sanitizeMeasurementContext(measurement.context, schema.context);
+  return {
+    context,
+    type: measurement.type,
+    values: sanitizeMeasurementValues(measurement.values, schema.values),
+  };
+}
+
+function droppedMeasurementPayload(): FaroMeasurementPayload {
+  return {
+    type: DROPPED_MEASUREMENT_TYPE,
+    values: { count: 1 },
+  };
+}
+
+function sanitizeMeasurementValues(
+  values: Record<string, unknown> | undefined,
+  allowedKeys: readonly string[],
+): Record<string, number> {
+  if (!isRecord(values)) return {};
+
+  const sanitized: Record<string, number> = {};
+  const safeKeys = new Set(allowedKeys);
+  for (const [key, value] of Object.entries(values)) {
+    if (!safeKeys.has(key)) continue;
+    const numericValue = sanitizeMeasurementNumber(value);
+    if (numericValue === undefined) continue;
+    sanitized[key] = numericValue;
+  }
+  return sanitized;
+}
+
+function sanitizeMeasurementContext(
+  context: Record<string, string> | undefined,
+  allowedContext: Readonly<Record<string, readonly string[]>>,
+): Record<string, string> | undefined {
+  if (!isStringRecord(context)) return undefined;
+
+  const sanitized = Object.fromEntries(
+    Object.entries(context).filter(([key, value]) =>
+      key in allowedContext && allowedContext[key as keyof typeof allowedContext].includes(value),
+    ),
+  );
+  return Object.keys(sanitized).length > 0 ? sanitized : undefined;
+}
+
+function sanitizeMeasurementNumber(value: unknown): number | undefined {
+  if (typeof value !== "number" || !Number.isFinite(value)) return undefined;
+  if (value < 0 || value > MAX_SAFE_TELEMETRY_MEASUREMENT_VALUE) return undefined;
+  return Number(value.toFixed(3));
 }
 
 function sanitizeOtelSpanAttributes(attributes: OtelKeyValue[] | undefined, trustedOrigins: Set<string>): void {
@@ -647,6 +787,10 @@ function getPrivacySafeWebInstrumentations() {
     instrumentation.name !== FARO_CSP_INSTRUMENTATION
     && instrumentation.name !== FARO_GLOBAL_ERROR_INSTRUMENTATION
     && instrumentation.name !== FARO_NAVIGATION_INSTRUMENTATION
+    // Faro's WebVitals instrumentation is hard-wired to
+    // `web-vitals/attribution`, which adds DOM selectors, generated IDs,
+    // and navigation entry IDs we do not emit anywhere else.
+    && instrumentation.name !== FARO_WEB_VITALS_INSTRUMENTATION
   );
 }
 

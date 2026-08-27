@@ -34,13 +34,16 @@ let _ffiInputs = [
 	"../../server/rust-toolchain.toml",
 	"../../server/crates/waddle-xmpp-client/**",
 	"../../server/crates/waddle-xmpp-client-ffi/**",
+	"../../server/crates/waddle-xmpp-core/**",
 	"../../scripts/build-android-rust.sh",
 	"../../scripts/check-android-ffi-bindings.sh",
 ]
 
 let _gradleInputs = [
+	"**/build.gradle.kts",
 	"settings.gradle.kts",
 	"build.gradle.kts",
+	"gradle/libs.versions.toml",
 	"gradle.properties",
 	"gradle/**",
 	"gradlew",
@@ -151,7 +154,7 @@ schema.#Project & {
 		telemetryContract: schema.#Task & {
 			command: "bash"
 			args: ["../../scripts/check-native-remote-telemetry.sh", "--android"]
-			inputs: list.Concat([_gradleInputs, ["env.cue", "../../scripts/check-native-remote-telemetry.sh"]])
+			inputs: list.Concat([_gradleInputs, _ffiInputs, ["env.cue", "../../scripts/check-native-remote-telemetry.sh"]])
 		}
 
 		build: schema.#Task & {

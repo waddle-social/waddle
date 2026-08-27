@@ -9,6 +9,11 @@ on:
     paths:
     - .cargo/**
     - .github/workflows/waddle-chat-default.yml
+    - apps/android/**/build.gradle.kts
+    - apps/android/gradle/libs.versions.toml
+    - apps/android/gradle/libs.versions.toml/**
+    - apps/android/settings.gradle.kts
+    - apps/android/settings.gradle.kts/**
     - bun.lock
     - bun.lock/**
     - chat/astro.config.mjs
@@ -56,6 +61,7 @@ on:
     - server/crates/waddle-xmpp-client-wasm/Cargo.toml/**
     - server/crates/waddle-xmpp-client-wasm/src/**
     - server/crates/waddle-xmpp-client/**
+    - server/crates/waddle-xmpp-client-ffi/**
     - server/crates/waddle-xmpp-core/**
     - server/rust-toolchain.toml
     - server/rust-toolchain.toml/**

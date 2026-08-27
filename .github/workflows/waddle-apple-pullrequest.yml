@@ -11,6 +11,7 @@ on:
       - server/Cargo.toml
       - server/crates/waddle-xmpp-client/**
       - server/crates/waddle-xmpp-client-ffi/**
+      - server/crates/waddle-xmpp-core/**
       - server/rust-toolchain.toml
   workflow_dispatch: {}
 

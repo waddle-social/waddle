@@ -7,6 +7,11 @@ on:
     paths:
     - .cargo/**
     - .github/workflows/waddle-chat-pullrequest.yml
+    - apps/android/**/build.gradle.kts
+    - apps/android/gradle/libs.versions.toml
+    - apps/android/gradle/libs.versions.toml/**
+    - apps/android/settings.gradle.kts
+    - apps/android/settings.gradle.kts/**
     - apps/apple/Waddle/Assets.xcassets/AccentColor.colorset/Contents.json
     - apps/apple/Waddle/Assets.xcassets/AccentColor.colorset/Contents.json/**
     - bun.lock
@@ -62,6 +67,7 @@ on:
     - server/crates/waddle-xmpp-client-wasm/Cargo.toml/**
     - server/crates/waddle-xmpp-client-wasm/src/**
     - server/crates/waddle-xmpp-client/**
+    - server/crates/waddle-xmpp-client-ffi/**
     - server/crates/waddle-xmpp-core/**
     - server/rust-toolchain.toml
     - server/rust-toolchain.toml/**

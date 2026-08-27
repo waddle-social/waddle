@@ -8,6 +8,7 @@ on:
     - main
     paths:
     - .github/workflows/waddle-android-default.yml
+    - apps/android/**/build.gradle.kts
     - apps/android/app/**
     - apps/android/build.gradle.kts
     - apps/android/build.gradle.kts/**
@@ -25,6 +26,8 @@ on:
     - apps/android/detekt.yml/**
     - apps/android/env.cue
     - apps/android/env.cue/**
+    - apps/android/gradle/libs.versions.toml
+    - apps/android/gradle/libs.versions.toml/**
     - apps/android/gradle.properties
     - apps/android/gradle.properties/**
     - apps/android/gradle/**
@@ -48,6 +51,7 @@ on:
     - server/Cargo.toml/**
     - server/crates/waddle-xmpp-client-ffi/**
     - server/crates/waddle-xmpp-client/**
+    - server/crates/waddle-xmpp-core/**
     - server/rust-toolchain.toml
     - server/rust-toolchain.toml/**
   workflow_dispatch: {}
