@@ -38,12 +38,16 @@ on:
     - apps/android/settings.gradle.kts
     - apps/android/settings.gradle.kts/**
     - cue.mod/**
+    - flake.nix
+    - flake.nix/**
     - scripts/build-android-rust.sh
     - scripts/build-android-rust.sh/**
     - scripts/check-android-ffi-bindings.sh
     - scripts/check-android-ffi-bindings.sh/**
     - scripts/check-native-remote-telemetry.sh
     - scripts/check-native-remote-telemetry.sh/**
+    - scripts/native-telemetry-cargo-closure.py
+    - scripts/native-telemetry-cargo-closure.py/**
     - scripts/setup-android-sdk.sh
     - scripts/setup-android-sdk.sh/**
     - server/Cargo.lock

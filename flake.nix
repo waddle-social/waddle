@@ -440,6 +440,7 @@
               rustToolchain
               pkgs.bun
               pkgs.nodejs_22
+              pkgs.python3
               pkgs.go
               pkgs.cue
               pkgs.kubectl

@@ -35,10 +35,12 @@ let _NativeTelemetryContractInputs = [
 	"env.cue",
 	"package.json",
 	"tests/native-telemetry-off.test.ts",
+	"../flake.nix",
 	"../apps/android/**/build.gradle.kts",
 	"../apps/android/gradle/libs.versions.toml",
 	"../apps/android/settings.gradle.kts",
 	"../scripts/check-native-remote-telemetry.sh",
+	"../scripts/native-telemetry-cargo-closure.py",
 	"../server/crates/**",
 	"../server/wasm-pkg/waddle-xmpp-client-wasm/**",
 ]

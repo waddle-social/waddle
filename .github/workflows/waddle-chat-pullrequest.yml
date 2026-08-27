@@ -55,6 +55,8 @@ on:
     - package.json/**
     - scripts/check-native-remote-telemetry.sh
     - scripts/check-native-remote-telemetry.sh/**
+    - scripts/native-telemetry-cargo-closure.py
+    - scripts/native-telemetry-cargo-closure.py/**
     - scripts/generate-design-tokens.mjs
     - scripts/generate-design-tokens.mjs/**
     - server/.cargo/**

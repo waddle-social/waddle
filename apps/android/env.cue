@@ -154,7 +154,12 @@ schema.#Project & {
 		telemetryContract: schema.#Task & {
 			command: "bash"
 			args: ["../../scripts/check-native-remote-telemetry.sh", "--android"]
-			inputs: list.Concat([_gradleInputs, _ffiInputs, ["env.cue", "../../scripts/check-native-remote-telemetry.sh"]])
+			inputs: list.Concat([_gradleInputs, _ffiInputs, [
+				"env.cue",
+				"../../flake.nix",
+				"../../scripts/check-native-remote-telemetry.sh",
+				"../../scripts/native-telemetry-cargo-closure.py",
+			]])
 		}
 
 		build: schema.#Task & {

@@ -67,170 +67,12 @@ check_absent() {
   rm -f "$output_file"
 }
 
-resolve_dir() {
-  local dir="$1"
-  (
-    cd "$dir" >/dev/null 2>&1 && pwd
-  )
-}
-
-cargo_path_dependencies() {
-  local manifest="$1"
-  awk '
-    /^[[:space:]]*\[/ {
-      section = $0
-      gsub(/^[[:space:]]*\[/, "", section)
-      sub(/\].*$/, "", section)
-      gsub(/[[:space:]]+/, "", section)
-      active = section == "dependencies" || section == "build-dependencies" || section ~ /^target\..*\.(dependencies|build-dependencies)$/ || section ~ /^(dependencies|build-dependencies)\.[^.]+$/ || section ~ /^target\..*\.(dependencies|build-dependencies)\.[^.]+$/
-    }
-    active && $0 !~ /^[[:space:]]*#/ {
-      if (match($0, /path[[:space:]]*=[[:space:]]*"[^"]+"/)) {
-        value = substr($0, RSTART, RLENGTH)
-        sub(/^[^"]*"/, "", value)
-        sub(/"$/, "", value)
-        print value
-      } else if (match($0, /path[[:space:]]*=[[:space:]]*\047[^\047]+\047/)) {
-        value = substr($0, RSTART, RLENGTH)
-        sub(/^[^\047]*\047/, "", value)
-        sub(/\047$/, "", value)
-        print value
-      }
-    }
-  ' "$manifest"
-}
-
-# Dependency names a manifest inherits from its workspace root
-# (`name = { workspace = true }` / `name.workspace = true`) inside
-# dependency sections.
-cargo_workspace_inherited_dependencies() {
-  local manifest="$1"
-  awk '
-    /^[[:space:]]*\[/ {
-      section = $0
-      gsub(/^[[:space:]]*\[/, "", section)
-      sub(/\].*$/, "", section)
-      gsub(/[[:space:]]+/, "", section)
-      active = section == "dependencies" || section == "build-dependencies" || section ~ /^target\..*\.(dependencies|build-dependencies)$/
-      inline_name = ""
-      if (section ~ /^(dependencies|build-dependencies)\.("[^"]+"|\047[^\047]+\047|[^.]+)$/ || section ~ /^target\..*\.(dependencies|build-dependencies)\.("[^"]+"|\047[^\047]+\047|[^.]+)$/) {
-        inline_name = section
-        sub(/^(.*\.)?(dependencies|build-dependencies)\./, "", inline_name)
-        gsub(/^["\047]|["\047]$/, "", inline_name)
-      }
-    }
-    $0 ~ /^[[:space:]]*#/ { next }
-    active && $0 ~ /^[[:space:]]*("[^"]+"|\047[^\047]+\047|[A-Za-z0-9_-]+)([[:space:]]*=[[:space:]]*\{[^}]*workspace[[:space:]]*=[[:space:]]*true|\.workspace[[:space:]]*=[[:space:]]*true)/ {
-      name = $0
-      sub(/^[[:space:]]*/, "", name)
-      sub(/[[:space:]]*(=|\.workspace).*$/, "", name)
-      gsub(/^["\047]|["\047]$/, "", name)
-      print name
-    }
-    inline_name != "" && $0 ~ /^[[:space:]]*workspace[[:space:]]*=[[:space:]]*true/ {
-      print inline_name
-    }
-  ' "$manifest"
-}
-
-# Nearest ancestor Cargo.toml declaring `[workspace]`, or nothing.
-cargo_workspace_root_manifest() {
-  local dir="$1"
-  while [[ -n "$dir" && "$dir" != "/" ]]; do
-    if [[ -f "${dir}/Cargo.toml" ]] && grep -Eq '^[[:space:]]*\[[[:space:]]*workspace[[:space:]]*\]' "${dir}/Cargo.toml"; then
-      printf '%s\n' "${dir}/Cargo.toml"
-      return 0
-    fi
-    dir="$(dirname "$dir")"
-  done
-  return 0
-}
-
-# `path = "..."` of one `[workspace.dependencies]` entry, relative to the
-# workspace root.
-cargo_workspace_dependency_path() {
-  local root_manifest="$1"
-  local name="$2"
-  awk -v name="$name" '
-    /^[[:space:]]*\[/ {
-      section = $0
-      gsub(/^[[:space:]]*\[/, "", section)
-      sub(/\].*$/, "", section)
-      gsub(/[[:space:]]+/, "", section)
-      active = section == "workspace.dependencies"
-      inline = section == "workspace.dependencies." name || section == "workspace.dependencies.\"" name "\"" || section == "workspace.dependencies.\047" name "\047"
-    }
-    $0 ~ /^[[:space:]]*#/ { next }
-    active {
-      key = $0
-      sub(/^[[:space:]]*/, "", key)
-      sub(/[[:space:]]*=.*$/, "", key)
-      gsub(/^["\047]|["\047]$/, "", key)
-      entry = key == name
-    }
-    !active { entry = 0 }
-    entry || inline {
-      if (match($0, /path[[:space:]]*=[[:space:]]*"[^"]+"/)) {
-        value = substr($0, RSTART, RLENGTH)
-        sub(/^[^"]*"/, "", value)
-        sub(/"$/, "", value)
-        print value
-        exit
-      } else if (match($0, /path[[:space:]]*=[[:space:]]*\047[^\047]+\047/)) {
-        value = substr($0, RSTART, RLENGTH)
-        sub(/^[^\047]*\047/, "", value)
-        sub(/\047$/, "", value)
-        print value
-        exit
-      }
-    }
-  ' "$root_manifest"
-}
-
-emit_cargo_crate_paths() {
-  local manifest="$1"
-  local visited_file="$2"
-  local crate_dir dependency_rel dependency_dir dependency_name root_manifest root_dir
-  if ! crate_dir="$(resolve_dir "$(dirname "$manifest")")"; then
-    return
-  fi
-  manifest="${crate_dir}/Cargo.toml"
-  if [[ ! -f "$manifest" ]] || grep -Fqx -- "$manifest" "$visited_file"; then
-    return
-  fi
-  printf '%s\n' "$manifest" >>"$visited_file"
-  printf '%s\n' "$manifest"
-  if [[ -d "${crate_dir}/src" ]]; then
-    printf '%s\n' "${crate_dir}/src"
-  fi
-  while IFS= read -r dependency_rel; do
-    [[ -n "$dependency_rel" ]] || continue
-    if dependency_dir="$(resolve_dir "${crate_dir}/${dependency_rel}")"; then
-      emit_cargo_crate_paths "${dependency_dir}/Cargo.toml" "$visited_file"
-    fi
-  done < <(cargo_path_dependencies "$manifest")
-  root_manifest="$(cargo_workspace_root_manifest "$(dirname "$crate_dir")")"
-  if [[ -z "$root_manifest" ]]; then
-    return 0
-  fi
-  root_dir="$(dirname "$root_manifest")"
-  while IFS= read -r dependency_name; do
-    [[ -n "$dependency_name" ]] || continue
-    dependency_rel="$(cargo_workspace_dependency_path "$root_manifest" "$dependency_name")"
-    [[ -n "$dependency_rel" ]] || continue
-    if dependency_dir="$(resolve_dir "${root_dir}/${dependency_rel}")"; then
-      emit_cargo_crate_paths "${dependency_dir}/Cargo.toml" "$visited_file"
-    fi
-  done < <(cargo_workspace_inherited_dependencies "$manifest")
-}
-
 discover_cargo_closure_paths() {
-  local visited_file manifest
-  visited_file="$(mktemp)"
-  for manifest in "$@"; do
-    emit_cargo_crate_paths "$manifest" "$visited_file"
-  done
-  rm -f "$visited_file"
+  if ! command -v python3 >/dev/null 2>&1; then
+    echo "[fail] python3 3.11 or newer is required for Cargo closure discovery" >&2
+    return 1
+  fi
+  python3 "${script_dir}/native-telemetry-cargo-closure.py" "$@"
 }
 
 android_module_source_sets() {
@@ -264,14 +106,18 @@ check_apple() {
   local -a apple_exporter_paths=(
     "$repo_root/apps/apple/Waddle"
   )
-  local path
-  while IFS= read -r path; do
-    apple_dependency_paths+=("$path")
-    apple_exporter_paths+=("$path")
-  done < <(discover_cargo_closure_paths \
+  local path cargo_closure
+  if ! cargo_closure="$(discover_cargo_closure_paths \
     "$repo_root/server/crates/waddle-xmpp-client/Cargo.toml" \
     "$repo_root/server/crates/waddle-xmpp-core/Cargo.toml" \
-    "$repo_root/server/crates/waddle-xmpp-client-ffi/Cargo.toml")
+    "$repo_root/server/crates/waddle-xmpp-client-ffi/Cargo.toml")"; then
+    return 1
+  fi
+  while IFS= read -r path; do
+    [[ -n "$path" ]] || continue
+    apple_dependency_paths+=("$path")
+    apple_exporter_paths+=("$path")
+  done <<<"$cargo_closure"
   check_absent "apple dependency" \
     "$native_dependency_pattern" \
     "${apple_dependency_paths[@]}"
@@ -294,7 +140,7 @@ check_android() {
     "$repo_root/apps/android/gradle.properties"
     "$repo_root/apps/android/app/src/main/AndroidManifest.xml"
   )
-  local path module_dir source_set_dir
+  local path module_dir source_set_dir cargo_closure
   while IFS= read -r path; do
     android_dependency_paths+=("$path")
     android_exporter_paths+=("$path")
@@ -312,13 +158,17 @@ check_android() {
   require_file "server/crates/waddle-xmpp-client/Cargo.toml"
   require_file "server/crates/waddle-xmpp-core/Cargo.toml"
   require_file "server/crates/waddle-xmpp-client-ffi/Cargo.toml"
-  while IFS= read -r path; do
-    android_dependency_paths+=("$path")
-    android_exporter_paths+=("$path")
-  done < <(discover_cargo_closure_paths \
+  if ! cargo_closure="$(discover_cargo_closure_paths \
     "$repo_root/server/crates/waddle-xmpp-client/Cargo.toml" \
     "$repo_root/server/crates/waddle-xmpp-core/Cargo.toml" \
-    "$repo_root/server/crates/waddle-xmpp-client-ffi/Cargo.toml")
+    "$repo_root/server/crates/waddle-xmpp-client-ffi/Cargo.toml")"; then
+    return 1
+  fi
+  while IFS= read -r path; do
+    [[ -n "$path" ]] || continue
+    android_dependency_paths+=("$path")
+    android_exporter_paths+=("$path")
+  done <<<"$cargo_closure"
   check_absent "android dependency" \
     "$native_dependency_pattern" \
     "${android_dependency_paths[@]}"
@@ -341,15 +191,19 @@ check_wasm() {
   require_file "server/crates/waddle-xmpp-client/Cargo.toml"
   require_file "server/crates/waddle-xmpp-core/Cargo.toml"
   require_file "server/crates/waddle-xmpp-client-ffi/Cargo.toml"
-  local path
-  while IFS= read -r path; do
-    wasm_dependency_paths+=("$path")
-    wasm_exporter_paths+=("$path")
-  done < <(discover_cargo_closure_paths \
+  local path cargo_closure
+  if ! cargo_closure="$(discover_cargo_closure_paths \
     "$repo_root/server/crates/waddle-xmpp-client-wasm/Cargo.toml" \
     "$repo_root/server/crates/waddle-xmpp-client/Cargo.toml" \
     "$repo_root/server/crates/waddle-xmpp-core/Cargo.toml" \
-    "$repo_root/server/crates/waddle-xmpp-client-ffi/Cargo.toml")
+    "$repo_root/server/crates/waddle-xmpp-client-ffi/Cargo.toml")"; then
+    return 1
+  fi
+  while IFS= read -r path; do
+    [[ -n "$path" ]] || continue
+    wasm_dependency_paths+=("$path")
+    wasm_exporter_paths+=("$path")
+  done <<<"$cargo_closure"
   check_absent "wasm dependency" \
     "$native_dependency_pattern" \
     "${wasm_dependency_paths[@]}"
