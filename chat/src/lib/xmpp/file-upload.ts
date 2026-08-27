@@ -101,18 +101,20 @@ async function uploadToSlot(
         return;
       }
       const error = new Error(`Upload failed with HTTP ${xhr.status}`);
-      reportError("upload", new Error("Upload failed with HTTP status"), {
-        recoverable: false,
-        detail: "xep-0363-put-failed",
+      reportError({
+        kind: "upload",
+        operation: "xep-0363-put",
+        failure: "http-status",
         status: xhr.status,
       });
       reject(error);
     };
     xhr.onerror = () => {
       const error = new Error("Upload failed: network error");
-      reportError("upload", new Error("Upload failed with network error"), {
-        recoverable: false,
-        detail: "xep-0363-put-network-error",
+      reportError({
+        kind: "upload",
+        operation: "xep-0363-put",
+        failure: "network-error",
       });
       reject(error);
     };

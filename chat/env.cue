@@ -31,6 +31,16 @@ let _WasmBuildInputs = list.Concat([_WasmSourceInputs, [
 	"scripts/build-xmpp-wasm.mjs",
 ]])
 
+let _NativeTelemetryContractInputs = [
+	"env.cue",
+	"package.json",
+	"tests/native-telemetry-off.test.ts",
+	"../scripts/check-native-remote-telemetry.sh",
+	"../server/crates/waddle-xmpp-client-wasm/Cargo.toml",
+	"../server/crates/waddle-xmpp-client-wasm/src/**",
+	"../server/wasm-pkg/waddle-xmpp-client-wasm/**",
+]
+
 schema.#Project & {
 	name: "waddle-chat"
 
@@ -70,7 +80,7 @@ schema.#Project & {
 				packages:        "none"
 				"pull-requests": "none"
 			}
-			"tasks": [tasks.deploy]
+			"tasks": [tasks.nativeTelemetryContract, tasks.deploy]
 		}
 		pullRequest: {
 			when: {
@@ -81,7 +91,7 @@ schema.#Project & {
 				"id-token": "write"
 				packages:   "none"
 			}
-			"tasks": [tasks.test, tasks.lint, tasks.build, tasks.tokensCheck]
+			"tasks": [tasks.nativeTelemetryContract, tasks.test, tasks.lint, tasks.build, tasks.tokensCheck]
 		}
 	}
 
@@ -118,6 +128,13 @@ schema.#Project & {
 			outputs: [
 				"worker-configuration.d.ts",
 			]
+		}
+
+		nativeTelemetryContract: schema.#Task & {
+			command: "bun"
+			args: ["test", "tests/native-telemetry-off.test.ts"]
+			dependsOn: [buildWasm, generateTypes]
+			inputs: _NativeTelemetryContractInputs
 		}
 
 		lint: schema.#Task & {
@@ -158,6 +175,9 @@ schema.#Project & {
 				"../bun.lock",
 				"package.json",
 				"tsconfig.json",
+				"../scripts/check-native-remote-telemetry.sh",
+				"../server/crates/waddle-xmpp-client-wasm/Cargo.toml",
+				"../server/crates/waddle-xmpp-client-wasm/src/**",
 				"src/**",
 				"tests/**",
 				"dist/**",

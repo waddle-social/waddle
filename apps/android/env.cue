@@ -86,14 +86,14 @@ schema.#Project & {
 				manual:        true
 			}
 			provider: github: permissions: contents: "write"
-			"tasks": [tasks.checkBindingsDrift, tasks.lint, tasks.test, tasks.publishDebugApk]
+			"tasks": [tasks.checkBindingsDrift, tasks.telemetryContract, tasks.lint, tasks.test, tasks.publishDebugApk]
 		}
 		pullRequest: {
 			when: {
 				pullRequest: true
 			}
 			provider: github: permissions: contents: "read"
-			"tasks": [tasks.checkCiDrift, tasks.checkBindingsDrift, tasks.lint, tasks.test, tasks.build]
+			"tasks": [tasks.checkCiDrift, tasks.checkBindingsDrift, tasks.telemetryContract, tasks.lint, tasks.test, tasks.build]
 		}
 		// Instrumented suite on a headless GMD ATD emulator. Runs as its
 		// own parallel PR job so a flaky emulator never delays unit-test
@@ -146,6 +146,12 @@ schema.#Project & {
 			command: "cuenv"
 			args: ["sync", "ci", "--check", "-p", "."]
 			inputs: ["env.cue", "../../.github/workflows/waddle-android-*.yml"]
+		}
+
+		telemetryContract: schema.#Task & {
+			command: "bash"
+			args: ["../../scripts/check-native-remote-telemetry.sh", "--android"]
+			inputs: list.Concat([_gradleInputs, ["env.cue", "../../scripts/check-native-remote-telemetry.sh"]])
 		}
 
 		build: schema.#Task & {

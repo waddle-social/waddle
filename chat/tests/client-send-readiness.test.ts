@@ -639,7 +639,7 @@ describe("client send readiness", () => {
     expect(errors[0].kind).toBe("muc-join");
     expect(errors[0].condition).toBe("registration-required");
     expect(errors[0].errorType).toBe("auth");
-    expect(errors[0].roomLocalpart).toBe("c1");
+    expect(errors[0].roomLocalpart).toBeUndefined();
     expect(staleJoinVisibleAtEmit).toEqual([false]);
   });
 
@@ -1960,7 +1960,7 @@ describe("client send readiness", () => {
     const client = new BrowserXmppClient(session());
     const failures: string[] = [];
     const depths: unknown[] = [];
-    client.onMessageDeliveryFailed((id) => failures.push(id));
+    client.onMessageDeliveryFailed((_meta) => failures.push("called"));
     client.onQueueDepthChange((depth) => depths.push(depth));
     const xmpp = { send_chat_message: mock(async () => await sent) };
     (client as unknown as { xmpp: typeof xmpp; connected: boolean }).xmpp = xmpp;
@@ -1990,7 +1990,7 @@ describe("client send readiness", () => {
     const client = new BrowserXmppClient(session());
     const failures: string[] = [];
     const depths: unknown[] = [];
-    client.onMessageDeliveryFailed((id) => failures.push(id));
+    client.onMessageDeliveryFailed((_meta) => failures.push("called"));
     client.onQueueDepthChange((depth) => depths.push(depth));
     const xmpp = { send_chat_message: mock(async () => await sent) };
     (client as unknown as { xmpp: typeof xmpp; connected: boolean }).xmpp = xmpp;
@@ -2020,7 +2020,7 @@ describe("client send readiness", () => {
     const client = new BrowserXmppClient(session());
     const failures: string[] = [];
     const depths: unknown[] = [];
-    client.onMessageDeliveryFailed((id) => failures.push(id));
+    client.onMessageDeliveryFailed((_meta) => failures.push("called"));
     client.onQueueDepthChange((depth) => depths.push(depth));
     const xmpp = { send_chat_message: mock(async () => await sent) };
     (client as unknown as { xmpp: typeof xmpp; connected: boolean }).xmpp = xmpp;

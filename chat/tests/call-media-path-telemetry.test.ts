@@ -2,6 +2,7 @@ import { describe, expect, test } from "bun:test";
 import {
   callMediaPathEventAttributes,
   createCallMediaPathBeacon,
+  telemetryMediaCodec,
   type CallMediaPathSnapshot,
 } from "../src/lib/calls/call-media-path-telemetry";
 
@@ -16,6 +17,11 @@ const RELAY_TCP: CallMediaPathSnapshot = {
 };
 
 describe("callMediaPathEventAttributes", () => {
+  test("normalizes arbitrary runtime codec names to the closed unknown value", () => {
+    expect(telemetryMediaCodec("private-codec-with-user-tag")).toBe("unknown");
+    expect(telemetryMediaCodec("video/vp9")).toBe("VP9");
+  });
+
   test("maps a snapshot to flat, low-cardinality attributes", () => {
     expect(callMediaPathEventAttributes(RELAY_TCP)).toEqual({
       direction: "send",

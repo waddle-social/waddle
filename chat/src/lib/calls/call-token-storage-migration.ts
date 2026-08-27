@@ -22,10 +22,8 @@ export function purgeLegacyStoragePrefixFromLocalStorage(prefix: string): void {
     // runs on every cache touch.
     if (!reportedPurgeFailures.has(prefix)) {
       reportedPurgeFailures.add(prefix);
-      reportError("storage.write", err, {
-        recoverable: true,
-        detail: `legacy call cache purge failed: ${prefix}`,
-      });
+      void err;
+      reportError({ kind: "storage.write", reason: "write-failed", area: "call-token-cache" });
     }
   }
 }
@@ -59,7 +57,9 @@ export function clearCallCacheKeysWithPrefix(
   try {
     for (const key of keysWithPrefix(storage, prefix)) storage.removeItem(key);
   } catch (err) {
-    reportError("storage.write", err, { recoverable: true, detail });
+    void err;
+    void detail;
+    reportError({ kind: "storage.write", reason: "write-failed", area: "call-token-cache" });
   }
 }
 

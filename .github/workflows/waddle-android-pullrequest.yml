@@ -37,6 +37,8 @@ on:
     - scripts/build-android-rust.sh/**
     - scripts/check-android-ffi-bindings.sh
     - scripts/check-android-ffi-bindings.sh/**
+    - scripts/check-native-remote-telemetry.sh
+    - scripts/check-native-remote-telemetry.sh/**
     - scripts/setup-android-sdk.sh
     - scripts/setup-android-sdk.sh/**
     - server/Cargo.lock

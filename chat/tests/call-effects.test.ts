@@ -8,7 +8,7 @@ import { handleCallEventSideEffect } from "../src/lib/calls/call-effects";
 import type { CallWireSender } from "../src/lib/calls/outbound";
 import type { CallEvent, CallMedia, CallState, LiveKitJoin } from "../src/lib/calls/types";
 import { __resetCallLifecycleTelemetryForTesting } from "../src/lib/calls/call-lifecycle-telemetry";
-import { __setFaroForTesting, callLifecycleEmissionSettled } from "../src/lib/telemetry";
+import { __setFaroForTesting } from "../src/lib/telemetry";
 
 const audioVideo: CallMedia = { audio: true, video: true };
 const audioOnly: CallMedia = { audio: true, video: false };
@@ -377,7 +377,6 @@ describe("handleCallEventSideEffect", () => {
       media: audioVideo,
     }, prev, sender, "alice@waddle.test/web-1");
 
-    await callLifecycleEmissionSettled();
     expect(events).toEqual([{
       name: "chat.call.lifecycle",
       attributes: expect.objectContaining({
@@ -419,7 +418,6 @@ describe("handleCallEventSideEffect", () => {
       media: audioVideo,
     }, prev, sender, "alice@waddle.test/web-1");
 
-    await callLifecycleEmissionSettled();
     expect(events).toEqual([{
       name: "chat.call.lifecycle",
       attributes: expect.objectContaining({

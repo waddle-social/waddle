@@ -5,7 +5,6 @@ import {
   roomBareJidFor,
   type SessionLifecycleEvent,
 } from "../src/lib/xmpp-client";
-import { __createFallbackXmppResourceForTesting } from "../src/lib/xmpp/client";
 import { RoomJoinRetryCoordinator } from "../src/lib/xmpp/room-join-retry";
 import {
   __clearSensitiveUrlsForTesting,
@@ -32,12 +31,7 @@ import {
   reportSessionLifecycle,
   reportStatusChange,
   reportStreamManagement,
-  setXmppResourceForTelemetry,
 } from "../src/lib/telemetry";
-import {
-  adoptCallCorrelationId,
-  clearCallCorrelationId,
-} from "../src/lib/calls/call-correlation";
 import { DiscoTimeoutError, discoverChannels } from "../src/lib/xmpp/discovery";
 import { installInstrumentation } from "../src/lib/xmpp/xmpp-instrumentation";
 import { nullResumePersistence } from "../src/lib/xmpp/resume-persistence";
@@ -94,22 +88,11 @@ function createFaroStub() {
     error: Error;
     options?: { type?: string; context?: Record<string, string> };
   }> = [];
-  const sessions: Array<{ attributes?: Record<string, string> }> = [];
-  let currentSession: { id?: string; attributes?: Record<string, string> } = {
-    id: "faro-session",
-    attributes: { retained: "yes" },
-  };
   return {
     events,
     measurements,
     errors,
-    sessions,
     api: {
-      getSession: () => currentSession,
-      setSession: (meta: { attributes?: Record<string, string> }) => {
-        currentSession = meta;
-        sessions.push(meta);
-      },
       pushEvent: (name: string, attributes?: Record<string, string>) => {
         events.push({ name, attributes });
       },
@@ -200,7 +183,6 @@ describe("reportCallAudioProcessing", () => {
           auto_gain_control: "unknown",
           ai_noise_filter: "rnnoise",
           call_kind: "muc",
-          call_id: "unknown",
         },
       },
     ]);
@@ -232,15 +214,13 @@ describe("call beacon kind tagging", () => {
         ice_transport: "udp",
         video_resolution_band: "720p",
         call_kind: "dm",
-        call_id: "unknown",
       },
     });
   });
 
-  test("adds call_kind and the shared correlation id to ICE events", async () => {
+  test("adds call_kind to ICE events", () => {
     const stub = createFaroStub();
     __setFaroForTesting(stub as never);
-    await adoptCallCorrelationId("general@muc.example.com");
 
     reportCallIce(
       {
@@ -252,7 +232,6 @@ describe("call beacon kind tagging", () => {
       },
       "muc",
     );
-    clearCallCorrelationId();
 
     expect(stub.events[0]).toEqual({
       name: "chat.call.ice",
@@ -263,9 +242,6 @@ describe("call beacon kind tagging", () => {
         turn_reachability: "gathered",
         ice_restarts: "once",
         call_kind: "muc",
-        // The #1452 join key — the same digest the server's call-setup
-        // logs and the LiveKit webhook logs carry for this room.
-        call_id: "ba2798ebd1a58db8",
       },
     });
   });
@@ -282,8 +258,8 @@ describe("telemetry module no-op behaviour", () => {
     // Nothing to assert beyond 'must not throw' — if these hit undefined
     // faro refs the chat would blow up on every send in local dev.
     expect(() => {
-      reportMessageAcked({ id: "x", kind: "room", latencyMs: 5 });
-      reportMessageFailed({ id: "x", kind: "dm" });
+      reportMessageAcked({ kind: "room", latencyMs: 5 });
+      reportMessageFailed({ kind: "dm" });
       reportSendEnqueued({ kind: "room", reason: "offline" });
       reportQueueDepthChange({ kind: "dm", persisted: 0, inflight: 0 });
       reportSessionLifecycle({ type: "fresh" });
@@ -299,8 +275,8 @@ describe("telemetry module no-op behaviour", () => {
     const stub = createFaroStub();
     __setFaroForTesting(stub as never);
 
-    reportMessageAcked({ id: "m-1", kind: "room", latencyMs: 123.4 });
-    reportMessageFailed({ id: "m-2", kind: "dm" });
+    reportMessageAcked({ kind: "room", latencyMs: 123.4 });
+    reportMessageFailed({ kind: "dm" });
     reportSendEnqueued({ kind: "dm", reason: "offline" });
     reportQueueDepthChange({ kind: "room", persisted: 2, inflight: 1 });
     reportSessionLifecycle({ type: "resumed" });
@@ -505,7 +481,7 @@ describe("telemetry module no-op behaviour", () => {
     ]);
   });
 
-  test("records the generated XMPP resource as a Faro session attribute", () => {
+  test("does not mutate the Faro session when installing XMPP instrumentation", () => {
     const stub = createFaroStub();
     __setFaroForTesting(stub as never);
 
@@ -513,24 +489,8 @@ describe("telemetry module no-op behaviour", () => {
     installInstrumentation(client);
 
     expect(client.fullJid).toMatch(/^alice@example\.com\/web-/);
-    expect(stub.sessions).toEqual([{
-      id: "faro-session",
-      attributes: {
-        retained: "yes",
-        xmpp_resource: client.xmppResource,
-      },
-    }]);
-  });
-
-  test("keeps the no-randomUUID XMPP resource fallback UUID-shaped", () => {
-    const stub = createFaroStub();
-    __setFaroForTesting(stub as never);
-
-    const resource = __createFallbackXmppResourceForTesting(new Uint8Array(16));
-    setXmppResourceForTelemetry(resource);
-
-    expect(resource).toBe("web-00000000-0000-4000-8000-000000000000");
-    expect(stub.sessions.at(-1)?.attributes?.xmpp_resource).toBe(resource);
+    expect(stub.events).toEqual([]);
+    expect(stub.errors).toEqual([]);
   });
 
   test("drops all WebSocket query values from telemetry span URLs", () => {
@@ -581,31 +541,27 @@ describe("telemetry module no-op behaviour", () => {
     state.reconnect.clearTimer();
   });
 
-  test("reportError drops identifier-bearing context fields", () => {
+  test("reportError encodes only the closed observation fields", () => {
     const stub = createFaroStub();
     __setFaroForTesting(stub as never);
 
-    reportError("storage.read", new Error("boom"), {
-      recoverable: true,
-      detail: "storage failed",
-      accountKey: "alice@example.com",
-      api_key: "secret",
-      jid: "alice@example.com/desktop",
-      key: "waddle.chat.sm-resume.alice@example.com",
-      note: "download /api/files/slot-1/file.png?waddle_session_id=tok",
+    reportError({
+      kind: "storage.read",
+      reason: "read-failed",
+      area: "outbound-queue",
       queueSize: 2,
-      storage_area: "outbound-queue",
-      storageKey: "waddle.chat.outbound.alice@example.com",
-    });
+      jid: "alice@example.com/desktop",
+      note: "download /api/files/slot-1/file.png?waddle_session_id=tok",
+    } as never);
 
     expect(stub.errors).toHaveLength(1);
+    expect(stub.errors[0].error.message).toBe("storage.read.read-failed");
+    expect(stub.errors[0].error.stack).toBeUndefined();
     expect(stub.errors[0].options?.context).toEqual({
       kind: "storage.read",
-      recoverable: "true",
-      detail: "storage failed",
-      note: "download /api/files/:slot/:file?waddle_session_id=:redacted",
+      reason: "read-failed",
+      area: "outbound-queue",
       queueSize: "2",
-      storage_area: "outbound-queue",
     });
   });
 
@@ -668,7 +624,7 @@ describe("telemetry module no-op behaviour", () => {
     await firstAttempt;
 
     expect(stub.errors).toHaveLength(1);
-    expect(stub.errors[0].error.message).toBe("room-join-resource-constraint");
+    expect(stub.errors[0].error.message).toBe("xmpp.muc-join.room-join-resource-constraint");
     const firstJoinListener = client.ensureJoined(roomJid);
     const secondJoinListener = client.ensureJoined(roomJid);
     retryTimer.runNext();
@@ -684,8 +640,8 @@ describe("telemetry module no-op behaviour", () => {
     expect(joinRoom).toHaveBeenCalledTimes(2);
     expect(stub.errors).toHaveLength(2);
     expect(stub.errors.map(({ error }) => error.message)).toEqual([
-      "room-join-resource-constraint",
-      "room-join-resource-constraint",
+      "xmpp.muc-join.room-join-resource-constraint",
+      "xmpp.muc-join.room-join-resource-constraint",
     ]);
     expect(observedByFirstListener).toHaveLength(2);
     expect(observedBySecondListener).toHaveLength(2);
@@ -747,7 +703,7 @@ describe("telemetry module no-op behaviour", () => {
       await firstAttempt;
 
       expect(stub.errors).toHaveLength(1);
-      expect(stub.errors[0].error.message).toBe("room-self-presence-timeout");
+      expect(stub.errors[0].error.message).toBe("xmpp.disconnect.room-self-presence-timeout");
 
       const firstJoinListener = client.ensureJoined(roomJid);
       const secondJoinListener = client.ensureJoined(roomJid);
@@ -760,8 +716,8 @@ describe("telemetry module no-op behaviour", () => {
       expect(joinRoom).toHaveBeenCalledTimes(2);
       expect(stub.errors).toHaveLength(2);
       expect(stub.errors.map(({ error }) => error.message)).toEqual([
-        "room-self-presence-timeout",
-        "room-self-presence-timeout",
+        "xmpp.disconnect.room-self-presence-timeout",
+        "xmpp.disconnect.room-self-presence-timeout",
       ]);
       expect(observedByFirstListener).toHaveLength(2);
       expect(observedBySecondListener).toHaveLength(2);
@@ -1004,9 +960,9 @@ describe("BrowserXmppClient telemetry hooks", () => {
     const client = new BrowserXmppClient(session());
 
     const primaryAcks: string[] = [];
-    const hookAcks: Array<{ id: string; kind: "room" | "dm"; latencyMs: number }> = [];
+    const hookAcks: Array<{ kind: "room" | "dm"; latencyMs: number }> = [];
     client.setMessageAckHandler((id) => primaryAcks.push(id));
-    client.onMessageAcked((id, meta) => hookAcks.push({ id, kind: meta.kind, latencyMs: meta.latencyMs }));
+    client.onMessageAcked((meta) => hookAcks.push({ kind: meta.kind, latencyMs: meta.latencyMs }));
 
     // Stub the pending-send bookkeeping by simulating a flush that
     // added an inflight entry plus a pending timestamp, then emit ack.
@@ -1038,7 +994,6 @@ describe("BrowserXmppClient telemetry hooks", () => {
 
     expect(primaryAcks).toEqual(["room-1"]);
     expect(hookAcks).toHaveLength(1);
-    expect(hookAcks[0].id).toBe("room-1");
     expect(hookAcks[0].kind).toBe("room");
     expect(hookAcks[0].latencyMs).toBeGreaterThanOrEqual(0);
   });
@@ -1245,27 +1200,28 @@ describe("BrowserXmppClient telemetry hooks", () => {
 
     const streamErr = stub.errors[0];
     expect(streamErr.error).not.toBe(streamCause);
-    expect(streamErr.error.message).toBe("stream-not-authorized");
+    expect(streamErr.error.message).toBe("xmpp.stream.stream-not-authorized");
+    expect(streamErr.error.stack).toBeUndefined();
     expect(streamErr.options?.type).toBe("xmpp.stream");
     expect(streamErr.options?.context?.kind).toBe("xmpp.stream");
     expect(streamErr.options?.context?.recoverable).toBe("false");
-    expect(streamErr.options?.context?.detail).toBe("stream-not-authorized");
+    expect(streamErr.options?.context?.reason).toBe("stream-not-authorized");
     expect(streamErr.options?.context?.condition).toBe("not-authorized");
 
     const authErr = stub.errors[1];
     expect(authErr.options?.type).toBe("xmpp.auth");
     expect(authErr.options?.context?.recoverable).toBe("false");
-    expect(authErr.options?.context?.detail).toBe("auth-error");
+    expect(authErr.options?.context?.reason).toBe("auth-error");
 
     const timeoutErr = stub.errors[2];
     expect(timeoutErr.options?.type).toBe("xmpp.disconnect");
     expect(timeoutErr.options?.context?.recoverable).toBe("true");
-    expect(timeoutErr.options?.context?.detail).toBe("connect-timeout");
+    expect(timeoutErr.options?.context?.reason).toBe("connect-timeout");
 
     const memberErr = stub.errors[3];
-    expect(memberErr.options?.type).toBe("xmpp.stream");
+    expect(memberErr.options?.type).toBe("xmpp.member-query");
     expect(memberErr.options?.context?.condition).toBe("unknown");
-    expect(memberErr.options?.context?.detail).toBe("member-query-unknown");
+    expect(memberErr.options?.context?.reason).toBe("member-query-unknown");
   });
 
   test("self-presence join timeout reports a stable room timeout detail", () => {
@@ -1292,11 +1248,11 @@ describe("BrowserXmppClient telemetry hooks", () => {
     expect(stub.errors).toHaveLength(1);
     expect(stub.errors[0].options?.type).toBe("xmpp.disconnect");
     expect(stub.errors[0].options?.context?.recoverable).toBe("true");
-    expect(stub.errors[0].options?.context?.detail).toBe("room-self-presence-timeout");
+    expect(stub.errors[0].options?.context?.reason).toBe("room-self-presence-timeout");
     expect(stub.errors[0].options?.context?.errorSource).toBe("local-timeout");
   });
 
-  test("stanza error context carries errorType, errorText, and errorSource", () => {
+  test("stanza error context carries only closed fields and drops server text", () => {
     const stub = createFaroStub();
     __setFaroForTesting(stub as never);
 
@@ -1346,18 +1302,18 @@ describe("BrowserXmppClient telemetry hooks", () => {
     const serverErr = stub.errors[0];
     expect(serverErr.options?.context?.condition).toBe("item-not-found");
     expect(serverErr.options?.context?.errorType).toBe("cancel");
-    expect(serverErr.options?.context?.errorText).toBe("no such room");
+    expect(serverErr.options?.context?.errorText).toBeUndefined();
     expect(serverErr.options?.context?.errorSource).toBe("server");
-    expect(serverErr.options?.context?.detail).toBe("member-query-item-not-found");
+    expect(serverErr.options?.context?.reason).toBe("member-query-item-not-found");
 
     const definedCondition = stub.errors[1];
     expect(definedCondition.options?.context?.condition).toBe("not-allowed");
-    expect(definedCondition.options?.context?.detail).toBe("member-query-not-allowed");
+    expect(definedCondition.options?.context?.reason).toBe("member-query-not-allowed");
 
     const unattributed = stub.errors[2];
     expect(unattributed.options?.context?.condition).toBeUndefined();
     expect(unattributed.options?.context?.errorSource).toBeUndefined();
-    expect(unattributed.options?.context?.detail).toBe("member-query-failed");
+    expect(unattributed.options?.context?.reason).toBe("member-query-failed");
   });
 
   test("rejected MUC join presence reports the stanza error condition", () => {
@@ -1391,14 +1347,13 @@ describe("BrowserXmppClient telemetry hooks", () => {
 
     expect(stub.errors).toHaveLength(1);
     const joinErr = stub.errors[0];
-    expect(joinErr.options?.type).toBe("xmpp.stream");
-    expect(joinErr.options?.context?.detail).toBe("room-join-registration-required");
+    expect(joinErr.options?.type).toBe("xmpp.muc-join");
+    expect(joinErr.options?.context?.reason).toBe("room-join-registration-required");
     expect(joinErr.options?.context?.condition).toBe("registration-required");
     expect(joinErr.options?.context?.errorType).toBe("auth");
     expect(joinErr.options?.context?.errorText).toBeUndefined();
     expect(joinErr.options?.context?.errorSource).toBe("server");
-    expect(joinErr.options?.context?.roomLocalpart).toBe("room");
-    expect(joinErr.options?.context?.roomLocalpart).not.toContain("@");
+    expect(joinErr.options?.context?.roomLocalpart).toBeUndefined();
   });
 
   test("disco failures report to Faro with condition or local-timeout attribution", async () => {
@@ -1416,7 +1371,7 @@ describe("BrowserXmppClient telemetry hooks", () => {
       "alice@example.com",
     ).catch(() => undefined);
     const serverErr = stub.errors.find(
-      (entry) => entry.options?.context?.detail === "disco-items-service-unavailable",
+      (entry) => entry.options?.context?.reason === "disco-items-service-unavailable",
     );
     expect(serverErr).toBeDefined();
     expect(serverErr?.options?.context?.condition).toBe("service-unavailable");
@@ -1429,7 +1384,7 @@ describe("BrowserXmppClient telemetry hooks", () => {
       "alice@example.com",
     ).catch(() => undefined);
     const timeoutErr = stub.errors.find(
-      (entry) => entry.options?.context?.detail === "disco-items-timeout",
+      (entry) => entry.options?.context?.reason === "disco-items-timeout",
     );
     expect(timeoutErr).toBeDefined();
     expect(timeoutErr?.options?.context?.errorSource).toBe("local-timeout");
@@ -1469,10 +1424,10 @@ describe("BrowserXmppClient telemetry hooks", () => {
     onError?.({ detail: "stream error", condition: "not-authorized" });
 
     expect(stub.errors).toHaveLength(1);
-    expect(stub.errors[0].error.message).toBe("stream-not-authorized");
+    expect(stub.errors[0].error.message).toBe("xmpp.stream.stream-not-authorized");
     expect(stub.errors[0].options?.type).toBe("xmpp.stream");
     expect(stub.errors[0].options?.context?.condition).toBe("not-authorized");
-    expect(stub.errors[0].options?.context?.detail).toBe("stream-not-authorized");
+    expect(stub.errors[0].options?.context?.reason).toBe("stream-not-authorized");
   });
 
   test("own-resume conflict collateral reaches Faro as recoverable before terminal classification", () => {
@@ -1556,11 +1511,11 @@ describe("BrowserXmppClient telemetry hooks", () => {
     onError?.({ detail: "not-authorized" });
 
     expect(stub.errors).toHaveLength(1);
-    expect(stub.errors[0].error.message).toBe("stream-not-authorized");
+    expect(stub.errors[0].error.message).toBe("xmpp.stream.stream-not-authorized");
     expect(stub.errors[0].options?.type).toBe("xmpp.stream");
     expect(stub.errors[0].options?.context?.condition).toBe("not-authorized");
-    expect(stub.errors[0].options?.context?.detail).toBe("stream-not-authorized");
-    expect(stub.errors[0].options?.context?.streamDetail).toBe("not-authorized");
+    expect(stub.errors[0].options?.context?.reason).toBe("stream-not-authorized");
+    expect(stub.errors[0].options?.context?.streamDetail).toBeUndefined();
   });
 
   test("set_on_error bridge keeps stanza-only conditions out of stream telemetry", () => {
@@ -1586,13 +1541,13 @@ describe("BrowserXmppClient telemetry hooks", () => {
     onError?.("forbidden");
 
     expect(stub.errors).toHaveLength(1);
-    expect(stub.errors[0].error.message).toBe("stream-error");
+    expect(stub.errors[0].error.message).toBe("xmpp.stream.stream-error");
     expect(stub.errors[0].options?.type).toBe("xmpp.stream");
     expect(stub.errors[0].options?.context?.condition).toBeUndefined();
-    expect(stub.errors[0].options?.context?.detail).toBe("stream-error");
+    expect(stub.errors[0].options?.context?.reason).toBe("stream-error");
   });
 
-  test("set_on_error bridge classifies driver errors without losing stream detail", () => {
+  test("set_on_error bridge classifies driver errors without copying stream detail", () => {
     const stub = createFaroStub();
     __setFaroForTesting(stub as never);
 
@@ -1615,11 +1570,11 @@ describe("BrowserXmppClient telemetry hooks", () => {
     onError?.("websocket transport error");
 
     expect(stub.errors).toHaveLength(1);
-    expect(stub.errors[0].error.message).toBe("stream-transport-error");
+    expect(stub.errors[0].error.message).toBe("xmpp.stream.stream-transport-error");
     expect(stub.errors[0].options?.type).toBe("xmpp.stream");
     expect(stub.errors[0].options?.context?.condition).toBeUndefined();
-    expect(stub.errors[0].options?.context?.detail).toBe("stream-transport-error");
-    expect(stub.errors[0].options?.context?.streamDetail).toBe("websocket transport error");
+    expect(stub.errors[0].options?.context?.reason).toBe("stream-transport-error");
+    expect(stub.errors[0].options?.context?.streamDetail).toBeUndefined();
   });
 
   test("set_on_error bridge names handled-count detail when SM metadata is absent", () => {
@@ -1645,11 +1600,11 @@ describe("BrowserXmppClient telemetry hooks", () => {
     onError?.({ detail: "handled-count-too-high" });
 
     expect(stub.errors).toHaveLength(1);
-    expect(stub.errors[0].error.message).toBe("stream-handled-count-too-high");
+    expect(stub.errors[0].error.message).toBe("xmpp.stream.stream-handled-count-too-high");
     expect(stub.errors[0].options?.type).toBe("xmpp.stream");
     expect(stub.errors[0].options?.context?.condition).toBeUndefined();
-    expect(stub.errors[0].options?.context?.detail).toBe("stream-handled-count-too-high");
-    expect(stub.errors[0].options?.context?.streamDetail).toBe("handled-count-too-high");
+    expect(stub.errors[0].options?.context?.reason).toBe("stream-handled-count-too-high");
+    expect(stub.errors[0].options?.context?.streamDetail).toBeUndefined();
   });
 
   test("set_on_error bridge names XEP-0198 handled-count stream failures", () => {
@@ -1683,10 +1638,10 @@ describe("BrowserXmppClient telemetry hooks", () => {
     });
 
     expect(stub.errors).toHaveLength(1);
-    expect(stub.errors[0].error.message).toBe("stream-handled-count-too-high");
+    expect(stub.errors[0].error.message).toBe("xmpp.stream.stream-handled-count-too-high");
     expect(stub.errors[0].options?.type).toBe("xmpp.stream");
     expect(stub.errors[0].options?.context?.condition).toBe("undefined-condition");
-    expect(stub.errors[0].options?.context?.detail).toBe("stream-handled-count-too-high");
+    expect(stub.errors[0].options?.context?.reason).toBe("stream-handled-count-too-high");
     expect(stub.errors[0].options?.context?.smH).toBe("3");
     expect(stub.errors[0].options?.context?.smSendCount).toBe("2");
   });
@@ -1755,9 +1710,9 @@ describe("BrowserXmppClient telemetry hooks", () => {
   test("message:failed emits queue depth and preserves recorded DM kind", () => {
     const client = new BrowserXmppClient(session());
 
-    const fails: Array<{ id: string; kind: "room" | "dm" }> = [];
+    const fails: Array<{ kind: "room" | "dm" }> = [];
     const depths: Array<{ kind: "room" | "dm"; persisted: number; inflight: number }> = [];
-    client.onMessageDeliveryFailed((id, meta) => fails.push({ id, kind: meta.kind }));
+    client.onMessageDeliveryFailed((meta) => fails.push({ kind: meta.kind }));
     client.onQueueDepthChange((d) => depths.push(d));
 
     const internal = client as unknown as {
@@ -1786,7 +1741,7 @@ describe("BrowserXmppClient telemetry hooks", () => {
 
     stubXmpp.emit("message:failed", { id: "dm-fail-1" });
 
-    expect(fails).toEqual([{ id: "dm-fail-1", kind: "dm" }]);
+    expect(fails).toEqual([{ kind: "dm" }]);
     expect(depths).toHaveLength(2);
     expect(depths.find((depth) => depth.kind === "dm")?.inflight).toBe(0);
   });
@@ -1795,7 +1750,7 @@ describe("BrowserXmppClient telemetry hooks", () => {
     const client = new BrowserXmppClient(session());
 
     const fails: string[] = [];
-    client.onMessageDeliveryFailed((id) => fails.push(id));
+    client.onMessageDeliveryFailed((_meta) => fails.push("called"));
 
     const internal = client as unknown as {
       xmpp: unknown;

@@ -617,8 +617,7 @@ export function useChannelMessages(
   ) {
     messageSearch.reset();
     return withSpan(
-      "xmpp.initial_render",
-      { "conversation.kind": "room" },
+      { kind: "initial-render", conversation: "room" },
       () =>
         paging.loadMessages(
           spaceId,

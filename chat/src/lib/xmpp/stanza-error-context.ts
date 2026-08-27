@@ -11,12 +11,7 @@ import type { XmppStanzaErrorType } from "@/lib/xmpp/types";
 export interface StanzaErrorContext {
   condition?: string;
   errorType?: XmppStanzaErrorType;
-  errorText?: string;
 }
-
-/** Cap on server-provided error text forwarded to telemetry — RFC 6120
- * puts no size limit on `<text/>`, and beacon context should stay small. */
-const MAX_ERROR_TEXT_LENGTH = 256;
 
 const STANZA_ERROR_TYPES: ReadonlySet<string> = new Set([
   "auth",
@@ -30,18 +25,14 @@ const STANZA_ERROR_TYPES: ReadonlySet<string> = new Set([
 export function stanzaErrorContext(error: unknown): StanzaErrorContext {
   const source = stanzaErrorSource(error);
   if (!source) return {};
-  const { condition, errorType, text } = source as {
+  const { condition, errorType } = source as {
     condition?: unknown;
     errorType?: unknown;
-    text?: unknown;
   };
   const normalizedCondition = typeof condition === "string" ? condition.trim().toLowerCase() : "";
   return {
     ...(normalizedCondition ? { condition: normalizedCondition } : {}),
     ...(isStanzaErrorType(errorType) ? { errorType } : {}),
-    ...(typeof text === "string" && text.length > 0
-      ? { errorText: text.slice(0, MAX_ERROR_TEXT_LENGTH) }
-      : {}),
   };
 }
 

@@ -39,6 +39,13 @@ import {
 import { getDefaultOTELInstrumentations, TracingInstrumentation } from "@grafana/faro-web-tracing";
 import { context, SpanStatusCode, trace, type Span } from "@opentelemetry/api";
 import {
+  encodeTelemetryError,
+  encodeTelemetrySpan,
+  type TelemetryErrorContext,
+  type TelemetryErrorObservation,
+  type TelemetrySpanObservation,
+} from "./telemetry-observations";
+import {
   callAudioProcessingEventAttributes,
   type VerifiedCallAudioProcessing,
 } from "./calls/call-audio-processing-telemetry";
@@ -51,11 +58,11 @@ import {
   type IceCredentialEvent,
   type CallIceSnapshot,
 } from "./calls/call-ice-telemetry";
-import { callCorrelationId, deriveCallCorrelationId } from "./calls/call-correlation";
 import type {
   CallKind,
   CallLifecyclePayload,
 } from "./calls/call-lifecycle-telemetry";
+import type { XmppStatusSnapshot } from "./xmpp/types";
 
 type MessageKind = "room" | "dm";
 type DisplayedMarkerLatencyBand = "unknown" | "under-250ms" | "250ms-1s" | "1s-5s" | "over-5s";
@@ -69,22 +76,7 @@ type StreamManagementTelemetryPayload =
   | { kind: "lifecycle-failed"; operation: "prepare-xmpp" | "resume-xmpp" | "suspend-call" };
 
 /** Errors we classify coarsely so Tempo filters stay useful. */
-export type ErrorKind =
-  | "xmpp.stream"
-  | "xmpp.auth"
-  | "xmpp.disconnect"
-  | "xmpp.send"
-  | "xmpp.receive"
-  | "storage.quota"
-  | "storage.read"
-  | "storage.write"
-  | "http.fetch"
-  | "upload"
-  | "call.operation"
-  | "call.media"
-  | "window-error"
-  | "unhandled-rejection"
-  | "vue-render-error";
+export type ErrorKind = TelemetryErrorObservation["kind"];
 
 interface InitTelemetryOptions {
   /** Faro collector URL (from Grafana Cloud Faro app config). */
@@ -107,6 +99,7 @@ interface InitTelemetryOptions {
 }
 
 let faro: Faro | null = null;
+let spanFactoryForTesting: ((name: string, attributes: Record<string, string>) => Span) | null = null;
 const TELEMETRY_EXCEPTION_RECORDED = Symbol("waddle.telemetry.exception-recorded");
 let configuredTrustedSpanOrigins = new Set<string>();
 const sensitiveSpanUrls = new Set<string>();
@@ -148,7 +141,7 @@ const SENSITIVE_ERROR_CONTEXT_KEYS = new Set([
   "key",
   "storagekey",
 ]);
-const XMPP_RESOURCE_PATTERN = /^web-[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
+const XMPP_RESOURCE_PATTERN = /web-[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}/gi;
 
 type SpanAttributeValue = string | number;
 type FaroEventPayload = {
@@ -226,8 +219,8 @@ export function initTelemetry(options: InitTelemetryOptions): void {
       beforeSend: sanitizeFaroTransportItem,
       instrumentations: [
         // Default browser instrumentations, minus global error capture:
-        // explicit app errors go through `reportError()` so messages and
-        // context are sanitized before leaving the page. Console and
+        // explicit app errors go through `reportError()` so only canonical
+        // closed observations leave the page. Console and
         // resource performance capture stay disabled for the same reason.
         ...getPrivacySafeWebInstrumentations(),
         // Wraps fetch + XMLHttpRequest in OTel spans and injects
@@ -266,8 +259,8 @@ export function initTelemetry(options: InitTelemetryOptions): void {
 //
 // Faro's stock errors instrumentation is deliberately stripped in
 // `getPrivacySafeWebInstrumentations()` because it ships raw messages
-// and stacks. These handlers restore global capture but funnel every
-// error through the sanitizing `reportError()` path instead.
+// and stacks. These handlers restore global capture but project every
+// failure to a canonical closed observation instead.
 
 const GLOBAL_ERROR_DEDUPE_WINDOW_MS = 5_000;
 const BENIGN_RESIZE_OBSERVER_ERROR_MESSAGES = new Set([
@@ -279,6 +272,7 @@ const BENIGN_RESIZE_OBSERVER_ERROR_MESSAGES = new Set([
 // own listeners instead of a silent no-op.
 let globalErrorsInstalledOn: unknown = null;
 let reportingGlobalError = false;
+let telemetrySinkActive = false;
 let lastGlobalErrorKey = "";
 let lastGlobalErrorAtMs = 0;
 
@@ -326,17 +320,13 @@ export function handleUnhandledRejectionEvent(event: { reason?: unknown }): void
  * (installed in `src/vue-app.ts`). Shares the loop guard + flood dedupe
  * with the window-level handlers.
  */
-export function reportVueError(error: unknown, componentName?: string, info?: string): void {
-  reportGlobalError("vue-render-error", error, {
-    ...(componentName ? { component: componentName } : {}),
-    ...(info ? { detail: info } : {}),
-  });
+export function reportVueError(): void {
+  reportGlobalError("vue-render-error", undefined);
 }
 
 function reportGlobalError(
-  kind: ErrorKind,
+  kind: "window-error" | "unhandled-rejection" | "vue-render-error",
   error: unknown,
-  context: Record<string, unknown> = {},
 ): void {
   // Loop guard: an error thrown while reporting (inside Faro or our
   // sanitizers) would re-enter via the same global handlers forever.
@@ -351,7 +341,7 @@ function reportGlobalError(
     }
     lastGlobalErrorKey = key;
     lastGlobalErrorAtMs = now;
-    reportError(kind, error, { recoverable: false, ...context });
+    reportError({ kind, reason: "unexpected" });
   } catch {
     // Never let telemetry take the page down (or recurse).
   } finally {
@@ -393,6 +383,10 @@ function sanitizeEventPayload(payload: unknown, trustedOrigins: Set<string>): vo
   }
 
   for (const [key, value] of Object.entries(attributes)) {
+    if (isSensitiveContextKey(key)) {
+      delete attributes[key];
+      continue;
+    }
     attributes[key] = sanitizeTelemetryText(value);
   }
 }
@@ -861,17 +855,11 @@ export function __setFaroForTesting(instance: Faro | null): void {
   }
 }
 
-/** Attach the privacy-safe XMPP resource to Faro's current browser session. */
-export function setXmppResourceForTelemetry(resource: string): void {
-  if (!faro || !XMPP_RESOURCE_PATTERN.test(resource)) return;
-  const current = faro.api.getSession();
-  faro.api.setSession({
-    ...current,
-    attributes: {
-      ...current?.attributes,
-      xmpp_resource: resource,
-    },
-  });
+/** For tests only — inject manual span setup without installing a global OTel provider. */
+export function __setSpanFactoryForTesting(
+  factory: ((name: string, attributes: Record<string, string>) => Span) | null,
+): void {
+  spanFactoryForTesting = factory;
 }
 
 /** For tests only — exercise the final transport guard without calling Grafana. */
@@ -928,31 +916,42 @@ export function __scrubMissingFetchSpanUrlForTesting(): Record<string, string | 
  * needing their own tracer handle.
  */
 export async function withSpan<T>(
-  name: string,
-  attributes: Record<string, string | number | boolean>,
+  observation: TelemetrySpanObservation,
   fn: (span: Span | null) => Promise<T>,
 ): Promise<T> {
   if (!faro) return fn(null);
-  const tracer = trace.getTracer(TRACER_NAME);
-  const span = tracer.startSpan(name, { attributes });
-  const activeCtx = trace.setSpan(context.active(), span);
-  return context.with(activeCtx, async () => {
-    try {
-      const result = await fn(span);
-      span.setStatus({ code: SpanStatusCode.OK });
-      return result;
-    } catch (err) {
-      const sanitizedError = sanitizeErrorForTelemetry(err, `${name}.error`);
-      span.setStatus({
-        code: SpanStatusCode.ERROR,
-        message: sanitizedError.message,
-      });
-      recordSpanExceptionOnce(span, err, `${name}.error`);
-      throw err;
-    } finally {
-      span.end();
-    }
-  });
+  const encoded = encodeTelemetrySpan(observation);
+  let span: Span;
+  let activeCtx: ReturnType<typeof context.active>;
+  try {
+    span = spanFactoryForTesting
+      ? spanFactoryForTesting(encoded.name, encoded.attributes)
+      : trace.getTracer(TRACER_NAME).startSpan(encoded.name, { attributes: encoded.attributes });
+    activeCtx = trace.setSpan(context.active(), span);
+  } catch {
+    return fn(null);
+  }
+
+  let callbackStarted = false;
+  try {
+    return await context.with(activeCtx, async () => {
+      callbackStarted = true;
+      try {
+        const result = await fn(span);
+        safelyUseTelemetrySink(() => span.setStatus({ code: SpanStatusCode.OK }));
+        return result;
+      } catch (err) {
+        safelyUseTelemetrySink(() => span.setStatus({ code: SpanStatusCode.ERROR }));
+        safelyUseTelemetrySink(() => recordSpanExceptionOnce(span, err, `${encoded.name}.error`));
+        throw err;
+      } finally {
+        safelyUseTelemetrySink(() => span.end());
+      }
+    });
+  } catch (err) {
+    if (!callbackStarted) return fn(null);
+    throw err;
+  }
 }
 
 /**
@@ -967,23 +966,11 @@ export async function withSpan<T>(
  * (session expired, stream closed fatally, storage quota exhausted).
  */
 export function reportError(
-  kind: ErrorKind,
-  error: unknown,
-  context: { recoverable: boolean; detail?: string; [attr: string]: unknown } = {
-    recoverable: true,
-  },
+  observation: TelemetryErrorObservation,
 ): void {
   if (!faro) return;
-  const err = sanitizeErrorForTelemetry(error, kind);
-  const contextStrings: Record<string, string> = { kind, recoverable: String(context.recoverable) };
-  for (const [k, v] of Object.entries(context)) {
-    if (k === "recoverable") continue;
-    if (isSensitiveContextKey(k)) continue;
-    if (v === undefined || v === null) continue;
-    const serialized = typeof v === "string" ? v : JSON.stringify(v);
-    contextStrings[k] = sanitizeTelemetryText(serialized);
-  }
-  faro.api.pushError(err, { type: kind, context: contextStrings });
+  const encoded = encodeTelemetryError(observation);
+  safePushError(encoded.error, { type: encoded.type, context: encoded.context });
 }
 
 /**
@@ -998,7 +985,9 @@ export function markErrorReportedToTelemetry(error: unknown): void {
 function recordSpanExceptionOnce(span: Span, error: unknown, fallbackMessage: string): void {
   if (telemetryExceptionWasRecorded(error)) return;
   markTelemetryExceptionRecorded(error);
-  span.recordException(sanitizeErrorForTelemetry(error, fallbackMessage));
+  const canonical = new Error(fallbackMessage);
+  canonical.stack = undefined;
+  span.recordException(canonical);
 }
 
 function telemetryExceptionWasRecorded(error: unknown): boolean {
@@ -1036,16 +1025,9 @@ export function __recordSpanExceptionForTesting(error: unknown): number {
   return records;
 }
 
-function sanitizeErrorForTelemetry(error: unknown, fallbackMessage: string): Error {
-  const source = error instanceof Error ? error : new Error(String(error));
-  const sanitized = new Error(sanitizeTelemetryText(source.message || fallbackMessage));
-  sanitized.name = source.name || "Error";
-  if (source.stack) sanitized.stack = sanitizeTelemetryText(source.stack);
-  return sanitized;
-}
-
 function sanitizeTelemetryText(value: string): string {
   return value
+    .replace(XMPP_RESOURCE_PATTERN, ":resource")
     .replace(/([#?&](?:waddle_session_id|session_id|api_key)=)[^\s&#)]+/gi, "$1:redacted")
     .replace(/\/api\/upload\/[^\s?#)]+/g, "/api/upload/:slot")
     .replace(/\/api\/files\/[^\s?#)]+(?:\/[^\s?#)]+)?/g, "/api/files/:slot/:file")
@@ -1057,25 +1039,56 @@ function isSensitiveContextKey(key: string): boolean {
   return SENSITIVE_ERROR_CONTEXT_KEYS.has(normalized) || normalized.endsWith("key");
 }
 
+function safelyUseTelemetrySink(operation: () => void): void {
+  if (telemetrySinkActive) return;
+  telemetrySinkActive = true;
+  try {
+    operation();
+  } catch {
+    // Telemetry is best-effort and must never affect protocol/UI behavior.
+  } finally {
+    telemetrySinkActive = false;
+  }
+}
+
+function safePushEvent(name: string, attributes?: Record<string, string>): void {
+  if (!faro) return;
+  safelyUseTelemetrySink(() => faro?.api.pushEvent(name, attributes));
+}
+
+function safePushMeasurement(
+  payload: { type: string; values: Record<string, number> },
+  options?: { context?: Record<string, string> },
+): void {
+  if (!faro) return;
+  safelyUseTelemetrySink(() => faro?.api.pushMeasurement(payload, options));
+}
+
+function safePushError(
+  error: Error,
+  options: { type: string; context: TelemetryErrorContext },
+): void {
+  if (!faro) return;
+  safelyUseTelemetrySink(() => faro?.api.pushError(error, options));
+}
+
 export function reportMessageFailed(payload: {
-  id: string;
   kind: MessageKind;
 }): void {
-  faro?.api.pushEvent("chat.xmpp.message.failed", {
+  safePushEvent("chat.xmpp.message.failed", {
     kind: payload.kind,
   });
 }
 
 export function reportMessageAcked(payload: {
-  id: string;
   kind: MessageKind;
   latencyMs: number;
 }): void {
   if (!faro) return;
-  faro.api.pushEvent("chat.xmpp.message.acked", {
+  safePushEvent("chat.xmpp.message.acked", {
     kind: payload.kind,
   });
-  faro.api.pushMeasurement({
+  safePushMeasurement({
     type: "chat.xmpp.message.acked.latency_ms",
     values: { latency_ms: payload.latencyMs },
   }, { context: { kind: payload.kind } });
@@ -1095,7 +1108,7 @@ export function reportDisplayedMarkerFailure(payload: {
   reason: "send-failed" | "receive-processing-failed";
   roundTripMs: number | null;
 }): void {
-  faro?.api.pushEvent("chat.xmpp.displayed_marker.failed", {
+  safePushEvent("chat.xmpp.displayed_marker.failed", {
     direction: payload.direction,
     kind: payload.kind,
     reason: payload.reason,
@@ -1105,9 +1118,9 @@ export function reportDisplayedMarkerFailure(payload: {
 
 export function reportSendEnqueued(payload: {
   kind: MessageKind;
-  reason: string;
+  reason: "offline" | "disposed" | "destroying" | "no-client" | "reconnecting" | "not-ready";
 }): void {
-  faro?.api.pushEvent("chat.xmpp.send.enqueued", {
+  safePushEvent("chat.xmpp.send.enqueued", {
     kind: payload.kind,
     reason: payload.reason,
   });
@@ -1139,7 +1152,7 @@ export function reportQueueDepthChange(payload: {
     reading !== "0/0" && prior !== undefined && Date.now() - prior.at >= QUEUE_DEPTH_REEMIT_MS;
   if (prior?.reading === reading && !stuckNonZero) return;
   lastQueueDepth.set(payload.kind, { reading, at: Date.now() });
-  faro.api.pushMeasurement({
+  safePushMeasurement({
     type: "chat.xmpp.queue.depth",
     values: {
       persisted: payload.persisted,
@@ -1151,7 +1164,7 @@ export function reportQueueDepthChange(payload: {
 export function reportSessionLifecycle(payload: {
   type: "fresh" | "resumed";
 }): void {
-  faro?.api.pushEvent("chat.xmpp.session.lifecycle", { type: payload.type });
+  safePushEvent("chat.xmpp.session.lifecycle", { type: payload.type });
 }
 
 /**
@@ -1168,10 +1181,9 @@ export function reportCallAudioProcessing(
   state: VerifiedCallAudioProcessing,
   callKind: CallKind,
 ): void {
-  faro?.api.pushEvent("chat.call.audio_processing", {
+  safePushEvent("chat.call.audio_processing", {
     ...callAudioProcessingEventAttributes(state),
     call_kind: callKind,
-    call_id: callCorrelationId(),
   });
 }
 
@@ -1186,10 +1198,9 @@ export function reportCallAudioProcessing(
  * via `createCallMediaPathBeacon`.
  */
 export function reportCallMediaPath(snapshot: CallMediaPathSnapshot, callKind: CallKind): void {
-  faro?.api.pushEvent("chat.call.media_path", {
+  safePushEvent("chat.call.media_path", {
     ...callMediaPathEventAttributes(snapshot),
     call_kind: callKind,
-    call_id: callCorrelationId(),
   });
 }
 
@@ -1205,96 +1216,56 @@ export function reportCallMediaPath(snapshot: CallMediaPathSnapshot, callKind: C
  * job via `createCallIceBeacon`.
  */
 export function reportCallIce(snapshot: CallIceSnapshot, callKind: CallKind): void {
-  faro?.api.pushEvent("chat.call.ice", {
+  safePushEvent("chat.call.ice", {
     ...callIceEventAttributes(snapshot),
     call_kind: callKind,
-    call_id: callCorrelationId(),
   });
 }
 
 /**
  * Beacon XEP-0215 TURN credential refresh/expiry without including the
  * credential, server address, or expiry timestamp. The closed status value is
- * intentionally low-cardinality and shares the call ICE correlation id.
+ * intentionally low-cardinality.
  */
 export function reportCallIceCredentials(event: IceCredentialEvent, callKind: CallKind): void {
-  faro?.api.pushEvent("chat.call.ice_credentials", {
+  safePushEvent("chat.call.ice_credentials", {
     credential_state: event,
     call_kind: callKind,
-    call_id: callCorrelationId(),
   });
 }
 
-/**
- * Settles when the most recent `reportCallLifecycle` emission has been
- * pushed. Room-name-carrying emissions derive their `call_id` digest
- * asynchronously; tests await this instead of guessing at microtask
- * timing.
- */
-export function callLifecycleEmissionSettled(): Promise<unknown> {
-  return lastCallLifecyclePush;
-}
-
-let lastCallLifecyclePush: Promise<unknown> = Promise.resolve();
-
 export function reportCallLifecycle(
   payload: CallLifecyclePayload,
-  roomName?: string | null,
 ): void {
-  // Captured now, compared at (possibly async) push time: an emission
-  // still deriving its digest when the Faro instance is swapped (new
-  // page session, or a test installing a fresh stub) must be dropped,
-  // not delivered to the new instance.
-  const faroAtEmit = faro;
-  const push = (callId: string) => {
-    if (faro !== faroAtEmit) return;
-    faroAtEmit?.api.pushEvent("chat.call.lifecycle", {
-      setup_outcome: payload.setupOutcome,
-      end_reason: payload.endReason,
-      duration_bucket: payload.durationBucket,
-      call_kind: payload.callKind,
-      rtt_band: payload.rttBand,
-      packet_loss_band: payload.packetLossBand,
-      connection_quality: payload.connectionQuality,
-      reconnect_count: payload.reconnectCount,
-      // The #1452 join key: the same bounded, non-PII value the server's
-      // call-setup logs and the LiveKit webhook logs carry, derived from
-      // the LiveKit room name all three already know.
-      call_id: callId,
-    });
-  };
-  // A per-attempt room name beats the module-global id: declined and
-  // failed attempts never connect, so the global is still "unknown"
-  // when their lifecycle event fires.
-  if (roomName) {
-    lastCallLifecyclePush = deriveCallCorrelationId(roomName).then(push);
-    return;
-  }
-  push(callCorrelationId());
+  safePushEvent("chat.call.lifecycle", {
+    setup_outcome: payload.setupOutcome,
+    end_reason: payload.endReason,
+    duration_bucket: payload.durationBucket,
+    call_kind: payload.callKind,
+    rtt_band: payload.rttBand,
+    packet_loss_band: payload.packetLossBand,
+    connection_quality: payload.connectionQuality,
+    reconnect_count: payload.reconnectCount,
+  });
 }
 
 export function reportCallMediaError(
   mediaKind: "mic" | "cam" | "screen",
   reason: "denied" | "missing" | "in-use" | "failed",
 ): void {
-  reportError("call.media", new Error(`call.media.${mediaKind}.${reason}`), {
-    recoverable: true,
-    detail: "media-capture",
-    media_kind: mediaKind,
-    reason,
-  });
+  reportError({ kind: "call.media", mediaKind, reason });
 }
 
 export function reportStatusChange(payload: {
-  state: string;
+  state: XmppStatusSnapshot["state"];
   reconnectDurationMs?: number;
 }): void {
   if (!faro) return;
-  faro.api.pushEvent("chat.xmpp.status", {
+  safePushEvent("chat.xmpp.status", {
     state: payload.state,
   });
   if (typeof payload.reconnectDurationMs === "number") {
-    faro.api.pushMeasurement({
+    safePushMeasurement({
       type: "chat.xmpp.reconnect.duration_ms",
       values: { duration_ms: payload.reconnectDurationMs },
     });
@@ -1354,12 +1325,12 @@ function visibilityMetric(): {
 }
 
 function reportVisibility(): void {
-  faro?.api.pushEvent("chat.client.visibility", visibilityTags());
+  safePushEvent("chat.client.visibility", visibilityTags());
 }
 
 function reportLongTask(durationMs: number): void {
   const metric = visibilityMetric();
-  faro?.api.pushMeasurement({
+  safePushMeasurement({
     type: "chat.client.longtask.duration_ms",
     values: { duration_ms: Math.round(durationMs), hidden_ms: metric.hiddenMs },
   }, { context: metric.context });
@@ -1376,7 +1347,7 @@ function sampleHeap(): void {
   const mem = (performance as Performance & { memory?: ChromeMemory }).memory;
   if (!mem) return; // Chrome-only API; absent elsewhere
   const metric = visibilityMetric();
-  faro.api.pushMeasurement({
+  safePushMeasurement({
     type: "chat.client.heap",
     values: {
       used_mb: Math.round(mem.usedJSHeapSize / 1_048_576),
@@ -1394,8 +1365,8 @@ export function reportReconnectScheduled(payload: { attempt: number; delayMs: nu
   if (!faro) return;
   const tags = visibilityTags();
   const metric = visibilityMetric();
-  faro.api.pushEvent("chat.xmpp.reconnect.scheduled", tags);
-  faro.api.pushMeasurement({
+  safePushEvent("chat.xmpp.reconnect.scheduled", tags);
+  safePushMeasurement({
     type: "chat.xmpp.reconnect.attempt",
     values: {
       count: 1,
@@ -1418,7 +1389,7 @@ export function reportCatchup(payload: {
   outcome?: "completed" | "aborted" | "failed";
 }): void {
   const metric = visibilityMetric();
-  faro?.api.pushMeasurement({
+  safePushMeasurement({
     type: "chat.xmpp.catchup",
     values: {
       conversations: payload.conversations,
@@ -1436,7 +1407,7 @@ export function reportCatchup(payload: {
  * synchronously on session-ready, and how long that one task took. */
 export function reportResumeDrain(payload: { buffered: number; durationMs: number }): void {
   const metric = visibilityMetric();
-  faro?.api.pushMeasurement({
+  safePushMeasurement({
     type: "chat.xmpp.resume_drain",
     values: { buffered: payload.buffered, duration_ms: Math.round(payload.durationMs), hidden_ms: metric.hiddenMs },
   }, { context: metric.context });
@@ -1468,7 +1439,7 @@ export function reportStreamManagement(event: StreamManagementTelemetryPayload):
     case "failed":
       break;
   }
-  faro?.api.pushEvent("chat.xmpp.stream_management", attributes);
+  safePushEvent("chat.xmpp.stream_management", attributes);
 }
 
 /** Records the closed page-lifecycle failure projection used by XmppProvider. */

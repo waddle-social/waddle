@@ -21,6 +21,34 @@ import type {
 /** What a call track is carrying its media as. */
 type CallMediaPathSource = "camera" | "screen" | "microphone";
 
+export type TelemetryMediaCodec =
+  | "AV1"
+  | "G722"
+  | "H264"
+  | "PCMA"
+  | "PCMU"
+  | "VP8"
+  | "VP9"
+  | "opus"
+  | "red"
+  | "unknown";
+
+export function telemetryMediaCodec(value: string | null): TelemetryMediaCodec {
+  const name = (value ?? "").split("/").at(-1)?.toLowerCase();
+  switch (name) {
+    case "av1": return "AV1";
+    case "g722": return "G722";
+    case "h264": return "H264";
+    case "pcma": return "PCMA";
+    case "pcmu": return "PCMU";
+    case "vp8": return "VP8";
+    case "vp9": return "VP9";
+    case "opus": return "opus";
+    case "red": return "red";
+    default: return "unknown";
+  }
+}
+
 /**
  * One observed media path for a single track. `codec` and the two ICE fields
  * are null until the report names them; the sampler skips fully-empty
@@ -39,7 +67,7 @@ type CallMediaPathSource = "camera" | "screen" | "microphone";
 export type CallMediaPathSnapshot = {
   direction: CallStatDirection;
   source: CallMediaPathSource;
-  codec: string | null;
+  codec: TelemetryMediaCodec | null;
   iceCandidateType: IceCandidateType | null;
   iceTransport: IceTransport | null;
   audioBitrateBand: AudioBitrateBand | null;

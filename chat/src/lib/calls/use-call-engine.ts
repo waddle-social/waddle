@@ -48,10 +48,10 @@ import {
 import { createCallAudioProcessingBeacon } from "./call-audio-processing-telemetry";
 import {
   createCallMediaPathBeacon,
+  telemetryMediaCodec,
   type CallMediaPathSnapshot,
 } from "./call-media-path-telemetry";
 import { createCallIceBeacon, iceStatsEntries } from "./call-ice-telemetry";
-import { adoptCallCorrelationId, clearCallCorrelationId } from "./call-correlation";
 import {
   audioBitrateBand,
   summarizeAudioStats,
@@ -425,7 +425,7 @@ async function sampleTrackMediaPath(
     return { snapshot: {
       direction,
       source: track.source === "screen_share" ? "screen" : "camera",
-      codec: summary.codec,
+      codec: telemetryMediaCodec(summary.codec),
       iceCandidateType: summary.iceCandidateType,
       iceTransport: summary.iceTransport,
       audioBitrateBand: null, // video paths carry no audio band
@@ -484,7 +484,7 @@ async function sampleAudioTrackMediaPath(
         : {
             direction,
             source: "microphone",
-            codec: summary.codec,
+            codec: telemetryMediaCodec(summary.codec),
             iceCandidateType: summary.iceCandidateType,
             iceTransport: summary.iceTransport,
             audioBitrateBand: band,
@@ -620,14 +620,6 @@ export function useCallEngine(): {
         (existing) => existing.publicationSid !== track.publicationSid,
       );
       if (track.source === "screen_share") syncScreenShareEnabled(false);
-    });
-    singletonEngine.on("connected", ({ roomName }) => {
-      // Adopt the #1452 correlation id before any call-scoped beacon can
-      // fire, so every event of this call joins with the server's
-      // call-setup logs and the LiveKit webhook logs. Fire-and-forget:
-      // the digest is a microtask, and an event that races it simply
-      // carries `unknown` rather than blocking the connect path.
-      void adoptCallCorrelationId(roomName);
     });
     singletonEngine.on("connected", ({ localIdentity, remoteIdentities }) => {
       // Seed the LK-truth projection for the active MUC room with
@@ -808,9 +800,6 @@ export function useCallEngine(): {
       // Same for the ICE beacon: drop this call's seen-set and restart
       // count so the next call measures its own connectivity.
       callIceBeacon.reset();
-      // Drop the correlation id so a stray post-call event cannot be
-      // attributed to the call that just ended.
-      clearCallCorrelationId();
       // Drop the connection-quality chip so a stale `poor`/`reconnecting`
       // from the call that just ended can't bleed into the next call.
       resetCallConnectionQuality();

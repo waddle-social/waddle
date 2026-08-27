@@ -64,7 +64,7 @@ describe("MucAdmin.listRoomMembers", () => {
     expect(errors[0].condition).toBe("forbidden");
   });
 
-  test("structured Error rejections from the wasm bridge surface condition, errorType, and text", async () => {
+  test("structured Error rejections from the wasm bridge surface condition and errorType", async () => {
     const rejection = Object.assign(
       new Error("server returned a stanza error: cancel: item-not-found"),
       { condition: "item-not-found", errorType: "cancel", text: "no such room" },
@@ -82,7 +82,7 @@ describe("MucAdmin.listRoomMembers", () => {
     expect(errors).toHaveLength(1);
     expect(errors[0].condition).toBe("item-not-found");
     expect(errors[0].errorType).toBe("cancel");
-    expect(errors[0].errorText).toBe("no such room");
+    expect(errors[0].errorText).toBeUndefined();
   });
 
   test("throws RoomMemberListUnavailableError when every affiliation query fails", async () => {

@@ -22,7 +22,7 @@ import {
   finishCallAttempt,
   markCallAttemptAccepted,
 } from "../src/lib/calls/call-lifecycle-telemetry";
-import { __setFaroForTesting, callLifecycleEmissionSettled } from "../src/lib/telemetry";
+import { __setFaroForTesting } from "../src/lib/telemetry";
 import { useCallEngine } from "../src/lib/calls/use-call-engine";
 import { DisconnectReason, type Room } from "livekit-client";
 import {
@@ -223,7 +223,6 @@ describe("call-store reducer", () => {
     });
     clearCallState();
 
-    await callLifecycleEmissionSettled();
     expect($callState.get()).toEqual({ phase: "idle" });
     expect(events).toEqual([{
       name: "chat.call.lifecycle",
@@ -270,7 +269,6 @@ describe("call-store reducer", () => {
     // lifecycle beacon (accepted via the media path in the real flow).
     markCallAttemptAccepted("local-accept");
     finishCallAttempt("local-accept", { endReason: "hangup" });
-    await callLifecycleEmissionSettled();
     expect(events).toEqual([{
       name: "chat.call.lifecycle",
       attributes: expect.objectContaining({
@@ -617,7 +615,7 @@ describe("clearLastCallError", () => {
     expect($callState.get().phase).toBe(phaseBefore);
     expect(errors[0]).toEqual({
       type: "call.operation",
-      context: expect.objectContaining({ recoverable: "true", detail: "call-operation" }),
+      context: { kind: "call.operation", reason: "call-operation" },
     });
     __setFaroForTesting(null);
   });

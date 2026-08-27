@@ -51,7 +51,7 @@ import { connectionStore } from "../src/lib/connection-store";
 import { DisconnectReason } from "livekit-client";
 import type { WaddleSession } from "../src/lib/server-auth";
 import { __resetCallLifecycleTelemetryForTesting } from "../src/lib/calls/call-lifecycle-telemetry";
-import { __setFaroForTesting, callLifecycleEmissionSettled } from "../src/lib/telemetry";
+import { __setFaroForTesting } from "../src/lib/telemetry";
 
 function session(partial: Partial<WaddleSession> = {}): WaddleSession {
   return {
@@ -1530,7 +1530,6 @@ describe("1:1 call event wiring", () => {
       reason: "reject",
     });
     expect(sender.send_call_reject).not.toHaveBeenCalled();
-    await callLifecycleEmissionSettled();
     expect(telemetryEvents).toEqual([{
       name: "chat.call.lifecycle",
       attributes: expect.objectContaining({
@@ -2485,7 +2484,6 @@ describe("MUC group call", () => {
 
     expect(started).toBe(false);
     expect($callState.get()).toEqual({ phase: "idle" });
-    await callLifecycleEmissionSettled();
     expect(telemetryEvents).toEqual([{
       name: "chat.call.lifecycle",
       attributes: expect.objectContaining({

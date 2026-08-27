@@ -260,11 +260,8 @@ function readEntries(selfBareJid: string): CachedMucCallSession[] {
       .map((entry) => isCachedMucCallSession(entry) ? normalizeEntry(entry) : null)
       .filter((entry): entry is CachedMucCallSession => !!entry);
   } catch (err) {
-    reportError("storage.read", err, {
-      recoverable: true,
-      detail: "muc call session cache read failed",
-      storage_area: "muc-call-session-cache",
-    });
+    void err;
+    reportError({ kind: "storage.read", reason: "read-failed", area: "muc-call-session-cache" });
     return [];
   }
 }
@@ -280,11 +277,8 @@ function writeEntries(selfBareJid: string, entries: CachedMucCallSession[]): voi
     }
     s.setItem(key, JSON.stringify(entries));
   } catch (err) {
-    reportError("storage.write", err, {
-      recoverable: true,
-      detail: "muc call session cache write failed",
-      storage_area: "muc-call-session-cache",
-    });
+    void err;
+    reportError({ kind: "storage.write", reason: "write-failed", area: "muc-call-session-cache" });
   }
 }
 
@@ -294,11 +288,8 @@ function removeKey(key: string): void {
   try {
     s.removeItem(key);
   } catch (err) {
-    reportError("storage.write", err, {
-      recoverable: true,
-      detail: "muc call session cache clear failed",
-      storage_area: "muc-call-session-cache",
-    });
+    void err;
+    reportError({ kind: "storage.write", reason: "write-failed", area: "muc-call-session-cache" });
   }
 }
 

@@ -30,6 +30,7 @@
  */
 
 import { reportError } from "@/lib/telemetry";
+import type { StorageArea } from "@/lib/telemetry-observations";
 import { bareJidKey } from "./jid";
 import {
   ROOM_CATALOG_FINGERPRINT_FIELDS,
@@ -323,11 +324,7 @@ export function createLocalStorageResumePersistence(
       if (disposed) return;
       gcSmOwnerSlots(smAccountKeyPrefix);
       if (!canPersistSmOwnerSlot(smAccountKeyPrefix, smKey)) {
-        reportError("storage.quota", new Error("SM owner-slot retention is full"), {
-          recoverable: true,
-          detail: "resume-persistence retained every live owner tail",
-          storage_area: "sm-resume",
-        });
+        reportStorageQuotaFailure("sm-resume");
         return;
       }
       const envelope: PersistedSmEnvelope = {
@@ -518,11 +515,8 @@ function consumeSmEnvelope(key: string, owner: ResumeOwner): PersistedSmResumeSt
       ...(resource ? { resource } : {}),
     };
   } catch (err) {
-    reportError("storage.read", err, {
-      recoverable: true,
-      detail: "resume-persistence consume failed (sm)",
-      storage_area: "sm-resume",
-    });
+    void err;
+    reportStorageReadFailure("sm-resume");
     return null;
   }
 }
@@ -931,11 +925,8 @@ function removeOwnResumeMarkerIfOwned(key: string, owner: ResumeOwner, clientId:
     ) return;
     if (s.getItem(key) === raw) s.removeItem(key);
   } catch (err) {
-    reportError("storage.write", err, {
-      recoverable: true,
-      detail: "resume-persistence compare-delete failed (own-resume)",
-      storage_area: "own-resume",
-    });
+    void err;
+    reportStorageWriteFailure("own-resume");
   }
 }
 
@@ -962,11 +953,8 @@ function restoreOwnResumePointerAfterAttemptRemoval(key: string, attemptKey: str
       s.removeItem(key);
     }
   } catch (err) {
-    reportError("storage.write", err, {
-      recoverable: true,
-      detail: "resume-persistence compare-delete failed (own-resume)",
-      storage_area: "own-resume",
-    });
+    void err;
+    reportStorageWriteFailure("own-resume");
   }
 }
 
@@ -988,11 +976,8 @@ function consumeOwnResumeMarker(key: string, clientId: string): OwnResumeConflic
     if (parsed.clientId === clientId) return "self";
     return "foreign";
   } catch (err) {
-    reportError("storage.read", err, {
-      recoverable: true,
-      detail: "resume-persistence consume failed (own-resume)",
-      storage_area: "own-resume",
-    });
+    void err;
+    reportStorageReadFailure("own-resume");
     return "absent";
   }
 }
@@ -1025,11 +1010,8 @@ function refreshOwnResumeMarkerIfOwned(
     ) return;
     writeJson(key, { ...marker, expiresAt: Date.now() + ttlMs }, "own-resume");
   } catch (err) {
-    reportError("storage.write", err, {
-      recoverable: true,
-      detail: "resume-persistence refresh failed (own-resume)",
-      storage_area: "own-resume",
-    });
+    void err;
+    reportStorageWriteFailure("own-resume");
   }
 }
 
@@ -1075,11 +1057,8 @@ function currentOwnResumeAttemptKey(
     ) return null;
     return pointer.attemptKey;
   } catch (err) {
-    reportError("storage.read", err, {
-      recoverable: true,
-      detail: "resume-persistence read failed (own-resume)",
-      storage_area: "own-resume",
-    });
+    void err;
+    reportStorageReadFailure("own-resume");
     return null;
   }
 }
@@ -1093,11 +1072,8 @@ function gcOwnResumeMarkers(keyPrefix: string): void {
     try {
       raw = s.getItem(key);
     } catch (err) {
-      reportError("storage.read", err, {
-        recoverable: true,
-        detail: "resume-persistence read failed (own-resume)",
-        storage_area: "own-resume",
-      });
+      void err;
+      reportStorageReadFailure("own-resume");
       continue;
     }
     if (!raw) continue;
@@ -1126,11 +1102,8 @@ function gcOwnResumeMarkers(keyPrefix: string): void {
         remove = true;
       }
     } catch (err) {
-      reportError("storage.read", err, {
-        recoverable: true,
-        detail: "resume-persistence read failed (own-resume)",
-        storage_area: "own-resume",
-      });
+      void err;
+      reportStorageReadFailure("own-resume");
       remove = true;
     }
     if (restoreFromAttemptKey) {
@@ -1142,11 +1115,8 @@ function gcOwnResumeMarkers(keyPrefix: string): void {
     try {
       if (s.getItem(key) === raw) s.removeItem(key);
     } catch (err) {
-      reportError("storage.write", err, {
-        recoverable: true,
-        detail: "resume-persistence compare-delete failed (own-resume)",
-        storage_area: "own-resume",
-      });
+      void err;
+      reportStorageWriteFailure("own-resume");
     }
   }
 }
@@ -1155,7 +1125,7 @@ function removeJsonIfOwned<T extends { ownerId?: string; instanceId?: string; ow
   key: string,
   validate: (value: unknown) => value is T,
   owner: ResumeOwner,
-  kind: string,
+  kind: ResumeStorageKind,
 ): void {
   const s = storage();
   if (!s) return;
@@ -1173,11 +1143,8 @@ function removeJsonIfOwned<T extends { ownerId?: string; instanceId?: string; ow
     // replacement's lease, handoff, or SM tail.
     if (s.getItem(key) === raw) s.removeItem(key);
   } catch (err) {
-    reportError("storage.write", err, {
-      recoverable: true,
-      detail: `resume-persistence compare-delete failed (${kind})`,
-      storage_area: kind,
-    });
+    void err;
+    reportStorageWriteFailure(storageAreaForKind(kind));
   }
 }
 
@@ -1221,7 +1188,7 @@ function sessionStorageForOwner(): Storage | null {
   }
 }
 
-function readJson<T>(key: string, validate: (value: unknown) => value is T, kind: string): T | null {
+function readJson<T>(key: string, validate: (value: unknown) => value is T, kind: ResumeStorageKind): T | null {
   const s = storage();
   if (!s) return null;
   try {
@@ -1230,11 +1197,8 @@ function readJson<T>(key: string, validate: (value: unknown) => value is T, kind
     const parsed: unknown = JSON.parse(raw);
     return validate(parsed) ? parsed : null;
   } catch (err) {
-    reportError("storage.read", err, {
-      recoverable: true,
-      detail: `resume-persistence read failed (${kind})`,
-      storage_area: kind,
-    });
+    void err;
+    reportStorageReadFailure(storageAreaForKind(kind));
     return null;
   }
 }
@@ -1249,11 +1213,8 @@ function storageKeysWithPrefix(prefix: string): string[] {
       if (key?.startsWith(prefix)) keys.push(key);
     }
   } catch (err) {
-    reportError("storage.read", err, {
-      recoverable: true,
-      detail: "resume-persistence shard enumeration failed (catchup)",
-      storage_area: "catchup",
-    });
+    void err;
+    reportStorageReadFailure("catchup");
   }
   return keys;
 }
@@ -1269,11 +1230,11 @@ function readCatchupShards(prefix: string): PersistedReconnectCatchup | null {
   };
 }
 
-function removeKeysWithPrefix(prefix: string, kind: string): void {
+function removeKeysWithPrefix(prefix: string, kind: ResumeStorageKind): void {
   for (const key of storageKeysWithPrefix(prefix)) removeKey(key, kind);
 }
 
-function writeJson(key: string, value: unknown, kind: string): boolean {
+function writeJson(key: string, value: unknown, kind: ResumeStorageKind): boolean {
   const s = storage();
   if (!s) return false;
   try {
@@ -1281,27 +1242,24 @@ function writeJson(key: string, value: unknown, kind: string): boolean {
     return true;
   } catch (err) {
     const name = err instanceof Error ? err.name : "";
-    const errorKind = name === "QuotaExceededError" ? "storage.quota" : "storage.write";
-    reportError(errorKind, err, {
-      recoverable: true,
-      detail: `resume-persistence write failed (${kind})`,
-      storage_area: kind,
-    });
+    void err;
+    if (name === "QuotaExceededError") {
+      reportStorageQuotaFailure(storageAreaForKind(kind));
+    } else {
+      reportStorageWriteFailure(storageAreaForKind(kind));
+    }
     return false;
   }
 }
 
-function removeKey(key: string, kind: string): void {
+function removeKey(key: string, kind: ResumeStorageKind): void {
   const s = storage();
   if (!s) return;
   try {
     s.removeItem(key);
   } catch (err) {
-    reportError("storage.write", err, {
-      recoverable: true,
-      detail: `resume-persistence clear failed (${kind})`,
-      storage_area: kind,
-    });
+    void err;
+    reportStorageWriteFailure(storageAreaForKind(kind));
   }
 }
 
@@ -1478,4 +1436,41 @@ function isPersistedUnhandledOutboundEntries(value: unknown): value is Array<{ x
     const candidate = entry as Record<string, unknown>;
     return typeof candidate.xml === "string" && typeof candidate.sentAt === "string";
   });
+}
+type ResumeStorageKind =
+  | "auto-join-blocks"
+  | "catchup"
+  | "joined-rooms"
+  | "owner-handoff"
+  | "owner-lease"
+  | "own-resume"
+  | "sm"
+  | "sm-consumed";
+
+function storageAreaForKind(kind: ResumeStorageKind): StorageArea {
+  switch (kind) {
+    case "catchup":
+      return "catchup";
+    case "owner-handoff":
+    case "owner-lease":
+    case "own-resume":
+      return "own-resume";
+    case "auto-join-blocks":
+    case "joined-rooms":
+    case "sm":
+    case "sm-consumed":
+      return "sm-resume";
+  }
+}
+
+function reportStorageReadFailure(area: StorageArea): void {
+  reportError({ kind: "storage.read", reason: "read-failed", area });
+}
+
+function reportStorageWriteFailure(area: StorageArea): void {
+  reportError({ kind: "storage.write", reason: "write-failed", area });
+}
+
+function reportStorageQuotaFailure(area: StorageArea): void {
+  reportError({ kind: "storage.quota", reason: "quota-exceeded", area });
 }
