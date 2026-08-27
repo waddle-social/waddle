@@ -6,6 +6,9 @@ on:
   pull_request:
     paths:
     - .github/workflows/waddle-android-devicetests.yml
+    - apps/android/**/build.gradle.kts
+    - apps/android/**/src
+    - apps/android/**/src/**
     - apps/android/app/**
     - apps/android/build.gradle.kts
     - apps/android/build.gradle.kts/**
@@ -25,6 +28,8 @@ on:
     - apps/android/gradle.properties
     - apps/android/gradle.properties/**
     - apps/android/gradle/**
+    - apps/android/gradle/libs.versions.toml
+    - apps/android/gradle/libs.versions.toml/**
     - apps/android/gradlew
     - apps/android/gradlew/**
     - apps/android/schema/**
@@ -41,8 +46,7 @@ on:
     - server/Cargo.lock/**
     - server/Cargo.toml
     - server/Cargo.toml/**
-    - server/crates/waddle-xmpp-client-ffi/**
-    - server/crates/waddle-xmpp-client/**
+    - server/crates/**
     - server/rust-toolchain.toml
     - server/rust-toolchain.toml/**
   workflow_dispatch: {}

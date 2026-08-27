@@ -426,8 +426,8 @@ waddle-xmpp-telemetry-helper = { workspace = true }
 [workspace]
 members = ["crates/*"]
 
-[workspace.dependencies]
-waddle-xmpp-telemetry-helper = { path = "crates/waddle-xmpp-telemetry-helper" }
+[workspace.dependencies.waddle-xmpp-telemetry-helper]
+path = 'crates/waddle-xmpp-telemetry-helper'
 `,
       );
       writeSharedClientPathDependencyFixture(root);

@@ -163,6 +163,12 @@ cargo_workspace_dependency_path() {
         sub(/"$/, "", value)
         print value
         exit
+      } else if (match($0, /path[[:space:]]*=[[:space:]]*\047[^\047]+\047/)) {
+        value = substr($0, RSTART, RLENGTH)
+        sub(/^[^\047]*\047/, "", value)
+        sub(/\047$/, "", value)
+        print value
+        exit
       }
     }
   ' "$root_manifest"
