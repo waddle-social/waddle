@@ -402,6 +402,98 @@ waddle-xmpp-telemetry-helper = { path = "../waddle-xmpp-telemetry-helper" }
     }
   }, CHECKER_TIMEOUT_MS);
 
+  test("synthetic local git-file dependency, patch, and replacement are rejected in wasm mode", () => {
+    const shapes = [
+      {
+        name: "dependency",
+        clientDependency:
+          'waddle-xmpp-telemetry-helper = { git = "file:../waddle-xmpp-telemetry-helper" }',
+        rootManifest: undefined,
+      },
+      {
+        name: "patch",
+        clientDependency: 'waddle-xmpp-telemetry-helper = "0.1"',
+        rootManifest: `
+[workspace]
+members = ["crates/*"]
+
+[patch.crates-io]
+waddle-xmpp-telemetry-helper = { git = "file:crates/waddle-xmpp-telemetry-helper" }
+`,
+      },
+      {
+        name: "replacement",
+        clientDependency: "",
+        rootManifest: `
+[workspace]
+members = ["crates/*"]
+
+[replace]
+"foo:0.1.0" = { git = "file://crates/waddle-xmpp-telemetry-helper" }
+`,
+      },
+    ];
+
+    for (const shape of shapes) {
+      const root = mkdtempSync(resolve(tmpdir(), "waddle-native-telemetry-"));
+      try {
+        writeWasmFixture(root, { generatedJs: "export {};\n" });
+        writeSharedClientFixture(root, {
+          clientCargoToml: `
+[package]
+name = "waddle-xmpp-client"
+
+[dependencies]
+waddle-xmpp-core = { path = "../waddle-xmpp-core" }
+${shape.clientDependency}
+`,
+        });
+        if (shape.rootManifest !== undefined) {
+          writeFixtureFile(root, "server/Cargo.toml", shape.rootManifest);
+        }
+        writeSharedClientPathDependencyFixture(root);
+
+        const result = runChecker(["--wasm"], root);
+        expect(result.status, shape.name).toBe(1);
+        expect(result.stderr, shape.name).toContain("wasm dependency");
+      } finally {
+        rmSync(root, { recursive: true, force: true });
+      }
+    }
+  }, CHECKER_TIMEOUT_MS);
+
+  test("missing and bare local git-file sources fail closed", () => {
+    for (const target of ["missing-helper", "bare-helper"] as const) {
+      const root = mkdtempSync(resolve(tmpdir(), "waddle-native-telemetry-"));
+      try {
+        writeWasmFixture(root, { generatedJs: "export {};\n" });
+        writeSharedClientFixture(root, {
+          clientCargoToml: `
+[package]
+name = "waddle-xmpp-client"
+
+[dependencies]
+waddle-xmpp-core = { path = "../waddle-xmpp-core" }
+helper = { git = "file:../${target}" }
+`,
+        });
+        if (target === "bare-helper") {
+          writeFixtureFile(root, "server/crates/bare-helper/HEAD", "ref: refs/heads/main\n");
+          mkdirSync(resolve(root, "server/crates/bare-helper/objects"), { recursive: true });
+        }
+
+        const result = runChecker(["--wasm"], root);
+        expect(result.status, target).not.toBe(0);
+        expect(result.stderr, target).toContain("local git file source");
+        expect(result.stderr, target).toContain(
+          target === "bare-helper" ? "bare git repository" : "missing directory",
+        );
+      } finally {
+        rmSync(root, { recursive: true, force: true });
+      }
+    }
+  }, CHECKER_TIMEOUT_MS);
+
   test("synthetic workspace root crates.io patch is rejected in every native mode", () => {
     const root = mkdtempSync(resolve(tmpdir(), "waddle-native-telemetry-"));
     try {
@@ -519,6 +611,114 @@ members = ["crates/*"]
       }
     } finally {
       rmSync(root, { recursive: true, force: true });
+    }
+  }, CHECKER_TIMEOUT_MS);
+
+  test("synthetic preferred extensionless Cargo config is rejected in wasm mode", () => {
+    const root = mkdtempSync(resolve(tmpdir(), "waddle-native-telemetry-"));
+    try {
+      writeWasmFixture(root, { generatedJs: "export {};\n" });
+      writeFixtureFile(root, "server/.cargo/config.toml", "[net]\noffline = true\n");
+      writeFixtureFile(
+        root,
+        "server/.cargo/config",
+        'paths = ["crates/waddle-xmpp-telemetry-helper"]\n',
+      );
+      writeSharedClientPathDependencyFixture(root);
+
+      const result = runChecker(["--wasm"], root);
+      expect(result.status).toBe(1);
+      expect(result.stderr).toContain("wasm dependency");
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  }, CHECKER_TIMEOUT_MS);
+
+  test("extensionless Cargo config shadows config.toml at the same level", () => {
+    const root = mkdtempSync(resolve(tmpdir(), "waddle-native-telemetry-"));
+    try {
+      writeWasmFixture(root, { generatedJs: "export {};\n" });
+      writeFixtureFile(root, "server/.cargo/config", "[net]\noffline = true\n");
+      writeFixtureFile(
+        root,
+        "server/.cargo/config.toml",
+        'paths = ["crates/waddle-xmpp-telemetry-helper"]\n',
+      );
+      writeSharedClientPathDependencyFixture(root);
+
+      const result = runChecker(["--wasm"], root);
+      expect(result.status).toBe(0);
+      expect(result.stdout).toContain("native remote telemetry contract OK: wasm");
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  }, CHECKER_TIMEOUT_MS);
+
+  test("synthetic Cargo config local source mechanisms are rejected in wasm mode", () => {
+    const shapes = [
+      {
+        name: "directory source",
+        config: '[source.vendor]\ndirectory = "vendor"\n',
+        writeSource(root: string) {
+          writeFixtureFile(
+            root,
+            "server/vendor/helper/Cargo.toml",
+            '[package]\nname = "helper"\n\n[dependencies]\nopentelemetry-otlp = "0.1"\n',
+          );
+        },
+      },
+      {
+        name: "local registry source",
+        config: '[source.local]\nlocal-registry = "registry"\n',
+        writeSource(root: string) {
+          writeFixtureFile(root, "server/registry/index/metadata", "opentelemetry-otlp\n");
+        },
+      },
+      {
+        name: "replace-with chain",
+        config: `
+[source.crates-io]
+replace-with = "mirror"
+[source.mirror]
+replace-with = "vendor"
+[source.vendor]
+directory = "vendor"
+`,
+        writeSource(root: string) {
+          writeFixtureFile(
+            root,
+            "server/vendor/helper/Cargo.toml",
+            '[package]\nname = "helper"\n\n[dependencies]\nopentelemetry-otlp = "0.1"\n',
+          );
+        },
+      },
+      {
+        name: "git-file source",
+        config: `
+[source.crates-io]
+replace-with = "local"
+[source.local]
+git = "file:crates/waddle-xmpp-telemetry-helper"
+`,
+        writeSource(root: string) {
+          writeSharedClientPathDependencyFixture(root);
+        },
+      },
+    ];
+
+    for (const shape of shapes) {
+      const root = mkdtempSync(resolve(tmpdir(), "waddle-native-telemetry-"));
+      try {
+        writeWasmFixture(root, { generatedJs: "export {};\n" });
+        writeFixtureFile(root, "server/.cargo/config.toml", shape.config);
+        shape.writeSource(root);
+
+        const result = runChecker(["--wasm"], root);
+        expect(result.status, shape.name).toBe(1);
+        expect(result.stderr, shape.name).toContain("wasm dependency");
+      } finally {
+        rmSync(root, { recursive: true, force: true });
+      }
     }
   }, CHECKER_TIMEOUT_MS);
 
@@ -897,12 +1097,23 @@ waddle-xmpp-core = { path = "../waddle-xmpp-core" }
   test("synthetic generated wasm glue with a collector beacon is rejected", () => {
     const root = mkdtempSync(resolve(tmpdir(), "waddle-native-telemetry-"));
     try {
+      const gitInit = spawnSync("git", ["init", "--quiet", root], {
+        encoding: "utf8",
+      });
+      expect(gitInit.status).toBe(0);
+      writeFixtureFile(
+        root,
+        ".gitignore",
+        "/server/wasm-pkg/waddle-xmpp-client-wasm/waddle_xmpp_client_wasm.js\n",
+      );
       writeWasmFixture(root, {
         cargoToml: "[package]\nname = \"fixture\"\n",
         eventsSrc: "pub fn event() {}\n",
         generatedJs: 'fetch("https://telemetry.example/collect", { method: "POST" });\n',
       });
 
+      // rg must bypass ignore files; environments without rg use grep, which
+      // already scans ignored paths and therefore still exercises the contract.
       const result = runChecker(["--wasm"], root);
       expect(result.status).toBe(1);
       expect(result.stderr).toContain("wasm exporter");

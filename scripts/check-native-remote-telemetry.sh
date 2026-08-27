@@ -1,4 +1,13 @@
 #!/usr/bin/env bash
+# Contract:
+# - Proves native manifests, local dependency closures, and crate sources contain
+#   no remote telemetry SDK, exporter, or collector configuration. The closure
+#   includes Cargo path and git-file dependencies plus patch, replace, and
+#   config-source overrides.
+# - Does not defend against deliberately adversarial authors using out-of-crate
+#   include!/include_str!, #[path = "../…"], symlinked sources, ../ target paths,
+#   or CARGO_HOME-level configuration. This is an accidental-inclusion backstop;
+#   code review remains the control for intentional evasion.
 set -euo pipefail
 
 script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -66,7 +75,7 @@ check_absent() {
   local output_file
   output_file="$(mktemp)"
   if command -v rg >/dev/null 2>&1; then
-    if rg --hidden --glob '!.git' --glob '!target' --no-messages -n -i -e "$pattern" "${existing[@]}" >"$output_file"; then
+    if rg --hidden --no-ignore --glob '!.git' --glob '!target' --no-messages -n -i -e "$pattern" "${existing[@]}" >"$output_file"; then
       echo "[fail] $label matched pattern: $pattern" >&2
       cat "$output_file" >&2
       failed=1
