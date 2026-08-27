@@ -684,6 +684,108 @@ async fn local_demotion_discards_hydration_from_an_older_reclaim_generation() {
 }
 
 #[tokio::test]
+async fn local_demotion_clears_parked_expired_claim_promotion_before_drain() {
+    let registry = InMemorySmSessionRegistry::new();
+    let stream_id = "demoted-parked-expired-promotion";
+    registry
+        .store_session(make_test_session(stream_id))
+        .await
+        .expect("store session");
+    assert!(registry
+        .claim_session(stream_id)
+        .await
+        .expect("claim session")
+        .is_some());
+    {
+        let mut claimed = registry
+            .claimed_sessions
+            .write()
+            .expect("claimed_sessions lock");
+        let session = claimed.get_mut(stream_id).expect("claimed entry");
+        session.max_resume_time = Some(1);
+        session.detached_at = Instant::now() - Duration::from_secs(120);
+        assert!(session.is_expired());
+    }
+
+    assert!(registry.defer_claimed_resume_release(stream_id));
+    assert_eq!(registry.pending_claim_release_count(), 0);
+
+    registry.forget_claim_locally(stream_id).await;
+
+    assert!(registry
+        .drain_expired()
+        .await
+        .expect("drain after demotion")
+        .is_empty());
+    assert!(registry
+        .live_session_ids()
+        .expect("live inventory after demotion")
+        .is_empty());
+    assert_eq!(
+        registry.pending_claim_release_count(),
+        0,
+        "demotion must not duplicate terminal release responsibility for a lost fence"
+    );
+}
+
+#[tokio::test]
+async fn local_demotion_discards_in_flight_promotion_retry_restore() {
+    let registry = InMemorySmSessionRegistry::new();
+    let stream_id = "demoted-in-flight-promotion-retry";
+    registry
+        .store_session(make_test_session(stream_id))
+        .await
+        .expect("store session");
+    assert!(registry
+        .claim_session(stream_id)
+        .await
+        .expect("claim session")
+        .is_some());
+    {
+        let mut claimed = registry
+            .claimed_sessions
+            .write()
+            .expect("claimed_sessions lock");
+        let session = claimed.get_mut(stream_id).expect("claimed entry");
+        session.max_resume_time = Some(1);
+        session.detached_at = Instant::now() - Duration::from_secs(120);
+        assert!(session.is_expired());
+    }
+
+    assert!(registry.defer_claimed_resume_release(stream_id));
+    let leased = registry
+        .pending_promotion_retries
+        .write()
+        .expect("pending_promotion_retries lock")
+        .remove(stream_id)
+        .expect("leased retry payload");
+    assert!(registry
+        .pending_promotions
+        .read()
+        .expect("pending_promotions lock")
+        .contains(stream_id));
+
+    registry.forget_claim_locally(stream_id).await;
+
+    assert_eq!(
+        registry
+            .retain_pending_promotion_for_retry(leased)
+            .expect("restore cancelled lease after demotion"),
+        super::PendingPromotionRetryRetention::NotTracked,
+        "without a surviving marker, a cancelled retry lease must discard rather than resurrect"
+    );
+    assert!(registry
+        .live_session_ids()
+        .expect("live inventory after demotion")
+        .is_empty());
+    assert!(registry
+        .drain_expired()
+        .await
+        .expect("drain after demotion")
+        .is_empty());
+}
+
+#[tokio::test]
 async fn active_fence_readmission_publishes_a_demotion_safe_reservation() {
     let registry = InMemorySmSessionRegistry::with_capacity(1);
     let entity = crate::ownership::Entity::new(
@@ -6819,20 +6921,23 @@ async fn typed_resumable_session_probe_surfaces_durable_read_failure() {
     assert!(registry.any_resumable_session_for_full_jid(&jid).await);
 }
 
-/// The cancellation guard's deferred release must not strand an
-/// expired-while-claimed session: the snapshot leaves `claimed_sessions`
-/// entirely (no sweeper walks that map), it is NOT restored to `sessions`
-/// (it is expired), and the exact fence moves into terminal-release
-/// inventory exactly as `release_claim_locked` would arrange (#1643
-/// adversarial round 2).
+/// An expired resume cancelled from `Drop` moves into the same off-map
+/// promotion inventory as the ordinary release path. Its exact fence stays
+/// active until the promote-then-confirm lifecycle deletes durable state.
 #[tokio::test]
 async fn defer_claimed_resume_release_unwinds_expired_claimed_session() {
+    use crate::ownership::ClaimStore as _;
+
     let me = crate::ownership::NodeIdentity::new("sm-node", "incarnation");
-    let store: std::sync::Arc<dyn crate::ownership::ClaimStore> =
-        std::sync::Arc::new(crate::ownership::InProcessClaimStore::new());
+    let store = std::sync::Arc::new(crate::ownership::InProcessClaimStore::new());
+    let claim_store: std::sync::Arc<dyn crate::ownership::ClaimStore> = store.clone();
     let registry = InMemorySmSessionRegistry::new()
-        .with_claim_store(store, crate::ownership::SharedNodeIdentity::new(me));
+        .with_claim_store(claim_store, crate::ownership::SharedNodeIdentity::new(me));
     let stream_id = "defer-expired-claimed";
+    let entity = crate::ownership::Entity::new(
+        crate::ownership::EntityType::SmSession,
+        stream_id.to_string(),
+    );
 
     registry
         .store_session(make_test_session(stream_id))
@@ -6861,7 +6966,7 @@ async fn defer_claimed_resume_release_unwinds_expired_claimed_session() {
 
     assert!(
         registry.defer_claimed_resume_release(stream_id),
-        "expired unwind must transfer the exact fence into terminal inventory"
+        "expired unwind must transfer the payload into promotion ownership"
     );
 
     assert!(
@@ -6876,15 +6981,227 @@ async fn defer_claimed_resume_release_unwinds_expired_claimed_session() {
         registry.sessions.read().expect("sessions lock").is_empty(),
         "an expired session must not be restored to the resumable pool"
     );
+    assert!(registry
+        .pending_promotions
+        .read()
+        .expect("pending_promotions lock")
+        .contains(stream_id));
     assert_eq!(
-        registry.pending_claim_release_count(),
-        1,
-        "the exact fence must sit in terminal-release inventory for the janitor"
-    );
-    assert_eq!(
-        registry.retry_pending_claim_releases(8).await,
-        1,
-        "the deferred fence must be releasable by the ordinary retry chain"
+        registry
+            .pending_promotion_retries
+            .read()
+            .expect("pending_promotion_retries lock")
+            .get(stream_id)
+            .expect("promotion retry payload")
+            .unacked_stanzas
+            .len(),
+        3,
+        "the full unacked queue moves with promotion ownership"
     );
     assert_eq!(registry.pending_claim_release_count(), 0);
+    assert!(store
+        .current_claim(&entity)
+        .await
+        .expect("claim before confirmation")
+        .is_some());
+
+    assert!(registry.confirm_drained(stream_id).await);
+    assert!(store
+        .current_claim(&entity)
+        .await
+        .expect("claim after confirmation")
+        .is_none());
+}
+
+#[tokio::test]
+async fn release_claim_moves_expired_claimed_session_to_promotion() {
+    use crate::ownership::ClaimStore as _;
+
+    let store = std::sync::Arc::new(crate::ownership::InProcessClaimStore::new());
+    let claim_store: std::sync::Arc<dyn crate::ownership::ClaimStore> = store.clone();
+    let registry = InMemorySmSessionRegistry::new().with_claim_store(
+        claim_store,
+        crate::ownership::SharedNodeIdentity::new(crate::ownership::NodeIdentity::new(
+            "sm-node",
+            "release-incarnation",
+        )),
+    );
+    let stream_id = "release-expired-claimed";
+    let entity = crate::ownership::Entity::new(
+        crate::ownership::EntityType::SmSession,
+        stream_id.to_string(),
+    );
+    registry
+        .store_session(make_test_session(stream_id))
+        .await
+        .expect("store session");
+    assert!(registry
+        .claim_session(stream_id)
+        .await
+        .expect("claim session")
+        .is_some());
+    {
+        let mut claimed = registry
+            .claimed_sessions
+            .write()
+            .expect("claimed_sessions lock");
+        let session = claimed.get_mut(stream_id).expect("claimed entry");
+        session.max_resume_time = Some(1);
+        session.detached_at = std::time::Instant::now() - std::time::Duration::from_secs(120);
+    }
+
+    registry
+        .release_claim(stream_id)
+        .await
+        .expect("release expired claim");
+
+    assert!(registry
+        .claimed_sessions
+        .read()
+        .expect("claimed_sessions lock")
+        .is_empty());
+    assert!(registry.sessions.read().expect("sessions lock").is_empty());
+    assert!(registry
+        .pending_promotions
+        .read()
+        .expect("pending_promotions lock")
+        .contains(stream_id));
+    assert_eq!(
+        registry
+            .pending_promotion_retries
+            .read()
+            .expect("pending_promotion_retries lock")
+            .get(stream_id)
+            .expect("promotion retry payload")
+            .unacked_stanzas
+            .len(),
+        3
+    );
+    assert_eq!(registry.pending_claim_release_count(), 0);
+    assert!(store
+        .current_claim(&entity)
+        .await
+        .expect("claim before confirmation")
+        .is_some());
+
+    assert!(registry.confirm_drained(stream_id).await);
+    assert!(store
+        .current_claim(&entity)
+        .await
+        .expect("claim after confirmation")
+        .is_none());
+}
+
+#[tokio::test]
+async fn stale_deferred_release_keeps_existing_promotion_ownership() {
+    use crate::ownership::ClaimStore as _;
+
+    let store = std::sync::Arc::new(crate::ownership::InProcessClaimStore::new());
+    let claim_store: std::sync::Arc<dyn crate::ownership::ClaimStore> = store.clone();
+    let registry = InMemorySmSessionRegistry::new().with_claim_store(
+        claim_store,
+        crate::ownership::SharedNodeIdentity::new(crate::ownership::NodeIdentity::new(
+            "sm-node",
+            "stale-incarnation",
+        )),
+    );
+    let stream_id = "stale-defer-expired-claimed";
+    let entity = crate::ownership::Entity::new(
+        crate::ownership::EntityType::SmSession,
+        stream_id.to_string(),
+    );
+    registry
+        .store_session(make_test_session(stream_id))
+        .await
+        .expect("store session");
+    assert!(registry
+        .claim_session(stream_id)
+        .await
+        .expect("claim session")
+        .is_some());
+    {
+        let mut claimed = registry
+            .claimed_sessions
+            .write()
+            .expect("claimed_sessions lock");
+        let session = claimed.get_mut(stream_id).expect("claimed entry");
+        session.max_resume_time = Some(1);
+        session.detached_at = std::time::Instant::now() - std::time::Duration::from_secs(120);
+    }
+
+    assert!(registry.defer_claimed_resume_release(stream_id));
+    assert!(registry.defer_claimed_resume_release(stream_id));
+
+    assert!(registry
+        .pending_promotions
+        .read()
+        .expect("pending_promotions lock")
+        .contains(stream_id));
+    assert_eq!(
+        registry
+            .pending_promotion_retries
+            .read()
+            .expect("pending_promotion_retries lock")
+            .get(stream_id)
+            .expect("original promotion payload remains")
+            .unacked_stanzas
+            .len(),
+        3
+    );
+    assert_eq!(
+        registry.pending_claim_release_count(),
+        0,
+        "a stale guard must not create terminal-release responsibility"
+    );
+    assert!(store
+        .current_claim(&entity)
+        .await
+        .expect("claim after stale guard")
+        .is_some());
+}
+
+#[tokio::test]
+async fn stale_deferred_release_after_local_demotion_falls_back_without_reparking() {
+    let registry = InMemorySmSessionRegistry::new();
+    let stream_id = "stale-defer-after-demotion";
+    registry
+        .store_session(make_test_session(stream_id))
+        .await
+        .expect("store session");
+    assert!(registry
+        .claim_session(stream_id)
+        .await
+        .expect("claim session")
+        .is_some());
+    {
+        let mut claimed = registry
+            .claimed_sessions
+            .write()
+            .expect("claimed_sessions lock");
+        let session = claimed.get_mut(stream_id).expect("claimed entry");
+        session.max_resume_time = Some(1);
+        session.detached_at = Instant::now() - Duration::from_secs(120);
+        assert!(session.is_expired());
+    }
+
+    registry.forget_claim_locally(stream_id).await;
+
+    assert!(
+        !registry.defer_claimed_resume_release(stream_id),
+        "once demotion removes the claimed snapshot, the late cancelled-resume path must use the missing fallback"
+    );
+    assert!(!registry
+        .pending_promotions
+        .read()
+        .expect("pending promotions")
+        .contains(stream_id));
+    assert!(!registry
+        .pending_promotion_retries
+        .read()
+        .expect("pending promotion retries")
+        .contains_key(stream_id));
+    assert!(registry
+        .live_session_ids()
+        .expect("live inventory after late stale defer")
+        .is_empty());
 }

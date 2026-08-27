@@ -17,6 +17,13 @@ pub(super) enum ClaimSessionOutcome {
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum ClaimedReleaseTransition {
+    Restored,
+    PromotionOwned,
+    Missing,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum PendingPromotionRetryRetention {
     Retained,
     NotTracked,
@@ -179,6 +186,49 @@ impl Drop for DrainedSessionBatch<'_> {
 }
 
 impl InMemorySmSessionRegistry {
+    /// Return a claimed resume snapshot to the lifecycle that now owns it.
+    ///
+    /// All four maps are locked before mutation so the synchronous `Drop`
+    /// path can fall back to exact-fence release without losing a partially
+    /// moved payload when a lock is poisoned. Keep this lock order aligned
+    /// with `forget_claim_locally_locked` and promotion retry handling:
+    /// sessions → claimed sessions → promotion marker → retry payload.
+    fn transition_claimed_resume_release(
+        &self,
+        stream_id: &str,
+    ) -> Result<ClaimedReleaseTransition, SmRegistryError> {
+        let mut sessions = self
+            .sessions
+            .write()
+            .map_err(|_| SmRegistryError::Internal("Lock poisoned".to_string()))?;
+        let mut claimed = self
+            .claimed_sessions
+            .write()
+            .map_err(|_| SmRegistryError::Internal("Lock poisoned".to_string()))?;
+        let mut promotions = self
+            .pending_promotions
+            .write()
+            .map_err(|_| SmRegistryError::Internal("Lock poisoned".to_string()))?;
+        let mut retries = self
+            .pending_promotion_retries
+            .write()
+            .map_err(|_| SmRegistryError::Internal("Lock poisoned".to_string()))?;
+
+        match claimed.remove(stream_id) {
+            Some(session) if !session.is_expired() => {
+                sessions.insert(stream_id.to_string(), session);
+                Ok(ClaimedReleaseTransition::Restored)
+            }
+            Some(session) => {
+                promotions.insert(stream_id.to_string());
+                retries.insert(stream_id.to_string(), session);
+                Ok(ClaimedReleaseTransition::PromotionOwned)
+            }
+            None if promotions.contains(stream_id) => Ok(ClaimedReleaseTransition::PromotionOwned),
+            None => Ok(ClaimedReleaseTransition::Missing),
+        }
+    }
+
     /// Return an in-flight resume claim to the detached pool from a
     /// cancellation guard.  This is synchronous specifically so a dropped
     /// WebSocket resume future cannot strand the claimed snapshot between
@@ -189,27 +239,14 @@ impl InMemorySmSessionRegistry {
     /// If bookkeeping cannot be acquired, the exact fence is transferred to
     /// the existing terminal-release inventory rather than being forgotten.
     pub fn defer_claimed_resume_release(&self, stream_id: &str) -> bool {
-        let reinserted = match (self.sessions.write(), self.claimed_sessions.write()) {
-            (Ok(mut sessions), Ok(mut claimed)) => match claimed.remove(stream_id) {
-                Some(session) if !session.is_expired() => {
-                    sessions.insert(stream_id.to_string(), session);
-                    true
-                }
-                // Expired while claimed: mirror `release_claim_locked` —
-                // drop it from memory (re-inserting would strand it in
-                // `claimed_sessions` forever, since expiry sweeps only walk
-                // `sessions`), keep the durable rows for the janitor's
-                // promotion chain, and fall through so the exact fence moves
-                // into terminal-release inventory.
-                Some(_expired) => false,
-                None => false,
-            },
-            _ => false,
-        };
-        if reinserted {
-            return true;
+        match self.transition_claimed_resume_release(stream_id) {
+            Ok(ClaimedReleaseTransition::Restored | ClaimedReleaseTransition::PromotionOwned) => {
+                true
+            }
+            Ok(ClaimedReleaseTransition::Missing) | Err(_) => {
+                self.defer_enabled_claim_release(stream_id)
+            }
         }
-        self.defer_enabled_claim_release(stream_id)
     }
 
     /// Atomically move a claim acquired for `<enable/>` out of the active
@@ -279,6 +316,7 @@ impl InMemorySmSessionRegistry {
             sessions.keys().cloned().collect()
         };
         let mut drained = DrainedSessionBatch::new(self, stream_ids.len());
+        self.lease_pending_promotion_retries(&mut drained).await?;
         for stream_id in &stream_ids {
             let stream_lock = self.stream_lock(stream_id)?;
             let _stream_guard = stream_lock.lock().await;
@@ -831,18 +869,23 @@ impl InMemorySmSessionRegistry {
         stream_id: &str,
         preserve_terminal_release: Option<&super::super::persistence::SmClaimFence>,
     ) {
-        // Both maps must clear in ONE critical section, in the same
-        // sessions-then-claimed order as `defer_claimed_resume_release`'s
-        // tuple lock: that handback runs from a sync `Drop` with no shard
-        // lock, and if it interleaved between two separate removals here it
-        // could move the snapshot from `claimed_sessions` back into
-        // `sessions` AFTER this demotion already swept `sessions` —
-        // republishing a detached session whose claim Postgres reassigned.
-        if let (Ok(mut sessions), Ok(mut claimed)) =
-            (self.sessions.write(), self.claimed_sessions.write())
-        {
+        // Clear every resumable/promotion view in ONE critical section, in
+        // the same lock order as `transition_claimed_resume_release`:
+        // sessions -> claimed_sessions -> pending_promotions ->
+        // pending_promotion_retries. A late cancelled-resume guard can park
+        // an expired snapshot into the promotion maps; if demotion cleared
+        // only sessions/claimed, the next janitor drain could still lease
+        // and promote a payload this node no longer owns.
+        if let (Ok(mut sessions), Ok(mut claimed), Ok(mut promotions), Ok(mut retries)) = (
+            self.sessions.write(),
+            self.claimed_sessions.write(),
+            self.pending_promotions.write(),
+            self.pending_promotion_retries.write(),
+        ) {
             sessions.remove(stream_id);
             claimed.remove(stream_id);
+            promotions.remove(stream_id);
+            retries.remove(stream_id);
         }
         // A reservation/acquisition/lookup represents an ownership CAS that
         // may still be in flight outside this shard. Preserve that ambiguous,
@@ -1195,7 +1238,16 @@ impl InMemorySmSessionRegistry {
     /// mid-batch, the failed sessions' durable rows survive so a
     /// restart can retry. (Copilot review on PR #346: previous
     /// up-front delete lost stanzas on partial-promotion failure.)
-    pub async fn drain_expired(&self) -> Result<Vec<DetachedSession>, SmRegistryError> {
+    /// Lease every payload parked in `pending_promotion_retries` into
+    /// `drained`, exactly once per payload. Both the janitor drain and the
+    /// graceful-shutdown drain call this first: the retry inventory is where
+    /// expired-while-claimed sessions and failed promotions wait, and a
+    /// drain that skipped it would report clean while `live_session_ids()`
+    /// still listed the lifecycle.
+    async fn lease_pending_promotion_retries(
+        &self,
+        drained: &mut DrainedSessionBatch<'_>,
+    ) -> Result<(), SmRegistryError> {
         let retry_ids = self
             .pending_promotion_retries
             .read()
@@ -1203,7 +1255,6 @@ impl InMemorySmSessionRegistry {
             .keys()
             .cloned()
             .collect::<Vec<_>>();
-        let mut drained = DrainedSessionBatch::new(self, retry_ids.len());
         for stream_id in retry_ids {
             let stream_lock = self.stream_lock(&stream_id)?;
             let _stream_guard = stream_lock.lock().await;
@@ -1228,6 +1279,12 @@ impl InMemorySmSessionRegistry {
                 retry.discard();
             }
         }
+        Ok(())
+    }
+
+    pub async fn drain_expired(&self) -> Result<Vec<DetachedSession>, SmRegistryError> {
+        let mut drained = DrainedSessionBatch::new(self, 0);
+        self.lease_pending_promotion_retries(&mut drained).await?;
         let expired_ids: Vec<String> = {
             let sessions = self
                 .sessions
@@ -1321,13 +1378,42 @@ impl InMemorySmSessionRegistry {
         if let Some(storage) = &self.persistence {
             let session_id = crate::pending_delivery::SmSessionId::new(session.stream_id.clone());
             match storage.get_session(&session_id).await {
-                Ok(Some(_)) => match storage.list_unacked(&session_id).await {
+                Ok(Some(persisted)) => match storage.list_unacked(&session_id).await {
                     Ok(rows) => {
-                        let durable: std::collections::HashSet<u32> =
-                            rows.iter().map(|row| row.sequence).collect();
-                        session
-                            .unacked_stanzas
-                            .retain(|entry| durable.contains(&entry.sequence));
+                        match super::persistence_codec::persisted_to_detached(&persisted, &rows) {
+                            Ok(durable_session) => {
+                                let durable = durable_session
+                                    .unacked_stanzas
+                                    .iter()
+                                    .map(|entry| entry.sequence)
+                                    .collect::<std::collections::HashSet<_>>();
+                                session
+                                    .unacked_stanzas
+                                    .retain(|entry| durable.contains(&entry.sequence));
+                                let present = session
+                                    .unacked_stanzas
+                                    .iter()
+                                    .map(|entry| entry.sequence)
+                                    .collect::<std::collections::HashSet<_>>();
+                                session.unacked_stanzas.extend(
+                                    durable_session
+                                        .unacked_stanzas
+                                        .into_iter()
+                                        .filter(|entry| !present.contains(&entry.sequence)),
+                                );
+                                session.unacked_stanzas.sort_by_key(|entry| {
+                                    entry.sequence.wrapping_sub(session.last_acked)
+                                });
+                            }
+                            Err(error) => {
+                                debug!(
+                                    stream_id = %session.stream_id,
+                                    error = %error,
+                                    "reinsert_for_retry: durable unacked hydration failed; keeping \
+                                     the in-memory queue verbatim (at-least-once)"
+                                );
+                            }
+                        }
                     }
                     Err(error) => {
                         debug!(
@@ -1745,12 +1831,11 @@ impl InMemorySmSessionRegistry {
     /// pass, or the orphan reaper) could observe the entity as unclaimed
     /// and take it over while this node still holds it in memory, exactly
     /// the double-ownership hazard acquire-then-hydrate exists to prevent.
-    /// Only when the session is expired (and therefore NOT reinserted —
-    /// left for the janitor's drain_expired/promote/confirm chain, which
-    /// releases the claim itself via [`Self::confirm_drained`]) or was
-    /// absent from `claimed_sessions` altogether does this release the
-    /// store entry: those are the only cases where the entity genuinely
-    /// stops being tracked by this call.
+    /// An expired session moves into the off-map promotion inventory so the
+    /// janitor can drain its full payload without making it resumable again;
+    /// its exact claim remains active until [`Self::confirm_drained`]. Only a
+    /// session absent from both claimed and promotion ownership uses the
+    /// terminal release fallback.
     pub async fn release_claim(&self, stream_id: &str) -> Result<(), SmRegistryError> {
         let stream_lock = self.stream_lock(stream_id)?;
         let _stream_guard = stream_lock.lock().await;
@@ -1769,26 +1854,11 @@ impl InMemorySmSessionRegistry {
     }
 
     async fn release_claim_locked(&self, stream_id: &str) -> Result<(), SmRegistryError> {
-        let reinserted = {
-            let mut sessions = self
-                .sessions
-                .write()
-                .map_err(|_| SmRegistryError::Internal("Lock poisoned".to_string()))?;
-            let mut claimed = self
-                .claimed_sessions
-                .write()
-                .map_err(|_| SmRegistryError::Internal("Lock poisoned".to_string()))?;
-            let session = claimed.remove(stream_id);
-            match session {
-                Some(session) if !session.is_expired() => {
-                    sessions.insert(stream_id.to_string(), session);
-                    true
-                }
-                _ => false,
+        match self.transition_claimed_resume_release(stream_id)? {
+            ClaimedReleaseTransition::Restored | ClaimedReleaseTransition::PromotionOwned => {}
+            ClaimedReleaseTransition::Missing => {
+                self.release_claim_store_entry(stream_id).await;
             }
-        };
-        if !reinserted {
-            self.release_claim_store_entry(stream_id).await;
         }
         Ok(())
     }
