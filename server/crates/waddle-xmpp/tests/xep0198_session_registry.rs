@@ -1496,3 +1496,75 @@ async fn xep0198_record_outbound_for_unknown_stream_does_not_persist_orphan_row(
         "no orphan row may be persisted for an unknown stream_id"
     );
 }
+
+#[tokio::test]
+async fn xep0198_shutdown_drain_leases_expired_claimed_promotion_payload() {
+    use waddle_xmpp::ownership::{
+        ClaimStore, InProcessClaimStore, NodeIdentity, SharedNodeIdentity,
+    };
+    use waddle_xmpp::stream_management::DetachedUnackedStanza;
+
+    let persistence = Arc::new(InMemorySmPersistence::new());
+    let storage: Arc<dyn SmPersistenceStorage> = persistence.clone();
+    let claim_store = Arc::new(InProcessClaimStore::new());
+    let claims: Arc<dyn ClaimStore> = claim_store.clone();
+    let owner = NodeIdentity::new("sm-node", "incarnation");
+    let registry = InMemorySmSessionRegistry::new()
+        .with_persistence(storage)
+        .with_claim_store(claims, SharedNodeIdentity::new(owner));
+    let jid: FullJid = "alice@example.test/watch".parse().expect("valid jid");
+    let stream_id = "stream-expiring-claim-shutdown";
+    let mut session = expiring_detached_session(stream_id, jid.as_str());
+    session.unacked_stanzas.push(DetachedUnackedStanza {
+        sequence: 11,
+        stanza_xml: "<message xmlns='jabber:client' id='queued'><body>queued</body></message>"
+            .to_string(),
+        original_receipt_at: chrono::Utc::now(),
+    });
+    registry
+        .store_session(session)
+        .await
+        .expect("store expiring detached session");
+    registry
+        .claim_session(stream_id)
+        .await
+        .expect("claim session")
+        .expect("session exists");
+    tokio::time::sleep(Duration::from_secs(2)).await;
+    registry
+        .release_claim(stream_id)
+        .await
+        .expect("release expired claim");
+
+    // SIGTERM before the janitor's next drain_expired(): the graceful
+    // shutdown drain must lease the promotion-owned payload, not report
+    // a clean drain while live_session_ids() still lists it.
+    let drained = registry
+        .drain_all_for_shutdown()
+        .await
+        .expect("shutdown drain");
+    assert_eq!(
+        drained.len(),
+        1,
+        "shutdown drain leases the promotion-owned payload"
+    );
+    assert_eq!(drained[0].unacked_stanzas[0].sequence, 11);
+    assert!(
+        registry
+            .drain_expired()
+            .await
+            .expect("janitor drain after shutdown lease")
+            .is_empty(),
+        "payload is leased exactly once"
+    );
+    assert_eq!(
+        registry.live_session_ids().expect("live inventory"),
+        vec![stream_id.to_string()],
+        "promotion lifecycle stays live until confirmation"
+    );
+    assert!(registry.confirm_drained(stream_id).await);
+    assert!(registry
+        .live_session_ids()
+        .expect("live inventory")
+        .is_empty());
+}

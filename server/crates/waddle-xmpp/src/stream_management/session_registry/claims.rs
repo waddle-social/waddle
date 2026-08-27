@@ -316,6 +316,7 @@ impl InMemorySmSessionRegistry {
             sessions.keys().cloned().collect()
         };
         let mut drained = DrainedSessionBatch::new(self, stream_ids.len());
+        self.lease_pending_promotion_retries(&mut drained).await?;
         for stream_id in &stream_ids {
             let stream_lock = self.stream_lock(stream_id)?;
             let _stream_guard = stream_lock.lock().await;
@@ -1232,7 +1233,16 @@ impl InMemorySmSessionRegistry {
     /// mid-batch, the failed sessions' durable rows survive so a
     /// restart can retry. (Copilot review on PR #346: previous
     /// up-front delete lost stanzas on partial-promotion failure.)
-    pub async fn drain_expired(&self) -> Result<Vec<DetachedSession>, SmRegistryError> {
+    /// Lease every payload parked in `pending_promotion_retries` into
+    /// `drained`, exactly once per payload. Both the janitor drain and the
+    /// graceful-shutdown drain call this first: the retry inventory is where
+    /// expired-while-claimed sessions and failed promotions wait, and a
+    /// drain that skipped it would report clean while `live_session_ids()`
+    /// still listed the lifecycle.
+    async fn lease_pending_promotion_retries(
+        &self,
+        drained: &mut DrainedSessionBatch<'_>,
+    ) -> Result<(), SmRegistryError> {
         let retry_ids = self
             .pending_promotion_retries
             .read()
@@ -1240,7 +1250,6 @@ impl InMemorySmSessionRegistry {
             .keys()
             .cloned()
             .collect::<Vec<_>>();
-        let mut drained = DrainedSessionBatch::new(self, retry_ids.len());
         for stream_id in retry_ids {
             let stream_lock = self.stream_lock(&stream_id)?;
             let _stream_guard = stream_lock.lock().await;
@@ -1265,6 +1274,12 @@ impl InMemorySmSessionRegistry {
                 retry.discard();
             }
         }
+        Ok(())
+    }
+
+    pub async fn drain_expired(&self) -> Result<Vec<DetachedSession>, SmRegistryError> {
+        let mut drained = DrainedSessionBatch::new(self, 0);
+        self.lease_pending_promotion_retries(&mut drained).await?;
         let expired_ids: Vec<String> = {
             let sessions = self
                 .sessions
