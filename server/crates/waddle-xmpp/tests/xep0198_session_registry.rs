@@ -520,33 +520,58 @@ async fn xep0198_initial_store_does_not_overwrite_concurrent_detached_append() {
 }
 
 #[tokio::test]
-async fn xep0198_release_claim_drops_expired_claimed_session() {
-    let registry = InMemorySmSessionRegistry::new();
+async fn xep0198_release_claim_moves_expired_session_to_promotion() {
+    use waddle_xmpp::ownership::{
+        ClaimStore, Entity, EntityType, InProcessClaimStore, NodeIdentity, SharedNodeIdentity,
+    };
+    use waddle_xmpp::stream_management::DetachedUnackedStanza;
+
+    let persistence = Arc::new(InMemorySmPersistence::new());
+    let storage: Arc<dyn SmPersistenceStorage> = persistence.clone();
+    let claim_store = Arc::new(InProcessClaimStore::new());
+    let claims: Arc<dyn ClaimStore> = claim_store.clone();
+    let owner = NodeIdentity::new("sm-node", "incarnation");
+    let registry = InMemorySmSessionRegistry::new()
+        .with_persistence(storage)
+        .with_claim_store(claims, SharedNodeIdentity::new(owner));
     let jid: FullJid = "alice@example.test/watch".parse().expect("valid jid");
+    let stream_id = "stream-expiring-claim";
+    let entity = Entity::new(EntityType::SmSession, stream_id);
+    let mut session = expiring_detached_session(stream_id, jid.as_str());
+    session.unacked_stanzas.push(DetachedUnackedStanza {
+        sequence: 11,
+        stanza_xml: "<message xmlns='jabber:client' id='queued'><body>queued</body></message>"
+            .to_string(),
+        original_receipt_at: chrono::Utc::now(),
+    });
     registry
-        .store_session(expiring_detached_session(
-            "stream-expiring-claim",
-            jid.as_str(),
-        ))
+        .store_session(session)
         .await
         .expect("store expiring detached session");
     registry
-        .claim_session("stream-expiring-claim")
+        .claim_session(stream_id)
         .await
         .expect("claim session")
         .expect("session exists");
     tokio::time::sleep(Duration::from_secs(2)).await;
 
     registry
-        .release_claim("stream-expiring-claim")
+        .release_claim(stream_id)
         .await
         .expect("release expired claim");
 
-    assert!(registry
-        .take_session("stream-expiring-claim")
-        .await
-        .expect("take expired released claim")
-        .is_none());
+    let drained = registry.drain_expired().await.expect("drain expired claim");
+    assert_eq!(drained.len(), 1, "expired claim is immediately drainable");
+    assert_eq!(drained[0].unacked_stanzas.len(), 1);
+    assert_eq!(drained[0].unacked_stanzas[0].sequence, 11);
+    assert!(
+        registry
+            .claim_session(stream_id)
+            .await
+            .expect("retry resume after promotion handoff")
+            .is_none(),
+        "promotion-owned session is not resumable"
+    );
     assert!(!registry
         .record_stanza_for_detached_bound_resource(
             &jid,
@@ -554,7 +579,266 @@ async fn xep0198_release_claim_drops_expired_claimed_session() {
             chrono::Utc::now(),
         )
         .await
-        .expect("record against expired released claim"));
+        .expect("record against promotion-owned claim"));
+    assert!(
+        persistence
+            .get_session(&SmSessionId::new(stream_id))
+            .await
+            .expect("read durable session before confirmation")
+            .is_some(),
+        "durable session survives promotion handoff"
+    );
+    assert_eq!(
+        persistence
+            .list_unacked(&SmSessionId::new(stream_id))
+            .await
+            .expect("read durable queue before confirmation")
+            .len(),
+        1,
+        "durable queue survives promotion handoff"
+    );
+    assert!(
+        claim_store
+            .current_claim(&entity)
+            .await
+            .expect("read exact claim before confirmation")
+            .is_some(),
+        "exact claim remains held until confirmation"
+    );
+
+    assert!(registry.confirm_drained(stream_id).await);
+    assert!(persistence
+        .get_session(&SmSessionId::new(stream_id))
+        .await
+        .expect("read durable session after confirmation")
+        .is_none());
+    assert!(persistence
+        .list_unacked(&SmSessionId::new(stream_id))
+        .await
+        .expect("read durable queue after confirmation")
+        .is_empty());
+    assert!(
+        claim_store
+            .current_claim(&entity)
+            .await
+            .expect("read exact claim after confirmation")
+            .is_none(),
+        "confirmation releases the exact claim"
+    );
+}
+
+#[tokio::test]
+async fn xep0198_deferred_release_moves_expired_session_to_promotion() {
+    use waddle_xmpp::ownership::{
+        ClaimStore, Entity, EntityType, InProcessClaimStore, NodeIdentity, SharedNodeIdentity,
+    };
+    use waddle_xmpp::stream_management::DetachedUnackedStanza;
+
+    let persistence = Arc::new(InMemorySmPersistence::new());
+    let storage: Arc<dyn SmPersistenceStorage> = persistence.clone();
+    let claim_store = Arc::new(InProcessClaimStore::new());
+    let claims: Arc<dyn ClaimStore> = claim_store.clone();
+    let owner = NodeIdentity::new("sm-node", "deferred-incarnation");
+    let registry = InMemorySmSessionRegistry::new()
+        .with_persistence(storage)
+        .with_claim_store(claims, SharedNodeIdentity::new(owner));
+    let jid: FullJid = "alice@example.test/deferred".parse().expect("valid jid");
+    let stream_id = "stream-deferred-expiring-claim";
+    let entity = Entity::new(EntityType::SmSession, stream_id);
+    let mut session = expiring_detached_session(stream_id, jid.as_str());
+    session.unacked_stanzas.push(DetachedUnackedStanza {
+        sequence: 11,
+        stanza_xml: "<message xmlns='jabber:client' id='deferred'><body>queued</body></message>"
+            .to_string(),
+        original_receipt_at: chrono::Utc::now(),
+    });
+    registry
+        .store_session(session)
+        .await
+        .expect("store session");
+    registry
+        .claim_session(stream_id)
+        .await
+        .expect("claim session")
+        .expect("session exists");
+    tokio::time::sleep(Duration::from_secs(2)).await;
+
+    assert!(registry.defer_claimed_resume_release(stream_id));
+
+    let drained = registry
+        .drain_expired()
+        .await
+        .expect("drain deferred claim");
+    assert_eq!(drained.len(), 1);
+    assert_eq!(drained[0].unacked_stanzas.len(), 1);
+    assert!(registry
+        .claim_session(stream_id)
+        .await
+        .expect("retry resume after deferred handoff")
+        .is_none());
+    assert!(!registry
+        .record_stanza_for_detached_bound_resource(
+            &jid,
+            &chat_stanza(&jid, "expired deferred"),
+            chrono::Utc::now(),
+        )
+        .await
+        .expect("record against deferred promotion"));
+    assert!(persistence
+        .get_session(&SmSessionId::new(stream_id))
+        .await
+        .expect("durable session before confirmation")
+        .is_some());
+    assert_eq!(
+        persistence
+            .list_unacked(&SmSessionId::new(stream_id))
+            .await
+            .expect("durable queue before confirmation")
+            .len(),
+        1
+    );
+    assert!(claim_store
+        .current_claim(&entity)
+        .await
+        .expect("claim before confirmation")
+        .is_some());
+
+    assert!(registry.confirm_drained(stream_id).await);
+    assert!(persistence
+        .get_session(&SmSessionId::new(stream_id))
+        .await
+        .expect("durable session after confirmation")
+        .is_none());
+    assert!(persistence
+        .list_unacked(&SmSessionId::new(stream_id))
+        .await
+        .expect("durable queue after confirmation")
+        .is_empty());
+    assert!(claim_store
+        .current_claim(&entity)
+        .await
+        .expect("claim after confirmation")
+        .is_none());
+}
+
+#[tokio::test]
+async fn xep0198_expired_claim_handoff_has_one_drain_and_no_late_resume() {
+    let registry = Arc::new(InMemorySmSessionRegistry::new());
+    let jid: FullJid = "alice@example.test/race".parse().expect("valid jid");
+    let stream_id = "stream-expired-claim-race";
+    registry
+        .store_session(expiring_detached_session(stream_id, jid.as_str()))
+        .await
+        .expect("store session");
+    registry
+        .claim_session(stream_id)
+        .await
+        .expect("claim session")
+        .expect("session exists");
+    tokio::time::sleep(Duration::from_secs(2)).await;
+    registry
+        .release_claim(stream_id)
+        .await
+        .expect("handoff expired claim");
+
+    let first_registry = Arc::clone(&registry);
+    let second_registry = Arc::clone(&registry);
+    let resume_registry = Arc::clone(&registry);
+    let (first, second, resumed) = tokio::join!(
+        async move { first_registry.drain_expired().await.expect("first drain") },
+        async move { second_registry.drain_expired().await.expect("second drain") },
+        async move {
+            resume_registry
+                .claim_session(stream_id)
+                .await
+                .expect("late resume")
+        }
+    );
+
+    assert_eq!(first.len() + second.len(), 1);
+    assert!(resumed.is_none());
+    assert!(registry
+        .drain_expired()
+        .await
+        .expect("later drain")
+        .is_empty());
+}
+
+#[tokio::test]
+async fn xep0198_expired_claim_handoff_recovers_after_restart_before_confirmation() {
+    use waddle_xmpp::ownership::{
+        ClaimStore, InProcessClaimStore, NodeIdentity, SharedNodeIdentity,
+    };
+    use waddle_xmpp::stream_management::DetachedUnackedStanza;
+
+    let persistence = Arc::new(InMemorySmPersistence::new());
+    let storage: Arc<dyn SmPersistenceStorage> = persistence.clone();
+    let claim_store = Arc::new(InProcessClaimStore::new());
+    let claims: Arc<dyn ClaimStore> = claim_store.clone();
+    let owner = NodeIdentity::new("sm-node", "restart-incarnation");
+    let stream_id = "stream-expired-claim-restart";
+    let jid: FullJid = "alice@example.test/restart".parse().expect("valid jid");
+    let registry = InMemorySmSessionRegistry::new()
+        .with_persistence(storage)
+        .with_claim_store(claims, SharedNodeIdentity::new(owner.clone()));
+    let mut session = expiring_detached_session(stream_id, jid.as_str());
+    session.unacked_stanzas.push(DetachedUnackedStanza {
+        sequence: 11,
+        stanza_xml: "<message xmlns='jabber:client' id='restart'><body>queued</body></message>"
+            .to_string(),
+        original_receipt_at: chrono::Utc::now(),
+    });
+    registry
+        .store_session(session)
+        .await
+        .expect("store session");
+    registry
+        .claim_session(stream_id)
+        .await
+        .expect("claim session")
+        .expect("session exists");
+    tokio::time::sleep(Duration::from_secs(2)).await;
+    registry
+        .release_claim(stream_id)
+        .await
+        .expect("handoff expired claim");
+    drop(registry);
+
+    let storage: Arc<dyn SmPersistenceStorage> = persistence.clone();
+    let claims: Arc<dyn ClaimStore> = claim_store;
+    let restored = InMemorySmSessionRegistry::new()
+        .with_persistence(storage)
+        .with_claim_store(claims, SharedNodeIdentity::new(owner));
+    assert_eq!(
+        restored
+            .restore_from_persistence()
+            .await
+            .expect("restore durable session"),
+        1
+    );
+    let drained = restored
+        .drain_expired()
+        .await
+        .expect("drain restored session");
+    assert_eq!(drained.len(), 1);
+    assert_eq!(drained[0].unacked_stanzas.len(), 1);
+    assert!(restored
+        .drain_expired()
+        .await
+        .expect("second restored drain")
+        .is_empty());
+    assert!(persistence
+        .get_session(&SmSessionId::new(stream_id))
+        .await
+        .expect("durable row before confirmation")
+        .is_some());
+
+    assert!(restored.confirm_drained(stream_id).await);
+    assert!(persistence
+        .get_session(&SmSessionId::new(stream_id))
+        .await
+        .expect("durable row after confirmation")
+        .is_none());
 }
 
 #[tokio::test]

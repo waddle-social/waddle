@@ -2991,42 +2991,22 @@ async fn terminal_ownership_discovery_failure_defers_promotion_until_janitor_ret
     )
     .await;
     let jid: FullJid = "alice@example.com/ownership-unknown".parse().expect("jid");
-    let (old_tx, mut old_rx) = mpsc::channel::<OutboundStanza>(4);
-    let old_owner = state
-        .deps
-        .protocol
-        .connection_registry
-        .register(jid.clone(), old_tx);
-
-    let mut old_conn = WsConnState::new();
-    old_conn.phase = ConnectionPhase::ready(jid.clone(), false);
-    old_conn.authenticated_session = Some(create_test_session(state.as_ref(), "alice").await);
-    old_conn.registry_owner = Some(old_owner);
-    let enabled = handle_xmpp_frame(
-        "<enable xmlns='urn:xmpp:sm:3' resume='true'/>",
-        "example.com",
+    let old_stream_id = "ownership-unknown-expired-claim".to_string();
+    seed_claimed_pending_row(state.as_ref(), &jid.to_bare(), &old_stream_id, 1).await;
+    handoff_expired_claimed_session(
         state.as_ref(),
-        &mut old_conn,
+        &old_stream_id,
+        &jid,
+        vec![waddle_xmpp::stream_management::DetachedUnackedStanza {
+            sequence: 1,
+            stanza_xml: message_frame_xml_with_id("terminal-release-replay-copy".to_string()),
+            original_receipt_at: chrono::Utc::now(),
+        }],
     )
     .await;
-    let old_stream_id = Element::from_str(&enabled[0])
-        .expect("enabled xml")
-        .attr("id")
-        .expect("stream id")
-        .to_string();
-    old_conn.publish_pending_sm_enable(state.as_ref());
-    seed_claimed_pending_row(state.as_ref(), &jid.to_bare(), &old_stream_id, 1).await;
-    let _ = old_conn.sm_state.record_outbound(
-        message_frame_xml_with_id("terminal-release-replay-copy".to_string()),
-        SmEvictionPath::Batch,
-    );
-    old_conn.begin_terminal_sm_recovery();
 
     failing_storage.arm();
-    assert_eq!(
-        cleanup_connection_shutdown(state.as_ref(), &mut old_rx, &mut old_conn, false).await,
-        super::super::cleanup::ConnectionShutdownOutcome::NotPersisted
-    );
+    crate::server::session_janitors::run_sm_expiry_sweep(&state).await;
 
     let rows = state
         .deps
@@ -3752,52 +3732,30 @@ async fn terminal_promotion_queued_row_redrives_even_while_session_retries() {
 /// reaches a live replacement ahead of the earlier released row.
 #[tokio::test]
 async fn janitor_redrives_released_rows_before_promoting_remainder() {
-    use waddle_xmpp::stream_management::{DetachedSession, DetachedUnackedStanza};
+    use waddle_xmpp::stream_management::DetachedUnackedStanza;
     let state = create_test_websocket_state().await;
     let jid: FullJid = "alice@example.com/janitor-fifo".parse().expect("jid");
     let stream_id = "janitor-fifo-expired".to_string();
     seed_claimed_pending_row(state.as_ref(), &jid.to_bare(), &stream_id, 1).await;
 
-    state
-        .deps
-        .protocol
-        .sm_session_registry
-        .store_session(DetachedSession {
-            stream_id: stream_id.clone(),
-            user_id: "alice@example.com".to_string(),
-            jid: jid.clone(),
-            inbound_count: 0,
-            shadow_ordinal: waddle_xmpp::stream_management::ShadowOrdinal::ZERO,
-            outbound_count: 2,
-            last_acked: 0,
-            replay_gap_through: None,
-            unacked_stanzas: vec![
-                DetachedUnackedStanza {
-                    sequence: 1,
-                    stanza_xml: message_frame_xml_with_id("row-backed-copy".to_string()),
-                    original_receipt_at: chrono::Utc::now(),
-                },
-                DetachedUnackedStanza {
-                    sequence: 2,
-                    stanza_xml: transient_chat_message_xml("janitor-later", &jid.to_bare()),
-                    original_receipt_at: chrono::Utc::now(),
-                },
-            ],
-            max_resume_time: Some(0),
-            detached_at: std::time::Instant::now(),
-            carbons_enabled: false,
-            roster_interested: false,
-            blocklist_interested: false,
-            presence_available: false,
-            presence_show: None,
-            presence_status: None,
-            presence_priority: 0,
-            presence_payloads: Vec::new(),
-            pending_subscribes_flushed: false,
-        })
-        .await
-        .expect("store expired session");
-    tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+    handoff_expired_claimed_session(
+        state.as_ref(),
+        &stream_id,
+        &jid,
+        vec![
+            DetachedUnackedStanza {
+                sequence: 1,
+                stanza_xml: message_frame_xml_with_id("row-backed-copy".to_string()),
+                original_receipt_at: chrono::Utc::now(),
+            },
+            DetachedUnackedStanza {
+                sequence: 2,
+                stanza_xml: transient_chat_message_xml("janitor-later", &jid.to_bare()),
+                original_receipt_at: chrono::Utc::now(),
+            },
+        ],
+    )
+    .await;
 
     let (replacement_tx, mut replacement_rx) = mpsc::channel::<OutboundStanza>(8);
     let replacement_owner = state
@@ -5784,6 +5742,57 @@ async fn seed_claimed_pending_row(
         })
         .await
         .expect("seed claimed pending_delivery row");
+}
+
+/// Build a fresh detached snapshot, claim it for resume, let it expire while
+/// claimed, then release it through issue #1667's off-map promotion handoff.
+async fn handoff_expired_claimed_session(
+    state: &super::super::state::WebSocketState,
+    stream_id: &str,
+    jid: &FullJid,
+    unacked_stanzas: Vec<waddle_xmpp::stream_management::DetachedUnackedStanza>,
+) {
+    let registry = &state.deps.protocol.sm_session_registry;
+    registry
+        .store_session(waddle_xmpp::stream_management::DetachedSession {
+            stream_id: stream_id.to_string(),
+            user_id: jid.to_bare().to_string(),
+            jid: jid.clone(),
+            inbound_count: 0,
+            shadow_ordinal: waddle_xmpp::stream_management::ShadowOrdinal::ZERO,
+            outbound_count: unacked_stanzas.len() as u32,
+            last_acked: 0,
+            replay_gap_through: None,
+            unacked_stanzas,
+            max_resume_time: Some(1),
+            detached_at: std::time::Instant::now(),
+            carbons_enabled: false,
+            roster_interested: false,
+            blocklist_interested: false,
+            presence_available: false,
+            presence_show: None,
+            presence_status: None,
+            presence_priority: 0,
+            presence_payloads: Vec::new(),
+            pending_subscribes_flushed: false,
+        })
+        .await
+        .expect("store fresh session before claimed expiry");
+    assert!(registry
+        .claim_session(stream_id)
+        .await
+        .expect("claim session before expiry")
+        .is_some());
+    tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+    registry
+        .release_claim(stream_id)
+        .await
+        .expect("handoff expired claimed session");
+    assert!(registry
+        .claim_session(stream_id)
+        .await
+        .expect("promotion-owned session is not resumable")
+        .is_none());
 }
 
 #[tokio::test]

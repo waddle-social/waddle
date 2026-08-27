@@ -17,6 +17,13 @@ pub(super) enum ClaimSessionOutcome {
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum ClaimedReleaseTransition {
+    Restored,
+    PromotionOwned,
+    Missing,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum PendingPromotionRetryRetention {
     Retained,
     NotTracked,
@@ -179,6 +186,49 @@ impl Drop for DrainedSessionBatch<'_> {
 }
 
 impl InMemorySmSessionRegistry {
+    /// Return a claimed resume snapshot to the lifecycle that now owns it.
+    ///
+    /// All four maps are locked before mutation so the synchronous `Drop`
+    /// path can fall back to exact-fence release without losing a partially
+    /// moved payload when a lock is poisoned. Keep this lock order aligned
+    /// with `forget_claim_locally_locked` and promotion retry handling:
+    /// sessions → claimed sessions → promotion marker → retry payload.
+    fn transition_claimed_resume_release(
+        &self,
+        stream_id: &str,
+    ) -> Result<ClaimedReleaseTransition, SmRegistryError> {
+        let mut sessions = self
+            .sessions
+            .write()
+            .map_err(|_| SmRegistryError::Internal("Lock poisoned".to_string()))?;
+        let mut claimed = self
+            .claimed_sessions
+            .write()
+            .map_err(|_| SmRegistryError::Internal("Lock poisoned".to_string()))?;
+        let mut promotions = self
+            .pending_promotions
+            .write()
+            .map_err(|_| SmRegistryError::Internal("Lock poisoned".to_string()))?;
+        let mut retries = self
+            .pending_promotion_retries
+            .write()
+            .map_err(|_| SmRegistryError::Internal("Lock poisoned".to_string()))?;
+
+        match claimed.remove(stream_id) {
+            Some(session) if !session.is_expired() => {
+                sessions.insert(stream_id.to_string(), session);
+                Ok(ClaimedReleaseTransition::Restored)
+            }
+            Some(session) => {
+                promotions.insert(stream_id.to_string());
+                retries.insert(stream_id.to_string(), session);
+                Ok(ClaimedReleaseTransition::PromotionOwned)
+            }
+            None if promotions.contains(stream_id) => Ok(ClaimedReleaseTransition::PromotionOwned),
+            None => Ok(ClaimedReleaseTransition::Missing),
+        }
+    }
+
     /// Return an in-flight resume claim to the detached pool from a
     /// cancellation guard.  This is synchronous specifically so a dropped
     /// WebSocket resume future cannot strand the claimed snapshot between
@@ -189,27 +239,14 @@ impl InMemorySmSessionRegistry {
     /// If bookkeeping cannot be acquired, the exact fence is transferred to
     /// the existing terminal-release inventory rather than being forgotten.
     pub fn defer_claimed_resume_release(&self, stream_id: &str) -> bool {
-        let reinserted = match (self.sessions.write(), self.claimed_sessions.write()) {
-            (Ok(mut sessions), Ok(mut claimed)) => match claimed.remove(stream_id) {
-                Some(session) if !session.is_expired() => {
-                    sessions.insert(stream_id.to_string(), session);
-                    true
-                }
-                // Expired while claimed: mirror `release_claim_locked` —
-                // drop it from memory (re-inserting would strand it in
-                // `claimed_sessions` forever, since expiry sweeps only walk
-                // `sessions`), keep the durable rows for the janitor's
-                // promotion chain, and fall through so the exact fence moves
-                // into terminal-release inventory.
-                Some(_expired) => false,
-                None => false,
-            },
-            _ => false,
-        };
-        if reinserted {
-            return true;
+        match self.transition_claimed_resume_release(stream_id) {
+            Ok(ClaimedReleaseTransition::Restored | ClaimedReleaseTransition::PromotionOwned) => {
+                true
+            }
+            Ok(ClaimedReleaseTransition::Missing) | Err(_) => {
+                self.defer_enabled_claim_release(stream_id)
+            }
         }
-        self.defer_enabled_claim_release(stream_id)
     }
 
     /// Atomically move a claim acquired for `<enable/>` out of the active
@@ -1745,12 +1782,11 @@ impl InMemorySmSessionRegistry {
     /// pass, or the orphan reaper) could observe the entity as unclaimed
     /// and take it over while this node still holds it in memory, exactly
     /// the double-ownership hazard acquire-then-hydrate exists to prevent.
-    /// Only when the session is expired (and therefore NOT reinserted —
-    /// left for the janitor's drain_expired/promote/confirm chain, which
-    /// releases the claim itself via [`Self::confirm_drained`]) or was
-    /// absent from `claimed_sessions` altogether does this release the
-    /// store entry: those are the only cases where the entity genuinely
-    /// stops being tracked by this call.
+    /// An expired session moves into the off-map promotion inventory so the
+    /// janitor can drain its full payload without making it resumable again;
+    /// its exact claim remains active until [`Self::confirm_drained`]. Only a
+    /// session absent from both claimed and promotion ownership uses the
+    /// terminal release fallback.
     pub async fn release_claim(&self, stream_id: &str) -> Result<(), SmRegistryError> {
         let stream_lock = self.stream_lock(stream_id)?;
         let _stream_guard = stream_lock.lock().await;
@@ -1769,26 +1805,11 @@ impl InMemorySmSessionRegistry {
     }
 
     async fn release_claim_locked(&self, stream_id: &str) -> Result<(), SmRegistryError> {
-        let reinserted = {
-            let mut sessions = self
-                .sessions
-                .write()
-                .map_err(|_| SmRegistryError::Internal("Lock poisoned".to_string()))?;
-            let mut claimed = self
-                .claimed_sessions
-                .write()
-                .map_err(|_| SmRegistryError::Internal("Lock poisoned".to_string()))?;
-            let session = claimed.remove(stream_id);
-            match session {
-                Some(session) if !session.is_expired() => {
-                    sessions.insert(stream_id.to_string(), session);
-                    true
-                }
-                _ => false,
+        match self.transition_claimed_resume_release(stream_id)? {
+            ClaimedReleaseTransition::Restored | ClaimedReleaseTransition::PromotionOwned => {}
+            ClaimedReleaseTransition::Missing => {
+                self.release_claim_store_entry(stream_id).await;
             }
-        };
-        if !reinserted {
-            self.release_claim_store_entry(stream_id).await;
         }
         Ok(())
     }
