@@ -544,28 +544,42 @@ pub async fn gc_expired_aliases(
             });
         }
         let batch_len = candidates.len();
-        match gc_candidate_batch(db, &cutoff, candidates, &budget).await {
-            Ok(outcome) => {
-                deleted_messages += outcome.deleted_messages;
-                if !outcome.completed {
-                    return Ok(AliasGcOutcome {
-                        deleted_messages,
-                        completed: false,
-                    });
-                }
-            }
+        let batch = match gc_candidate_batch(db, &cutoff, candidates, &budget).await {
+            Ok(batch) => batch,
             Err(mut failure) => {
                 failure.deleted_messages += deleted_messages;
                 return Err(failure);
             }
-        }
-        if batch_len < GC_BATCH_LIMIT {
+        };
+        deleted_messages += batch.deleted_messages;
+        if batch.deadline_reached {
             return Ok(AliasGcOutcome {
                 deleted_messages,
-                completed: true,
+                completed: false,
+            });
+        }
+        // A candidate held by another writer stays eligible and reappears at
+        // the head of every rescan, so the last batch's skips decide whether
+        // the backlog is drained; a batch that processed nothing would only
+        // rescan the same locked rows.
+        if batch_len < GC_BATCH_LIMIT || batch.processed == 0 {
+            return Ok(AliasGcOutcome {
+                deleted_messages,
+                completed: batch_len < GC_BATCH_LIMIT && batch.skipped_locked == 0,
             });
         }
     }
+}
+
+/// Work done by one candidate batch.
+struct BatchOutcome {
+    deleted_messages: usize,
+    /// Candidates locked and collected (their aliases are gone).
+    processed: usize,
+    /// Candidates held by another writer, left eligible for a later run.
+    skipped_locked: usize,
+    /// The cooperative deadline stopped the batch early.
+    deadline_reached: bool,
 }
 
 /// Upper bound on messages examined per GC scan.
@@ -576,16 +590,17 @@ async fn gc_candidate_batch(
     cutoff: &str,
     candidates: Vec<MessageKey>,
     budget: &AliasGcBudget,
-) -> Result<AliasGcOutcome, AliasGcFailure> {
+) -> Result<BatchOutcome, AliasGcFailure> {
     let mut deleted_messages = 0usize;
-    // A candidate held by another writer stays eligible, so a batch that
-    // skipped one cannot claim the backlog is drained.
-    let mut skipped_locked = false;
+    let mut processed = 0usize;
+    let mut skipped_locked = 0usize;
     for message_key in candidates {
         if Instant::now() >= budget.deadline {
-            return Ok(AliasGcOutcome {
+            return Ok(BatchOutcome {
                 deleted_messages,
-                completed: false,
+                processed,
+                skipped_locked,
+                deadline_reached: true,
             });
         }
         let mut tx = db
@@ -643,10 +658,10 @@ async fn gc_candidate_batch(
             .await
             .map_err(|error| gc_failure(deleted_messages, error))?
         {
-            CandidateLock::Eligible => {}
+            CandidateLock::Eligible => processed += 1,
             CandidateLock::Skipped(reason) => {
                 if reason == SkipReason::LockedElsewhere {
-                    skipped_locked = true;
+                    skipped_locked += 1;
                 }
                 tx.commit()
                     .await
@@ -699,9 +714,11 @@ async fn gc_candidate_batch(
         deleted_messages += deleted;
     }
 
-    Ok(AliasGcOutcome {
+    Ok(BatchOutcome {
         deleted_messages,
-        completed: !skipped_locked,
+        processed,
+        skipped_locked,
+        deadline_reached: false,
     })
 }
 
@@ -1601,6 +1618,46 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn gc_keeps_draining_later_batches_after_skipping_a_locked_candidate() {
+        let Some(fixture) = Fixture::open("gc_skip_then_drain").await else {
+            return;
+        };
+        let terminal_at = timestamp(17);
+        let total = GC_BATCH_LIMIT + 8;
+        let keys = fixture.record_terminal_messages(total, terminal_at).await;
+        let mut blocker = sqlx::PgConnection::connect(&fixture.schema_url)
+            .await
+            .expect("open candidate blocker");
+        let mut blocker_tx = blocker.begin().await.expect("begin candidate blocker");
+        sqlx::query("SELECT 1 FROM ingress_messages WHERE message_key = $1 FOR UPDATE")
+            .bind(keys[0].to_storage())
+            .execute(&mut *blocker_tx)
+            .await
+            .expect("lock the oldest GC candidate");
+
+        let outcome = fixture
+            .store
+            .gc_expired_aliases(
+                terminal_at + ALIAS_RETENTION + Duration::days(1),
+                gc_budget(),
+            )
+            .await
+            .expect("a locked head candidate must not stop the run");
+        assert_eq!(
+            outcome,
+            AliasGcOutcome {
+                deleted_messages: total - 1,
+                completed: false,
+            },
+            "every unlocked row across both batches is reclaimed; the locked one keeps the run partial"
+        );
+        assert_eq!(fixture.count("ingress_messages").await, 1);
+        blocker_tx.rollback().await.expect("release candidate lock");
+        drop(blocker);
+        fixture.close().await;
+    }
+
+    #[tokio::test]
     async fn gc_epoch_lock_timeout_has_zero_progress() {
         let Some(fixture) = Fixture::open("gc_epoch_lock_timeout").await else {
             return;
@@ -1616,12 +1673,15 @@ mod tests {
             .await
             .expect("lock protocol epoch row");
 
+        // Production-relative bounds: the statement timer covers the lock
+        // wait, so the lock bound must be the one that fires first.
         let failure = fixture
             .store
             .gc_expired_aliases(
                 terminal_at + ALIAS_RETENTION + Duration::days(1),
                 AliasGcBudget {
                     lock_timeout: StdDuration::from_millis(100),
+                    statement_timeout: StdDuration::from_millis(250),
                     ..gc_budget()
                 },
             )

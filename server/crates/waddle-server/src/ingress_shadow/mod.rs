@@ -73,11 +73,14 @@ const RETENTION_GC_BUDGET: Duration = Duration::from_secs(2);
 /// (`RETENTION_GC_SCAN_TIMEOUT`), then one candidate transaction — the epoch
 /// lock wait plus the nine single-row statements it issues — and margin, so
 /// slowness inside the bounds is classified by the run itself rather than
-/// cancelled from outside.  2 s + 1 s + 0.25 s + 9 × 0.25 s ≈ 5.5 s.
+/// cancelled from outside.  2 s + 1 s + 0.1 s + 9 × 0.25 s ≈ 5.4 s.
 #[cfg(feature = "clustering")]
 const RETENTION_GC_HARD_DEADLINE: Duration = Duration::from_secs(6);
+/// Strictly below the statement bound: PostgreSQL's statement timer covers
+/// the lock wait, so an equal or larger lock bound would surface every lock
+/// wait as a statement timeout.
 #[cfg(feature = "clustering")]
-const RETENTION_GC_LOCK_TIMEOUT: Duration = Duration::from_millis(250);
+const RETENTION_GC_LOCK_TIMEOUT: Duration = Duration::from_millis(100);
 /// Every candidate-transaction statement touches one row by primary key.
 #[cfg(feature = "clustering")]
 const RETENTION_GC_STATEMENT_TIMEOUT: Duration = Duration::from_millis(250);
@@ -542,9 +545,10 @@ impl IngressShadowHandle {
                 forced_retirement_retryable_failures: Arc::new(
                     std::sync::atomic::AtomicUsize::new(0),
                 ),
-                gc_state: Arc::new(RetentionGcState::default()),
+                gc_trigger: Arc::new(Notify::new()),
             };
             let recovery_database = worker.database.clone();
+            let retention_gc = worker.retention_gc_coordinator();
             let handle = Self::spawn_worker_with_enqueued_streams(
                 WorkerLimits {
                     queue_capacity: config.queue_capacity,
@@ -558,12 +562,15 @@ impl IngressShadowHandle {
                 retiring_streams,
                 Some(worker.database.clone()),
                 stream_activity,
-                Arc::new(move |task, outstanding| {
-                    let worker = worker.clone();
-                    Box::pin(async move {
-                        worker.execute(task, outstanding.as_ref()).await;
-                    })
-                }),
+                WorkerTasks {
+                    execute: Arc::new(move |task, outstanding| {
+                        let worker = worker.clone();
+                        Box::pin(async move {
+                            worker.execute(task, outstanding.as_ref()).await;
+                        })
+                    }),
+                    retention_gc: Some(retention_gc),
+                },
             );
             handle
                 .recover_orphaned_retirements(&recovery_database)
@@ -775,7 +782,10 @@ impl IngressShadowHandle {
             Arc::new(std::sync::Mutex::new(HashSet::new())),
             None,
             Arc::new(std::sync::Mutex::new(StreamActivityState::default())),
-            Arc::new(move |task, _outstanding| execute(task)),
+            WorkerTasks {
+                execute: Arc::new(move |task, _outstanding| execute(task)),
+                retention_gc: None,
+            },
         )
     }
 
@@ -812,12 +822,16 @@ impl IngressShadowHandle {
         retiring_streams: Arc<std::sync::Mutex<HashSet<SmSessionId>>>,
         retry_database: Option<Database>,
         stream_activity: Arc<std::sync::Mutex<StreamActivityState>>,
-        execute: IngressShadowExecutor,
+        tasks: WorkerTasks,
     ) -> Self {
         let WorkerLimits {
             queue_capacity,
             max_concurrency,
         } = limits;
+        let WorkerTasks {
+            execute,
+            retention_gc,
+        } = tasks;
         let (sender, rx) = mpsc::unbounded_channel();
         *tx.lock()
             .expect("shadow worker sender mutex must not be poisoned") = Some(sender);
@@ -851,10 +865,16 @@ impl IngressShadowHandle {
             shutdown.clone(),
             retry_database,
         ));
+        let retention_gc = retention_gc.map(|coordinator| {
+            tokio::spawn(run_retention_gc_coordinator(coordinator, shutdown.clone()))
+        });
         let shutdown_completion = shutdown.clone();
         tokio::spawn(async move {
             shutdown_completion.cancellation.cancelled().await;
             let _ = scheduler.await;
+            if let Some(retention_gc) = retention_gc {
+                let _ = retention_gc.await;
+            }
             shutdown_completion.mark_complete();
         });
         Self {
@@ -886,6 +906,14 @@ impl IngressShadowHandle {
 struct WorkerLimits {
     queue_capacity: usize,
     max_concurrency: usize,
+}
+
+/// The work a shadow worker runs: the per-task executor and, when the worker
+/// backs a real processor, the retention GC coordinator.
+#[cfg(feature = "clustering")]
+struct WorkerTasks {
+    execute: IngressShadowExecutor,
+    retention_gc: Option<RetentionGcCoordinator>,
 }
 
 /// Borrowed view of the worker-variant queue state that a single task
@@ -1497,7 +1525,7 @@ struct IngressShadowProcessor {
     forced_alias_serialization_failures: Arc<std::sync::atomic::AtomicUsize>,
     #[cfg(test)]
     forced_retirement_retryable_failures: Arc<std::sync::atomic::AtomicUsize>,
-    gc_state: Arc<RetentionGcState>,
+    gc_trigger: Arc<Notify>,
 }
 
 #[cfg(feature = "clustering")]
@@ -1521,32 +1549,33 @@ impl RetentionGcBudget {
     };
 }
 
-/// Per-process retention GC coordination: one run at a time, and a trigger
-/// that arrives while a run is in flight is kept as a pending rerun instead
-/// of being dropped, so a burst that ends mid-run still drains.
+/// Retention GC runs on its own background task, off the per-stream worker
+/// slots.  Triggers arrive through a `Notify`: `notify_one` stores exactly
+/// one permit while a run is in flight, so a trigger that lands mid-run is
+/// never lost and a burst of triggers coalesces into one follow-up run.
 #[cfg(feature = "clustering")]
-#[derive(Default)]
-struct RetentionGcState {
-    in_flight: AtomicBool,
-    rerun_requested: AtomicBool,
+#[derive(Clone)]
+struct RetentionGcCoordinator {
+    trigger: Arc<Notify>,
+    run: Arc<dyn Fn() -> IngressShadowExecuteFuture + Send + Sync>,
 }
 
 #[cfg(feature = "clustering")]
-struct RetentionGcInFlightGuard<'a>(&'a AtomicBool);
-
-#[cfg(feature = "clustering")]
-impl RetentionGcInFlightGuard<'_> {
-    fn acquire(flag: &AtomicBool) -> Option<RetentionGcInFlightGuard<'_>> {
-        flag.compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
-            .ok()
-            .map(|_| RetentionGcInFlightGuard(flag))
-    }
-}
-
-#[cfg(feature = "clustering")]
-impl Drop for RetentionGcInFlightGuard<'_> {
-    fn drop(&mut self) {
-        self.0.store(false, Ordering::Release);
+async fn run_retention_gc_coordinator(
+    coordinator: RetentionGcCoordinator,
+    shutdown: Arc<IngressShadowShutdown>,
+) {
+    loop {
+        tokio::select! {
+            () = shutdown.cancellation.cancelled() => return,
+            () = coordinator.trigger.notified() => {}
+        }
+        // A run in flight at graceful shutdown finishes within its envelope;
+        // only the forced stop abandons it.
+        tokio::select! {
+            () = shutdown.force_stop.cancelled() => return,
+            () = (coordinator.run)() => {}
+        }
     }
 }
 
@@ -1813,7 +1842,7 @@ impl IngressShadowProcessor {
                             );
                         }
                         if outcome.run_retention_gc {
-                            self.run_retention_gc().await;
+                            self.request_retention_gc();
                         }
                     }
                     Ok(Err(exhausted)) => {
@@ -1884,7 +1913,7 @@ impl IngressShadowProcessor {
                         observe_retry_sequence(attempts, false);
                         forget_retiring_stream(&self.retiring_streams, &retire_stream);
                         if matches!(outcome, RetirementOutcome::Deleted) {
-                            self.run_retention_gc().await;
+                            self.request_retention_gc();
                         }
                     }
                     Ok(Ok(RetirementOutcome::DeferredClaim)) => {
@@ -2224,28 +2253,23 @@ impl IngressShadowProcessor {
             .await;
     }
 
-    async fn run_retention_gc_with_budget(&self, budget: RetentionGcBudget) {
-        loop {
-            // Clear before acquiring: a trigger that lands after this point
-            // while the run is in flight is observed after the run.
-            self.gc_state
-                .rerun_requested
-                .store(false, Ordering::Release);
-            let Some(in_flight) = RetentionGcInFlightGuard::acquire(&self.gc_state.in_flight)
-            else {
-                self.gc_state.rerun_requested.store(true, Ordering::Release);
-                tracing::debug!("ingress shadow retention GC already in flight; rerun queued");
-                return;
-            };
-            self.run_retention_gc_once(&budget).await;
-            drop(in_flight);
-            if !self.gc_state.rerun_requested.swap(false, Ordering::AcqRel) {
-                return;
-            }
+    /// Hand a GC trigger to the coordinator task without waiting for it.
+    fn request_retention_gc(&self) {
+        self.gc_trigger.notify_one();
+    }
+
+    fn retention_gc_coordinator(&self) -> RetentionGcCoordinator {
+        let processor = self.clone();
+        RetentionGcCoordinator {
+            trigger: self.gc_trigger.clone(),
+            run: Arc::new(move || {
+                let processor = processor.clone();
+                Box::pin(async move { processor.run_retention_gc().await })
+            }),
         }
     }
 
-    async fn run_retention_gc_once(&self, budget: &RetentionGcBudget) {
+    async fn run_retention_gc_with_budget(&self, budget: RetentionGcBudget) {
         let substrate = match PostgresIngressSubstrate::open(self.database.clone()) {
             Ok(substrate) => substrate,
             Err(error) => {
@@ -2945,7 +2969,28 @@ mod tests {
             Arc::new(std::sync::Mutex::new(HashSet::new())),
             None,
             Arc::new(std::sync::Mutex::new(StreamActivityState::default())),
-            Arc::new(move |task, outstanding| execute(task, outstanding)),
+            WorkerTasks {
+                execute: Arc::new(move |task, outstanding| execute(task, outstanding)),
+                retention_gc: None,
+            },
+        )
+    }
+
+    fn test_handle_with_retention_gc(coordinator: RetentionGcCoordinator) -> IngressShadowHandle {
+        IngressShadowHandle::spawn_worker_with_enqueued_streams(
+            WorkerLimits {
+                queue_capacity: 1,
+                max_concurrency: 1,
+            },
+            Arc::new(std::sync::Mutex::new(None)),
+            Arc::new(std::sync::Mutex::new(HashSet::new())),
+            Arc::new(std::sync::Mutex::new(HashSet::new())),
+            None,
+            Arc::new(std::sync::Mutex::new(StreamActivityState::default())),
+            WorkerTasks {
+                execute: Arc::new(|_, _| Box::pin(async {})),
+                retention_gc: Some(coordinator),
+            },
         )
     }
 
@@ -3001,19 +3046,6 @@ mod tests {
                 .counter_sum("ingress.shadow.aborted", &[])
                 .unwrap_or(0),
         }
-    }
-
-    fn ingress_shadow_gc_runs(
-        metrics: &waddle_xmpp::telemetry::test_support::MetricsTestGuard,
-    ) -> u64 {
-        ["completed", "partial", "failed", "timed_out"]
-            .into_iter()
-            .map(|outcome| {
-                metrics
-                    .counter_sum("ingress.shadow.gc.runs", &[("outcome", outcome)])
-                    .unwrap_or(0)
-            })
-            .sum()
     }
 
     struct PoolCloseSignal(Option<oneshot::Sender<()>>);
@@ -3111,7 +3143,7 @@ mod tests {
                 retiring_streams: Arc::new(std::sync::Mutex::new(HashSet::new())),
                 forced_alias_serialization_failures: Arc::new(AtomicUsize::new(0)),
                 forced_retirement_retryable_failures: Arc::new(AtomicUsize::new(0)),
-                gc_state: Arc::new(RetentionGcState::default()),
+                gc_trigger: Arc::new(Notify::new()),
             };
             let fixture = Self {
                 db,
@@ -4555,71 +4587,60 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn retention_gc_queues_a_rerun_while_another_run_is_in_flight() {
-        let metrics = waddle_xmpp::telemetry::test_support::acquire().await;
-        let Some(fixture) = ShadowFixture::open("retention_gc_coalescing").await else {
-            return;
+    async fn retention_gc_coordinator_keeps_one_pending_trigger_and_never_loses_the_last_one() {
+        let runs = Arc::new(AtomicUsize::new(0));
+        let started = Arc::new(Notify::new());
+        let release = Arc::new(Notify::new());
+        let trigger = Arc::new(Notify::new());
+        let coordinator = RetentionGcCoordinator {
+            trigger: trigger.clone(),
+            run: Arc::new({
+                let runs = runs.clone();
+                let started = started.clone();
+                let release = release.clone();
+                move || {
+                    let runs = runs.clone();
+                    let started = started.clone();
+                    let release = release.clone();
+                    Box::pin(async move {
+                        runs.fetch_add(1, Ordering::AcqRel);
+                        started.notify_one();
+                        release.notified().await;
+                    })
+                }
+            }),
         };
-        fixture.record_expired_messages(1).await;
-        let runs_before = ingress_shadow_gc_runs(&metrics);
-        let completed_before = metrics
-            .counter_sum("ingress.shadow.gc.runs", &[("outcome", "completed")])
-            .unwrap_or(0);
-        let state = &fixture.processor.gc_state;
+        let handle = test_handle_with_retention_gc(coordinator);
 
-        state.in_flight.store(true, Ordering::Release);
-        fixture.processor.run_retention_gc().await;
+        trigger.notify_one();
+        started.notified().await;
+        assert_eq!(runs.load(Ordering::Acquire), 1);
+        // Triggers that land mid-run coalesce into exactly one follow-up run.
+        trigger.notify_one();
+        trigger.notify_one();
+        trigger.notify_one();
+        release.notify_one();
+        started.notified().await;
+        assert_eq!(runs.load(Ordering::Acquire), 2);
+        release.notify_one();
+        tokio::time::sleep(Duration::from_millis(50)).await;
         assert_eq!(
-            ingress_shadow_gc_runs(&metrics),
-            runs_before,
-            "a coalesced trigger must not run or record a GC run"
-        );
-        assert_eq!(
-            fixture.count("ingress_messages").await,
-            1,
-            "a coalesced trigger must not touch the database"
-        );
-        assert!(
-            state.in_flight.load(Ordering::Acquire),
-            "a coalesced trigger must not release a flag it did not acquire"
-        );
-        assert!(
-            state.rerun_requested.load(Ordering::Acquire),
-            "a coalesced trigger must be kept as a pending rerun"
+            runs.load(Ordering::Acquire),
+            2,
+            "coalesced triggers must not fan out into extra runs"
         );
 
-        // The in-flight run finishing observes the pending rerun and loops:
-        // one run reclaims the row, the rerun finds nothing and completes.
-        state.in_flight.store(false, Ordering::Release);
-        fixture.processor.run_retention_gc().await;
-        assert_eq!(fixture.count("ingress_messages").await, 0);
-        assert_eq!(
-            metrics
-                .counter_sum("ingress.shadow.gc.runs", &[("outcome", "completed")])
-                .unwrap_or(0),
-            completed_before + 1,
-            "a fresh trigger with no pending rerun runs exactly once"
-        );
-        assert!(!state.in_flight.load(Ordering::Acquire));
-        assert!(!state.rerun_requested.load(Ordering::Acquire));
-
-        fixture.record_expired_messages(1).await;
-        state.rerun_requested.store(true, Ordering::Release);
-        fixture.processor.run_retention_gc().await;
-        assert_eq!(
-            metrics
-                .counter_sum("ingress.shadow.gc.runs", &[("outcome", "completed")])
-                .unwrap_or(0),
-            completed_before + 2,
-            "a stale pending rerun is cleared before the run, not replayed after it"
-        );
-        assert_eq!(fixture.count("ingress_messages").await, 0);
-        assert!(!state.rerun_requested.load(Ordering::Acquire));
-        fixture.close().await;
+        // The last trigger of a burst is honoured even when it lands as the
+        // previous run finishes.
+        trigger.notify_one();
+        started.notified().await;
+        assert_eq!(runs.load(Ordering::Acquire), 3);
+        release.notify_one();
+        drop(handle);
     }
 
     #[tokio::test]
-    async fn retention_gc_hard_envelope_reports_committed_progress_and_releases_the_flag() {
+    async fn retention_gc_hard_envelope_reports_committed_progress() {
         const BACKLOG: usize = 8;
 
         let metrics = waddle_xmpp::telemetry::test_support::acquire().await;
@@ -4672,10 +4693,6 @@ mod tests {
                 .unwrap_or(0),
             reclaimed_before + u64::try_from(BACKLOG - remaining).expect("count fits u64"),
             "a hard-envelope cancellation must still report the committed deletions"
-        );
-        assert!(
-            !fixture.processor.gc_state.in_flight.load(Ordering::Acquire),
-            "a cancelled run must release the in-flight flag"
         );
         fixture.close().await;
     }
@@ -4752,7 +4769,7 @@ mod tests {
             retiring_streams: Arc::new(std::sync::Mutex::new(HashSet::new())),
             forced_alias_serialization_failures: Arc::new(AtomicUsize::new(0)),
             forced_retirement_retryable_failures: Arc::new(AtomicUsize::new(0)),
-            gc_state: Arc::new(RetentionGcState::default()),
+            gc_trigger: Arc::new(Notify::new()),
         };
         let failed_before = metrics
             .counter_sum("ingress.shadow.gc.runs", &[("outcome", "failed")])
@@ -5874,25 +5891,28 @@ mod tests {
             retiring_streams.clone(),
             None,
             Arc::new(std::sync::Mutex::new(StreamActivityState::default())),
-            Arc::new({
-                let release_first = release_first.clone();
-                move |task, _outstanding| {
+            WorkerTasks {
+                execute: Arc::new({
                     let release_first = release_first.clone();
-                    let retiring_streams = retiring_streams.clone();
-                    let started_tx = started_tx.clone();
-                    Box::pin(async move {
-                        if let IngressShadowTask::Retire { stream_id } = task {
-                            started_tx
-                                .send(stream_id.clone())
-                                .expect("record retirement start");
-                            if stream_id.as_str() == "retire-a" {
-                                release_first.notified().await;
+                    move |task, _outstanding| {
+                        let release_first = release_first.clone();
+                        let retiring_streams = retiring_streams.clone();
+                        let started_tx = started_tx.clone();
+                        Box::pin(async move {
+                            if let IngressShadowTask::Retire { stream_id } = task {
+                                started_tx
+                                    .send(stream_id.clone())
+                                    .expect("record retirement start");
+                                if stream_id.as_str() == "retire-a" {
+                                    release_first.notified().await;
+                                }
+                                forget_retiring_stream(&retiring_streams, &stream_id);
                             }
-                            forget_retiring_stream(&retiring_streams, &stream_id);
-                        }
-                    })
-                }
-            }),
+                        })
+                    }
+                }),
+                retention_gc: None,
+            },
         );
 
         assert_eq!(
