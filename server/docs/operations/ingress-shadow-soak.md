@@ -230,13 +230,15 @@ mid-window, the window restarts.
 | PostgreSQL | Backends stay below 80% of `max_connections`; data and WAL PVC use stay below 70% on both instances. |
 | Submission latency | p99 `ingress_shadow_tx_duration_seconds` remains below 2 seconds. |
 
-Known instrumentation limit: retention GC runs under the worker's 2.5 s
-transaction deadline and commits per candidate, so a GC run that times out
-has already reclaimed rows that `ingress_shadow_gc_reclaimed_messages_total`
-does not count. `IngressShadowGcFailing` firing is therefore a soak finding
-against #1656's GC budget (tracked as a follow-up issue), and the cohort
-state metrics — not the reclaimed counter — are the primary reclamation
-evidence.
+Retention GC uses a 2 s cooperative budget inside a 2.5 s hard envelope, with
+a 250 ms `lock_timeout` and a 1 s `statement_timeout`. A `partial` outcome means
+the cooperative budget stopped the run after its progress was accounted;
+`timed_out` means the run hit the lock timeout, statement timeout, or hard
+envelope. The reclaimed-message counter accounts progress on cooperative exits
+and errors returned to the worker, but remains a lower bound across hard-envelope
+cancellation, force-stop, and ambiguous commit. The cohort state metrics remain
+the authoritative reclamation evidence. Cross-pod GC contention on the same
+oldest candidates surfaces as `timed_out`.
 
 ## Loki checks
 

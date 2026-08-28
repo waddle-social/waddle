@@ -14,7 +14,9 @@ use crate::config::IngressShadowConfig;
 use crate::config::LineageConfig;
 use crate::db::{Database, DatabaseDriver};
 #[cfg(feature = "clustering")]
-use crate::ingress_substrate::PostgresIngressSubstrate;
+use crate::ingress_substrate::{
+    AliasGcBudget, AliasGcError, AliasGcFailure, AliasGcOutcome, PostgresIngressSubstrate,
+};
 #[cfg(feature = "clustering")]
 use crate::ingress_uow::{
     run_with_retry, CanonicalMessageRepository, ClaimRepository, EffectIntentRepository,
@@ -63,6 +65,14 @@ const DEFAULT_LOCK_TIMEOUT_MS: u64 = 250;
 const DEFAULT_STATEMENT_TIMEOUT_MS: u64 = 1_500;
 #[cfg(feature = "clustering")]
 const DEFAULT_TX_DEADLINE: Duration = Duration::from_millis(2_500);
+#[cfg(feature = "clustering")]
+const RETENTION_GC_BUDGET: Duration = Duration::from_secs(2);
+#[cfg(feature = "clustering")]
+const RETENTION_GC_HARD_DEADLINE: Duration = Duration::from_millis(2_500);
+#[cfg(feature = "clustering")]
+const RETENTION_GC_LOCK_TIMEOUT: Duration = Duration::from_millis(250);
+#[cfg(feature = "clustering")]
+const RETENTION_GC_STATEMENT_TIMEOUT: Duration = Duration::from_secs(1);
 #[cfg(feature = "clustering")]
 const DEFAULT_RETIREMENT_ADMISSION_RETRY_DELAY: Duration = Duration::from_millis(10);
 
@@ -522,6 +532,7 @@ impl IngressShadowHandle {
                 forced_retirement_retryable_failures: Arc::new(
                     std::sync::atomic::AtomicUsize::new(0),
                 ),
+                gc_in_flight: Arc::new(AtomicBool::new(false)),
             };
             let recovery_database = worker.database.clone();
             let handle = Self::spawn_worker_with_enqueued_streams(
@@ -1476,6 +1487,84 @@ struct IngressShadowProcessor {
     forced_alias_serialization_failures: Arc<std::sync::atomic::AtomicUsize>,
     #[cfg(test)]
     forced_retirement_retryable_failures: Arc<std::sync::atomic::AtomicUsize>,
+    gc_in_flight: Arc<AtomicBool>,
+}
+
+#[cfg(feature = "clustering")]
+#[derive(Clone, Copy)]
+struct RetentionGcBudget {
+    cooperative: Duration,
+    hard_deadline: Duration,
+    lock_timeout: Duration,
+    statement_timeout: Duration,
+}
+
+#[cfg(feature = "clustering")]
+impl RetentionGcBudget {
+    const DEFAULT: Self = Self {
+        cooperative: RETENTION_GC_BUDGET,
+        hard_deadline: RETENTION_GC_HARD_DEADLINE,
+        lock_timeout: RETENTION_GC_LOCK_TIMEOUT,
+        statement_timeout: RETENTION_GC_STATEMENT_TIMEOUT,
+    };
+}
+
+#[cfg(feature = "clustering")]
+struct RetentionGcInFlightGuard<'a>(&'a AtomicBool);
+
+#[cfg(feature = "clustering")]
+impl RetentionGcInFlightGuard<'_> {
+    fn acquire(flag: &AtomicBool) -> Option<RetentionGcInFlightGuard<'_>> {
+        flag.compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
+            .ok()
+            .map(|_| RetentionGcInFlightGuard(flag))
+    }
+}
+
+#[cfg(feature = "clustering")]
+impl Drop for RetentionGcInFlightGuard<'_> {
+    fn drop(&mut self) {
+        self.0.store(false, Ordering::Release);
+    }
+}
+
+#[cfg(feature = "clustering")]
+fn classify_retention_gc_result(
+    result: Result<AliasGcOutcome, AliasGcFailure>,
+) -> (waddle_xmpp::telemetry::attributes::IngressGcOutcome, usize) {
+    use waddle_xmpp::telemetry::attributes::IngressGcOutcome;
+
+    match result {
+        Ok(AliasGcOutcome {
+            deleted_messages,
+            completed: true,
+        }) => (IngressGcOutcome::Completed, deleted_messages),
+        Ok(AliasGcOutcome {
+            deleted_messages,
+            completed: false,
+        }) => (IngressGcOutcome::Partial, deleted_messages),
+        Err(AliasGcFailure {
+            deleted_messages,
+            error: AliasGcError::DatabaseTimeout { .. },
+        }) => (IngressGcOutcome::TimedOut, deleted_messages),
+        Err(AliasGcFailure {
+            deleted_messages,
+            error: AliasGcError::Substrate(_),
+        }) => (IngressGcOutcome::Failed, deleted_messages),
+    }
+}
+
+#[cfg(feature = "clustering")]
+fn record_retention_gc_result(
+    outcome: waddle_xmpp::telemetry::attributes::IngressGcOutcome,
+    deleted_messages: usize,
+) {
+    waddle_xmpp::telemetry::reliability::increment_ingress_shadow_gc_run(outcome);
+    if deleted_messages > 0 {
+        waddle_xmpp::telemetry::reliability::add_ingress_shadow_gc_reclaimed_messages(
+            u64::try_from(deleted_messages).unwrap_or(u64::MAX),
+        );
+    }
 }
 
 #[cfg(feature = "clustering")]
@@ -2109,40 +2198,51 @@ impl IngressShadowProcessor {
     }
 
     async fn run_retention_gc(&self) {
+        self.run_retention_gc_with_budget(RetentionGcBudget::DEFAULT)
+            .await;
+    }
+
+    async fn run_retention_gc_with_budget(&self, budget: RetentionGcBudget) {
+        let Some(_in_flight) = RetentionGcInFlightGuard::acquire(&self.gc_in_flight) else {
+            tracing::debug!("ingress shadow retention GC already in flight; skipping");
+            return;
+        };
         let substrate = match PostgresIngressSubstrate::open(self.database.clone()) {
             Ok(substrate) => substrate,
             Err(error) => {
                 tracing::warn!(%error, "ingress shadow retention GC setup failed");
-                waddle_xmpp::telemetry::reliability::increment_ingress_shadow_gc_run(
+                record_retention_gc_result(
                     waddle_xmpp::telemetry::attributes::IngressGcOutcome::Failed,
+                    0,
                 );
                 return;
             }
         };
-        match tokio::time::timeout(
-            DEFAULT_TX_DEADLINE,
-            substrate.gc_expired_aliases(Utc::now()),
+        let result = tokio::time::timeout(
+            budget.hard_deadline,
+            substrate.gc_expired_aliases(
+                Utc::now(),
+                AliasGcBudget {
+                    deadline: tokio::time::Instant::now() + budget.cooperative,
+                    lock_timeout: budget.lock_timeout,
+                    statement_timeout: budget.statement_timeout,
+                },
+            ),
         )
-        .await
-        {
-            Ok(Ok(outcome)) => {
-                waddle_xmpp::telemetry::reliability::increment_ingress_shadow_gc_run(
-                    waddle_xmpp::telemetry::attributes::IngressGcOutcome::Completed,
-                );
-                waddle_xmpp::telemetry::reliability::add_ingress_shadow_gc_reclaimed_messages(
-                    u64::try_from(outcome.deleted_messages).unwrap_or(u64::MAX),
-                );
-            }
-            Ok(Err(error)) => {
-                tracing::warn!(%error, "ingress shadow retention GC failed");
-                waddle_xmpp::telemetry::reliability::increment_ingress_shadow_gc_run(
-                    waddle_xmpp::telemetry::attributes::IngressGcOutcome::Failed,
-                );
+        .await;
+        match result {
+            Ok(result) => {
+                if let Err(failure) = &result {
+                    tracing::warn!(%failure, "ingress shadow retention GC failed");
+                }
+                let (outcome, deleted_messages) = classify_retention_gc_result(result);
+                record_retention_gc_result(outcome, deleted_messages);
             }
             Err(error) => {
-                tracing::warn!(%error, "ingress shadow retention GC timed out");
-                waddle_xmpp::telemetry::reliability::increment_ingress_shadow_gc_run(
+                tracing::warn!(%error, "ingress shadow retention GC exceeded hard deadline");
+                record_retention_gc_result(
                     waddle_xmpp::telemetry::attributes::IngressGcOutcome::TimedOut,
+                    0,
                 );
             }
         }
@@ -2861,6 +2961,19 @@ mod tests {
         }
     }
 
+    fn ingress_shadow_gc_runs(
+        metrics: &waddle_xmpp::telemetry::test_support::MetricsTestGuard,
+    ) -> u64 {
+        ["completed", "partial", "failed", "timed_out"]
+            .into_iter()
+            .map(|outcome| {
+                metrics
+                    .counter_sum("ingress.shadow.gc.runs", &[("outcome", outcome)])
+                    .unwrap_or(0)
+            })
+            .sum()
+    }
+
     struct PoolCloseSignal(Option<oneshot::Sender<()>>);
 
     impl Drop for PoolCloseSignal {
@@ -2956,6 +3069,7 @@ mod tests {
                 retiring_streams: Arc::new(std::sync::Mutex::new(HashSet::new())),
                 forced_alias_serialization_failures: Arc::new(AtomicUsize::new(0)),
                 forced_retirement_retryable_failures: Arc::new(AtomicUsize::new(0)),
+                gc_in_flight: Arc::new(AtomicBool::new(false)),
             };
             let fixture = Self {
                 db,
@@ -3126,6 +3240,44 @@ mod tests {
                         .expect("message key UUID"),
                 )
             })
+        }
+
+        async fn record_expired_messages(&self, count: usize) -> Vec<MessageKey> {
+            let store = PostgresIngressSubstrate::open(self.db.clone())
+                .expect("open fixture ingress substrate");
+            let digest = waddle_xmpp::ingress::SemanticDigest::from_storage(1, [7; 32])
+                .expect("valid fixture semantic digest");
+            let first_terminal_at =
+                Utc::now() - crate::ingress_substrate::ALIAS_RETENTION - ChronoDuration::days(1);
+            let mut transaction = store.begin().await.expect("begin expired message seed");
+            let mut keys = Vec::with_capacity(count);
+            for index in 0..count {
+                let key = MessageKey::new();
+                store
+                    .record_message(&mut transaction, key, &digest)
+                    .await
+                    .expect("record expired message");
+                assert_eq!(
+                    store
+                        .terminalize_message(
+                            &mut transaction,
+                            key,
+                            first_terminal_at
+                                + ChronoDuration::milliseconds(
+                                    i64::try_from(index).expect("fixture index fits i64"),
+                                ),
+                        )
+                        .await
+                        .expect("terminalize expired message"),
+                    crate::ingress_substrate::TerminalizeOutcome::Terminalized
+                );
+                keys.push(key);
+            }
+            transaction
+                .commit()
+                .await
+                .expect("commit expired message seed");
+            keys
         }
 
         async fn message_is_terminal(&self, message_key: MessageKey) -> bool {
@@ -3798,6 +3950,11 @@ mod tests {
         let outcome = substrate
             .gc_expired_aliases(
                 Utc::now() + crate::ingress_substrate::ALIAS_RETENTION + ChronoDuration::seconds(1),
+                AliasGcBudget {
+                    deadline: tokio::time::Instant::now() + DEFAULT_TX_DEADLINE,
+                    lock_timeout: Duration::from_millis(250),
+                    statement_timeout: Duration::from_secs(1),
+                },
             )
             .await
             .expect("gc expired aliases");
@@ -4168,6 +4325,93 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn retention_gc_reports_partial_progress_then_completes_without_double_counting() {
+        const BACKLOG: usize = 258;
+
+        let metrics = waddle_xmpp::telemetry::test_support::acquire().await;
+        let Some(fixture) = ShadowFixture::open("retention_gc_partial").await else {
+            return;
+        };
+        fixture.record_expired_messages(BACKLOG).await;
+        fixture
+            .execute(
+                "CREATE FUNCTION waddle_test_slow_gc_delete() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN PERFORM pg_sleep(0.005); RETURN OLD; END $$",
+                (),
+            )
+            .await
+            .expect("create deterministic GC pacing function");
+        fixture
+            .execute(
+                "CREATE TRIGGER waddle_test_slow_gc_delete BEFORE DELETE ON ingress_messages FOR EACH ROW EXECUTE FUNCTION waddle_test_slow_gc_delete()",
+                (),
+            )
+            .await
+            .expect("install deterministic GC pacing trigger");
+        let partial_before = metrics
+            .counter_sum("ingress.shadow.gc.runs", &[("outcome", "partial")])
+            .unwrap_or(0);
+        let completed_before = metrics
+            .counter_sum("ingress.shadow.gc.runs", &[("outcome", "completed")])
+            .unwrap_or(0);
+        let reclaimed_before = metrics
+            .counter_sum("ingress.shadow.gc.reclaimed_messages", &[])
+            .unwrap_or(0);
+
+        fixture
+            .processor
+            .run_retention_gc_with_budget(RetentionGcBudget {
+                cooperative: Duration::from_millis(100),
+                ..RetentionGcBudget::DEFAULT
+            })
+            .await;
+        let remaining = usize::try_from(fixture.count("ingress_messages").await)
+            .expect("remaining message count fits usize");
+        let deleted = BACKLOG - remaining;
+        assert!(deleted > 0 && deleted < BACKLOG);
+        assert_eq!(deleted + remaining, BACKLOG);
+        assert_eq!(
+            metrics
+                .counter_sum("ingress.shadow.gc.runs", &[("outcome", "partial")])
+                .unwrap_or(0),
+            partial_before + 1
+        );
+        assert_eq!(
+            metrics
+                .counter_sum("ingress.shadow.gc.reclaimed_messages", &[])
+                .unwrap_or(0),
+            reclaimed_before + u64::try_from(deleted).expect("deleted count fits u64")
+        );
+
+        fixture
+            .execute(
+                "DROP TRIGGER waddle_test_slow_gc_delete ON ingress_messages",
+                (),
+            )
+            .await
+            .expect("remove deterministic GC pacing trigger");
+        fixture
+            .execute("DROP FUNCTION waddle_test_slow_gc_delete()", ())
+            .await
+            .expect("remove deterministic GC pacing function");
+        fixture.processor.run_retention_gc().await;
+
+        assert_eq!(fixture.count("ingress_messages").await, 0);
+        assert_eq!(
+            metrics
+                .counter_sum("ingress.shadow.gc.runs", &[("outcome", "completed")])
+                .unwrap_or(0),
+            completed_before + 1
+        );
+        assert_eq!(
+            metrics
+                .counter_sum("ingress.shadow.gc.reclaimed_messages", &[])
+                .unwrap_or(0),
+            reclaimed_before + u64::try_from(BACKLOG).expect("backlog count fits u64")
+        );
+        fixture.close().await;
+    }
+
+    #[tokio::test]
     async fn retention_gc_records_timed_out_outcome_when_gc_blocks_on_a_locked_row() {
         let metrics = waddle_xmpp::telemetry::test_support::acquire().await;
         let Some(fixture) = ShadowFixture::open("retention_gc_timeout").await else {
@@ -4210,7 +4454,7 @@ mod tests {
             .expect("age terminal message beyond alias retention");
 
         // Mirror the substrate GC race: its candidate lock is FOR UPDATE, so
-        // this independent transaction keeps the production GC past its deadline.
+        // this independent transaction forces the per-operation lock timeout.
         let mut lock = fixture.db.begin().await.expect("begin message lock tx");
         lock.query(
             "SELECT 1 FROM ingress_messages WHERE message_key = ?::uuid FOR UPDATE",
@@ -4224,16 +4468,15 @@ mod tests {
         let completed_before = metrics
             .counter_sum("ingress.shadow.gc.runs", &[("outcome", "completed")])
             .unwrap_or(0);
+        let reclaimed_before = metrics
+            .counter_sum("ingress.shadow.gc.reclaimed_messages", &[])
+            .unwrap_or(0);
 
         let processor = fixture.processor.clone();
         let gc = tokio::spawn(async move { processor.run_retention_gc().await });
         wait_for_lock_waiter(&fixture.admin, "FOR UPDATE").await;
-        assert!(
-            !gc.is_finished(),
-            "production GC must still wait on the row lock"
-        );
         gc.await
-            .expect("join production retention GC after its deadline");
+            .expect("join production retention GC after its lock timeout");
         lock.commit().await.expect("release message row lock");
 
         assert_eq!(
@@ -4249,6 +4492,111 @@ mod tests {
                 .unwrap_or(0),
             completed_before,
             "a timed-out production GC must not record a completed outcome"
+        );
+        assert_eq!(
+            metrics
+                .counter_sum("ingress.shadow.gc.reclaimed_messages", &[])
+                .unwrap_or(0),
+            reclaimed_before,
+            "a timeout before the first commit must not report reclaimed messages"
+        );
+        fixture.close().await;
+    }
+
+    #[tokio::test]
+    async fn retention_gc_coalesces_concurrent_runs_without_recording_a_skipped_run() {
+        let metrics = waddle_xmpp::telemetry::test_support::acquire().await;
+        let Some(fixture) = ShadowFixture::open("retention_gc_coalescing").await else {
+            return;
+        };
+        let key = fixture
+            .record_expired_messages(1)
+            .await
+            .into_iter()
+            .next()
+            .expect("seed one expired message");
+        let mut lock = fixture.db.begin().await.expect("begin message lock tx");
+        lock.query(
+            "SELECT 1 FROM ingress_messages WHERE message_key = ?::uuid FOR UPDATE",
+            crate::db_params![key.to_storage().to_string()],
+        )
+        .await
+        .expect("lock expired message row");
+        let runs_before = ingress_shadow_gc_runs(&metrics);
+
+        let processor = fixture.processor.clone();
+        let first = tokio::spawn(async move {
+            processor
+                .run_retention_gc_with_budget(RetentionGcBudget {
+                    lock_timeout: Duration::from_secs(2),
+                    ..RetentionGcBudget::DEFAULT
+                })
+                .await;
+        });
+        wait_for_lock_waiter(&fixture.admin, "FOR UPDATE").await;
+        tokio::time::timeout(
+            Duration::from_millis(100),
+            fixture.processor.run_retention_gc(),
+        )
+        .await
+        .expect("coalesced GC run must return immediately");
+        assert_eq!(
+            ingress_shadow_gc_runs(&metrics),
+            runs_before,
+            "a coalesced run must not increment the GC runs counter"
+        );
+
+        lock.commit().await.expect("release message row lock");
+        first.await.expect("join blocked retention GC");
+        fixture.close().await;
+    }
+
+    #[tokio::test]
+    async fn retention_gc_failure_after_progress_reports_reclaimed_messages() {
+        let metrics = waddle_xmpp::telemetry::test_support::acquire().await;
+        let Some(fixture) = ShadowFixture::open("retention_gc_failure_progress").await else {
+            return;
+        };
+        let keys = fixture.record_expired_messages(2).await;
+        fixture
+            .execute(
+                &format!(
+                    "CREATE FUNCTION waddle_test_fail_gc_delete() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN IF OLD.message_key = '{}'::uuid THEN RAISE EXCEPTION 'forced GC failure' USING ERRCODE = 'P0001'; END IF; RETURN OLD; END $$",
+                    keys[1].to_storage()
+                ),
+                (),
+            )
+            .await
+            .expect("create deterministic GC failure function");
+        fixture
+            .execute(
+                "CREATE TRIGGER waddle_test_fail_gc_delete AFTER DELETE ON ingress_messages FOR EACH ROW EXECUTE FUNCTION waddle_test_fail_gc_delete()",
+                (),
+            )
+            .await
+            .expect("install deterministic GC failure trigger");
+        let failed_before = metrics
+            .counter_sum("ingress.shadow.gc.runs", &[("outcome", "failed")])
+            .unwrap_or(0);
+        let reclaimed_before = metrics
+            .counter_sum("ingress.shadow.gc.reclaimed_messages", &[])
+            .unwrap_or(0);
+
+        fixture.processor.run_retention_gc().await;
+
+        assert_eq!(fixture.count("ingress_messages").await, 1);
+        assert_eq!(
+            metrics
+                .counter_sum("ingress.shadow.gc.runs", &[("outcome", "failed")])
+                .unwrap_or(0),
+            failed_before + 1
+        );
+        assert_eq!(
+            metrics
+                .counter_sum("ingress.shadow.gc.reclaimed_messages", &[])
+                .unwrap_or(0),
+            reclaimed_before + 1,
+            "a returned substrate failure must retain committed progress"
         );
         fixture.close().await;
     }
@@ -4275,6 +4623,7 @@ mod tests {
             retiring_streams: Arc::new(std::sync::Mutex::new(HashSet::new())),
             forced_alias_serialization_failures: Arc::new(AtomicUsize::new(0)),
             forced_retirement_retryable_failures: Arc::new(AtomicUsize::new(0)),
+            gc_in_flight: Arc::new(AtomicBool::new(false)),
         };
         let failed_before = metrics
             .counter_sum("ingress.shadow.gc.runs", &[("outcome", "failed")])

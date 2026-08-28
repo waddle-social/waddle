@@ -7,12 +7,14 @@
 #[cfg(feature = "clustering")]
 mod ingress_shadow_support;
 
+use std::time::Duration as StdDuration;
+
 use chrono::{Duration, Utc};
 #[cfg(feature = "clustering")]
 use jid::Jid;
 use waddle_server::{
     db::{Database, DatabaseConfig, DatabaseDriver, MigrationRunner},
-    ingress_substrate::{PostgresIngressSubstrate, ALIAS_RETENTION},
+    ingress_substrate::{AliasGcBudget, PostgresIngressSubstrate, ALIAS_RETENTION},
 };
 #[cfg(feature = "clustering")]
 use waddle_xmpp::ingress::IngressEffectIntent;
@@ -101,7 +103,14 @@ async fn retention_is_non_cascading_and_child_foreign_keys_are_no_action() {
     assert_eq!(
         fixture
             .store
-            .gc_expired_aliases(Utc::now())
+            .gc_expired_aliases(
+                Utc::now(),
+                AliasGcBudget {
+                    deadline: tokio::time::Instant::now() + StdDuration::from_secs(30),
+                    lock_timeout: StdDuration::from_secs(5),
+                    statement_timeout: StdDuration::from_secs(10),
+                },
+            )
             .await
             .expect("run GC")
             .deleted_messages,
