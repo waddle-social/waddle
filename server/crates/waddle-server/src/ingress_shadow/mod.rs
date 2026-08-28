@@ -86,6 +86,11 @@ const RETENTION_GC_LOCK_TIMEOUT: Duration = Duration::from_millis(100);
 const RETENTION_GC_STATEMENT_TIMEOUT: Duration = Duration::from_millis(250);
 #[cfg(feature = "clustering")]
 const RETENTION_GC_SCAN_TIMEOUT: Duration = Duration::from_secs(1);
+/// Pause between a `partial` run and its self-scheduled continuation, so a
+/// backlog drains without an external trigger while leaving the dedicated
+/// pool connection free between passes.
+#[cfg(feature = "clustering")]
+const RETENTION_GC_PARTIAL_RETRY_DELAY: Duration = Duration::from_secs(1);
 #[cfg(feature = "clustering")]
 const DEFAULT_RETIREMENT_ADMISSION_RETRY_DELAY: Duration = Duration::from_millis(10);
 
@@ -1553,28 +1558,58 @@ impl RetentionGcBudget {
 /// slots.  Triggers arrive through a `Notify`: `notify_one` stores exactly
 /// one permit while a run is in flight, so a trigger that lands mid-run is
 /// never lost and a burst of triggers coalesces into one follow-up run.
+/// The task makes one pass at startup (reclaiming whatever an earlier
+/// process left behind) and a `partial` run continues on its own after
+/// `partial_retry_delay`, so a backlog converges without external triggers.
 #[cfg(feature = "clustering")]
 #[derive(Clone)]
 struct RetentionGcCoordinator {
     trigger: Arc<Notify>,
-    run: Arc<dyn Fn() -> IngressShadowExecuteFuture + Send + Sync>,
+    run: Arc<dyn Fn() -> RetentionGcRunFuture + Send + Sync>,
+    partial_retry_delay: Duration,
 }
+
+#[cfg(feature = "clustering")]
+type RetentionGcRunFuture = Pin<
+    Box<dyn Future<Output = waddle_xmpp::telemetry::attributes::IngressGcOutcome> + Send + 'static>,
+>;
 
 #[cfg(feature = "clustering")]
 async fn run_retention_gc_coordinator(
     coordinator: RetentionGcCoordinator,
     shutdown: Arc<IngressShadowShutdown>,
 ) {
+    use waddle_xmpp::telemetry::attributes::IngressGcOutcome;
+
+    let mut pending = true;
     loop {
-        tokio::select! {
-            () = shutdown.cancellation.cancelled() => return,
-            () = coordinator.trigger.notified() => {}
+        if !pending {
+            tokio::select! {
+                biased;
+                () = shutdown.cancellation.cancelled() => return,
+                () = coordinator.trigger.notified() => {}
+            }
         }
-        // A run in flight at graceful shutdown finishes within its envelope;
-        // only the forced stop abandons it.
-        tokio::select! {
+        // Graceful shutdown never starts a run: a fresh run could extend the
+        // drain by a whole envelope, and the next process's startup pass
+        // reclaims whatever is left.  A run already in flight finishes
+        // unless the forced stop abandons it.
+        if shutdown.cancellation.is_cancelled() {
+            return;
+        }
+        let outcome = tokio::select! {
+            biased;
             () = shutdown.force_stop.cancelled() => return,
-            () = (coordinator.run)() => {}
+            outcome = (coordinator.run)() => outcome,
+        };
+        pending = outcome == IngressGcOutcome::Partial;
+        if pending {
+            tokio::select! {
+                biased;
+                () = shutdown.cancellation.cancelled() => return,
+                () = coordinator.trigger.notified() => {}
+                () = tokio::time::sleep(coordinator.partial_retry_delay) => {}
+            }
         }
     }
 }
@@ -1609,13 +1644,14 @@ fn classify_retention_gc_result(
 fn record_retention_gc_result(
     outcome: waddle_xmpp::telemetry::attributes::IngressGcOutcome,
     deleted_messages: usize,
-) {
+) -> waddle_xmpp::telemetry::attributes::IngressGcOutcome {
     waddle_xmpp::telemetry::reliability::increment_ingress_shadow_gc_run(outcome);
     if deleted_messages > 0 {
         waddle_xmpp::telemetry::reliability::add_ingress_shadow_gc_reclaimed_messages(
             u64::try_from(deleted_messages).unwrap_or(u64::MAX),
         );
     }
+    outcome
 }
 
 #[cfg(feature = "clustering")]
@@ -2248,9 +2284,9 @@ impl IngressShadowProcessor {
         Ok(RetirementOutcome::Deleted)
     }
 
-    async fn run_retention_gc(&self) {
+    async fn run_retention_gc(&self) -> waddle_xmpp::telemetry::attributes::IngressGcOutcome {
         self.run_retention_gc_with_budget(RetentionGcBudget::DEFAULT)
-            .await;
+            .await
     }
 
     /// Hand a GC trigger to the coordinator task without waiting for it.
@@ -2266,19 +2302,22 @@ impl IngressShadowProcessor {
                 let processor = processor.clone();
                 Box::pin(async move { processor.run_retention_gc().await })
             }),
+            partial_retry_delay: RETENTION_GC_PARTIAL_RETRY_DELAY,
         }
     }
 
-    async fn run_retention_gc_with_budget(&self, budget: RetentionGcBudget) {
+    async fn run_retention_gc_with_budget(
+        &self,
+        budget: RetentionGcBudget,
+    ) -> waddle_xmpp::telemetry::attributes::IngressGcOutcome {
         let substrate = match PostgresIngressSubstrate::open(self.database.clone()) {
             Ok(substrate) => substrate,
             Err(error) => {
                 tracing::warn!(%error, "ingress shadow retention GC setup failed");
-                record_retention_gc_result(
+                return record_retention_gc_result(
                     waddle_xmpp::telemetry::attributes::IngressGcOutcome::Failed,
                     0,
                 );
-                return;
             }
         };
         let progress = AliasGcProgress::default();
@@ -2302,14 +2341,14 @@ impl IngressShadowProcessor {
                     tracing::warn!(%failure, "ingress shadow retention GC failed");
                 }
                 let (outcome, deleted_messages) = classify_retention_gc_result(result);
-                record_retention_gc_result(outcome, deleted_messages);
+                record_retention_gc_result(outcome, deleted_messages)
             }
             Err(error) => {
                 tracing::warn!(%error, "ingress shadow retention GC exceeded hard deadline");
                 record_retention_gc_result(
                     waddle_xmpp::telemetry::attributes::IngressGcOutcome::TimedOut,
                     progress.committed(),
-                );
+                )
             }
         }
     }
@@ -2717,6 +2756,7 @@ mod tests {
     use waddle_xmpp::auth::{AuthContextId, AuthContextVersion, PrincipalAuthEpoch};
     use waddle_xmpp::ingress::{ConnectionGeneration, EntityGeneration, NormalizedTarget};
     use waddle_xmpp::ownership::ClaimStore;
+    use waddle_xmpp::telemetry::attributes::IngressGcOutcome;
     use waddle_xmpp_core::xep0359::StanzaId;
     use xmpp_parsers::message::MessageType;
 
@@ -4586,57 +4626,124 @@ mod tests {
         fixture.close().await;
     }
 
-    #[tokio::test]
-    async fn retention_gc_coordinator_keeps_one_pending_trigger_and_never_loses_the_last_one() {
-        let runs = Arc::new(AtomicUsize::new(0));
-        let started = Arc::new(Notify::new());
-        let release = Arc::new(Notify::new());
-        let trigger = Arc::new(Notify::new());
-        let coordinator = RetentionGcCoordinator {
-            trigger: trigger.clone(),
-            run: Arc::new({
-                let runs = runs.clone();
-                let started = started.clone();
-                let release = release.clone();
-                move || {
+    /// A scripted coordinator run: counts invocations, signals when it
+    /// starts, waits to be released, and reports the outcome handed to it.
+    struct ScriptedGcRuns {
+        runs: Arc<AtomicUsize>,
+        started: Arc<Notify>,
+        release: Arc<Notify>,
+        outcomes: Arc<std::sync::Mutex<Vec<IngressGcOutcome>>>,
+    }
+
+    impl ScriptedGcRuns {
+        fn new(outcomes: Vec<IngressGcOutcome>) -> Self {
+            Self {
+                runs: Arc::new(AtomicUsize::new(0)),
+                started: Arc::new(Notify::new()),
+                release: Arc::new(Notify::new()),
+                outcomes: Arc::new(std::sync::Mutex::new(outcomes)),
+            }
+        }
+
+        fn coordinator(&self, trigger: Arc<Notify>) -> RetentionGcCoordinator {
+            let runs = self.runs.clone();
+            let started = self.started.clone();
+            let release = self.release.clone();
+            let outcomes = self.outcomes.clone();
+            RetentionGcCoordinator {
+                trigger,
+                run: Arc::new(move || {
                     let runs = runs.clone();
                     let started = started.clone();
                     let release = release.clone();
+                    let outcomes = outcomes.clone();
                     Box::pin(async move {
                         runs.fetch_add(1, Ordering::AcqRel);
                         started.notify_one();
                         release.notified().await;
+                        let mut outcomes = outcomes.lock().expect("scripted outcomes");
+                        if outcomes.is_empty() {
+                            IngressGcOutcome::Completed
+                        } else {
+                            outcomes.remove(0)
+                        }
                     })
-                }
-            }),
-        };
-        let handle = test_handle_with_retention_gc(coordinator);
+                }),
+                partial_retry_delay: Duration::from_millis(10),
+            }
+        }
 
-        trigger.notify_one();
-        started.notified().await;
-        assert_eq!(runs.load(Ordering::Acquire), 1);
+        fn count(&self) -> usize {
+            self.runs.load(Ordering::Acquire)
+        }
+    }
+
+    #[tokio::test]
+    async fn retention_gc_coordinator_runs_at_startup_coalesces_triggers_and_continues_partial_runs(
+    ) {
+        let script = ScriptedGcRuns::new(vec![
+            IngressGcOutcome::Completed,
+            IngressGcOutcome::Partial,
+            IngressGcOutcome::Completed,
+        ]);
+        let trigger = Arc::new(Notify::new());
+        let handle = test_handle_with_retention_gc(script.coordinator(trigger.clone()));
+
+        // Startup pass without any trigger.
+        script.started.notified().await;
+        assert_eq!(script.count(), 1);
         // Triggers that land mid-run coalesce into exactly one follow-up run.
         trigger.notify_one();
         trigger.notify_one();
         trigger.notify_one();
-        release.notify_one();
-        started.notified().await;
-        assert_eq!(runs.load(Ordering::Acquire), 2);
-        release.notify_one();
+        script.release.notify_one();
+        script.started.notified().await;
+        assert_eq!(script.count(), 2);
+        // That run reports partial: the coordinator continues on its own.
+        script.release.notify_one();
+        script.started.notified().await;
+        assert_eq!(script.count(), 3);
+        script.release.notify_one();
         tokio::time::sleep(Duration::from_millis(50)).await;
         assert_eq!(
-            runs.load(Ordering::Acquire),
-            2,
-            "coalesced triggers must not fan out into extra runs"
+            script.count(),
+            3,
+            "a completed run must not fan out into extra runs"
         );
 
-        // The last trigger of a burst is honoured even when it lands as the
-        // previous run finishes.
+        // The last trigger of a burst is honoured even when it lands after
+        // the previous run finished.
         trigger.notify_one();
-        started.notified().await;
-        assert_eq!(runs.load(Ordering::Acquire), 3);
-        release.notify_one();
+        script.started.notified().await;
+        assert_eq!(script.count(), 4);
+        script.release.notify_one();
         drop(handle);
+    }
+
+    #[tokio::test]
+    async fn retention_gc_coordinator_never_starts_a_run_after_graceful_cancellation() {
+        let script = ScriptedGcRuns::new(vec![IngressGcOutcome::Partial]);
+        let trigger = Arc::new(Notify::new());
+        let handle = test_handle_with_retention_gc(script.coordinator(trigger.clone()));
+        let shutdown = handle.shutdown().expect("worker handle exposes shutdown");
+
+        script.started.notified().await;
+        assert_eq!(script.count(), 1);
+        // A trigger is pending and the in-flight run will report partial,
+        // both of which would otherwise start another run.
+        trigger.notify_one();
+        drop(handle);
+        assert!(shutdown.cancellation.is_cancelled());
+        script.release.notify_one();
+        tokio::time::timeout(Duration::from_secs(1), shutdown.wait_for_completion())
+            .await
+            .expect("the coordinator must exit once its in-flight run finishes");
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        assert_eq!(
+            script.count(),
+            1,
+            "neither the pending trigger nor the partial continuation may start a run after cancellation"
+        );
     }
 
     #[tokio::test]

@@ -240,8 +240,11 @@ waited on and stays eligible for the next run — so contention between pods
 never produces `timed_out`. `timed_out` means the run hit the epoch-row lock
 timeout, a statement timeout, or the hard envelope. GC runs on its own
 background task rather than in the submission worker: a trigger that arrives
-while a run is in flight is kept as one pending run, so a burst that ends
-mid-run still drains without holding a worker slot. The reclaimed-message
+while a run is in flight is kept as one pending run, a `partial` run
+continues on its own after 1 s until the backlog is drained, and each
+process makes one pass at startup — so a burst that ends mid-run, or a
+shutdown that drops a trigger, still converges without holding a worker
+slot. The reclaimed-message
 counter accounts progress on cooperative exits, on errors returned to the
 worker, and on hard-envelope cancellation (through the run's progress
 handle), but remains a lower bound across force-stop and ambiguous commit.
