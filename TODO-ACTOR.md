@@ -29,8 +29,8 @@ Merge order within the wave: **#1642 lands first** (advisory remediation + −6k
 - [OK] **#1644** `feat(server): room lifecycle and revision types with expand-only schema` — MERGED e436da56 (PR #1673, 2026-08-11). Store-owned ensure_schema DDL, no migration version (#1651 freeze intact); codex-bot review loop clean at 7c8dd1d2. #1645-binding notes in the PR desc. Unblocks #1645.
 - [OK] ⚠ **#1650** `feat(server): typed ingress identity domain and versioned semantic digest` — ten identity types + SemanticDigest v1 canonicalizer + property suites; **fixes and closes #1137** (wrap-aware comparator at the three plain-`>` sites).
 - [OK] **#1651** `fix(server): append-only migration ledger with checksum enforcement` — MERGED 43860571 (PR #1671, 2026-08-10). Codex review clean at bf8f7949. **Rolling-deploy constraint: do not add a new migration version until ledger-aware binaries are fully rolled out** (a pre-ledger pod seeing an unknown version would reset the ledger). Unblocks #1652 and (with #1650) #1653.
-- [ ] **#1648** `feat(server): closed observation variants and bounded cluster metrics` — audit-and-map the four metric families; **consumes then closes PR #1238**.
-- [ ] **#1649** `feat(chat): closed telemetry observations with source-level identity removal` — Faro identity removed at source; native surfaces verified telemetry-off.
+- [OK] **#1648** `feat(server): closed observation variants and bounded cluster metrics` — MERGED b072120c (PR #1708, 2026-08-23); the four metric families mapped onto closed variants, PR #1238 consumed and closed.
+- [OK] **#1649** `feat(chat): closed telemetry observations with source-level identity removal` — MERGED 33018c2c (PR #1719, 2026-08-27). Faro identity removed at source (resource, `call_id`, message IDs, error text/stacks); closed observation unions + measurement schemas; native surfaces proven telemetry-off by `scripts/check-native-remote-telemetry.sh` (TOML-semantic Cargo closure) wired into Apple/Android/chat CI.
 
 ## Wave 2 — after their wave-1 blockers
 
