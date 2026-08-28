@@ -230,14 +230,17 @@ mid-window, the window restarts.
 | PostgreSQL | Backends stay below 80% of `max_connections`; data and WAL PVC use stay below 70% on both instances. |
 | Submission latency | p99 `ingress_shadow_tx_duration_seconds` remains below 2 seconds. |
 
-Retention GC uses a 2 s cooperative budget inside a 4 s hard envelope, with
-a 250 ms `lock_timeout` and a 1 s `statement_timeout` on every GC statement
-(candidate scan included). A `partial` outcome means the cooperative budget
-stopped the run after its progress was accounted; `timed_out` means the run
-hit the epoch-row lock timeout, a statement timeout, or the hard envelope.
-Candidate rows held by another writer (a concurrent pod's GC or an in-flight
-child write) are skipped, not waited on, and stay eligible for the next run,
-so contention between pods never produces `timed_out`. The reclaimed-message
+Retention GC uses a 2 s cooperative budget inside a 6 s hard envelope, with
+a 250 ms `lock_timeout`, a 250 ms `statement_timeout` on every single-row
+candidate statement and a 1 s bound on the candidate scan. A `partial`
+outcome means eligible work remains: the cooperative budget stopped the run
+after its progress was accounted, or a candidate row held by another writer
+(a concurrent pod's GC or an in-flight child write) was skipped rather than
+waited on and stays eligible for the next run — so contention between pods
+never produces `timed_out`. `timed_out` means the run hit the epoch-row lock
+timeout, a statement timeout, or the hard envelope. A trigger that arrives
+while a run is in flight is kept as a pending rerun, so a burst that ends
+mid-run still drains. The reclaimed-message
 counter accounts progress on cooperative exits, on errors returned to the
 worker, and on hard-envelope cancellation (through the run's progress
 handle), but remains a lower bound across force-stop and ambiguous commit.

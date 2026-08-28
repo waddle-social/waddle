@@ -111,6 +111,7 @@ async fn retention_is_non_cascading_and_child_foreign_keys_are_no_action() {
                     deadline: tokio::time::Instant::now() + StdDuration::from_secs(30),
                     lock_timeout: StdDuration::from_secs(5),
                     statement_timeout: StdDuration::from_secs(10),
+                    scan_timeout: StdDuration::from_secs(10),
                     progress: AliasGcProgress::default(),
                 },
             )

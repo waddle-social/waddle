@@ -68,16 +68,21 @@ const DEFAULT_STATEMENT_TIMEOUT_MS: u64 = 1_500;
 const DEFAULT_TX_DEADLINE: Duration = Duration::from_millis(2_500);
 #[cfg(feature = "clustering")]
 const RETENTION_GC_BUDGET: Duration = Duration::from_secs(2);
-/// Last-resort envelope around one GC run: the cooperative budget plus the
-/// worst legal per-candidate wait (one statement bound, one epoch lock wait)
-/// and margin, so ordinary slowness inside the per-operation bounds is
-/// classified by the run itself instead of being cancelled from outside.
+/// Last-resort envelope around one GC run, sized from the longest path the
+/// per-operation bounds allow after the final cooperative check: one scan
+/// (`RETENTION_GC_SCAN_TIMEOUT`), then one candidate transaction — the epoch
+/// lock wait plus the nine single-row statements it issues — and margin, so
+/// slowness inside the bounds is classified by the run itself rather than
+/// cancelled from outside.  2 s + 1 s + 0.25 s + 9 × 0.25 s ≈ 5.5 s.
 #[cfg(feature = "clustering")]
-const RETENTION_GC_HARD_DEADLINE: Duration = Duration::from_secs(4);
+const RETENTION_GC_HARD_DEADLINE: Duration = Duration::from_secs(6);
 #[cfg(feature = "clustering")]
 const RETENTION_GC_LOCK_TIMEOUT: Duration = Duration::from_millis(250);
+/// Every candidate-transaction statement touches one row by primary key.
 #[cfg(feature = "clustering")]
-const RETENTION_GC_STATEMENT_TIMEOUT: Duration = Duration::from_secs(1);
+const RETENTION_GC_STATEMENT_TIMEOUT: Duration = Duration::from_millis(250);
+#[cfg(feature = "clustering")]
+const RETENTION_GC_SCAN_TIMEOUT: Duration = Duration::from_secs(1);
 #[cfg(feature = "clustering")]
 const DEFAULT_RETIREMENT_ADMISSION_RETRY_DELAY: Duration = Duration::from_millis(10);
 
@@ -537,7 +542,7 @@ impl IngressShadowHandle {
                 forced_retirement_retryable_failures: Arc::new(
                     std::sync::atomic::AtomicUsize::new(0),
                 ),
-                gc_in_flight: Arc::new(AtomicBool::new(false)),
+                gc_state: Arc::new(RetentionGcState::default()),
             };
             let recovery_database = worker.database.clone();
             let handle = Self::spawn_worker_with_enqueued_streams(
@@ -1492,7 +1497,7 @@ struct IngressShadowProcessor {
     forced_alias_serialization_failures: Arc<std::sync::atomic::AtomicUsize>,
     #[cfg(test)]
     forced_retirement_retryable_failures: Arc<std::sync::atomic::AtomicUsize>,
-    gc_in_flight: Arc<AtomicBool>,
+    gc_state: Arc<RetentionGcState>,
 }
 
 #[cfg(feature = "clustering")]
@@ -1502,6 +1507,7 @@ struct RetentionGcBudget {
     hard_deadline: Duration,
     lock_timeout: Duration,
     statement_timeout: Duration,
+    scan_timeout: Duration,
 }
 
 #[cfg(feature = "clustering")]
@@ -1511,7 +1517,18 @@ impl RetentionGcBudget {
         hard_deadline: RETENTION_GC_HARD_DEADLINE,
         lock_timeout: RETENTION_GC_LOCK_TIMEOUT,
         statement_timeout: RETENTION_GC_STATEMENT_TIMEOUT,
+        scan_timeout: RETENTION_GC_SCAN_TIMEOUT,
     };
+}
+
+/// Per-process retention GC coordination: one run at a time, and a trigger
+/// that arrives while a run is in flight is kept as a pending rerun instead
+/// of being dropped, so a burst that ends mid-run still drains.
+#[cfg(feature = "clustering")]
+#[derive(Default)]
+struct RetentionGcState {
+    in_flight: AtomicBool,
+    rerun_requested: AtomicBool,
 }
 
 #[cfg(feature = "clustering")]
@@ -2208,10 +2225,27 @@ impl IngressShadowProcessor {
     }
 
     async fn run_retention_gc_with_budget(&self, budget: RetentionGcBudget) {
-        let Some(_in_flight) = RetentionGcInFlightGuard::acquire(&self.gc_in_flight) else {
-            tracing::debug!("ingress shadow retention GC already in flight; skipping");
-            return;
-        };
+        loop {
+            // Clear before acquiring: a trigger that lands after this point
+            // while the run is in flight is observed after the run.
+            self.gc_state
+                .rerun_requested
+                .store(false, Ordering::Release);
+            let Some(in_flight) = RetentionGcInFlightGuard::acquire(&self.gc_state.in_flight)
+            else {
+                self.gc_state.rerun_requested.store(true, Ordering::Release);
+                tracing::debug!("ingress shadow retention GC already in flight; rerun queued");
+                return;
+            };
+            self.run_retention_gc_once(&budget).await;
+            drop(in_flight);
+            if !self.gc_state.rerun_requested.swap(false, Ordering::AcqRel) {
+                return;
+            }
+        }
+    }
+
+    async fn run_retention_gc_once(&self, budget: &RetentionGcBudget) {
         let substrate = match PostgresIngressSubstrate::open(self.database.clone()) {
             Ok(substrate) => substrate,
             Err(error) => {
@@ -2232,6 +2266,7 @@ impl IngressShadowProcessor {
                     deadline: tokio::time::Instant::now() + budget.cooperative,
                     lock_timeout: budget.lock_timeout,
                     statement_timeout: budget.statement_timeout,
+                    scan_timeout: budget.scan_timeout,
                     progress: progress.clone(),
                 },
             ),
@@ -3076,7 +3111,7 @@ mod tests {
                 retiring_streams: Arc::new(std::sync::Mutex::new(HashSet::new())),
                 forced_alias_serialization_failures: Arc::new(AtomicUsize::new(0)),
                 forced_retirement_retryable_failures: Arc::new(AtomicUsize::new(0)),
-                gc_in_flight: Arc::new(AtomicBool::new(false)),
+                gc_state: Arc::new(RetentionGcState::default()),
             };
             let fixture = Self {
                 db,
@@ -3961,6 +3996,7 @@ mod tests {
                     deadline: tokio::time::Instant::now() + DEFAULT_TX_DEADLINE,
                     lock_timeout: Duration::from_millis(250),
                     statement_timeout: Duration::from_secs(1),
+                    scan_timeout: Duration::from_secs(1),
                     progress: AliasGcProgress::default(),
                 },
             )
@@ -4519,7 +4555,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn retention_gc_skips_while_another_run_is_in_flight_and_releases_the_flag_afterwards() {
+    async fn retention_gc_queues_a_rerun_while_another_run_is_in_flight() {
         let metrics = waddle_xmpp::telemetry::test_support::acquire().await;
         let Some(fixture) = ShadowFixture::open("retention_gc_coalescing").await else {
             return;
@@ -4529,43 +4565,56 @@ mod tests {
         let completed_before = metrics
             .counter_sum("ingress.shadow.gc.runs", &[("outcome", "completed")])
             .unwrap_or(0);
+        let state = &fixture.processor.gc_state;
 
-        fixture
-            .processor
-            .gc_in_flight
-            .store(true, Ordering::Release);
+        state.in_flight.store(true, Ordering::Release);
         fixture.processor.run_retention_gc().await;
         assert_eq!(
             ingress_shadow_gc_runs(&metrics),
             runs_before,
-            "a coalesced run must not increment the GC runs counter"
+            "a coalesced trigger must not run or record a GC run"
         );
         assert_eq!(
             fixture.count("ingress_messages").await,
             1,
-            "a coalesced run must not touch the database"
+            "a coalesced trigger must not touch the database"
         );
         assert!(
-            fixture.processor.gc_in_flight.load(Ordering::Acquire),
-            "a coalesced run must not release a flag it did not acquire"
+            state.in_flight.load(Ordering::Acquire),
+            "a coalesced trigger must not release a flag it did not acquire"
+        );
+        assert!(
+            state.rerun_requested.load(Ordering::Acquire),
+            "a coalesced trigger must be kept as a pending rerun"
         );
 
-        fixture
-            .processor
-            .gc_in_flight
-            .store(false, Ordering::Release);
+        // The in-flight run finishing observes the pending rerun and loops:
+        // one run reclaims the row, the rerun finds nothing and completes.
+        state.in_flight.store(false, Ordering::Release);
         fixture.processor.run_retention_gc().await;
         assert_eq!(fixture.count("ingress_messages").await, 0);
         assert_eq!(
             metrics
                 .counter_sum("ingress.shadow.gc.runs", &[("outcome", "completed")])
                 .unwrap_or(0),
-            completed_before + 1
+            completed_before + 1,
+            "a fresh trigger with no pending rerun runs exactly once"
         );
-        assert!(
-            !fixture.processor.gc_in_flight.load(Ordering::Acquire),
-            "a completed run must release the in-flight flag"
+        assert!(!state.in_flight.load(Ordering::Acquire));
+        assert!(!state.rerun_requested.load(Ordering::Acquire));
+
+        fixture.record_expired_messages(1).await;
+        state.rerun_requested.store(true, Ordering::Release);
+        fixture.processor.run_retention_gc().await;
+        assert_eq!(
+            metrics
+                .counter_sum("ingress.shadow.gc.runs", &[("outcome", "completed")])
+                .unwrap_or(0),
+            completed_before + 2,
+            "a stale pending rerun is cleared before the run, not replayed after it"
         );
+        assert_eq!(fixture.count("ingress_messages").await, 0);
+        assert!(!state.rerun_requested.load(Ordering::Acquire));
         fixture.close().await;
     }
 
@@ -4625,7 +4674,7 @@ mod tests {
             "a hard-envelope cancellation must still report the committed deletions"
         );
         assert!(
-            !fixture.processor.gc_in_flight.load(Ordering::Acquire),
+            !fixture.processor.gc_state.in_flight.load(Ordering::Acquire),
             "a cancelled run must release the in-flight flag"
         );
         fixture.close().await;
@@ -4703,7 +4752,7 @@ mod tests {
             retiring_streams: Arc::new(std::sync::Mutex::new(HashSet::new())),
             forced_alias_serialization_failures: Arc::new(AtomicUsize::new(0)),
             forced_retirement_retryable_failures: Arc::new(AtomicUsize::new(0)),
-            gc_in_flight: Arc::new(AtomicBool::new(false)),
+            gc_state: Arc::new(RetentionGcState::default()),
         };
         let failed_before = metrics
             .counter_sum("ingress.shadow.gc.runs", &[("outcome", "failed")])

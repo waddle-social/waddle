@@ -108,7 +108,10 @@ pub struct AliasGcOutcome {
 pub struct AliasGcBudget {
     pub deadline: Instant,
     pub lock_timeout: StdDuration,
+    /// Bound on each single-row statement of a candidate transaction.
     pub statement_timeout: StdDuration,
+    /// Bound on the candidate scan, which walks retained history.
+    pub scan_timeout: StdDuration,
     /// Committed deletions, observable by the caller even when the run is
     /// cancelled from outside before it can return its outcome.
     pub progress: AliasGcProgress,
@@ -575,6 +578,9 @@ async fn gc_candidate_batch(
     budget: &AliasGcBudget,
 ) -> Result<AliasGcOutcome, AliasGcFailure> {
     let mut deleted_messages = 0usize;
+    // A candidate held by another writer stays eligible, so a batch that
+    // skipped one cannot claim the backlog is drained.
+    let mut skipped_locked = false;
     for message_key in candidates {
         if Instant::now() >= budget.deadline {
             return Ok(AliasGcOutcome {
@@ -591,7 +597,7 @@ async fn gc_candidate_batch(
         tx.execute("SET TRANSACTION ISOLATION LEVEL READ COMMITTED", ())
             .await
             .map_err(|error| gc_database_failure(deleted_messages, error))?;
-        install_gc_timeouts(&mut tx, budget)
+        install_gc_timeouts(&mut tx, budget, budget.statement_timeout)
             .await
             .map_err(|error| gc_failure(deleted_messages, error))?;
         // GC is an epoch-aware writer: install the transaction-bound proof
@@ -633,14 +639,20 @@ async fn gc_candidate_batch(
                 )
             })?;
         drop(proof);
-        if !lock_eligible_terminal_message(&mut tx, message_key, cutoff)
+        match lock_eligible_terminal_message(&mut tx, message_key, cutoff)
             .await
             .map_err(|error| gc_failure(deleted_messages, error))?
         {
-            tx.commit()
-                .await
-                .map_err(|error| gc_database_failure(deleted_messages, error))?;
-            continue;
+            CandidateLock::Eligible => {}
+            CandidateLock::Skipped(reason) => {
+                if reason == SkipReason::LockedElsewhere {
+                    skipped_locked = true;
+                }
+                tx.commit()
+                    .await
+                    .map_err(|error| gc_database_failure(deleted_messages, error))?;
+                continue;
+            }
         }
         // Alias retention has elapsed: the aliases go unconditionally, even
         // when live refs/deliveries keep the message row itself alive —
@@ -689,15 +701,16 @@ async fn gc_candidate_batch(
 
     Ok(AliasGcOutcome {
         deleted_messages,
-        completed: true,
+        completed: !skipped_locked,
     })
 }
 
 async fn install_gc_timeouts(
     tx: &mut Transaction<'_>,
     budget: &AliasGcBudget,
+    statement_timeout: StdDuration,
 ) -> Result<(), AliasGcError> {
-    if set_local_transaction_timeouts(tx, budget.lock_timeout, budget.statement_timeout)
+    if set_local_transaction_timeouts(tx, budget.lock_timeout, statement_timeout)
         .await
         .map_err(gc_error_from_database)?
     {
@@ -867,7 +880,7 @@ async fn expired_candidates(
     budget: &AliasGcBudget,
 ) -> Result<Vec<MessageKey>, AliasGcError> {
     let mut tx = db.begin().await.map_err(gc_error_from_database)?;
-    install_gc_timeouts(&mut tx, budget).await?;
+    install_gc_timeouts(&mut tx, budget, budget.scan_timeout).await?;
     let mut rows = tx
         .query(
             r#"
@@ -908,6 +921,21 @@ async fn expired_candidates(
     Ok(candidates)
 }
 
+/// Why a candidate was not collected in this pass.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum SkipReason {
+    /// Another writer holds the row; it stays eligible for the next run.
+    LockedElsewhere,
+    /// The row is gone, no longer terminal, or not yet past retention.
+    NotEligible,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum CandidateLock {
+    Eligible,
+    Skipped(SkipReason),
+}
+
 /// Lock one candidate row and report whether its retention has elapsed.
 ///
 /// A row held by another writer — a concurrent GC run or an in-flight child
@@ -918,7 +946,7 @@ async fn lock_eligible_terminal_message(
     tx: &mut Transaction<'_>,
     message_key: MessageKey,
     cutoff: &str,
-) -> Result<bool, AliasGcError> {
+) -> Result<CandidateLock, AliasGcError> {
     let mut rows = tx
         .query(
             r#"
@@ -931,10 +959,41 @@ async fn lock_eligible_terminal_message(
         )
         .await
         .map_err(gc_error_from_database)?;
-    let Some(row) = rows.next().await.map_err(gc_error_from_database)? else {
-        return Ok(false);
-    };
-    row.get(0).map_err(gc_error_from_database)
+    let locked = rows.next().await.map_err(gc_error_from_database)?;
+    drop(rows);
+    match locked {
+        Some(row) => {
+            let expired: bool = row.get(0).map_err(gc_error_from_database)?;
+            Ok(if expired {
+                CandidateLock::Eligible
+            } else {
+                CandidateLock::Skipped(SkipReason::NotEligible)
+            })
+        }
+        None => {
+            // No row under SKIP LOCKED means either "held elsewhere" or
+            // "gone / not eligible"; tell them apart without locking.
+            let mut rows = tx
+                .query(
+                    r#"
+                    SELECT 1
+                    FROM ingress_messages
+                    WHERE message_key = ?::uuid
+                      AND terminal_at IS NOT NULL
+                      AND terminal_at <= ?::timestamptz
+                    "#,
+                    crate::db_params![message_key.to_storage().to_string(), cutoff],
+                )
+                .await
+                .map_err(gc_error_from_database)?;
+            let still_eligible = rows.next().await.map_err(gc_error_from_database)?.is_some();
+            Ok(CandidateLock::Skipped(if still_eligible {
+                SkipReason::LockedElsewhere
+            } else {
+                SkipReason::NotEligible
+            }))
+        }
+    }
 }
 
 fn discard_database_error(error: DatabaseError) -> IngressSubstrateError {
@@ -1010,6 +1069,7 @@ mod tests {
             deadline: Instant::now() + StdDuration::from_secs(30),
             lock_timeout: StdDuration::from_secs(5),
             statement_timeout: StdDuration::from_secs(10),
+            scan_timeout: StdDuration::from_secs(10),
             progress: AliasGcProgress::default(),
         }
     }
@@ -1513,8 +1573,9 @@ mod tests {
             outcome,
             AliasGcOutcome {
                 deleted_messages: 1,
-                completed: true,
-            }
+                completed: false,
+            },
+            "a skipped candidate is still eligible, so the run is not complete"
         );
         assert_eq!(fixture.count("ingress_messages").await, 1);
         blocker_tx.rollback().await.expect("release candidate lock");
@@ -1528,7 +1589,13 @@ mod tests {
             )
             .await
             .expect("the skipped candidate is reclaimed by the next run");
-        assert_eq!(outcome.deleted_messages, 1);
+        assert_eq!(
+            outcome,
+            AliasGcOutcome {
+                deleted_messages: 1,
+                completed: true,
+            }
+        );
         assert_eq!(fixture.count("ingress_messages").await, 0);
         fixture.close().await;
     }
@@ -1685,7 +1752,6 @@ mod tests {
         let mut deleted = 0usize;
         for result in results {
             let outcome = result.expect("concurrent GC runs skip each other's locked rows");
-            assert!(outcome.completed);
             deleted += outcome.deleted_messages;
         }
         assert_eq!(deleted, total);
@@ -2442,7 +2508,7 @@ mod tests {
             outcome,
             AliasGcOutcome {
                 deleted_messages: 0,
-                completed: true,
+                completed: false,
             }
         );
         tx.commit()
