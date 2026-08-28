@@ -68,8 +68,12 @@ const DEFAULT_STATEMENT_TIMEOUT_MS: u64 = 1_500;
 const DEFAULT_TX_DEADLINE: Duration = Duration::from_millis(2_500);
 #[cfg(feature = "clustering")]
 const RETENTION_GC_BUDGET: Duration = Duration::from_secs(2);
+/// Last-resort envelope around one GC run: the cooperative budget plus the
+/// worst legal per-candidate wait (one statement bound, one epoch lock wait)
+/// and margin, so ordinary slowness inside the per-operation bounds is
+/// classified by the run itself instead of being cancelled from outside.
 #[cfg(feature = "clustering")]
-const RETENTION_GC_HARD_DEADLINE: Duration = Duration::from_millis(2_500);
+const RETENTION_GC_HARD_DEADLINE: Duration = Duration::from_secs(4);
 #[cfg(feature = "clustering")]
 const RETENTION_GC_LOCK_TIMEOUT: Duration = Duration::from_millis(250);
 #[cfg(feature = "clustering")]
@@ -4422,7 +4426,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn retention_gc_records_timed_out_outcome_when_gc_blocks_on_a_locked_row() {
+    async fn retention_gc_records_timed_out_outcome_when_the_epoch_row_is_locked() {
         let metrics = waddle_xmpp::telemetry::test_support::acquire().await;
         let Some(fixture) = ShadowFixture::open("retention_gc_timeout").await else {
             return;
@@ -4463,15 +4467,16 @@ mod tests {
             .await
             .expect("age terminal message beyond alias retention");
 
-        // Mirror the substrate GC race: its candidate lock is FOR UPDATE, so
-        // this independent transaction forces the per-operation lock timeout.
-        let mut lock = fixture.db.begin().await.expect("begin message lock tx");
+        // GC waits on the epoch row FOR SHARE first (a locked candidate row is
+        // skipped instead), so an exclusive epoch lock is what forces the
+        // per-operation lock timeout.
+        let mut lock = fixture.db.begin().await.expect("begin epoch lock tx");
         lock.query(
-            "SELECT 1 FROM ingress_messages WHERE message_key = ?::uuid FOR UPDATE",
-            crate::db_params![message_key.to_storage().to_string()],
+            "SELECT 1 FROM ingress_protocol_epoch WHERE id = 1 FOR UPDATE",
+            (),
         )
         .await
-        .expect("lock expired terminal message row");
+        .expect("lock the protocol epoch row");
         let timed_out_before = metrics
             .counter_sum("ingress.shadow.gc.runs", &[("outcome", "timed_out")])
             .unwrap_or(0);
@@ -4484,10 +4489,10 @@ mod tests {
 
         let processor = fixture.processor.clone();
         let gc = tokio::spawn(async move { processor.run_retention_gc().await });
-        wait_for_lock_waiter(&fixture.admin, "FOR UPDATE").await;
+        wait_for_lock_waiter(&fixture.admin, "FOR SHARE").await;
         gc.await
             .expect("join production retention GC after its lock timeout");
-        lock.commit().await.expect("release message row lock");
+        lock.commit().await.expect("release epoch row lock");
 
         assert_eq!(
             metrics

@@ -230,23 +230,20 @@ mid-window, the window restarts.
 | PostgreSQL | Backends stay below 80% of `max_connections`; data and WAL PVC use stay below 70% on both instances. |
 | Submission latency | p99 `ingress_shadow_tx_duration_seconds` remains below 2 seconds. |
 
-Retention GC uses a 2 s cooperative budget inside a 2.5 s hard envelope, with
-a 250 ms `lock_timeout` and a 1 s `statement_timeout`. A `partial` outcome means
-the cooperative budget stopped the run after its progress was accounted;
-`timed_out` means the run hit the lock timeout, statement timeout, or hard
-envelope. The reclaimed-message counter accounts progress on cooperative exits,
-on errors returned to the worker, and on hard-envelope cancellation (through
-the run's progress handle), but remains a lower bound across force-stop and
-ambiguous commit. The cohort state metrics remain the authoritative
-reclamation evidence.
-
-Triage for `IngressShadowGcFailing`: a `timed_out` run whose warning line
-reads `ingress alias GC database operation timed out (Lock)` is a lock wait
-past 250 ms on the oldest candidate — usually another pod's GC or an in-flight
-child write on the same row — and is benign when
-`ingress_shadow_gc_reclaimed_messages_total` keeps rising and
-`IngressShadowGcBacklog` / `IngressShadowGcAge` stay quiet; a `(Statement)`
-timeout, a `failed` run, or a stalled backlog is the real finding.
+Retention GC uses a 2 s cooperative budget inside a 4 s hard envelope, with
+a 250 ms `lock_timeout` and a 1 s `statement_timeout` on every GC statement
+(candidate scan included). A `partial` outcome means the cooperative budget
+stopped the run after its progress was accounted; `timed_out` means the run
+hit the epoch-row lock timeout, a statement timeout, or the hard envelope.
+Candidate rows held by another writer (a concurrent pod's GC or an in-flight
+child write) are skipped, not waited on, and stay eligible for the next run,
+so contention between pods never produces `timed_out`. The reclaimed-message
+counter accounts progress on cooperative exits, on errors returned to the
+worker, and on hard-envelope cancellation (through the run's progress
+handle), but remains a lower bound across force-stop and ambiguous commit.
+The cohort state metrics remain the authoritative reclamation evidence.
+`IngressShadowGcFailing` therefore keeps its place in the pass criteria
+above: every `failed` or `timed_out` run is a soak finding.
 
 ## Loki checks
 

@@ -531,7 +531,7 @@ pub async fn gc_expired_aliases(
         // Bounded batches of rows with work left to do: expired rows kept
         // alive by refs/deliveries stop matching once their aliases are gone,
         // so retained history does not grow the scan or the candidate vector.
-        let candidates = expired_candidates(db, &cutoff)
+        let candidates = expired_candidates(db, &cutoff, &budget)
             .await
             .map_err(|error| gc_failure(deleted_messages, error))?;
         if candidates.is_empty() {
@@ -697,6 +697,27 @@ async fn install_gc_timeouts(
     tx: &mut Transaction<'_>,
     budget: &AliasGcBudget,
 ) -> Result<(), AliasGcError> {
+    if set_local_transaction_timeouts(tx, budget.lock_timeout, budget.statement_timeout)
+        .await
+        .map_err(gc_error_from_database)?
+    {
+        Ok(())
+    } else {
+        Err(AliasGcError::Substrate(IngressSubstrateError::Database {
+            retry_class: DbRetryClass::NotRetryable,
+        }))
+    }
+}
+
+/// Install transaction-local PostgreSQL `lock_timeout` / `statement_timeout`
+/// bounds (`SET LOCAL` semantics: they revert at commit or rollback).
+/// Returns whether the driver confirmed the settings; `false` is a
+/// defensive signal for a missing `set_config` row.
+pub(crate) async fn set_local_transaction_timeouts(
+    tx: &mut Transaction<'_>,
+    lock_timeout: StdDuration,
+    statement_timeout: StdDuration,
+) -> Result<bool, DatabaseError> {
     let mut proof = tx
         .query(
             r#"
@@ -705,20 +726,12 @@ async fn install_gc_timeouts(
                 set_config('statement_timeout', ?, true)
             "#,
             crate::db_params![
-                format!("{}ms", budget.lock_timeout.as_millis()),
-                format!("{}ms", budget.statement_timeout.as_millis()),
+                format!("{}ms", lock_timeout.as_millis()),
+                format!("{}ms", statement_timeout.as_millis()),
             ],
         )
-        .await
-        .map_err(gc_error_from_database)?;
-    proof
-        .next()
-        .await
-        .map_err(gc_error_from_database)?
-        .ok_or(AliasGcError::Substrate(IngressSubstrateError::Database {
-            retry_class: DbRetryClass::NotRetryable,
-        }))?;
-    Ok(())
+        .await?;
+    Ok(proof.next().await?.is_some())
 }
 
 /// Typed alias identity held until the driver binding edge: the sender and
@@ -845,9 +858,17 @@ async fn message_exists(
     Ok(rows.next().await.map_err(discard_database_error)?.is_some())
 }
 
-async fn expired_candidates(db: &Database, cutoff: &str) -> Result<Vec<MessageKey>, AliasGcError> {
-    let conn = db.guard().await.map_err(gc_error_from_database)?;
-    let mut rows = conn
+/// Scan the next batch of candidates under the same statement bound as the
+/// per-candidate transactions, so a slow scan is classified as a statement
+/// timeout instead of being cancelled from outside.
+async fn expired_candidates(
+    db: &Database,
+    cutoff: &str,
+    budget: &AliasGcBudget,
+) -> Result<Vec<MessageKey>, AliasGcError> {
+    let mut tx = db.begin().await.map_err(gc_error_from_database)?;
+    install_gc_timeouts(&mut tx, budget).await?;
+    let mut rows = tx
         .query(
             r#"
             SELECT m.message_key::text
@@ -882,9 +903,17 @@ async fn expired_candidates(db: &Database, cutoff: &str) -> Result<Vec<MessageKe
             .map_err(|_| AliasGcError::Substrate(IngressSubstrateError::InvalidStoredMessageKey))?;
         candidates.push(message_key);
     }
+    drop(rows);
+    tx.commit().await.map_err(gc_error_from_database)?;
     Ok(candidates)
 }
 
+/// Lock one candidate row and report whether its retention has elapsed.
+///
+/// A row held by another writer — a concurrent GC run or an in-flight child
+/// write — is skipped rather than waited on: the child write keeps the
+/// message alive anyway, and a skipped candidate stays eligible for the next
+/// run.  Only the epoch row is ever waited on, bounded by `lock_timeout`.
 async fn lock_eligible_terminal_message(
     tx: &mut Transaction<'_>,
     message_key: MessageKey,
@@ -896,7 +925,7 @@ async fn lock_eligible_terminal_message(
             SELECT terminal_at <= ?::timestamptz
             FROM ingress_messages
             WHERE message_key = ?::uuid AND terminal_at IS NOT NULL
-            FOR UPDATE
+            FOR UPDATE SKIP LOCKED
             "#,
             crate::db_params![cutoff, message_key.to_storage().to_string()],
         )
@@ -1453,7 +1482,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn gc_lock_timeout_after_progress_preserves_committed_count() {
+    async fn gc_skips_a_candidate_locked_by_another_writer_and_keeps_going() {
         let Some(fixture) = Fixture::open("gc_lock_progress").await else {
             return;
         };
@@ -1469,7 +1498,7 @@ mod tests {
             .await
             .expect("lock second GC candidate");
 
-        let failure = fixture
+        let outcome = fixture
             .store
             .gc_expired_aliases(
                 terminal_at + ALIAS_RETENTION + Duration::days(1),
@@ -1479,17 +1508,28 @@ mod tests {
                 },
             )
             .await
-            .expect_err("second candidate lock must time out");
-        assert_eq!(failure.deleted_messages, 1);
-        assert!(matches!(
-            failure.error,
-            AliasGcError::DatabaseTimeout {
-                kind: DatabaseTimeoutKind::Lock
+            .expect("a locked candidate is skipped, not waited on");
+        assert_eq!(
+            outcome,
+            AliasGcOutcome {
+                deleted_messages: 1,
+                completed: true,
             }
-        ));
+        );
         assert_eq!(fixture.count("ingress_messages").await, 1);
         blocker_tx.rollback().await.expect("release candidate lock");
         drop(blocker);
+
+        let outcome = fixture
+            .store
+            .gc_expired_aliases(
+                terminal_at + ALIAS_RETENTION + Duration::days(1),
+                gc_budget(),
+            )
+            .await
+            .expect("the skipped candidate is reclaimed by the next run");
+        assert_eq!(outcome.deleted_messages, 1);
+        assert_eq!(fixture.count("ingress_messages").await, 0);
         fixture.close().await;
     }
 
@@ -1632,15 +1672,7 @@ mod tests {
         let spawn_gc = |store: PostgresIngressSubstrate, barrier: Arc<Barrier>| {
             tokio::spawn(async move {
                 barrier.wait().await;
-                store
-                    .gc_expired_aliases(
-                        now,
-                        AliasGcBudget {
-                            lock_timeout: StdDuration::from_secs(2),
-                            ..gc_budget()
-                        },
-                    )
-                    .await
+                store.gc_expired_aliases(now, gc_budget()).await
             })
         };
         let first = spawn_gc(fixture.store.clone(), barrier.clone());
@@ -1651,22 +1683,12 @@ mod tests {
             second.await.expect("join second GC"),
         ];
         let mut deleted = 0usize;
-        let mut timeouts = 0usize;
         for result in results {
-            match result {
-                Ok(outcome) => deleted += outcome.deleted_messages,
-                Err(failure) => {
-                    deleted += failure.deleted_messages;
-                    if matches!(failure.error, AliasGcError::DatabaseTimeout { .. }) {
-                        timeouts += 1;
-                    } else {
-                        panic!("concurrent GC failed unexpectedly: {failure}");
-                    }
-                }
-            }
+            let outcome = result.expect("concurrent GC runs skip each other's locked rows");
+            assert!(outcome.completed);
+            deleted += outcome.deleted_messages;
         }
         assert_eq!(deleted, total);
-        assert!(timeouts <= 1);
         assert_eq!(fixture.count("ingress_messages").await, 0);
         fixture.close().await;
     }
@@ -2387,7 +2409,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn gc_returns_lock_timeout_when_a_child_insert_holds_the_message_lock() {
+    async fn gc_skips_a_message_whose_row_is_locked_by_an_in_flight_child_insert() {
         let Some(fixture) = Fixture::open("gc_ref_race").await else {
             return;
         };
@@ -2405,7 +2427,7 @@ mod tests {
             MessageWriteOutcome::Recorded
         );
 
-        let failure = fixture
+        let outcome = fixture
             .store
             .gc_expired_aliases(
                 terminal_at + ALIAS_RETENTION,
@@ -2415,19 +2437,17 @@ mod tests {
                 },
             )
             .await
-            .expect_err("message-row lock wait times out");
-        assert!(matches!(
-            failure,
-            AliasGcFailure {
+            .expect("a row held by an in-flight child write is skipped");
+        assert_eq!(
+            outcome,
+            AliasGcOutcome {
                 deleted_messages: 0,
-                error: AliasGcError::DatabaseTimeout {
-                    kind: DatabaseTimeoutKind::Lock,
-                },
+                completed: true,
             }
-        ));
+        );
         tx.commit()
             .await
-            .expect("commit child insert after GC timeout");
+            .expect("commit child insert after GC skipped the row");
         assert_eq!(fixture.count("ingress_messages").await, 1);
         assert_eq!(fixture.count("ingress_sm_refs").await, 1);
         fixture.close().await;
