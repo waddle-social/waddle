@@ -15,7 +15,8 @@ use crate::config::LineageConfig;
 use crate::db::{Database, DatabaseDriver};
 #[cfg(feature = "clustering")]
 use crate::ingress_substrate::{
-    AliasGcBudget, AliasGcError, AliasGcFailure, AliasGcOutcome, PostgresIngressSubstrate,
+    AliasGcBudget, AliasGcError, AliasGcFailure, AliasGcOutcome, AliasGcProgress,
+    PostgresIngressSubstrate,
 };
 #[cfg(feature = "clustering")]
 use crate::ingress_uow::{
@@ -2218,6 +2219,7 @@ impl IngressShadowProcessor {
                 return;
             }
         };
+        let progress = AliasGcProgress::default();
         let result = tokio::time::timeout(
             budget.hard_deadline,
             substrate.gc_expired_aliases(
@@ -2226,6 +2228,7 @@ impl IngressShadowProcessor {
                     deadline: tokio::time::Instant::now() + budget.cooperative,
                     lock_timeout: budget.lock_timeout,
                     statement_timeout: budget.statement_timeout,
+                    progress: progress.clone(),
                 },
             ),
         )
@@ -2242,7 +2245,7 @@ impl IngressShadowProcessor {
                 tracing::warn!(%error, "ingress shadow retention GC exceeded hard deadline");
                 record_retention_gc_result(
                     waddle_xmpp::telemetry::attributes::IngressGcOutcome::TimedOut,
-                    0,
+                    progress.committed(),
                 );
             }
         }
@@ -3954,6 +3957,7 @@ mod tests {
                     deadline: tokio::time::Instant::now() + DEFAULT_TX_DEADLINE,
                     lock_timeout: Duration::from_millis(250),
                     statement_timeout: Duration::from_secs(1),
+                    progress: AliasGcProgress::default(),
                 },
             )
             .await
@@ -4335,7 +4339,7 @@ mod tests {
         fixture.record_expired_messages(BACKLOG).await;
         fixture
             .execute(
-                "CREATE FUNCTION waddle_test_slow_gc_delete() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN PERFORM pg_sleep(0.005); RETURN OLD; END $$",
+                "CREATE FUNCTION waddle_test_slow_gc_delete() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN PERFORM pg_sleep(0.05); RETURN OLD; END $$",
                 (),
             )
             .await
@@ -4360,7 +4364,7 @@ mod tests {
         fixture
             .processor
             .run_retention_gc_with_budget(RetentionGcBudget {
-                cooperative: Duration::from_millis(100),
+                cooperative: Duration::from_secs(1),
                 ..RetentionGcBudget::DEFAULT
             })
             .await;
@@ -4393,7 +4397,13 @@ mod tests {
             .execute("DROP FUNCTION waddle_test_slow_gc_delete()", ())
             .await
             .expect("remove deterministic GC pacing function");
-        fixture.processor.run_retention_gc().await;
+        fixture
+            .processor
+            .run_retention_gc_with_budget(RetentionGcBudget {
+                cooperative: Duration::from_secs(30),
+                ..RetentionGcBudget::DEFAULT
+            })
+            .await;
 
         assert_eq!(fixture.count("ingress_messages").await, 0);
         assert_eq!(
@@ -4504,50 +4514,115 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn retention_gc_coalesces_concurrent_runs_without_recording_a_skipped_run() {
+    async fn retention_gc_skips_while_another_run_is_in_flight_and_releases_the_flag_afterwards() {
         let metrics = waddle_xmpp::telemetry::test_support::acquire().await;
         let Some(fixture) = ShadowFixture::open("retention_gc_coalescing").await else {
             return;
         };
-        let key = fixture
-            .record_expired_messages(1)
-            .await
-            .into_iter()
-            .next()
-            .expect("seed one expired message");
-        let mut lock = fixture.db.begin().await.expect("begin message lock tx");
-        lock.query(
-            "SELECT 1 FROM ingress_messages WHERE message_key = ?::uuid FOR UPDATE",
-            crate::db_params![key.to_storage().to_string()],
-        )
-        .await
-        .expect("lock expired message row");
+        fixture.record_expired_messages(1).await;
         let runs_before = ingress_shadow_gc_runs(&metrics);
+        let completed_before = metrics
+            .counter_sum("ingress.shadow.gc.runs", &[("outcome", "completed")])
+            .unwrap_or(0);
 
-        let processor = fixture.processor.clone();
-        let first = tokio::spawn(async move {
-            processor
-                .run_retention_gc_with_budget(RetentionGcBudget {
-                    lock_timeout: Duration::from_secs(2),
-                    ..RetentionGcBudget::DEFAULT
-                })
-                .await;
-        });
-        wait_for_lock_waiter(&fixture.admin, "FOR UPDATE").await;
-        tokio::time::timeout(
-            Duration::from_millis(100),
-            fixture.processor.run_retention_gc(),
-        )
-        .await
-        .expect("coalesced GC run must return immediately");
+        fixture
+            .processor
+            .gc_in_flight
+            .store(true, Ordering::Release);
+        fixture.processor.run_retention_gc().await;
         assert_eq!(
             ingress_shadow_gc_runs(&metrics),
             runs_before,
             "a coalesced run must not increment the GC runs counter"
         );
+        assert_eq!(
+            fixture.count("ingress_messages").await,
+            1,
+            "a coalesced run must not touch the database"
+        );
+        assert!(
+            fixture.processor.gc_in_flight.load(Ordering::Acquire),
+            "a coalesced run must not release a flag it did not acquire"
+        );
 
-        lock.commit().await.expect("release message row lock");
-        first.await.expect("join blocked retention GC");
+        fixture
+            .processor
+            .gc_in_flight
+            .store(false, Ordering::Release);
+        fixture.processor.run_retention_gc().await;
+        assert_eq!(fixture.count("ingress_messages").await, 0);
+        assert_eq!(
+            metrics
+                .counter_sum("ingress.shadow.gc.runs", &[("outcome", "completed")])
+                .unwrap_or(0),
+            completed_before + 1
+        );
+        assert!(
+            !fixture.processor.gc_in_flight.load(Ordering::Acquire),
+            "a completed run must release the in-flight flag"
+        );
+        fixture.close().await;
+    }
+
+    #[tokio::test]
+    async fn retention_gc_hard_envelope_reports_committed_progress_and_releases_the_flag() {
+        const BACKLOG: usize = 8;
+
+        let metrics = waddle_xmpp::telemetry::test_support::acquire().await;
+        let Some(fixture) = ShadowFixture::open("retention_gc_hard_envelope").await else {
+            return;
+        };
+        fixture.record_expired_messages(BACKLOG).await;
+        fixture
+            .execute(
+                "CREATE FUNCTION waddle_test_slow_gc_delete() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN PERFORM pg_sleep(0.05); RETURN OLD; END $$",
+                (),
+            )
+            .await
+            .expect("create deterministic GC pacing function");
+        fixture
+            .execute(
+                "CREATE TRIGGER waddle_test_slow_gc_delete BEFORE DELETE ON ingress_messages FOR EACH ROW EXECUTE FUNCTION waddle_test_slow_gc_delete()",
+                (),
+            )
+            .await
+            .expect("install deterministic GC pacing trigger");
+        let timed_out_before = metrics
+            .counter_sum("ingress.shadow.gc.runs", &[("outcome", "timed_out")])
+            .unwrap_or(0);
+        let reclaimed_before = metrics
+            .counter_sum("ingress.shadow.gc.reclaimed_messages", &[])
+            .unwrap_or(0);
+
+        fixture
+            .processor
+            .run_retention_gc_with_budget(RetentionGcBudget {
+                cooperative: Duration::from_secs(30),
+                hard_deadline: Duration::from_millis(150),
+                ..RetentionGcBudget::DEFAULT
+            })
+            .await;
+
+        let remaining = usize::try_from(fixture.count("ingress_messages").await)
+            .expect("remaining message count fits usize");
+        assert!(remaining > 0 && remaining < BACKLOG);
+        assert_eq!(
+            metrics
+                .counter_sum("ingress.shadow.gc.runs", &[("outcome", "timed_out")])
+                .unwrap_or(0),
+            timed_out_before + 1
+        );
+        assert_eq!(
+            metrics
+                .counter_sum("ingress.shadow.gc.reclaimed_messages", &[])
+                .unwrap_or(0),
+            reclaimed_before + u64::try_from(BACKLOG - remaining).expect("count fits u64"),
+            "a hard-envelope cancellation must still report the committed deletions"
+        );
+        assert!(
+            !fixture.processor.gc_in_flight.load(Ordering::Acquire),
+            "a cancelled run must release the in-flight flag"
+        );
         fixture.close().await;
     }
 

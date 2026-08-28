@@ -14,7 +14,9 @@ use chrono::{Duration, Utc};
 use jid::Jid;
 use waddle_server::{
     db::{Database, DatabaseConfig, DatabaseDriver, MigrationRunner},
-    ingress_substrate::{AliasGcBudget, PostgresIngressSubstrate, ALIAS_RETENTION},
+    ingress_substrate::{
+        AliasGcBudget, AliasGcProgress, PostgresIngressSubstrate, ALIAS_RETENTION,
+    },
 };
 #[cfg(feature = "clustering")]
 use waddle_xmpp::ingress::IngressEffectIntent;
@@ -109,6 +111,7 @@ async fn retention_is_non_cascading_and_child_foreign_keys_are_no_action() {
                     deadline: tokio::time::Instant::now() + StdDuration::from_secs(30),
                     lock_timeout: StdDuration::from_secs(5),
                     statement_timeout: StdDuration::from_secs(10),
+                    progress: AliasGcProgress::default(),
                 },
             )
             .await

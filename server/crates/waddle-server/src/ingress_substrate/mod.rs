@@ -3,6 +3,8 @@
 //! This substrate is consumed by tests now and by the #1654 repositories
 //! later.  It deliberately has no production caller in this foundation slice.
 
+use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::Arc;
 use std::time::Duration as StdDuration;
 
 use chrono::{DateTime, Duration, Utc};
@@ -102,11 +104,28 @@ pub struct AliasGcOutcome {
 }
 
 /// Per-operation bounds and cooperative deadline for one alias GC run.
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone)]
 pub struct AliasGcBudget {
     pub deadline: Instant,
     pub lock_timeout: StdDuration,
     pub statement_timeout: StdDuration,
+    /// Committed deletions, observable by the caller even when the run is
+    /// cancelled from outside before it can return its outcome.
+    pub progress: AliasGcProgress,
+}
+
+/// Messages committed as deleted so far by one alias GC run.
+#[derive(Debug, Clone, Default)]
+pub struct AliasGcProgress(Arc<AtomicUsize>);
+
+impl AliasGcProgress {
+    pub fn committed(&self) -> usize {
+        self.0.load(Ordering::Acquire)
+    }
+
+    fn record(&self, deleted_messages: usize) {
+        self.0.fetch_add(deleted_messages, Ordering::AcqRel);
+    }
 }
 
 /// PostgreSQL timeout category surfaced by alias GC.
@@ -522,7 +541,7 @@ pub async fn gc_expired_aliases(
             });
         }
         let batch_len = candidates.len();
-        match gc_candidate_batch(db, &cutoff, candidates, budget).await {
+        match gc_candidate_batch(db, &cutoff, candidates, &budget).await {
             Ok(outcome) => {
                 deleted_messages += outcome.deleted_messages;
                 if !outcome.completed {
@@ -553,7 +572,7 @@ async fn gc_candidate_batch(
     db: &Database,
     cutoff: &str,
     candidates: Vec<MessageKey>,
-    budget: AliasGcBudget,
+    budget: &AliasGcBudget,
 ) -> Result<AliasGcOutcome, AliasGcFailure> {
     let mut deleted_messages = 0usize;
     for message_key in candidates {
@@ -655,7 +674,7 @@ async fn gc_candidate_batch(
         tx.commit()
             .await
             .map_err(|error| gc_database_failure(deleted_messages, error))?;
-        deleted_messages += usize::try_from(deleted).map_err(|_| {
+        let deleted = usize::try_from(deleted).map_err(|_| {
             gc_failure(
                 deleted_messages,
                 IngressSubstrateError::Database {
@@ -664,6 +683,8 @@ async fn gc_candidate_batch(
                 .into(),
             )
         })?;
+        budget.progress.record(deleted);
+        deleted_messages += deleted;
     }
 
     Ok(AliasGcOutcome {
@@ -674,7 +695,7 @@ async fn gc_candidate_batch(
 
 async fn install_gc_timeouts(
     tx: &mut Transaction<'_>,
-    budget: AliasGcBudget,
+    budget: &AliasGcBudget,
 ) -> Result<(), AliasGcError> {
     let mut proof = tx
         .query(
@@ -960,6 +981,7 @@ mod tests {
             deadline: Instant::now() + StdDuration::from_secs(30),
             lock_timeout: StdDuration::from_secs(5),
             statement_timeout: StdDuration::from_secs(10),
+            progress: AliasGcProgress::default(),
         }
     }
 
@@ -1350,7 +1372,7 @@ mod tests {
         fixture
             .db
             .execute(
-                "CREATE FUNCTION waddle_test_slow_gc_delete() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN PERFORM pg_sleep(0.005); RETURN OLD; END $$",
+                "CREATE FUNCTION waddle_test_slow_gc_delete() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN PERFORM pg_sleep(0.05); RETURN OLD; END $$",
             )
             .await
             .expect("create deterministic GC pacing function");
@@ -1366,7 +1388,7 @@ mod tests {
             .gc_expired_aliases(
                 now,
                 AliasGcBudget {
-                    deadline: tokio::time::Instant::now() + StdDuration::from_millis(100),
+                    deadline: tokio::time::Instant::now() + StdDuration::from_secs(1),
                     ..gc_budget()
                 },
             )
@@ -1545,6 +1567,55 @@ mod tests {
         assert_eq!(failure.deleted_messages, 1);
         assert!(matches!(failure.error, AliasGcError::Substrate(_)));
         assert_eq!(fixture.count("ingress_messages").await, 1);
+        fixture.close().await;
+    }
+
+    #[tokio::test]
+    async fn gc_progress_handle_reports_committed_deletions_after_external_cancellation() {
+        let Some(fixture) = Fixture::open("gc_progress_cancel").await else {
+            return;
+        };
+        let terminal_at = timestamp(16);
+        let total = 8usize;
+        fixture.record_terminal_messages(total, terminal_at).await;
+        fixture
+            .db
+            .execute(
+                "CREATE FUNCTION waddle_test_slow_gc_delete() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN PERFORM pg_sleep(0.05); RETURN OLD; END $$",
+            )
+            .await
+            .expect("create deterministic GC pacing function");
+        fixture
+            .db
+            .execute(
+                "CREATE TRIGGER waddle_test_slow_gc_delete BEFORE DELETE ON ingress_messages FOR EACH ROW EXECUTE FUNCTION waddle_test_slow_gc_delete()",
+            )
+            .await
+            .expect("install deterministic GC pacing trigger");
+        let progress = AliasGcProgress::default();
+        let cancelled = tokio::time::timeout(
+            StdDuration::from_millis(150),
+            fixture.store.gc_expired_aliases(
+                terminal_at + ALIAS_RETENTION + Duration::days(1),
+                AliasGcBudget {
+                    progress: progress.clone(),
+                    ..gc_budget()
+                },
+            ),
+        )
+        .await;
+        assert!(
+            cancelled.is_err(),
+            "the paced run must be cancelled mid-way"
+        );
+        let remaining = usize::try_from(fixture.count("ingress_messages").await)
+            .expect("remaining count fits usize");
+        assert!(remaining > 0 && remaining < total);
+        assert_eq!(
+            progress.committed(),
+            total - remaining,
+            "the progress handle must match the rows actually committed"
+        );
         fixture.close().await;
     }
 
@@ -2339,9 +2410,8 @@ mod tests {
             .gc_expired_aliases(
                 terminal_at + ALIAS_RETENTION,
                 AliasGcBudget {
-                    deadline: Instant::now() + StdDuration::from_secs(30),
                     lock_timeout: StdDuration::from_millis(50),
-                    statement_timeout: StdDuration::from_secs(5),
+                    ..gc_budget()
                 },
             )
             .await
