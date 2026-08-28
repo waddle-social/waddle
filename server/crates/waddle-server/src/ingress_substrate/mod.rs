@@ -3,10 +3,15 @@
 //! This substrate is consumed by tests now and by the #1654 repositories
 //! later.  It deliberately has no production caller in this foundation slice.
 
+use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::Arc;
+use std::time::Duration as StdDuration;
+
 use chrono::{DateTime, Duration, Utc};
 use jid::BareJid;
 use sha2::{Digest, Sha256};
 use thiserror::Error;
+use tokio::time::Instant;
 use uuid::Uuid;
 use waddle_xmpp::ingress::{
     resolve_alias, AliasResolution, DeliveryKey, IngressOrdinal, MessageKey, NormalizedTarget,
@@ -95,6 +100,60 @@ pub enum TerminalizeOutcome {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct AliasGcOutcome {
     pub deleted_messages: usize,
+    pub completed: bool,
+}
+
+/// Per-operation bounds and cooperative deadline for one alias GC run.
+#[derive(Debug, Clone)]
+pub struct AliasGcBudget {
+    pub deadline: Instant,
+    pub lock_timeout: StdDuration,
+    /// Bound on each single-row statement of a candidate transaction.
+    pub statement_timeout: StdDuration,
+    /// Bound on the candidate scan, which walks retained history.
+    pub scan_timeout: StdDuration,
+    /// Committed deletions, observable by the caller even when the run is
+    /// cancelled from outside before it can return its outcome.
+    pub progress: AliasGcProgress,
+}
+
+/// Messages committed as deleted so far by one alias GC run.
+#[derive(Debug, Clone, Default)]
+pub struct AliasGcProgress(Arc<AtomicUsize>);
+
+impl AliasGcProgress {
+    pub fn committed(&self) -> usize {
+        self.0.load(Ordering::Acquire)
+    }
+
+    fn record(&self, deleted_messages: usize) {
+        self.0.fetch_add(deleted_messages, Ordering::AcqRel);
+    }
+}
+
+/// PostgreSQL timeout category surfaced by alias GC.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DatabaseTimeoutKind {
+    Lock,
+    Statement,
+}
+
+/// Typed reason an alias GC run failed.
+#[derive(Debug, Error)]
+pub enum AliasGcError {
+    #[error("ingress alias GC database operation timed out ({kind:?})")]
+    DatabaseTimeout { kind: DatabaseTimeoutKind },
+    #[error(transparent)]
+    Substrate(#[from] IngressSubstrateError),
+}
+
+/// Alias GC failure with all successfully committed progress retained.
+#[derive(Debug, Error)]
+#[error("ingress alias GC failed after deleting {deleted_messages} messages: {error}")]
+pub struct AliasGcFailure {
+    pub deleted_messages: usize,
+    #[source]
+    pub error: AliasGcError,
 }
 
 /// Typed handle for the PostgreSQL-only ingress substrate.
@@ -172,8 +231,9 @@ impl PostgresIngressSubstrate {
     pub async fn gc_expired_aliases(
         &self,
         now: DateTime<Utc>,
-    ) -> Result<AliasGcOutcome, IngressSubstrateError> {
-        gc_expired_aliases(&self.db, now).await
+        budget: AliasGcBudget,
+    ) -> Result<AliasGcOutcome, AliasGcFailure> {
+        gc_expired_aliases(&self.db, now, budget).await
     }
 }
 
@@ -189,25 +249,46 @@ impl PostgresIngressSubstrate {
 pub(crate) async fn acquire_epoch_lock_first(
     tx: &mut Transaction<'_>,
 ) -> Result<ProtocolEpoch, IngressSubstrateError> {
+    read_live_epoch_for_share(tx)
+        .await
+        .map_err(|error| match error {
+            EpochLockError::Database(error) => discard_database_error(error),
+            EpochLockError::MissingRow => IngressSubstrateError::Database {
+                retry_class: DbRetryClass::NotRetryable,
+            },
+            EpochLockError::UnsupportedLiveEpoch => IngressSubstrateError::UnsupportedLiveEpoch,
+        })
+}
+
+/// Why the singleton epoch row could not be read `FOR SHARE`.  Kept as the
+/// raw driver error so callers can classify Postgres timeouts before
+/// discarding the diagnostic.
+enum EpochLockError {
+    Database(DatabaseError),
+    MissingRow,
+    UnsupportedLiveEpoch,
+}
+
+async fn read_live_epoch_for_share(
+    tx: &mut Transaction<'_>,
+) -> Result<ProtocolEpoch, EpochLockError> {
     let mut rows = tx
         .query(
             "SELECT epoch FROM ingress_protocol_epoch WHERE id = 1 FOR SHARE",
             (),
         )
         .await
-        .map_err(discard_database_error)?;
+        .map_err(EpochLockError::Database)?;
     let live_epoch: i64 = rows
         .next()
         .await
-        .map_err(discard_database_error)?
-        .ok_or(IngressSubstrateError::Database {
-            retry_class: DbRetryClass::NotRetryable,
-        })?
+        .map_err(EpochLockError::Database)?
+        .ok_or(EpochLockError::MissingRow)?
         .get(0)
-        .map_err(discard_database_error)?;
-    Ok(ProtocolEpoch::from_storage(
-        u32::try_from(live_epoch).map_err(|_| IngressSubstrateError::UnsupportedLiveEpoch)?,
-    ))
+        .map_err(EpochLockError::Database)?;
+    u32::try_from(live_epoch)
+        .map(ProtocolEpoch::from_storage)
+        .map_err(|_| EpochLockError::UnsupportedLiveEpoch)
 }
 
 /// Insert a message's immutable semantic digest.
@@ -432,29 +513,73 @@ pub async fn terminalize_message(
 pub async fn gc_expired_aliases(
     db: &Database,
     now: DateTime<Utc>,
-) -> Result<AliasGcOutcome, IngressSubstrateError> {
+    budget: AliasGcBudget,
+) -> Result<AliasGcOutcome, AliasGcFailure> {
     if db.driver() != DatabaseDriver::Postgres {
-        return Err(IngressSubstrateError::PostgresRequired);
+        return Err(gc_failure(
+            0,
+            IngressSubstrateError::PostgresRequired.into(),
+        ));
     }
     let cutoff = (now - ALIAS_RETENTION).to_rfc3339();
     let mut deleted_messages = 0usize;
 
     loop {
+        if Instant::now() >= budget.deadline {
+            return Ok(AliasGcOutcome {
+                deleted_messages,
+                completed: false,
+            });
+        }
         // Bounded batches of rows with work left to do: expired rows kept
         // alive by refs/deliveries stop matching once their aliases are gone,
         // so retained history does not grow the scan or the candidate vector.
-        let candidates = expired_candidates(db, &cutoff).await?;
+        let candidates = expired_candidates(db, &cutoff, &budget)
+            .await
+            .map_err(|error| gc_failure(deleted_messages, error))?;
         if candidates.is_empty() {
-            break;
+            return Ok(AliasGcOutcome {
+                deleted_messages,
+                completed: true,
+            });
         }
         let batch_len = candidates.len();
-        deleted_messages += gc_candidate_batch(db, &cutoff, candidates).await?;
-        if batch_len < GC_BATCH_LIMIT {
-            break;
+        let batch = match gc_candidate_batch(db, &cutoff, candidates, &budget).await {
+            Ok(batch) => batch,
+            Err(mut failure) => {
+                failure.deleted_messages += deleted_messages;
+                return Err(failure);
+            }
+        };
+        deleted_messages += batch.deleted_messages;
+        if batch.deadline_reached {
+            return Ok(AliasGcOutcome {
+                deleted_messages,
+                completed: false,
+            });
+        }
+        // A candidate held by another writer stays eligible and reappears at
+        // the head of every rescan, so the last batch's skips decide whether
+        // the backlog is drained; a batch that processed nothing would only
+        // rescan the same locked rows.
+        if batch_len < GC_BATCH_LIMIT || batch.processed == 0 {
+            return Ok(AliasGcOutcome {
+                deleted_messages,
+                completed: batch_len < GC_BATCH_LIMIT && batch.skipped_locked == 0,
+            });
         }
     }
+}
 
-    Ok(AliasGcOutcome { deleted_messages })
+/// Work done by one candidate batch.
+struct BatchOutcome {
+    deleted_messages: usize,
+    /// Candidates locked and collected (their aliases are gone).
+    processed: usize,
+    /// Candidates held by another writer, left eligible for a later run.
+    skipped_locked: usize,
+    /// The cooperative deadline stopped the batch early.
+    deadline_reached: bool,
 }
 
 /// Upper bound on messages examined per GC scan.
@@ -464,15 +589,32 @@ async fn gc_candidate_batch(
     db: &Database,
     cutoff: &str,
     candidates: Vec<MessageKey>,
-) -> Result<usize, IngressSubstrateError> {
+    budget: &AliasGcBudget,
+) -> Result<BatchOutcome, AliasGcFailure> {
     let mut deleted_messages = 0usize;
+    let mut processed = 0usize;
+    let mut skipped_locked = 0usize;
     for message_key in candidates {
-        let mut tx = db.begin().await.map_err(discard_database_error)?;
+        if Instant::now() >= budget.deadline {
+            return Ok(BatchOutcome {
+                deleted_messages,
+                processed,
+                skipped_locked,
+                deadline_reached: true,
+            });
+        }
+        let mut tx = db
+            .begin()
+            .await
+            .map_err(|error| gc_database_failure(deleted_messages, error))?;
         // First statement: Postgres's default READ COMMITTED mode is required
         // so every candidate lock/recheck sees the latest committed children.
         tx.execute("SET TRANSACTION ISOLATION LEVEL READ COMMITTED", ())
             .await
-            .map_err(discard_database_error)?;
+            .map_err(|error| gc_database_failure(deleted_messages, error))?;
+        install_gc_timeouts(&mut tx, budget, budget.statement_timeout)
+            .await
+            .map_err(|error| gc_failure(deleted_messages, error))?;
         // GC is an epoch-aware writer: install the transaction-bound proof
         // for the live epoch so its deletes pass the V1009 guard at
         // epoch >= 1 (a no-op at epoch 0).  The FOR SHARE epoch read holds
@@ -480,9 +622,12 @@ async fn gc_candidate_batch(
         // go stale mid-transaction.  The proof only claims epochs this
         // binary was built for: a future activation past
         // supported_protocol_epoch() must fence this GC, not be auto-claimed.
-        let live_epoch = acquire_epoch_lock_first(&mut tx).await?;
+        let live_epoch = acquire_gc_epoch_lock_first(&mut tx, deleted_messages).await?;
         if live_epoch > supported_protocol_epoch() {
-            return Err(IngressSubstrateError::UnsupportedLiveEpoch);
+            return Err(gc_failure(
+                deleted_messages,
+                IngressSubstrateError::UnsupportedLiveEpoch.into(),
+            ));
         }
         let mut proof = tx
             .query(
@@ -494,16 +639,35 @@ async fn gc_candidate_batch(
                 crate::db_params![live_epoch.to_storage().to_string()],
             )
             .await
-            .map_err(discard_database_error)?;
-        proof.next().await.map_err(discard_database_error)?.ok_or(
-            IngressSubstrateError::Database {
-                retry_class: DbRetryClass::NotRetryable,
-            },
-        )?;
+            .map_err(|error| gc_database_failure(deleted_messages, error))?;
+        proof
+            .next()
+            .await
+            .map_err(|error| gc_database_failure(deleted_messages, error))?
+            .ok_or_else(|| {
+                gc_failure(
+                    deleted_messages,
+                    IngressSubstrateError::Database {
+                        retry_class: DbRetryClass::NotRetryable,
+                    }
+                    .into(),
+                )
+            })?;
         drop(proof);
-        if !lock_eligible_terminal_message(&mut tx, message_key, cutoff).await? {
-            tx.commit().await.map_err(discard_database_error)?;
-            continue;
+        match lock_eligible_terminal_message(&mut tx, message_key, cutoff)
+            .await
+            .map_err(|error| gc_failure(deleted_messages, error))?
+        {
+            CandidateLock::Eligible => processed += 1,
+            CandidateLock::Skipped(reason) => {
+                if reason == SkipReason::LockedElsewhere {
+                    skipped_locked += 1;
+                }
+                tx.commit()
+                    .await
+                    .map_err(|error| gc_database_failure(deleted_messages, error))?;
+                continue;
+            }
         }
         // Alias retention has elapsed: the aliases go unconditionally, even
         // when live refs/deliveries keep the message row itself alive —
@@ -514,7 +678,7 @@ async fn gc_candidate_batch(
             crate::db_params![message_key.to_storage().to_string()],
         )
         .await
-        .map_err(discard_database_error)?;
+        .map_err(|error| gc_database_failure(deleted_messages, error))?;
         let deleted = tx
             .execute(
                 r#"
@@ -533,15 +697,71 @@ async fn gc_candidate_batch(
                 crate::db_params![message_key.to_storage().to_string()],
             )
             .await
-            .map_err(discard_database_error)?;
-        tx.commit().await.map_err(discard_database_error)?;
-        deleted_messages +=
-            usize::try_from(deleted).map_err(|_| IngressSubstrateError::Database {
-                retry_class: DbRetryClass::NotRetryable,
-            })?;
+            .map_err(|error| gc_database_failure(deleted_messages, error))?;
+        tx.commit()
+            .await
+            .map_err(|error| gc_database_failure(deleted_messages, error))?;
+        let deleted = usize::try_from(deleted).map_err(|_| {
+            gc_failure(
+                deleted_messages,
+                IngressSubstrateError::Database {
+                    retry_class: DbRetryClass::NotRetryable,
+                }
+                .into(),
+            )
+        })?;
+        budget.progress.record(deleted);
+        deleted_messages += deleted;
     }
 
-    Ok(deleted_messages)
+    Ok(BatchOutcome {
+        deleted_messages,
+        processed,
+        skipped_locked,
+        deadline_reached: false,
+    })
+}
+
+async fn install_gc_timeouts(
+    tx: &mut Transaction<'_>,
+    budget: &AliasGcBudget,
+    statement_timeout: StdDuration,
+) -> Result<(), AliasGcError> {
+    if set_local_transaction_timeouts(tx, budget.lock_timeout, statement_timeout)
+        .await
+        .map_err(gc_error_from_database)?
+    {
+        Ok(())
+    } else {
+        Err(AliasGcError::Substrate(IngressSubstrateError::Database {
+            retry_class: DbRetryClass::NotRetryable,
+        }))
+    }
+}
+
+/// Install transaction-local PostgreSQL `lock_timeout` / `statement_timeout`
+/// bounds (`SET LOCAL` semantics: they revert at commit or rollback).
+/// Returns whether the driver confirmed the settings; `false` is a
+/// defensive signal for a missing `set_config` row.
+pub(crate) async fn set_local_transaction_timeouts(
+    tx: &mut Transaction<'_>,
+    lock_timeout: StdDuration,
+    statement_timeout: StdDuration,
+) -> Result<bool, DatabaseError> {
+    let mut proof = tx
+        .query(
+            r#"
+            SELECT
+                set_config('lock_timeout', ?, true),
+                set_config('statement_timeout', ?, true)
+            "#,
+            crate::db_params![
+                format!("{}ms", lock_timeout.as_millis()),
+                format!("{}ms", statement_timeout.as_millis()),
+            ],
+        )
+        .await?;
+    Ok(proof.next().await?.is_some())
 }
 
 /// Typed alias identity held until the driver binding edge: the sender and
@@ -668,12 +888,17 @@ async fn message_exists(
     Ok(rows.next().await.map_err(discard_database_error)?.is_some())
 }
 
+/// Scan the next batch of candidates under the same statement bound as the
+/// per-candidate transactions, so a slow scan is classified as a statement
+/// timeout instead of being cancelled from outside.
 async fn expired_candidates(
     db: &Database,
     cutoff: &str,
-) -> Result<Vec<MessageKey>, IngressSubstrateError> {
-    let conn = db.guard().await.map_err(discard_database_error)?;
-    let mut rows = conn
+    budget: &AliasGcBudget,
+) -> Result<Vec<MessageKey>, AliasGcError> {
+    let mut tx = db.begin().await.map_err(gc_error_from_database)?;
+    install_gc_timeouts(&mut tx, budget, budget.scan_timeout).await?;
+    let mut rows = tx
         .query(
             r#"
             SELECT m.message_key::text
@@ -698,40 +923,94 @@ async fn expired_candidates(
             crate::db_params![cutoff, GC_BATCH_LIMIT as i64],
         )
         .await
-        .map_err(discard_database_error)?;
+        .map_err(gc_error_from_database)?;
     let mut candidates = Vec::new();
-    while let Some(row) = rows.next().await.map_err(discard_database_error)? {
-        let message_key: String = row.get(0).map_err(discard_database_error)?;
+    while let Some(row) = rows.next().await.map_err(gc_error_from_database)? {
+        let message_key: String = row.get(0).map_err(gc_error_from_database)?;
         let message_key = message_key
             .parse::<Uuid>()
             .map(MessageKey::from_storage)
-            .map_err(|_| IngressSubstrateError::InvalidStoredMessageKey)?;
+            .map_err(|_| AliasGcError::Substrate(IngressSubstrateError::InvalidStoredMessageKey))?;
         candidates.push(message_key);
     }
+    drop(rows);
+    tx.commit().await.map_err(gc_error_from_database)?;
     Ok(candidates)
 }
 
+/// Why a candidate was not collected in this pass.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum SkipReason {
+    /// Another writer holds the row; it stays eligible for the next run.
+    LockedElsewhere,
+    /// The row is gone, no longer terminal, or not yet past retention.
+    NotEligible,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum CandidateLock {
+    Eligible,
+    Skipped(SkipReason),
+}
+
+/// Lock one candidate row and report whether its retention has elapsed.
+///
+/// A row held by another writer — a concurrent GC run or an in-flight child
+/// write — is skipped rather than waited on: the child write keeps the
+/// message alive anyway, and a skipped candidate stays eligible for the next
+/// run.  Only the epoch row is ever waited on, bounded by `lock_timeout`.
 async fn lock_eligible_terminal_message(
     tx: &mut Transaction<'_>,
     message_key: MessageKey,
     cutoff: &str,
-) -> Result<bool, IngressSubstrateError> {
+) -> Result<CandidateLock, AliasGcError> {
     let mut rows = tx
         .query(
             r#"
             SELECT terminal_at <= ?::timestamptz
             FROM ingress_messages
             WHERE message_key = ?::uuid AND terminal_at IS NOT NULL
-            FOR UPDATE
+            FOR UPDATE SKIP LOCKED
             "#,
             crate::db_params![cutoff, message_key.to_storage().to_string()],
         )
         .await
-        .map_err(discard_database_error)?;
-    let Some(row) = rows.next().await.map_err(discard_database_error)? else {
-        return Ok(false);
-    };
-    row.get(0).map_err(discard_database_error)
+        .map_err(gc_error_from_database)?;
+    let locked = rows.next().await.map_err(gc_error_from_database)?;
+    drop(rows);
+    match locked {
+        Some(row) => {
+            let expired: bool = row.get(0).map_err(gc_error_from_database)?;
+            Ok(if expired {
+                CandidateLock::Eligible
+            } else {
+                CandidateLock::Skipped(SkipReason::NotEligible)
+            })
+        }
+        None => {
+            // No row under SKIP LOCKED means either "held elsewhere" or
+            // "gone / not eligible"; tell them apart without locking.
+            let mut rows = tx
+                .query(
+                    r#"
+                    SELECT 1
+                    FROM ingress_messages
+                    WHERE message_key = ?::uuid
+                      AND terminal_at IS NOT NULL
+                      AND terminal_at <= ?::timestamptz
+                    "#,
+                    crate::db_params![message_key.to_storage().to_string(), cutoff],
+                )
+                .await
+                .map_err(gc_error_from_database)?;
+            let still_eligible = rows.next().await.map_err(gc_error_from_database)?.is_some();
+            Ok(CandidateLock::Skipped(if still_eligible {
+                SkipReason::LockedElsewhere
+            } else {
+                SkipReason::NotEligible
+            }))
+        }
+    }
 }
 
 fn discard_database_error(error: DatabaseError) -> IngressSubstrateError {
@@ -740,8 +1019,58 @@ fn discard_database_error(error: DatabaseError) -> IngressSubstrateError {
     }
 }
 
+fn gc_failure(deleted_messages: usize, error: AliasGcError) -> AliasGcFailure {
+    AliasGcFailure {
+        deleted_messages,
+        error,
+    }
+}
+
+fn gc_database_failure(deleted_messages: usize, error: DatabaseError) -> AliasGcFailure {
+    gc_failure(deleted_messages, gc_error_from_database(error))
+}
+
+fn gc_error_from_database(error: DatabaseError) -> AliasGcError {
+    match database_timeout_kind(&error) {
+        Some(kind) => AliasGcError::DatabaseTimeout { kind },
+        None => AliasGcError::Substrate(discard_database_error(error)),
+    }
+}
+
+fn database_timeout_kind(error: &DatabaseError) -> Option<DatabaseTimeoutKind> {
+    let DatabaseError::Internal(sqlx::Error::Database(database_error)) = error else {
+        return None;
+    };
+    match database_error.code().as_deref() {
+        Some("55P03") => Some(DatabaseTimeoutKind::Lock),
+        Some("57014") => Some(DatabaseTimeoutKind::Statement),
+        _ => None,
+    }
+}
+
+async fn acquire_gc_epoch_lock_first(
+    tx: &mut Transaction<'_>,
+    deleted_messages: usize,
+) -> Result<ProtocolEpoch, AliasGcFailure> {
+    read_live_epoch_for_share(tx).await.map_err(|error| {
+        let error = match error {
+            EpochLockError::Database(error) => gc_error_from_database(error),
+            EpochLockError::MissingRow => {
+                AliasGcError::Substrate(IngressSubstrateError::Database {
+                    retry_class: DbRetryClass::NotRetryable,
+                })
+            }
+            EpochLockError::UnsupportedLiveEpoch => {
+                AliasGcError::Substrate(IngressSubstrateError::UnsupportedLiveEpoch)
+            }
+        };
+        gc_failure(deleted_messages, error)
+    })
+}
+
 #[cfg(test)]
 mod tests {
+    use std::borrow::Cow;
     use std::sync::Arc;
 
     use chrono::{TimeZone, Utc};
@@ -751,6 +1080,16 @@ mod tests {
 
     use super::*;
     use crate::db::{DatabaseConfig, MigrationRunner};
+
+    fn gc_budget() -> AliasGcBudget {
+        AliasGcBudget {
+            deadline: Instant::now() + StdDuration::from_secs(30),
+            lock_timeout: StdDuration::from_secs(5),
+            statement_timeout: StdDuration::from_secs(10),
+            scan_timeout: StdDuration::from_secs(10),
+            progress: AliasGcProgress::default(),
+        }
+    }
 
     #[test]
     fn storage_codecs_round_trip_full_range_values_and_uuid_keys() {
@@ -785,6 +1124,60 @@ mod tests {
                 "target codec must round trip every variant"
             );
         }
+    }
+
+    #[derive(Debug)]
+    struct FakePgError(&'static str);
+
+    impl std::fmt::Display for FakePgError {
+        fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+            write!(formatter, "fake pg error {}", self.0)
+        }
+    }
+
+    impl std::error::Error for FakePgError {}
+
+    impl sqlx::error::DatabaseError for FakePgError {
+        fn message(&self) -> &str {
+            "fake pg error"
+        }
+
+        fn code(&self) -> Option<Cow<'_, str>> {
+            Some(Cow::Borrowed(self.0))
+        }
+
+        fn kind(&self) -> sqlx::error::ErrorKind {
+            sqlx::error::ErrorKind::Other
+        }
+
+        fn as_error(&self) -> &(dyn std::error::Error + Send + Sync + 'static) {
+            self
+        }
+
+        fn as_error_mut(&mut self) -> &mut (dyn std::error::Error + Send + Sync + 'static) {
+            self
+        }
+
+        fn into_error(self: Box<Self>) -> Box<dyn std::error::Error + Send + Sync + 'static> {
+            self
+        }
+    }
+
+    fn fake_database_error(code: &'static str) -> DatabaseError {
+        DatabaseError::Internal(sqlx::Error::Database(Box::new(FakePgError(code))))
+    }
+
+    #[test]
+    fn alias_gc_maps_postgres_timeout_sqlstates_to_typed_kinds() {
+        assert_eq!(
+            database_timeout_kind(&fake_database_error("55P03")),
+            Some(DatabaseTimeoutKind::Lock)
+        );
+        assert_eq!(
+            database_timeout_kind(&fake_database_error("57014")),
+            Some(DatabaseTimeoutKind::Statement)
+        );
+        assert_eq!(database_timeout_kind(&fake_database_error("42P01")), None);
     }
 
     #[tokio::test]
@@ -1000,7 +1393,7 @@ mod tests {
         fixture.terminalize(key, terminal_at).await;
         let result = fixture
             .store
-            .gc_expired_aliases(terminal_at + ALIAS_RETENTION)
+            .gc_expired_aliases(terminal_at + ALIAS_RETENTION, gc_budget())
             .await
             .expect("garbage collect terminal message");
         assert_eq!(result.deleted_messages, 1);
@@ -1032,7 +1425,10 @@ mod tests {
         assert_eq!(
             fixture
                 .store
-                .gc_expired_aliases(terminal_at + ALIAS_RETENTION - Duration::microseconds(1))
+                .gc_expired_aliases(
+                    terminal_at + ALIAS_RETENTION - Duration::microseconds(1),
+                    gc_budget(),
+                )
                 .await
                 .expect("collect before exact cutoff")
                 .deleted_messages,
@@ -1041,12 +1437,385 @@ mod tests {
         assert_eq!(
             fixture
                 .store
-                .gc_expired_aliases(terminal_at + ALIAS_RETENTION)
+                .gc_expired_aliases(terminal_at + ALIAS_RETENTION, gc_budget())
                 .await
                 .expect("collect at exact cutoff")
                 .deleted_messages,
             1
         );
+        fixture.close().await;
+    }
+
+    #[tokio::test]
+    async fn gc_budget_stops_without_work_then_preserves_partial_progress() {
+        let Some(fixture) = Fixture::open("gc_budget_progress").await else {
+            return;
+        };
+        let terminal_at = timestamp(10);
+        let total = GC_BATCH_LIMIT + 2;
+        fixture.record_terminal_messages(total, terminal_at).await;
+        let now = terminal_at + ALIAS_RETENTION + Duration::days(1);
+
+        let no_work = fixture
+            .store
+            .gc_expired_aliases(
+                now,
+                AliasGcBudget {
+                    deadline: tokio::time::Instant::now() - StdDuration::from_millis(1),
+                    ..gc_budget()
+                },
+            )
+            .await
+            .expect("an expired budget is a cooperative stop");
+        assert_eq!(
+            no_work,
+            AliasGcOutcome {
+                deleted_messages: 0,
+                completed: false,
+            }
+        );
+
+        fixture
+            .db
+            .execute(
+                "CREATE FUNCTION waddle_test_slow_gc_delete() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN PERFORM pg_sleep(0.05); RETURN OLD; END $$",
+            )
+            .await
+            .expect("create deterministic GC pacing function");
+        fixture
+            .db
+            .execute(
+                "CREATE TRIGGER waddle_test_slow_gc_delete BEFORE DELETE ON ingress_messages FOR EACH ROW EXECUTE FUNCTION waddle_test_slow_gc_delete()",
+            )
+            .await
+            .expect("install deterministic GC pacing trigger");
+        let partial = fixture
+            .store
+            .gc_expired_aliases(
+                now,
+                AliasGcBudget {
+                    deadline: tokio::time::Instant::now() + StdDuration::from_secs(1),
+                    ..gc_budget()
+                },
+            )
+            .await
+            .expect("budgeted GC returns committed progress");
+        assert!(!partial.completed);
+        assert!(partial.deleted_messages > 0);
+        assert!(partial.deleted_messages < total);
+        let remaining = usize::try_from(fixture.count("ingress_messages").await)
+            .expect("remaining count fits usize");
+        assert_eq!(partial.deleted_messages + remaining, total);
+
+        fixture
+            .db
+            .execute("DROP TRIGGER waddle_test_slow_gc_delete ON ingress_messages")
+            .await
+            .expect("remove deterministic GC pacing trigger");
+        fixture
+            .db
+            .execute("DROP FUNCTION waddle_test_slow_gc_delete()")
+            .await
+            .expect("remove deterministic GC pacing function");
+        let completed = fixture
+            .store
+            .gc_expired_aliases(now, gc_budget())
+            .await
+            .expect("finish remaining GC backlog");
+        assert!(completed.completed);
+        assert_eq!(completed.deleted_messages, remaining);
+        assert_eq!(partial.deleted_messages + completed.deleted_messages, total);
+        assert_eq!(fixture.count("ingress_messages").await, 0);
+        assert_eq!(fixture.count("ingress_origin_aliases").await, 0);
+        fixture.close().await;
+    }
+
+    #[tokio::test]
+    async fn gc_exact_full_batch_completes_after_empty_rescan() {
+        let Some(fixture) = Fixture::open("gc_exact_batch").await else {
+            return;
+        };
+        let terminal_at = timestamp(11);
+        fixture
+            .record_terminal_messages(GC_BATCH_LIMIT, terminal_at)
+            .await;
+        let outcome = fixture
+            .store
+            .gc_expired_aliases(
+                terminal_at + ALIAS_RETENTION + Duration::days(1),
+                gc_budget(),
+            )
+            .await
+            .expect("collect exact full batch and confirm empty rescan");
+        assert_eq!(
+            outcome,
+            AliasGcOutcome {
+                deleted_messages: GC_BATCH_LIMIT,
+                completed: true,
+            }
+        );
+        assert_eq!(fixture.count("ingress_messages").await, 0);
+        fixture.close().await;
+    }
+
+    #[tokio::test]
+    async fn gc_skips_a_candidate_locked_by_another_writer_and_keeps_going() {
+        let Some(fixture) = Fixture::open("gc_lock_progress").await else {
+            return;
+        };
+        let terminal_at = timestamp(12);
+        let keys = fixture.record_terminal_messages(2, terminal_at).await;
+        let mut blocker = sqlx::PgConnection::connect(&fixture.schema_url)
+            .await
+            .expect("open candidate blocker");
+        let mut blocker_tx = blocker.begin().await.expect("begin candidate blocker");
+        sqlx::query("SELECT 1 FROM ingress_messages WHERE message_key = $1 FOR UPDATE")
+            .bind(keys[1].to_storage())
+            .execute(&mut *blocker_tx)
+            .await
+            .expect("lock second GC candidate");
+
+        let outcome = fixture
+            .store
+            .gc_expired_aliases(
+                terminal_at + ALIAS_RETENTION + Duration::days(1),
+                AliasGcBudget {
+                    lock_timeout: StdDuration::from_millis(100),
+                    ..gc_budget()
+                },
+            )
+            .await
+            .expect("a locked candidate is skipped, not waited on");
+        assert_eq!(
+            outcome,
+            AliasGcOutcome {
+                deleted_messages: 1,
+                completed: false,
+            },
+            "a skipped candidate is still eligible, so the run is not complete"
+        );
+        assert_eq!(fixture.count("ingress_messages").await, 1);
+        blocker_tx.rollback().await.expect("release candidate lock");
+        drop(blocker);
+
+        let outcome = fixture
+            .store
+            .gc_expired_aliases(
+                terminal_at + ALIAS_RETENTION + Duration::days(1),
+                gc_budget(),
+            )
+            .await
+            .expect("the skipped candidate is reclaimed by the next run");
+        assert_eq!(
+            outcome,
+            AliasGcOutcome {
+                deleted_messages: 1,
+                completed: true,
+            }
+        );
+        assert_eq!(fixture.count("ingress_messages").await, 0);
+        fixture.close().await;
+    }
+
+    #[tokio::test]
+    async fn gc_keeps_draining_later_batches_after_skipping_a_locked_candidate() {
+        let Some(fixture) = Fixture::open("gc_skip_then_drain").await else {
+            return;
+        };
+        let terminal_at = timestamp(17);
+        let total = GC_BATCH_LIMIT + 8;
+        let keys = fixture.record_terminal_messages(total, terminal_at).await;
+        let mut blocker = sqlx::PgConnection::connect(&fixture.schema_url)
+            .await
+            .expect("open candidate blocker");
+        let mut blocker_tx = blocker.begin().await.expect("begin candidate blocker");
+        sqlx::query("SELECT 1 FROM ingress_messages WHERE message_key = $1 FOR UPDATE")
+            .bind(keys[0].to_storage())
+            .execute(&mut *blocker_tx)
+            .await
+            .expect("lock the oldest GC candidate");
+
+        let outcome = fixture
+            .store
+            .gc_expired_aliases(
+                terminal_at + ALIAS_RETENTION + Duration::days(1),
+                gc_budget(),
+            )
+            .await
+            .expect("a locked head candidate must not stop the run");
+        assert_eq!(
+            outcome,
+            AliasGcOutcome {
+                deleted_messages: total - 1,
+                completed: false,
+            },
+            "every unlocked row across both batches is reclaimed; the locked one keeps the run partial"
+        );
+        assert_eq!(fixture.count("ingress_messages").await, 1);
+        blocker_tx.rollback().await.expect("release candidate lock");
+        drop(blocker);
+        fixture.close().await;
+    }
+
+    #[tokio::test]
+    async fn gc_epoch_lock_timeout_has_zero_progress() {
+        let Some(fixture) = Fixture::open("gc_epoch_lock_timeout").await else {
+            return;
+        };
+        let terminal_at = timestamp(13);
+        fixture.record_terminal_messages(1, terminal_at).await;
+        let mut blocker = sqlx::PgConnection::connect(&fixture.schema_url)
+            .await
+            .expect("open epoch blocker");
+        let mut blocker_tx = blocker.begin().await.expect("begin epoch blocker");
+        sqlx::query("SELECT 1 FROM ingress_protocol_epoch WHERE id = 1 FOR UPDATE")
+            .execute(&mut *blocker_tx)
+            .await
+            .expect("lock protocol epoch row");
+
+        // Production-relative bounds: the statement timer covers the lock
+        // wait, so the lock bound must be the one that fires first.
+        let failure = fixture
+            .store
+            .gc_expired_aliases(
+                terminal_at + ALIAS_RETENTION + Duration::days(1),
+                AliasGcBudget {
+                    lock_timeout: StdDuration::from_millis(100),
+                    statement_timeout: StdDuration::from_millis(250),
+                    ..gc_budget()
+                },
+            )
+            .await
+            .expect_err("epoch lock must time out");
+        assert_eq!(failure.deleted_messages, 0);
+        assert!(matches!(
+            failure.error,
+            AliasGcError::DatabaseTimeout {
+                kind: DatabaseTimeoutKind::Lock
+            }
+        ));
+        assert_eq!(fixture.count("ingress_messages").await, 1);
+        blocker_tx.rollback().await.expect("release epoch lock");
+        drop(blocker);
+        fixture.close().await;
+    }
+
+    #[tokio::test]
+    async fn gc_non_timeout_failure_after_progress_preserves_committed_count() {
+        let Some(fixture) = Fixture::open("gc_failure_progress").await else {
+            return;
+        };
+        let terminal_at = timestamp(14);
+        let keys = fixture.record_terminal_messages(2, terminal_at).await;
+        fixture
+            .db
+            .execute(&format!(
+                "CREATE FUNCTION waddle_test_fail_gc_delete() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN IF OLD.message_key = '{}'::uuid THEN RAISE EXCEPTION 'forced GC failure' USING ERRCODE = 'P0001'; END IF; RETURN OLD; END $$",
+                keys[1].to_storage()
+            ))
+            .await
+            .expect("create deterministic GC failure function");
+        fixture
+            .db
+            .execute(
+                "CREATE TRIGGER waddle_test_fail_gc_delete AFTER DELETE ON ingress_messages FOR EACH ROW EXECUTE FUNCTION waddle_test_fail_gc_delete()",
+            )
+            .await
+            .expect("install deterministic GC failure trigger");
+
+        let failure = fixture
+            .store
+            .gc_expired_aliases(
+                terminal_at + ALIAS_RETENTION + Duration::days(1),
+                gc_budget(),
+            )
+            .await
+            .expect_err("second candidate trigger must fail");
+        assert_eq!(failure.deleted_messages, 1);
+        assert!(matches!(failure.error, AliasGcError::Substrate(_)));
+        assert_eq!(fixture.count("ingress_messages").await, 1);
+        fixture.close().await;
+    }
+
+    #[tokio::test]
+    async fn gc_progress_handle_reports_committed_deletions_after_external_cancellation() {
+        let Some(fixture) = Fixture::open("gc_progress_cancel").await else {
+            return;
+        };
+        let terminal_at = timestamp(16);
+        let total = 8usize;
+        fixture.record_terminal_messages(total, terminal_at).await;
+        fixture
+            .db
+            .execute(
+                "CREATE FUNCTION waddle_test_slow_gc_delete() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN PERFORM pg_sleep(0.05); RETURN OLD; END $$",
+            )
+            .await
+            .expect("create deterministic GC pacing function");
+        fixture
+            .db
+            .execute(
+                "CREATE TRIGGER waddle_test_slow_gc_delete BEFORE DELETE ON ingress_messages FOR EACH ROW EXECUTE FUNCTION waddle_test_slow_gc_delete()",
+            )
+            .await
+            .expect("install deterministic GC pacing trigger");
+        let progress = AliasGcProgress::default();
+        let cancelled = tokio::time::timeout(
+            StdDuration::from_millis(150),
+            fixture.store.gc_expired_aliases(
+                terminal_at + ALIAS_RETENTION + Duration::days(1),
+                AliasGcBudget {
+                    progress: progress.clone(),
+                    ..gc_budget()
+                },
+            ),
+        )
+        .await;
+        assert!(
+            cancelled.is_err(),
+            "the paced run must be cancelled mid-way"
+        );
+        let remaining = usize::try_from(fixture.count("ingress_messages").await)
+            .expect("remaining count fits usize");
+        assert!(remaining > 0 && remaining < total);
+        assert_eq!(
+            progress.committed(),
+            total - remaining,
+            "the progress handle must match the rows actually committed"
+        );
+        fixture.close().await;
+    }
+
+    #[tokio::test]
+    async fn concurrent_gc_runs_never_double_count_deletions() {
+        let Some(fixture) = Fixture::open("gc_concurrent").await else {
+            return;
+        };
+        let terminal_at = timestamp(15);
+        let total = 32usize;
+        fixture.record_terminal_messages(total, terminal_at).await;
+        let barrier = Arc::new(Barrier::new(3));
+        let now = terminal_at + ALIAS_RETENTION + Duration::days(1);
+        let spawn_gc = |store: PostgresIngressSubstrate, barrier: Arc<Barrier>| {
+            tokio::spawn(async move {
+                barrier.wait().await;
+                store.gc_expired_aliases(now, gc_budget()).await
+            })
+        };
+        let first = spawn_gc(fixture.store.clone(), barrier.clone());
+        let second = spawn_gc(fixture.store.clone(), barrier.clone());
+        barrier.wait().await;
+        let results = [
+            first.await.expect("join first GC"),
+            second.await.expect("join second GC"),
+        ];
+        let mut deleted = 0usize;
+        for result in results {
+            let outcome = result.expect("concurrent GC runs skip each other's locked rows");
+            deleted += outcome.deleted_messages;
+        }
+        assert_eq!(deleted, total);
+        assert_eq!(fixture.count("ingress_messages").await, 0);
         fixture.close().await;
     }
 
@@ -1096,7 +1865,7 @@ mod tests {
         assert_eq!(
             fixture
                 .store
-                .gc_expired_aliases(terminal_at + ALIAS_RETENTION)
+                .gc_expired_aliases(terminal_at + ALIAS_RETENTION, gc_budget())
                 .await
                 .expect("collect terminal message with children")
                 .deleted_messages,
@@ -1113,7 +1882,7 @@ mod tests {
         assert_eq!(
             fixture
                 .store
-                .gc_expired_aliases(terminal_at + ALIAS_RETENTION)
+                .gc_expired_aliases(terminal_at + ALIAS_RETENTION, gc_budget())
                 .await
                 .expect("re-run GC over retained history")
                 .deleted_messages,
@@ -1254,9 +2023,12 @@ mod tests {
         assert!(matches!(
             fixture
                 .store
-                .gc_expired_aliases(terminal_at + ALIAS_RETENTION)
+                .gc_expired_aliases(terminal_at + ALIAS_RETENTION, gc_budget())
                 .await,
-            Err(IngressSubstrateError::UnsupportedLiveEpoch)
+            Err(AliasGcFailure {
+                deleted_messages: 0,
+                error: AliasGcError::Substrate(IngressSubstrateError::UnsupportedLiveEpoch),
+            })
         ));
         drop(conn);
         fixture.close().await;
@@ -1526,7 +2298,7 @@ mod tests {
             .expect("activate epoch one");
         let outcome = fixture
             .store
-            .gc_expired_aliases(terminal_at + ALIAS_RETENTION)
+            .gc_expired_aliases(terminal_at + ALIAS_RETENTION, gc_budget())
             .await
             .expect("GC proves its own transactions at epoch one");
         assert_eq!(
@@ -1763,7 +2535,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn gc_blocks_behind_an_in_flight_child_insert_and_skips_the_message() {
+    async fn gc_skips_a_message_whose_row_is_locked_by_an_in_flight_child_insert() {
         let Some(fixture) = Fixture::open("gc_ref_race").await else {
             return;
         };
@@ -1771,7 +2543,6 @@ mod tests {
         let terminal_at = timestamp(6);
         fixture.terminalize(key, terminal_at).await;
 
-        // Child insert holds FOR SHARE on the message row, uncommitted.
         let mut tx = fixture.store.begin().await.expect("begin child insert");
         assert_eq!(
             fixture
@@ -1782,25 +2553,27 @@ mod tests {
             MessageWriteOutcome::Recorded
         );
 
-        // Concurrent GC must block on that row's FOR UPDATE, then re-check
-        // children under the lock and skip the message.
-        let gc_store = fixture.store.clone();
-        let gc_now = terminal_at + ALIAS_RETENTION;
-        let gc = tokio::spawn(async move { gc_store.gc_expired_aliases(gc_now).await });
-        wait_for_lock_waiter(&fixture.admin, "FOR UPDATE").await;
-        assert!(
-            !gc.is_finished(),
-            "GC must still be blocked on the row lock"
-        );
-        tx.commit().await.expect("commit the child insert");
-        let outcome = gc
+        let outcome = fixture
+            .store
+            .gc_expired_aliases(
+                terminal_at + ALIAS_RETENTION,
+                AliasGcBudget {
+                    lock_timeout: StdDuration::from_millis(50),
+                    ..gc_budget()
+                },
+            )
             .await
-            .expect("join GC task")
-            .expect("GC completes after the writer commits");
+            .expect("a row held by an in-flight child write is skipped");
         assert_eq!(
-            outcome.deleted_messages, 0,
-            "GC re-checks children under the lock and skips the message"
+            outcome,
+            AliasGcOutcome {
+                deleted_messages: 0,
+                completed: false,
+            }
         );
+        tx.commit()
+            .await
+            .expect("commit child insert after GC skipped the row");
         assert_eq!(fixture.count("ingress_messages").await, 1);
         assert_eq!(fixture.count("ingress_sm_refs").await, 1);
         fixture.close().await;
@@ -2061,6 +2834,36 @@ mod tests {
                 TerminalizeOutcome::Terminalized
             );
             tx.commit().await.expect("commit terminalize");
+        }
+
+        async fn record_terminal_messages(
+            &self,
+            count: usize,
+            first_terminal_at: DateTime<Utc>,
+        ) -> Vec<MessageKey> {
+            let mut tx = self.store.begin().await.expect("begin message seed");
+            let mut keys = Vec::with_capacity(count);
+            for index in 0..count {
+                let key = MessageKey::new();
+                self.store
+                    .record_message(&mut tx, key, &digest(1))
+                    .await
+                    .expect("record seeded message");
+                assert_eq!(
+                    self.store
+                        .terminalize_message(
+                            &mut tx,
+                            key,
+                            first_terminal_at + Duration::milliseconds(index as i64),
+                        )
+                        .await
+                        .expect("terminalize seeded message"),
+                    TerminalizeOutcome::Terminalized
+                );
+                keys.push(key);
+            }
+            tx.commit().await.expect("commit message seed");
+            keys
         }
 
         async fn count(&self, table: &str) -> i64 {

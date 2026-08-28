@@ -22,10 +22,14 @@ pub use repositories::{
 };
 pub use retry::{run_with_retry, DbRetryClass, RetryExhausted};
 
+use std::time::Duration;
+
 use crate::{
     config::LineageConfig,
     db::{lineage, Database, DatabaseDriver, Transaction},
-    ingress_substrate::{acquire_epoch_lock_first, supported_protocol_epoch},
+    ingress_substrate::{
+        acquire_epoch_lock_first, set_local_transaction_timeouts, supported_protocol_epoch,
+    },
 };
 #[cfg(feature = "clustering")]
 use uuid::Uuid;
@@ -184,25 +188,17 @@ impl<'a> IngressUowTransaction<'a> {
         lock_timeout_ms: u64,
         statement_timeout_ms: u64,
     ) -> Result<(), IngressUowError> {
-        let mut proof = self
-            .transaction
-            .query(
-                r#"
-                SELECT
-                    set_config('lock_timeout', ?, true),
-                    set_config('statement_timeout', ?, true)
-                "#,
-                crate::db_params![
-                    format!("{lock_timeout_ms}ms"),
-                    format!("{statement_timeout_ms}ms"),
-                ],
-            )
-            .await?;
-        proof
-            .next()
-            .await?
-            .ok_or(IngressUowError::EpochProofMissing)?;
-        Ok(())
+        if set_local_transaction_timeouts(
+            &mut self.transaction,
+            Duration::from_millis(lock_timeout_ms),
+            Duration::from_millis(statement_timeout_ms),
+        )
+        .await?
+        {
+            Ok(())
+        } else {
+            Err(IngressUowError::EpochProofMissing)
+        }
     }
 
     #[cfg(feature = "clustering")]

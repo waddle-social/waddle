@@ -230,13 +230,27 @@ mid-window, the window restarts.
 | PostgreSQL | Backends stay below 80% of `max_connections`; data and WAL PVC use stay below 70% on both instances. |
 | Submission latency | p99 `ingress_shadow_tx_duration_seconds` remains below 2 seconds. |
 
-Known instrumentation limit: retention GC runs under the worker's 2.5 s
-transaction deadline and commits per candidate, so a GC run that times out
-has already reclaimed rows that `ingress_shadow_gc_reclaimed_messages_total`
-does not count. `IngressShadowGcFailing` firing is therefore a soak finding
-against #1656's GC budget (tracked as a follow-up issue), and the cohort
-state metrics — not the reclaimed counter — are the primary reclamation
-evidence.
+Retention GC uses a 2 s cooperative budget inside a 6 s hard envelope, with
+a 100 ms `lock_timeout`, a 250 ms `statement_timeout` on every single-row
+candidate statement and a 1 s bound on the candidate scan. A `partial`
+outcome means eligible work remains: the cooperative budget stopped the run
+after its progress was accounted, or a candidate row held by another writer
+(a concurrent pod's GC or an in-flight child write) was skipped rather than
+waited on and stays eligible for the next run — so contention between pods
+never produces `timed_out`. `timed_out` means the run hit the epoch-row lock
+timeout, a statement timeout, or the hard envelope. GC runs on its own
+background task rather than in the submission worker: a trigger that arrives
+while a run is in flight is kept as one pending run, a `partial` run
+continues on its own after 1 s until the backlog is drained, and each
+process makes one pass at startup — so a burst that ends mid-run, or a
+shutdown that drops a trigger, still converges without holding a worker
+slot. The reclaimed-message
+counter accounts progress on cooperative exits, on errors returned to the
+worker, and on hard-envelope cancellation (through the run's progress
+handle), but remains a lower bound across force-stop and ambiguous commit.
+The cohort state metrics remain the authoritative reclamation evidence.
+`IngressShadowGcFailing` therefore keeps its place in the pass criteria
+above: every `failed` or `timed_out` run is a soak finding.
 
 ## Loki checks
 

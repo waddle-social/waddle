@@ -650,13 +650,18 @@ impl MetricAttribute for IngressCandidateOutcome {
 /// `outcome` — how a shadow-ingress retention GC run ended.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum IngressGcOutcome {
+    /// The run exhausted its cooperative budget after accounting for progress.
+    Partial,
+    /// The run processed all eligible work within its budgets.
     Completed,
+    /// The run returned an error unrelated to an enforced timeout.
     Failed,
+    /// The run hit its lock, statement, or hard-envelope timeout.
     TimedOut,
 }
 
 impl IngressGcOutcome {
-    pub const ALL: [Self; 3] = [Self::Completed, Self::Failed, Self::TimedOut];
+    pub const ALL: [Self; 4] = [Self::Completed, Self::Partial, Self::Failed, Self::TimedOut];
 }
 
 impl sealed::Sealed for IngressGcOutcome {}
@@ -667,6 +672,7 @@ impl MetricAttribute for IngressGcOutcome {
 
     fn value(&self) -> &'static str {
         match self {
+            Self::Partial => "partial",
             Self::Completed => "completed",
             Self::Failed => "failed",
             Self::TimedOut => "timed_out",

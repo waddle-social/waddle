@@ -533,7 +533,7 @@ fn record_ingress_shadow_gc_reclaimed_messages(count: u64) {
     crate::counter_add!(
         "ingress.shadow.gc.reclaimed_messages",
         "{message}",
-        "Ingress messages reclaimed by completed shadow retention GC runs.",
+        "Ingress messages reclaimed by shadow retention GC runs (lower bound: progress lost to external cancellation is not counted).",
         count,
     );
 }
@@ -603,6 +603,7 @@ mod tests {
         increment_ingress_shadow_skip(IngressSkipReason::Unenrolled);
         increment_ingress_shadow_candidate(IngressCandidateOutcome::NoCapture);
         increment_ingress_shadow_gc_run(IngressGcOutcome::TimedOut);
+        increment_ingress_shadow_gc_run(IngressGcOutcome::Partial);
         increment_ingress_shadow_admissions();
         increment_ingress_shadow_completions();
         increment_ingress_shadow_aborted();
@@ -629,6 +630,10 @@ mod tests {
         );
         assert_eq!(
             guard.counter_sum("ingress.shadow.gc.runs", &[("outcome", "timed_out")]),
+            Some(1)
+        );
+        assert_eq!(
+            guard.counter_sum("ingress.shadow.gc.runs", &[("outcome", "partial")]),
             Some(1)
         );
         assert_eq!(guard.counter_sum("ingress.shadow.admissions", &[]), Some(1));
@@ -776,6 +781,11 @@ mod tests {
     async fn registration_covers_every_closed_attribute_value() {
         let guard = setup().await;
         register_reliability_counters();
+
+        assert_eq!(
+            IngressGcOutcome::ALL.map(|outcome| outcome.value()),
+            ["completed", "partial", "failed", "timed_out"]
+        );
 
         for path in SmEvictionPath::ALL {
             assert_eq!(
