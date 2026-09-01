@@ -40,7 +40,7 @@ use waddle_xmpp::registry::{
     ForceDetachOutcome, ForceDetachRequest, GetResources, GetUserForLocalClaim, ListUsers,
     ListUsersOwnedBy, UserRegistryActor,
 };
-use waddle_xmpp::stream_management::{InMemorySmSessionRegistry, SmSessionRegistry as _};
+use waddle_xmpp::stream_management::InMemorySmSessionRegistry;
 
 use super::self_fence::{LocallyClaimedEntities, ReclaimedHydrationHandoff};
 
@@ -125,16 +125,13 @@ impl SmSessionLocalClaims {
         // row is gone or reassigned, so an in-flight fenced write fails
         // `NotOwner` at the database regardless of the in-memory fence.
         //
-        // Whether the stream was in the detached/claimed pool is captured
-        // BEFORE the forget: a detached demotion (the terminal-sweep bulk
-        // case) has no socket to signal and must not spawn a retry poller.
-        let was_pooled = registry
-            .peek_session(stream_id)
-            .await
-            .ok()
-            .flatten()
-            .is_some();
-        registry.forget_claim_locally(stream_id).await;
+        // Whether the stream was in the detached/claimed pool is reported
+        // by the forget itself, read in the same shard-locked critical
+        // section as the removal (a separate peek could race a concurrent
+        // resume attaching the stream between check and forget): a pooled
+        // demotion (the terminal-sweep bulk case) has no socket to signal
+        // and must not spawn a retry poller.
+        let was_pooled = registry.forget_claim_locally(stream_id).await;
         if was_pooled {
             return;
         }

@@ -670,9 +670,13 @@ impl InMemorySmSessionRegistry {
     /// release) would strip the live socket's fence and make it stealable.
     /// Terminal inventory for a DIFFERENT fence is deliberately untouched.
     pub(super) fn cancel_pending_release_matching_active_fence(&self, stream_id: &str) {
-        let (Ok(fences), Ok(mut pending)) = (
-            self.claim_fences.read(),
+        // Canonical bookkeeping lock order (pending-release before fences),
+        // matching `try_record_claim_fence`/`try_record_terminal_claim_fence`
+        // — the reverse order can deadlock against concurrent adoption or
+        // terminalization.
+        let (Ok(mut pending), Ok(fences)) = (
             self.pending_claim_releases.write(),
+            self.claim_fences.read(),
         ) else {
             return;
         };
@@ -928,14 +932,21 @@ impl InMemorySmSessionRegistry {
     /// `demote`'s own contract, must not be REQUIRED to succeed while
     /// Postgres is unreachable (the self-fencing trigger this method
     /// exists to serve).
-    pub async fn forget_claim_locally(&self, stream_id: &str) {
+    /// Returns whether the stream was in the detached/claimed pool (or
+    /// pending promotion) at the moment of the forget — read in the same
+    /// shard-locked critical section as the removal, so demotion callers can
+    /// distinguish a pooled session from a (possibly mid-publication)
+    /// attached one without a check-then-act race.
+    pub async fn forget_claim_locally(&self, stream_id: &str) -> bool {
         let Ok(stream_lock) = self.stream_lock(stream_id) else {
-            return;
+            return false;
         };
         let _stream_guard = stream_lock.lock().await;
+        let was_pooled = self.stream_liveness(stream_id).unwrap_or(false);
         self.node_identity
             .with_publications_blocked(|| self.forget_claim_locally_locked(stream_id, None))
             .await;
+        was_pooled
     }
 
     pub(super) fn forget_claim_locally_locked(
