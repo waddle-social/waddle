@@ -739,14 +739,15 @@ async fn handle_xmpp_websocket(
         // claim here, pre-drain, would hand the still-captured fence to the
         // release-retry janitor while admitted submissions are in flight.
     } else {
-        // A claim-loss force-detach (the stream's live fence is already
-        // gone — demotion or terminal release) gets the same treatment as
-        // node authority revocation: dispatching the parked frames would
-        // run them fenceless, and the terminal recovery below rejects
+        // A claim-loss teardown (the stream's live fence is already gone —
+        // demotion or terminal release) gets the same treatment as node
+        // authority revocation: dispatching the parked frames would run
+        // them fenceless, and the terminal recovery below rejects
         // resumption, so the client retransmits them anyway (XEP-0198) —
-        // processing here would double their non-idempotent effects.
-        let fenceless_force_detach = !pending_force_detach.is_empty()
-            && conn.sm_state.is_resumable()
+        // processing here would double their non-idempotent effects. No
+        // pending force-detach prerequisite: an ordinary or keepalive close
+        // can win the race before the demotion signal is consumed.
+        let fenceless_teardown = conn.sm_state.is_resumable()
             && conn.sm_state.stream_id.as_deref().is_some_and(|stream_id| {
                 state
                     .deps
@@ -757,7 +758,7 @@ async fn handle_xmpp_websocket(
             });
         if shutdown_token.is_cancelled()
             || admission_permit.revalidate().is_err()
-            || fenceless_force_detach
+            || fenceless_teardown
         {
             let dropped = discard_deferred_inbound(&mut conn);
             if dropped > 0 {

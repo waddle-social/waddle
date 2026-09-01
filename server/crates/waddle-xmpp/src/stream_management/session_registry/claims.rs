@@ -288,7 +288,11 @@ impl InMemorySmSessionRegistry {
     /// the detached resumable pool. The live fence is first converted into
     /// the registry's existing terminal retry inventory, so a failed or
     /// timed-out release retains the immutable owner+epoch for the janitor.
-    pub async fn release_attached_session_claim(&self, stream_id: &str) {
+    pub async fn release_attached_session_claim(
+        &self,
+        stream_id: &crate::pending_delivery::SmSessionId,
+    ) {
+        let stream_id = stream_id.as_str();
         let Ok(stream_lock) = self.stream_lock(stream_id) else {
             return;
         };
@@ -654,6 +658,27 @@ impl InMemorySmSessionRegistry {
                 .await;
         }
         attempted
+    }
+
+    /// Cancel a stale exact-release retry that matches `stream_id`'s ACTIVE
+    /// fence. Called at the two points where an ATTACHED lifecycle adopts a
+    /// fence (`ensure_session_claim` success and a successful resume's
+    /// `Resumed` completion): an attached stream has no pool entry, so the
+    /// release-retry janitor's liveness probe cannot shield it — a leftover
+    /// pending release for the identical owner+epoch (a failed resume's
+    /// restore-release, or an idempotent self-reacquire after a hung
+    /// release) would strip the live socket's fence and make it stealable.
+    /// Terminal inventory for a DIFFERENT fence is deliberately untouched.
+    pub(super) fn cancel_pending_release_matching_active_fence(&self, stream_id: &str) {
+        let (Ok(fences), Ok(mut pending)) = (
+            self.claim_fences.read(),
+            self.pending_claim_releases.write(),
+        ) else {
+            return;
+        };
+        if let Some(active) = fences.get(stream_id) {
+            pending.remove(&(stream_id.to_string(), active.clone()));
+        }
     }
 
     pub(super) fn stream_liveness(&self, stream_id: &str) -> Option<bool> {
@@ -1605,6 +1630,7 @@ impl InMemorySmSessionRegistry {
                     }
                     return None;
                 } else {
+                    self.cancel_pending_release_matching_active_fence(stream_id);
                     Some(publication_guard)
                 }
             }
@@ -2297,6 +2323,12 @@ impl InMemorySmSessionRegistry {
             // next detach self-reacquires idempotently under that fence; a
             // non-detach teardown releases it explicitly.
             self.release_claim_store_entry(stream_id).await;
+        } else if matches!(outcome, Some(SmClaimCompletion::Resumed(_))) {
+            // The attached lifecycle adopted this fence: cancel any stale
+            // exact-release retry for the identical owner+epoch (e.g. an
+            // earlier failed resume's restore-release) — the janitor's
+            // pool-backed liveness probe cannot see an attached stream.
+            self.cancel_pending_release_matching_active_fence(stream_id);
         }
         Ok(outcome)
     }

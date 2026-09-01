@@ -16,6 +16,7 @@ use waddle_xmpp::muc::room_actor::{
 };
 use waddle_xmpp::muc::room_registry_actor::{RoomAcquisition, RoomRegistryError};
 use waddle_xmpp::muc::RoomRegistry;
+use waddle_xmpp::stream_management::SmSessionRegistry as _;
 use waddle_xmpp::xep::xep0272::Muji;
 use waddle_xmpp::xep::xep0421::OccupantIdentity;
 
@@ -1163,14 +1164,7 @@ async fn cleanup_connection_shutdown_inner(
                     // to the failed stream on purpose: a JID-wide
                     // invalidation could sweep a cross-node replacement's
                     // freshly stored snapshot for the same FullJid.
-                    match state
-                        .deps
-                        .protocol
-                        .sm_session_registry
-                        .displace_stored_session_if_unclaimed(&stream_id)
-                        .await
-                        .map(|stranded| stranded.into_iter().collect::<Vec<_>>())
-                    {
+                    match displace_failed_detach_snapshot(state, &stream_id).await {
                         Ok(stranded) if !stranded.is_empty() => {
                             crate::sm_promotion::promote_displaced_sessions(
                                 stranded.clone(),
@@ -1289,6 +1283,50 @@ async fn cleanup_connection_shutdown_inner(
     ConnectionShutdownOutcome::NotPersisted
 }
 
+/// Take the failed detach store's stranded in-memory snapshot back out for
+/// terminal promotion, riding out a transient concurrent resume: a reconnect
+/// can claim the just-inserted snapshot between the failed write and this
+/// call, but with no durable rows that resume fails and its guard restores
+/// the snapshot to `sessions`, where a retry displaces it. A resume that is
+/// still holding the claim when the budget expires owns the snapshot's
+/// lifecycle (its own failure path restores-and-releases).
+async fn displace_failed_detach_snapshot(
+    state: &WebSocketState,
+    stream_id: &str,
+) -> Result<
+    Vec<waddle_xmpp::stream_management::DetachedSession>,
+    waddle_xmpp::stream_management::SmRegistryError,
+> {
+    let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(2);
+    loop {
+        let displaced = state
+            .deps
+            .protocol
+            .sm_session_registry
+            .displace_stored_session_if_unclaimed(stream_id)
+            .await?;
+        if let Some(session) = displaced {
+            return Ok(vec![session]);
+        }
+        let claimed = state
+            .deps
+            .protocol
+            .sm_session_registry
+            .peek_session(stream_id)
+            .await?
+            .is_none();
+        if claimed && tokio::time::Instant::now() < deadline {
+            // Absent from the detached pool: either a concurrent resume
+            // holds it (retry — its failure restores the snapshot) or it
+            // was never inserted (the store failed before the in-memory
+            // insert); the retry budget distinguishes the two cheaply.
+            tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+            continue;
+        }
+        return Ok(Vec::new());
+    }
+}
+
 async fn forget_terminal_shadow_stream_and_release_claim(
     state: &WebSocketState,
     sm_state: &waddle_xmpp::stream_management::StreamManagementState,
@@ -1307,7 +1345,7 @@ async fn forget_terminal_shadow_stream_and_release_claim(
 async fn forget_terminal_shadow_stream_and_wait(
     state: &WebSocketState,
     sm_state: &waddle_xmpp::stream_management::StreamManagementState,
-) -> Option<String> {
+) -> Option<waddle_xmpp::pending_delivery::SmSessionId> {
     // Retire first to close admission, then wait for every previously
     // admitted submission task to drain before ending the fence those tasks
     // captured at observation time. Enroll/Retire tasks are not counted in
@@ -1315,8 +1353,8 @@ async fn forget_terminal_shadow_stream_and_wait(
     // absence itself and self-reschedules (`DeferredClaim`) when it runs
     // before the release below.
     forget_terminal_shadow_stream(state, sm_state);
-    let stream_id = sm_state.stream_id.clone()?;
-    let session_id = waddle_xmpp::pending_delivery::SmSessionId::new(stream_id.clone());
+    let session_id =
+        waddle_xmpp::pending_delivery::SmSessionId::new(sm_state.stream_id.as_deref()?);
     while !state
         .deps
         .protocol
@@ -1329,7 +1367,7 @@ async fn forget_terminal_shadow_stream_and_wait(
             "terminal SM cleanup is still waiting for admitted ingress shadow work to drain"
         );
     }
-    Some(stream_id)
+    Some(session_id)
 }
 
 fn forget_terminal_shadow_stream(
