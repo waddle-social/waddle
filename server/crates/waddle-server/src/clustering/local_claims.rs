@@ -148,23 +148,33 @@ impl SmSessionLocalClaims {
             requester_bare_jid: jid.to_bare(),
             ack,
         };
-        if entry.force_detach_sender().try_send(request).is_err() {
-            tracing::warn!(
-                stream_id,
-                jid = %jid,
-                "demoted SM stream's attached connection could not be signalled for termination"
-            );
-            crate::telemetry::mark_span_error(
-                "sm_session_local_claims: attached force-detach signal failed",
-            );
-            return;
-        }
+        // Delivery and acknowledgement both live in a detached, bounded,
+        // span-instrumented task: `send().await` rides out a momentarily
+        // full force-detach channel (a `try_send` here would silently drop
+        // the only termination signal for a socket whose fence is already
+        // gone), while `demote` itself stays purely local and returns
+        // immediately. A closed channel or an expired budget means the
+        // connection is already tearing down or wedged; the fence removal
+        // above stands either way and cleanup owns the rest.
+        let sender = entry.force_detach_sender();
         let observed_stream_id = stream_id.to_string();
-        // Instrumented with the caller's span so the warn keeps the
-        // lease-reconcile correlation fields; a bare spawn would emit it
-        // unparented.
         tokio::spawn(tracing::Instrument::instrument(
             async move {
+                let delivery = tokio::time::timeout(USER_FORCE_DETACH_ACK_TIMEOUT, async {
+                    sender.send(request).await.is_ok()
+                })
+                .await;
+                match delivery {
+                    Ok(true) => {}
+                    Ok(false) | Err(_) => {
+                        tracing::warn!(
+                            stream_id = %observed_stream_id,
+                            jid = %jid,
+                            "demoted SM stream's connection could not be signalled for termination"
+                        );
+                        return;
+                    }
+                }
                 match tokio::time::timeout(USER_FORCE_DETACH_ACK_TIMEOUT, ack_rx).await {
                     Ok(Ok(_outcome)) => {}
                     Ok(Err(_)) | Err(_) => {
@@ -1448,6 +1458,70 @@ mod tests {
             "an unreachable connection must not leave the demoted fence behind"
         );
         assert!(local_claims.owned().await.is_empty());
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn attached_sm_demotion_delivers_the_signal_once_a_full_channel_drains() {
+        let local_claims = SmSessionLocalClaims::new();
+        let registry = Arc::new(InMemorySmSessionRegistry::new());
+        let connections = Arc::new(ConnectionRegistry::new());
+        let stream_id = "full-channel-demotion";
+        let publication = registry
+            .ensure_session_claim(stream_id)
+            .await
+            .expect("attached claim");
+        drop(publication);
+        local_claims.wire(Arc::clone(&registry));
+        local_claims.wire_connection_registry(Arc::clone(&connections));
+
+        let jid: FullJid = "alice@example.com/full-channel-demotion"
+            .parse()
+            .expect("jid");
+        let (outbound_tx, _outbound_rx) = tokio::sync::mpsc::channel(1);
+        let owner = connections.register(jid.clone(), outbound_tx);
+        assert!(connections.set_sm_stream_id_if_owner(
+            &jid,
+            &owner,
+            Some(waddle_xmpp::pending_delivery::SmSessionId::new(stream_id)),
+        ));
+        let entry = connections
+            .entry_if_owner(&jid, &owner)
+            .expect("attached entry");
+        let mut force_detach_rx = entry
+            .take_force_detach_rx()
+            .expect("connection owns force-detach receiver");
+        // Saturate the bounded channel so the demotion signal cannot be
+        // accepted synchronously; a try_send here would drop it on the floor.
+        let mut fillers = Vec::new();
+        loop {
+            let (ack, ack_rx) = tokio::sync::oneshot::channel();
+            let filler = ForceDetachRequest {
+                origin: ForceDetachOrigin::OwnerManagedRetirement,
+                requester_bare_jid: jid.to_bare(),
+                ack,
+            };
+            match entry.force_detach_sender().try_send(filler) {
+                Ok(()) => fillers.push(ack_rx),
+                Err(_) => break,
+            }
+        }
+
+        local_claims
+            .demote(&Entity::new(EntityType::SmSession, stream_id))
+            .await;
+        // Local demotion is complete even while the signal is still parked
+        // behind the full channel.
+        assert_eq!(registry.current_sm_claim_fence(stream_id), None);
+
+        // Drain the fillers; the demotion request must then arrive intact.
+        let mut saw_demotion_request = false;
+        for _ in 0..=fillers.len() {
+            let request = force_detach_rx.recv().await.expect("queued request");
+            assert_eq!(request.origin, ForceDetachOrigin::OwnerManagedRetirement);
+            saw_demotion_request = true;
+            let _ = request.ack.send(ForceDetachOutcome::NotPersisted);
+        }
+        assert!(saw_demotion_request);
     }
 
     #[tokio::test]

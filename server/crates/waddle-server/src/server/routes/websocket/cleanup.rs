@@ -715,6 +715,33 @@ async fn cleanup_connection_shutdown_inner(
         return promote_terminal_recovery(state, outbound_rx, &jid, conn).await;
     }
 
+    // Claim-loss owner-managed retirement (an attached SM claim was demoted
+    // or terminally released, so the live fence is already gone): a resumable
+    // detach is doomed here — the fenced snapshot write fails `NotOwner`
+    // after `store_session` has inserted the detached session in memory,
+    // leaving the unacked queue neither durably resumable nor promoted.
+    // Route it through terminal XEP-0198 §5 promotion instead. Owner-managed
+    // retirements that still hold a live fence keep the ordinary
+    // detach-for-resume path.
+    if matches!(
+        force_detach_origin,
+        Some(waddle_xmpp::registry::ForceDetachOrigin::OwnerManagedRetirement)
+    ) && conn.sm_state.is_resumable()
+        && !conn.sm_recovery_required
+        && conn.sm_state.stream_id.as_deref().is_some_and(|stream_id| {
+            state
+                .deps
+                .protocol
+                .sm_session_registry
+                .current_sm_claim_fence(stream_id)
+                .is_none()
+        })
+    {
+        conn.begin_terminal_sm_recovery();
+        let _ = forget_terminal_shadow_stream_and_wait(state, &conn.sm_state).await;
+        return promote_terminal_recovery(state, outbound_rx, &jid, conn).await;
+    }
+
     let should_detach_for_resume = (conn.sm_state.is_resumable()
         && !matches!(conn.phase, ConnectionPhase::Closing { .. }))
         || conn.sm_recovery_required;

@@ -5766,6 +5766,61 @@ async fn resumable_clean_close_releases_attached_claim_and_reclaims_capacity() {
 }
 
 #[tokio::test]
+async fn claim_loss_owner_retirement_promotes_terminally_instead_of_detaching() {
+    let registry = Arc::new(InMemorySmSessionRegistry::new());
+    let state = create_test_websocket_state_with_sm_registry(Arc::clone(&registry)).await;
+    let jid: FullJid = "alice@example.com/claim-loss".parse().expect("jid");
+    let mut conn = WsConnState::new();
+    conn.phase = ConnectionPhase::ready(jid.clone(), false);
+    register_sm_publish_owner(state.as_ref(), &mut conn, &jid);
+
+    let responses = handle_xmpp_frame(
+        "<enable xmlns='urn:xmpp:sm:3' resume='true'/>",
+        "example.com",
+        state.as_ref(),
+        &mut conn,
+    )
+    .await;
+    let enabled = Element::from_str(&responses[0]).expect("enabled xml");
+    let stream_id = enabled.attr("id").expect("stream id").to_string();
+    conn.publish_pending_sm_enable(state.as_ref());
+    assert!(registry.current_sm_claim_fence(&stream_id).is_some());
+
+    // Simulate an SM claim demotion racing ahead of the force-detach: the
+    // live fence is forgotten while the connection is still attached.
+    registry.forget_claim_locally(&stream_id).await;
+    assert_eq!(registry.current_sm_claim_fence(&stream_id), None);
+
+    // The owner-managed retirement teardown must not take the resumable
+    // detach path (its fenced snapshot would fail NotOwner after inserting
+    // an undurable in-memory session); it promotes terminally instead.
+    let (_outbound_tx, mut outbound_rx) = mpsc::channel(1);
+    assert_eq!(
+        super::super::cleanup::cleanup_force_detach_connection_shutdown(
+            state.as_ref(),
+            &mut outbound_rx,
+            &mut conn,
+            false,
+            waddle_xmpp::registry::ForceDetachOrigin::OwnerManagedRetirement,
+        )
+        .await,
+        super::super::cleanup::ConnectionShutdownOutcome::NotPersisted
+    );
+    assert!(
+        conn.sm_recovery_required,
+        "claim-loss retirement must enter terminal XEP-0198 recovery"
+    );
+    assert!(
+        !registry
+            .locally_owned_claim_ids()
+            .expect("local claim snapshot")
+            .contains(&stream_id),
+        "terminal promotion must not strand an undurable in-memory session"
+    );
+    assert_eq!(registry.current_sm_claim_fence(&stream_id), None);
+}
+
+#[tokio::test]
 async fn resumable_clean_close_retains_failed_exact_release_for_retry() {
     let claim_store = Arc::new(HangingEnsureClaimStore {
         inner: InProcessClaimStore::new(),
