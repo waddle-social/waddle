@@ -1003,7 +1003,7 @@ mod inbound_dispatch_tests {
     #[cfg(feature = "clustering")]
     use std::sync::Arc;
     #[cfg(feature = "clustering")]
-    use waddle_xmpp::stream_management::InMemorySmSessionRegistry;
+    use waddle_xmpp::stream_management::{InMemorySmSessionRegistry, SmSessionRegistry as _};
     use xmpp_parsers::message::MessageType;
     use xmpp_parsers::minidom::Element;
 

@@ -309,6 +309,26 @@ struct QueuedIngressShadowTask {
     task: IngressShadowTask,
     permit: Option<OwnedSemaphorePermit>,
     outstanding: Option<OutstandingSubmission>,
+    pending: Option<PendingStreamTask>,
+}
+
+#[cfg(feature = "clustering")]
+/// Cancellation-safe pending-activity guard for an admitted submission task.
+/// The stream's pending count is decremented exactly once, wherever the task
+/// ends: normal completion, a rejected admission, a queued task dropped by
+/// forced shutdown, or a running task aborted by it. Without this guard a
+/// forced teardown left the count stranded and `wait_for_stream_idle` never
+/// idled, so terminal cleanup never released the attached SM claim.
+struct PendingStreamTask {
+    stream_activity: Arc<std::sync::Mutex<StreamActivityState>>,
+    stream_id: SmSessionId,
+}
+
+#[cfg(feature = "clustering")]
+impl Drop for PendingStreamTask {
+    fn drop(&mut self) {
+        note_stream_task_finished(&self.stream_activity, &self.stream_id);
+    }
 }
 
 /// An admitted submission's obligation: registered before the task is
@@ -970,11 +990,23 @@ fn try_send_worker_task(
                 Err(disposition) => return disposition,
             };
             note_stream_task_enqueued(stream_activity, &stream_id);
-            match admit_submission(tx, stream_activity, stream_id.clone(), submit, permit) {
+            let pending = PendingStreamTask {
+                stream_activity: Arc::clone(stream_activity),
+                stream_id: stream_id.clone(),
+            };
+            match admit_submission(
+                tx,
+                stream_activity,
+                stream_id.clone(),
+                submit,
+                permit,
+                pending,
+            ) {
                 Ok(()) => IngressShadowDisposition::Enqueued,
                 Err(task) => {
-                    note_stream_task_finished(stream_activity, &stream_id);
-                    drop(task.permit);
+                    // Dropping the rejected task drops its PendingStreamTask
+                    // guard, which decrements the count taken above.
+                    drop(task);
                     IngressShadowDisposition::Closed
                 }
             }
@@ -1021,6 +1053,7 @@ fn send_enrollment_task(
             },
             permit: Some(permit),
             outstanding: None,
+            pending: None,
         },
     ) {
         Ok(()) => IngressShadowDisposition::Enqueued,
@@ -1058,6 +1091,7 @@ fn ensure_stream_enrollment_task(
             },
             permit: Some(permit),
             outstanding: None,
+            pending: None,
         },
     ) {
         Ok(()) => IngressShadowDisposition::Enqueued,
@@ -1092,6 +1126,7 @@ fn send_retirement_task(
             task: IngressShadowTask::Retire { stream_id },
             permit: None,
             outstanding: None,
+            pending: None,
         },
     ) {
         Ok(()) => IngressShadowDisposition::Enqueued,
@@ -1113,6 +1148,7 @@ fn reschedule_retirement_task(
             task: IngressShadowTask::Retire { stream_id },
             permit: None,
             outstanding: None,
+            pending: None,
         },
     ) {
         Ok(()) => IngressShadowDisposition::Enqueued,
@@ -1198,6 +1234,7 @@ fn admit_submission(
     stream_id: SmSessionId,
     submit: IngressShadowTask,
     permit: OwnedSemaphorePermit,
+    pending: PendingStreamTask,
 ) -> Result<(), QueuedIngressShadowTask> {
     let mut state = stream_activity_lock(stream_activity);
     let seq = state.next_seq;
@@ -1215,6 +1252,7 @@ fn admit_submission(
             task: submit,
             permit: Some(permit),
             outstanding: Some(outstanding),
+            pending: Some(pending),
         },
     ) {
         Ok(()) => {
@@ -2464,27 +2502,23 @@ impl IngressShadowScheduler {
             self.active_streams.insert(stream_id.clone());
             let completion_tx = self.completion_tx.clone();
             let execute = self.execute.clone();
-            let stream_activity = self.stream_activity.clone();
             let task_shutdown = self.shutdown.clone();
             let task_finished = Arc::new(AtomicBool::new(false));
             let task_finished_for_completion = task_finished.clone();
-            // Only submissions were counted at enqueue time; decrementing for
-            // an Enroll/Retire task would consume a still-running submission's
-            // pending count and let a claim transfer treat active shadow work
-            // as drained.
-            let counted_submission = matches!(task.task, IngressShadowTask::Submit(_));
             let QueuedIngressShadowTask {
                 task,
                 permit,
                 outstanding,
+                pending,
             } = task;
             let task_handle = tokio::spawn(async move {
                 (execute)(task, outstanding).await;
                 drop(permit);
                 task_shutdown.finish_active_task(&task_finished_for_completion);
-                if counted_submission {
-                    note_stream_task_finished(&stream_activity, &stream_id);
-                }
+                // Only submissions carry a PendingStreamTask; dropping it
+                // here decrements the count after every post-decision effect,
+                // and an abort or queue drop decrements it via the same Drop.
+                drop(pending);
                 let _ = completion_tx.send(stream_id);
             });
             self.shutdown
@@ -5867,6 +5901,62 @@ mod tests {
                 "fast submissions must not leave leaked pending activity behind"
             );
         }
+    }
+
+    /// Forced teardown (queued tasks dropped, running tasks aborted) must
+    /// still decrement every admitted submission's pending activity, or the
+    /// terminal-cleanup `wait_for_stream_idle` loop never observes idle and
+    /// the attached SM claim release never runs (#1724 review finding).
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn forced_teardown_releases_pending_activity_for_stream_idle_waiters() {
+        let started = Arc::new(Notify::new());
+        let handle = IngressShadowHandle::spawn_test_worker(2, 1, {
+            let started = started.clone();
+            move |kind, _stream_id| {
+                let started = started.clone();
+                async move {
+                    if kind == IngressShadowTestTaskKind::Submit {
+                        started.notify_waiters();
+                        std::future::pending::<()>().await;
+                    }
+                }
+            }
+        });
+        let stream_id = SmSessionId::new("stream-a");
+
+        let started_wait = started.notified();
+        assert_eq!(
+            handle.try_submit(base_submission(Message::new(Some(jid::Jid::from(
+                "room@conference.example.com"
+                    .parse::<BareJid>()
+                    .expect("room jid"),
+            ))))),
+            IngressShadowDisposition::Enqueued
+        );
+        tokio::time::timeout(Duration::from_millis(250), started_wait)
+            .await
+            .expect("submission should start");
+        // Queue a second submission behind the blocked one so the forced
+        // teardown also exercises the dropped-while-queued path.
+        assert_eq!(
+            handle.try_submit(base_submission(Message::new(Some(jid::Jid::from(
+                "room@conference.example.com"
+                    .parse::<BareJid>()
+                    .expect("room jid"),
+            ))))),
+            IngressShadowDisposition::Enqueued
+        );
+
+        assert!(
+            !handle.drain_and_join(Duration::ZERO).await,
+            "zero budget must take the forced path"
+        );
+        assert!(
+            handle
+                .wait_for_stream_idle(&stream_id, Duration::from_millis(250))
+                .await,
+            "forced teardown must not strand pending activity behind aborted or dropped tasks"
+        );
     }
 
     #[tokio::test]
