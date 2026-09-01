@@ -53,7 +53,7 @@ pub struct Session {
     pub last_used_at: DateTime<Utc>,
     /// Non-secret durable identity context used for SM resume. This is not
     /// the bearer token (`id`) and never travels on the XMPP wire.
-    pub auth_context_id: Option<Uuid>,
+    pub auth_context_id: Uuid,
     pub auth_context_version: u64,
     pub principal_auth_epoch: u64,
     /// True for rows persisted solely to back the durable SM resume fence
@@ -74,7 +74,7 @@ impl Session {
             expires_at: Some(Utc::now() + Duration::days(30)),
             created_at: Utc::now(),
             last_used_at: Utc::now(),
-            auth_context_id: Some(Uuid::new_v4()),
+            auth_context_id: Uuid::new_v4(),
             auth_context_version: AuthContextVersion::INITIAL.get(),
             principal_auth_epoch: PrincipalAuthEpoch::INITIAL.get(),
             native_resume_only: false,
@@ -103,13 +103,9 @@ impl Session {
             .user_jid
             .parse()
             .map_err(|_| AuthenticatedPrincipalRefError::InvalidPersistedPrincipalJid)?;
-        let auth_context_id = self
-            .auth_context_id
-            .ok_or(AuthenticatedPrincipalRefError::LegacySessionWithoutAuthContext)?;
-
         Ok(AuthenticatedPrincipalRef::new(
             bare_jid,
-            AuthContextId::new(auth_context_id),
+            AuthContextId::new(self.auth_context_id),
             AuthContextVersion::new(self.auth_context_version),
             PrincipalAuthEpoch::new(self.principal_auth_epoch),
         ))
@@ -121,12 +117,10 @@ pub struct SessionManager {
     hash_key: Option<Vec<u8>>,
 }
 
-/// A session row cannot yield a durable principal reference when it predates
-/// the auth-context migration or when its persisted JID is invalid.
+/// A session row cannot yield a durable principal reference when its persisted
+/// JID is invalid.
 #[derive(Debug, Error, PartialEq, Eq)]
 pub enum AuthenticatedPrincipalRefError {
-    #[error("legacy session has no auth context")]
-    LegacySessionWithoutAuthContext,
     #[error("persisted session principal JID is invalid")]
     InvalidPersistedPrincipalJid,
 }
@@ -268,12 +262,9 @@ impl SessionManager {
         let auth_context_id = row_value(row, 8)
             .and_then(ValueExt::as_optional_string)
             .map_err(|e| AuthError::DatabaseError(format!("Failed to get auth context id: {e}")))?
-            .map(|value| {
-                value
-                    .parse()
-                    .map_err(|e| AuthError::DatabaseError(format!("invalid auth context id: {e}")))
-            })
-            .transpose()?;
+            .ok_or_else(|| AuthError::SessionNotFound(id.clone()))?
+            .parse()
+            .map_err(|e| AuthError::DatabaseError(format!("invalid auth context id: {e}")))?;
         let auth_context_version = integer_column(row, 9, "auth context version")?;
         let principal_auth_epoch = integer_column(row, 10, "principal auth epoch")?;
 
@@ -318,10 +309,11 @@ impl SessionManager {
             // Native-resume rows exist only for the SM resume fence; every
             // caller of get_session treats Ok(Some) as bearer-backed, so
             // they are indistinguishable from absent here.
-            Some(values) => Ok(self
-                .values_to_session(&values)
-                .map(Some)?
-                .filter(|session| !session.native_resume_only)),
+            Some(values) => match self.values_to_session(&values) {
+                Ok(session) => Ok((!session.native_resume_only).then_some(session)),
+                Err(AuthError::SessionNotFound(_)) => Ok(None),
+                Err(error) => Err(error),
+            },
             None => Ok(None),
         }
     }
@@ -366,7 +358,7 @@ impl SessionManager {
             Ok(session) => session,
             Err(error) => return PrincipalResolution::StorageError(error),
         };
-        let matches = session.auth_context_id == Some(principal.auth_context_id().as_uuid())
+        let matches = session.auth_context_id == principal.auth_context_id().as_uuid()
             && session.auth_context_version == principal.auth_context_version().get()
             && session.principal_auth_epoch == principal.auth_epoch().get()
             && session.user_jid == principal.bare_jid().to_string();
@@ -439,7 +431,7 @@ fn integer_column(row: &[crate::db::Value], index: usize, name: &str) -> Result<
 
 #[cfg(test)]
 mod tests {
-    use super::{AuthenticatedPrincipalRefError, PrincipalResolution, Session, SessionManager};
+    use super::{PrincipalResolution, Session, SessionManager};
     use crate::db::{actor::DbActor, actor::DbExecute, Database, MigrationRunner, Value};
     use kameo::actor::Spawn;
 
@@ -473,47 +465,83 @@ mod tests {
         assert_eq!(loaded.user_jid, "alice@example.com");
         assert_eq!(loaded.username, "alice");
         assert_eq!(loaded.xmpp_localpart, "alice");
-        assert!(loaded.auth_context_id.is_some());
+        assert_eq!(loaded.auth_context_id, second.auth_context_id);
         assert_eq!(loaded.auth_context_version, 1);
         assert_eq!(loaded.principal_auth_epoch, 1);
     }
 
     #[tokio::test]
-    async fn legacy_null_auth_context_remains_usable_but_is_not_resumable() {
+    async fn null_auth_context_row_is_treated_as_absent() {
         let db = Database::in_memory("test-auth-session-legacy-context")
             .await
             .expect("in-memory database");
-        MigrationRunner::single()
-            .run(&db)
-            .await
-            .expect("migrations");
-        let actor = DbActor::spawn(DbActor::new(db));
-        let manager = SessionManager::new(actor.clone(), Some(b"test-session-key"));
+        let conn = db.guard().await.expect("database guard");
+        // V0012 makes NULL impossible in the live schema, so this test
+        // exercises the row-decoding guard directly with a handcrafted
+        // pre-constraint shape.
+        conn.execute_batch(
+            r#"
+            CREATE TABLE users (
+                jid TEXT PRIMARY KEY,
+                username TEXT NOT NULL,
+                xmpp_localpart TEXT NOT NULL
+            );
+            CREATE TABLE sessions (
+                id TEXT PRIMARY KEY,
+                user_jid TEXT NOT NULL,
+                token_hash TEXT NOT NULL UNIQUE,
+                expires_at TEXT,
+                created_at TEXT NOT NULL,
+                last_used_at TEXT NOT NULL,
+                auth_context_id TEXT,
+                auth_context_version INTEGER NOT NULL DEFAULT 1,
+                principal_auth_epoch INTEGER NOT NULL DEFAULT 1
+            );
+            "#,
+        )
+        .await
+        .expect("create pre-constraint schema");
+        conn.execute(
+            "INSERT INTO users (jid, username, xmpp_localpart) VALUES (?, ?, ?)",
+            crate::db_params!["alice@example.com", "alice", "alice"],
+        )
+        .await
+        .expect("insert user");
+        let actor = DbActor::spawn(DbActor::new(db.clone()));
+        let manager = SessionManager::new(actor, Some(b"test-session-key"));
         let session = Session::new("alice@example.com", "alice", "alice");
-        manager
-            .create_session(&session)
-            .await
-            .expect("create session");
+        conn.execute(
+            r#"
+            INSERT INTO sessions (
+                id, user_jid, token_hash, expires_at, created_at, last_used_at,
+                auth_context_id, auth_context_version, principal_auth_epoch
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+            "#,
+            crate::db_params![
+                session.id.clone(),
+                session.user_jid.clone(),
+                manager.token_hash(&session.id),
+                session.expires_at.map(|value| value.to_rfc3339()),
+                session.created_at.to_rfc3339(),
+                session.last_used_at.to_rfc3339(),
+                Value::NullText,
+                session.auth_context_version,
+                session.principal_auth_epoch,
+            ],
+        )
+        .await
+        .expect("insert pre-constraint session");
+        drop(conn);
 
-        actor
-            .ask(DbExecute {
-                sql: "UPDATE sessions SET auth_context_id = ? WHERE id = ?".to_string(),
-                params: vec![Value::NullText, Value::from(session.id.clone())],
-            })
-            .await
-            .expect("clear auth context");
-
-        let loaded = manager
+        assert!(manager
             .get_session(&session.id)
             .await
-            .expect("load legacy session")
-            .expect("session exists");
-        assert_eq!(loaded.auth_context_id, None);
-        assert!(manager.validate_session(&session.id).await.is_ok());
-        assert_eq!(
-            loaded.authenticated_principal_ref(),
-            Err(AuthenticatedPrincipalRefError::LegacySessionWithoutAuthContext)
-        );
+            .expect("load invalid row")
+            .is_none());
+        assert!(matches!(
+            manager.validate_session(&session.id).await,
+            Err(super::AuthError::SessionNotFound(_))
+        ));
     }
 
     #[tokio::test]

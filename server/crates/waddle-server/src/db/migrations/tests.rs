@@ -35,7 +35,9 @@ async fn test_migration_runner_global() {
     let auth_context_columns: i64 = row.get(0).unwrap();
     assert_eq!(auth_context_columns, 3);
 
-    // Check version (global + shared waddle schema)
+    // Check version (global + shared waddle schema). `current_version` reads
+    // the ledger max, which the waddle namespace (V1011) still dominates
+    // after global V0012.
     let version = runner.current_version(&db).await.unwrap();
     assert_eq!(version, Some(1011));
 }
@@ -241,8 +243,8 @@ async fn test_global_v0004_adds_policy_digest_to_existing_v0003_schema() {
     assert_eq!(
         applied,
         vec![
-            4, 5, 6, 7, 8, 9, 10, 11, 1001, 1002, 1003, 1004, 1005, 1006, 1007, 1008, 1009, 1010,
-            1011
+            4, 5, 6, 7, 8, 9, 10, 11, 12, 1001, 1002, 1003, 1004, 1005, 1006, 1007, 1008, 1009,
+            1010, 1011
         ]
     );
 
@@ -549,7 +551,7 @@ async fn sqlite_single_runner_backfills_checksums_when_legacy_ledger_has_no_pend
         .await
         .unwrap();
     let runner = MigrationRunner::single();
-    assert_eq!(runner.migrations.len(), 22);
+    assert_eq!(runner.migrations.len(), 23);
     runner.run(&db).await.unwrap();
 
     let conn = db.guard().await.unwrap();
@@ -559,7 +561,7 @@ async fn sqlite_single_runner_backfills_checksums_when_legacy_ledger_has_no_pend
     drop(conn);
 
     assert!(runner.run(&db).await.unwrap().is_empty());
-    assert_eq!(migration_ledger_row_count(&db).await, 22);
+    assert_eq!(migration_ledger_row_count(&db).await, 23);
     assert_all_migration_checksums(&db, DatabaseDriver::Sqlite).await;
     assert!(runner.run(&db).await.unwrap().is_empty());
 }
@@ -576,7 +578,7 @@ async fn unknown_owned_ledger_version_fails_closed_without_changes() {
     let conn = db.guard().await.unwrap();
     conn.execute(
         "INSERT INTO _migrations (version, description, checksum) VALUES (?, ?, ?)",
-        crate::db_params![12_i64, "future migration", "future-checksum"],
+        crate::db_params![13_i64, "future migration", "future-checksum"],
     )
     .await
     .unwrap();
@@ -585,7 +587,7 @@ async fn unknown_owned_ledger_version_fails_closed_without_changes() {
     let error = runner.run(&db).await.unwrap_err();
     assert!(matches!(
         error,
-        DatabaseError::MigrationLedger(MigrationLedgerError::UnknownVersion { version: 12, .. })
+        DatabaseError::MigrationLedger(MigrationLedgerError::UnknownVersion { version: 13, .. })
     ));
     assert_eq!(migration_ledger_row_count(&db).await, before + 1);
     assert_eq!(sqlite_schema_object_count(&db).await, schema_before);
@@ -1023,7 +1025,7 @@ async fn postgres_single_runner_backfills_checksums_when_legacy_ledger_has_no_pe
     let schema = unique_postgres_schema_name("ledger_pure_adoption");
     let (db, admin) = open_isolated_postgres_database(&database_url, &schema).await;
     let runner = MigrationRunner::single();
-    assert_eq!(runner.migrations.len(), 22);
+    assert_eq!(runner.migrations.len(), 23);
     runner.run(&db).await.expect("initial single migration run");
 
     let conn = db.guard().await.expect("postgres guard");
@@ -1037,7 +1039,7 @@ async fn postgres_single_runner_backfills_checksums_when_legacy_ledger_has_no_pe
         .await
         .expect("pure adoption rerun")
         .is_empty());
-    assert_eq!(migration_ledger_row_count(&db).await, 22);
+    assert_eq!(migration_ledger_row_count(&db).await, 23);
     assert_all_migration_checksums(&db, DatabaseDriver::Postgres).await;
     assert!(runner
         .run(&db)
@@ -1882,7 +1884,10 @@ async fn postgres_v0006_widens_existing_upload_slot_size_bytes() {
         .expect("run global migration");
     assert_eq!(
         applied,
-        vec![6, 7, 8, 9, 10, 11, 1001, 1002, 1003, 1004, 1005, 1006, 1007, 1008, 1009, 1010, 1011]
+        vec![
+            6, 7, 8, 9, 10, 11, 12, 1001, 1002, 1003, 1004, 1005, 1006, 1007, 1008, 1009, 1010,
+            1011
+        ]
     );
     assert_postgres_column_type(&db, "upload_slots", "size_bytes", "bigint").await;
 
@@ -1956,7 +1961,7 @@ async fn sqlite_v0007_tracks_link_preview_media_refs() {
     let applied = MigrationRunner::global().run(&db).await.unwrap();
     assert_eq!(
         applied,
-        vec![7, 8, 9, 10, 11, 1001, 1002, 1003, 1004, 1005, 1006, 1007, 1008, 1009, 1010, 1011]
+        vec![7, 8, 9, 10, 11, 12, 1001, 1002, 1003, 1004, 1005, 1006, 1007, 1008, 1009, 1010, 1011]
     );
 
     let conn = db.guard().await.unwrap();
@@ -2075,7 +2080,7 @@ async fn sqlite_v0008_repairs_marked_but_missing_global_tables() {
     drop(conn);
 
     let applied = MigrationRunner::global().run(&db).await.unwrap();
-    assert_eq!(applied, vec![8, 9, 10, 11]);
+    assert_eq!(applied, vec![8, 9, 10, 11, 12]);
 
     let conn = db.guard().await.unwrap();
     for table in ["provider_webhook_deliveries", "link_preview_media_refs"] {
@@ -2140,7 +2145,7 @@ async fn sqlite_v0010_drops_retired_isr_token_store() {
     drop(conn);
 
     let applied = MigrationRunner::global().run(&db).await.unwrap();
-    assert_eq!(applied, vec![10, 11]);
+    assert_eq!(applied, vec![10, 11, 12]);
 
     let conn = db.guard().await.unwrap();
     for table in [
@@ -2192,7 +2197,17 @@ async fn sqlite_v0011_adds_auth_context_reference_to_existing_sessions() {
     .expect("seed legacy session");
     drop(conn);
 
-    assert_eq!(MigrationRunner::global().run(&db).await.unwrap(), vec![11]);
+    // The runner must own every version already seeded into the ledger
+    // (global < 11 and the waddle namespace) or it fails closed on them;
+    // stopping at 11 keeps V0012 from deleting the NULL row under test.
+    let runner = MigrationRunner::new(
+        global::all()
+            .into_iter()
+            .filter(|m| m.version <= 11)
+            .chain(waddle::all())
+            .collect(),
+    );
+    assert_eq!(runner.run(&db).await.expect("apply V0011"), vec![11]);
 
     let conn = db.guard().await.expect("database guard");
     let mut rows = conn
@@ -2267,7 +2282,17 @@ async fn postgres_v0011_adds_auth_context_reference_to_existing_sessions() {
     .expect("seed legacy session");
     drop(conn);
 
-    assert_eq!(MigrationRunner::global().run(&db).await.unwrap(), vec![11]);
+    // The runner must own every version already seeded into the ledger
+    // (global < 11 and the waddle namespace) or it fails closed on them;
+    // stopping at 11 keeps V0012 from deleting the NULL row under test.
+    let runner = MigrationRunner::new(
+        global::all()
+            .into_iter()
+            .filter(|m| m.version <= 11)
+            .chain(waddle::all())
+            .collect(),
+    );
+    assert_eq!(runner.run(&db).await.expect("apply V0011"), vec![11]);
     // TEXT (not UUID) on Postgres: matches the sm_sessions principal columns
     // and keeps principal resolution index-served with one shared SQL string
     // (no CAST on the indexed column — Codex PR review on #1666).
@@ -2291,6 +2316,103 @@ async fn postgres_v0011_adds_auth_context_reference_to_existing_sessions() {
     assert_eq!(auth_context_version, 1);
     assert_eq!(principal_auth_epoch, 1);
     drop(rows);
+    drop(conn);
+
+    drop_postgres_schema(&admin, &schema).await;
+}
+
+#[tokio::test]
+async fn sqlite_v0012_makes_auth_context_total() {
+    let db = Database::in_memory("test-global-v0012-auth-context-total")
+        .await
+        .expect("in-memory database");
+    let conn = db.guard().await.expect("database guard");
+    prepare_pre_v0012_sessions(&conn, DatabaseDriver::Sqlite).await;
+    seed_pre_v0012_session_rows(&conn).await;
+    drop(conn);
+
+    assert_eq!(
+        MigrationRunner::global()
+            .run(&db)
+            .await
+            .expect("apply V0012"),
+        vec![12]
+    );
+
+    let conn = db.guard().await.expect("database guard");
+    assert_v0012_session_rows_and_constraints(&conn).await;
+
+    let mut foreign_keys = conn
+        .query("PRAGMA foreign_key_list('sessions')", ())
+        .await
+        .expect("inspect sessions foreign keys");
+    let foreign_key = foreign_keys
+        .next()
+        .await
+        .expect("read foreign key")
+        .expect("sessions foreign key");
+    assert_eq!(
+        foreign_key.get::<String>(2).expect("foreign table"),
+        "users"
+    );
+    assert_eq!(
+        foreign_key.get::<String>(3).expect("foreign column"),
+        "user_jid"
+    );
+    assert_eq!(foreign_key.get::<String>(4).expect("target column"), "jid");
+    assert_eq!(
+        foreign_key.get::<String>(6).expect("delete action"),
+        "CASCADE"
+    );
+
+    let mut indexes = conn
+        .query("PRAGMA index_list('sessions')", ())
+        .await
+        .expect("inspect sessions indexes");
+    let mut named_indexes = HashSet::new();
+    let mut auth_context_unique = false;
+    while let Some(index) = indexes.next().await.expect("read sessions index") {
+        let name: String = index.get(1).expect("index name");
+        let unique: i64 = index.get(2).expect("index uniqueness");
+        if name == "idx_sessions_auth_context" {
+            auth_context_unique = unique == 1;
+        }
+        named_indexes.insert(name);
+    }
+    assert!(named_indexes.contains("idx_sessions_user_jid"));
+    assert!(named_indexes.contains("idx_sessions_expires_at"));
+    assert!(named_indexes.contains("idx_sessions_auth_context"));
+    assert!(auth_context_unique, "auth-context index must remain unique");
+}
+
+#[tokio::test]
+async fn postgres_v0012_makes_auth_context_total() {
+    let Ok(database_url) = std::env::var("WADDLE_TEST_POSTGRES_URL") else {
+        eprintln!(
+            "skipping: WADDLE_TEST_POSTGRES_URL not set \
+             (postgres-backed migration regression for total auth contexts)"
+        );
+        return;
+    };
+
+    let schema = unique_postgres_schema_name("auth_context_total");
+    let (db, admin) = open_isolated_postgres_database(&database_url, &schema).await;
+    let conn = db.guard().await.expect("postgres guard");
+    prepare_pre_v0012_sessions(&conn, DatabaseDriver::Postgres).await;
+    seed_pre_v0012_session_rows(&conn).await;
+    drop(conn);
+
+    assert_eq!(
+        MigrationRunner::global()
+            .run(&db)
+            .await
+            .expect("apply V0012"),
+        vec![12]
+    );
+    assert_postgres_column_type(&db, "sessions", "auth_context_id", "text").await;
+
+    let conn = db.guard().await.expect("postgres guard");
+    assert_v0012_session_rows_and_constraints(&conn).await;
     drop(conn);
 
     drop_postgres_schema(&admin, &schema).await;
@@ -2346,7 +2468,7 @@ async fn postgres_v0007_tracks_link_preview_media_refs() {
         .expect("run global migration");
     assert_eq!(
         applied,
-        vec![7, 8, 9, 10, 11, 1001, 1002, 1003, 1004, 1005, 1006, 1007, 1008, 1009, 1010, 1011]
+        vec![7, 8, 9, 10, 11, 12, 1001, 1002, 1003, 1004, 1005, 1006, 1007, 1008, 1009, 1010, 1011]
     );
 
     let conn = db.guard().await.expect("postgres guard");
@@ -2490,7 +2612,7 @@ async fn postgres_v0008_repairs_marked_but_missing_global_tables() {
         .run(&db)
         .await
         .expect("run global migration");
-    assert_eq!(applied, vec![8, 9, 10, 11]);
+    assert_eq!(applied, vec![8, 9, 10, 11, 12]);
 
     let conn = db.guard().await.expect("postgres guard");
     for table in ["provider_webhook_deliveries", "link_preview_media_refs"] {
@@ -2863,6 +2985,127 @@ async fn create_legacy_session_schema(conn: &crate::db::ConnectionGuard) {
     )
     .await
     .expect("create legacy sessions expiry index");
+}
+
+async fn prepare_pre_v0012_sessions(conn: &crate::db::ConnectionGuard, driver: DatabaseDriver) {
+    conn.execute(sql::migrations_table_sql(driver), ())
+        .await
+        .expect("create migration table");
+    seed_applied_migrations(
+        conn,
+        global::all()
+            .into_iter()
+            .filter(|migration| migration.version < 12),
+        driver,
+    )
+    .await;
+    seed_applied_migrations(conn, waddle::all(), driver).await;
+    create_legacy_session_schema(conn).await;
+    let migration = migration_by_version(11);
+    conn.execute_batch(migration.sql_for(driver))
+        .await
+        .expect("apply V0011 fixture schema");
+}
+
+async fn seed_pre_v0012_session_rows(conn: &crate::db::ConnectionGuard) {
+    conn.execute(
+        "INSERT INTO users (jid, username, xmpp_localpart, created_at, updated_at) \
+         VALUES (?, ?, ?, ?, ?)",
+        crate::db_params![
+            "alice@example.com",
+            "alice",
+            "alice",
+            "2026-01-01T00:00:00Z",
+            "2026-01-01T00:00:00Z"
+        ],
+    )
+    .await
+    .expect("seed V0012 user");
+    conn.execute(
+        "INSERT INTO sessions \
+         (id, user_jid, token_hash, auth_context_id, created_at, last_used_at) \
+         VALUES (?, ?, ?, ?, ?, ?)",
+        crate::db_params![
+            "legacy-null-context",
+            "alice@example.com",
+            "legacy-token",
+            Option::<String>::None,
+            "2026-01-01T00:00:00Z",
+            "2026-01-01T00:00:00Z"
+        ],
+    )
+    .await
+    .expect("seed null-context session");
+    conn.execute(
+        "INSERT INTO sessions \
+         (id, user_jid, token_hash, auth_context_id, created_at, last_used_at) \
+         VALUES (?, ?, ?, ?, ?, ?)",
+        crate::db_params![
+            "current-context",
+            "alice@example.com",
+            "current-token",
+            "e54271ba-2fe1-4632-84b0-b8895cb2f5dd",
+            "2026-01-01T00:00:00Z",
+            "2026-01-01T00:00:00Z"
+        ],
+    )
+    .await
+    .expect("seed current session");
+}
+
+async fn assert_v0012_session_rows_and_constraints(conn: &crate::db::ConnectionGuard) {
+    let mut rows = conn
+        .query("SELECT id FROM sessions ORDER BY id", ())
+        .await
+        .expect("read V0012 sessions");
+    let row = rows
+        .next()
+        .await
+        .expect("read surviving session")
+        .expect("normal session survives");
+    assert_eq!(
+        row.get::<String>(0).expect("decode session id"),
+        "current-context"
+    );
+    assert!(rows.next().await.expect("finish session rows").is_none());
+    drop(rows);
+
+    let null_context = conn
+        .execute(
+            "INSERT INTO sessions \
+             (id, user_jid, token_hash, auth_context_id, created_at, last_used_at) \
+             VALUES (?, ?, ?, ?, ?, ?)",
+            crate::db_params![
+                "new-null-context",
+                "alice@example.com",
+                "new-token",
+                Option::<String>::None,
+                "2026-01-01T00:00:00Z",
+                "2026-01-01T00:00:00Z"
+            ],
+        )
+        .await;
+    assert!(null_context.is_err(), "NULL auth context must be rejected");
+
+    let duplicate_context = conn
+        .execute(
+            "INSERT INTO sessions \
+             (id, user_jid, token_hash, auth_context_id, created_at, last_used_at) \
+             VALUES (?, ?, ?, ?, ?, ?)",
+            crate::db_params![
+                "duplicate-context",
+                "alice@example.com",
+                "duplicate-token",
+                "e54271ba-2fe1-4632-84b0-b8895cb2f5dd",
+                "2026-01-01T00:00:00Z",
+                "2026-01-01T00:00:00Z"
+            ],
+        )
+        .await;
+    assert!(
+        duplicate_context.is_err(),
+        "duplicate auth context must remain rejected"
+    );
 }
 
 async fn assert_provider_delivery_conflict_target(conn: &crate::db::ConnectionGuard) {

@@ -844,28 +844,23 @@ async fn cleanup_connection_shutdown_inner(
                 return promote_terminal_recovery(state, outbound_rx, &jid, conn).await;
             }
             let stream_id = detached.stream_id.clone();
-            let principal = match conn.authenticated_session.as_ref() {
-                Some(session) => match session.authenticated_principal_ref() {
-                    Ok(principal) => principal,
-                    Err(error) => {
-                        // Pre-v11 rows do not carry an auth context. They
-                        // cannot prove a durable resume identity, so fall
-                        // through to ordinary non-resumable cleanup below.
-                        warn!(jid = %jid, %error, "Refusing SM detach without a durable principal");
-                        return refuse_detach_without_principal(
-                            state,
-                            outbound_rx,
-                            &jid,
-                            conn,
-                            vec![detached],
-                            TerminalRowRecovery::default(),
-                            TerminalRouteRemoval::NotAttempted,
-                        )
-                        .await;
-                    }
-                },
-                None => {
-                    warn!(jid = %jid, "Refusing SM detach without an authenticated principal");
+            let Some(session) = conn.authenticated_session.as_ref() else {
+                warn!(jid = %jid, "Refusing SM detach without an authenticated principal");
+                return refuse_detach_without_principal(
+                    state,
+                    outbound_rx,
+                    &jid,
+                    conn,
+                    vec![detached],
+                    TerminalRowRecovery::default(),
+                    TerminalRouteRemoval::NotAttempted,
+                )
+                .await;
+            };
+            let principal = match session.authenticated_principal_ref() {
+                Ok(principal) => principal,
+                Err(error) => {
+                    warn!(jid = %jid, %error, "Refusing SM detach with an invalid persisted principal");
                     return refuse_detach_without_principal(
                         state,
                         outbound_rx,
