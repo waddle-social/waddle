@@ -1227,8 +1227,11 @@ async fn forget_terminal_shadow_stream_and_wait(
     sm_state: &waddle_xmpp::stream_management::StreamManagementState,
 ) -> Option<String> {
     // Retire first to close admission, then wait for every previously
-    // admitted task (including the retirement task) to drain before ending
-    // the fence those tasks captured at observation time.
+    // admitted submission task to drain before ending the fence those tasks
+    // captured at observation time. Enroll/Retire tasks are not counted in
+    // per-stream pending activity; the retirement task fences on claim
+    // absence itself and self-reschedules (`DeferredClaim`) when it runs
+    // before the release below.
     forget_terminal_shadow_stream(state, sm_state);
     let stream_id = sm_state.stream_id.clone()?;
     let session_id = waddle_xmpp::pending_delivery::SmSessionId::new(stream_id.clone());
