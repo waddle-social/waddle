@@ -1143,6 +1143,10 @@ async fn cleanup_connection_shutdown_inner(
                 }
                 Err(err) => {
                     warn!(jid = %jid, error = %err, "Failed to detach SM session; falling back to full cleanup");
+                    // Owned copy so the terminal-promotion fallback below can
+                    // borrow `conn` mutably while the arm keeps its owner token.
+                    let owner_token = std::sync::Arc::clone(owner);
+                    let owner = &owner_token;
                     // Unregister the route BEFORE the awaited shadow drain:
                     // this receiver is never drained or promoted again, so
                     // every stanza routing could still enqueue during the
@@ -1164,8 +1168,10 @@ async fn cleanup_connection_shutdown_inner(
                     // to the failed stream on purpose: a JID-wide
                     // invalidation could sweep a cross-node replacement's
                     // freshly stored snapshot for the same FullJid.
+                    let mut recovered_any = false;
                     match displace_failed_detach_snapshot(state, &stream_id).await {
                         Ok(stranded) if !stranded.is_empty() => {
+                            recovered_any = true;
                             crate::sm_promotion::promote_displaced_sessions(
                                 stranded.clone(),
                                 crate::sm_promotion::DisplacedPromotionDeps {
@@ -1192,6 +1198,22 @@ async fn cleanup_connection_shutdown_inner(
                         }
                     }
                     forget_terminal_shadow_stream_and_release_claim(state, &conn.sm_state).await;
+                    if !recovered_any {
+                        // Nothing came back from displacement: either the
+                        // store failed before its in-memory insert, or a
+                        // concurrent demotion swept the non-durable snapshot
+                        // out of the pool before this arm ran. The
+                        // connection's own SM state still holds the unacked
+                        // queue — promote it terminally rather than lose it.
+                        // Deliberately NOT an early return: unlike the
+                        // superseded promotion paths, no replacement owns
+                        // this connection's MUC/caps/actor-tree cleanup, so
+                        // the rest of this arm must still run (the route was
+                        // already unregistered above, so the promotion's own
+                        // owner-gated unregister is a no-op).
+                        conn.begin_terminal_sm_recovery();
+                        let _ = promote_terminal_recovery(state, outbound_rx, &jid, conn).await;
+                    }
                     let cleanup_origin = clustered_cleanup_origin(state, &jid, owner).await;
                     if detach_fail_removed {
                         cleanup_muc_presence_with_origin(
@@ -1297,7 +1319,11 @@ async fn displace_failed_detach_snapshot(
     Vec<waddle_xmpp::stream_management::DetachedSession>,
     waddle_xmpp::stream_management::SmRegistryError,
 > {
-    let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(2);
+    // Budget must outlast a concurrent resume's bounded claim acquisition
+    // (the 5s claim-ask class of timeouts) plus its failed durable-principal
+    // lookup, so the retry observes the resume guard restoring the snapshot
+    // instead of expiring first.
+    let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(10);
     loop {
         let displaced = state
             .deps

@@ -154,7 +154,14 @@ impl SmSessionLocalClaims {
             async move {
                 let session_id =
                     waddle_xmpp::pending_delivery::SmSessionId::new(observed_stream_id.as_str());
-                let deadline = tokio::time::Instant::now() + USER_FORCE_DETACH_ACK_TIMEOUT;
+                // The lookup budget is deliberately much longer than the
+                // ack budget: owner-index publication waits behind the
+                // enable-response write, which a slow client socket can
+                // stall well past 2s — and this poller only ever spawns for
+                // a non-pooled stream (a real attached or mid-publication
+                // lifecycle), so the cost is one small task per such
+                // demotion, not per terminal-sweep entry.
+                let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(30);
                 let (jid, entry) = loop {
                     let attached = connections.sm_stream_owner(&session_id).and_then(|jid| {
                         let entry = connections.get_entry(&jid)?;
