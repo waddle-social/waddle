@@ -148,32 +148,22 @@ impl SmSessionLocalClaims {
             requester_bare_jid: jid.to_bare(),
             ack,
         };
-        // Delivery and acknowledgement both live in a detached, bounded,
-        // span-instrumented task: `send().await` rides out a momentarily
-        // full force-detach channel (a `try_send` here would silently drop
-        // the only termination signal for a socket whose fence is already
-        // gone), while `demote` itself stays purely local and returns
-        // immediately. A closed channel or an expired budget means the
-        // connection is already tearing down or wedged; the fence removal
-        // above stands either way and cleanup owns the rest.
+        // Delivery and acknowledgement both live in a detached,
+        // span-instrumented task, so `demote` itself stays purely local and
+        // returns immediately. The send is deliberately unbounded:
+        // `mpsc::Sender::send` waits for capacity and fails only when the
+        // receiver is gone — a full channel eventually drains or the
+        // connection tears down (closing the channel), and either way the
+        // signal is never silently dropped for a socket whose fence is
+        // already removed (a `try_send` or a send timeout would drop it).
         let sender = entry.force_detach_sender();
         let observed_stream_id = stream_id.to_string();
         tokio::spawn(tracing::Instrument::instrument(
             async move {
-                let delivery = tokio::time::timeout(USER_FORCE_DETACH_ACK_TIMEOUT, async {
-                    sender.send(request).await.is_ok()
-                })
-                .await;
-                match delivery {
-                    Ok(true) => {}
-                    Ok(false) | Err(_) => {
-                        tracing::warn!(
-                            stream_id = %observed_stream_id,
-                            jid = %jid,
-                            "demoted SM stream's connection could not be signalled for termination"
-                        );
-                        return;
-                    }
+                if sender.send(request).await.is_err() {
+                    // Receiver gone: the connection is already inside its
+                    // own teardown, which owns the rest.
+                    return;
                 }
                 match tokio::time::timeout(USER_FORCE_DETACH_ACK_TIMEOUT, ack_rx).await {
                     Ok(Ok(_outcome)) => {}

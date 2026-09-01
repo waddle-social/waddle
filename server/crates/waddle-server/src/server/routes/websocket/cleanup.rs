@@ -715,18 +715,19 @@ async fn cleanup_connection_shutdown_inner(
         return promote_terminal_recovery(state, outbound_rx, &jid, conn).await;
     }
 
-    // Claim-loss owner-managed retirement (an attached SM claim was demoted
-    // or terminally released, so the live fence is already gone): a resumable
+    // Claim-loss force-detach (an attached SM claim was demoted or
+    // terminally released, so the live fence is already gone): a resumable
     // detach is doomed here — the fenced snapshot write fails `NotOwner`
     // after `store_session` has inserted the detached session in memory,
     // leaving the unacked queue neither durably resumable nor promoted.
-    // Route it through terminal XEP-0198 §5 promotion instead. Owner-managed
-    // retirements that still hold a live fence keep the ordinary
-    // detach-for-resume path.
-    if matches!(
-        force_detach_origin,
-        Some(waddle_xmpp::registry::ForceDetachOrigin::OwnerManagedRetirement)
-    ) && conn.sm_state.is_resumable()
+    // Route it through terminal XEP-0198 §5 promotion instead. This is
+    // origin-independent on purpose: `authoritative_force_detach_origin`
+    // can rank a queued CrossNodeResume above the demotion's
+    // OwnerManagedRetirement, and a fenceless detach is equally doomed
+    // under either. Force-detaches that still hold a live fence keep the
+    // ordinary detach-for-resume path.
+    if force_detach
+        && conn.sm_state.is_resumable()
         && !conn.sm_recovery_required
         && conn.sm_state.stream_id.as_deref().is_some_and(|stream_id| {
             state
@@ -1136,13 +1137,17 @@ async fn cleanup_connection_shutdown_inner(
                 }
                 Err(err) => {
                     warn!(jid = %jid, error = %err, "Failed to detach SM session; falling back to full cleanup");
-                    forget_terminal_shadow_stream_and_release_claim(state, &conn.sm_state).await;
+                    // Unregister the route BEFORE the awaited shadow drain:
+                    // this receiver is never drained or promoted again, so
+                    // every stanza routing could still enqueue during the
+                    // drain would be silently dropped on task exit.
                     let detach_fail_removed = state
                         .deps
                         .protocol
                         .connection_registry
                         .unregister_if_owner(&jid, owner)
                         .is_some();
+                    forget_terminal_shadow_stream_and_release_claim(state, &conn.sm_state).await;
                     let cleanup_origin = clustered_cleanup_origin(state, &jid, owner).await;
                     if detach_fail_removed {
                         cleanup_muc_presence_with_origin(
