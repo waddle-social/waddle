@@ -379,6 +379,76 @@ async fn handle_xmpp_websocket(
                 break;
             }
 
+            // A force-detach request for this connection's own stream —
+            // deliberately ahead of every inbound/deferred/outbound arm in
+            // this biased select: a continuously busy client must not starve
+            // its own termination signal (conflict kill, cross-node steal,
+            // or SM claim demotion, whose fence is already removed — every
+            // starved iteration would process stanzas fenceless). Frames the
+            // client already sent are replayed by it after resume (XEP-0198
+            // retransmission), so preempting them loses nothing durable. Cross-node
+            // XEP-0198 resume uses the live-steal handshake; stale UserActor
+            // retirement uses the same safe connection-owned close path.
+            // The identity check gates the destructive close itself (defense
+            // in depth against a wrong-identity `previd` forcing a disconnect
+            // before rejection) — a mismatch answers inline and this
+            // connection keeps serving normally; a match sends `<conflict/>`
+            // (XEP-0198 "Resumption" SHOULD) and closes, falling through to
+            // the SAME detach-for-resume cleanup a graceful/keepalive close
+            // uses (never transitions `phase` to `Closing`).
+            request = recv_optional(&mut force_detach_rx) => {
+                match request {
+                    Some(request) => {
+                        let bound_bare = conn.phase.bound_jid().map(|jid| jid.to_bare());
+                        if bound_bare.as_ref() != Some(&request.requester_bare_jid) {
+                            warn!("force-detach rejected: identity mismatch");
+                            let _ = request
+                                .ack
+                                .send(waddle_xmpp::registry::ForceDetachOutcome::IdentityMismatch);
+                        } else if shutdown_token.is_cancelled()
+                            || admission_permit.revalidate().is_err()
+                        {
+                            // The old serving generation may no longer emit
+                            // the optional `<conflict/>`. Still acknowledge
+                            // only after normal detach persistence below.
+                            pending_force_detach.push(request);
+                            if let Some(bound_bare) = bound_bare.as_ref() {
+                                pending_force_detach.extend(drain_ready_force_detach_requests(
+                                    &mut force_detach_rx,
+                                    bound_bare,
+                                ));
+                            }
+                            break;
+                        } else {
+                            info!("force-detaching this session (<conflict/> close)");
+                            close_live_session_for_force_detach(
+                                &mut ws_sender,
+                                &conn,
+                                &admission_permit,
+                                &shutdown_token,
+                            )
+                            .await;
+                            // Deferred: acked only after this connection's own
+                            // detach-for-resume cleanup below actually runs.
+                            pending_force_detach.push(request);
+                            if let Some(bound_bare) = bound_bare.as_ref() {
+                                pending_force_detach.extend(drain_ready_force_detach_requests(
+                                    &mut force_detach_rx,
+                                    bound_bare,
+                                ));
+                            }
+                            break;
+                        }
+                    }
+                    None => {
+                        // The registry entry was removed (e.g. superseded)
+                        // without this channel ever being used — disable
+                        // this arm for the remainder of the loop.
+                        force_detach_rx = None;
+                    }
+                }
+            }
+
             // Process a bounded drain-deferred inbound chunk.
             _ = std::future::ready(()), if deferred_pending => {
                 for _ in 0..DEFERRED_INBOUND_DRAIN_CHUNK {
@@ -542,69 +612,6 @@ async fn handle_xmpp_websocket(
                     None => {
                         warn!("Ordered relay handoff completion channel closed");
                         break;
-                    }
-                }
-            }
-
-            // A force-detach request for this connection's own stream. Cross-node
-            // XEP-0198 resume uses the live-steal handshake; stale UserActor
-            // retirement uses the same safe connection-owned close path.
-            // The identity check gates the destructive close itself (defense
-            // in depth against a wrong-identity `previd` forcing a disconnect
-            // before rejection) — a mismatch answers inline and this
-            // connection keeps serving normally; a match sends `<conflict/>`
-            // (XEP-0198 "Resumption" SHOULD) and closes, falling through to
-            // the SAME detach-for-resume cleanup a graceful/keepalive close
-            // uses (never transitions `phase` to `Closing`).
-            request = recv_optional(&mut force_detach_rx) => {
-                match request {
-                    Some(request) => {
-                        let bound_bare = conn.phase.bound_jid().map(|jid| jid.to_bare());
-                        if bound_bare.as_ref() != Some(&request.requester_bare_jid) {
-                            warn!("force-detach rejected: identity mismatch");
-                            let _ = request
-                                .ack
-                                .send(waddle_xmpp::registry::ForceDetachOutcome::IdentityMismatch);
-                        } else if shutdown_token.is_cancelled()
-                            || admission_permit.revalidate().is_err()
-                        {
-                            // The old serving generation may no longer emit
-                            // the optional `<conflict/>`. Still acknowledge
-                            // only after normal detach persistence below.
-                            pending_force_detach.push(request);
-                            if let Some(bound_bare) = bound_bare.as_ref() {
-                                pending_force_detach.extend(drain_ready_force_detach_requests(
-                                    &mut force_detach_rx,
-                                    bound_bare,
-                                ));
-                            }
-                            break;
-                        } else {
-                            info!("force-detaching this session (<conflict/> close)");
-                            close_live_session_for_force_detach(
-                                &mut ws_sender,
-                                &conn,
-                                &admission_permit,
-                                &shutdown_token,
-                            )
-                            .await;
-                            // Deferred: acked only after this connection's own
-                            // detach-for-resume cleanup below actually runs.
-                            pending_force_detach.push(request);
-                            if let Some(bound_bare) = bound_bare.as_ref() {
-                                pending_force_detach.extend(drain_ready_force_detach_requests(
-                                    &mut force_detach_rx,
-                                    bound_bare,
-                                ));
-                            }
-                            break;
-                        }
-                    }
-                    None => {
-                        // The registry entry was removed (e.g. superseded)
-                        // without this channel ever being used — disable
-                        // this arm for the remainder of the loop.
-                        force_detach_rx = None;
                     }
                 }
             }
