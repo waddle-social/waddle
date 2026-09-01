@@ -1,0 +1,81 @@
+# Default-deny + targeted-allow isolation for the LiveKit Egress workers.
+#
+# CiliumNetworkPolicy (not vanilla NetworkPolicy) to match the rest of the
+# livekit stack — see gitops/livekit-sfu/networkpolicy.yaml for the Cilium/
+# Gateway rationale. The ingress/egress blocks below put the egress pod in
+# default-deny on both directions, then re-open only what a recording
+# worker needs: reach the SFU + Redis bus in-cluster, and upload to R2.
+apiVersion: cilium.io/v2
+kind: CiliumNetworkPolicy
+metadata:
+  name: livekit-egress
+  namespace: livekit
+spec:
+  endpointSelector:
+    matchLabels:
+      app.kubernetes.io/name: livekit-egress
+      app.kubernetes.io/instance: livekit-egress
+  ingress:
+    # Only the kubelet (host) reaches the worker, for liveness/readiness
+    # probes. Egress workers accept no peer-initiated traffic.
+    - fromEntities:
+        - host
+        - remote-node
+  egress:
+    # DNS resolution (the SFU service, and the R2 endpoint hostname).
+    - toEndpoints:
+        - matchLabels:
+            k8s:io.kubernetes.pod.namespace: kube-system
+            k8s:k8s-app: kube-dns
+      toPorts:
+        - ports:
+            - port: "53"
+              protocol: UDP
+            - port: "53"
+              protocol: TCP
+    # SFU signalling — join the room to capture it.
+    - toEndpoints:
+        - matchLabels:
+            k8s:io.kubernetes.pod.namespace: livekit
+            app.kubernetes.io/instance: livekit-sfu
+      toPorts:
+        - ports:
+            - port: "7880"
+              protocol: TCP
+    # Redis message bus — receive egress jobs dispatched by the SFU.
+    - toEndpoints:
+        - matchLabels:
+            k8s:io.kubernetes.pod.namespace: livekit
+            app.kubernetes.io/instance: livekit-redis
+      toPorts:
+        - ports:
+            - port: "6379"
+              protocol: TCP
+    # WebRTC media subscription from the SFU. Egress joins the room as a
+    # participant and pulls each track's RTP. The SFU runs
+    # `use_external_ip: true`, so it advertises its PUBLIC IP + NodePort
+    # media ports in ICE — the egress reaches them as `world` (the same
+    # path the SFU itself uses for media egress), not as an in-cluster
+    # service. Without this, egress joins the room but receives no media
+    # and records black/silent output. Scoped to the SFU's RTC + TURN
+    # relay ports (mirrors gitops/livekit-sfu/networkpolicy.yaml).
+    - toEntities:
+        - world
+      toPorts:
+        - ports:
+            - port: "30000"
+              endPort: 40000
+              protocol: UDP
+            - port: "30882"
+              protocol: UDP
+            - port: "30881"
+              protocol: TCP
+    # R2 artifact upload over HTTPS. The bucket endpoint is a public
+    # Cloudflare hostname reached via the cluster's external egress, i.e.
+    # `world`, not an in-cluster service.
+    - toEntities:
+        - world
+      toPorts:
+        - ports:
+            - port: "443"
+              protocol: TCP

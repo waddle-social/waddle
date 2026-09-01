@@ -38,7 +38,8 @@ type livekitHelmRelease struct {
 	} `yaml:"spec"`
 }
 
-// ciliumNetworkPolicy captures the ingress rules of the SFU policy.
+// ciliumNetworkPolicy captures the ingress and egress port rules of a
+// livekit-stack CiliumNetworkPolicy.
 type ciliumNetworkPolicy struct {
 	Spec struct {
 		Ingress []struct {
@@ -50,7 +51,75 @@ type ciliumNetworkPolicy struct {
 				} `yaml:"ports"`
 			} `yaml:"toPorts"`
 		} `yaml:"ingress"`
+		Egress []ciliumEgressRule `yaml:"egress"`
 	} `yaml:"spec"`
+}
+
+type ciliumEgressRule struct {
+	ToEntities  []string `yaml:"toEntities"`
+	ToEndpoints []struct {
+		MatchLabels map[string]string `yaml:"matchLabels"`
+	} `yaml:"toEndpoints"`
+	ToPorts []struct {
+		Ports []struct {
+			Port     string `yaml:"port"`
+			Protocol string `yaml:"protocol"`
+		} `yaml:"ports"`
+	} `yaml:"toPorts"`
+}
+
+func (r ciliumEgressRule) opensPort(port, proto string) bool {
+	for _, tp := range r.ToPorts {
+		for _, pt := range tp.Ports {
+			if pt.Port == port && pt.Protocol == proto {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+// egressOpens reports whether any egress rule allows port/proto out (to
+// any target).
+func (p ciliumNetworkPolicy) egressOpens(port, proto string) bool {
+	for _, rule := range p.Spec.Egress {
+		if rule.opensPort(port, proto) {
+			return true
+		}
+	}
+	return false
+}
+
+// egressOpensToEntity reports whether an egress rule allows port/proto to a
+// named Cilium entity (e.g. "world").
+func (p ciliumNetworkPolicy) egressOpensToEntity(port, proto, entity string) bool {
+	for _, rule := range p.Spec.Egress {
+		if !rule.opensPort(port, proto) {
+			continue
+		}
+		for _, e := range rule.ToEntities {
+			if e == entity {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+// egressOpensToInstance reports whether an egress rule allows port/proto to
+// an in-cluster endpoint selected by app.kubernetes.io/instance.
+func (p ciliumNetworkPolicy) egressOpensToInstance(port, proto, instance string) bool {
+	for _, rule := range p.Spec.Egress {
+		if !rule.opensPort(port, proto) {
+			continue
+		}
+		for _, ep := range rule.ToEndpoints {
+			if ep.MatchLabels["app.kubernetes.io/instance"] == instance {
+				return true
+			}
+		}
+	}
+	return false
 }
 
 // k8sService is the rendered NodePort Service shape we assert on.
