@@ -160,21 +160,24 @@ impl SmSessionLocalClaims {
             return;
         }
         let observed_stream_id = stream_id.to_string();
-        tokio::spawn(async move {
-            match tokio::time::timeout(USER_FORCE_DETACH_ACK_TIMEOUT, ack_rx).await {
-                Ok(Ok(_outcome)) => {}
-                Ok(Err(_)) | Err(_) => {
-                    tracing::warn!(
-                        stream_id = %observed_stream_id,
-                        jid = %jid,
-                        "demoted SM stream's connection never acknowledged termination"
-                    );
-                    crate::telemetry::mark_span_error(
-                        "sm_session_local_claims: attached force-detach was not acknowledged",
-                    );
+        // Instrumented with the caller's span so the warn keeps the
+        // lease-reconcile correlation fields; a bare spawn would emit it
+        // unparented.
+        tokio::spawn(tracing::Instrument::instrument(
+            async move {
+                match tokio::time::timeout(USER_FORCE_DETACH_ACK_TIMEOUT, ack_rx).await {
+                    Ok(Ok(_outcome)) => {}
+                    Ok(Err(_)) | Err(_) => {
+                        tracing::warn!(
+                            stream_id = %observed_stream_id,
+                            jid = %jid,
+                            "demoted SM stream's connection never acknowledged termination"
+                        );
+                    }
                 }
-            }
-        });
+            },
+            tracing::Span::current(),
+        ));
     }
 }
 

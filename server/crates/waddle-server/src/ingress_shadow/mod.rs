@@ -5899,6 +5899,7 @@ mod tests {
     /// the attached SM claim release never runs (#1724 review finding).
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn forced_teardown_releases_pending_activity_for_stream_idle_waiters() {
+        let _metrics = waddle_xmpp::telemetry::test_support::acquire().await;
         let started = Arc::new(Notify::new());
         let handle = IngressShadowHandle::spawn_test_worker(2, 1, {
             let started = started.clone();
