@@ -1148,6 +1148,47 @@ async fn cleanup_connection_shutdown_inner(
                         .connection_registry
                         .unregister_if_owner(&jid, owner)
                         .is_some();
+                    // The failed fenced store has already inserted the
+                    // detached session into the in-memory registry (the
+                    // durable snapshot rolled back), so a fence check that
+                    // raced a demotion would otherwise strand the unacked
+                    // queue memory-only. Take every detached session for
+                    // this JID back out and run the XEP-0198 §5 promote →
+                    // confirm chain on it (#1097 contract) — the safety net
+                    // for every check-then-act window around detach.
+                    match state
+                        .deps
+                        .protocol
+                        .sm_session_registry
+                        .invalidate_sessions_for_jid(&jid)
+                        .await
+                    {
+                        Ok(stranded) if !stranded.is_empty() => {
+                            crate::sm_promotion::promote_displaced_sessions(
+                                stranded.clone(),
+                                crate::sm_promotion::DisplacedPromotionDeps {
+                                    sm_registry: &state.deps.protocol.sm_session_registry,
+                                    connection_registry: &state.deps.protocol.connection_registry,
+                                    user_registry: &state.deps.protocol.user_registry,
+                                    pending_storage: &state.deps.protocol.pending_delivery_storage,
+                                    blocking_storage: state.deps.protocol.blocking_storage.as_ref(),
+                                    server_domain: state.deps.auth_state.xmpp_domain.as_str(),
+                                },
+                            )
+                            .await;
+                            for dead in stranded {
+                                cleanup_invalidated_detached_session(state, dead, None).await;
+                            }
+                        }
+                        Ok(_) => {}
+                        Err(error) => {
+                            warn!(
+                                jid = %jid,
+                                %error,
+                                "failed to reclaim stranded detached sessions after detach failure"
+                            );
+                        }
+                    }
                     forget_terminal_shadow_stream_and_release_claim(state, &conn.sm_state).await;
                     let cleanup_origin = clustered_cleanup_origin(state, &jid, owner).await;
                     if detach_fail_removed {
