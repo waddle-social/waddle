@@ -865,14 +865,7 @@ impl IngressShadowHandle {
         let shutdown = Arc::new(IngressShadowShutdown::default());
         let scheduler_shutdown = shutdown.clone();
         let scheduler = tokio::spawn(
-            IngressShadowScheduler::new(
-                rx,
-                max_concurrency,
-                execute,
-                stream_activity.clone(),
-                scheduler_shutdown,
-            )
-            .run(),
+            IngressShadowScheduler::new(rx, max_concurrency, execute, scheduler_shutdown).run(),
         );
         let retirement_retry_dispatcher = RetirementRetryDispatcher {
             state: Arc::new(std::sync::Mutex::new(RetirementRetryState {
@@ -2399,7 +2392,6 @@ struct IngressShadowScheduler {
     completion_rx: mpsc::UnboundedReceiver<SmSessionId>,
     execute: IngressShadowExecutor,
     max_concurrency: usize,
-    stream_activity: Arc<std::sync::Mutex<StreamActivityState>>,
     shutdown: Arc<IngressShadowShutdown>,
     active_streams: HashSet<SmSessionId>,
     ready_streams: VecDeque<SmSessionId>,
@@ -2413,7 +2405,6 @@ impl IngressShadowScheduler {
         rx: mpsc::UnboundedReceiver<QueuedIngressShadowTask>,
         max_concurrency: usize,
         execute: IngressShadowExecutor,
-        stream_activity: Arc<std::sync::Mutex<StreamActivityState>>,
         shutdown: Arc<IngressShadowShutdown>,
     ) -> Self {
         let (completion_tx, completion_rx) = mpsc::unbounded_channel();
@@ -2423,7 +2414,6 @@ impl IngressShadowScheduler {
             completion_rx,
             execute,
             max_concurrency: max_concurrency.max(1),
-            stream_activity,
             shutdown,
             active_streams: HashSet::new(),
             ready_streams: VecDeque::new(),
