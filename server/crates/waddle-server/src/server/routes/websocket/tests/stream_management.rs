@@ -875,6 +875,18 @@ async fn timed_out_inbound_stanza_detaches_and_resumes_before_the_hole() {
     conn.registry_owner = Some(owner);
     conn.sm_state
         .enable("timeout-detach".to_string(), true, Some(300));
+    // A production enabled stream always carries a live claim fence;
+    // without one the fenceless teardown promotes terminally instead of
+    // taking the detach path this test exercises.
+    drop(
+        state
+            .deps
+            .protocol
+            .sm_session_registry
+            .ensure_session_claim("timeout-detach")
+            .await
+            .expect("enable claim"),
+    );
 
     let handled = conn.sm_inbound_completion.reserve(&conn.sm_state);
     settle_inbound_dispatch(
@@ -5915,6 +5927,45 @@ async fn fenceless_cross_node_resume_teardown_also_promotes_terminally() {
 }
 
 #[tokio::test]
+async fn fenceless_ordinary_close_also_promotes_terminally() {
+    // Demotion's forget-first signal window can race an ordinary socket
+    // close: cleanup then arrives with no force-detach request consumed.
+    // The fenceless resumable teardown must still promote terminally
+    // rather than attempt the doomed detach.
+    let registry = Arc::new(InMemorySmSessionRegistry::new());
+    let state = create_test_websocket_state_with_sm_registry(Arc::clone(&registry)).await;
+    let jid: FullJid = "alice@example.com/ordinary-claim-loss"
+        .parse()
+        .expect("jid");
+    let mut conn = WsConnState::new();
+    conn.phase = ConnectionPhase::ready(jid.clone(), false);
+    register_sm_publish_owner(state.as_ref(), &mut conn, &jid);
+
+    let responses = handle_xmpp_frame(
+        "<enable xmlns='urn:xmpp:sm:3' resume='true'/>",
+        "example.com",
+        state.as_ref(),
+        &mut conn,
+    )
+    .await;
+    let enabled = Element::from_str(&responses[0]).expect("enabled xml");
+    let stream_id = enabled.attr("id").expect("stream id").to_string();
+    conn.publish_pending_sm_enable(state.as_ref());
+    registry.forget_claim_locally(&stream_id).await;
+
+    let (_outbound_tx, mut outbound_rx) = mpsc::channel(1);
+    assert_eq!(
+        cleanup_connection_shutdown(state.as_ref(), &mut outbound_rx, &mut conn, false).await,
+        super::super::cleanup::ConnectionShutdownOutcome::NotPersisted
+    );
+    assert!(conn.sm_recovery_required);
+    assert!(!registry
+        .locally_owned_claim_ids()
+        .expect("local claim snapshot")
+        .contains(&stream_id));
+}
+
+#[tokio::test]
 async fn resumable_clean_close_retains_failed_exact_release_for_retry() {
     let claim_store = Arc::new(HangingEnsureClaimStore {
         inner: InProcessClaimStore::new(),
@@ -8132,6 +8183,18 @@ async fn cleanup_shutdown_detaches_resumable_session_on_transport_drop() {
     conn.roster_interested = true;
     conn.sm_state
         .enable("stream-detach".to_string(), true, Some(300));
+    // A production enabled stream always carries a live claim fence;
+    // without one the fenceless teardown promotes terminally instead of
+    // taking the detach path this test exercises.
+    drop(
+        state
+            .deps
+            .protocol
+            .sm_session_registry
+            .ensure_session_claim("stream-detach")
+            .await
+            .expect("enable claim"),
+    );
     state
         .deps
         .protocol
@@ -8231,6 +8294,18 @@ async fn cleanup_shutdown_detach_prunes_actor_tree_entry() {
     conn.registry_owner = Some(owner);
     conn.sm_state
         .enable("stream-detach-actor".to_string(), true, Some(300));
+    // A production enabled stream always carries a live claim fence;
+    // without one the fenceless teardown promotes terminally instead of
+    // taking the detach path this test exercises.
+    drop(
+        state
+            .deps
+            .protocol
+            .sm_session_registry
+            .ensure_session_claim("stream-detach-actor")
+            .await
+            .expect("enable claim"),
+    );
 
     let _ = cleanup_connection_shutdown(state.as_ref(), &mut rx, &mut conn, false).await;
 
@@ -8836,6 +8911,18 @@ async fn sm_detach_on_transport_drop_does_not_evict_sfu_call_session() {
     conn.registry_owner = Some(owner);
     conn.sm_state
         .enable("stream-detach-call".to_string(), true, Some(300));
+    // A production enabled stream always carries a live claim fence;
+    // without one the fenceless teardown promotes terminally instead of
+    // taking the detach path this test exercises.
+    drop(
+        state
+            .deps
+            .protocol
+            .sm_session_registry
+            .ensure_session_claim("stream-detach-call")
+            .await
+            .expect("enable claim"),
+    );
 
     let _ = cleanup_connection_shutdown(state.as_ref(), &mut rx, &mut conn, false).await;
 

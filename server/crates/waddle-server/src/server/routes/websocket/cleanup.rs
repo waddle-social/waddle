@@ -715,19 +715,20 @@ async fn cleanup_connection_shutdown_inner(
         return promote_terminal_recovery(state, outbound_rx, &jid, conn).await;
     }
 
-    // Claim-loss force-detach (an attached SM claim was demoted or
-    // terminally released, so the live fence is already gone): a resumable
-    // detach is doomed here — the fenced snapshot write fails `NotOwner`
-    // after `store_session` has inserted the detached session in memory,
-    // leaving the unacked queue neither durably resumable nor promoted.
-    // Route it through terminal XEP-0198 §5 promotion instead. This is
-    // origin-independent on purpose: `authoritative_force_detach_origin`
-    // can rank a queued CrossNodeResume above the demotion's
-    // OwnerManagedRetirement, and a fenceless detach is equally doomed
-    // under either. Force-detaches that still hold a live fence keep the
-    // ordinary detach-for-resume path.
-    if force_detach
-        && conn.sm_state.is_resumable()
+    // Claim-loss teardown (an attached SM claim was demoted or terminally
+    // released, so the live fence is already gone): a resumable detach is
+    // doomed here — the fenced snapshot write fails `NotOwner` after
+    // `store_session` has inserted the detached session in memory, leaving
+    // the unacked queue neither durably resumable nor promoted. Route it
+    // through terminal XEP-0198 §5 promotion instead. Deliberately
+    // independent of both the force-detach origin
+    // (`authoritative_force_detach_origin` can rank a queued
+    // CrossNodeResume above the demotion's OwnerManagedRetirement) and of
+    // whether a detach signal was observed at all: demotion's forget-first
+    // signal window can race an ordinary socket or keepalive close, whose
+    // cleanup arrives with no force-detach request yet consumed. Teardowns
+    // that still hold a live fence keep their ordinary paths.
+    if conn.sm_state.is_resumable()
         && !conn.sm_recovery_required
         && conn.sm_state.stream_id.as_deref().is_some_and(|stream_id| {
             state
