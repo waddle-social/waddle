@@ -1222,6 +1222,105 @@ mod inbound_dispatch_tests {
 
     #[cfg(feature = "clustering")]
     #[tokio::test]
+    async fn resumed_shadow_message_parks_with_the_retained_claim_fence() {
+        let metrics = waddle_xmpp::telemetry::test_support::acquire().await;
+        let registry = Arc::new(InMemorySmSessionRegistry::new());
+        let stream_id = "shadow-after-resume";
+        let publication = registry
+            .ensure_session_claim(stream_id)
+            .await
+            .expect("enable claim");
+        drop(publication);
+
+        let jid = "alice@example.com/phone"
+            .parse::<jid::FullJid>()
+            .expect("jid");
+        let mut detached_state = waddle_xmpp::stream_management::StreamManagementState::new();
+        detached_state.enable(stream_id.to_string(), true, Some(300));
+        let detached = detached_state
+            .to_detached_session(waddle_xmpp::stream_management::DetachedSessionSnapshot {
+                user_id: "alice@example.com".to_string(),
+                jid,
+                carbons_enabled: false,
+                roster_interested: false,
+                blocklist_interested: false,
+                presence_available: false,
+                presence_show: None,
+                presence_status: None,
+                presence_priority: 0,
+                presence_payloads: Vec::new(),
+                pending_subscribes_flushed: false,
+            })
+            .expect("resumable snapshot");
+        registry
+            .store_session(detached)
+            .await
+            .expect("detach session");
+        registry
+            .claim_session(stream_id)
+            .await
+            .expect("claim session")
+            .expect("detached session exists");
+        let completion = registry
+            .complete_claim_if_resumable(stream_id, 0)
+            .await
+            .expect("complete resume")
+            .expect("claimed session exists");
+        let waddle_xmpp::stream_management::SmClaimCompletion::Resumed(resumed) = completion else {
+            panic!("resume must succeed")
+        };
+        let mut sm_state = waddle_xmpp::stream_management::StreamManagementState::new();
+        sm_state.restore_from_session(&resumed);
+
+        let websocket_state =
+            crate::server::routes::websocket::tests::create_test_websocket_state_with_sm_registry_and_ingress_shadow(
+                registry,
+                IngressShadowHandle::spawn_test_worker(8, 1, |_kind, _stream_id| async move {}),
+            )
+            .await;
+        let session = crate::auth::Session::new("alice@example.com", "alice", "alice");
+        let stanza = Stanza::Message(xmpp_parsers::message::Message::new(Some(
+            "room@muc.example.com".parse::<jid::Jid>().expect("jid"),
+        )));
+        let capture = ingress_effect_capture_for_stanza(websocket_state.as_ref(), None, &stanza)
+            .expect("message capture");
+        let parked_before = metrics
+            .counter_sum("ingress.shadow.candidates", &[("outcome", "parked")])
+            .unwrap_or(0);
+        let no_fence_before = metrics
+            .counter_sum(
+                "ingress.shadow.candidates",
+                &[("outcome", "no_claim_fence")],
+            )
+            .unwrap_or(0);
+
+        assert!(parked_shadow_submission(
+            websocket_state.as_ref(),
+            &sm_state,
+            Some(&session),
+            &stanza,
+            Some(capture),
+        )
+        .is_some());
+        assert_eq!(
+            metrics
+                .counter_sum("ingress.shadow.candidates", &[("outcome", "parked")])
+                .unwrap_or(0),
+            parked_before + 1
+        );
+        assert_eq!(
+            metrics
+                .counter_sum(
+                    "ingress.shadow.candidates",
+                    &[("outcome", "no_claim_fence")],
+                )
+                .unwrap_or(0),
+            no_fence_before
+        );
+    }
+
+    #[cfg(feature = "clustering")]
+    #[tokio::test]
     async fn enabled_shadow_counts_fenced_message_without_principal() {
         let metrics = waddle_xmpp::telemetry::test_support::acquire().await;
         let registry = Arc::new(InMemorySmSessionRegistry::new());

@@ -418,6 +418,9 @@ async fn xep0198_claimed_session_remains_writable_until_completed() {
         .expect("claim session")
         .expect("session exists");
     assert_eq!(claimed.unacked_stanzas.len(), 0);
+    let claimed_fence = registry
+        .current_sm_claim_fence("stream-1")
+        .expect("claimed session fence");
 
     assert!(registry
         .record_stanza_for_detached_bound_resource(
@@ -439,6 +442,11 @@ async fn xep0198_claimed_session_remains_writable_until_completed() {
     assert_eq!(completed.unacked_stanzas.len(), 1);
     assert!(completed.unacked_stanzas[0].stanza_xml.contains("handoff"));
     assert_eq!(registry.session_count().await, 0);
+    assert_eq!(
+        registry.current_sm_claim_fence("stream-1"),
+        Some(claimed_fence),
+        "successful XEP-0198 resume keeps claim custody while attached"
+    );
 }
 
 #[tokio::test]

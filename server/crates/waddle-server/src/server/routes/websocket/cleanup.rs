@@ -696,7 +696,7 @@ async fn cleanup_connection_shutdown_inner(
     // promotes this task's already accepted delivery and leaves those shared
     // resources alone.
     if superseded && !conn.sm_recovery_required {
-        forget_terminal_shadow_stream(state, &conn.sm_state);
+        forget_terminal_shadow_stream_and_release_claim(state, &conn.sm_state).await;
         return ConnectionShutdownOutcome::NotPersisted;
     }
     // Note: we deliberately do NOT mirror `conn.phase` Closing into
@@ -730,7 +730,7 @@ async fn cleanup_connection_shutdown_inner(
         }
         let Some(owner) = conn.registry_owner.as_ref() else {
             debug!(jid = %jid, "Skipped SM detach for connection without registry ownership");
-            forget_terminal_shadow_stream(state, &conn.sm_state);
+            forget_terminal_shadow_stream_and_release_claim(state, &conn.sm_state).await;
             return ConnectionShutdownOutcome::NotPersisted;
         };
         let presence_state = state
@@ -749,7 +749,7 @@ async fn cleanup_connection_shutdown_inner(
             }
             super::stream_management::defer_superseded_sm_claim(state, &conn.sm_state);
             debug!(jid = %jid, "Skipped SM detach for non-owned registry entry");
-            forget_terminal_shadow_stream(state, &conn.sm_state);
+            forget_terminal_shadow_stream_and_release_claim(state, &conn.sm_state).await;
             return ConnectionShutdownOutcome::NotPersisted;
         };
 
@@ -1114,7 +1114,7 @@ async fn cleanup_connection_shutdown_inner(
                 }
                 Err(err) => {
                     warn!(jid = %jid, error = %err, "Failed to detach SM session; falling back to full cleanup");
-                    forget_terminal_shadow_stream(state, &conn.sm_state);
+                    forget_terminal_shadow_stream_and_release_claim(state, &conn.sm_state).await;
                     let detach_fail_removed = state
                         .deps
                         .protocol
@@ -1208,8 +1208,48 @@ async fn cleanup_connection_shutdown_inner(
     }
     // Every path reaching here is a non-detach (full-cleanup or no-op)
     // teardown — never a persisted resumable snapshot.
-    forget_terminal_shadow_stream(state, &conn.sm_state);
+    forget_terminal_shadow_stream_and_release_claim(state, &conn.sm_state).await;
     ConnectionShutdownOutcome::NotPersisted
+}
+
+async fn forget_terminal_shadow_stream_and_release_claim(
+    state: &WebSocketState,
+    sm_state: &waddle_xmpp::stream_management::StreamManagementState,
+) {
+    let Some(stream_id) = forget_terminal_shadow_stream_and_wait(state, sm_state).await else {
+        return;
+    };
+    state
+        .deps
+        .protocol
+        .sm_session_registry
+        .release_attached_session_claim(&stream_id)
+        .await;
+}
+
+async fn forget_terminal_shadow_stream_and_wait(
+    state: &WebSocketState,
+    sm_state: &waddle_xmpp::stream_management::StreamManagementState,
+) -> Option<String> {
+    // Retire first to close admission, then wait for every previously
+    // admitted task (including the retirement task) to drain before ending
+    // the fence those tasks captured at observation time.
+    forget_terminal_shadow_stream(state, sm_state);
+    let stream_id = sm_state.stream_id.clone()?;
+    let session_id = waddle_xmpp::pending_delivery::SmSessionId::new(stream_id.clone());
+    while !state
+        .deps
+        .protocol
+        .ingress_shadow
+        .wait_for_stream_idle(&session_id, std::time::Duration::from_secs(30))
+        .await
+    {
+        warn!(
+            %session_id,
+            "terminal SM cleanup is still waiting for admitted ingress shadow work to drain"
+        );
+    }
+    Some(stream_id)
 }
 
 fn forget_terminal_shadow_stream(
@@ -1867,7 +1907,7 @@ async fn refuse_detach_without_principal(
     row_recovery: TerminalRowRecovery,
     terminal_route_removal: TerminalRouteRemoval,
 ) -> ConnectionShutdownOutcome {
-    forget_terminal_shadow_stream(state, &conn.sm_state);
+    let _ = forget_terminal_shadow_stream_and_wait(state, &conn.sm_state).await;
     // A terminal session must disappear from the exact-FullJID routing table
     // before promotion. Otherwise `send_to` can successfully target this
     // closed channel and drop a <no-store/> stanza instead of taking the
