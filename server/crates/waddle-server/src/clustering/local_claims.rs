@@ -40,7 +40,7 @@ use waddle_xmpp::registry::{
     ForceDetachOutcome, ForceDetachRequest, GetResources, GetUserForLocalClaim, ListUsers,
     ListUsersOwnedBy, UserRegistryActor,
 };
-use waddle_xmpp::stream_management::InMemorySmSessionRegistry;
+use waddle_xmpp::stream_management::{InMemorySmSessionRegistry, SmSessionRegistry as _};
 
 use super::self_fence::{LocallyClaimedEntities, ReclaimedHydrationHandoff};
 
@@ -124,43 +124,60 @@ impl SmSessionLocalClaims {
         // signal window below: demotion's premise is that the `ClaimStore`
         // row is gone or reassigned, so an in-flight fenced write fails
         // `NotOwner` at the database regardless of the in-memory fence.
+        //
+        // Whether the stream was in the detached/claimed pool is captured
+        // BEFORE the forget: a detached demotion (the terminal-sweep bulk
+        // case) has no socket to signal and must not spawn a retry poller.
+        let was_pooled = registry
+            .peek_session(stream_id)
+            .await
+            .ok()
+            .flatten()
+            .is_some();
         registry.forget_claim_locally(stream_id).await;
-
-        // Then, best effort and without awaiting the connection: hand the
-        // attached WebSocket (if any) its termination signal so inbound
-        // processing stops instead of riding on without local authority. A
-        // wedged or torn-down connection changes nothing above; the
-        // acknowledgement is observed off-path for telemetry only. A later
-        // clean detach re-ensures the claim idempotently and rebuilds
-        // consistent custody if this node in fact still owns the entity.
-        let attached = self.connection_registry.get().and_then(|connections| {
-            let session_id = waddle_xmpp::pending_delivery::SmSessionId::new(stream_id);
-            let jid = connections.sm_stream_owner(&session_id)?;
-            let entry = connections.get_entry(&jid)?;
-            (entry.sm_stream_id().as_ref() == Some(&session_id)).then_some((jid, entry))
-        });
-        let Some((jid, entry)) = attached else {
+        if was_pooled {
+            return;
+        }
+        let Some(connections) = self.connection_registry.get() else {
             return;
         };
-        let (ack, ack_rx) = tokio::sync::oneshot::channel();
-        let request = ForceDetachRequest {
-            origin: waddle_xmpp::registry::ForceDetachOrigin::OwnerManagedRetirement,
-            requester_bare_jid: jid.to_bare(),
-            ack,
-        };
-        // Delivery and acknowledgement both live in a detached,
-        // span-instrumented task, so `demote` itself stays purely local and
-        // returns immediately. The send is deliberately unbounded:
-        // `mpsc::Sender::send` waits for capacity and fails only when the
-        // receiver is gone — a full channel eventually drains or the
-        // connection tears down (closing the channel), and either way the
-        // signal is never silently dropped for a socket whose fence is
-        // already removed (a `try_send` or a send timeout would drop it).
-        let sender = entry.force_detach_sender();
+        let connections = Arc::clone(connections);
         let observed_stream_id = stream_id.to_string();
+        // Delivery, including the attached-binding lookup itself, lives in a
+        // detached, span-instrumented, bounded task so `demote` returns
+        // immediately. The lookup RETRIES briefly: a fresh `<enable/>` (or a
+        // resume) records its claim fence before the stream-owner index is
+        // published, so a demotion in that window would otherwise remove the
+        // fence and skip the termination signal entirely. A stream that
+        // never appears in the index within the budget was not attached.
+        // The send is deliberately unbounded once a binding is found:
+        // `mpsc::Sender::send` waits for capacity and fails only when the
+        // receiver is gone — the signal is never silently dropped.
         tokio::spawn(tracing::Instrument::instrument(
             async move {
-                if sender.send(request).await.is_err() {
+                let session_id =
+                    waddle_xmpp::pending_delivery::SmSessionId::new(observed_stream_id.as_str());
+                let deadline = tokio::time::Instant::now() + USER_FORCE_DETACH_ACK_TIMEOUT;
+                let (jid, entry) = loop {
+                    let attached = connections.sm_stream_owner(&session_id).and_then(|jid| {
+                        let entry = connections.get_entry(&jid)?;
+                        (entry.sm_stream_id().as_ref() == Some(&session_id)).then_some((jid, entry))
+                    });
+                    if let Some(found) = attached {
+                        break found;
+                    }
+                    if tokio::time::Instant::now() >= deadline {
+                        return;
+                    }
+                    tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+                };
+                let (ack, ack_rx) = tokio::sync::oneshot::channel();
+                let request = ForceDetachRequest {
+                    origin: waddle_xmpp::registry::ForceDetachOrigin::OwnerManagedRetirement,
+                    requester_bare_jid: jid.to_bare(),
+                    ack,
+                };
+                if entry.force_detach_sender().send(request).await.is_err() {
                     // Receiver gone: the connection is already inside its
                     // own teardown, which owns the rest.
                     return;
