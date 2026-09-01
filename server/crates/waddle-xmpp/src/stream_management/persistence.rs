@@ -421,9 +421,10 @@ pub trait SmPersistenceStorage: Send + Sync {
     /// Called by `InMemorySmSessionRegistry` (`session_registry/claims.rs`)
     /// every time this node's `ClaimStore` claim for `stream_id` ends —
     /// `release_claim`/`complete_claim`/`complete_claim_if_resumable`'s
-    /// terminal branches, and `invalidate_sessions_for_jid`'s removal of a
-    /// claimed session — so a cache keyed by stream_id never outlives the
-    /// claim it caches the owner/epoch pair for. Default no-op: the portable
+    /// terminal branches, attached terminal teardown, and
+    /// `invalidate_sessions_for_jid`'s removal of a claimed session — so a
+    /// cache keyed by stream_id never outlives the claim it caches the
+    /// owner/epoch pair for. Default no-op: the portable
     /// (single-node, in-memory) implementation has no such cache (its
     /// `ClaimStore` is always `InProcessClaimStore`, which is cheap to call
     /// directly on every write); only the Postgres-fenced implementation

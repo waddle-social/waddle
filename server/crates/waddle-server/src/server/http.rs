@@ -741,6 +741,10 @@ async fn create_websocket_state(
         &state,
     )
     .await?;
+    #[cfg(feature = "clustering")]
+    if let Some(local_claims) = &state.clustering_claims.local_claims {
+        local_claims.wire_connection_registry(Arc::clone(&connection_registry));
+    }
     // Pending delivery opens here (rather than with the other protocol
     // stores below) so that EVERY durable pool is registered before the
     // startup attestation gate that follows — it is the last registrant.

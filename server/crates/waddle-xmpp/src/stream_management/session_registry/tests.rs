@@ -2942,6 +2942,119 @@ async fn test_claimed_session_remains_writable_for_handoff_fanout() {
 }
 
 #[tokio::test]
+async fn successful_resume_retains_claim_fence_through_reattach_and_next_detach() {
+    use crate::ownership::ClaimStore as _;
+
+    let store = std::sync::Arc::new(crate::ownership::InProcessClaimStore::new());
+    let identity = crate::ownership::NodeIdentity::local();
+    let registry = InMemorySmSessionRegistry::with_capacity(1).with_claim_store(
+        store.clone(),
+        crate::ownership::SharedNodeIdentity::new(identity.clone()),
+    );
+    let stream_id = "resumed-claim-custody";
+
+    let publication = registry
+        .ensure_session_claim(stream_id)
+        .await
+        .expect("enable claim");
+    drop(publication);
+    let enabled_fence = registry
+        .current_sm_claim_fence(stream_id)
+        .expect("enable fence");
+    registry
+        .store_session(make_test_session(stream_id))
+        .await
+        .expect("first detach");
+    registry
+        .claim_session(stream_id)
+        .await
+        .expect("claim detached session")
+        .expect("detached session exists");
+
+    let completion = registry
+        .complete_claim_if_resumable(stream_id, 12)
+        .await
+        .expect("complete resumable claim")
+        .expect("claimed session exists");
+    let SmClaimCompletion::Resumed(resumed) = completion else {
+        panic!("valid resume must complete")
+    };
+    assert_eq!(
+        registry.current_sm_claim_fence(stream_id),
+        Some(enabled_fence.clone()),
+        "resume must retain the live exact fence"
+    );
+    let entity = crate::ownership::Entity::new(
+        crate::ownership::EntityType::SmSession,
+        stream_id.to_string(),
+    );
+    let held = store
+        .current_claim(&entity)
+        .await
+        .expect("claim lookup")
+        .expect("claim remains held after resume");
+    assert_eq!(held.owner, identity);
+    assert_eq!(held.claim_epoch, enabled_fence.epoch());
+    assert_eq!(registry.pending_claim_release_count(), 0);
+    assert_eq!(registry.claim_fence_capacity_used(), 1);
+
+    registry
+        .store_session(resumed)
+        .await
+        .expect("second detach self-reacquires claim");
+    assert_eq!(
+        registry.current_sm_claim_fence(stream_id),
+        Some(enabled_fence),
+        "detach self-reacquire must preserve the epoch"
+    );
+    assert_eq!(registry.pending_claim_release_count(), 0);
+    assert_eq!(registry.claim_fence_capacity_used(), 1);
+}
+
+#[tokio::test]
+async fn expired_claim_completion_still_releases_claim_and_fence() {
+    use crate::ownership::ClaimStore as _;
+
+    let store = std::sync::Arc::new(crate::ownership::InProcessClaimStore::new());
+    let registry = InMemorySmSessionRegistry::new().with_claim_store(
+        store.clone(),
+        crate::ownership::SharedNodeIdentity::new(crate::ownership::NodeIdentity::local()),
+    );
+    let stream_id = "expired-claim-completion";
+    let publication = registry
+        .ensure_session_claim(stream_id)
+        .await
+        .expect("claim admission");
+    drop(publication);
+    let mut expired = make_test_session(stream_id);
+    expired.max_resume_time = Some(0);
+    registry
+        .claimed_sessions
+        .write()
+        .expect("claimed sessions")
+        .insert(stream_id.to_string(), expired);
+
+    let completion = registry
+        .complete_claim(stream_id)
+        .await
+        .expect("complete expired claim")
+        .expect("expired claim exists");
+    assert!(matches!(completion, SmClaimCompletion::Expired(_)));
+    assert_eq!(registry.current_sm_claim_fence(stream_id), None);
+    assert_eq!(registry.pending_claim_release_count(), 0);
+    assert_eq!(registry.claim_fence_capacity_used(), 0);
+    let entity = crate::ownership::Entity::new(
+        crate::ownership::EntityType::SmSession,
+        stream_id.to_string(),
+    );
+    assert!(store
+        .current_claim(&entity)
+        .await
+        .expect("claim lookup")
+        .is_none());
+}
+
+#[tokio::test]
 async fn blocklist_interested_detached_resources_include_claimed_sessions_and_record_pushes() {
     let registry = InMemorySmSessionRegistry::new();
 
@@ -3061,6 +3174,8 @@ async fn complete_claim_releases_when_handoff_creates_replay_gap() {
         !restored.can_resume_from(0),
         "restored session must continue rejecting the stale h value"
     );
+    assert_eq!(registry.current_sm_claim_fence("stream-handoff-gap"), None);
+    assert_eq!(registry.pending_claim_release_count(), 0);
 }
 
 #[tokio::test]
@@ -3116,6 +3231,8 @@ async fn complete_claim_releases_when_client_handled_count_is_too_high() {
         .acquire(&entity, &me)
         .await
         .expect("claim released on HandledCountTooHigh — entity re-acquirable");
+    assert_eq!(registry.current_sm_claim_fence("stream-h-too-high"), None);
+    assert_eq!(registry.pending_claim_release_count(), 0);
 }
 
 #[tokio::test]

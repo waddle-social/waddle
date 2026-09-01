@@ -284,6 +284,55 @@ impl InMemorySmSessionRegistry {
         fences.get(stream_id).cloned()
     }
 
+    /// End the exact claim held by an attached SM stream that will not enter
+    /// the detached resumable pool. The live fence is first converted into
+    /// the registry's existing terminal retry inventory, so a failed or
+    /// timed-out release retains the immutable owner+epoch for the janitor.
+    pub async fn release_attached_session_claim(&self, stream_id: &str) {
+        let Ok(stream_lock) = self.stream_lock(stream_id) else {
+            return;
+        };
+        let _stream_guard = stream_lock.lock().await;
+        let detached_or_claimed = self
+            .sessions
+            .read()
+            .map(|sessions| sessions.contains_key(stream_id))
+            .unwrap_or(true)
+            || self
+                .claimed_sessions
+                .read()
+                .map(|claimed| claimed.contains_key(stream_id))
+                .unwrap_or(true)
+            || self
+                .pending_promotions
+                .read()
+                .map(|promotions| promotions.contains(stream_id))
+                .unwrap_or(true);
+        if detached_or_claimed {
+            tracing::warn!(
+                stream_id = %stream_id,
+                "refused to terminalize an SM claim still backed by registry session state"
+            );
+            return;
+        }
+        let fence = self
+            .claim_fences
+            .read()
+            .ok()
+            .and_then(|fences| fences.get(stream_id).cloned());
+        let Some(fence) = fence else {
+            return;
+        };
+        if !self.try_record_terminal_claim_fence(stream_id, fence.clone()) {
+            tracing::warn!(
+                stream_id = %stream_id,
+                "attached SM claim could not enter exact-release retry inventory"
+            );
+            return;
+        }
+        self.release_claim_store_entry_under(stream_id, fence).await;
+    }
+
     /// Remove every expired session and return the detached state in full.
     ///
     /// Callers (notably the server-side janitor) need the JID and stream id
@@ -2241,10 +2290,12 @@ impl InMemorySmSessionRegistry {
                     SmClaimCompletion::Resumed(session)
                 }
             });
-        if outcome.is_some() {
-            // Terminal path (ADR-0017 Phase 3 Slice 1 fix): both
-            // `Resumed` and `Expired` end this claim — release the store
-            // entry so a successful resume does not leak it forever.
+        if matches!(outcome, Some(SmClaimCompletion::Expired(_))) {
+            // Expiry ends the claim. A successful resume does not: the
+            // reattached stream keeps the exact owner+epoch fence for its
+            // attached lifetime, symmetrical with fresh `<enable/>`. Its
+            // next detach self-reacquires idempotently under that fence; a
+            // non-detach teardown releases it explicitly.
             self.release_claim_store_entry(stream_id).await;
         }
         Ok(outcome)
