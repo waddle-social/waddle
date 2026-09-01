@@ -309,7 +309,7 @@ struct QueuedIngressShadowTask {
     task: IngressShadowTask,
     permit: Option<OwnedSemaphorePermit>,
     outstanding: Option<OutstandingSubmission>,
-    pending: Option<PendingStreamTask>,
+    pending: Option<Box<PendingStreamTask>>,
 }
 
 #[cfg(feature = "clustering")]
@@ -1252,7 +1252,7 @@ fn admit_submission(
             task: submit,
             permit: Some(permit),
             outstanding: Some(outstanding),
-            pending: Some(pending),
+            pending: Some(Box::new(pending)),
         },
     ) {
         Ok(()) => {
