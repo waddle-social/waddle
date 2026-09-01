@@ -726,9 +726,11 @@ async fn handle_xmpp_websocket(
         }
     }
     if superseded {
-        if !conn.sm_recovery_required {
-            super::stream_management::defer_superseded_sm_claim(state.as_ref(), &conn.sm_state);
-        }
+        // Claim terminalization for the superseded stream happens inside
+        // cleanup's superseded branch AFTER the ingress-shadow idle barrier
+        // (`forget_terminal_shadow_stream_and_release_claim`). Deferring the
+        // claim here, pre-drain, would hand the still-captured fence to the
+        // release-retry janitor while admitted submissions are in flight.
     } else {
         if shutdown_token.is_cancelled() || admission_permit.revalidate().is_err() {
             let dropped = discard_deferred_inbound(&mut conn);

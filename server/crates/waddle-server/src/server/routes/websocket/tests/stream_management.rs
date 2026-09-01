@@ -5668,8 +5668,15 @@ async fn replaced_connection_commits_written_enable_without_publishing_stale_ali
         cleanup_connection_shutdown(state.as_ref(), &mut outbound_rx, &mut old_conn, false).await,
         super::super::cleanup::ConnectionShutdownOutcome::NotPersisted
     );
-    assert_eq!(registry.pending_claim_release_count(), 1);
-    assert_eq!(registry.retry_pending_claim_releases(1).await, 1);
+    // The superseded teardown now exact-releases immediately after the
+    // ingress-shadow idle barrier (pre-drain deferral would let the retry
+    // janitor free the fence under in-flight shadow submissions); the
+    // pending inventory is only the failed-release path.
+    assert_eq!(registry.pending_claim_release_count(), 0);
+    assert!(!registry
+        .locally_owned_claim_ids()
+        .expect("ownership inventory")
+        .contains(&stream_id.to_string()));
 }
 
 #[tokio::test]
@@ -5726,12 +5733,14 @@ async fn replacement_after_enable_publication_terminalizes_only_the_old_stream_c
         "old-stream cleanup must not alter the replacement entry"
     );
     let registry = &state.deps.protocol.sm_session_registry;
-    assert_eq!(registry.pending_claim_release_count(), 1);
-    assert!(registry
+    // Post-drain immediate exact release (see the sibling test above): the
+    // old stream's claim is gone without a janitor round-trip, and the
+    // replacement's claim state is untouched.
+    assert_eq!(registry.pending_claim_release_count(), 0);
+    assert!(!registry
         .locally_owned_claim_ids()
         .expect("ownership inventory")
         .contains(&old_stream_id));
-    assert_eq!(registry.retry_pending_claim_releases(1).await, 1);
 }
 
 #[tokio::test]

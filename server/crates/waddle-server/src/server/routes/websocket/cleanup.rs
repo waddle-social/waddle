@@ -776,7 +776,11 @@ async fn cleanup_connection_shutdown_inner(
             if conn.sm_recovery_required {
                 return promote_terminal_recovery(state, outbound_rx, &jid, conn).await;
             }
-            super::stream_management::defer_superseded_sm_claim(state, &conn.sm_state);
+            // No pre-drain claim deferral here: the release-retry janitor
+            // could release the deferred fence while admitted shadow
+            // submissions still hold it. `forget_terminal_shadow_stream_and_
+            // release_claim` drains to idle first and then terminalizes the
+            // exact claim itself.
             debug!(jid = %jid, "Skipped SM detach for non-owned registry entry");
             forget_terminal_shadow_stream_and_release_claim(state, &conn.sm_state).await;
             return ConnectionShutdownOutcome::NotPersisted;
@@ -1152,16 +1156,20 @@ async fn cleanup_connection_shutdown_inner(
                     // detached session into the in-memory registry (the
                     // durable snapshot rolled back), so a fence check that
                     // raced a demotion would otherwise strand the unacked
-                    // queue memory-only. Take every detached session for
-                    // this JID back out and run the XEP-0198 §5 promote →
+                    // queue memory-only. Take exactly THIS stream's detached
+                    // session back out and run the XEP-0198 §5 promote →
                     // confirm chain on it (#1097 contract) — the safety net
-                    // for every check-then-act window around detach.
+                    // for every check-then-act window around detach. Scoped
+                    // to the failed stream on purpose: a JID-wide
+                    // invalidation could sweep a cross-node replacement's
+                    // freshly stored snapshot for the same FullJid.
                     match state
                         .deps
                         .protocol
                         .sm_session_registry
-                        .invalidate_sessions_for_jid(&jid)
+                        .displace_stored_session_if_unclaimed(&stream_id)
                         .await
+                        .map(|stranded| stranded.into_iter().collect::<Vec<_>>())
                     {
                         Ok(stranded) if !stranded.is_empty() => {
                             crate::sm_promotion::promote_displaced_sessions(
