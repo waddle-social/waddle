@@ -198,12 +198,20 @@ pub(super) fn publish_stream_id_and_presence(
                 .map(waddle_xmpp::pending_delivery::SmSessionId::new),
         )
     {
-        super::stream_management::terminate_if_demoted_during_publication(
-            state,
-            jid,
-            owner,
-            conn.sm_state.stream_id.as_deref(),
-        );
+        // Resumable-only for the same reason as the enable site: only a
+        // resumable stream carries a claim fence.
+        if conn.sm_state.is_resumable() {
+            super::stream_management::terminate_if_demoted_during_publication(
+                state,
+                jid,
+                owner,
+                conn.sm_state
+                    .stream_id
+                    .clone()
+                    .map(waddle_xmpp::pending_delivery::SmSessionId::new)
+                    .as_ref(),
+            );
+        }
     }
 
     // Each write re-verifies ownership INSIDE the registry call: a separate

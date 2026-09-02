@@ -1239,15 +1239,31 @@ async fn cleanup_connection_shutdown_inner(
                         let _ = promote_terminal_recovery(state, outbound_rx, &jid, conn).await;
                     }
                     let cleanup_origin = clustered_cleanup_origin(state, &jid, owner).await;
+                    // Re-check for a same-FullJID replacement AFTER the long
+                    // awaits above (reclamation, promotion, shadow drain):
+                    // our own route was unregistered before them, so any
+                    // entry now present is a replacement that may already
+                    // have joined rooms — its occupancy must not be swept by
+                    // this old session's leave (same rule as the superseded
+                    // path); the ghost-occupant janitor covers an old
+                    // occupancy the replacement did not re-join.
+                    let replacement_bound_during_recovery = state
+                        .deps
+                        .protocol
+                        .connection_registry
+                        .get_entry(&jid)
+                        .is_some();
                     if detach_fail_removed {
-                        cleanup_muc_presence_with_origin(
-                            state,
-                            &jid,
-                            cleanup_origin.as_ref(),
-                            waddle_xmpp::muc::room_actor::LeaveAttemptId::generate(),
-                            SweepFailureRecording::RecordSweep,
-                        )
-                        .await;
+                        if !replacement_bound_during_recovery {
+                            cleanup_muc_presence_with_origin(
+                                state,
+                                &jid,
+                                cleanup_origin.as_ref(),
+                                waddle_xmpp::muc::room_actor::LeaveAttemptId::generate(),
+                                SweepFailureRecording::RecordSweep,
+                            )
+                            .await;
+                        }
                         // ADR-0017 Phase 1: mirror the unregister into the
                         // actor tree on the SM-detach-failure fallback. This
                         // session is never stored, so no SM-expiry janitor
@@ -1267,9 +1283,13 @@ async fn cleanup_connection_shutdown_inner(
                     // fails we fall back to a full unregister, so the
                     // caps resource→ver mapping AND any pending
                     // disco#info resolution must be cleared too —
-                    // otherwise stale state lingers indefinitely.
-                    state.deps.protocol.caps_resolver.drop_resource(&jid);
-                    if !detach_fail_removed {
+                    // otherwise stale state lingers indefinitely. Same
+                    // replacement guard as the MUC sweep: a live
+                    // replacement re-published its own caps at bind.
+                    if !replacement_bound_during_recovery {
+                        state.deps.protocol.caps_resolver.drop_resource(&jid);
+                    }
+                    if !detach_fail_removed && !replacement_bound_during_recovery {
                         cleanup_muc_presence(state, &jid).await;
                     }
                     return ConnectionShutdownOutcome::NotPersisted;
@@ -3009,12 +3029,30 @@ pub(super) async fn cleanup_invalidated_detached_session(
         }
         // XEP-0115 §6: clear the resource→ver mapping AND any stuck
         // pending disco#info resolution for this resource so an
-        // unresumed detached session doesn't leak indefinitely.
-        state
+        // unresumed detached session doesn't leak indefinitely. Gated on no
+        // UNRELATED live session holding the resource: a same-FullJID
+        // replacement that bound while the invalidation awaited owns this
+        // mapping now (it re-published its caps at bind), and dropping it
+        // would hide the live resource from PEP +notify fan-out.
+        let unrelated_replacement_live = state
             .deps
             .protocol
-            .caps_resolver
-            .drop_resource(&detached.jid);
+            .connection_registry
+            .get_entry(&detached.jid)
+            .is_some_and(|entry| {
+                entry
+                    .sm_stream_id()
+                    .as_ref()
+                    .map(waddle_xmpp::pending_delivery::SmSessionId::as_str)
+                    != Some(detached.stream_id.as_str())
+            });
+        if !unrelated_replacement_live {
+            state
+                .deps
+                .protocol
+                .caps_resolver
+                .drop_resource(&detached.jid);
+        }
     }
     // Same rule as the unclean-disconnect path: the helper suppresses
     // the broadcast ONLY when the current registry entry is

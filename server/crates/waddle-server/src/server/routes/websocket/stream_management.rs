@@ -121,14 +121,13 @@ impl SmEnableCommit {
             guard.commit();
         }
         try_enqueue_shadow_stream_enrollment(&state.deps.protocol.ingress_shadow, &self.stream_id);
-        if registry_published {
+        // Only a RESUMABLE enable mints a claim fence (`ensure_session_claim`
+        // is skipped for resume='false'), so only a resumable publication can
+        // have raced a demotion — a fenceless non-resumable stream is the
+        // normal state, not a kill signal.
+        if registry_published && self.resume {
             if let (Some(jid), Some(owner)) = (bound_jid, registry_owner) {
-                terminate_if_demoted_during_publication(
-                    state,
-                    jid,
-                    owner,
-                    Some(self.stream_id.as_str()),
-                );
+                terminate_if_demoted_during_publication(state, jid, owner, Some(&self.stream_id));
             }
         }
         if !registry_published {
@@ -191,9 +190,9 @@ pub(super) fn terminate_if_demoted_during_publication(
     state: &WebSocketState,
     jid: &jid::FullJid,
     owner: &std::sync::Arc<std::sync::atomic::AtomicBool>,
-    stream_id: Option<&str>,
+    stream_id: Option<&waddle_xmpp::pending_delivery::SmSessionId>,
 ) {
-    let Some(stream_id) = stream_id else {
+    let Some(stream_id) = stream_id.map(waddle_xmpp::pending_delivery::SmSessionId::as_str) else {
         return;
     };
     if state
