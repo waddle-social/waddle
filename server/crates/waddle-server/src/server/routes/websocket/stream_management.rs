@@ -121,6 +121,16 @@ impl SmEnableCommit {
             guard.commit();
         }
         try_enqueue_shadow_stream_enrollment(&state.deps.protocol.ingress_shadow, &self.stream_id);
+        if registry_published {
+            if let (Some(jid), Some(owner)) = (bound_jid, registry_owner) {
+                terminate_if_demoted_during_publication(
+                    state,
+                    jid,
+                    owner,
+                    Some(self.stream_id.as_str()),
+                );
+            }
+        }
         if !registry_published {
             debug!(
                 stream_id = %self.stream_id,
@@ -164,6 +174,64 @@ impl Drop for SmEnableClaimGuard {
                 "SM enable cancelled before publication but exact claim cleanup could not be inventoried"
             );
         }
+    }
+}
+
+/// Event-driven closure of the demotion-vs-publication race: an SM claim
+/// demotion that runs between fence recording and stream-owner-index
+/// publication cannot find the connection to signal (its poller is
+/// best-effort and any finite budget can be outlived by a stalled response
+/// write). The PUBLISHER holds the binding at exactly the moment it lands,
+/// so it verifies post-publication that the fence survived and self-sends
+/// the force-detach the demotion could not deliver — the prioritized
+/// force-detach arm then routes the connection through the fenceless
+/// terminal-promotion teardown. The ack receiver is dropped on purpose:
+/// nobody waits on a self-signal.
+pub(super) fn terminate_if_demoted_during_publication(
+    state: &WebSocketState,
+    jid: &jid::FullJid,
+    owner: &std::sync::Arc<std::sync::atomic::AtomicBool>,
+    stream_id: Option<&str>,
+) {
+    let Some(stream_id) = stream_id else {
+        return;
+    };
+    if state
+        .deps
+        .protocol
+        .sm_session_registry
+        .current_sm_claim_fence(stream_id)
+        .is_some()
+    {
+        return;
+    }
+    let Some(entry) = state
+        .deps
+        .protocol
+        .connection_registry
+        .entry_if_owner(jid, owner)
+    else {
+        return;
+    };
+    warn!(
+        stream_id,
+        jid = %jid,
+        "SM claim was demoted during stream-id publication; terminating the connection"
+    );
+    let (ack, _ack_rx) = tokio::sync::oneshot::channel();
+    let request = waddle_xmpp::registry::ForceDetachRequest {
+        origin: waddle_xmpp::registry::ForceDetachOrigin::OwnerManagedRetirement,
+        requester_bare_jid: jid.to_bare(),
+        ack,
+    };
+    if entry.force_detach_sender().try_send(request).is_err() {
+        // Channel full or closed: the connection is already being torn
+        // down or has queued kills ahead of this one — either path ends
+        // in the same fenceless terminal teardown.
+        debug!(
+            stream_id,
+            "self force-detach after demoted publication not enqueued"
+        );
     }
 }
 

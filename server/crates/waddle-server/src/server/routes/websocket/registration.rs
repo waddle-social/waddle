@@ -185,7 +185,7 @@ pub(super) fn publish_stream_id_and_presence(
     // `sm_stream_owners` index is maintained: SM claim demotion resolves the
     // attached connection through that index, and a resumed stream missing
     // from it would be demoted without its termination signal.
-    state
+    if state
         .deps
         .protocol
         .connection_registry
@@ -196,7 +196,15 @@ pub(super) fn publish_stream_id_and_presence(
                 .stream_id
                 .clone()
                 .map(waddle_xmpp::pending_delivery::SmSessionId::new),
+        )
+    {
+        super::stream_management::terminate_if_demoted_during_publication(
+            state,
+            jid,
+            owner,
+            conn.sm_state.stream_id.as_deref(),
         );
+    }
 
     // Each write re-verifies ownership INSIDE the registry call: a separate
     // `entry_if_owner(...).is_some()` check ahead of ungated writes would let

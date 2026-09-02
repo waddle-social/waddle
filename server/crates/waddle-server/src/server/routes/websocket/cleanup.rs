@@ -1172,20 +1172,44 @@ async fn cleanup_connection_shutdown_inner(
                     match displace_failed_detach_snapshot(state, &stream_id).await {
                         Ok(stranded) if !stranded.is_empty() => {
                             recovered_any = true;
-                            crate::sm_promotion::promote_displaced_sessions(
-                                stranded.clone(),
-                                crate::sm_promotion::DisplacedPromotionDeps {
-                                    sm_registry: &state.deps.protocol.sm_session_registry,
-                                    connection_registry: &state.deps.protocol.connection_registry,
-                                    user_registry: &state.deps.protocol.user_registry,
-                                    pending_storage: &state.deps.protocol.pending_delivery_storage,
-                                    blocking_storage: state.deps.protocol.blocking_storage.as_ref(),
-                                    server_domain: state.deps.auth_state.xmpp_domain.as_str(),
-                                },
-                            )
-                            .await;
+                            let promotion_outcome =
+                                crate::sm_promotion::promote_displaced_sessions(
+                                    stranded.clone(),
+                                    crate::sm_promotion::DisplacedPromotionDeps {
+                                        sm_registry: &state.deps.protocol.sm_session_registry,
+                                        connection_registry: &state
+                                            .deps
+                                            .protocol
+                                            .connection_registry,
+                                        user_registry: &state.deps.protocol.user_registry,
+                                        pending_storage: &state
+                                            .deps
+                                            .protocol
+                                            .pending_delivery_storage,
+                                        blocking_storage: state
+                                            .deps
+                                            .protocol
+                                            .blocking_storage
+                                            .as_ref(),
+                                        server_domain: state.deps.auth_state.xmpp_domain.as_str(),
+                                    },
+                                )
+                                .await;
                             for dead in stranded {
                                 cleanup_invalidated_detached_session(state, dead, None).await;
+                            }
+                            if promotion_outcome.queued_pending_rows() {
+                                // Same race as the terminal-recovery path: a
+                                // same-user replacement binding during the
+                                // promotion await can spend its once-only
+                                // offline flush before the row insert
+                                // commits — re-drive the queued rows onto
+                                // the live replacement.
+                                redrive_terminal_pending_rows_to_live_resource(
+                                    state,
+                                    &jid.to_bare(),
+                                )
+                                .await;
                             }
                         }
                         Ok(_) => {}
