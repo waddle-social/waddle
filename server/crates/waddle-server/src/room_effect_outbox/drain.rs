@@ -27,7 +27,6 @@ use super::{
     RoomEffectOutboxError,
 };
 use crate::server::routes::websocket::handlers::presence::registered_remote_resource_write_accepted_delivery;
-#[cfg(feature = "clustering")]
 use crate::server::routes::websocket::handlers::presence::RegisteredRemoteDelivery;
 use crate::server::routes::websocket::WebSocketState;
 
@@ -649,12 +648,15 @@ async fn deliver_recipients_concurrently(
                     )
                     .await
                     {
+                        #[cfg(feature = "clustering")]
                         RegisteredRemoteDelivery::Retryable => {
                             RecipientDeliveryOutcome::RemoteRetryable
                         }
-                        RegisteredRemoteDelivery::Delivered | RegisteredRemoteDelivery::Absent => {
+                        #[cfg(feature = "clustering")]
+                        RegisteredRemoteDelivery::Delivered => {
                             RecipientDeliveryOutcome::RemoteSettled
                         }
+                        RegisteredRemoteDelivery::Absent => RecipientDeliveryOutcome::RemoteSettled,
                     }
                 }
             }
@@ -668,6 +670,7 @@ async fn deliver_recipients_concurrently(
             match outcome {
                 RecipientDeliveryOutcome::LocalAccepted(ack) => acks.push(ack),
                 RecipientDeliveryOutcome::LocalTimedOut => local_timed_out = true,
+                #[cfg(feature = "clustering")]
                 RecipientDeliveryOutcome::RemoteRetryable => remote_retry = true,
                 RecipientDeliveryOutcome::RemoteSettled => {}
             }
@@ -692,6 +695,7 @@ async fn deliver_recipients_concurrently(
 enum RecipientDeliveryOutcome {
     LocalAccepted(oneshot::Receiver<()>),
     LocalTimedOut,
+    #[cfg(feature = "clustering")]
     RemoteRetryable,
     RemoteSettled,
 }

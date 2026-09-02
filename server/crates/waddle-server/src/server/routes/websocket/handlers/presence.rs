@@ -45,7 +45,6 @@ pub use muc::handle_muc_join;
 pub use muc::parse_room_jid_context;
 pub(crate) use muc::registered_remote_resource_write_accepted_delivery;
 pub(crate) use muc::route_room_presence_to_occupant;
-#[cfg(feature = "clustering")]
 pub(crate) use muc::RegisteredRemoteDelivery;
 pub use muc::{
     get_managed_channel_for_room, handle_muc_join_with_ordered_relay, handle_muc_leave,
