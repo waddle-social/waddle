@@ -140,6 +140,25 @@ function createHarness() {
   };
 }
 
+type ReconnectHarness = ReturnType<typeof createHarness>;
+
+function disconnectHarness(
+  { state, stub, fireDisconnected }: Pick<ReconnectHarness, "state" | "stub" | "fireDisconnected">,
+): void {
+  state.reconnect.clearTimer();
+  state.xmpp = stub;
+  state.connected = true;
+  fireDisconnected();
+}
+
+function exhaustReconnectBudget(
+  harness: Pick<ReconnectHarness, "state" | "stub" | "fireDisconnected">,
+): void {
+  for (let i = 0; i < 11; i += 1) {
+    disconnectHarness(harness);
+  }
+}
+
 describe("terminal error state (#1164 slice 1)", () => {
   test("a not-authorized stream error reaches state \"error\" and never schedules a retry", () => {
     const { state, statuses, scheduled, fireError, fireDisconnected } = createHarness();
@@ -582,10 +601,7 @@ describe("retry-loop cap (#1164 slice 2)", () => {
     for (let i = 0; i < 11; i += 1) {
       // Re-arm the handle + drop the pending timer so each disconnect
       // is accepted and each schedule() call actually runs.
-      state.reconnect.clearTimer();
-      state.xmpp = stub;
-      state.connected = true;
-      fireDisconnected();
+      disconnectHarness({ state, stub, fireDisconnected });
     }
 
     // 10 scheduled attempts, then exhaustion: no 11th schedule.
@@ -663,12 +679,7 @@ describe("connect budget measures to session-ready, not catch-up completion (C1)
 describe("exhaustion recovery (C2)", () => {
   test("a fresh-budget connect after exhaustion restores the retry budget", async () => {
     const { state, stub, scheduled, fireDisconnected } = createHarness();
-    for (let i = 0; i < 11; i += 1) {
-      state.reconnect.clearTimer();
-      state.xmpp = stub;
-      state.connected = true;
-      fireDisconnected();
-    }
+    exhaustReconnectBudget({ state, stub, fireDisconnected });
     expect(scheduled).toHaveLength(10);
 
     // User-explicit recovery (the online listener's path): the attempt
@@ -676,10 +687,7 @@ describe("exhaustion recovery (C2)", () => {
     // schedules attempt 1 again instead of re-exhausting instantly.
     state.doConnect = async () => { throw new Error("still down"); };
     await state.connectWithFreshBudget().catch(() => undefined);
-    state.reconnect.clearTimer();
-    state.xmpp = stub;
-    state.connected = true;
-    fireDisconnected();
+    disconnectHarness({ state, stub, fireDisconnected });
 
     expect(scheduled).toHaveLength(11);
     expect(scheduled.at(-1)?.attempt).toBe(1);
@@ -694,12 +702,7 @@ describe("exhaustion recovery (C2)", () => {
     });
     try {
       const { state, stub, statuses, fireDisconnected } = createHarness();
-      for (let i = 0; i < 11; i += 1) {
-        state.reconnect.clearTimer();
-        state.xmpp = stub;
-        state.connected = true;
-        fireDisconnected();
-      }
+      exhaustReconnectBudget({ state, stub, fireDisconnected });
       expect(statuses.at(-1)?.state).toBe("offline");
       state.reconnect.clearTimer();
     } finally {
@@ -723,12 +726,7 @@ describe("exhaustion recovery (C2)", () => {
     try {
       const { state, stub, scheduled, fireDisconnected } = createHarness();
       state.doConnect = async () => { throw new Error("still down"); };
-      for (let i = 0; i < 11; i += 1) {
-        state.reconnect.clearTimer();
-        state.xmpp = stub;
-        state.connected = true;
-        fireDisconnected();
-      }
+      exhaustReconnectBudget({ state, stub, fireDisconnected });
       expect(scheduled).toHaveLength(10);
 
       // Network returns: the listener fires the fresh-budget path.
@@ -737,10 +735,7 @@ describe("exhaustion recovery (C2)", () => {
 
       // Fresh budget: the next disconnect schedules attempt 1 again —
       // the exhausted/terminal gate no longer blocks the retry loop.
-      state.reconnect.clearTimer();
-      state.xmpp = stub;
-      state.connected = true;
-      fireDisconnected();
+      disconnectHarness({ state, stub, fireDisconnected });
       expect(scheduled).toHaveLength(11);
       expect(scheduled.at(-1)?.attempt).toBe(1);
       state.reconnect.clearTimer();
@@ -756,10 +751,7 @@ describe("internal connect() must not leak the fresh-budget reset (F1)", () => {
     const { client, state, stub, scheduled, fireDisconnected } = createHarness();
     state.doConnect = async () => { throw new Error("still down"); };
     for (let i = 0; i < 3; i += 1) {
-      state.reconnect.clearTimer();
-      state.xmpp = stub;
-      state.connected = true;
-      fireDisconnected();
+      disconnectHarness({ state, stub, fireDisconnected });
     }
     expect(scheduled.at(-1)?.attempt).toBe(3);
 
@@ -768,10 +760,7 @@ describe("internal connect() must not leak the fresh-budget reset (F1)", () => {
     // the outage — the budget must keep counting up, not restart.
     await client.connect().catch(() => undefined);
     await client.connect().catch(() => undefined);
-    state.reconnect.clearTimer();
-    state.xmpp = stub;
-    state.connected = true;
-    fireDisconnected();
+    disconnectHarness({ state, stub, fireDisconnected });
 
     expect(scheduled.at(-1)?.attempt).toBe(4);
     state.reconnect.clearTimer();
@@ -800,12 +789,7 @@ describe("internal connect() must not leak the fresh-budget reset (F1)", () => {
 
   test("internal connect() after exhaustion rejects without restarting the retry loop", async () => {
     const { client, state, stub, statuses, scheduled, fireDisconnected } = createHarness();
-    for (let i = 0; i < 11; i += 1) {
-      state.reconnect.clearTimer();
-      state.xmpp = stub;
-      state.connected = true;
-      fireDisconnected();
-    }
+    exhaustReconnectBudget({ state, stub, fireDisconnected });
     expect(scheduled).toHaveLength(10);
     expect(statuses.at(-1)?.state).toBe("error");
     const statusCount = statuses.length;
