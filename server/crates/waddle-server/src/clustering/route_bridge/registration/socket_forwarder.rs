@@ -5,6 +5,7 @@ impl OrderedRelayDeliveryBridge {
         self: &Arc<Self>,
         jid: jid::FullJid,
         registration_id: RemoteResourceRegistrationId,
+        socket_generation: RemoteResourceSocketGeneration,
         socket_node: NodeId,
         mut rx: mpsc::Receiver<OutboundStanza>,
         force_detach_rx: Option<mpsc::Receiver<ForceDetachRequest>>,
@@ -18,6 +19,7 @@ impl OrderedRelayDeliveryBridge {
                     &outbound_bridge,
                     &outbound_jid,
                     registration_id,
+                    socket_generation,
                     &outbound_socket_node,
                     outbound,
                 )
@@ -47,8 +49,9 @@ async fn forward_remote_resource_outbound(
     bridge: &Arc<OrderedRelayDeliveryBridge>,
     jid: &jid::FullJid,
     registration_id: RemoteResourceRegistrationId,
+    socket_generation: RemoteResourceSocketGeneration,
     socket_node: &NodeId,
-    outbound: OutboundStanza,
+    mut outbound: OutboundStanza,
 ) {
     if outbound.pending_row_id.is_some() {
         tracing::warn!(
@@ -56,6 +59,57 @@ async fn forward_remote_resource_outbound(
             "clustered remote-resource forwarder received pending-delivery \
              flush frame; dropping to avoid breaking SM row ack accounting"
         );
+        return;
+    }
+    // A frame carrying a write acceptance is a durable effect that reached
+    // this owner-mirror node's PROXY entry via the local queue path: the
+    // legacy enqueue-only ask would drop the acceptance (never acknowledged,
+    // origin redelivers forever). Carry it end to end on the write-accepted
+    // ask and acknowledge only on the destination writer's acceptance.
+    if let Some(acceptance) = outbound.write_acceptance.take() {
+        let mut handle = RelayHandle::new(socket_node.clone(), bridge.stop_token.clone())
+            .with_ask_timeouts(
+                bridge.mailbox_timeout,
+                bridge.remote_resource_write_accepted_reply_timeout(),
+            );
+        match handle
+            .deliver_remote_resource_write_accepted_frame(
+                RelayDeliverRemoteResourceWriteAcceptedFrame {
+                    frame: RemoteResourceWriteAcceptedOutboundFrame {
+                        jid: jid.clone(),
+                        registration_id,
+                        socket_generation,
+                        stanza: RemoteStanza(outbound.stanza),
+                    },
+                    trace: RelayTraceContext::default(),
+                },
+            )
+            .await
+        {
+            Ok(RelayRemoteResourceWriteAcceptedReply {
+                status: RelayRemoteResourceWriteAcceptedStatus::WriteAccepted,
+            }) => {
+                acceptance.acknowledge();
+            }
+            Ok(RelayRemoteResourceWriteAcceptedReply {
+                status: RelayRemoteResourceWriteAcceptedStatus::Unavailable,
+            }) => {
+                tracing::debug!(
+                    jid = %jid,
+                    "write-accepted forward found the socket registration gone; cleaning owner mirror"
+                );
+                bridge
+                    .cleanup_remote_owner_resource_if_registration(jid, registration_id)
+                    .await;
+                drop(acceptance);
+            }
+            Ok(_) | Err(_) => {
+                // AcceptanceClosed/Pending/StaleRegistration or an ask
+                // failure: drop the acceptance unacknowledged — the closed
+                // oneshot tells the origin to retry (at-least-once).
+                drop(acceptance);
+            }
+        }
         return;
     }
     let kind = outbound.kind;

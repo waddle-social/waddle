@@ -129,7 +129,10 @@ pub async fn complete_after_write(
         .unwrap_or_else(std::sync::PoisonError::into_inner)
         .take()
         .unwrap_or_default();
-    if !await_acks(pending, completion.acceptance_deadline).await {
+    // Nothing to wait for ⇒ nothing the deadline can gate: a replay-recorded
+    // inline completion finalized after the aggregate deadline must still
+    // settle its already-durable row instead of leasing it into a duplicate.
+    if !pending.is_empty() && !await_acks(pending, completion.acceptance_deadline).await {
         return Ok(false);
     }
     state
@@ -505,30 +508,19 @@ async fn drain_claimed(
             });
             continue;
         }
-        match queue_local(state, &recipient, stanza.clone(), aggregate_deadline).await {
-            LocalQueueResult::Accepted(ack) => {
-                acks.push(ack);
-                continue;
-            }
-            LocalQueueResult::NotConnected => {}
-            LocalQueueResult::TimedOut => {
-                // Keep attempting the rest of the roster before releasing:
-                // aborting here would re-spam the already-queued head on every
-                // retry while starving the tail behind one backpressured
-                // recipient (same discipline as the remote Retryable path).
-                tracing::warn!(
-                    recipient = %recipient,
-                    room = %claimed.row.room_jid,
-                    "room effect outbox local enqueue timed out; will release after remaining recipients"
-                );
-                local_retry_needed = true;
-                continue;
-            }
-        }
+        // Delivery itself is deferred into the concurrent phase below: a
+        // backpressured local channel must not serialize the roster and
+        // starve the tail behind one slow recipient. Only the cheap
+        // classification (lease renewal, initiator split) stays sequential,
+        // preserving the lost-lease abort checkpoint above.
         remote.push((recipient, stanza));
     }
-    let remote_retry_needed =
-        await_remote_write_accepted_deliveries(state, remote, aggregate_deadline).await;
+    let (accepted_acks, remote_retry_needed, local_timed_out) =
+        deliver_recipients_concurrently(state, remote, aggregate_deadline).await;
+    acks.extend(accepted_acks);
+    if local_timed_out {
+        local_retry_needed = true;
+    }
     if remote_retry_needed || local_retry_needed {
         let release_now_ms = actual_release_base_ms(now_ms);
         let _ = store
@@ -624,36 +616,84 @@ async fn await_acks(
     tokio::time::timeout(timeout, wait).await.unwrap_or(false)
 }
 
-async fn await_remote_write_accepted_deliveries(
+/// Concurrent delivery phase for every non-initiator recipient: each
+/// recipient's future tries the local SM-backed enqueue first and, when the
+/// resource is not locally connected, chains into the remote write-accepted
+/// ask — all under the shared aggregate deadline, so one backpressured
+/// channel or slow peer cannot starve the roster tail. Returns the accepted
+/// local receivers plus whether any recipient needs a retry release
+/// (remote-retryable, or local timeout/deadline expiry).
+async fn deliver_recipients_concurrently(
     state: &WebSocketState,
-    remote: Vec<(FullJid, Stanza)>,
+    recipients: Vec<(FullJid, Stanza)>,
     aggregate_deadline: Option<tokio::time::Instant>,
-) -> bool {
-    if remote.is_empty() {
-        return false;
+) -> (Vec<oneshot::Receiver<()>>, bool, bool) {
+    if recipients.is_empty() {
+        return (Vec::new(), false, false);
     }
     let mut pending = FuturesUnordered::new();
-    for (recipient, stanza) in remote {
+    for (recipient, stanza) in recipients {
         pending.push(async move {
-            registered_remote_resource_write_accepted_delivery(state, &recipient, &stanza).await
+            match queue_local(state, &recipient, stanza.clone(), aggregate_deadline).await {
+                LocalQueueResult::Accepted(ack) => RecipientDeliveryOutcome::LocalAccepted(ack),
+                LocalQueueResult::TimedOut => {
+                    tracing::warn!(
+                        recipient = %recipient,
+                        "room effect outbox local enqueue timed out; releasing after the pass"
+                    );
+                    RecipientDeliveryOutcome::LocalTimedOut
+                }
+                LocalQueueResult::NotConnected => {
+                    match registered_remote_resource_write_accepted_delivery(
+                        state, &recipient, &stanza,
+                    )
+                    .await
+                    {
+                        RegisteredRemoteDelivery::Retryable => {
+                            RecipientDeliveryOutcome::RemoteRetryable
+                        }
+                        RegisteredRemoteDelivery::Delivered | RegisteredRemoteDelivery::Absent => {
+                            RecipientDeliveryOutcome::RemoteSettled
+                        }
+                    }
+                }
+            }
         });
     }
-    while !pending.is_empty() {
-        let next = match aggregate_deadline {
-            Some(deadline) => match tokio::time::timeout_at(deadline, pending.next()).await {
-                Ok(next) => next,
-                Err(_) => return true,
-            },
-            None => pending.next().await,
-        };
-        match next {
-            #[cfg(feature = "clustering")]
-            Some(RegisteredRemoteDelivery::Retryable) => return true,
-            Some(_) => {}
-            None => break,
+    let mut acks = Vec::new();
+    let mut remote_retry = false;
+    let mut local_timed_out = false;
+    let drive = async {
+        while let Some(outcome) = pending.next().await {
+            match outcome {
+                RecipientDeliveryOutcome::LocalAccepted(ack) => acks.push(ack),
+                RecipientDeliveryOutcome::LocalTimedOut => local_timed_out = true,
+                RecipientDeliveryOutcome::RemoteRetryable => remote_retry = true,
+                RecipientDeliveryOutcome::RemoteSettled => {}
+            }
+        }
+    };
+    match remaining_timeout(aggregate_deadline, LOCAL_ACCEPTANCE_TIMEOUT) {
+        Some(budget) => {
+            if tokio::time::timeout(budget, drive).await.is_err() {
+                // Deadline expired with recipients still in flight: they are
+                // neither settled nor durably accepted — release and let the
+                // janitor redeliver (at-least-once).
+                remote_retry = true;
+            }
+        }
+        None => {
+            remote_retry = true;
         }
     }
-    false
+    (acks, remote_retry, local_timed_out)
+}
+
+enum RecipientDeliveryOutcome {
+    LocalAccepted(oneshot::Receiver<()>),
+    LocalTimedOut,
+    RemoteRetryable,
+    RemoteSettled,
 }
 
 async fn renew_claim_lease(

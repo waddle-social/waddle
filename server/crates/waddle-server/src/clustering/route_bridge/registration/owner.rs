@@ -328,6 +328,7 @@ impl OrderedRelayDeliveryBridge {
                 self.spawn_remote_resource_forwarder(
                     msg.jid,
                     msg.registration_id,
+                    msg.socket_generation,
                     msg.socket_node,
                     rx,
                     force_detach_rx,
