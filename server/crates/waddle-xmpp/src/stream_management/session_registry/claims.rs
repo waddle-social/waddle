@@ -669,7 +669,11 @@ impl InMemorySmSessionRegistry {
     /// restore-release, or an idempotent self-reacquire after a hung
     /// release) would strip the live socket's fence and make it stealable.
     /// Terminal inventory for a DIFFERENT fence is deliberately untouched.
-    pub(super) fn cancel_pending_release_matching_active_fence(&self, stream_id: &str) {
+    pub(super) fn cancel_pending_release_matching_active_fence(
+        &self,
+        stream_id: &crate::pending_delivery::SmSessionId,
+    ) {
+        let stream_id = stream_id.as_str();
         // Canonical bookkeeping lock order (pending-release before fences),
         // matching `try_record_claim_fence`/`try_record_terminal_claim_fence`
         // — the reverse order can deadlock against concurrent adoption or
@@ -1641,7 +1645,9 @@ impl InMemorySmSessionRegistry {
                     }
                     return None;
                 } else {
-                    self.cancel_pending_release_matching_active_fence(stream_id);
+                    self.cancel_pending_release_matching_active_fence(
+                        &crate::pending_delivery::SmSessionId::new(stream_id),
+                    );
                     Some(publication_guard)
                 }
             }
@@ -2339,7 +2345,9 @@ impl InMemorySmSessionRegistry {
             // exact-release retry for the identical owner+epoch (e.g. an
             // earlier failed resume's restore-release) — the janitor's
             // pool-backed liveness probe cannot see an attached stream.
-            self.cancel_pending_release_matching_active_fence(stream_id);
+            self.cancel_pending_release_matching_active_fence(
+                &crate::pending_delivery::SmSessionId::new(stream_id),
+            );
         }
         Ok(outcome)
     }

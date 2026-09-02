@@ -113,7 +113,7 @@ impl SmSessionLocalClaims {
         }
     }
 
-    async fn demote_stream(&self, registry: &InMemorySmSessionRegistry, stream_id: &str) {
+    async fn demote_stream(&self, registry: &Arc<InMemorySmSessionRegistry>, stream_id: &str) {
         // Authoritative local demotion FIRST, unconditionally. The
         // `LocallyClaimedEntities::demote` contract (self_fence.rs, FIX 3)
         // requires demotion to be purely local, cheap, and effective against
@@ -139,7 +139,8 @@ impl SmSessionLocalClaims {
             return;
         };
         let connections = Arc::clone(connections);
-        let observed_stream_id = stream_id.to_string();
+        let registry = Arc::clone(registry);
+        let session_id = waddle_xmpp::pending_delivery::SmSessionId::new(stream_id);
         // Delivery, including the attached-binding lookup itself, lives in a
         // detached, span-instrumented, bounded task so `demote` returns
         // immediately. The lookup RETRIES briefly: a fresh `<enable/>` (or a
@@ -152,8 +153,6 @@ impl SmSessionLocalClaims {
         // receiver is gone — the signal is never silently dropped.
         tokio::spawn(tracing::Instrument::instrument(
             async move {
-                let session_id =
-                    waddle_xmpp::pending_delivery::SmSessionId::new(observed_stream_id.as_str());
                 // The lookup budget is deliberately much longer than the
                 // ack budget: owner-index publication waits behind the
                 // enable-response write, which a slow client socket can
@@ -175,6 +174,17 @@ impl SmSessionLocalClaims {
                     }
                     tokio::time::sleep(std::time::Duration::from_millis(50)).await;
                 };
+                // Revalidate before signaling: the binding may belong to a
+                // NEW lifecycle that legitimately resumed the same stream id
+                // onto this node during the polling window — a fresh live
+                // fence means it re-claimed authority and must not be
+                // disconnected for the old lifecycle's demotion.
+                if registry
+                    .current_sm_claim_fence(session_id.as_str())
+                    .is_some()
+                {
+                    return;
+                }
                 let (ack, ack_rx) = tokio::sync::oneshot::channel();
                 let request = ForceDetachRequest {
                     origin: waddle_xmpp::registry::ForceDetachOrigin::OwnerManagedRetirement,
@@ -190,7 +200,7 @@ impl SmSessionLocalClaims {
                     Ok(Ok(_outcome)) => {}
                     Ok(Err(_)) | Err(_) => {
                         tracing::warn!(
-                            stream_id = %observed_stream_id,
+                            stream_id = %session_id,
                             jid = %jid,
                             "demoted SM stream's connection never acknowledged termination"
                         );
