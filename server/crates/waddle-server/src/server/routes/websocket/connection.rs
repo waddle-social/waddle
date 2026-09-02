@@ -379,6 +379,76 @@ async fn handle_xmpp_websocket(
                 break;
             }
 
+            // A force-detach request for this connection's own stream —
+            // deliberately ahead of every inbound/deferred/outbound arm in
+            // this biased select: a continuously busy client must not starve
+            // its own termination signal (conflict kill, cross-node steal,
+            // or SM claim demotion, whose fence is already removed — every
+            // starved iteration would process stanzas fenceless). Frames the
+            // client already sent are replayed by it after resume (XEP-0198
+            // retransmission), so preempting them loses nothing durable. Cross-node
+            // XEP-0198 resume uses the live-steal handshake; stale UserActor
+            // retirement uses the same safe connection-owned close path.
+            // The identity check gates the destructive close itself (defense
+            // in depth against a wrong-identity `previd` forcing a disconnect
+            // before rejection) — a mismatch answers inline and this
+            // connection keeps serving normally; a match sends `<conflict/>`
+            // (XEP-0198 "Resumption" SHOULD) and closes, falling through to
+            // the SAME detach-for-resume cleanup a graceful/keepalive close
+            // uses (never transitions `phase` to `Closing`).
+            request = recv_optional(&mut force_detach_rx) => {
+                match request {
+                    Some(request) => {
+                        let bound_bare = conn.phase.bound_jid().map(|jid| jid.to_bare());
+                        if bound_bare.as_ref() != Some(&request.requester_bare_jid) {
+                            warn!("force-detach rejected: identity mismatch");
+                            let _ = request
+                                .ack
+                                .send(waddle_xmpp::registry::ForceDetachOutcome::IdentityMismatch);
+                        } else if shutdown_token.is_cancelled()
+                            || admission_permit.revalidate().is_err()
+                        {
+                            // The old serving generation may no longer emit
+                            // the optional `<conflict/>`. Still acknowledge
+                            // only after normal detach persistence below.
+                            pending_force_detach.push(request);
+                            if let Some(bound_bare) = bound_bare.as_ref() {
+                                pending_force_detach.extend(drain_ready_force_detach_requests(
+                                    &mut force_detach_rx,
+                                    bound_bare,
+                                ));
+                            }
+                            break;
+                        } else {
+                            info!("force-detaching this session (<conflict/> close)");
+                            close_live_session_for_force_detach(
+                                &mut ws_sender,
+                                &conn,
+                                &admission_permit,
+                                &shutdown_token,
+                            )
+                            .await;
+                            // Deferred: acked only after this connection's own
+                            // detach-for-resume cleanup below actually runs.
+                            pending_force_detach.push(request);
+                            if let Some(bound_bare) = bound_bare.as_ref() {
+                                pending_force_detach.extend(drain_ready_force_detach_requests(
+                                    &mut force_detach_rx,
+                                    bound_bare,
+                                ));
+                            }
+                            break;
+                        }
+                    }
+                    None => {
+                        // The registry entry was removed (e.g. superseded)
+                        // without this channel ever being used — disable
+                        // this arm for the remainder of the loop.
+                        force_detach_rx = None;
+                    }
+                }
+            }
+
             // Process a bounded drain-deferred inbound chunk.
             _ = std::future::ready(()), if deferred_pending => {
                 for _ in 0..DEFERRED_INBOUND_DRAIN_CHUNK {
@@ -546,69 +616,6 @@ async fn handle_xmpp_websocket(
                 }
             }
 
-            // A force-detach request for this connection's own stream. Cross-node
-            // XEP-0198 resume uses the live-steal handshake; stale UserActor
-            // retirement uses the same safe connection-owned close path.
-            // The identity check gates the destructive close itself (defense
-            // in depth against a wrong-identity `previd` forcing a disconnect
-            // before rejection) — a mismatch answers inline and this
-            // connection keeps serving normally; a match sends `<conflict/>`
-            // (XEP-0198 "Resumption" SHOULD) and closes, falling through to
-            // the SAME detach-for-resume cleanup a graceful/keepalive close
-            // uses (never transitions `phase` to `Closing`).
-            request = recv_optional(&mut force_detach_rx) => {
-                match request {
-                    Some(request) => {
-                        let bound_bare = conn.phase.bound_jid().map(|jid| jid.to_bare());
-                        if bound_bare.as_ref() != Some(&request.requester_bare_jid) {
-                            warn!("force-detach rejected: identity mismatch");
-                            let _ = request
-                                .ack
-                                .send(waddle_xmpp::registry::ForceDetachOutcome::IdentityMismatch);
-                        } else if shutdown_token.is_cancelled()
-                            || admission_permit.revalidate().is_err()
-                        {
-                            // The old serving generation may no longer emit
-                            // the optional `<conflict/>`. Still acknowledge
-                            // only after normal detach persistence below.
-                            pending_force_detach.push(request);
-                            if let Some(bound_bare) = bound_bare.as_ref() {
-                                pending_force_detach.extend(drain_ready_force_detach_requests(
-                                    &mut force_detach_rx,
-                                    bound_bare,
-                                ));
-                            }
-                            break;
-                        } else {
-                            info!("force-detaching this session (<conflict/> close)");
-                            close_live_session_for_force_detach(
-                                &mut ws_sender,
-                                &conn,
-                                &admission_permit,
-                                &shutdown_token,
-                            )
-                            .await;
-                            // Deferred: acked only after this connection's own
-                            // detach-for-resume cleanup below actually runs.
-                            pending_force_detach.push(request);
-                            if let Some(bound_bare) = bound_bare.as_ref() {
-                                pending_force_detach.extend(drain_ready_force_detach_requests(
-                                    &mut force_detach_rx,
-                                    bound_bare,
-                                ));
-                            }
-                            break;
-                        }
-                    }
-                    None => {
-                        // The registry entry was removed (e.g. superseded)
-                        // without this channel ever being used — disable
-                        // this arm for the remainder of the loop.
-                        force_detach_rx = None;
-                    }
-                }
-            }
-
             // RFC 7395 §3.8 keepalive clock (issue #1090). Fires only
             // when the state machine armed a timer; the tick is fed
             // back into the machine, whose policy decides: quiet
@@ -726,16 +733,38 @@ async fn handle_xmpp_websocket(
         }
     }
     if superseded {
-        if !conn.sm_recovery_required {
-            super::stream_management::defer_superseded_sm_claim(state.as_ref(), &conn.sm_state);
-        }
+        // Claim terminalization for the superseded stream happens inside
+        // cleanup's superseded branch AFTER the ingress-shadow idle barrier
+        // (`forget_terminal_shadow_stream_and_release_claim`). Deferring the
+        // claim here, pre-drain, would hand the still-captured fence to the
+        // release-retry janitor while admitted submissions are in flight.
     } else {
-        if shutdown_token.is_cancelled() || admission_permit.revalidate().is_err() {
+        // A claim-loss teardown (the stream's live fence is already gone —
+        // demotion or terminal release) gets the same treatment as node
+        // authority revocation: dispatching the parked frames would run
+        // them fenceless, and the terminal recovery below rejects
+        // resumption, so the client retransmits them anyway (XEP-0198) —
+        // processing here would double their non-idempotent effects. No
+        // pending force-detach prerequisite: an ordinary or keepalive close
+        // can win the race before the demotion signal is consumed.
+        let fenceless_teardown = conn.sm_state.is_resumable()
+            && conn.sm_state.stream_id.as_deref().is_some_and(|stream_id| {
+                state
+                    .deps
+                    .protocol
+                    .sm_session_registry
+                    .current_sm_claim_fence(stream_id)
+                    .is_none()
+            });
+        if shutdown_token.is_cancelled()
+            || admission_permit.revalidate().is_err()
+            || fenceless_teardown
+        {
             let dropped = discard_deferred_inbound(&mut conn);
             if dropped > 0 {
                 info!(
                     dropped,
-                    "Dropping deferred inbound frames after node authority revocation; sender may replay them"
+                    "Dropping deferred inbound frames after authority or claim loss; sender may replay them"
                 );
             }
         } else {
@@ -1417,8 +1446,17 @@ async fn handle_inbound_text(
             // pair lives on. `take_force_detach_rx` returns `Some` exactly
             // once per entry, so a racing/duplicate registration attempt
             // for the same entry observes `None` here, same as intended.
-            if let Some(jid) = conn.phase.bound_jid() {
-                if let Some(entry) = state.deps.protocol.connection_registry.get_entry(jid) {
+            // Owner-gated: a superseded older registration must not steal
+            // the REPLACEMENT entry's receiver — signals for the new socket
+            // would be consumed by (or die with) the old one.
+            if let (Some(jid), Some(owner)) = (conn.phase.bound_jid(), conn.registry_owner.as_ref())
+            {
+                if let Some(entry) = state
+                    .deps
+                    .protocol
+                    .connection_registry
+                    .entry_if_owner(jid, owner)
+                {
                     if let Some(rx) = entry.take_force_detach_rx() {
                         *force_detach_rx = Some(rx);
                     }

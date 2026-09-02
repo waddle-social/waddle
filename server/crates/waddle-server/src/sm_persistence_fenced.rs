@@ -1294,12 +1294,14 @@ impl SmPersistenceStorage for PostgresFencedSmPersistence {
     /// session ends by any path other than `delete_session`, were never
     /// evicted — carried here explicitly. `InMemorySmSessionRegistry`
     /// (`session_registry/claims.rs`) now calls this on every terminal
-    /// claim-ending path (`release_claim`, both `complete_claim*` success
-    /// branches, `invalidate_sessions_for_jid`), so a stream_id's cached
+    /// claim-ending path (`release_claim`, expired/failed `complete_claim*`
+    /// branches, attached terminal teardown, `invalidate_sessions_for_jid`),
+    /// so a stream_id's cached
     /// epoch never survives past the claim it was derived from — the next
     /// fenced write for that stream_id (a fresh detach + claim, or a
     /// different node's claim if this one no longer holds it) re-derives
-    /// its epoch from a clean cell instead of a stale one.
+    /// its epoch from a clean cell instead of a stale one. Successful resume
+    /// deliberately keeps both the claim and this same-owner/same-epoch cache.
     fn evict_claim_cache(&self, stream_id: &SmSessionId, expected_fence: &SmClaimFence) {
         self.remove_claim_fence_if(stream_id, expected_fence);
     }

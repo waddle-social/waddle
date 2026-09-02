@@ -15,6 +15,9 @@
 //! observable behavior to [`super::self_fence::NoLocallyClaimedEntities`]
 //! for the brief startup window before the registry exists), and
 //! [`SmSessionLocalClaims::wire`] completes it once the registry is built.
+//! [`SmSessionLocalClaims::wire_connection_registry`] separately supplies the
+//! already-live connection registry so demotion can distinguish attached
+//! streams and hand their termination to the owning WebSocket task.
 //!
 //! **Scope note**: this module reports SM-session, RoomActor, and UserActor
 //! claims to the generic node-lease/self-fence machinery. UserActor local
@@ -76,6 +79,7 @@ impl std::fmt::Display for LocalClaimsErrorClass {
 /// See the module doc for the construction-order rationale.
 pub struct SmSessionLocalClaims {
     registry: OnceLock<Arc<InMemorySmSessionRegistry>>,
+    connection_registry: OnceLock<Arc<ConnectionRegistry>>,
 }
 
 impl SmSessionLocalClaims {
@@ -83,6 +87,7 @@ impl SmSessionLocalClaims {
     pub fn new() -> Arc<Self> {
         Arc::new(Self {
             registry: OnceLock::new(),
+            connection_registry: OnceLock::new(),
         })
     }
 
@@ -97,6 +102,117 @@ impl SmSessionLocalClaims {
                  registry handle was already wired (ignoring this call)"
             );
         }
+    }
+
+    pub fn wire_connection_registry(&self, registry: Arc<ConnectionRegistry>) {
+        if self.connection_registry.set(registry).is_err() {
+            tracing::error!(
+                "SmSessionLocalClaims::wire_connection_registry called more than once; the \
+                 connection registry handle was already wired (ignoring this call)"
+            );
+        }
+    }
+
+    async fn demote_stream(
+        &self,
+        registry: &Arc<InMemorySmSessionRegistry>,
+        stream_id: &waddle_xmpp::pending_delivery::SmSessionId,
+    ) {
+        // Authoritative local demotion FIRST, unconditionally. The
+        // `LocallyClaimedEntities::demote` contract (self_fence.rs, FIX 3)
+        // requires demotion to be purely local, cheap, and effective against
+        // a wedged target: the un-deadlined lease-reconcile and terminal-
+        // sweep loops call this once per lost entity and must never block on
+        // a connection task. Mirrors `UserLocalClaims::demote`'s removal-
+        // then-force-detach ordering. Durable writes stay safe during the
+        // signal window below: demotion's premise is that the `ClaimStore`
+        // row is gone or reassigned, so an in-flight fenced write fails
+        // `NotOwner` at the database regardless of the in-memory fence.
+        //
+        // Whether the stream was in the detached/claimed pool is reported
+        // by the forget itself, read in the same shard-locked critical
+        // section as the removal (a separate peek could race a concurrent
+        // resume attaching the stream between check and forget): a pooled
+        // demotion (the terminal-sweep bulk case) has no socket to signal
+        // and must not spawn a retry poller.
+        let was_pooled = registry.forget_claim_locally(stream_id.as_str()).await;
+        if was_pooled {
+            return;
+        }
+        let Some(connections) = self.connection_registry.get() else {
+            return;
+        };
+        let connections = Arc::clone(connections);
+        let registry = Arc::clone(registry);
+        let session_id = stream_id.clone();
+        // Delivery, including the attached-binding lookup itself, lives in a
+        // detached, span-instrumented, bounded task so `demote` returns
+        // immediately. The lookup RETRIES briefly: a fresh `<enable/>` (or a
+        // resume) records its claim fence before the stream-owner index is
+        // published, so a demotion in that window would otherwise remove the
+        // fence and skip the termination signal entirely. A stream that
+        // never appears in the index within the budget was not attached.
+        // The send is deliberately unbounded once a binding is found:
+        // `mpsc::Sender::send` waits for capacity and fails only when the
+        // receiver is gone — the signal is never silently dropped.
+        tokio::spawn(tracing::Instrument::instrument(
+            async move {
+                // The lookup budget is deliberately much longer than the
+                // ack budget: owner-index publication waits behind the
+                // enable-response write, which a slow client socket can
+                // stall well past 2s — and this poller only ever spawns for
+                // a non-pooled stream (a real attached or mid-publication
+                // lifecycle), so the cost is one small task per such
+                // demotion, not per terminal-sweep entry.
+                let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(30);
+                let (jid, entry) = loop {
+                    let attached = connections.sm_stream_owner(&session_id).and_then(|jid| {
+                        let entry = connections.get_entry(&jid)?;
+                        (entry.sm_stream_id().as_ref() == Some(&session_id)).then_some((jid, entry))
+                    });
+                    if let Some(found) = attached {
+                        break found;
+                    }
+                    if tokio::time::Instant::now() >= deadline {
+                        return;
+                    }
+                    tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+                };
+                // Revalidate before signaling: the binding may belong to a
+                // NEW lifecycle that legitimately resumed the same stream id
+                // onto this node during the polling window — a fresh live
+                // fence means it re-claimed authority and must not be
+                // disconnected for the old lifecycle's demotion.
+                if registry
+                    .current_sm_claim_fence(session_id.as_str())
+                    .is_some()
+                {
+                    return;
+                }
+                let (ack, ack_rx) = tokio::sync::oneshot::channel();
+                let request = ForceDetachRequest {
+                    origin: waddle_xmpp::registry::ForceDetachOrigin::OwnerManagedRetirement,
+                    requester_bare_jid: jid.to_bare(),
+                    ack,
+                };
+                if entry.force_detach_sender().send(request).await.is_err() {
+                    // Receiver gone: the connection is already inside its
+                    // own teardown, which owns the rest.
+                    return;
+                }
+                match tokio::time::timeout(USER_FORCE_DETACH_ACK_TIMEOUT, ack_rx).await {
+                    Ok(Ok(_outcome)) => {}
+                    Ok(Err(_)) | Err(_) => {
+                        tracing::warn!(
+                            stream_id = %session_id,
+                            jid = %jid,
+                            "demoted SM stream's connection never acknowledged termination"
+                        );
+                    }
+                }
+            },
+            tracing::Span::current(),
+        ));
     }
 }
 
@@ -121,7 +237,11 @@ impl LocallyClaimedEntities for SmSessionLocalClaims {
         if entity.entity_type != EntityType::SmSession {
             return;
         }
-        registry.forget_claim_locally(&entity.id).await;
+        self.demote_stream(
+            registry,
+            &waddle_xmpp::pending_delivery::SmSessionId::new(entity.id.as_str()),
+        )
+        .await;
     }
 
     async fn demote_owned_by(&self, owner: &waddle_xmpp::ownership::NodeIdentity) {
@@ -132,7 +252,11 @@ impl LocallyClaimedEntities for SmSessionLocalClaims {
             .locally_owned_claim_ids_for_owner(owner)
             .unwrap_or_default();
         for stream_id in entities {
-            registry.forget_claim_locally(&stream_id).await;
+            self.demote_stream(
+                registry,
+                &waddle_xmpp::pending_delivery::SmSessionId::new(stream_id.as_str()),
+            )
+            .await;
         }
     }
 
@@ -1278,6 +1402,186 @@ mod tests {
             1,
             "demote must not touch an entity of a different EntityType sharing the same id"
         );
+    }
+
+    #[tokio::test]
+    async fn attached_sm_demotion_forgets_locally_first_and_signals_termination() {
+        let local_claims = SmSessionLocalClaims::new();
+        let registry = Arc::new(InMemorySmSessionRegistry::new());
+        let connections = Arc::new(ConnectionRegistry::new());
+        let stream_id = "attached-demotion";
+        let publication = registry
+            .ensure_session_claim(stream_id)
+            .await
+            .expect("attached claim");
+        drop(publication);
+        local_claims.wire(Arc::clone(&registry));
+        local_claims.wire_connection_registry(Arc::clone(&connections));
+
+        let jid: FullJid = "alice@example.com/attached-demotion".parse().expect("jid");
+        let (outbound_tx, _outbound_rx) = tokio::sync::mpsc::channel(1);
+        let owner = connections.register(jid.clone(), outbound_tx);
+        assert!(connections.set_sm_stream_id_if_owner(
+            &jid,
+            &owner,
+            Some(waddle_xmpp::pending_delivery::SmSessionId::new(stream_id)),
+        ));
+        let entry = connections
+            .entry_if_owner(&jid, &owner)
+            .expect("attached entry");
+        let mut force_detach_rx = entry
+            .take_force_detach_rx()
+            .expect("connection owns force-detach receiver");
+
+        local_claims
+            .demote(&Entity::new(EntityType::SmSession, stream_id))
+            .await;
+
+        // The local demotion is unconditional and complete before any
+        // connection acknowledgement: `demote` must never block on (or be
+        // gated by) the attached task (self_fence.rs demote contract FIX 3).
+        assert_eq!(registry.current_sm_claim_fence(stream_id), None);
+        assert!(local_claims.owned().await.is_empty());
+
+        let request = force_detach_rx.recv().await.expect("termination request");
+        assert_eq!(request.origin, ForceDetachOrigin::OwnerManagedRetirement);
+        let _ = request.ack.send(ForceDetachOutcome::NotPersisted);
+    }
+
+    #[tokio::test]
+    async fn attached_sm_demotion_is_effective_when_the_connection_is_unreachable() {
+        let local_claims = SmSessionLocalClaims::new();
+        let registry = Arc::new(InMemorySmSessionRegistry::new());
+        let connections = Arc::new(ConnectionRegistry::new());
+        let stream_id = "wedged-demotion";
+        let publication = registry
+            .ensure_session_claim(stream_id)
+            .await
+            .expect("attached claim");
+        drop(publication);
+        local_claims.wire(Arc::clone(&registry));
+        local_claims.wire_connection_registry(Arc::clone(&connections));
+
+        let jid: FullJid = "alice@example.com/wedged-demotion".parse().expect("jid");
+        let (outbound_tx, _outbound_rx) = tokio::sync::mpsc::channel(1);
+        let owner = connections.register(jid.clone(), outbound_tx);
+        assert!(connections.set_sm_stream_id_if_owner(
+            &jid,
+            &owner,
+            Some(waddle_xmpp::pending_delivery::SmSessionId::new(stream_id)),
+        ));
+        let entry = connections
+            .entry_if_owner(&jid, &owner)
+            .expect("attached entry");
+        // Simulate a torn-down/wedged connection: its force-detach receiver
+        // is gone, so the best-effort signal cannot be delivered.
+        drop(
+            entry
+                .take_force_detach_rx()
+                .expect("connection owns force-detach receiver"),
+        );
+
+        local_claims
+            .demote(&Entity::new(EntityType::SmSession, stream_id))
+            .await;
+
+        assert_eq!(
+            registry.current_sm_claim_fence(stream_id),
+            None,
+            "an unreachable connection must not leave the demoted fence behind"
+        );
+        assert!(local_claims.owned().await.is_empty());
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn attached_sm_demotion_delivers_the_signal_once_a_full_channel_drains() {
+        let local_claims = SmSessionLocalClaims::new();
+        let registry = Arc::new(InMemorySmSessionRegistry::new());
+        let connections = Arc::new(ConnectionRegistry::new());
+        let stream_id = "full-channel-demotion";
+        let publication = registry
+            .ensure_session_claim(stream_id)
+            .await
+            .expect("attached claim");
+        drop(publication);
+        local_claims.wire(Arc::clone(&registry));
+        local_claims.wire_connection_registry(Arc::clone(&connections));
+
+        let jid: FullJid = "alice@example.com/full-channel-demotion"
+            .parse()
+            .expect("jid");
+        let (outbound_tx, _outbound_rx) = tokio::sync::mpsc::channel(1);
+        let owner = connections.register(jid.clone(), outbound_tx);
+        assert!(connections.set_sm_stream_id_if_owner(
+            &jid,
+            &owner,
+            Some(waddle_xmpp::pending_delivery::SmSessionId::new(stream_id)),
+        ));
+        let entry = connections
+            .entry_if_owner(&jid, &owner)
+            .expect("attached entry");
+        let mut force_detach_rx = entry
+            .take_force_detach_rx()
+            .expect("connection owns force-detach receiver");
+        // Saturate the bounded channel so the demotion signal cannot be
+        // accepted synchronously; a try_send here would drop it on the floor.
+        let mut fillers = Vec::new();
+        loop {
+            let (ack, ack_rx) = tokio::sync::oneshot::channel();
+            let filler = ForceDetachRequest {
+                origin: ForceDetachOrigin::OwnerManagedRetirement,
+                requester_bare_jid: jid.to_bare(),
+                ack,
+            };
+            match entry.force_detach_sender().try_send(filler) {
+                Ok(()) => fillers.push(ack_rx),
+                Err(_) => break,
+            }
+        }
+
+        local_claims
+            .demote(&Entity::new(EntityType::SmSession, stream_id))
+            .await;
+        // Local demotion is complete even while the signal is still parked
+        // behind the full channel.
+        assert_eq!(registry.current_sm_claim_fence(stream_id), None);
+
+        // Drain the fillers; the demotion request must then arrive intact.
+        let mut saw_demotion_request = false;
+        for _ in 0..=fillers.len() {
+            let request = force_detach_rx.recv().await.expect("queued request");
+            assert_eq!(request.origin, ForceDetachOrigin::OwnerManagedRetirement);
+            saw_demotion_request = true;
+            let _ = request.ack.send(ForceDetachOutcome::NotPersisted);
+        }
+        assert!(saw_demotion_request);
+    }
+
+    #[tokio::test]
+    async fn detached_sm_demotion_keeps_immediate_local_forget_behavior() {
+        let local_claims = SmSessionLocalClaims::new();
+        let registry = Arc::new(InMemorySmSessionRegistry::new());
+        local_claims.wire(Arc::clone(&registry));
+        local_claims.wire_connection_registry(Arc::new(ConnectionRegistry::new()));
+        let stream_id = "detached-demotion";
+        registry
+            .store_session(test_session(
+                stream_id,
+                "alice@example.com/detached-demotion",
+            ))
+            .await
+            .expect("detached session");
+
+        local_claims
+            .demote(&Entity::new(EntityType::SmSession, stream_id))
+            .await;
+
+        assert!(local_claims.owned().await.is_empty());
+        assert!(registry
+            .peek_session(stream_id)
+            .await
+            .expect("detached lookup")
+            .is_none());
     }
 
     #[tokio::test]

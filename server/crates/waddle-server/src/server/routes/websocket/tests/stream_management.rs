@@ -33,7 +33,7 @@ use waddle_xmpp::{
         ConnectionEntry, DeliveryKind, ForceDetachOrigin, ForceDetachOutcome, ForceDetachRequest,
         GetUser, OutboundStanza, RegisterUserResource, UserRegistryError, WireUserClusteringClaims,
     },
-    stream_management::{SmSessionRegistry, SM_NS},
+    stream_management::{InMemorySmSessionRegistry, SmSessionRegistry, SM_NS},
     telemetry::attributes::SmEvictionPath,
     Stanza,
 };
@@ -41,6 +41,9 @@ use xmpp_parsers::minidom::Element;
 
 struct HangingEnsureClaimStore {
     inner: waddle_xmpp::ownership::InProcessClaimStore,
+    hang_ensure: bool,
+    fail_next_release: std::sync::atomic::AtomicBool,
+    release_calls: std::sync::atomic::AtomicUsize,
 }
 
 /// A transient promotion failure with a real pending-delivery backend behind
@@ -716,10 +719,14 @@ impl waddle_xmpp::ownership::ClaimStore for HangingEnsureClaimStore {
 
     async fn ensure_claimed(
         &self,
-        _entity: &waddle_xmpp::ownership::Entity,
-        _me: &waddle_xmpp::ownership::NodeIdentity,
+        entity: &waddle_xmpp::ownership::Entity,
+        me: &waddle_xmpp::ownership::NodeIdentity,
     ) -> Result<waddle_xmpp::ownership::ClaimEpoch, waddle_xmpp::ownership::ClaimError> {
-        std::future::pending().await
+        if self.hang_ensure {
+            std::future::pending().await
+        } else {
+            self.inner.ensure_claimed(entity, me).await
+        }
     }
 
     async fn steal_stale(
@@ -769,6 +776,16 @@ impl waddle_xmpp::ownership::ClaimStore for HangingEnsureClaimStore {
         me: &waddle_xmpp::ownership::NodeIdentity,
         mine: waddle_xmpp::ownership::ClaimEpoch,
     ) -> Result<(), waddle_xmpp::ownership::ClaimError> {
+        self.release_calls
+            .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        if self
+            .fail_next_release
+            .swap(false, std::sync::atomic::Ordering::SeqCst)
+        {
+            return Err(waddle_xmpp::ownership::ClaimError::Backend(
+                "injected release failure".to_string(),
+            ));
+        }
         self.inner.release(entity, me, mine).await
     }
 
@@ -858,6 +875,18 @@ async fn timed_out_inbound_stanza_detaches_and_resumes_before_the_hole() {
     conn.registry_owner = Some(owner);
     conn.sm_state
         .enable("timeout-detach".to_string(), true, Some(300));
+    // A production enabled stream always carries a live claim fence;
+    // without one the fenceless teardown promotes terminally instead of
+    // taking the detach path this test exercises.
+    drop(
+        state
+            .deps
+            .protocol
+            .sm_session_registry
+            .ensure_session_claim("timeout-detach")
+            .await
+            .expect("enable claim"),
+    );
 
     let handled = conn.sm_inbound_completion.reserve(&conn.sm_state);
     settle_inbound_dispatch(
@@ -945,6 +974,18 @@ async fn force_detach_cleanup_returns_not_persisted_when_unregister_retry_cannot
     conn.registry_owner = Some(owner);
     conn.sm_state
         .enable("force-detach-ambiguous".to_string(), true, Some(300));
+    // A production enabled stream always carries a live claim fence; without
+    // one the fenceless force-detach teardown promotes terminally instead of
+    // taking the detach path this test exercises.
+    drop(
+        state
+            .deps
+            .protocol
+            .sm_session_registry
+            .ensure_session_claim("force-detach-ambiguous")
+            .await
+            .expect("enable claim"),
+    );
 
     // Both the original synchronous ask and its ordered retry-record ask
     // fail, exercising the pre-handler transport-failure branch.
@@ -1097,6 +1138,19 @@ async fn stale_actor_force_detach_cleanup_detaches_without_registry_reentry() {
     conn.registry_owner = Some(owner);
     conn.sm_state
         .enable("stale-force-detach-stream".to_string(), true, Some(300));
+    // A production enabled stream always carries a live claim fence
+    // (`ensure_session_claim` gates <enabled/>); without one the fenceless
+    // force-detach teardown correctly promotes terminally instead of
+    // detaching, which is not what this test exercises.
+    drop(
+        state
+            .deps
+            .protocol
+            .sm_session_registry
+            .ensure_session_claim("stale-force-detach-stream")
+            .await
+            .expect("enable claim"),
+    );
 
     state.deps.protocol.user_registry.kill();
     state.deps.protocol.user_registry.wait_for_shutdown().await;
@@ -1264,6 +1318,18 @@ async fn force_detach_busy_child_retries_and_converges_without_janitor() {
     conn.registry_owner = Some(owner);
     conn.sm_state
         .enable("force-detach-busy".to_string(), true, Some(300));
+    // A production enabled stream always carries a live claim fence; without
+    // one the fenceless force-detach teardown promotes terminally instead of
+    // taking the detach path this test exercises.
+    drop(
+        state
+            .deps
+            .protocol
+            .sm_session_registry
+            .ensure_session_claim("force-detach-busy")
+            .await
+            .expect("enable claim"),
+    );
 
     let cleanup_state = Arc::clone(&state);
     let cleanup = tokio::spawn(async move {
@@ -1378,6 +1444,17 @@ async fn queued_stale_force_detach_waiter_is_released_before_cross_node_cleanup(
     conn.registry_owner = Some(owner);
     conn.sm_state
         .enable("queued-force-detach-stream".to_string(), true, Some(300));
+    // See stale_actor_force_detach_cleanup_detaches_without_registry_reentry:
+    // an enabled stream carries a live fence in production.
+    drop(
+        state
+            .deps
+            .protocol
+            .sm_session_registry
+            .ensure_session_claim("queued-force-detach-stream")
+            .await
+            .expect("enable claim"),
+    );
 
     let (crossnode_ack_tx, crossnode_ack_rx) = oneshot::channel();
     old_entry
@@ -4631,6 +4708,9 @@ async fn sm_enable_claim_timeout_returns_failure_without_enabling_state() {
         waddle_xmpp::stream_management::InMemorySmSessionRegistry::new().with_claim_store(
             Arc::new(HangingEnsureClaimStore {
                 inner: waddle_xmpp::ownership::InProcessClaimStore::new(),
+                hang_ensure: true,
+                fail_next_release: std::sync::atomic::AtomicBool::new(false),
+                release_calls: std::sync::atomic::AtomicUsize::new(0),
             }),
             waddle_xmpp::ownership::SharedNodeIdentity::new(
                 waddle_xmpp::ownership::NodeIdentity::new("sm-node", "incarnation"),
@@ -5588,8 +5668,15 @@ async fn replaced_connection_commits_written_enable_without_publishing_stale_ali
         cleanup_connection_shutdown(state.as_ref(), &mut outbound_rx, &mut old_conn, false).await,
         super::super::cleanup::ConnectionShutdownOutcome::NotPersisted
     );
-    assert_eq!(registry.pending_claim_release_count(), 1);
-    assert_eq!(registry.retry_pending_claim_releases(1).await, 1);
+    // The superseded teardown now exact-releases immediately after the
+    // ingress-shadow idle barrier (pre-drain deferral would let the retry
+    // janitor free the fence under in-flight shadow submissions); the
+    // pending inventory is only the failed-release path.
+    assert_eq!(registry.pending_claim_release_count(), 0);
+    assert!(!registry
+        .locally_owned_claim_ids()
+        .expect("ownership inventory")
+        .contains(&stream_id.to_string()));
 }
 
 #[tokio::test]
@@ -5646,12 +5733,14 @@ async fn replacement_after_enable_publication_terminalizes_only_the_old_stream_c
         "old-stream cleanup must not alter the replacement entry"
     );
     let registry = &state.deps.protocol.sm_session_registry;
-    assert_eq!(registry.pending_claim_release_count(), 1);
-    assert!(registry
+    // Post-drain immediate exact release (see the sibling test above): the
+    // old stream's claim is gone without a janitor round-trip, and the
+    // replacement's claim state is untouched.
+    assert_eq!(registry.pending_claim_release_count(), 0);
+    assert!(!registry
         .locally_owned_claim_ids()
         .expect("ownership inventory")
         .contains(&old_stream_id));
-    assert_eq!(registry.retry_pending_claim_releases(1).await, 1);
 }
 
 #[tokio::test]
@@ -5687,6 +5776,270 @@ async fn non_resumable_sm_enable_does_not_create_cluster_claim() {
             .contains(&stream_id.to_string()),
         "non-resumable SM must not retain a clustered ownership claim"
     );
+}
+
+#[tokio::test]
+async fn resumable_clean_close_releases_attached_claim_and_reclaims_capacity() {
+    let claim_store = Arc::new(HangingEnsureClaimStore {
+        inner: InProcessClaimStore::new(),
+        hang_ensure: false,
+        fail_next_release: std::sync::atomic::AtomicBool::new(false),
+        release_calls: std::sync::atomic::AtomicUsize::new(0),
+    });
+    let registry = Arc::new(
+        InMemorySmSessionRegistry::with_capacity(1).with_claim_store(
+            claim_store.clone(),
+            SharedNodeIdentity::new(NodeIdentity::local()),
+        ),
+    );
+    let state = create_test_websocket_state_with_sm_registry(Arc::clone(&registry)).await;
+    let jid: FullJid = "alice@example.com/clean-close".parse().expect("jid");
+    let mut conn = WsConnState::new();
+    conn.phase = ConnectionPhase::ready(jid.clone(), false);
+    register_sm_publish_owner(state.as_ref(), &mut conn, &jid);
+
+    let responses = handle_xmpp_frame(
+        "<enable xmlns='urn:xmpp:sm:3' resume='true'/>",
+        "example.com",
+        state.as_ref(),
+        &mut conn,
+    )
+    .await;
+    let enabled = Element::from_str(&responses[0]).expect("enabled xml");
+    let stream_id = enabled.attr("id").expect("stream id").to_string();
+    conn.publish_pending_sm_enable(state.as_ref());
+    assert_eq!(registry.claim_fence_capacity_used(), 1);
+
+    conn.phase = ConnectionPhase::closing(Some(jid));
+    let (_outbound_tx, mut outbound_rx) = mpsc::channel(1);
+    assert_eq!(
+        cleanup_connection_shutdown(state.as_ref(), &mut outbound_rx, &mut conn, false).await,
+        super::super::cleanup::ConnectionShutdownOutcome::NotPersisted
+    );
+    assert_eq!(registry.current_sm_claim_fence(&stream_id), None);
+    assert_eq!(registry.pending_claim_release_count(), 0);
+    assert_eq!(registry.claim_fence_capacity_used(), 0);
+    assert_eq!(
+        claim_store
+            .release_calls
+            .load(std::sync::atomic::Ordering::SeqCst),
+        1,
+        "clean close must exact-release the attached claim once"
+    );
+
+    let replacement = registry
+        .ensure_session_claim("after-clean-close")
+        .await
+        .expect("released capacity admits the next enable");
+    drop(replacement);
+}
+
+#[tokio::test]
+async fn claim_loss_owner_retirement_promotes_terminally_instead_of_detaching() {
+    let registry = Arc::new(InMemorySmSessionRegistry::new());
+    let state = create_test_websocket_state_with_sm_registry(Arc::clone(&registry)).await;
+    let jid: FullJid = "alice@example.com/claim-loss".parse().expect("jid");
+    let mut conn = WsConnState::new();
+    conn.phase = ConnectionPhase::ready(jid.clone(), false);
+    register_sm_publish_owner(state.as_ref(), &mut conn, &jid);
+
+    let responses = handle_xmpp_frame(
+        "<enable xmlns='urn:xmpp:sm:3' resume='true'/>",
+        "example.com",
+        state.as_ref(),
+        &mut conn,
+    )
+    .await;
+    let enabled = Element::from_str(&responses[0]).expect("enabled xml");
+    let stream_id = enabled.attr("id").expect("stream id").to_string();
+    conn.publish_pending_sm_enable(state.as_ref());
+    assert!(registry.current_sm_claim_fence(&stream_id).is_some());
+
+    // Simulate an SM claim demotion racing ahead of the force-detach: the
+    // live fence is forgotten while the connection is still attached.
+    registry.forget_claim_locally(&stream_id).await;
+    assert_eq!(registry.current_sm_claim_fence(&stream_id), None);
+
+    // The owner-managed retirement teardown must not take the resumable
+    // detach path (its fenced snapshot would fail NotOwner after inserting
+    // an undurable in-memory session); it promotes terminally instead.
+    let (_outbound_tx, mut outbound_rx) = mpsc::channel(1);
+    assert_eq!(
+        super::super::cleanup::cleanup_force_detach_connection_shutdown(
+            state.as_ref(),
+            &mut outbound_rx,
+            &mut conn,
+            false,
+            waddle_xmpp::registry::ForceDetachOrigin::OwnerManagedRetirement,
+        )
+        .await,
+        super::super::cleanup::ConnectionShutdownOutcome::NotPersisted
+    );
+    assert!(
+        conn.sm_recovery_required,
+        "claim-loss retirement must enter terminal XEP-0198 recovery"
+    );
+    assert!(
+        !registry
+            .locally_owned_claim_ids()
+            .expect("local claim snapshot")
+            .contains(&stream_id),
+        "terminal promotion must not strand an undurable in-memory session"
+    );
+    assert_eq!(registry.current_sm_claim_fence(&stream_id), None);
+}
+
+#[tokio::test]
+async fn fenceless_cross_node_resume_teardown_also_promotes_terminally() {
+    // `authoritative_force_detach_origin` can rank a queued CrossNodeResume
+    // above a demotion's OwnerManagedRetirement; a fenceless resumable
+    // detach is equally doomed under either origin, so the terminal-recovery
+    // routing must be origin-independent.
+    let registry = Arc::new(InMemorySmSessionRegistry::new());
+    let state = create_test_websocket_state_with_sm_registry(Arc::clone(&registry)).await;
+    let jid: FullJid = "alice@example.com/cross-node-claim-loss"
+        .parse()
+        .expect("jid");
+    let mut conn = WsConnState::new();
+    conn.phase = ConnectionPhase::ready(jid.clone(), false);
+    register_sm_publish_owner(state.as_ref(), &mut conn, &jid);
+
+    let responses = handle_xmpp_frame(
+        "<enable xmlns='urn:xmpp:sm:3' resume='true'/>",
+        "example.com",
+        state.as_ref(),
+        &mut conn,
+    )
+    .await;
+    let enabled = Element::from_str(&responses[0]).expect("enabled xml");
+    let stream_id = enabled.attr("id").expect("stream id").to_string();
+    conn.publish_pending_sm_enable(state.as_ref());
+    registry.forget_claim_locally(&stream_id).await;
+
+    let (_outbound_tx, mut outbound_rx) = mpsc::channel(1);
+    assert_eq!(
+        super::super::cleanup::cleanup_force_detach_connection_shutdown(
+            state.as_ref(),
+            &mut outbound_rx,
+            &mut conn,
+            false,
+            waddle_xmpp::registry::ForceDetachOrigin::CrossNodeResume,
+        )
+        .await,
+        super::super::cleanup::ConnectionShutdownOutcome::NotPersisted
+    );
+    assert!(conn.sm_recovery_required);
+    assert!(!registry
+        .locally_owned_claim_ids()
+        .expect("local claim snapshot")
+        .contains(&stream_id));
+}
+
+#[tokio::test]
+async fn fenceless_ordinary_close_also_promotes_terminally() {
+    // Demotion's forget-first signal window can race an ordinary socket
+    // close: cleanup then arrives with no force-detach request consumed.
+    // The fenceless resumable teardown must still promote terminally
+    // rather than attempt the doomed detach.
+    let registry = Arc::new(InMemorySmSessionRegistry::new());
+    let state = create_test_websocket_state_with_sm_registry(Arc::clone(&registry)).await;
+    let jid: FullJid = "alice@example.com/ordinary-claim-loss"
+        .parse()
+        .expect("jid");
+    let mut conn = WsConnState::new();
+    conn.phase = ConnectionPhase::ready(jid.clone(), false);
+    register_sm_publish_owner(state.as_ref(), &mut conn, &jid);
+
+    let responses = handle_xmpp_frame(
+        "<enable xmlns='urn:xmpp:sm:3' resume='true'/>",
+        "example.com",
+        state.as_ref(),
+        &mut conn,
+    )
+    .await;
+    let enabled = Element::from_str(&responses[0]).expect("enabled xml");
+    let stream_id = enabled.attr("id").expect("stream id").to_string();
+    conn.publish_pending_sm_enable(state.as_ref());
+    registry.forget_claim_locally(&stream_id).await;
+
+    let (_outbound_tx, mut outbound_rx) = mpsc::channel(1);
+    assert_eq!(
+        cleanup_connection_shutdown(state.as_ref(), &mut outbound_rx, &mut conn, false).await,
+        super::super::cleanup::ConnectionShutdownOutcome::NotPersisted
+    );
+    assert!(conn.sm_recovery_required);
+    assert!(!registry
+        .locally_owned_claim_ids()
+        .expect("local claim snapshot")
+        .contains(&stream_id));
+}
+
+#[tokio::test]
+async fn resumable_clean_close_retains_failed_exact_release_for_retry() {
+    let claim_store = Arc::new(HangingEnsureClaimStore {
+        inner: InProcessClaimStore::new(),
+        hang_ensure: false,
+        fail_next_release: std::sync::atomic::AtomicBool::new(true),
+        release_calls: std::sync::atomic::AtomicUsize::new(0),
+    });
+    let registry = Arc::new(
+        InMemorySmSessionRegistry::with_capacity(1).with_claim_store(
+            claim_store.clone(),
+            SharedNodeIdentity::new(NodeIdentity::local()),
+        ),
+    );
+    let state = create_test_websocket_state_with_sm_registry(Arc::clone(&registry)).await;
+    let jid: FullJid = "alice@example.com/clean-close-retry".parse().expect("jid");
+    let mut conn = WsConnState::new();
+    conn.phase = ConnectionPhase::ready(jid.clone(), false);
+    register_sm_publish_owner(state.as_ref(), &mut conn, &jid);
+
+    let responses = handle_xmpp_frame(
+        "<enable xmlns='urn:xmpp:sm:3' resume='true'/>",
+        "example.com",
+        state.as_ref(),
+        &mut conn,
+    )
+    .await;
+    let enabled = Element::from_str(&responses[0]).expect("enabled xml");
+    let stream_id = enabled.attr("id").expect("stream id").to_string();
+    conn.publish_pending_sm_enable(state.as_ref());
+
+    conn.phase = ConnectionPhase::closing(Some(jid));
+    let (_outbound_tx, mut outbound_rx) = mpsc::channel(1);
+    assert_eq!(
+        cleanup_connection_shutdown(state.as_ref(), &mut outbound_rx, &mut conn, false).await,
+        super::super::cleanup::ConnectionShutdownOutcome::NotPersisted
+    );
+    assert_eq!(registry.current_sm_claim_fence(&stream_id), None);
+    assert_eq!(registry.pending_claim_release_count(), 1);
+    assert_eq!(registry.claim_fence_capacity_used(), 1);
+    assert_eq!(
+        claim_store
+            .release_calls
+            .load(std::sync::atomic::Ordering::SeqCst),
+        1
+    );
+    assert!(registry
+        .ensure_session_claim("blocked-at-capacity")
+        .await
+        .is_none());
+
+    assert_eq!(registry.retry_pending_claim_releases(1).await, 1);
+    assert_eq!(registry.pending_claim_release_count(), 0);
+    assert_eq!(registry.claim_fence_capacity_used(), 0);
+    assert_eq!(
+        claim_store
+            .release_calls
+            .load(std::sync::atomic::Ordering::SeqCst),
+        2,
+        "retry must make exactly one additional exact-release attempt"
+    );
+    let replacement = registry
+        .ensure_session_claim("after-release-retry")
+        .await
+        .expect("retry reclaims claim-fence capacity");
+    drop(replacement);
 }
 
 /// Enable SM on a fresh ready connection and return the negotiated
@@ -7839,6 +8192,18 @@ async fn cleanup_shutdown_detaches_resumable_session_on_transport_drop() {
     conn.roster_interested = true;
     conn.sm_state
         .enable("stream-detach".to_string(), true, Some(300));
+    // A production enabled stream always carries a live claim fence;
+    // without one the fenceless teardown promotes terminally instead of
+    // taking the detach path this test exercises.
+    drop(
+        state
+            .deps
+            .protocol
+            .sm_session_registry
+            .ensure_session_claim("stream-detach")
+            .await
+            .expect("enable claim"),
+    );
     state
         .deps
         .protocol
@@ -7938,6 +8303,18 @@ async fn cleanup_shutdown_detach_prunes_actor_tree_entry() {
     conn.registry_owner = Some(owner);
     conn.sm_state
         .enable("stream-detach-actor".to_string(), true, Some(300));
+    // A production enabled stream always carries a live claim fence;
+    // without one the fenceless teardown promotes terminally instead of
+    // taking the detach path this test exercises.
+    drop(
+        state
+            .deps
+            .protocol
+            .sm_session_registry
+            .ensure_session_claim("stream-detach-actor")
+            .await
+            .expect("enable claim"),
+    );
 
     let _ = cleanup_connection_shutdown(state.as_ref(), &mut rx, &mut conn, false).await;
 
@@ -8543,6 +8920,18 @@ async fn sm_detach_on_transport_drop_does_not_evict_sfu_call_session() {
     conn.registry_owner = Some(owner);
     conn.sm_state
         .enable("stream-detach-call".to_string(), true, Some(300));
+    // A production enabled stream always carries a live claim fence;
+    // without one the fenceless teardown promotes terminally instead of
+    // taking the detach path this test exercises.
+    drop(
+        state
+            .deps
+            .protocol
+            .sm_session_registry
+            .ensure_session_claim("stream-detach-call")
+            .await
+            .expect("enable claim"),
+    );
 
     let _ = cleanup_connection_shutdown(state.as_ref(), &mut rx, &mut conn, false).await;
 

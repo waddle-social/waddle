@@ -689,6 +689,47 @@ CREATE UNIQUE INDEX IF NOT EXISTS idx_sessions_auth_context
     ON sessions (auth_context_id);
 "#;
 
+/// Retire sessions that predate durable auth contexts and make the persisted
+/// context reference total for every remaining session.
+pub const V0012_AUTH_CONTEXT_TOTAL: &str = r#"
+DELETE FROM sessions WHERE auth_context_id IS NULL;
+
+CREATE TABLE sessions_auth_context_total (
+    id TEXT PRIMARY KEY,
+    user_jid TEXT NOT NULL,
+    token_hash TEXT NOT NULL UNIQUE,
+    expires_at TEXT,
+    created_at TEXT NOT NULL,
+    last_used_at TEXT NOT NULL,
+    auth_context_id TEXT NOT NULL,
+    auth_context_version INTEGER NOT NULL DEFAULT 1,
+    principal_auth_epoch INTEGER NOT NULL DEFAULT 1,
+    FOREIGN KEY (user_jid) REFERENCES users(jid) ON DELETE CASCADE
+);
+
+INSERT INTO sessions_auth_context_total (
+    id, user_jid, token_hash, expires_at, created_at, last_used_at,
+    auth_context_id, auth_context_version, principal_auth_epoch
+)
+SELECT
+    id, user_jid, token_hash, expires_at, created_at, last_used_at,
+    auth_context_id, auth_context_version, principal_auth_epoch
+FROM sessions
+WHERE auth_context_id IS NOT NULL;
+
+DROP TABLE sessions;
+ALTER TABLE sessions_auth_context_total RENAME TO sessions;
+
+CREATE INDEX idx_sessions_user_jid ON sessions(user_jid);
+CREATE INDEX idx_sessions_expires_at ON sessions(expires_at);
+CREATE UNIQUE INDEX idx_sessions_auth_context ON sessions(auth_context_id);
+"#;
+
+pub const V0012_AUTH_CONTEXT_TOTAL_POSTGRES: &str = r#"
+DELETE FROM sessions WHERE auth_context_id IS NULL;
+ALTER TABLE sessions ALTER COLUMN auth_context_id SET NOT NULL;
+"#;
+
 /// Get all global migrations in order
 pub fn all() -> Vec<Migration> {
     vec![
@@ -760,6 +801,12 @@ pub fn all() -> Vec<Migration> {
             description: "Durable non-secret auth-context references for SM resume".to_string(),
             sql_sqlite: V0011_AUTH_CONTEXT_REFERENCE,
             sql_postgres: V0011_AUTH_CONTEXT_REFERENCE_POSTGRES,
+        },
+        Migration {
+            version: 12,
+            description: "Make session auth context total".to_string(),
+            sql_sqlite: V0012_AUTH_CONTEXT_TOTAL,
+            sql_postgres: V0012_AUTH_CONTEXT_TOTAL_POSTGRES,
         },
     ]
 }

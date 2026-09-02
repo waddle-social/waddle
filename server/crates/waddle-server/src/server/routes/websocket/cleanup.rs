@@ -16,6 +16,7 @@ use waddle_xmpp::muc::room_actor::{
 };
 use waddle_xmpp::muc::room_registry_actor::{RoomAcquisition, RoomRegistryError};
 use waddle_xmpp::muc::RoomRegistry;
+use waddle_xmpp::stream_management::SmSessionRegistry as _;
 use waddle_xmpp::xep::xep0272::Muji;
 use waddle_xmpp::xep::xep0421::OccupantIdentity;
 
@@ -696,7 +697,7 @@ async fn cleanup_connection_shutdown_inner(
     // promotes this task's already accepted delivery and leaves those shared
     // resources alone.
     if superseded && !conn.sm_recovery_required {
-        forget_terminal_shadow_stream(state, &conn.sm_state);
+        forget_terminal_shadow_stream_and_release_claim(state, &conn.sm_state).await;
         return ConnectionShutdownOutcome::NotPersisted;
     }
     // Note: we deliberately do NOT mirror `conn.phase` Closing into
@@ -715,6 +716,35 @@ async fn cleanup_connection_shutdown_inner(
         return promote_terminal_recovery(state, outbound_rx, &jid, conn).await;
     }
 
+    // Claim-loss teardown (an attached SM claim was demoted or terminally
+    // released, so the live fence is already gone): a resumable detach is
+    // doomed here — the fenced snapshot write fails `NotOwner` after
+    // `store_session` has inserted the detached session in memory, leaving
+    // the unacked queue neither durably resumable nor promoted. Route it
+    // through terminal XEP-0198 §5 promotion instead. Deliberately
+    // independent of both the force-detach origin
+    // (`authoritative_force_detach_origin` can rank a queued
+    // CrossNodeResume above the demotion's OwnerManagedRetirement) and of
+    // whether a detach signal was observed at all: demotion's forget-first
+    // signal window can race an ordinary socket or keepalive close, whose
+    // cleanup arrives with no force-detach request yet consumed. Teardowns
+    // that still hold a live fence keep their ordinary paths.
+    if conn.sm_state.is_resumable()
+        && !conn.sm_recovery_required
+        && conn.sm_state.stream_id.as_deref().is_some_and(|stream_id| {
+            state
+                .deps
+                .protocol
+                .sm_session_registry
+                .current_sm_claim_fence(stream_id)
+                .is_none()
+        })
+    {
+        conn.begin_terminal_sm_recovery();
+        let _ = forget_terminal_shadow_stream_and_wait(state, &conn.sm_state).await;
+        return promote_terminal_recovery(state, outbound_rx, &jid, conn).await;
+    }
+
     let should_detach_for_resume = (conn.sm_state.is_resumable()
         && !matches!(conn.phase, ConnectionPhase::Closing { .. }))
         || conn.sm_recovery_required;
@@ -730,7 +760,7 @@ async fn cleanup_connection_shutdown_inner(
         }
         let Some(owner) = conn.registry_owner.as_ref() else {
             debug!(jid = %jid, "Skipped SM detach for connection without registry ownership");
-            forget_terminal_shadow_stream(state, &conn.sm_state);
+            forget_terminal_shadow_stream_and_release_claim(state, &conn.sm_state).await;
             return ConnectionShutdownOutcome::NotPersisted;
         };
         let presence_state = state
@@ -747,9 +777,13 @@ async fn cleanup_connection_shutdown_inner(
             if conn.sm_recovery_required {
                 return promote_terminal_recovery(state, outbound_rx, &jid, conn).await;
             }
-            super::stream_management::defer_superseded_sm_claim(state, &conn.sm_state);
+            // No pre-drain claim deferral here: the release-retry janitor
+            // could release the deferred fence while admitted shadow
+            // submissions still hold it. `forget_terminal_shadow_stream_and_
+            // release_claim` drains to idle first and then terminalizes the
+            // exact claim itself.
             debug!(jid = %jid, "Skipped SM detach for non-owned registry entry");
-            forget_terminal_shadow_stream(state, &conn.sm_state);
+            forget_terminal_shadow_stream_and_release_claim(state, &conn.sm_state).await;
             return ConnectionShutdownOutcome::NotPersisted;
         };
 
@@ -844,28 +878,23 @@ async fn cleanup_connection_shutdown_inner(
                 return promote_terminal_recovery(state, outbound_rx, &jid, conn).await;
             }
             let stream_id = detached.stream_id.clone();
-            let principal = match conn.authenticated_session.as_ref() {
-                Some(session) => match session.authenticated_principal_ref() {
-                    Ok(principal) => principal,
-                    Err(error) => {
-                        // Pre-v11 rows do not carry an auth context. They
-                        // cannot prove a durable resume identity, so fall
-                        // through to ordinary non-resumable cleanup below.
-                        warn!(jid = %jid, %error, "Refusing SM detach without a durable principal");
-                        return refuse_detach_without_principal(
-                            state,
-                            outbound_rx,
-                            &jid,
-                            conn,
-                            vec![detached],
-                            TerminalRowRecovery::default(),
-                            TerminalRouteRemoval::NotAttempted,
-                        )
-                        .await;
-                    }
-                },
-                None => {
-                    warn!(jid = %jid, "Refusing SM detach without an authenticated principal");
+            let Some(session) = conn.authenticated_session.as_ref() else {
+                warn!(jid = %jid, "Refusing SM detach without an authenticated principal");
+                return refuse_detach_without_principal(
+                    state,
+                    outbound_rx,
+                    &jid,
+                    conn,
+                    vec![detached],
+                    TerminalRowRecovery::default(),
+                    TerminalRouteRemoval::NotAttempted,
+                )
+                .await;
+            };
+            let principal = match session.authenticated_principal_ref() {
+                Ok(principal) => principal,
+                Err(error) => {
+                    warn!(jid = %jid, %error, "Refusing SM detach with an invalid persisted principal");
                     return refuse_detach_without_principal(
                         state,
                         outbound_rx,
@@ -1114,23 +1143,132 @@ async fn cleanup_connection_shutdown_inner(
                 }
                 Err(err) => {
                     warn!(jid = %jid, error = %err, "Failed to detach SM session; falling back to full cleanup");
-                    forget_terminal_shadow_stream(state, &conn.sm_state);
+                    // Owned copy so the terminal-promotion fallback below can
+                    // borrow `conn` mutably while the arm keeps its owner token.
+                    let owner_token = std::sync::Arc::clone(owner);
+                    let owner = &owner_token;
+                    // Unregister the route BEFORE the awaited shadow drain:
+                    // this receiver is never drained or promoted again, so
+                    // every stanza routing could still enqueue during the
+                    // drain would be silently dropped on task exit.
                     let detach_fail_removed = state
                         .deps
                         .protocol
                         .connection_registry
                         .unregister_if_owner(&jid, owner)
                         .is_some();
+                    // The failed fenced store has already inserted the
+                    // detached session into the in-memory registry (the
+                    // durable snapshot rolled back), so a fence check that
+                    // raced a demotion would otherwise strand the unacked
+                    // queue memory-only. Take exactly THIS stream's detached
+                    // session back out and run the XEP-0198 §5 promote →
+                    // confirm chain on it (#1097 contract) — the safety net
+                    // for every check-then-act window around detach. Scoped
+                    // to the failed stream on purpose: a JID-wide
+                    // invalidation could sweep a cross-node replacement's
+                    // freshly stored snapshot for the same FullJid.
+                    let mut recovered_any = false;
+                    match displace_failed_detach_snapshot(
+                        state,
+                        &waddle_xmpp::pending_delivery::SmSessionId::new(stream_id.as_str()),
+                    )
+                    .await
+                    {
+                        Ok(stranded) if !stranded.is_empty() => {
+                            recovered_any = true;
+                            let promotion_outcome =
+                                crate::sm_promotion::promote_displaced_sessions(
+                                    stranded.clone(),
+                                    crate::sm_promotion::DisplacedPromotionDeps {
+                                        sm_registry: &state.deps.protocol.sm_session_registry,
+                                        connection_registry: &state
+                                            .deps
+                                            .protocol
+                                            .connection_registry,
+                                        user_registry: &state.deps.protocol.user_registry,
+                                        pending_storage: &state
+                                            .deps
+                                            .protocol
+                                            .pending_delivery_storage,
+                                        blocking_storage: state
+                                            .deps
+                                            .protocol
+                                            .blocking_storage
+                                            .as_ref(),
+                                        server_domain: state.deps.auth_state.xmpp_domain.as_str(),
+                                    },
+                                )
+                                .await;
+                            for dead in stranded {
+                                cleanup_invalidated_detached_session(state, dead, None).await;
+                            }
+                            if promotion_outcome.queued_pending_rows() {
+                                // Same race as the terminal-recovery path: a
+                                // same-user replacement binding during the
+                                // promotion await can spend its once-only
+                                // offline flush before the row insert
+                                // commits — re-drive the queued rows onto
+                                // the live replacement.
+                                redrive_terminal_pending_rows_to_live_resource(
+                                    state,
+                                    &jid.to_bare(),
+                                )
+                                .await;
+                            }
+                        }
+                        Ok(_) => {}
+                        Err(error) => {
+                            warn!(
+                                jid = %jid,
+                                %error,
+                                "failed to reclaim stranded detached sessions after detach failure"
+                            );
+                        }
+                    }
+                    forget_terminal_shadow_stream_and_release_claim(state, &conn.sm_state).await;
+                    if !recovered_any {
+                        // Nothing came back from displacement: either the
+                        // store failed before its in-memory insert, or a
+                        // concurrent demotion swept the non-durable snapshot
+                        // out of the pool before this arm ran. The
+                        // connection's own SM state still holds the unacked
+                        // queue — promote it terminally rather than lose it.
+                        // Deliberately NOT an early return: unlike the
+                        // superseded promotion paths, no replacement owns
+                        // this connection's MUC/caps/actor-tree cleanup, so
+                        // the rest of this arm must still run (the route was
+                        // already unregistered above, so the promotion's own
+                        // owner-gated unregister is a no-op).
+                        conn.begin_terminal_sm_recovery();
+                        let _ = promote_terminal_recovery(state, outbound_rx, &jid, conn).await;
+                    }
                     let cleanup_origin = clustered_cleanup_origin(state, &jid, owner).await;
+                    // Re-check for a same-FullJID replacement AFTER the long
+                    // awaits above (reclamation, promotion, shadow drain):
+                    // our own route was unregistered before them, so any
+                    // entry now present is a replacement that may already
+                    // have joined rooms — its occupancy must not be swept by
+                    // this old session's leave (same rule as the superseded
+                    // path); the ghost-occupant janitor covers an old
+                    // occupancy the replacement did not re-join.
+                    let replacement_bound_during_recovery = state
+                        .deps
+                        .protocol
+                        .connection_registry
+                        .get_entry(&jid)
+                        .is_some();
                     if detach_fail_removed {
-                        cleanup_muc_presence_with_origin(
-                            state,
-                            &jid,
-                            cleanup_origin.as_ref(),
-                            waddle_xmpp::muc::room_actor::LeaveAttemptId::generate(),
-                            SweepFailureRecording::RecordSweep,
-                        )
-                        .await;
+                        if !replacement_bound_during_recovery {
+                            cleanup_muc_presence_with_origin(
+                                state,
+                                &jid,
+                                cleanup_origin.as_ref(),
+                                waddle_xmpp::muc::room_actor::LeaveAttemptId::generate(),
+                                SweepFailureRecording::RecordSweep,
+                            )
+                            .await;
+                        }
                         // ADR-0017 Phase 1: mirror the unregister into the
                         // actor tree on the SM-detach-failure fallback. This
                         // session is never stored, so no SM-expiry janitor
@@ -1150,9 +1288,13 @@ async fn cleanup_connection_shutdown_inner(
                     // fails we fall back to a full unregister, so the
                     // caps resource→ver mapping AND any pending
                     // disco#info resolution must be cleared too —
-                    // otherwise stale state lingers indefinitely.
-                    state.deps.protocol.caps_resolver.drop_resource(&jid);
-                    if !detach_fail_removed {
+                    // otherwise stale state lingers indefinitely. Same
+                    // replacement guard as the MUC sweep: a live
+                    // replacement re-published its own caps at bind.
+                    if !replacement_bound_during_recovery {
+                        state.deps.protocol.caps_resolver.drop_resource(&jid);
+                    }
+                    if !detach_fail_removed && !replacement_bound_during_recovery {
                         cleanup_muc_presence(state, &jid).await;
                     }
                     return ConnectionShutdownOutcome::NotPersisted;
@@ -1208,8 +1350,99 @@ async fn cleanup_connection_shutdown_inner(
     }
     // Every path reaching here is a non-detach (full-cleanup or no-op)
     // teardown — never a persisted resumable snapshot.
-    forget_terminal_shadow_stream(state, &conn.sm_state);
+    forget_terminal_shadow_stream_and_release_claim(state, &conn.sm_state).await;
     ConnectionShutdownOutcome::NotPersisted
+}
+
+/// Take the failed detach store's stranded in-memory snapshot back out for
+/// terminal promotion, riding out a transient concurrent resume: a reconnect
+/// can claim the just-inserted snapshot between the failed write and this
+/// call, but with no durable rows that resume fails and its guard restores
+/// the snapshot to `sessions`, where a retry displaces it. A resume that is
+/// still holding the claim when the budget expires owns the snapshot's
+/// lifecycle (its own failure path restores-and-releases).
+async fn displace_failed_detach_snapshot(
+    state: &WebSocketState,
+    stream_id: &waddle_xmpp::pending_delivery::SmSessionId,
+) -> Result<
+    Vec<waddle_xmpp::stream_management::DetachedSession>,
+    waddle_xmpp::stream_management::SmRegistryError,
+> {
+    // Budget must outlast a concurrent resume's bounded claim acquisition
+    // (the 5s claim-ask class of timeouts) plus its failed durable-principal
+    // lookup, so the retry observes the resume guard restoring the snapshot
+    // instead of expiring first.
+    let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(10);
+    loop {
+        let displaced = state
+            .deps
+            .protocol
+            .sm_session_registry
+            .displace_stored_session_if_unclaimed(stream_id.as_str())
+            .await?;
+        if let Some(session) = displaced {
+            return Ok(vec![session]);
+        }
+        let claimed = state
+            .deps
+            .protocol
+            .sm_session_registry
+            .peek_session(stream_id.as_str())
+            .await?
+            .is_none();
+        if claimed && tokio::time::Instant::now() < deadline {
+            // Absent from the detached pool: either a concurrent resume
+            // holds it (retry — its failure restores the snapshot) or it
+            // was never inserted (the store failed before the in-memory
+            // insert); the retry budget distinguishes the two cheaply.
+            tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+            continue;
+        }
+        return Ok(Vec::new());
+    }
+}
+
+async fn forget_terminal_shadow_stream_and_release_claim(
+    state: &WebSocketState,
+    sm_state: &waddle_xmpp::stream_management::StreamManagementState,
+) {
+    let Some(stream_id) = forget_terminal_shadow_stream_and_wait(state, sm_state).await else {
+        return;
+    };
+    state
+        .deps
+        .protocol
+        .sm_session_registry
+        .release_attached_session_claim(&stream_id)
+        .await;
+}
+
+async fn forget_terminal_shadow_stream_and_wait(
+    state: &WebSocketState,
+    sm_state: &waddle_xmpp::stream_management::StreamManagementState,
+) -> Option<waddle_xmpp::pending_delivery::SmSessionId> {
+    // Retire first to close admission, then wait for every previously
+    // admitted submission task to drain before ending the fence those tasks
+    // captured at observation time. Enroll/Retire tasks are not counted in
+    // per-stream pending activity; the retirement task fences on claim
+    // absence itself and self-reschedules (`DeferredClaim`) when it runs
+    // before the release below.
+    forget_terminal_shadow_stream(state, sm_state);
+    let session_id =
+        waddle_xmpp::pending_delivery::SmSessionId::new(sm_state.stream_id.as_deref()?);
+    while !state
+        .deps
+        .protocol
+        .ingress_shadow
+        .wait_for_stream_idle(&session_id, std::time::Duration::from_secs(30))
+        .await
+    {
+        warn!(
+            %session_id,
+            "terminal SM cleanup is still waiting for admitted ingress shadow work to drain"
+        );
+    }
+    Some(session_id)
 }
 
 fn forget_terminal_shadow_stream(
@@ -1867,7 +2100,7 @@ async fn refuse_detach_without_principal(
     row_recovery: TerminalRowRecovery,
     terminal_route_removal: TerminalRouteRemoval,
 ) -> ConnectionShutdownOutcome {
-    forget_terminal_shadow_stream(state, &conn.sm_state);
+    let _ = forget_terminal_shadow_stream_and_wait(state, &conn.sm_state).await;
     // A terminal session must disappear from the exact-FullJID routing table
     // before promotion. Otherwise `send_to` can successfully target this
     // closed channel and drop a <no-store/> stanza instead of taking the
@@ -2801,12 +3034,30 @@ pub(super) async fn cleanup_invalidated_detached_session(
         }
         // XEP-0115 §6: clear the resource→ver mapping AND any stuck
         // pending disco#info resolution for this resource so an
-        // unresumed detached session doesn't leak indefinitely.
-        state
+        // unresumed detached session doesn't leak indefinitely. Gated on no
+        // UNRELATED live session holding the resource: a same-FullJID
+        // replacement that bound while the invalidation awaited owns this
+        // mapping now (it re-published its caps at bind), and dropping it
+        // would hide the live resource from PEP +notify fan-out.
+        let unrelated_replacement_live = state
             .deps
             .protocol
-            .caps_resolver
-            .drop_resource(&detached.jid);
+            .connection_registry
+            .get_entry(&detached.jid)
+            .is_some_and(|entry| {
+                entry
+                    .sm_stream_id()
+                    .as_ref()
+                    .map(waddle_xmpp::pending_delivery::SmSessionId::as_str)
+                    != Some(detached.stream_id.as_str())
+            });
+        if !unrelated_replacement_live {
+            state
+                .deps
+                .protocol
+                .caps_resolver
+                .drop_resource(&detached.jid);
+        }
     }
     // Same rule as the unclean-disconnect path: the helper suppresses
     // the broadcast ONLY when the current registry entry is

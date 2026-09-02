@@ -544,8 +544,11 @@ impl InMemorySmSessionRegistry {
             .is_ok_and(|reservations| reservations.contains(stream_id))
     }
 
-    #[cfg(test)]
-    pub(super) fn claim_fence_capacity_used(&self) -> usize {
+    /// Occupied bounded-ownership capacity (reservations + reclaimed +
+    /// pending releases + live fences). Observability accessor for
+    /// cross-crate lifecycle tests, mirroring
+    /// [`Self::pending_claim_release_count`].
+    pub fn claim_fence_capacity_used(&self) -> usize {
         let (Ok(reservations), Ok(reclaimed), Ok(pending), Ok(fences)) = (
             self.claim_fence_reservations.read(),
             self.reclaimed_claim_reservations.read(),

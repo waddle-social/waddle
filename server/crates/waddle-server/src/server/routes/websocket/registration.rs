@@ -180,19 +180,38 @@ pub(super) fn publish_stream_id_and_presence(
     // Owner-gated: a racing same-JID replacement can take the slot between
     // `register_with_stream_state` and this publication; a stale-owner write
     // would stamp OUR stream id and restored presence onto the replacement's
-    // entry / the JID-keyed presence map.
-    if let Some(entry) = state
+    // entry / the JID-keyed presence map. Must go through the registry's
+    // owner-gated setter (not the raw entry method) so the
+    // `sm_stream_owners` index is maintained: SM claim demotion resolves the
+    // attached connection through that index, and a resumed stream missing
+    // from it would be demoted without its termination signal.
+    if state
         .deps
         .protocol
         .connection_registry
-        .entry_if_owner(jid, owner)
-    {
-        entry.set_sm_stream_id(
+        .set_sm_stream_id_if_owner(
+            jid,
+            owner,
             conn.sm_state
                 .stream_id
                 .clone()
                 .map(waddle_xmpp::pending_delivery::SmSessionId::new),
-        );
+        )
+    {
+        // Resumable-only for the same reason as the enable site: only a
+        // resumable stream carries a claim fence.
+        if conn.sm_state.is_resumable() {
+            super::stream_management::terminate_if_demoted_during_publication(
+                state,
+                jid,
+                owner,
+                conn.sm_state
+                    .stream_id
+                    .clone()
+                    .map(waddle_xmpp::pending_delivery::SmSessionId::new)
+                    .as_ref(),
+            );
+        }
     }
 
     // Each write re-verifies ownership INSIDE the registry call: a separate

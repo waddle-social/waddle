@@ -78,7 +78,7 @@ pub struct CreateAuthSession {
     pub username: String,
     pub xmpp_localpart: String,
     pub token_hash: String,
-    pub auth_context_id: Option<uuid::Uuid>,
+    pub auth_context_id: uuid::Uuid,
     pub auth_context_version: u64,
     pub principal_auth_epoch: u64,
     pub expires_at: Option<String>,
@@ -126,7 +126,7 @@ impl kameo::message::Message<CreateAuthSession> for DbActor {
                 .bind(&msg.session_id)
                 .bind(&msg.user_jid)
                 .bind(&msg.token_hash)
-                .bind(msg.auth_context_id.map(|id| id.to_string()))
+                .bind(msg.auth_context_id.to_string())
                 .bind(i64::try_from(msg.auth_context_version).map_err(|_| {
                     DatabaseError::QueryFailed("auth context version overflow".to_string())
                 })?)
@@ -173,7 +173,7 @@ impl kameo::message::Message<CreateAuthSession> for DbActor {
                 // The column is TEXT on both engines (index-served principal
                 // resolution with one shared SQL string); bind the string
                 // form — Postgres will not assignment-cast a uuid parameter.
-                .bind(msg.auth_context_id.map(|id| id.to_string()))
+                .bind(msg.auth_context_id.to_string())
                 .bind(i64::try_from(msg.auth_context_version).map_err(|_| {
                     DatabaseError::QueryFailed("auth context version overflow".to_string())
                 })?)
