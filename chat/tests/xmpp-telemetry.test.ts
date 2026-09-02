@@ -1,4 +1,5 @@
 import { afterEach, beforeEach, describe, expect, mock, test } from "bun:test";
+import { installMockBrowserGlobals } from "./helpers/mock-browser-storage";
 import type { WaddleSession } from "../src/lib/server-auth";
 import {
   BrowserXmppClient,
@@ -54,23 +55,6 @@ type TestXmppStreamErrorPayload = string | {
   streamManagementError?: { kind: "handled-count-too-high"; h: number; sendCount: number };
 };
 
-function createStorageMock() {
-  const values = new Map<string, string>();
-  return {
-    getItem(key: string) {
-      return values.has(key) ? values.get(key)! : null;
-    },
-    setItem(key: string, value: string) {
-      values.set(key, value);
-    },
-    removeItem(key: string) {
-      values.delete(key);
-    },
-    clear() {
-      values.clear();
-    },
-  };
-}
 
 /**
  * Minimal Faro API stub that records every pushEvent / pushMeasurement
@@ -113,35 +97,19 @@ function createFaroStub() {
   };
 }
 
+// Captured at module load for the two sanitizer tests that build their own
+// window value; the shared hooks capture their own copy.
 const originalWindow = globalThis.window;
-const originalLocalStorage = globalThis.localStorage;
 
-beforeEach(() => {
-  const storage = createStorageMock();
-  (globalThis as typeof globalThis & { localStorage: typeof storage }).localStorage = storage;
-  (globalThis as typeof globalThis & { window: Window & { localStorage: typeof storage } }).window = {
-    ...(originalWindow ?? {}),
-    localStorage: storage,
-  } as Window & { localStorage: typeof storage };
-  localStorage.clear();
-  __setFaroForTesting(null);
-  __clearSensitiveUrlsForTesting();
-});
-
-afterEach(() => {
-  localStorage.clear();
-  __setFaroForTesting(null);
-  __clearSensitiveUrlsForTesting();
-  if (originalLocalStorage === undefined) {
-    Reflect.deleteProperty(globalThis, "localStorage");
-  } else {
-    (globalThis as typeof globalThis & { localStorage: Storage }).localStorage = originalLocalStorage;
-  }
-  if (originalWindow === undefined) {
-    Reflect.deleteProperty(globalThis, "window");
-  } else {
-    (globalThis as typeof globalThis & { window: Window & typeof globalThis }).window = originalWindow;
-  }
+installMockBrowserGlobals({
+  beforeEachExtra: () => {
+    __setFaroForTesting(null);
+    __clearSensitiveUrlsForTesting();
+  },
+  afterEachExtra: () => {
+    __setFaroForTesting(null);
+    __clearSensitiveUrlsForTesting();
+  },
 });
 
 describe("reportCallAudioProcessing", () => {

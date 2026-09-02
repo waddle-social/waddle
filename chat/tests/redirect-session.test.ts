@@ -1,27 +1,10 @@
 import { afterEach, describe, expect, test } from "bun:test";
+import { createStorageMock } from "./helpers/mock-browser-storage";
 import {
   clearStoredSessionId,
   consumeRedirectSession,
   getStoredSessionId,
 } from "../src/auth/redirect-session";
-
-function createStorageMock() {
-  const values = new Map<string, string>();
-  return {
-    getItem(key: string) {
-      return values.get(key) ?? null;
-    },
-    setItem(key: string, value: string) {
-      values.set(key, value);
-    },
-    removeItem(key: string) {
-      values.delete(key);
-    },
-    clear() {
-      values.clear();
-    },
-  };
-}
 
 const originalWindow = globalThis.window;
 const originalLocalStorage = globalThis.localStorage;

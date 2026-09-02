@@ -1,4 +1,5 @@
 import { afterEach, beforeEach, describe, expect, mock, test } from "bun:test";
+import { installMockBrowserGlobals } from "./helpers/mock-browser-storage";
 import { EventEmitter } from "events";
 import { ref } from "vue";
 import type { WaddleSession } from "../src/lib/server-auth";
@@ -30,23 +31,6 @@ function normalizeError(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
 }
 
-function createStorageMock() {
-  const values = new Map<string, string>();
-  return {
-    getItem(key: string) {
-      return values.has(key) ? values.get(key)! : null;
-    },
-    setItem(key: string, value: string) {
-      values.set(key, value);
-    },
-    removeItem(key: string) {
-      values.delete(key);
-    },
-    clear() {
-      values.clear();
-    },
-  };
-}
 
 function roomWasmMessage(partial: Record<string, unknown> = {}) {
   return {
@@ -100,35 +84,15 @@ async function settleReconnectCatchup(turns = 6): Promise<void> {
   for (let i = 0; i < turns; i += 1) await Promise.resolve();
 }
 
-const originalWindow = globalThis.window;
-const originalLocalStorage = globalThis.localStorage;
-
-beforeEach(() => {
-  const storage = createStorageMock();
-  (globalThis as typeof globalThis & { localStorage: typeof storage }).localStorage = storage;
-  (globalThis as typeof globalThis & { window: Window & { localStorage: typeof storage } }).window = {
-    ...(originalWindow ?? {}),
-    localStorage: storage,
-  } as Window & { localStorage: typeof storage };
-  localStorage.clear();
-  clearDmCallActivities();
-  $dmCallOutcomeAnchor.set(null);
-});
-
-afterEach(() => {
-  clearDmCallActivities();
-  $dmCallOutcomeAnchor.set(null);
-  localStorage.clear();
-  if (originalLocalStorage === undefined) {
-    Reflect.deleteProperty(globalThis, "localStorage");
-  } else {
-    (globalThis as typeof globalThis & { localStorage: Storage }).localStorage = originalLocalStorage;
-  }
-  if (originalWindow === undefined) {
-    Reflect.deleteProperty(globalThis, "window");
-  } else {
-    (globalThis as typeof globalThis & { window: Window & typeof globalThis }).window = originalWindow;
-  }
+installMockBrowserGlobals({
+  beforeEachExtra: () => {
+    clearDmCallActivities();
+    $dmCallOutcomeAnchor.set(null);
+  },
+  afterEachExtra: () => {
+    clearDmCallActivities();
+    $dmCallOutcomeAnchor.set(null);
+  },
 });
 
 describe("client send readiness", () => {
