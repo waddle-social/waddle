@@ -1169,7 +1169,12 @@ async fn cleanup_connection_shutdown_inner(
                     // invalidation could sweep a cross-node replacement's
                     // freshly stored snapshot for the same FullJid.
                     let mut recovered_any = false;
-                    match displace_failed_detach_snapshot(state, &stream_id).await {
+                    match displace_failed_detach_snapshot(
+                        state,
+                        &waddle_xmpp::pending_delivery::SmSessionId::new(stream_id.as_str()),
+                    )
+                    .await
+                    {
                         Ok(stranded) if !stranded.is_empty() => {
                             recovered_any = true;
                             let promotion_outcome =
@@ -1358,7 +1363,7 @@ async fn cleanup_connection_shutdown_inner(
 /// lifecycle (its own failure path restores-and-releases).
 async fn displace_failed_detach_snapshot(
     state: &WebSocketState,
-    stream_id: &str,
+    stream_id: &waddle_xmpp::pending_delivery::SmSessionId,
 ) -> Result<
     Vec<waddle_xmpp::stream_management::DetachedSession>,
     waddle_xmpp::stream_management::SmRegistryError,
@@ -1373,7 +1378,7 @@ async fn displace_failed_detach_snapshot(
             .deps
             .protocol
             .sm_session_registry
-            .displace_stored_session_if_unclaimed(stream_id)
+            .displace_stored_session_if_unclaimed(stream_id.as_str())
             .await?;
         if let Some(session) = displaced {
             return Ok(vec![session]);
@@ -1382,7 +1387,7 @@ async fn displace_failed_detach_snapshot(
             .deps
             .protocol
             .sm_session_registry
-            .peek_session(stream_id)
+            .peek_session(stream_id.as_str())
             .await?
             .is_none();
         if claimed && tokio::time::Instant::now() < deadline {

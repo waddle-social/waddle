@@ -1446,8 +1446,17 @@ async fn handle_inbound_text(
             // pair lives on. `take_force_detach_rx` returns `Some` exactly
             // once per entry, so a racing/duplicate registration attempt
             // for the same entry observes `None` here, same as intended.
-            if let Some(jid) = conn.phase.bound_jid() {
-                if let Some(entry) = state.deps.protocol.connection_registry.get_entry(jid) {
+            // Owner-gated: a superseded older registration must not steal
+            // the REPLACEMENT entry's receiver — signals for the new socket
+            // would be consumed by (or die with) the old one.
+            if let (Some(jid), Some(owner)) = (conn.phase.bound_jid(), conn.registry_owner.as_ref())
+            {
+                if let Some(entry) = state
+                    .deps
+                    .protocol
+                    .connection_registry
+                    .entry_if_owner(jid, owner)
+                {
                     if let Some(rx) = entry.take_force_detach_rx() {
                         *force_detach_rx = Some(rx);
                     }

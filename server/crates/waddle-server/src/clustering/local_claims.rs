@@ -113,7 +113,11 @@ impl SmSessionLocalClaims {
         }
     }
 
-    async fn demote_stream(&self, registry: &Arc<InMemorySmSessionRegistry>, stream_id: &str) {
+    async fn demote_stream(
+        &self,
+        registry: &Arc<InMemorySmSessionRegistry>,
+        stream_id: &waddle_xmpp::pending_delivery::SmSessionId,
+    ) {
         // Authoritative local demotion FIRST, unconditionally. The
         // `LocallyClaimedEntities::demote` contract (self_fence.rs, FIX 3)
         // requires demotion to be purely local, cheap, and effective against
@@ -131,7 +135,7 @@ impl SmSessionLocalClaims {
         // resume attaching the stream between check and forget): a pooled
         // demotion (the terminal-sweep bulk case) has no socket to signal
         // and must not spawn a retry poller.
-        let was_pooled = registry.forget_claim_locally(stream_id).await;
+        let was_pooled = registry.forget_claim_locally(stream_id.as_str()).await;
         if was_pooled {
             return;
         }
@@ -140,7 +144,7 @@ impl SmSessionLocalClaims {
         };
         let connections = Arc::clone(connections);
         let registry = Arc::clone(registry);
-        let session_id = waddle_xmpp::pending_delivery::SmSessionId::new(stream_id);
+        let session_id = stream_id.clone();
         // Delivery, including the attached-binding lookup itself, lives in a
         // detached, span-instrumented, bounded task so `demote` returns
         // immediately. The lookup RETRIES briefly: a fresh `<enable/>` (or a
@@ -233,7 +237,11 @@ impl LocallyClaimedEntities for SmSessionLocalClaims {
         if entity.entity_type != EntityType::SmSession {
             return;
         }
-        self.demote_stream(registry, &entity.id).await;
+        self.demote_stream(
+            registry,
+            &waddle_xmpp::pending_delivery::SmSessionId::new(entity.id.as_str()),
+        )
+        .await;
     }
 
     async fn demote_owned_by(&self, owner: &waddle_xmpp::ownership::NodeIdentity) {
@@ -244,7 +252,11 @@ impl LocallyClaimedEntities for SmSessionLocalClaims {
             .locally_owned_claim_ids_for_owner(owner)
             .unwrap_or_default();
         for stream_id in entities {
-            self.demote_stream(registry, &stream_id).await;
+            self.demote_stream(
+                registry,
+                &waddle_xmpp::pending_delivery::SmSessionId::new(stream_id.as_str()),
+            )
+            .await;
         }
     }
 
