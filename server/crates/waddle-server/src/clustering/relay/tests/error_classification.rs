@@ -112,6 +112,31 @@ fn ask_failures_classify_handler_effect_separately_from_failure_kind() {
         assert_eq!(classify_effect::<Infallible>(&error), expected, "{error:?}");
     }
 }
+
+#[test]
+fn write_accepted_retry_contract_distinguishes_unknown_message_from_maybe_committed_transport() {
+    use std::convert::Infallible;
+
+    assert_eq!(
+        classify::<Infallible>(&RemoteSendError::UnknownMessage {
+            actor_remote_id: "actor".into(),
+            message_remote_id: "message".into(),
+        }),
+        RelaySendFailure::Codec
+    );
+    assert_eq!(
+        classify_effect::<Infallible>(&RemoteSendError::UnknownMessage {
+            actor_remote_id: "actor".into(),
+            message_remote_id: "message".into(),
+        }),
+        RelaySendEffect::NoEffect
+    );
+    assert_eq!(
+        classify_effect::<Infallible>(&RemoteSendError::ConnectionClosed),
+        RelaySendEffect::MaybeCommitted
+    );
+}
+
 #[test]
 fn ask_failures_classify_into_typed_kinds() {
     use std::convert::Infallible;

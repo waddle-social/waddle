@@ -435,15 +435,14 @@ pub(crate) async fn route_room_presence_to_occupant(
     }
 }
 
-/// Ordered-relay handoff for generated recipient-addressed MUC frames.  The
-/// room-effect outbox shares this exact DirectFrame path: a successful bridge
-/// handoff is its remote completion boundary, without changing relay wire
-/// contracts.
+/// Ordered-relay handoff for ordinary generated recipient-addressed MUC
+/// frames. Durable room effects use the write-accepted sibling below.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum RegisteredRemoteDelivery {
     #[cfg(feature = "clustering")]
     Delivered,
     Absent,
+    #[cfg(feature = "clustering")]
     Retryable,
 }
 
@@ -483,6 +482,45 @@ pub(crate) async fn registered_remote_resource_delivery(
                 | crate::server::routes::interpret::FullJidDeliveryOutcome::QueuedDetached,
             )
             | None => RegisteredRemoteDelivery::Absent,
+        }
+    }
+    #[cfg(not(feature = "clustering"))]
+    {
+        let _ = (state, target, stanza);
+        RegisteredRemoteDelivery::Absent
+    }
+}
+
+pub(crate) async fn registered_remote_resource_write_accepted_delivery(
+    state: &WebSocketState,
+    target: &FullJid,
+    stanza: &Stanza,
+) -> RegisteredRemoteDelivery {
+    #[cfg(feature = "clustering")]
+    {
+        let Some(bridge) = state
+            .deps
+            .app_state
+            .clustering_claims
+            .ordered_relay_delivery_bridge
+            .as_ref()
+        else {
+            return RegisteredRemoteDelivery::Absent;
+        };
+        match bridge
+            .try_deliver_registered_remote_resource_write_accepted(target, stanza)
+            .await
+        {
+            crate::clustering::route_bridge::RegisteredRemoteWriteAcceptedDelivery::Delivered => {
+                RegisteredRemoteDelivery::Delivered
+            }
+            crate::clustering::route_bridge::RegisteredRemoteWriteAcceptedDelivery::Absent => {
+                RegisteredRemoteDelivery::Absent
+            }
+            crate::clustering::route_bridge::RegisteredRemoteWriteAcceptedDelivery::Retryable
+            | crate::clustering::route_bridge::RegisteredRemoteWriteAcceptedDelivery::RefreshNeeded => {
+                RegisteredRemoteDelivery::Retryable
+            }
         }
     }
     #[cfg(not(feature = "clustering"))]

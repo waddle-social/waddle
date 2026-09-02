@@ -24,8 +24,8 @@ use waddle_xmpp::ownership::{
 use waddle_xmpp::protocol::CarbonKind;
 use waddle_xmpp::registry::{
     BroadcastOutcome, ConnectionEntry, ConnectionRegistry, DeliveryKind, ForceDetachOutcome,
-    ForceDetachRequest, OutboundStanza, PresenceState, RegisterUserResourceIfOwnerOrAbsent,
-    UserRegistryActor,
+    ForceDetachRequest, OutboundStanza, OutboundWriteAcceptance, PresenceState,
+    RegisterUserResourceIfOwnerOrAbsent, UserRegistryActor,
 };
 use waddle_xmpp::roster::{RosterItem, RosterVersion};
 use waddle_xmpp::stream_management::InMemorySmSessionRegistry;
@@ -43,16 +43,17 @@ use super::ordered_relay::{
     OriginInboundSequence, RemoteStanzaEnvelope,
 };
 use super::relay::{
-    RelayAskError, RelayDeliverRemoteResourceFrame, RelayForceDetachRemoteUserResource,
-    RelayForceDetachRemoteUserResourceReply, RelayHandle, RelayRegisterRemoteUserResource,
-    RelayRemoteResourceForceDetachStatus, RelayRemoteResourceFrameReply,
-    RelayRemoteResourceFrameStatus, RelayRemoteResourceRegistrationReply,
-    RelayRemoteResourceRegistrationStatus, RelayRemoteResourceUnregisterReply,
-    RelayRemoteResourceUnregisterStatus, RelayRemoteResourceUpdateReply,
-    RelayRemoteResourceUpdateStatus, RelayRemoteUserSideEffect, RelayRemoteUserSideEffectReply,
-    RelayRemoteUserSideEffectStatus, RelayRouteRemoteResourceStanza,
-    RelayRouteRemoteResourceStanzaReply, RelaySendEffect, RelaySendFailure,
-    RelayUnregisterRemoteUserResource, RelayUpdateRemoteUserResource,
+    RelayAskError, RelayDeliverRemoteResourceFrame, RelayDeliverRemoteResourceWriteAcceptedFrame,
+    RelayForceDetachRemoteUserResource, RelayForceDetachRemoteUserResourceReply, RelayHandle,
+    RelayRegisterRemoteUserResource, RelayRemoteResourceForceDetachStatus,
+    RelayRemoteResourceFrameReply, RelayRemoteResourceFrameStatus,
+    RelayRemoteResourceRegistrationReply, RelayRemoteResourceRegistrationStatus,
+    RelayRemoteResourceUnregisterReply, RelayRemoteResourceUnregisterStatus,
+    RelayRemoteResourceUpdateReply, RelayRemoteResourceUpdateStatus,
+    RelayRemoteResourceWriteAcceptedReply, RelayRemoteResourceWriteAcceptedStatus,
+    RelayRemoteUserSideEffect, RelayRemoteUserSideEffectReply, RelayRemoteUserSideEffectStatus,
+    RelayRouteRemoteResourceStanza, RelayRouteRemoteResourceStanzaReply, RelaySendEffect,
+    RelaySendFailure, RelayUnregisterRemoteUserResource, RelayUpdateRemoteUserResource,
 };
 use super::trace_context::RelayTraceContext;
 use super::NodeId;
@@ -68,6 +69,7 @@ const ORDERED_DELIVERY_MAILBOX_TIMEOUT: Duration = ORDERED_RELAY_MAILBOX_TIMEOUT
 const ORDERED_DELIVERY_REPLY_TIMEOUT: Duration = ORDERED_RELAY_REPLY_TIMEOUT;
 const ORDERED_RECEIVER_DELIVERY_TIMEOUT: Duration = Duration::from_secs(6);
 const ORDERED_RECEIVER_EFFECT_TIMEOUT_MARGIN: Duration = Duration::from_millis(250);
+const REMOTE_RESOURCE_WRITE_ACCEPTED_REPLY_TIMEOUT: Duration = Duration::from_secs(3);
 const MAX_ORDERED_RELAY_CHANNEL_LOCKS: usize = 4096;
 const MAX_REMOTE_OWNER_REGISTRATION_LOCKS: usize = 4096;
 const REMOTE_RESOURCE_OUTBOUND_CHANNEL_SIZE: usize = 256;
@@ -80,7 +82,9 @@ mod validation;
 
 #[cfg(test)]
 pub(crate) use delivery::MucProxyRouteAttempt;
-pub(crate) use delivery::{MucProxyRouteDecision, OrderedRelayMucProxyOutcome};
+pub(crate) use delivery::{
+    MucProxyRouteDecision, OrderedRelayMucProxyOutcome, RegisteredRemoteWriteAcceptedDelivery,
+};
 pub use reassert::LocalMediaGrantReassertion;
 #[cfg(test)]
 pub(crate) use registration::retry_remote_resource_register_test;
@@ -91,7 +95,8 @@ pub use types::{
     RemoteCarbonKind, RemotePresenceShow, RemotePresenceStateSnapshot,
     RemoteResourceOriginSnapshot, RemoteResourceOutboundFrame, RemoteResourceRegistrationId,
     RemoteResourceRouteOutcome, RemoteResourceRouteTarget, RemoteResourceSocketGeneration,
-    RemoteResourceStateSnapshot, RemoteResourceStateUpdate, RemoteUserSideEffect,
+    RemoteResourceStateSnapshot, RemoteResourceStateUpdate,
+    RemoteResourceWriteAcceptedOutboundFrame, RemoteUserSideEffect,
 };
 pub(crate) use types::{RemoteResourceRegisterOutcome, RemoteResourceUnregisterOutcome};
 use validation::*;
@@ -213,6 +218,18 @@ impl OrderedRelayDeliveryBridge {
             .unwrap_or_else(|| self.reply_timeout / 2)
     }
 
+    pub(crate) fn remote_resource_write_accepted_reply_timeout(&self) -> Duration {
+        self.reply_timeout
+            .min(REMOTE_RESOURCE_WRITE_ACCEPTED_REPLY_TIMEOUT)
+    }
+
+    pub(crate) fn remote_resource_write_accepted_acceptance_timeout(&self) -> Duration {
+        self.remote_resource_write_accepted_reply_timeout()
+            .checked_sub(ORDERED_RECEIVER_EFFECT_TIMEOUT_MARGIN)
+            .filter(|timeout| !timeout.is_zero())
+            .unwrap_or_else(|| self.remote_resource_write_accepted_reply_timeout() / 2)
+    }
+
     #[cfg(test)]
     pub(crate) async fn test_insert_remote_socket_registration(
         &self,
@@ -227,6 +244,23 @@ impl OrderedRelayDeliveryBridge {
                 socket_generation: RemoteResourceSocketGeneration::next(None),
                 owner,
                 user_owner,
+            },
+        );
+    }
+
+    #[cfg(test)]
+    pub(crate) async fn test_insert_remote_owner_registration(
+        &self,
+        jid: jid::FullJid,
+        socket_node: NodeId,
+    ) {
+        self.remote_owner_resources.lock().await.insert(
+            jid,
+            RemoteOwnerRegistration {
+                registration_id: RemoteResourceRegistrationId::fresh(),
+                socket_node,
+                socket_generation: RemoteResourceSocketGeneration::next(None),
+                owner: Arc::new(AtomicBool::new(false)),
             },
         );
     }

@@ -43,12 +43,14 @@ mod subscription;
 pub use muc::handle_muc_join;
 #[cfg(test)]
 pub use muc::parse_room_jid_context;
+pub(crate) use muc::registered_remote_resource_write_accepted_delivery;
 pub(crate) use muc::route_room_presence_to_occupant;
+#[cfg(feature = "clustering")]
+pub(crate) use muc::RegisteredRemoteDelivery;
 pub use muc::{
     get_managed_channel_for_room, handle_muc_join_with_ordered_relay, handle_muc_leave,
     resolve_muc_room_archive_access, MucJoinRequest, RoomArchiveAccess,
 };
-pub(crate) use muc::{registered_remote_resource_delivery, RegisteredRemoteDelivery};
 #[cfg(feature = "clustering")]
 pub(crate) use muc_update::try_handle_muc_presence_update;
 use probe::handle_presence_probe;

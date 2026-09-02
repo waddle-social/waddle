@@ -17,6 +17,10 @@ use waddle_xmpp::{Stanza, Voice};
 use xmpp_parsers::minidom::Element;
 
 use super::*;
+#[cfg(feature = "clustering")]
+use crate::clustering::{route_bridge::OrderedRelayDeliveryBridge, NodeId};
+#[cfg(feature = "clustering")]
+use crate::config::ClusteringMessagingConfig;
 use crate::room_effect_outbox::drain::{
     complete_after_write, drain_due_effects, drain_reservation_inline,
 };
@@ -27,6 +31,8 @@ use crate::server::routes::websocket::tests::{
     create_test_websocket_state_with_sfu, register_test_connection,
 };
 use crate::server::routes::websocket::WebSocketState;
+#[cfg(feature = "clustering")]
+use tokio_util::sync::CancellationToken;
 
 fn drain_room_jid() -> BareJid {
     BareJid::from_str("room@muc.example.com").expect("room JID")
@@ -1647,6 +1653,64 @@ async fn inline_self_removal_still_returns_initiator_frame_when_sibling_send_tim
             .await
             .expect("complete released inline retry"),
         "released retry rows should still hand the initiator a completion token without deleting the queued retry"
+    );
+}
+
+#[cfg(feature = "clustering")]
+#[tokio::test]
+async fn inline_room_effect_keeps_remote_write_accepted_retry_row_after_completion() {
+    let stop = CancellationToken::new();
+    stop.cancel();
+    let bridge = OrderedRelayDeliveryBridge::new(stop, &ClusteringMessagingConfig::default());
+    let remote = full_jid("remote@example.test/phone");
+    bridge
+        .test_insert_remote_owner_registration(
+            remote.clone(),
+            NodeId::new("unreachable-remote-socket".to_owned()),
+        )
+        .await;
+    let state = create_test_websocket_state_with_clustering(
+        crate::clustering::ClusteringHandles {
+            ordered_relay_delivery_bridge: Some(Arc::clone(&bridge)),
+            ..crate::clustering::ClusteringHandles::default()
+        },
+        Arc::new(InMemorySmSessionRegistry::new()),
+    )
+    .await;
+    let room_jid = drain_room_jid();
+    let initiator = full_jid("alice@example.test/web");
+    let lifecycle = create_owned_room_and_lifecycle_for(state.as_ref(), &room_jid).await;
+    let reservation = enqueue_effects(
+        state.as_ref(),
+        lifecycle,
+        initial_revision(),
+        &config_effects_for(&room_jid, vec![initiator.clone(), remote]),
+        0,
+    )
+    .await;
+
+    let mut frames = drain_reservation_inline(state.as_ref(), &reservation, Some(&initiator))
+        .await
+        .expect("inline drain with remote retry");
+    assert_eq!(frames.len(), 1, "the initiator frame still returns inline");
+    assert_eq!(frames.summary.inline, 1);
+    let completion = frames.remove(0).completion;
+    assert!(
+        !complete_after_write(state.as_ref(), &completion)
+            .await
+            .expect("complete released inline retry"),
+        "remote retry release must happen before the initiator completion can delete the durable row"
+    );
+    assert!(
+        state
+            .deps
+            .protocol
+            .room_effect_outbox
+            .find(&completion.key)
+            .await
+            .expect("find retained retry row")
+            .is_some(),
+        "the row must remain queued for janitor redelivery"
     );
 }
 

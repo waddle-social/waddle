@@ -11,6 +11,7 @@ use std::ops::{Deref, DerefMut};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
+use futures::stream::{FuturesUnordered, StreamExt};
 use jid::FullJid;
 use kameo::actor::ActorRef;
 use tokio::sync::oneshot;
@@ -25,13 +26,15 @@ use super::{
     ClaimedRoomEffect, RoomEffectKey, RoomEffectLastError, RoomEffectLeaseToken,
     RoomEffectOutboxError,
 };
-use crate::server::routes::websocket::handlers::presence::{
-    registered_remote_resource_delivery, RegisteredRemoteDelivery,
-};
+use crate::server::routes::websocket::handlers::presence::registered_remote_resource_write_accepted_delivery;
+#[cfg(feature = "clustering")]
+use crate::server::routes::websocket::handlers::presence::RegisteredRemoteDelivery;
 use crate::server::routes::websocket::WebSocketState;
 
 const OWNERSHIP_LOOKUP_TIMEOUT: Duration = waddle_xmpp::muc::ROOM_REGISTRY_REPLY_TIMEOUT;
+const INLINE_DRAIN_AGGREGATE_TIMEOUT: Duration = Duration::from_secs(8);
 const LOCAL_ACCEPTANCE_TIMEOUT: Duration = Duration::from_secs(5);
+const CLAIM_BATCH_CHUNK_SIZE: usize = 8;
 const OWNERSHIP_RETRY_DELAY_MS: i64 = 15_000;
 const OWNERSHIP_DEAD_LETTER_MS: i64 = 24 * 60 * 60 * 1_000;
 
@@ -56,6 +59,7 @@ pub struct RoomEffectCompletion {
     pub key: RoomEffectKey,
     pub lease: RoomEffectLeaseToken,
     pending_local_acceptances: Arc<Mutex<Option<Vec<oneshot::Receiver<()>>>>>,
+    acceptance_deadline: Option<tokio::time::Instant>,
 }
 
 impl std::fmt::Debug for RoomEffectCompletion {
@@ -73,6 +77,7 @@ impl Clone for RoomEffectCompletion {
             key: self.key.clone(),
             lease: self.lease.clone(),
             pending_local_acceptances: Arc::clone(&self.pending_local_acceptances),
+            acceptance_deadline: self.acceptance_deadline,
         }
     }
 }
@@ -124,7 +129,7 @@ pub async fn complete_after_write(
         .unwrap_or_else(std::sync::PoisonError::into_inner)
         .take()
         .unwrap_or_default();
-    if !await_acks(pending).await {
+    if !await_acks(pending, completion.acceptance_deadline).await {
         return Ok(false);
     }
     state
@@ -141,23 +146,63 @@ pub async fn drain_due_effects(
     batch: usize,
 ) -> Result<RoomEffectDrainSummary, RoomEffectOutboxError> {
     let store = &state.deps.protocol.room_effect_outbox;
-    let claimed = store.claim_due_head(now_ms, batch).await?;
-    let needs_ownership = claimed
-        .iter()
-        .any(|effect| !effect.row.effect.is_terminal());
-    let local_rooms = if needs_ownership {
-        local_room_jids(&state.deps.protocol.room_registry).await
-    } else {
-        Ok(HashSet::new())
-    };
     let mut summary = RoomEffectDrainSummary::default();
-    for claimed in claimed {
-        match drain_claimed(state, claimed, now_ms, local_rooms.as_ref(), None, false).await? {
-            ClaimDisposition::Completed => summary.drained += 1,
-            ClaimDisposition::Requeued => summary.requeued += 1,
-            ClaimDisposition::Stale => summary.stale += 1,
-            ClaimDisposition::DeadLettered => summary.dead_lettered += 1,
-            ClaimDisposition::Leased | ClaimDisposition::Inline(_) => {}
+    let mut remaining = batch;
+    // Chunk lease freshness stays on the CALLER's clock: `now_ms` plus the
+    // tokio-instant elapsed time since entry. In production both clocks
+    // agree; in tests `now_ms` is synthetic and mixing in the real epoch
+    // would corrupt every lease/renewal comparison (the #1646 paused-clock
+    // trap). Later chunks still get strictly fresher lease timestamps, so a
+    // chunk claimed after minutes of draining is not born half-expired.
+    let drain_entry = tokio::time::Instant::now();
+    while remaining > 0 {
+        let elapsed_ms = i64::try_from(drain_entry.elapsed().as_millis()).unwrap_or(i64::MAX);
+        let claimed = store
+            .claim_due_head_with_lease_time(
+                now_ms,
+                remaining.min(CLAIM_BATCH_CHUNK_SIZE),
+                now_ms.saturating_add(elapsed_ms),
+            )
+            .await?;
+        if claimed.is_empty() {
+            break;
+        }
+        let needs_ownership = claimed
+            .iter()
+            .any(|effect| !effect.row.effect.is_terminal());
+        let local_rooms = if needs_ownership {
+            local_room_jids(&state.deps.protocol.room_registry).await
+        } else {
+            Ok(HashSet::new())
+        };
+        remaining = remaining.saturating_sub(claimed.len());
+        // A PARTIAL chunk means the currently-due backlog is drained: stop
+        // rather than re-querying, so a lifecycle successor whose head
+        // completed inside this pass keeps its next-sweep latency (several
+        // suites pin the one-claim-per-pass choreography). A FULL chunk is
+        // genuine backlog — keep chunking with fresh lease timestamps.
+        let chunk_was_full = claimed.len() >= CLAIM_BATCH_CHUNK_SIZE.min(batch);
+        for claimed in claimed {
+            match drain_claimed(
+                state,
+                claimed,
+                now_ms,
+                local_rooms.as_ref(),
+                None,
+                false,
+                None,
+            )
+            .await?
+            {
+                ClaimDisposition::Completed => summary.drained += 1,
+                ClaimDisposition::Requeued => summary.requeued += 1,
+                ClaimDisposition::Stale => summary.stale += 1,
+                ClaimDisposition::DeadLettered => summary.dead_lettered += 1,
+                ClaimDisposition::Leased | ClaimDisposition::Inline(_) => {}
+            }
+        }
+        if !chunk_was_full {
+            break;
         }
     }
     Ok(summary)
@@ -194,6 +239,7 @@ async fn drain_reservation(
     committed_locally: bool,
 ) -> Result<InlineRoomEffectDrain, RoomEffectOutboxError> {
     let now_ms = crate::time::now_ms();
+    let aggregate_deadline = tokio::time::Instant::now() + INLINE_DRAIN_AGGREGATE_TIMEOUT;
     let mut drain = InlineRoomEffectDrain::default();
     let mut owned_leases = HashSet::new();
     // Inline draining still observes the same ownership fence as the janitor;
@@ -227,6 +273,7 @@ async fn drain_reservation(
             inline_owned_rooms.as_ref(),
             initiator,
             committed_locally,
+            Some(aggregate_deadline),
         )
         .await?
         {
@@ -318,6 +365,7 @@ async fn drain_claimed(
     local_rooms: Result<&HashSet<jid::BareJid>, &()>,
     initiator: Option<&FullJid>,
     committed_locally: bool,
+    aggregate_deadline: Option<tokio::time::Instant>,
 ) -> Result<ClaimDisposition, RoomEffectOutboxError> {
     let store = &state.deps.protocol.room_effect_outbox;
     if !store.lifecycle_is_executable(&claimed.row).await? {
@@ -418,7 +466,7 @@ async fn drain_claimed(
     );
     let mut acks = Vec::new();
     let mut inline = Vec::new();
-    let mut remote_retry_needed = false;
+    let mut remote = Vec::new();
     let mut local_retry_needed = false;
     for (recipient, stanza) in rendered {
         if !renew_claim_lease(state, &claimed.row.key, &claimed.lease_token).await? {
@@ -452,11 +500,12 @@ async fn drain_claimed(
                     key: claimed.row.key.clone(),
                     lease: claimed.lease_token.clone(),
                     pending_local_acceptances: Arc::new(Mutex::new(Some(Vec::new()))),
+                    acceptance_deadline: aggregate_deadline,
                 },
             });
             continue;
         }
-        match queue_local(state, &recipient, stanza.clone()).await {
+        match queue_local(state, &recipient, stanza.clone(), aggregate_deadline).await {
             LocalQueueResult::Accepted(ack) => {
                 acks.push(ack);
                 continue;
@@ -476,15 +525,10 @@ async fn drain_claimed(
                 continue;
             }
         }
-        // A resource absent from this node may be registered on a peer.  A
-        // successful DirectFrame bridge handoff is the remote completion
-        // boundary; absent resources retain today's intentional silent drop.
-        if registered_remote_resource_delivery(state, &recipient, &stanza).await
-            == RegisteredRemoteDelivery::Retryable
-        {
-            remote_retry_needed = true;
-        }
+        remote.push((recipient, stanza));
     }
+    let remote_retry_needed =
+        await_remote_write_accepted_deliveries(state, remote, aggregate_deadline).await;
     if remote_retry_needed || local_retry_needed {
         let release_now_ms = actual_release_base_ms(now_ms);
         let _ = store
@@ -500,6 +544,7 @@ async fn drain_claimed(
                 key: claimed.row.key.clone(),
                 lease: claimed.lease_token.clone(),
                 pending_local_acceptances: Arc::new(Mutex::new(Some(acks))),
+                acceptance_deadline: aggregate_deadline,
             };
             for frame in &mut inline {
                 frame.completion = completion.clone();
@@ -513,13 +558,14 @@ async fn drain_claimed(
             key: claimed.row.key.clone(),
             lease: claimed.lease_token.clone(),
             pending_local_acceptances: Arc::new(Mutex::new(Some(acks))),
+            acceptance_deadline: aggregate_deadline,
         };
         for frame in &mut inline {
             frame.completion = completion.clone();
         }
         return Ok(ClaimDisposition::Inline(inline));
     }
-    if !await_acks(acks).await {
+    if !await_acks(acks, aggregate_deadline).await {
         // Keep the lease rather than completing or releasing it: expiry
         // intentionally drives an at-least-once retry after a stalled writer.
         return Ok(ClaimDisposition::Leased);
@@ -538,10 +584,14 @@ async fn queue_local(
     state: &WebSocketState,
     recipient: &FullJid,
     stanza: Stanza,
+    aggregate_deadline: Option<tokio::time::Instant>,
 ) -> LocalQueueResult {
     let (acceptance, receiver) = OutboundWriteAcceptance::new();
+    let Some(timeout) = remaining_timeout(aggregate_deadline, LOCAL_ACCEPTANCE_TIMEOUT) else {
+        return LocalQueueResult::TimedOut;
+    };
     match tokio::time::timeout(
-        LOCAL_ACCEPTANCE_TIMEOUT,
+        timeout,
         state
             .deps
             .protocol
@@ -556,7 +606,13 @@ async fn queue_local(
     }
 }
 
-async fn await_acks(acks: Vec<oneshot::Receiver<()>>) -> bool {
+async fn await_acks(
+    acks: Vec<oneshot::Receiver<()>>,
+    aggregate_deadline: Option<tokio::time::Instant>,
+) -> bool {
+    let Some(timeout) = remaining_timeout(aggregate_deadline, LOCAL_ACCEPTANCE_TIMEOUT) else {
+        return false;
+    };
     let wait = async {
         for ack in acks {
             if ack.await.is_err() {
@@ -565,9 +621,39 @@ async fn await_acks(acks: Vec<oneshot::Receiver<()>>) -> bool {
         }
         true
     };
-    tokio::time::timeout(LOCAL_ACCEPTANCE_TIMEOUT, wait)
-        .await
-        .unwrap_or(false)
+    tokio::time::timeout(timeout, wait).await.unwrap_or(false)
+}
+
+async fn await_remote_write_accepted_deliveries(
+    state: &WebSocketState,
+    remote: Vec<(FullJid, Stanza)>,
+    aggregate_deadline: Option<tokio::time::Instant>,
+) -> bool {
+    if remote.is_empty() {
+        return false;
+    }
+    let mut pending = FuturesUnordered::new();
+    for (recipient, stanza) in remote {
+        pending.push(async move {
+            registered_remote_resource_write_accepted_delivery(state, &recipient, &stanza).await
+        });
+    }
+    while !pending.is_empty() {
+        let next = match aggregate_deadline {
+            Some(deadline) => match tokio::time::timeout_at(deadline, pending.next()).await {
+                Ok(next) => next,
+                Err(_) => return true,
+            },
+            None => pending.next().await,
+        };
+        match next {
+            #[cfg(feature = "clustering")]
+            Some(RegisteredRemoteDelivery::Retryable) => return true,
+            Some(_) => {}
+            None => break,
+        }
+    }
+    false
 }
 
 async fn renew_claim_lease(
@@ -585,6 +671,15 @@ async fn renew_claim_lease(
 
 fn actual_release_base_ms(claimed_at_ms: i64) -> i64 {
     crate::time::now_ms().max(claimed_at_ms)
+}
+
+fn remaining_timeout(
+    aggregate_deadline: Option<tokio::time::Instant>,
+    fallback: Duration,
+) -> Option<Duration> {
+    aggregate_deadline.map_or(Some(fallback), |deadline| {
+        deadline.checked_duration_since(tokio::time::Instant::now())
+    })
 }
 
 async fn local_room_jids(

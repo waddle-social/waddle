@@ -233,6 +233,14 @@ pub struct RemoteResourceOutboundFrame {
 }
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct RemoteResourceWriteAcceptedOutboundFrame {
+    pub jid: jid::FullJid,
+    pub registration_id: RemoteResourceRegistrationId,
+    pub socket_generation: RemoteResourceSocketGeneration,
+    pub stanza: RemoteStanza,
+}
+
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub enum RemoteResourceRouteTarget {
     FullJid {
         target: jid::FullJid,

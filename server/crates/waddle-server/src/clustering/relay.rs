@@ -29,7 +29,8 @@ use super::resume_bridge::ResumeStealBridge;
 use super::route_bridge::{
     OrderedRelayDeliveryBridge, RemoteResourceOutboundFrame, RemoteResourceRegistrationId,
     RemoteResourceRouteOutcome, RemoteResourceRouteTarget, RemoteResourceSocketGeneration,
-    RemoteResourceStateSnapshot, RemoteResourceStateUpdate, RemoteUserSideEffect,
+    RemoteResourceStateSnapshot, RemoteResourceStateUpdate,
+    RemoteResourceWriteAcceptedOutboundFrame, RemoteUserSideEffect,
 };
 use super::self_fence::LocallyClaimedEntities;
 use super::trace_context::RelayTraceContext;
@@ -101,6 +102,7 @@ enum RelayDispatchKind {
     RemoteUserSideEffect,
     RemoteResourceRoute,
     RemoteResourceFrame,
+    RemoteResourceWriteAccepted,
     RemoteResourceForceDetach,
     ResumeSteal,
     Demote,
@@ -117,6 +119,7 @@ impl RelayDispatchKind {
             Self::RemoteUserSideEffect => "remote_user_side_effect",
             Self::RemoteResourceRoute => "remote_resource_route",
             Self::RemoteResourceFrame => "remote_resource_frame",
+            Self::RemoteResourceWriteAccepted => "remote_resource_write_accepted",
             Self::RemoteResourceForceDetach => "remote_resource_force_detach",
             Self::ResumeSteal => "resume_steal",
             Self::Demote => "demote",
@@ -706,6 +709,59 @@ impl Message<RelayDeliverRemoteResourceFrame> for RelayActor {
         let bridge = Arc::clone(&self.ordered_delivery_bridge);
         spawn_in_dispatch_span(ctx, span, async move {
             bridge.deliver_remote_resource_frame_on_socket(msg).await
+        })
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RelayDeliverRemoteResourceWriteAcceptedFrame {
+    pub frame: RemoteResourceWriteAcceptedOutboundFrame,
+    /// Sender's W3C trace context (#1485), telemetry only: absent from
+    /// an older node's encoding, defaulted on decode, and never read for
+    /// relay semantics. Stamped at the send seam by [`RelayHandle`].
+    #[serde(default)]
+    pub trace: RelayTraceContext,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum RelayRemoteResourceWriteAcceptedStatus {
+    WriteAccepted,
+    AcceptanceClosed,
+    AcceptancePending,
+    StaleRegistration,
+    Unavailable,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Reply)]
+pub struct RelayRemoteResourceWriteAcceptedReply {
+    pub status: RelayRemoteResourceWriteAcceptedStatus,
+}
+
+// #1597 HARD RULE: add a NEW message id for EVERY change to the
+// write-accepted remote-resource ask wire format (`RelayDeliverRemoteResourceWriteAcceptedFrame`
+// or anything it contains). A peer running an older build then fails the ask
+// with `UnknownMessage` — provably before its handler ran — which the durable
+// sender maps to a retryable no-effect result. Reusing an old id instead makes
+// the old peer fail mid-decode with `DeserializeMessage`, which is
+// indistinguishable from a reply-decode failure after a committed acceptance
+// and would let mixed-version rollout poison durable delivery classification.
+// v1: durable room-effect direct-frame delivery settled on writer acceptance.
+#[kameo::remote_message("waddle.clustering.relay.remote_resource_write_accepted.v1")]
+impl Message<RelayDeliverRemoteResourceWriteAcceptedFrame> for RelayActor {
+    type Reply = kameo::reply::DelegatedReply<RelayRemoteResourceWriteAcceptedReply>;
+
+    async fn handle(
+        &mut self,
+        msg: RelayDeliverRemoteResourceWriteAcceptedFrame,
+        ctx: &mut Context<Self, Self::Reply>,
+    ) -> Self::Reply {
+        let span = relay_dispatch_span(RelayDispatchKind::RemoteResourceWriteAccepted, &msg.trace);
+        span.record("jid", tracing::field::display(&msg.frame.jid));
+        let bridge = Arc::clone(&self.ordered_delivery_bridge);
+        spawn_in_dispatch_span(ctx, span, async move {
+            bridge
+                .deliver_remote_resource_write_accepted_frame_on_socket(msg)
+                .await
         })
     }
 }
@@ -1822,6 +1878,45 @@ impl RelayHandle {
         &mut self,
         message: RelayDeliverRemoteResourceFrame,
     ) -> Result<RelayRemoteResourceFrameReply, RelayAskError> {
+        let remote_ref = self.resolve().await?;
+        match remote_ref
+            .ask(&message)
+            .mailbox_timeout(self.mailbox_timeout)
+            .reply_timeout(self.reply_timeout)
+            .await
+        {
+            Ok(reply) => Ok(reply),
+            Err(error) if is_no_effect_stale_ref_relookup_error(&error) => {
+                self.cached = None;
+                let remote_ref = self.resolve().await?;
+                remote_ref
+                    .ask(&message)
+                    .mailbox_timeout(self.mailbox_timeout)
+                    .reply_timeout(self.reply_timeout)
+                    .await
+                    .map_err(send_error)
+            }
+            Err(error) => Err(send_error(error)),
+        }
+    }
+
+    pub async fn deliver_remote_resource_write_accepted_frame(
+        &mut self,
+        mut message: RelayDeliverRemoteResourceWriteAcceptedFrame,
+    ) -> Result<RelayRemoteResourceWriteAcceptedReply, RelayAskError> {
+        message.trace = RelayTraceContext::capture();
+        let stop_token = self.stop_token.clone();
+        tokio::select! {
+            biased;
+            _ = stop_token.cancelled() => Err(RelayAskError::Cancelled),
+            result = self.deliver_remote_resource_write_accepted_frame_inner(message) => result,
+        }
+    }
+
+    async fn deliver_remote_resource_write_accepted_frame_inner(
+        &mut self,
+        message: RelayDeliverRemoteResourceWriteAcceptedFrame,
+    ) -> Result<RelayRemoteResourceWriteAcceptedReply, RelayAskError> {
         let remote_ref = self.resolve().await?;
         match remote_ref
             .ask(&message)

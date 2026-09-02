@@ -20,6 +20,7 @@ pub(crate) use muc::MucProxyRouteAttempt;
 pub(crate) use muc::{MucProxyRouteDecision, OrderedRelayMucProxyOutcome};
 use receiver::*;
 pub(super) use remote_route_helpers::*;
+pub(crate) use remote_socket::RegisteredRemoteWriteAcceptedDelivery;
 
 pub(super) fn no_client_reply_outcome(delivery: FullJidDeliveryOutcome) -> RemoteDeliveryOutcome {
     no_client_reply_outcome_with_commit_state(delivery, false)

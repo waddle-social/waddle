@@ -92,10 +92,410 @@ async fn remote_socket_delivery_preserves_direct_frame_kind() {
         .await;
 
     assert_eq!(reply.status, RelayRemoteResourceFrameStatus::Delivered);
+    let outbound = rx.recv().await.expect("socket receives relayed frame");
     assert_eq!(
-        rx.recv().await.expect("socket receives relayed frame").kind,
+        outbound.kind,
         DeliveryKind::DirectFrame,
         "remote resource frames must bypass the recipient pass"
+    );
+    assert!(
+        outbound.write_acceptance.is_none(),
+        "remote_resource_frame.v1 must remain enqueue-only"
+    );
+}
+
+#[tokio::test]
+async fn remote_socket_write_accepted_waits_for_writer_handoff() {
+    let services = Arc::new(
+        services_with_claims(
+            origin_identity(),
+            receiver_identity(),
+            receiver_identity(),
+            test_peer_id(),
+        )
+        .await,
+    );
+    let bridge = OrderedRelayDeliveryBridge::new(
+        CancellationToken::new(),
+        &ClusteringMessagingConfig::default(),
+    );
+    bridge.wire(Arc::clone(&services));
+    let target = target_full();
+    let (tx, mut rx) = mpsc::channel(1);
+    let entry = ConnectionEntry::new(tx);
+    let owner = entry.carbons_handle();
+    services
+        .connection_registry
+        .register_entry(target.clone(), entry);
+    bridge
+        .test_insert_remote_socket_registration(
+            target.clone(),
+            Arc::clone(&owner),
+            NodeId::new("remote-user-owner".to_owned()),
+        )
+        .await;
+    let registration = bridge
+        .remote_socket_resources
+        .lock()
+        .await
+        .get(&target)
+        .cloned()
+        .expect("socket registration");
+
+    let bridge_for_task = Arc::clone(&bridge);
+    let target_for_task = target.clone();
+    let mut reply = tokio::spawn(async move {
+        bridge_for_task
+            .deliver_remote_resource_write_accepted_frame_on_socket(
+                RelayDeliverRemoteResourceWriteAcceptedFrame {
+                    frame: RemoteResourceWriteAcceptedOutboundFrame {
+                        jid: target_for_task.clone(),
+                        registration_id: registration.registration_id,
+                        socket_generation: registration.socket_generation,
+                        stanza: RemoteStanza(Stanza::Message(Message::new(Some(jid::Jid::from(
+                            target_for_task,
+                        ))))),
+                    },
+                    trace: RelayTraceContext::default(),
+                },
+            )
+            .await
+    });
+
+    let outbound = rx
+        .recv()
+        .await
+        .expect("destination dequeues write-accepted frame");
+    assert!(
+        tokio::time::timeout(Duration::from_millis(20), &mut reply)
+            .await
+            .is_err(),
+        "reply must stay pending until the writer accepts the frame"
+    );
+    outbound
+        .write_acceptance
+        .as_ref()
+        .expect("write acceptance token")
+        .acknowledge();
+    assert_eq!(
+        reply.await.expect("reply task").status,
+        RelayRemoteResourceWriteAcceptedStatus::WriteAccepted
+    );
+    assert!(
+        matches!(
+            rx.try_recv(),
+            Err(tokio::sync::mpsc::error::TryRecvError::Empty)
+        ),
+        "the handler must enqueue exactly one outbound frame"
+    );
+}
+
+#[tokio::test]
+async fn remote_socket_write_accepted_reports_acceptance_closed_when_writer_drops_frame() {
+    let services = Arc::new(
+        services_with_claims(
+            origin_identity(),
+            receiver_identity(),
+            receiver_identity(),
+            test_peer_id(),
+        )
+        .await,
+    );
+    let bridge = OrderedRelayDeliveryBridge::new(
+        CancellationToken::new(),
+        &ClusteringMessagingConfig::default(),
+    );
+    bridge.wire(Arc::clone(&services));
+    let target = target_full();
+    let (tx, mut rx) = mpsc::channel(1);
+    let entry = ConnectionEntry::new(tx);
+    let owner = entry.carbons_handle();
+    services
+        .connection_registry
+        .register_entry(target.clone(), entry);
+    bridge
+        .test_insert_remote_socket_registration(
+            target.clone(),
+            Arc::clone(&owner),
+            NodeId::new("remote-user-owner".to_owned()),
+        )
+        .await;
+    let registration = bridge
+        .remote_socket_resources
+        .lock()
+        .await
+        .get(&target)
+        .cloned()
+        .expect("socket registration");
+
+    let bridge_for_task = Arc::clone(&bridge);
+    let target_for_task = target.clone();
+    let reply = tokio::spawn(async move {
+        bridge_for_task
+            .deliver_remote_resource_write_accepted_frame_on_socket(
+                RelayDeliverRemoteResourceWriteAcceptedFrame {
+                    frame: RemoteResourceWriteAcceptedOutboundFrame {
+                        jid: target_for_task.clone(),
+                        registration_id: registration.registration_id,
+                        socket_generation: registration.socket_generation,
+                        stanza: RemoteStanza(Stanza::Message(Message::new(Some(jid::Jid::from(
+                            target_for_task,
+                        ))))),
+                    },
+                    trace: RelayTraceContext::default(),
+                },
+            )
+            .await
+    });
+
+    let outbound = rx
+        .recv()
+        .await
+        .expect("destination dequeues write-accepted frame");
+    assert!(outbound.write_acceptance.is_some());
+    drop(outbound);
+
+    assert_eq!(
+        reply.await.expect("reply task").status,
+        RelayRemoteResourceWriteAcceptedStatus::AcceptanceClosed
+    );
+}
+
+#[tokio::test(start_paused = true)]
+async fn remote_socket_write_accepted_reports_acceptance_pending_when_writer_stalls() {
+    let services = Arc::new(
+        services_with_claims(
+            origin_identity(),
+            receiver_identity(),
+            receiver_identity(),
+            test_peer_id(),
+        )
+        .await,
+    );
+    let bridge = OrderedRelayDeliveryBridge::new(
+        CancellationToken::new(),
+        &ClusteringMessagingConfig::default(),
+    );
+    bridge.wire(Arc::clone(&services));
+    let target = target_full();
+    let (tx, mut rx) = mpsc::channel(1);
+    let entry = ConnectionEntry::new(tx);
+    let owner = entry.carbons_handle();
+    services
+        .connection_registry
+        .register_entry(target.clone(), entry);
+    bridge
+        .test_insert_remote_socket_registration(
+            target.clone(),
+            Arc::clone(&owner),
+            NodeId::new("remote-user-owner".to_owned()),
+        )
+        .await;
+    let registration = bridge
+        .remote_socket_resources
+        .lock()
+        .await
+        .get(&target)
+        .cloned()
+        .expect("socket registration");
+
+    let bridge_for_task = Arc::clone(&bridge);
+    let target_for_task = target.clone();
+    let reply = tokio::spawn(async move {
+        bridge_for_task
+            .deliver_remote_resource_write_accepted_frame_on_socket(
+                RelayDeliverRemoteResourceWriteAcceptedFrame {
+                    frame: RemoteResourceWriteAcceptedOutboundFrame {
+                        jid: target_for_task.clone(),
+                        registration_id: registration.registration_id,
+                        socket_generation: registration.socket_generation,
+                        stanza: RemoteStanza(Stanza::Message(Message::new(Some(jid::Jid::from(
+                            target_for_task,
+                        ))))),
+                    },
+                    trace: RelayTraceContext::default(),
+                },
+            )
+            .await
+    });
+
+    let held = rx
+        .recv()
+        .await
+        .expect("destination dequeues write-accepted frame");
+    assert!(held.write_acceptance.is_some());
+    tokio::time::advance(
+        bridge.remote_resource_write_accepted_acceptance_timeout() + Duration::from_millis(1),
+    )
+    .await;
+
+    assert_eq!(
+        reply.await.expect("reply task").status,
+        RelayRemoteResourceWriteAcceptedStatus::AcceptancePending
+    );
+    drop(held);
+}
+
+#[tokio::test]
+async fn remote_socket_write_accepted_rejects_stale_socket_generation() {
+    let services = Arc::new(
+        services_with_claims(
+            origin_identity(),
+            receiver_identity(),
+            receiver_identity(),
+            test_peer_id(),
+        )
+        .await,
+    );
+    let bridge = OrderedRelayDeliveryBridge::new(
+        CancellationToken::new(),
+        &ClusteringMessagingConfig::default(),
+    );
+    bridge.wire(Arc::clone(&services));
+    let target = target_full();
+    let (tx, _rx) = mpsc::channel(1);
+    let entry = ConnectionEntry::new(tx);
+    let owner = entry.carbons_handle();
+    services
+        .connection_registry
+        .register_entry(target.clone(), entry);
+    bridge
+        .test_insert_remote_socket_registration(
+            target.clone(),
+            Arc::clone(&owner),
+            NodeId::new("remote-user-owner".to_owned()),
+        )
+        .await;
+    let registration = bridge
+        .remote_socket_resources
+        .lock()
+        .await
+        .get(&target)
+        .cloned()
+        .expect("socket registration");
+
+    let reply = bridge
+        .deliver_remote_resource_write_accepted_frame_on_socket(
+            RelayDeliverRemoteResourceWriteAcceptedFrame {
+                frame: RemoteResourceWriteAcceptedOutboundFrame {
+                    jid: target.clone(),
+                    registration_id: registration.registration_id,
+                    socket_generation: RemoteResourceSocketGeneration::next(Some(
+                        registration.socket_generation,
+                    )),
+                    stanza: RemoteStanza(Stanza::Message(Message::new(Some(jid::Jid::from(
+                        target,
+                    ))))),
+                },
+                trace: RelayTraceContext::default(),
+            },
+        )
+        .await;
+
+    assert_eq!(
+        reply.status,
+        RelayRemoteResourceWriteAcceptedStatus::StaleRegistration
+    );
+}
+
+#[tokio::test]
+async fn remote_socket_write_accepted_reports_unavailable_for_absent_resource() {
+    let services = Arc::new(
+        services_with_claims(
+            origin_identity(),
+            receiver_identity(),
+            receiver_identity(),
+            test_peer_id(),
+        )
+        .await,
+    );
+    let bridge = OrderedRelayDeliveryBridge::new(
+        CancellationToken::new(),
+        &ClusteringMessagingConfig::default(),
+    );
+    bridge.wire(Arc::clone(&services));
+    let target = target_full();
+
+    let reply = bridge
+        .deliver_remote_resource_write_accepted_frame_on_socket(
+            RelayDeliverRemoteResourceWriteAcceptedFrame {
+                frame: RemoteResourceWriteAcceptedOutboundFrame {
+                    jid: target.clone(),
+                    registration_id: RemoteResourceRegistrationId::fresh(),
+                    socket_generation: RemoteResourceSocketGeneration::next(None),
+                    stanza: RemoteStanza(Stanza::Message(Message::new(Some(jid::Jid::from(
+                        target,
+                    ))))),
+                },
+                trace: RelayTraceContext::default(),
+            },
+        )
+        .await;
+
+    assert_eq!(
+        reply.status,
+        RelayRemoteResourceWriteAcceptedStatus::Unavailable
+    );
+}
+
+#[tokio::test]
+async fn refreshing_stale_write_accepted_owner_to_local_resource_clears_the_remote_mirror() {
+    let services = Arc::new(
+        services_with_claims(
+            origin_identity(),
+            receiver_identity(),
+            receiver_identity(),
+            test_peer_id(),
+        )
+        .await,
+    );
+    let bridge = OrderedRelayDeliveryBridge::new(
+        CancellationToken::new(),
+        &ClusteringMessagingConfig::default(),
+    );
+    bridge.wire(Arc::clone(&services));
+    let target = target_full();
+    let (tx, _rx) = mpsc::channel(1);
+    let entry = ConnectionEntry::new(tx);
+    let owner = entry.carbons_handle();
+    services
+        .connection_registry
+        .register_entry(target.clone(), entry.clone());
+    services
+        .user_registry
+        .ask(waddle_xmpp::registry::RegisterUserResource {
+            jid: target.clone(),
+            entry,
+        })
+        .await
+        .expect("register local target");
+    let stale = RemoteOwnerRegistration {
+        registration_id: RemoteResourceRegistrationId::fresh(),
+        socket_node: NodeId::new("origin-node".to_owned()),
+        socket_generation: RemoteResourceSocketGeneration::next(None),
+        owner,
+    };
+    bridge
+        .remote_owner_resources
+        .lock()
+        .await
+        .insert(target.clone(), stale.clone());
+
+    let refreshed = bridge
+        .refresh_remote_owner_registration(&target, &stale)
+        .await;
+
+    assert!(
+        refreshed.is_none(),
+        "local-owner refresh should not keep a remote relay target"
+    );
+    assert!(
+        !bridge
+            .remote_owner_resources
+            .lock()
+            .await
+            .contains_key(&target),
+        "the stale remote-owner mirror must be cleared when the claim refresh resolves local"
     );
 }
 
