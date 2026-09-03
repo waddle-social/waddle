@@ -673,12 +673,18 @@ async fn deliver_recipients_concurrently(
     // structural property rather than an accident of executor polling.
     // Recipients still fan out concurrently against each other.
     let mut grouped: Vec<(FullJid, Vec<Stanza>)> = Vec::new();
+    let mut group_index: std::collections::HashMap<FullJid, usize> =
+        std::collections::HashMap::new();
     for (recipient, stanza) in recipients {
-        match grouped.iter_mut().find(|(jid, _)| *jid == recipient) {
-            Some((_, stanzas)) => stanzas.push(stanza),
-            None => grouped.push((recipient, vec![stanza])),
+        match group_index.get(&recipient) {
+            Some(&at) => grouped[at].1.push(stanza),
+            None => {
+                group_index.insert(recipient.clone(), grouped.len());
+                grouped.push((recipient, vec![stanza]));
+            }
         }
     }
+    drop(group_index);
     // Bounded fan-out: a large room can render thousands of unique
     // recipients from one config/destroy effect, and unbounded concurrency
     // would thundering-herd the local queues and relay lookups that the
@@ -724,6 +730,7 @@ async fn deliver_recipients_concurrently(
     let mut remote_retry = false;
     let mut local_timed_out = false;
     let mut lease_lost = false;
+    let mut renewal_errored = false;
     let drive = async {
         while let Some(outcome) = pending.next().await {
             // Refills re-validate the lease: every renewal happened before
@@ -731,12 +738,24 @@ async fn deliver_recipients_concurrently(
             // supersede/steal landing mid-phase must stop NEW deliveries
             // (in-flight ones settle; the caller treats a lost lease
             // exactly like the sequential mid-roster checkpoint).
-            if !lease_lost {
+            if !lease_lost && !renewal_errored {
                 if let Some(entry) = queued.next() {
                     match renew_claim_lease(state, key, lease).await {
                         Ok(true) => pending.push(make_future(entry)),
-                        Ok(false) | Err(_) => {
-                            lease_lost = true;
+                        // A definitive renewal refusal means another holder
+                        // owns delivery — the caller's Stale path.
+                        Ok(false) => lease_lost = true,
+                        // A TRANSIENT storage error proves nothing about the
+                        // lease: stop scheduling and let the caller RELEASE
+                        // for retry — conflating it with loss would route
+                        // into the token-gated complete and delete a live
+                        // effect.
+                        Err(error) => {
+                            tracing::warn!(
+                                %error,
+                                "room effect refill lease renewal errored; releasing for retry"
+                            );
+                            renewal_errored = true;
                         }
                     }
                 }
@@ -749,7 +768,7 @@ async fn deliver_recipients_concurrently(
                 #[cfg(feature = "clustering")]
                 RecipientDeliveryOutcome::RemoteRetryable => remote_retry = true,
             }
-            if lease_lost {
+            if lease_lost || renewal_errored {
                 // Let in-flight futures finish (their frames are already
                 // enqueued or in the relay), but schedule nothing further.
                 queued.by_ref().for_each(drop);
@@ -775,6 +794,9 @@ async fn deliver_recipients_concurrently(
     } else {
         // Inline deadline already exhausted on entry: nothing was attempted.
         drop(drive);
+        remote_retry = true;
+    }
+    if renewal_errored {
         remote_retry = true;
     }
     (acks, remote_retry, local_timed_out, lease_lost)
