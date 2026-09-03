@@ -293,7 +293,7 @@ async fn relay_dispatch_span_is_a_root_even_inside_an_active_span() {
 // everything after the file's first `#[cfg(test)]` as test code, so a
 // test-gated item up in the production section would silently shrink the
 // segment it audits.
-const ALL_DISPATCH_KINDS: [RelayDispatchKind; 11] = [
+const ALL_DISPATCH_KINDS: [RelayDispatchKind; 12] = [
     RelayDispatchKind::DeliverOrdered,
     RelayDispatchKind::RemoteResourceRegister,
     RelayDispatchKind::RemoteResourceUnregister,
@@ -301,6 +301,7 @@ const ALL_DISPATCH_KINDS: [RelayDispatchKind; 11] = [
     RelayDispatchKind::RemoteUserSideEffect,
     RelayDispatchKind::RemoteResourceRoute,
     RelayDispatchKind::RemoteResourceFrame,
+    RelayDispatchKind::RemoteResourceWriteAccepted,
     RelayDispatchKind::RemoteResourceForceDetach,
     RelayDispatchKind::ResumeSteal,
     RelayDispatchKind::Demote,
@@ -319,6 +320,7 @@ fn relay_dispatch_kind_strings_are_pinned() {
             "remote_user_side_effect",
             "remote_resource_route",
             "remote_resource_frame",
+            "remote_resource_write_accepted",
             "remote_resource_force_detach",
             "resume_steal",
             "demote",

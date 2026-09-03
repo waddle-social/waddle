@@ -183,6 +183,62 @@ async fn renew_lease_rejects_superseded_rows() {
 }
 
 #[tokio::test]
+async fn batch_64_later_chunk_uses_fresh_lease_time_against_competing_claimant() {
+    let (_db, store) = store_with_db("room-effect-batch-64-fresh-lease").await;
+    for _ in 0..64 {
+        enqueue_and_arm(
+            &store,
+            RoomLifecycleId::generate(),
+            initial_revision(),
+            config_effects(),
+        )
+        .await;
+    }
+
+    for _ in 0..7 {
+        let claimed = store
+            .claim_due_head_with_lease_time(0, 8, 0)
+            .await
+            .expect("claim an early batch-64 chunk");
+        assert_eq!(claimed.len(), 8);
+        for effect in claimed {
+            assert!(store
+                .complete(&effect.row.key, &effect.lease_token)
+                .await
+                .expect("complete early chunk"));
+        }
+    }
+
+    let late_lease_ms = CLAIM_TIMEOUT_MS + 10;
+    let late_chunk = store
+        .claim_due_head_with_lease_time(0, 8, late_lease_ms)
+        .await
+        .expect("claim late chunk with fresh lease timestamp");
+    assert_eq!(late_chunk.len(), 8);
+
+    let competing_now_ms = late_lease_ms + 1;
+    assert!(
+        store
+            .claim_due_head(competing_now_ms, 8)
+            .await
+            .expect("competing claimant")
+            .is_empty(),
+        "a later batch-64 chunk must not be born stale and stolen immediately"
+    );
+    for effect in late_chunk {
+        assert_eq!(
+            store
+                .find(&effect.row.key)
+                .await
+                .expect("find late chunk row")
+                .expect("late chunk row remains")
+                .lease_token,
+            Some(effect.lease_token)
+        );
+    }
+}
+
+#[tokio::test]
 async fn handler_window_rows_wait_for_grace_but_exact_claim_is_immediate() {
     let (_db, store) = store_with_db("room-effect-handler-window-grace").await;
     let exact_lifecycle = lifecycle();

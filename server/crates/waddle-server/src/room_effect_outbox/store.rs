@@ -463,13 +463,22 @@ impl RoomEffectOutboxStore {
         now_ms: i64,
         batch: usize,
     ) -> Result<Vec<ClaimedRoomEffect>, RoomEffectOutboxError> {
-        let stale = now_ms.saturating_sub(CLAIM_TIMEOUT_MS);
+        self.claim_due_head_with_lease_time(now_ms, batch, now_ms)
+            .await
+    }
+    pub async fn claim_due_head_with_lease_time(
+        &self,
+        due_now_ms: i64,
+        batch: usize,
+        lease_now_ms: i64,
+    ) -> Result<Vec<ClaimedRoomEffect>, RoomEffectOutboxError> {
+        let stale = lease_now_ms.saturating_sub(CLAIM_TIMEOUT_MS);
         let c = self.db.guard().await?;
         // Preselect only per-lifecycle FIFO heads: a requeued head carries a
         // LATER available_at_ms than its successor ordinal, so without this
         // filter a small batch would keep selecting the unclaimable successor
         // and the lifecycle would never drain.
-        let mut rows = c.query(&format!("{} WHERE available_at_ms <= ? AND NOT superseded AND (lease_token IS NULL OR leased_at_ms <= ?) AND NOT EXISTS (SELECT 1 FROM clustering_muc_room_effects earlier WHERE earlier.lifecycle_id = clustering_muc_room_effects.lifecycle_id AND (earlier.revision < clustering_muc_room_effects.revision OR (earlier.revision = clustering_muc_room_effects.revision AND earlier.ordinal < clustering_muc_room_effects.ordinal))) ORDER BY available_at_ms, lifecycle_id LIMIT ?", select_columns()), crate::db_params![now_ms, stale, batch.clamp(1,1000) as i64]).await?;
+        let mut rows = c.query(&format!("{} WHERE available_at_ms <= ? AND NOT superseded AND (lease_token IS NULL OR leased_at_ms <= ?) AND NOT EXISTS (SELECT 1 FROM clustering_muc_room_effects earlier WHERE earlier.lifecycle_id = clustering_muc_room_effects.lifecycle_id AND (earlier.revision < clustering_muc_room_effects.revision OR (earlier.revision = clustering_muc_room_effects.revision AND earlier.ordinal < clustering_muc_room_effects.ordinal))) ORDER BY available_at_ms, lifecycle_id LIMIT ?", select_columns()), crate::db_params![due_now_ms, stale, batch.clamp(1,1000) as i64]).await?;
         let mut candidates = Vec::new();
         while let Some(row) = rows.next().await? {
             candidates.push(decode_row(&row)?);
@@ -478,7 +487,10 @@ impl RoomEffectOutboxStore {
         drop(c);
         let mut claimed = Vec::new();
         for row in candidates {
-            if let Some(job) = self.claim_inner(&row.key, now_ms, false).await? {
+            if let Some(job) = self
+                .claim_inner_with_due_time(&row.key, lease_now_ms, Some(due_now_ms))
+                .await?
+            {
                 claimed.push(job);
             }
         }
@@ -489,7 +501,7 @@ impl RoomEffectOutboxStore {
         key: &RoomEffectKey,
         now_ms: i64,
     ) -> Result<Option<ClaimedRoomEffect>, RoomEffectOutboxError> {
-        self.claim_inner(key, now_ms, true).await
+        self.claim_inner_with_due_time(key, now_ms, None).await
     }
     pub async fn claim_exact_with_owned_leases(
         &self,
@@ -509,16 +521,16 @@ impl RoomEffectOutboxStore {
         }
         self.claim_exact_without_earlier_exists(key, now_ms).await
     }
-    async fn claim_inner(
+    async fn claim_inner_with_due_time(
         &self,
         key: &RoomEffectKey,
         now_ms: i64,
-        exact: bool,
+        due_now_ms: Option<i64>,
     ) -> Result<Option<ClaimedRoomEffect>, RoomEffectOutboxError> {
         let stale = now_ms.saturating_sub(CLAIM_TIMEOUT_MS);
         let token = RoomEffectLeaseToken::new();
         let c = self.db.guard().await?;
-        let eligibility = if exact {
+        let eligibility = if due_now_ms.is_none() {
             ""
         } else {
             "AND available_at_ms <= ?"
@@ -533,8 +545,8 @@ impl RoomEffectOutboxStore {
             key.revision.as_i64(),
             key.ordinal.as_i64()
         ];
-        if !exact {
-            params.push(now_ms.into());
+        if let Some(due_now_ms) = due_now_ms {
+            params.push(due_now_ms.into());
         }
         params.push(stale.into());
         params.push(stale.into());
