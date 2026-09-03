@@ -514,9 +514,26 @@ async fn drain_claimed(
         // preserving the lost-lease abort checkpoint above.
         remote.push((recipient, stanza));
     }
-    let (accepted_acks, remote_retry_needed, local_timed_out) =
-        deliver_recipients_concurrently(state, remote, aggregate_deadline).await;
+    let (accepted_acks, remote_retry_needed, local_timed_out, lease_lost) =
+        deliver_recipients_concurrently(
+            state,
+            &claimed.row.key,
+            &claimed.lease_token,
+            remote,
+            aggregate_deadline,
+        )
+        .await;
     acks.extend(accepted_acks);
+    if lease_lost {
+        // Same contract as the sequential mid-roster checkpoint above: a
+        // lost/superseded lease during the concurrent phase reports Stale,
+        // with the token-gated complete clearing a superseded predecessor
+        // (a stolen lease makes it a token-mismatch no-op).
+        let _ = store
+            .complete(&claimed.row.key, &claimed.lease_token)
+            .await?;
+        return Ok(ClaimDisposition::Stale);
+    }
     if local_timed_out {
         local_retry_needed = true;
     }
@@ -599,12 +616,15 @@ async fn await_acks(
     mut acks: Vec<oneshot::Receiver<()>>,
     aggregate_deadline: Option<tokio::time::Instant>,
 ) -> bool {
+    let mut consumed = 0usize;
     if let Some(budget) = remaining_timeout(aggregate_deadline, LOCAL_ACCEPTANCE_TIMEOUT) {
+        let consumed = &mut consumed;
         let wait = async {
             for ack in acks.iter_mut() {
                 if ack.await.is_err() {
                     return false;
                 }
+                *consumed += 1;
             }
             true
         };
@@ -614,9 +634,13 @@ async fn await_acks(
     }
     // Deadline exhausted (or already expired on entry): the writers may
     // nevertheless have ALREADY acknowledged every frame — poll each
-    // receiver non-blockingly before declaring failure, so a slow pass
-    // cannot convert a fully-settled delivery into a leased duplicate.
-    acks.iter_mut().all(|ack| ack.try_recv().is_ok())
+    // NOT-YET-CONSUMED receiver non-blockingly before declaring failure (a
+    // receiver the loop already resolved reports Closed on try_recv and
+    // must not fail the sweep), so a slow pass cannot convert a
+    // fully-settled delivery into a leased duplicate.
+    acks[consumed..]
+        .iter_mut()
+        .all(|ack| ack.try_recv().is_ok())
 }
 
 /// Concurrent delivery phase for every non-initiator recipient: each
@@ -626,13 +650,22 @@ async fn await_acks(
 /// channel or slow peer cannot starve the roster tail. Returns the accepted
 /// local receivers plus whether any recipient needs a retry release
 /// (remote-retryable, or local timeout/deadline expiry).
+/// Outer budget for a background (janitor/supervisor) drain's fan-out: no
+/// dispatch backstop applies there, each inner operation is individually
+/// bounded (5s local enqueue, ~3s remote ask), and this cap keeps even a
+/// many-wave large-room drain comfortably inside the 300s claim TTL. An
+/// unfinished tail releases for the next sweep (at-least-once).
+const BACKGROUND_FANOUT_BUDGET: Duration = Duration::from_secs(120);
+
 async fn deliver_recipients_concurrently(
     state: &WebSocketState,
+    key: &RoomEffectKey,
+    lease: &RoomEffectLeaseToken,
     recipients: Vec<(FullJid, Stanza)>,
     aggregate_deadline: Option<tokio::time::Instant>,
-) -> (Vec<oneshot::Receiver<()>>, bool, bool) {
+) -> (Vec<oneshot::Receiver<()>>, bool, bool, bool) {
     if recipients.is_empty() {
-        return (Vec::new(), false, false);
+        return (Vec::new(), false, false, false);
     }
     // Group per recipient and deliver each recipient's stanzas SEQUENTIALLY
     // inside one future: a row can render several frames for one recipient
@@ -690,10 +723,23 @@ async fn deliver_recipients_concurrently(
     let mut acks = Vec::new();
     let mut remote_retry = false;
     let mut local_timed_out = false;
+    let mut lease_lost = false;
     let drive = async {
         while let Some(outcome) = pending.next().await {
-            if let Some(entry) = queued.next() {
-                pending.push(make_future(entry));
+            // Refills re-validate the lease: every renewal happened before
+            // the concurrent phase started, and with more than one wave a
+            // supersede/steal landing mid-phase must stop NEW deliveries
+            // (in-flight ones settle; the caller treats a lost lease
+            // exactly like the sequential mid-roster checkpoint).
+            if !lease_lost {
+                if let Some(entry) = queued.next() {
+                    match renew_claim_lease(state, key, lease).await {
+                        Ok(true) => pending.push(make_future(entry)),
+                        Ok(false) | Err(_) => {
+                            lease_lost = true;
+                        }
+                    }
+                }
             }
             match outcome {
                 RecipientDeliveryOutcome::RecipientDone(recipient_acks) => {
@@ -703,22 +749,35 @@ async fn deliver_recipients_concurrently(
                 #[cfg(feature = "clustering")]
                 RecipientDeliveryOutcome::RemoteRetryable => remote_retry = true,
             }
-        }
-    };
-    match remaining_timeout(aggregate_deadline, LOCAL_ACCEPTANCE_TIMEOUT) {
-        Some(budget) => {
-            if tokio::time::timeout(budget, drive).await.is_err() {
-                // Deadline expired with recipients still in flight: they are
-                // neither settled nor durably accepted — release and let the
-                // janitor redeliver (at-least-once).
-                remote_retry = true;
+            if lease_lost {
+                // Let in-flight futures finish (their frames are already
+                // enqueued or in the relay), but schedule nothing further.
+                queued.by_ref().for_each(drop);
             }
         }
-        None => {
+    };
+    // The inline path shares the pass's aggregate deadline; a background
+    // drain (deadline None) gets BACKGROUND_FANOUT_BUDGET instead of the
+    // 5s default — the default equals each queue_local's own bound, so a
+    // fully backpressured first wave would otherwise cancel the drive
+    // before recipient 33 could ever launch.
+    let budget = match aggregate_deadline {
+        Some(_) => remaining_timeout(aggregate_deadline, LOCAL_ACCEPTANCE_TIMEOUT),
+        None => Some(BACKGROUND_FANOUT_BUDGET),
+    };
+    if let Some(budget) = budget {
+        if tokio::time::timeout(budget, drive).await.is_err() {
+            // Budget expired with recipients still in flight: they are
+            // neither settled nor durably accepted — release and let the
+            // janitor redeliver (at-least-once).
             remote_retry = true;
         }
+    } else {
+        // Inline deadline already exhausted on entry: nothing was attempted.
+        drop(drive);
+        remote_retry = true;
     }
-    (acks, remote_retry, local_timed_out)
+    (acks, remote_retry, local_timed_out, lease_lost)
 }
 
 enum RecipientDeliveryOutcome {
