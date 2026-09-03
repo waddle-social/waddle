@@ -58,7 +58,6 @@ pub struct RoomEffectCompletion {
     pub key: RoomEffectKey,
     pub lease: RoomEffectLeaseToken,
     pending_local_acceptances: Arc<Mutex<Option<Vec<oneshot::Receiver<()>>>>>,
-    acceptance_deadline: Option<tokio::time::Instant>,
 }
 
 impl std::fmt::Debug for RoomEffectCompletion {
@@ -76,7 +75,6 @@ impl Clone for RoomEffectCompletion {
             key: self.key.clone(),
             lease: self.lease.clone(),
             pending_local_acceptances: Arc::clone(&self.pending_local_acceptances),
-            acceptance_deadline: self.acceptance_deadline,
         }
     }
 }
@@ -128,10 +126,13 @@ pub async fn complete_after_write(
         .unwrap_or_else(std::sync::PoisonError::into_inner)
         .take()
         .unwrap_or_default();
-    // Nothing to wait for ⇒ nothing the deadline can gate: a replay-recorded
-    // inline completion finalized after the aggregate deadline must still
-    // settle its already-durable row instead of leasing it into a duplicate.
-    if !pending.is_empty() && !await_acks(pending, completion.acceptance_deadline).await {
+    // The aggregate deadline bounds the inline DRAIN PASS under the dispatch
+    // backstop; this completion runs in a spawned task after the batch write,
+    // where an inherited, possibly-expired deadline would bound nothing and
+    // convert an already-acknowledged delivery into a 300s-leased duplicate.
+    // The fresh default floor makes an acked receiver resolve immediately and
+    // keeps the pre-existing bound for a genuinely pending one.
+    if !pending.is_empty() && !await_acks(pending, None).await {
         return Ok(false);
     }
     state
@@ -502,7 +503,6 @@ async fn drain_claimed(
                     key: claimed.row.key.clone(),
                     lease: claimed.lease_token.clone(),
                     pending_local_acceptances: Arc::new(Mutex::new(Some(Vec::new()))),
-                    acceptance_deadline: aggregate_deadline,
                 },
             });
             continue;
@@ -535,7 +535,6 @@ async fn drain_claimed(
                 key: claimed.row.key.clone(),
                 lease: claimed.lease_token.clone(),
                 pending_local_acceptances: Arc::new(Mutex::new(Some(acks))),
-                acceptance_deadline: aggregate_deadline,
             };
             for frame in &mut inline {
                 frame.completion = completion.clone();
@@ -549,7 +548,6 @@ async fn drain_claimed(
             key: claimed.row.key.clone(),
             lease: claimed.lease_token.clone(),
             pending_local_acceptances: Arc::new(Mutex::new(Some(acks))),
-            acceptance_deadline: aggregate_deadline,
         };
         for frame in &mut inline {
             frame.completion = completion.clone();
@@ -630,36 +628,50 @@ async fn deliver_recipients_concurrently(
     if recipients.is_empty() {
         return (Vec::new(), false, false);
     }
-    let mut pending = FuturesUnordered::new();
+    // Group per recipient and deliver each recipient's stanzas SEQUENTIALLY
+    // inside one future: a row can render several frames for one recipient
+    // (e.g. batch-removal broadcasts), and their relative order must be a
+    // structural property rather than an accident of executor polling.
+    // Recipients still fan out concurrently against each other.
+    let mut grouped: Vec<(FullJid, Vec<Stanza>)> = Vec::new();
     for (recipient, stanza) in recipients {
+        match grouped.iter_mut().find(|(jid, _)| *jid == recipient) {
+            Some((_, stanzas)) => stanzas.push(stanza),
+            None => grouped.push((recipient, vec![stanza])),
+        }
+    }
+    let mut pending = FuturesUnordered::new();
+    for (recipient, stanzas) in grouped {
         pending.push(async move {
-            match queue_local(state, &recipient, stanza.clone(), aggregate_deadline).await {
-                LocalQueueResult::Accepted(ack) => RecipientDeliveryOutcome::LocalAccepted(ack),
-                LocalQueueResult::TimedOut => {
-                    tracing::warn!(
-                        recipient = %recipient,
-                        "room effect outbox local enqueue timed out; releasing after the pass"
-                    );
-                    RecipientDeliveryOutcome::LocalTimedOut
-                }
-                LocalQueueResult::NotConnected => {
-                    match registered_remote_resource_write_accepted_delivery(
-                        state, &recipient, &stanza,
-                    )
-                    .await
-                    {
-                        #[cfg(feature = "clustering")]
-                        RegisteredRemoteDelivery::Retryable => {
-                            RecipientDeliveryOutcome::RemoteRetryable
+            let mut recipient_acks = Vec::new();
+            for stanza in stanzas {
+                match queue_local(state, &recipient, stanza.clone(), aggregate_deadline).await {
+                    LocalQueueResult::Accepted(ack) => recipient_acks.push(ack),
+                    LocalQueueResult::TimedOut => {
+                        tracing::warn!(
+                            recipient = %recipient,
+                            "room effect outbox local enqueue timed out; releasing after the pass"
+                        );
+                        return RecipientDeliveryOutcome::LocalTimedOut;
+                    }
+                    LocalQueueResult::NotConnected => {
+                        match registered_remote_resource_write_accepted_delivery(
+                            state, &recipient, &stanza,
+                        )
+                        .await
+                        {
+                            #[cfg(feature = "clustering")]
+                            RegisteredRemoteDelivery::Retryable => {
+                                return RecipientDeliveryOutcome::RemoteRetryable;
+                            }
+                            #[cfg(feature = "clustering")]
+                            RegisteredRemoteDelivery::Delivered => {}
+                            RegisteredRemoteDelivery::Absent => {}
                         }
-                        #[cfg(feature = "clustering")]
-                        RegisteredRemoteDelivery::Delivered => {
-                            RecipientDeliveryOutcome::RemoteSettled
-                        }
-                        RegisteredRemoteDelivery::Absent => RecipientDeliveryOutcome::RemoteSettled,
                     }
                 }
             }
+            RecipientDeliveryOutcome::RecipientDone(recipient_acks)
         });
     }
     let mut acks = Vec::new();
@@ -668,11 +680,12 @@ async fn deliver_recipients_concurrently(
     let drive = async {
         while let Some(outcome) = pending.next().await {
             match outcome {
-                RecipientDeliveryOutcome::LocalAccepted(ack) => acks.push(ack),
+                RecipientDeliveryOutcome::RecipientDone(recipient_acks) => {
+                    acks.extend(recipient_acks)
+                }
                 RecipientDeliveryOutcome::LocalTimedOut => local_timed_out = true,
                 #[cfg(feature = "clustering")]
                 RecipientDeliveryOutcome::RemoteRetryable => remote_retry = true,
-                RecipientDeliveryOutcome::RemoteSettled => {}
             }
         }
     };
@@ -693,11 +706,10 @@ async fn deliver_recipients_concurrently(
 }
 
 enum RecipientDeliveryOutcome {
-    LocalAccepted(oneshot::Receiver<()>),
+    RecipientDone(Vec<oneshot::Receiver<()>>),
     LocalTimedOut,
     #[cfg(feature = "clustering")]
     RemoteRetryable,
-    RemoteSettled,
 }
 
 async fn renew_claim_lease(

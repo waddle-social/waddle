@@ -439,36 +439,20 @@ async fn remote_socket_write_accepted_reports_unavailable_for_absent_resource() 
 }
 
 #[tokio::test]
-async fn refreshing_stale_write_accepted_owner_to_local_resource_clears_the_remote_mirror() {
-    let services = Arc::new(
-        services_with_claims(
-            origin_identity(),
-            receiver_identity(),
-            receiver_identity(),
-            test_peer_id(),
-        )
-        .await,
-    );
-    let bridge = OrderedRelayDeliveryBridge::new(
-        CancellationToken::new(),
-        &ClusteringMessagingConfig::default(),
-    );
-    bridge.wire(Arc::clone(&services));
+async fn stale_write_accepted_registration_is_retryable_and_keeps_the_owner_mirror() {
+    // A StaleRegistration reply means the destination's socket lifecycle
+    // moved. An owner-side refresh is structurally impossible (only the
+    // socket node's own re-registration rebuilds the mirror), so the
+    // delivery must classify as retryable WITHOUT touching the mirror —
+    // falsely settling the durable row or tearing down a mirror the socket
+    // node still converges would lose the effect or the route.
+    let stop = CancellationToken::new();
+    stop.cancel();
+    let bridge = OrderedRelayDeliveryBridge::new(stop, &ClusteringMessagingConfig::default());
     let target = target_full();
     let (tx, _rx) = mpsc::channel(1);
     let entry = ConnectionEntry::new(tx);
     let owner = entry.carbons_handle();
-    services
-        .connection_registry
-        .register_entry(target.clone(), entry.clone());
-    services
-        .user_registry
-        .ask(waddle_xmpp::registry::RegisterUserResource {
-            jid: target.clone(),
-            entry,
-        })
-        .await
-        .expect("register local target");
     let stale = RemoteOwnerRegistration {
         registration_id: RemoteResourceRegistrationId::fresh(),
         socket_node: NodeId::new("origin-node".to_owned()),
@@ -481,21 +465,22 @@ async fn refreshing_stale_write_accepted_owner_to_local_resource_clears_the_remo
         .await
         .insert(target.clone(), stale.clone());
 
-    let refreshed = bridge
-        .refresh_remote_owner_registration(&target, &stale)
+    // The cancelled stop token makes the relay ask fail fast; the delivery
+    // outcome for an unreachable/stale destination must be retryable.
+    let outcome = bridge
+        .try_deliver_registered_remote_resource_write_accepted(
+            &target,
+            &Stanza::Message(Message::new(Some(jid::Jid::from(target.clone())))),
+        )
         .await;
-
+    assert_eq!(outcome, RegisteredRemoteWriteAcceptedDelivery::Retryable);
     assert!(
-        refreshed.is_none(),
-        "local-owner refresh should not keep a remote relay target"
-    );
-    assert!(
-        !bridge
+        bridge
             .remote_owner_resources
             .lock()
             .await
             .contains_key(&target),
-        "the stale remote-owner mirror must be cleared when the claim refresh resolves local"
+        "a retryable stale/unreachable delivery must keep the owner mirror for the next pass"
     );
 }
 

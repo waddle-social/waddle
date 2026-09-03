@@ -247,75 +247,13 @@ impl OrderedRelayDeliveryBridge {
                 RegisteredRemoteWriteAcceptedDelivery::Absent
             }
             RegisteredRemoteWriteAcceptedDelivery::RefreshNeeded => {
-                let refreshed = self
-                    .refresh_remote_owner_registration(target, &registration)
-                    .await;
-                let Some(refreshed) = refreshed else {
-                    if !self
-                        .remote_owner_resources
-                        .lock()
-                        .await
-                        .contains_key(target)
-                    {
-                        return self
-                            .deliver_local_write_accepted_after_target_refresh(target, stanza)
-                            .await;
-                    }
-                    return RegisteredRemoteWriteAcceptedDelivery::Retryable;
-                };
-                match self
-                    .deliver_registered_remote_resource_write_accepted_with_registration(
-                        target, stanza, &refreshed,
-                    )
-                    .await
-                {
-                    RegisteredRemoteWriteAcceptedDelivery::Delivered => {
-                        RegisteredRemoteWriteAcceptedDelivery::Delivered
-                    }
-                    RegisteredRemoteWriteAcceptedDelivery::Absent => {
-                        RegisteredRemoteWriteAcceptedDelivery::Absent
-                    }
-                    RegisteredRemoteWriteAcceptedDelivery::Retryable
-                    | RegisteredRemoteWriteAcceptedDelivery::RefreshNeeded => {
-                        RegisteredRemoteWriteAcceptedDelivery::Retryable
-                    }
-                }
-            }
-        }
-    }
-
-    pub(in super::super) async fn refresh_remote_owner_registration(
-        self: &Arc<Self>,
-        target: &jid::FullJid,
-        stale: &RemoteOwnerRegistration,
-    ) -> Option<RemoteOwnerRegistration> {
-        let services = self.services.get().cloned()?;
-        let entry = services
-            .connection_registry
-            .entry_if_owner(target, &stale.owner)?;
-        let target_entity = user_entity(&target.to_bare());
-        let snapshot = current_claim(&services, &target_entity).await?;
-        if !snapshot.owner_lease_fresh {
-            return None;
-        }
-        let me = services.node_identity.current();
-        if snapshot.owner == me {
-            self.cleanup_remote_owner_resource_if_registration(target, stale.registration_id)
-                .await;
-            return None;
-        }
-        match self
-            .try_register_remote_user_resource(target, entry, stale.owner.clone())
-            .await
-        {
-            RemoteResourceRegisterOutcome::Registered => self
-                .remote_owner_resources
-                .lock()
-                .await
-                .get(target)
-                .cloned(),
-            RemoteResourceRegisterOutcome::NotRemote | RemoteResourceRegisterOutcome::Failed => {
-                None
+                // A stale registration means the destination's socket
+                // lifecycle moved; an owner-side "refresh" is structurally
+                // impossible (the owner mirror is rebuilt only by the socket
+                // node's own re-registration ask). Keep the mirror intact and
+                // retry: the row stays leased/released for the janitor and
+                // the next pass observes the converged registration.
+                RegisteredRemoteWriteAcceptedDelivery::Retryable
             }
         }
     }
@@ -579,40 +517,6 @@ impl OrderedRelayDeliveryBridge {
                 );
                 RegisteredRemoteWriteAcceptedDelivery::Retryable
             }
-        }
-    }
-
-    pub(crate) async fn deliver_local_write_accepted_after_target_refresh(
-        &self,
-        target: &jid::FullJid,
-        stanza: &Stanza,
-    ) -> RegisteredRemoteWriteAcceptedDelivery {
-        let Some(services) = self.services.get().cloned() else {
-            return RegisteredRemoteWriteAcceptedDelivery::Retryable;
-        };
-        let (acceptance, receiver) = OutboundWriteAcceptance::new();
-        let timeout = self.remote_resource_write_accepted_acceptance_timeout();
-        match tokio::time::timeout(
-            timeout,
-            services.connection_registry.send_to_with_write_acceptance(
-                target,
-                stanza.clone(),
-                acceptance,
-            ),
-        )
-        .await
-        {
-            Ok(waddle_xmpp::registry::SendResult::Sent) => {
-                match tokio::time::timeout(timeout, receiver).await {
-                    Ok(Ok(())) => RegisteredRemoteWriteAcceptedDelivery::Delivered,
-                    Ok(Err(_)) | Err(_) => RegisteredRemoteWriteAcceptedDelivery::Retryable,
-                }
-            }
-            Ok(
-                waddle_xmpp::registry::SendResult::NotConnected
-                | waddle_xmpp::registry::SendResult::ChannelClosed,
-            ) => RegisteredRemoteWriteAcceptedDelivery::Absent,
-            Err(_) => RegisteredRemoteWriteAcceptedDelivery::Retryable,
         }
     }
 }
