@@ -1,4 +1,5 @@
 import { afterEach, beforeEach, describe, expect, mock, test } from "bun:test";
+import { installMockBrowserGlobals } from "./helpers/mock-browser-storage";
 import { nextTick, ref } from "vue";
 import { useDirectMessages } from "../src/dms/messages";
 import { useChannelMessages } from "../src/channels/messages";
@@ -20,23 +21,6 @@ import {
 import type { WaddleSession } from "../src/lib/server-auth";
 import type { LiveDmMessage, LiveRoomMessage } from "../src/lib/xmpp-client";
 
-function createStorageMock() {
-  const values = new Map<string, string>();
-  return {
-    getItem(key: string) {
-      return values.has(key) ? values.get(key)! : null;
-    },
-    setItem(key: string, value: string) {
-      values.set(key, value);
-    },
-    removeItem(key: string) {
-      values.delete(key);
-    },
-    clear() {
-      values.clear();
-    },
-  };
-}
 
 function session(partial: Partial<WaddleSession> = {}): WaddleSession {
   return {
@@ -71,36 +55,16 @@ async function flushAsync() {
   await nextTick();
 }
 
-const originalWindow = globalThis.window;
-const originalLocalStorage = globalThis.localStorage;
-
 describe("scroll direction preference", () => {
   const { mode, setScrollDirection } = useScrollDirectionPreference();
 
-  beforeEach(() => {
-    const storage = createStorageMock();
-    (globalThis as typeof globalThis & { localStorage: typeof storage }).localStorage = storage;
-    (globalThis as typeof globalThis & { window: Window & { localStorage: typeof storage } }).window = {
-      ...(originalWindow ?? {}),
-      localStorage: storage,
-    } as Window & { localStorage: typeof storage };
-    localStorage.clear();
-    setScrollDirection("chat");
-  });
-
-  afterEach(() => {
-    localStorage.clear();
-    setScrollDirection("chat");
-    if (originalLocalStorage === undefined) {
-      Reflect.deleteProperty(globalThis, "localStorage");
-    } else {
-      (globalThis as typeof globalThis & { localStorage: Storage }).localStorage = originalLocalStorage;
-    }
-    if (originalWindow === undefined) {
-      Reflect.deleteProperty(globalThis, "window");
-    } else {
-      (globalThis as typeof globalThis & { window: Window & typeof globalThis }).window = originalWindow;
-    }
+  installMockBrowserGlobals({
+    beforeEachExtra: () => {
+      setScrollDirection("chat");
+    },
+    afterEachExtra: () => {
+      setScrollDirection("chat");
+    },
   });
 
   test("defaults to chat mode and only persists non-default values", () => {

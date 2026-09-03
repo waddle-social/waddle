@@ -1,4 +1,5 @@
 import { afterEach, beforeEach, describe, expect, mock, test } from "bun:test";
+import { installMockBrowserGlobals } from "./helpers/mock-browser-storage";
 import { ref } from "vue";
 import type { WaddleSession } from "../src/lib/server-auth";
 import { useDirectMessages } from "../src/dms/messages";
@@ -20,50 +21,7 @@ function session(partial: Partial<WaddleSession> = {}): WaddleSession {
   } as WaddleSession;
 }
 
-function createStorageMock() {
-  const values = new Map<string, string>();
-  return {
-    getItem(key: string) {
-      return values.has(key) ? values.get(key)! : null;
-    },
-    setItem(key: string, value: string) {
-      values.set(key, value);
-    },
-    removeItem(key: string) {
-      values.delete(key);
-    },
-    clear() {
-      values.clear();
-    },
-  };
-}
-
-const originalWindow = globalThis.window;
-const originalLocalStorage = globalThis.localStorage;
-
-beforeEach(() => {
-  const storage = createStorageMock();
-  (globalThis as typeof globalThis & { localStorage: typeof storage }).localStorage = storage;
-  (globalThis as typeof globalThis & { window: Window & { localStorage: typeof storage } }).window = {
-    ...(originalWindow ?? {}),
-    localStorage: storage,
-  } as Window & { localStorage: typeof storage };
-  localStorage.clear();
-});
-
-afterEach(() => {
-  localStorage.clear();
-  if (originalLocalStorage === undefined) {
-    Reflect.deleteProperty(globalThis, "localStorage");
-  } else {
-    (globalThis as typeof globalThis & { localStorage: Storage }).localStorage = originalLocalStorage;
-  }
-  if (originalWindow === undefined) {
-    Reflect.deleteProperty(globalThis, "window");
-  } else {
-    (globalThis as typeof globalThis & { window: Window & typeof globalThis }).window = originalWindow;
-  }
-});
+installMockBrowserGlobals();
 
 describe("offline outbound queue replay", () => {
   test("does not persist decodable link preview tokens for queued sends", async () => {

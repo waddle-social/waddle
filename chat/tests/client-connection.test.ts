@@ -6,6 +6,7 @@
  * persistence — all exercised without constructing the full client.
  */
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
+import { installMockBrowserGlobals } from "./helpers/mock-browser-storage";
 import { TypedEventBus, type ClientEvents } from "../src/lib/xmpp/client-events";
 import {
   OfflineSendQueue,
@@ -21,55 +22,16 @@ import type { XmppStatusSnapshot } from "../src/lib/xmpp/types";
 
 const SCOPE = "alice@example.com";
 
-function createStorageMock() {
-  const values = new Map<string, string>();
-  return {
-    getItem(key: string) {
-      return values.has(key) ? values.get(key)! : null;
-    },
-    setItem(key: string, value: string) {
-      values.set(key, value);
-    },
-    removeItem(key: string) {
-      values.delete(key);
-    },
-    clear() {
-      values.clear();
-    },
-  };
-}
-
-const originalWindow = globalThis.window;
-const originalLocalStorage = globalThis.localStorage;
 const originalQueueMicrotask = globalThis.queueMicrotask;
 const originalSetInterval = globalThis.setInterval;
 const originalClearInterval = globalThis.clearInterval;
 
-beforeEach(() => {
-  const storage = createStorageMock();
-  (globalThis as typeof globalThis & { localStorage: typeof storage }).localStorage = storage;
-  (globalThis as typeof globalThis & { window: Window & { localStorage: typeof storage } }).window = {
-    ...(originalWindow ?? {}),
-    localStorage: storage,
-  } as Window & { localStorage: typeof storage };
-  localStorage.clear();
-});
-
-afterEach(() => {
-  localStorage.clear();
-  if (originalLocalStorage === undefined) {
-    Reflect.deleteProperty(globalThis, "localStorage");
-  } else {
-    (globalThis as typeof globalThis & { localStorage: Storage }).localStorage = originalLocalStorage;
-  }
-  if (originalWindow === undefined) {
-    Reflect.deleteProperty(globalThis, "window");
-  } else {
-    (globalThis as typeof globalThis & { window: Window & typeof globalThis }).window = originalWindow;
-  }
-  globalThis.queueMicrotask = originalQueueMicrotask;
-  globalThis.setInterval = originalSetInterval;
-  globalThis.clearInterval = originalClearInterval;
+installMockBrowserGlobals({
+  afterEachExtra: () => {
+    globalThis.queueMicrotask = originalQueueMicrotask;
+    globalThis.setInterval = originalSetInterval;
+    globalThis.clearInterval = originalClearInterval;
+  },
 });
 
 type QueueOverrides = {
