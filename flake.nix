@@ -355,6 +355,12 @@
               cargoArtifacts = workspaceAllFeaturesArtifacts;
               cargoExtraArgs = "--locked --workspace --all-features";
               cargoNextestExtraArgs = "--profile ci --lib --tests";
+              # The waddle-server lib-test crate alone peaks at ~6 GB of
+              # rustc RSS; unbounded `-j nproc` alongside the rest of the
+              # workspace (plus the derivation's PostgreSQL instance)
+              # exceeds the CI runner's memory on cache-miss builds and
+              # gets rustc OOM-killed (SIGKILL, no diagnostics).
+              CARGO_BUILD_JOBS = "4";
             }
           );
           waddle-server-doctest = craneLib.cargoTest (
