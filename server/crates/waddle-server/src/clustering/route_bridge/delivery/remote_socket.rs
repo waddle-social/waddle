@@ -465,48 +465,41 @@ impl OrderedRelayDeliveryBridge {
             )
             .await
         {
-            Ok(RelayRemoteResourceWriteAcceptedReply {
-                status: RelayRemoteResourceWriteAcceptedStatus::WriteAccepted,
-            }) => {
-                super::telemetry::record_remote_resource_delivered(stanza);
-                tracing::debug!(
-                    jid = %target,
-                    message_id = stanza_message_id(stanza),
-                    outcome = ?FullJidDeliveryOutcome::Delivered,
-                    "clustered remote-resource write-accepted delivery outcome"
-                );
-                RegisteredRemoteWriteAcceptedDelivery::Delivered
-            }
-            Ok(RelayRemoteResourceWriteAcceptedReply {
-                status:
-                    RelayRemoteResourceWriteAcceptedStatus::AcceptanceClosed
-                    | RelayRemoteResourceWriteAcceptedStatus::AcceptancePending,
-            }) => {
-                tracing::debug!(
-                    jid = %target,
-                    message_id = stanza_message_id(stanza),
-                    "clustered remote-resource write-accepted delivery requires retry"
-                );
-                RegisteredRemoteWriteAcceptedDelivery::Retryable
-            }
-            Ok(RelayRemoteResourceWriteAcceptedReply {
-                status: RelayRemoteResourceWriteAcceptedStatus::StaleRegistration,
-            }) => RegisteredRemoteWriteAcceptedDelivery::RefreshNeeded,
-            Ok(RelayRemoteResourceWriteAcceptedReply {
-                status: RelayRemoteResourceWriteAcceptedStatus::Unavailable,
-            }) => {
-                tracing::debug!(
-                    jid = %target,
-                    message_id = stanza_message_id(stanza),
-                    outcome = ?FullJidDeliveryOutcome::Unavailable,
-                    "clustered remote-resource write-accepted delivery outcome"
-                );
-                self.cleanup_remote_owner_resource_if_registration(
-                    target,
-                    registration.registration_id,
-                )
-                .await;
-                RegisteredRemoteWriteAcceptedDelivery::Absent
+            Ok(reply) => {
+                let outcome = classify_write_accepted_status(reply.status);
+                match outcome {
+                    RegisteredRemoteWriteAcceptedDelivery::Delivered => {
+                        super::telemetry::record_remote_resource_delivered(stanza);
+                        tracing::debug!(
+                            jid = %target,
+                            message_id = stanza_message_id(stanza),
+                            outcome = ?FullJidDeliveryOutcome::Delivered,
+                            "clustered remote-resource write-accepted delivery outcome"
+                        );
+                    }
+                    RegisteredRemoteWriteAcceptedDelivery::Retryable
+                    | RegisteredRemoteWriteAcceptedDelivery::RefreshNeeded => {
+                        tracing::debug!(
+                            jid = %target,
+                            message_id = stanza_message_id(stanza),
+                            "clustered remote-resource write-accepted delivery requires retry"
+                        );
+                    }
+                    RegisteredRemoteWriteAcceptedDelivery::Absent => {
+                        tracing::debug!(
+                            jid = %target,
+                            message_id = stanza_message_id(stanza),
+                            outcome = ?FullJidDeliveryOutcome::Unavailable,
+                            "clustered remote-resource write-accepted delivery outcome"
+                        );
+                        self.cleanup_remote_owner_resource_if_registration(
+                            target,
+                            registration.registration_id,
+                        )
+                        .await;
+                    }
+                }
+                outcome
             }
             Err(error) => {
                 tracing::warn!(
@@ -517,6 +510,30 @@ impl OrderedRelayDeliveryBridge {
                 );
                 RegisteredRemoteWriteAcceptedDelivery::Retryable
             }
+        }
+    }
+}
+
+/// Pure reply-status → delivery-outcome mapping for the write-accepted ask.
+/// Kept side-effect free so the contract each status carries (notably
+/// `StaleRegistration` → retryable WITHOUT settling the row or touching the
+/// owner mirror) is directly unit-testable.
+pub(crate) fn classify_write_accepted_status(
+    status: RelayRemoteResourceWriteAcceptedStatus,
+) -> RegisteredRemoteWriteAcceptedDelivery {
+    match status {
+        RelayRemoteResourceWriteAcceptedStatus::WriteAccepted => {
+            RegisteredRemoteWriteAcceptedDelivery::Delivered
+        }
+        RelayRemoteResourceWriteAcceptedStatus::AcceptanceClosed
+        | RelayRemoteResourceWriteAcceptedStatus::AcceptancePending => {
+            RegisteredRemoteWriteAcceptedDelivery::Retryable
+        }
+        RelayRemoteResourceWriteAcceptedStatus::StaleRegistration => {
+            RegisteredRemoteWriteAcceptedDelivery::RefreshNeeded
+        }
+        RelayRemoteResourceWriteAcceptedStatus::Unavailable => {
+            RegisteredRemoteWriteAcceptedDelivery::Absent
         }
     }
 }

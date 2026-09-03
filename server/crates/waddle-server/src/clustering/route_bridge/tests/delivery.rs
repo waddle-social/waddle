@@ -438,8 +438,36 @@ async fn remote_socket_write_accepted_reports_unavailable_for_absent_resource() 
     );
 }
 
+#[test]
+fn write_accepted_status_classification_is_pinned() {
+    use crate::clustering::route_bridge::delivery::remote_socket::classify_write_accepted_status;
+    assert_eq!(
+        classify_write_accepted_status(RelayRemoteResourceWriteAcceptedStatus::WriteAccepted),
+        RegisteredRemoteWriteAcceptedDelivery::Delivered
+    );
+    assert_eq!(
+        classify_write_accepted_status(RelayRemoteResourceWriteAcceptedStatus::AcceptanceClosed),
+        RegisteredRemoteWriteAcceptedDelivery::Retryable
+    );
+    assert_eq!(
+        classify_write_accepted_status(RelayRemoteResourceWriteAcceptedStatus::AcceptancePending),
+        RegisteredRemoteWriteAcceptedDelivery::Retryable
+    );
+    // StaleRegistration maps to RefreshNeeded, whose ONLY consumer arm
+    // classifies Retryable without settling the row or touching the owner
+    // mirror — an owner-side refresh is structurally impossible.
+    assert_eq!(
+        classify_write_accepted_status(RelayRemoteResourceWriteAcceptedStatus::StaleRegistration),
+        RegisteredRemoteWriteAcceptedDelivery::RefreshNeeded
+    );
+    assert_eq!(
+        classify_write_accepted_status(RelayRemoteResourceWriteAcceptedStatus::Unavailable),
+        RegisteredRemoteWriteAcceptedDelivery::Absent
+    );
+}
+
 #[tokio::test]
-async fn stale_write_accepted_registration_is_retryable_and_keeps_the_owner_mirror() {
+async fn unreachable_write_accepted_ask_is_retryable_and_keeps_the_owner_mirror() {
     // A StaleRegistration reply means the destination's socket lifecycle
     // moved. An owner-side refresh is structurally impossible (only the
     // socket node's own re-registration rebuilds the mirror), so the
