@@ -41,7 +41,7 @@ Merge order within the wave: **#1642 lands first** (advisory remediation + −6k
 
 ## Wave 3
 
-- [OK] **#1646** `feat(server): durable room effect outbox with per-lifecycle FIFO` (after #1645) — follow the `call_teardown_outbox` pattern; destroy leases + tombstone. MERGED 8ea8cfe5 (PR #1694, 2026-08-16). Follow-up **#1696** (end-to-end remote write acceptance for relayed effects; needs a `deliver_ordered.vN` bump).
+- [OK] **#1646** `feat(server): durable room effect outbox with per-lifecycle FIFO` (after #1645) — follow the `call_teardown_outbox` pattern; destroy leases + tombstone. MERGED 8ea8cfe5 (PR #1694, 2026-08-16). Follow-up **#1696** (end-to-end remote write acceptance for relayed effects) MERGED 9923bd02 (PR #1727, 2026-09-03) — shipped as a dedicated `remote_resource_write_accepted.v1` ask; `deliver_ordered.v2` unchanged.
 - [OK] **#1647** `feat(server): one-use occupancy projection authorization` (after #1645, ∥ #1646) — PR #1702; claim-fenced one-use occupancy and pin projections, with local departure convergence retries. Pin-state rehydration remains with the P4 owner (#1660), per the #1647 scope amendment.
 - [OK] **#1654** `feat(server): Postgres ingress unit-of-work seam and substrate repositories` (after #1652 + #1653) — dark; one-transaction-spans-everything proof.
 
