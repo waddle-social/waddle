@@ -15,7 +15,9 @@
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+/// `Ord` is byte order of the UUID: it exists only so inventories keyed by
+/// generation can order entries deterministically; it carries no meaning.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
 pub struct OccupancySessionGeneration(Uuid);
 
 impl OccupancySessionGeneration {
