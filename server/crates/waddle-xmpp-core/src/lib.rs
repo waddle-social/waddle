@@ -7,6 +7,7 @@ pub mod domain;
 pub mod error;
 pub mod link_preview;
 pub mod mam;
+pub mod occupancy_session;
 pub mod parser_utils;
 pub mod presence;
 pub mod pubsub;
@@ -27,6 +28,7 @@ pub use carbons::{
     is_carbons_enable, should_copy_message, CARBONS_NS, DELAY_NS, FORWARDED_NS,
 };
 pub use connection::ConnectionConfig;
+pub use occupancy_session::OccupancySessionGeneration;
 pub use disco::{
     build_disco_info_response, build_disco_info_response_with_extensions,
     build_disco_items_response, community_service_features, is_disco_info_query,
