@@ -521,6 +521,7 @@ async fn drain_claimed(
             &claimed.lease_token,
             remote,
             aggregate_deadline,
+            claimed.row.attempt_count.unsigned_abs() as usize,
         )
         .await;
     acks.extend(accepted_acks);
@@ -663,6 +664,7 @@ async fn deliver_recipients_concurrently(
     lease: &RoomEffectLeaseToken,
     recipients: Vec<(FullJid, Stanza)>,
     aggregate_deadline: Option<tokio::time::Instant>,
+    retry_rotation: usize,
 ) -> (Vec<oneshot::Receiver<()>>, bool, bool, bool) {
     if recipients.is_empty() {
         return (Vec::new(), false, false, false);
@@ -685,6 +687,15 @@ async fn deliver_recipients_concurrently(
         }
     }
     drop(group_index);
+    // Rotate the roster by the row's attempt count so a persistently
+    // backpressured HEAD cannot starve the same tail on every retry: each
+    // pass starts scheduling at a different position, guaranteeing every
+    // recipient group is eventually attempted first (at-least-once fairness
+    // across retries; a fresh row rotates by zero).
+    if !grouped.is_empty() {
+        let offset = retry_rotation % grouped.len();
+        grouped.rotate_left(offset);
+    }
     // Bounded fan-out: a large room can render thousands of unique
     // recipients from one config/destroy effect, and unbounded concurrency
     // would thundering-herd the local queues and relay lookups that the
