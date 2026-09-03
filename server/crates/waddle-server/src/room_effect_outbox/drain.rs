@@ -596,21 +596,27 @@ async fn queue_local(
 }
 
 async fn await_acks(
-    acks: Vec<oneshot::Receiver<()>>,
+    mut acks: Vec<oneshot::Receiver<()>>,
     aggregate_deadline: Option<tokio::time::Instant>,
 ) -> bool {
-    let Some(timeout) = remaining_timeout(aggregate_deadline, LOCAL_ACCEPTANCE_TIMEOUT) else {
-        return false;
-    };
-    let wait = async {
-        for ack in acks {
-            if ack.await.is_err() {
-                return false;
+    if let Some(budget) = remaining_timeout(aggregate_deadline, LOCAL_ACCEPTANCE_TIMEOUT) {
+        let wait = async {
+            for ack in acks.iter_mut() {
+                if ack.await.is_err() {
+                    return false;
+                }
             }
+            true
+        };
+        if let Ok(result) = tokio::time::timeout(budget, wait).await {
+            return result;
         }
-        true
-    };
-    tokio::time::timeout(timeout, wait).await.unwrap_or(false)
+    }
+    // Deadline exhausted (or already expired on entry): the writers may
+    // nevertheless have ALREADY acknowledged every frame — poll each
+    // receiver non-blockingly before declaring failure, so a slow pass
+    // cannot convert a fully-settled delivery into a leased duplicate.
+    acks.iter_mut().all(|ack| ack.try_recv().is_ok())
 }
 
 /// Concurrent delivery phase for every non-initiator recipient: each
@@ -640,45 +646,55 @@ async fn deliver_recipients_concurrently(
             None => grouped.push((recipient, vec![stanza])),
         }
     }
+    // Bounded fan-out: a large room can render thousands of unique
+    // recipients from one config/destroy effect, and unbounded concurrency
+    // would thundering-herd the local queues and relay lookups that the
+    // pre-#1696 sequential loop naturally paced.
+    const RECIPIENT_FANOUT_LIMIT: usize = 32;
     let mut pending = FuturesUnordered::new();
-    for (recipient, stanzas) in grouped {
-        pending.push(async move {
-            let mut recipient_acks = Vec::new();
-            for stanza in stanzas {
-                match queue_local(state, &recipient, stanza.clone(), aggregate_deadline).await {
-                    LocalQueueResult::Accepted(ack) => recipient_acks.push(ack),
-                    LocalQueueResult::TimedOut => {
-                        tracing::warn!(
-                            recipient = %recipient,
-                            "room effect outbox local enqueue timed out; releasing after the pass"
-                        );
-                        return RecipientDeliveryOutcome::LocalTimedOut;
-                    }
-                    LocalQueueResult::NotConnected => {
-                        match registered_remote_resource_write_accepted_delivery(
-                            state, &recipient, &stanza,
-                        )
-                        .await
-                        {
-                            #[cfg(feature = "clustering")]
-                            RegisteredRemoteDelivery::Retryable => {
-                                return RecipientDeliveryOutcome::RemoteRetryable;
-                            }
-                            #[cfg(feature = "clustering")]
-                            RegisteredRemoteDelivery::Delivered => {}
-                            RegisteredRemoteDelivery::Absent => {}
+    let mut queued = grouped.into_iter();
+    let make_future = |(recipient, stanzas): (FullJid, Vec<Stanza>)| async move {
+        let mut recipient_acks = Vec::new();
+        for stanza in stanzas {
+            match queue_local(state, &recipient, stanza.clone(), aggregate_deadline).await {
+                LocalQueueResult::Accepted(ack) => recipient_acks.push(ack),
+                LocalQueueResult::TimedOut => {
+                    tracing::warn!(
+                        recipient = %recipient,
+                        "room effect outbox local enqueue timed out; releasing after the pass"
+                    );
+                    return RecipientDeliveryOutcome::LocalTimedOut;
+                }
+                LocalQueueResult::NotConnected => {
+                    match registered_remote_resource_write_accepted_delivery(
+                        state, &recipient, &stanza,
+                    )
+                    .await
+                    {
+                        #[cfg(feature = "clustering")]
+                        RegisteredRemoteDelivery::Retryable => {
+                            return RecipientDeliveryOutcome::RemoteRetryable;
                         }
+                        #[cfg(feature = "clustering")]
+                        RegisteredRemoteDelivery::Delivered => {}
+                        RegisteredRemoteDelivery::Absent => {}
                     }
                 }
             }
-            RecipientDeliveryOutcome::RecipientDone(recipient_acks)
-        });
+        }
+        RecipientDeliveryOutcome::RecipientDone(recipient_acks)
+    };
+    for entry in queued.by_ref().take(RECIPIENT_FANOUT_LIMIT) {
+        pending.push(make_future(entry));
     }
     let mut acks = Vec::new();
     let mut remote_retry = false;
     let mut local_timed_out = false;
     let drive = async {
         while let Some(outcome) = pending.next().await {
+            if let Some(entry) = queued.next() {
+                pending.push(make_future(entry));
+            }
             match outcome {
                 RecipientDeliveryOutcome::RecipientDone(recipient_acks) => {
                     acks.extend(recipient_acks)
