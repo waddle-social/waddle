@@ -3903,3 +3903,40 @@ fn occupant_scoped_unregister_tears_down_an_unbound_registration_when_the_depart
     }
     assert!(!sfu.has_call_participant(&call, &alice));
 }
+
+#[test]
+fn occupant_scoped_note_left_refuses_a_same_sid_registration_of_a_newer_generation() {
+    let sfu = LiveKitSfu::new(fixture_config()).expect("test SFU");
+    let call = CallId::new("room@muc.waddle.test").expect("call id");
+    let alice = fixture_identity("alice");
+    let sid = SessionBinding::new("muji-session-shared").expect("binding");
+    let generation_one = fixture_occupancy_session();
+    let generation_two = fixture_occupancy_session();
+
+    // g2 re-registered with the SAME sid before g1's clear reached the registry.
+    sfu.register_call_participant_with_session(&call, &alice, &sid, generation_two);
+    assert_eq!(
+        sfu.note_participant_left_if_occupant_matches(
+            &call,
+            &alice,
+            None,
+            generation_one,
+            UnboundOccupantPolicy::TearDown,
+        ),
+        SessionScopedTeardown::SessionMismatch
+    );
+    assert!(sfu.has_call_participant(&call, &alice));
+
+    // The owner generation clears it.
+    match sfu.note_participant_left_if_occupant_matches(
+        &call,
+        &alice,
+        None,
+        generation_two,
+        UnboundOccupantPolicy::Keep,
+    ) {
+        SessionScopedTeardown::Applied(_) => {}
+        other => panic!("matching generation must apply, got {other:?}"),
+    }
+    assert!(!sfu.has_call_participant(&call, &alice));
+}

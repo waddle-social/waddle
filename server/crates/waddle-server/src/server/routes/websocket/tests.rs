@@ -729,6 +729,33 @@ impl waddle_sfu::SfuService for RecordingSfu {
             ))
     }
 
+    fn note_participant_left_if_occupant_matches(
+        &self,
+        call_id: &waddle_sfu::CallId,
+        identity: &waddle_sfu::Identity,
+        observed_sids: Option<&waddle_sfu::ObservedCallSids>,
+        presented: waddle_xmpp_core::OccupancySessionGeneration,
+        unbound: waddle_sfu::UnboundOccupantPolicy,
+    ) -> waddle_sfu::SessionScopedTeardown {
+        let stored = self
+            .occupant_sessions
+            .lock()
+            .expect("recording lock")
+            .get(&(call_id.clone(), identity.clone()))
+            .copied()
+            .flatten();
+        match stored {
+            Some(bound) if bound == presented => {}
+            None if unbound == waddle_sfu::UnboundOccupantPolicy::TearDown => {}
+            _ => return waddle_sfu::SessionScopedTeardown::SessionMismatch,
+        }
+        waddle_sfu::SessionScopedTeardown::Applied(self.note_participant_left(
+            call_id,
+            identity,
+            observed_sids,
+        ))
+    }
+
     fn observe_call_participant_sids(
         &self,
         call_id: &waddle_sfu::CallId,

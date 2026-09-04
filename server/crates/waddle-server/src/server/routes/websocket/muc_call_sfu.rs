@@ -456,6 +456,32 @@ pub(crate) fn note_participant_left_for_session(
     Some(sfu.note_participant_left_if_session_matches(&call_id, &identity, observed_sids, session))
 }
 
+/// Occupant-scoped variant of [`note_participant_left_for_session`] (#1703):
+/// the connection-originated Muji clear presents its occupancy generation and
+/// the registry decides atomically (a same-sid re-registration by a newer
+/// generation is untouched).
+pub(crate) fn note_participant_left_for_occupant(
+    state: &WebSocketState,
+    room_jid: &BareJid,
+    jid: &FullJid,
+    observed_sids: Option<&ObservedCallSids>,
+    occupant: OccupancySessionGeneration,
+    unbound: waddle_sfu::UnboundOccupantPolicy,
+) -> Option<waddle_sfu::SessionScopedTeardown> {
+    let Ok(call_id) = CallId::new(room_jid.to_string()) else {
+        return None;
+    };
+    let sfu = state.deps.protocol.sfu.as_ref()?;
+    let identity = Identity::from_jid(jid.clone());
+    Some(sfu.note_participant_left_if_occupant_matches(
+        &call_id,
+        &identity,
+        observed_sids,
+        occupant,
+        unbound,
+    ))
+}
+
 /// Non-destructively validate and learn webhook SIDs before an async
 /// MUC actor cleanup. Keeping membership intact until the actor step
 /// succeeds preserves `room_finished`'s survivor recovery path when a

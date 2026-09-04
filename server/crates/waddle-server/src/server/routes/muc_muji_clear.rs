@@ -238,29 +238,24 @@ fn record_participant_left(
     unbound: waddle_sfu::UnboundOccupantPolicy,
     session: Option<&waddle_sfu::SessionBinding>,
 ) {
-    // #1703: a connection-originated clear names its occupant generation. A
-    // registration bound to a DIFFERENT generation belongs to a replacement
-    // connection and is left alone; a matching one continues into the
-    // session-scoped bookkeeping below, exactly as before. This is an
-    // advisory pre-check
-    // like the sid pre-check in the Jingle handler: the atomic fence is the
-    // sid-scoped registry operation it guards.
+    // #1703: a connection-originated clear names its occupant generation and
+    // the registry decides ATOMICALLY under its call-entry guard: a
+    // registration bound to a DIFFERENT generation (a replacement connection,
+    // same sid or not) is untouched; a matching one is cleared; an unbound
+    // (restored) one follows `unbound` — the live connection's own clear
+    // tears it down, a durable redrive keeps it. A silent mismatch is
+    // correct here for the same reason as the sid path below: the
+    // presence-side outcome was already decided by the actor.
     if let Some(occupant) = occupant {
-        let bound = state.deps.protocol.sfu.as_ref().and_then(|sfu| {
-            let call_id = waddle_sfu::CallId::new(room_jid.to_string()).ok()?;
-            sfu.participant_occupant_session(
-                &call_id,
-                &waddle_sfu::Identity::from_jid(full_jid.clone()),
-            )
-        });
-        match bound {
-            Some(bound) if bound == occupant => {}
-            // A restored (unbound) registration is only cleared with evidence:
-            // the live connection asked (`TearDown`); a durable redrive of an
-            // old intent keeps it — it may be a live replacement's (#1703).
-            None if unbound == waddle_sfu::UnboundOccupantPolicy::TearDown => {}
-            _ => return,
-        }
+        let _ = super::websocket::muc_call_sfu::note_participant_left_for_occupant(
+            state,
+            room_jid,
+            full_jid,
+            observed_sids,
+            occupant,
+            unbound,
+        );
+        return;
     }
     match session {
         // #1608: the signaling-driven cleanup removes the registration

@@ -331,6 +331,32 @@ pub trait SfuService: Send + Sync + 'static {
         }
     }
 
+    /// Occupant-scoped variant of [`Self::note_participant_left`] (#1703):
+    /// apply the local-only cleanup only when the stored occupant generation
+    /// is exactly `Some(presented)`, or when it is unbound and `unbound` is
+    /// [`UnboundOccupantPolicy::TearDown`]. Check and removal are atomic in
+    /// tracking implementations, so a connection-originated Muji clear that
+    /// raced a same-identity, same-sid re-registration by a NEWER connection
+    /// generation cannot remove that registration.
+    fn note_participant_left_if_occupant_matches(
+        &self,
+        call_id: &CallId,
+        identity: &Identity,
+        observed_sids: Option<&ObservedCallSids>,
+        presented: OccupancySessionGeneration,
+        unbound: UnboundOccupantPolicy,
+    ) -> SessionScopedTeardown {
+        match self.participant_occupant_session(call_id, identity) {
+            Some(bound) if bound == presented => SessionScopedTeardown::Applied(
+                self.note_participant_left(call_id, identity, observed_sids),
+            ),
+            None if unbound == UnboundOccupantPolicy::TearDown => SessionScopedTeardown::Applied(
+                self.note_participant_left(call_id, identity, observed_sids),
+            ),
+            _ => SessionScopedTeardown::SessionMismatch,
+        }
+    }
+
     /// Local-only cleanup driven by an SFU-originated signal that
     /// `identity` has already left `call_id` (e.g. LiveKit's
     /// `participant_left` webhook). Mirrors the bookkeeping side of

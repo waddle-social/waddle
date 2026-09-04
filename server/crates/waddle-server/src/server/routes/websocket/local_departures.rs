@@ -462,12 +462,17 @@ impl Inventory {
         // InFlight→RoomDeparture conversion) is bounded by the per-occupancy
         // generation cap, so it is applied here rather than per caller.
         if let LocalDepartureKey::RoomScoped(room, jid, cause, Some(_)) = &key {
-            if !self.entries.contains_key(&key) {
-                evict_oldest_room_scoped_generation_if_at_cap(
+            if !self.entries.contains_key(&key)
+                && !evict_oldest_room_scoped_generation_if_at_cap(
                     self,
                     (room, jid, *cause),
+                    entry.attempts,
                     MAX_ROOM_SCOPED_GENERATIONS,
-                );
+                )
+            {
+                // The entry being (re)inserted is itself the most-retried
+                // responsibility in its scope: it loses instead of a fresher one.
+                return;
             }
         }
         self.counts[kind_slot(&entry.item)] += 1;
@@ -794,14 +799,19 @@ fn backoff(attempts: u32) -> Duration {
 
 /// Drop the oldest retained sweep once the cap is reached. Only the overflow
 /// path pays the linear scan; ordinary inserts stay O(1).
-/// Drop the oldest generation-scoped departure for `(room, jid, cause)` once
-/// `cap` distinct generations are retained for it (see
-/// [`MAX_ROOM_SCOPED_GENERATIONS`]).
+/// Make room for one more generation-scoped departure for `(room, jid,
+/// cause)` once `cap` distinct generations are retained for it (see
+/// [`MAX_ROOM_SCOPED_GENERATIONS`]): drops the most-retried retained entry and
+/// returns `true`, or returns `false` when the INCOMING entry (with
+/// `incoming_attempts`) is itself the most-retried one and should be dropped
+/// instead — a requeued entry is out of the map while it is processed and
+/// must not be exempt from its own cap.
 fn evict_oldest_room_scoped_generation_if_at_cap(
     inventory: &mut Inventory,
     (room, jid, cause): (&BareJid, &FullJid, u8),
+    incoming_attempts: u32,
     cap: usize,
-) {
+) -> bool {
     let same_scope = |key: &LocalDepartureKey| {
         matches!(
             key,
@@ -816,12 +826,12 @@ fn evict_oldest_room_scoped_generation_if_at_cap(
         .count()
         < cap
     {
-        return;
+        return true;
     }
     // The oldest responsibility is the one retried the most (a requeued
     // entry's deadline moves INTO the future with backoff, so deadlines
     // would pick the freshest); ties fall back to the earliest deadline.
-    let Some(oldest) = inventory
+    let Some((oldest, oldest_attempts)) = inventory
         .entries
         .iter()
         .filter(|(key, _)| same_scope(key))
@@ -831,20 +841,25 @@ fn evict_oldest_room_scoped_generation_if_at_cap(
                 .then_with(|| right.not_before.cmp(&left.not_before))
                 .then_with(|| right_key.cmp(left_key))
         })
-        .map(|(key, _)| key.clone())
+        .map(|(key, entry)| (key.clone(), entry.attempts))
     else {
-        return;
+        return true;
     };
-    inventory.remove(&oldest);
+    let incoming_loses = incoming_attempts > oldest_attempts;
+    if !incoming_loses {
+        inventory.remove(&oldest);
+    }
     warn!(
         room = %room,
         jid = %jid,
         cap,
-        "retained generation-scoped MUC departures overflow for one occupancy; dropped the oldest generation's cleanup responsibility"
+        dropped_incoming = incoming_loses,
+        "retained generation-scoped MUC departures overflow for one occupancy; dropped the most-retried generation's cleanup responsibility"
     );
     crate::metrics::record_local_departure_retry(
         crate::metrics::LocalDepartureRetryOutcome::Overflow,
     );
+    !incoming_loses
 }
 
 fn evict_oldest_sweep_if_at_cap(inventory: &mut Inventory, cap: usize) {
@@ -1733,6 +1748,48 @@ mod tests {
             key,
             LocalDepartureKey::RoomScoped(_, _, _, Some(generation)) if *generation == generations[MAX_ROOM_SCOPED_GENERATIONS]
         )));
+    }
+
+    #[test]
+    fn requeued_most_retried_generation_loses_to_fresher_ones_at_the_cap() {
+        let inventory = PendingLocalMucDepartures::default();
+        let now = Instant::now();
+        let room = room("generation-cap-requeue");
+        let jid = jid("alice@example.com/web");
+        let departure = |generation| LocalDepartureItem::RoomDeparture {
+            room: room.clone(),
+            jid: jid.clone(),
+            cause: OccupancyLeaveCause::Disconnect,
+            selector: LeaveSessionSelector::Generation(generation),
+            attempt: LeaveAttemptId::generate(),
+            notified: HashSet::new(),
+        };
+        // A much-retried responsibility is drained for processing …
+        let stuck = generation();
+        inventory.record_at(departure(stuck), now);
+        let mut drained = inventory.take_due(now);
+        assert_eq!(drained.len(), 1);
+        let mut stuck_entry = drained.remove(0);
+        stuck_entry.attempts = 40;
+        // … while the scope refills with fresh generations up to the cap …
+        for index in 0..MAX_ROOM_SCOPED_GENERATIONS {
+            inventory.record_at(
+                departure(generation()),
+                now + Duration::from_secs(index as u64),
+            );
+        }
+        assert_eq!(inventory.len(), MAX_ROOM_SCOPED_GENERATIONS);
+        // … and the requeue must not evict a fresh one in its own favour.
+        inventory.requeue_with_backoff(stuck_entry);
+        assert_eq!(inventory.len(), MAX_ROOM_SCOPED_GENERATIONS);
+        let retained = inventory.entries.lock().expect("lock");
+        assert!(
+            !retained.entries.keys().any(|key| matches!(
+                key,
+                LocalDepartureKey::RoomScoped(_, _, _, Some(generation)) if *generation == stuck
+            )),
+            "the most-retried responsibility is the one dropped"
+        );
     }
 
     #[test]

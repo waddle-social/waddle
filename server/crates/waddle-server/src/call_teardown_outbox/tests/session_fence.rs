@@ -285,13 +285,14 @@ async fn unbound_registration_survives_a_redriven_muji_clear_but_not_the_live_co
     sfu.register_call_participant(&call_id, &identity);
 
     // A durable redrive of an old intent (Keep) must not touch it: it may be
-    // the live replacement's registration.
+    // the live replacement's registration. The joined generation is presented
+    // on both calls so the policy is the only variable.
     let _ = crate::server::routes::muc_muji_clear::clear_muji_presence_for_departure(
         state.as_ref(),
         &room_jid,
         &alice,
         None,
-        Some(occupant_generation()),
+        Some(occupant),
         waddle_sfu::UnboundOccupantPolicy::Keep,
         Some(&current),
     )

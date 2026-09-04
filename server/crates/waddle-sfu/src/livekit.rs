@@ -2729,6 +2729,22 @@ impl SfuService for LiveKitSfu {
         )
     }
 
+    fn note_participant_left_if_occupant_matches(
+        &self,
+        call_id: &CallId,
+        identity: &Identity,
+        observed_sids: Option<&ObservedCallSids>,
+        presented: OccupancySessionGeneration,
+        unbound: crate::UnboundOccupantPolicy,
+    ) -> SessionScopedTeardown {
+        self.note_participant_left_gated(
+            call_id,
+            identity,
+            observed_sids,
+            SessionGate::Occupant { presented, unbound },
+        )
+    }
+
     fn observe_call_participant_sids(
         &self,
         call_id: &CallId,
