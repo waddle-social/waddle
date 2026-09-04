@@ -1607,15 +1607,20 @@ mod tests {
             Some(LeaveSessionSelector::Generation(g1))
         );
 
-        let mismatch = std::panic::catch_unwind(|| {
-            merge_selectors(
-                Some(LeaveSessionSelector::Generation(g1)),
-                Some(LeaveSessionSelector::Generation(g2)),
-            )
-        });
-        assert!(
-            mismatch.is_err(),
-            "different generation selectors are unreachable by key construction"
+        // Different generations never reach `merge_selectors`: their
+        // inventory keys differ, so they are retained as separate items.
+        let departure = |generation| LocalDepartureItem::RoomDeparture {
+            room: room("merge-room"),
+            jid: jid("alice@example.com/web"),
+            cause: OccupancyLeaveCause::Disconnect,
+            selector: LeaveSessionSelector::Generation(generation),
+            attempt: LeaveAttemptId::generate(),
+            notified: HashSet::new(),
+        };
+        assert_ne!(
+            departure(g1).key(),
+            departure(g2).key(),
+            "different generation selectors must never share a retained-departure key"
         );
     }
 

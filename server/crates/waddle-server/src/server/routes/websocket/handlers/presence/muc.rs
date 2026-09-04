@@ -3375,7 +3375,7 @@ mod occupancy_projection_handler_tests {
             nick,
             presence_show,
             MucJoinConnectionContext {
-                occupancy_session: record_occupancy_session(sender_jid),
+                occupancy_session: record_occupancy_session(state, sender_jid),
                 authenticated_session,
             },
         )
@@ -3394,7 +3394,7 @@ mod occupancy_projection_handler_tests {
             room_jid,
             sender_jid,
             nick,
-            current_occupancy_session(sender_jid),
+            current_occupancy_session(state, sender_jid),
             ordered_relay_origin,
         )
         .await
@@ -4079,7 +4079,7 @@ mod occupancy_projection_handler_tests {
             &waddle_sfu::CallId::new(room_jid.to_string()).expect("call id"),
             &waddle_sfu::Identity::from_jid(alice.clone()),
             &waddle_sfu::SessionBinding::new("leave-timeout-session").expect("session binding"),
-            current_occupancy_session(&alice),
+            current_occupancy_session(state.as_ref(), &alice),
         );
         let bob_join = handle_muc_join(
             state.as_ref(),
@@ -4354,7 +4354,7 @@ mod occupancy_projection_handler_tests {
             &waddle_sfu::CallId::new(room_jid.to_string()).expect("call id"),
             &waddle_sfu::Identity::from_jid(alice.clone()),
             &waddle_sfu::SessionBinding::new("replacement-leave-session").expect("session binding"),
-            current_occupancy_session(&alice),
+            current_occupancy_session(state.as_ref(), &alice),
         );
         while alice_rx.try_recv().is_ok() {}
         while bob_rx.try_recv().is_ok() {}

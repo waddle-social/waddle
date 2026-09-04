@@ -61,7 +61,7 @@ async fn handle_muc_join(
         nick,
         presence_show,
         (
-            super::record_test_occupancy_session(sender_jid),
+            super::record_test_occupancy_session(state, sender_jid),
             authenticated_session,
         ),
     )
@@ -80,7 +80,7 @@ async fn handle_muc_leave(
         room_jid,
         sender_jid,
         nick,
-        super::current_test_occupancy_session(sender_jid),
+        super::current_test_occupancy_session(state, sender_jid),
         ordered_relay_origin,
     )
     .await
@@ -5210,7 +5210,7 @@ async fn cleanup_muc_presence_broadcasts_unavailable_to_remaining_occupants() {
         state.as_ref(),
         &alice,
         waddle_xmpp::muc::room_actor::LeaveSessionSelector::Generation(
-            current_test_occupancy_session(&alice),
+            current_test_occupancy_session(state.as_ref(), &alice),
         ),
     )
     .await;
@@ -5614,7 +5614,7 @@ async fn available_presence_without_muji_clears_existing_muji_state() {
     while bob_rx.try_recv().is_ok() {}
 
     let alice_phase = waddle_xmpp::protocol::ConnectionPhase::ready(alice.clone(), false);
-    let alice_occupancy_session = current_test_occupancy_session(&alice);
+    let alice_occupancy_session = current_test_occupancy_session(state.as_ref(), &alice);
     waddle_sfu::SfuService::register_call_participant_with_session(
         recorder.as_ref(),
         &waddle_sfu::CallId::new(room_jid.to_string()).expect("call id"),
@@ -5748,7 +5748,7 @@ async fn empty_muji_presence_unregisters_the_sfu_participant() {
     )
     .await;
     let alice_phase = waddle_xmpp::protocol::ConnectionPhase::ready(alice.clone(), false);
-    let alice_occupancy_session = current_test_occupancy_session(&alice);
+    let alice_occupancy_session = current_test_occupancy_session(state.as_ref(), &alice);
     waddle_sfu::SfuService::register_call_participant_with_session(
         recorder.as_ref(),
         &waddle_sfu::CallId::new(room_jid.to_string()).expect("call id"),
@@ -7390,7 +7390,7 @@ async fn detached_invalidation_skips_muc_cleanup_when_live_replacement_exists() 
         stream_id: "stale-stream".to_string(),
         user_id: "alice@example.com".to_string(),
         jid: alice.clone(),
-        occupancy_session: current_test_occupancy_session(&alice),
+        occupancy_session: current_test_occupancy_session(state.as_ref(), &alice),
         inbound_count: 0,
         shadow_ordinal: waddle_xmpp::stream_management::ShadowOrdinal::ZERO,
         outbound_count: 0,
@@ -7473,7 +7473,7 @@ async fn fresh_bind_invalidation_cleans_the_dead_sessions_room_occupancy() {
         stream_id: "stale-stream-fresh-bind".to_string(),
         user_id: "alice@example.com".to_string(),
         jid: alice.clone(),
-        occupancy_session: current_test_occupancy_session(&alice),
+        occupancy_session: current_test_occupancy_session(state.as_ref(), &alice),
         inbound_count: 0,
         shadow_ordinal: waddle_xmpp::stream_management::ShadowOrdinal::ZERO,
         outbound_count: 0,

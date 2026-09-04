@@ -431,6 +431,7 @@ pub(crate) async fn redrive_local_muc_cleanup(
         None,
         attempt,
         SweepFailureRecording::JanitorRequeues { remote_ceiling },
+        LocalRoomSweepScope::EveryRoom,
     )
     .await
     {
@@ -456,6 +457,7 @@ pub async fn cleanup_muc_presence_for_jid_with_origin(
         Some(&origin),
         waddle_xmpp::muc::room_actor::LeaveAttemptId::generate(),
         SweepFailureRecording::RecordSweep,
+        LocalRoomSweepScope::EveryRoom,
     )
     .await
     {
@@ -506,6 +508,7 @@ pub(crate) async fn redrive_remote_muc_cleanup(
         // authoritative membership snapshots, so this retry must not widen a
         // failed pass into a local `FullJidSweep` with selector `Any`.
         SweepFailureRecording::JanitorRequeues { remote_ceiling },
+        LocalRoomSweepScope::MembershipBacked,
     )
     .await
     {
@@ -1282,6 +1285,7 @@ async fn cleanup_connection_shutdown_inner(
                                 cleanup_origin.as_ref(),
                                 waddle_xmpp::muc::room_actor::LeaveAttemptId::generate(),
                                 SweepFailureRecording::RecordSweep,
+                                LocalRoomSweepScope::EveryRoom,
                             )
                             .await;
                         }
@@ -1354,6 +1358,7 @@ async fn cleanup_connection_shutdown_inner(
             cleanup_origin.as_ref(),
             waddle_xmpp::muc::room_actor::LeaveAttemptId::generate(),
             SweepFailureRecording::RecordSweep,
+            LocalRoomSweepScope::EveryRoom,
         )
         .await;
         // ADR-0017 Phase 1: mirror the unregister into the actor tree on
@@ -2253,6 +2258,7 @@ async fn refuse_detach_without_principal(
                 cleanup_origin.as_ref(),
                 waddle_xmpp::muc::room_actor::LeaveAttemptId::generate(),
                 SweepFailureRecording::RecordSweep,
+                LocalRoomSweepScope::EveryRoom,
             )
             .await;
             unregister_remote_user_resource_if_owner(state, jid, &owner).await;
@@ -2343,8 +2349,23 @@ async fn cleanup_muc_presence(
         None,
         waddle_xmpp::muc::room_actor::LeaveAttemptId::generate(),
         SweepFailureRecording::RecordSweep,
+        LocalRoomSweepScope::EveryRoom,
     )
     .await
+}
+
+/// Which local rooms a cleanup pass sweeps with its `LeaveByRealJid` loop.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum LocalRoomSweepScope {
+    /// A connection's own cleanup: every local room, with the connection's
+    /// selector (its occupancy generation).
+    EveryRoom,
+    /// The remote-membership janitor's redrive: no connection is behind it,
+    /// so only rooms backed by a retained membership snapshot are swept, each
+    /// with the generation that snapshot recorded. Any other local room this
+    /// full JID occupies belongs to a live (possibly cross-node) session and
+    /// is never that redrive's responsibility.
+    MembershipBacked,
 }
 
 /// Whether an enumeration/lookup failure records a `FullJidSweep`. The
@@ -2390,6 +2411,7 @@ async fn cleanup_muc_presence_with_origin(
     origin: Option<&crate::server::routes::interpret::OrderedRelayRouteOrigin>,
     sweep_attempt: waddle_xmpp::muc::room_actor::LeaveAttemptId,
     sweep_recording: SweepFailureRecording,
+    sweep_scope: LocalRoomSweepScope,
 ) -> bool {
     let remote_ceiling = match sweep_recording {
         SweepFailureRecording::RecordSweep => state
@@ -2437,11 +2459,11 @@ async fn cleanup_muc_presence_with_origin(
         }
     };
     for room_jid in room_jids {
-        let session = remote_membership_sessions
-            .get(&room_jid)
-            .copied()
-            .map(LeaveSessionSelector::Generation)
-            .unwrap_or(session);
+        let session = match remote_membership_sessions.get(&room_jid) {
+            Some(occupant_session) => LeaveSessionSelector::Generation(*occupant_session),
+            None if sweep_scope == LocalRoomSweepScope::MembershipBacked => continue,
+            None => session,
+        };
         let room_actor = match get_room_actor_result(state, &room_jid).await {
             Ok(Some(room_actor)) => room_actor,
             Ok(None) => continue,
@@ -4640,6 +4662,7 @@ mod local_departure_cleanup_tests {
                 None,
                 waddle_xmpp::muc::room_actor::LeaveAttemptId::generate(),
                 SweepFailureRecording::RecordSweep,
+                LocalRoomSweepScope::EveryRoom,
             )
             .await
         );
@@ -4696,6 +4719,7 @@ mod local_departure_cleanup_tests {
                 None,
                 waddle_xmpp::muc::room_actor::LeaveAttemptId::generate(),
                 SweepFailureRecording::RecordSweep,
+                LocalRoomSweepScope::EveryRoom,
             )
             .await
         );
@@ -4754,6 +4778,7 @@ mod local_departure_cleanup_tests {
                 None,
                 waddle_xmpp::muc::room_actor::LeaveAttemptId::generate(),
                 SweepFailureRecording::RecordSweep,
+                LocalRoomSweepScope::EveryRoom,
             )
             .await
         );
@@ -4821,6 +4846,60 @@ mod local_departure_cleanup_tests {
             snapshot.room.find_occupant_by_real_jid(&alice).is_some(),
             "the replacement occupant must remain in the room"
         );
+    }
+
+    /// Node A retains alice's old-generation membership for remote room X;
+    /// the replacement (same full JID, new generation, possibly bound on
+    /// another node) occupies a DIFFERENT local room Y. The membership
+    /// redrive has no connection behind it, so Y is not its responsibility:
+    /// it must never sweep Y with an `Any` leave.
+    #[cfg(feature = "clustering")]
+    #[tokio::test]
+    async fn redriven_remote_membership_cleanup_never_sweeps_rooms_without_a_snapshot() {
+        let store = CleanupProjectionStore::new();
+        let state = clustered_state_with_store(store).await;
+        let remote_room = room_jid("remote-redrive-two-rooms-x");
+        let other_room = room_jid("remote-redrive-two-rooms-y");
+        let other_actor = state
+            .deps
+            .protocol
+            .room_registry
+            .ask(CreateRoom {
+                room_jid: other_room.clone(),
+                waddle_id: "w".to_string(),
+                channel_id: "c".to_string(),
+                config: RoomConfig::default(),
+            })
+            .await
+            .expect("create room");
+        let alice = full_jid("alice@example.com/web");
+        let replacement_generation =
+            waddle_xmpp::muc::room_actor::OccupancySessionGeneration::mint();
+
+        state.deps.protocol.remote_muc_memberships.record_join(
+            &alice,
+            &remote_room,
+            "alice",
+            waddle_xmpp_core::OccupancySessionGeneration::mint(),
+        );
+        join_member_with_generation(&other_actor, &alice, "alice", replacement_generation).await;
+
+        assert_eq!(
+            redrive_remote_muc_cleanup(state.as_ref(), &alice).await,
+            MucCleanupOutcome::Failed,
+            "the fixture has no relay bridge, so the remote responsibility stays retained"
+        );
+
+        let snapshot = other_actor
+            .ask(GetSnapshot)
+            .await
+            .expect("snapshot after redrive");
+        assert_eq!(
+            snapshot.room.session_generation(&alice),
+            Some(replacement_generation),
+            "a room without a membership snapshot is never swept by the redrive"
+        );
+        assert_eq!(snapshot.room.occupant_count(), 1);
     }
 
     #[cfg(feature = "clustering")]

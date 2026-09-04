@@ -53,30 +53,47 @@ mod registration;
 mod send;
 mod stream_features;
 
-/// One stable `OccupancySessionGeneration` per simulated connection (keyed by
-/// full JID) so test joins, presence updates and leaves that go through the
-/// connection-less test wrappers present the SAME generation the join
-/// recorded, exactly like a real `WsConnState` would.
+/// One stable `OccupancySessionGeneration` per simulated connection, keyed by
+/// the test's `WebSocketState` and full JID, so test joins, presence updates
+/// and leaves that go through the connection-less test wrappers present the
+/// SAME generation the join recorded (like a real `WsConnState`) while
+/// parallel tests sharing a JID never see each other's entries.
+type TestOccupancySessionKey = (usize, String);
+
 pub(crate) fn test_occupancy_sessions() -> &'static std::sync::Mutex<
-    std::collections::HashMap<String, waddle_xmpp_core::OccupancySessionGeneration>,
+    std::collections::HashMap<
+        TestOccupancySessionKey,
+        waddle_xmpp_core::OccupancySessionGeneration,
+    >,
 > {
     static SESSIONS: std::sync::OnceLock<
         std::sync::Mutex<
-            std::collections::HashMap<String, waddle_xmpp_core::OccupancySessionGeneration>,
+            std::collections::HashMap<
+                TestOccupancySessionKey,
+                waddle_xmpp_core::OccupancySessionGeneration,
+            >,
         >,
     > = std::sync::OnceLock::new();
     SESSIONS.get_or_init(|| std::sync::Mutex::new(std::collections::HashMap::new()))
 }
 
+fn test_occupancy_session_key(
+    state: &WebSocketState,
+    jid: &jid::FullJid,
+) -> TestOccupancySessionKey {
+    (std::ptr::from_ref(state) as usize, jid.to_string())
+}
+
 /// Mint and record a fresh generation for `jid` (a new simulated connection).
 pub(crate) fn record_test_occupancy_session(
+    state: &WebSocketState,
     jid: &jid::FullJid,
 ) -> waddle_xmpp_core::OccupancySessionGeneration {
     let generation = waddle_xmpp_core::OccupancySessionGeneration::mint();
     test_occupancy_sessions()
         .lock()
         .expect("test occupancy session lock")
-        .insert(jid.to_string(), generation);
+        .insert(test_occupancy_session_key(state, jid), generation);
     generation
 }
 
@@ -84,14 +101,15 @@ pub(crate) fn record_test_occupancy_session(
 /// dropped before minting: `record_test_occupancy_session` takes the same
 /// lock and a guard kept alive across the closure deadlocks.
 pub(crate) fn current_test_occupancy_session(
+    state: &WebSocketState,
     jid: &jid::FullJid,
 ) -> waddle_xmpp_core::OccupancySessionGeneration {
     let recorded = test_occupancy_sessions()
         .lock()
         .expect("test occupancy session lock")
-        .get(jid.as_str())
+        .get(&test_occupancy_session_key(state, jid))
         .copied();
-    recorded.unwrap_or_else(|| record_test_occupancy_session(jid))
+    recorded.unwrap_or_else(|| record_test_occupancy_session(state, jid))
 }
 mod stream_management;
 

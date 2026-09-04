@@ -84,7 +84,9 @@ pub async fn handle_presence(
     // one would make every presence update `Superseded` against its own
     // occupancy.
     let occupancy_session = match phase.bound_jid() {
-        Some(jid) => crate::server::routes::websocket::tests::current_test_occupancy_session(jid),
+        Some(jid) => {
+            crate::server::routes::websocket::tests::current_test_occupancy_session(state, jid)
+        }
         None => waddle_xmpp_core::OccupancySessionGeneration::mint(),
     };
     handle_presence_with_occupancy_session(
