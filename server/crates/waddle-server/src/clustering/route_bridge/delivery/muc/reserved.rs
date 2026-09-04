@@ -4,6 +4,7 @@ pub(in super::super::super) async fn deliver_reserved_muc_proxy(
     services: &OrderedRelayDeliveryServices,
     room_jid: &jid::BareJid,
     kind: OrderedRelayMucProxyKind,
+    origin: MucProxyOrigin,
     stanza: &Stanza,
 ) -> Result<Vec<RemoteStanza>, OrderedRelayNackReason> {
     let Some(state) = services.web_socket_state.upgrade() else {
@@ -13,19 +14,30 @@ pub(in super::super::super) async fn deliver_reserved_muc_proxy(
         );
         return Err(OrderedRelayNackReason::Unreachable);
     };
-    match (kind, stanza) {
-        (OrderedRelayMucProxyKind::JoinPresence, Stanza::Presence(presence)) => {
-            deliver_reserved_muc_join(state.as_ref(), room_jid, presence).await
+    match (kind, origin, stanza) {
+        (
+            OrderedRelayMucProxyKind::JoinPresence,
+            MucProxyOrigin::Connection(generation),
+            Stanza::Presence(presence),
+        ) => deliver_reserved_muc_join(state.as_ref(), room_jid, generation, presence).await,
+        (
+            OrderedRelayMucProxyKind::GroupchatMessage,
+            MucProxyOrigin::Server,
+            Stanza::Message(message),
+        ) => deliver_reserved_muc_groupchat(state.as_ref(), room_jid, message).await,
+        (
+            OrderedRelayMucProxyKind::OccupantPresence,
+            MucProxyOrigin::Connection(generation),
+            Stanza::Presence(presence),
+        ) => {
+            deliver_reserved_muc_occupant_presence(state.as_ref(), room_jid, generation, presence)
+                .await
         }
-        (OrderedRelayMucProxyKind::GroupchatMessage, Stanza::Message(message)) => {
-            deliver_reserved_muc_groupchat(state.as_ref(), room_jid, message).await
-        }
-        (OrderedRelayMucProxyKind::OccupantPresence, Stanza::Presence(presence)) => {
-            deliver_reserved_muc_occupant_presence(state.as_ref(), room_jid, presence).await
-        }
-        (OrderedRelayMucProxyKind::MujiJingleIq, Stanza::Iq(iq)) => {
-            deliver_reserved_muji_iq(state.as_ref(), room_jid, iq).await
-        }
+        (
+            OrderedRelayMucProxyKind::MujiJingleIq,
+            MucProxyOrigin::Connection(generation),
+            Stanza::Iq(iq),
+        ) => deliver_reserved_muji_iq(state.as_ref(), room_jid, generation, iq).await,
         _ => Err(OrderedRelayNackReason::ParseFailure),
     }
 }
@@ -42,12 +54,13 @@ pub(in super::super::super) async fn deliver_reserved_muc_proxy(
 pub(in super::super::super) async fn deliver_reserved_muji_iq(
     state: &WebSocketState,
     room_jid: &jid::BareJid,
+    occupancy_session: waddle_xmpp_core::OccupancySessionGeneration,
     iq: &xmpp_parsers::iq::Iq,
 ) -> Result<Vec<RemoteStanza>, OrderedRelayNackReason> {
     let frames = tokio::time::timeout(
         ORDERED_RECEIVER_DELIVERY_TIMEOUT,
         crate::server::routes::websocket::handlers::iq::jingle_muji_relay::handle_relayed_muji_initiate(
-            state, iq,
+            state, iq, occupancy_session,
         ),
     )
     .await
@@ -66,17 +79,19 @@ pub(in super::super::super) async fn deliver_reserved_muji_iq(
 pub(in super::super::super) async fn deliver_reserved_muc_occupant_presence(
     state: &WebSocketState,
     room_jid: &jid::BareJid,
+    occupancy_session: waddle_xmpp_core::OccupancySessionGeneration,
     presence: &xmpp_parsers::presence::Presence,
 ) -> Result<Vec<RemoteStanza>, OrderedRelayNackReason> {
     if presence.type_ == xmpp_parsers::presence::Type::Unavailable {
-        return deliver_reserved_muc_leave(state, room_jid, presence).await;
+        return deliver_reserved_muc_leave(state, room_jid, occupancy_session, presence).await;
     }
-    deliver_reserved_muc_update(state, room_jid, presence).await
+    deliver_reserved_muc_update(state, room_jid, occupancy_session, presence).await
 }
 
 pub(in super::super::super) async fn deliver_reserved_muc_join(
     state: &WebSocketState,
     room_jid: &jid::BareJid,
+    occupancy_session: waddle_xmpp_core::OccupancySessionGeneration,
     presence: &xmpp_parsers::presence::Presence,
 ) -> Result<Vec<RemoteStanza>, OrderedRelayNackReason> {
     let Some(sender_jid) = presence
@@ -109,10 +124,8 @@ pub(in super::super::super) async fn deliver_reserved_muc_join(
             &sender_jid,
             nick,
             presence_show,
-            // Slice D replaces this receiver-local placeholder with the
-            // source connection generation carried by the relay envelope.
             crate::server::routes::websocket::handlers::presence::MucJoinConnectionContext {
-                occupancy_session: waddle_xmpp_core::OccupancySessionGeneration::mint(),
+                occupancy_session,
                 authenticated_session: &Some(synthetic_session),
             },
         ),
@@ -132,6 +145,7 @@ pub(in super::super::super) async fn deliver_reserved_muc_join(
 pub(in super::super::super) async fn deliver_reserved_muc_update(
     state: &WebSocketState,
     room_jid: &jid::BareJid,
+    occupancy_session: waddle_xmpp_core::OccupancySessionGeneration,
     presence: &xmpp_parsers::presence::Presence,
 ) -> Result<Vec<RemoteStanza>, OrderedRelayNackReason> {
     let Some(sender_jid) = presence
@@ -158,9 +172,7 @@ pub(in super::super::super) async fn deliver_reserved_muc_update(
             room_jid,
             &sender_jid,
             nick,
-            // Slice D replaces this receiver-local placeholder with the
-            // source connection generation carried by the relay envelope.
-            waddle_xmpp_core::OccupancySessionGeneration::mint(),
+            occupancy_session,
             presence,
         ),
     )
@@ -181,6 +193,7 @@ pub(in super::super::super) async fn deliver_reserved_muc_update(
 pub(in super::super::super) async fn deliver_reserved_muc_leave(
     state: &WebSocketState,
     room_jid: &jid::BareJid,
+    occupancy_session: waddle_xmpp_core::OccupancySessionGeneration,
     presence: &xmpp_parsers::presence::Presence,
 ) -> Result<Vec<RemoteStanza>, OrderedRelayNackReason> {
     let Some(sender_jid) = presence
@@ -207,9 +220,7 @@ pub(in super::super::super) async fn deliver_reserved_muc_leave(
             room_jid,
             &sender_jid,
             nick,
-            // Slice D replaces this receiver-local placeholder with the
-            // source connection generation carried by the relay envelope.
-            waddle_xmpp_core::OccupancySessionGeneration::mint(),
+            occupancy_session,
             None,
         ),
     )

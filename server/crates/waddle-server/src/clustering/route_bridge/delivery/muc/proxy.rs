@@ -30,9 +30,10 @@ impl OrderedRelayDeliveryBridge {
         room_jid: &jid::BareJid,
         stanza: &Stanza,
         kind: OrderedRelayMucProxyKind,
+        muc_origin: MucProxyOrigin,
         origin: &OrderedRelayRouteOrigin,
     ) -> Option<OrderedRelayMucProxyOutcome> {
-        self.try_proxy_muc_remote_decision(room_jid, stanza, kind, origin)
+        self.try_proxy_muc_remote_decision(room_jid, stanza, kind, muc_origin, origin)
             .await
             .into_attempted()
     }
@@ -45,6 +46,7 @@ impl OrderedRelayDeliveryBridge {
         room_jid: &jid::BareJid,
         stanza: &Stanza,
         kind: OrderedRelayMucProxyKind,
+        muc_origin: MucProxyOrigin,
         origin: &OrderedRelayRouteOrigin,
     ) -> MucProxyRouteDecision {
         if let Some(remote_origin) = remote_resource_origin(origin) {
@@ -54,6 +56,7 @@ impl OrderedRelayDeliveryBridge {
                     RemoteResourceRouteTarget::MucProxy {
                         room_jid: room_jid.clone(),
                         kind,
+                        origin: muc_origin,
                         stanza: RemoteStanza(stanza.clone()),
                     },
                     stanza,
@@ -67,8 +70,10 @@ impl OrderedRelayDeliveryBridge {
                 None => MucProxyRouteDecision::RoomClaimUnavailable,
             };
         }
-        self.try_proxy_muc_remote_from_local_origin_decision(room_jid, stanza, kind, origin)
-            .await
+        self.try_proxy_muc_remote_from_local_origin_decision(
+            room_jid, stanza, kind, muc_origin, origin,
+        )
+        .await
     }
 
     pub(in super::super) async fn try_proxy_muc_remote_from_local_origin_decision(
@@ -76,6 +81,7 @@ impl OrderedRelayDeliveryBridge {
         room_jid: &jid::BareJid,
         stanza: &Stanza,
         kind: OrderedRelayMucProxyKind,
+        muc_origin: MucProxyOrigin,
         origin: &OrderedRelayRouteOrigin,
     ) -> MucProxyRouteDecision {
         let Some(services) = self.services.get().cloned() else {
@@ -133,6 +139,7 @@ impl OrderedRelayDeliveryBridge {
         let payload = OrderedRelayPayload::MucProxy {
             room_jid: room_jid.clone(),
             kind,
+            origin: muc_origin,
             stanza: RemoteStanza(stanza.clone()),
         };
         let channel = OrderedRelayChannel {
@@ -225,7 +232,7 @@ impl OrderedRelayDeliveryBridge {
                     }
                 }
                 if let Some(repair) = Arc::clone(self)
-                    .try_proxy_muc_join_repair(room_jid, stanza, origin)
+                    .try_proxy_muc_join_repair(room_jid, stanza, muc_origin, origin)
                     .await
                 {
                     if !repair.maybe_committed {
@@ -305,6 +312,7 @@ impl OrderedRelayDeliveryBridge {
         self: Arc<Self>,
         room_jid: &jid::BareJid,
         stanza: &Stanza,
+        muc_origin: MucProxyOrigin,
         original_origin: &OrderedRelayRouteOrigin,
     ) -> Option<RemoteDeliveryOutcome> {
         let Stanza::Presence(presence) = stanza else {
@@ -354,6 +362,7 @@ impl OrderedRelayDeliveryBridge {
         let payload = OrderedRelayPayload::MucProxy {
             room_jid: room_jid.clone(),
             kind: OrderedRelayMucProxyKind::JoinPresence,
+            origin: muc_origin,
             stanza: RemoteStanza(stanza.clone()),
         };
         let channel = OrderedRelayChannel {

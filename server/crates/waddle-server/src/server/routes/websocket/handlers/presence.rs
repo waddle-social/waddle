@@ -298,6 +298,9 @@ async fn handle_presence_impl(
                             &room_jid,
                             &stanza,
                             crate::clustering::ordered_relay::OrderedRelayMucProxyKind::OccupantPresence,
+                            crate::clustering::ordered_relay::MucProxyOrigin::Connection(
+                                *context.occupancy_session,
+                            ),
                             origin,
                         )
                         .await

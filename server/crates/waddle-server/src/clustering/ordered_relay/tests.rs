@@ -1,6 +1,7 @@
 use super::*;
 use std::str::FromStr;
 use waddle_xmpp::ownership::EntityType;
+use waddle_xmpp_core::OccupancySessionGeneration;
 use xmpp_parsers::message::{Lang, Message};
 
 fn channel() -> OrderedRelayChannel {
@@ -21,6 +22,14 @@ fn origin_node() -> NodeId {
 
 fn room_jid() -> jid::BareJid {
     jid::BareJid::from_str("room@example.test").expect("room jid")
+}
+
+fn occupancy_session(value: u128) -> OccupancySessionGeneration {
+    OccupancySessionGeneration::from_uuid(uuid::Uuid::from_u128(value))
+}
+
+fn connection_origin(value: u128) -> MucProxyOrigin {
+    MucProxyOrigin::Connection(occupancy_session(value))
 }
 
 fn room_channel() -> OrderedRelayChannel {
@@ -139,6 +148,7 @@ fn muji_envelope(kind: OrderedRelayMucProxyKind, stanza: RemoteStanza) -> Remote
         payload: OrderedRelayPayload::MucProxy {
             room_jid: room_jid(),
             kind,
+            origin: connection_origin(1),
             stanza,
         },
         origin_proof: None,

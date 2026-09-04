@@ -15,6 +15,7 @@ fn muc_proxy_kind_validates_the_carried_stanza_kind() {
         payload: OrderedRelayPayload::MucProxy {
             room_jid: room_jid(),
             kind: OrderedRelayMucProxyKind::JoinPresence,
+            origin: connection_origin(1),
             stanza: presence_stanza(),
         },
         origin_proof: None,
@@ -40,6 +41,7 @@ fn muc_proxy_kind_validates_the_carried_stanza_kind() {
         payload: OrderedRelayPayload::MucProxy {
             room_jid: room_jid(),
             kind: OrderedRelayMucProxyKind::GroupchatMessage,
+            origin: MucProxyOrigin::Server,
             stanza: presence_stanza(),
         },
         origin_proof: None,
@@ -92,6 +94,7 @@ fn room_lane_must_match_the_muc_proxy_kind() {
         payload: OrderedRelayPayload::MucProxy {
             room_jid: room_jid(),
             kind: OrderedRelayMucProxyKind::GroupchatMessage,
+            origin: MucProxyOrigin::Server,
             stanza: groupchat_stanza_to("room@example.test"),
         },
         origin_proof: None,
@@ -260,6 +263,7 @@ fn muc_proxy_validation_rejects_malformed_xep0045_shapes() {
         payload: OrderedRelayPayload::MucProxy {
             room_jid: room_jid(),
             kind: OrderedRelayMucProxyKind::JoinPresence,
+            origin: connection_origin(1),
             stanza: presence_stanza_to(
                 "room@example.test/romeo",
                 xmpp_parsers::presence::Type::Unavailable,
@@ -271,6 +275,7 @@ fn muc_proxy_validation_rejects_malformed_xep0045_shapes() {
         payload: OrderedRelayPayload::MucProxy {
             room_jid: room_jid(),
             kind: OrderedRelayMucProxyKind::GroupchatMessage,
+            origin: MucProxyOrigin::Server,
             stanza: groupchat_stanza_to("room@example.test"),
         },
         ..unavailable_join.clone()
@@ -279,6 +284,7 @@ fn muc_proxy_validation_rejects_malformed_xep0045_shapes() {
         payload: OrderedRelayPayload::MucProxy {
             room_jid: room_jid(),
             kind: OrderedRelayMucProxyKind::GroupchatMessage,
+            origin: MucProxyOrigin::Server,
             stanza: groupchat_stanza_to("room@example.test/romeo"),
         },
         ..unavailable_join.clone()
@@ -299,6 +305,59 @@ fn muc_proxy_validation_rejects_malformed_xep0045_shapes() {
     let mut receiver = OrderedRelayReceiverState::default();
     assert!(matches!(
         receive(&mut receiver, full_groupchat),
+        OrderedRelayReply::Nack(OrderedRelayNack {
+            reason: OrderedRelayNackReason::ParseFailure,
+            ..
+        })
+    ));
+}
+
+#[test]
+fn muc_proxy_origin_must_match_kind_policy() {
+    let mut receiver = OrderedRelayReceiverState::default();
+    let join_with_server_origin = RemoteStanzaEnvelope {
+        asserted_origin_node: origin_node(),
+        channel: room_channel(),
+        sequence: OrderedRelaySequence(1),
+        origin_inbound_sequence: inbound(1),
+        origin_claim: origin_claim(),
+        sender_claim: sender_claim(),
+        target_claim: room_claim(),
+        payload: OrderedRelayPayload::MucProxy {
+            room_jid: room_jid(),
+            kind: OrderedRelayMucProxyKind::JoinPresence,
+            origin: MucProxyOrigin::Server,
+            stanza: presence_stanza(),
+        },
+        origin_proof: None,
+    };
+    assert!(matches!(
+        receive(&mut receiver, join_with_server_origin),
+        OrderedRelayReply::Nack(OrderedRelayNack {
+            reason: OrderedRelayNackReason::ParseFailure,
+            ..
+        })
+    ));
+
+    let mut receiver = OrderedRelayReceiverState::default();
+    let server_kind_with_connection_origin = RemoteStanzaEnvelope {
+        asserted_origin_node: origin_node(),
+        channel: room_channel(),
+        sequence: OrderedRelaySequence(1),
+        origin_inbound_sequence: inbound(1),
+        origin_claim: origin_claim(),
+        sender_claim: sender_claim(),
+        target_claim: room_claim(),
+        payload: OrderedRelayPayload::MucProxy {
+            room_jid: room_jid(),
+            kind: OrderedRelayMucProxyKind::GroupchatMessage,
+            origin: connection_origin(2),
+            stanza: groupchat_stanza_to("room@example.test"),
+        },
+        origin_proof: None,
+    };
+    assert!(matches!(
+        receive(&mut receiver, server_kind_with_connection_origin),
         OrderedRelayReply::Nack(OrderedRelayNack {
             reason: OrderedRelayNackReason::ParseFailure,
             ..

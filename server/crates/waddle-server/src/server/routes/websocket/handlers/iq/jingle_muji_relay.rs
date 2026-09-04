@@ -16,9 +16,34 @@
 use super::super::super::interpret_loop::build_interpret_deps;
 use super::super::super::transport_xml::build_iq_error_xml_typed;
 use super::super::super::WebSocketState;
+use super::errors::{forbidden_iq_error, internal_server_error_iq_error};
 use super::jingle_muji_gate::{self, GateInvocation, GateOutcome};
 use super::sans_io::events_contain_iq_error;
 use super::ProtocolStanzaContext;
+use waddle_xmpp::muc::room_actor::GetSnapshot;
+use waddle_xmpp::xep::xep0272::{find_muji, Muji};
+
+async fn relayed_muji_generation_is_current(
+    state: &WebSocketState,
+    room: &jid::BareJid,
+    sender: &jid::FullJid,
+    generation: waddle_xmpp_core::OccupancySessionGeneration,
+) -> Result<bool, ()> {
+    let actor = crate::server::routes::websocket::get_room_actor_result(state, room)
+        .await
+        .map_err(|_| ())?
+        .ok_or(())?;
+    let snapshot = actor.ask(GetSnapshot).await.map_err(|_| ())?;
+    Ok(snapshot.room.session_generation(sender) == Some(generation))
+}
+
+fn relayed_muji_room(iq: &xmpp_parsers::iq::Iq) -> Option<jid::BareJid> {
+    let xmpp_parsers::iq::Iq::Set { payload, .. } = iq else {
+        return None;
+    };
+    let muji = Muji::try_from(find_muji(payload)?).ok()?;
+    muji.room
+}
 
 /// Execute a relayed Muji `session-initiate` or `session-terminate`
 /// on the room-owning node.
@@ -32,6 +57,7 @@ use super::ProtocolStanzaContext;
 pub(crate) async fn handle_relayed_muji_initiate(
     state: &WebSocketState,
     iq: &xmpp_parsers::iq::Iq,
+    occupancy_session: waddle_xmpp_core::OccupancySessionGeneration,
 ) -> Option<Vec<String>> {
     let sender = iq.from()?.clone().try_into_full().ok()?;
     let id = iq.id();
@@ -100,11 +126,36 @@ pub(crate) async fn handle_relayed_muji_initiate(
         }
     };
 
+    if !is_terminate {
+        let room = relayed_muji_room(iq)?;
+        match relayed_muji_generation_is_current(state, &room, &sender, occupancy_session).await {
+            Ok(true) => {}
+            Ok(false) => {
+                return Some(vec![build_iq_error_xml_typed(
+                    id,
+                    response_from.as_deref(),
+                    Some(response_to.as_str()),
+                    forbidden_iq_error("occupant session was replaced; rejoin before retrying"),
+                )]);
+            }
+            Err(()) => {
+                return Some(vec![build_iq_error_xml_typed(
+                    id,
+                    response_from.as_deref(),
+                    Some(response_to.as_str()),
+                    internal_server_error_iq_error(
+                        "could not verify the current occupant session; please retry",
+                    ),
+                )]);
+            }
+        }
+    }
+
     let ctx = ProtocolStanzaContext {
         domain: state.deps.auth_state.xmpp_domain.as_str(),
         full_jid: &sender,
         media_capabilities,
-        occupant_session: None,
+        occupant_session: Some(occupancy_session),
     };
     let muji_terminate_room = jingle_muji_gate::muji_session_terminate_room(iq);
     let events = state.deps.protocol.dispatcher.dispatch_iq(iq, &ctx);
@@ -130,7 +181,7 @@ pub(crate) async fn handle_relayed_muji_initiate(
             &room_jid,
             &sender,
             None,
-            None,
+            Some(occupancy_session),
             terminate_session.as_ref(),
         )
         .await;
@@ -158,15 +209,19 @@ mod tests {
     use super::*;
     use crate::server::routes::websocket::tests::create_test_websocket_state_with_calls;
     use jid::{BareJid, FullJid};
-    use waddle_xmpp::muc::room_actor::Join;
+    use waddle_xmpp::muc::room_actor::{JoinAffiliationGrant, JoinWithAffiliation};
     use waddle_xmpp::muc::room_registry_actor::CreateInstantRoom;
     use waddle_xmpp::xep::xep0167::MediaKind;
     use waddle_xmpp::xep::xep0272::{Creator, Muji, MujiContent};
-    use waddle_xmpp_core::{Affiliation, Role};
+    use waddle_xmpp_core::Affiliation;
     use xmpp_parsers::iq::Iq;
     use xmpp_parsers::jingle::{
         Action, Content, ContentId, Creator as JingleCreator, Jingle, SessionId,
     };
+
+    fn occupancy_session() -> waddle_xmpp_core::OccupancySessionGeneration {
+        waddle_xmpp_core::OccupancySessionGeneration::mint()
+    }
 
     fn muji_initiate_iq(from: Option<&str>, room: &str) -> Iq {
         let mut content = Content::new(JingleCreator::Initiator, ContentId("audio".into()));
@@ -209,7 +264,7 @@ mod tests {
         room: &BareJid,
         nick: &str,
         jid: &FullJid,
-    ) {
+    ) -> waddle_xmpp_core::OccupancySessionGeneration {
         let actor = state
             .deps
             .protocol
@@ -220,15 +275,33 @@ mod tests {
             .await
             .expect("create instant room")
             .actor_ref;
+        let session = occupancy_session();
+        let admission_revision = actor
+            .ask(GetSnapshot)
+            .await
+            .expect("pre-join room snapshot")
+            .admission_revision;
         actor
-            .ask(Join {
+            .ask(JoinWithAffiliation {
+                sender_jid: jid.clone(),
                 nick: nick.to_string(),
-                real_jid: jid.clone(),
-                role: Role::Participant,
-                affiliation: Affiliation::Member,
+                affiliation_grant: JoinAffiliationGrant::Resolver(Affiliation::Member),
+                local_domain: "example.com".to_owned(),
+                admission_revision,
+                session,
             })
             .await
             .expect("join");
+        assert_eq!(
+            actor
+                .ask(GetSnapshot)
+                .await
+                .expect("room snapshot")
+                .room
+                .session_generation(jid),
+            Some(session)
+        );
+        session
     }
 
     /// The relayed mint on the owner: gate passes against the local
@@ -240,10 +313,10 @@ mod tests {
         let state = create_test_websocket_state_with_calls().await;
         let room: BareJid = "general@muc.example.com".parse().unwrap();
         let alice: FullJid = "alice@example.com/web".parse().unwrap();
-        create_room_and_join(&state, &room, "alice", &alice).await;
+        let generation = create_room_and_join(&state, &room, "alice", &alice).await;
 
         let iq = muji_initiate_iq(Some("alice@example.com/web"), "general@muc.example.com");
-        let frames = handle_relayed_muji_initiate(&state, &iq)
+        let frames = handle_relayed_muji_initiate(&state, &iq, generation)
             .await
             .expect("well-formed relayed IQ executes");
 
@@ -259,6 +332,49 @@ mod tests {
                 .any(|f| f.contains("session-accept") && f.contains("<token")),
             "the focus session-accept with an issued token must be among the replies: {frames:?}"
         );
+        let sfu = state
+            .deps
+            .protocol
+            .sfu
+            .as_ref()
+            .expect("calls fixture wires an SFU");
+        let call = waddle_sfu::CallId::new(room.to_string()).expect("valid call id");
+        let identity = waddle_sfu::Identity::from_jid(alice);
+        assert_eq!(
+            sfu.participant_occupant_session(&call, &identity),
+            Some(generation),
+            "the owner-side SFU registration must be fenced by the source connection generation"
+        );
+    }
+
+    #[tokio::test]
+    async fn stale_relayed_initiate_cannot_rebind_the_replacement_sfu_session() {
+        let state = create_test_websocket_state_with_calls().await;
+        let room: BareJid = "general@muc.example.com".parse().unwrap();
+        let alice: FullJid = "alice@example.com/web".parse().unwrap();
+        let displaced = create_room_and_join(&state, &room, "alice", &alice).await;
+        let replacement = create_room_and_join(&state, &room, "alice", &alice).await;
+        assert_ne!(displaced, replacement);
+
+        let frames = handle_relayed_muji_initiate(
+            &state,
+            &muji_initiate_iq(Some("alice@example.com/web"), "general@muc.example.com"),
+            displaced,
+        )
+        .await
+        .expect("stale generation is a terminal client denial");
+
+        assert_eq!(frames.len(), 1);
+        assert!(frames[0].contains("<forbidden"), "{frames:?}");
+        let sfu = state
+            .deps
+            .protocol
+            .sfu
+            .as_ref()
+            .expect("calls fixture wires an SFU");
+        let call = waddle_sfu::CallId::new(room.to_string()).expect("valid call id");
+        let identity = waddle_sfu::Identity::from_jid(alice);
+        assert_eq!(sfu.participant_occupant_session(&call, &identity), None);
     }
 
     fn muji_terminate_iq(from: &str, room: &str) -> Iq {
@@ -291,7 +407,7 @@ mod tests {
         let state = create_test_websocket_state_with_calls().await;
         let room: BareJid = "general@muc.example.com".parse().unwrap();
         let alice: FullJid = "alice@example.com/web".parse().unwrap();
-        create_room_and_join(&state, &room, "alice", &alice).await;
+        let occupancy_session = create_room_and_join(&state, &room, "alice", &alice).await;
         let sfu = state
             .deps
             .protocol
@@ -300,10 +416,10 @@ mod tests {
             .expect("the calls fixture wires an SFU");
         let call = waddle_sfu::CallId::new(room.to_string()).expect("room JID is a valid call id");
         let identity = waddle_sfu::Identity::from_jid(alice.clone());
-
         handle_relayed_muji_initiate(
             &state,
             &muji_initiate_iq(Some("alice@example.com/web"), "general@muc.example.com"),
+            occupancy_session,
         )
         .await
         .expect("relayed initiate executes");
@@ -315,6 +431,7 @@ mod tests {
         handle_relayed_muji_initiate(
             &state,
             &muji_terminate_iq("alice@example.com/web", "general@muc.example.com"),
+            occupancy_session,
         )
         .await
         .expect("relayed terminate executes");
@@ -356,6 +473,7 @@ mod tests {
         let frames = handle_relayed_muji_initiate(
             &state,
             &muji_terminate_iq("alice@example.com/web", "vanished@muc.example.com"),
+            occupancy_session(),
         )
         .await
         .expect("terminate executes");
@@ -380,13 +498,13 @@ mod tests {
         let state = create_test_websocket_state_with_calls().await;
         let room: BareJid = "general@muc.example.com".parse().unwrap();
         let alice: FullJid = "alice@example.com/web".parse().unwrap();
-        create_room_and_join(&state, &room, "alice", &alice).await;
+        let _ = create_room_and_join(&state, &room, "alice", &alice).await;
 
         let iq = muji_initiate_iq(
             Some("mallory@example.com/laptop"),
             "general@muc.example.com",
         );
-        let frames = handle_relayed_muji_initiate(&state, &iq)
+        let frames = handle_relayed_muji_initiate(&state, &iq, occupancy_session())
             .await
             .expect("a denial is a delivered reply, not a shape failure");
 
@@ -405,7 +523,7 @@ mod tests {
         let state = create_test_websocket_state_with_calls().await;
 
         let iq = muji_initiate_iq(Some("alice@example.com/web"), "ghost@muc.example.com");
-        let frames = handle_relayed_muji_initiate(&state, &iq)
+        let frames = handle_relayed_muji_initiate(&state, &iq, occupancy_session())
             .await
             .expect("terminal denial is a delivered reply");
 
@@ -420,13 +538,17 @@ mod tests {
         let state = create_test_websocket_state_with_calls().await;
 
         let no_from = muji_initiate_iq(None, "general@muc.example.com");
-        assert!(handle_relayed_muji_initiate(&state, &no_from)
-            .await
-            .is_none());
+        assert!(
+            handle_relayed_muji_initiate(&state, &no_from, occupancy_session())
+                .await
+                .is_none()
+        );
 
         let bare_from = muji_initiate_iq(Some("alice@example.com"), "general@muc.example.com");
-        assert!(handle_relayed_muji_initiate(&state, &bare_from)
-            .await
-            .is_none());
+        assert!(
+            handle_relayed_muji_initiate(&state, &bare_from, occupancy_session())
+                .await
+                .is_none()
+        );
     }
 }

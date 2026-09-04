@@ -117,6 +117,7 @@ pub(super) async fn dispatch_to_room(
                     &room_jid,
                     &stanza,
                     crate::clustering::ordered_relay::OrderedRelayMucProxyKind::GroupchatMessage,
+                    crate::clustering::ordered_relay::MucProxyOrigin::Server,
                     origin,
                 )
                 .await

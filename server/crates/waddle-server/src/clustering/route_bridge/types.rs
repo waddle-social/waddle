@@ -253,6 +253,7 @@ pub enum RemoteResourceRouteTarget {
     MucProxy {
         room_jid: jid::BareJid,
         kind: OrderedRelayMucProxyKind,
+        origin: MucProxyOrigin,
         stanza: RemoteStanza,
     },
 }

@@ -714,6 +714,9 @@ async fn relay_muji_to_room_owner(
             room_jid,
             &stanza,
             OrderedRelayMucProxyKind::MujiJingleIq,
+            crate::clustering::ordered_relay::MucProxyOrigin::Connection(
+                *conn_state.occupancy_session,
+            ),
             origin,
         )
         .await

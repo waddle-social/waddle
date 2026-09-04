@@ -2726,11 +2726,26 @@ async fn cleanup_remote_muc_presence(
         presence.from = Some(jid::Jid::from(jid.clone()));
         presence.to = Some(to);
         let stanza = Stanza::Presence(presence);
+        let LeaveSessionSelector::Generation(generation) = session else {
+            warn!(
+                room = %room_jid,
+                jid = %jid,
+                "remote MUC connection cleanup lacks an occupancy generation; retaining for retry"
+            );
+            completed = false;
+            state
+                .deps
+                .protocol
+                .remote_muc_memberships
+                .restore_snapshot_if_current(&membership);
+            continue;
+        };
         let decision = bridge
             .try_proxy_muc_remote_decision(
                 &room_jid,
                 &stanza,
                 crate::clustering::ordered_relay::OrderedRelayMucProxyKind::OccupantPresence,
+                crate::clustering::ordered_relay::MucProxyOrigin::Connection(generation),
                 &origin,
             )
             .await;

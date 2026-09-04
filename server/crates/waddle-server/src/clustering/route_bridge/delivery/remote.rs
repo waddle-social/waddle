@@ -402,6 +402,7 @@ impl OrderedRelayDeliveryBridge {
         let RemoteResourceRouteTarget::MucProxy {
             room_jid,
             kind,
+            origin: muc_origin,
             stanza,
         } = target
         else {
@@ -413,7 +414,9 @@ impl OrderedRelayDeliveryBridge {
         };
         let origin = local_origin_for_remote_resource(remote_origin);
         match self
-            .try_proxy_muc_remote_from_local_origin_decision(&room_jid, &stanza.0, kind, &origin)
+            .try_proxy_muc_remote_from_local_origin_decision(
+                &room_jid, &stanza.0, kind, muc_origin, &origin,
+            )
             .await
         {
             MucProxyRouteDecision::Attempted(attempt) => Some(attempt),
@@ -426,7 +429,7 @@ impl OrderedRelayDeliveryBridge {
                 outcome: muc_proxy_result_to_ordered_outcome(
                     kind,
                     Box::pin(deliver_reserved_muc_proxy(
-                        &services, &room_jid, kind, &stanza.0,
+                        &services, &room_jid, kind, muc_origin, &stanza.0,
                     ))
                     .await,
                 ),

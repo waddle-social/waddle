@@ -12,6 +12,7 @@ use std::collections::{HashMap, VecDeque};
 use std::hash::{Hash, Hasher};
 use waddle_xmpp::ownership::{ClaimEpoch, Entity, EntityType};
 use waddle_xmpp::pending_delivery::SmSessionId;
+use waddle_xmpp_core::OccupancySessionGeneration;
 
 const RECENT_ACK_CACHE_PER_CHANNEL: usize = 64;
 const MAX_TRACKED_ORDERED_RELAY_CHANNELS: usize = 8_192;
@@ -184,6 +185,32 @@ impl OrderedRelayMucProxyKind {
             )
         )
     }
+
+    fn requires_connection_origin(self) -> bool {
+        matches!(
+            self,
+            Self::JoinPresence | Self::OccupantPresence | Self::MujiJingleIq
+        )
+    }
+}
+
+/// Where a relayed MUC proxy stanza was produced.
+///
+/// Current production emitters divide cleanly by kind:
+/// - `Connection(...)`: `JoinPresence` from the websocket join path,
+///   `OccupantPresence` from connection presence updates/leaves and their
+///   generation-fenced cleanup replays, and `MujiJingleIq` from relayed Muji
+///   Jingle IQs authenticated as one occupant connection.
+/// - `Server`: `GroupchatMessage` from server-side room dispatch, plus the
+///   server-built MUC routing/fanout kinds `PrivateMessage`, `BareRoomIq`,
+///   `OccupantIq`, and `FanoutChunk`.
+///
+/// Receiver-side envelope validation rejects a kind/origin mismatch before any
+/// handler runs.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum MucProxyOrigin {
+    Connection(OccupancySessionGeneration),
+    Server,
 }
 
 /// Typed stanza payloads planned for Phase 4 routing. The stanza remains a
@@ -205,6 +232,7 @@ pub enum OrderedRelayPayload {
     MucProxy {
         room_jid: jid::BareJid,
         kind: OrderedRelayMucProxyKind,
+        origin: MucProxyOrigin,
         stanza: RemoteStanza,
     },
 }
@@ -264,6 +292,7 @@ impl OrderedRelayPayload {
                 room_jid,
                 kind,
                 stanza,
+                ..
             } => muc_proxy_stanza_is_addressed_to_room(room_jid, *kind, &stanza.0),
         }
     }
@@ -314,10 +343,12 @@ impl OrderedRelayPayload {
             OrderedRelayPayload::MucProxy {
                 room_jid,
                 kind,
+                origin,
                 stanza,
             } => OrderedRelayPayloadFingerprint::MucProxy {
                 room_jid: room_jid.clone(),
                 kind: *kind,
+                origin: *origin,
                 stanza: stanza.0.to_element(),
             },
         }
@@ -544,6 +575,7 @@ enum OrderedRelayPayloadFingerprint {
     MucProxy {
         room_jid: jid::BareJid,
         kind: OrderedRelayMucProxyKind,
+        origin: MucProxyOrigin,
         stanza: minidom::Element,
     },
 }
@@ -959,6 +991,7 @@ fn record_ack(
 
 fn envelope_is_consistent(envelope: &RemoteStanzaEnvelope) -> bool {
     envelope.payload.matches_stanza_kind()
+        && envelope.payload.matches_muc_proxy_origin()
         && origin_claim_matches_channel(&envelope.origin_claim, &envelope.channel.origin)
         && sender_claim_matches_channel(&envelope.sender_claim, &envelope.channel.origin)
         && envelope.target_claim.epoch == envelope.channel.target_epoch
@@ -972,6 +1005,19 @@ fn envelope_is_consistent(envelope: &RemoteStanzaEnvelope) -> bool {
         && envelope
             .payload
             .matches_target_claim(&envelope.target_claim)
+}
+
+impl OrderedRelayPayload {
+    fn matches_muc_proxy_origin(&self) -> bool {
+        match self {
+            OrderedRelayPayload::MucProxy { kind, origin, .. } => {
+                kind.requires_connection_origin() == matches!(origin, MucProxyOrigin::Connection(_))
+            }
+            OrderedRelayPayload::Message { .. }
+            | OrderedRelayPayload::Iq { .. }
+            | OrderedRelayPayload::Presence { .. } => true,
+        }
+    }
 }
 
 fn origin_claim_matches_channel(claim: &OrderedRelayClaim, origin: &OrderedRelayOrigin) -> bool {

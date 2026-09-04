@@ -1303,6 +1303,9 @@ async fn handle_muc_join_unlocked(state: &WebSocketState, request: MucJoinWork<'
                                             room_jid,
                                             &stanza,
                                             crate::clustering::ordered_relay::OrderedRelayMucProxyKind::JoinPresence,
+                                            crate::clustering::ordered_relay::MucProxyOrigin::Connection(
+                                                occupancy_session,
+                                            ),
                                             origin,
                                         )
                                         .await,
@@ -1945,6 +1948,9 @@ pub async fn handle_muc_leave(
                             room_jid,
                             &stanza,
                             crate::clustering::ordered_relay::OrderedRelayMucProxyKind::OccupantPresence,
+                            crate::clustering::ordered_relay::MucProxyOrigin::Connection(
+                                occupancy_session,
+                            ),
                             origin,
                         )
                         .await,
