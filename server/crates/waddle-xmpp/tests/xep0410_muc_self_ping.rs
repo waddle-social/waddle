@@ -312,6 +312,7 @@ async fn join_as_alice(actor: &ActorRef<RoomActor>, jid: jid::FullJid) {
             affiliation_grant: JoinAffiliationGrant::Resolver(Affiliation::Member),
             local_domain: "example.com".to_string(),
             admission_revision,
+            session: waddle_xmpp_core::OccupancySessionGeneration::mint(),
         })
         .await
         .expect("join");

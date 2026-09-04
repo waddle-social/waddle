@@ -792,6 +792,10 @@ impl JingleHandler {
             attempt.failed(reason.setup_failure_reason());
             return reason.into_error_reply(iq, &jingle.sid, &mixer_jid);
         }
+        let Some(occupant_session) = ctx.occupant_session else {
+            attempt.failed(CallSetupFailureReason::MembershipCheckFailed);
+            return error_reply(iq, DefinedCondition::InternalServerError, "internal error");
+        };
         // Register and bind to this session-initiate's Jingle sid in
         // one atomic registry operation (#1608): a later terminate
         // carrying a DIFFERENT sid is a stale leftover from a previous
@@ -800,8 +804,12 @@ impl JingleHandler {
         // binding always names the newest session with no window in
         // which a concurrent stale terminate could observe the new
         // registration unbound.
-        self.sfu
-            .register_call_participant_with_session(&call_id, &identity, &session);
+        self.sfu.register_call_participant_with_session(
+            &call_id,
+            &identity,
+            &session,
+            occupant_session,
+        );
 
         // XEP-0166 §6.3 ack: respond to the session-initiate IQ
         // with an EMPTY IQ result IMMEDIATELY. The session-accept
@@ -1567,6 +1575,7 @@ mod tests {
         StanzaContext {
             domain: "waddle.test",
             full_jid: jid,
+            occupant_session: Some(waddle_xmpp_core::OccupancySessionGeneration::mint()),
             media_capabilities: Some(MediaCapabilities::from_muc_voice(
                 waddle_xmpp_core::types::Voice::Voiced,
             )),

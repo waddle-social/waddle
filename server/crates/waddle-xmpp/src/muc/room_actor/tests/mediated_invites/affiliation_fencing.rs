@@ -160,6 +160,7 @@ async fn prepared_invite_rollback_reserves_the_invitee_from_join_and_affiliation
             affiliation_grant: JoinAffiliationGrant::Unaffiliated,
             local_domain: "example.com".to_string(),
             admission_revision: revision,
+            session: waddle_xmpp_core::OccupancySessionGeneration::mint(),
         })
         .await;
     assert!(matches!(
@@ -376,6 +377,7 @@ async fn prepared_rollback_blocks_guarded_and_batched_affiliation_paths() {
             affiliation_grant: JoinAffiliationGrant::Unaffiliated,
             local_domain: "example.com".to_string(),
             admission_revision: revision,
+            session: waddle_xmpp_core::OccupancySessionGeneration::mint(),
         })
         .await
         .expect("invitee joins before compensation");
@@ -517,6 +519,7 @@ async fn committed_rollback_ejects_a_joined_invitee_with_status_321() {
             affiliation_grant: JoinAffiliationGrant::Unaffiliated,
             local_domain: "example.com".to_string(),
             admission_revision: current_admission_revision(&actor).await,
+            session: waddle_xmpp_core::OccupancySessionGeneration::mint(),
         })
         .await
         .expect("invitee joins");
@@ -556,6 +559,7 @@ async fn refused_resolver_affiliation_writes_preserve_invite_rollback_authority(
             affiliation_grant: JoinAffiliationGrant::Resolver(Affiliation::Member),
             local_domain: "example.com".to_string(),
             admission_revision: current_admission_revision(&join_actor).await,
+            session: waddle_xmpp_core::OccupancySessionGeneration::mint(),
         })
         .await
         .expect("resolver-derived join is admitted by explicit invite membership");
@@ -610,6 +614,7 @@ async fn rejected_creator_owner_grant_preserves_invite_rollback_authority() {
             affiliation_grant: JoinAffiliationGrant::CreatorOwner,
             local_domain: "example.com".to_string(),
             admission_revision: current_admission_revision(&actor).await,
+            session: waddle_xmpp_core::OccupancySessionGeneration::mint(),
         })
         .await
         .expect("creator claim is ignored because an owner exists");

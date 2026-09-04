@@ -21,6 +21,7 @@ use crate::Stanza;
 use jid::{FullJid, Jid};
 use waddle_sfu::MediaCapabilities;
 use waddle_xmpp_core::xep0359::{OriginId, StanzaId};
+use waddle_xmpp_core::OccupancySessionGeneration;
 use xmpp_parsers::message::Message;
 
 mod outbound;
@@ -245,6 +246,9 @@ pub struct StanzaContext<'a> {
     pub domain: &'a str,
     /// The currently authenticated full JID of the connection owner.
     pub full_jid: &'a FullJid,
+    /// The current MUC occupant-session generation, when this stanza
+    /// came through a room-scoped connection path that carried one.
+    pub occupant_session: Option<OccupancySessionGeneration>,
     /// Media grants derived by the websocket layer's Muji gate from
     /// the sender's current XEP-0045 role, at the moment the gate
     /// authorized this stanza. `Some` only for Muji Jingle IQs that

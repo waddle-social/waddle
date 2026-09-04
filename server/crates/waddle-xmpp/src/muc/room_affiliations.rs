@@ -4,6 +4,7 @@ use super::affiliation::{self, AffiliationChange, AffiliationProvenance};
 use super::room::{MucRoom, Occupant};
 use super::room_actor::OccupancyWatermark;
 use crate::types::{Affiliation, Role};
+use waddle_xmpp_core::OccupancySessionGeneration;
 
 impl MucRoom {
     /// Get the affiliation for a JID.
@@ -136,6 +137,7 @@ impl MucRoom {
         nick: String,
         local_domain: Option<&str>,
         watermark: OccupancyWatermark,
+        session: OccupancySessionGeneration,
     ) -> &Occupant {
         if let Some(existing) = self.occupants.get(&nick) {
             if existing.real_jid.to_bare() == real_jid.to_bare() {
@@ -146,7 +148,8 @@ impl MucRoom {
                 if !sessions.iter().any(|session| session == &real_jid) {
                     sessions.push(real_jid.clone());
                 }
-                self.set_session_watermark(real_jid, watermark);
+                self.set_session_watermark(real_jid.clone(), watermark);
+                self.set_session_generation(&real_jid, session);
                 return self
                     .occupants
                     .get(&nick)
@@ -189,6 +192,7 @@ impl MucRoom {
         *gen += 1;
 
         self.set_session_watermark(real_jid.clone(), watermark);
+        self.set_session_generation(&real_jid, session);
         self.occupant_sessions.insert(nick.clone(), vec![real_jid]);
         self.occupants.insert(nick.clone(), occupant);
         self.occupants
@@ -271,6 +275,7 @@ mod tests {
             "alice".to_string(),
             None,
             OccupancyWatermark::initial(),
+            OccupancySessionGeneration::mint(),
         );
 
         let alice = room.occupants.get("alice").expect("alice joined");
@@ -317,6 +322,7 @@ mod tests {
             "bob".to_string(),
             None,
             OccupancyWatermark::initial(),
+            OccupancySessionGeneration::mint(),
         );
         assert_eq!(
             room.occupants.get("bob").expect("bob joined").role,

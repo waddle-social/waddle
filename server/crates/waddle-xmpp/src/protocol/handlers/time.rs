@@ -50,6 +50,7 @@ mod tests {
         let ctx = StanzaContext {
             domain: "waddle.social",
             full_jid: &jid,
+            occupant_session: None,
             media_capabilities: None,
         };
 

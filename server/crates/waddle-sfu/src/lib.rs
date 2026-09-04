@@ -22,6 +22,7 @@
 
 use std::future::Future;
 use std::pin::Pin;
+use waddle_xmpp_core::OccupancySessionGeneration;
 
 mod admin;
 mod call;
@@ -155,6 +156,7 @@ pub trait SfuService: Send + Sync + 'static {
         call_id: &CallId,
         identity: &Identity,
         _session: &SessionBinding,
+        _occupant: OccupancySessionGeneration,
     ) {
         self.register_call_participant(call_id, identity);
     }
@@ -171,6 +173,18 @@ pub trait SfuService: Send + Sync + 'static {
         _call_id: &CallId,
         _identity: &Identity,
     ) -> Option<SessionBinding> {
+        None
+    }
+
+    /// The occupant-session generation bound to `identity`'s current
+    /// registration in `call_id`, or `None` when the registration is
+    /// unbound (not registered, restored from a webhook/probe, or the
+    /// implementation does not track occupancy generations).
+    fn participant_occupant_session(
+        &self,
+        _call_id: &CallId,
+        _identity: &Identity,
+    ) -> Option<OccupancySessionGeneration> {
         None
     }
 
@@ -198,6 +212,26 @@ pub trait SfuService: Send + Sync + 'static {
                 identity,
                 observed_sids,
             )),
+        }
+    }
+
+    /// Occupant-scoped teardown (#1703): unregister `identity` from
+    /// `call_id` only when the stored occupant generation is exactly
+    /// `Some(presented)`. A registration restored without an occupant
+    /// generation, or one rebound to a different generation, is left
+    /// untouched and schedules no SFU-side eviction.
+    fn unregister_call_participant_if_occupant_matches(
+        &self,
+        call_id: &CallId,
+        identity: &Identity,
+        presented: OccupancySessionGeneration,
+        observed_sids: Option<&ObservedCallSids>,
+    ) -> SessionScopedTeardown {
+        match self.participant_occupant_session(call_id, identity) {
+            Some(bound) if bound == presented => SessionScopedTeardown::Applied(
+                self.unregister_call_participant(call_id, identity, observed_sids),
+            ),
+            _ => SessionScopedTeardown::SessionMismatch,
         }
     }
 

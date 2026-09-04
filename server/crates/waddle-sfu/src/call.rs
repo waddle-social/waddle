@@ -7,7 +7,7 @@
 
 use jid::FullJid;
 use serde::{de, Deserialize, Deserializer, Serialize, Serializer};
-use waddle_xmpp_core::types::Voice;
+use waddle_xmpp_core::{types::Voice, OccupancySessionGeneration};
 
 use crate::error::SfuError;
 
@@ -217,6 +217,7 @@ pub struct CallTeardownIntentLite {
     pub target: TeardownTargetLite,
     pub generation: Option<CallGeneration>,
     pub room_sid: Option<RoomSid>,
+    pub occupant_session: Option<OccupancySessionGeneration>,
     /// The signaling session whose terminate produced this intent
     /// (#1608): the executor re-checks it against the live
     /// registration's binding immediately before the destructive

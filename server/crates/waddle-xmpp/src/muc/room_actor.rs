@@ -58,6 +58,7 @@ pub use occupancy_handlers::{
     PresenceUpdateData, ReconcileChannelBackedRoom, ResolverAffiliationSyncOutcome,
     SyncResolverAffiliation, UpsertInCallState, UpsertMujiPresence,
 };
+pub use waddle_xmpp_core::OccupancySessionGeneration;
 
 /// A local occupancy generation used to avoid removing a replacement session
 /// while retrying a previously deferred departure.
@@ -2046,6 +2047,9 @@ impl kameo::message::Message<Join> for RoomActor {
             actor
                 .room
                 .set_session_watermark(msg.real_jid.clone(), joined_at);
+            actor
+                .room
+                .set_session_generation(&msg.real_jid, OccupancySessionGeneration::mint());
             actor.note_session_joined(&msg.real_jid);
             actor.occupancy_revision = actor.occupancy_revision.saturating_add(1);
         })

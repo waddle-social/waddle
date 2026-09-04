@@ -10,6 +10,7 @@ use chrono::Duration;
 use jid::FullJid;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use url::Url;
+use waddle_xmpp_core::OccupancySessionGeneration;
 
 fn fixture_config() -> SfuConfig {
     SfuConfig {
@@ -55,6 +56,10 @@ fn observed_sids(room_sid: Option<&str>, participant_sid: Option<&str>) -> Obser
         room_sid.map(fixture_room_sid),
         participant_sid.map(fixture_participant_sid),
     )
+}
+
+fn fixture_occupancy_session() -> OccupancySessionGeneration {
+    OccupancySessionGeneration::mint()
 }
 
 #[test]
@@ -1450,6 +1455,7 @@ async fn teardown_executor_sid_guard_skips_a_new_room_incarnation() {
         },
         generation: None,
         room_sid: Some(fixture_room_sid("RM_old")),
+        occupant_session: None,
         session: None,
     };
 
@@ -1478,6 +1484,7 @@ async fn teardown_executor_defers_when_live_entry_has_not_learned_persisted_sids
         },
         generation: None,
         room_sid: Some(fixture_room_sid("RM_old")),
+        occupant_session: None,
         session: None,
     };
 
@@ -1505,6 +1512,7 @@ async fn teardown_executor_requeues_fenced_missing_calls_until_a_reconcile_pass_
         },
         generation: Some(CallGeneration::new(1)),
         room_sid: Some(fixture_room_sid("RM_restart")),
+        occupant_session: None,
         session: None,
     };
 
@@ -1560,6 +1568,7 @@ async fn teardown_executor_declines_missing_call_when_live_sid_disproves_the_fen
         },
         generation: None,
         room_sid: None,
+        occupant_session: None,
         session: None,
     };
     assert_eq!(
@@ -1584,6 +1593,7 @@ async fn teardown_executor_declines_missing_call_when_live_sid_disproves_the_fen
         },
         generation: None,
         room_sid: None,
+        occupant_session: None,
         session: None,
     };
     assert_eq!(
@@ -3217,6 +3227,7 @@ async fn adopted_participant_sid_makes_fenced_removal_decidable() {
         },
         generation: stored_generation(&sfu, &call),
         room_sid: Some(room_sid),
+        occupant_session: None,
         session: None,
     };
     assert_eq!(
@@ -3436,8 +3447,9 @@ fn session_binding_dies_with_the_registration() {
     let call = CallId::new("room@muc.waddle.test").expect("call id");
     let alice = fixture_identity("alice");
     let sid = SessionBinding::new("muji-sid-1").expect("binding");
+    let occupant = fixture_occupancy_session();
 
-    sfu.register_call_participant_with_session(&call, &alice, &sid);
+    sfu.register_call_participant_with_session(&call, &alice, &sid, occupant);
     let _ = sfu.unregister_call_participant(&call, &alice, None);
 
     // A later re-registration (fresh session) starts unbound.
@@ -3484,8 +3496,9 @@ fn plain_re_registration_clears_the_previous_session_binding() {
     let call = CallId::new("room@muc.waddle.test").expect("call id");
     let alice = fixture_identity("alice");
     let old = SessionBinding::new("muji-sid-old").expect("binding");
+    let occupant = fixture_occupancy_session();
 
-    sfu.register_call_participant_with_session(&call, &alice, &old);
+    sfu.register_call_participant_with_session(&call, &alice, &old, occupant);
     sfu.register_call_participant(&call, &alice);
 
     assert_eq!(sfu.participant_session_binding(&call, &alice), None);
@@ -3498,14 +3511,16 @@ fn register_with_session_binds_atomically_and_rebinds_on_rejoin() {
     let alice = fixture_identity("alice");
     let old = SessionBinding::new("muji-sid-old").expect("binding");
     let new = SessionBinding::new("muji-sid-new").expect("binding");
+    let first_occupant = fixture_occupancy_session();
+    let second_occupant = fixture_occupancy_session();
 
-    sfu.register_call_participant_with_session(&call, &alice, &old);
+    sfu.register_call_participant_with_session(&call, &alice, &old, first_occupant);
     assert_eq!(
         sfu.participant_session_binding(&call, &alice),
         Some(old.clone())
     );
 
-    sfu.register_call_participant_with_session(&call, &alice, &new);
+    sfu.register_call_participant_with_session(&call, &alice, &new, second_occupant);
     assert_eq!(sfu.participant_session_binding(&call, &alice), Some(new));
     assert_eq!(sfu.participant_count(&call), 1);
 }
@@ -3517,8 +3532,9 @@ fn session_scoped_unregister_refuses_a_mismatching_sid() {
     let alice = fixture_identity("alice");
     let live = SessionBinding::new("muji-live").expect("binding");
     let stale = SessionBinding::new("muji-stale").expect("binding");
+    let occupant = fixture_occupancy_session();
 
-    sfu.register_call_participant_with_session(&call, &alice, &live);
+    sfu.register_call_participant_with_session(&call, &alice, &live, occupant);
     assert_eq!(
         sfu.unregister_call_participant_if_session_matches(&call, &alice, Some(&stale), None),
         SessionScopedTeardown::SessionMismatch
@@ -3535,8 +3551,9 @@ fn session_scoped_unregister_applies_on_a_matching_sid() {
     let call = CallId::new("room@muc.waddle.test").expect("call id");
     let alice = fixture_identity("alice");
     let live = SessionBinding::new("muji-live").expect("binding");
+    let occupant = fixture_occupancy_session();
 
-    sfu.register_call_participant_with_session(&call, &alice, &live);
+    sfu.register_call_participant_with_session(&call, &alice, &live, occupant);
     match sfu.unregister_call_participant_if_session_matches(&call, &alice, Some(&live), None) {
         SessionScopedTeardown::Applied(TeardownDisposition::Applied(CallState::Ended)) => {}
         other => panic!("matching-sid unregister must apply and end the call, got {other:?}"),
@@ -3571,8 +3588,9 @@ fn session_scoped_unregister_refuses_an_unparseable_sid_against_a_bound_registra
     let call = CallId::new("room@muc.waddle.test").expect("call id");
     let alice = fixture_identity("alice");
     let live = SessionBinding::new("muji-live").expect("binding");
+    let occupant = fixture_occupancy_session();
 
-    sfu.register_call_participant_with_session(&call, &alice, &live);
+    sfu.register_call_participant_with_session(&call, &alice, &live, occupant);
     assert_eq!(
         sfu.unregister_call_participant_if_session_matches(&call, &alice, None, None),
         SessionScopedTeardown::SessionMismatch
@@ -3590,8 +3608,9 @@ async fn executor_refuses_a_session_bearing_intent_after_a_rebind() {
     let alice = fixture_identity("alice");
     let rebound = SessionBinding::new("muji-rebound").expect("binding");
     let stale = SessionBinding::new("muji-stale").expect("binding");
+    let occupant = fixture_occupancy_session();
 
-    sfu.register_call_participant_with_session(&call, &alice, &rebound);
+    sfu.register_call_participant_with_session(&call, &alice, &rebound, occupant);
     let intent = CallTeardownIntentLite {
         call_id: call.clone(),
         target: TeardownTargetLite::Participant {
@@ -3600,6 +3619,7 @@ async fn executor_refuses_a_session_bearing_intent_after_a_rebind() {
         },
         generation: None,
         room_sid: None,
+        occupant_session: None,
         session: Some(stale),
     };
 
@@ -3621,8 +3641,9 @@ async fn executor_applies_a_session_bearing_intent_that_matches_the_binding() {
     let call = CallId::new("room@muc.waddle.test").expect("call id");
     let alice = fixture_identity("alice");
     let current = SessionBinding::new("muji-current").expect("binding");
+    let occupant = fixture_occupancy_session();
 
-    sfu.register_call_participant_with_session(&call, &alice, &current);
+    sfu.register_call_participant_with_session(&call, &alice, &current, occupant);
     let intent = CallTeardownIntentLite {
         call_id: call.clone(),
         target: TeardownTargetLite::Participant {
@@ -3631,6 +3652,7 @@ async fn executor_applies_a_session_bearing_intent_that_matches_the_binding() {
         },
         generation: None,
         room_sid: None,
+        occupant_session: None,
         session: Some(current),
     };
 
@@ -3674,17 +3696,20 @@ async fn inline_teardown_refuses_the_remote_eject_after_a_same_identity_rejoin()
     let bob = fixture_identity("bob");
     let session_a = SessionBinding::new("muji-session-a").expect("binding");
     let session_b = SessionBinding::new("muji-session-b").expect("binding");
+    let occupant_a = fixture_occupancy_session();
+    let occupant_b = fixture_occupancy_session();
+    let occupant_bob = fixture_occupancy_session();
 
     // Bob keeps the call non-empty so no DeleteRoom fires.
     sfu.register_call_participant(&call, &bob);
-    sfu.register_call_participant_with_session(&call, &alice, &session_a);
+    sfu.register_call_participant_with_session(&call, &alice, &session_a, occupant_a);
     match sfu.unregister_call_participant_if_session_matches(&call, &alice, Some(&session_a), None)
     {
         SessionScopedTeardown::Applied(_) => {}
         other => panic!("matching terminate must apply, got {other:?}"),
     }
     // The rejoin lands before the spawned eject runs.
-    sfu.register_call_participant_with_session(&call, &alice, &session_b);
+    sfu.register_call_participant_with_session(&call, &alice, &session_b, occupant_b);
 
     drain_spawned_admin_tasks(&sfu).await;
 
@@ -3704,7 +3729,7 @@ async fn inline_teardown_refuses_the_remote_eject_after_a_same_identity_rejoin()
     // eject spawn actually ran and was refused, rather than never
     // having been scheduled at all).
     let session_bob = SessionBinding::new("muji-session-bob").expect("binding");
-    sfu.register_call_participant_with_session(&call, &bob, &session_bob);
+    sfu.register_call_participant_with_session(&call, &bob, &session_bob, occupant_bob);
     match sfu.unregister_call_participant_if_session_matches(&call, &bob, Some(&session_bob), None)
     {
         SessionScopedTeardown::Applied(_) => {}
@@ -3727,8 +3752,9 @@ fn session_scoped_note_left_refuses_a_rebound_registration() {
     let alice = fixture_identity("alice");
     let rebound = SessionBinding::new("muji-rebound").expect("binding");
     let stale = SessionBinding::new("muji-stale").expect("binding");
+    let occupant = fixture_occupancy_session();
 
-    sfu.register_call_participant_with_session(&call, &alice, &rebound);
+    sfu.register_call_participant_with_session(&call, &alice, &rebound, occupant);
     assert_eq!(
         sfu.note_participant_left_if_session_matches(&call, &alice, None, Some(&stale)),
         SessionScopedTeardown::SessionMismatch
@@ -3740,4 +3766,92 @@ fn session_scoped_note_left_refuses_a_rebound_registration() {
         other => panic!("matching note-left must apply, got {other:?}"),
     }
     assert!(!sfu.has_call_participant(&call, &alice));
+}
+
+#[test]
+fn occupant_scoped_unregister_applies_on_a_matching_generation() {
+    let sfu = LiveKitSfu::new(fixture_config()).expect("test SFU");
+    let call = CallId::new("room@muc.waddle.test").expect("call id");
+    let alice = fixture_identity("alice");
+    let sid = SessionBinding::new("muji-live").expect("binding");
+    let occupant = fixture_occupancy_session();
+
+    sfu.register_call_participant_with_session(&call, &alice, &sid, occupant);
+    match sfu.unregister_call_participant_if_occupant_matches(&call, &alice, occupant, None) {
+        SessionScopedTeardown::Applied(TeardownDisposition::Applied(CallState::Ended)) => {}
+        other => panic!("matching generation must clear the registration, got {other:?}"),
+    }
+    assert!(!sfu.has_call_participant(&call, &alice));
+}
+
+#[test]
+fn occupant_scoped_unregister_refuses_a_mismatching_generation_without_mutation() {
+    let sfu = LiveKitSfu::new(fixture_config()).expect("test SFU");
+    let call = CallId::new("room@muc.waddle.test").expect("call id");
+    let alice = fixture_identity("alice");
+    let sid = SessionBinding::new("muji-live").expect("binding");
+    let live = fixture_occupancy_session();
+    let stale = fixture_occupancy_session();
+
+    sfu.register_call_participant_with_session(&call, &alice, &sid, live);
+    assert_eq!(
+        sfu.unregister_call_participant_if_occupant_matches(&call, &alice, stale, None),
+        SessionScopedTeardown::SessionMismatch
+    );
+    assert!(sfu.has_call_participant(&call, &alice));
+    assert_eq!(sfu.participant_occupant_session(&call, &alice), Some(live));
+}
+
+#[test]
+fn occupant_scoped_unregister_refuses_an_unbound_registration() {
+    let sfu = LiveKitSfu::new(fixture_config()).expect("test SFU");
+    let call = CallId::new("room@muc.waddle.test").expect("call id");
+    let alice = fixture_identity("alice");
+    let presented = fixture_occupancy_session();
+
+    sfu.register_call_participant(&call, &alice);
+    assert_eq!(
+        sfu.unregister_call_participant_if_occupant_matches(&call, &alice, presented, None),
+        SessionScopedTeardown::SessionMismatch
+    );
+    assert!(sfu.has_call_participant(&call, &alice));
+    assert_eq!(sfu.participant_occupant_session(&call, &alice), None);
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn inline_teardown_refuses_the_remote_eject_after_a_same_sid_rejoin_with_new_generation() {
+    let admin = Arc::new(RecordingAdmin::default());
+    let sfu = LiveKitSfu::with_admin(fixture_config(), Arc::clone(&admin) as Arc<_>);
+    let call = CallId::new("room@muc.waddle.test").expect("call id");
+    let alice = fixture_identity("alice");
+    let bob = fixture_identity("bob");
+    let sid = SessionBinding::new("muji-session-shared").expect("binding");
+    let generation_one = fixture_occupancy_session();
+    let generation_two = fixture_occupancy_session();
+    let bob_generation = fixture_occupancy_session();
+
+    sfu.register_call_participant_with_session(&call, &bob, &sid, bob_generation);
+    sfu.register_call_participant_with_session(&call, &alice, &sid, generation_one);
+    match sfu.unregister_call_participant_if_occupant_matches(&call, &alice, generation_one, None) {
+        SessionScopedTeardown::Applied(_) => {}
+        other => panic!("matching generation must apply, got {other:?}"),
+    }
+    sfu.register_call_participant_with_session(&call, &alice, &sid, generation_two);
+
+    drain_spawned_admin_tasks(&sfu).await;
+
+    assert!(
+        admin
+            .remove_calls
+            .lock()
+            .expect("recording lock")
+            .iter()
+            .all(|(_, identity)| identity != &alice),
+        "the stale generation's spawned eject must be refused after the same-sid rejoin"
+    );
+    assert!(sfu.has_call_participant(&call, &alice));
+    assert_eq!(
+        sfu.participant_occupant_session(&call, &alice),
+        Some(generation_two)
+    );
 }

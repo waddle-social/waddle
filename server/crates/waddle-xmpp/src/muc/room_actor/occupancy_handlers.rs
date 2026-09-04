@@ -2,6 +2,7 @@ use std::convert::Infallible;
 
 use jid::{BareJid, FullJid};
 use kameo::message::Context;
+use waddle_xmpp_core::OccupancySessionGeneration;
 
 use super::{
     affiliation_overflows_full_room, JoinDenialReason, JoinExistingOccupant, JoinOutcome,
@@ -43,6 +44,7 @@ pub struct JoinWithAffiliation {
     pub affiliation_grant: JoinAffiliationGrant,
     pub local_domain: String,
     pub admission_revision: u64,
+    pub session: OccupancySessionGeneration,
 }
 
 impl kameo::message::Message<JoinWithAffiliation> for RoomActor {
@@ -243,9 +245,11 @@ impl kameo::message::Message<JoinWithAffiliation> for RoomActor {
                     msg.nick.clone(),
                     Some(msg.local_domain.as_str()),
                     joined_at,
+                    msg.session,
                 )
                 .clone();
             actor.room.set_session_order(&joined_jid, join_order);
+            actor.room.set_session_generation(&joined_jid, msg.session);
             actor.note_session_joined(&joined_jid);
             let new_occupant_affiliation = new_occupant.affiliation;
             let new_occupant_role = new_occupant.role;
@@ -347,6 +351,7 @@ pub fn next_occupancy_order() -> OccupancyOrder {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum LeaveSessionSelector {
     Any,
+    Generation(OccupancySessionGeneration),
     JoinedAtOrBefore(OccupancyWatermark),
 }
 
@@ -486,6 +491,13 @@ impl kameo::message::Message<LeaveByRealJid> for RoomActor {
             .session_order(&msg.sender_jid)
             .is_some_and(|joined_order| joined_order > msg.attempt.order())
         {
+            return Ok(LeaveDisposition::Superseded);
+        }
+        if matches!(
+            msg.session,
+            LeaveSessionSelector::Generation(generation)
+                if self.room.session_generation(&msg.sender_jid) != Some(generation)
+        ) {
             return Ok(LeaveDisposition::Superseded);
         }
         let departing_generation = self
