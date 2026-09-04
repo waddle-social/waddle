@@ -52,11 +52,11 @@ pub use mediated_invites::{
     PrepareMediatedInviteGrantRollback,
 };
 pub use occupancy_handlers::{
-    next_occupancy_order, ClearMujiPresence, GetActiveMujiSessions, InCallPresenceUpdateOutcome,
-    JoinAffiliationGrant, JoinWithAffiliation, LeaveAttemptId, LeaveByRealJid, LeaveDisposition,
-    LeaveOrigin, LeaveSessionSelector, MujiPresenceUpdateOutcome, OccupancyOrder, PingSelfCheck,
-    PresenceUpdateData, ReconcileChannelBackedRoom, ResolverAffiliationSyncOutcome,
-    SyncResolverAffiliation, UpsertInCallState, UpsertMujiPresence,
+    next_occupancy_order, ClearMujiPresence, ClearMujiPresenceOutcome, GetActiveMujiSessions,
+    InCallPresenceUpdateOutcome, JoinAffiliationGrant, JoinWithAffiliation, LeaveAttemptId,
+    LeaveByRealJid, LeaveDisposition, LeaveOrigin, LeaveSessionSelector, MujiPresenceUpdateOutcome,
+    OccupancyOrder, PingSelfCheck, PresenceUpdateData, ReconcileChannelBackedRoom,
+    ResolverAffiliationSyncOutcome, SyncResolverAffiliation, UpsertInCallState, UpsertMujiPresence,
 };
 pub use waddle_xmpp_core::OccupancySessionGeneration;
 

@@ -624,7 +624,12 @@ fn muji_session_terminate_to_local_mixer_passes_federation_guard() {
     let jid = test_full_jid();
     let sfu = fixture_sfu();
     let call_id = CallId::new("room@muc.waddle.test").expect("valid room call id");
-    sfu.register_call_participant(&call_id, &waddle_sfu::Identity::from_jid(jid.clone()));
+    sfu.register_call_participant_with_session(
+        &call_id,
+        &waddle_sfu::Identity::from_jid(jid.clone()),
+        &waddle_sfu::SessionBinding::new("muji-1").expect("session binding"),
+        test_occupant_session(),
+    );
     let handler = JingleHandler::new(sfu);
     let events = handler.handle(&iq, &ctx(&jid));
 
@@ -795,7 +800,12 @@ async fn muji_session_terminate_evicts_participant_via_livekit_admin() {
     let room_jid_str = "room@muc.waddle.test";
     let call_id = CallId::new(room_jid_str).expect("valid call id");
     let initiator = test_full_jid();
-    sfu.register_call_participant(&call_id, &waddle_sfu::Identity::from_jid(initiator.clone()));
+    sfu.register_call_participant_with_session(
+        &call_id,
+        &waddle_sfu::Identity::from_jid(initiator.clone()),
+        &waddle_sfu::SessionBinding::new("muji-1").expect("session binding"),
+        test_occupant_session(),
+    );
 
     let iq = muji_session_terminate_iq(
         TEST_INITIATOR,
@@ -844,7 +854,12 @@ async fn muji_session_terminate_skips_delete_room_when_call_still_has_participan
     let alice = test_full_jid();
     let bob: jid::FullJid = "bob@waddle.test/desktop".parse().unwrap();
     sfu.register_call_participant(&call_id, &waddle_sfu::Identity::from_jid(alice.clone()));
-    sfu.register_call_participant(&call_id, &waddle_sfu::Identity::from_jid(bob.clone()));
+    sfu.register_call_participant_with_session(
+        &call_id,
+        &waddle_sfu::Identity::from_jid(bob.clone()),
+        &waddle_sfu::SessionBinding::new("muji-2").expect("session binding"),
+        test_occupant_session(),
+    );
 
     let iq = muji_session_terminate_iq(
         &bob.to_string(),
@@ -1313,6 +1328,70 @@ async fn muji_session_terminate_with_matching_sid_tears_down_as_today() {
     assert!(
         !sfu.has_call_participant(&call_id, &waddle_sfu::Identity::from_jid(jid.clone())),
         "matching-sid terminate must unregister the participant",
+    );
+    assert_eq!(admin.remove_snapshot().len(), 1);
+}
+
+#[tokio::test]
+async fn same_sid_terminate_is_fenced_by_the_occupant_generation() {
+    let admin = Arc::new(RecordingAdmin::default());
+    let sfu = fixture_sfu_with_admin(Arc::clone(&admin));
+    let room_jid_str = "room@muc.waddle.test";
+    let call_id = CallId::new(room_jid_str).expect("valid call id");
+    let jid = test_full_jid();
+    let displaced = OccupancySessionGeneration::mint();
+    let replacement = OccupancySessionGeneration::mint();
+    let media_capabilities = Some(waddle_sfu::MediaCapabilities::from_muc_voice(
+        waddle_xmpp_core::types::Voice::Voiced,
+    ));
+    let handler = JingleHandler::new(Arc::clone(&sfu));
+    let initiate = muji_session_initiate_iq(
+        TEST_INITIATOR,
+        &calls_mixer_jid(TEST_DOMAIN).to_string(),
+        room_jid_str,
+        "muji-reused",
+    );
+    let events = handler.handle(
+        &initiate,
+        &ctx_with_caps_and_session(&jid, media_capabilities, Some(replacement)),
+    );
+    assert!(
+        first_error_condition(&events).is_none(),
+        "replacement initiate must succeed: {events:?}",
+    );
+
+    let terminate = muji_session_terminate_iq(
+        TEST_INITIATOR,
+        &calls_mixer_jid(TEST_DOMAIN).to_string(),
+        room_jid_str,
+        "muji-reused",
+    );
+    let stale_events = handler.handle(
+        &terminate,
+        &ctx_with_caps_and_session(&jid, media_capabilities, Some(displaced)),
+    );
+    assert_eq!(
+        first_error_condition(&stale_events),
+        Some(DefinedCondition::ItemNotFound),
+        "a stale generation must not be authorized by reusing the current SID",
+    );
+    assert!(
+        sfu.has_call_participant(&call_id, &Identity::from_jid(jid.clone())),
+        "the replacement registration must survive the stale terminate",
+    );
+
+    let matching_events = handler.handle(
+        &terminate,
+        &ctx_with_caps_and_session(&jid, media_capabilities, Some(replacement)),
+    );
+    drain_spawned_admin_tasks().await;
+    assert!(
+        first_error_condition(&matching_events).is_none(),
+        "the matching generation must still terminate successfully: {matching_events:?}",
+    );
+    assert!(
+        !sfu.has_call_participant(&call_id, &Identity::from_jid(jid)),
+        "the matching generation must remove its registration",
     );
     assert_eq!(admin.remove_snapshot().len(), 1);
 }

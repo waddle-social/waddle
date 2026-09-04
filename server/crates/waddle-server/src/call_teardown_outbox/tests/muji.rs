@@ -286,6 +286,107 @@ async fn sid_fenced_muji_presence_clear_stale_rejoin_preserves_room_muji_state_a
 }
 
 #[tokio::test]
+async fn occupant_fenced_muji_clear_rejects_stale_same_session_binding() {
+    let admin = Arc::new(RecordingAdmin::default());
+    let sfu = Arc::new(waddle_sfu::LiveKitSfu::with_admin(
+        fixture_config(),
+        Arc::clone(&admin) as Arc<_>,
+    ));
+    let state = state_with_executor(Arc::clone(&sfu)).await;
+    let owner_session = create_test_server_owner_session(state.as_ref(), "alice").await;
+    let room_jid: BareJid = "muji-occupant-stale@muc.example.com"
+        .parse()
+        .expect("room jid");
+    let alice: FullJid = "alice@example.com/web".parse().expect("alice jid");
+    let call_id = CallId::new(room_jid.to_string()).expect("call id");
+    let identity = Identity::from_jid(alice.clone());
+    let displaced = occupant_generation();
+    let replacement = occupant_generation();
+    let reused_session = waddle_sfu::SessionBinding::new("muji-reused").expect("session binding");
+
+    let _ = handle_muc_join_with_occupancy_session(
+        state.as_ref(),
+        "example.com",
+        &room_jid,
+        &alice,
+        "alice",
+        None,
+        (displaced, &Some(owner_session.clone())),
+    )
+    .await;
+    let _ = handle_muc_join_with_occupancy_session(
+        state.as_ref(),
+        "example.com",
+        &room_jid,
+        &alice,
+        "alice",
+        None,
+        (replacement, &Some(owner_session)),
+    )
+    .await;
+    get_room_actor(state.as_ref(), &room_jid)
+        .await
+        .expect("room actor")
+        .ask(UpsertMujiPresence {
+            sender_jid: alice.clone(),
+            muji: active_muji(),
+        })
+        .await
+        .expect("muji update")
+        .expect("occupant update");
+    sfu.register_call_participant_with_session(&call_id, &identity, &reused_session, replacement);
+
+    let intent_id = state
+        .deps
+        .protocol
+        .call_teardown_outbox
+        .enqueue(CallTeardownIntent {
+            call_id: call_id.clone(),
+            target: TeardownTarget::MujiPresenceClear {
+                room_jid: room_jid.clone(),
+                departed: alice.clone(),
+                participant_sid: None,
+            },
+            generation: None,
+            occupant: Some(displaced),
+            room_sid: None,
+            session: Some(reused_session),
+        })
+        .await
+        .expect("enqueue");
+
+    let summary = drain_due(&state, 8).await.expect("drain");
+
+    assert_eq!(summary.drained, 1);
+    assert!(sfu.has_call_participant(&call_id, &identity));
+    assert!(
+        snapshot_room(state.as_ref(), &room_jid)
+            .await
+            .room
+            .muji_for_session("alice", &alice)
+            .is_some(),
+        "the stale durable intent must not clear the replacement advertisement",
+    );
+    assert!(admin
+        .remove_calls
+        .lock()
+        .expect("recording lock")
+        .is_empty());
+    assert_eq!(
+        state
+            .deps
+            .protocol
+            .call_teardown_outbox
+            .find(&intent_id)
+            .await
+            .expect("find")
+            .expect("stored intent")
+            .status,
+        CallTeardownStatus::Done,
+    );
+}
+
+#[tokio::test]
 async fn sid_fenced_muji_presence_clear_matching_sid_still_clears_room_muji_state() {
     let admin = Arc::new(RecordingAdmin::default());
     let sfu = Arc::new(waddle_sfu::LiveKitSfu::with_admin(

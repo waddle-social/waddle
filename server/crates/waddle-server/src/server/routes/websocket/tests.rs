@@ -52,6 +52,47 @@ mod muc;
 mod registration;
 mod send;
 mod stream_features;
+
+/// One stable `OccupancySessionGeneration` per simulated connection (keyed by
+/// full JID) so test joins, presence updates and leaves that go through the
+/// connection-less test wrappers present the SAME generation the join
+/// recorded, exactly like a real `WsConnState` would.
+pub(crate) fn test_occupancy_sessions() -> &'static std::sync::Mutex<
+    std::collections::HashMap<String, waddle_xmpp_core::OccupancySessionGeneration>,
+> {
+    static SESSIONS: std::sync::OnceLock<
+        std::sync::Mutex<
+            std::collections::HashMap<String, waddle_xmpp_core::OccupancySessionGeneration>,
+        >,
+    > = std::sync::OnceLock::new();
+    SESSIONS.get_or_init(|| std::sync::Mutex::new(std::collections::HashMap::new()))
+}
+
+/// Mint and record a fresh generation for `jid` (a new simulated connection).
+pub(crate) fn record_test_occupancy_session(
+    jid: &jid::FullJid,
+) -> waddle_xmpp_core::OccupancySessionGeneration {
+    let generation = waddle_xmpp_core::OccupancySessionGeneration::mint();
+    test_occupancy_sessions()
+        .lock()
+        .expect("test occupancy session lock")
+        .insert(jid.to_string(), generation);
+    generation
+}
+
+/// The generation recorded for `jid`, minting one on first use. The guard is
+/// dropped before minting: `record_test_occupancy_session` takes the same
+/// lock and a guard kept alive across the closure deadlocks.
+pub(crate) fn current_test_occupancy_session(
+    jid: &jid::FullJid,
+) -> waddle_xmpp_core::OccupancySessionGeneration {
+    let recorded = test_occupancy_sessions()
+        .lock()
+        .expect("test occupancy session lock")
+        .get(jid.as_str())
+        .copied();
+    recorded.unwrap_or_else(|| record_test_occupancy_session(jid))
+}
 mod stream_management;
 
 async fn handle_muc_join(

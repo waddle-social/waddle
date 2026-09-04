@@ -1315,7 +1315,12 @@ async fn handle_muc_join_unlocked(state: &WebSocketState, request: MucJoinWork<'
                                             .deps
                                             .protocol
                                             .remote_muc_memberships
-                                            .record_join(sender_jid, room_jid, &nick);
+                                            .record_join(
+                                                sender_jid,
+                                                room_jid,
+                                                &nick,
+                                                occupancy_session,
+                                            );
                                         return replies
                                             .into_iter()
                                             .map(|reply| stanza_to_xml(&reply))
@@ -1329,7 +1334,12 @@ async fn handle_muc_join_unlocked(state: &WebSocketState, request: MucJoinWork<'
                                             .deps
                                             .protocol
                                             .remote_muc_memberships
-                                            .record_join(sender_jid, room_jid, &nick);
+                                            .record_join(
+                                                sender_jid,
+                                                room_jid,
+                                                &nick,
+                                                occupancy_session,
+                                            );
                                         return Vec::new();
                                     }
                                     None => {}
@@ -2070,6 +2080,13 @@ pub async fn handle_muc_leave(
                 .pending_local_muc_departures
                 .complete_in_flight(&in_flight);
             debug!(room = %room_jid, nick = %nick, sender = %sender_jid, "MUC leave superseded by a replacement session");
+            let _ = super::super::super::muc_call_sfu::unregister_participant_from_room_if_occupant_matches(
+                state,
+                room_jid,
+                sender_jid,
+                occupancy_session,
+                None,
+            );
             return vec![build_muc_self_unavailable_xml(
                 state,
                 room_jid,
@@ -3323,7 +3340,6 @@ mod occupancy_projection_handler_tests {
         RecordingSfu,
     };
     use kameo::actor::ActorRef;
-    use std::collections::HashMap;
     use std::str::FromStr;
     use std::sync::{Arc, Mutex};
     use tokio::sync::mpsc;
@@ -3337,35 +3353,10 @@ mod occupancy_projection_handler_tests {
     use waddle_xmpp::muc::room_registry_actor::CreateRoom;
     use waddle_xmpp::ownership::{ClaimEpoch, Entity, EntityType, NodeIdentity};
 
-    fn occupancy_sessions(
-    ) -> &'static Mutex<HashMap<String, waddle_xmpp_core::OccupancySessionGeneration>> {
-        static SESSIONS: std::sync::OnceLock<
-            Mutex<HashMap<String, waddle_xmpp_core::OccupancySessionGeneration>>,
-        > = std::sync::OnceLock::new();
-        SESSIONS.get_or_init(|| Mutex::new(HashMap::new()))
-    }
-
-    fn record_occupancy_session(
-        sender_jid: &FullJid,
-    ) -> waddle_xmpp_core::OccupancySessionGeneration {
-        let generation = waddle_xmpp_core::OccupancySessionGeneration::mint();
-        occupancy_sessions()
-            .lock()
-            .expect("occupancy session lock")
-            .insert(sender_jid.to_string(), generation);
-        generation
-    }
-
-    fn current_occupancy_session(
-        sender_jid: &FullJid,
-    ) -> waddle_xmpp_core::OccupancySessionGeneration {
-        occupancy_sessions()
-            .lock()
-            .expect("occupancy session lock")
-            .get(sender_jid.as_str())
-            .copied()
-            .unwrap_or_else(|| record_occupancy_session(sender_jid))
-    }
+    use crate::server::routes::websocket::tests::{
+        current_test_occupancy_session as current_occupancy_session,
+        record_test_occupancy_session as record_occupancy_session,
+    };
 
     async fn handle_muc_join(
         state: &WebSocketState,

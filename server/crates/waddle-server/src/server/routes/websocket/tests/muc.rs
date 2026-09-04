@@ -3,6 +3,7 @@ use crate::permissions::CheckPermission;
 use std::io;
 use std::sync::{Arc, Mutex};
 use tracing::Instrument as _;
+use waddle_sfu::SfuService;
 use waddle_xmpp_core::OccupancySessionGeneration;
 
 #[derive(Clone, Default)]
@@ -43,32 +44,6 @@ fn captured_admission_denial_log(buffer: &Arc<Mutex<Vec<u8>>>) -> String {
         .to_string()
 }
 
-fn test_occupancy_sessions(
-) -> &'static Mutex<std::collections::HashMap<String, OccupancySessionGeneration>> {
-    static SESSIONS: std::sync::OnceLock<
-        Mutex<std::collections::HashMap<String, OccupancySessionGeneration>>,
-    > = std::sync::OnceLock::new();
-    SESSIONS.get_or_init(|| Mutex::new(std::collections::HashMap::new()))
-}
-
-fn record_test_occupancy_session(jid: &FullJid) -> OccupancySessionGeneration {
-    let generation = OccupancySessionGeneration::mint();
-    test_occupancy_sessions()
-        .lock()
-        .expect("test occupancy session lock")
-        .insert(jid.to_string(), generation);
-    generation
-}
-
-fn current_test_occupancy_session(jid: &FullJid) -> OccupancySessionGeneration {
-    test_occupancy_sessions()
-        .lock()
-        .expect("test occupancy session lock")
-        .get(jid.as_str())
-        .copied()
-        .unwrap_or_else(|| record_test_occupancy_session(jid))
-}
-
 async fn handle_muc_join(
     state: &WebSocketState,
     domain: &str,
@@ -86,7 +61,7 @@ async fn handle_muc_join(
         nick,
         presence_show,
         (
-            record_test_occupancy_session(sender_jid),
+            super::record_test_occupancy_session(sender_jid),
             authenticated_session,
         ),
     )
@@ -105,7 +80,7 @@ async fn handle_muc_leave(
         room_jid,
         sender_jid,
         nick,
-        current_test_occupancy_session(sender_jid),
+        super::current_test_occupancy_session(sender_jid),
         ordered_relay_origin,
     )
     .await
@@ -6629,6 +6604,88 @@ async fn same_nick_originator_leave_broadcasts_muji_clear() {
 }
 
 #[tokio::test]
+async fn stale_explicit_leave_superseded_by_replacement_unregisters_only_the_old_sfu_session() {
+    let recorder = Arc::new(RecordingSfu::default());
+    let state = create_test_websocket_state_with_sfu(recorder.clone()).await;
+    let owner_session = create_test_server_owner_session(state.as_ref(), "alice").await;
+    let room_jid: BareJid = "explicit-superseded-sfu@muc.example.com"
+        .parse()
+        .expect("room jid");
+    let alice: FullJid = "alice@example.com/web".parse().expect("alice jid");
+
+    let first_generation = OccupancySessionGeneration::mint();
+    let second_generation = OccupancySessionGeneration::mint();
+    let first_join = super::handle_muc_join_with_occupancy_session(
+        state.as_ref(),
+        "example.com",
+        &room_jid,
+        &alice,
+        "alice",
+        None,
+        (first_generation, &Some(owner_session.clone())),
+    )
+    .await;
+    assert!(first_join
+        .iter()
+        .any(|frame| frame.contains("status code='110'")));
+
+    let call_id = waddle_sfu::CallId::new(room_jid.to_string()).expect("call id");
+    let identity = waddle_sfu::Identity::from_jid(alice.clone());
+    recorder.register_call_participant_with_session(
+        &call_id,
+        &identity,
+        &waddle_sfu::SessionBinding::new("explicit-superseded-g1").expect("sid"),
+        first_generation,
+    );
+
+    let second_join = super::handle_muc_join_with_occupancy_session(
+        state.as_ref(),
+        "example.com",
+        &room_jid,
+        &alice,
+        "alice",
+        None,
+        (second_generation, &Some(owner_session)),
+    )
+    .await;
+    assert!(second_join
+        .iter()
+        .any(|frame| frame.contains("status code='110'")));
+
+    let frames = super::handle_muc_leave_with_occupancy_session(
+        state.as_ref(),
+        &room_jid,
+        &alice,
+        "alice",
+        first_generation,
+        None,
+    )
+    .await;
+
+    assert_eq!(frames.len(), 1);
+    assert!(
+        frames[0].contains("type='unavailable'"),
+        "superseded explicit leave still returns the self unavailable echo: {frames:?}"
+    );
+
+    let room = snapshot_room(state.as_ref(), &room_jid).await.room;
+    assert_eq!(
+        room.find_nick_by_real_jid(&alice),
+        Some("alice"),
+        "the replacement occupancy must remain after the stale explicit leave"
+    );
+    assert_eq!(
+        recorder.snapshot().len(),
+        1,
+        "the stale explicit leave must tear down the departed generation's SFU participant"
+    );
+    assert!(
+        !recorder.has_call_participant(&call_id, &identity),
+        "the old generation's SFU registration must be removed"
+    );
+}
+
+#[tokio::test]
 async fn same_nick_active_leave_broadcasts_departed_clear_before_preparing_sibling() {
     let state = create_test_websocket_state().await;
     let owner_session = create_test_server_owner_session(state.as_ref(), "alice").await;
@@ -8757,11 +8814,12 @@ async fn muc_self_ping_answers_joined_for_recorded_remote_membership() {
     let ready = ready_phase(&alice_jid);
     let room_jid: BareJid = "remote-room@muc.example.com".parse().expect("room jid");
 
-    state
-        .deps
-        .protocol
-        .remote_muc_memberships
-        .record_join(&alice_jid, &room_jid, "alice");
+    state.deps.protocol.remote_muc_memberships.record_join(
+        &alice_jid,
+        &room_jid,
+        "alice",
+        OccupancySessionGeneration::mint(),
+    );
 
     let ping = |nick: &str, id: &str| {
         let iq = xmpp_parsers::iq::Iq::Get {

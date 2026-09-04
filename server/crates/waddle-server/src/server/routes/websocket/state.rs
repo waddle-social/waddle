@@ -457,9 +457,10 @@ mod resolver_affiliation_sync_scheduler_tests {
         let occupant: FullJid = "alice@example.com/web".parse().expect("occupant");
         let old_room: BareJid = "old@muc.remote.example".parse().expect("room");
         let new_room: BareJid = "new@muc.remote.example".parse().expect("room");
-        memberships.record_join(&occupant, &old_room, "alice");
+        let occupant_session = waddle_xmpp_core::OccupancySessionGeneration::mint();
+        memberships.record_join(&occupant, &old_room, "alice", occupant_session);
         let ceiling = memberships.generation_watermark();
-        memberships.record_join(&occupant, &new_room, "alice");
+        memberships.record_join(&occupant, &new_room, "alice", occupant_session);
 
         let taken = memberships.take_for_occupant_below(&occupant, ceiling);
         assert_eq!(taken.len(), 1, "only the pre-ceiling membership is taken");
@@ -790,6 +791,7 @@ enum RemoteMucMembershipEntry {
 struct RemoteMucMembership {
     nick: String,
     generation: u64,
+    occupant_session: waddle_xmpp_core::OccupancySessionGeneration,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -798,6 +800,7 @@ pub struct RemoteMucMembershipSnapshot {
     room: BareJid,
     nick: String,
     generation: u64,
+    occupant_session: waddle_xmpp_core::OccupancySessionGeneration,
 }
 
 impl RemoteMucMembershipSnapshot {
@@ -807,6 +810,10 @@ impl RemoteMucMembershipSnapshot {
 
     pub fn nick(&self) -> &str {
         &self.nick
+    }
+
+    pub fn occupant_session(&self) -> waddle_xmpp_core::OccupancySessionGeneration {
+        self.occupant_session
     }
 }
 
@@ -834,13 +841,20 @@ impl RemoteMucMemberships {
             .await
     }
 
-    pub fn record_join(&self, occupant: &FullJid, room: &BareJid, nick: &str) {
+    pub fn record_join(
+        &self,
+        occupant: &FullJid,
+        room: &BareJid,
+        nick: &str,
+        occupant_session: waddle_xmpp_core::OccupancySessionGeneration,
+    ) {
         let generation = self.next_generation();
         self.entries.insert(
             (occupant.clone(), room.clone()),
             RemoteMucMembershipEntry::Active(RemoteMucMembership {
                 nick: nick.to_string(),
                 generation,
+                occupant_session,
             }),
         );
     }
@@ -925,6 +939,7 @@ impl RemoteMucMemberships {
                     room: room.clone(),
                     nick: membership.nick.clone(),
                     generation: membership.generation,
+                    occupant_session: membership.occupant_session,
                 })
             })
             .collect();
@@ -945,6 +960,7 @@ impl RemoteMucMemberships {
                 entry.insert(RemoteMucMembershipEntry::Active(RemoteMucMembership {
                     nick: snapshot.nick.clone(),
                     generation: snapshot.generation,
+                    occupant_session: snapshot.occupant_session,
                 }));
             }
         }
@@ -997,6 +1013,24 @@ impl RemoteMucMemberships {
         self.next_generation
             .fetch_add(1, std::sync::atomic::Ordering::Relaxed)
     }
+
+    pub fn occupancy_sessions_for_occupant_below(
+        &self,
+        occupant: &FullJid,
+        generation_ceiling: u64,
+    ) -> std::collections::HashMap<BareJid, waddle_xmpp_core::OccupancySessionGeneration> {
+        self.entries
+            .iter()
+            .filter_map(|entry| {
+                let (entry_occupant, room) = entry.key();
+                let RemoteMucMembershipEntry::Active(membership) = entry.value() else {
+                    return None;
+                };
+                (entry_occupant == occupant && membership.generation < generation_ceiling)
+                    .then(|| (room.clone(), membership.occupant_session))
+            })
+            .collect()
+    }
 }
 
 #[cfg(test)]
@@ -1013,6 +1047,10 @@ mod remote_muc_membership_tests {
             .expect("bare jid")
     }
 
+    fn occupant_session() -> waddle_xmpp_core::OccupancySessionGeneration {
+        waddle_xmpp_core::OccupancySessionGeneration::mint()
+    }
+
     /// #1249: the janitor enumeration surfaces occupants with ACTIVE
     /// memberships only — tombstones (cleanup in flight) are invisible,
     /// and restoring a snapshot makes the occupant visible again so the
@@ -1024,7 +1062,7 @@ mod remote_muc_membership_tests {
         let room = room_bare_jid("reconcile");
 
         assert!(memberships.occupants_with_active_memberships().is_empty());
-        memberships.record_join(&occupant, &room, "carol");
+        memberships.record_join(&occupant, &room, "carol", occupant_session());
         assert_eq!(
             memberships.occupants_with_active_memberships(),
             vec![occupant.clone()]
@@ -1055,12 +1093,12 @@ mod remote_muc_membership_tests {
         let occupant = full_jid("alice@example.com/web");
         let room = room_bare_jid("race");
 
-        memberships.record_join(&occupant, &room, "alice");
+        memberships.record_join(&occupant, &room, "alice", occupant_session());
         let stale_snapshots = memberships.take_for_occupant(&occupant);
         assert_eq!(stale_snapshots.len(), 1);
         assert!(memberships.snapshot_is_current_tombstone(&stale_snapshots[0]));
 
-        memberships.record_join(&occupant, &room, "alice");
+        memberships.record_join(&occupant, &room, "alice", occupant_session());
         assert!(!memberships.snapshot_is_current_tombstone(&stale_snapshots[0]));
         memberships.restore_snapshot_if_current(&stale_snapshots[0]);
 
@@ -1076,12 +1114,12 @@ mod remote_muc_membership_tests {
         let occupant = full_jid("alice@example.com/web");
         let room = room_bare_jid("race-left");
 
-        memberships.record_join(&occupant, &room, "alice");
+        memberships.record_join(&occupant, &room, "alice", occupant_session());
         let stale_snapshots = memberships.take_for_occupant(&occupant);
         assert_eq!(stale_snapshots.len(), 1);
         assert!(memberships.snapshot_is_current_tombstone(&stale_snapshots[0]));
 
-        memberships.record_join(&occupant, &room, "alice");
+        memberships.record_join(&occupant, &room, "alice", occupant_session());
         memberships.record_leave(&occupant, &room);
         assert!(!memberships.snapshot_is_current_tombstone(&stale_snapshots[0]));
         memberships.restore_snapshot_if_current(&stale_snapshots[0]);

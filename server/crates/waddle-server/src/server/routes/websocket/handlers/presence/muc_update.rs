@@ -229,10 +229,16 @@ pub(crate) async fn try_handle_muc_presence_update(
         None => match actor
             .ask(ClearMujiPresence {
                 sender_jid: sender_jid.clone(),
+                occupant: Some(occupancy_session),
             })
             .await
         {
-            Ok(Some(outcome)) => outcome,
+            Ok(Some(waddle_xmpp::muc::room_actor::ClearMujiPresenceOutcome::Updated(outcome))) => {
+                *outcome
+            }
+            Ok(Some(waddle_xmpp::muc::room_actor::ClearMujiPresenceOutcome::Superseded)) => {
+                return None;
+            }
             Ok(None) => return None,
             Err(error) => {
                 warn!(

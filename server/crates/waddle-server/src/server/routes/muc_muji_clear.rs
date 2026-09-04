@@ -10,7 +10,9 @@ use jid::{BareJid, FullJid};
 use tracing::{debug, warn};
 use waddle_sfu::{ObservedCallSids, TeardownDisposition};
 use waddle_xmpp::muc::build_occupant_presence;
-use waddle_xmpp::muc::room_actor::{ClearMujiPresence, MujiPresenceUpdateOutcome};
+use waddle_xmpp::muc::room_actor::{
+    ClearMujiPresence, ClearMujiPresenceOutcome, MujiPresenceUpdateOutcome,
+};
 use waddle_xmpp::telemetry::call::increment_call_teardown_stale_dropped;
 use waddle_xmpp::xep::xep0272::Muji;
 use waddle_xmpp::xep::xep0421::OccupantIdentity;
@@ -118,10 +120,14 @@ pub(crate) async fn clear_muji_presence_for_departure(
     let outcome = match actor
         .ask(ClearMujiPresence {
             sender_jid: full_jid.clone(),
+            occupant,
         })
         .await
     {
-        Ok(Some(outcome)) => outcome,
+        Ok(Some(ClearMujiPresenceOutcome::Updated(outcome))) => *outcome,
+        Ok(Some(ClearMujiPresenceOutcome::Superseded)) => {
+            return WebhookEffectOutcome::Stale;
+        }
         Ok(None) => {
             debug!(
                 room = %room_jid,

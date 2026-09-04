@@ -491,13 +491,21 @@ pub(crate) async fn redrive_remote_muc_cleanup(
     state: &WebSocketState,
     jid: &FullJid,
 ) -> MucCleanupOutcome {
+    let remote_ceiling = state
+        .deps
+        .protocol
+        .remote_muc_memberships
+        .generation_watermark();
     if cleanup_muc_presence_with_origin(
         state,
         jid,
         LeaveSessionSelector::Any,
         None,
         waddle_xmpp::muc::room_actor::LeaveAttemptId::generate(),
-        SweepFailureRecording::RecordSweep,
+        // The remote-membership reconciler already re-drives from the
+        // authoritative membership snapshots, so this retry must not widen a
+        // failed pass into a local `FullJidSweep` with selector `Any`.
+        SweepFailureRecording::JanitorRequeues { remote_ceiling },
     )
     .await
     {
@@ -2354,6 +2362,27 @@ enum SweepFailureRecording {
     JanitorRequeues { remote_ceiling: u64 },
 }
 
+fn retain_remote_membership_departure(
+    state: &WebSocketState,
+    room: BareJid,
+    jid: &FullJid,
+    occupant_session: waddle_xmpp_core::OccupancySessionGeneration,
+    attempt: waddle_xmpp::muc::room_actor::LeaveAttemptId,
+) {
+    state
+        .deps
+        .protocol
+        .pending_local_muc_departures
+        .record(LocalDepartureItem::RoomDeparture {
+            room,
+            jid: jid.clone(),
+            cause: OccupancyLeaveCause::Disconnect,
+            selector: LeaveSessionSelector::Generation(occupant_session),
+            attempt,
+            notified: HashSet::new(),
+        });
+}
+
 async fn cleanup_muc_presence_with_origin(
     state: &WebSocketState,
     jid: &FullJid,
@@ -2370,8 +2399,12 @@ async fn cleanup_muc_presence_with_origin(
             .generation_watermark(),
         SweepFailureRecording::JanitorRequeues { remote_ceiling } => remote_ceiling,
     };
-    let mut completed =
-        cleanup_remote_muc_presence(state, jid, session, origin, remote_ceiling).await;
+    let remote_membership_sessions = state
+        .deps
+        .protocol
+        .remote_muc_memberships
+        .occupancy_sessions_for_occupant_below(jid, remote_ceiling);
+    let mut completed = cleanup_remote_muc_presence(state, jid, origin, remote_ceiling).await;
 
     let room_jids = match RoomRegistry::wrap(state.deps.protocol.room_registry.clone())
         .list_rooms()
@@ -2381,6 +2414,15 @@ async fn cleanup_muc_presence_with_origin(
         Err(error) => {
             completed = false;
             warn!(error = %error, "Failed to list room actors");
+            for (room, occupant_session) in &remote_membership_sessions {
+                retain_remote_membership_departure(
+                    state,
+                    room.clone(),
+                    jid,
+                    *occupant_session,
+                    sweep_attempt,
+                );
+            }
             if sweep_recording == SweepFailureRecording::RecordSweep {
                 state.deps.protocol.pending_local_muc_departures.record(
                     LocalDepartureItem::FullJidSweep {
@@ -2395,13 +2437,26 @@ async fn cleanup_muc_presence_with_origin(
         }
     };
     for room_jid in room_jids {
+        let session = remote_membership_sessions
+            .get(&room_jid)
+            .copied()
+            .map(LeaveSessionSelector::Generation)
+            .unwrap_or(session);
         let room_actor = match get_room_actor_result(state, &room_jid).await {
             Ok(Some(room_actor)) => room_actor,
             Ok(None) => continue,
             Err(error) => {
                 completed = false;
                 warn!(room = %room_jid, error = %error, "Failed to get room actor");
-                if sweep_recording == SweepFailureRecording::RecordSweep {
+                if let Some(occupant_session) = remote_membership_sessions.get(&room_jid) {
+                    retain_remote_membership_departure(
+                        state,
+                        room_jid.clone(),
+                        jid,
+                        *occupant_session,
+                        sweep_attempt,
+                    );
+                } else if sweep_recording == SweepFailureRecording::RecordSweep {
                     state.deps.protocol.pending_local_muc_departures.record(
                         LocalDepartureItem::FullJidSweep {
                             jid: jid.clone(),
@@ -2630,10 +2685,16 @@ async fn cleanup_muc_presence_with_origin(
 }
 
 #[cfg(feature = "clustering")]
+fn remote_membership_leave_origin(
+    membership: &crate::server::routes::websocket::state::RemoteMucMembershipSnapshot,
+) -> crate::clustering::ordered_relay::MucProxyOrigin {
+    crate::clustering::ordered_relay::MucProxyOrigin::Connection(membership.occupant_session())
+}
+
+#[cfg(feature = "clustering")]
 async fn cleanup_remote_muc_presence(
     state: &WebSocketState,
     jid: &FullJid,
-    session: LeaveSessionSelector,
     cleanup_origin: Option<&crate::server::routes::interpret::OrderedRelayRouteOrigin>,
     remote_ceiling: u64,
 ) -> bool {
@@ -2716,36 +2777,25 @@ async fn cleanup_remote_muc_presence(
             );
             continue;
         }
-        if let LeaveSessionSelector::Generation(occupant) = session {
-            let _ = super::muc_call_sfu::unregister_participant_from_room_if_occupant_matches(
-                state, &room_jid, jid, occupant, None,
-            );
-        }
+        let occupant_session = membership.occupant_session();
+        let _ = super::muc_call_sfu::unregister_participant_from_room_if_occupant_matches(
+            state,
+            &room_jid,
+            jid,
+            occupant_session,
+            None,
+        );
         let mut presence =
             xmpp_parsers::presence::Presence::new(xmpp_parsers::presence::Type::Unavailable);
         presence.from = Some(jid::Jid::from(jid.clone()));
         presence.to = Some(to);
         let stanza = Stanza::Presence(presence);
-        let LeaveSessionSelector::Generation(generation) = session else {
-            warn!(
-                room = %room_jid,
-                jid = %jid,
-                "remote MUC connection cleanup lacks an occupancy generation; retaining for retry"
-            );
-            completed = false;
-            state
-                .deps
-                .protocol
-                .remote_muc_memberships
-                .restore_snapshot_if_current(&membership);
-            continue;
-        };
         let decision = bridge
             .try_proxy_muc_remote_decision(
                 &room_jid,
                 &stanza,
                 crate::clustering::ordered_relay::OrderedRelayMucProxyKind::OccupantPresence,
-                crate::clustering::ordered_relay::MucProxyOrigin::Connection(generation),
+                remote_membership_leave_origin(&membership),
                 &origin,
             )
             .await;
@@ -3037,7 +3087,6 @@ async fn reap_remote_muc_cleanup_origin_if_empty(state: &WebSocketState, jid: &F
 async fn cleanup_remote_muc_presence(
     _state: &WebSocketState,
     _jid: &FullJid,
-    _session: LeaveSessionSelector,
     _cleanup_origin: Option<&crate::server::routes::interpret::OrderedRelayRouteOrigin>,
     _remote_ceiling: u64,
 ) -> bool {
@@ -3656,13 +3705,23 @@ mod eviction_tests {
         let occupant = full_jid("alice@example.com/web");
         let room = room_bare_jid("race");
 
-        memberships.record_join(&occupant, &room, "old-nick");
+        memberships.record_join(
+            &occupant,
+            &room,
+            "old-nick",
+            waddle_xmpp_core::OccupancySessionGeneration::mint(),
+        );
         let snapshot = memberships.take_for_occupant(&occupant);
         assert_eq!(snapshot.len(), 1);
         assert_eq!(snapshot[0].room(), &room);
         assert_eq!(snapshot[0].nick(), "old-nick");
 
-        memberships.record_join(&occupant, &room, "fresh-nick");
+        memberships.record_join(
+            &occupant,
+            &room,
+            "fresh-nick",
+            waddle_xmpp_core::OccupancySessionGeneration::mint(),
+        );
         memberships.restore_snapshot_if_current(&snapshot[0]);
 
         assert_eq!(
@@ -3683,13 +3742,23 @@ mod eviction_tests {
         let occupant = full_jid("alice@example.com/web");
         let room = room_bare_jid("race-success");
 
-        memberships.record_join(&occupant, &room, "old-nick");
+        memberships.record_join(
+            &occupant,
+            &room,
+            "old-nick",
+            waddle_xmpp_core::OccupancySessionGeneration::mint(),
+        );
         let snapshot = memberships.take_for_occupant(&occupant);
         assert_eq!(snapshot.len(), 1);
         assert_eq!(snapshot[0].room(), &room);
         assert_eq!(snapshot[0].nick(), "old-nick");
 
-        memberships.record_join(&occupant, &room, "fresh-nick");
+        memberships.record_join(
+            &occupant,
+            &room,
+            "fresh-nick",
+            waddle_xmpp_core::OccupancySessionGeneration::mint(),
+        );
         assert_eq!(
             remote_muc_cleanup_disposition(&MucProxyRouteDecision::Attempted(
                 MucProxyRouteAttempt {
@@ -3705,6 +3774,32 @@ mod eviction_tests {
         assert_eq!(
             memberships.nick_for(&occupant, &room).as_deref(),
             Some("fresh-nick")
+        );
+    }
+
+    #[cfg(feature = "clustering")]
+    #[test]
+    fn restored_remote_membership_redrives_with_its_connection_generation() {
+        let memberships = crate::server::routes::websocket::state::RemoteMucMemberships::default();
+        let occupant = full_jid("alice@example.com/web");
+        let room = room_bare_jid("generation-redrive");
+        let occupant_session = waddle_xmpp_core::OccupancySessionGeneration::mint();
+        memberships.record_join(&occupant, &room, "alice", occupant_session);
+
+        let first = memberships.take_for_occupant(&occupant);
+        assert_eq!(first.len(), 1);
+        assert_eq!(
+            remote_membership_leave_origin(&first[0]),
+            crate::clustering::ordered_relay::MucProxyOrigin::Connection(occupant_session),
+        );
+
+        memberships.restore_snapshot_if_current(&first[0]);
+        let retry = memberships.take_for_occupant(&occupant);
+        assert_eq!(retry.len(), 1);
+        assert_eq!(
+            remote_membership_leave_origin(&retry[0]),
+            crate::clustering::ordered_relay::MucProxyOrigin::Connection(occupant_session),
+            "a retained cleanup must never reconstruct the relay as Any",
         );
     }
 
@@ -4675,6 +4770,96 @@ mod local_departure_cleanup_tests {
             !recorder.has_call_participant(&call_id, &identity),
             "ask failure must still tear down the matching SFU registration"
         );
+    }
+
+    #[cfg(feature = "clustering")]
+    #[tokio::test]
+    async fn redriven_remote_membership_cleanup_does_not_evict_a_local_replacement() {
+        let store = CleanupProjectionStore::new();
+        let state = clustered_state_with_store(store).await;
+        let room_jid = room_jid("remote-redrive-local-replacement");
+        let room_actor = state
+            .deps
+            .protocol
+            .room_registry
+            .ask(CreateRoom {
+                room_jid: room_jid.clone(),
+                waddle_id: "w".to_string(),
+                channel_id: "c".to_string(),
+                config: RoomConfig::default(),
+            })
+            .await
+            .expect("create room");
+        let alice = full_jid("alice@example.com/web");
+        let replacement_generation =
+            waddle_xmpp::muc::room_actor::OccupancySessionGeneration::mint();
+
+        state.deps.protocol.remote_muc_memberships.record_join(
+            &alice,
+            &room_jid,
+            "alice",
+            waddle_xmpp_core::OccupancySessionGeneration::mint(),
+        );
+        join_member_with_generation(&room_actor, &alice, "alice", replacement_generation).await;
+
+        assert_eq!(
+            redrive_remote_muc_cleanup(state.as_ref(), &alice).await,
+            MucCleanupOutcome::Failed,
+            "the fixture has no relay bridge, so the remote responsibility stays retained"
+        );
+
+        let snapshot = room_actor
+            .ask(GetSnapshot)
+            .await
+            .expect("snapshot after redrive");
+        assert_eq!(
+            snapshot.room.session_generation(&alice),
+            Some(replacement_generation),
+            "the redriven remote cleanup must not evict the newer local replacement"
+        );
+        assert!(
+            snapshot.room.find_occupant_by_real_jid(&alice).is_some(),
+            "the replacement occupant must remain in the room"
+        );
+    }
+
+    #[cfg(feature = "clustering")]
+    #[tokio::test]
+    async fn redriven_remote_membership_cleanup_failure_does_not_reconstruct_any_sweep() {
+        let store = CleanupProjectionStore::new();
+        let state = clustered_state_with_store(store).await;
+        let alice = full_jid("alice@example.com/web");
+        let room_jid = room_jid("remote-redrive-no-any-sweep");
+
+        let occupant_session = waddle_xmpp_core::OccupancySessionGeneration::mint();
+        state.deps.protocol.remote_muc_memberships.record_join(
+            &alice,
+            &room_jid,
+            "alice",
+            occupant_session,
+        );
+        state.deps.protocol.room_registry.kill();
+        state.deps.protocol.room_registry.wait_for_shutdown().await;
+
+        assert_eq!(
+            redrive_remote_muc_cleanup(state.as_ref(), &alice).await,
+            MucCleanupOutcome::Failed
+        );
+        let retained = state
+            .deps
+            .protocol
+            .pending_local_muc_departures
+            .take_due(std::time::Instant::now() + std::time::Duration::from_secs(1));
+        assert_eq!(retained.len(), 1);
+        assert!(matches!(
+            &retained[0].item,
+            LocalDepartureItem::RoomDeparture {
+                room,
+                jid,
+                selector: LeaveSessionSelector::Generation(generation),
+                ..
+            } if room == &room_jid && jid == &alice && generation == &occupant_session
+        ));
     }
 
     #[tokio::test]

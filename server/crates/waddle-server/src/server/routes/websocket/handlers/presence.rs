@@ -79,7 +79,14 @@ pub async fn handle_presence(
     _authenticated_session: &Option<Session>,
     registry_owner: Option<&std::sync::Arc<std::sync::atomic::AtomicBool>>,
 ) -> Vec<String> {
-    let occupancy_session = waddle_xmpp_core::OccupancySessionGeneration::mint();
+    // Present the generation the connection's join recorded (see
+    // `tests::current_test_occupancy_session`), not a fresh mint: a fresh
+    // one would make every presence update `Superseded` against its own
+    // occupancy.
+    let occupancy_session = match phase.bound_jid() {
+        Some(jid) => crate::server::routes::websocket::tests::current_test_occupancy_session(jid),
+        None => waddle_xmpp_core::OccupancySessionGeneration::mint(),
+    };
     handle_presence_with_occupancy_session(
         presence,
         domain,

@@ -729,6 +729,7 @@ pub struct UpsertMujiPresence {
 
 pub struct ClearMujiPresence {
     pub sender_jid: FullJid,
+    pub occupant: Option<OccupancySessionGeneration>,
 }
 
 /// Read the full JIDs of occupant sessions currently advertising active
@@ -753,6 +754,12 @@ pub struct MujiPresenceUpdateOutcome {
     pub session_mujis: Vec<(FullJid, crate::xep::xep0272::Muji)>,
     /// True when this update starts the room's active call state.
     pub active_call_started: bool,
+}
+
+#[derive(Debug, Clone)]
+pub enum ClearMujiPresenceOutcome {
+    Updated(Box<MujiPresenceUpdateOutcome>),
+    Superseded,
 }
 
 impl kameo::message::Message<UpsertMujiPresence> for RoomActor {
@@ -805,7 +812,7 @@ impl kameo::message::Message<UpsertMujiPresence> for RoomActor {
 }
 
 impl kameo::message::Message<ClearMujiPresence> for RoomActor {
-    type Reply = Result<Option<MujiPresenceUpdateOutcome>, Infallible>;
+    type Reply = Result<Option<ClearMujiPresenceOutcome>, Infallible>;
 
     async fn handle(
         &mut self,
@@ -818,6 +825,11 @@ impl kameo::message::Message<ClearMujiPresence> for RoomActor {
         let Some(sender_occupant) = self.room.find_occupant_by_real_jid(&msg.sender_jid) else {
             return Ok(None);
         };
+        if msg.occupant.is_some_and(|generation| {
+            self.room.session_generation(&msg.sender_jid) != Some(generation)
+        }) {
+            return Ok(Some(ClearMujiPresenceOutcome::Superseded));
+        }
         let sender_nick = sender_occupant.nick.clone();
         let sender_real_jid = sender_occupant.real_jid.clone();
         let sender_role = sender_occupant.role;
@@ -830,20 +842,22 @@ impl kameo::message::Message<ClearMujiPresence> for RoomActor {
             .values()
             .flat_map(|o| self.room.get_occupant_sessions(&o.nick))
             .collect();
-        Ok(Some(MujiPresenceUpdateOutcome {
-            update: PresenceUpdateOutcome {
-                sender_nick,
-                sender_real_jid,
-                sender_role,
-                sender_affiliation,
-                room_jid,
-                recipients,
+        Ok(Some(ClearMujiPresenceOutcome::Updated(Box::new(
+            MujiPresenceUpdateOutcome {
+                update: PresenceUpdateOutcome {
+                    sender_nick,
+                    sender_real_jid,
+                    sender_role,
+                    sender_affiliation,
+                    room_jid,
+                    recipients,
+                },
+                sender_muji: muji_state.sender_muji,
+                active_muji: muji_state.room_muji,
+                session_mujis: muji_state.session_mujis,
+                active_call_started: muji_state.active_call_started,
             },
-            sender_muji: muji_state.sender_muji,
-            active_muji: muji_state.room_muji,
-            session_mujis: muji_state.session_mujis,
-            active_call_started: muji_state.active_call_started,
-        }))
+        ))))
     }
 }
 

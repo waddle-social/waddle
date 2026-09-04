@@ -441,6 +441,79 @@ mod tests {
         );
     }
 
+    #[tokio::test]
+    async fn relayed_same_sid_terminate_preserves_the_replacement_generation() {
+        let state = create_test_websocket_state_with_calls().await;
+        let room: BareJid = "generation-relay@muc.example.com".parse().unwrap();
+        let alice: FullJid = "alice@example.com/web".parse().unwrap();
+        let displaced = create_room_and_join(&state, &room, "alice", &alice).await;
+        let replacement = create_room_and_join(&state, &room, "alice", &alice).await;
+        let initiate = muji_initiate_iq(
+            Some("alice@example.com/web"),
+            "generation-relay@muc.example.com",
+        );
+        handle_relayed_muji_initiate(&state, &initiate, replacement)
+            .await
+            .expect("replacement initiate executes");
+        let actor = crate::server::routes::websocket::get_room_actor_result(state.as_ref(), &room)
+            .await
+            .expect("room lookup")
+            .expect("room actor");
+        actor
+            .ask(waddle_xmpp::muc::room_actor::UpsertMujiPresence {
+                sender_jid: alice.clone(),
+                muji: Muji::with_contents(vec![MujiContent::new(
+                    "audio",
+                    Creator::Initiator,
+                    MediaKind::Audio,
+                )]),
+            })
+            .await
+            .expect("muji update")
+            .expect("occupant update");
+
+        let terminate =
+            muji_terminate_iq("alice@example.com/web", "generation-relay@muc.example.com");
+        let stale_frames = handle_relayed_muji_initiate(&state, &terminate, displaced)
+            .await
+            .expect("stale terminate is answered");
+        assert!(
+            stale_frames
+                .iter()
+                .any(|frame| frame.contains("item-not-found")),
+            "the stale generation must receive unknown-session: {stale_frames:?}",
+        );
+        let sfu = state.deps.protocol.sfu.as_ref().expect("calls fixture SFU");
+        let call = waddle_sfu::CallId::new(room.to_string()).expect("call id");
+        let identity = waddle_sfu::Identity::from_jid(alice.clone());
+        assert!(sfu.has_call_participant(&call, &identity));
+        assert!(
+            actor
+                .ask(GetSnapshot)
+                .await
+                .expect("stale snapshot")
+                .room
+                .muji_for_session("alice", &alice)
+                .is_some(),
+            "the stale relay must not clear the replacement advertisement",
+        );
+
+        handle_relayed_muji_initiate(&state, &terminate, replacement)
+            .await
+            .expect("matching terminate executes");
+        assert!(!sfu.has_call_participant(&call, &identity));
+        assert!(
+            actor
+                .ask(GetSnapshot)
+                .await
+                .expect("matching snapshot")
+                .room
+                .muji_for_session("alice", &alice)
+                .is_none(),
+            "the matching generation must clear its advertisement",
+        );
+    }
+
     /// A hangup must never fail, and must actually tear the media
     /// session down. Two occupants leaving at once is the ordinary way
     /// to reach the owner with no room actor left: the first empties
@@ -467,13 +540,19 @@ mod tests {
         // tore the actor down before their Jingle terminate arrived.
         let call = waddle_sfu::CallId::new("vanished@muc.example.com").expect("valid call id");
         let identity = waddle_sfu::Identity::from_jid(alice.clone());
-        sfu.register_call_participant(&call, &identity);
+        let generation = occupancy_session();
+        sfu.register_call_participant_with_session(
+            &call,
+            &identity,
+            &waddle_sfu::SessionBinding::new("relay-sid").expect("session binding"),
+            generation,
+        );
         assert!(sfu.has_call_participant(&call, &identity));
 
         let frames = handle_relayed_muji_initiate(
             &state,
             &muji_terminate_iq("alice@example.com/web", "vanished@muc.example.com"),
-            occupancy_session(),
+            generation,
         )
         .await
         .expect("terminate executes");

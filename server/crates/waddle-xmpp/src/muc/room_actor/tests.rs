@@ -3118,10 +3118,14 @@ async fn clear_muji_presence_clears_existing_state_without_muji_payload() {
     let outcome = actor
         .ask(crate::muc::room_actor::ClearMujiPresence {
             sender_jid: alice.clone(),
+            occupant: None,
         })
         .await
         .expect("ask")
         .expect("alice had Muji state to clear");
+    let crate::muc::room_actor::ClearMujiPresenceOutcome::Updated(outcome) = outcome else {
+        panic!("existing Muji state should clear, not supersede");
+    };
 
     assert_eq!(outcome.update.sender_nick, "alice");
     assert!(
@@ -3171,14 +3175,71 @@ async fn clear_muji_presence_reflects_plain_presence_when_no_state_exists() {
         .expect("alice join");
 
     let outcome = actor
-        .ask(crate::muc::room_actor::ClearMujiPresence { sender_jid: alice })
+        .ask(crate::muc::room_actor::ClearMujiPresence {
+            sender_jid: alice,
+            occupant: None,
+        })
         .await
         .expect("ask");
 
-    let outcome = outcome.expect("existing occupant presence update is reflected");
+    let Some(crate::muc::room_actor::ClearMujiPresenceOutcome::Updated(outcome)) = outcome else {
+        panic!("existing occupant presence update is reflected");
+    };
     assert_eq!(outcome.update.sender_nick, "alice");
     assert!(outcome.sender_muji.is_none());
     assert!(outcome.active_muji.is_none());
+}
+
+#[tokio::test]
+async fn stale_generation_clear_muji_presence_is_superseded_and_preserves_live_advertisement() {
+    let actor = spawn_room_actor().await;
+    let alice = test_full_jid("alice");
+    let generation_one = test_session_generation();
+    let generation_two = test_session_generation();
+
+    join_as_resolver_with_session(&actor, alice.clone(), "alice", generation_one)
+        .await
+        .expect("first join");
+    actor
+        .ask(crate::muc::room_actor::UpsertMujiPresence {
+            sender_jid: alice.clone(),
+            muji: audio_muji(),
+        })
+        .await
+        .expect("first muji update")
+        .expect("first occupant update");
+    join_as_resolver_with_session(&actor, alice.clone(), "alice", generation_two)
+        .await
+        .expect("replacement join");
+    actor
+        .ask(crate::muc::room_actor::UpsertMujiPresence {
+            sender_jid: alice.clone(),
+            muji: audio_muji(),
+        })
+        .await
+        .expect("replacement muji update")
+        .expect("replacement occupant update");
+
+    assert!(matches!(
+        actor
+            .ask(crate::muc::room_actor::ClearMujiPresence {
+                sender_jid: alice.clone(),
+                occupant: Some(generation_one),
+            })
+            .await
+            .expect("clear ask"),
+        Some(crate::muc::room_actor::ClearMujiPresenceOutcome::Superseded)
+    ));
+
+    let snapshot = actor.ask(GetSnapshot).await.expect("snapshot");
+    assert!(
+        snapshot.room.muji_for_session("alice", &alice).is_some(),
+        "a stale generation must not clear the replacement session's advertisement"
+    );
+    assert_eq!(
+        snapshot.room.session_generation(&alice),
+        Some(generation_two)
+    );
 }
 
 #[tokio::test]
@@ -8004,6 +8065,7 @@ async fn destroy_seal_blocks_muji_clears() {
         actor
             .ask(ClearMujiPresence {
                 sender_jid: alice.clone(),
+                occupant: None,
             })
             .await
             .expect("clear ask")

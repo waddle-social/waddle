@@ -943,20 +943,27 @@ impl JingleHandler {
             if let Some(reply) = self.check_terminate_rate_limit(iq, ctx) {
                 return reply;
             }
-            // The pre-check above and this removal are NOT one lock:
-            // a concurrent initiate can rebind the registration in
-            // between. The session-scoped unregister re-checks under
-            // the registry's call-entry guard, so a terminate that
-            // read binding A can never remove a registration that has
-            // just been rebound to B (charging the limiter for this
-            // vanishingly-rare raced rejection is accepted).
-            if self.sfu.unregister_call_participant_if_session_matches(
-                &call_id,
-                &sender_identity,
-                presented.as_ref(),
-                None,
-            ) == SessionScopedTeardown::SessionMismatch
-            {
+            // The pre-check above and this removal are NOT one lock: a
+            // concurrent initiate can rebind the registration between them.
+            // Connection-originated Muji carries the occupant generation, so
+            // the atomic unregister fences same-SID reuse as well as SID
+            // changes. Server-originated callers without a generation retain
+            // the existing session-scoped policy.
+            let teardown = match ctx.occupant_session {
+                Some(occupant) => self.sfu.unregister_call_participant_if_occupant_matches(
+                    &call_id,
+                    &sender_identity,
+                    occupant,
+                    None,
+                ),
+                None => self.sfu.unregister_call_participant_if_session_matches(
+                    &call_id,
+                    &sender_identity,
+                    presented.as_ref(),
+                    None,
+                ),
+            };
+            if teardown == SessionScopedTeardown::SessionMismatch {
                 return unknown_session_reply(iq);
             }
         }
