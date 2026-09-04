@@ -241,7 +241,9 @@ fn record_participant_left(
     // #1703: a connection-originated clear names its occupant generation and
     // the registry decides ATOMICALLY under its call-entry guard: a
     // registration bound to a DIFFERENT generation (a replacement connection,
-    // same sid or not) is untouched; a matching one is cleared; an unbound
+    // same sid or not) or to a different sid (the same connection re-initiated
+    // while this clear was in flight, #1608) is untouched; a matching one is
+    // cleared; an unbound
     // (restored) one follows `unbound` — the live connection's own clear
     // tears it down, a durable redrive keeps it. A silent mismatch is
     // correct here for the same reason as the sid path below: the
@@ -254,6 +256,7 @@ fn record_participant_left(
             observed_sids,
             occupant,
             unbound,
+            session,
         );
         return;
     }

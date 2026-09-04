@@ -467,6 +467,7 @@ pub(crate) fn note_participant_left_for_occupant(
     observed_sids: Option<&ObservedCallSids>,
     occupant: OccupancySessionGeneration,
     unbound: waddle_sfu::UnboundOccupantPolicy,
+    session: Option<&waddle_sfu::SessionBinding>,
 ) -> Option<waddle_sfu::SessionScopedTeardown> {
     let Ok(call_id) = CallId::new(room_jid.to_string()) else {
         return None;
@@ -479,6 +480,7 @@ pub(crate) fn note_participant_left_for_occupant(
         observed_sids,
         occupant,
         unbound,
+        session,
     ))
 }
 

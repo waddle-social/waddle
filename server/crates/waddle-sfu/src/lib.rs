@@ -333,11 +333,12 @@ pub trait SfuService: Send + Sync + 'static {
 
     /// Occupant-scoped variant of [`Self::note_participant_left`] (#1703):
     /// apply the local-only cleanup only when the stored occupant generation
-    /// is exactly `Some(presented)`, or when it is unbound and `unbound` is
-    /// [`UnboundOccupantPolicy::TearDown`]. Check and removal are atomic in
-    /// tracking implementations, so a connection-originated Muji clear that
-    /// raced a same-identity, same-sid re-registration by a NEWER connection
-    /// generation cannot remove that registration.
+    /// is exactly `Some(presented)` (or unbound with
+    /// [`UnboundOccupantPolicy::TearDown`]) AND the stored sid binding, if
+    /// any, equals `session` (the #1608 rule). Check and removal are atomic
+    /// in tracking implementations, so a connection-originated Muji clear
+    /// that raced a re-registration — by a NEWER connection generation, or
+    /// by the SAME connection under a new sid — cannot remove it.
     fn note_participant_left_if_occupant_matches(
         &self,
         call_id: &CallId,
@@ -345,16 +346,22 @@ pub trait SfuService: Send + Sync + 'static {
         observed_sids: Option<&ObservedCallSids>,
         presented: OccupancySessionGeneration,
         unbound: UnboundOccupantPolicy,
+        session: Option<&SessionBinding>,
     ) -> SessionScopedTeardown {
         match self.participant_occupant_session(call_id, identity) {
-            Some(bound) if bound == presented => SessionScopedTeardown::Applied(
-                self.note_participant_left(call_id, identity, observed_sids),
-            ),
-            None if unbound == UnboundOccupantPolicy::TearDown => SessionScopedTeardown::Applied(
-                self.note_participant_left(call_id, identity, observed_sids),
-            ),
-            _ => SessionScopedTeardown::SessionMismatch,
+            Some(bound) if bound == presented => {}
+            None if unbound == UnboundOccupantPolicy::TearDown => {}
+            _ => return SessionScopedTeardown::SessionMismatch,
         }
+        // The #1608 sid rule still applies: the same connection (same
+        // generation) may have re-initiated under a new sid while this
+        // terminate was in flight.
+        if let Some(bound) = self.participant_session_binding(call_id, identity) {
+            if session != Some(&bound) {
+                return SessionScopedTeardown::SessionMismatch;
+            }
+        }
+        SessionScopedTeardown::Applied(self.note_participant_left(call_id, identity, observed_sids))
     }
 
     /// Local-only cleanup driven by an SFU-originated signal that

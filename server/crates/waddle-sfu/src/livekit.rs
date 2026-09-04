@@ -331,6 +331,10 @@ enum SessionGate<'a> {
     Occupant {
         presented: OccupancySessionGeneration,
         unbound: crate::UnboundOccupantPolicy,
+        /// `Some` for signaling-driven clears: the stored sid binding, if
+        /// any, must equal the presented sid as well (#1608). `None` for
+        /// connection teardown, which carries no sid.
+        session: Option<Option<&'a SessionBinding>>,
     },
 }
 
@@ -1671,15 +1675,24 @@ impl LiveKitSfu {
                     }
                 }
             }
-            SessionGate::Occupant { presented, unbound } => {
-                let stored = entry
-                    .participants
-                    .get(identity)
-                    .and_then(|participant| participant.occupant_session);
-                match stored {
+            SessionGate::Occupant {
+                presented,
+                unbound,
+                session,
+            } => {
+                let participant = entry.participants.get(identity);
+                match participant.and_then(|participant| participant.occupant_session) {
                     Some(bound) if bound == presented => {}
                     None if unbound == crate::UnboundOccupantPolicy::TearDown => {}
                     _ => return ClearDisposition::SessionMismatch,
+                }
+                if let (Some(presented_sid), Some(bound_sid)) = (
+                    session,
+                    participant.and_then(|participant| participant.session.as_ref()),
+                ) {
+                    if presented_sid != Some(bound_sid) {
+                        return ClearDisposition::SessionMismatch;
+                    }
                 }
             }
         }
@@ -2694,7 +2707,11 @@ impl SfuService for LiveKitSfu {
             call_id,
             identity,
             observed_sids,
-            SessionGate::Occupant { presented, unbound },
+            SessionGate::Occupant {
+                presented,
+                unbound,
+                session: None,
+            },
         )
     }
 
@@ -2736,12 +2753,17 @@ impl SfuService for LiveKitSfu {
         observed_sids: Option<&ObservedCallSids>,
         presented: OccupancySessionGeneration,
         unbound: crate::UnboundOccupantPolicy,
+        session: Option<&SessionBinding>,
     ) -> SessionScopedTeardown {
         self.note_participant_left_gated(
             call_id,
             identity,
             observed_sids,
-            SessionGate::Occupant { presented, unbound },
+            SessionGate::Occupant {
+                presented,
+                unbound,
+                session: Some(session),
+            },
         )
     }
 

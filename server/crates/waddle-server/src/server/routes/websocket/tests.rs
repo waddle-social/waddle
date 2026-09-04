@@ -736,6 +736,7 @@ impl waddle_sfu::SfuService for RecordingSfu {
         observed_sids: Option<&waddle_sfu::ObservedCallSids>,
         presented: waddle_xmpp_core::OccupancySessionGeneration,
         unbound: waddle_sfu::UnboundOccupantPolicy,
+        _: Option<&waddle_sfu::SessionBinding>,
     ) -> waddle_sfu::SessionScopedTeardown {
         let stored = self
             .occupant_sessions

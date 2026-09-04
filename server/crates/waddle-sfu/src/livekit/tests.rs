@@ -3922,6 +3922,7 @@ fn occupant_scoped_note_left_refuses_a_same_sid_registration_of_a_newer_generati
             None,
             generation_one,
             UnboundOccupantPolicy::TearDown,
+            Some(&sid),
         ),
         SessionScopedTeardown::SessionMismatch
     );
@@ -3934,9 +3935,48 @@ fn occupant_scoped_note_left_refuses_a_same_sid_registration_of_a_newer_generati
         None,
         generation_two,
         UnboundOccupantPolicy::Keep,
+        Some(&sid),
     ) {
         SessionScopedTeardown::Applied(_) => {}
         other => panic!("matching generation must apply, got {other:?}"),
+    }
+    assert!(!sfu.has_call_participant(&call, &alice));
+}
+
+#[test]
+fn occupant_scoped_note_left_refuses_the_same_generations_newer_sid() {
+    let sfu = LiveKitSfu::new(fixture_config()).expect("test SFU");
+    let call = CallId::new("room@muc.waddle.test").expect("call id");
+    let alice = fixture_identity("alice");
+    let generation = fixture_occupancy_session();
+    let old_sid = SessionBinding::new("muji-session-old").expect("binding");
+    let new_sid = SessionBinding::new("muji-session-new").expect("binding");
+
+    // The SAME connection re-initiated under a new sid while its terminate
+    // for the old sid was in flight (#1608 rule kept under the occupant gate).
+    sfu.register_call_participant_with_session(&call, &alice, &new_sid, generation);
+    assert_eq!(
+        sfu.note_participant_left_if_occupant_matches(
+            &call,
+            &alice,
+            None,
+            generation,
+            UnboundOccupantPolicy::TearDown,
+            Some(&old_sid),
+        ),
+        SessionScopedTeardown::SessionMismatch
+    );
+    assert!(sfu.has_call_participant(&call, &alice));
+    match sfu.note_participant_left_if_occupant_matches(
+        &call,
+        &alice,
+        None,
+        generation,
+        UnboundOccupantPolicy::TearDown,
+        Some(&new_sid),
+    ) {
+        SessionScopedTeardown::Applied(_) => {}
+        other => panic!("the current sid must apply, got {other:?}"),
     }
     assert!(!sfu.has_call_participant(&call, &alice));
 }
