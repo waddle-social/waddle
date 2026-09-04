@@ -193,6 +193,7 @@ async fn xep_0280_send_carbons_queues_for_detached_xep_0198_resources() {
         stream_id: "phone-stream-id".to_string(),
         user_id: "alice".to_string(),
         jid: alice_phone.clone(),
+        occupancy_session: waddle_xmpp_core::OccupancySessionGeneration::mint(),
         inbound_count: 0,
         shadow_ordinal: waddle_xmpp::stream_management::ShadowOrdinal::ZERO,
         outbound_count: 0,

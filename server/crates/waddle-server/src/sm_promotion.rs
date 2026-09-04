@@ -216,10 +216,28 @@ pub(crate) async fn promote_terminal_overflow_entry(
     entry: DetachedUnackedStanza,
     deps: TerminalOverflowPromotionDeps<'_>,
 ) -> PromotionSummary {
-    let session = DetachedSession {
+    let session = detached_session_for_terminal_entry(source, entry);
+    promote_session_unacked(
+        &session,
+        deps.registry,
+        deps.user_registry,
+        deps.pending_storage,
+        deps.blocklist,
+        deps.server_domain,
+        deps.recent_tombstones,
+    )
+    .await
+}
+
+fn detached_session_for_terminal_entry(
+    source: &DetachedSession,
+    entry: DetachedUnackedStanza,
+) -> DetachedSession {
+    DetachedSession {
         stream_id: source.stream_id.clone(),
         user_id: source.user_id.clone(),
         jid: source.jid.clone(),
+        occupancy_session: source.occupancy_session,
         inbound_count: source.inbound_count,
         shadow_ordinal: source.shadow_ordinal,
         outbound_count: source.outbound_count,
@@ -237,17 +255,7 @@ pub(crate) async fn promote_terminal_overflow_entry(
         presence_priority: source.presence_priority,
         presence_payloads: source.presence_payloads.clone(),
         pending_subscribes_flushed: source.pending_subscribes_flushed,
-    };
-    promote_session_unacked(
-        &session,
-        deps.registry,
-        deps.user_registry,
-        deps.pending_storage,
-        deps.blocklist,
-        deps.server_domain,
-        deps.recent_tombstones,
-    )
-    .await
+    }
 }
 
 pub(crate) struct TerminalOverflowPromotionDeps<'a> {

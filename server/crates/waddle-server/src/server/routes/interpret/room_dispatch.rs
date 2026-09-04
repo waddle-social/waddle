@@ -539,7 +539,7 @@ pub(super) async fn dispatch_to_room(
             &incoming,
             &room_jid,
             &sender_full,
-            stanza_error,
+            *stanza_error,
         );
         return outcome;
     }

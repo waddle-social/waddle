@@ -14,6 +14,7 @@ use crate::telemetry::attributes::SmEvictionPath;
 pub struct DetachedSessionSnapshot {
     pub user_id: String,
     pub jid: jid::FullJid,
+    pub occupancy_session: waddle_xmpp_core::OccupancySessionGeneration,
     pub carbons_enabled: bool,
     pub roster_interested: bool,
     pub blocklist_interested: bool,
@@ -516,6 +517,7 @@ impl StreamManagementState {
             stream_id: self.stream_id.clone()?,
             user_id: snapshot.user_id,
             jid: snapshot.jid,
+            occupancy_session: snapshot.occupancy_session,
             inbound_count: self.inbound_count,
             shadow_ordinal: self.shadow_ordinal,
             outbound_count: self.outbound_count,
@@ -779,11 +781,13 @@ mod tests {
         let mut state = StreamManagementState::new();
         state.enable("stream-carb".to_string(), true, Some(300));
         let jid: jid::FullJid = "user@example.com/resource".parse().unwrap();
+        let occupancy_session = waddle_xmpp_core::OccupancySessionGeneration::mint();
 
         let detached_off = state
             .to_detached_session(DetachedSessionSnapshot {
                 user_id: "user@example.com".to_string(),
                 jid: jid.clone(),
+                occupancy_session,
                 carbons_enabled: false,
                 roster_interested: true,
                 blocklist_interested: true,
@@ -807,11 +811,16 @@ mod tests {
             detached_off.blocklist_interested,
             "blocklist_interested=true must round-trip through DetachedSession"
         );
+        assert_eq!(
+            detached_off.occupancy_session, occupancy_session,
+            "occupancy_session must round-trip through DetachedSession so resume keeps room ownership"
+        );
 
         let detached_on = state
             .to_detached_session(DetachedSessionSnapshot {
                 user_id: "user@example.com".to_string(),
                 jid,
+                occupancy_session,
                 carbons_enabled: true,
                 roster_interested: false,
                 blocklist_interested: false,
@@ -912,6 +921,7 @@ mod tests {
             stream_id: "previd".to_string(),
             user_id: "u@h".to_string(),
             jid: "u@h/r".parse().unwrap(),
+            occupancy_session: waddle_xmpp_core::OccupancySessionGeneration::mint(),
             inbound_count: 10,
             shadow_ordinal: ShadowOrdinal::from_storage(41),
             outbound_count: 42,

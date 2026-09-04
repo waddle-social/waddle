@@ -28,7 +28,6 @@ pub use carbons::{
     is_carbons_enable, should_copy_message, CARBONS_NS, DELAY_NS, FORWARDED_NS,
 };
 pub use connection::ConnectionConfig;
-pub use occupancy_session::OccupancySessionGeneration;
 pub use disco::{
     build_disco_info_response, build_disco_info_response_with_extensions,
     build_disco_items_response, community_service_features, is_disco_info_query,
@@ -50,6 +49,7 @@ pub use mam::{
     parse_mam_query, ArchivedMessage, MamQuery, MamResult, DATA_FORMS_NS, FORWARD_NS, MAM_NS,
     RSM_NS, STANZA_ID_NS,
 };
+pub use occupancy_session::OccupancySessionGeneration;
 pub use parser_utils::{ensure_thread_element, extract_thread_parent, reattach_thread_parent};
 pub use presence::{
     build_available_presence, build_subscription_presence, build_unavailable_presence,

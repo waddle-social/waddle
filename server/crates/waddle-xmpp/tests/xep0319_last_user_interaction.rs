@@ -163,6 +163,7 @@ async fn xep0319_idle_payload_survives_sm_detach_snapshot() {
             stream_id: "xep0319-detached".to_string(),
             user_id: "juliet@capulet.com".to_string(),
             jid: jid.clone(),
+            occupancy_session: waddle_xmpp_core::OccupancySessionGeneration::mint(),
             inbound_count: 0,
             shadow_ordinal: waddle_xmpp::stream_management::ShadowOrdinal::ZERO,
             outbound_count: 0,

@@ -24,6 +24,12 @@ fn bare(s: &str) -> BareJid {
     s.parse().unwrap()
 }
 
+fn fixed_occupancy_session() -> waddle_xmpp_core::OccupancySessionGeneration {
+    waddle_xmpp_core::OccupancySessionGeneration::from_uuid(
+        uuid::Uuid::parse_str("99999999-8888-7777-6666-555555555555").expect("uuid"),
+    )
+}
+
 /// A fresh, empty actor-authoritative registry for `promote_session_unacked`
 /// / `promote_displaced_sessions` tests (ADR-0017 Phase 3 Slice 9). Tests
 /// that need a live resource register it through this actor directly (the
@@ -78,6 +84,7 @@ fn detached_session_with_unacked(
         stream_id: stream_id.to_string(),
         user_id: "alice".to_string(),
         jid,
+        occupancy_session: fixed_occupancy_session(),
         inbound_count: 0,
         shadow_ordinal: waddle_xmpp::stream_management::ShadowOrdinal::ZERO,
         outbound_count: unacked_xml.len() as u32,
@@ -106,6 +113,28 @@ fn detached_session_with_unacked(
         presence_payloads: Vec::new(),
         pending_subscribes_flushed: false,
     }
+}
+
+#[test]
+fn terminal_overflow_entry_clone_keeps_the_source_occupancy_session() {
+    let source = detached_session_with_unacked(
+        "stream-overflow-source",
+        full("alice@example.com/phone"),
+        vec![
+            "<message xmlns='jabber:client' id='m1'/>".to_string(),
+            "<message xmlns='jabber:client' id='m2'/>".to_string(),
+        ],
+    );
+    let entry = source
+        .unacked_stanzas
+        .last()
+        .cloned()
+        .expect("source entry");
+
+    let session = super::detached_session_for_terminal_entry(&source, entry.clone());
+
+    assert_eq!(session.occupancy_session, source.occupancy_session);
+    assert_eq!(session.unacked_stanzas, vec![entry]);
 }
 
 /// PendingDeliveryStorage whose `insert` always fails — simulates a
@@ -772,6 +801,7 @@ async fn promoted_pending_row_carries_per_stanza_original_receipt_at() {
         stream_id: "stream-receipt-test".to_string(),
         user_id: "alice".to_string(),
         jid: full("alice@example.com/laptop"),
+        occupancy_session: fixed_occupancy_session(),
         inbound_count: 0,
         shadow_ordinal: waddle_xmpp::stream_management::ShadowOrdinal::ZERO,
         outbound_count: 1,
@@ -1003,6 +1033,7 @@ async fn restart_outlasting_resume_window_promotes_queue_into_pending_delivery()
             stream_id: SmSessionId::new("stream-dead"),
             user_id: "alice".to_string(),
             jid: full("alice@example.com/laptop"),
+            occupancy_session: waddle_xmpp_core::OccupancySessionGeneration::mint(),
             inbound_count: 0,
             shadow_ordinal: waddle_xmpp::stream_management::ShadowOrdinal::ZERO,
             outbound_count: 1,

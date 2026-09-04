@@ -45,11 +45,18 @@ fn stale_caller_supplied_time() -> DateTime<Utc> {
     Utc.with_ymd_and_hms(2020, 1, 1, 0, 0, 0).unwrap()
 }
 
+fn fixed_occupancy_session() -> waddle_xmpp_core::OccupancySessionGeneration {
+    waddle_xmpp_core::OccupancySessionGeneration::from_uuid(
+        uuid::Uuid::parse_str("aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee").expect("uuid"),
+    )
+}
+
 fn fixture_session(stream_id: &str) -> PersistedSession {
     PersistedSession {
         stream_id: SmSessionId::new(stream_id),
         user_id: "alice".to_string(),
         jid: full("alice@example.com/web"),
+        occupancy_session: fixed_occupancy_session(),
         inbound_count: 7,
         shadow_ordinal: waddle_xmpp::stream_management::ShadowOrdinal::from_storage(11),
         outbound_count: 12,
@@ -128,6 +135,19 @@ async fn current_claim_epoch(fixture: &Fixture, entity: &Entity) -> ClaimEpoch {
         .expect("claim lookup")
         .expect("fenced write established a claim")
         .claim_epoch
+}
+
+async fn stored_occupancy_session_text(f: &Fixture, stream_id: &SmSessionId) -> Option<String> {
+    let conn = f.claims_db.guard().await.expect("guard");
+    let mut rows = conn
+        .query(
+            "SELECT occupancy_session FROM sm_sessions WHERE stream_id = ?",
+            crate::db_params![stream_id.as_str().to_string()],
+        )
+        .await
+        .expect("query occupancy_session");
+    let row = rows.next().await.expect("row result").expect("row present");
+    row.get(0).expect("occupancy_session column")
 }
 
 struct Fixture {
@@ -239,6 +259,7 @@ async fn upsert_and_get_session_round_trip_except_divergent_detached_at() {
     assert_eq!(loaded.stream_id, session.stream_id);
     assert_eq!(loaded.user_id, session.user_id);
     assert_eq!(loaded.jid, session.jid);
+    assert_eq!(loaded.occupancy_session, session.occupancy_session);
     assert_eq!(loaded.inbound_count, session.inbound_count);
     assert_eq!(loaded.max_resume_duration, session.max_resume_duration);
 
@@ -252,6 +273,113 @@ async fn upsert_and_get_session_round_trip_except_divergent_detached_at() {
         loaded.detached_at >= before,
         "detached_at must be stamped from Postgres now() at write time"
     );
+}
+
+#[tokio::test]
+async fn null_occupancy_session_mints_and_rewrites_non_null() {
+    let Some(f) = fixture().await else { return };
+    let stream_id = "stream-null-occupancy";
+    let original = fixture_session(stream_id);
+    f.fenced
+        .upsert_session(original)
+        .await
+        .expect("seed fenced session");
+
+    let conn = f.claims_db.guard().await.expect("guard");
+    conn.execute(
+        "UPDATE sm_sessions SET occupancy_session = NULL WHERE stream_id = ?",
+        crate::db_params![stream_id],
+    )
+    .await
+    .expect("null occupancy_session");
+
+    let loaded = f
+        .fenced
+        .get_session(&SmSessionId::new(stream_id))
+        .await
+        .expect("load null occupancy_session")
+        .expect("session present");
+    let minted = loaded.occupancy_session;
+    assert_ne!(
+        minted,
+        waddle_xmpp_core::OccupancySessionGeneration::from_uuid(uuid::Uuid::nil()),
+        "decode boundary must mint a real generation, not a sentinel"
+    );
+
+    f.fenced
+        .upsert_session(loaded)
+        .await
+        .expect("rewrite minted occupancy_session");
+
+    let stored = stored_occupancy_session_text(&f, &SmSessionId::new(stream_id)).await;
+    assert_eq!(stored.as_deref(), Some(minted.to_string().as_str()));
+}
+
+#[tokio::test]
+async fn malformed_occupancy_session_is_a_corrupt_decode_error() {
+    let Some(f) = fixture().await else { return };
+    let expected_stream_id = "stream-bad-occupancy";
+    f.fenced
+        .upsert_session(fixture_session(expected_stream_id))
+        .await
+        .expect("seed fenced session");
+
+    let conn = f.claims_db.guard().await.expect("guard");
+    conn.execute(
+        "UPDATE sm_sessions SET occupancy_session = ? WHERE stream_id = ?",
+        crate::db_params!["not-a-uuid", expected_stream_id],
+    )
+    .await
+    .expect("corrupt occupancy_session");
+
+    let error = f
+        .fenced
+        .get_session(&SmSessionId::new(expected_stream_id))
+        .await
+        .expect_err("malformed occupancy_session must fail decode");
+    assert!(matches!(
+        error,
+        SmPersistenceError::Corrupt {
+            stream_id: ref corrupt_stream_id,
+            ..
+        } if corrupt_stream_id.as_str() == expected_stream_id
+    ));
+}
+
+#[tokio::test]
+async fn cold_start_listing_skips_malformed_occupancy_session_and_keeps_healthy_sessions() {
+    let Some(f) = fixture().await else { return };
+    let healthy_stream_id = SmSessionId::new("stream-healthy-occupancy");
+    let malformed_stream_id = SmSessionId::new("stream-malformed-occupancy");
+    f.fenced
+        .upsert_session(fixture_session(healthy_stream_id.as_str()))
+        .await
+        .expect("seed healthy fenced session");
+    f.fenced
+        .upsert_session(fixture_session(malformed_stream_id.as_str()))
+        .await
+        .expect("seed malformed fenced session");
+
+    let conn = f.claims_db.guard().await.expect("guard");
+    conn.execute(
+        "UPDATE sm_sessions SET occupancy_session = ? WHERE stream_id = ?",
+        crate::db_params!["not-a-uuid", malformed_stream_id.as_str().to_string()],
+    )
+    .await
+    .expect("corrupt occupancy_session");
+
+    let sessions = f
+        .fenced
+        .list_all_sessions_with_unacked()
+        .await
+        .expect("one poison session must not brick cold-start listing");
+    assert_eq!(sessions.len(), 1);
+    assert_eq!(sessions[0].0.stream_id, healthy_stream_id);
+
+    f.fenced
+        .list_all_sessions()
+        .await
+        .expect_err("general durable probes must still fail closed on a poison session row");
 }
 
 /// #1206: the fenced backend must persist the resource's presence extension

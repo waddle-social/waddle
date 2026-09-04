@@ -812,6 +812,7 @@ async fn cleanup_connection_shutdown_inner(
         let detached_snapshot = waddle_xmpp::stream_management::DetachedSessionSnapshot {
             user_id,
             jid: jid.clone(),
+            occupancy_session: conn.occupancy_session,
             carbons_enabled,
             roster_interested: conn.roster_interested,
             blocklist_interested: conn.blocklist_interested,
@@ -1778,6 +1779,7 @@ fn terminal_recovery_snapshot(
             .map(|session| session.user_jid.to_string())
             .unwrap_or_else(|| jid.to_bare().to_string()),
         jid: jid.clone(),
+        occupancy_session: conn.occupancy_session,
         carbons_enabled: conn.carbons_enabled,
         roster_interested: conn.roster_interested,
         blocklist_interested: conn.blocklist_interested,

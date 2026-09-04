@@ -1438,6 +1438,7 @@ mod tests {
                 stream_id: "preview-stream-1".to_string(),
                 user_id: requester.to_string(),
                 jid: requester.clone(),
+                occupancy_session: waddle_xmpp_core::OccupancySessionGeneration::mint(),
                 inbound_count: 1,
                 shadow_ordinal: waddle_xmpp::stream_management::ShadowOrdinal::ZERO,
                 outbound_count: 4,

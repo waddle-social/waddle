@@ -429,6 +429,7 @@ mod tests {
             .to_detached_session(waddle_xmpp::stream_management::DetachedSessionSnapshot {
                 user_id: "alice@example.com".to_string(),
                 jid: "alice@example.com/web".parse().expect("jid"),
+                occupancy_session: waddle_xmpp_core::OccupancySessionGeneration::mint(),
                 carbons_enabled: false,
                 roster_interested: false,
                 blocklist_interested: false,

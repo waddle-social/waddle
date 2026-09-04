@@ -39,7 +39,7 @@ use waddle_xmpp::pending_delivery::storage::PendingDeliveryStorage;
 use waddle_xmpp::pending_delivery::{PendingPayload, PendingRow, PendingRowId, QuotaPolicy};
 use waddle_xmpp::stream_management::{
     CrossNodeResumeOutcome, DetachedSession, DetachedUnackedStanza, InMemorySmSessionRegistry,
-    RemoteResumeAskOutcome, RemoteResumeAsker, SmClaimCompletion, SmSessionRegistry,
+    RemoteResumeAskOutcome, RemoteResumeAsker, SmClaimCompletion, SmResumed, SmSessionRegistry,
 };
 
 /// Serializes every test in this file: they share the mutable control-plane
@@ -202,6 +202,7 @@ fn detached_session(stream_id: &str, jid: &FullJid) -> DetachedSession {
         stream_id: stream_id.to_string(),
         user_id: jid.to_bare().to_string(),
         jid: jid.clone(),
+        occupancy_session: waddle_xmpp_core::OccupancySessionGeneration::mint(),
         inbound_count: 3,
         shadow_ordinal: waddle_xmpp::stream_management::ShadowOrdinal::ZERO,
         outbound_count: 7,
@@ -232,6 +233,40 @@ fn detached_session(stream_id: &str, jid: &FullJid) -> DetachedSession {
         presence_payloads: Vec::new(),
         pending_subscribes_flushed: false,
     }
+}
+
+#[tokio::test]
+async fn detached_cross_node_resume_preserves_occupancy_generation() {
+    let _guard = serial_lock().lock().await;
+    let Some(db) = clean_db().await else {
+        return;
+    };
+    let (bare, full) = alice_jid();
+    let (registry_a, _identity_a) = node_registry(&db, node_identity(), None).await;
+    let (registry_b, _identity_b) = node_registry(&db, node_identity(), None).await;
+    let session = detached_session("stream-occupancy-resume", &full);
+    let expected_occupancy_session = session.occupancy_session;
+    registry_a
+        .store_session(session)
+        .await
+        .expect("node A stores detached session");
+
+    let outcome = registry_b
+        .attempt_cross_node_resume("stream-occupancy-resume", &bare, HANDSHAKE_BUDGET)
+        .await
+        .expect("cross-node resume succeeds");
+    let CrossNodeResumeOutcome::Claimed(resumed) = outcome else {
+        panic!("expected Claimed");
+    };
+    assert_eq!(resumed.occupancy_session, expected_occupancy_session);
+
+    let wire = SmResumed::new(resumed.stream_id, resumed.inbound_count).to_element();
+    assert_eq!(wire.name(), "resumed");
+    assert_eq!(wire.ns(), "urn:xmpp:sm:3");
+    assert_eq!(wire.attrs().len(), 2);
+    assert!(wire.children().next().is_none());
+    assert_eq!(wire.attr("previd"), Some("stream-occupancy-resume"));
+    assert_eq!(wire.attr("h"), Some("3"));
 }
 
 /// Stands in for the relay + `ResumeStealBridge` layer: simulates node A's

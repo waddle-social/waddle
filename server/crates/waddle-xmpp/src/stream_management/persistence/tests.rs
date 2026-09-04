@@ -18,6 +18,7 @@ fn fixture_session(stream_id: &str) -> PersistedSession {
         stream_id: sid(stream_id),
         user_id: "alice".to_string(),
         jid: full("alice@example.com/web"),
+        occupancy_session: waddle_xmpp_core::OccupancySessionGeneration::mint(),
         inbound_count: 0,
         shadow_ordinal: crate::stream_management::ShadowOrdinal::ZERO,
         outbound_count: 0,

@@ -360,6 +360,7 @@ async fn handle_xmpp_frame_impl(
     let WsConnState {
         phase,
         authenticated_session,
+        occupancy_session,
         sm_state,
         sm_inbound_completion,
         inbound_frame_terminal,
@@ -401,6 +402,7 @@ async fn handle_xmpp_frame_impl(
                 phase,
                 sm_state,
                 authenticated_session,
+                occupancy_session,
                 carbons_enabled,
                 presence_available,
                 presence_show,
@@ -1241,6 +1243,7 @@ mod inbound_dispatch_tests {
             .to_detached_session(waddle_xmpp::stream_management::DetachedSessionSnapshot {
                 user_id: "alice@example.com".to_string(),
                 jid,
+                occupancy_session: waddle_xmpp_core::OccupancySessionGeneration::mint(),
                 carbons_enabled: false,
                 roster_interested: false,
                 blocklist_interested: false,

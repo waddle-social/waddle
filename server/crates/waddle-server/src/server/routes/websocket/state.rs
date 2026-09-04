@@ -1513,6 +1513,7 @@ pub(super) struct WsConnState {
     /// The authenticated backend Session for this connection, if any.
     /// Populated on SASL success and used for SM resume/detach.
     pub(super) authenticated_session: Option<Session>,
+    pub(super) occupancy_session: waddle_xmpp_core::OccupancySessionGeneration,
     /// XEP-0198 state for this WebSocket. Counts stanzas in both directions
     /// once enabled and holds the unacked queue used for resumption.
     pub(super) sm_state: StreamManagementState,
@@ -1663,6 +1664,7 @@ impl WsConnState {
             stream_open_handled: false,
             stream_open_wire_state: StreamOpenWireState::NotCommitted,
             authenticated_session: None,
+            occupancy_session: waddle_xmpp_core::OccupancySessionGeneration::mint(),
             sm_state: StreamManagementState::new(),
             sm_inbound_completion:
                 crate::server::routes::interpret::SmInboundCompletionTracker::default(),
