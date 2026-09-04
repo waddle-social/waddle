@@ -212,16 +212,24 @@ fn record_participant_left(
     occupant: Option<waddle_xmpp_core::OccupancySessionGeneration>,
     session: Option<&waddle_sfu::SessionBinding>,
 ) {
+    // #1703: a connection-originated clear names its occupant generation. A
+    // registration bound to a DIFFERENT generation belongs to a replacement
+    // connection and is left alone; an unbound one (restored after a
+    // restart) or a matching one continues into the session-scoped
+    // bookkeeping below, exactly as before. This is an advisory pre-check
+    // like the sid pre-check in the Jingle handler: the atomic fence is the
+    // sid-scoped registry operation it guards.
     if let Some(occupant) = occupant {
-        let _ =
-            super::websocket::muc_call_sfu::unregister_participant_from_room_if_occupant_matches(
-                state,
-                room_jid,
-                full_jid,
-                occupant,
-                observed_sids,
-            );
-        return;
+        let bound = state.deps.protocol.sfu.as_ref().and_then(|sfu| {
+            let call_id = waddle_sfu::CallId::new(room_jid.to_string()).ok()?;
+            sfu.participant_occupant_session(
+                &call_id,
+                &waddle_sfu::Identity::from_jid(full_jid.clone()),
+            )
+        });
+        if bound.is_some_and(|bound| bound != occupant) {
+            return;
+        }
     }
     match session {
         // #1608: the signaling-driven cleanup removes the registration

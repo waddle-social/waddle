@@ -65,10 +65,18 @@ pub(crate) fn unregister_participant_from_room_if_occupant_matches(
     room_jid: &BareJid,
     jid: &FullJid,
     occupant: OccupancySessionGeneration,
+    unbound: waddle_sfu::UnboundOccupantPolicy,
     observed_sids: Option<&ObservedCallSids>,
 ) -> Option<SessionScopedTeardown> {
     let sfu = state.deps.protocol.sfu.as_ref()?;
-    unregister_participant_via_sfu_if_occupant_matches(sfu, room_jid, jid, occupant, observed_sids)
+    unregister_participant_via_sfu_if_occupant_matches(
+        sfu,
+        room_jid,
+        jid,
+        occupant,
+        unbound,
+        observed_sids,
+    )
 }
 
 /// SFU-handle variant of [`unregister_participant_from_room_if_occupant_matches`] for
@@ -78,6 +86,7 @@ pub(crate) fn unregister_participant_via_sfu_if_occupant_matches(
     room_jid: &BareJid,
     jid: &FullJid,
     occupant: OccupancySessionGeneration,
+    unbound: waddle_sfu::UnboundOccupantPolicy,
     observed_sids: Option<&ObservedCallSids>,
 ) -> Option<SessionScopedTeardown> {
     let Ok(call_id) = CallId::new(room_jid.to_string()) else {
@@ -88,6 +97,7 @@ pub(crate) fn unregister_participant_via_sfu_if_occupant_matches(
         &call_id,
         &identity,
         occupant,
+        unbound,
         observed_sids,
     ))
 }

@@ -264,6 +264,7 @@ pub(crate) async fn try_handle_muc_presence_update(
                 room_jid,
                 sender_jid,
                 occupancy_session,
+                waddle_sfu::UnboundOccupantPolicy::TearDown,
                 None,
             );
     }

@@ -943,17 +943,21 @@ impl JingleHandler {
             if let Some(reply) = self.check_terminate_rate_limit(iq, ctx) {
                 return reply;
             }
-            // The pre-check above and this removal are NOT one lock: a
+            // The sid pre-check above and this removal are NOT one lock: a
             // concurrent initiate can rebind the registration between them.
-            // Connection-originated Muji carries the occupant generation, so
-            // the atomic unregister fences same-SID reuse as well as SID
-            // changes. Server-originated callers without a generation retain
-            // the existing session-scoped policy.
+            // Connection-originated Muji carries the occupant generation and
+            // the atomic unregister is gated on THAT (a registration rebound
+            // to a different generation — same sid or not — is untouched);
+            // the sid itself is only checked by the advisory pre-check. An
+            // unbound (restored) registration is torn down: this terminate
+            // comes from the live connection. Server-originated callers
+            // without a generation retain the session-scoped (sid) policy.
             let teardown = match ctx.occupant_session {
                 Some(occupant) => self.sfu.unregister_call_participant_if_occupant_matches(
                     &call_id,
                     &sender_identity,
                     occupant,
+                    waddle_sfu::UnboundOccupantPolicy::TearDown,
                     None,
                 ),
                 None => self.sfu.unregister_call_participant_if_session_matches(

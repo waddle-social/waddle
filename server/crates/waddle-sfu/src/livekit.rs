@@ -326,9 +326,12 @@ enum SessionGate<'a> {
     /// session.
     Presented(Option<&'a SessionBinding>),
     /// Clear only when the stored occupant generation is exactly
-    /// `Some(presented)`. An unbound registration is not owned by the
-    /// caller and must remain untouched.
-    Occupant(OccupancySessionGeneration),
+    /// `Some(presented)`; an UNBOUND registration is cleared only when the
+    /// caller's `unbound` policy says its evidence allows it (#1703).
+    Occupant {
+        presented: OccupancySessionGeneration,
+        unbound: crate::UnboundOccupantPolicy,
+    },
 }
 
 pub type TeardownFailureSink =
@@ -504,12 +507,18 @@ impl LiveKitTeardownExecutor {
                 return Ok(TeardownExecution::StaleGeneration);
             }
         }
+        // Same shape as the sid check above: a registration bound to a
+        // DIFFERENT generation proves a rejoin and blocks; a registration
+        // with no generation (restored after a restart) proves nothing and
+        // does not block — the local clear already applied the caller's
+        // unbound policy before this intent was minted.
         if let Some(intent_occupant_session) = intent.occupant_session.as_ref() {
             let rebound = self.calls.get(call_id).is_some_and(|entry| {
-                entry
-                    .participants
-                    .get(identity)
-                    .is_some_and(|state| state.occupant_session != Some(*intent_occupant_session))
+                entry.participants.get(identity).is_some_and(|state| {
+                    state
+                        .occupant_session
+                        .is_some_and(|bound| bound != *intent_occupant_session)
+                })
             });
             if rebound {
                 return Ok(TeardownExecution::StaleGeneration);
@@ -1660,13 +1669,15 @@ impl LiveKitSfu {
                     }
                 }
             }
-            SessionGate::Occupant(presented) => {
+            SessionGate::Occupant { presented, unbound } => {
                 let stored = entry
                     .participants
                     .get(identity)
                     .and_then(|participant| participant.occupant_session);
-                if stored != Some(presented) {
-                    return ClearDisposition::SessionMismatch;
+                match stored {
+                    Some(bound) if bound == presented => {}
+                    None if unbound == crate::UnboundOccupantPolicy::TearDown => {}
+                    _ => return ClearDisposition::SessionMismatch,
                 }
             }
         }
@@ -2674,13 +2685,14 @@ impl SfuService for LiveKitSfu {
         call_id: &CallId,
         identity: &Identity,
         presented: OccupancySessionGeneration,
+        unbound: crate::UnboundOccupantPolicy,
         observed_sids: Option<&ObservedCallSids>,
     ) -> SessionScopedTeardown {
         self.unregister_participant_gated(
             call_id,
             identity,
             observed_sids,
-            SessionGate::Occupant(presented),
+            SessionGate::Occupant { presented, unbound },
         )
     }
 

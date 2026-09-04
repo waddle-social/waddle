@@ -130,7 +130,7 @@ async fn handle_muc_join(
         nick,
         presence_show,
         (
-            waddle_xmpp_core::OccupancySessionGeneration::mint(),
+            record_test_occupancy_session(state, sender_jid),
             authenticated_session,
         ),
     )
@@ -434,10 +434,13 @@ pub(crate) async fn create_test_websocket_state_with_sfu_and_clustering(
 /// the production code paths under test only touch the teardown
 /// surfaces.
 pub(crate) struct RecordingSfu {
+    /// Registrations keyed by (call, identity): `Some(generation)` for a
+    /// connection-bound registration, `None` for an unbound one (the shape a
+    /// webhook/probe restore leaves behind).
     occupant_sessions: std::sync::Mutex<
         std::collections::HashMap<
             (waddle_sfu::CallId, waddle_sfu::Identity),
-            waddle_xmpp_core::OccupancySessionGeneration,
+            Option<waddle_xmpp_core::OccupancySessionGeneration>,
         >,
     >,
     registered_calls: std::sync::Mutex<
@@ -580,7 +583,16 @@ impl waddle_sfu::SfuService for RecordingSfu {
         unimplemented!("not exercised by these tests")
     }
 
-    fn register_call_participant(&self, _: &waddle_sfu::CallId, _: &waddle_sfu::Identity) {}
+    fn register_call_participant(
+        &self,
+        call_id: &waddle_sfu::CallId,
+        identity: &waddle_sfu::Identity,
+    ) {
+        self.occupant_sessions
+            .lock()
+            .expect("recording lock")
+            .insert((call_id.clone(), identity.clone()), None);
+    }
 
     fn register_call_participant_with_session(
         &self,
@@ -592,7 +604,7 @@ impl waddle_sfu::SfuService for RecordingSfu {
         self.occupant_sessions
             .lock()
             .expect("recording lock")
-            .insert((call_id.clone(), identity.clone()), occupant);
+            .insert((call_id.clone(), identity.clone()), Some(occupant));
     }
 
     fn register_call_participant_observed(
@@ -639,6 +651,7 @@ impl waddle_sfu::SfuService for RecordingSfu {
             .expect("recording lock")
             .get(&(call_id.clone(), identity.clone()))
             .copied()
+            .flatten()
     }
 
     fn unregister_call_participant_if_occupant_matches(
@@ -646,12 +659,15 @@ impl waddle_sfu::SfuService for RecordingSfu {
         call_id: &waddle_sfu::CallId,
         identity: &waddle_sfu::Identity,
         presented: waddle_xmpp_core::OccupancySessionGeneration,
+        unbound: waddle_sfu::UnboundOccupantPolicy,
         _: Option<&waddle_sfu::ObservedCallSids>,
     ) -> waddle_sfu::SessionScopedTeardown {
         let mut sessions = self.occupant_sessions.lock().expect("recording lock");
         let key = (call_id.clone(), identity.clone());
-        if sessions.get(&key).copied() != Some(presented) {
-            return waddle_sfu::SessionScopedTeardown::SessionMismatch;
+        match sessions.get(&key).copied().flatten() {
+            Some(bound) if bound == presented => {}
+            None if unbound == waddle_sfu::UnboundOccupantPolicy::TearDown => {}
+            _ => return waddle_sfu::SessionScopedTeardown::SessionMismatch,
         }
         sessions.remove(&key);
         drop(sessions);

@@ -19,7 +19,6 @@ use xml::{
 pub(super) use xml::{build_muc_join_presence_xml, build_muc_presence_error_xml, MucJoinPresence};
 
 #[cfg(any(test, feature = "clustering"))]
-#[cfg(any(test, feature = "clustering"))]
 pub async fn handle_muc_join(
     state: &WebSocketState,
     domain: &str,
@@ -2002,6 +2001,7 @@ pub async fn handle_muc_leave(
                 room_jid,
                 sender_jid,
                 occupancy_session,
+                waddle_sfu::UnboundOccupantPolicy::Keep,
                 None,
             );
         return vec![build_muc_self_unavailable_xml(
@@ -2063,8 +2063,8 @@ pub async fn handle_muc_leave(
                 room_jid,
                 sender_jid,
                 occupancy_session,
-                None,
-            );
+                waddle_sfu::UnboundOccupantPolicy::TearDown,
+                None,);
             return vec![build_muc_self_unavailable_xml(
                 state,
                 room_jid,
@@ -2085,8 +2085,8 @@ pub async fn handle_muc_leave(
                 room_jid,
                 sender_jid,
                 occupancy_session,
-                None,
-            );
+                waddle_sfu::UnboundOccupantPolicy::Keep,
+                None,);
             return vec![build_muc_self_unavailable_xml(
                 state,
                 room_jid,
@@ -2122,8 +2122,8 @@ pub async fn handle_muc_leave(
                 room_jid,
                 sender_jid,
                 occupancy_session,
-                None,
-            );
+                waddle_sfu::UnboundOccupantPolicy::TearDown,
+                None,);
             // The actor's typed nickname is authoritative: the request's
             // `to` JID may carry a nick the sender never held.
             return vec![build_muc_self_unavailable_xml(
@@ -2204,6 +2204,7 @@ pub async fn handle_muc_leave(
         room_jid,
         sender_jid,
         occupancy_session,
+        waddle_sfu::UnboundOccupantPolicy::TearDown,
         None,
     );
 

@@ -35,6 +35,14 @@ const IN_FLIGHT_RENEWAL: Duration = Duration::from_secs(10);
 pub(crate) const ACK_ABSENT_ROOM_RETRIES: u32 = 3;
 const MAX_FULL_JID_SWEEPS: usize = 50_000;
 
+/// Cap on retained generation-scoped departures per `(room, full JID, cause)`.
+/// Keying room-scoped items by connection generation (#1703) means a client
+/// that reconnects with a stable resource during an outage adds one retained
+/// departure per connection instead of coalescing; the oldest is dropped past
+/// this bound (counted as an overflow) so the inventory stays bounded by
+/// observed occupancies × a small constant.
+const MAX_ROOM_SCOPED_GENERATIONS: usize = 16;
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum LocalDepartureItem {
     FullJidSweep {
@@ -423,7 +431,8 @@ pub struct PendingLocalMucDepartures {
     /// enumeration failure for every disconnecting JID (false positives
     /// included), so under a prolonged registry outage they grow with
     /// connection churn. Room-scoped items are bounded by observed local
-    /// occupancies and carry no cap.
+    /// occupancies × [`MAX_ROOM_SCOPED_GENERATIONS`] retained generations
+    /// per occupancy.
     full_jid_sweep_cap: usize,
 }
 
@@ -533,6 +542,13 @@ impl PendingLocalMucDepartures {
         }
         if matches!(entry.item, LocalDepartureItem::FullJidSweep { .. }) {
             evict_oldest_sweep_if_at_cap(&mut inventory, self.full_jid_sweep_cap);
+        }
+        if let LocalDepartureKey::RoomScoped(room, jid, cause, Some(_)) = entry.item.key() {
+            evict_oldest_room_scoped_generation_if_at_cap(
+                &mut inventory,
+                (&room, &jid, cause),
+                MAX_ROOM_SCOPED_GENERATIONS,
+            );
         }
         inventory.insert(entry);
         inventory.record_gauges();
@@ -773,6 +789,55 @@ fn backoff(attempts: u32) -> Duration {
 
 /// Drop the oldest retained sweep once the cap is reached. Only the overflow
 /// path pays the linear scan; ordinary inserts stay O(1).
+/// Drop the oldest generation-scoped departure for `(room, jid, cause)` once
+/// `cap` distinct generations are retained for it (see
+/// [`MAX_ROOM_SCOPED_GENERATIONS`]).
+fn evict_oldest_room_scoped_generation_if_at_cap(
+    inventory: &mut Inventory,
+    (room, jid, cause): (&BareJid, &FullJid, u8),
+    cap: usize,
+) {
+    let same_scope = |key: &LocalDepartureKey| {
+        matches!(
+            key,
+            LocalDepartureKey::RoomScoped(key_room, key_jid, key_cause, Some(_))
+                if key_room == room && key_jid == jid && *key_cause == cause
+        )
+    };
+    if inventory
+        .entries
+        .keys()
+        .filter(|key| same_scope(key))
+        .count()
+        < cap
+    {
+        return;
+    }
+    let Some(oldest) = inventory
+        .entries
+        .iter()
+        .filter(|(key, _)| same_scope(key))
+        .min_by(|(left_key, left), (right_key, right)| {
+            left.not_before
+                .cmp(&right.not_before)
+                .then_with(|| left_key.cmp(right_key))
+        })
+        .map(|(key, _)| key.clone())
+    else {
+        return;
+    };
+    inventory.remove(&oldest);
+    warn!(
+        room = %room,
+        jid = %jid,
+        cap,
+        "retained generation-scoped MUC departures overflow for one occupancy; dropped the oldest generation's cleanup responsibility"
+    );
+    crate::metrics::record_local_departure_retry(
+        crate::metrics::LocalDepartureRetryOutcome::Overflow,
+    );
+}
+
 fn evict_oldest_sweep_if_at_cap(inventory: &mut Inventory, cap: usize) {
     if inventory.counts[0] < cap as i64 {
         return;
@@ -1622,6 +1687,43 @@ mod tests {
             departure(g2).key(),
             "different generation selectors must never share a retained-departure key"
         );
+    }
+
+    #[test]
+    fn room_scoped_generation_overflow_drops_the_oldest_generation() {
+        let inventory = PendingLocalMucDepartures::default();
+        let now = Instant::now();
+        let room = room("generation-cap-room");
+        let jid = jid("alice@example.com/web");
+        let mut generations = Vec::new();
+        for index in 0..=MAX_ROOM_SCOPED_GENERATIONS {
+            let generation = generation();
+            generations.push(generation);
+            inventory.record_at(
+                LocalDepartureItem::RoomDeparture {
+                    room: room.clone(),
+                    jid: jid.clone(),
+                    cause: OccupancyLeaveCause::Disconnect,
+                    selector: LeaveSessionSelector::Generation(generation),
+                    attempt: LeaveAttemptId::generate(),
+                    notified: HashSet::new(),
+                },
+                now + Duration::from_secs(index as u64),
+            );
+        }
+        assert_eq!(inventory.len(), MAX_ROOM_SCOPED_GENERATIONS);
+        let retained = inventory.entries.lock().expect("lock");
+        assert!(
+            !retained.entries.keys().any(|key| matches!(
+                key,
+                LocalDepartureKey::RoomScoped(_, _, _, Some(generation)) if *generation == generations[0]
+            )),
+            "the oldest generation's departure is dropped past the cap"
+        );
+        assert!(retained.entries.keys().any(|key| matches!(
+            key,
+            LocalDepartureKey::RoomScoped(_, _, _, Some(generation)) if *generation == generations[MAX_ROOM_SCOPED_GENERATIONS]
+        )));
     }
 
     #[test]

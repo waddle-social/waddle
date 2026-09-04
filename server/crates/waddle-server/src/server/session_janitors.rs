@@ -339,8 +339,7 @@ pub(crate) async fn run_local_muc_departure_sweep(state: &WebSocketState) {
                                     match selector {
                                         LeaveSessionSelector::Generation(occupant) => {
                                             let _ = routes::websocket::muc_call_sfu::unregister_participant_from_room_if_occupant_matches(
-                                                state, &room, &jid, occupant, None,
-                                            );
+                                                state, &room, &jid, occupant, waddle_sfu::UnboundOccupantPolicy::TearDown, None,);
                                         }
                                         // Membership-authoritative departures (admin removals) keep the
                                         // ungated teardown: no connection owns them.
@@ -427,8 +426,7 @@ pub(crate) async fn run_local_muc_departure_sweep(state: &WebSocketState) {
                                     match selector {
                                         LeaveSessionSelector::Generation(occupant) => {
                                             let _ = routes::websocket::muc_call_sfu::unregister_participant_from_room_if_occupant_matches(
-                                                state, &room, &jid, occupant, None,
-                                            );
+                                                state, &room, &jid, occupant, waddle_sfu::UnboundOccupantPolicy::TearDown, None,);
                                         }
                                         // Membership-authoritative departures (admin removals) keep the
                                         // ungated teardown: no connection owns them.
@@ -529,8 +527,7 @@ pub(crate) async fn run_local_muc_departure_sweep(state: &WebSocketState) {
                         Ok(LeaveDisposition::NotOccupant) => {
                             if let LeaveSessionSelector::Generation(occupant) = selector {
                                 let _ = routes::websocket::muc_call_sfu::unregister_participant_from_room_if_occupant_matches(
-                                    state, &room, &jid, occupant, None,
-                                );
+                                    state, &room, &jid, occupant, waddle_sfu::UnboundOccupantPolicy::Keep, None,);
                             }
                             crate::metrics::record_local_departure_retry(
                                 crate::metrics::LocalDepartureRetryOutcome::NotOccupant,
@@ -541,8 +538,7 @@ pub(crate) async fn run_local_muc_departure_sweep(state: &WebSocketState) {
                         Ok(LeaveDisposition::Superseded) => {
                             if let LeaveSessionSelector::Generation(occupant) = selector {
                                 let _ = routes::websocket::muc_call_sfu::unregister_participant_from_room_if_occupant_matches(
-                                    state, &room, &jid, occupant, None,
-                                );
+                                    state, &room, &jid, occupant, waddle_sfu::UnboundOccupantPolicy::Keep, None,);
                             }
                             crate::metrics::record_local_departure_retry(
                                 crate::metrics::LocalDepartureRetryOutcome::Superseded,
@@ -588,8 +584,7 @@ pub(crate) async fn run_local_muc_departure_sweep(state: &WebSocketState) {
                             match selector {
                                 LeaveSessionSelector::Generation(occupant) => {
                                     let _ = routes::websocket::muc_call_sfu::unregister_participant_from_room_if_occupant_matches(
-                                        state, &room, &jid, occupant, None,
-                                    );
+                                        state, &room, &jid, occupant, waddle_sfu::UnboundOccupantPolicy::TearDown, None,);
                                 }
                                 // Membership-authoritative explicit departures keep the ungated
                                 // teardown: no connection owns them.

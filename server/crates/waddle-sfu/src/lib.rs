@@ -62,6 +62,21 @@ pub use webhook::{
 /// ([`Self::register_call_participant`] /
 /// [`Self::unregister_call_participant`]) update an in-memory call
 /// registry used for MUC focus accounting.
+/// What an occupant-scoped teardown does with a registration that carries
+/// NO occupant generation (webhook/probe-restored after a process restart,
+/// or a 1:1 registration) — see
+/// [`SfuService::unregister_call_participant_if_occupant_matches`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum UnboundOccupantPolicy {
+    /// The departure is confirmed by the room actor or requested by the live
+    /// connection: an unbound registration belongs to nobody else provable,
+    /// so tear it down (the pre-#1703 behaviour for restored registrations).
+    TearDown,
+    /// Unconfirmed cleanup (`Superseded`, `NotOccupant`, redrives): an
+    /// unbound registration may be a restored live replacement — keep it.
+    Keep,
+}
+
 pub trait SfuService: Send + Sync + 'static {
     /// Mint a short-lived LiveKit join JWT for `identity` to enter
     /// `call_id` with the given media capabilities. The returned token
@@ -216,19 +231,29 @@ pub trait SfuService: Send + Sync + 'static {
     }
 
     /// Occupant-scoped teardown (#1703): unregister `identity` from
-    /// `call_id` only when the stored occupant generation is exactly
-    /// `Some(presented)`. A registration restored without an occupant
-    /// generation, or one rebound to a different generation, is left
-    /// untouched and schedules no SFU-side eviction.
+    /// `call_id` when the stored occupant generation is exactly
+    /// `Some(presented)`. A registration rebound to a DIFFERENT generation
+    /// is always left untouched (no SFU-side eviction). A registration
+    /// with NO stored generation (restored from a webhook/probe, or a 1:1
+    /// path) is decided by `unbound`: the caller presents
+    /// [`UnboundOccupantPolicy::TearDown`] only when it holds independent
+    /// evidence that the departure is real (the room actor confirmed the
+    /// session left, or the live connection itself asked), and
+    /// [`UnboundOccupantPolicy::Keep`] for stale/unconfirmed cleanup so a
+    /// restored live replacement is never deleted by an old connection.
     fn unregister_call_participant_if_occupant_matches(
         &self,
         call_id: &CallId,
         identity: &Identity,
         presented: OccupancySessionGeneration,
+        unbound: UnboundOccupantPolicy,
         observed_sids: Option<&ObservedCallSids>,
     ) -> SessionScopedTeardown {
         match self.participant_occupant_session(call_id, identity) {
             Some(bound) if bound == presented => SessionScopedTeardown::Applied(
+                self.unregister_call_participant(call_id, identity, observed_sids),
+            ),
+            None if unbound == UnboundOccupantPolicy::TearDown => SessionScopedTeardown::Applied(
                 self.unregister_call_participant(call_id, identity, observed_sids),
             ),
             _ => SessionScopedTeardown::SessionMismatch,

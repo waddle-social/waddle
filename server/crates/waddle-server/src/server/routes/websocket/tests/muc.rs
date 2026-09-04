@@ -5366,12 +5366,15 @@ impl waddle_sfu::SfuService for RecordingSfu {
         call_id: &waddle_sfu::CallId,
         identity: &waddle_sfu::Identity,
         presented: waddle_xmpp_core::OccupancySessionGeneration,
+        unbound: waddle_sfu::UnboundOccupantPolicy,
         _: Option<&waddle_sfu::ObservedCallSids>,
     ) -> waddle_sfu::SessionScopedTeardown {
         let mut sessions = self.occupant_sessions.lock().expect("recording lock");
         let key = (call_id.clone(), identity.clone());
-        if sessions.get(&key).copied() != Some(presented) {
-            return waddle_sfu::SessionScopedTeardown::SessionMismatch;
+        match sessions.get(&key).copied() {
+            Some(bound) if bound == presented => {}
+            None if unbound == waddle_sfu::UnboundOccupantPolicy::TearDown => {}
+            _ => return waddle_sfu::SessionScopedTeardown::SessionMismatch,
         }
         sessions.remove(&key);
         drop(sessions);

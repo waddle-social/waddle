@@ -6,6 +6,7 @@
 
 use super::*;
 use crate::config::{ApiKey, ApiSecret, TurnSharedSecret};
+use crate::UnboundOccupantPolicy;
 use chrono::Duration;
 use jid::FullJid;
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -3777,7 +3778,13 @@ fn occupant_scoped_unregister_applies_on_a_matching_generation() {
     let occupant = fixture_occupancy_session();
 
     sfu.register_call_participant_with_session(&call, &alice, &sid, occupant);
-    match sfu.unregister_call_participant_if_occupant_matches(&call, &alice, occupant, None) {
+    match sfu.unregister_call_participant_if_occupant_matches(
+        &call,
+        &alice,
+        occupant,
+        UnboundOccupantPolicy::Keep,
+        None,
+    ) {
         SessionScopedTeardown::Applied(TeardownDisposition::Applied(CallState::Ended)) => {}
         other => panic!("matching generation must clear the registration, got {other:?}"),
     }
@@ -3795,7 +3802,13 @@ fn occupant_scoped_unregister_refuses_a_mismatching_generation_without_mutation(
 
     sfu.register_call_participant_with_session(&call, &alice, &sid, live);
     assert_eq!(
-        sfu.unregister_call_participant_if_occupant_matches(&call, &alice, stale, None),
+        sfu.unregister_call_participant_if_occupant_matches(
+            &call,
+            &alice,
+            stale,
+            UnboundOccupantPolicy::Keep,
+            None,
+        ),
         SessionScopedTeardown::SessionMismatch
     );
     assert!(sfu.has_call_participant(&call, &alice));
@@ -3811,7 +3824,13 @@ fn occupant_scoped_unregister_refuses_an_unbound_registration() {
 
     sfu.register_call_participant(&call, &alice);
     assert_eq!(
-        sfu.unregister_call_participant_if_occupant_matches(&call, &alice, presented, None),
+        sfu.unregister_call_participant_if_occupant_matches(
+            &call,
+            &alice,
+            presented,
+            UnboundOccupantPolicy::Keep,
+            None,
+        ),
         SessionScopedTeardown::SessionMismatch
     );
     assert!(sfu.has_call_participant(&call, &alice));
@@ -3832,7 +3851,13 @@ async fn inline_teardown_refuses_the_remote_eject_after_a_same_sid_rejoin_with_n
 
     sfu.register_call_participant_with_session(&call, &bob, &sid, bob_generation);
     sfu.register_call_participant_with_session(&call, &alice, &sid, generation_one);
-    match sfu.unregister_call_participant_if_occupant_matches(&call, &alice, generation_one, None) {
+    match sfu.unregister_call_participant_if_occupant_matches(
+        &call,
+        &alice,
+        generation_one,
+        UnboundOccupantPolicy::Keep,
+        None,
+    ) {
         SessionScopedTeardown::Applied(_) => {}
         other => panic!("matching generation must apply, got {other:?}"),
     }
@@ -3854,4 +3879,27 @@ async fn inline_teardown_refuses_the_remote_eject_after_a_same_sid_rejoin_with_n
         sfu.participant_occupant_session(&call, &alice),
         Some(generation_two)
     );
+}
+
+#[test]
+fn occupant_scoped_unregister_tears_down_an_unbound_registration_when_the_departure_is_confirmed() {
+    let sfu = LiveKitSfu::new(fixture_config()).expect("test SFU");
+    let call = CallId::new("room@muc.waddle.test").expect("call id");
+    let alice = fixture_identity("alice");
+
+    // Restored after a restart: no occupant generation on the registration.
+    sfu.register_call_participant(&call, &alice);
+    match sfu.unregister_call_participant_if_occupant_matches(
+        &call,
+        &alice,
+        fixture_occupancy_session(),
+        UnboundOccupantPolicy::TearDown,
+        None,
+    ) {
+        SessionScopedTeardown::Applied(_) => {}
+        other => {
+            panic!("a confirmed departure must tear down an unbound registration, got {other:?}")
+        }
+    }
+    assert!(!sfu.has_call_participant(&call, &alice));
 }

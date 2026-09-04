@@ -2540,10 +2540,25 @@ async fn cleanup_muc_presence_with_origin(
         // connection is physically gone, so it runs on the first attempt
         // regardless of how the room answered (today's semantics; #1703 tracks
         // the generation-safe variant).
+        // An unbound (webhook-restored) SFU registration is torn down only
+        // when the room confirmed this session's departure; on
+        // `Superseded`/`NotOccupant`/failure it may be a restored live
+        // replacement and is kept (#1703).
+        let unbound_policy = match &leave_result {
+            Ok(LeaveDisposition::Left(_) | LeaveDisposition::Suppressed { .. }) => {
+                waddle_sfu::UnboundOccupantPolicy::TearDown
+            }
+            _ => waddle_sfu::UnboundOccupantPolicy::Keep,
+        };
         match session {
             LeaveSessionSelector::Generation(occupant) => {
                 let _ = super::muc_call_sfu::unregister_participant_from_room_if_occupant_matches(
-                    state, &room_jid, jid, occupant, None,
+                    state,
+                    &room_jid,
+                    jid,
+                    occupant,
+                    unbound_policy,
+                    None,
                 );
             }
             LeaveSessionSelector::Any | LeaveSessionSelector::JoinedAtOrBefore(_) => {
@@ -2805,6 +2820,7 @@ async fn cleanup_remote_muc_presence(
             &room_jid,
             jid,
             occupant_session,
+            waddle_sfu::UnboundOccupantPolicy::Keep,
             None,
         );
         let mut presence =
@@ -4612,6 +4628,101 @@ mod local_departure_cleanup_tests {
             "the first attempt unregisters SFU"
         );
         assert_eq!(state.deps.protocol.pending_local_muc_departures.len(), 1);
+    }
+
+    /// A registration restored without a generation (webhook after a restart)
+    /// is torn down when the room confirms the session's departure.
+    #[tokio::test]
+    async fn confirmed_disconnect_cleanup_tears_down_an_unbound_sfu_registration() {
+        let recorder = Arc::new(RecordingSfu::default());
+        let state = create_test_websocket_state_with_sfu(recorder.clone()).await;
+        let room_jid = room_jid("unbound-confirmed");
+        let room_actor = state
+            .deps
+            .protocol
+            .room_registry
+            .ask(CreateRoom {
+                room_jid: room_jid.clone(),
+                waddle_id: "w".to_string(),
+                channel_id: "c".to_string(),
+                config: RoomConfig::default(),
+            })
+            .await
+            .expect("create room");
+        let alice = full_jid("alice@example.com/web");
+        let generation = waddle_xmpp::muc::room_actor::OccupancySessionGeneration::mint();
+        join_member_with_generation(&room_actor, &alice, "alice", generation).await;
+        let call_id = waddle_sfu::CallId::new(room_jid.to_string()).expect("call id");
+        let identity = waddle_sfu::Identity::from_jid(alice.clone());
+        recorder.register_call_participant(&call_id, &identity);
+
+        assert!(
+            cleanup_muc_presence_with_origin(
+                state.as_ref(),
+                &alice,
+                LeaveSessionSelector::Generation(generation),
+                None,
+                waddle_xmpp::muc::room_actor::LeaveAttemptId::generate(),
+                SweepFailureRecording::RecordSweep,
+                LocalRoomSweepScope::EveryRoom,
+            )
+            .await
+        );
+        assert!(
+            !recorder.has_call_participant(&call_id, &identity),
+            "the room confirmed the departure, so the unbound registration is torn down"
+        );
+    }
+
+    /// The same unbound registration survives a stale cleanup the room answers
+    /// `Superseded`: it may belong to the restored live replacement.
+    #[tokio::test]
+    async fn superseded_disconnect_cleanup_keeps_an_unbound_sfu_registration() {
+        let recorder = Arc::new(RecordingSfu::default());
+        let state = create_test_websocket_state_with_sfu(recorder.clone()).await;
+        let room_jid = room_jid("unbound-superseded");
+        let room_actor = state
+            .deps
+            .protocol
+            .room_registry
+            .ask(CreateRoom {
+                room_jid: room_jid.clone(),
+                waddle_id: "w".to_string(),
+                channel_id: "c".to_string(),
+                config: RoomConfig::default(),
+            })
+            .await
+            .expect("create room");
+        let alice = full_jid("alice@example.com/web");
+        let first_generation = waddle_xmpp::muc::room_actor::OccupancySessionGeneration::mint();
+        let second_generation = waddle_xmpp::muc::room_actor::OccupancySessionGeneration::mint();
+        join_member_with_generation(&room_actor, &alice, "alice", first_generation).await;
+        join_member_with_generation(&room_actor, &alice, "alice", second_generation).await;
+        let call_id = waddle_sfu::CallId::new(room_jid.to_string()).expect("call id");
+        let identity = waddle_sfu::Identity::from_jid(alice.clone());
+        recorder.register_call_participant(&call_id, &identity);
+
+        assert!(
+            cleanup_muc_presence_with_origin(
+                state.as_ref(),
+                &alice,
+                LeaveSessionSelector::Generation(first_generation),
+                None,
+                waddle_xmpp::muc::room_actor::LeaveAttemptId::generate(),
+                SweepFailureRecording::RecordSweep,
+                LocalRoomSweepScope::EveryRoom,
+            )
+            .await
+        );
+        assert!(
+            recorder.has_call_participant(&call_id, &identity),
+            "a superseded cleanup must not delete a restored (unbound) registration"
+        );
+        let snapshot = room_actor.ask(GetSnapshot).await.expect("snapshot");
+        assert_eq!(
+            snapshot.room.session_generation(&alice),
+            Some(second_generation)
+        );
     }
 
     #[tokio::test]
