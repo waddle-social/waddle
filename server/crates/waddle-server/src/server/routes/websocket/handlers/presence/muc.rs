@@ -1994,14 +1994,16 @@ pub async fn handle_muc_leave(
         debug!(room = %room_jid, "Room not found for leave");
         // Idempotent on the SFU side — the user could have an SFU
         // participant even when the room actor is gone (process
-        // restart, eviction). Tear that down too.
+        // restart, eviction). Tear that down too: this is the live
+        // connection's own leave, so a restored (unbound) registration
+        // is torn down as well.
         let _ =
             super::super::super::muc_call_sfu::unregister_participant_from_room_if_occupant_matches(
                 state,
                 room_jid,
                 sender_jid,
                 occupancy_session,
-                waddle_sfu::UnboundOccupantPolicy::Keep,
+                waddle_sfu::UnboundOccupantPolicy::TearDown,
                 None,
             );
         return vec![build_muc_self_unavailable_xml(

@@ -182,6 +182,7 @@ pub(crate) async fn handle_relayed_muji_initiate(
             &sender,
             None,
             Some(occupancy_session),
+            waddle_sfu::UnboundOccupantPolicy::TearDown,
             terminate_session.as_ref(),
         )
         .await;

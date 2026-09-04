@@ -273,6 +273,7 @@ async fn handle_sans_io_iq_with_relay_override(
                 full_jid,
                 None,
                 Some(*conn_state.occupancy_session),
+                waddle_sfu::UnboundOccupantPolicy::TearDown,
                 terminate_session.as_ref(),
             )
             .await;
@@ -903,7 +904,13 @@ async fn fallback_muji_terminate_owner_cleanup_ack(
     let persisted =
         enqueue_muji_relay_teardown_fallback(state, room_jid, departed, occupant, session).await;
     let _ = crate::server::routes::muc_muji_clear::clear_muji_presence_for_departure(
-        state, room_jid, departed, None, occupant, session,
+        state,
+        room_jid,
+        departed,
+        None,
+        occupant,
+        waddle_sfu::UnboundOccupantPolicy::TearDown,
+        session,
     )
     .await;
     if persisted.is_err() {

@@ -44,6 +44,7 @@ pub(crate) async fn clear_muji_presence_for_departure(
     full_jid: &FullJid,
     observed_sids: Option<&ObservedCallSids>,
     occupant: Option<waddle_xmpp_core::OccupancySessionGeneration>,
+    unbound: waddle_sfu::UnboundOccupantPolicy,
     session: Option<&waddle_sfu::SessionBinding>,
 ) -> WebhookEffectOutcome {
     debug!(
@@ -94,7 +95,15 @@ pub(crate) async fn clear_muji_presence_for_departure(
             {
                 return WebhookEffectOutcome::Retryable("teardown_outbox_enqueue_failed");
             }
-            record_participant_left(state, room_jid, full_jid, observed_sids, occupant, session);
+            record_participant_left(
+                state,
+                room_jid,
+                full_jid,
+                observed_sids,
+                occupant,
+                unbound,
+                session,
+            );
             return WebhookEffectOutcome::Completed;
         }
         Err(error) => {
@@ -134,7 +143,15 @@ pub(crate) async fn clear_muji_presence_for_departure(
                 identity = %full_jid,
                 "Participant not in MUC actor; SFU registry cleanup only"
             );
-            record_participant_left(state, room_jid, full_jid, observed_sids, occupant, session);
+            record_participant_left(
+                state,
+                room_jid,
+                full_jid,
+                observed_sids,
+                occupant,
+                unbound,
+                session,
+            );
             return super::call_thread_end::maybe_broadcast_call_thread_ended(state, room_jid)
                 .await;
         }
@@ -150,7 +167,15 @@ pub(crate) async fn clear_muji_presence_for_departure(
     };
 
     broadcast_muji_clear(state, room_jid, full_jid, &outcome);
-    record_participant_left(state, room_jid, full_jid, observed_sids, occupant, session);
+    record_participant_left(
+        state,
+        room_jid,
+        full_jid,
+        observed_sids,
+        occupant,
+        unbound,
+        session,
+    );
     super::call_thread_end::maybe_broadcast_call_thread_ended(state, room_jid).await
 }
 
@@ -210,13 +235,14 @@ fn record_participant_left(
     full_jid: &FullJid,
     observed_sids: Option<&ObservedCallSids>,
     occupant: Option<waddle_xmpp_core::OccupancySessionGeneration>,
+    unbound: waddle_sfu::UnboundOccupantPolicy,
     session: Option<&waddle_sfu::SessionBinding>,
 ) {
     // #1703: a connection-originated clear names its occupant generation. A
     // registration bound to a DIFFERENT generation belongs to a replacement
-    // connection and is left alone; an unbound one (restored after a
-    // restart) or a matching one continues into the session-scoped
-    // bookkeeping below, exactly as before. This is an advisory pre-check
+    // connection and is left alone; a matching one continues into the
+    // session-scoped bookkeeping below, exactly as before. This is an
+    // advisory pre-check
     // like the sid pre-check in the Jingle handler: the atomic fence is the
     // sid-scoped registry operation it guards.
     if let Some(occupant) = occupant {
@@ -227,8 +253,13 @@ fn record_participant_left(
                 &waddle_sfu::Identity::from_jid(full_jid.clone()),
             )
         });
-        if bound.is_some_and(|bound| bound != occupant) {
-            return;
+        match bound {
+            Some(bound) if bound == occupant => {}
+            // A restored (unbound) registration is only cleared with evidence:
+            // the live connection asked (`TearDown`); a durable redrive of an
+            // old intent keeps it — it may be a live replacement's (#1703).
+            None if unbound == waddle_sfu::UnboundOccupantPolicy::TearDown => {}
+            _ => return,
         }
     }
     match session {
@@ -376,6 +407,7 @@ mod tests {
             &full_jid,
             None,
             None,
+            waddle_sfu::UnboundOccupantPolicy::TearDown,
             None,
         )
         .await;

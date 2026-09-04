@@ -487,6 +487,7 @@ async fn execute_intent(
                 departed,
                 observed_sids.as_ref(),
                 intent.occupant,
+                waddle_sfu::UnboundOccupantPolicy::Keep,
                 intent.session.as_ref(),
             ),
         )
@@ -606,6 +607,7 @@ async fn execute_intent(
                     &departed_jid,
                     Some(&observed_sids),
                     None,
+                    waddle_sfu::UnboundOccupantPolicy::Keep,
                     None,
                 ),
             )

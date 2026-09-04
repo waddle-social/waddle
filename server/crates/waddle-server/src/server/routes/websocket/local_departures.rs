@@ -458,6 +458,18 @@ const fn kind_slot(item: &LocalDepartureItem) -> usize {
 impl Inventory {
     fn insert(&mut self, entry: PendingLocalDeparture) {
         let key = entry.item.key();
+        // Every insert path (fresh record, requeue, the janitor's
+        // InFlight→RoomDeparture conversion) is bounded by the per-occupancy
+        // generation cap, so it is applied here rather than per caller.
+        if let LocalDepartureKey::RoomScoped(room, jid, cause, Some(_)) = &key {
+            if !self.entries.contains_key(&key) {
+                evict_oldest_room_scoped_generation_if_at_cap(
+                    self,
+                    (room, jid, *cause),
+                    MAX_ROOM_SCOPED_GENERATIONS,
+                );
+            }
+        }
         self.counts[kind_slot(&entry.item)] += 1;
         if let Some(previous) = self.entries.insert(key, entry) {
             self.counts[kind_slot(&previous.item)] -= 1;
@@ -542,13 +554,6 @@ impl PendingLocalMucDepartures {
         }
         if matches!(entry.item, LocalDepartureItem::FullJidSweep { .. }) {
             evict_oldest_sweep_if_at_cap(&mut inventory, self.full_jid_sweep_cap);
-        }
-        if let LocalDepartureKey::RoomScoped(room, jid, cause, Some(_)) = entry.item.key() {
-            evict_oldest_room_scoped_generation_if_at_cap(
-                &mut inventory,
-                (&room, &jid, cause),
-                MAX_ROOM_SCOPED_GENERATIONS,
-            );
         }
         inventory.insert(entry);
         inventory.record_gauges();
@@ -813,14 +818,18 @@ fn evict_oldest_room_scoped_generation_if_at_cap(
     {
         return;
     }
+    // The oldest responsibility is the one retried the most (a requeued
+    // entry's deadline moves INTO the future with backoff, so deadlines
+    // would pick the freshest); ties fall back to the earliest deadline.
     let Some(oldest) = inventory
         .entries
         .iter()
         .filter(|(key, _)| same_scope(key))
-        .min_by(|(left_key, left), (right_key, right)| {
-            left.not_before
-                .cmp(&right.not_before)
-                .then_with(|| left_key.cmp(right_key))
+        .max_by(|(left_key, left), (right_key, right)| {
+            left.attempts
+                .cmp(&right.attempts)
+                .then_with(|| right.not_before.cmp(&left.not_before))
+                .then_with(|| right_key.cmp(left_key))
         })
         .map(|(key, _)| key.clone())
     else {

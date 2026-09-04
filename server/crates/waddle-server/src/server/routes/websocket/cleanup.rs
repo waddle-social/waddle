@@ -2544,10 +2544,15 @@ async fn cleanup_muc_presence_with_origin(
         // when the room confirmed this session's departure; on
         // `Superseded`/`NotOccupant`/failure it may be a restored live
         // replacement and is kept (#1703).
-        let unbound_policy = match &leave_result {
-            Ok(LeaveDisposition::Left(_) | LeaveDisposition::Suppressed { .. }) => {
-                waddle_sfu::UnboundOccupantPolicy::TearDown
-            }
+        // Only a FRESH pass counts as evidence: the janitor's redrive reuses
+        // the original attempt and can replay a retained receipt (an owed
+        // old-nick departure) while the full JID is live again under another
+        // nick.
+        let unbound_policy = match (&leave_result, sweep_recording) {
+            (
+                Ok(LeaveDisposition::Left(_) | LeaveDisposition::Suppressed { .. }),
+                SweepFailureRecording::RecordSweep,
+            ) => waddle_sfu::UnboundOccupantPolicy::TearDown,
             _ => waddle_sfu::UnboundOccupantPolicy::Keep,
         };
         match session {

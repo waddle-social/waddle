@@ -336,10 +336,17 @@ pub(crate) async fn run_local_muc_departure_sweep(state: &WebSocketState) {
                                     // media participant allocated until the
                                     // SFU's long timeout (#1647, codex
                                     // closing round).
+                                    // A retained retry may REPLAY an old departure
+                                    // receipt (an old-nick departure whose fan-out
+                                    // is still owed) while the same full JID is
+                                    // live again under another nick, so even a
+                                    // `Left` here is not evidence about the
+                                    // CURRENT registration: unbound ones are kept
+                                    // (#1703); only fresh confirmed asks tear down.
                                     match selector {
                                         LeaveSessionSelector::Generation(occupant) => {
                                             let _ = routes::websocket::muc_call_sfu::unregister_participant_from_room_if_occupant_matches(
-                                                state, &room, &jid, occupant, waddle_sfu::UnboundOccupantPolicy::TearDown, None,);
+                                                state, &room, &jid, occupant, waddle_sfu::UnboundOccupantPolicy::Keep, None,);
                                         }
                                         // Membership-authoritative departures (admin removals) keep the
                                         // ungated teardown: no connection owns them.
@@ -426,7 +433,7 @@ pub(crate) async fn run_local_muc_departure_sweep(state: &WebSocketState) {
                                     match selector {
                                         LeaveSessionSelector::Generation(occupant) => {
                                             let _ = routes::websocket::muc_call_sfu::unregister_participant_from_room_if_occupant_matches(
-                                                state, &room, &jid, occupant, waddle_sfu::UnboundOccupantPolicy::TearDown, None,);
+                                                state, &room, &jid, occupant, waddle_sfu::UnboundOccupantPolicy::Keep, None,);
                                         }
                                         // Membership-authoritative departures (admin removals) keep the
                                         // ungated teardown: no connection owns them.
@@ -584,7 +591,7 @@ pub(crate) async fn run_local_muc_departure_sweep(state: &WebSocketState) {
                             match selector {
                                 LeaveSessionSelector::Generation(occupant) => {
                                     let _ = routes::websocket::muc_call_sfu::unregister_participant_from_room_if_occupant_matches(
-                                        state, &room, &jid, occupant, waddle_sfu::UnboundOccupantPolicy::TearDown, None,);
+                                        state, &room, &jid, occupant, waddle_sfu::UnboundOccupantPolicy::Keep, None,);
                                 }
                                 // Membership-authoritative explicit departures keep the ungated
                                 // teardown: no connection owns them.
@@ -9469,6 +9476,64 @@ mod local_muc_departure_tests {
             state.deps.protocol.pending_local_muc_departures.len(),
             0,
             "the superseded explicit retry must converge"
+        );
+    }
+
+    /// A retained retry that the room answers `Left` is NOT evidence about
+    /// the current SFU registration (a retry can replay an owed old-nick
+    /// receipt while the same full JID is live under another nick), so an
+    /// unbound (restored) registration survives it.
+    #[tokio::test]
+    async fn retained_retry_left_keeps_an_unbound_sfu_registration() {
+        let recorder = Arc::new(RecordingSfu::default());
+        let state = create_test_websocket_state_with_sfu(recorder.clone()).await;
+        let room = room_jid("retry-left-unbound");
+        let jid = full_jid("alice@example.com/web");
+        let generation = OccupancySessionGeneration::mint();
+
+        let actor = create_room(state.as_ref(), &room).await;
+        let admission_revision = actor
+            .ask(GetSnapshot)
+            .await
+            .expect("initial snapshot")
+            .admission_revision;
+        actor
+            .ask(waddle_xmpp::muc::room_actor::JoinWithAffiliation {
+                sender_jid: jid.clone(),
+                nick: "alice".to_string(),
+                affiliation_grant: waddle_xmpp::muc::room_actor::JoinAffiliationGrant::Resolver(
+                    Affiliation::Member,
+                ),
+                local_domain: "example.com".to_string(),
+                admission_revision,
+                session: generation,
+            })
+            .await
+            .expect("join");
+        let call_id = waddle_sfu::CallId::new(room.to_string()).expect("call id");
+        let identity = waddle_sfu::Identity::from_jid(jid.clone());
+        recorder.register_call_participant(&call_id, &identity);
+        state.deps.protocol.pending_local_muc_departures.record(
+            crate::server::routes::websocket::LocalDepartureItem::RoomDeparture {
+                room: room.clone(),
+                jid: jid.clone(),
+                cause: OccupancyLeaveCause::Explicit,
+                selector: LeaveSessionSelector::Generation(generation),
+                attempt: waddle_xmpp::muc::room_actor::LeaveAttemptId::generate(),
+                notified: std::collections::HashSet::new(),
+            },
+        );
+
+        run_local_muc_departure_sweep(&state).await;
+
+        let snapshot = actor.ask(GetSnapshot).await.expect("snapshot after sweep");
+        assert!(
+            snapshot.room.find_occupant_by_real_jid(&jid).is_none(),
+            "the retained retry removes the occupancy"
+        );
+        assert!(
+            recorder.has_call_participant(&call_id, &identity),
+            "a retry's Left is not evidence about an unbound registration; it is kept"
         );
     }
 

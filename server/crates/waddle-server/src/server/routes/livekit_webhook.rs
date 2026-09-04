@@ -701,6 +701,7 @@ async fn process_participant_left_for_identity(
             &full_jid,
             observed_sids,
             None,
+            waddle_sfu::UnboundOccupantPolicy::Keep,
             None,
         )
         .await;

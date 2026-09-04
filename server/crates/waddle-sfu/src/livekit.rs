@@ -507,18 +507,20 @@ impl LiveKitTeardownExecutor {
                 return Ok(TeardownExecution::StaleGeneration);
             }
         }
-        // Same shape as the sid check above: a registration bound to a
-        // DIFFERENT generation proves a rejoin and blocks; a registration
-        // with no generation (restored after a restart) proves nothing and
-        // does not block — the local clear already applied the caller's
-        // unbound policy before this intent was minted.
+        // Unlike the sid check above this one FAILS CLOSED on an unbound
+        // registration: a durable occupant intent is old by construction
+        // (minted at the departure, executed after a retry or a restart),
+        // so a registration restored without a generation in the meantime
+        // may be the same user's live replacement whose media never dropped.
+        // Only an entry bound to EXACTLY the intent's generation — or no
+        // entry at all — lets the admin removal proceed; restored
+        // registrations converge through the reconcile backstop.
         if let Some(intent_occupant_session) = intent.occupant_session.as_ref() {
             let rebound = self.calls.get(call_id).is_some_and(|entry| {
-                entry.participants.get(identity).is_some_and(|state| {
-                    state
-                        .occupant_session
-                        .is_some_and(|bound| bound != *intent_occupant_session)
-                })
+                entry
+                    .participants
+                    .get(identity)
+                    .is_some_and(|state| state.occupant_session != Some(*intent_occupant_session))
             });
             if rebound {
                 return Ok(TeardownExecution::StaleGeneration);
