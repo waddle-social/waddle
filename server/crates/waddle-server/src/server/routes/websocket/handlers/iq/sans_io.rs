@@ -219,6 +219,7 @@ async fn handle_sans_io_iq_with_relay_override(
                         state,
                         &room_jid,
                         full_jid,
+                        Some(*conn_state.occupancy_session),
                         super::jingle_muji_gate::muji_session_terminate_session(iq).as_ref(),
                         relay_outcome,
                         IqReplyAddressing {
@@ -238,6 +239,7 @@ async fn handle_sans_io_iq_with_relay_override(
             domain,
             full_jid,
             media_capabilities,
+            occupant_session: Some(*conn_state.occupancy_session),
         };
         let muji_terminate_room = super::jingle_muji_gate::muji_session_terminate_room(iq);
         let events = state.deps.protocol.dispatcher.dispatch_iq(iq, &ctx);
@@ -270,6 +272,7 @@ async fn handle_sans_io_iq_with_relay_override(
                 &room_jid,
                 full_jid,
                 None,
+                Some(*conn_state.occupancy_session),
                 terminate_session.as_ref(),
             )
             .await;
@@ -822,6 +825,7 @@ async fn enqueue_muji_relay_teardown_fallback(
     state: &WebSocketState,
     room_jid: &jid::BareJid,
     departed: &jid::FullJid,
+    occupant: Option<waddle_xmpp_core::OccupancySessionGeneration>,
     session: Option<&waddle_sfu::SessionBinding>,
 ) -> Result<(), crate::call_teardown_outbox::CallTeardownOutboxError> {
     let call_id = match waddle_sfu::CallId::new(room_jid.to_string()) {
@@ -849,6 +853,7 @@ async fn enqueue_muji_relay_teardown_fallback(
                 participant_sid: None,
             },
             generation: None,
+            occupant,
             room_sid: None,
             session: session.cloned(),
         },
@@ -859,6 +864,7 @@ async fn enqueue_muji_relay_teardown_fallback(
                 participant_sid: None,
             },
             generation: None,
+            occupant,
             room_sid: None,
             session: session.cloned(),
         },
@@ -887,12 +893,14 @@ async fn fallback_muji_terminate_owner_cleanup_ack(
     state: &WebSocketState,
     room_jid: &jid::BareJid,
     departed: &jid::FullJid,
+    occupant: Option<waddle_xmpp_core::OccupancySessionGeneration>,
     session: Option<&waddle_sfu::SessionBinding>,
     reply: IqReplyAddressing<'_>,
 ) -> Vec<String> {
-    let persisted = enqueue_muji_relay_teardown_fallback(state, room_jid, departed, session).await;
+    let persisted =
+        enqueue_muji_relay_teardown_fallback(state, room_jid, departed, occupant, session).await;
     let _ = crate::server::routes::muc_muji_clear::clear_muji_presence_for_departure(
-        state, room_jid, departed, None, session,
+        state, room_jid, departed, None, occupant, session,
     )
     .await;
     if persisted.is_err() {
@@ -919,6 +927,7 @@ async fn resolve_muji_relay_outcome(
     state: &WebSocketState,
     room_jid: &jid::BareJid,
     departed: &jid::FullJid,
+    occupant: Option<waddle_xmpp_core::OccupancySessionGeneration>,
     session: Option<&waddle_sfu::SessionBinding>,
     outcome: MujiRelayOutcome,
     reply: IqReplyAddressing<'_>,
@@ -949,7 +958,7 @@ async fn resolve_muji_relay_outcome(
             }
             Some(
                 fallback_muji_terminate_owner_cleanup_ack(
-                    state, room_jid, departed, session, reply,
+                    state, room_jid, departed, occupant, session, reply,
                 )
                 .await,
             )
@@ -1307,11 +1316,17 @@ mod tests {
         let state = create_test_websocket_state_with_calls().await;
         let room: jid::BareJid = "general@muc.example.com".parse().expect("room JID");
         let alice: jid::FullJid = "alice@example.com/web".parse().expect("full JID");
-
+        let occupant = waddle_xmpp_core::OccupancySessionGeneration::mint();
         let session = waddle_sfu::SessionBinding::new("muji-fallback-sid").expect("binding");
-        super::enqueue_muji_relay_teardown_fallback(&state, &room, &alice, Some(&session))
-            .await
-            .expect("persist fallback intents");
+        super::enqueue_muji_relay_teardown_fallback(
+            &state,
+            &room,
+            &alice,
+            Some(occupant),
+            Some(&session),
+        )
+        .await
+        .expect("persist fallback intents");
 
         let jobs = state
             .deps
@@ -1320,7 +1335,7 @@ mod tests {
             .claim_due(8)
             .await
             .expect("claim fallback intents");
-        assert_eq!(jobs.len(), 2);
+        assert_eq!(jobs.len(), 2, "claimed fallback jobs: {jobs:#?}");
         assert!(jobs
             .iter()
             .any(|job| matches!(job.intent.target, TeardownTarget::MujiPresenceClear { .. })));
@@ -1328,6 +1343,7 @@ mod tests {
             .iter()
             .any(|job| matches!(job.intent.target, TeardownTarget::Participant { .. })));
         assert!(jobs.iter().all(|job| job.intent.generation.is_none()));
+        assert!(jobs.iter().all(|job| job.intent.occupant == Some(occupant)));
         assert!(jobs.iter().all(|job| job.intent.room_sid.is_none()));
     }
 
@@ -1342,10 +1358,12 @@ mod tests {
         let mut carbons = false;
         let mut roster = false;
         let mut blocklist = false;
+        let occupancy_session = waddle_xmpp_core::OccupancySessionGeneration::mint();
         let mut conn_state = super::IqConnState {
             carbons_enabled: &mut carbons,
             roster_interested: &mut roster,
             blocklist_interested: &mut blocklist,
+            occupancy_session: &occupancy_session,
             registry_owner: None,
             state_machine: None,
             ordered_relay_origin: None,
@@ -1395,7 +1413,7 @@ mod tests {
             .claim_due(8)
             .await
             .expect("claim fallback intents");
-        assert_eq!(jobs.len(), 2);
+        assert_eq!(jobs.len(), 2, "claimed fallback jobs: {jobs:#?}");
     }
 
     #[tokio::test]
@@ -1405,6 +1423,7 @@ mod tests {
         let room: jid::BareJid = "general@muc.example.com".parse().expect("room JID");
         let alice: jid::FullJid = "alice@example.com/web".parse().expect("full JID");
         let owner_session = create_test_server_owner_session(state.as_ref(), "alice").await;
+        let occupancy_session = waddle_xmpp_core::OccupancySessionGeneration::mint();
 
         let _ = handle_muc_join(
             state.as_ref(),
@@ -1413,7 +1432,10 @@ mod tests {
             &alice,
             "alice",
             None,
-            &Some(owner_session),
+            crate::server::routes::websocket::handlers::presence::MucJoinConnectionContext {
+                occupancy_session,
+                authenticated_session: &Some(owner_session),
+            },
         )
         .await;
         get_room_actor(state.as_ref(), &room)
@@ -1440,6 +1462,7 @@ mod tests {
             &state,
             &room,
             &alice,
+            Some(occupancy_session),
             Some(&session),
             super::MujiRelayOutcome::ProcessLocally {
                 enqueue_owner_cleanup: true,
@@ -1501,10 +1524,12 @@ mod tests {
             .expect("drop outbox table");
 
         let session = waddle_sfu::SessionBinding::new("muji-fallback-sid").expect("binding");
+        let occupancy_session = waddle_xmpp_core::OccupancySessionGeneration::mint();
         let frames = super::resolve_muji_relay_outcome(
             &state,
             &room,
             &alice,
+            Some(occupancy_session),
             Some(&session),
             super::MujiRelayOutcome::ProcessLocally {
                 enqueue_owner_cleanup: true,
@@ -1544,10 +1569,12 @@ mod tests {
         let mut carbons = false;
         let mut roster = false;
         let mut blocklist = false;
+        let occupancy_session = waddle_xmpp_core::OccupancySessionGeneration::mint();
         let conn_state = super::IqConnState {
             carbons_enabled: &mut carbons,
             roster_interested: &mut roster,
             blocklist_interested: &mut blocklist,
+            occupancy_session: &occupancy_session,
             registry_owner: None,
             state_machine: None,
             ordered_relay_origin: None,
@@ -1600,10 +1627,12 @@ mod tests {
         let mut carbons = false;
         let mut roster = false;
         let mut blocklist = false;
+        let occupancy_session = waddle_xmpp_core::OccupancySessionGeneration::mint();
         let conn_state = super::IqConnState {
             carbons_enabled: &mut carbons,
             roster_interested: &mut roster,
             blocklist_interested: &mut blocklist,
+            occupancy_session: &occupancy_session,
             registry_owner: None,
             state_machine: None,
             ordered_relay_origin: None,
@@ -1917,6 +1946,7 @@ mod tests {
         // Muji terminate handler, which rejects the unknown session
         // WITHOUT charging (the exact starvation scenario from review).
         let owner_session = create_test_server_owner_session(state.as_ref(), "alice").await;
+        let occupancy_session = waddle_xmpp_core::OccupancySessionGeneration::mint();
         let _ = handle_muc_join(
             state.as_ref(),
             "example.com",
@@ -1924,7 +1954,10 @@ mod tests {
             &alice,
             "alice",
             None,
-            &Some(owner_session),
+            crate::server::routes::websocket::handlers::presence::MucJoinConnectionContext {
+                occupancy_session,
+                authenticated_session: &Some(owner_session),
+            },
         )
         .await;
         let max_terminates =
@@ -2034,6 +2067,7 @@ mod tests {
             &state,
             &room,
             &alice,
+            None,
             None,
             super::MujiRelayOutcome::ProcessLocally {
                 enqueue_owner_cleanup: true,

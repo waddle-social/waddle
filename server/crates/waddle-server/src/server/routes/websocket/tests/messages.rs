@@ -1466,6 +1466,7 @@ async fn groupchat_personal_mention_pushes_affiliated_non_live_member() {
             affiliation_grant: JoinAffiliationGrant::Resolver(Affiliation::Member),
             local_domain: "example.com".to_string(),
             admission_revision: current_admission_revision(&room_actor).await,
+            session: waddle_xmpp_core::OccupancySessionGeneration::mint(),
         })
         .await
         .expect("join alice");
@@ -1554,6 +1555,7 @@ async fn groupchat_xep0513_occupant_id_mention_pushes_affiliated_member() {
             affiliation_grant: JoinAffiliationGrant::Resolver(Affiliation::Member),
             local_domain: "example.com".to_string(),
             admission_revision: current_admission_revision(&room_actor).await,
+            session: waddle_xmpp_core::OccupancySessionGeneration::mint(),
         })
         .await
         .expect("join alice");
@@ -1643,6 +1645,7 @@ async fn groupchat_xep0492_never_suppresses_personal_mentions_and_plain_messages
                 affiliation_grant: JoinAffiliationGrant::Resolver(Affiliation::Member),
                 local_domain: "example.com".to_string(),
                 admission_revision: current_admission_revision(&room_actor).await,
+                session: waddle_xmpp_core::OccupancySessionGeneration::mint(),
             })
             .await
             .expect("join alice");
@@ -1867,6 +1870,7 @@ async fn groupchat_public_default_suppresses_plain_push_until_always() {
                 affiliation_grant: JoinAffiliationGrant::Resolver(Affiliation::Member),
                 local_domain: "example.com".to_string(),
                 admission_revision: current_admission_revision(&room_actor).await,
+                session: waddle_xmpp_core::OccupancySessionGeneration::mint(),
             })
             .await
             .expect("join alice");
@@ -1977,6 +1981,7 @@ async fn groupchat_channel_mention_for_foreign_room_does_not_ping_current_room()
             affiliation_grant: JoinAffiliationGrant::Resolver(Affiliation::Member),
             local_domain: "example.com".to_string(),
             admission_revision: current_admission_revision(&room_actor).await,
+            session: waddle_xmpp_core::OccupancySessionGeneration::mint(),
         })
         .await
         .expect("join alice");
@@ -2074,6 +2079,7 @@ async fn groupchat_active_channel_mention_pushes_live_occupants_only() {
             affiliation_grant: JoinAffiliationGrant::Resolver(Affiliation::Admin),
             local_domain: "example.com".to_string(),
             admission_revision: current_admission_revision(&room_actor).await,
+            session: waddle_xmpp_core::OccupancySessionGeneration::mint(),
         })
         .await
         .expect("join alice");
@@ -2084,6 +2090,7 @@ async fn groupchat_active_channel_mention_pushes_live_occupants_only() {
             affiliation_grant: JoinAffiliationGrant::Resolver(Affiliation::Member),
             local_domain: "example.com".to_string(),
             admission_revision: current_admission_revision(&room_actor).await,
+            session: waddle_xmpp_core::OccupancySessionGeneration::mint(),
         })
         .await
         .expect("join bob");
@@ -2173,6 +2180,7 @@ async fn groupchat_active_channel_mention_does_not_expand_to_live_unaffiliated_o
             affiliation_grant: JoinAffiliationGrant::Resolver(Affiliation::Admin),
             local_domain: "example.com".to_string(),
             admission_revision: current_admission_revision(&room_actor).await,
+            session: waddle_xmpp_core::OccupancySessionGeneration::mint(),
         })
         .await
         .expect("join alice");
@@ -2183,6 +2191,7 @@ async fn groupchat_active_channel_mention_does_not_expand_to_live_unaffiliated_o
             affiliation_grant: JoinAffiliationGrant::Unaffiliated,
             local_domain: "example.com".to_string(),
             admission_revision: current_admission_revision(&room_actor).await,
+            session: waddle_xmpp_core::OccupancySessionGeneration::mint(),
         })
         .await
         .expect("join bob without durable affiliation");
@@ -2276,6 +2285,7 @@ async fn groupchat_active_channel_mention_preserves_notify_all_for_non_live_alwa
             affiliation_grant: JoinAffiliationGrant::Resolver(Affiliation::Admin),
             local_domain: "example.com".to_string(),
             admission_revision: current_admission_revision(&room_actor).await,
+            session: waddle_xmpp_core::OccupancySessionGeneration::mint(),
         })
         .await
         .expect("join alice");
@@ -2286,6 +2296,7 @@ async fn groupchat_active_channel_mention_preserves_notify_all_for_non_live_alwa
             affiliation_grant: JoinAffiliationGrant::Resolver(Affiliation::Member),
             local_domain: "example.com".to_string(),
             admission_revision: current_admission_revision(&room_actor).await,
+            session: waddle_xmpp_core::OccupancySessionGeneration::mint(),
         })
         .await
         .expect("join bob");
@@ -3540,6 +3551,7 @@ async fn handle_message_groupchat_rejects_client_authored_extension_envelope() {
             affiliation_grant: JoinAffiliationGrant::Resolver(Affiliation::Member),
             local_domain: "example.com".to_string(),
             admission_revision: current_admission_revision(&room_actor).await,
+            session: waddle_xmpp_core::OccupancySessionGeneration::mint(),
         })
         .await
         .expect("join alice");
@@ -3617,6 +3629,7 @@ async fn handle_message_groupchat_extension_envelope_preserves_non_occupant_erro
             affiliation_grant: JoinAffiliationGrant::Resolver(Affiliation::Member),
             local_domain: "example.com".to_string(),
             admission_revision: current_admission_revision(&room_actor).await,
+            session: waddle_xmpp_core::OccupancySessionGeneration::mint(),
         })
         .await
         .expect("join bob");
@@ -4988,10 +5001,12 @@ async fn inbox_query_requires_ready_phase() {
     let mut roster_interested = false;
     let mut blocklist_interested = false;
     let frame = r#"<iq xmlns='jabber:client' type='get' to='bob@example.com' id='inbox-prebind-1'><inbox xmlns='urn:xmpp:inbox:1'/></iq>"#;
+    let occupancy_session = waddle_xmpp_core::OccupancySessionGeneration::mint();
     let mut conn_state = IqConnState {
         carbons_enabled: &mut carbons_enabled,
         roster_interested: &mut roster_interested,
         blocklist_interested: &mut blocklist_interested,
+        occupancy_session: &occupancy_session,
         registry_owner: None,
         state_machine: None,
         ordered_relay_origin: None,
@@ -5122,6 +5137,7 @@ async fn groupchat_messages_are_archived_and_returned_via_mam() {
             affiliation_grant: JoinAffiliationGrant::Resolver(Affiliation::Member),
             local_domain: "example.com".to_string(),
             admission_revision: current_admission_revision(&room_actor).await,
+            session: waddle_xmpp_core::OccupancySessionGeneration::mint(),
         })
         .await
         .expect("join room");
@@ -5215,6 +5231,7 @@ async fn groupchat_preview_request_is_stamped_and_archived_without_private_paylo
             affiliation_grant: JoinAffiliationGrant::Resolver(Affiliation::Member),
             local_domain: "example.com".to_string(),
             admission_revision: current_admission_revision(&room_actor).await,
+            session: waddle_xmpp_core::OccupancySessionGeneration::mint(),
         })
         .await
         .expect("join room");

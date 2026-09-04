@@ -4,6 +4,7 @@ use crate::server::routes::websocket::WebSocketState;
 use std::sync::Arc;
 use std::time::Duration;
 use tracing::{debug, error, info, warn, Instrument};
+use waddle_xmpp::muc::room_actor::LeaveSessionSelector;
 use waddle_xmpp::telemetry::attributes::{Janitor, MetricAttribute, SweepOutcome};
 
 /// Named root span for one janitor sweep tick (#1483).
@@ -137,6 +138,7 @@ pub(crate) async fn run_local_muc_departure_sweep(state: &WebSocketState) {
             match item {
                 LocalDepartureItem::FullJidSweep {
                     jid,
+                    selector,
                     attempt,
                     remote_ceiling,
                 } => {
@@ -149,6 +151,7 @@ pub(crate) async fn run_local_muc_departure_sweep(state: &WebSocketState) {
                     match routes::websocket::redrive_local_muc_cleanup(
                         state,
                         &jid,
+                        selector,
                         attempt,
                         remote_ceiling,
                     )
@@ -170,6 +173,7 @@ pub(crate) async fn run_local_muc_departure_sweep(state: &WebSocketState) {
                                 .requeue_with_backoff(PendingLocalDeparture {
                                     item: LocalDepartureItem::FullJidSweep {
                                         jid,
+                                        selector,
                                         attempt,
                                         remote_ceiling,
                                     },
@@ -332,9 +336,21 @@ pub(crate) async fn run_local_muc_departure_sweep(state: &WebSocketState) {
                                     // media participant allocated until the
                                     // SFU's long timeout (#1647, codex
                                     // closing round).
-                                    routes::websocket::muc_call_sfu::unregister_participant_from_room(
-                                        state, &room, &jid,
-                                    );
+                                    match selector {
+                                        LeaveSessionSelector::Generation(occupant) => {
+                                            let _ = routes::websocket::muc_call_sfu::unregister_participant_from_room_if_occupant_matches(
+                                                state, &room, &jid, occupant, None,
+                                            );
+                                        }
+                                        // Membership-authoritative departures (admin removals) keep the
+                                        // ungated teardown: no connection owns them.
+                                        LeaveSessionSelector::Any
+                                        | LeaveSessionSelector::JoinedAtOrBefore(_) => {
+                                            routes::websocket::muc_call_sfu::unregister_participant_from_room_ungated(
+                                                state, &room, &jid,
+                                            );
+                                        }
+                                    }
                                     broadcast_muc_leave_to_remaining_resumable(
                                         state,
                                         &room,
@@ -408,9 +424,21 @@ pub(crate) async fn run_local_muc_departure_sweep(state: &WebSocketState) {
                                         }),
                                     )
                                     .await;
-                                    routes::websocket::muc_call_sfu::unregister_participant_from_room(
-                                        state, &room, &jid,
-                                    );
+                                    match selector {
+                                        LeaveSessionSelector::Generation(occupant) => {
+                                            let _ = routes::websocket::muc_call_sfu::unregister_participant_from_room_if_occupant_matches(
+                                                state, &room, &jid, occupant, None,
+                                            );
+                                        }
+                                        // Membership-authoritative departures (admin removals) keep the
+                                        // ungated teardown: no connection owns them.
+                                        LeaveSessionSelector::Any
+                                        | LeaveSessionSelector::JoinedAtOrBefore(_) => {
+                                            routes::websocket::muc_call_sfu::unregister_participant_from_room_ungated(
+                                                state, &room, &jid,
+                                            );
+                                        }
+                                    }
                                     let _ = maybe_evict_empty_room(state, &room, &outcome).await;
                                 }
                             }
@@ -480,10 +508,13 @@ pub(crate) async fn run_local_muc_departure_sweep(state: &WebSocketState) {
                                         room,
                                         jid,
                                         cause,
-                                        selector:
-                                            waddle_xmpp::muc::room_actor::LeaveSessionSelector::JoinedAtOrBefore(
-                                                watermark,
-                                            ),
+                                        selector: match selector {
+                                            LeaveSessionSelector::Generation(_) => selector,
+                                            LeaveSessionSelector::Any
+                                            | LeaveSessionSelector::JoinedAtOrBefore(_) => {
+                                                LeaveSessionSelector::JoinedAtOrBefore(watermark)
+                                            }
+                                        },
                                         attempt,
                                         notified: notified.clone(),
                                     },
@@ -545,9 +576,21 @@ pub(crate) async fn run_local_muc_departure_sweep(state: &WebSocketState) {
                                 .await;
                                 // Same idempotent teardown the immediate
                                 // explicit path performs.
-                                routes::websocket::muc_call_sfu::unregister_participant_from_room(
-                                    state, &room, &jid,
-                                );
+                                match selector {
+                                    LeaveSessionSelector::Generation(occupant) => {
+                                        let _ = routes::websocket::muc_call_sfu::unregister_participant_from_room_if_occupant_matches(
+                                            state, &room, &jid, occupant, None,
+                                        );
+                                    }
+                                    // Membership-authoritative departures (admin removals) keep the
+                                    // ungated teardown: no connection owns them.
+                                    LeaveSessionSelector::Any
+                                    | LeaveSessionSelector::JoinedAtOrBefore(_) => {
+                                        routes::websocket::muc_call_sfu::unregister_participant_from_room_ungated(
+                                            state, &room, &jid,
+                                        );
+                                    }
+                                }
                             }
                             crate::metrics::record_local_departure_retry(
                                 crate::metrics::LocalDepartureRetryOutcome::Completed,
@@ -603,6 +646,7 @@ pub(crate) async fn run_local_muc_departure_sweep(state: &WebSocketState) {
                     room,
                     jid,
                     cause,
+                    selector,
                     attempt,
                     notified,
                 } => {
@@ -614,7 +658,7 @@ pub(crate) async fn run_local_muc_departure_sweep(state: &WebSocketState) {
                         room,
                         jid,
                         cause,
-                        selector: waddle_xmpp::muc::room_actor::LeaveSessionSelector::Any,
+                        selector,
                         attempt,
                         notified,
                     };
@@ -1435,6 +1479,7 @@ pub(crate) async fn run_sm_expiry_sweep(state: &Arc<WebSocketState>) {
                     if routes::websocket::cleanup_muc_presence_for_jid_with_origin(
                         state,
                         &session.jid,
+                        LeaveSessionSelector::Generation(session.occupancy_session),
                         cleanup_origin,
                     )
                     .await
@@ -1445,8 +1490,12 @@ pub(crate) async fn run_sm_expiry_sweep(state: &Arc<WebSocketState>) {
                 }
                 #[cfg(not(feature = "clustering"))]
                 {
-                    if routes::websocket::cleanup_muc_presence_for_jid(state, &session.jid)
-                        .await
+                    if routes::websocket::cleanup_muc_presence_for_jid(
+                        state,
+                        &session.jid,
+                        LeaveSessionSelector::Generation(session.occupancy_session),
+                    )
+                    .await
                         == routes::websocket::MucCleanupOutcome::Failed
                     {
                         sweep_failed = true;
@@ -1570,6 +1619,182 @@ mod sm_retry_budget_tests {
 
         assert!(!completed);
         assert!(release_polled.load(std::sync::atomic::Ordering::SeqCst));
+    }
+}
+
+#[cfg(test)]
+mod sm_expiry_tests {
+    use super::run_sm_expiry_sweep;
+    use crate::server::routes::websocket::tests::{
+        create_test_websocket_state, register_test_connection, snapshot_room,
+    };
+    use jid::{BareJid, FullJid};
+    use tokio::sync::mpsc;
+    use waddle_xmpp::muc::room_actor::{GetSnapshot, JoinAffiliationGrant, JoinWithAffiliation};
+    use waddle_xmpp::muc::room_registry_actor::CreateRoom;
+    use waddle_xmpp::muc::RoomConfig;
+    use waddle_xmpp::stream_management::{DetachedSession, ShadowOrdinal, SmSessionRegistry};
+    use waddle_xmpp::Affiliation;
+    use waddle_xmpp_core::OccupancySessionGeneration;
+
+    fn room(local: &str) -> BareJid {
+        format!("{local}@muc.example.com")
+            .parse()
+            .expect("room jid")
+    }
+
+    fn full_jid(value: &str) -> FullJid {
+        value.parse().expect("full jid")
+    }
+
+    fn expired_detached_session(
+        stream_id: &str,
+        jid: FullJid,
+        occupancy_session: OccupancySessionGeneration,
+    ) -> DetachedSession {
+        DetachedSession {
+            stream_id: stream_id.to_string(),
+            user_id: jid.to_bare().to_string(),
+            jid,
+            occupancy_session,
+            inbound_count: 0,
+            shadow_ordinal: ShadowOrdinal::ZERO,
+            outbound_count: 0,
+            last_acked: 0,
+            replay_gap_through: None,
+            unacked_stanzas: Vec::new(),
+            max_resume_time: Some(0),
+            detached_at: std::time::Instant::now(),
+            carbons_enabled: false,
+            roster_interested: false,
+            blocklist_interested: false,
+            presence_available: false,
+            presence_show: None,
+            presence_status: None,
+            presence_priority: 0,
+            presence_payloads: Vec::new(),
+            pending_subscribes_flushed: false,
+        }
+    }
+
+    async fn join_member_with_generation(
+        state: &crate::server::routes::websocket::WebSocketState,
+        room_jid: &BareJid,
+        jid: &FullJid,
+        nick: &str,
+        generation: OccupancySessionGeneration,
+    ) {
+        let actor = match state
+            .deps
+            .protocol
+            .room_registry
+            .ask(waddle_xmpp::muc::room_registry_actor::GetRoom {
+                room_jid: room_jid.clone(),
+            })
+            .await
+            .expect("get room")
+        {
+            Some(actor) => actor,
+            None => state
+                .deps
+                .protocol
+                .room_registry
+                .ask(CreateRoom {
+                    room_jid: room_jid.clone(),
+                    waddle_id: "w".to_string(),
+                    channel_id: "c".to_string(),
+                    config: RoomConfig::default(),
+                })
+                .await
+                .expect("create room"),
+        };
+        let admission_revision = actor
+            .ask(GetSnapshot)
+            .await
+            .expect("snapshot before join")
+            .admission_revision;
+        actor
+            .ask(JoinWithAffiliation {
+                sender_jid: jid.clone(),
+                nick: nick.to_string(),
+                affiliation_grant: JoinAffiliationGrant::Resolver(Affiliation::Member),
+                local_domain: "example.com".to_string(),
+                admission_revision,
+                session: generation,
+            })
+            .await
+            .expect("join occupant");
+    }
+
+    #[tokio::test]
+    async fn sm_expiry_generation_keeps_a_same_full_jid_replacement_occupancy() {
+        let state = create_test_websocket_state().await;
+        let room_jid = room("sm-expiry-replacement");
+        let jid = full_jid("alice@example.com/web");
+        let first_generation = OccupancySessionGeneration::mint();
+        let second_generation = OccupancySessionGeneration::mint();
+
+        join_member_with_generation(state.as_ref(), &room_jid, &jid, "alice", first_generation)
+            .await;
+        let (tx, _rx) = mpsc::channel(4);
+        register_test_connection(state.as_ref(), &jid, tx).await;
+        join_member_with_generation(state.as_ref(), &room_jid, &jid, "alice", second_generation)
+            .await;
+
+        state
+            .deps
+            .protocol
+            .sm_session_registry
+            .store_session(expired_detached_session(
+                "expired-g1",
+                jid.clone(),
+                first_generation,
+            ))
+            .await
+            .expect("store detached session");
+
+        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        run_sm_expiry_sweep(&state).await;
+
+        let snapshot = snapshot_room(state.as_ref(), &room_jid).await;
+        assert!(
+            snapshot.room.find_occupant_by_real_jid(&jid).is_some(),
+            "the replacement occupant must remain after expiring the detached g1 session"
+        );
+        assert!(
+            state.deps.protocol.connection_registry.is_connected(&jid),
+            "the replacement connection must remain registered"
+        );
+    }
+
+    #[tokio::test]
+    async fn sm_expiry_generation_without_replacement_removes_the_old_occupancy() {
+        let state = create_test_websocket_state().await;
+        let room_jid = room("sm-expiry-no-replacement");
+        let jid = full_jid("alice@example.com/web");
+        let generation = OccupancySessionGeneration::mint();
+
+        join_member_with_generation(state.as_ref(), &room_jid, &jid, "alice", generation).await;
+        state
+            .deps
+            .protocol
+            .sm_session_registry
+            .store_session(expired_detached_session(
+                "expired-no-replacement",
+                jid.clone(),
+                generation,
+            ))
+            .await
+            .expect("store detached session");
+
+        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        run_sm_expiry_sweep(&state).await;
+
+        let snapshot = snapshot_room(state.as_ref(), &room_jid).await;
+        assert!(
+            snapshot.room.find_occupant_by_real_jid(&jid).is_none(),
+            "without a replacement the expired detached session must be cleaned from the room"
+        );
     }
 }
 
@@ -8167,6 +8392,7 @@ mod room_dormancy_tests {
                 affiliation_grant: JoinAffiliationGrant::Resolver(Affiliation::Member),
                 local_domain: "example.com".to_string(),
                 admission_revision: 0,
+                session: waddle_xmpp_core::OccupancySessionGeneration::mint(),
             })
             .await
             .expect("resolver-derived member join");
@@ -8231,6 +8457,7 @@ mod room_dormancy_tests {
                 affiliation_grant: JoinAffiliationGrant::Resolver(Affiliation::Member),
                 local_domain: "example.com".to_string(),
                 admission_revision: 0,
+                session: waddle_xmpp_core::OccupancySessionGeneration::mint(),
             })
             .await
             .expect("first join");
@@ -8283,6 +8510,7 @@ mod room_dormancy_tests {
                 affiliation_grant: JoinAffiliationGrant::Resolver(Affiliation::Member),
                 local_domain: "example.com".to_string(),
                 admission_revision: 0,
+                session: waddle_xmpp_core::OccupancySessionGeneration::mint(),
             })
             .await
             .expect("rejoin after eviction");
@@ -9112,6 +9340,7 @@ mod local_muc_departure_tests {
                 ),
                 local_domain: "example.com".to_string(),
                 admission_revision: before.admission_revision,
+                session: waddle_xmpp_core::OccupancySessionGeneration::mint(),
             })
             .await
             .expect("replacement rejoin");
@@ -9657,6 +9886,7 @@ mod local_muc_departure_tests {
             room: room.clone(),
             jid: alice.clone(),
             cause: OccupancyLeaveCause::Explicit,
+            selector: LeaveSessionSelector::Any,
             attempt,
             notified: std::collections::HashSet::new(),
         };
@@ -9731,6 +9961,7 @@ mod local_muc_departure_tests {
             room: room.clone(),
             jid: alice.clone(),
             cause: OccupancyLeaveCause::Explicit,
+            selector: LeaveSessionSelector::Any,
             attempt,
             notified: std::collections::HashSet::new(),
         };
@@ -9760,6 +9991,7 @@ mod local_muc_departure_tests {
                 room: room.clone(),
                 jid: alice.clone(),
                 cause: OccupancyLeaveCause::Explicit,
+                selector: LeaveSessionSelector::Any,
                 attempt: waddle_xmpp::muc::room_actor::LeaveAttemptId::generate(),
                 notified: std::collections::HashSet::new(),
             });
@@ -9807,6 +10039,7 @@ mod local_muc_departure_tests {
             room: room.clone(),
             jid: alice.clone(),
             cause: OccupancyLeaveCause::Explicit,
+            selector: LeaveSessionSelector::Any,
             attempt,
             notified: std::collections::HashSet::new(),
         };
@@ -9900,6 +10133,7 @@ mod local_muc_departure_tests {
             room: room.clone(),
             jid: alice.clone(),
             cause: OccupancyLeaveCause::Disconnect,
+            selector: LeaveSessionSelector::Any,
             attempt,
             notified: std::collections::HashSet::new(),
         };
@@ -10235,6 +10469,7 @@ mod local_muc_departure_tests {
                     .await
                     .expect("snapshot before rejoin")
                     .admission_revision,
+                session: waddle_xmpp_core::OccupancySessionGeneration::mint(),
             })
             .await
             .expect("replacement rejoin");
@@ -10289,6 +10524,62 @@ mod local_muc_departure_tests {
             "the newest watermark must remove the rejoined session"
         );
         assert_eq!(state.deps.protocol.pending_local_muc_departures.len(), 0);
+    }
+
+    #[tokio::test]
+    async fn deferred_generation_retry_preserves_the_occupant_selector() {
+        let store = JanitorProjectionStore::new();
+        let state = clustered_state_with_store(store.clone()).await;
+        let room = room_jid("deferred-generation-selector");
+        let alice = full_jid("alice@example.com/web");
+        let actor = create_room(state.as_ref(), &room).await;
+        let generation = waddle_xmpp_core::OccupancySessionGeneration::mint();
+        let admission_revision = actor
+            .ask(GetSnapshot)
+            .await
+            .expect("snapshot before join")
+            .admission_revision;
+        actor
+            .ask(waddle_xmpp::muc::room_actor::JoinWithAffiliation {
+                sender_jid: alice.clone(),
+                nick: "alice".to_string(),
+                affiliation_grant: waddle_xmpp::muc::room_actor::JoinAffiliationGrant::Resolver(
+                    Affiliation::Member,
+                ),
+                local_domain: "example.com".to_string(),
+                admission_revision,
+                session: generation,
+            })
+            .await
+            .expect("join occupant");
+
+        store.set_leave_mode(LeaveProjectionMode::OwnershipUnavailable);
+        state.deps.protocol.pending_local_muc_departures.record(
+            crate::server::routes::websocket::LocalDepartureItem::RoomDeparture {
+                room,
+                jid: alice,
+                cause: OccupancyLeaveCause::Disconnect,
+                selector: LeaveSessionSelector::Generation(generation),
+                attempt: waddle_xmpp::muc::room_actor::LeaveAttemptId::generate(),
+                notified: std::collections::HashSet::new(),
+            },
+        );
+
+        run_local_muc_departure_sweep(&state).await;
+
+        let retained = state
+            .deps
+            .protocol
+            .pending_local_muc_departures
+            .take_due(std::time::Instant::now() + std::time::Duration::from_secs(60));
+        assert_eq!(retained.len(), 1);
+        assert!(matches!(
+            retained[0].item,
+            crate::server::routes::websocket::LocalDepartureItem::RoomDeparture {
+                selector: LeaveSessionSelector::Generation(found),
+                ..
+            } if found == generation
+        ));
     }
 
     /// #1647 (codex round 27): one inventory entry can stand for several owed
@@ -10411,6 +10702,7 @@ mod local_muc_departure_tests {
         state.deps.protocol.pending_local_muc_departures.record(
             crate::server::routes::websocket::LocalDepartureItem::FullJidSweep {
                 jid: jid.clone(),
+                selector: LeaveSessionSelector::Any,
                 attempt,
                 remote_ceiling: u64::MAX,
             },
@@ -10769,6 +11061,7 @@ mod local_muc_departure_tests {
         state.deps.protocol.pending_local_muc_departures.record(
             crate::server::routes::websocket::LocalDepartureItem::FullJidSweep {
                 jid: jid.clone(),
+                selector: LeaveSessionSelector::Any,
                 attempt,
                 remote_ceiling: u64::MAX,
             },
@@ -10814,6 +11107,7 @@ mod local_muc_departure_tests {
             .record(
                 crate::server::routes::websocket::LocalDepartureItem::FullJidSweep {
                     jid: jid.clone(),
+                    selector: LeaveSessionSelector::Any,
                     attempt: waddle_xmpp::muc::room_actor::LeaveAttemptId::generate(),
                     remote_ceiling: u64::MAX,
                 },
@@ -10856,6 +11150,7 @@ mod local_muc_departure_tests {
                 // that postdates it.
                 item: crate::server::routes::websocket::LocalDepartureItem::FullJidSweep {
                     jid: jid.clone(),
+                    selector: LeaveSessionSelector::Any,
                     attempt: waddle_xmpp::muc::room_actor::LeaveAttemptId::generate(),
                     remote_ceiling: u64::MAX,
                 },

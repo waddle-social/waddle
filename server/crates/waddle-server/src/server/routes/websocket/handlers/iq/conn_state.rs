@@ -2,6 +2,7 @@ pub struct IqConnState<'a> {
     pub carbons_enabled: &'a mut bool,
     pub roster_interested: &'a mut bool,
     pub blocklist_interested: &'a mut bool,
+    pub occupancy_session: &'a waddle_xmpp_core::OccupancySessionGeneration,
     pub registry_owner: Option<&'a std::sync::Arc<std::sync::atomic::AtomicBool>>,
     /// Per-connection [`waddle_xmpp::protocol::XmppStateMachine`].
     /// Required so XEP-0191 block/unblock IQs can mirror their

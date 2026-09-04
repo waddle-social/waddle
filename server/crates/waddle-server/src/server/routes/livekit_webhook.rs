@@ -429,6 +429,7 @@ async fn enqueue_muji_room_sweep(
             room_jid: room_jid.clone(),
         },
         generation: None,
+        occupant: None,
         room_sid: Some(room_sid.clone()),
         session: None,
     };
@@ -694,9 +695,15 @@ async fn process_participant_left_for_identity(
         }
     };
     if let Ok(room_jid) = room_name.parse::<BareJid>() {
-        let outcome =
-            clear_muji_presence_for_departure(state, &room_jid, &full_jid, observed_sids, None)
-                .await;
+        let outcome = clear_muji_presence_for_departure(
+            state,
+            &room_jid,
+            &full_jid,
+            observed_sids,
+            None,
+            None,
+        )
+        .await;
         if outcome == WebhookEffectOutcome::Stale {
             increment_call_teardown_stale_dropped();
         }
@@ -1289,6 +1296,7 @@ mod tests {
         .await;
         let room_jid: BareJid = "retryable@muc.example.com".parse().expect("room JID");
         let alice: FullJid = "alice@example.com/web".parse().expect("full JID");
+        let alice_occupancy_session = waddle_xmpp_core::OccupancySessionGeneration::mint();
         crate::server::routes::websocket::handlers::presence::handle_muc_join(
             retry_state.as_ref(),
             "example.com",
@@ -1296,7 +1304,10 @@ mod tests {
             &alice,
             "alice",
             None,
-            &Some(session),
+            crate::server::routes::websocket::handlers::presence::MucJoinConnectionContext {
+                occupancy_session: alice_occupancy_session,
+                authenticated_session: &Some(session),
+            },
         )
         .await;
         let retry_secret = retry_state
@@ -1700,6 +1711,7 @@ mod tests {
         .await;
         let room_jid: BareJid = "grants-here@muc.example.com".parse().expect("room jid");
         let alice: FullJid = "alice@example.com/web".parse().expect("full jid");
+        let alice_occupancy_session = waddle_xmpp_core::OccupancySessionGeneration::mint();
         crate::server::routes::websocket::handlers::presence::handle_muc_join(
             state.as_ref(),
             "example.com",
@@ -1707,7 +1719,10 @@ mod tests {
             &alice,
             "alice",
             None,
-            &Some(session),
+            crate::server::routes::websocket::handlers::presence::MucJoinConnectionContext {
+                occupancy_session: alice_occupancy_session,
+                authenticated_session: &Some(session),
+            },
         )
         .await;
 
@@ -1750,6 +1765,7 @@ mod tests {
         .await;
         let room_jid: BareJid = "evictions@muc.example.com".parse().expect("room jid");
         let alice: FullJid = "alice@example.com/web".parse().expect("full jid");
+        let alice_occupancy_session = waddle_xmpp_core::OccupancySessionGeneration::mint();
         crate::server::routes::websocket::handlers::presence::handle_muc_join(
             state.as_ref(),
             "example.com",
@@ -1757,7 +1773,10 @@ mod tests {
             &alice,
             "alice",
             None,
-            &Some(session),
+            crate::server::routes::websocket::handlers::presence::MucJoinConnectionContext {
+                occupancy_session: alice_occupancy_session,
+                authenticated_session: &Some(session),
+            },
         )
         .await;
         let bob: FullJid = "bob@example.com/phone".parse().expect("full jid");
@@ -2078,6 +2097,7 @@ mod tests {
             Some(ParticipantSid::new("PA_current").expect("participant sid")),
         );
 
+        let alice_occupancy_session = waddle_xmpp_core::OccupancySessionGeneration::mint();
         crate::server::routes::websocket::handlers::presence::handle_muc_join(
             state.as_ref(),
             "example.com",
@@ -2085,7 +2105,10 @@ mod tests {
             &alice,
             "alice",
             None,
-            &Some(session),
+            crate::server::routes::websocket::handlers::presence::MucJoinConnectionContext {
+                occupancy_session: alice_occupancy_session,
+                authenticated_session: &Some(session),
+            },
         )
         .await;
         get_room_actor(state.as_ref(), &room_jid)
@@ -2230,6 +2253,7 @@ mod tests {
         let session = create_test_server_owner_session(state.as_ref(), "alice").await;
         let room_jid: BareJid = "stale-sid@muc.example.com".parse().expect("room jid");
         let alice: FullJid = "alice@example.com/web".parse().expect("full jid");
+        let alice_occupancy_session = waddle_xmpp_core::OccupancySessionGeneration::mint();
         crate::server::routes::websocket::handlers::presence::handle_muc_join(
             state.as_ref(),
             "example.com",
@@ -2237,7 +2261,10 @@ mod tests {
             &alice,
             "alice",
             None,
-            &Some(session),
+            crate::server::routes::websocket::handlers::presence::MucJoinConnectionContext {
+                occupancy_session: alice_occupancy_session,
+                authenticated_session: &Some(session),
+            },
         )
         .await;
         let observed_sids = ObservedCallSids {

@@ -857,6 +857,7 @@ mod tests {
                 affiliation_grant: JoinAffiliationGrant::Resolver(waddle_xmpp::Affiliation::Member),
                 local_domain: "example.com".to_string(),
                 admission_revision: 0,
+                session: waddle_xmpp_core::OccupancySessionGeneration::mint(),
             })
             .await
             .expect("join occupant");

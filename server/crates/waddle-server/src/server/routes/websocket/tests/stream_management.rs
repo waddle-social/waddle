@@ -5,7 +5,7 @@ use super::super::{
     },
     frame::{handle_xmpp_frame, settle_inbound_dispatch},
     frame_backstop::InboundDisposition,
-    handlers::{self, presence::handle_muc_join},
+    handlers,
     interpret_loop::build_interpret_deps,
     replay::drive_interpret_loop,
     state::{WsConnState, TERMINAL_RECOVERY_QUEUE_CAP},
@@ -16,9 +16,10 @@ use super::{
     create_test_server_owner_session, create_test_session, create_test_websocket_state,
     create_test_websocket_state_with_sm_registry,
     create_test_websocket_state_with_sm_registry_and_pending_storage,
-    create_test_websocket_state_with_sm_registry_pending_and_blocking, message_frame_xml_with_id,
-    register_test_connection, register_test_native_user, scram_client_final_from_challenge,
-    snapshot_room, store_resumable_detached_session,
+    create_test_websocket_state_with_sm_registry_pending_and_blocking, handle_muc_join,
+    handle_muc_join_with_occupancy_session, message_frame_xml_with_id, register_test_connection,
+    register_test_native_user, scram_client_final_from_challenge, snapshot_room,
+    store_resumable_detached_session,
 };
 use crate::auth::Session;
 use base64::{engine::general_purpose::STANDARD as BASE64_STANDARD, Engine as _};
@@ -8395,15 +8396,16 @@ async fn cleanup_shutdown_does_not_detach_explicit_close() {
     let owner_session = create_test_server_owner_session(state.as_ref(), "alice").await;
     let room_jid: BareJid = "closing-channel@muc.example.com".parse().expect("room");
     let jid: FullJid = "alice@example.com/web".parse().expect("jid");
+    let mut conn = WsConnState::new();
 
-    let _ = handle_muc_join(
+    let _ = handle_muc_join_with_occupancy_session(
         state.as_ref(),
         "example.com",
         &room_jid,
         &jid,
         "alice",
         None,
-        &Some(owner_session.clone()),
+        (conn.occupancy_session, &Some(owner_session.clone())),
     )
     .await;
     let (tx, mut rx) = mpsc::channel::<OutboundStanza>(4);
@@ -8413,7 +8415,6 @@ async fn cleanup_shutdown_does_not_detach_explicit_close() {
         .connection_registry
         .register(jid.clone(), tx);
 
-    let mut conn = WsConnState::new();
     conn.phase = ConnectionPhase::ready(jid.clone(), false);
     conn.authenticated_session = Some(owner_session.clone());
     conn.registry_owner = Some(owner);
@@ -8636,21 +8637,21 @@ async fn terminal_cleanup_without_replacement_still_tears_down_room_membership()
         .parse()
         .expect("room");
     let jid: FullJid = "alice@example.com/web".parse().expect("jid");
+    let mut conn = WsConnState::new();
 
-    let _ = handle_muc_join(
+    let _ = handle_muc_join_with_occupancy_session(
         state.as_ref(),
         "example.com",
         &room_jid,
         &jid,
         "alice",
         None,
-        &Some(owner_session),
+        (conn.occupancy_session, &Some(owner_session)),
     )
     .await;
 
     let (tx, mut rx) = mpsc::channel::<OutboundStanza>(4);
     let owner = super::register_test_connection(state.as_ref(), &jid, tx).await;
-    let mut conn = WsConnState::new();
     conn.phase = ConnectionPhase::ready(jid.clone(), false);
     conn.registry_owner = Some(owner);
     conn.sm_state.enable(
@@ -8720,16 +8721,17 @@ async fn sm_janitor_helper_drains_expired_and_cleans_muc() {
     let owner_session = create_test_server_owner_session(state.as_ref(), "alice").await;
     let room_jid: BareJid = "expired-channel@muc.example.com".parse().expect("room");
     let jid: FullJid = "alice@example.com/web".parse().expect("jid");
+    let occupancy_session = waddle_xmpp_core::OccupancySessionGeneration::mint();
 
     // Put alice in the room, as if she'd detached with SM.
-    let _ = handle_muc_join(
+    let _ = handle_muc_join_with_occupancy_session(
         state.as_ref(),
         "example.com",
         &room_jid,
         &jid,
         "alice",
         None,
-        &Some(owner_session.clone()),
+        (occupancy_session, &Some(owner_session.clone())),
     )
     .await;
     assert!(snapshot_room(state.as_ref(), &room_jid)
@@ -8748,7 +8750,7 @@ async fn sm_janitor_helper_drains_expired_and_cleans_muc() {
             stream_id: stream_id.clone(),
             user_id: "alice@example.com".to_string(),
             jid: jid.clone(),
-            occupancy_session: waddle_xmpp_core::OccupancySessionGeneration::mint(),
+            occupancy_session,
             inbound_count: 0,
             shadow_ordinal: waddle_xmpp::stream_management::ShadowOrdinal::ZERO,
             outbound_count: 0,
@@ -8789,7 +8791,14 @@ async fn sm_janitor_helper_drains_expired_and_cleans_muc() {
         .protocol
         .connection_registry
         .unregister(&drained[0].jid);
-    cleanup_muc_presence_for_jid(state.as_ref(), &drained[0].jid).await;
+    cleanup_muc_presence_for_jid(
+        state.as_ref(),
+        &drained[0].jid,
+        waddle_xmpp::muc::room_actor::LeaveSessionSelector::Generation(
+            drained[0].occupancy_session,
+        ),
+    )
+    .await;
 
     assert!(
         snapshot_room(state.as_ref(), &room_jid)

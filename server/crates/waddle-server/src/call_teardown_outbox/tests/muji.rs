@@ -24,14 +24,14 @@ async fn unfenced_muji_presence_clear_rejoin_is_skipped_and_preserves_room_muji_
     let call_id = CallId::new(room_jid.to_string()).expect("call id");
     let identity = Identity::from_jid(alice.clone());
 
-    let _ = handle_muc_join(
+    let _ = handle_muc_join_with_occupancy_session(
         state.as_ref(),
         "example.com",
         &room_jid,
         &alice,
         "alice",
         None,
-        &Some(owner_session.clone()),
+        (occupant_generation(), &Some(owner_session.clone())),
     )
     .await;
     get_room_actor(state.as_ref(), &room_jid)
@@ -60,6 +60,7 @@ async fn unfenced_muji_presence_clear_rejoin_is_skipped_and_preserves_room_muji_
                     participant_sid: None,
                 },
                 generation: None,
+                occupant: None,
                 room_sid: None,
                 session: None,
             },
@@ -109,14 +110,14 @@ async fn unfenced_muji_presence_clear_without_live_registration_still_clears_roo
     let alice: FullJid = "alice@example.com/web".parse().expect("alice jid");
     let call_id = CallId::new(room_jid.to_string()).expect("call id");
 
-    let _ = handle_muc_join(
+    let _ = handle_muc_join_with_occupancy_session(
         state.as_ref(),
         "example.com",
         &room_jid,
         &alice,
         "alice",
         None,
-        &Some(owner_session.clone()),
+        (occupant_generation(), &Some(owner_session.clone())),
     )
     .await;
     get_room_actor(state.as_ref(), &room_jid)
@@ -142,6 +143,7 @@ async fn unfenced_muji_presence_clear_without_live_registration_still_clears_roo
                 participant_sid: None,
             },
             generation: None,
+            occupant: None,
             room_sid: None,
             session: None,
         })
@@ -199,14 +201,14 @@ async fn sid_fenced_muji_presence_clear_stale_rejoin_preserves_room_muji_state_a
         Some(ParticipantSid::new("PA_current").expect("participant sid")),
     );
 
-    let _ = handle_muc_join(
+    let _ = handle_muc_join_with_occupancy_session(
         state.as_ref(),
         "example.com",
         &room_jid,
         &alice,
         "alice",
         None,
-        &Some(owner_session.clone()),
+        (occupant_generation(), &Some(owner_session.clone())),
     )
     .await;
     get_room_actor(state.as_ref(), &room_jid)
@@ -244,6 +246,7 @@ async fn sid_fenced_muji_presence_clear_stale_rejoin_preserves_room_muji_state_a
                 participant_sid: old_sids.participant_sid.clone(),
             },
             generation: None,
+            occupant: None,
             room_sid: old_sids.room_sid.clone(),
             session: None,
         })
@@ -300,14 +303,14 @@ async fn sid_fenced_muji_presence_clear_matching_sid_still_clears_room_muji_stat
         Some(ParticipantSid::new("PA_match").expect("participant sid")),
     );
 
-    let _ = handle_muc_join(
+    let _ = handle_muc_join_with_occupancy_session(
         state.as_ref(),
         "example.com",
         &room_jid,
         &alice,
         "alice",
         None,
-        &Some(owner_session.clone()),
+        (occupant_generation(), &Some(owner_session.clone())),
     )
     .await;
     get_room_actor(state.as_ref(), &room_jid)
@@ -337,6 +340,7 @@ async fn sid_fenced_muji_presence_clear_matching_sid_still_clears_room_muji_stat
                 participant_sid: observed_sids.participant_sid.clone(),
             },
             generation: None,
+            occupant: None,
             room_sid: observed_sids.room_sid.clone(),
             session: None,
         })
@@ -392,14 +396,14 @@ async fn muji_room_sweep_clears_owner_local_participants_with_matching_room_sid(
         Some(ParticipantSid::new("PA_sweep").expect("participant sid")),
     );
 
-    let _ = handle_muc_join(
+    let _ = handle_muc_join_with_occupancy_session(
         state.as_ref(),
         "example.com",
         &room_jid,
         &alice,
         "alice",
         None,
-        &Some(owner_session.clone()),
+        (occupant_generation(), &Some(owner_session.clone())),
     )
     .await;
     get_room_actor(state.as_ref(), &room_jid)
@@ -427,6 +431,7 @@ async fn muji_room_sweep_clears_owner_local_participants_with_matching_room_sid(
                 room_jid: room_jid.clone(),
             },
             generation: None,
+            occupant: None,
             room_sid: observed_sids.room_sid.clone(),
             session: None,
         })
@@ -476,14 +481,14 @@ async fn muji_room_sweep_clears_actor_advertisement_absent_from_sfu_registry() {
     let alice: FullJid = "alice@example.com/web".parse().expect("alice jid");
     let call_id = CallId::new(room_jid.to_string()).expect("call id");
 
-    let _ = handle_muc_join(
+    let _ = handle_muc_join_with_occupancy_session(
         state.as_ref(),
         "example.com",
         &room_jid,
         &alice,
         "alice",
         None,
-        &Some(owner_session.clone()),
+        (occupant_generation(), &Some(owner_session.clone())),
     )
     .await;
     get_room_actor(state.as_ref(), &room_jid)
@@ -511,6 +516,7 @@ async fn muji_room_sweep_clears_actor_advertisement_absent_from_sfu_registry() {
                 room_jid: room_jid.clone(),
             },
             generation: None,
+            occupant: None,
             room_sid: Some(RoomSid::new("RM_actor_only").expect("room sid")),
             session: None,
         })
@@ -557,14 +563,14 @@ async fn muji_room_sweep_retries_when_the_owned_actor_disappears_before_enumerat
         .expect("room jid");
     let alice: FullJid = "alice@example.com/web".parse().expect("alice jid");
 
-    let _ = handle_muc_join(
+    let _ = handle_muc_join_with_occupancy_session(
         state.as_ref(),
         "example.com",
         &room_jid,
         &alice,
         "alice",
         None,
-        &Some(owner_session),
+        (occupant_generation(), &Some(owner_session)),
     )
     .await;
     get_room_actor(state.as_ref(), &room_jid)
@@ -582,6 +588,7 @@ async fn muji_room_sweep_retries_when_the_owned_actor_disappears_before_enumerat
                 room_jid: room_jid.clone(),
             },
             generation: None,
+            occupant: None,
             room_sid: Some(RoomSid::new("RM_actor_race").expect("room sid")),
             session: None,
         })
@@ -629,14 +636,14 @@ async fn muji_room_sweep_stale_room_sid_preserves_room_muji_state_and_counts_onc
         Some(ParticipantSid::new("PA_current").expect("participant sid")),
     );
 
-    let _ = handle_muc_join(
+    let _ = handle_muc_join_with_occupancy_session(
         state.as_ref(),
         "example.com",
         &room_jid,
         &alice,
         "alice",
         None,
-        &Some(owner_session.clone()),
+        (occupant_generation(), &Some(owner_session.clone())),
     )
     .await;
     get_room_actor(state.as_ref(), &room_jid)
@@ -664,6 +671,7 @@ async fn muji_room_sweep_stale_room_sid_preserves_room_muji_state_and_counts_onc
                 room_jid: room_jid.clone(),
             },
             generation: None,
+            occupant: None,
             room_sid: Some(RoomSid::new("RM_stale").expect("room sid")),
             session: None,
         })

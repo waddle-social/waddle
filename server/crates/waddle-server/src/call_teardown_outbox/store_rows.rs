@@ -2,6 +2,7 @@ use std::str::FromStr;
 
 use jid::{BareJid, FullJid};
 use waddle_sfu::{CallGeneration, CallId, ParticipantSid, RoomSid, SessionBinding};
+use waddle_xmpp_core::OccupancySessionGeneration;
 
 use super::{
     CallTeardownIntent, CallTeardownIntentId, CallTeardownJob, CallTeardownLastError,
@@ -39,6 +40,13 @@ pub(super) fn decode_job(row: &Row) -> Result<CallTeardownJob, CallTeardownOutbo
             call_id: CallId::new(row.get::<String>(1)?)?,
             target,
             generation,
+            occupant: row
+                .get::<Option<String>>(20)?
+                .map(|value| {
+                    OccupancySessionGeneration::from_str(&value)
+                        .map_err(|_| CallTeardownOutboxError::InvalidOccupantGeneration(value))
+                })
+                .transpose()?,
             room_sid: row
                 .get::<Option<String>>(6)?
                 .map(RoomSid::new)

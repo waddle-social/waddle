@@ -9,12 +9,13 @@ use waddle_sfu::{
 use waddle_xmpp::muc::room_actor::UpsertMujiPresence;
 use waddle_xmpp::xep::xep0167::MediaKind;
 use waddle_xmpp::xep::xep0272::{Creator, Muji, MujiContent};
+use waddle_xmpp_core::OccupancySessionGeneration;
 
 use super::*;
 use crate::db::Database;
 use crate::server::routes::websocket::{
     get_room_actor,
-    handlers::presence::handle_muc_join,
+    handlers::presence::handle_muc_join as handle_muc_join_real,
     tests::{
         create_test_server_owner_session, create_test_websocket_state_with_clustering,
         create_test_websocket_state_with_sfu, snapshot_room,
@@ -30,6 +31,31 @@ async fn store(name: &str) -> CallTeardownOutboxStore {
         .unwrap()
 }
 
+async fn handle_muc_join_with_occupancy_session(
+    state: &crate::server::routes::websocket::WebSocketState,
+    domain: &str,
+    room_jid: &BareJid,
+    sender_jid: &FullJid,
+    nick: &str,
+    presence_show: Option<crate::notification_activity::NotificationPresenceShow>,
+    connection: (OccupancySessionGeneration, &Option<crate::auth::Session>),
+) -> Vec<String> {
+    let (occupancy_session, authenticated_session) = connection;
+    handle_muc_join_real(
+        state,
+        domain,
+        room_jid,
+        sender_jid,
+        nick,
+        presence_show,
+        crate::server::routes::websocket::handlers::presence::MucJoinConnectionContext {
+            occupancy_session,
+            authenticated_session,
+        },
+    )
+    .await
+}
+
 /// A raw 1:1 intent with NO sid fences: only its producing node's
 /// process-local registry can execute it safely, so it stays behind
 /// the producer gate (unlike fenced rows, which survive producer
@@ -42,6 +68,7 @@ fn unfenced_participant_intent() -> CallTeardownIntent {
             participant_sid: None,
         },
         generation: None,
+        occupant: None,
         room_sid: None,
         session: None,
     }
@@ -55,9 +82,21 @@ fn participant_intent() -> CallTeardownIntent {
             participant_sid: Some(ParticipantSid::new("PA_test").unwrap()),
         },
         generation: Some(CallGeneration::try_from(1).unwrap()),
+        occupant: None,
         room_sid: Some(RoomSid::new("RM_test").unwrap()),
         session: None,
     }
+}
+
+fn participant_intent_with_occupant() -> CallTeardownIntent {
+    CallTeardownIntent {
+        occupant: Some(occupant_generation()),
+        ..participant_intent()
+    }
+}
+
+fn occupant_generation() -> OccupancySessionGeneration {
+    OccupancySessionGeneration::mint()
 }
 
 #[derive(Default)]

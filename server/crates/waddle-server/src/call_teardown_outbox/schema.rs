@@ -15,6 +15,7 @@ pub(super) async fn initialize(db: &Database) -> Result<(), CallTeardownOutboxEr
                     room_jid TEXT NULL CHECK (room_jid IS NULL OR room_jid <> ''), \
                     action TEXT NOT NULL CHECK (action IN ('remove_participant','delete_room','muji_presence_clear','muji_room_sweep','call_thread_end_retry')), \
                     generation INTEGER NULL CHECK (generation IS NULL OR generation > 0), \
+                    occupant TEXT NULL CHECK (occupant IS NULL OR occupant <> ''), \
                     room_sid TEXT NULL, \
                     participant_sid TEXT NULL, \
                     session_binding TEXT NULL CHECK (session_binding IS NULL OR session_binding <> ''), \
@@ -46,6 +47,7 @@ pub(super) async fn initialize(db: &Database) -> Result<(), CallTeardownOutboxEr
         .await?;
     add_non_blank_text_column_if_missing(&connection, driver, "producing_node").await?;
     add_non_blank_text_column_if_missing(&connection, driver, "session_binding").await?;
+    add_non_blank_text_column_if_missing(&connection, driver, "occupant").await?;
     connection
         .execute(
             "CREATE INDEX IF NOT EXISTS idx_call_teardown_outbox_status_due \

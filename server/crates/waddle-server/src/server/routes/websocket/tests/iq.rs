@@ -81,10 +81,12 @@ async fn link_preview_lookup_for_test(
     let mut carbons_enabled = false;
     let mut roster_interested = false;
     let mut blocklist_interested = false;
+    let occupancy_session = waddle_xmpp_core::OccupancySessionGeneration::mint();
     let mut conn_state = IqConnState {
         carbons_enabled: &mut carbons_enabled,
         roster_interested: &mut roster_interested,
         blocklist_interested: &mut blocklist_interested,
+        occupancy_session: &occupancy_session,
         registry_owner: None,
         state_machine: None,
         ordered_relay_origin: None,
@@ -249,6 +251,7 @@ async fn link_preview_lookup_for_muc_scope_allows_current_occupant_before_resolv
             affiliation_grant: JoinAffiliationGrant::Resolver(Affiliation::Member),
             local_domain: "example.com".to_string(),
             admission_revision: 0,
+            session: waddle_xmpp_core::OccupancySessionGeneration::mint(),
         })
         .await
         .expect("join room");
@@ -781,10 +784,12 @@ async fn handle_iq_command_request_requires_ready_phase() {
     let mut roster_interested = false;
     let mut blocklist_interested = false;
     let frame = r#"<iq xmlns="jabber:client" id="cmd-prebind-1" type="set" to="example.com"><command xmlns="http://jabber.org/protocol/commands" node="test:adhoc-command" action="execute"/></iq>"#;
+    let occupancy_session = waddle_xmpp_core::OccupancySessionGeneration::mint();
     let mut conn_state = IqConnState {
         carbons_enabled: &mut carbons_enabled,
         roster_interested: &mut roster_interested,
         blocklist_interested: &mut blocklist_interested,
+        occupancy_session: &occupancy_session,
         registry_owner: None,
         state_machine: None,
         ordered_relay_origin: None,
@@ -4795,6 +4800,7 @@ async fn create_members_only_room_with_member(
             affiliation_grant: JoinAffiliationGrant::Resolver(Affiliation::Member),
             local_domain: "example.com".to_string(),
             admission_revision: 0,
+            session: waddle_xmpp_core::OccupancySessionGeneration::mint(),
         })
         .await
         .expect("member join");

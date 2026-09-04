@@ -2284,6 +2284,7 @@ async fn run_group_dm_leave(
                 room: args.room_jid.clone(),
                 jid: resource.clone(),
                 cause: waddle_xmpp::muc::durable::OccupancyLeaveCause::Administrative,
+                selector: waddle_xmpp::muc::room_actor::LeaveSessionSelector::Any,
                 attempt,
                 notified: HashSet::new(),
             };
@@ -5268,7 +5269,7 @@ fn evict_moderation_removals(
         return;
     };
     for jid in removed {
-        crate::server::routes::websocket::muc_call_sfu::unregister_participant_via_sfu(
+        crate::server::routes::websocket::muc_call_sfu::unregister_participant_via_sfu_ungated(
             sfu, room_jid, jid,
         );
     }
@@ -6031,6 +6032,7 @@ mod sfu_eviction_tests {
                 affiliation_grant: JoinAffiliationGrant::Resolver(Affiliation::Member),
                 local_domain: "localhost".to_string(),
                 admission_revision: 0,
+                session: waddle_xmpp_core::OccupancySessionGeneration::mint(),
             })
             .await
             .expect("bob joins");
@@ -6930,6 +6932,7 @@ mod group_dm_durable_reconciliation_tests {
                     .await
                     .expect("snapshot before alice phone join")
                     .admission_revision,
+                session: waddle_xmpp_core::OccupancySessionGeneration::mint(),
             })
             .await
             .expect("join alice phone");
@@ -6944,6 +6947,7 @@ mod group_dm_durable_reconciliation_tests {
                     .await
                     .expect("snapshot before alice web join")
                     .admission_revision,
+                session: waddle_xmpp_core::OccupancySessionGeneration::mint(),
             })
             .await
             .expect("join alice web");
@@ -6958,6 +6962,7 @@ mod group_dm_durable_reconciliation_tests {
                     .await
                     .expect("snapshot before bob join")
                     .admission_revision,
+                session: waddle_xmpp_core::OccupancySessionGeneration::mint(),
             })
             .await
             .expect("join bob");

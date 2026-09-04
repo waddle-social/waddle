@@ -109,7 +109,12 @@ pub(in super::super::super) async fn deliver_reserved_muc_join(
             &sender_jid,
             nick,
             presence_show,
-            &Some(synthetic_session),
+            // Slice D replaces this receiver-local placeholder with the
+            // source connection generation carried by the relay envelope.
+            crate::server::routes::websocket::handlers::presence::MucJoinConnectionContext {
+                occupancy_session: waddle_xmpp_core::OccupancySessionGeneration::mint(),
+                authenticated_session: &Some(synthetic_session),
+            },
         ),
     )
     .await
@@ -153,6 +158,9 @@ pub(in super::super::super) async fn deliver_reserved_muc_update(
             room_jid,
             &sender_jid,
             nick,
+            // Slice D replaces this receiver-local placeholder with the
+            // source connection generation carried by the relay envelope.
+            waddle_xmpp_core::OccupancySessionGeneration::mint(),
             presence,
         ),
     )
@@ -199,6 +207,9 @@ pub(in super::super::super) async fn deliver_reserved_muc_leave(
             room_jid,
             &sender_jid,
             nick,
+            // Slice D replaces this receiver-local placeholder with the
+            // source connection generation carried by the relay envelope.
+            waddle_xmpp_core::OccupancySessionGeneration::mint(),
             None,
         ),
     )

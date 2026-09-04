@@ -599,6 +599,7 @@ mod tests {
             .expect("install pin projection store");
         register_test_connection(state.as_ref(), &bob, bob_tx).await;
 
+        let alice_occupancy_session = waddle_xmpp_core::OccupancySessionGeneration::mint();
         let alice_join = handle_muc_join(
             state.as_ref(),
             "example.com",
@@ -606,7 +607,10 @@ mod tests {
             &alice,
             "alice",
             None,
-            &Some(alice_session),
+            crate::server::routes::websocket::handlers::presence::MucJoinConnectionContext {
+                occupancy_session: alice_occupancy_session,
+                authenticated_session: &Some(alice_session),
+            },
         )
         .await;
         assert!(
@@ -615,6 +619,7 @@ mod tests {
                 .any(|frame| frame.contains("status code='110'")),
             "alice join must succeed before pinning: {alice_join:?}"
         );
+        let bob_occupancy_session = waddle_xmpp_core::OccupancySessionGeneration::mint();
         let bob_join = handle_muc_join(
             state.as_ref(),
             "example.com",
@@ -622,7 +627,10 @@ mod tests {
             &bob,
             "bob",
             None,
-            &None,
+            crate::server::routes::websocket::handlers::presence::MucJoinConnectionContext {
+                occupancy_session: bob_occupancy_session,
+                authenticated_session: &None,
+            },
         )
         .await;
         assert!(

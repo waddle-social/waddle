@@ -3,6 +3,7 @@ use crate::permissions::CheckPermission;
 use std::io;
 use std::sync::{Arc, Mutex};
 use tracing::Instrument as _;
+use waddle_xmpp_core::OccupancySessionGeneration;
 
 #[derive(Clone, Default)]
 struct CaptureWriter(Arc<Mutex<Vec<u8>>>);
@@ -40,6 +41,74 @@ fn captured_admission_denial_log(buffer: &Arc<Mutex<Vec<u8>>>) -> String {
         .find(|line| line.contains("MUC join admission denied"))
         .unwrap_or_else(|| panic!("MUC join admission denial log not found in:\n{logs}"))
         .to_string()
+}
+
+fn test_occupancy_sessions(
+) -> &'static Mutex<std::collections::HashMap<String, OccupancySessionGeneration>> {
+    static SESSIONS: std::sync::OnceLock<
+        Mutex<std::collections::HashMap<String, OccupancySessionGeneration>>,
+    > = std::sync::OnceLock::new();
+    SESSIONS.get_or_init(|| Mutex::new(std::collections::HashMap::new()))
+}
+
+fn record_test_occupancy_session(jid: &FullJid) -> OccupancySessionGeneration {
+    let generation = OccupancySessionGeneration::mint();
+    test_occupancy_sessions()
+        .lock()
+        .expect("test occupancy session lock")
+        .insert(jid.to_string(), generation);
+    generation
+}
+
+fn current_test_occupancy_session(jid: &FullJid) -> OccupancySessionGeneration {
+    test_occupancy_sessions()
+        .lock()
+        .expect("test occupancy session lock")
+        .get(jid.as_str())
+        .copied()
+        .unwrap_or_else(|| record_test_occupancy_session(jid))
+}
+
+async fn handle_muc_join(
+    state: &WebSocketState,
+    domain: &str,
+    room_jid: &BareJid,
+    sender_jid: &FullJid,
+    nick: &str,
+    presence_show: Option<crate::notification_activity::NotificationPresenceShow>,
+    authenticated_session: &Option<Session>,
+) -> Vec<String> {
+    super::handle_muc_join_with_occupancy_session(
+        state,
+        domain,
+        room_jid,
+        sender_jid,
+        nick,
+        presence_show,
+        (
+            record_test_occupancy_session(sender_jid),
+            authenticated_session,
+        ),
+    )
+    .await
+}
+
+async fn handle_muc_leave(
+    state: &WebSocketState,
+    room_jid: &BareJid,
+    sender_jid: &FullJid,
+    nick: &str,
+    ordered_relay_origin: Option<&crate::server::routes::interpret::OrderedRelayRouteOrigin>,
+) -> Vec<String> {
+    super::handle_muc_leave_with_occupancy_session(
+        state,
+        room_jid,
+        sender_jid,
+        nick,
+        current_test_occupancy_session(sender_jid),
+        ordered_relay_origin,
+    )
+    .await
 }
 
 fn expected_local_room_fence(
@@ -5162,7 +5231,14 @@ async fn cleanup_muc_presence_broadcasts_unavailable_to_remaining_occupants() {
 
     // Simulate Alice's unclean disconnect — same entry point the SM
     // janitor and `cleanup_connection_shutdown` reach.
-    cleanup_muc_presence_for_jid(state.as_ref(), &alice).await;
+    cleanup_muc_presence_for_jid(
+        state.as_ref(),
+        &alice,
+        waddle_xmpp::muc::room_actor::LeaveSessionSelector::Generation(
+            current_test_occupancy_session(&alice),
+        ),
+    )
+    .await;
 
     // The room actor must have evicted Alice's occupant slot.
     let room = snapshot_room(state.as_ref(), &room_jid).await.room;
@@ -5223,6 +5299,12 @@ fn empty_muji() -> waddle_xmpp::xep::xep0272::Muji {
 
 #[derive(Default)]
 struct RecordingSfu {
+    occupant_sessions: std::sync::Mutex<
+        std::collections::HashMap<
+            (waddle_sfu::CallId, waddle_sfu::Identity),
+            waddle_xmpp_core::OccupancySessionGeneration,
+        >,
+    >,
     calls: std::sync::Mutex<Vec<(waddle_sfu::CallId, waddle_sfu::Identity)>>,
     note_calls: std::sync::Mutex<Vec<(waddle_sfu::CallId, waddle_sfu::Identity)>>,
     update_calls: std::sync::Mutex<
@@ -5259,6 +5341,19 @@ impl waddle_sfu::SfuService for RecordingSfu {
 
     fn register_call_participant(&self, _: &waddle_sfu::CallId, _: &waddle_sfu::Identity) {}
 
+    fn register_call_participant_with_session(
+        &self,
+        call_id: &waddle_sfu::CallId,
+        identity: &waddle_sfu::Identity,
+        _: &waddle_sfu::SessionBinding,
+        occupant: waddle_xmpp_core::OccupancySessionGeneration,
+    ) {
+        self.occupant_sessions
+            .lock()
+            .expect("recording lock")
+            .insert((call_id.clone(), identity.clone()), occupant);
+    }
+
     fn register_call_participant_observed(
         &self,
         _: &waddle_sfu::CallId,
@@ -5268,8 +5363,50 @@ impl waddle_sfu::SfuService for RecordingSfu {
         waddle_sfu::SidObservationDisposition::Applied
     }
 
-    fn has_call_participant(&self, _: &waddle_sfu::CallId, _: &waddle_sfu::Identity) -> bool {
-        false
+    fn has_call_participant(
+        &self,
+        call_id: &waddle_sfu::CallId,
+        identity: &waddle_sfu::Identity,
+    ) -> bool {
+        self.occupant_sessions
+            .lock()
+            .expect("recording lock")
+            .contains_key(&(call_id.clone(), identity.clone()))
+    }
+
+    fn participant_occupant_session(
+        &self,
+        call_id: &waddle_sfu::CallId,
+        identity: &waddle_sfu::Identity,
+    ) -> Option<waddle_xmpp_core::OccupancySessionGeneration> {
+        self.occupant_sessions
+            .lock()
+            .expect("recording lock")
+            .get(&(call_id.clone(), identity.clone()))
+            .copied()
+    }
+
+    fn unregister_call_participant_if_occupant_matches(
+        &self,
+        call_id: &waddle_sfu::CallId,
+        identity: &waddle_sfu::Identity,
+        presented: waddle_xmpp_core::OccupancySessionGeneration,
+        _: Option<&waddle_sfu::ObservedCallSids>,
+    ) -> waddle_sfu::SessionScopedTeardown {
+        let mut sessions = self.occupant_sessions.lock().expect("recording lock");
+        let key = (call_id.clone(), identity.clone());
+        if sessions.get(&key).copied() != Some(presented) {
+            return waddle_sfu::SessionScopedTeardown::SessionMismatch;
+        }
+        sessions.remove(&key);
+        drop(sessions);
+        self.calls
+            .lock()
+            .expect("recording lock")
+            .push((call_id.clone(), identity.clone()));
+        waddle_sfu::SessionScopedTeardown::Applied(waddle_sfu::TeardownDisposition::Applied(
+            waddle_sfu::CallState::Ended,
+        ))
     }
 
     fn revoke_issued_token(
@@ -5287,6 +5424,10 @@ impl waddle_sfu::SfuService for RecordingSfu {
         identity: &waddle_sfu::Identity,
         _: Option<&waddle_sfu::ObservedCallSids>,
     ) -> waddle_sfu::TeardownDisposition {
+        self.occupant_sessions
+            .lock()
+            .expect("recording lock")
+            .remove(&(call_id.clone(), identity.clone()));
         self.calls
             .lock()
             .expect("recording lock")
@@ -5498,29 +5639,37 @@ async fn available_presence_without_muji_clears_existing_muji_state() {
     while bob_rx.try_recv().is_ok() {}
 
     let alice_phase = waddle_xmpp::protocol::ConnectionPhase::ready(alice.clone(), false);
+    let alice_occupancy_session = current_test_occupancy_session(&alice);
+    waddle_sfu::SfuService::register_call_participant_with_session(
+        recorder.as_ref(),
+        &waddle_sfu::CallId::new(room_jid.to_string()).expect("call id"),
+        &waddle_sfu::Identity::from_jid(alice.clone()),
+        &waddle_sfu::SessionBinding::new("muji-clear-session").expect("session binding"),
+        alice_occupancy_session,
+    );
     let mut active = muc_presence_to(&room_jid, "alice");
     active.payloads.push(active_muji().to_element());
-    let _ = handlers::presence::handle_presence(
+    let _ = handlers::presence::handle_presence_with_occupancy_session(
         active,
         "example.com",
         "muc.example.com",
         state.as_ref(),
         &alice_phase,
         &Some(owner_session),
-        None,
+        (alice_occupancy_session, None),
     )
     .await;
     while bob_rx.try_recv().is_ok() {}
 
     let plain_available = muc_presence_to(&room_jid, "alice");
-    let responses = handlers::presence::handle_presence(
+    let responses = handlers::presence::handle_presence_with_occupancy_session(
         plain_available,
         "example.com",
         "muc.example.com",
         state.as_ref(),
         &alice_phase,
         &None,
-        None,
+        (alice_occupancy_session, None),
     )
     .await;
     let recorded = recorder.snapshot();
@@ -5624,30 +5773,38 @@ async fn empty_muji_presence_unregisters_the_sfu_participant() {
     )
     .await;
     let alice_phase = waddle_xmpp::protocol::ConnectionPhase::ready(alice.clone(), false);
+    let alice_occupancy_session = current_test_occupancy_session(&alice);
+    waddle_sfu::SfuService::register_call_participant_with_session(
+        recorder.as_ref(),
+        &waddle_sfu::CallId::new(room_jid.to_string()).expect("call id"),
+        &waddle_sfu::Identity::from_jid(alice.clone()),
+        &waddle_sfu::SessionBinding::new("empty-muji-session").expect("session binding"),
+        alice_occupancy_session,
+    );
 
     let mut active = muc_presence_to(&room_jid, "alice");
     active.payloads.push(active_muji().to_element());
-    let _ = handlers::presence::handle_presence(
+    let _ = handlers::presence::handle_presence_with_occupancy_session(
         active,
         "example.com",
         "muc.example.com",
         state.as_ref(),
         &alice_phase,
         &Some(owner_session.clone()),
-        None,
+        (alice_occupancy_session, None),
     )
     .await;
 
     let mut empty = muc_presence_to(&room_jid, "alice");
     empty.payloads.push(empty_muji().to_element());
-    let responses = handlers::presence::handle_presence(
+    let responses = handlers::presence::handle_presence_with_occupancy_session(
         empty,
         "example.com",
         "muc.example.com",
         state.as_ref(),
         &alice_phase,
         &Some(owner_session),
-        None,
+        (alice_occupancy_session, None),
     )
     .await;
 
@@ -7176,7 +7333,7 @@ async fn detached_invalidation_skips_muc_cleanup_when_live_replacement_exists() 
         stream_id: "stale-stream".to_string(),
         user_id: "alice@example.com".to_string(),
         jid: alice.clone(),
-        occupancy_session: waddle_xmpp_core::OccupancySessionGeneration::mint(),
+        occupancy_session: current_test_occupancy_session(&alice),
         inbound_count: 0,
         shadow_ordinal: waddle_xmpp::stream_management::ShadowOrdinal::ZERO,
         outbound_count: 0,
@@ -7259,7 +7416,7 @@ async fn fresh_bind_invalidation_cleans_the_dead_sessions_room_occupancy() {
         stream_id: "stale-stream-fresh-bind".to_string(),
         user_id: "alice@example.com".to_string(),
         jid: alice.clone(),
-        occupancy_session: waddle_xmpp_core::OccupancySessionGeneration::mint(),
+        occupancy_session: current_test_occupancy_session(&alice),
         inbound_count: 0,
         shadow_ordinal: waddle_xmpp::stream_management::ShadowOrdinal::ZERO,
         outbound_count: 0,

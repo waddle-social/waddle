@@ -14,6 +14,7 @@ async fn prune_failed_also_prunes_done_rows_after_retention() {
                 call_id: CallId::new("alice@example.test:failed-call").expect("call id"),
                 target: TeardownTarget::Room,
                 generation: None,
+                occupant: None,
                 room_sid: None,
                 session: None,
             },
@@ -27,6 +28,7 @@ async fn prune_failed_also_prunes_done_rows_after_retention() {
                 call_id: CallId::new("alice@example.test:fresh-done").expect("call id"),
                 target: TeardownTarget::Room,
                 generation: None,
+                occupant: None,
                 room_sid: None,
                 session: None,
             },
@@ -249,6 +251,7 @@ async fn unowned_room_scoped_intent_older_than_a_day_dead_letters() {
                 call_id: CallId::new("room@muc.example.test").expect("room call id"),
                 target: TeardownTarget::Room,
                 generation: None,
+                occupant: None,
                 room_sid: None,
                 session: None,
             },
@@ -290,6 +293,7 @@ async fn old_room_scoped_intent_survives_transient_registry_unavailability() {
                 call_id: CallId::new("room@muc.example.test").expect("room call id"),
                 target: TeardownTarget::Room,
                 generation: None,
+                occupant: None,
                 room_sid: None,
                 session: None,
             },
@@ -346,6 +350,7 @@ async fn old_room_scoped_intent_survives_a_live_foreign_owner_claim() {
                 call_id: CallId::new(room_jid.to_string()).expect("room call id"),
                 target: TeardownTarget::Room,
                 generation: None,
+                occupant: None,
                 room_sid: None,
                 session: None,
             },
@@ -386,14 +391,14 @@ async fn live_registration_predating_the_intent_still_executes_removal() {
     let owner_session = create_test_server_owner_session(state.as_ref(), "alice").await;
     let room_jid: BareJid = "owner-room@muc.example.com".parse().expect("room jid");
     let alice: FullJid = "alice@example.com/web".parse().expect("alice jid");
-    let _ = handle_muc_join(
+    let _ = handle_muc_join_with_occupancy_session(
         state.as_ref(),
         "example.com",
         &room_jid,
         &alice,
         "alice",
         None,
-        &Some(owner_session.clone()),
+        (occupant_generation(), &Some(owner_session.clone())),
     )
     .await;
     let call_id = CallId::new(room_jid.to_string()).expect("call id");
@@ -410,6 +415,7 @@ async fn live_registration_predating_the_intent_still_executes_removal() {
                 participant_sid: None,
             },
             generation: None,
+            occupant: None,
             room_sid: None,
             session: None,
         })
@@ -467,6 +473,7 @@ async fn existing_participant_reobservation_does_not_reopen_the_swallow_window()
                     participant_sid: None,
                 },
                 generation: None,
+                occupant: None,
                 room_sid: None,
                 session: None,
             },
@@ -512,6 +519,7 @@ async fn later_local_token_mint_skips_an_older_queued_participant_eject() {
                     participant_sid: None,
                 },
                 generation: None,
+                occupant: None,
                 room_sid: None,
                 session: None,
             },
@@ -578,6 +586,7 @@ async fn no_later_local_token_mint_executes_the_queued_participant_eject() {
                     participant_sid: None,
                 },
                 generation: None,
+                occupant: None,
                 room_sid: None,
                 session: None,
             },
@@ -620,6 +629,7 @@ async fn sid_fenced_room_scoped_intent_executes_when_room_has_no_claim() {
                     participant_sid: Some(ParticipantSid::new("PA_orphaned").expect("sid")),
                 },
                 generation: None,
+                occupant: None,
                 room_sid: Some(RoomSid::new("RM_orphaned").expect("room sid")),
                 session: None,
             },
@@ -668,6 +678,7 @@ async fn unfenced_room_scoped_intent_stays_gated_without_a_claim() {
                     participant_sid: None,
                 },
                 generation: None,
+                occupant: None,
                 room_sid: Some(RoomSid::new("RM_orphaned_unfenced").expect("room sid")),
                 session: None,
             },

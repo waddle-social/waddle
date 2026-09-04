@@ -52,6 +52,89 @@ async fn drain_executes_admin_call_and_marks_intent_done() {
 }
 
 #[tokio::test]
+async fn drain_skips_participant_when_intent_occupant_generation_is_stale() {
+    let admin = Arc::new(RecordingAdmin::default());
+    let sfu = Arc::new(waddle_sfu::LiveKitSfu::with_admin(
+        fixture_config(),
+        Arc::clone(&admin) as Arc<_>,
+    ));
+    let state = state_with_executor(Arc::clone(&sfu)).await;
+    let owner_session = create_test_server_owner_session(state.as_ref(), "alice").await;
+    let room_jid: BareJid = "stale-occupant-generation@muc.example.com"
+        .parse()
+        .expect("room jid");
+    let alice: FullJid = "alice@example.com/web".parse().expect("alice jid");
+    let current_occupant = occupant_generation();
+    let _ = handle_muc_join_with_occupancy_session(
+        state.as_ref(),
+        "example.com",
+        &room_jid,
+        &alice,
+        "alice",
+        None,
+        (current_occupant, &Some(owner_session)),
+    )
+    .await;
+
+    let stale_occupant = occupant_generation();
+    let current_session = waddle_sfu::SessionBinding::new("muji-current").expect("binding");
+    let call_id = CallId::new(room_jid.to_string()).expect("call id");
+    let identity = Identity::from_jid(alice.clone());
+    sfu.register_call_participant_with_session(
+        &call_id,
+        &identity,
+        &current_session,
+        current_occupant,
+    );
+
+    let intent_id = state
+        .deps
+        .protocol
+        .call_teardown_outbox
+        .enqueue(CallTeardownIntent {
+            call_id: call_id.clone(),
+            target: TeardownTarget::Participant {
+                identity: alice.clone(),
+                participant_sid: None,
+            },
+            generation: None,
+            occupant: Some(stale_occupant),
+            room_sid: None,
+            session: None,
+        })
+        .await
+        .expect("enqueue");
+
+    let summary = drain_due(&state, 8).await.expect("drain");
+
+    assert_eq!(summary.drained, 1);
+    assert!(
+        sfu.has_call_participant(&call_id, &identity),
+        "a stale occupant-scoped intent must not remove the live participant"
+    );
+    assert!(
+        admin
+            .remove_calls
+            .lock()
+            .expect("recording lock")
+            .is_empty(),
+        "a stale occupant-scoped intent must not fire RemoveParticipant"
+    );
+    assert_eq!(
+        state
+            .deps
+            .protocol
+            .call_teardown_outbox
+            .find(&intent_id)
+            .await
+            .expect("find")
+            .expect("stored intent")
+            .status,
+        CallTeardownStatus::Done
+    );
+}
+
+#[tokio::test]
 async fn one_to_one_drain_holds_the_producer_fence_through_execution_and_completion() {
     let remove_gate = Arc::new(tokio::sync::Semaphore::new(0));
     let admin = Arc::new(RecordingAdmin {
@@ -205,14 +288,14 @@ async fn drain_marks_higher_generation_stale_without_admin_call() {
     let owner_session = create_test_server_owner_session(state.as_ref(), "alice").await;
     let room_jid: BareJid = "stale-room@muc.example.com".parse().expect("room jid");
     let alice: FullJid = "alice@example.com/web".parse().expect("alice jid");
-    let _ = handle_muc_join(
+    let _ = handle_muc_join_with_occupancy_session(
         state.as_ref(),
         "example.com",
         &room_jid,
         &alice,
         "alice",
         None,
-        &Some(owner_session.clone()),
+        (occupant_generation(), &Some(owner_session.clone())),
     )
     .await;
     let call_id = CallId::new(room_jid.to_string()).expect("call id");
@@ -227,6 +310,7 @@ async fn drain_marks_higher_generation_stale_without_admin_call() {
             participant_sid: None,
         },
         generation: Some(CallGeneration::try_from_u64(1).expect("generation")),
+        occupant: None,
         room_sid: None,
         session: None,
     };
@@ -275,6 +359,7 @@ async fn room_not_owned_by_this_node_remains_queued() {
             participant_sid: None,
         },
         generation: None,
+        occupant: None,
         room_sid: None,
         session: None,
     };
@@ -331,6 +416,7 @@ async fn occupied_room_intent_is_requeued_not_consumed() {
             call_id: CallId::new("alice@example.test:occupied-call").expect("call id"),
             target: TeardownTarget::Room,
             generation: None,
+            occupant: None,
             room_sid: None,
             session: None,
         })
@@ -382,6 +468,7 @@ async fn unfenced_participant_rejoin_is_skipped_without_admin_call() {
                     participant_sid: None,
                 },
                 generation: None,
+                occupant: None,
                 room_sid: None,
                 session: None,
             },
@@ -432,6 +519,7 @@ async fn unfenced_participant_without_live_registration_still_removes_participan
                 participant_sid: None,
             },
             generation: None,
+            occupant: None,
             room_sid: None,
             session: None,
         })

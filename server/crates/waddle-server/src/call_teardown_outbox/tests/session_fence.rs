@@ -27,21 +27,22 @@ async fn participant_intent_with_stale_session_binding_is_skipped() {
     let identity = Identity::from_jid(alice.clone());
     let current = waddle_sfu::SessionBinding::new("muji-current").expect("binding");
     let stale = waddle_sfu::SessionBinding::new("muji-stale").expect("binding");
+    let occupant = occupant_generation();
 
-    let _ = handle_muc_join(
+    let _ = handle_muc_join_with_occupancy_session(
         state.as_ref(),
         "example.com",
         &room_jid,
         &alice,
         "alice",
         None,
-        &Some(owner_session.clone()),
+        (occupant, &Some(owner_session.clone())),
     )
     .await;
     // The replacement registration happens FIRST; the stale intent is
     // enqueued after it, so the registered-after-intent timestamp
     // fence alone would let it execute.
-    sfu.register_call_participant_with_session(&call_id, &identity, &current);
+    sfu.register_call_participant_with_session(&call_id, &identity, &current, occupant);
 
     let intent_id = state
         .deps
@@ -56,6 +57,7 @@ async fn participant_intent_with_stale_session_binding_is_skipped() {
             generation: None,
             room_sid: None,
             session: Some(stale),
+            occupant: Some(occupant),
         })
         .await
         .expect("enqueue");
@@ -105,18 +107,19 @@ async fn participant_intent_with_matching_session_binding_executes() {
     let call_id = CallId::new(room_jid.to_string()).expect("call id");
     let identity = Identity::from_jid(alice.clone());
     let current = waddle_sfu::SessionBinding::new("muji-current").expect("binding");
+    let occupant = occupant_generation();
 
-    let _ = handle_muc_join(
+    let _ = handle_muc_join_with_occupancy_session(
         state.as_ref(),
         "example.com",
         &room_jid,
         &alice,
         "alice",
         None,
-        &Some(owner_session.clone()),
+        (occupant, &Some(owner_session.clone())),
     )
     .await;
-    sfu.register_call_participant_with_session(&call_id, &identity, &current);
+    sfu.register_call_participant_with_session(&call_id, &identity, &current, occupant);
 
     // The registration predates the intent, so the timestamp fence
     // does not veto; only the session gate could, and it matches.
@@ -133,6 +136,7 @@ async fn participant_intent_with_matching_session_binding_executes() {
             generation: None,
             room_sid: None,
             session: Some(current),
+            occupant: Some(occupant),
         })
         .await
         .expect("enqueue");
@@ -173,15 +177,16 @@ async fn actor_present_muji_clear_with_stale_session_is_refused() {
     let identity = Identity::from_jid(alice.clone());
     let current = waddle_sfu::SessionBinding::new("muji-current").expect("binding");
     let stale = waddle_sfu::SessionBinding::new("muji-stale").expect("binding");
+    let occupant = occupant_generation();
 
-    let _ = handle_muc_join(
+    let _ = handle_muc_join_with_occupancy_session(
         state.as_ref(),
         "example.com",
         &room_jid,
         &alice,
         "alice",
         None,
-        &Some(owner_session.clone()),
+        (occupant, &Some(owner_session.clone())),
     )
     .await;
     get_room_actor(state.as_ref(), &room_jid)
@@ -198,12 +203,13 @@ async fn actor_present_muji_clear_with_stale_session_is_refused() {
         .await
         .expect("muji update")
         .expect("occupant update");
-    sfu.register_call_participant_with_session(&call_id, &identity, &current);
+    sfu.register_call_participant_with_session(&call_id, &identity, &current, occupant);
 
     let outcome = crate::server::routes::muc_muji_clear::clear_muji_presence_for_departure(
         state.as_ref(),
         &room_jid,
         &alice,
+        None,
         None,
         Some(&stale),
     )
@@ -243,15 +249,16 @@ async fn actor_present_muji_clear_with_matching_session_still_clears() {
     let call_id = CallId::new(room_jid.to_string()).expect("call id");
     let identity = Identity::from_jid(alice.clone());
     let current = waddle_sfu::SessionBinding::new("muji-current").expect("binding");
+    let occupant = occupant_generation();
 
-    let _ = handle_muc_join(
+    let _ = handle_muc_join_with_occupancy_session(
         state.as_ref(),
         "example.com",
         &room_jid,
         &alice,
         "alice",
         None,
-        &Some(owner_session.clone()),
+        (occupant, &Some(owner_session.clone())),
     )
     .await;
     get_room_actor(state.as_ref(), &room_jid)
@@ -268,12 +275,13 @@ async fn actor_present_muji_clear_with_matching_session_still_clears() {
         .await
         .expect("muji update")
         .expect("occupant update");
-    sfu.register_call_participant_with_session(&call_id, &identity, &current);
+    sfu.register_call_participant_with_session(&call_id, &identity, &current, occupant);
 
     let _ = crate::server::routes::muc_muji_clear::clear_muji_presence_for_departure(
         state.as_ref(),
         &room_jid,
         &alice,
+        None,
         None,
         Some(&current),
     )

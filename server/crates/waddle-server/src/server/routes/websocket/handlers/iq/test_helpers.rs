@@ -29,10 +29,12 @@ pub async fn handle_iq(
         _ => return vec![],
     };
 
+    let occupancy_session = waddle_xmpp_core::OccupancySessionGeneration::mint();
     let mut conn_state = IqConnState {
         carbons_enabled: &mut carbons_enabled,
         roster_interested: &mut roster_interested,
         blocklist_interested: &mut blocklist_interested,
+        occupancy_session: &occupancy_session,
         registry_owner: None,
         state_machine: None,
         ordered_relay_origin: None,

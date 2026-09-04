@@ -104,6 +104,7 @@ pub(crate) async fn handle_relayed_muji_initiate(
         domain: state.deps.auth_state.xmpp_domain.as_str(),
         full_jid: &sender,
         media_capabilities,
+        occupant_session: None,
     };
     let muji_terminate_room = jingle_muji_gate::muji_session_terminate_room(iq);
     let events = state.deps.protocol.dispatcher.dispatch_iq(iq, &ctx);
@@ -128,6 +129,7 @@ pub(crate) async fn handle_relayed_muji_initiate(
             state,
             &room_jid,
             &sender,
+            None,
             None,
             terminate_session.as_ref(),
         )

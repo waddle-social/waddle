@@ -15,6 +15,7 @@ use waddle_xmpp::muc::{
     durable::OccupancyLeaveCause,
     room_actor::{LeaveAttemptId, LeaveSessionSelector},
 };
+use waddle_xmpp_core::OccupancySessionGeneration;
 
 const BACKOFF_BASE: Duration = Duration::from_secs(2);
 const BACKOFF_MAX: Duration = Duration::from_secs(60);
@@ -38,6 +39,7 @@ const MAX_FULL_JID_SWEEPS: usize = 50_000;
 pub enum LocalDepartureItem {
     FullJidSweep {
         jid: FullJid,
+        selector: LeaveSessionSelector,
         /// The occupancy-order ceiling for the whole redrive, minted when the
         /// ORIGINAL disconnect cleanup started: a session that (re)joined
         /// after this attempt is not the sweep's target, so the actor's
@@ -89,6 +91,7 @@ pub enum LocalDepartureItem {
         room: BareJid,
         jid: FullJid,
         cause: OccupancyLeaveCause,
+        selector: LeaveSessionSelector,
         attempt: LeaveAttemptId,
         /// Per-recipient fan-out progress (see `RoomDeparture::notified`).
         notified: HashSet<FullJid>,
@@ -114,23 +117,44 @@ pub enum LocalDepartureItem {
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord)]
 enum LocalDepartureKey {
-    FullJidSweep(FullJid),
-    RoomScoped(BareJid, FullJid, u8),
+    FullJidSweep(FullJid, Option<OccupancySessionGeneration>),
+    RoomScoped(BareJid, FullJid, u8, Option<OccupancySessionGeneration>),
     Ack(BareJid, FullJid, LeaveAttemptId),
     Evict(BareJid),
-    InFlight(BareJid, FullJid, u8, LeaveAttemptId),
+    InFlight(
+        BareJid,
+        FullJid,
+        u8,
+        Option<OccupancySessionGeneration>,
+        LeaveAttemptId,
+    ),
 }
 
 impl LocalDepartureItem {
     fn key(&self) -> LocalDepartureKey {
         match self {
-            Self::FullJidSweep { jid, .. } => LocalDepartureKey::FullJidSweep(jid.clone()),
+            Self::FullJidSweep { jid, selector, .. } => {
+                LocalDepartureKey::FullJidSweep(jid.clone(), selector_generation(*selector))
+            }
             Self::RoomDeparture {
-                room, jid, cause, ..
+                room,
+                jid,
+                cause,
+                selector,
+                ..
             }
             | Self::ConfirmRetired {
-                room, jid, cause, ..
-            } => LocalDepartureKey::RoomScoped(room.clone(), jid.clone(), cause_key(*cause)),
+                room,
+                jid,
+                cause,
+                selector,
+                ..
+            } => LocalDepartureKey::RoomScoped(
+                room.clone(),
+                jid.clone(),
+                cause_key(*cause),
+                selector_generation(*selector),
+            ),
             Self::AckReceipt {
                 room, jid, attempt, ..
             } => LocalDepartureKey::Ack(room.clone(), jid.clone(), *attempt),
@@ -139,11 +163,16 @@ impl LocalDepartureItem {
                 room,
                 jid,
                 cause,
+                selector,
                 attempt,
                 ..
-            } => {
-                LocalDepartureKey::InFlight(room.clone(), jid.clone(), cause_key(*cause), *attempt)
-            }
+            } => LocalDepartureKey::InFlight(
+                room.clone(),
+                jid.clone(),
+                cause_key(*cause),
+                selector_generation(*selector),
+                *attempt,
+            ),
         }
     }
 
@@ -234,16 +263,19 @@ impl LocalDepartureItem {
             (
                 LocalDepartureItem::FullJidSweep {
                     jid,
+                    selector: _,
                     attempt: existing_attempt,
                     remote_ceiling: existing_ceiling,
                 },
                 LocalDepartureItem::FullJidSweep {
+                    selector: _,
                     attempt: incoming_attempt,
                     remote_ceiling: incoming_ceiling,
                     ..
                 },
             ) => LocalDepartureItem::FullJidSweep {
                 jid,
+                selector: merged_selector,
                 attempt: merged_attempt,
                 remote_ceiling: if incoming_attempt > existing_attempt {
                     incoming_ceiling
@@ -254,12 +286,14 @@ impl LocalDepartureItem {
             (
                 LocalDepartureItem::FullJidSweep {
                     jid,
+                    selector,
                     attempt,
                     remote_ceiling,
                 },
                 _,
             ) => LocalDepartureItem::FullJidSweep {
                 jid,
+                selector,
                 attempt,
                 remote_ceiling,
             },
@@ -302,14 +336,19 @@ impl LocalDepartureItem {
 
     fn selector(&self) -> Option<LeaveSessionSelector> {
         match self {
-            Self::FullJidSweep { .. }
-            | Self::AckReceipt { .. }
-            | Self::InFlight { .. }
-            | Self::EvictEmptyRoom { .. } => None,
-            Self::RoomDeparture { selector, .. } | Self::ConfirmRetired { selector, .. } => {
-                Some(*selector)
-            }
+            Self::AckReceipt { .. } | Self::EvictEmptyRoom { .. } => None,
+            Self::FullJidSweep { selector, .. }
+            | Self::RoomDeparture { selector, .. }
+            | Self::ConfirmRetired { selector, .. }
+            | Self::InFlight { selector, .. } => Some(*selector),
         }
+    }
+}
+
+const fn selector_generation(selector: LeaveSessionSelector) -> Option<OccupancySessionGeneration> {
+    match selector {
+        LeaveSessionSelector::Generation(generation) => Some(generation),
+        LeaveSessionSelector::Any | LeaveSessionSelector::JoinedAtOrBefore(_) => None,
     }
 }
 
@@ -329,6 +368,36 @@ fn merge_selectors(
             Some(LeaveSessionSelector::JoinedAtOrBefore(left)),
             Some(LeaveSessionSelector::JoinedAtOrBefore(right)),
         ) => Some(LeaveSessionSelector::JoinedAtOrBefore(left.max(right))),
+        // The inventory key carries the selector's generation, so a
+        // `Generation` item only ever merges with the SAME generation and
+        // never with a watermark item. Keep the incoming selector rather
+        // than widening on a violated invariant: a stale generation is
+        // `Superseded` by the actor, a widened `Any` would evict a live
+        // replacement.
+        (
+            Some(LeaveSessionSelector::Generation(existing_generation)),
+            Some(incoming @ LeaveSessionSelector::Generation(incoming_generation)),
+        ) => {
+            debug_assert_eq!(
+                existing_generation, incoming_generation,
+                "different occupancy generations must never share a retained-departure key"
+            );
+            Some(incoming)
+        }
+        (
+            Some(LeaveSessionSelector::Generation(_)),
+            Some(incoming @ LeaveSessionSelector::JoinedAtOrBefore(_)),
+        )
+        | (
+            Some(LeaveSessionSelector::JoinedAtOrBefore(_)),
+            Some(incoming @ LeaveSessionSelector::Generation(_)),
+        ) => {
+            debug_assert!(
+                false,
+                "generation and watermark selectors never share a retained-departure key"
+            );
+            Some(incoming)
+        }
     }
 }
 
@@ -654,7 +723,7 @@ impl PendingLocalMucDepartures {
             .any(|key| {
                 matches!(
                     key,
-                    LocalDepartureKey::InFlight(in_room, in_jid, _, _)
+                    LocalDepartureKey::InFlight(in_room, in_jid, _, _, _)
                         if in_room == room && in_jid == jid
                 )
             })
@@ -711,7 +780,7 @@ fn evict_oldest_sweep_if_at_cap(inventory: &mut Inventory, cap: usize) {
     let Some(oldest) = inventory
         .entries
         .iter()
-        .filter(|(key, _)| matches!(key, LocalDepartureKey::FullJidSweep(_)))
+        .filter(|(key, _)| matches!(key, LocalDepartureKey::FullJidSweep(_, _)))
         .min_by(|(left_key, left), (right_key, right)| {
             left.not_before
                 .cmp(&right.not_before)
@@ -722,7 +791,7 @@ fn evict_oldest_sweep_if_at_cap(inventory: &mut Inventory, cap: usize) {
         return;
     };
     inventory.remove(&oldest);
-    let LocalDepartureKey::FullJidSweep(dropped) = &oldest else {
+    let LocalDepartureKey::FullJidSweep(dropped, _) = &oldest else {
         unreachable!("the overflow filter only selects full-JID sweeps");
     };
     warn!(
@@ -792,12 +861,162 @@ impl Drop for InFlightLease {
 mod tests {
     use super::*;
     use waddle_xmpp::muc::room_actor::OccupancyWatermark;
+    use waddle_xmpp_core::OccupancySessionGeneration;
 
     fn jid(value: &str) -> FullJid {
         value.parse().expect("jid")
     }
     fn room(value: &str) -> BareJid {
         format!("{value}@muc.example.com").parse().expect("room")
+    }
+
+    fn generation() -> OccupancySessionGeneration {
+        OccupancySessionGeneration::mint()
+    }
+
+    #[test]
+    fn generation_scoped_room_departures_for_the_same_room_and_jid_do_not_merge() {
+        let inventory = PendingLocalMucDepartures::default();
+        let now = Instant::now();
+        let room = room("generation-room");
+        let jid = jid("alice@example.com/web");
+        let first_generation = generation();
+        let second_generation = generation();
+
+        inventory.record_at(
+            LocalDepartureItem::RoomDeparture {
+                room: room.clone(),
+                jid: jid.clone(),
+                cause: OccupancyLeaveCause::Disconnect,
+                selector: LeaveSessionSelector::Generation(first_generation),
+                attempt: LeaveAttemptId::generate(),
+                notified: HashSet::new(),
+            },
+            now,
+        );
+        inventory.record_at(
+            LocalDepartureItem::RoomDeparture {
+                room: room.clone(),
+                jid: jid.clone(),
+                cause: OccupancyLeaveCause::Disconnect,
+                selector: LeaveSessionSelector::Generation(second_generation),
+                attempt: LeaveAttemptId::generate(),
+                notified: HashSet::new(),
+            },
+            now,
+        );
+
+        let due = inventory.take_due(now);
+        assert_eq!(
+            due.len(),
+            2,
+            "distinct occupant generations stay independent"
+        );
+        assert!(due.iter().any(|entry| matches!(
+            entry.item,
+            LocalDepartureItem::RoomDeparture {
+                room: ref retained_room,
+                jid: ref retained_jid,
+                selector: LeaveSessionSelector::Generation(retained_generation),
+                ..
+            } if retained_room == &room
+                && retained_jid == &jid
+                && retained_generation == first_generation
+        )));
+        assert!(due.iter().any(|entry| matches!(
+            entry.item,
+            LocalDepartureItem::RoomDeparture {
+                room: ref retained_room,
+                jid: ref retained_jid,
+                selector: LeaveSessionSelector::Generation(retained_generation),
+                ..
+            } if retained_room == &room
+                && retained_jid == &jid
+                && retained_generation == second_generation
+        )));
+    }
+
+    #[test]
+    fn generation_scoped_full_jid_sweeps_for_the_same_jid_do_not_merge() {
+        let inventory = PendingLocalMucDepartures::default();
+        let now = Instant::now();
+        let jid = jid("alice@example.com/web");
+        let first_generation = generation();
+        let second_generation = generation();
+
+        inventory.record_at(
+            LocalDepartureItem::FullJidSweep {
+                jid: jid.clone(),
+                selector: LeaveSessionSelector::Generation(first_generation),
+                attempt: LeaveAttemptId::generate(),
+                remote_ceiling: 11,
+            },
+            now,
+        );
+        inventory.record_at(
+            LocalDepartureItem::FullJidSweep {
+                jid: jid.clone(),
+                selector: LeaveSessionSelector::Generation(second_generation),
+                attempt: LeaveAttemptId::generate(),
+                remote_ceiling: 22,
+            },
+            now,
+        );
+
+        let due = inventory.take_due(now);
+        assert_eq!(
+            due.len(),
+            2,
+            "same JID sweeps keep one entry per generation"
+        );
+        assert!(due.iter().any(|entry| matches!(
+            entry.item,
+            LocalDepartureItem::FullJidSweep {
+                jid: ref retained_jid,
+                selector: LeaveSessionSelector::Generation(retained_generation),
+                remote_ceiling: 11,
+                ..
+            } if retained_jid == &jid && retained_generation == first_generation
+        )));
+        assert!(due.iter().any(|entry| matches!(
+            entry.item,
+            LocalDepartureItem::FullJidSweep {
+                jid: ref retained_jid,
+                selector: LeaveSessionSelector::Generation(retained_generation),
+                remote_ceiling: 22,
+                ..
+            } if retained_jid == &jid && retained_generation == second_generation
+        )));
+    }
+
+    #[test]
+    fn in_flight_entries_keep_their_generation_selector_until_redrive() {
+        let inventory = PendingLocalMucDepartures::default();
+        let room = room("generation-in-flight");
+        let jid = jid("alice@example.com/web");
+        let selector = LeaveSessionSelector::Generation(generation());
+        let item = LocalDepartureItem::InFlight {
+            room: room.clone(),
+            jid: jid.clone(),
+            cause: OccupancyLeaveCause::Disconnect,
+            selector,
+            attempt: LeaveAttemptId::generate(),
+            notified: HashSet::new(),
+        };
+
+        inventory.record_in_flight(item.clone());
+        let due =
+            inventory.take_due(Instant::now() + IN_FLIGHT_REPLAY_DELAY + Duration::from_secs(1));
+        assert_eq!(due.len(), 1);
+        assert!(matches!(
+            due[0].item,
+            LocalDepartureItem::InFlight {
+                room: ref retained_room,
+                jid: ref retained_jid,
+                selector: retained_selector,
+                ..
+            } if retained_room == &room && retained_jid == &jid && retained_selector == selector
+        ));
     }
 
     #[test]
@@ -981,6 +1200,64 @@ mod tests {
                 attempt,
                 ..
             } if merged_room == room && merged_jid == jid && attempt == attempt_b
+        ));
+    }
+
+    #[test]
+    fn full_jid_sweep_merge_keeps_newest_watermark_and_any_dominates() {
+        let inventory = PendingLocalMucDepartures::default();
+        let now = Instant::now();
+        let jid = jid("alice@example.com/web");
+        let sweep = |selector, attempt| LocalDepartureItem::FullJidSweep {
+            jid: jid.clone(),
+            selector,
+            attempt,
+            remote_ceiling: u64::MAX,
+        };
+        let attempt_a = LeaveAttemptId::generate();
+        let attempt_b = LeaveAttemptId::generate();
+        let attempt_c = LeaveAttemptId::generate();
+
+        inventory.record_at(
+            sweep(
+                LeaveSessionSelector::JoinedAtOrBefore(OccupancyWatermark::from_revision(3)),
+                attempt_a,
+            ),
+            now,
+        );
+        inventory.record_at(
+            sweep(
+                LeaveSessionSelector::JoinedAtOrBefore(OccupancyWatermark::from_revision(7)),
+                attempt_b,
+            ),
+            now,
+        );
+        let merged = inventory.take_due(now).pop().expect("merged sweep");
+        assert!(matches!(
+            merged.item,
+            LocalDepartureItem::FullJidSweep {
+                selector: LeaveSessionSelector::JoinedAtOrBefore(watermark),
+                attempt,
+                ..
+            } if watermark == OccupancyWatermark::from_revision(7) && attempt == attempt_b
+        ));
+
+        inventory.record_at(
+            sweep(
+                LeaveSessionSelector::JoinedAtOrBefore(OccupancyWatermark::from_revision(3)),
+                attempt_a,
+            ),
+            now,
+        );
+        inventory.record_at(sweep(LeaveSessionSelector::Any, attempt_c), now);
+        let merged = inventory.take_due(now).pop().expect("any dominates");
+        assert!(matches!(
+            merged.item,
+            LocalDepartureItem::FullJidSweep {
+                selector: LeaveSessionSelector::Any,
+                attempt,
+                ..
+            } if attempt == attempt_c
         ));
     }
 
@@ -1270,6 +1547,79 @@ mod tests {
     }
 
     #[test]
+    fn newer_generation_entry_survives_even_when_older_attempt_orders_later() {
+        let inventory = PendingLocalMucDepartures::default();
+        let now = Instant::now();
+        let room = room("generation-order-inversion");
+        let jid = jid("alice@example.com/web");
+        let g1 = generation();
+        let g2 = generation();
+        let attempt_g2 = LeaveAttemptId::generate();
+        let attempt_g1 = LeaveAttemptId::generate();
+
+        inventory.record_at(
+            LocalDepartureItem::RoomDeparture {
+                room: room.clone(),
+                jid: jid.clone(),
+                cause: OccupancyLeaveCause::Disconnect,
+                selector: LeaveSessionSelector::Generation(g2),
+                attempt: attempt_g2,
+                notified: HashSet::new(),
+            },
+            now,
+        );
+        inventory.record_at(
+            LocalDepartureItem::RoomDeparture {
+                room: room.clone(),
+                jid: jid.clone(),
+                cause: OccupancyLeaveCause::Disconnect,
+                selector: LeaveSessionSelector::Generation(g1),
+                attempt: attempt_g1,
+                notified: HashSet::new(),
+            },
+            now,
+        );
+
+        let due = inventory.take_due(now);
+        assert_eq!(due.len(), 2, "attempt ordering must not merge generations");
+        assert!(due.iter().any(|pending| {
+            matches!(
+                pending.item,
+                LocalDepartureItem::RoomDeparture {
+                    selector: LeaveSessionSelector::Generation(found),
+                    attempt,
+                    ..
+                } if found == g2 && attempt == attempt_g2
+            )
+        }));
+    }
+
+    #[test]
+    fn merge_selectors_accepts_only_identical_generations() {
+        let g1 = generation();
+        let g2 = generation();
+
+        assert_eq!(
+            merge_selectors(
+                Some(LeaveSessionSelector::Generation(g1)),
+                Some(LeaveSessionSelector::Generation(g1)),
+            ),
+            Some(LeaveSessionSelector::Generation(g1))
+        );
+
+        let mismatch = std::panic::catch_unwind(|| {
+            merge_selectors(
+                Some(LeaveSessionSelector::Generation(g1)),
+                Some(LeaveSessionSelector::Generation(g2)),
+            )
+        });
+        assert!(
+            mismatch.is_err(),
+            "different generation selectors are unreachable by key construction"
+        );
+    }
+
+    #[test]
     fn full_jid_sweep_overflow_drops_oldest_with_metric() {
         const CAP: usize = 8;
         let inventory = PendingLocalMucDepartures::with_full_jid_sweep_cap(CAP);
@@ -1278,6 +1628,7 @@ mod tests {
             inventory.record_at(
                 LocalDepartureItem::FullJidSweep {
                     jid: jid(&format!("u{index}@example.com/r")),
+                    selector: LeaveSessionSelector::Any,
                     attempt: LeaveAttemptId::generate(),
                     remote_ceiling: u64::MAX,
                 },
@@ -1289,7 +1640,10 @@ mod tests {
         assert!(
             !retained
                 .entries
-                .contains_key(&LocalDepartureKey::FullJidSweep(jid("u0@example.com/r"))),
+                .contains_key(&LocalDepartureKey::FullJidSweep(
+                    jid("u0@example.com/r"),
+                    None,
+                )),
             "the oldest sweep is the one dropped"
         );
     }
@@ -1345,6 +1699,7 @@ mod tests {
             room: room.clone(),
             jid: jid.clone(),
             cause: OccupancyLeaveCause::Disconnect,
+            selector: LeaveSessionSelector::Any,
             attempt,
             notified: HashSet::new(),
         };
@@ -1381,6 +1736,7 @@ mod tests {
             room: room.clone(),
             jid: jid.clone(),
             cause: OccupancyLeaveCause::Explicit,
+            selector: LeaveSessionSelector::Any,
             attempt,
             notified: HashSet::new(),
         };
@@ -1468,6 +1824,7 @@ mod tests {
             room,
             jid,
             cause: OccupancyLeaveCause::Explicit,
+            selector: LeaveSessionSelector::Any,
             attempt: LeaveAttemptId::generate(),
             notified: HashSet::new(),
         };
@@ -1515,6 +1872,7 @@ mod tests {
         inventory.record_at(
             LocalDepartureItem::FullJidSweep {
                 jid: jid("b@example.com/web"),
+                selector: LeaveSessionSelector::Any,
                 attempt: LeaveAttemptId::generate(),
                 remote_ceiling: u64::MAX,
             },
@@ -1523,6 +1881,7 @@ mod tests {
         inventory.record_at(
             LocalDepartureItem::FullJidSweep {
                 jid: jid("a@example.com/web"),
+                selector: LeaveSessionSelector::Any,
                 attempt: LeaveAttemptId::generate(),
                 remote_ceiling: u64::MAX,
             },

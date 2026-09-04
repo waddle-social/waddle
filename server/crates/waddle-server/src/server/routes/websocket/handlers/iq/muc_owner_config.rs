@@ -1554,6 +1554,7 @@ mod tests {
                 affiliation_grant: JoinAffiliationGrant::Resolver(waddle_xmpp::Affiliation::Owner),
                 local_domain: "example.test".to_owned(),
                 admission_revision: 0,
+                session: waddle_xmpp_core::OccupancySessionGeneration::mint(),
             })
             .await
             .expect("owner join");
@@ -1773,6 +1774,7 @@ mod tests {
                     ),
                     local_domain: "example.test".to_owned(),
                     admission_revision: 0,
+                    session: waddle_xmpp_core::OccupancySessionGeneration::mint(),
                 })
                 .await
                 .expect("owner join");
@@ -1877,6 +1879,7 @@ mod tests {
                     ),
                     local_domain: "example.test".to_owned(),
                     admission_revision: 0,
+                    session: waddle_xmpp_core::OccupancySessionGeneration::mint(),
                 })
                 .await
                 .expect("owner join");
@@ -2021,6 +2024,7 @@ mod tests {
                 affiliation_grant: JoinAffiliationGrant::Resolver(waddle_xmpp::Affiliation::Owner),
                 local_domain: "example.test".to_owned(),
                 admission_revision: 0,
+                session: waddle_xmpp_core::OccupancySessionGeneration::mint(),
             })
             .await
             .expect("owner join");
@@ -2174,6 +2178,7 @@ mod tests {
                 affiliation_grant: JoinAffiliationGrant::Resolver(waddle_xmpp::Affiliation::Owner),
                 local_domain: "example.test".to_owned(),
                 admission_revision: 0,
+                session: waddle_xmpp_core::OccupancySessionGeneration::mint(),
             })
             .await
             .expect("owner join");
@@ -2372,6 +2377,7 @@ mod tests {
                 affiliation_grant: JoinAffiliationGrant::Resolver(waddle_xmpp::Affiliation::Owner),
                 local_domain: "example.test".to_owned(),
                 admission_revision: 0,
+                session: waddle_xmpp_core::OccupancySessionGeneration::mint(),
             })
             .await
             .expect("admin join");
@@ -2382,6 +2388,7 @@ mod tests {
                 affiliation_grant: JoinAffiliationGrant::Resolver(waddle_xmpp::Affiliation::None),
                 local_domain: "example.test".to_owned(),
                 admission_revision: 0,
+                session: waddle_xmpp_core::OccupancySessionGeneration::mint(),
             })
             .await
             .expect("alice join");
@@ -2521,6 +2528,7 @@ mod tests {
                 affiliation_grant: JoinAffiliationGrant::Resolver(waddle_xmpp::Affiliation::Owner),
                 local_domain: "example.test".to_owned(),
                 admission_revision: 0,
+                session: waddle_xmpp_core::OccupancySessionGeneration::mint(),
             })
             .await
             .expect("admin join");
@@ -2531,6 +2539,7 @@ mod tests {
                 affiliation_grant: JoinAffiliationGrant::Resolver(waddle_xmpp::Affiliation::None),
                 local_domain: "example.test".to_owned(),
                 admission_revision: 0,
+                session: waddle_xmpp_core::OccupancySessionGeneration::mint(),
             })
             .await
             .expect("alice join");

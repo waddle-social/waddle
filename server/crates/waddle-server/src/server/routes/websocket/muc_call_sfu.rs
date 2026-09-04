@@ -20,10 +20,13 @@
 use jid::{BareJid, FullJid};
 use std::collections::{BTreeMap, HashSet};
 use waddle_sfu::{
-    CallId, Identity, MediaCapabilities, ObservedCallSids, SidObservationDisposition,
-    TeardownDisposition,
+    CallId, Identity, MediaCapabilities, ObservedCallSids, SessionScopedTeardown,
+    SidObservationDisposition, TeardownDisposition,
 };
-use waddle_xmpp_core::types::{Moderation, Voice};
+use waddle_xmpp_core::{
+    types::{Moderation, Voice},
+    OccupancySessionGeneration,
+};
 
 use super::state::WebSocketState;
 
@@ -57,21 +60,42 @@ pub(crate) fn derive_room_voice_from_snapshot(
 ///   theoretically reject some MUC bare JIDs — those are rooms with
 ///   no calling capability and there is nothing on the SFU to undo
 ///   for them anyway).
-pub(crate) fn unregister_participant_from_room(
+pub(crate) fn unregister_participant_from_room_if_occupant_matches(
     state: &WebSocketState,
     room_jid: &BareJid,
     jid: &FullJid,
-) {
-    let Some(sfu) = state.deps.protocol.sfu.as_ref() else {
-        return;
-    };
-    unregister_participant_via_sfu(sfu, room_jid, jid);
+    occupant: OccupancySessionGeneration,
+    observed_sids: Option<&ObservedCallSids>,
+) -> Option<SessionScopedTeardown> {
+    let sfu = state.deps.protocol.sfu.as_ref()?;
+    unregister_participant_via_sfu_if_occupant_matches(sfu, room_jid, jid, occupant, observed_sids)
 }
 
-/// SFU-handle variant of [`unregister_participant_from_room`] for
+/// SFU-handle variant of [`unregister_participant_from_room_if_occupant_matches`] for
+/// callers that do not hold a `WebSocketState`.
+pub(crate) fn unregister_participant_via_sfu_if_occupant_matches(
+    sfu: &std::sync::Arc<dyn waddle_sfu::SfuService>,
+    room_jid: &BareJid,
+    jid: &FullJid,
+    occupant: OccupancySessionGeneration,
+    observed_sids: Option<&ObservedCallSids>,
+) -> Option<SessionScopedTeardown> {
+    let Ok(call_id) = CallId::new(room_jid.to_string()) else {
+        return None;
+    };
+    let identity = Identity::from_jid(jid.clone());
+    Some(sfu.unregister_call_participant_if_occupant_matches(
+        &call_id,
+        &identity,
+        occupant,
+        observed_sids,
+    ))
+}
+
+/// SFU-handle variant of [`unregister_participant_from_room_ungated`] for
 /// callers that don't hold a `WebSocketState` (the admin V2 command
 /// handlers receive the SFU as an explicit dependency).
-pub(crate) fn unregister_participant_via_sfu(
+pub(crate) fn unregister_participant_via_sfu_ungated(
     sfu: &std::sync::Arc<dyn waddle_sfu::SfuService>,
     room_jid: &BareJid,
     jid: &FullJid,
@@ -84,6 +108,17 @@ pub(crate) fn unregister_participant_via_sfu(
     };
     let identity = Identity::from_jid(jid.clone());
     let _ = sfu.unregister_call_participant(&call_id, &identity, None);
+}
+
+pub(crate) fn unregister_participant_from_room_ungated(
+    state: &WebSocketState,
+    room_jid: &BareJid,
+    jid: &FullJid,
+) {
+    let Some(sfu) = state.deps.protocol.sfu.as_ref() else {
+        return;
+    };
+    unregister_participant_via_sfu_ungated(sfu, room_jid, jid);
 }
 
 /// Push a session's XEP-0045 voice grant through an explicit SFU handle.
@@ -129,7 +164,7 @@ pub(crate) fn converge_moderation_deltas_via_sfu(
         return;
     };
     for removed in removed_sessions {
-        unregister_participant_via_sfu(sfu, room_jid, removed);
+        unregister_participant_via_sfu_ungated(sfu, room_jid, removed);
     }
     for (session, voice) in effective_voice_changes(removed_sessions, voice_changes) {
         apply_voice_grants_via_sfu(sfu, room_jid, session, voice);
@@ -269,7 +304,7 @@ pub(crate) fn apply_derived_enforcement(
                 user = %full_jid.to_bare(),
                 "LiveKit participant is not a MUC occupant; evicting from the call",
             );
-            unregister_participant_via_sfu(sfu, room_jid, full_jid);
+            unregister_participant_via_sfu_ungated(sfu, room_jid, full_jid);
             GrantEnforcement::EvictedNonOccupant
         }
         VoiceDerivation::NoLocalRoomActor => GrantEnforcement::NoLocalRoomActor,
@@ -468,7 +503,7 @@ mod tests {
         let room: BareJid = "room@muc.example.com".parse().unwrap();
         let alice: FullJid = "alice@example.com/web".parse().unwrap();
         // Should not panic, not write anywhere.
-        unregister_participant_from_room(&state, &room, &alice);
+        unregister_participant_from_room_ungated(&state, &room, &alice);
     }
 
     #[tokio::test]
@@ -478,7 +513,7 @@ mod tests {
         let room: BareJid = "room@muc.example.com".parse().unwrap();
         let alice: FullJid = "alice@example.com/web".parse().unwrap();
 
-        unregister_participant_from_room(&state, &room, &alice);
+        unregister_participant_from_room_ungated(&state, &room, &alice);
 
         let recorded = recorder.snapshot();
         assert_eq!(recorded.len(), 1, "exactly one teardown call expected");
@@ -500,8 +535,8 @@ mod tests {
         let room: BareJid = "room@muc.example.com".parse().unwrap();
         let alice: FullJid = "alice@example.com/web".parse().unwrap();
 
-        unregister_participant_from_room(&state, &room, &alice);
-        unregister_participant_from_room(&state, &room, &alice);
+        unregister_participant_from_room_ungated(&state, &room, &alice);
+        unregister_participant_from_room_ungated(&state, &room, &alice);
 
         let recorded = recorder.snapshot();
         assert_eq!(recorded.len(), 2, "both teardown calls reach the SFU");

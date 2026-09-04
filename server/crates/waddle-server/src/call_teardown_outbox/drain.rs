@@ -486,6 +486,7 @@ async fn execute_intent(
                 room_jid,
                 departed,
                 observed_sids.as_ref(),
+                intent.occupant,
                 intent.session.as_ref(),
             ),
         )
@@ -605,6 +606,7 @@ async fn execute_intent(
                     &departed_jid,
                     Some(&observed_sids),
                     None,
+                    None,
                 ),
             )
             .await
@@ -652,6 +654,7 @@ async fn execute_intent(
         generation: intent.generation,
         room_sid: intent.room_sid.clone(),
         session: intent.session.clone(),
+        occupant_session: intent.occupant,
     };
     match executor.execute(&lite).await {
         Ok(TeardownExecution::Executed) => IntentExecution::Done,

@@ -403,8 +403,9 @@ pub enum MucCleanupOutcome {
 pub async fn cleanup_muc_presence_for_jid(
     state: &WebSocketState,
     jid: &FullJid,
+    session: LeaveSessionSelector,
 ) -> MucCleanupOutcome {
-    if cleanup_muc_presence(state, jid).await {
+    if cleanup_muc_presence(state, jid, session).await {
         MucCleanupOutcome::Completed
     } else {
         MucCleanupOutcome::Failed
@@ -415,6 +416,7 @@ pub async fn cleanup_muc_presence_for_jid(
 pub(crate) async fn redrive_local_muc_cleanup(
     state: &WebSocketState,
     jid: &FullJid,
+    session: LeaveSessionSelector,
     attempt: waddle_xmpp::muc::room_actor::LeaveAttemptId,
     remote_ceiling: u64,
 ) -> MucCleanupOutcome {
@@ -425,6 +427,7 @@ pub(crate) async fn redrive_local_muc_cleanup(
     if cleanup_muc_presence_with_origin(
         state,
         jid,
+        session,
         None,
         attempt,
         SweepFailureRecording::JanitorRequeues { remote_ceiling },
@@ -443,11 +446,13 @@ pub(crate) async fn redrive_local_muc_cleanup(
 pub async fn cleanup_muc_presence_for_jid_with_origin(
     state: &WebSocketState,
     jid: &FullJid,
+    session: LeaveSessionSelector,
     origin: crate::server::routes::interpret::OrderedRelayRouteOrigin,
 ) -> MucCleanupOutcome {
     if cleanup_muc_presence_with_origin(
         state,
         jid,
+        session,
         Some(&origin),
         waddle_xmpp::muc::room_actor::LeaveAttemptId::generate(),
         SweepFailureRecording::RecordSweep,
@@ -489,6 +494,7 @@ pub(crate) async fn redrive_remote_muc_cleanup(
     if cleanup_muc_presence_with_origin(
         state,
         jid,
+        LeaveSessionSelector::Any,
         None,
         waddle_xmpp::muc::room_actor::LeaveAttemptId::generate(),
         SweepFailureRecording::RecordSweep,
@@ -1264,6 +1270,7 @@ async fn cleanup_connection_shutdown_inner(
                             cleanup_muc_presence_with_origin(
                                 state,
                                 &jid,
+                                LeaveSessionSelector::Generation(conn.occupancy_session),
                                 cleanup_origin.as_ref(),
                                 waddle_xmpp::muc::room_actor::LeaveAttemptId::generate(),
                                 SweepFailureRecording::RecordSweep,
@@ -1296,7 +1303,12 @@ async fn cleanup_connection_shutdown_inner(
                         state.deps.protocol.caps_resolver.drop_resource(&jid);
                     }
                     if !detach_fail_removed && !replacement_bound_during_recovery {
-                        cleanup_muc_presence(state, &jid).await;
+                        cleanup_muc_presence(
+                            state,
+                            &jid,
+                            LeaveSessionSelector::Generation(conn.occupancy_session),
+                        )
+                        .await;
                     }
                     return ConnectionShutdownOutcome::NotPersisted;
                 }
@@ -1330,6 +1342,7 @@ async fn cleanup_connection_shutdown_inner(
         cleanup_muc_presence_with_origin(
             state,
             &jid,
+            LeaveSessionSelector::Generation(conn.occupancy_session),
             cleanup_origin.as_ref(),
             waddle_xmpp::muc::room_actor::LeaveAttemptId::generate(),
             SweepFailureRecording::RecordSweep,
@@ -2228,6 +2241,7 @@ async fn refuse_detach_without_principal(
             cleanup_muc_presence_with_origin(
                 state,
                 jid,
+                LeaveSessionSelector::Generation(conn.occupancy_session),
                 cleanup_origin.as_ref(),
                 waddle_xmpp::muc::room_actor::LeaveAttemptId::generate(),
                 SweepFailureRecording::RecordSweep,
@@ -2309,10 +2323,15 @@ pub(crate) async fn broadcast_unavailable_if_no_replacement(
     handlers::presence::broadcast_unavailable_for_terminated_session(state, jid).await
 }
 
-async fn cleanup_muc_presence(state: &WebSocketState, jid: &FullJid) -> bool {
+async fn cleanup_muc_presence(
+    state: &WebSocketState,
+    jid: &FullJid,
+    session: LeaveSessionSelector,
+) -> bool {
     cleanup_muc_presence_with_origin(
         state,
         jid,
+        session,
         None,
         waddle_xmpp::muc::room_actor::LeaveAttemptId::generate(),
         SweepFailureRecording::RecordSweep,
@@ -2338,6 +2357,7 @@ enum SweepFailureRecording {
 async fn cleanup_muc_presence_with_origin(
     state: &WebSocketState,
     jid: &FullJid,
+    session: LeaveSessionSelector,
     origin: Option<&crate::server::routes::interpret::OrderedRelayRouteOrigin>,
     sweep_attempt: waddle_xmpp::muc::room_actor::LeaveAttemptId,
     sweep_recording: SweepFailureRecording,
@@ -2350,7 +2370,8 @@ async fn cleanup_muc_presence_with_origin(
             .generation_watermark(),
         SweepFailureRecording::JanitorRequeues { remote_ceiling } => remote_ceiling,
     };
-    let mut completed = cleanup_remote_muc_presence(state, jid, origin, remote_ceiling).await;
+    let mut completed =
+        cleanup_remote_muc_presence(state, jid, session, origin, remote_ceiling).await;
 
     let room_jids = match RoomRegistry::wrap(state.deps.protocol.room_registry.clone())
         .list_rooms()
@@ -2364,6 +2385,7 @@ async fn cleanup_muc_presence_with_origin(
                 state.deps.protocol.pending_local_muc_departures.record(
                     LocalDepartureItem::FullJidSweep {
                         jid: jid.clone(),
+                        selector: session,
                         attempt: sweep_attempt,
                         remote_ceiling,
                     },
@@ -2383,6 +2405,7 @@ async fn cleanup_muc_presence_with_origin(
                     state.deps.protocol.pending_local_muc_departures.record(
                         LocalDepartureItem::FullJidSweep {
                             jid: jid.clone(),
+                            selector: session,
                             attempt: sweep_attempt,
                             remote_ceiling,
                         },
@@ -2401,6 +2424,7 @@ async fn cleanup_muc_presence_with_origin(
             room: room_jid.clone(),
             jid: jid.clone(),
             cause: OccupancyLeaveCause::Disconnect,
+            selector: session,
             attempt,
             notified: HashSet::new(),
         };
@@ -2418,7 +2442,7 @@ async fn cleanup_muc_presence_with_origin(
             LeaveByRealJid {
                 sender_jid: jid.clone(),
                 cause: OccupancyLeaveCause::Disconnect,
-                session: LeaveSessionSelector::Any,
+                session,
                 attempt,
                 origin: waddle_xmpp::muc::room_actor::LeaveOrigin::Fresh,
             },
@@ -2439,7 +2463,18 @@ async fn cleanup_muc_presence_with_origin(
         // connection is physically gone, so it runs on the first attempt
         // regardless of how the room answered (today's semantics; #1703 tracks
         // the generation-safe variant).
-        super::muc_call_sfu::unregister_participant_from_room(state, &room_jid, jid);
+        match session {
+            LeaveSessionSelector::Generation(occupant) => {
+                let _ = super::muc_call_sfu::unregister_participant_from_room_if_occupant_matches(
+                    state, &room_jid, jid, occupant, None,
+                );
+            }
+            LeaveSessionSelector::Any | LeaveSessionSelector::JoinedAtOrBefore(_) => {
+                super::muc_call_sfu::unregister_participant_from_room_ungated(
+                    state, &room_jid, jid,
+                );
+            }
+        }
         match leave_result {
             Ok(LeaveDisposition::Left(outcome)) => {
                 debug!(
@@ -2510,7 +2545,13 @@ async fn cleanup_muc_presence_with_origin(
                         room: room_jid,
                         jid: jid.clone(),
                         cause: OccupancyLeaveCause::Disconnect,
-                        selector: LeaveSessionSelector::JoinedAtOrBefore(watermark),
+                        selector: match session {
+                            LeaveSessionSelector::Generation(_) => session,
+                            LeaveSessionSelector::Any
+                            | LeaveSessionSelector::JoinedAtOrBefore(_) => {
+                                LeaveSessionSelector::JoinedAtOrBefore(watermark)
+                            }
+                        },
                         attempt,
                         notified: HashSet::new(),
                     },
@@ -2551,7 +2592,7 @@ async fn cleanup_muc_presence_with_origin(
                         room: room_jid.clone(),
                         jid: jid.clone(),
                         cause: OccupancyLeaveCause::Disconnect,
-                        selector: LeaveSessionSelector::Any,
+                        selector: session,
                         attempt,
                         notified: HashSet::new(),
                     },
@@ -2571,7 +2612,7 @@ async fn cleanup_muc_presence_with_origin(
                         jid: jid.clone(),
                         actor: room_actor.id(),
                         cause: OccupancyLeaveCause::Disconnect,
-                        selector: LeaveSessionSelector::Any,
+                        selector: session,
                         attempt,
                         notified: HashSet::new(),
                     },
@@ -2592,6 +2633,7 @@ async fn cleanup_muc_presence_with_origin(
 async fn cleanup_remote_muc_presence(
     state: &WebSocketState,
     jid: &FullJid,
+    session: LeaveSessionSelector,
     cleanup_origin: Option<&crate::server::routes::interpret::OrderedRelayRouteOrigin>,
     remote_ceiling: u64,
 ) -> bool {
@@ -2674,7 +2716,11 @@ async fn cleanup_remote_muc_presence(
             );
             continue;
         }
-        super::muc_call_sfu::unregister_participant_from_room(state, &room_jid, jid);
+        if let LeaveSessionSelector::Generation(occupant) = session {
+            let _ = super::muc_call_sfu::unregister_participant_from_room_if_occupant_matches(
+                state, &room_jid, jid, occupant, None,
+            );
+        }
         let mut presence =
             xmpp_parsers::presence::Presence::new(xmpp_parsers::presence::Type::Unavailable);
         presence.from = Some(jid::Jid::from(jid.clone()));
@@ -2976,6 +3022,7 @@ async fn reap_remote_muc_cleanup_origin_if_empty(state: &WebSocketState, jid: &F
 async fn cleanup_remote_muc_presence(
     _state: &WebSocketState,
     _jid: &FullJid,
+    _session: LeaveSessionSelector,
     _cleanup_origin: Option<&crate::server::routes::interpret::OrderedRelayRouteOrigin>,
     _remote_ceiling: u64,
 ) -> bool {
@@ -3090,7 +3137,12 @@ pub(super) async fn cleanup_invalidated_detached_session(
             .get_entry(&detached.jid)
             .is_some();
     if !foreign_live_entry {
-        cleanup_muc_presence(state, &detached.jid).await;
+        cleanup_muc_presence(
+            state,
+            &detached.jid,
+            LeaveSessionSelector::Generation(detached.occupancy_session),
+        )
+        .await;
     }
 }
 
@@ -3949,8 +4001,8 @@ mod remote_muc_cleanup_disposition_tests {
 mod local_departure_cleanup_tests {
     use super::super::tests::{
         create_test_websocket_state, create_test_websocket_state_with_clustering,
-        create_test_websocket_state_with_sfu_and_clustering, register_test_connection,
-        snapshot_room, RecordingSfu,
+        create_test_websocket_state_with_sfu, create_test_websocket_state_with_sfu_and_clustering,
+        register_test_connection, snapshot_room, RecordingSfu,
     };
     use super::*;
     use crate::clustering::ClusteringHandles;
@@ -3963,6 +4015,7 @@ mod local_departure_cleanup_tests {
     };
     use std::time::{Duration, Instant};
     use tokio::sync::mpsc;
+    use waddle_sfu::SfuService;
     use waddle_xmpp::muc::durable::{
         DurableRoomState, MucDurableFuture, MucDurableStore, RoomClaimFenceContext,
     };
@@ -4212,9 +4265,41 @@ mod local_departure_cleanup_tests {
                 affiliation_grant: JoinAffiliationGrant::Resolver(Affiliation::Member),
                 local_domain: "example.com".to_string(),
                 admission_revision: 0,
+                session: waddle_xmpp::muc::room_actor::OccupancySessionGeneration::mint(),
             })
             .await
             .expect("join occupant");
+    }
+
+    async fn join_member_with_generation(
+        room_actor: &ActorRef<RoomActor>,
+        jid: &FullJid,
+        nick: &str,
+        session: waddle_xmpp::muc::room_actor::OccupancySessionGeneration,
+    ) {
+        let admission_revision = room_actor
+            .ask(GetSnapshot)
+            .await
+            .expect("snapshot before join")
+            .admission_revision;
+        room_actor
+            .ask(JoinWithAffiliation {
+                sender_jid: jid.clone(),
+                nick: nick.to_string(),
+                affiliation_grant: JoinAffiliationGrant::Resolver(Affiliation::Member),
+                local_domain: "example.com".to_string(),
+                admission_revision,
+                session,
+            })
+            .await
+            .expect("join occupant with generation");
+    }
+
+    async fn cleanup_muc_presence_for_jid(
+        state: &WebSocketState,
+        jid: &FullJid,
+    ) -> MucCleanupOutcome {
+        super::cleanup_muc_presence_for_jid(state, jid, LeaveSessionSelector::Any).await
     }
 
     #[tokio::test]
@@ -4395,6 +4480,186 @@ mod local_departure_cleanup_tests {
             "the first attempt unregisters SFU"
         );
         assert_eq!(state.deps.protocol.pending_local_muc_departures.len(), 1);
+    }
+
+    #[tokio::test]
+    async fn generation_scoped_disconnect_cleanup_keeps_a_same_full_jid_replacement_and_its_sfu_registration(
+    ) {
+        let recorder = Arc::new(RecordingSfu::default());
+        let state = create_test_websocket_state_with_sfu(recorder.clone()).await;
+        let room_jid = room_jid("generation-replacement");
+        let room_actor = state
+            .deps
+            .protocol
+            .room_registry
+            .ask(CreateRoom {
+                room_jid: room_jid.clone(),
+                waddle_id: "w".to_string(),
+                channel_id: "c".to_string(),
+                config: RoomConfig::default(),
+            })
+            .await
+            .expect("create room");
+        let alice = full_jid("alice@example.com/web");
+        let first_generation = waddle_xmpp::muc::room_actor::OccupancySessionGeneration::mint();
+        let second_generation = waddle_xmpp::muc::room_actor::OccupancySessionGeneration::mint();
+        join_member_with_generation(&room_actor, &alice, "alice", first_generation).await;
+
+        let call_id = waddle_sfu::CallId::new(room_jid.to_string()).expect("call id");
+        let identity = waddle_sfu::Identity::from_jid(alice.clone());
+        recorder.register_call_participant_with_session(
+            &call_id,
+            &identity,
+            &waddle_sfu::SessionBinding::new("muji-g1").expect("sid"),
+            first_generation,
+        );
+
+        join_member_with_generation(&room_actor, &alice, "alice", second_generation).await;
+        recorder.register_call_participant_with_session(
+            &call_id,
+            &identity,
+            &waddle_sfu::SessionBinding::new("muji-g2").expect("sid"),
+            second_generation,
+        );
+
+        assert!(
+            cleanup_muc_presence_with_origin(
+                state.as_ref(),
+                &alice,
+                LeaveSessionSelector::Generation(first_generation),
+                None,
+                waddle_xmpp::muc::room_actor::LeaveAttemptId::generate(),
+                SweepFailureRecording::RecordSweep,
+            )
+            .await
+        );
+
+        let snapshot = room_actor
+            .ask(GetSnapshot)
+            .await
+            .expect("snapshot after cleanup");
+        assert!(
+            snapshot.room.find_occupant_by_real_jid(&alice).is_some(),
+            "the replacement occupant must remain in the room"
+        );
+        assert!(
+            recorder.has_call_participant(&call_id, &identity),
+            "generation-scoped teardown must not remove the replacement SFU registration"
+        );
+    }
+
+    #[tokio::test]
+    async fn generation_scoped_disconnect_cleanup_without_a_replacement_evicts_and_unregisters() {
+        let recorder = Arc::new(RecordingSfu::default());
+        let state = create_test_websocket_state_with_sfu(recorder.clone()).await;
+        let room_jid = room_jid("generation-evict");
+        let room_actor = state
+            .deps
+            .protocol
+            .room_registry
+            .ask(CreateRoom {
+                room_jid: room_jid.clone(),
+                waddle_id: "w".to_string(),
+                channel_id: "c".to_string(),
+                config: RoomConfig::default(),
+            })
+            .await
+            .expect("create room");
+        let alice = full_jid("alice@example.com/web");
+        let generation = waddle_xmpp::muc::room_actor::OccupancySessionGeneration::mint();
+        join_member_with_generation(&room_actor, &alice, "alice", generation).await;
+
+        let call_id = waddle_sfu::CallId::new(room_jid.to_string()).expect("call id");
+        let identity = waddle_sfu::Identity::from_jid(alice.clone());
+        recorder.register_call_participant_with_session(
+            &call_id,
+            &identity,
+            &waddle_sfu::SessionBinding::new("muji-live").expect("sid"),
+            generation,
+        );
+
+        assert!(
+            cleanup_muc_presence_with_origin(
+                state.as_ref(),
+                &alice,
+                LeaveSessionSelector::Generation(generation),
+                None,
+                waddle_xmpp::muc::room_actor::LeaveAttemptId::generate(),
+                SweepFailureRecording::RecordSweep,
+            )
+            .await
+        );
+
+        let snapshot = room_actor
+            .ask(GetSnapshot)
+            .await
+            .expect("snapshot after cleanup");
+        assert!(
+            snapshot.room.find_occupant_by_real_jid(&alice).is_none(),
+            "the generation-matched occupant must be evicted"
+        );
+        assert!(
+            !recorder.has_call_participant(&call_id, &identity),
+            "generation-scoped teardown must remove the matching SFU registration"
+        );
+    }
+
+    #[tokio::test]
+    async fn generation_scoped_failed_cleanup_unbinds_the_matching_sfu_participant() {
+        let store = CleanupProjectionStore::new();
+        let recorder = Arc::new(RecordingSfu::default());
+        let state = clustered_state_with_sfu_and_store(store.clone(), recorder.clone()).await;
+        let room_jid = room_jid("generation-failed-ask");
+        let room_actor = state
+            .deps
+            .protocol
+            .room_registry
+            .ask(CreateRoom {
+                room_jid: room_jid.clone(),
+                waddle_id: "w".to_string(),
+                channel_id: "c".to_string(),
+                config: RoomConfig::default(),
+            })
+            .await
+            .expect("create room");
+        let alice = full_jid("alice@example.com/web");
+        let first_generation = waddle_xmpp::muc::room_actor::OccupancySessionGeneration::mint();
+        join_member_with_generation(&room_actor, &alice, "alice", first_generation).await;
+
+        let call_id = waddle_sfu::CallId::new(room_jid.to_string()).expect("call id");
+        let identity = waddle_sfu::Identity::from_jid(alice.clone());
+        recorder.register_call_participant_with_session(
+            &call_id,
+            &identity,
+            &waddle_sfu::SessionBinding::new("muji-g1").expect("sid"),
+            first_generation,
+        );
+        store.set_leave_mode(LeaveProjectionMode::NotOwner);
+
+        assert!(
+            !cleanup_muc_presence_with_origin(
+                state.as_ref(),
+                &alice,
+                LeaveSessionSelector::Generation(first_generation),
+                None,
+                waddle_xmpp::muc::room_actor::LeaveAttemptId::generate(),
+                SweepFailureRecording::RecordSweep,
+            )
+            .await
+        );
+
+        let snapshot = room_actor
+            .ask(GetSnapshot)
+            .await
+            .expect("snapshot after failed cleanup");
+        assert!(
+            snapshot.room.find_occupant_by_real_jid(&alice).is_some(),
+            "the sealed actor keeps the occupant after the failed ask"
+        );
+        assert!(
+            !recorder.has_call_participant(&call_id, &identity),
+            "ask failure must still tear down the matching SFU registration"
+        );
     }
 
     #[tokio::test]

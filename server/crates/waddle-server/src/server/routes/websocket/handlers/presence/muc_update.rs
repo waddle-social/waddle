@@ -148,6 +148,7 @@ pub(crate) async fn try_handle_muc_presence_update(
     room_jid: &BareJid,
     sender_jid: &FullJid,
     nick: &str,
+    occupancy_session: waddle_xmpp_core::OccupancySessionGeneration,
     incoming: &Presence,
 ) -> Option<Vec<String>> {
     if incoming.type_ != xmpp_parsers::presence::Type::None {
@@ -251,9 +252,14 @@ pub(crate) async fn try_handle_muc_presence_update(
         // registry just like full MUC leave / unclean disconnect do,
         // otherwise a hard-refreshed tab can clear the room indicator
         // while its LiveKit participant and issued token JTIs linger.
-        super::super::super::muc_call_sfu::unregister_participant_from_room(
-            state, room_jid, sender_jid,
-        );
+        let _ =
+            super::super::super::muc_call_sfu::unregister_participant_from_room_if_occupant_matches(
+                state,
+                room_jid,
+                sender_jid,
+                occupancy_session,
+                None,
+            );
     }
 
     // XEP-0045 §7.7: a user may change their *own* in-room presence

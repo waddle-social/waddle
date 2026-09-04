@@ -19,6 +19,7 @@ use xml::{
 pub(super) use xml::{build_muc_join_presence_xml, build_muc_presence_error_xml, MucJoinPresence};
 
 #[cfg(any(test, feature = "clustering"))]
+#[cfg(any(test, feature = "clustering"))]
 pub async fn handle_muc_join(
     state: &WebSocketState,
     domain: &str,
@@ -26,7 +27,7 @@ pub async fn handle_muc_join(
     sender_jid: &FullJid,
     nick: &str,
     presence_show: Option<crate::notification_activity::NotificationPresenceShow>,
-    authenticated_session: &Option<Session>,
+    connection: MucJoinConnectionContext<'_>,
 ) -> Vec<String> {
     handle_muc_join_with_ordered_relay(
         state,
@@ -36,11 +37,18 @@ pub async fn handle_muc_join(
             sender_jid,
             nick,
             presence_show,
-            authenticated_session,
+            occupancy_session: connection.occupancy_session,
+            authenticated_session: connection.authenticated_session,
             ordered_relay_origin: None,
         },
     )
     .await
+}
+
+#[cfg(any(test, feature = "clustering"))]
+pub struct MucJoinConnectionContext<'a> {
+    pub occupancy_session: waddle_xmpp_core::OccupancySessionGeneration,
+    pub authenticated_session: &'a Option<Session>,
 }
 
 pub struct MucJoinRequest<'a> {
@@ -49,6 +57,7 @@ pub struct MucJoinRequest<'a> {
     pub sender_jid: &'a FullJid,
     pub nick: &'a str,
     pub presence_show: Option<crate::notification_activity::NotificationPresenceShow>,
+    pub occupancy_session: waddle_xmpp_core::OccupancySessionGeneration,
     pub authenticated_session: &'a Option<Session>,
     pub ordered_relay_origin: Option<crate::server::routes::interpret::OrderedRelayRouteOrigin>,
 }
@@ -59,6 +68,7 @@ struct MucJoinWork<'a> {
     sender_jid: &'a FullJid,
     nick: String,
     presence_show: Option<crate::notification_activity::NotificationPresenceShow>,
+    occupancy_session: waddle_xmpp_core::OccupancySessionGeneration,
     authenticated_session: &'a Option<Session>,
     ordered_relay_origin: Option<crate::server::routes::interpret::OrderedRelayRouteOrigin>,
 }
@@ -83,6 +93,7 @@ pub async fn handle_muc_join_with_ordered_relay(
             sender_jid: request.sender_jid,
             nick: request.nick.to_string(),
             presence_show: request.presence_show,
+            occupancy_session: request.occupancy_session,
             authenticated_session: request.authenticated_session,
             ordered_relay_origin: request.ordered_relay_origin,
         },
@@ -902,6 +913,7 @@ async fn handle_muc_join_unlocked(state: &WebSocketState, request: MucJoinWork<'
         sender_jid,
         nick,
         presence_show,
+        occupancy_session,
         authenticated_session,
         ordered_relay_origin,
     } = request;
@@ -1403,6 +1415,7 @@ async fn handle_muc_join_unlocked(state: &WebSocketState, request: MucJoinWork<'
                 sender_jid: sender_jid.clone(),
                 nick: nick.clone(),
                 affiliation_grant,
+                session: occupancy_session,
                 local_domain: domain.clone(),
                 admission_revision,
             })
@@ -1873,6 +1886,7 @@ pub async fn handle_muc_leave(
     room_jid: &BareJid,
     sender_jid: &FullJid,
     nick: &str,
+    occupancy_session: waddle_xmpp_core::OccupancySessionGeneration,
     ordered_relay_origin: Option<&crate::server::routes::interpret::OrderedRelayRouteOrigin>,
 ) -> Vec<String> {
     let _request_timer = waddle_xmpp::metrics::MucOccupancyHandlerTimer::start("leave_request");
@@ -1966,9 +1980,14 @@ pub async fn handle_muc_leave(
         // Idempotent on the SFU side — the user could have an SFU
         // participant even when the room actor is gone (process
         // restart, eviction). Tear that down too.
-        super::super::super::muc_call_sfu::unregister_participant_from_room(
-            state, room_jid, sender_jid,
-        );
+        let _ =
+            super::super::super::muc_call_sfu::unregister_participant_from_room_if_occupant_matches(
+                state,
+                room_jid,
+                sender_jid,
+                occupancy_session,
+                None,
+            );
         return vec![build_muc_self_unavailable_xml(
             state,
             room_jid,
@@ -1986,6 +2005,7 @@ pub async fn handle_muc_leave(
         room: room_jid.clone(),
         jid: sender_jid.clone(),
         cause: waddle_xmpp::muc::durable::OccupancyLeaveCause::Explicit,
+        selector: waddle_xmpp::muc::room_actor::LeaveSessionSelector::Generation(occupancy_session),
         attempt: leave_attempt,
         notified: HashSet::new(),
     };
@@ -2003,7 +2023,9 @@ pub async fn handle_muc_leave(
         LeaveByRealJid {
             sender_jid: sender_jid.clone(),
             cause: waddle_xmpp::muc::durable::OccupancyLeaveCause::Explicit,
-            session: waddle_xmpp::muc::room_actor::LeaveSessionSelector::Any,
+            session: waddle_xmpp::muc::room_actor::LeaveSessionSelector::Generation(
+                occupancy_session,
+            ),
             attempt: leave_attempt,
             origin: waddle_xmpp::muc::room_actor::LeaveOrigin::Fresh,
         },
@@ -2020,8 +2042,12 @@ pub async fn handle_muc_leave(
             debug!(room = %room_jid, nick = %nick, sender = %sender_jid, "MUC leave for absent occupant");
             // No occupant slot to remove, but a stale SFU
             // participant could still exist — clear it.
-            super::super::super::muc_call_sfu::unregister_participant_from_room(
-                state, room_jid, sender_jid,
+            let _ = super::super::super::muc_call_sfu::unregister_participant_from_room_if_occupant_matches(
+                state,
+                room_jid,
+                sender_jid,
+                occupancy_session,
+                None,
             );
             return vec![build_muc_self_unavailable_xml(
                 state,
@@ -2068,8 +2094,12 @@ pub async fn handle_muc_leave(
             // Store-less room with a destroy/dormancy in flight: the departure
             // was recorded but nothing fans out. The departing session still
             // gets its XEP-0045 §7.14 self-presence echo (as before #1647).
-            super::super::super::muc_call_sfu::unregister_participant_from_room(
-                state, room_jid, sender_jid,
+            let _ = super::super::super::muc_call_sfu::unregister_participant_from_room_if_occupant_matches(
+                state,
+                room_jid,
+                sender_jid,
+                occupancy_session,
+                None,
             );
             // The actor's typed nickname is authoritative: the request's
             // `to` JID may carry a nick the sender never held.
@@ -2096,7 +2126,9 @@ pub async fn handle_muc_leave(
                     room: room_jid.clone(),
                     jid: sender_jid.clone(),
                     cause: waddle_xmpp::muc::durable::OccupancyLeaveCause::Explicit,
-                    selector: waddle_xmpp::muc::room_actor::LeaveSessionSelector::Any,
+                    selector: waddle_xmpp::muc::room_actor::LeaveSessionSelector::Generation(
+                        occupancy_session,
+                    ),
                     attempt: leave_attempt,
                     notified: HashSet::new(),
                 },
@@ -2125,7 +2157,9 @@ pub async fn handle_muc_leave(
                     jid: sender_jid.clone(),
                     actor: room_actor.id(),
                     cause: waddle_xmpp::muc::durable::OccupancyLeaveCause::Explicit,
-                    selector: waddle_xmpp::muc::room_actor::LeaveSessionSelector::Any,
+                    selector: waddle_xmpp::muc::room_actor::LeaveSessionSelector::Generation(
+                        occupancy_session,
+                    ),
                     attempt: leave_attempt,
                     notified: HashSet::new(),
                 },
@@ -2142,8 +2176,12 @@ pub async fn handle_muc_leave(
     // touched again. Closes the gap where a client leaves the MUC
     // without sending the call-specific `request-leave` — their SFU
     // participant would otherwise linger until LiveKit's timeout.
-    super::super::super::muc_call_sfu::unregister_participant_from_room(
-        state, room_jid, sender_jid,
+    let _ = super::super::super::muc_call_sfu::unregister_participant_from_room_if_occupant_matches(
+        state,
+        room_jid,
+        sender_jid,
+        occupancy_session,
+        None,
     );
 
     // Broadcast unavailable presence to remaining occupants (non-blocking).
@@ -3279,6 +3317,7 @@ mod occupancy_projection_handler_tests {
         RecordingSfu,
     };
     use kameo::actor::ActorRef;
+    use std::collections::HashMap;
     use std::str::FromStr;
     use std::sync::{Arc, Mutex};
     use tokio::sync::mpsc;
@@ -3291,6 +3330,78 @@ mod occupancy_projection_handler_tests {
     };
     use waddle_xmpp::muc::room_registry_actor::CreateRoom;
     use waddle_xmpp::ownership::{ClaimEpoch, Entity, EntityType, NodeIdentity};
+
+    fn occupancy_sessions(
+    ) -> &'static Mutex<HashMap<String, waddle_xmpp_core::OccupancySessionGeneration>> {
+        static SESSIONS: std::sync::OnceLock<
+            Mutex<HashMap<String, waddle_xmpp_core::OccupancySessionGeneration>>,
+        > = std::sync::OnceLock::new();
+        SESSIONS.get_or_init(|| Mutex::new(HashMap::new()))
+    }
+
+    fn record_occupancy_session(
+        sender_jid: &FullJid,
+    ) -> waddle_xmpp_core::OccupancySessionGeneration {
+        let generation = waddle_xmpp_core::OccupancySessionGeneration::mint();
+        occupancy_sessions()
+            .lock()
+            .expect("occupancy session lock")
+            .insert(sender_jid.to_string(), generation);
+        generation
+    }
+
+    fn current_occupancy_session(
+        sender_jid: &FullJid,
+    ) -> waddle_xmpp_core::OccupancySessionGeneration {
+        occupancy_sessions()
+            .lock()
+            .expect("occupancy session lock")
+            .get(sender_jid.as_str())
+            .copied()
+            .unwrap_or_else(|| record_occupancy_session(sender_jid))
+    }
+
+    async fn handle_muc_join(
+        state: &WebSocketState,
+        domain: &str,
+        room_jid: &BareJid,
+        sender_jid: &FullJid,
+        nick: &str,
+        presence_show: Option<crate::notification_activity::NotificationPresenceShow>,
+        authenticated_session: &Option<Session>,
+    ) -> Vec<String> {
+        super::handle_muc_join(
+            state,
+            domain,
+            room_jid,
+            sender_jid,
+            nick,
+            presence_show,
+            MucJoinConnectionContext {
+                occupancy_session: record_occupancy_session(sender_jid),
+                authenticated_session,
+            },
+        )
+        .await
+    }
+
+    async fn handle_muc_leave(
+        state: &WebSocketState,
+        room_jid: &BareJid,
+        sender_jid: &FullJid,
+        nick: &str,
+        ordered_relay_origin: Option<&crate::server::routes::interpret::OrderedRelayRouteOrigin>,
+    ) -> Vec<String> {
+        super::handle_muc_leave(
+            state,
+            room_jid,
+            sender_jid,
+            nick,
+            current_occupancy_session(sender_jid),
+            ordered_relay_origin,
+        )
+        .await
+    }
 
     #[derive(Debug, Clone, Copy, PartialEq, Eq)]
     enum ProjectionFailureMode {
@@ -3966,6 +4077,13 @@ mod occupancy_projection_handler_tests {
         assert!(alice_join
             .iter()
             .any(|frame| frame.contains("status code='110'")));
+        waddle_sfu::SfuService::register_call_participant_with_session(
+            recorder.as_ref(),
+            &waddle_sfu::CallId::new(room_jid.to_string()).expect("call id"),
+            &waddle_sfu::Identity::from_jid(alice.clone()),
+            &waddle_sfu::SessionBinding::new("leave-timeout-session").expect("session binding"),
+            current_occupancy_session(&alice),
+        );
         let bob_join = handle_muc_join(
             state.as_ref(),
             "example.com",
@@ -4233,6 +4351,13 @@ mod occupancy_projection_handler_tests {
                 .iter()
                 .any(|frame| frame.contains("status code='110'")),
             "alice must be able to rejoin before replaying the old leave: {rejoin:?}"
+        );
+        waddle_sfu::SfuService::register_call_participant_with_session(
+            recorder.as_ref(),
+            &waddle_sfu::CallId::new(room_jid.to_string()).expect("call id"),
+            &waddle_sfu::Identity::from_jid(alice.clone()),
+            &waddle_sfu::SessionBinding::new("replacement-leave-session").expect("session binding"),
+            current_occupancy_session(&alice),
         );
         while alice_rx.try_recv().is_ok() {}
         while bob_rx.try_recv().is_ok() {}

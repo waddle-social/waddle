@@ -2,6 +2,7 @@ use jid::{BareJid, FullJid};
 use thiserror::Error;
 use waddle_sfu::{CallGeneration, CallId, ParticipantSid, RoomSid, SessionBinding, SfuError};
 use waddle_xmpp::ownership::NodeIdentity;
+use waddle_xmpp_core::OccupancySessionGeneration;
 
 use crate::db::DatabaseError;
 
@@ -126,6 +127,7 @@ pub struct CallTeardownIntent {
     /// which cannot observe the room incarnation. Such intents are guarded
     /// only by a SID when one is present.
     pub generation: Option<CallGeneration>,
+    pub occupant: Option<OccupancySessionGeneration>,
     pub room_sid: Option<RoomSid>,
     /// The signaling session (Jingle sid) whose terminate produced this
     /// intent (#1608, PR #1626 review). At drain time a participant
@@ -299,6 +301,8 @@ pub enum CallTeardownOutboxError {
     InvalidGeneration(i64),
     #[error("call teardown generation does not fit the database INTEGER type: {0}")]
     GenerationOverflow(u64),
+    #[error("call teardown outbox row has invalid occupant generation '{0}'")]
+    InvalidOccupantGeneration(String),
     #[error("call teardown outbox row has an invalid target shape for action '{0}'")]
     InvalidTargetShape(String),
     #[error("failed to encode call teardown producing node: {0}")]

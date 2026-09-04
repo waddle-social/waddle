@@ -71,6 +71,21 @@ async fn join_room(client: &mut WsXmppClient, room: &str, nick: &str) {
         .expect("join responses");
 }
 
+fn unavailable_presence_xml(to: &str) -> String {
+    element_to_xml(
+        Element::builder("presence", "jabber:client")
+            .attr(
+                xmpp_parsers::minidom::rxml::xml_ncname!("to").to_owned(),
+                to,
+            )
+            .attr(
+                xmpp_parsers::minidom::rxml::xml_ncname!("type").to_owned(),
+                "unavailable",
+            )
+            .build(),
+    )
+}
+
 /// Find a descendant element with the given local-name and namespace.
 fn find_descendant<'a>(root: &'a Element, name: &str, ns: &str) -> Option<&'a Element> {
     for child in root.children() {
@@ -548,6 +563,56 @@ async fn xep_0045_stable_id_advertised_and_reflected_id_preserved() {
     let _ = admin.close().await;
     let _ = alice.close().await;
     let _ = bob.close().await;
+}
+
+#[tokio::test]
+async fn xep_0045_same_full_jid_replacement_leave_keeps_the_wire_shape_unchanged() {
+    let _guard = TEST_SERIAL.lock().await;
+    let alice_pass = format!("alice-pass-{}", uuid::Uuid::new_v4());
+    let bob_pass = format!("bob-pass-{}", uuid::Uuid::new_v4());
+    let server = TestServer::start_with_extra_accounts(&[(ALICE, &alice_pass), (BOB, &bob_pass)]);
+
+    let admin_pass = server.fixed_account_password().to_string();
+    let mut admin = connect(&server, ADMIN, &admin_pass, "replace-admin").await;
+    let mut alice_old = connect(&server, ALICE, &alice_pass, "replace-alice-old").await;
+    let mut bob = connect(&server, BOB, &bob_pass, "replace-bob").await;
+
+    let room = format!("replace-{}@muc.{DOMAIN}", uuid::Uuid::new_v4());
+    join_room(&mut admin, &room, ADMIN).await;
+    join_room(&mut alice_old, &room, ALICE).await;
+    join_room(&mut bob, &room, BOB).await;
+
+    let mut alice_replacement = connect(&server, ALICE, &alice_pass, "replace-alice-old").await;
+    join_room(&mut alice_replacement, &room, ALICE).await;
+
+    alice_old
+        .send(&unavailable_presence_xml(&format!("{room}/{ALICE}")))
+        .await
+        .expect("old connection sends unavailable");
+    assert_no_frame_matching(
+        &mut bob,
+        Duration::from_millis(700),
+        |frame| frame.contains("type='unavailable'") && frame.contains(&format!("{room}/{ALICE}")),
+        "the superseded connection must not broadcast a leave for the replacement",
+    )
+    .await;
+
+    alice_replacement
+        .send(&unavailable_presence_xml(&format!("{room}/{ALICE}")))
+        .await
+        .expect("replacement sends unavailable");
+    let leave = bob
+        .recv_matching(|frame| {
+            frame.contains("type='unavailable'") && frame.contains(&format!("{room}/{ALICE}"))
+        })
+        .await
+        .expect("bob receives the replacement leave");
+    assert_leave_presence(&leave, &format!("{room}/{ALICE}"));
+
+    let _ = admin.close().await;
+    let _ = bob.close().await;
+    let _ = alice_old.close().await;
+    let _ = alice_replacement.close().await;
 }
 
 /// XEP-0045 §7.4 (#1263): a groupchat message to a room that does not
