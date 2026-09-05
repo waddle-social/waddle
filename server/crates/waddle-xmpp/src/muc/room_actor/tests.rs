@@ -6380,6 +6380,7 @@ fn departure_receipts_keep_only_the_newest_generation_per_jid() {
     let bob = test_full_jid_resource("bob", "web");
     let outcome = |nick: &str, revision: u64| {
         super::DepartureReceiptOutcome::Left(Box::new(LeaveOutcome {
+            provenance: crate::muc::room_actor::DepartureProvenance::Live,
             acknowledge: LeaveAttemptId::generate(),
             nick: crate::muc::MucOccupantNick::new(nick.to_owned()).expect("valid test nick"),
             affiliation: Affiliation::Member,
@@ -10081,5 +10082,55 @@ async fn destroy_unseal_only_reopens_the_matching_attempt() {
     assert_eq!(
         actor.ask(GetRoomSealState).await.expect("seal state"),
         RoomSealState::Destroying { attempt: second }
+    );
+}
+
+/// #1703 (codex round 3): a same-full-JID rejoin by a different connection
+/// generation must not see the displaced connection's Muji advertisement in
+/// its own join snapshot (it is cleared BEFORE `existing_occupants` is taken).
+#[tokio::test]
+async fn rejoin_under_a_new_generation_does_not_snapshot_the_displaced_muji_state() {
+    let actor = spawn_room_actor().await;
+    let alice: FullJid = "alice@example.com/web".parse().unwrap();
+    let first = OccupancySessionGeneration::mint();
+    let second = OccupancySessionGeneration::mint();
+
+    join_as_resolver_with_session(&actor, alice.clone(), "alice", first)
+        .await
+        .expect("first join");
+    actor
+        .ask(crate::muc::room_actor::UpsertMujiPresence {
+            sender_jid: alice.clone(),
+            muji: crate::xep::xep0272::Muji::preparing(),
+        })
+        .await
+        .expect("muji upsert")
+        .expect("alice is an occupant");
+
+    let admission_revision = actor
+        .ask(GetSnapshot)
+        .await
+        .expect("snapshot")
+        .admission_revision;
+    let outcome = actor
+        .ask(JoinWithAffiliation {
+            sender_jid: alice.clone(),
+            nick: "alice".to_string(),
+            affiliation_grant: JoinAffiliationGrant::Unaffiliated,
+            local_domain: "example.com".to_string(),
+            admission_revision,
+            session: second,
+        })
+        .await
+        .expect("rejoin");
+
+    let own = outcome
+        .existing_occupants
+        .iter()
+        .find(|occupant| occupant.jid == alice)
+        .expect("the rejoining session is in the snapshot");
+    assert!(
+        own.muji.is_none(),
+        "the displaced generation's Muji advertisement must not be replayed to the replacement"
     );
 }

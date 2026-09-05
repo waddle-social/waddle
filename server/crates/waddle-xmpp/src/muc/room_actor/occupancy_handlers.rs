@@ -191,6 +191,21 @@ impl kameo::message::Message<JoinWithAffiliation> for RoomActor {
             return Err(RoomActorError::RoomFull);
         }
 
+        // A same-full-JID rejoin by a DIFFERENT connection generation
+        // displaces the previous connection: drop its call/in-call
+        // advertisements BEFORE the snapshot below is taken, or the
+        // replacement's own self-presence would replay them (#1703).
+        if self
+            .room
+            .session_generation(&msg.sender_jid)
+            .is_some_and(|previous| previous != msg.session)
+        {
+            if let Some(previous_nick) = self.room.find_nick_by_real_jid(&msg.sender_jid) {
+                let previous_nick = previous_nick.to_string();
+                self.room
+                    .clear_session_call_state(&previous_nick, &msg.sender_jid);
+            }
+        }
         let existing_occupants: Vec<JoinExistingOccupant> = self
             .room
             .occupants
@@ -615,6 +630,7 @@ impl kameo::message::Message<LeaveByRealJid> for RoomActor {
                 occupant_count as i64 - occupant_count_before as i64,
             );
             LeaveDisposition::Left(Box::new(LeaveOutcome {
+                provenance: super::DepartureProvenance::Live,
                 acknowledge: msg.attempt,
                 // Infallible: the join path refuses a nick that does not
                 // validate as a `MucOccupantNick`, so every occupant nick is
@@ -1149,6 +1165,7 @@ fn receipt_disposition(receipt: super::DepartureReceipt) -> LeaveDisposition {
     match receipt.outcome {
         super::DepartureReceiptOutcome::Left(mut outcome) => {
             outcome.acknowledge = attempt;
+            outcome.provenance = super::DepartureProvenance::ReplayedReceipt;
             LeaveDisposition::Left(outcome)
         }
         super::DepartureReceiptOutcome::Suppressed { nick, affiliation } => {

@@ -345,8 +345,19 @@ pub struct JoinOutcome {
     pub subject_state: Option<SubjectState>,
 }
 
+/// Whether a `Left` outcome removed the session NOW or replayed a retained
+/// departure receipt (#1703). Only a live removal is evidence about the
+/// session's current SFU registration: a replay can answer an owed old-nick
+/// departure while the same full JID is live again under another nick.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DepartureProvenance {
+    Live,
+    ReplayedReceipt,
+}
+
 #[derive(Debug, Clone)]
 pub struct LeaveOutcome {
+    pub provenance: DepartureProvenance,
     /// The attempt whose receipt this outcome answers: the caller's own
     /// attempt, or — when a retained retry replayed a receipt minted under a
     /// different (coalesced-away) attempt — that receipt's attempt. Callers

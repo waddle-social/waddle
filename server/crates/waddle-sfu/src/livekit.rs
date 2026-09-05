@@ -457,6 +457,7 @@ impl LiveKitTeardownExecutor {
             generation,
             room_sid,
             Some((identity, participant_sid)),
+            intent.occupant_session.is_some(),
         ) {
             TeardownGuard::Proceed => {}
             TeardownGuard::Stale => return Ok(TeardownExecution::StaleGeneration),
@@ -551,7 +552,7 @@ impl LiveKitTeardownExecutor {
         room_sid: Option<&RoomSid>,
     ) -> Result<TeardownExecution, SfuError> {
         let entry_missing = self.calls.get(call_id).is_none();
-        match self.guard(call_id, generation, room_sid, None) {
+        match self.guard(call_id, generation, room_sid, None, false) {
             TeardownGuard::Proceed => {}
             TeardownGuard::Stale => return Ok(TeardownExecution::StaleGeneration),
             TeardownGuard::Unresolved => return Ok(TeardownExecution::Occupied),
@@ -619,11 +620,18 @@ impl LiveKitTeardownExecutor {
         generation: Option<CallGeneration>,
         room_sid: Option<&RoomSid>,
         participant: Option<(&Identity, Option<&ParticipantSid>)>,
+        occupant_fence: bool,
     ) -> TeardownGuard {
         let Some(entry) = self.calls.get(call_id) else {
+            // An occupant-generation fence (#1703) is as undecidable without
+            // a local entry as the sid fences: the intent waits for the
+            // reconcile pass to restore the registry (a same-FullJID
+            // replacement that re-registered in the meantime then fails the
+            // occupant comparison) instead of ejecting by identity.
             let carries_fence = generation.is_some()
                 || room_sid.is_some()
-                || participant.is_some_and(|(_, participant_sid)| participant_sid.is_some());
+                || participant.is_some_and(|(_, participant_sid)| participant_sid.is_some())
+                || occupant_fence;
             if carries_fence
                 && !self.allow_missing_entry_before_reconcile
                 && !self.reconcile_pass_completed.load(Ordering::Acquire)

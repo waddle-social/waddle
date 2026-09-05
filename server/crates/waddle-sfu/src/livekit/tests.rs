@@ -4024,3 +4024,38 @@ fn occupant_scoped_unregister_refuses_the_same_generations_newer_sid_when_presen
     }
     assert!(!sfu.has_call_participant(&call, &alice));
 }
+
+/// #1703 (codex round 3): an occupant-fenced intent drained where no local
+/// call entry exists (the relay-fallback producer's node, or after a restart)
+/// must wait for a reconcile pass like the sid fences do, instead of ejecting
+/// the identity — a same-FullJID replacement may have re-registered meanwhile.
+#[tokio::test]
+async fn teardown_executor_defers_occupant_fenced_missing_calls_until_reconcile() {
+    let admin = Arc::new(RecordingAdmin::default());
+    let sfu = LiveKitSfu::with_admin(fixture_config(), Arc::clone(&admin) as Arc<_>);
+    let call = CallId::new("r-occupant-fence").expect("call id");
+    let alice = fixture_identity("alice");
+    let intent = CallTeardownIntentLite {
+        call_id: call.clone(),
+        target: TeardownTargetLite::Participant {
+            identity: alice.clone(),
+            participant_sid: None,
+        },
+        generation: None,
+        room_sid: None,
+        occupant_session: Some(fixture_occupancy_session()),
+        session: None,
+    };
+
+    assert_eq!(
+        sfu.teardown_executor()
+            .execute(&intent)
+            .await
+            .expect("typed defer"),
+        TeardownExecution::Occupied
+    );
+    assert!(
+        admin.remove_snapshot().is_empty(),
+        "an occupant-fenced intent must not eject by identity before reconciliation"
+    );
+}

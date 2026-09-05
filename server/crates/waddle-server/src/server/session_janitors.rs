@@ -5,6 +5,23 @@ use std::sync::Arc;
 use std::time::Duration;
 use tracing::{debug, error, info, warn, Instrument};
 use waddle_xmpp::muc::room_actor::LeaveSessionSelector;
+
+/// A retained retry's `Left` is evidence about the session's CURRENT SFU
+/// registration only when the room removed the session NOW; a replayed
+/// departure receipt may answer an owed old-nick departure while the same
+/// full JID is live again under another nick (#1703).
+fn unbound_policy_for_left(
+    outcome: &waddle_xmpp::muc::room_actor::LeaveOutcome,
+) -> waddle_sfu::UnboundOccupantPolicy {
+    match outcome.provenance {
+        waddle_xmpp::muc::room_actor::DepartureProvenance::Live => {
+            waddle_sfu::UnboundOccupantPolicy::TearDown
+        }
+        waddle_xmpp::muc::room_actor::DepartureProvenance::ReplayedReceipt => {
+            waddle_sfu::UnboundOccupantPolicy::Keep
+        }
+    }
+}
 use waddle_xmpp::telemetry::attributes::{Janitor, MetricAttribute, SweepOutcome};
 
 /// Named root span for one janitor sweep tick (#1483).
@@ -336,17 +353,13 @@ pub(crate) async fn run_local_muc_departure_sweep(state: &WebSocketState) {
                                     // media participant allocated until the
                                     // SFU's long timeout (#1647, codex
                                     // closing round).
-                                    // A retained retry may REPLAY an old departure
-                                    // receipt (an old-nick departure whose fan-out
-                                    // is still owed) while the same full JID is
-                                    // live again under another nick, so even a
-                                    // `Left` here is not evidence about the
-                                    // CURRENT registration: unbound ones are kept
-                                    // (#1703); only fresh confirmed asks tear down.
+                                    // See `unbound_policy_for_left`: a live removal
+                                    // tears an unbound registration down, a replayed
+                                    // receipt keeps it (#1703).
                                     match selector {
                                         LeaveSessionSelector::Generation(occupant) => {
                                             let _ = routes::websocket::muc_call_sfu::unregister_participant_from_room_if_occupant_matches(
-                                                state, &room, &jid, occupant, waddle_sfu::UnboundOccupantPolicy::Keep, None,);
+                                                state, &room, &jid, occupant, unbound_policy_for_left(&outcome), None,);
                                         }
                                         // Membership-authoritative departures (admin removals) keep the
                                         // ungated teardown: no connection owns them.
@@ -433,7 +446,7 @@ pub(crate) async fn run_local_muc_departure_sweep(state: &WebSocketState) {
                                     match selector {
                                         LeaveSessionSelector::Generation(occupant) => {
                                             let _ = routes::websocket::muc_call_sfu::unregister_participant_from_room_if_occupant_matches(
-                                                state, &room, &jid, occupant, waddle_sfu::UnboundOccupantPolicy::Keep, None,);
+                                                state, &room, &jid, occupant, unbound_policy_for_left(&outcome), None,);
                                         }
                                         // Membership-authoritative departures (admin removals) keep the
                                         // ungated teardown: no connection owns them.
@@ -9470,12 +9483,12 @@ mod local_muc_departure_tests {
         );
     }
 
-    /// A retained retry that the room answers `Left` is NOT evidence about
-    /// the current SFU registration (a retry can replay an owed old-nick
-    /// receipt while the same full JID is live under another nick), so an
-    /// unbound (restored) registration survives it.
+    /// A retained retry the room answers with a LIVE `Left` (the session was
+    /// removed now, under the generation fence) is evidence about the current
+    /// SFU registration: an unbound (restored) one is torn down. Only a
+    /// replayed receipt keeps it (`unbound_policy_for_left`).
     #[tokio::test]
-    async fn retained_retry_left_keeps_an_unbound_sfu_registration() {
+    async fn retained_retry_live_left_tears_down_an_unbound_sfu_registration() {
         let recorder = Arc::new(RecordingSfu::default());
         let state = create_test_websocket_state_with_sfu(recorder.clone()).await;
         let room = room_jid("retry-left-unbound");
@@ -9523,8 +9536,8 @@ mod local_muc_departure_tests {
             "the retained retry removes the occupancy"
         );
         assert!(
-            recorder.has_call_participant(&call_id, &identity),
-            "a retry's Left is not evidence about an unbound registration; it is kept"
+            !recorder.has_call_participant(&call_id, &identity),
+            "a live Left on retry removes the session now, so the restored registration is torn down"
         );
     }
 
