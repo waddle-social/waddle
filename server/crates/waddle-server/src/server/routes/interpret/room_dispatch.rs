@@ -124,7 +124,11 @@ pub(super) async fn dispatch_to_room(
             {
                 MucProxyRouteDecision::Attempted(attempt) => match attempt.outcome {
                     OrderedRelayMucProxyOutcome::Delivered(replies) => {
-                        refresh_shadow_room_fence(deps, &room_jid, attempt.room_fence.as_ref());
+                        record_remote_shadow_room_authority(
+                            deps,
+                            &room_jid,
+                            attempt.room_fence.as_ref(),
+                        );
                         if let (Some(capture), Some(relay_target)) =
                             (deps.ingress_effect_capture.as_ref(), attempt.relay_target)
                         {
@@ -175,7 +179,11 @@ pub(super) async fn dispatch_to_room(
                     }
                     OrderedRelayMucProxyOutcome::MaybeCommitted
                     | OrderedRelayMucProxyOutcome::JoinMaybeCommitted => {
-                        refresh_shadow_room_fence(deps, &room_jid, attempt.room_fence.as_ref());
+                        record_remote_shadow_room_authority(
+                            deps,
+                            &room_jid,
+                            attempt.room_fence.as_ref(),
+                        );
                         if let (Some(capture), Some(relay_target)) =
                             (deps.ingress_effect_capture.as_ref(), attempt.relay_target)
                         {
@@ -696,16 +704,19 @@ fn room_lookup_internal_error() -> xmpp_parsers::stanza_error::StanzaError {
 
 fn clear_provisional_shadow_room_fence(deps: &Deps<'_>) {
     if let Some(capture) = deps.ingress_effect_capture.as_ref() {
-        capture.clear_room_fence();
+        capture.clear_room_scope();
     }
 }
 
 /// Replace parse-time room ownership with the immutable claim carried by the
-/// final proxy attempt. A local snapshot is never taken for a proxy delivery,
-/// so retaining the provisional frame fence can make shadow assert an
+/// final proxy attempt. The proxy path only runs for a room owned by another
+/// node (`LocalRoom` returns before any attempt), so that claim is the remote
+/// owner's: it is recorded as authority context, never as a fence this node
+/// could assert. A local snapshot is never taken for a proxy delivery, so
+/// retaining the provisional frame fence would let the shadow assert an
 /// owner/epoch the actual relay no longer used.
 #[cfg(feature = "clustering")]
-fn refresh_shadow_room_fence(
+pub(super) fn record_remote_shadow_room_authority(
     deps: &Deps<'_>,
     room: &jid::BareJid,
     claim_fence: Option<&waddle_xmpp::muc::RoomClaimFenceContext>,
@@ -715,7 +726,8 @@ fn refresh_shadow_room_fence(
         return;
     };
     if let Some(capture) = deps.ingress_effect_capture.as_ref() {
-        capture.record_room_fence(IngressShadowRoomFence::from_context(room, claim_fence));
+        capture
+            .record_remote_room_authority(IngressShadowRoomFence::from_context(room, claim_fence));
     }
 }
 

@@ -11881,7 +11881,7 @@ mod graceful_shutdown_drain_tests {
             capture: crate::ingress_shadow::IngressEffectCaptureSnapshot {
                 stanza_lang: None,
                 sanitized_message: None,
-                room_fence: None,
+                room_scope: None,
                 intents: Vec::new(),
                 markers: Vec::new(),
             },

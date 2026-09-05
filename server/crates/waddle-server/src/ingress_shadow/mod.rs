@@ -3,7 +3,8 @@ mod observe;
 
 pub use capture::{
     IngressEffectCapture, IngressEffectCaptureSnapshot, IngressShadowRoomFence,
-    ShadowAuthorizationDeniedReason, ShadowDecisionMarker, ShadowSemanticRejectedReason,
+    IngressShadowRoomScope, ShadowAuthorizationDeniedReason, ShadowDecisionMarker,
+    ShadowSemanticRejectedReason,
 };
 pub use observe::{
     observe, IngressShadowAliasOutcome, IngressShadowCommitKind, IngressShadowDecisionClass,
@@ -2748,15 +2749,27 @@ impl IngressShadowSubmission {
         None
     }
 
+    /// The exact room claim this node must hold before the transaction
+    /// touches room-fenced rows. A relayed delivery carries the owning
+    /// node's claim as [`IngressShadowRoomScope::RemoteAuthority`]; this
+    /// node never holds that claim, so it is never a local assert target.
     fn room_claim_target(&self) -> Option<&IngressShadowRoomFence> {
-        self.capture.room_fence.as_ref()
+        match self.capture.room_scope.as_ref()? {
+            IngressShadowRoomScope::LocalFence(fence) => Some(fence),
+            IngressShadowRoomScope::RemoteAuthority(_) => None,
+        }
     }
 
     fn server_authorities(&self) -> Vec<BareJid> {
         let mut authorities = vec![self.principal.bare_jid().clone()];
-        if let Some(room_fence) = self.room_claim_target() {
-            if !authorities.contains(&room_fence.room) {
-                authorities.push(room_fence.room.clone());
+        if let Some(room) = self
+            .capture
+            .room_scope
+            .as_ref()
+            .map(IngressShadowRoomScope::room)
+        {
+            if !authorities.contains(room) {
+                authorities.push(room.clone());
             }
         }
         authorities
@@ -2809,7 +2822,7 @@ mod tests {
             capture: IngressEffectCaptureSnapshot {
                 stanza_lang: Some(xmpp_parsers::message::Lang::from("en")),
                 sanitized_message: None,
-                room_fence: None,
+                room_scope: None,
                 intents: Vec::new(),
                 markers: Vec::new(),
             },
@@ -3289,7 +3302,7 @@ mod tests {
                 capture: IngressEffectCaptureSnapshot {
                     stanza_lang: None,
                     sanitized_message: None,
-                    room_fence: None,
+                    room_scope: None,
                     intents: Vec::new(),
                     markers: Vec::new(),
                 },
@@ -3634,13 +3647,14 @@ mod tests {
         )));
         message.type_ = MessageType::Groupchat;
         let mut submission = base_submission(message);
-        submission.capture.room_fence = Some(IngressShadowRoomFence {
-            room: "room@conference.example.com"
-                .parse::<BareJid>()
-                .expect("room jid"),
-            owner: NodeIdentity::new("room-node", "room-epoch"),
-            claim_epoch: ClaimEpoch(11),
-        });
+        submission.capture.room_scope =
+            Some(IngressShadowRoomScope::LocalFence(IngressShadowRoomFence {
+                room: "room@conference.example.com"
+                    .parse::<BareJid>()
+                    .expect("room jid"),
+                owner: NodeIdentity::new("room-node", "room-epoch"),
+                claim_epoch: ClaimEpoch(11),
+            }));
 
         let authorities = submission.server_authorities();
         assert!(authorities.contains(submission.principal.bare_jid()));
@@ -3660,13 +3674,14 @@ mod tests {
         )));
         message.type_ = xmpp_parsers::message::MessageType::Chat;
         let mut submission = base_submission(message);
-        submission.capture.room_fence = Some(IngressShadowRoomFence {
-            room: "room@conference.example.com"
-                .parse::<BareJid>()
-                .expect("room jid"),
-            owner: NodeIdentity::new("room-node", "room-epoch"),
-            claim_epoch: ClaimEpoch(13),
-        });
+        submission.capture.room_scope =
+            Some(IngressShadowRoomScope::LocalFence(IngressShadowRoomFence {
+                room: "room@conference.example.com"
+                    .parse::<BareJid>()
+                    .expect("room jid"),
+                owner: NodeIdentity::new("room-node", "room-epoch"),
+                claim_epoch: ClaimEpoch(13),
+            }));
 
         assert_eq!(
             submission
@@ -3683,32 +3698,76 @@ mod tests {
     }
 
     #[test]
-    fn digest_input_strips_forged_server_stanza_ids_and_retries() {
-        let mut message = Message::new(Some(Jid::from(
-            "room@conference.example.com"
-                .parse::<BareJid>()
-                .expect("room jid"),
-        )));
+    fn relayed_groupchat_submission_keeps_room_authority_without_a_local_claim_target() {
+        let room: BareJid = "room@conference.example.com".parse().expect("room jid");
+        let mut message = Message::new(Some(Jid::from(room.clone())));
         message.type_ = MessageType::Groupchat;
-        message
-            .payloads
-            .push(waddle_xmpp_core::xep0359::build_stanza_id_element(
-                "forged",
-                &Jid::from(
-                    "room@conference.example.com"
-                        .parse::<BareJid>()
-                        .expect("room jid"),
-                ),
-            ));
-        let submission = base_submission(message);
+        let mut submission = base_submission(message);
+        submission.capture.room_scope = Some(IngressShadowRoomScope::RemoteAuthority(
+            IngressShadowRoomFence {
+                room: room.clone(),
+                owner: NodeIdentity::new("room-owner-node", "room-owner-epoch"),
+                claim_epoch: ClaimEpoch(29),
+            },
+        ));
 
-        let digest_input = digest_input_from_submission(&submission)
-            .expect("digest evaluation succeeds")
-            .expect("digest input is valid after stripping");
+        assert_eq!(submission.room_claim_target(), None);
+        assert!(submission.server_authorities().contains(&room));
+    }
+
+    #[test]
+    fn digest_input_strips_forged_server_stanza_ids_and_retries() {
+        let room: BareJid = "room@conference.example.com".parse().expect("room jid");
+        let digest_with_scope = |forged: bool, scope: Option<IngressShadowRoomScope>| {
+            let mut message = Message::new(Some(Jid::from(room.clone())));
+            message.type_ = MessageType::Groupchat;
+            if forged {
+                message
+                    .payloads
+                    .push(waddle_xmpp_core::xep0359::build_stanza_id_element(
+                        "forged",
+                        &Jid::from(room.clone()),
+                    ));
+            }
+            let mut submission = base_submission(message);
+            submission.capture.room_scope = scope;
+            let digest_input = digest_input_from_submission(&submission)
+                .expect("digest evaluation succeeds")
+                .expect("digest input is valid after stripping");
+            assert_eq!(
+                digest_input.stanza_lang(),
+                Some(&xmpp_parsers::message::Lang::from("en"))
+            );
+            assert!(
+                digest_input.extensions().is_empty(),
+                "a stanza-id element is server metadata and never digest payload"
+            );
+            digest_v1::digest(&digest_input)
+        };
+        let fence = IngressShadowRoomFence {
+            room: room.clone(),
+            owner: NodeIdentity::new("room-node", "room-epoch"),
+            claim_epoch: ClaimEpoch(11),
+        };
+
+        // XEP-0359: the room is the assigning entity for groupchat. With the
+        // room as an authority (local fence or relayed remote authority) a
+        // client-authored `<stanza-id by='room'/>` is stripped and the digest
+        // retried; without one it is merely validated. Either way the element
+        // never reaches the digest, so identity is stable across nodes.
+        let unforged = digest_with_scope(false, None);
         assert_eq!(
-            digest_input.stanza_lang(),
-            Some(&xmpp_parsers::message::Lang::from("en"))
+            digest_with_scope(
+                true,
+                Some(IngressShadowRoomScope::LocalFence(fence.clone()))
+            ),
+            unforged
         );
+        assert_eq!(
+            digest_with_scope(true, Some(IngressShadowRoomScope::RemoteAuthority(fence))),
+            unforged
+        );
+        assert_eq!(digest_with_scope(true, None), unforged);
     }
 
     #[test]
@@ -3750,7 +3809,7 @@ mod tests {
         let snapshot = IngressEffectCaptureSnapshot {
             stanza_lang: Some(xmpp_parsers::message::Lang::from("en")),
             sanitized_message: None,
-            room_fence: None,
+            room_scope: None,
             intents: vec![
                 waddle_xmpp::ingress::IngressEffectIntent::ArchiveAuthoritative {
                     archive: "romeo@example.com".parse().expect("bare jid"),
@@ -4209,12 +4268,87 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn postgres_remote_room_authority_commits_without_asserting_a_foreign_claim() {
+        let Some(fixture) = ShadowFixture::open("remote_room_authority").await else {
+            return;
+        };
+        let room: BareJid = "room@conference.example.com".parse().expect("room jid");
+        let foreign_owner = NodeIdentity::new("room-owner-node", "room-owner-epoch");
+        let foreign_fence = IngressShadowRoomFence {
+            room: room.clone(),
+            owner: foreign_owner.clone(),
+            claim_epoch: ClaimEpoch(fixture.claim_epoch.0 + 100),
+        };
+        let relayed_intent = waddle_xmpp::ingress::IngressEffectIntent::DispatchToRoomRemote {
+            room: room.clone(),
+            relay_target: waddle_xmpp::ingress::RelayTargetIdentity::owner_node(
+                foreign_owner.node_id.clone(),
+                foreign_owner.node_epoch.clone(),
+            ),
+        };
+
+        // A groupchat message relayed to the owning node: the room claim
+        // belongs to that node, so the transaction records the relayed
+        // effect and commits without asserting a claim this node never held.
+        let mut relayed = fixture.submission(1, Some("relayed-origin"));
+        relayed.message.to = Some(Jid::from(room.clone()));
+        relayed.message.type_ = MessageType::Groupchat;
+        relayed.target = NormalizedTarget::Bare(room.clone());
+        relayed.capture.room_scope = Some(IngressShadowRoomScope::RemoteAuthority(
+            foreign_fence.clone(),
+        ));
+        relayed.capture.intents.push(relayed_intent.clone());
+        assert!(matches!(
+            fixture.processor.execute_submission(&relayed).await,
+            Ok(ShadowSubmissionOutcome {
+                decision: IngressShadowDecisionClass::Accepted,
+                commit_kind: Some(IngressShadowCommitKind::Advanced),
+                alias: IngressShadowAliasOutcome::Inserted,
+                ..
+            })
+        ));
+        assert_eq!(fixture.frontier().await, 1);
+        fixture.assert_rows(1, 1, 1, 1).await;
+
+        // The same foreign claim presented as a *local* fence is still
+        // refused: this node does not hold it, and the frontier must not
+        // move on a rolled-back ordinal.
+        let mut local = fixture.submission(2, Some("local-origin"));
+        local.message.to = Some(Jid::from(room.clone()));
+        local.message.type_ = MessageType::Groupchat;
+        local.target = NormalizedTarget::Bare(room.clone());
+        local.capture.room_scope = Some(IngressShadowRoomScope::LocalFence(foreign_fence));
+        local.capture.intents.push(relayed_intent);
+        assert!(matches!(
+            fixture.processor.execute_submission(&local).await,
+            Ok(ShadowSubmissionOutcome {
+                decision: IngressShadowDecisionClass::ClaimFenceMissing,
+                commit_kind: None,
+                ..
+            })
+        ));
+        assert_eq!(fixture.frontier().await, 1);
+        fixture.assert_rows(1, 1, 1, 1).await;
+        fixture.close().await;
+    }
+
+    #[tokio::test]
     async fn postgres_ambiguous_remote_route_advances_frontier_without_rows() {
         let Some(fixture) = ShadowFixture::open("ambiguous_remote_route").await else {
             return;
         };
 
         let mut ambiguous = fixture.submission(1, None);
+        // The relayed branch records the remote owner's claim alongside the
+        // ambiguity marker; the rowless decision must win, never a local
+        // assert of a claim this node does not hold.
+        ambiguous.capture.room_scope = Some(IngressShadowRoomScope::RemoteAuthority(
+            IngressShadowRoomFence {
+                room: "room@conference.example.com".parse().expect("room jid"),
+                owner: NodeIdentity::new("node-b", "epoch-b"),
+                claim_epoch: ClaimEpoch(fixture.claim_epoch.0 + 100),
+            },
+        ));
         ambiguous
             .capture
             .markers

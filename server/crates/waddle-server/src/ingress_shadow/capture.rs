@@ -47,7 +47,7 @@ pub struct IngressEffectCaptureSnapshot {
     pub stanza_lang: Option<Lang>,
     /// Sanitized, pre-rewrite stanza captured by the message handler.
     pub sanitized_message: Option<Message>,
-    pub room_fence: Option<IngressShadowRoomFence>,
+    pub room_scope: Option<IngressShadowRoomScope>,
     pub intents: Vec<IngressEffectIntent>,
     pub markers: Vec<ShadowDecisionMarker>,
 }
@@ -69,6 +69,30 @@ impl IngressShadowRoomFence {
     }
 }
 
+/// How the room named by a MUC-scoped stanza relates to this node's
+/// authority. Both variants make the room a server authority for digest
+/// input (a client-authored `<stanza-id by='room'/>` is stripped either
+/// way); only a local fence is asserted inside the shadow transaction.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum IngressShadowRoomScope {
+    /// The room effect executes on this node: the transaction asserts the
+    /// exact room claim under `FOR SHARE` before any room-fenced write.
+    LocalFence(IngressShadowRoomFence),
+    /// The room effect was relayed to the owning node. The owner and epoch
+    /// the relay used are recorded as observation-time context; this node
+    /// never holds that claim, so the transaction must not assert it. The
+    /// owner fences its own writes through remote write acceptance.
+    RemoteAuthority(IngressShadowRoomFence),
+}
+
+impl IngressShadowRoomScope {
+    pub fn room(&self) -> &BareJid {
+        match self {
+            Self::LocalFence(fence) | Self::RemoteAuthority(fence) => &fence.room,
+        }
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct IngressEffectCapture {
     inner: Arc<Mutex<CaptureState>>,
@@ -78,7 +102,7 @@ pub struct IngressEffectCapture {
 struct CaptureState {
     stanza_lang: Option<Lang>,
     sanitized_message: Option<Message>,
-    room_fence: Option<IngressShadowRoomFence>,
+    room_scope: Option<IngressShadowRoomScope>,
     intents: Vec<IngressEffectIntent>,
     intent_keys: BTreeSet<IngressEffectKey>,
     markers: Vec<ShadowDecisionMarker>,
@@ -93,7 +117,7 @@ impl IngressEffectCapture {
             inner: Arc::new(Mutex::new(CaptureState {
                 stanza_lang,
                 sanitized_message: None,
-                room_fence: None,
+                room_scope: None,
                 intents: Vec::new(),
                 intent_keys: BTreeSet::new(),
                 markers: Vec::new(),
@@ -162,29 +186,43 @@ impl IngressEffectCapture {
             Ok(state) => IngressEffectCaptureSnapshot {
                 stanza_lang: state.stanza_lang.clone(),
                 sanitized_message: state.sanitized_message.clone(),
-                room_fence: state.room_fence.clone(),
+                room_scope: state.room_scope.clone(),
                 intents: state.intents.clone(),
                 markers: state.markers.clone(),
             },
             Err(_) => IngressEffectCaptureSnapshot {
                 stanza_lang: None,
                 sanitized_message: None,
-                room_fence: None,
+                room_scope: None,
                 intents: Vec::new(),
                 markers: vec![ShadowDecisionMarker::Overflow],
             },
         }
     }
 
+    /// Bind the exact room claim this node holds for a locally executed
+    /// room effect. The shadow transaction asserts it before any room-fenced
+    /// write.
     pub fn record_room_fence(&self, room_fence: IngressShadowRoomFence) {
-        self.with_state(|state| state.room_fence = Some(room_fence));
+        self.with_state(|state| {
+            state.room_scope = Some(IngressShadowRoomScope::LocalFence(room_fence));
+        });
+    }
+
+    /// Replace parse-time room ownership with the claim a relayed delivery
+    /// actually used. That claim belongs to the owning node, so it is kept
+    /// as authority context only; this node's transaction never asserts it.
+    pub fn record_remote_room_authority(&self, room_fence: IngressShadowRoomFence) {
+        self.with_state(|state| {
+            state.room_scope = Some(IngressShadowRoomScope::RemoteAuthority(room_fence));
+        });
     }
 
     /// Discard a provisional room scope when the live MUC path never reached
     /// its actor snapshot boundary. The shadow must not assert an unrelated
     /// later room claim for a locally generated pre-dispatch error reply.
-    pub fn clear_room_fence(&self) {
-        self.with_state(|state| state.room_fence = None);
+    pub fn clear_room_scope(&self) {
+        self.with_state(|state| state.room_scope = None);
     }
 
     fn with_state(&self, action: impl FnOnce(&mut CaptureState)) {
@@ -234,7 +272,7 @@ mod tests {
 
         let snapshot = capture.snapshot();
         assert_eq!(snapshot.stanza_lang, Some(Lang::from("en")));
-        assert_eq!(snapshot.room_fence, None);
+        assert_eq!(snapshot.room_scope, None);
         assert_eq!(snapshot.intents.len(), 1);
         assert_eq!(snapshot.markers.len(), 1);
     }
@@ -270,9 +308,40 @@ mod tests {
             claim_epoch: ClaimEpoch(3),
         });
 
-        capture.clear_room_fence();
+        capture.clear_room_scope();
 
-        assert_eq!(capture.snapshot().room_fence, None);
+        assert_eq!(capture.snapshot().room_scope, None);
+    }
+
+    #[test]
+    fn remote_room_authority_replaces_a_provisional_local_fence() {
+        let capture = IngressEffectCapture::new(None);
+        let room: BareJid = "room@muc.example.com".parse().expect("room jid");
+        capture.record_room_fence(IngressShadowRoomFence {
+            room: room.clone(),
+            owner: NodeIdentity::new("this-node", "this-epoch"),
+            claim_epoch: ClaimEpoch(3),
+        });
+        let relayed = IngressShadowRoomFence {
+            room: room.clone(),
+            owner: NodeIdentity::new("owner-node", "owner-epoch"),
+            claim_epoch: ClaimEpoch(9),
+        };
+
+        capture.record_remote_room_authority(relayed.clone());
+
+        let snapshot = capture.snapshot();
+        assert_eq!(
+            snapshot.room_scope,
+            Some(IngressShadowRoomScope::RemoteAuthority(relayed))
+        );
+        assert_eq!(
+            snapshot
+                .room_scope
+                .as_ref()
+                .map(IngressShadowRoomScope::room),
+            Some(&room)
+        );
     }
 
     #[test]
