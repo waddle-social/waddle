@@ -428,7 +428,7 @@ async fn handle_muc_mediated_decline(
     // provisional lookup would make the shadow assert authority that the
     // live decision never used.
     if let Some(capture) = ingress_effect_capture {
-        capture.clear_room_fence();
+        capture.clear_room_scope();
     }
 
     let decliner = bound_jid.to_bare();

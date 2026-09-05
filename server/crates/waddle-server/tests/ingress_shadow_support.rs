@@ -163,7 +163,7 @@ impl ShadowFixture {
             capture: IngressEffectCaptureSnapshot {
                 stanza_lang: None,
                 sanitized_message: None,
-                room_fence: None,
+                room_scope: None,
                 intents,
                 markers: Vec::new(),
             },
