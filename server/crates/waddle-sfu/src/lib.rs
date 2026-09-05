@@ -77,6 +77,28 @@ pub enum UnboundOccupantPolicy {
     Keep,
 }
 
+/// The Jingle-sid evidence a Muji teardown presents alongside its occupancy
+/// generation (#1608 + #1703).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SidEvidence<'a> {
+    /// Connection teardown (disconnect, SM expiry, explicit leave): no
+    /// signaling sid is involved, only the occupancy generation is checked.
+    NotSignaling,
+    /// A signaling stanza presented this sid (`None` = a sid that could not
+    /// become a binding): a registration bound to a sid must match it
+    /// exactly; an unbound one accepts any.
+    Presented(Option<&'a SessionBinding>),
+}
+
+impl SidEvidence<'_> {
+    pub(crate) fn accepts(self, bound: Option<&SessionBinding>) -> bool {
+        match (self, bound) {
+            (Self::NotSignaling, _) | (_, None) => true,
+            (Self::Presented(presented), Some(bound)) => presented == Some(bound),
+        }
+    }
+}
+
 pub trait SfuService: Send + Sync + 'static {
     /// Mint a short-lived LiveKit join JWT for `identity` to enter
     /// `call_id` with the given media capabilities. The returned token
@@ -232,7 +254,7 @@ pub trait SfuService: Send + Sync + 'static {
 
     /// Occupant-scoped teardown (#1703): unregister `identity` from
     /// `call_id` when the stored occupant generation is exactly
-    /// `Some(presented)`. A registration rebound to a DIFFERENT generation
+    /// `Some(presented)` and the stored sid binding, if any, accepts `sid`. A registration rebound to a DIFFERENT generation
     /// is always left untouched (no SFU-side eviction). A registration
     /// with NO stored generation (restored from a webhook/probe, or a 1:1
     /// path) is decided by `unbound`: the caller presents
@@ -247,17 +269,22 @@ pub trait SfuService: Send + Sync + 'static {
         identity: &Identity,
         presented: OccupancySessionGeneration,
         unbound: UnboundOccupantPolicy,
+        sid: SidEvidence<'_>,
         observed_sids: Option<&ObservedCallSids>,
     ) -> SessionScopedTeardown {
         match self.participant_occupant_session(call_id, identity) {
-            Some(bound) if bound == presented => SessionScopedTeardown::Applied(
-                self.unregister_call_participant(call_id, identity, observed_sids),
-            ),
-            None if unbound == UnboundOccupantPolicy::TearDown => SessionScopedTeardown::Applied(
-                self.unregister_call_participant(call_id, identity, observed_sids),
-            ),
-            _ => SessionScopedTeardown::SessionMismatch,
+            Some(bound) if bound == presented => {}
+            None if unbound == UnboundOccupantPolicy::TearDown => {}
+            _ => return SessionScopedTeardown::SessionMismatch,
         }
+        if !sid.accepts(self.participant_session_binding(call_id, identity).as_ref()) {
+            return SessionScopedTeardown::SessionMismatch;
+        }
+        SessionScopedTeardown::Applied(self.unregister_call_participant(
+            call_id,
+            identity,
+            observed_sids,
+        ))
     }
 
     /// Record that `identity` has left `call_id` and report whether
@@ -346,7 +373,7 @@ pub trait SfuService: Send + Sync + 'static {
         observed_sids: Option<&ObservedCallSids>,
         presented: OccupancySessionGeneration,
         unbound: UnboundOccupantPolicy,
-        session: Option<&SessionBinding>,
+        sid: SidEvidence<'_>,
     ) -> SessionScopedTeardown {
         match self.participant_occupant_session(call_id, identity) {
             Some(bound) if bound == presented => {}
@@ -356,10 +383,8 @@ pub trait SfuService: Send + Sync + 'static {
         // The #1608 sid rule still applies: the same connection (same
         // generation) may have re-initiated under a new sid while this
         // terminate was in flight.
-        if let Some(bound) = self.participant_session_binding(call_id, identity) {
-            if session != Some(&bound) {
-                return SessionScopedTeardown::SessionMismatch;
-            }
+        if !sid.accepts(self.participant_session_binding(call_id, identity).as_ref()) {
+            return SessionScopedTeardown::SessionMismatch;
         }
         SessionScopedTeardown::Applied(self.note_participant_left(call_id, identity, observed_sids))
     }

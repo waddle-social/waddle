@@ -452,6 +452,56 @@ mod resolver_affiliation_sync_scheduler_tests {
     /// memberships that existed when the ORIGINAL cleanup started — a
     /// replacement session's later registration survives the redrive.
     #[test]
+    fn take_for_occupant_below_with_session_leaves_other_generations_in_place() {
+        let memberships = RemoteMucMemberships::default();
+        let occupant: FullJid = "alice@example.com/web".parse().expect("occupant");
+        let first_room: BareJid = "first@muc.remote.example".parse().expect("room");
+        let second_room: BareJid = "second@muc.remote.example".parse().expect("room");
+        let first = waddle_xmpp_core::OccupancySessionGeneration::mint();
+        let second = waddle_xmpp_core::OccupancySessionGeneration::mint();
+        memberships.record_join(&occupant, &first_room, "alice", first);
+        memberships.record_join(&occupant, &second_room, "alice", second);
+
+        let taken =
+            memberships.take_for_occupant_below_with_session(&occupant, u64::MAX, Some(first));
+        assert_eq!(
+            taken.len(),
+            1,
+            "only the departing generation's membership is taken"
+        );
+        assert_eq!(taken[0].room, first_room);
+        assert!(
+            memberships.contains(&occupant, &second_room),
+            "the replacement's membership stays for its own cleanup"
+        );
+        assert_eq!(
+            memberships
+                .occupancy_sessions_for_occupant_below(&occupant, u64::MAX, Some(first))
+                .len(),
+            0,
+            "the taken membership no longer appears; the other generation is filtered out"
+        );
+    }
+
+    #[test]
+    fn record_leave_if_session_keeps_a_replacements_membership() {
+        let memberships = RemoteMucMemberships::default();
+        let occupant: FullJid = "alice@example.com/web".parse().expect("occupant");
+        let room: BareJid = "room@muc.remote.example".parse().expect("room");
+        let first = waddle_xmpp_core::OccupancySessionGeneration::mint();
+        let second = waddle_xmpp_core::OccupancySessionGeneration::mint();
+        memberships.record_join(&occupant, &room, "alice", second);
+
+        assert!(
+            !memberships.record_leave_if_session(&occupant, &room, first),
+            "the old generation's leave must not tombstone the replacement's membership"
+        );
+        assert!(memberships.contains(&occupant, &room));
+        assert!(memberships.record_leave_if_session(&occupant, &room, second));
+        assert!(!memberships.contains(&occupant, &room));
+    }
+
+    #[test]
     fn take_for_occupant_below_spares_memberships_registered_after_the_ceiling() {
         let memberships = RemoteMucMemberships::default();
         let occupant: FullJid = "alice@example.com/web".parse().expect("occupant");
@@ -867,6 +917,31 @@ impl RemoteMucMemberships {
         );
     }
 
+    /// Tombstone the membership only while it still belongs to
+    /// `occupant_session`: a same-full-JID replacement that recorded its own
+    /// join keeps its snapshot, so its later disconnect can still relay the
+    /// leave (#1703). Returns whether a tombstone was written.
+    pub fn record_leave_if_session(
+        &self,
+        occupant: &FullJid,
+        room: &BareJid,
+        occupant_session: waddle_xmpp_core::OccupancySessionGeneration,
+    ) -> bool {
+        let key = (occupant.clone(), room.clone());
+        let owned_by_other = self.entries.get(&key).is_some_and(|entry| {
+            matches!(
+                entry.value(),
+                RemoteMucMembershipEntry::Active(membership)
+                    if membership.occupant_session != occupant_session
+            )
+        });
+        if owned_by_other {
+            return false;
+        }
+        self.record_leave(occupant, room);
+        true
+    }
+
     pub fn contains(&self, occupant: &FullJid, room: &BareJid) -> bool {
         self.entries
             .get(&(occupant.clone(), room.clone()))
@@ -920,6 +995,19 @@ impl RemoteMucMemberships {
         occupant: &FullJid,
         generation_ceiling: u64,
     ) -> Vec<RemoteMucMembershipSnapshot> {
+        self.take_for_occupant_below_with_session(occupant, generation_ceiling, None)
+    }
+
+    /// [`Self::take_for_occupant_below`] restricted to memberships recorded
+    /// by `occupant_session` when one is given: a connection-scoped cleanup
+    /// must never take (and relay under its own generation) a snapshot a
+    /// same-full-JID replacement recorded in the meantime (#1703).
+    pub fn take_for_occupant_below_with_session(
+        &self,
+        occupant: &FullJid,
+        generation_ceiling: u64,
+        occupant_session: Option<waddle_xmpp_core::OccupancySessionGeneration>,
+    ) -> Vec<RemoteMucMembershipSnapshot> {
         let snapshots: Vec<RemoteMucMembershipSnapshot> = self
             .entries
             .iter()
@@ -932,6 +1020,9 @@ impl RemoteMucMemberships {
                     return None;
                 };
                 if membership.generation >= generation_ceiling {
+                    return None;
+                }
+                if occupant_session.is_some_and(|session| membership.occupant_session != session) {
                     return None;
                 }
                 Some(RemoteMucMembershipSnapshot {
@@ -1018,6 +1109,7 @@ impl RemoteMucMemberships {
         &self,
         occupant: &FullJid,
         generation_ceiling: u64,
+        occupant_session: Option<waddle_xmpp_core::OccupancySessionGeneration>,
     ) -> std::collections::HashMap<BareJid, waddle_xmpp_core::OccupancySessionGeneration> {
         self.entries
             .iter()
@@ -1026,8 +1118,11 @@ impl RemoteMucMemberships {
                 let RemoteMucMembershipEntry::Active(membership) = entry.value() else {
                     return None;
                 };
-                (entry_occupant == occupant && membership.generation < generation_ceiling)
-                    .then(|| (room.clone(), membership.occupant_session))
+                (entry_occupant == occupant
+                    && membership.generation < generation_ceiling
+                    && occupant_session
+                        .is_none_or(|session| membership.occupant_session == session))
+                .then(|| (room.clone(), membership.occupant_session))
             })
             .collect()
     }

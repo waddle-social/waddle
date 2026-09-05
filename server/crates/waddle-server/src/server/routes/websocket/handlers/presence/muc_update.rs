@@ -237,7 +237,17 @@ pub(crate) async fn try_handle_muc_presence_update(
                 *outcome
             }
             Ok(Some(waddle_xmpp::muc::room_actor::ClearMujiPresenceOutcome::Superseded)) => {
-                return None;
+                // A replacement connection owns this occupancy now. `None`
+                // would fall through to the JOIN path and let the stale
+                // connection overwrite the replacement's generation, so this
+                // is a handled no-op instead (#1703).
+                debug!(
+                    room = %room_jid,
+                    nick = %nick,
+                    sender = %sender_jid,
+                    "ignored Muji clear from a superseded connection"
+                );
+                return Some(Vec::new());
             }
             Ok(None) => return None,
             Err(error) => {

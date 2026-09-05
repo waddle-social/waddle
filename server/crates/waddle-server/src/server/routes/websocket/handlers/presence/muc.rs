@@ -1965,11 +1965,14 @@ pub async fn handle_muc_leave(
                         .await,
                 ) {
                     RemoteMucLeaveDecision::Delivered(replies) => {
+                        // Only this connection's membership is tombstoned: a
+                        // replacement that already recorded its join keeps
+                        // its snapshot (the owner answered it `Superseded`).
                         state
                             .deps
                             .protocol
                             .remote_muc_memberships
-                            .record_leave(sender_jid, room_jid);
+                            .record_leave_if_session(sender_jid, room_jid, occupancy_session);
                         return replies
                             .into_iter()
                             .map(|reply| stanza_to_xml(&reply))

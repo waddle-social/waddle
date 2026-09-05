@@ -585,6 +585,25 @@ impl MucRoom {
     /// alice/desktop on the call, alice/mobile in the room (not on
     /// the call), desktop drops → the call advertisement must clear,
     /// not persist under mobile's session.
+    /// Drop the call (XEP-0272 Muji) and in-call advertisements one session
+    /// owns without removing the session itself: a same-full-JID rejoin by a
+    /// DIFFERENT connection generation must not inherit the displaced
+    /// connection's chip/hand/mute state (#1703).
+    pub(super) fn clear_session_call_state(&mut self, nick: &str, jid: &FullJid) {
+        if let Some(entries) = self.muji_state.get_mut(nick) {
+            entries.remove(jid);
+            if entries.is_empty() {
+                self.muji_state.remove(nick);
+            }
+        }
+        if let Some(in_call) = self.in_call_state.get_mut(nick) {
+            in_call.remove(jid);
+            if in_call.is_empty() {
+                self.in_call_state.remove(nick);
+            }
+        }
+    }
+
     pub fn remove_occupant_session(&mut self, nick: &str, jid: &FullJid) -> Option<bool> {
         if !self.occupants.contains_key(nick) {
             return None;

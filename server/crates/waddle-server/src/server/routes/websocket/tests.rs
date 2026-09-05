@@ -660,6 +660,7 @@ impl waddle_sfu::SfuService for RecordingSfu {
         identity: &waddle_sfu::Identity,
         presented: waddle_xmpp_core::OccupancySessionGeneration,
         unbound: waddle_sfu::UnboundOccupantPolicy,
+        _: waddle_sfu::SidEvidence<'_>,
         _: Option<&waddle_sfu::ObservedCallSids>,
     ) -> waddle_sfu::SessionScopedTeardown {
         let mut sessions = self.occupant_sessions.lock().expect("recording lock");
@@ -736,7 +737,7 @@ impl waddle_sfu::SfuService for RecordingSfu {
         observed_sids: Option<&waddle_sfu::ObservedCallSids>,
         presented: waddle_xmpp_core::OccupancySessionGeneration,
         unbound: waddle_sfu::UnboundOccupantPolicy,
-        _: Option<&waddle_sfu::SessionBinding>,
+        _: waddle_sfu::SidEvidence<'_>,
     ) -> waddle_sfu::SessionScopedTeardown {
         let stored = self
             .occupant_sessions

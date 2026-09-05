@@ -5367,6 +5367,7 @@ impl waddle_sfu::SfuService for RecordingSfu {
         identity: &waddle_sfu::Identity,
         presented: waddle_xmpp_core::OccupancySessionGeneration,
         unbound: waddle_sfu::UnboundOccupantPolicy,
+        _: waddle_sfu::SidEvidence<'_>,
         _: Option<&waddle_sfu::ObservedCallSids>,
     ) -> waddle_sfu::SessionScopedTeardown {
         let mut sessions = self.occupant_sessions.lock().expect("recording lock");
@@ -6405,6 +6406,66 @@ async fn same_nick_late_join_replays_preparing_only_muji_with_exact_owner() {
         .expect("Muji parses");
     assert!(muji.preparing);
     assert!(!muji.is_active());
+}
+
+/// A plain available presence from a SUPERSEDED connection (its full JID was
+/// re-bound by a replacement) must be a handled no-op: falling through to the
+/// join path would let the stale connection overwrite the replacement's
+/// occupancy generation (#1703).
+#[tokio::test]
+async fn superseded_connections_plain_presence_does_not_rejoin_over_the_replacement() {
+    let state = create_test_websocket_state().await;
+    let owner_session = create_test_server_owner_session(state.as_ref(), "alice").await;
+    let room_jid: BareJid = "superseded-plain-presence@muc.example.com"
+        .parse()
+        .expect("room jid");
+    let alice: FullJid = "alice@example.com/web".parse().expect("alice jid");
+    let first = OccupancySessionGeneration::mint();
+    let second = OccupancySessionGeneration::mint();
+
+    let _ = super::handle_muc_join_with_occupancy_session(
+        state.as_ref(),
+        "example.com",
+        &room_jid,
+        &alice,
+        "alice",
+        None,
+        (first, &Some(owner_session.clone())),
+    )
+    .await;
+    let _ = super::handle_muc_join_with_occupancy_session(
+        state.as_ref(),
+        "example.com",
+        &room_jid,
+        &alice,
+        "alice",
+        None,
+        (second, &Some(owner_session.clone())),
+    )
+    .await;
+
+    let phase = waddle_xmpp::protocol::ConnectionPhase::ready(alice.clone(), false);
+    let frames = handlers::presence::handle_presence_with_occupancy_session(
+        muc_presence_to(&room_jid, "alice"),
+        "example.com",
+        "muc.example.com",
+        state.as_ref(),
+        &phase,
+        &Some(owner_session),
+        (first, None),
+    )
+    .await;
+
+    assert!(
+        frames.is_empty(),
+        "a superseded connection's plain presence is a handled no-op: {frames:?}"
+    );
+    let room = snapshot_room(state.as_ref(), &room_jid).await.room;
+    assert_eq!(
+        room.session_generation(&alice),
+        Some(second),
+        "the replacement's generation must not be overwritten by a stale rejoin"
+    );
 }
 
 #[tokio::test]

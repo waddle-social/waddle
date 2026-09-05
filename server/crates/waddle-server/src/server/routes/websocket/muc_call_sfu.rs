@@ -98,6 +98,7 @@ pub(crate) fn unregister_participant_via_sfu_if_occupant_matches(
         &identity,
         occupant,
         unbound,
+        waddle_sfu::SidEvidence::NotSignaling,
         observed_sids,
     ))
 }
@@ -480,7 +481,7 @@ pub(crate) fn note_participant_left_for_occupant(
         observed_sids,
         occupant,
         unbound,
-        session,
+        waddle_sfu::SidEvidence::Presented(session),
     ))
 }
 

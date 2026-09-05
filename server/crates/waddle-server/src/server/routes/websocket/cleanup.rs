@@ -2421,12 +2421,21 @@ async fn cleanup_muc_presence_with_origin(
             .generation_watermark(),
         SweepFailureRecording::JanitorRequeues { remote_ceiling } => remote_ceiling,
     };
+    // A connection-scoped sweep (`Generation`) only ever acts on memberships
+    // ITS join recorded; a replacement's snapshot recorded in the meantime
+    // stays for the replacement's own cleanup (#1703).
+    let connection_generation = match session {
+        LeaveSessionSelector::Generation(generation) => Some(generation),
+        LeaveSessionSelector::Any | LeaveSessionSelector::JoinedAtOrBefore(_) => None,
+    };
     let remote_membership_sessions = state
         .deps
         .protocol
         .remote_muc_memberships
-        .occupancy_sessions_for_occupant_below(jid, remote_ceiling);
-    let mut completed = cleanup_remote_muc_presence(state, jid, origin, remote_ceiling).await;
+        .occupancy_sessions_for_occupant_below(jid, remote_ceiling, connection_generation);
+    let mut completed =
+        cleanup_remote_muc_presence(state, jid, origin, remote_ceiling, connection_generation)
+            .await;
 
     let room_jids = match RoomRegistry::wrap(state.deps.protocol.room_registry.clone())
         .list_rooms()
@@ -2739,12 +2748,13 @@ async fn cleanup_remote_muc_presence(
     jid: &FullJid,
     cleanup_origin: Option<&crate::server::routes::interpret::OrderedRelayRouteOrigin>,
     remote_ceiling: u64,
+    connection_generation: Option<waddle_xmpp_core::OccupancySessionGeneration>,
 ) -> bool {
     let memberships = state
         .deps
         .protocol
         .remote_muc_memberships
-        .take_for_occupant_below(jid, remote_ceiling);
+        .take_for_occupant_below_with_session(jid, remote_ceiling, connection_generation);
     if memberships.is_empty() {
         return true;
     }
@@ -3132,6 +3142,7 @@ async fn cleanup_remote_muc_presence(
     _jid: &FullJid,
     _cleanup_origin: Option<&crate::server::routes::interpret::OrderedRelayRouteOrigin>,
     _remote_ceiling: u64,
+    _connection_generation: Option<waddle_xmpp_core::OccupancySessionGeneration>,
 ) -> bool {
     true
 }

@@ -6,7 +6,7 @@
 
 use super::*;
 use crate::config::{ApiKey, ApiSecret, TurnSharedSecret};
-use crate::UnboundOccupantPolicy;
+use crate::{SidEvidence, UnboundOccupantPolicy};
 use chrono::Duration;
 use jid::FullJid;
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -3783,6 +3783,7 @@ fn occupant_scoped_unregister_applies_on_a_matching_generation() {
         &alice,
         occupant,
         UnboundOccupantPolicy::Keep,
+        SidEvidence::NotSignaling,
         None,
     ) {
         SessionScopedTeardown::Applied(TeardownDisposition::Applied(CallState::Ended)) => {}
@@ -3807,6 +3808,7 @@ fn occupant_scoped_unregister_refuses_a_mismatching_generation_without_mutation(
             &alice,
             stale,
             UnboundOccupantPolicy::Keep,
+            SidEvidence::NotSignaling,
             None,
         ),
         SessionScopedTeardown::SessionMismatch
@@ -3829,6 +3831,7 @@ fn occupant_scoped_unregister_refuses_an_unbound_registration() {
             &alice,
             presented,
             UnboundOccupantPolicy::Keep,
+            SidEvidence::NotSignaling,
             None,
         ),
         SessionScopedTeardown::SessionMismatch
@@ -3856,6 +3859,7 @@ async fn inline_teardown_refuses_the_remote_eject_after_a_same_sid_rejoin_with_n
         &alice,
         generation_one,
         UnboundOccupantPolicy::Keep,
+        SidEvidence::NotSignaling,
         None,
     ) {
         SessionScopedTeardown::Applied(_) => {}
@@ -3894,6 +3898,7 @@ fn occupant_scoped_unregister_tears_down_an_unbound_registration_when_the_depart
         &alice,
         fixture_occupancy_session(),
         UnboundOccupantPolicy::TearDown,
+        SidEvidence::NotSignaling,
         None,
     ) {
         SessionScopedTeardown::Applied(_) => {}
@@ -3922,7 +3927,7 @@ fn occupant_scoped_note_left_refuses_a_same_sid_registration_of_a_newer_generati
             None,
             generation_one,
             UnboundOccupantPolicy::TearDown,
-            Some(&sid),
+            SidEvidence::Presented(Some(&sid)),
         ),
         SessionScopedTeardown::SessionMismatch
     );
@@ -3935,7 +3940,7 @@ fn occupant_scoped_note_left_refuses_a_same_sid_registration_of_a_newer_generati
         None,
         generation_two,
         UnboundOccupantPolicy::Keep,
-        Some(&sid),
+        SidEvidence::Presented(Some(&sid)),
     ) {
         SessionScopedTeardown::Applied(_) => {}
         other => panic!("matching generation must apply, got {other:?}"),
@@ -3962,7 +3967,7 @@ fn occupant_scoped_note_left_refuses_the_same_generations_newer_sid() {
             None,
             generation,
             UnboundOccupantPolicy::TearDown,
-            Some(&old_sid),
+            SidEvidence::Presented(Some(&old_sid)),
         ),
         SessionScopedTeardown::SessionMismatch
     );
@@ -3973,10 +3978,49 @@ fn occupant_scoped_note_left_refuses_the_same_generations_newer_sid() {
         None,
         generation,
         UnboundOccupantPolicy::TearDown,
-        Some(&new_sid),
+        SidEvidence::Presented(Some(&new_sid)),
     ) {
         SessionScopedTeardown::Applied(_) => {}
         other => panic!("the current sid must apply, got {other:?}"),
+    }
+    assert!(!sfu.has_call_participant(&call, &alice));
+}
+
+#[test]
+fn occupant_scoped_unregister_refuses_the_same_generations_newer_sid_when_presented() {
+    let sfu = LiveKitSfu::new(fixture_config()).expect("test SFU");
+    let call = CallId::new("room@muc.waddle.test").expect("call id");
+    let alice = fixture_identity("alice");
+    let generation = fixture_occupancy_session();
+    let old_sid = SessionBinding::new("muji-session-old").expect("binding");
+    let new_sid = SessionBinding::new("muji-session-new").expect("binding");
+
+    sfu.register_call_participant_with_session(&call, &alice, &new_sid, generation);
+    // A terminate for the OLD sid from the same connection must not unregister
+    // the re-initiated session.
+    assert_eq!(
+        sfu.unregister_call_participant_if_occupant_matches(
+            &call,
+            &alice,
+            generation,
+            UnboundOccupantPolicy::TearDown,
+            SidEvidence::Presented(Some(&old_sid)),
+            None,
+        ),
+        SessionScopedTeardown::SessionMismatch
+    );
+    assert!(sfu.has_call_participant(&call, &alice));
+    // Connection teardown (no sid evidence) of the same generation still applies.
+    match sfu.unregister_call_participant_if_occupant_matches(
+        &call,
+        &alice,
+        generation,
+        UnboundOccupantPolicy::Keep,
+        SidEvidence::NotSignaling,
+        None,
+    ) {
+        SessionScopedTeardown::Applied(_) => {}
+        other => panic!("connection teardown of the owner generation must apply, got {other:?}"),
     }
     assert!(!sfu.has_call_participant(&call, &alice));
 }
