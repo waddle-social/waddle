@@ -1262,33 +1262,22 @@ async fn cleanup_connection_shutdown_inner(
                         let _ = promote_terminal_recovery(state, outbound_rx, &jid, conn).await;
                     }
                     let cleanup_origin = clustered_cleanup_origin(state, &jid, owner).await;
-                    // Re-check for a same-FullJID replacement AFTER the long
-                    // awaits above (reclamation, promotion, shadow drain):
-                    // our own route was unregistered before them, so any
-                    // entry now present is a replacement that may already
-                    // have joined rooms — its occupancy must not be swept by
-                    // this old session's leave (same rule as the superseded
-                    // path); the ghost-occupant janitor covers an old
-                    // occupancy the replacement did not re-join.
-                    let replacement_bound_during_recovery = state
-                        .deps
-                        .protocol
-                        .connection_registry
-                        .get_entry(&jid)
-                        .is_some();
                     if detach_fail_removed {
-                        if !replacement_bound_during_recovery {
-                            cleanup_muc_presence_with_origin(
-                                state,
-                                &jid,
-                                LeaveSessionSelector::Generation(conn.occupancy_session),
-                                cleanup_origin.as_ref(),
-                                waddle_xmpp::muc::room_actor::LeaveAttemptId::generate(),
-                                SweepFailureRecording::RecordSweep,
-                                LocalRoomSweepScope::EveryRoom,
-                            )
-                            .await;
-                        }
+                        // The leave is generation-scoped (#1703): a same-FullJID
+                        // replacement that bound during the long awaits above
+                        // keeps every room it re-joined (`Superseded`), and the
+                        // rooms it did NOT re-join are exactly the ones only this
+                        // old session can converge — so the sweep always runs.
+                        cleanup_muc_presence_with_origin(
+                            state,
+                            &jid,
+                            LeaveSessionSelector::Generation(conn.occupancy_session),
+                            cleanup_origin.as_ref(),
+                            waddle_xmpp::muc::room_actor::LeaveAttemptId::generate(),
+                            SweepFailureRecording::RecordSweep,
+                            LocalRoomSweepScope::EveryRoom,
+                        )
+                        .await;
                         // ADR-0017 Phase 1: mirror the unregister into the
                         // actor tree on the SM-detach-failure fallback. This
                         // session is never stored, so no SM-expiry janitor
@@ -1308,13 +1297,20 @@ async fn cleanup_connection_shutdown_inner(
                     // fails we fall back to a full unregister, so the
                     // caps resource→ver mapping AND any pending
                     // disco#info resolution must be cleared too —
-                    // otherwise stale state lingers indefinitely. Same
-                    // replacement guard as the MUC sweep: a live
-                    // replacement re-published its own caps at bind.
+                    // otherwise stale state lingers indefinitely. A live
+                    // replacement re-published its own caps at bind, so
+                    // this FullJID-keyed resource stays replacement-gated
+                    // (the MUC sweep itself is generation-scoped and is not).
+                    let replacement_bound_during_recovery = state
+                        .deps
+                        .protocol
+                        .connection_registry
+                        .get_entry(&jid)
+                        .is_some();
                     if !replacement_bound_during_recovery {
                         state.deps.protocol.caps_resolver.drop_resource(&jid);
                     }
-                    if !detach_fail_removed && !replacement_bound_during_recovery {
+                    if !detach_fail_removed {
                         cleanup_muc_presence(
                             state,
                             &jid,
@@ -2248,19 +2244,24 @@ async fn refuse_detach_without_principal(
             .connection_registry
             .get_entry(jid)
             .is_some();
+        // The MUC sweep is generation-scoped (#1703) and therefore runs even
+        // when a replacement retook the FullJID: rooms the replacement
+        // re-joined answer `Superseded`, rooms it did not re-join are only
+        // this session's to converge. The other FullJID-keyed resources stay
+        // owner-gated below.
+        let cleanup_origin = clustered_cleanup_origin(state, jid, &owner).await;
+        cleanup_muc_presence_with_origin(
+            state,
+            jid,
+            LeaveSessionSelector::Generation(conn.occupancy_session),
+            cleanup_origin.as_ref(),
+            waddle_xmpp::muc::room_actor::LeaveAttemptId::generate(),
+            SweepFailureRecording::RecordSweep,
+            LocalRoomSweepScope::EveryRoom,
+        )
+        .await;
         if !replacement_took_over {
-            let cleanup_origin = clustered_cleanup_origin(state, jid, &owner).await;
             state.deps.protocol.caps_resolver.drop_resource(jid);
-            cleanup_muc_presence_with_origin(
-                state,
-                jid,
-                LeaveSessionSelector::Generation(conn.occupancy_session),
-                cleanup_origin.as_ref(),
-                waddle_xmpp::muc::room_actor::LeaveAttemptId::generate(),
-                SweepFailureRecording::RecordSweep,
-                LocalRoomSweepScope::EveryRoom,
-            )
-            .await;
             unregister_remote_user_resource_if_owner(state, jid, &owner).await;
         } else {
             debug!(
@@ -3247,21 +3248,15 @@ pub(super) async fn cleanup_invalidated_detached_session(
     //    invalidation): it may have legitimately re-joined rooms under
     //    the shared full JID — skip cleanup; its own disconnect path
     //    cleans up when it ends.
-    let foreign_live_entry = !replacement_is_current_owner
-        && state
-            .deps
-            .protocol
-            .connection_registry
-            .get_entry(&detached.jid)
-            .is_some();
-    if !foreign_live_entry {
-        cleanup_muc_presence(
-            state,
-            &detached.jid,
-            LeaveSessionSelector::Generation(detached.occupancy_session),
-        )
-        .await;
-    }
+    // Generation-scoped (#1703): a live same-FullJID replacement keeps the
+    // rooms it re-joined (`Superseded`); the rooms it did not re-join are
+    // only this detached session's to converge, so the sweep always runs.
+    cleanup_muc_presence(
+        state,
+        &detached.jid,
+        LeaveSessionSelector::Generation(detached.occupancy_session),
+    )
+    .await;
 }
 
 pub(crate) async fn get_room_actor(

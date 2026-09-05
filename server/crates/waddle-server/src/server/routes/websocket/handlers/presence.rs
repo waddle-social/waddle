@@ -338,6 +338,26 @@ async fn handle_presence_impl(
             }
         }
 
+        // A connection that no longer owns its registry slot has been
+        // superseded by a same-FullJID replacement: its (possibly late) join
+        // must not be installed over the replacement's occupancy — locally
+        // or, for a remotely owned room, at the destination (#1703).
+        if let Some(owner) = context.registry_owner {
+            if !context
+                .state
+                .deps
+                .protocol
+                .connection_registry
+                .is_owned_by(sender_jid, owner)
+            {
+                debug!(
+                    room = %room_jid,
+                    sender = %sender_jid,
+                    "ignored MUC join from a superseded connection"
+                );
+                return Vec::new();
+            }
+        }
         let presence_show = presence
             .show
             .clone()

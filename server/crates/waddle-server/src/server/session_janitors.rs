@@ -1462,19 +1462,10 @@ pub(crate) async fn run_sm_expiry_sweep(state: &Arc<WebSocketState>) {
                 .protocol
                 .caps_resolver
                 .drop_resource(&session.jid);
-            // MUC occupancy is keyed by FULL JID: a live same-JID
-            // replacement session (fresh bind after this expired
-            // session detached) shares the room occupancies, so
-            // evicting them here would kick the replacement out of
-            // its rooms. Skip room cleanup whenever any live
-            // registry entry exists for the JID (same guard as
-            // cleanup_invalidated_detached_session).
-            if state
-                .deps
-                .protocol
-                .connection_registry
-                .get_entry(&session.jid)
-                .is_none()
+            // The MUC sweep is generation-scoped (#1703): a live same-JID
+            // replacement keeps every room it re-joined (`Superseded`), and
+            // the rooms it did not re-join are only this expired session's to
+            // converge — so it runs regardless of the registry entry.
             {
                 #[cfg(feature = "clustering")]
                 {

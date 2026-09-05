@@ -7417,44 +7417,61 @@ async fn muc_admin_voice_grant_upgrades_live_sfu_grants() {
 /// from its rooms while a live same-JID replacement session exists —
 /// the replacement shares the occupancy and would be kicked out of
 /// every room it just (re)joined.
+/// A live same-FullJID replacement no longer SKIPS the detached session's
+/// room cleanup (#1703): the leave is generation-scoped, so the room the
+/// replacement re-joined keeps it (`Superseded`) while a room only the old
+/// session occupied is converged even though the replacement is live.
 #[tokio::test]
-async fn detached_invalidation_skips_muc_cleanup_when_live_replacement_exists() {
+async fn detached_invalidation_is_generation_safe_with_a_live_replacement() {
     use super::cleanup::cleanup_invalidated_detached_session;
 
     let state = create_test_websocket_state().await;
     let owner_session = create_test_server_owner_session(state.as_ref(), "alice").await;
-    let room_jid: BareJid = "replacement-race-channel@muc.example.com"
+    let rejoined_room: BareJid = "replacement-rejoined@muc.example.com"
+        .parse()
+        .expect("room jid");
+    let orphaned_room: BareJid = "replacement-orphaned@muc.example.com"
         .parse()
         .expect("room jid");
     let alice: FullJid = "alice@example.com/web".parse().expect("alice jid");
+    let old_generation = OccupancySessionGeneration::mint();
+    let replacement_generation = OccupancySessionGeneration::mint();
 
-    let _ = handle_muc_join(
-        state.as_ref(),
-        "example.com",
-        &room_jid,
-        &alice,
-        "alice",
-        None,
-        &Some(owner_session),
-    )
-    .await;
-
-    // A live replacement session holds the registry slot for the SAME
-    // full JID (fresh bind after the old session detached).
+    for room in [&rejoined_room, &orphaned_room] {
+        let _ = super::handle_muc_join_with_occupancy_session(
+            state.as_ref(),
+            "example.com",
+            room,
+            &alice,
+            "alice",
+            None,
+            (old_generation, &Some(owner_session.clone())),
+        )
+        .await;
+    }
+    // The replacement binds and re-joins ONE of the rooms.
     let (repl_tx, _repl_rx) = mpsc::channel::<OutboundStanza>(4);
     state
         .deps
         .protocol
         .connection_registry
         .register(alice.clone(), repl_tx);
+    let _ = super::handle_muc_join_with_occupancy_session(
+        state.as_ref(),
+        "example.com",
+        &rejoined_room,
+        &alice,
+        "alice",
+        None,
+        (replacement_generation, &Some(owner_session)),
+    )
+    .await;
 
-    // The stale detached session (a stream id the registry no longer
-    // holds) gets invalidated.
     let detached = waddle_xmpp::stream_management::DetachedSession {
         stream_id: "stale-stream".to_string(),
         user_id: "alice@example.com".to_string(),
         jid: alice.clone(),
-        occupancy_session: current_test_occupancy_session(state.as_ref(), &alice),
+        occupancy_session: old_generation,
         inbound_count: 0,
         shadow_ordinal: waddle_xmpp::stream_management::ShadowOrdinal::ZERO,
         outbound_count: 0,
@@ -7473,35 +7490,92 @@ async fn detached_invalidation_skips_muc_cleanup_when_live_replacement_exists() 
         presence_payloads: Vec::new(),
         pending_subscribes_flushed: false,
     };
-    cleanup_invalidated_detached_session(state.as_ref(), detached.clone(), None).await;
-
-    let room = snapshot_room(state.as_ref(), &room_jid).await.room;
-    assert_eq!(
-        room.find_nick_by_real_jid(&alice),
-        Some("alice"),
-        "the live replacement's room occupancy must survive the stale \
-         detached session's invalidation cleanup"
-    );
-
-    // Companion: with no live entry for the JID, the invalidation DOES
-    // evict the occupancy.
-    state.deps.protocol.connection_registry.unregister(&alice);
     cleanup_invalidated_detached_session(state.as_ref(), detached, None).await;
-    let room = snapshot_room(state.as_ref(), &room_jid).await.room;
+
+    let rejoined = snapshot_room(state.as_ref(), &rejoined_room).await.room;
+    assert_eq!(
+        rejoined.session_generation(&alice),
+        Some(replacement_generation),
+        "the room the live replacement re-joined keeps the replacement"
+    );
+    let orphaned = snapshot_room(state.as_ref(), &orphaned_room).await.room;
     assert!(
-        room.find_nick_by_real_jid(&alice).is_none(),
-        "with no live replacement the invalidated session's occupancy \
-         must be cleaned up"
+        orphaned.find_nick_by_real_jid(&alice).is_none(),
+        "the room only the old session occupied is converged despite the live replacement"
     );
 }
 
-/// codex P1 on PR #1207: when the invalidation is triggered BY the
-/// same client's fresh bind (the replacement owner IS the invalidating
-/// caller), the new stream cannot have joined any rooms yet — the dead
-/// session's occupancies are certainly stale and MUST be cleaned, or
-/// the fresh connection inherits room fan-out without ever joining.
-/// Only a FOREIGN live entry (someone else's slot, unknown join state)
-/// warrants skipping room cleanup.
+/// A join from a connection that no longer owns its registry slot (a
+/// same-FullJID replacement took it) is ignored instead of being installed
+/// over the replacement's occupancy (#1703).
+#[tokio::test]
+async fn join_from_a_superseded_connection_is_ignored() {
+    let state = create_test_websocket_state().await;
+    let owner_session = create_test_server_owner_session(state.as_ref(), "alice").await;
+    let room_jid: BareJid = "superseded-join@muc.example.com".parse().expect("room jid");
+    let alice: FullJid = "alice@example.com/web".parse().expect("alice jid");
+    // Pre-create the room so an ignored join leaves an observable empty room.
+    let _ = state
+        .deps
+        .protocol
+        .room_registry
+        .ask(waddle_xmpp::muc::room_registry_actor::CreateRoom {
+            room_jid: room_jid.clone(),
+            waddle_id: "test-waddle".to_string(),
+            channel_id: "test-channel".to_string(),
+            config: waddle_xmpp::muc::RoomConfig {
+                members_only: false,
+                ..Default::default()
+            },
+        })
+        .await
+        .expect("create room");
+    let (tx, _rx) = mpsc::channel::<OutboundStanza>(4);
+    let current_owner = register_test_connection(state.as_ref(), &alice, tx).await;
+    let stale_owner = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let phase = waddle_xmpp::protocol::ConnectionPhase::ready(alice.clone(), false);
+
+    let frames = handlers::presence::handle_presence_with_occupancy_session(
+        muc_presence_to(&room_jid, "alice"),
+        "example.com",
+        "muc.example.com",
+        state.as_ref(),
+        &phase,
+        &Some(owner_session.clone()),
+        (OccupancySessionGeneration::mint(), Some(&stale_owner)),
+    )
+    .await;
+    assert!(
+        frames.is_empty(),
+        "a superseded connection's join must be ignored: {frames:?}"
+    );
+    assert!(
+        snapshot_room(state.as_ref(), &room_jid)
+            .await
+            .room
+            .find_nick_by_real_jid(&alice)
+            .is_none(),
+        "no occupancy is installed for a superseded connection"
+    );
+
+    let frames = handlers::presence::handle_presence_with_occupancy_session(
+        muc_presence_to(&room_jid, "alice"),
+        "example.com",
+        "muc.example.com",
+        state.as_ref(),
+        &phase,
+        &Some(owner_session),
+        (OccupancySessionGeneration::mint(), Some(&current_owner)),
+    )
+    .await;
+    assert!(
+        frames
+            .iter()
+            .any(|frame| frame.contains("status code='110'")),
+        "the slot owner joins normally: {frames:?}"
+    );
+}
+
 #[tokio::test]
 async fn fresh_bind_invalidation_cleans_the_dead_sessions_room_occupancy() {
     use super::cleanup::cleanup_invalidated_detached_session;

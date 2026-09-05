@@ -126,6 +126,16 @@ impl ConnectionRegistry {
         removed.map(|(_, entry)| entry)
     }
 
+    /// Whether the current registry entry for `jid` still belongs to the
+    /// connection holding `carbons_handle` (its ownership token). A
+    /// connection that lost its slot to a same-FullJID replacement must not
+    /// perform FullJID-keyed writes such as a MUC join (#1703).
+    pub fn is_owned_by(&self, jid: &FullJid, carbons_handle: &Arc<AtomicBool>) -> bool {
+        self.connections
+            .get(jid)
+            .is_some_and(|entry| Arc::ptr_eq(&entry.carbons_enabled, carbons_handle))
+    }
+
     /// Unregister a connection only if the current registry entry belongs to
     /// the provided carbons handle (i.e. this actor still owns the slot).
     #[instrument(skip(self, carbons_handle, jid), fields(jid = %jid))]
