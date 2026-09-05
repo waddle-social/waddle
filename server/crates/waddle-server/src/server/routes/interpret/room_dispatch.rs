@@ -716,7 +716,7 @@ fn clear_provisional_shadow_room_fence(deps: &Deps<'_>) {
 /// retaining the provisional frame fence would let the shadow assert an
 /// owner/epoch the actual relay no longer used.
 #[cfg(feature = "clustering")]
-fn record_remote_shadow_room_authority(
+pub(super) fn record_remote_shadow_room_authority(
     deps: &Deps<'_>,
     room: &jid::BareJid,
     claim_fence: Option<&waddle_xmpp::muc::RoomClaimFenceContext>,

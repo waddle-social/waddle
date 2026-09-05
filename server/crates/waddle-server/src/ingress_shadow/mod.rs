@@ -3717,31 +3717,57 @@ mod tests {
 
     #[test]
     fn digest_input_strips_forged_server_stanza_ids_and_retries() {
-        let mut message = Message::new(Some(Jid::from(
-            "room@conference.example.com"
-                .parse::<BareJid>()
-                .expect("room jid"),
-        )));
-        message.type_ = MessageType::Groupchat;
-        message
-            .payloads
-            .push(waddle_xmpp_core::xep0359::build_stanza_id_element(
-                "forged",
-                &Jid::from(
-                    "room@conference.example.com"
-                        .parse::<BareJid>()
-                        .expect("room jid"),
-                ),
-            ));
-        let submission = base_submission(message);
+        let room: BareJid = "room@conference.example.com".parse().expect("room jid");
+        let digest_with_scope = |forged: bool, scope: Option<IngressShadowRoomScope>| {
+            let mut message = Message::new(Some(Jid::from(room.clone())));
+            message.type_ = MessageType::Groupchat;
+            if forged {
+                message
+                    .payloads
+                    .push(waddle_xmpp_core::xep0359::build_stanza_id_element(
+                        "forged",
+                        &Jid::from(room.clone()),
+                    ));
+            }
+            let mut submission = base_submission(message);
+            submission.capture.room_scope = scope;
+            let digest_input = digest_input_from_submission(&submission)
+                .expect("digest evaluation succeeds")
+                .expect("digest input is valid after stripping");
+            assert_eq!(
+                digest_input.stanza_lang(),
+                Some(&xmpp_parsers::message::Lang::from("en"))
+            );
+            assert!(
+                digest_input.extensions().is_empty(),
+                "a stanza-id element is server metadata and never digest payload"
+            );
+            digest_v1::digest(&digest_input)
+        };
+        let fence = IngressShadowRoomFence {
+            room: room.clone(),
+            owner: NodeIdentity::new("room-node", "room-epoch"),
+            claim_epoch: ClaimEpoch(11),
+        };
 
-        let digest_input = digest_input_from_submission(&submission)
-            .expect("digest evaluation succeeds")
-            .expect("digest input is valid after stripping");
+        // XEP-0359: the room is the assigning entity for groupchat. With the
+        // room as an authority (local fence or relayed remote authority) a
+        // client-authored `<stanza-id by='room'/>` is stripped and the digest
+        // retried; without one it is merely validated. Either way the element
+        // never reaches the digest, so identity is stable across nodes.
+        let unforged = digest_with_scope(false, None);
         assert_eq!(
-            digest_input.stanza_lang(),
-            Some(&xmpp_parsers::message::Lang::from("en"))
+            digest_with_scope(
+                true,
+                Some(IngressShadowRoomScope::LocalFence(fence.clone()))
+            ),
+            unforged
         );
+        assert_eq!(
+            digest_with_scope(true, Some(IngressShadowRoomScope::RemoteAuthority(fence))),
+            unforged
+        );
+        assert_eq!(digest_with_scope(true, None), unforged);
     }
 
     #[test]
@@ -4313,6 +4339,16 @@ mod tests {
         };
 
         let mut ambiguous = fixture.submission(1, None);
+        // The relayed branch records the remote owner's claim alongside the
+        // ambiguity marker; the rowless decision must win, never a local
+        // assert of a claim this node does not hold.
+        ambiguous.capture.room_scope = Some(IngressShadowRoomScope::RemoteAuthority(
+            IngressShadowRoomFence {
+                room: "room@conference.example.com".parse().expect("room jid"),
+                owner: NodeIdentity::new("node-b", "epoch-b"),
+                claim_epoch: ClaimEpoch(fixture.claim_epoch.0 + 100),
+            },
+        ));
         ambiguous
             .capture
             .markers
