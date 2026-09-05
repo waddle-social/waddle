@@ -487,7 +487,7 @@ async fn execute_intent(
                 departed,
                 observed_sids.as_ref(),
                 intent.occupant,
-                waddle_sfu::UnboundOccupantPolicy::Keep,
+                intent.unbound_occupant,
                 intent.session.as_ref(),
             ),
         )
@@ -657,7 +657,7 @@ async fn execute_intent(
         room_sid: intent.room_sid.clone(),
         session: intent.session.clone(),
         occupant_session: intent.occupant,
-        unbound_occupant: waddle_sfu::UnboundOccupantPolicy::Keep,
+        unbound_occupant: intent.unbound_occupant,
     };
     match executor.execute(&lite).await {
         Ok(TeardownExecution::Executed) => IntentExecution::Done,

@@ -325,7 +325,11 @@ pub(crate) async fn try_handle_muc_presence_update(
         .await
     {
         Ok(Some(in_call_outcome)) => in_call_outcome.in_call_sessions,
-        Ok(None) | Err(_) => Vec::new(),
+        // The sender was superseded (or removed) between the two fenced
+        // asks: nothing derived from the first mutation may be broadcast or
+        // anchored on its behalf (#1703).
+        Ok(None) => return Some(Vec::new()),
+        Err(_) => Vec::new(),
     };
 
     let from_room_jid = room_jid
