@@ -36,11 +36,11 @@ use super::allowlist::AllowlistStore;
 use super::claims::NodeLeaseStore;
 use super::codec::{RemoteElement, RemoteStanza};
 use super::ordered_relay::{
-    OrderedRelayChannel, OrderedRelayClaim, OrderedRelayClaimRole, OrderedRelayDiversion,
-    OrderedRelayDiversionReason, OrderedRelayEnvelopeClaims, OrderedRelayMucProxyKind,
-    OrderedRelayNack, OrderedRelayNackReason, OrderedRelayOrigin, OrderedRelayOriginProof,
-    OrderedRelayPayload, OrderedRelayRecipient, OrderedRelayReply, OrderedRelaySenderState,
-    OriginInboundSequence, RemoteStanzaEnvelope,
+    MucProxyOrigin, OrderedRelayChannel, OrderedRelayClaim, OrderedRelayClaimRole,
+    OrderedRelayDiversion, OrderedRelayDiversionReason, OrderedRelayEnvelopeClaims,
+    OrderedRelayMucProxyKind, OrderedRelayNack, OrderedRelayNackReason, OrderedRelayOrigin,
+    OrderedRelayOriginProof, OrderedRelayPayload, OrderedRelayRecipient, OrderedRelayReply,
+    OrderedRelaySenderState, OriginInboundSequence, RemoteStanzaEnvelope,
 };
 use super::relay::{
     RelayAskError, RelayDeliverRemoteResourceFrame, RelayDeliverRemoteResourceWriteAcceptedFrame,

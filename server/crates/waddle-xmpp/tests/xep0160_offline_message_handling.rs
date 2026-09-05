@@ -794,6 +794,7 @@ fn xep0160_sm_resumption_preserves_carbons_enabled_state() {
         .to_detached_session(DetachedSessionSnapshot {
             user_id: "alice".to_string(),
             jid: full("alice@example.com/laptop"),
+            occupancy_session: waddle_xmpp_core::OccupancySessionGeneration::mint(),
             carbons_enabled: true,
             roster_interested: true,
             blocklist_interested: false,
@@ -821,6 +822,7 @@ fn xep0160_sm_resumption_preserves_carbons_enabled_state() {
         .to_detached_session(DetachedSessionSnapshot {
             user_id: "alice".to_string(),
             jid: full("alice@example.com/laptop"),
+            occupancy_session: waddle_xmpp_core::OccupancySessionGeneration::mint(),
             carbons_enabled: false,
             roster_interested: true,
             blocklist_interested: false,

@@ -148,6 +148,7 @@ pub(crate) async fn try_handle_muc_presence_update(
     room_jid: &BareJid,
     sender_jid: &FullJid,
     nick: &str,
+    occupancy_session: waddle_xmpp_core::OccupancySessionGeneration,
     incoming: &Presence,
 ) -> Option<Vec<String>> {
     if incoming.type_ != xmpp_parsers::presence::Type::None {
@@ -208,12 +209,16 @@ pub(crate) async fn try_handle_muc_presence_update(
         Some(muji) => match actor
             .ask(UpsertMujiPresence {
                 sender_jid: sender_jid.clone(),
+                occupant: Some(occupancy_session),
                 muji,
             })
             .await
         {
             Ok(Some(outcome)) => outcome,
-            Ok(None) => return None,
+            // The sender WAS an occupant a moment ago (the admin-context check
+            // above): a `None` now means it was removed or superseded by a
+            // replacement in between — a handled no-op, never a rejoin (#1703).
+            Ok(None) => return Some(Vec::new()),
             Err(error) => {
                 warn!(
                     room = %room_jid,
@@ -228,10 +233,26 @@ pub(crate) async fn try_handle_muc_presence_update(
         None => match actor
             .ask(ClearMujiPresence {
                 sender_jid: sender_jid.clone(),
+                occupant: Some(occupancy_session),
             })
             .await
         {
-            Ok(Some(outcome)) => outcome,
+            Ok(Some(waddle_xmpp::muc::room_actor::ClearMujiPresenceOutcome::Updated(outcome))) => {
+                *outcome
+            }
+            Ok(Some(waddle_xmpp::muc::room_actor::ClearMujiPresenceOutcome::Superseded)) => {
+                // A replacement connection owns this occupancy now. `None`
+                // would fall through to the JOIN path and let the stale
+                // connection overwrite the replacement's generation, so this
+                // is a handled no-op instead (#1703).
+                debug!(
+                    room = %room_jid,
+                    nick = %nick,
+                    sender = %sender_jid,
+                    "ignored Muji clear from a superseded connection"
+                );
+                return Some(Vec::new());
+            }
             Ok(None) => return None,
             Err(error) => {
                 warn!(
@@ -251,9 +272,15 @@ pub(crate) async fn try_handle_muc_presence_update(
         // registry just like full MUC leave / unclean disconnect do,
         // otherwise a hard-refreshed tab can clear the room indicator
         // while its LiveKit participant and issued token JTIs linger.
-        super::super::super::muc_call_sfu::unregister_participant_from_room(
-            state, room_jid, sender_jid,
-        );
+        let _ =
+            super::super::super::muc_call_sfu::unregister_participant_from_room_if_occupant_matches(
+                state,
+                room_jid,
+                sender_jid,
+                occupancy_session,
+                waddle_sfu::UnboundOccupantPolicy::TearDown,
+                None,
+            );
     }
 
     // XEP-0045 §7.7: a user may change their *own* in-room presence
@@ -292,12 +319,17 @@ pub(crate) async fn try_handle_muc_presence_update(
     let in_call_sessions = match actor
         .ask(UpsertInCallState {
             sender_jid: sender_jid.clone(),
+            occupant: Some(occupancy_session),
             state: in_call_state,
         })
         .await
     {
         Ok(Some(in_call_outcome)) => in_call_outcome.in_call_sessions,
-        Ok(None) | Err(_) => Vec::new(),
+        // The sender was superseded (or removed) between the two fenced
+        // asks: nothing derived from the first mutation may be broadcast or
+        // anchored on its behalf (#1703).
+        Ok(None) => return Some(Vec::new()),
+        Err(_) => Vec::new(),
     };
 
     let from_room_jid = room_jid

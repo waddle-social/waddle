@@ -24,7 +24,10 @@ use tokio::sync::mpsc;
 use handlers::iq::{
     handle_iq, handle_iq_with_conn_state, managed_channel_permission_allowed, IqConnState,
 };
-use handlers::presence::{handle_muc_join, handle_muc_leave, parse_room_jid_context};
+use handlers::presence::{
+    handle_muc_join as handle_muc_join_real, handle_muc_leave as handle_muc_leave_real,
+    parse_room_jid_context,
+};
 // Types moved out of mod.rs scope but used in tests
 use waddle_extensions::ExtensionConfig;
 use waddle_xmpp::commands::{CommandContext, CommandResult};
@@ -49,7 +52,138 @@ mod muc;
 mod registration;
 mod send;
 mod stream_features;
+
+/// One stable `OccupancySessionGeneration` per simulated connection, keyed by
+/// the test's `WebSocketState` and full JID, so test joins, presence updates
+/// and leaves that go through the connection-less test wrappers present the
+/// SAME generation the join recorded (like a real `WsConnState`) while
+/// parallel tests sharing a JID never see each other's entries.
+type TestOccupancySessionKey = (usize, String);
+
+pub(crate) fn test_occupancy_sessions() -> &'static std::sync::Mutex<
+    std::collections::HashMap<
+        TestOccupancySessionKey,
+        waddle_xmpp_core::OccupancySessionGeneration,
+    >,
+> {
+    static SESSIONS: std::sync::OnceLock<
+        std::sync::Mutex<
+            std::collections::HashMap<
+                TestOccupancySessionKey,
+                waddle_xmpp_core::OccupancySessionGeneration,
+            >,
+        >,
+    > = std::sync::OnceLock::new();
+    SESSIONS.get_or_init(|| std::sync::Mutex::new(std::collections::HashMap::new()))
+}
+
+fn test_occupancy_session_key(
+    state: &WebSocketState,
+    jid: &jid::FullJid,
+) -> TestOccupancySessionKey {
+    (std::ptr::from_ref(state) as usize, jid.to_string())
+}
+
+/// Mint and record a fresh generation for `jid` (a new simulated connection).
+pub(crate) fn record_test_occupancy_session(
+    state: &WebSocketState,
+    jid: &jid::FullJid,
+) -> waddle_xmpp_core::OccupancySessionGeneration {
+    let generation = waddle_xmpp_core::OccupancySessionGeneration::mint();
+    test_occupancy_sessions()
+        .lock()
+        .expect("test occupancy session lock")
+        .insert(test_occupancy_session_key(state, jid), generation);
+    generation
+}
+
+/// The generation recorded for `jid`, minting one on first use. The guard is
+/// dropped before minting: `record_test_occupancy_session` takes the same
+/// lock and a guard kept alive across the closure deadlocks.
+pub(crate) fn current_test_occupancy_session(
+    state: &WebSocketState,
+    jid: &jid::FullJid,
+) -> waddle_xmpp_core::OccupancySessionGeneration {
+    let recorded = test_occupancy_sessions()
+        .lock()
+        .expect("test occupancy session lock")
+        .get(&test_occupancy_session_key(state, jid))
+        .copied();
+    recorded.unwrap_or_else(|| record_test_occupancy_session(state, jid))
+}
 mod stream_management;
+
+async fn handle_muc_join(
+    state: &WebSocketState,
+    domain: &str,
+    room_jid: &jid::BareJid,
+    sender_jid: &jid::FullJid,
+    nick: &str,
+    presence_show: Option<crate::notification_activity::NotificationPresenceShow>,
+    authenticated_session: &Option<crate::auth::Session>,
+) -> Vec<String> {
+    handle_muc_join_with_occupancy_session(
+        state,
+        domain,
+        room_jid,
+        sender_jid,
+        nick,
+        presence_show,
+        (
+            record_test_occupancy_session(state, sender_jid),
+            authenticated_session,
+        ),
+    )
+    .await
+}
+
+async fn handle_muc_join_with_occupancy_session(
+    state: &WebSocketState,
+    domain: &str,
+    room_jid: &jid::BareJid,
+    sender_jid: &jid::FullJid,
+    nick: &str,
+    presence_show: Option<crate::notification_activity::NotificationPresenceShow>,
+    connection: (
+        waddle_xmpp_core::OccupancySessionGeneration,
+        &Option<crate::auth::Session>,
+    ),
+) -> Vec<String> {
+    let (occupancy_session, authenticated_session) = connection;
+    handle_muc_join_real(
+        state,
+        domain,
+        room_jid,
+        sender_jid,
+        nick,
+        presence_show,
+        handlers::presence::MucJoinConnectionContext {
+            registry_owner: None,
+            occupancy_session,
+            authenticated_session,
+        },
+    )
+    .await
+}
+
+async fn handle_muc_leave_with_occupancy_session(
+    state: &WebSocketState,
+    room_jid: &jid::BareJid,
+    sender_jid: &jid::FullJid,
+    nick: &str,
+    occupancy_session: waddle_xmpp_core::OccupancySessionGeneration,
+    ordered_relay_origin: Option<&crate::server::routes::interpret::OrderedRelayRouteOrigin>,
+) -> Vec<String> {
+    handle_muc_leave_real(
+        state,
+        room_jid,
+        sender_jid,
+        nick,
+        occupancy_session,
+        ordered_relay_origin,
+    )
+    .await
+}
 
 /// Seed an OIDC-provisioned local account directly into the `users`
 /// table, the way the OIDC login flow does. Needed since #1246: a
@@ -301,6 +435,15 @@ pub(crate) async fn create_test_websocket_state_with_sfu_and_clustering(
 /// the production code paths under test only touch the teardown
 /// surfaces.
 pub(crate) struct RecordingSfu {
+    /// Registrations keyed by (call, identity): `Some(generation)` for a
+    /// connection-bound registration, `None` for an unbound one (the shape a
+    /// webhook/probe restore leaves behind).
+    occupant_sessions: std::sync::Mutex<
+        std::collections::HashMap<
+            (waddle_sfu::CallId, waddle_sfu::Identity),
+            Option<waddle_xmpp_core::OccupancySessionGeneration>,
+        >,
+    >,
     registered_calls: std::sync::Mutex<
         Vec<(
             waddle_sfu::CallId,
@@ -338,6 +481,7 @@ pub(crate) struct RecordingSfu {
 impl Default for RecordingSfu {
     fn default() -> Self {
         Self {
+            occupant_sessions: std::sync::Mutex::new(std::collections::HashMap::new()),
             registered_calls: std::sync::Mutex::new(Vec::new()),
             calls: std::sync::Mutex::new(Vec::new()),
             note_calls: std::sync::Mutex::new(Vec::new()),
@@ -440,7 +584,29 @@ impl waddle_sfu::SfuService for RecordingSfu {
         unimplemented!("not exercised by these tests")
     }
 
-    fn register_call_participant(&self, _: &waddle_sfu::CallId, _: &waddle_sfu::Identity) {}
+    fn register_call_participant(
+        &self,
+        call_id: &waddle_sfu::CallId,
+        identity: &waddle_sfu::Identity,
+    ) {
+        self.occupant_sessions
+            .lock()
+            .expect("recording lock")
+            .insert((call_id.clone(), identity.clone()), None);
+    }
+
+    fn register_call_participant_with_session(
+        &self,
+        call_id: &waddle_sfu::CallId,
+        identity: &waddle_sfu::Identity,
+        _: &waddle_sfu::SessionBinding,
+        occupant: waddle_xmpp_core::OccupancySessionGeneration,
+    ) {
+        self.occupant_sessions
+            .lock()
+            .expect("recording lock")
+            .insert((call_id.clone(), identity.clone()), Some(occupant));
+    }
 
     fn register_call_participant_observed(
         &self,
@@ -465,8 +631,55 @@ impl waddle_sfu::SfuService for RecordingSfu {
         waddle_sfu::SidObservationDisposition::Applied
     }
 
-    fn has_call_participant(&self, _: &waddle_sfu::CallId, _: &waddle_sfu::Identity) -> bool {
-        false
+    fn has_call_participant(
+        &self,
+        call_id: &waddle_sfu::CallId,
+        identity: &waddle_sfu::Identity,
+    ) -> bool {
+        self.occupant_sessions
+            .lock()
+            .expect("recording lock")
+            .contains_key(&(call_id.clone(), identity.clone()))
+    }
+
+    fn participant_occupant_session(
+        &self,
+        call_id: &waddle_sfu::CallId,
+        identity: &waddle_sfu::Identity,
+    ) -> Option<waddle_xmpp_core::OccupancySessionGeneration> {
+        self.occupant_sessions
+            .lock()
+            .expect("recording lock")
+            .get(&(call_id.clone(), identity.clone()))
+            .copied()
+            .flatten()
+    }
+
+    fn unregister_call_participant_if_occupant_matches(
+        &self,
+        call_id: &waddle_sfu::CallId,
+        identity: &waddle_sfu::Identity,
+        presented: waddle_xmpp_core::OccupancySessionGeneration,
+        unbound: waddle_sfu::UnboundOccupantPolicy,
+        _: waddle_sfu::SidEvidence<'_>,
+        _: Option<&waddle_sfu::ObservedCallSids>,
+    ) -> waddle_sfu::SessionScopedTeardown {
+        let mut sessions = self.occupant_sessions.lock().expect("recording lock");
+        let key = (call_id.clone(), identity.clone());
+        match sessions.get(&key).copied().flatten() {
+            Some(bound) if bound == presented => {}
+            None if unbound == waddle_sfu::UnboundOccupantPolicy::TearDown => {}
+            _ => return waddle_sfu::SessionScopedTeardown::SessionMismatch,
+        }
+        sessions.remove(&key);
+        drop(sessions);
+        self.calls
+            .lock()
+            .expect("recording lock")
+            .push((call_id.clone(), identity.clone()));
+        waddle_sfu::SessionScopedTeardown::Applied(waddle_sfu::TeardownDisposition::Applied(
+            waddle_sfu::CallState::Ended,
+        ))
     }
 
     fn revoke_issued_token(
@@ -484,6 +697,10 @@ impl waddle_sfu::SfuService for RecordingSfu {
         identity: &waddle_sfu::Identity,
         _: Option<&waddle_sfu::ObservedCallSids>,
     ) -> waddle_sfu::TeardownDisposition {
+        self.occupant_sessions
+            .lock()
+            .expect("recording lock")
+            .remove(&(call_id.clone(), identity.clone()));
         self.calls
             .lock()
             .expect("recording lock")
@@ -512,6 +729,34 @@ impl waddle_sfu::SfuService for RecordingSfu {
             .unwrap_or(waddle_sfu::TeardownDisposition::Applied(
                 waddle_sfu::CallState::Ended,
             ))
+    }
+
+    fn note_participant_left_if_occupant_matches(
+        &self,
+        call_id: &waddle_sfu::CallId,
+        identity: &waddle_sfu::Identity,
+        observed_sids: Option<&waddle_sfu::ObservedCallSids>,
+        presented: waddle_xmpp_core::OccupancySessionGeneration,
+        unbound: waddle_sfu::UnboundOccupantPolicy,
+        _: waddle_sfu::SidEvidence<'_>,
+    ) -> waddle_sfu::SessionScopedTeardown {
+        let stored = self
+            .occupant_sessions
+            .lock()
+            .expect("recording lock")
+            .get(&(call_id.clone(), identity.clone()))
+            .copied()
+            .flatten();
+        match stored {
+            Some(bound) if bound == presented => {}
+            None if unbound == waddle_sfu::UnboundOccupantPolicy::TearDown => {}
+            _ => return waddle_sfu::SessionScopedTeardown::SessionMismatch,
+        }
+        waddle_sfu::SessionScopedTeardown::Applied(self.note_participant_left(
+            call_id,
+            identity,
+            observed_sids,
+        ))
     }
 
     fn observe_call_participant_sids(

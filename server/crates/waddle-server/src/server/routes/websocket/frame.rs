@@ -360,6 +360,7 @@ async fn handle_xmpp_frame_impl(
     let WsConnState {
         phase,
         authenticated_session,
+        occupancy_session,
         sm_state,
         sm_inbound_completion,
         inbound_frame_terminal,
@@ -401,6 +402,7 @@ async fn handle_xmpp_frame_impl(
                 phase,
                 sm_state,
                 authenticated_session,
+                occupancy_session,
                 carbons_enabled,
                 presence_available,
                 presence_show,
@@ -546,6 +548,23 @@ async fn handle_xmpp_frame_impl(
         }
 
         InboundFrame::Stanza(stanza) => {
+            // A connection that lost its registry slot to a same-FullJID
+            // replacement is superseded (#1703): none of its further stanzas
+            // may perform FullJID-keyed writes (MUC joins, Muji updates,
+            // call initiates), so its inbound stream ends here exactly like a
+            // revoked authority. Its shutdown cleanup stays generation-scoped.
+            if let (Some(owner), Some(bound)) = (registry_owner.as_ref(), phase.bound_jid()) {
+                if !state
+                    .deps
+                    .protocol
+                    .connection_registry
+                    .is_owned_by(bound, owner)
+                {
+                    debug!(jid = %bound, "dropping stanza from a superseded connection");
+                    *inbound_frame_terminal = Some(InboundFrameTerminal::AuthorityRevoked);
+                    return ResponseBatch::default();
+                }
+            }
             // Resource binding is stream setup, not a countable request. Keep
             // it before SM reservation and the ordered-relay lookup so a
             // lifecycle cancellation cannot leave an unsettled inbound slot.
@@ -615,6 +634,7 @@ async fn handle_xmpp_frame_impl(
                             carbons_enabled,
                             roster_interested,
                             blocklist_interested,
+                            occupancy_session,
                             registry_owner: registry_owner.as_ref(),
                             state_machine: state_machine.as_mut(),
                             ordered_relay_origin: ordered_relay_origin.clone(),
@@ -640,6 +660,7 @@ async fn handle_xmpp_frame_impl(
                                 state,
                                 phase,
                                 authenticated_session,
+                                occupancy_session,
                                 registry_owner: registry_owner.as_ref(),
                                 ordered_relay_origin: ordered_relay_origin.clone(),
                             },
@@ -1241,6 +1262,7 @@ mod inbound_dispatch_tests {
             .to_detached_session(waddle_xmpp::stream_management::DetachedSessionSnapshot {
                 user_id: "alice@example.com".to_string(),
                 jid,
+                occupancy_session: waddle_xmpp_core::OccupancySessionGeneration::mint(),
                 carbons_enabled: false,
                 roster_interested: false,
                 blocklist_interested: false,

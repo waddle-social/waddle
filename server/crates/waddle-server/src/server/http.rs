@@ -670,6 +670,8 @@ async fn create_websocket_state(
                             target,
                             generation: lite.generation,
                             room_sid: lite.room_sid,
+                            occupant: lite.occupant_session,
+                            unbound_occupant: lite.unbound_occupant,
                             session: None,
                         };
                         let sink_store = Arc::clone(&sink_store);

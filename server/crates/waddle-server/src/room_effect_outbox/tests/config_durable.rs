@@ -293,6 +293,7 @@ async fn uncommitted_members_only_enforcement_arms_and_delivers_its_staged_fallb
             affiliation_grant: JoinAffiliationGrant::Resolver(Affiliation::Member),
             local_domain: "example.test".to_owned(),
             admission_revision: 0,
+            session: waddle_xmpp_core::OccupancySessionGeneration::mint(),
         })
         .await
         .expect("qualified occupant joins");
@@ -365,6 +366,7 @@ async fn zero_delta_members_only_enforcement_supersedes_fallback_and_delivers_on
             affiliation_grant: JoinAffiliationGrant::Resolver(Affiliation::Member),
             local_domain: "example.test".to_owned(),
             admission_revision: 0,
+            session: waddle_xmpp_core::OccupancySessionGeneration::mint(),
         })
         .await
         .expect("already-qualified occupant joins");
@@ -725,6 +727,7 @@ async fn managed_members_only_enforcement_commits_after_interleaved_config_consu
                     .await
                     .expect("current admission revision")
                     .admission_revision,
+                session: waddle_xmpp_core::OccupancySessionGeneration::mint(),
             })
             .await
             .expect("occupant joins with managed membership");
@@ -910,6 +913,7 @@ async fn managed_members_only_removal_drains_322_before_full_config_to_remaining
                     .await
                     .expect("current admission revision")
                     .admission_revision,
+                session: waddle_xmpp_core::OccupancySessionGeneration::mint(),
             })
             .await
             .expect("occupant joins with managed membership");
@@ -1058,6 +1062,7 @@ async fn rollback_config_proceeds_after_staged_row_was_already_drained() {
             affiliation_grant: JoinAffiliationGrant::Resolver(Affiliation::Member),
             local_domain: "example.test".to_owned(),
             admission_revision: 0,
+            session: waddle_xmpp_core::OccupancySessionGeneration::mint(),
         })
         .await
         .expect("recipient joins before the config mutation");
@@ -1135,6 +1140,7 @@ async fn armed_config_effect_preserves_original_recipients_across_dormancy_and_s
             affiliation_grant: JoinAffiliationGrant::Resolver(Affiliation::Member),
             local_domain: "example.test".to_owned(),
             admission_revision: 0,
+            session: waddle_xmpp_core::OccupancySessionGeneration::mint(),
         })
         .await
         .expect("original recipient joins before the config mutation");
@@ -1302,6 +1308,7 @@ async fn join_processed_immediately_before_config_is_included_in_durable_config_
             affiliation_grant: JoinAffiliationGrant::Resolver(Affiliation::Member),
             local_domain: "example.test".to_owned(),
             admission_revision: 0,
+            session: waddle_xmpp_core::OccupancySessionGeneration::mint(),
         })
         .await
         .expect("first occupant joins");
@@ -1316,6 +1323,7 @@ async fn join_processed_immediately_before_config_is_included_in_durable_config_
                 .await
                 .expect("admission revision before second join")
                 .admission_revision,
+            session: waddle_xmpp_core::OccupancySessionGeneration::mint(),
         })
         .await
         .expect("second occupant joins immediately before config");

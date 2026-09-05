@@ -39,8 +39,6 @@ mod probe;
 mod regular;
 mod subscription;
 
-#[cfg(any(test, feature = "clustering"))]
-pub use muc::handle_muc_join;
 #[cfg(test)]
 pub use muc::parse_room_jid_context;
 pub(crate) use muc::registered_remote_resource_write_accepted_delivery;
@@ -50,6 +48,8 @@ pub use muc::{
     get_managed_channel_for_room, handle_muc_join_with_ordered_relay, handle_muc_leave,
     resolve_muc_room_archive_access, MucJoinRequest, RoomArchiveAccess,
 };
+#[cfg(any(test, feature = "clustering"))]
+pub use muc::{handle_muc_join, MucJoinConnectionContext};
 #[cfg(feature = "clustering")]
 pub(crate) use muc_update::try_handle_muc_presence_update;
 use probe::handle_presence_probe;
@@ -79,6 +79,42 @@ pub async fn handle_presence(
     _authenticated_session: &Option<Session>,
     registry_owner: Option<&std::sync::Arc<std::sync::atomic::AtomicBool>>,
 ) -> Vec<String> {
+    // Present the generation the connection's join recorded (see
+    // `tests::current_test_occupancy_session`), not a fresh mint: a fresh
+    // one would make every presence update `Superseded` against its own
+    // occupancy.
+    let occupancy_session = match phase.bound_jid() {
+        Some(jid) => {
+            crate::server::routes::websocket::tests::current_test_occupancy_session(state, jid)
+        }
+        None => waddle_xmpp_core::OccupancySessionGeneration::mint(),
+    };
+    handle_presence_with_occupancy_session(
+        presence,
+        domain,
+        muc_domain,
+        state,
+        phase,
+        _authenticated_session,
+        (occupancy_session, registry_owner),
+    )
+    .await
+}
+
+#[cfg(test)]
+pub async fn handle_presence_with_occupancy_session(
+    presence: xmpp_parsers::presence::Presence,
+    domain: &str,
+    muc_domain: &str,
+    state: &WebSocketState,
+    phase: &ConnectionPhase,
+    authenticated_session: &Option<Session>,
+    connection: (
+        waddle_xmpp_core::OccupancySessionGeneration,
+        Option<&std::sync::Arc<std::sync::atomic::AtomicBool>>,
+    ),
+) -> Vec<String> {
+    let (occupancy_session, registry_owner) = connection;
     handle_presence_with_ordered_relay(
         presence,
         PresenceHandlerContext {
@@ -86,7 +122,8 @@ pub async fn handle_presence(
             muc_domain,
             state,
             phase,
-            authenticated_session: _authenticated_session,
+            authenticated_session,
+            occupancy_session: &occupancy_session,
             registry_owner,
             ordered_relay_origin: None,
         },
@@ -107,6 +144,7 @@ pub struct PresenceHandlerContext<'a> {
     pub state: &'a WebSocketState,
     pub phase: &'a ConnectionPhase,
     pub authenticated_session: &'a Option<Session>,
+    pub occupancy_session: &'a waddle_xmpp_core::OccupancySessionGeneration,
     pub registry_owner: Option<&'a std::sync::Arc<std::sync::atomic::AtomicBool>>,
     pub ordered_relay_origin: Option<crate::server::routes::interpret::OrderedRelayRouteOrigin>,
 }
@@ -210,6 +248,7 @@ async fn handle_presence_impl(
                 &room_jid,
                 sender_jid,
                 nick,
+                *context.occupancy_session,
                 context.ordered_relay_origin.as_ref(),
             )
             .await;
@@ -240,6 +279,7 @@ async fn handle_presence_impl(
             &room_jid,
             sender_jid,
             nick,
+            *context.occupancy_session,
             &presence,
         )
         .await
@@ -267,6 +307,9 @@ async fn handle_presence_impl(
                             &room_jid,
                             &stanza,
                             crate::clustering::ordered_relay::OrderedRelayMucProxyKind::OccupantPresence,
+                            crate::clustering::ordered_relay::MucProxyOrigin::Connection(
+                                *context.occupancy_session,
+                            ),
                             origin,
                         )
                         .await
@@ -295,6 +338,26 @@ async fn handle_presence_impl(
             }
         }
 
+        // A connection that no longer owns its registry slot has been
+        // superseded by a same-FullJID replacement: its (possibly late) join
+        // must not be installed over the replacement's occupancy — locally
+        // or, for a remotely owned room, at the destination (#1703).
+        if let Some(owner) = context.registry_owner {
+            if !context
+                .state
+                .deps
+                .protocol
+                .connection_registry
+                .is_owned_by(sender_jid, owner)
+            {
+                debug!(
+                    room = %room_jid,
+                    sender = %sender_jid,
+                    "ignored MUC join from a superseded connection"
+                );
+                return Vec::new();
+            }
+        }
         let presence_show = presence
             .show
             .clone()
@@ -308,6 +371,8 @@ async fn handle_presence_impl(
                 nick,
                 presence_show,
                 authenticated_session: context.authenticated_session,
+                occupancy_session: *context.occupancy_session,
+                registry_owner: context.registry_owner,
                 ordered_relay_origin: context.ordered_relay_origin,
             },
         )

@@ -41,6 +41,9 @@ pub struct DetachedSession {
     pub user_id: String,
     /// The full JID of the session owner
     pub jid: FullJid,
+    /// Per-connection occupancy ownership generation carried through SM
+    /// detach/resume so the resumed connection keeps room ownership.
+    pub occupancy_session: waddle_xmpp_core::OccupancySessionGeneration,
     /// Server's inbound stanza count at detach time
     pub inbound_count: u32,
     /// Durable non-wrapping shadow ordinal frontier at detach time.

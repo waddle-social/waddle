@@ -99,6 +99,8 @@ pub(crate) async fn enqueue_call_thread_end_retry(
         },
         generation: None,
         room_sid: None,
+        occupant: None,
+        unbound_occupant: waddle_sfu::UnboundOccupantPolicy::Keep,
         session: None,
     };
     let store = &state.deps.protocol.call_teardown_outbox;

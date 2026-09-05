@@ -34,6 +34,7 @@
 use jid::{BareJid, FullJid};
 use waddle_sfu::MediaCapabilities;
 use waddle_xmpp::muc::room_actor::GetOccupantVoice;
+use waddle_xmpp::muc::room_actor::GetSnapshot;
 use waddle_xmpp::telemetry::attributes::{CallSignalEvent, SfuDenialReason};
 use waddle_xmpp::xep::xep0166::NS_JINGLE;
 use waddle_xmpp::xep::xep0272::{find_muji, Muji};
@@ -270,6 +271,55 @@ pub(super) fn muji_session_terminate_room(iq: &Iq) -> Option<BareJid> {
 /// and its sid can be one (#1608). `None` for non-terminates and for
 /// pathological sids — the durable relay fallback then persists no
 /// session evidence and keeps its timestamp-fence-only guard.
+/// Any Muji Jingle stanza's sid as a typed binding (initiate or terminate).
+pub(super) fn muji_jingle_session(iq: &Iq) -> Option<waddle_sfu::SessionBinding> {
+    let Iq::Set { payload, .. } = iq else {
+        return None;
+    };
+    if payload.ns() != NS_JINGLE || payload.name() != "jingle" {
+        return None;
+    }
+    find_muji(payload)?;
+    let jingle = Jingle::try_from(payload.clone()).ok()?;
+    waddle_sfu::SessionBinding::new(jingle.sid.0).ok()
+}
+
+/// After a Muji initiate registered the SFU participant, re-check that the
+/// room still holds this connection's generation: a same-FullJID replacement
+/// that re-joined between the pre-dispatch check and the registration would
+/// otherwise have been overwritten. On mismatch the just-made registration
+/// (bound to this generation and sid) is revoked atomically. Returns whether
+/// the initiate stands.
+pub(super) async fn initiate_still_current(
+    state: &WebSocketState,
+    room: &BareJid,
+    full_jid: &FullJid,
+    generation: waddle_xmpp_core::OccupancySessionGeneration,
+    iq: &Iq,
+) -> bool {
+    if matches!(
+        relayed_muji_generation_is_current(state, room, full_jid, generation).await,
+        Ok(true)
+    ) {
+        return true;
+    }
+    if let (Some(sfu), Ok(call_id)) = (
+        state.deps.protocol.sfu.as_ref(),
+        waddle_sfu::CallId::new(room.to_string()),
+    ) {
+        let sid = muji_jingle_session(iq);
+        let _ = sfu.unregister_call_participant_if_occupant_matches(
+            &call_id,
+            &waddle_sfu::Identity::from_jid(full_jid.clone()),
+            generation,
+            waddle_sfu::UnboundOccupantPolicy::TearDown,
+            waddle_sfu::SidEvidence::Presented(sid.as_ref()),
+            None,
+        );
+    }
+    false
+}
+
 pub(super) fn muji_session_terminate_session(iq: &Iq) -> Option<waddle_sfu::SessionBinding> {
     let Iq::Set { payload, .. } = iq else {
         return None;
@@ -369,6 +419,31 @@ async fn verify_room_membership(
             )))
         }
     }
+}
+
+/// Whether `generation` is the room's CURRENT occupancy generation for
+/// `sender` (#1703). Used by both the relayed and the local Muji initiate
+/// paths before a token is minted.
+pub(super) async fn relayed_muji_generation_is_current(
+    state: &WebSocketState,
+    room: &jid::BareJid,
+    sender: &jid::FullJid,
+    generation: waddle_xmpp_core::OccupancySessionGeneration,
+) -> Result<bool, ()> {
+    let actor = crate::server::routes::websocket::get_room_actor_result(state, room)
+        .await
+        .map_err(|_| ())?
+        .ok_or(())?;
+    let snapshot = actor.ask(GetSnapshot).await.map_err(|_| ())?;
+    Ok(snapshot.room.session_generation(sender) == Some(generation))
+}
+
+pub(super) fn relayed_muji_room(iq: &xmpp_parsers::iq::Iq) -> Option<jid::BareJid> {
+    let xmpp_parsers::iq::Iq::Set { payload, .. } = iq else {
+        return None;
+    };
+    let muji = Muji::try_from(find_muji(payload)?).ok()?;
+    muji.room
 }
 
 #[cfg(test)]

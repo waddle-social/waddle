@@ -78,6 +78,7 @@ fn stanza_ctx<'a>(jid: &'a jid::FullJid) -> StanzaContext<'a> {
     StanzaContext {
         domain: "waddle.social",
         full_jid: jid,
+        occupant_session: None,
         media_capabilities: None,
     }
 }

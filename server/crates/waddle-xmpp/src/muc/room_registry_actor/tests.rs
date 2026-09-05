@@ -483,6 +483,7 @@ async fn guarded_destroy_refuses_when_join_landed_after_dormancy_probe() {
             affiliation_grant: JoinAffiliationGrant::Resolver(Affiliation::Member),
             local_domain: "example.com".to_string(),
             admission_revision: 0,
+            session: waddle_xmpp_core::OccupancySessionGeneration::mint(),
         })
         .await
         .expect("interleaved join");
@@ -607,6 +608,7 @@ async fn sealed_room_refuses_late_join_with_retryable_error() {
             affiliation_grant: JoinAffiliationGrant::Resolver(Affiliation::Member),
             local_domain: "example.com".to_string(),
             admission_revision: 0,
+            session: waddle_xmpp_core::OccupancySessionGeneration::mint(),
         })
         .await;
     assert!(
@@ -1388,6 +1390,7 @@ async fn offline_durable_member_gets_inbox_projection_after_actor_respawn() {
             affiliation_grant: JoinAffiliationGrant::Resolver(Affiliation::Member),
             local_domain: "example.com".to_string(),
             admission_revision: 0,
+            session: waddle_xmpp_core::OccupancySessionGeneration::mint(),
         })
         .await
         .expect("sender join");
@@ -4581,6 +4584,7 @@ mod ownership_claims_tests {
             affiliation_grant: JoinAffiliationGrant::Resolver(Affiliation::Member),
             local_domain: "example.com".to_string(),
             admission_revision,
+            session: waddle_xmpp_core::OccupancySessionGeneration::mint(),
         };
         source_actor
             .ask(join("old-nick", 0))
@@ -4668,6 +4672,7 @@ mod ownership_claims_tests {
                 affiliation_grant: JoinAffiliationGrant::Resolver(Affiliation::Member),
                 local_domain: "example.com".to_string(),
                 admission_revision: 0,
+                session: waddle_xmpp_core::OccupancySessionGeneration::mint(),
             })
             .await
             .expect("join source room");
@@ -4766,6 +4771,7 @@ mod ownership_claims_tests {
                 affiliation_grant: JoinAffiliationGrant::Resolver(Affiliation::Member),
                 local_domain: "example.com".to_string(),
                 admission_revision: 0,
+                session: waddle_xmpp_core::OccupancySessionGeneration::mint(),
             })
             .await
             .expect("join source room");
@@ -4893,6 +4899,7 @@ mod ownership_claims_tests {
                 affiliation_grant: JoinAffiliationGrant::Resolver(Affiliation::Member),
                 local_domain: "example.com".to_string(),
                 admission_revision: 0,
+                session: waddle_xmpp_core::OccupancySessionGeneration::mint(),
             })
             .await
             .expect("join source room");
@@ -10984,6 +10991,7 @@ mod ownership_claims_tests {
                 affiliation_grant: JoinAffiliationGrant::Resolver(Affiliation::Member),
                 local_domain: "example.com".to_string(),
                 admission_revision: 0,
+                session: waddle_xmpp_core::OccupancySessionGeneration::mint(),
             })
             .await;
         assert!(matches!(
@@ -11156,6 +11164,7 @@ mod ownership_claims_tests {
                     affiliation_grant: JoinAffiliationGrant::Unaffiliated,
                     local_domain: "example.com".to_string(),
                     admission_revision: 0,
+                    session: waddle_xmpp_core::OccupancySessionGeneration::mint(),
                 })
                 .await,
             Err(SendError::HandlerError(
@@ -11296,6 +11305,7 @@ mod ownership_claims_tests {
                 affiliation_grant: JoinAffiliationGrant::Unaffiliated,
                 local_domain: "example.com".to_string(),
                 admission_revision: 0,
+                session: waddle_xmpp_core::OccupancySessionGeneration::mint(),
             })
             .await;
         assert!(matches!(
@@ -11379,6 +11389,7 @@ mod ownership_claims_tests {
                     affiliation_grant: JoinAffiliationGrant::Unaffiliated,
                     local_domain: "example.com".to_string(),
                     admission_revision: 0,
+                    session: waddle_xmpp_core::OccupancySessionGeneration::mint(),
                 })
                 .await,
             Err(SendError::HandlerError(
@@ -11436,6 +11447,7 @@ mod ownership_claims_tests {
                 affiliation_grant: JoinAffiliationGrant::Resolver(Affiliation::Member),
                 local_domain: "example.com".to_string(),
                 admission_revision: 0,
+                session: waddle_xmpp_core::OccupancySessionGeneration::mint(),
             })
             .await
             .expect("alice join");
@@ -11454,6 +11466,7 @@ mod ownership_claims_tests {
                 affiliation_grant: JoinAffiliationGrant::Resolver(Affiliation::Member),
                 local_domain: "example.com".to_string(),
                 admission_revision: 0,
+                session: waddle_xmpp_core::OccupancySessionGeneration::mint(),
             })
             .await;
         assert!(matches!(
@@ -11513,6 +11526,7 @@ mod ownership_claims_tests {
                 affiliation_grant: JoinAffiliationGrant::Resolver(Affiliation::Member),
                 local_domain: "example.com".to_string(),
                 admission_revision: 0,
+                session: waddle_xmpp_core::OccupancySessionGeneration::mint(),
             })
             .await
             .expect("bob rejoin on successor");
@@ -11523,6 +11537,7 @@ mod ownership_claims_tests {
                 affiliation_grant: JoinAffiliationGrant::Resolver(Affiliation::Member),
                 local_domain: "example.com".to_string(),
                 admission_revision: 0,
+                session: waddle_xmpp_core::OccupancySessionGeneration::mint(),
             })
             .await
             .expect("alice rejoin on successor");

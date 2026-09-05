@@ -301,6 +301,7 @@ pub(crate) async fn dispatch_extension_bot_groupchat_response(
             affiliation_grant: JoinAffiliationGrant::Resolver(waddle_xmpp::Affiliation::Member),
             local_domain: state.deps.auth_state.xmpp_domain.clone(),
             admission_revision: initial_snapshot.admission_revision,
+            session: waddle_xmpp_core::OccupancySessionGeneration::mint(),
         })
         .await
     {

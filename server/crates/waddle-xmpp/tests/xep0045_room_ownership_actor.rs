@@ -248,6 +248,7 @@ fn resolver_join() -> JoinWithAffiliation {
         affiliation_grant: JoinAffiliationGrant::Resolver(Affiliation::Member),
         local_domain: "example.com".to_string(),
         admission_revision: 0,
+        session: waddle_xmpp_core::OccupancySessionGeneration::mint(),
     }
 }
 
@@ -258,6 +259,7 @@ fn creator_join() -> JoinWithAffiliation {
         affiliation_grant: JoinAffiliationGrant::CreatorOwner,
         local_domain: "example.com".to_string(),
         admission_revision: 0,
+        session: waddle_xmpp_core::OccupancySessionGeneration::mint(),
     }
 }
 

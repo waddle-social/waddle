@@ -7,7 +7,7 @@
 
 use jid::FullJid;
 use serde::{de, Deserialize, Deserializer, Serialize, Serializer};
-use waddle_xmpp_core::types::Voice;
+use waddle_xmpp_core::{types::Voice, OccupancySessionGeneration};
 
 use crate::error::SfuError;
 
@@ -217,6 +217,13 @@ pub struct CallTeardownIntentLite {
     pub target: TeardownTargetLite,
     pub generation: Option<CallGeneration>,
     pub room_sid: Option<RoomSid>,
+    pub occupant_session: Option<OccupancySessionGeneration>,
+    /// What the executor does with a registration that has NO occupant
+    /// generation (restored by a webhook/reconcile after a restart) when
+    /// `occupant_session` is `Some` (#1703): `TearDown` for an intent minted
+    /// by a CONFIRMED departure (the room actor removed the session or the
+    /// live connection asked), `Keep` for stale/unconfirmed cleanup.
+    pub unbound_occupant: crate::UnboundOccupantPolicy,
     /// The signaling session whose terminate produced this intent
     /// (#1608): the executor re-checks it against the live
     /// registration's binding immediately before the destructive

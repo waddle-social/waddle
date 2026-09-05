@@ -61,6 +61,10 @@ fn test_full_jid_resource(user: &str, resource: &str) -> FullJid {
         .expect("valid jid")
 }
 
+fn test_session_generation() -> waddle_xmpp_core::OccupancySessionGeneration {
+    waddle_xmpp_core::OccupancySessionGeneration::mint()
+}
+
 async fn spawn_room_actor() -> ActorRef<RoomActor> {
     RoomActor::spawn(RoomActor::new(test_room(), test_secret()))
 }
@@ -311,6 +315,7 @@ async fn test_join_with_admin_affiliation_allowed_when_room_full() {
             affiliation_grant: JoinAffiliationGrant::Resolver(Affiliation::Member),
             local_domain: "example.com".to_string(),
             admission_revision: current_admission_revision(&actor).await,
+            session: waddle_xmpp_core::OccupancySessionGeneration::mint(),
         })
         .await
         .expect("first join should succeed");
@@ -322,6 +327,7 @@ async fn test_join_with_admin_affiliation_allowed_when_room_full() {
             affiliation_grant: JoinAffiliationGrant::Resolver(Affiliation::Admin),
             local_domain: "example.com".to_string(),
             admission_revision: current_admission_revision(&actor).await,
+            session: waddle_xmpp_core::OccupancySessionGeneration::mint(),
         })
         .await
         .expect("admin affiliation should bypass full-room rejection");
@@ -346,6 +352,7 @@ async fn test_join_existing_session_allowed_when_room_full() {
             affiliation_grant: JoinAffiliationGrant::Resolver(Affiliation::Member),
             local_domain: "example.com".to_string(),
             admission_revision: current_admission_revision(&actor).await,
+            session: waddle_xmpp_core::OccupancySessionGeneration::mint(),
         })
         .await
         .expect("first join should succeed");
@@ -357,6 +364,7 @@ async fn test_join_existing_session_allowed_when_room_full() {
             affiliation_grant: JoinAffiliationGrant::Resolver(Affiliation::Member),
             local_domain: "example.com".to_string(),
             admission_revision: current_admission_revision(&actor).await,
+            session: waddle_xmpp_core::OccupancySessionGeneration::mint(),
         })
         .await
         .expect("existing session rejoin should bypass full-room rejection");
@@ -377,6 +385,7 @@ async fn join_and_leave_emit_presence_and_occupant_metrics() {
             affiliation_grant: JoinAffiliationGrant::Resolver(Affiliation::Member),
             local_domain: "example.com".to_string(),
             admission_revision: current_admission_revision(&actor).await,
+            session: waddle_xmpp_core::OccupancySessionGeneration::mint(),
         })
         .await
         .expect("join should succeed");
@@ -631,6 +640,7 @@ async fn membership_revocation_in_members_only_room_ejects_occupant_with_status_
             affiliation_grant: JoinAffiliationGrant::Resolver(Affiliation::Member),
             local_domain: "example.com".to_string(),
             admission_revision: snapshot.admission_revision,
+            session: waddle_xmpp_core::OccupancySessionGeneration::mint(),
         })
         .await
         .expect("join");
@@ -1058,6 +1068,7 @@ async fn affiliation_batch_validation_happens_before_members_only_ejection() {
             affiliation_grant: JoinAffiliationGrant::Resolver(Affiliation::Member),
             local_domain: "example.com".to_string(),
             admission_revision: snapshot.admission_revision,
+            session: waddle_xmpp_core::OccupancySessionGeneration::mint(),
         })
         .await
         .expect("alice join");
@@ -1121,6 +1132,7 @@ async fn stale_admission_revision_returns_retryable_error_without_joining() {
             affiliation_grant: JoinAffiliationGrant::Unaffiliated,
             local_domain: "example.com".to_string(),
             admission_revision: 0,
+            session: waddle_xmpp_core::OccupancySessionGeneration::mint(),
         })
         .await;
 
@@ -1183,6 +1195,7 @@ async fn role_none_kick_notifies_same_nick_sibling_sessions() {
             affiliation_grant: JoinAffiliationGrant::Resolver(Affiliation::Member),
             local_domain: "example.com".to_string(),
             admission_revision: current_admission_revision(&actor).await,
+            session: waddle_xmpp_core::OccupancySessionGeneration::mint(),
         })
         .await
         .expect("first session join");
@@ -1193,6 +1206,7 @@ async fn role_none_kick_notifies_same_nick_sibling_sessions() {
             affiliation_grant: JoinAffiliationGrant::Resolver(Affiliation::Member),
             local_domain: "example.com".to_string(),
             admission_revision: current_admission_revision(&actor).await,
+            session: waddle_xmpp_core::OccupancySessionGeneration::mint(),
         })
         .await
         .expect("same nick sibling session join");
@@ -1246,6 +1260,7 @@ async fn members_only_revocation_removes_every_nick_for_bare_jid() {
             affiliation_grant: JoinAffiliationGrant::Resolver(Affiliation::Member),
             local_domain: "example.com".to_string(),
             admission_revision: current_admission_revision(&actor).await,
+            session: waddle_xmpp_core::OccupancySessionGeneration::mint(),
         })
         .await
         .expect("first nick join");
@@ -1256,6 +1271,7 @@ async fn members_only_revocation_removes_every_nick_for_bare_jid() {
             affiliation_grant: JoinAffiliationGrant::Resolver(Affiliation::Member),
             local_domain: "example.com".to_string(),
             admission_revision: current_admission_revision(&actor).await,
+            session: waddle_xmpp_core::OccupancySessionGeneration::mint(),
         })
         .await
         .expect("second nick join");
@@ -1367,6 +1383,7 @@ async fn managed_members_only_enforcement_uses_explicit_affiliation_snapshot() {
             affiliation_grant: JoinAffiliationGrant::Resolver(Affiliation::Member),
             local_domain: "example.com".to_string(),
             admission_revision: current_admission_revision(&actor).await,
+            session: waddle_xmpp_core::OccupancySessionGeneration::mint(),
         })
         .await
         .expect("open-room inherited member join");
@@ -1485,6 +1502,7 @@ async fn managed_members_only_enforcement_treats_missing_snapshot_entry_as_none(
             affiliation_grant: JoinAffiliationGrant::Resolver(Affiliation::Member),
             local_domain: "example.com".to_string(),
             admission_revision: current_admission_revision(&actor).await,
+            session: waddle_xmpp_core::OccupancySessionGeneration::mint(),
         })
         .await
         .expect("stale-open join");
@@ -1762,6 +1780,7 @@ async fn is_dormant_true_after_resolver_derived_member_leaves() {
             affiliation_grant: JoinAffiliationGrant::Resolver(Affiliation::Member),
             local_domain: "example.com".to_string(),
             admission_revision: current_admission_revision(&actor).await,
+            session: waddle_xmpp_core::OccupancySessionGeneration::mint(),
         })
         .await
         .expect("resolver-derived member join");
@@ -1824,6 +1843,7 @@ async fn creator_owner_grant_applies_only_while_room_has_no_owner() {
             affiliation_grant: JoinAffiliationGrant::CreatorOwner,
             local_domain: "example.com".to_string(),
             admission_revision: current_admission_revision(&actor).await,
+            session: waddle_xmpp_core::OccupancySessionGeneration::mint(),
         })
         .await
         .expect("creator join");
@@ -1840,6 +1860,7 @@ async fn creator_owner_grant_applies_only_while_room_has_no_owner() {
             affiliation_grant: JoinAffiliationGrant::CreatorOwner,
             local_domain: "example.com".to_string(),
             admission_revision: current_admission_revision(&actor).await,
+            session: waddle_xmpp_core::OccupancySessionGeneration::mint(),
         })
         .await
         .expect("racing second creator-join");
@@ -1869,6 +1890,7 @@ async fn same_full_jid_joining_under_second_nick_is_rejected() {
             affiliation_grant: JoinAffiliationGrant::Resolver(Affiliation::Member),
             local_domain: "example.com".to_string(),
             admission_revision: current_admission_revision(&actor).await,
+            session: waddle_xmpp_core::OccupancySessionGeneration::mint(),
         })
         .await
         .expect("first join");
@@ -1880,6 +1902,7 @@ async fn same_full_jid_joining_under_second_nick_is_rejected() {
             affiliation_grant: JoinAffiliationGrant::Resolver(Affiliation::Member),
             local_domain: "example.com".to_string(),
             admission_revision: current_admission_revision(&actor).await,
+            session: waddle_xmpp_core::OccupancySessionGeneration::mint(),
         })
         .await;
     assert!(
@@ -1974,6 +1997,7 @@ async fn leave_by_real_jid_removes_every_occupancy_of_the_full_jid() {
             affiliation_grant: JoinAffiliationGrant::Resolver(Affiliation::Member),
             local_domain: "example.com".to_string(),
             admission_revision: current_admission_revision(&actor).await,
+            session: waddle_xmpp_core::OccupancySessionGeneration::mint(),
         })
         .await
         .expect("rejoin");
@@ -2006,6 +2030,7 @@ async fn is_dormant_false_when_explicit_ban_outlives_occupancy() {
             affiliation_grant: JoinAffiliationGrant::Resolver(Affiliation::Member),
             local_domain: "example.com".to_string(),
             admission_revision: current_admission_revision(&actor).await,
+            session: waddle_xmpp_core::OccupancySessionGeneration::mint(),
         })
         .await
         .expect("join");
@@ -2693,6 +2718,7 @@ async fn upsert_muji_presence_returns_none_for_non_occupant() {
     let outcome = actor
         .ask(crate::muc::room_actor::UpsertMujiPresence {
             sender_jid: stranger,
+            occupant: None,
             muji: audio_muji(),
         })
         .await
@@ -2720,6 +2746,7 @@ async fn upsert_muji_presence_active_stores_and_returns_muji() {
     let outcome = actor
         .ask(crate::muc::room_actor::UpsertMujiPresence {
             sender_jid: alice.clone(),
+            occupant: None,
             muji: audio_muji(),
         })
         .await
@@ -2764,6 +2791,7 @@ async fn upsert_muji_presence_recipients_include_every_sibling_session_of_sender
             affiliation_grant: JoinAffiliationGrant::Resolver(Affiliation::Member),
             local_domain: "example.com".to_string(),
             admission_revision: current_admission_revision(&actor).await,
+            session: waddle_xmpp_core::OccupancySessionGeneration::mint(),
         })
         .await
         .expect("desktop join");
@@ -2774,6 +2802,7 @@ async fn upsert_muji_presence_recipients_include_every_sibling_session_of_sender
             affiliation_grant: JoinAffiliationGrant::Resolver(Affiliation::Member),
             local_domain: "example.com".to_string(),
             admission_revision: current_admission_revision(&actor).await,
+            session: waddle_xmpp_core::OccupancySessionGeneration::mint(),
         })
         .await
         .expect("mobile join recognized as same-bare multi-session");
@@ -2781,6 +2810,7 @@ async fn upsert_muji_presence_recipients_include_every_sibling_session_of_sender
     let outcome = actor
         .ask(crate::muc::room_actor::UpsertMujiPresence {
             sender_jid: desktop.clone(),
+            occupant: None,
             muji: audio_muji(),
         })
         .await
@@ -2813,6 +2843,7 @@ async fn same_nick_sibling_preparing_does_not_clobber_active_muji_snapshot() {
             affiliation_grant: JoinAffiliationGrant::Resolver(Affiliation::Member),
             local_domain: "example.com".to_string(),
             admission_revision: current_admission_revision(&actor).await,
+            session: waddle_xmpp_core::OccupancySessionGeneration::mint(),
         })
         .await
         .expect("desktop join");
@@ -2823,6 +2854,7 @@ async fn same_nick_sibling_preparing_does_not_clobber_active_muji_snapshot() {
             affiliation_grant: JoinAffiliationGrant::Resolver(Affiliation::Member),
             local_domain: "example.com".to_string(),
             admission_revision: current_admission_revision(&actor).await,
+            session: waddle_xmpp_core::OccupancySessionGeneration::mint(),
         })
         .await
         .expect("mobile join");
@@ -2830,6 +2862,7 @@ async fn same_nick_sibling_preparing_does_not_clobber_active_muji_snapshot() {
     actor
         .ask(crate::muc::room_actor::UpsertMujiPresence {
             sender_jid: desktop.clone(),
+            occupant: None,
             muji: audio_muji(),
         })
         .await
@@ -2839,6 +2872,7 @@ async fn same_nick_sibling_preparing_does_not_clobber_active_muji_snapshot() {
     let preparing = actor
         .ask(crate::muc::room_actor::UpsertMujiPresence {
             sender_jid: mobile.clone(),
+            occupant: None,
             muji: preparing_muji(),
         })
         .await
@@ -2867,6 +2901,7 @@ async fn same_nick_sibling_preparing_does_not_clobber_active_muji_snapshot() {
             affiliation_grant: JoinAffiliationGrant::Resolver(Affiliation::Member),
             local_domain: "example.com".to_string(),
             admission_revision: current_admission_revision(&actor).await,
+            session: waddle_xmpp_core::OccupancySessionGeneration::mint(),
         })
         .await
         .expect("bob join");
@@ -2911,6 +2946,7 @@ async fn late_join_replay_includes_preparing_only_same_nick_muji_with_exact_owne
             affiliation_grant: JoinAffiliationGrant::Resolver(Affiliation::Member),
             local_domain: "example.com".to_string(),
             admission_revision: current_admission_revision(&actor).await,
+            session: waddle_xmpp_core::OccupancySessionGeneration::mint(),
         })
         .await
         .expect("desktop join");
@@ -2921,6 +2957,7 @@ async fn late_join_replay_includes_preparing_only_same_nick_muji_with_exact_owne
             affiliation_grant: JoinAffiliationGrant::Resolver(Affiliation::Member),
             local_domain: "example.com".to_string(),
             admission_revision: current_admission_revision(&actor).await,
+            session: waddle_xmpp_core::OccupancySessionGeneration::mint(),
         })
         .await
         .expect("mobile join");
@@ -2928,6 +2965,7 @@ async fn late_join_replay_includes_preparing_only_same_nick_muji_with_exact_owne
     actor
         .ask(crate::muc::room_actor::UpsertMujiPresence {
             sender_jid: mobile.clone(),
+            occupant: None,
             muji: preparing_muji(),
         })
         .await
@@ -2941,6 +2979,7 @@ async fn late_join_replay_includes_preparing_only_same_nick_muji_with_exact_owne
             affiliation_grant: JoinAffiliationGrant::Resolver(Affiliation::Member),
             local_domain: "example.com".to_string(),
             admission_revision: current_admission_revision(&actor).await,
+            session: waddle_xmpp_core::OccupancySessionGeneration::mint(),
         })
         .await
         .expect("bob join");
@@ -3025,6 +3064,7 @@ async fn upsert_muji_presence_empty_clears_state_and_returns_none() {
     actor
         .ask(crate::muc::room_actor::UpsertMujiPresence {
             sender_jid: alice.clone(),
+            occupant: None,
             muji: audio_muji(),
         })
         .await
@@ -3039,6 +3079,7 @@ async fn upsert_muji_presence_empty_clears_state_and_returns_none() {
     let outcome = actor
         .ask(crate::muc::room_actor::UpsertMujiPresence {
             sender_jid: alice.clone(),
+            occupant: None,
             muji: empty_muji(),
         })
         .await
@@ -3076,6 +3117,7 @@ async fn clear_muji_presence_clears_existing_state_without_muji_payload() {
     actor
         .ask(crate::muc::room_actor::UpsertMujiPresence {
             sender_jid: alice.clone(),
+            occupant: None,
             muji: audio_muji(),
         })
         .await
@@ -3085,10 +3127,14 @@ async fn clear_muji_presence_clears_existing_state_without_muji_payload() {
     let outcome = actor
         .ask(crate::muc::room_actor::ClearMujiPresence {
             sender_jid: alice.clone(),
+            occupant: None,
         })
         .await
         .expect("ask")
         .expect("alice had Muji state to clear");
+    let crate::muc::room_actor::ClearMujiPresenceOutcome::Updated(outcome) = outcome else {
+        panic!("existing Muji state should clear, not supersede");
+    };
 
     assert_eq!(outcome.update.sender_nick, "alice");
     assert!(
@@ -3108,6 +3154,7 @@ async fn clear_muji_presence_clears_existing_state_without_muji_payload() {
             affiliation_grant: JoinAffiliationGrant::Resolver(Affiliation::Member),
             local_domain: "example.com".to_string(),
             admission_revision: current_admission_revision(&actor).await,
+            session: waddle_xmpp_core::OccupancySessionGeneration::mint(),
         })
         .await
         .expect("carol join");
@@ -3137,14 +3184,73 @@ async fn clear_muji_presence_reflects_plain_presence_when_no_state_exists() {
         .expect("alice join");
 
     let outcome = actor
-        .ask(crate::muc::room_actor::ClearMujiPresence { sender_jid: alice })
+        .ask(crate::muc::room_actor::ClearMujiPresence {
+            sender_jid: alice,
+            occupant: None,
+        })
         .await
         .expect("ask");
 
-    let outcome = outcome.expect("existing occupant presence update is reflected");
+    let Some(crate::muc::room_actor::ClearMujiPresenceOutcome::Updated(outcome)) = outcome else {
+        panic!("existing occupant presence update is reflected");
+    };
     assert_eq!(outcome.update.sender_nick, "alice");
     assert!(outcome.sender_muji.is_none());
     assert!(outcome.active_muji.is_none());
+}
+
+#[tokio::test]
+async fn stale_generation_clear_muji_presence_is_superseded_and_preserves_live_advertisement() {
+    let actor = spawn_room_actor().await;
+    let alice = test_full_jid("alice");
+    let generation_one = test_session_generation();
+    let generation_two = test_session_generation();
+
+    join_as_resolver_with_session(&actor, alice.clone(), "alice", generation_one)
+        .await
+        .expect("first join");
+    actor
+        .ask(crate::muc::room_actor::UpsertMujiPresence {
+            sender_jid: alice.clone(),
+            occupant: None,
+            muji: audio_muji(),
+        })
+        .await
+        .expect("first muji update")
+        .expect("first occupant update");
+    join_as_resolver_with_session(&actor, alice.clone(), "alice", generation_two)
+        .await
+        .expect("replacement join");
+    actor
+        .ask(crate::muc::room_actor::UpsertMujiPresence {
+            sender_jid: alice.clone(),
+            occupant: None,
+            muji: audio_muji(),
+        })
+        .await
+        .expect("replacement muji update")
+        .expect("replacement occupant update");
+
+    assert!(matches!(
+        actor
+            .ask(crate::muc::room_actor::ClearMujiPresence {
+                sender_jid: alice.clone(),
+                occupant: Some(generation_one),
+            })
+            .await
+            .expect("clear ask"),
+        Some(crate::muc::room_actor::ClearMujiPresenceOutcome::Superseded)
+    ));
+
+    let snapshot = actor.ask(GetSnapshot).await.expect("snapshot");
+    assert!(
+        snapshot.room.muji_for_session("alice", &alice).is_some(),
+        "a stale generation must not clear the replacement session's advertisement"
+    );
+    assert_eq!(
+        snapshot.room.session_generation(&alice),
+        Some(generation_two)
+    );
 }
 
 #[tokio::test]
@@ -3168,6 +3274,7 @@ async fn join_replay_includes_active_muji_from_existing_occupant() {
     actor
         .ask(crate::muc::room_actor::UpsertMujiPresence {
             sender_jid: alice.clone(),
+            occupant: None,
             muji: audio_muji(),
         })
         .await
@@ -3181,6 +3288,7 @@ async fn join_replay_includes_active_muji_from_existing_occupant() {
             affiliation_grant: JoinAffiliationGrant::Resolver(Affiliation::Member),
             local_domain: "example.com".to_string(),
             admission_revision: current_admission_revision(&actor).await,
+            session: waddle_xmpp_core::OccupancySessionGeneration::mint(),
         })
         .await
         .expect("bob join");
@@ -3216,6 +3324,7 @@ async fn leaving_occupant_clears_muji_state() {
     actor
         .ask(crate::muc::room_actor::UpsertMujiPresence {
             sender_jid: alice.clone(),
+            occupant: None,
             muji: audio_muji(),
         })
         .await
@@ -3240,6 +3349,7 @@ async fn leaving_occupant_clears_muji_state() {
             affiliation_grant: JoinAffiliationGrant::Resolver(Affiliation::Member),
             local_domain: "example.com".to_string(),
             admission_revision: current_admission_revision(&actor).await,
+            session: waddle_xmpp_core::OccupancySessionGeneration::mint(),
         })
         .await
         .expect("carol join");
@@ -3270,6 +3380,7 @@ async fn leaving_originator_session_clears_muji_state_even_with_peer_sessions_re
             affiliation_grant: JoinAffiliationGrant::Resolver(Affiliation::Member),
             local_domain: "example.com".to_string(),
             admission_revision: current_admission_revision(&actor).await,
+            session: waddle_xmpp_core::OccupancySessionGeneration::mint(),
         })
         .await
         .expect("desktop join");
@@ -3280,6 +3391,7 @@ async fn leaving_originator_session_clears_muji_state_even_with_peer_sessions_re
             affiliation_grant: JoinAffiliationGrant::Resolver(Affiliation::Member),
             local_domain: "example.com".to_string(),
             admission_revision: current_admission_revision(&actor).await,
+            session: waddle_xmpp_core::OccupancySessionGeneration::mint(),
         })
         .await
         .expect("mobile join recognized as same-bare multi-session");
@@ -3288,6 +3400,7 @@ async fn leaving_originator_session_clears_muji_state_even_with_peer_sessions_re
     let active_outcome = actor
         .ask(crate::muc::room_actor::UpsertMujiPresence {
             sender_jid: desktop.clone(),
+            occupant: None,
             muji: audio_muji(),
         })
         .await
@@ -3333,6 +3446,7 @@ async fn leaving_originator_session_clears_muji_state_even_with_peer_sessions_re
             affiliation_grant: JoinAffiliationGrant::Resolver(Affiliation::Member),
             local_domain: "example.com".to_string(),
             admission_revision: current_admission_revision(&actor).await,
+            session: waddle_xmpp_core::OccupancySessionGeneration::mint(),
         })
         .await
         .expect("carol join");
@@ -3365,6 +3479,7 @@ async fn leaving_non_originator_session_preserves_muji_state() {
             affiliation_grant: JoinAffiliationGrant::Resolver(Affiliation::Member),
             local_domain: "example.com".to_string(),
             admission_revision: current_admission_revision(&actor).await,
+            session: waddle_xmpp_core::OccupancySessionGeneration::mint(),
         })
         .await
         .expect("desktop join");
@@ -3375,6 +3490,7 @@ async fn leaving_non_originator_session_preserves_muji_state() {
             affiliation_grant: JoinAffiliationGrant::Resolver(Affiliation::Member),
             local_domain: "example.com".to_string(),
             admission_revision: current_admission_revision(&actor).await,
+            session: waddle_xmpp_core::OccupancySessionGeneration::mint(),
         })
         .await
         .expect("mobile join");
@@ -3383,6 +3499,7 @@ async fn leaving_non_originator_session_preserves_muji_state() {
     actor
         .ask(crate::muc::room_actor::UpsertMujiPresence {
             sender_jid: desktop.clone(),
+            occupant: None,
             muji: audio_muji(),
         })
         .await
@@ -3411,6 +3528,7 @@ async fn leaving_non_originator_session_preserves_muji_state() {
             affiliation_grant: JoinAffiliationGrant::Resolver(Affiliation::Member),
             local_domain: "example.com".to_string(),
             admission_revision: current_admission_revision(&actor).await,
+            session: waddle_xmpp_core::OccupancySessionGeneration::mint(),
         })
         .await
         .expect("carol join");
@@ -3439,6 +3557,7 @@ async fn leaving_one_active_same_nick_session_preserves_sibling_active_muji_stat
             affiliation_grant: JoinAffiliationGrant::Resolver(Affiliation::Member),
             local_domain: "example.com".to_string(),
             admission_revision: current_admission_revision(&actor).await,
+            session: waddle_xmpp_core::OccupancySessionGeneration::mint(),
         })
         .await
         .expect("desktop join");
@@ -3449,6 +3568,7 @@ async fn leaving_one_active_same_nick_session_preserves_sibling_active_muji_stat
             affiliation_grant: JoinAffiliationGrant::Resolver(Affiliation::Member),
             local_domain: "example.com".to_string(),
             admission_revision: current_admission_revision(&actor).await,
+            session: waddle_xmpp_core::OccupancySessionGeneration::mint(),
         })
         .await
         .expect("mobile join");
@@ -3456,6 +3576,7 @@ async fn leaving_one_active_same_nick_session_preserves_sibling_active_muji_stat
     actor
         .ask(crate::muc::room_actor::UpsertMujiPresence {
             sender_jid: desktop.clone(),
+            occupant: None,
             muji: audio_muji(),
         })
         .await
@@ -3464,6 +3585,7 @@ async fn leaving_one_active_same_nick_session_preserves_sibling_active_muji_stat
     actor
         .ask(crate::muc::room_actor::UpsertMujiPresence {
             sender_jid: mobile.clone(),
+            occupant: None,
             muji: audio_muji(),
         })
         .await
@@ -3499,6 +3621,7 @@ async fn leaving_one_active_same_nick_session_preserves_sibling_active_muji_stat
             affiliation_grant: JoinAffiliationGrant::Resolver(Affiliation::Member),
             local_domain: "example.com".to_string(),
             admission_revision: current_admission_revision(&actor).await,
+            session: waddle_xmpp_core::OccupancySessionGeneration::mint(),
         })
         .await
         .expect("carol join");
@@ -3529,6 +3652,7 @@ async fn kick_reports_every_removed_session_for_sfu_eviction() {
             affiliation_grant: JoinAffiliationGrant::Resolver(Affiliation::Member),
             local_domain: "example.com".to_string(),
             admission_revision: current_admission_revision(&actor).await,
+            session: waddle_xmpp_core::OccupancySessionGeneration::mint(),
         })
         .await
         .expect("join alice desktop");
@@ -3539,6 +3663,7 @@ async fn kick_reports_every_removed_session_for_sfu_eviction() {
             affiliation_grant: JoinAffiliationGrant::Resolver(Affiliation::Member),
             local_domain: "example.com".to_string(),
             admission_revision: current_admission_revision(&actor).await,
+            session: waddle_xmpp_core::OccupancySessionGeneration::mint(),
         })
         .await
         .expect("join alice mobile");
@@ -3586,6 +3711,7 @@ async fn ban_reports_every_removed_session_for_sfu_eviction() {
             affiliation_grant: JoinAffiliationGrant::Resolver(Affiliation::Member),
             local_domain: "example.com".to_string(),
             admission_revision: current_admission_revision(&actor).await,
+            session: waddle_xmpp_core::OccupancySessionGeneration::mint(),
         })
         .await
         .expect("join alice desktop");
@@ -3596,6 +3722,7 @@ async fn ban_reports_every_removed_session_for_sfu_eviction() {
             affiliation_grant: JoinAffiliationGrant::Resolver(Affiliation::Member),
             local_domain: "example.com".to_string(),
             admission_revision: current_admission_revision(&actor).await,
+            session: waddle_xmpp_core::OccupancySessionGeneration::mint(),
         })
         .await
         .expect("join alice mobile");
@@ -3639,6 +3766,7 @@ async fn non_removing_admin_changes_report_no_moderation_removals() {
             affiliation_grant: JoinAffiliationGrant::Resolver(Affiliation::Member),
             local_domain: "example.com".to_string(),
             admission_revision: current_admission_revision(&actor).await,
+            session: waddle_xmpp_core::OccupancySessionGeneration::mint(),
         })
         .await
         .expect("join alice");
@@ -3685,6 +3813,7 @@ async fn admin_set_error_after_ban_item_must_not_partially_apply() {
             affiliation_grant: JoinAffiliationGrant::Resolver(Affiliation::Member),
             local_domain: "example.com".to_string(),
             admission_revision: current_admission_revision(&actor).await,
+            session: waddle_xmpp_core::OccupancySessionGeneration::mint(),
         })
         .await
         .expect("victim joins");
@@ -3760,6 +3889,7 @@ async fn admin_set_with_owner_grant_before_demotion_applies_fully() {
             affiliation_grant: JoinAffiliationGrant::Resolver(Affiliation::Member),
             local_domain: "example.com".to_string(),
             admission_revision: current_admission_revision(&actor).await,
+            session: waddle_xmpp_core::OccupancySessionGeneration::mint(),
         })
         .await
         .expect("victim joins");
@@ -4488,6 +4618,25 @@ async fn join_as_resolver(
             affiliation_grant: JoinAffiliationGrant::Resolver(Affiliation::Member),
             local_domain: "example.com".to_owned(),
             admission_revision: current_admission_revision(actor).await,
+            session: test_session_generation(),
+        })
+        .await
+}
+
+async fn join_as_resolver_with_session(
+    actor: &ActorRef<RoomActor>,
+    jid: FullJid,
+    nick: &str,
+    session: waddle_xmpp_core::OccupancySessionGeneration,
+) -> Result<JoinOutcome, SendError<JoinWithAffiliation, RoomActorError>> {
+    actor
+        .ask(JoinWithAffiliation {
+            sender_jid: jid,
+            nick: nick.to_owned(),
+            affiliation_grant: JoinAffiliationGrant::Resolver(Affiliation::Member),
+            local_domain: "example.com".to_owned(),
+            admission_revision: current_admission_revision(actor).await,
+            session,
         })
         .await
 }
@@ -4502,6 +4651,24 @@ async fn leave_with_attempt(
             sender_jid: jid,
             cause: crate::muc::durable::OccupancyLeaveCause::Explicit,
             session: LeaveSessionSelector::Any,
+            attempt,
+            origin: crate::muc::room_actor::LeaveOrigin::Fresh,
+        })
+        .await
+        .expect("leave ask")
+}
+
+async fn leave_with_attempt_and_session(
+    actor: &ActorRef<RoomActor>,
+    jid: FullJid,
+    attempt: LeaveAttemptId,
+    session: LeaveSessionSelector,
+) -> LeaveDisposition {
+    actor
+        .ask(LeaveByRealJid {
+            sender_jid: jid,
+            cause: crate::muc::durable::OccupancyLeaveCause::Explicit,
+            session,
             attempt,
             origin: crate::muc::room_actor::LeaveOrigin::Fresh,
         })
@@ -4704,6 +4871,7 @@ async fn old_receipt_is_not_replayed_after_the_rejoined_session_was_kicked() {
             affiliation_grant: JoinAffiliationGrant::Resolver(Affiliation::Owner),
             local_domain: "example.com".to_owned(),
             admission_revision: current_admission_revision(&actor).await,
+            session: waddle_xmpp_core::OccupancySessionGeneration::mint(),
         })
         .await
         .expect("owner joins");
@@ -5240,6 +5408,7 @@ async fn cleanup_attempt_minted_during_a_blocked_join_still_removes_the_occupant
                 affiliation_grant: JoinAffiliationGrant::Resolver(Affiliation::Member),
                 local_domain: "example.com".to_string(),
                 admission_revision,
+                session: waddle_xmpp_core::OccupancySessionGeneration::mint(),
             })
             .await
     });
@@ -6228,6 +6397,7 @@ fn departure_receipts_keep_only_the_newest_generation_per_jid() {
     let bob = test_full_jid_resource("bob", "web");
     let outcome = |nick: &str, revision: u64| {
         super::DepartureReceiptOutcome::Left(Box::new(LeaveOutcome {
+            provenance: crate::muc::room_actor::DepartureProvenance::Live,
             acknowledge: LeaveAttemptId::generate(),
             nick: crate::muc::MucOccupantNick::new(nick.to_owned()).expect("valid test nick"),
             affiliation: Affiliation::Member,
@@ -6356,6 +6526,157 @@ async fn deferred_leave_watermark_supersedes_after_replacement_rejoin() {
             })
             .await
             .expect("current departure"),
+        LeaveDisposition::Left(_)
+    ));
+}
+
+#[tokio::test]
+async fn generation_scoped_leave_applies_to_the_matching_session() {
+    let _guard = crate::telemetry::test_support::acquire().await;
+    let actor = spawn_room_actor().await;
+    let alice = test_full_jid("alice-generation-left");
+    let generation = test_session_generation();
+
+    join_as_resolver_with_session(&actor, alice.clone(), "alice", generation)
+        .await
+        .expect("join");
+
+    assert!(matches!(
+        leave_with_attempt_and_session(
+            &actor,
+            alice,
+            LeaveAttemptId::generate(),
+            LeaveSessionSelector::Generation(generation),
+        )
+        .await,
+        LeaveDisposition::Left(_)
+    ));
+}
+
+#[tokio::test]
+async fn same_full_jid_rejoin_overwrites_the_stored_generation_and_stale_leave_is_superseded() {
+    let _guard = crate::telemetry::test_support::acquire().await;
+    let actor = spawn_room_actor().await;
+    let alice = test_full_jid("alice-generation-rejoin");
+    let generation_one = test_session_generation();
+    let generation_two = test_session_generation();
+
+    join_as_resolver_with_session(&actor, alice.clone(), "alice", generation_one)
+        .await
+        .expect("first join");
+    join_as_resolver_with_session(&actor, alice.clone(), "alice", generation_two)
+        .await
+        .expect("replacement rejoin");
+
+    assert!(matches!(
+        leave_with_attempt_and_session(
+            &actor,
+            alice.clone(),
+            LeaveAttemptId::generate(),
+            LeaveSessionSelector::Generation(generation_one),
+        )
+        .await,
+        LeaveDisposition::Superseded
+    ));
+    assert_eq!(actor.ask(OccupantCount).await.expect("count"), 1);
+    let snapshot = actor.ask(GetSnapshot).await.expect("snapshot");
+    assert_eq!(
+        snapshot.room.session_generation(&alice),
+        Some(generation_two)
+    );
+
+    assert!(matches!(
+        leave_with_attempt_and_session(
+            &actor,
+            alice,
+            LeaveAttemptId::generate(),
+            LeaveSessionSelector::Generation(generation_two),
+        )
+        .await,
+        LeaveDisposition::Left(_)
+    ));
+}
+
+#[tokio::test]
+async fn inactive_seal_with_mismatched_generation_is_superseded_not_deferred() {
+    let _guard = crate::telemetry::test_support::acquire().await;
+    let store = FakeDurableStore::owned();
+    let actor = spawn_room_actor_with_store(store).await;
+    let alice = test_full_jid("alice-generation-inactive");
+    let live_generation = test_session_generation();
+    let stale_generation = test_session_generation();
+
+    join_as_resolver_with_session(&actor, alice.clone(), "alice", live_generation)
+        .await
+        .expect("join");
+    actor
+        .ask(SetRoomSealForTest(RoomSealState::Inactive))
+        .await
+        .expect("inactive seal");
+
+    assert!(matches!(
+        leave_with_attempt_and_session(
+            &actor,
+            alice.clone(),
+            LeaveAttemptId::generate(),
+            LeaveSessionSelector::Generation(stale_generation),
+        )
+        .await,
+        LeaveDisposition::Superseded
+    ));
+    assert!(actor.ask(UnsealInactive).await.expect("unseal"));
+    assert!(matches!(
+        leave_with_attempt_and_session(
+            &actor,
+            alice,
+            LeaveAttemptId::generate(),
+            LeaveSessionSelector::Generation(live_generation),
+        )
+        .await,
+        LeaveDisposition::Left(_)
+    ));
+}
+
+#[tokio::test]
+async fn newer_attempt_still_cannot_evict_a_rejoined_session_when_generation_is_stale() {
+    let _guard = crate::telemetry::test_support::acquire().await;
+    let actor = spawn_room_actor().await;
+    let alice = test_full_jid("alice-generation-newer-attempt");
+    let generation_one = test_session_generation();
+    let generation_two = test_session_generation();
+
+    join_as_resolver_with_session(&actor, alice.clone(), "alice", generation_one)
+        .await
+        .expect("first join");
+    join_as_resolver_with_session(&actor, alice.clone(), "alice", generation_two)
+        .await
+        .expect("replacement rejoin");
+
+    let newer_attempt = LeaveAttemptId::generate();
+    assert!(matches!(
+        leave_with_attempt_and_session(
+            &actor,
+            alice.clone(),
+            newer_attempt,
+            LeaveSessionSelector::Generation(generation_one),
+        )
+        .await,
+        LeaveDisposition::Superseded
+    ));
+    let snapshot = actor.ask(GetSnapshot).await.expect("snapshot");
+    assert_eq!(
+        snapshot.room.session_generation(&alice),
+        Some(generation_two)
+    );
+    assert_eq!(actor.ask(OccupantCount).await.expect("count"), 1);
+    assert!(matches!(
+        leave_with_attempt_and_session(
+            &actor,
+            alice,
+            LeaveAttemptId::generate(),
+            LeaveSessionSelector::Generation(generation_two),
+        )
+        .await,
         LeaveDisposition::Left(_)
     ));
 }
@@ -6645,6 +6966,7 @@ async fn join_commits_projection_revision_before_admitting_occupant() {
             affiliation_grant: JoinAffiliationGrant::Resolver(Affiliation::Member),
             local_domain: "example.com".to_owned(),
             admission_revision: current_admission_revision(&actor).await,
+            session: waddle_xmpp_core::OccupancySessionGeneration::mint(),
         })
         .await
         .expect("projection-authorized join");
@@ -7157,6 +7479,7 @@ fn test_join_msg(nick: &str, sender: FullJid) -> JoinWithAffiliation {
         affiliation_grant: JoinAffiliationGrant::Unaffiliated,
         local_domain: "example.com".to_string(),
         admission_revision: 0,
+        session: test_session_generation(),
     }
 }
 
@@ -7713,6 +8036,7 @@ async fn destroy_seal_blocks_muji_upserts() {
         actor
             .ask(UpsertMujiPresence {
                 sender_jid: alice.clone(),
+                occupant: None,
                 muji: audio_muji(),
             })
             .await
@@ -7748,6 +8072,7 @@ async fn destroy_seal_blocks_muji_clears() {
     actor
         .ask(UpsertMujiPresence {
             sender_jid: alice.clone(),
+            occupant: None,
             muji: audio_muji(),
         })
         .await
@@ -7760,6 +8085,7 @@ async fn destroy_seal_blocks_muji_clears() {
         actor
             .ask(ClearMujiPresence {
                 sender_jid: alice.clone(),
+                occupant: None,
             })
             .await
             .expect("clear ask")
@@ -7798,6 +8124,7 @@ async fn destroy_seal_blocks_in_call_state_updates() {
         actor
             .ask(UpsertInCallState {
                 sender_jid: alice,
+                occupant: None,
                 state: crate::xep::InCallPresenceState {
                     hand_raised: true,
                     muted: false,
@@ -8298,6 +8625,7 @@ async fn apply_affiliation_change_threads_admin_effects_and_reservation() {
                 affiliation_grant: JoinAffiliationGrant::Resolver(Affiliation::Member),
                 local_domain: "example.com".to_string(),
                 admission_revision: current_admission_revision(&actor).await,
+                session: waddle_xmpp_core::OccupancySessionGeneration::mint(),
             })
             .await
             .expect("join");
@@ -8381,6 +8709,7 @@ async fn zero_delta_managed_members_only_enforcement_still_commits_one_config_ef
             affiliation_grant: JoinAffiliationGrant::Resolver(Affiliation::Member),
             local_domain: "example.com".to_owned(),
             admission_revision: current_admission_revision(&actor).await,
+            session: waddle_xmpp_core::OccupancySessionGeneration::mint(),
         })
         .await
         .expect("already-qualified member joins");
@@ -8489,6 +8818,7 @@ async fn managed_members_only_enforcement_dedupes_sibling_nick_322_effects() {
                 affiliation_grant,
                 local_domain: "example.com".to_owned(),
                 admission_revision: current_admission_revision(&actor).await,
+                session: waddle_xmpp_core::OccupancySessionGeneration::mint(),
             })
             .await
             .expect("join");
@@ -8795,6 +9125,7 @@ async fn resolver_write_does_not_replace_explicit_ban_and_join_stays_forbidden()
             affiliation_grant: JoinAffiliationGrant::Resolver(Affiliation::Member),
             local_domain: "example.com".to_string(),
             admission_revision: snapshot.admission_revision,
+            session: waddle_xmpp_core::OccupancySessionGeneration::mint(),
         })
         .await;
 
@@ -8832,6 +9163,7 @@ async fn resolver_none_clears_stale_resolver_derived_affiliation_and_join_is_for
             affiliation_grant: JoinAffiliationGrant::Resolver(Affiliation::Member),
             local_domain: "example.com".to_string(),
             admission_revision: current_admission_revision(&actor).await,
+            session: waddle_xmpp_core::OccupancySessionGeneration::mint(),
         })
         .await
         .expect("resolver-derived member joins the members-only room");
@@ -8857,6 +9189,7 @@ async fn resolver_none_clears_stale_resolver_derived_affiliation_and_join_is_for
             affiliation_grant: JoinAffiliationGrant::Resolver(Affiliation::None),
             local_domain: "example.com".to_string(),
             admission_revision: snapshot.admission_revision,
+            session: waddle_xmpp_core::OccupancySessionGeneration::mint(),
         })
         .await;
     assert!(
@@ -8906,6 +9239,7 @@ async fn resolver_none_does_not_clear_explicit_ban() {
             affiliation_grant: JoinAffiliationGrant::Resolver(Affiliation::None),
             local_domain: "example.com".to_string(),
             admission_revision: snapshot.admission_revision,
+            session: waddle_xmpp_core::OccupancySessionGeneration::mint(),
         })
         .await;
     assert!(
@@ -8954,6 +9288,7 @@ async fn sync_resolver_affiliation_clears_stale_resolver_derived_member() {
             affiliation_grant: JoinAffiliationGrant::Resolver(Affiliation::Member),
             local_domain: "example.com".to_string(),
             admission_revision: current_admission_revision(&actor).await,
+            session: waddle_xmpp_core::OccupancySessionGeneration::mint(),
         })
         .await
         .expect("resolver-derived member joins the members-only room");
@@ -9058,6 +9393,7 @@ async fn stale_sync_resolver_affiliation_does_not_clear_readmitted_member() {
             affiliation_grant: JoinAffiliationGrant::Resolver(Affiliation::Member),
             local_domain: "example.com".to_string(),
             admission_revision: stale_revision,
+            session: waddle_xmpp_core::OccupancySessionGeneration::mint(),
         })
         .await
         .expect("re-granted member joins the members-only room");
@@ -9129,6 +9465,7 @@ async fn stale_sync_does_not_clear_readmitted_member_when_resolver_grant_is_iden
             affiliation_grant: JoinAffiliationGrant::Resolver(Affiliation::Member),
             local_domain: "example.com".to_string(),
             admission_revision: stale_revision,
+            session: waddle_xmpp_core::OccupancySessionGeneration::mint(),
         })
         .await
         .expect("already-derived member rejoins successfully");
@@ -9209,6 +9546,7 @@ async fn resolver_join_does_not_invalidate_another_members_repair() {
             affiliation_grant: JoinAffiliationGrant::Resolver(Affiliation::Member),
             local_domain: "example.com".to_string(),
             admission_revision: alice_repair_revision,
+            session: waddle_xmpp_core::OccupancySessionGeneration::mint(),
         })
         .await
         .expect("bob joins with an identical resolver grant");
@@ -9691,6 +10029,7 @@ async fn banned_join_denial_reason_is_banned_even_in_members_only_room() {
             affiliation_grant: JoinAffiliationGrant::Unaffiliated,
             local_domain: "example.com".to_string(),
             admission_revision: snapshot.admission_revision,
+            session: waddle_xmpp_core::OccupancySessionGeneration::mint(),
         })
         .await;
     assert!(
@@ -9711,6 +10050,7 @@ async fn banned_join_denial_reason_is_banned_even_in_members_only_room() {
             affiliation_grant: JoinAffiliationGrant::Unaffiliated,
             local_domain: "example.com".to_string(),
             admission_revision: snapshot.admission_revision,
+            session: waddle_xmpp_core::OccupancySessionGeneration::mint(),
         })
         .await;
     assert!(
@@ -9763,4 +10103,112 @@ async fn destroy_unseal_only_reopens_the_matching_attempt() {
         actor.ask(GetRoomSealState).await.expect("seal state"),
         RoomSealState::Destroying { attempt: second }
     );
+}
+
+/// #1703 (codex round 3): a same-full-JID rejoin by a different connection
+/// generation must not see the displaced connection's Muji advertisement in
+/// its own join snapshot (it is cleared BEFORE `existing_occupants` is taken).
+#[tokio::test]
+async fn rejoin_under_a_new_generation_does_not_snapshot_the_displaced_muji_state() {
+    let actor = spawn_room_actor().await;
+    let alice: FullJid = "alice@example.com/web".parse().unwrap();
+    let first = OccupancySessionGeneration::mint();
+    let second = OccupancySessionGeneration::mint();
+
+    join_as_resolver_with_session(&actor, alice.clone(), "alice", first)
+        .await
+        .expect("first join");
+    actor
+        .ask(crate::muc::room_actor::UpsertMujiPresence {
+            sender_jid: alice.clone(),
+            occupant: None,
+            muji: crate::xep::xep0272::Muji::preparing(),
+        })
+        .await
+        .expect("muji upsert")
+        .expect("alice is an occupant");
+
+    let admission_revision = actor
+        .ask(GetSnapshot)
+        .await
+        .expect("snapshot")
+        .admission_revision;
+    let outcome = actor
+        .ask(JoinWithAffiliation {
+            sender_jid: alice.clone(),
+            nick: "alice".to_string(),
+            affiliation_grant: JoinAffiliationGrant::Unaffiliated,
+            local_domain: "example.com".to_string(),
+            admission_revision,
+            session: second,
+        })
+        .await
+        .expect("rejoin");
+
+    let own = outcome
+        .existing_occupants
+        .iter()
+        .find(|occupant| occupant.jid == alice)
+        .expect("the rejoining session is in the snapshot");
+    assert!(
+        own.muji.is_none(),
+        "the displaced generation's Muji advertisement must not be replayed to the replacement"
+    );
+}
+
+/// #1703 (codex round 5): Muji and in-call updates presented with a
+/// superseded occupancy generation are refused before any room state changes.
+#[tokio::test]
+async fn muji_and_in_call_updates_from_a_superseded_generation_are_refused() {
+    let actor = spawn_room_actor().await;
+    let alice: FullJid = "alice@example.com/web".parse().unwrap();
+    let first = OccupancySessionGeneration::mint();
+    let second = OccupancySessionGeneration::mint();
+    join_as_resolver_with_session(&actor, alice.clone(), "alice", first)
+        .await
+        .expect("first join");
+    join_as_resolver_with_session(&actor, alice.clone(), "alice", second)
+        .await
+        .expect("replacement join");
+
+    let refused = actor
+        .ask(crate::muc::room_actor::UpsertMujiPresence {
+            sender_jid: alice.clone(),
+            occupant: Some(first),
+            muji: crate::xep::xep0272::Muji::preparing(),
+        })
+        .await
+        .expect("ask");
+    assert!(
+        refused.is_none(),
+        "a superseded generation's Muji update is refused"
+    );
+    let snapshot = actor.ask(GetSnapshot).await.expect("snapshot");
+    assert!(snapshot.room.muji_for_session("alice", &alice).is_none());
+
+    let refused = actor
+        .ask(crate::muc::room_actor::UpsertInCallState {
+            sender_jid: alice.clone(),
+            occupant: Some(first),
+            state: crate::xep::InCallPresenceState {
+                hand_raised: true,
+                ..Default::default()
+            },
+        })
+        .await
+        .expect("ask");
+    assert!(
+        refused.is_none(),
+        "a superseded generation's in-call update is refused"
+    );
+
+    let applied = actor
+        .ask(crate::muc::room_actor::UpsertMujiPresence {
+            sender_jid: alice.clone(),
+            occupant: Some(second),
+            muji: crate::xep::xep0272::Muji::preparing(),
+        })
+        .await
+        .expect("ask");
+    assert!(applied.is_some(), "the current generation's update applies");
 }

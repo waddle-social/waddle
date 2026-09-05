@@ -2,6 +2,7 @@ use std::convert::Infallible;
 
 use jid::{BareJid, FullJid};
 use kameo::message::Context;
+use waddle_xmpp_core::OccupancySessionGeneration;
 
 use super::{
     affiliation_overflows_full_room, JoinDenialReason, JoinExistingOccupant, JoinOutcome,
@@ -43,6 +44,7 @@ pub struct JoinWithAffiliation {
     pub affiliation_grant: JoinAffiliationGrant,
     pub local_domain: String,
     pub admission_revision: u64,
+    pub session: OccupancySessionGeneration,
 }
 
 impl kameo::message::Message<JoinWithAffiliation> for RoomActor {
@@ -189,6 +191,21 @@ impl kameo::message::Message<JoinWithAffiliation> for RoomActor {
             return Err(RoomActorError::RoomFull);
         }
 
+        // A same-full-JID rejoin by a DIFFERENT connection generation
+        // displaces the previous connection: drop its call/in-call
+        // advertisements BEFORE the snapshot below is taken, or the
+        // replacement's own self-presence would replay them (#1703).
+        if self
+            .room
+            .session_generation(&msg.sender_jid)
+            .is_some_and(|previous| previous != msg.session)
+        {
+            if let Some(previous_nick) = self.room.find_nick_by_real_jid(&msg.sender_jid) {
+                let previous_nick = previous_nick.to_string();
+                self.room
+                    .clear_session_call_state(&previous_nick, &msg.sender_jid);
+            }
+        }
         let existing_occupants: Vec<JoinExistingOccupant> = self
             .room
             .occupants
@@ -243,9 +260,11 @@ impl kameo::message::Message<JoinWithAffiliation> for RoomActor {
                     msg.nick.clone(),
                     Some(msg.local_domain.as_str()),
                     joined_at,
+                    msg.session,
                 )
                 .clone();
             actor.room.set_session_order(&joined_jid, join_order);
+            actor.room.set_session_generation(&joined_jid, msg.session);
             actor.note_session_joined(&joined_jid);
             let new_occupant_affiliation = new_occupant.affiliation;
             let new_occupant_role = new_occupant.role;
@@ -347,6 +366,7 @@ pub fn next_occupancy_order() -> OccupancyOrder {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum LeaveSessionSelector {
     Any,
+    Generation(OccupancySessionGeneration),
     JoinedAtOrBefore(OccupancyWatermark),
 }
 
@@ -488,6 +508,13 @@ impl kameo::message::Message<LeaveByRealJid> for RoomActor {
         {
             return Ok(LeaveDisposition::Superseded);
         }
+        if matches!(
+            msg.session,
+            LeaveSessionSelector::Generation(generation)
+                if self.room.session_generation(&msg.sender_jid) != Some(generation)
+        ) {
+            return Ok(LeaveDisposition::Superseded);
+        }
         let departing_generation = self
             .room
             .session_order(&msg.sender_jid)
@@ -603,6 +630,7 @@ impl kameo::message::Message<LeaveByRealJid> for RoomActor {
                 occupant_count as i64 - occupant_count_before as i64,
             );
             LeaveDisposition::Left(Box::new(LeaveOutcome {
+                provenance: super::DepartureProvenance::Live,
                 acknowledge: msg.attempt,
                 // Infallible: the join path refuses a nick that does not
                 // validate as a `MucOccupantNick`, so every occupant nick is
@@ -710,13 +738,32 @@ impl kameo::message::Message<PresenceUpdateData> for RoomActor {
 /// here via `find_occupant_by_real_jid`; if the sender isn't an
 /// occupant, the actor returns `Ok(None)` and the caller falls
 /// back to the regular join path.
+impl RoomActor {
+    /// A FullJID-keyed mutation presented with an occupancy generation applies
+    /// only while the session still belongs to that generation: a connection
+    /// replaced by a same-full-JID successor is superseded (#1703).
+    fn session_is_superseded(
+        &self,
+        sender_jid: &FullJid,
+        occupant: Option<OccupancySessionGeneration>,
+    ) -> bool {
+        occupant
+            .is_some_and(|generation| self.room.session_generation(sender_jid) != Some(generation))
+    }
+}
+
 pub struct UpsertMujiPresence {
     pub sender_jid: FullJid,
     pub muji: crate::xep::xep0272::Muji,
+    /// The connection's occupancy generation (#1703): the update applies
+    /// only while the session still belongs to it (`None` = server-side
+    /// callers that carry no connection).
+    pub occupant: Option<OccupancySessionGeneration>,
 }
 
 pub struct ClearMujiPresence {
     pub sender_jid: FullJid,
+    pub occupant: Option<OccupancySessionGeneration>,
 }
 
 /// Read the full JIDs of occupant sessions currently advertising active
@@ -743,6 +790,12 @@ pub struct MujiPresenceUpdateOutcome {
     pub active_call_started: bool,
 }
 
+#[derive(Debug, Clone)]
+pub enum ClearMujiPresenceOutcome {
+    Updated(Box<MujiPresenceUpdateOutcome>),
+    Superseded,
+}
+
 impl kameo::message::Message<UpsertMujiPresence> for RoomActor {
     type Reply = Result<Option<MujiPresenceUpdateOutcome>, Infallible>;
 
@@ -752,6 +805,9 @@ impl kameo::message::Message<UpsertMujiPresence> for RoomActor {
         _ctx: &mut Context<Self, Self::Reply>,
     ) -> Self::Reply {
         if !self.effectful_work_is_permitted().await {
+            return Ok(None);
+        }
+        if self.session_is_superseded(&msg.sender_jid, msg.occupant) {
             return Ok(None);
         }
         let Some(sender_occupant) = self.room.find_occupant_by_real_jid(&msg.sender_jid) else {
@@ -793,7 +849,7 @@ impl kameo::message::Message<UpsertMujiPresence> for RoomActor {
 }
 
 impl kameo::message::Message<ClearMujiPresence> for RoomActor {
-    type Reply = Result<Option<MujiPresenceUpdateOutcome>, Infallible>;
+    type Reply = Result<Option<ClearMujiPresenceOutcome>, Infallible>;
 
     async fn handle(
         &mut self,
@@ -806,6 +862,9 @@ impl kameo::message::Message<ClearMujiPresence> for RoomActor {
         let Some(sender_occupant) = self.room.find_occupant_by_real_jid(&msg.sender_jid) else {
             return Ok(None);
         };
+        if self.session_is_superseded(&msg.sender_jid, msg.occupant) {
+            return Ok(Some(ClearMujiPresenceOutcome::Superseded));
+        }
         let sender_nick = sender_occupant.nick.clone();
         let sender_real_jid = sender_occupant.real_jid.clone();
         let sender_role = sender_occupant.role;
@@ -818,20 +877,22 @@ impl kameo::message::Message<ClearMujiPresence> for RoomActor {
             .values()
             .flat_map(|o| self.room.get_occupant_sessions(&o.nick))
             .collect();
-        Ok(Some(MujiPresenceUpdateOutcome {
-            update: PresenceUpdateOutcome {
-                sender_nick,
-                sender_real_jid,
-                sender_role,
-                sender_affiliation,
-                room_jid,
-                recipients,
+        Ok(Some(ClearMujiPresenceOutcome::Updated(Box::new(
+            MujiPresenceUpdateOutcome {
+                update: PresenceUpdateOutcome {
+                    sender_nick,
+                    sender_real_jid,
+                    sender_role,
+                    sender_affiliation,
+                    room_jid,
+                    recipients,
+                },
+                sender_muji: muji_state.sender_muji,
+                active_muji: muji_state.room_muji,
+                session_mujis: muji_state.session_mujis,
+                active_call_started: muji_state.active_call_started,
             },
-            sender_muji: muji_state.sender_muji,
-            active_muji: muji_state.room_muji,
-            session_mujis: muji_state.session_mujis,
-            active_call_started: muji_state.active_call_started,
-        }))
+        ))))
     }
 }
 
@@ -866,6 +927,8 @@ impl kameo::message::Message<GetActiveMujiSessions> for RoomActor {
 pub struct UpsertInCallState {
     pub sender_jid: FullJid,
     pub state: crate::xep::InCallPresenceState,
+    /// See [`UpsertMujiPresence::occupant`].
+    pub occupant: Option<OccupancySessionGeneration>,
 }
 
 #[derive(Debug, Clone)]
@@ -888,6 +951,9 @@ impl kameo::message::Message<UpsertInCallState> for RoomActor {
         _ctx: &mut Context<Self, Self::Reply>,
     ) -> Self::Reply {
         if !self.effectful_work_is_permitted().await {
+            return Ok(None);
+        }
+        if self.session_is_superseded(&msg.sender_jid, msg.occupant) {
             return Ok(None);
         }
         let Some(sender_occupant) = self.room.find_occupant_by_real_jid(&msg.sender_jid) else {
@@ -1123,6 +1189,7 @@ fn receipt_disposition(receipt: super::DepartureReceipt) -> LeaveDisposition {
     match receipt.outcome {
         super::DepartureReceiptOutcome::Left(mut outcome) => {
             outcome.acknowledge = attempt;
+            outcome.provenance = super::DepartureProvenance::ReplayedReceipt;
             LeaveDisposition::Left(outcome)
         }
         super::DepartureReceiptOutcome::Suppressed { nick, affiliation } => {

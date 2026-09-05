@@ -10,7 +10,9 @@ use jid::{BareJid, FullJid};
 use tracing::{debug, warn};
 use waddle_sfu::{ObservedCallSids, TeardownDisposition};
 use waddle_xmpp::muc::build_occupant_presence;
-use waddle_xmpp::muc::room_actor::{ClearMujiPresence, MujiPresenceUpdateOutcome};
+use waddle_xmpp::muc::room_actor::{
+    ClearMujiPresence, ClearMujiPresenceOutcome, MujiPresenceUpdateOutcome,
+};
 use waddle_xmpp::telemetry::call::increment_call_teardown_stale_dropped;
 use waddle_xmpp::xep::xep0272::Muji;
 use waddle_xmpp::xep::xep0421::OccupantIdentity;
@@ -41,6 +43,8 @@ pub(crate) async fn clear_muji_presence_for_departure(
     room_jid: &BareJid,
     full_jid: &FullJid,
     observed_sids: Option<&ObservedCallSids>,
+    occupant: Option<waddle_xmpp_core::OccupancySessionGeneration>,
+    unbound: waddle_sfu::UnboundOccupantPolicy,
     session: Option<&waddle_sfu::SessionBinding>,
 ) -> WebhookEffectOutcome {
     debug!(
@@ -78,13 +82,28 @@ pub(crate) async fn clear_muji_presence_for_departure(
                 identity = %full_jid,
                 "MUC room actor is absent during LiveKit departure cleanup; queueing owner-gated Muji clear"
             );
-            if enqueue_muji_presence_clear(state, room_jid, full_jid, observed_sids, session)
-                .await
-                .is_err()
+            if enqueue_muji_presence_clear(
+                state,
+                room_jid,
+                full_jid,
+                observed_sids,
+                occupant,
+                session,
+            )
+            .await
+            .is_err()
             {
                 return WebhookEffectOutcome::Retryable("teardown_outbox_enqueue_failed");
             }
-            record_participant_left(state, room_jid, full_jid, observed_sids, session);
+            record_participant_left(
+                state,
+                room_jid,
+                full_jid,
+                observed_sids,
+                occupant,
+                unbound,
+                session,
+            );
             return WebhookEffectOutcome::Completed;
         }
         Err(error) => {
@@ -110,17 +129,29 @@ pub(crate) async fn clear_muji_presence_for_departure(
     let outcome = match actor
         .ask(ClearMujiPresence {
             sender_jid: full_jid.clone(),
+            occupant,
         })
         .await
     {
-        Ok(Some(outcome)) => outcome,
+        Ok(Some(ClearMujiPresenceOutcome::Updated(outcome))) => *outcome,
+        Ok(Some(ClearMujiPresenceOutcome::Superseded)) => {
+            return WebhookEffectOutcome::Stale;
+        }
         Ok(None) => {
             debug!(
                 room = %room_jid,
                 identity = %full_jid,
                 "Participant not in MUC actor; SFU registry cleanup only"
             );
-            record_participant_left(state, room_jid, full_jid, observed_sids, session);
+            record_participant_left(
+                state,
+                room_jid,
+                full_jid,
+                observed_sids,
+                occupant,
+                unbound,
+                session,
+            );
             return super::call_thread_end::maybe_broadcast_call_thread_ended(state, room_jid)
                 .await;
         }
@@ -136,7 +167,15 @@ pub(crate) async fn clear_muji_presence_for_departure(
     };
 
     broadcast_muji_clear(state, room_jid, full_jid, &outcome);
-    record_participant_left(state, room_jid, full_jid, observed_sids, session);
+    record_participant_left(
+        state,
+        room_jid,
+        full_jid,
+        observed_sids,
+        occupant,
+        unbound,
+        session,
+    );
     super::call_thread_end::maybe_broadcast_call_thread_ended(state, room_jid).await
 }
 
@@ -145,6 +184,7 @@ async fn enqueue_muji_presence_clear(
     room_jid: &BareJid,
     full_jid: &FullJid,
     observed_sids: Option<&ObservedCallSids>,
+    occupant: Option<waddle_xmpp_core::OccupancySessionGeneration>,
     session: Option<&waddle_sfu::SessionBinding>,
 ) -> Result<(), crate::call_teardown_outbox::CallTeardownOutboxError> {
     let call_id = match waddle_sfu::CallId::new(room_jid.to_string()) {
@@ -167,7 +207,9 @@ async fn enqueue_muji_presence_clear(
             participant_sid: observed_sids.and_then(|sids| sids.participant_sid.clone()),
         },
         generation: None,
+        unbound_occupant: waddle_sfu::UnboundOccupantPolicy::Keep,
         room_sid: observed_sids.and_then(|sids| sids.room_sid.clone()),
+        occupant,
         // Carried through from the producer when the departure came
         // from a signaling terminate (#1608); webhook-driven callers
         // have no session evidence and pass None.
@@ -193,8 +235,32 @@ fn record_participant_left(
     room_jid: &BareJid,
     full_jid: &FullJid,
     observed_sids: Option<&ObservedCallSids>,
+    occupant: Option<waddle_xmpp_core::OccupancySessionGeneration>,
+    unbound: waddle_sfu::UnboundOccupantPolicy,
     session: Option<&waddle_sfu::SessionBinding>,
 ) {
+    // #1703: a connection-originated clear names its occupant generation and
+    // the registry decides ATOMICALLY under its call-entry guard: a
+    // registration bound to a DIFFERENT generation (a replacement connection,
+    // same sid or not) or to a different sid (the same connection re-initiated
+    // while this clear was in flight, #1608) is untouched; a matching one is
+    // cleared; an unbound
+    // (restored) one follows `unbound` — the live connection's own clear
+    // tears it down, a durable redrive keeps it. A silent mismatch is
+    // correct here for the same reason as the sid path below: the
+    // presence-side outcome was already decided by the actor.
+    if let Some(occupant) = occupant {
+        let _ = super::websocket::muc_call_sfu::note_participant_left_for_occupant(
+            state,
+            room_jid,
+            full_jid,
+            observed_sids,
+            occupant,
+            unbound,
+            session,
+        );
+        return;
+    }
     match session {
         // #1608: the signaling-driven cleanup removes the registration
         // only when its binding still accepts the producing session —
@@ -334,9 +400,16 @@ mod tests {
         let room_jid: BareJid = "enqueue-failure@muc.example.com".parse().expect("room jid");
         let full_jid: FullJid = "alice@example.com/web".parse().expect("full jid");
 
-        let outcome =
-            clear_muji_presence_for_departure(state.as_ref(), &room_jid, &full_jid, None, None)
-                .await;
+        let outcome = clear_muji_presence_for_departure(
+            state.as_ref(),
+            &room_jid,
+            &full_jid,
+            None,
+            None,
+            waddle_sfu::UnboundOccupantPolicy::TearDown,
+            None,
+        )
+        .await;
 
         assert_eq!(
             outcome,
@@ -375,6 +448,7 @@ mod tests {
         let room_jid: BareJid = "live-call-room@muc.example.com".parse().expect("room jid");
         let initiator: FullJid = "alice@example.com/web".parse().expect("initiator jid");
         let owner_session = create_test_server_owner_session(state.as_ref(), "alice").await;
+        let initiator_occupancy_session = waddle_xmpp_core::OccupancySessionGeneration::mint();
         let _ = handle_muc_join(
             state.as_ref(),
             "example.com",
@@ -382,7 +456,11 @@ mod tests {
             &initiator,
             "alice",
             None,
-            &Some(owner_session),
+            crate::server::routes::websocket::handlers::presence::MucJoinConnectionContext {
+                occupancy_session: initiator_occupancy_session,
+                authenticated_session: &Some(owner_session),
+                registry_owner: None,
+            },
         )
         .await;
         state

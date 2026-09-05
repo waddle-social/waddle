@@ -4,7 +4,7 @@ use std::str::FromStr;
 
 use waddle_server::clustering::codec::RemoteStanza;
 use waddle_server::clustering::ordered_relay::{
-    OrderedRelayAck, OrderedRelayChannel, OrderedRelayClaim, OrderedRelayDiversion,
+    MucProxyOrigin, OrderedRelayAck, OrderedRelayChannel, OrderedRelayClaim, OrderedRelayDiversion,
     OrderedRelayDiversionReason, OrderedRelayEnvelopeClaims, OrderedRelayMucProxyKind,
     OrderedRelayNack, OrderedRelayNackReason, OrderedRelayOrigin, OrderedRelayPayload,
     OrderedRelayRecipient, OrderedRelayReply, OrderedRelayReservation, OrderedRelayRoomLane,
@@ -36,6 +36,10 @@ fn origin_node() -> NodeId {
 
 fn room_jid() -> jid::BareJid {
     jid::BareJid::from_str("room@example.test").expect("room jid")
+}
+
+fn connection_origin() -> MucProxyOrigin {
+    MucProxyOrigin::Connection(waddle_xmpp_core::OccupancySessionGeneration::mint())
 }
 
 fn room_channel() -> OrderedRelayChannel {
@@ -428,6 +432,7 @@ fn receiver_duplicate_ack_replays_client_reply_stanzas() {
         payload: OrderedRelayPayload::MucProxy {
             room_jid: room_jid(),
             kind: OrderedRelayMucProxyKind::JoinPresence,
+            origin: connection_origin(),
             stanza: presence_stanza(),
         },
         origin_proof: None,
@@ -891,6 +896,7 @@ fn diverted_room_lane_leaves_the_other_lane_flowing() {
             OrderedRelayPayload::MucProxy {
                 room_jid: room_jid(),
                 kind: OrderedRelayMucProxyKind::MujiJingleIq,
+                origin: connection_origin(),
                 stanza: iq_stanza_to("calls.example.test"),
             },
         )
@@ -905,6 +911,7 @@ fn diverted_room_lane_leaves_the_other_lane_flowing() {
             OrderedRelayPayload::MucProxy {
                 room_jid: room_jid(),
                 kind: OrderedRelayMucProxyKind::GroupchatMessage,
+                origin: MucProxyOrigin::Server,
                 stanza: groupchat_stanza_to("room@example.test"),
             },
         )
@@ -925,6 +932,7 @@ fn diverted_room_lane_leaves_the_other_lane_flowing() {
             OrderedRelayPayload::MucProxy {
                 room_jid: room_jid(),
                 kind: OrderedRelayMucProxyKind::MujiJingleIq,
+                origin: connection_origin(),
                 stanza: iq_stanza_to("calls.example.test"),
             },
         )
@@ -947,6 +955,7 @@ fn muc_proxy_kind_validates_the_carried_stanza_kind() {
         payload: OrderedRelayPayload::MucProxy {
             room_jid: room_jid(),
             kind: OrderedRelayMucProxyKind::JoinPresence,
+            origin: connection_origin(),
             stanza: presence_stanza(),
         },
         origin_proof: None,
@@ -972,6 +981,7 @@ fn muc_proxy_kind_validates_the_carried_stanza_kind() {
         payload: OrderedRelayPayload::MucProxy {
             room_jid: room_jid(),
             kind: OrderedRelayMucProxyKind::GroupchatMessage,
+            origin: MucProxyOrigin::Server,
             stanza: presence_stanza(),
         },
         origin_proof: None,
@@ -1001,6 +1011,7 @@ fn muc_proxy_validation_rejects_malformed_xep0045_shapes() {
         payload: OrderedRelayPayload::MucProxy {
             room_jid: room_jid(),
             kind: OrderedRelayMucProxyKind::JoinPresence,
+            origin: connection_origin(),
             stanza: presence_stanza_to(
                 "room@example.test/romeo",
                 xmpp_parsers::presence::Type::Unavailable,
@@ -1012,6 +1023,7 @@ fn muc_proxy_validation_rejects_malformed_xep0045_shapes() {
         payload: OrderedRelayPayload::MucProxy {
             room_jid: room_jid(),
             kind: OrderedRelayMucProxyKind::GroupchatMessage,
+            origin: MucProxyOrigin::Server,
             stanza: groupchat_stanza_to("room@example.test"),
         },
         ..unavailable_join.clone()
@@ -1020,6 +1032,7 @@ fn muc_proxy_validation_rejects_malformed_xep0045_shapes() {
         payload: OrderedRelayPayload::MucProxy {
             room_jid: room_jid(),
             kind: OrderedRelayMucProxyKind::GroupchatMessage,
+            origin: MucProxyOrigin::Server,
             stanza: groupchat_stanza_to("room@example.test/romeo"),
         },
         ..unavailable_join.clone()
@@ -1062,6 +1075,7 @@ fn muc_proxy_room_iq_kinds_validate_bare_room_vs_occupant_addressing() {
         payload: OrderedRelayPayload::MucProxy {
             room_jid: room_jid(),
             kind: OrderedRelayMucProxyKind::BareRoomIq,
+            origin: MucProxyOrigin::Server,
             stanza: iq_stanza_to("room@example.test"),
         },
         origin_proof: None,
@@ -1070,6 +1084,7 @@ fn muc_proxy_room_iq_kinds_validate_bare_room_vs_occupant_addressing() {
         payload: OrderedRelayPayload::MucProxy {
             room_jid: room_jid(),
             kind: OrderedRelayMucProxyKind::BareRoomIq,
+            origin: MucProxyOrigin::Server,
             stanza: iq_stanza_to("room@example.test/romeo"),
         },
         ..bare_room_iq.clone()
@@ -1078,6 +1093,7 @@ fn muc_proxy_room_iq_kinds_validate_bare_room_vs_occupant_addressing() {
         payload: OrderedRelayPayload::MucProxy {
             room_jid: room_jid(),
             kind: OrderedRelayMucProxyKind::OccupantIq,
+            origin: MucProxyOrigin::Server,
             stanza: iq_stanza_to("room@example.test/romeo"),
         },
         ..bare_room_iq.clone()
@@ -1086,6 +1102,7 @@ fn muc_proxy_room_iq_kinds_validate_bare_room_vs_occupant_addressing() {
         payload: OrderedRelayPayload::MucProxy {
             room_jid: room_jid(),
             kind: OrderedRelayMucProxyKind::OccupantIq,
+            origin: MucProxyOrigin::Server,
             stanza: iq_stanza_to("room@example.test"),
         },
         ..bare_room_iq.clone()
@@ -1155,6 +1172,7 @@ fn muji_payload() -> OrderedRelayPayload {
     OrderedRelayPayload::MucProxy {
         room_jid: room_jid(),
         kind: OrderedRelayMucProxyKind::MujiJingleIq,
+        origin: connection_origin(),
         stanza,
     }
 }
@@ -1186,6 +1204,7 @@ fn receiver_enforces_room_lane_kind_binding() {
         payload: OrderedRelayPayload::MucProxy {
             room_jid: room_jid(),
             kind: OrderedRelayMucProxyKind::GroupchatMessage,
+            origin: MucProxyOrigin::Server,
             stanza: groupchat_stanza_to("room@example.test"),
         },
         ..valid_muji.clone()

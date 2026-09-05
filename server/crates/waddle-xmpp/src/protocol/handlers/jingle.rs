@@ -792,6 +792,10 @@ impl JingleHandler {
             attempt.failed(reason.setup_failure_reason());
             return reason.into_error_reply(iq, &jingle.sid, &mixer_jid);
         }
+        let Some(occupant_session) = ctx.occupant_session else {
+            attempt.failed(CallSetupFailureReason::MembershipCheckFailed);
+            return error_reply(iq, DefinedCondition::InternalServerError, "internal error");
+        };
         // Register and bind to this session-initiate's Jingle sid in
         // one atomic registry operation (#1608): a later terminate
         // carrying a DIFFERENT sid is a stale leftover from a previous
@@ -800,8 +804,12 @@ impl JingleHandler {
         // binding always names the newest session with no window in
         // which a concurrent stale terminate could observe the new
         // registration unbound.
-        self.sfu
-            .register_call_participant_with_session(&call_id, &identity, &session);
+        self.sfu.register_call_participant_with_session(
+            &call_id,
+            &identity,
+            &session,
+            occupant_session,
+        );
 
         // XEP-0166 §6.3 ack: respond to the session-initiate IQ
         // with an EMPTY IQ result IMMEDIATELY. The session-accept
@@ -935,20 +943,33 @@ impl JingleHandler {
             if let Some(reply) = self.check_terminate_rate_limit(iq, ctx) {
                 return reply;
             }
-            // The pre-check above and this removal are NOT one lock:
-            // a concurrent initiate can rebind the registration in
-            // between. The session-scoped unregister re-checks under
-            // the registry's call-entry guard, so a terminate that
-            // read binding A can never remove a registration that has
-            // just been rebound to B (charging the limiter for this
-            // vanishingly-rare raced rejection is accepted).
-            if self.sfu.unregister_call_participant_if_session_matches(
-                &call_id,
-                &sender_identity,
-                presented.as_ref(),
-                None,
-            ) == SessionScopedTeardown::SessionMismatch
-            {
+            // The sid pre-check above and this removal are NOT one lock: a
+            // concurrent initiate can rebind the registration between them.
+            // Connection-originated Muji carries the occupant generation and
+            // the atomic unregister is gated on BOTH the generation (a
+            // registration rebound to a different generation is untouched)
+            // and the presented sid (#1608: the same connection re-initiating
+            // under a new sid is untouched too). An unbound (restored)
+            // registration is torn down: this terminate comes from the live
+            // connection. Server-originated callers without a generation
+            // retain the session-scoped (sid) policy.
+            let teardown = match ctx.occupant_session {
+                Some(occupant) => self.sfu.unregister_call_participant_if_occupant_matches(
+                    &call_id,
+                    &sender_identity,
+                    occupant,
+                    waddle_sfu::UnboundOccupantPolicy::TearDown,
+                    waddle_sfu::SidEvidence::Presented(presented.as_ref()),
+                    None,
+                ),
+                None => self.sfu.unregister_call_participant_if_session_matches(
+                    &call_id,
+                    &sender_identity,
+                    presented.as_ref(),
+                    None,
+                ),
+            };
+            if teardown == SessionScopedTeardown::SessionMismatch {
                 return unknown_session_reply(iq);
             }
         }
@@ -1567,6 +1588,7 @@ mod tests {
         StanzaContext {
             domain: "waddle.test",
             full_jid: jid,
+            occupant_session: Some(waddle_xmpp_core::OccupancySessionGeneration::mint()),
             media_capabilities: Some(MediaCapabilities::from_muc_voice(
                 waddle_xmpp_core::types::Voice::Voiced,
             )),

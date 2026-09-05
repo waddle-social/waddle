@@ -1,3 +1,4 @@
+use super::state::MembershipGenerationFilter;
 use super::*;
 use super::{
     frame::ResponseBatch,
@@ -403,8 +404,9 @@ pub enum MucCleanupOutcome {
 pub async fn cleanup_muc_presence_for_jid(
     state: &WebSocketState,
     jid: &FullJid,
+    session: LeaveSessionSelector,
 ) -> MucCleanupOutcome {
-    if cleanup_muc_presence(state, jid).await {
+    if cleanup_muc_presence(state, jid, session).await {
         MucCleanupOutcome::Completed
     } else {
         MucCleanupOutcome::Failed
@@ -415,6 +417,7 @@ pub async fn cleanup_muc_presence_for_jid(
 pub(crate) async fn redrive_local_muc_cleanup(
     state: &WebSocketState,
     jid: &FullJid,
+    session: LeaveSessionSelector,
     attempt: waddle_xmpp::muc::room_actor::LeaveAttemptId,
     remote_ceiling: u64,
 ) -> MucCleanupOutcome {
@@ -425,9 +428,11 @@ pub(crate) async fn redrive_local_muc_cleanup(
     if cleanup_muc_presence_with_origin(
         state,
         jid,
+        session,
         None,
         attempt,
         SweepFailureRecording::JanitorRequeues { remote_ceiling },
+        LocalRoomSweepScope::EveryRoom,
     )
     .await
     {
@@ -443,14 +448,17 @@ pub(crate) async fn redrive_local_muc_cleanup(
 pub async fn cleanup_muc_presence_for_jid_with_origin(
     state: &WebSocketState,
     jid: &FullJid,
+    session: LeaveSessionSelector,
     origin: crate::server::routes::interpret::OrderedRelayRouteOrigin,
 ) -> MucCleanupOutcome {
     if cleanup_muc_presence_with_origin(
         state,
         jid,
+        session,
         Some(&origin),
         waddle_xmpp::muc::room_actor::LeaveAttemptId::generate(),
         SweepFailureRecording::RecordSweep,
+        LocalRoomSweepScope::EveryRoom,
     )
     .await
     {
@@ -485,13 +493,26 @@ pub async fn cleanup_muc_presence_for_jid_with_origin(
 pub(crate) async fn redrive_remote_muc_cleanup(
     state: &WebSocketState,
     jid: &FullJid,
+    live_generation: Option<waddle_xmpp_core::OccupancySessionGeneration>,
 ) -> MucCleanupOutcome {
+    let remote_ceiling = state
+        .deps
+        .protocol
+        .remote_muc_memberships
+        .generation_watermark();
     if cleanup_muc_presence_with_origin(
         state,
         jid,
+        LeaveSessionSelector::Any,
         None,
         waddle_xmpp::muc::room_actor::LeaveAttemptId::generate(),
-        SweepFailureRecording::RecordSweep,
+        // The remote-membership reconciler already re-drives from the
+        // authoritative membership snapshots, so this retry must not widen a
+        // failed pass into a local `FullJidSweep` with selector `Any`.
+        SweepFailureRecording::JanitorRequeues { remote_ceiling },
+        LocalRoomSweepScope::MembershipBacked {
+            except: live_generation,
+        },
     )
     .await
     {
@@ -812,6 +833,7 @@ async fn cleanup_connection_shutdown_inner(
         let detached_snapshot = waddle_xmpp::stream_management::DetachedSessionSnapshot {
             user_id,
             jid: jid.clone(),
+            occupancy_session: conn.occupancy_session,
             carbons_enabled,
             roster_interested: conn.roster_interested,
             blocklist_interested: conn.blocklist_interested,
@@ -1244,31 +1266,22 @@ async fn cleanup_connection_shutdown_inner(
                         let _ = promote_terminal_recovery(state, outbound_rx, &jid, conn).await;
                     }
                     let cleanup_origin = clustered_cleanup_origin(state, &jid, owner).await;
-                    // Re-check for a same-FullJID replacement AFTER the long
-                    // awaits above (reclamation, promotion, shadow drain):
-                    // our own route was unregistered before them, so any
-                    // entry now present is a replacement that may already
-                    // have joined rooms — its occupancy must not be swept by
-                    // this old session's leave (same rule as the superseded
-                    // path); the ghost-occupant janitor covers an old
-                    // occupancy the replacement did not re-join.
-                    let replacement_bound_during_recovery = state
-                        .deps
-                        .protocol
-                        .connection_registry
-                        .get_entry(&jid)
-                        .is_some();
                     if detach_fail_removed {
-                        if !replacement_bound_during_recovery {
-                            cleanup_muc_presence_with_origin(
-                                state,
-                                &jid,
-                                cleanup_origin.as_ref(),
-                                waddle_xmpp::muc::room_actor::LeaveAttemptId::generate(),
-                                SweepFailureRecording::RecordSweep,
-                            )
-                            .await;
-                        }
+                        // The leave is generation-scoped (#1703): a same-FullJID
+                        // replacement that bound during the long awaits above
+                        // keeps every room it re-joined (`Superseded`), and the
+                        // rooms it did NOT re-join are exactly the ones only this
+                        // old session can converge — so the sweep always runs.
+                        cleanup_muc_presence_with_origin(
+                            state,
+                            &jid,
+                            LeaveSessionSelector::Generation(conn.occupancy_session),
+                            cleanup_origin.as_ref(),
+                            waddle_xmpp::muc::room_actor::LeaveAttemptId::generate(),
+                            SweepFailureRecording::RecordSweep,
+                            LocalRoomSweepScope::EveryRoom,
+                        )
+                        .await;
                         // ADR-0017 Phase 1: mirror the unregister into the
                         // actor tree on the SM-detach-failure fallback. This
                         // session is never stored, so no SM-expiry janitor
@@ -1288,14 +1301,26 @@ async fn cleanup_connection_shutdown_inner(
                     // fails we fall back to a full unregister, so the
                     // caps resource→ver mapping AND any pending
                     // disco#info resolution must be cleared too —
-                    // otherwise stale state lingers indefinitely. Same
-                    // replacement guard as the MUC sweep: a live
-                    // replacement re-published its own caps at bind.
+                    // otherwise stale state lingers indefinitely. A live
+                    // replacement re-published its own caps at bind, so
+                    // this FullJID-keyed resource stays replacement-gated
+                    // (the MUC sweep itself is generation-scoped and is not).
+                    let replacement_bound_during_recovery = state
+                        .deps
+                        .protocol
+                        .connection_registry
+                        .get_entry(&jid)
+                        .is_some();
                     if !replacement_bound_during_recovery {
                         state.deps.protocol.caps_resolver.drop_resource(&jid);
                     }
-                    if !detach_fail_removed && !replacement_bound_during_recovery {
-                        cleanup_muc_presence(state, &jid).await;
+                    if !detach_fail_removed {
+                        cleanup_muc_presence(
+                            state,
+                            &jid,
+                            LeaveSessionSelector::Generation(conn.occupancy_session),
+                        )
+                        .await;
                     }
                     return ConnectionShutdownOutcome::NotPersisted;
                 }
@@ -1329,9 +1354,11 @@ async fn cleanup_connection_shutdown_inner(
         cleanup_muc_presence_with_origin(
             state,
             &jid,
+            LeaveSessionSelector::Generation(conn.occupancy_session),
             cleanup_origin.as_ref(),
             waddle_xmpp::muc::room_actor::LeaveAttemptId::generate(),
             SweepFailureRecording::RecordSweep,
+            LocalRoomSweepScope::EveryRoom,
         )
         .await;
         // ADR-0017 Phase 1: mirror the unregister into the actor tree on
@@ -1778,6 +1805,7 @@ fn terminal_recovery_snapshot(
             .map(|session| session.user_jid.to_string())
             .unwrap_or_else(|| jid.to_bare().to_string()),
         jid: jid.clone(),
+        occupancy_session: conn.occupancy_session,
         carbons_enabled: conn.carbons_enabled,
         roster_interested: conn.roster_interested,
         blocklist_interested: conn.blocklist_interested,
@@ -2220,17 +2248,24 @@ async fn refuse_detach_without_principal(
             .connection_registry
             .get_entry(jid)
             .is_some();
+        // The MUC sweep is generation-scoped (#1703) and therefore runs even
+        // when a replacement retook the FullJID: rooms the replacement
+        // re-joined answer `Superseded`, rooms it did not re-join are only
+        // this session's to converge. The other FullJID-keyed resources stay
+        // owner-gated below.
+        let cleanup_origin = clustered_cleanup_origin(state, jid, &owner).await;
+        cleanup_muc_presence_with_origin(
+            state,
+            jid,
+            LeaveSessionSelector::Generation(conn.occupancy_session),
+            cleanup_origin.as_ref(),
+            waddle_xmpp::muc::room_actor::LeaveAttemptId::generate(),
+            SweepFailureRecording::RecordSweep,
+            LocalRoomSweepScope::EveryRoom,
+        )
+        .await;
         if !replacement_took_over {
-            let cleanup_origin = clustered_cleanup_origin(state, jid, &owner).await;
             state.deps.protocol.caps_resolver.drop_resource(jid);
-            cleanup_muc_presence_with_origin(
-                state,
-                jid,
-                cleanup_origin.as_ref(),
-                waddle_xmpp::muc::room_actor::LeaveAttemptId::generate(),
-                SweepFailureRecording::RecordSweep,
-            )
-            .await;
             unregister_remote_user_resource_if_owner(state, jid, &owner).await;
         } else {
             debug!(
@@ -2307,15 +2342,40 @@ pub(crate) async fn broadcast_unavailable_if_no_replacement(
     handlers::presence::broadcast_unavailable_for_terminated_session(state, jid).await
 }
 
-async fn cleanup_muc_presence(state: &WebSocketState, jid: &FullJid) -> bool {
+async fn cleanup_muc_presence(
+    state: &WebSocketState,
+    jid: &FullJid,
+    session: LeaveSessionSelector,
+) -> bool {
     cleanup_muc_presence_with_origin(
         state,
         jid,
+        session,
         None,
         waddle_xmpp::muc::room_actor::LeaveAttemptId::generate(),
         SweepFailureRecording::RecordSweep,
+        LocalRoomSweepScope::EveryRoom,
     )
     .await
+}
+
+/// Which local rooms a cleanup pass sweeps with its `LeaveByRealJid` loop.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum LocalRoomSweepScope {
+    /// A connection's own cleanup: every local room, with the connection's
+    /// selector (its occupancy generation).
+    EveryRoom,
+    /// The remote-membership janitor's redrive: no connection is behind it,
+    /// so only rooms backed by a retained membership snapshot are swept, each
+    /// with the generation that snapshot recorded. Any other local room this
+    /// full JID occupies belongs to a live (possibly cross-node) session and
+    /// is never that redrive's responsibility. `except` is the live
+    /// replacement's generation when one is bound: its own snapshots are its
+    /// own cleanup's, the other generations' are redriven (#1703).
+    #[cfg(feature = "clustering")]
+    MembershipBacked {
+        except: Option<waddle_xmpp_core::OccupancySessionGeneration>,
+    },
 }
 
 /// Whether an enumeration/lookup failure records a `FullJidSweep`. The
@@ -2333,12 +2393,35 @@ enum SweepFailureRecording {
     JanitorRequeues { remote_ceiling: u64 },
 }
 
+fn retain_remote_membership_departure(
+    state: &WebSocketState,
+    room: BareJid,
+    jid: &FullJid,
+    occupant_session: waddle_xmpp_core::OccupancySessionGeneration,
+    attempt: waddle_xmpp::muc::room_actor::LeaveAttemptId,
+) {
+    state
+        .deps
+        .protocol
+        .pending_local_muc_departures
+        .record(LocalDepartureItem::RoomDeparture {
+            room,
+            jid: jid.clone(),
+            cause: OccupancyLeaveCause::Disconnect,
+            selector: LeaveSessionSelector::Generation(occupant_session),
+            attempt,
+            notified: HashSet::new(),
+        });
+}
+
 async fn cleanup_muc_presence_with_origin(
     state: &WebSocketState,
     jid: &FullJid,
+    session: LeaveSessionSelector,
     origin: Option<&crate::server::routes::interpret::OrderedRelayRouteOrigin>,
     sweep_attempt: waddle_xmpp::muc::room_actor::LeaveAttemptId,
     sweep_recording: SweepFailureRecording,
+    sweep_scope: LocalRoomSweepScope,
 ) -> bool {
     let remote_ceiling = match sweep_recording {
         SweepFailureRecording::RecordSweep => state
@@ -2348,7 +2431,30 @@ async fn cleanup_muc_presence_with_origin(
             .generation_watermark(),
         SweepFailureRecording::JanitorRequeues { remote_ceiling } => remote_ceiling,
     };
-    let mut completed = cleanup_remote_muc_presence(state, jid, origin, remote_ceiling).await;
+    // A connection-scoped sweep (`Generation`) only ever acts on memberships
+    // ITS join recorded; a replacement's snapshot recorded in the meantime
+    // stays for the replacement's own cleanup (#1703).
+    let connection_generation = match (session, sweep_scope) {
+        (LeaveSessionSelector::Generation(generation), LocalRoomSweepScope::EveryRoom) => {
+            MembershipGenerationFilter::Only(generation)
+        }
+        #[cfg(feature = "clustering")]
+        (_, LocalRoomSweepScope::MembershipBacked { except }) => except.map_or(
+            MembershipGenerationFilter::Any,
+            MembershipGenerationFilter::Except,
+        ),
+        (LeaveSessionSelector::Any | LeaveSessionSelector::JoinedAtOrBefore(_), _) => {
+            MembershipGenerationFilter::Any
+        }
+    };
+    let remote_membership_sessions = state
+        .deps
+        .protocol
+        .remote_muc_memberships
+        .occupancy_sessions_for_occupant_below(jid, remote_ceiling, connection_generation);
+    let mut completed =
+        cleanup_remote_muc_presence(state, jid, origin, remote_ceiling, connection_generation)
+            .await;
 
     let room_jids = match RoomRegistry::wrap(state.deps.protocol.room_registry.clone())
         .list_rooms()
@@ -2358,10 +2464,20 @@ async fn cleanup_muc_presence_with_origin(
         Err(error) => {
             completed = false;
             warn!(error = %error, "Failed to list room actors");
+            for (room, occupant_session) in &remote_membership_sessions {
+                retain_remote_membership_departure(
+                    state,
+                    room.clone(),
+                    jid,
+                    *occupant_session,
+                    sweep_attempt,
+                );
+            }
             if sweep_recording == SweepFailureRecording::RecordSweep {
                 state.deps.protocol.pending_local_muc_departures.record(
                     LocalDepartureItem::FullJidSweep {
                         jid: jid.clone(),
+                        selector: session,
                         attempt: sweep_attempt,
                         remote_ceiling,
                     },
@@ -2371,16 +2487,31 @@ async fn cleanup_muc_presence_with_origin(
         }
     };
     for room_jid in room_jids {
+        let session = match remote_membership_sessions.get(&room_jid) {
+            Some(occupant_session) => LeaveSessionSelector::Generation(*occupant_session),
+            #[cfg(feature = "clustering")]
+            None if matches!(sweep_scope, LocalRoomSweepScope::MembershipBacked { .. }) => continue,
+            None => session,
+        };
         let room_actor = match get_room_actor_result(state, &room_jid).await {
             Ok(Some(room_actor)) => room_actor,
             Ok(None) => continue,
             Err(error) => {
                 completed = false;
                 warn!(room = %room_jid, error = %error, "Failed to get room actor");
-                if sweep_recording == SweepFailureRecording::RecordSweep {
+                if let Some(occupant_session) = remote_membership_sessions.get(&room_jid) {
+                    retain_remote_membership_departure(
+                        state,
+                        room_jid.clone(),
+                        jid,
+                        *occupant_session,
+                        sweep_attempt,
+                    );
+                } else if sweep_recording == SweepFailureRecording::RecordSweep {
                     state.deps.protocol.pending_local_muc_departures.record(
                         LocalDepartureItem::FullJidSweep {
                             jid: jid.clone(),
+                            selector: session,
                             attempt: sweep_attempt,
                             remote_ceiling,
                         },
@@ -2399,6 +2530,7 @@ async fn cleanup_muc_presence_with_origin(
             room: room_jid.clone(),
             jid: jid.clone(),
             cause: OccupancyLeaveCause::Disconnect,
+            selector: session,
             attempt,
             notified: HashSet::new(),
         };
@@ -2416,7 +2548,7 @@ async fn cleanup_muc_presence_with_origin(
             LeaveByRealJid {
                 sender_jid: jid.clone(),
                 cause: OccupancyLeaveCause::Disconnect,
-                session: LeaveSessionSelector::Any,
+                session,
                 attempt,
                 origin: waddle_xmpp::muc::room_actor::LeaveOrigin::Fresh,
             },
@@ -2437,7 +2569,38 @@ async fn cleanup_muc_presence_with_origin(
         // connection is physically gone, so it runs on the first attempt
         // regardless of how the room answered (today's semantics; #1703 tracks
         // the generation-safe variant).
-        super::muc_call_sfu::unregister_participant_from_room(state, &room_jid, jid);
+        // An unbound (webhook-restored) SFU registration is torn down only
+        // when the room confirmed this session's departure; on
+        // `Superseded`/`NotOccupant`/failure it may be a restored live
+        // replacement and is kept (#1703).
+        // Only a FRESH pass counts as evidence: the janitor's redrive reuses
+        // the original attempt and can replay a retained receipt (an owed
+        // old-nick departure) while the full JID is live again under another
+        // nick.
+        let unbound_policy = match (&leave_result, sweep_recording) {
+            (
+                Ok(LeaveDisposition::Left(_) | LeaveDisposition::Suppressed { .. }),
+                SweepFailureRecording::RecordSweep,
+            ) => waddle_sfu::UnboundOccupantPolicy::TearDown,
+            _ => waddle_sfu::UnboundOccupantPolicy::Keep,
+        };
+        match session {
+            LeaveSessionSelector::Generation(occupant) => {
+                let _ = super::muc_call_sfu::unregister_participant_from_room_if_occupant_matches(
+                    state,
+                    &room_jid,
+                    jid,
+                    occupant,
+                    unbound_policy,
+                    None,
+                );
+            }
+            LeaveSessionSelector::Any | LeaveSessionSelector::JoinedAtOrBefore(_) => {
+                super::muc_call_sfu::unregister_participant_from_room_ungated(
+                    state, &room_jid, jid,
+                );
+            }
+        }
         match leave_result {
             Ok(LeaveDisposition::Left(outcome)) => {
                 debug!(
@@ -2508,7 +2671,13 @@ async fn cleanup_muc_presence_with_origin(
                         room: room_jid,
                         jid: jid.clone(),
                         cause: OccupancyLeaveCause::Disconnect,
-                        selector: LeaveSessionSelector::JoinedAtOrBefore(watermark),
+                        selector: match session {
+                            LeaveSessionSelector::Generation(_) => session,
+                            LeaveSessionSelector::Any
+                            | LeaveSessionSelector::JoinedAtOrBefore(_) => {
+                                LeaveSessionSelector::JoinedAtOrBefore(watermark)
+                            }
+                        },
                         attempt,
                         notified: HashSet::new(),
                     },
@@ -2549,7 +2718,7 @@ async fn cleanup_muc_presence_with_origin(
                         room: room_jid.clone(),
                         jid: jid.clone(),
                         cause: OccupancyLeaveCause::Disconnect,
-                        selector: LeaveSessionSelector::Any,
+                        selector: session,
                         attempt,
                         notified: HashSet::new(),
                     },
@@ -2569,7 +2738,7 @@ async fn cleanup_muc_presence_with_origin(
                         jid: jid.clone(),
                         actor: room_actor.id(),
                         cause: OccupancyLeaveCause::Disconnect,
-                        selector: LeaveSessionSelector::Any,
+                        selector: session,
                         attempt,
                         notified: HashSet::new(),
                     },
@@ -2587,17 +2756,25 @@ async fn cleanup_muc_presence_with_origin(
 }
 
 #[cfg(feature = "clustering")]
+fn remote_membership_leave_origin(
+    membership: &crate::server::routes::websocket::state::RemoteMucMembershipSnapshot,
+) -> crate::clustering::ordered_relay::MucProxyOrigin {
+    crate::clustering::ordered_relay::MucProxyOrigin::Connection(membership.occupant_session())
+}
+
+#[cfg(feature = "clustering")]
 async fn cleanup_remote_muc_presence(
     state: &WebSocketState,
     jid: &FullJid,
     cleanup_origin: Option<&crate::server::routes::interpret::OrderedRelayRouteOrigin>,
     remote_ceiling: u64,
+    connection_generation: MembershipGenerationFilter,
 ) -> bool {
     let memberships = state
         .deps
         .protocol
         .remote_muc_memberships
-        .take_for_occupant_below(jid, remote_ceiling);
+        .take_for_occupant_below_with_session(jid, remote_ceiling, connection_generation);
     if memberships.is_empty() {
         return true;
     }
@@ -2672,7 +2849,15 @@ async fn cleanup_remote_muc_presence(
             );
             continue;
         }
-        super::muc_call_sfu::unregister_participant_from_room(state, &room_jid, jid);
+        let occupant_session = membership.occupant_session();
+        let _ = super::muc_call_sfu::unregister_participant_from_room_if_occupant_matches(
+            state,
+            &room_jid,
+            jid,
+            occupant_session,
+            waddle_sfu::UnboundOccupantPolicy::Keep,
+            None,
+        );
         let mut presence =
             xmpp_parsers::presence::Presence::new(xmpp_parsers::presence::Type::Unavailable);
         presence.from = Some(jid::Jid::from(jid.clone()));
@@ -2683,6 +2868,7 @@ async fn cleanup_remote_muc_presence(
                 &room_jid,
                 &stanza,
                 crate::clustering::ordered_relay::OrderedRelayMucProxyKind::OccupantPresence,
+                remote_membership_leave_origin(&membership),
                 &origin,
             )
             .await;
@@ -2976,6 +3162,7 @@ async fn cleanup_remote_muc_presence(
     _jid: &FullJid,
     _cleanup_origin: Option<&crate::server::routes::interpret::OrderedRelayRouteOrigin>,
     _remote_ceiling: u64,
+    _connection_generation: MembershipGenerationFilter,
 ) -> bool {
     true
 }
@@ -3080,16 +3267,15 @@ pub(super) async fn cleanup_invalidated_detached_session(
     //    invalidation): it may have legitimately re-joined rooms under
     //    the shared full JID — skip cleanup; its own disconnect path
     //    cleans up when it ends.
-    let foreign_live_entry = !replacement_is_current_owner
-        && state
-            .deps
-            .protocol
-            .connection_registry
-            .get_entry(&detached.jid)
-            .is_some();
-    if !foreign_live_entry {
-        cleanup_muc_presence(state, &detached.jid).await;
-    }
+    // Generation-scoped (#1703): a live same-FullJID replacement keeps the
+    // rooms it re-joined (`Superseded`); the rooms it did not re-join are
+    // only this detached session's to converge, so the sweep always runs.
+    cleanup_muc_presence(
+        state,
+        &detached.jid,
+        LeaveSessionSelector::Generation(detached.occupancy_session),
+    )
+    .await;
 }
 
 pub(crate) async fn get_room_actor(
@@ -3587,13 +3773,23 @@ mod eviction_tests {
         let occupant = full_jid("alice@example.com/web");
         let room = room_bare_jid("race");
 
-        memberships.record_join(&occupant, &room, "old-nick");
+        memberships.record_join(
+            &occupant,
+            &room,
+            "old-nick",
+            waddle_xmpp_core::OccupancySessionGeneration::mint(),
+        );
         let snapshot = memberships.take_for_occupant(&occupant);
         assert_eq!(snapshot.len(), 1);
         assert_eq!(snapshot[0].room(), &room);
         assert_eq!(snapshot[0].nick(), "old-nick");
 
-        memberships.record_join(&occupant, &room, "fresh-nick");
+        memberships.record_join(
+            &occupant,
+            &room,
+            "fresh-nick",
+            waddle_xmpp_core::OccupancySessionGeneration::mint(),
+        );
         memberships.restore_snapshot_if_current(&snapshot[0]);
 
         assert_eq!(
@@ -3614,13 +3810,23 @@ mod eviction_tests {
         let occupant = full_jid("alice@example.com/web");
         let room = room_bare_jid("race-success");
 
-        memberships.record_join(&occupant, &room, "old-nick");
+        memberships.record_join(
+            &occupant,
+            &room,
+            "old-nick",
+            waddle_xmpp_core::OccupancySessionGeneration::mint(),
+        );
         let snapshot = memberships.take_for_occupant(&occupant);
         assert_eq!(snapshot.len(), 1);
         assert_eq!(snapshot[0].room(), &room);
         assert_eq!(snapshot[0].nick(), "old-nick");
 
-        memberships.record_join(&occupant, &room, "fresh-nick");
+        memberships.record_join(
+            &occupant,
+            &room,
+            "fresh-nick",
+            waddle_xmpp_core::OccupancySessionGeneration::mint(),
+        );
         assert_eq!(
             remote_muc_cleanup_disposition(&MucProxyRouteDecision::Attempted(
                 MucProxyRouteAttempt {
@@ -3636,6 +3842,32 @@ mod eviction_tests {
         assert_eq!(
             memberships.nick_for(&occupant, &room).as_deref(),
             Some("fresh-nick")
+        );
+    }
+
+    #[cfg(feature = "clustering")]
+    #[test]
+    fn restored_remote_membership_redrives_with_its_connection_generation() {
+        let memberships = crate::server::routes::websocket::state::RemoteMucMemberships::default();
+        let occupant = full_jid("alice@example.com/web");
+        let room = room_bare_jid("generation-redrive");
+        let occupant_session = waddle_xmpp_core::OccupancySessionGeneration::mint();
+        memberships.record_join(&occupant, &room, "alice", occupant_session);
+
+        let first = memberships.take_for_occupant(&occupant);
+        assert_eq!(first.len(), 1);
+        assert_eq!(
+            remote_membership_leave_origin(&first[0]),
+            crate::clustering::ordered_relay::MucProxyOrigin::Connection(occupant_session),
+        );
+
+        memberships.restore_snapshot_if_current(&first[0]);
+        let retry = memberships.take_for_occupant(&occupant);
+        assert_eq!(retry.len(), 1);
+        assert_eq!(
+            remote_membership_leave_origin(&retry[0]),
+            crate::clustering::ordered_relay::MucProxyOrigin::Connection(occupant_session),
+            "a retained cleanup must never reconstruct the relay as Any",
         );
     }
 
@@ -3947,8 +4179,8 @@ mod remote_muc_cleanup_disposition_tests {
 mod local_departure_cleanup_tests {
     use super::super::tests::{
         create_test_websocket_state, create_test_websocket_state_with_clustering,
-        create_test_websocket_state_with_sfu_and_clustering, register_test_connection,
-        snapshot_room, RecordingSfu,
+        create_test_websocket_state_with_sfu, create_test_websocket_state_with_sfu_and_clustering,
+        register_test_connection, snapshot_room, RecordingSfu,
     };
     use super::*;
     use crate::clustering::ClusteringHandles;
@@ -3961,6 +4193,7 @@ mod local_departure_cleanup_tests {
     };
     use std::time::{Duration, Instant};
     use tokio::sync::mpsc;
+    use waddle_sfu::SfuService;
     use waddle_xmpp::muc::durable::{
         DurableRoomState, MucDurableFuture, MucDurableStore, RoomClaimFenceContext,
     };
@@ -4210,9 +4443,41 @@ mod local_departure_cleanup_tests {
                 affiliation_grant: JoinAffiliationGrant::Resolver(Affiliation::Member),
                 local_domain: "example.com".to_string(),
                 admission_revision: 0,
+                session: waddle_xmpp::muc::room_actor::OccupancySessionGeneration::mint(),
             })
             .await
             .expect("join occupant");
+    }
+
+    async fn join_member_with_generation(
+        room_actor: &ActorRef<RoomActor>,
+        jid: &FullJid,
+        nick: &str,
+        session: waddle_xmpp::muc::room_actor::OccupancySessionGeneration,
+    ) {
+        let admission_revision = room_actor
+            .ask(GetSnapshot)
+            .await
+            .expect("snapshot before join")
+            .admission_revision;
+        room_actor
+            .ask(JoinWithAffiliation {
+                sender_jid: jid.clone(),
+                nick: nick.to_string(),
+                affiliation_grant: JoinAffiliationGrant::Resolver(Affiliation::Member),
+                local_domain: "example.com".to_string(),
+                admission_revision,
+                session,
+            })
+            .await
+            .expect("join occupant with generation");
+    }
+
+    async fn cleanup_muc_presence_for_jid(
+        state: &WebSocketState,
+        jid: &FullJid,
+    ) -> MucCleanupOutcome {
+        super::cleanup_muc_presence_for_jid(state, jid, LeaveSessionSelector::Any).await
     }
 
     #[tokio::test]
@@ -4393,6 +4658,428 @@ mod local_departure_cleanup_tests {
             "the first attempt unregisters SFU"
         );
         assert_eq!(state.deps.protocol.pending_local_muc_departures.len(), 1);
+    }
+
+    /// A registration restored without a generation (webhook after a restart)
+    /// is torn down when the room confirms the session's departure.
+    #[tokio::test]
+    async fn confirmed_disconnect_cleanup_tears_down_an_unbound_sfu_registration() {
+        let recorder = Arc::new(RecordingSfu::default());
+        let state = create_test_websocket_state_with_sfu(recorder.clone()).await;
+        let room_jid = room_jid("unbound-confirmed");
+        let room_actor = state
+            .deps
+            .protocol
+            .room_registry
+            .ask(CreateRoom {
+                room_jid: room_jid.clone(),
+                waddle_id: "w".to_string(),
+                channel_id: "c".to_string(),
+                config: RoomConfig::default(),
+            })
+            .await
+            .expect("create room");
+        let alice = full_jid("alice@example.com/web");
+        let generation = waddle_xmpp::muc::room_actor::OccupancySessionGeneration::mint();
+        join_member_with_generation(&room_actor, &alice, "alice", generation).await;
+        let call_id = waddle_sfu::CallId::new(room_jid.to_string()).expect("call id");
+        let identity = waddle_sfu::Identity::from_jid(alice.clone());
+        recorder.register_call_participant(&call_id, &identity);
+
+        assert!(
+            cleanup_muc_presence_with_origin(
+                state.as_ref(),
+                &alice,
+                LeaveSessionSelector::Generation(generation),
+                None,
+                waddle_xmpp::muc::room_actor::LeaveAttemptId::generate(),
+                SweepFailureRecording::RecordSweep,
+                LocalRoomSweepScope::EveryRoom,
+            )
+            .await
+        );
+        assert!(
+            !recorder.has_call_participant(&call_id, &identity),
+            "the room confirmed the departure, so the unbound registration is torn down"
+        );
+    }
+
+    /// The same unbound registration survives a stale cleanup the room answers
+    /// `Superseded`: it may belong to the restored live replacement.
+    #[tokio::test]
+    async fn superseded_disconnect_cleanup_keeps_an_unbound_sfu_registration() {
+        let recorder = Arc::new(RecordingSfu::default());
+        let state = create_test_websocket_state_with_sfu(recorder.clone()).await;
+        let room_jid = room_jid("unbound-superseded");
+        let room_actor = state
+            .deps
+            .protocol
+            .room_registry
+            .ask(CreateRoom {
+                room_jid: room_jid.clone(),
+                waddle_id: "w".to_string(),
+                channel_id: "c".to_string(),
+                config: RoomConfig::default(),
+            })
+            .await
+            .expect("create room");
+        let alice = full_jid("alice@example.com/web");
+        let first_generation = waddle_xmpp::muc::room_actor::OccupancySessionGeneration::mint();
+        let second_generation = waddle_xmpp::muc::room_actor::OccupancySessionGeneration::mint();
+        join_member_with_generation(&room_actor, &alice, "alice", first_generation).await;
+        join_member_with_generation(&room_actor, &alice, "alice", second_generation).await;
+        let call_id = waddle_sfu::CallId::new(room_jid.to_string()).expect("call id");
+        let identity = waddle_sfu::Identity::from_jid(alice.clone());
+        recorder.register_call_participant(&call_id, &identity);
+
+        assert!(
+            cleanup_muc_presence_with_origin(
+                state.as_ref(),
+                &alice,
+                LeaveSessionSelector::Generation(first_generation),
+                None,
+                waddle_xmpp::muc::room_actor::LeaveAttemptId::generate(),
+                SweepFailureRecording::RecordSweep,
+                LocalRoomSweepScope::EveryRoom,
+            )
+            .await
+        );
+        assert!(
+            recorder.has_call_participant(&call_id, &identity),
+            "a superseded cleanup must not delete a restored (unbound) registration"
+        );
+        let snapshot = room_actor.ask(GetSnapshot).await.expect("snapshot");
+        assert_eq!(
+            snapshot.room.session_generation(&alice),
+            Some(second_generation)
+        );
+    }
+
+    #[tokio::test]
+    async fn generation_scoped_disconnect_cleanup_keeps_a_same_full_jid_replacement_and_its_sfu_registration(
+    ) {
+        let recorder = Arc::new(RecordingSfu::default());
+        let state = create_test_websocket_state_with_sfu(recorder.clone()).await;
+        let room_jid = room_jid("generation-replacement");
+        let room_actor = state
+            .deps
+            .protocol
+            .room_registry
+            .ask(CreateRoom {
+                room_jid: room_jid.clone(),
+                waddle_id: "w".to_string(),
+                channel_id: "c".to_string(),
+                config: RoomConfig::default(),
+            })
+            .await
+            .expect("create room");
+        let alice = full_jid("alice@example.com/web");
+        let first_generation = waddle_xmpp::muc::room_actor::OccupancySessionGeneration::mint();
+        let second_generation = waddle_xmpp::muc::room_actor::OccupancySessionGeneration::mint();
+        join_member_with_generation(&room_actor, &alice, "alice", first_generation).await;
+
+        let call_id = waddle_sfu::CallId::new(room_jid.to_string()).expect("call id");
+        let identity = waddle_sfu::Identity::from_jid(alice.clone());
+        recorder.register_call_participant_with_session(
+            &call_id,
+            &identity,
+            &waddle_sfu::SessionBinding::new("muji-g1").expect("sid"),
+            first_generation,
+        );
+
+        join_member_with_generation(&room_actor, &alice, "alice", second_generation).await;
+        recorder.register_call_participant_with_session(
+            &call_id,
+            &identity,
+            &waddle_sfu::SessionBinding::new("muji-g2").expect("sid"),
+            second_generation,
+        );
+
+        assert!(
+            cleanup_muc_presence_with_origin(
+                state.as_ref(),
+                &alice,
+                LeaveSessionSelector::Generation(first_generation),
+                None,
+                waddle_xmpp::muc::room_actor::LeaveAttemptId::generate(),
+                SweepFailureRecording::RecordSweep,
+                LocalRoomSweepScope::EveryRoom,
+            )
+            .await
+        );
+
+        let snapshot = room_actor
+            .ask(GetSnapshot)
+            .await
+            .expect("snapshot after cleanup");
+        assert!(
+            snapshot.room.find_occupant_by_real_jid(&alice).is_some(),
+            "the replacement occupant must remain in the room"
+        );
+        assert!(
+            recorder.has_call_participant(&call_id, &identity),
+            "generation-scoped teardown must not remove the replacement SFU registration"
+        );
+    }
+
+    #[tokio::test]
+    async fn generation_scoped_disconnect_cleanup_without_a_replacement_evicts_and_unregisters() {
+        let recorder = Arc::new(RecordingSfu::default());
+        let state = create_test_websocket_state_with_sfu(recorder.clone()).await;
+        let room_jid = room_jid("generation-evict");
+        let room_actor = state
+            .deps
+            .protocol
+            .room_registry
+            .ask(CreateRoom {
+                room_jid: room_jid.clone(),
+                waddle_id: "w".to_string(),
+                channel_id: "c".to_string(),
+                config: RoomConfig::default(),
+            })
+            .await
+            .expect("create room");
+        let alice = full_jid("alice@example.com/web");
+        let generation = waddle_xmpp::muc::room_actor::OccupancySessionGeneration::mint();
+        join_member_with_generation(&room_actor, &alice, "alice", generation).await;
+
+        let call_id = waddle_sfu::CallId::new(room_jid.to_string()).expect("call id");
+        let identity = waddle_sfu::Identity::from_jid(alice.clone());
+        recorder.register_call_participant_with_session(
+            &call_id,
+            &identity,
+            &waddle_sfu::SessionBinding::new("muji-live").expect("sid"),
+            generation,
+        );
+
+        assert!(
+            cleanup_muc_presence_with_origin(
+                state.as_ref(),
+                &alice,
+                LeaveSessionSelector::Generation(generation),
+                None,
+                waddle_xmpp::muc::room_actor::LeaveAttemptId::generate(),
+                SweepFailureRecording::RecordSweep,
+                LocalRoomSweepScope::EveryRoom,
+            )
+            .await
+        );
+
+        let snapshot = room_actor
+            .ask(GetSnapshot)
+            .await
+            .expect("snapshot after cleanup");
+        assert!(
+            snapshot.room.find_occupant_by_real_jid(&alice).is_none(),
+            "the generation-matched occupant must be evicted"
+        );
+        assert!(
+            !recorder.has_call_participant(&call_id, &identity),
+            "generation-scoped teardown must remove the matching SFU registration"
+        );
+    }
+
+    #[tokio::test]
+    async fn generation_scoped_failed_cleanup_unbinds_the_matching_sfu_participant() {
+        let store = CleanupProjectionStore::new();
+        let recorder = Arc::new(RecordingSfu::default());
+        let state = clustered_state_with_sfu_and_store(store.clone(), recorder.clone()).await;
+        let room_jid = room_jid("generation-failed-ask");
+        let room_actor = state
+            .deps
+            .protocol
+            .room_registry
+            .ask(CreateRoom {
+                room_jid: room_jid.clone(),
+                waddle_id: "w".to_string(),
+                channel_id: "c".to_string(),
+                config: RoomConfig::default(),
+            })
+            .await
+            .expect("create room");
+        let alice = full_jid("alice@example.com/web");
+        let first_generation = waddle_xmpp::muc::room_actor::OccupancySessionGeneration::mint();
+        join_member_with_generation(&room_actor, &alice, "alice", first_generation).await;
+
+        let call_id = waddle_sfu::CallId::new(room_jid.to_string()).expect("call id");
+        let identity = waddle_sfu::Identity::from_jid(alice.clone());
+        recorder.register_call_participant_with_session(
+            &call_id,
+            &identity,
+            &waddle_sfu::SessionBinding::new("muji-g1").expect("sid"),
+            first_generation,
+        );
+        store.set_leave_mode(LeaveProjectionMode::NotOwner);
+
+        assert!(
+            !cleanup_muc_presence_with_origin(
+                state.as_ref(),
+                &alice,
+                LeaveSessionSelector::Generation(first_generation),
+                None,
+                waddle_xmpp::muc::room_actor::LeaveAttemptId::generate(),
+                SweepFailureRecording::RecordSweep,
+                LocalRoomSweepScope::EveryRoom,
+            )
+            .await
+        );
+
+        let snapshot = room_actor
+            .ask(GetSnapshot)
+            .await
+            .expect("snapshot after failed cleanup");
+        assert!(
+            snapshot.room.find_occupant_by_real_jid(&alice).is_some(),
+            "the sealed actor keeps the occupant after the failed ask"
+        );
+        assert!(
+            !recorder.has_call_participant(&call_id, &identity),
+            "ask failure must still tear down the matching SFU registration"
+        );
+    }
+
+    #[cfg(feature = "clustering")]
+    #[tokio::test]
+    async fn redriven_remote_membership_cleanup_does_not_evict_a_local_replacement() {
+        let store = CleanupProjectionStore::new();
+        let state = clustered_state_with_store(store).await;
+        let room_jid = room_jid("remote-redrive-local-replacement");
+        let room_actor = state
+            .deps
+            .protocol
+            .room_registry
+            .ask(CreateRoom {
+                room_jid: room_jid.clone(),
+                waddle_id: "w".to_string(),
+                channel_id: "c".to_string(),
+                config: RoomConfig::default(),
+            })
+            .await
+            .expect("create room");
+        let alice = full_jid("alice@example.com/web");
+        let replacement_generation =
+            waddle_xmpp::muc::room_actor::OccupancySessionGeneration::mint();
+
+        state.deps.protocol.remote_muc_memberships.record_join(
+            &alice,
+            &room_jid,
+            "alice",
+            waddle_xmpp_core::OccupancySessionGeneration::mint(),
+        );
+        join_member_with_generation(&room_actor, &alice, "alice", replacement_generation).await;
+
+        assert_eq!(
+            redrive_remote_muc_cleanup(state.as_ref(), &alice, None).await,
+            MucCleanupOutcome::Failed,
+            "the fixture has no relay bridge, so the remote responsibility stays retained"
+        );
+
+        let snapshot = room_actor
+            .ask(GetSnapshot)
+            .await
+            .expect("snapshot after redrive");
+        assert_eq!(
+            snapshot.room.session_generation(&alice),
+            Some(replacement_generation),
+            "the redriven remote cleanup must not evict the newer local replacement"
+        );
+        assert!(
+            snapshot.room.find_occupant_by_real_jid(&alice).is_some(),
+            "the replacement occupant must remain in the room"
+        );
+    }
+
+    /// Node A retains alice's old-generation membership for remote room X;
+    /// the replacement (same full JID, new generation, possibly bound on
+    /// another node) occupies a DIFFERENT local room Y. The membership
+    /// redrive has no connection behind it, so Y is not its responsibility:
+    /// it must never sweep Y with an `Any` leave.
+    #[cfg(feature = "clustering")]
+    #[tokio::test]
+    async fn redriven_remote_membership_cleanup_never_sweeps_rooms_without_a_snapshot() {
+        let store = CleanupProjectionStore::new();
+        let state = clustered_state_with_store(store).await;
+        let remote_room = room_jid("remote-redrive-two-rooms-x");
+        let other_room = room_jid("remote-redrive-two-rooms-y");
+        let other_actor = state
+            .deps
+            .protocol
+            .room_registry
+            .ask(CreateRoom {
+                room_jid: other_room.clone(),
+                waddle_id: "w".to_string(),
+                channel_id: "c".to_string(),
+                config: RoomConfig::default(),
+            })
+            .await
+            .expect("create room");
+        let alice = full_jid("alice@example.com/web");
+        let replacement_generation =
+            waddle_xmpp::muc::room_actor::OccupancySessionGeneration::mint();
+
+        state.deps.protocol.remote_muc_memberships.record_join(
+            &alice,
+            &remote_room,
+            "alice",
+            waddle_xmpp_core::OccupancySessionGeneration::mint(),
+        );
+        join_member_with_generation(&other_actor, &alice, "alice", replacement_generation).await;
+
+        assert_eq!(
+            redrive_remote_muc_cleanup(state.as_ref(), &alice, None).await,
+            MucCleanupOutcome::Failed,
+            "the fixture has no relay bridge, so the remote responsibility stays retained"
+        );
+
+        let snapshot = other_actor
+            .ask(GetSnapshot)
+            .await
+            .expect("snapshot after redrive");
+        assert_eq!(
+            snapshot.room.session_generation(&alice),
+            Some(replacement_generation),
+            "a room without a membership snapshot is never swept by the redrive"
+        );
+        assert_eq!(snapshot.room.occupant_count(), 1);
+    }
+
+    #[cfg(feature = "clustering")]
+    #[tokio::test]
+    async fn redriven_remote_membership_cleanup_failure_does_not_reconstruct_any_sweep() {
+        let store = CleanupProjectionStore::new();
+        let state = clustered_state_with_store(store).await;
+        let alice = full_jid("alice@example.com/web");
+        let room_jid = room_jid("remote-redrive-no-any-sweep");
+
+        let occupant_session = waddle_xmpp_core::OccupancySessionGeneration::mint();
+        state.deps.protocol.remote_muc_memberships.record_join(
+            &alice,
+            &room_jid,
+            "alice",
+            occupant_session,
+        );
+        state.deps.protocol.room_registry.kill();
+        state.deps.protocol.room_registry.wait_for_shutdown().await;
+
+        assert_eq!(
+            redrive_remote_muc_cleanup(state.as_ref(), &alice, None).await,
+            MucCleanupOutcome::Failed
+        );
+        let retained = state
+            .deps
+            .protocol
+            .pending_local_muc_departures
+            .take_due(std::time::Instant::now() + std::time::Duration::from_secs(1));
+        assert_eq!(retained.len(), 1);
+        assert!(matches!(
+            &retained[0].item,
+            LocalDepartureItem::RoomDeparture {
+                room,
+                jid,
+                selector: LeaveSessionSelector::Generation(generation),
+                ..
+            } if room == &room_jid && jid == &alice && generation == &occupant_session
+        ));
     }
 
     #[tokio::test]

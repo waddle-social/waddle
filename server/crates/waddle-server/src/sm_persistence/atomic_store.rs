@@ -62,16 +62,17 @@ async fn store_session_atomic_inner(
     tx.execute(
         r#"
         INSERT INTO sm_sessions (
-            stream_id, user_id, full_jid, inbound_count, shadow_ordinal, outbound_count,
+            stream_id, user_id, full_jid, occupancy_session, inbound_count, shadow_ordinal, outbound_count,
             last_acked, max_resume_secs, detached_at_ms, max_resume_duration_ms,
             carbons_enabled, roster_interested, blocklist_interested, presence_available,
             presence_show, presence_status, presence_priority, replay_gap_through,
             presence_payloads, bare_jid, auth_context_id, auth_context_version,
             principal_auth_epoch
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         ON CONFLICT (stream_id) DO UPDATE SET
             user_id = excluded.user_id,
             full_jid = excluded.full_jid,
+            occupancy_session = excluded.occupancy_session,
             inbound_count = excluded.inbound_count,
             shadow_ordinal = excluded.shadow_ordinal,
             outbound_count = excluded.outbound_count,
@@ -97,6 +98,7 @@ async fn store_session_atomic_inner(
             session.stream_id.as_str().to_string(),
             session.user_id.clone(),
             session.jid.to_string(),
+            Some(session.occupancy_session.to_string()),
             i64::from(session.inbound_count),
             session.shadow_ordinal.to_storage().to_string(),
             i64::from(session.outbound_count),

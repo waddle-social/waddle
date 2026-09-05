@@ -7,14 +7,15 @@ pub(super) async fn validate_groupchat_rich_targets(
     sender_room_nick_jid: Option<&Jid>,
     room_actor: &ActorRef<RoomActor>,
     sender_nickname_generation: Option<u64>,
-) -> Result<(), StanzaError> {
+) -> Result<(), Box<StanzaError>> {
     if message.from.is_none() {
         return Ok(());
     }
     if has_malformed_rich_payload(message) {
         return Err(bad_request_error(
             "Rich-message payload is missing a required identifier or contains an invalid JID.",
-        ));
+        )
+        .into());
     }
     let Some(mam_storage) = deps.mam_storage else {
         // No archive available — nothing to validate against. Mirrors
@@ -41,7 +42,8 @@ pub(super) async fn validate_groupchat_rich_targets(
         {
             return Err(forbidden_error(
                 "Sender is not joined to the room; rich-target operations require occupancy.",
-            ));
+            )
+            .into());
         }
         return Ok(());
     };
@@ -52,13 +54,11 @@ pub(super) async fn validate_groupchat_rich_targets(
             .await
         {
             Ok(Some(original)) => original,
-            Ok(None) => return Err(item_not_found_error("Correction target not found.")),
-            Err(_) => return Err(internal_server_error_for_lookup()),
+            Ok(None) => return Err(item_not_found_error("Correction target not found.").into()),
+            Err(_) => return Err(internal_server_error_for_lookup().into()),
         };
         if !sender_matches_groupchat_from(sender_archive_view, &original.from) {
-            return Err(forbidden_error(
-                "Only the original sender may correct a message.",
-            ));
+            return Err(forbidden_error("Only the original sender may correct a message.").into());
         }
         verify_groupchat_occupancy_generation(
             sender_archive_view,
@@ -75,13 +75,11 @@ pub(super) async fn validate_groupchat_rich_targets(
                 .await
             {
                 Ok(Some(original)) => original,
-                Ok(None) => return Err(item_not_found_error("Retraction target not found.")),
-                Err(_) => return Err(internal_server_error_for_lookup()),
+                Ok(None) => return Err(item_not_found_error("Retraction target not found.").into()),
+                Err(_) => return Err(internal_server_error_for_lookup().into()),
             };
         if !sender_matches_groupchat_from(sender_archive_view, &original.from) {
-            return Err(forbidden_error(
-                "Only the original sender may retract a message.",
-            ));
+            return Err(forbidden_error("Only the original sender may retract a message.").into());
         }
     }
     Ok(())
@@ -137,16 +135,17 @@ pub(super) async fn verify_groupchat_occupancy_generation(
     original: &MamArchivedMessage,
     room_actor: &ActorRef<RoomActor>,
     sender_current_generation: Option<u64>,
-) -> Result<(), StanzaError> {
+) -> Result<(), Box<StanzaError>> {
     let Some(nick) = sender.resource().map(|r| r.to_string()) else {
-        return Err(forbidden_error(
-            "Correction sender has no MUC nickname for occupancy check.",
-        ));
+        return Err(
+            forbidden_error("Correction sender has no MUC nickname for occupancy check.").into(),
+        );
     };
     let Some(archived_generation) = original.nickname_generation else {
         return Err(forbidden_error(
             "Original message predates occupancy tracking; correction window has closed.",
-        ));
+        )
+        .into());
     };
     // Prefer the generation snapshot already captured by `dispatch_to_room`
     // (it came from the same `GetRoomSnapshot` query that populated the
@@ -160,13 +159,14 @@ pub(super) async fn verify_groupchat_occupancy_generation(
             .await
         {
             Ok(value) => value,
-            Err(_) => return Err(internal_server_error_for_lookup()),
+            Err(_) => return Err(internal_server_error_for_lookup().into()),
         },
     };
     if current_generation != archived_generation {
         return Err(forbidden_error(
             "Occupancy generation has advanced; correction is no longer permitted across the leave/rejoin boundary.",
-        ));
+        )
+        .into());
     }
     Ok(())
 }

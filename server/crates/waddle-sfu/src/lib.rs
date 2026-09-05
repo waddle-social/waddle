@@ -22,6 +22,7 @@
 
 use std::future::Future;
 use std::pin::Pin;
+use waddle_xmpp_core::OccupancySessionGeneration;
 
 mod admin;
 mod call;
@@ -61,6 +62,43 @@ pub use webhook::{
 /// ([`Self::register_call_participant`] /
 /// [`Self::unregister_call_participant`]) update an in-memory call
 /// registry used for MUC focus accounting.
+/// What an occupant-scoped teardown does with a registration that carries
+/// NO occupant generation (webhook/probe-restored after a process restart,
+/// or a 1:1 registration) — see
+/// [`SfuService::unregister_call_participant_if_occupant_matches`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum UnboundOccupantPolicy {
+    /// The departure is confirmed by the room actor or requested by the live
+    /// connection: an unbound registration belongs to nobody else provable,
+    /// so tear it down (the pre-#1703 behaviour for restored registrations).
+    TearDown,
+    /// Unconfirmed cleanup (`Superseded`, `NotOccupant`, redrives): an
+    /// unbound registration may be a restored live replacement — keep it.
+    Keep,
+}
+
+/// The Jingle-sid evidence a Muji teardown presents alongside its occupancy
+/// generation (#1608 + #1703).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SidEvidence<'a> {
+    /// Connection teardown (disconnect, SM expiry, explicit leave): no
+    /// signaling sid is involved, only the occupancy generation is checked.
+    NotSignaling,
+    /// A signaling stanza presented this sid (`None` = a sid that could not
+    /// become a binding): a registration bound to a sid must match it
+    /// exactly; an unbound one accepts any.
+    Presented(Option<&'a SessionBinding>),
+}
+
+impl SidEvidence<'_> {
+    pub(crate) fn accepts(self, bound: Option<&SessionBinding>) -> bool {
+        match (self, bound) {
+            (Self::NotSignaling, _) | (_, None) => true,
+            (Self::Presented(presented), Some(bound)) => presented == Some(bound),
+        }
+    }
+}
+
 pub trait SfuService: Send + Sync + 'static {
     /// Mint a short-lived LiveKit join JWT for `identity` to enter
     /// `call_id` with the given media capabilities. The returned token
@@ -155,6 +193,7 @@ pub trait SfuService: Send + Sync + 'static {
         call_id: &CallId,
         identity: &Identity,
         _session: &SessionBinding,
+        _occupant: OccupancySessionGeneration,
     ) {
         self.register_call_participant(call_id, identity);
     }
@@ -171,6 +210,18 @@ pub trait SfuService: Send + Sync + 'static {
         _call_id: &CallId,
         _identity: &Identity,
     ) -> Option<SessionBinding> {
+        None
+    }
+
+    /// The occupant-session generation bound to `identity`'s current
+    /// registration in `call_id`, or `None` when the registration is
+    /// unbound (not registered, restored from a webhook/probe, or the
+    /// implementation does not track occupancy generations).
+    fn participant_occupant_session(
+        &self,
+        _call_id: &CallId,
+        _identity: &Identity,
+    ) -> Option<OccupancySessionGeneration> {
         None
     }
 
@@ -199,6 +250,41 @@ pub trait SfuService: Send + Sync + 'static {
                 observed_sids,
             )),
         }
+    }
+
+    /// Occupant-scoped teardown (#1703): unregister `identity` from
+    /// `call_id` when the stored occupant generation is exactly
+    /// `Some(presented)` and the stored sid binding, if any, accepts `sid`. A registration rebound to a DIFFERENT generation
+    /// is always left untouched (no SFU-side eviction). A registration
+    /// with NO stored generation (restored from a webhook/probe, or a 1:1
+    /// path) is decided by `unbound`: the caller presents
+    /// [`UnboundOccupantPolicy::TearDown`] only when it holds independent
+    /// evidence that the departure is real (the room actor confirmed the
+    /// session left, or the live connection itself asked), and
+    /// [`UnboundOccupantPolicy::Keep`] for stale/unconfirmed cleanup so a
+    /// restored live replacement is never deleted by an old connection.
+    fn unregister_call_participant_if_occupant_matches(
+        &self,
+        call_id: &CallId,
+        identity: &Identity,
+        presented: OccupancySessionGeneration,
+        unbound: UnboundOccupantPolicy,
+        sid: SidEvidence<'_>,
+        observed_sids: Option<&ObservedCallSids>,
+    ) -> SessionScopedTeardown {
+        match self.participant_occupant_session(call_id, identity) {
+            Some(bound) if bound == presented => {}
+            None if unbound == UnboundOccupantPolicy::TearDown => {}
+            _ => return SessionScopedTeardown::SessionMismatch,
+        }
+        if !sid.accepts(self.participant_session_binding(call_id, identity).as_ref()) {
+            return SessionScopedTeardown::SessionMismatch;
+        }
+        SessionScopedTeardown::Applied(self.unregister_call_participant(
+            call_id,
+            identity,
+            observed_sids,
+        ))
     }
 
     /// Record that `identity` has left `call_id` and report whether
@@ -270,6 +356,37 @@ pub trait SfuService: Send + Sync + 'static {
                 observed_sids,
             )),
         }
+    }
+
+    /// Occupant-scoped variant of [`Self::note_participant_left`] (#1703):
+    /// apply the local-only cleanup only when the stored occupant generation
+    /// is exactly `Some(presented)` (or unbound with
+    /// [`UnboundOccupantPolicy::TearDown`]) AND the stored sid binding, if
+    /// any, equals `session` (the #1608 rule). Check and removal are atomic
+    /// in tracking implementations, so a connection-originated Muji clear
+    /// that raced a re-registration — by a NEWER connection generation, or
+    /// by the SAME connection under a new sid — cannot remove it.
+    fn note_participant_left_if_occupant_matches(
+        &self,
+        call_id: &CallId,
+        identity: &Identity,
+        observed_sids: Option<&ObservedCallSids>,
+        presented: OccupancySessionGeneration,
+        unbound: UnboundOccupantPolicy,
+        sid: SidEvidence<'_>,
+    ) -> SessionScopedTeardown {
+        match self.participant_occupant_session(call_id, identity) {
+            Some(bound) if bound == presented => {}
+            None if unbound == UnboundOccupantPolicy::TearDown => {}
+            _ => return SessionScopedTeardown::SessionMismatch,
+        }
+        // The #1608 sid rule still applies: the same connection (same
+        // generation) may have re-initiated under a new sid while this
+        // terminate was in flight.
+        if !sid.accepts(self.participant_session_binding(call_id, identity).as_ref()) {
+            return SessionScopedTeardown::SessionMismatch;
+        }
+        SessionScopedTeardown::Applied(self.note_participant_left(call_id, identity, observed_sids))
     }
 
     /// Local-only cleanup driven by an SFU-originated signal that

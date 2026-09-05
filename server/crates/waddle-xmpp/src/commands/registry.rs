@@ -387,22 +387,6 @@ impl CommandRegistry {
         self.sessions.read().await.get(session_id).cloned()
     }
 
-    /// Update a command session's state.
-    pub async fn update_session_state(
-        &self,
-        session_id: &str,
-        key: String,
-        value: String,
-    ) -> Result<(), ()> {
-        let mut sessions = self.sessions.write().await;
-        if let Some(session) = sessions.get_mut(session_id) {
-            session.state.insert(key, value);
-            Ok(())
-        } else {
-            Err(())
-        }
-    }
-
     /// Remove a command session.
     pub async fn remove_session(&self, session_id: &str) {
         self.sessions.write().await.remove(session_id);

@@ -206,6 +206,10 @@ pub struct MucRoom {
     /// Process-wide occupancy order at which each session joined (see
     /// `LeaveAttemptId`); transplanted with the roster.
     pub(super) session_orders: HashMap<FullJid, super::room_actor::OccupancyOrder>,
+    /// Connection identity of each live occupant session. A same-full-JID
+    /// rejoin overwrites the previous generation so stale cleanup can prove
+    /// it belongs to the displaced connection.
+    pub(super) session_generations: HashMap<FullJid, waddle_xmpp_core::OccupancySessionGeneration>,
     /// Persistent affiliation list (synced with Zanzibar)
     pub(super) affiliation_list: AffiliationList,
     /// Per-nickname occupancy generation, bumped each time a nickname
@@ -301,6 +305,7 @@ impl MucRoom {
             occupant_sessions: HashMap::new(),
             session_watermarks: HashMap::new(),
             session_orders: HashMap::new(),
+            session_generations: HashMap::new(),
             affiliation_list: AffiliationList::new(),
             nickname_generation: HashMap::new(),
             generation_floor: u64::try_from(chrono::Utc::now().timestamp_millis()).unwrap_or(0),
@@ -516,6 +521,10 @@ impl MucRoom {
             occupant.real_jid.clone(),
             super::room_actor::next_occupancy_order(),
         );
+        self.session_generations.insert(
+            occupant.real_jid.clone(),
+            waddle_xmpp_core::OccupancySessionGeneration::mint(),
+        );
         if !self.occupants.contains_key(&occupant.nick) {
             let floor = self.generation_floor;
             let gen = self
@@ -541,6 +550,7 @@ impl MucRoom {
             for session in sessions {
                 self.session_watermarks.remove(&session);
                 self.session_orders.remove(&session);
+                self.session_generations.remove(&session);
             }
         }
         self.muji_state.remove(nick);
@@ -575,6 +585,25 @@ impl MucRoom {
     /// alice/desktop on the call, alice/mobile in the room (not on
     /// the call), desktop drops → the call advertisement must clear,
     /// not persist under mobile's session.
+    /// Drop the call (XEP-0272 Muji) and in-call advertisements one session
+    /// owns without removing the session itself: a same-full-JID rejoin by a
+    /// DIFFERENT connection generation must not inherit the displaced
+    /// connection's chip/hand/mute state (#1703).
+    pub(super) fn clear_session_call_state(&mut self, nick: &str, jid: &FullJid) {
+        if let Some(entries) = self.muji_state.get_mut(nick) {
+            entries.remove(jid);
+            if entries.is_empty() {
+                self.muji_state.remove(nick);
+            }
+        }
+        if let Some(in_call) = self.in_call_state.get_mut(nick) {
+            in_call.remove(jid);
+            if in_call.is_empty() {
+                self.in_call_state.remove(nick);
+            }
+        }
+    }
+
     pub fn remove_occupant_session(&mut self, nick: &str, jid: &FullJid) -> Option<bool> {
         if !self.occupants.contains_key(nick) {
             return None;
@@ -614,6 +643,7 @@ impl MucRoom {
         }
         self.session_watermarks.remove(jid);
         self.session_orders.remove(jid);
+        self.session_generations.remove(jid);
 
         if sessions.is_empty() {
             self.occupant_sessions.remove(nick);
@@ -646,12 +676,27 @@ impl MucRoom {
         self.session_orders.get(jid).copied()
     }
 
+    pub fn session_generation(
+        &self,
+        jid: &FullJid,
+    ) -> Option<waddle_xmpp_core::OccupancySessionGeneration> {
+        self.session_generations.get(jid).copied()
+    }
+
     /// Install an occupancy order captured BEFORE the join's durable
     /// projection awaited: a cleanup attempt minted while the projection was
     /// blocked must classify this session as its target, not as a newer
     /// replacement (#1647, codex round 27).
     pub fn set_session_order(&mut self, jid: &FullJid, order: super::room_actor::OccupancyOrder) {
         self.session_orders.insert(jid.clone(), order);
+    }
+
+    pub fn set_session_generation(
+        &mut self,
+        jid: &FullJid,
+        generation: waddle_xmpp_core::OccupancySessionGeneration,
+    ) {
+        self.session_generations.insert(jid.clone(), generation);
     }
 
     /// Get the number of occupants.

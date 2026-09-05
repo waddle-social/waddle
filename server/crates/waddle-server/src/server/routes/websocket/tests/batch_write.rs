@@ -1833,6 +1833,7 @@ fn terminal_recovery_caps_a_single_fanout_without_eviction_and_stays_promotable(
         .to_detached_session(waddle_xmpp::stream_management::DetachedSessionSnapshot {
             user_id: "user-1".to_string(),
             jid: "alice@example.com/terminal-recovery".parse().expect("jid"),
+            occupancy_session: waddle_xmpp_core::OccupancySessionGeneration::mint(),
             carbons_enabled: false,
             roster_interested: false,
             blocklist_interested: false,

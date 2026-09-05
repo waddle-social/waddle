@@ -67,6 +67,51 @@ fn receiver_nacks_recent_duplicate_with_different_payload() {
         })
     ));
 }
+
+#[test]
+fn receiver_nacks_same_sequence_muc_proxy_with_different_generation() {
+    let mut receiver = OrderedRelayReceiverState::default();
+    let envelope = RemoteStanzaEnvelope {
+        asserted_origin_node: origin_node(),
+        channel: room_channel(),
+        sequence: OrderedRelaySequence(1),
+        origin_inbound_sequence: inbound(1),
+        origin_claim: origin_claim(),
+        sender_claim: sender_claim(),
+        target_claim: room_claim(),
+        payload: OrderedRelayPayload::MucProxy {
+            room_jid: room_jid(),
+            kind: OrderedRelayMucProxyKind::JoinPresence,
+            origin: connection_origin(1),
+            stanza: presence_stanza(),
+        },
+        origin_proof: None,
+    };
+    assert!(matches!(
+        receive(&mut receiver, envelope.clone()),
+        OrderedRelayReply::Ack(OrderedRelayAck {
+            duplicate: false,
+            ..
+        })
+    ));
+
+    let replacement_generation = RemoteStanzaEnvelope {
+        payload: OrderedRelayPayload::MucProxy {
+            room_jid: room_jid(),
+            kind: OrderedRelayMucProxyKind::JoinPresence,
+            origin: connection_origin(2),
+            stanza: presence_stanza(),
+        },
+        ..envelope
+    };
+    assert!(matches!(
+        receive(&mut receiver, replacement_generation),
+        OrderedRelayReply::Nack(OrderedRelayNack {
+            reason: OrderedRelayNackReason::ParseFailure,
+            ..
+        })
+    ));
+}
 #[test]
 fn receiver_replays_duplicate_ack_across_mutable_provenance_changes() {
     let mut receiver = OrderedRelayReceiverState::default();

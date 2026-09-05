@@ -177,7 +177,7 @@ pub(super) async fn reconcile_voice_grants(
                 user = %session.to_bare(),
                 "LiveKit participant is no longer a MUC occupant; evicting from the call",
             );
-            crate::server::routes::websocket::muc_call_sfu::unregister_participant_via_sfu(
+            crate::server::routes::websocket::muc_call_sfu::unregister_participant_via_sfu_ungated(
                 sfu, &room_jid, &session,
             );
         }

@@ -35,6 +35,7 @@ pub(super) async fn initialize(storage: &DatabaseSmPersistence) -> Result<(), Sm
                 stream_id TEXT PRIMARY KEY,
                 user_id TEXT NOT NULL,
                 full_jid TEXT NOT NULL,
+                occupancy_session TEXT,
                 inbound_count {bigint} NOT NULL,
                 shadow_ordinal TEXT NOT NULL DEFAULT '0',
                 outbound_count {bigint} NOT NULL,
@@ -78,6 +79,7 @@ pub(super) async fn initialize(storage: &DatabaseSmPersistence) -> Result<(), Sm
             (),
         )
         .await?;
+    add_column_if_missing(storage, "sm_sessions", "occupancy_session TEXT").await?;
     add_column_if_missing(
         storage,
         "sm_sessions",

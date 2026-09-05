@@ -5,7 +5,8 @@ use crate::room_effect_outbox::{
     RoomEffectProducingNode,
 };
 use crate::server::routes::websocket::tests::create_test_websocket_state_with_clustering;
-use waddle_xmpp::muc::room_registry_actor::CreateRoom;
+use waddle_xmpp::muc::room_actor::GetSnapshot;
+use waddle_xmpp::muc::room_registry_actor::{CreateInstantRoom, CreateRoom, GetRoom};
 use waddle_xmpp::muc::{
     MucConfigStatusCode, RoomConfig, RoomLifecycleId, RoomLifecycleState, RoomMutationEffects,
     RoomRevision,
@@ -15,6 +16,149 @@ use waddle_xmpp::pending_delivery::SmSessionId;
 use waddle_xmpp::stream_management::InMemorySmSessionRegistry;
 use waddle_xmpp::stream_management::{DetachedSession, SmSessionRegistry};
 use xmpp_parsers::message::Message;
+
+fn relayed_muc_presence(
+    sender: &jid::FullJid,
+    room: &jid::BareJid,
+    nick: &str,
+    type_: xmpp_parsers::presence::Type,
+) -> xmpp_parsers::presence::Presence {
+    let mut presence = xmpp_parsers::presence::Presence::new(type_);
+    presence.from = Some(jid::Jid::from(sender.clone()));
+    presence.to = Some(jid::Jid::from(
+        room.clone()
+            .with_resource_str(nick)
+            .expect("valid occupant JID"),
+    ));
+    presence
+}
+
+#[tokio::test]
+async fn reserved_relay_join_stores_the_source_connection_generation() {
+    let state = create_test_websocket_state_with_clustering(
+        crate::clustering::ClusteringHandles::default(),
+        Arc::new(InMemorySmSessionRegistry::new()),
+    )
+    .await;
+    let mut services = services_with_claims(
+        origin_identity(),
+        receiver_identity(),
+        receiver_identity(),
+        test_peer_id(),
+    )
+    .await;
+    services.web_socket_state = Arc::downgrade(&state);
+    let room: jid::BareJid = "room@muc.example.com".parse().expect("room JID");
+    let sender: jid::FullJid = "alice@example.com/phone".parse().expect("full JID");
+    let generation = waddle_xmpp_core::OccupancySessionGeneration::mint();
+    state
+        .deps
+        .protocol
+        .room_registry
+        .ask(CreateInstantRoom {
+            room_jid: room.clone(),
+        })
+        .await
+        .expect("create room");
+    let presence =
+        relayed_muc_presence(&sender, &room, "alice", xmpp_parsers::presence::Type::None);
+
+    deliver_reserved_muc_proxy(
+        &services,
+        &room,
+        OrderedRelayMucProxyKind::JoinPresence,
+        MucProxyOrigin::Connection(generation),
+        &Stanza::Presence(presence),
+    )
+    .await
+    .expect("relayed join delivered");
+
+    let actor = state
+        .deps
+        .protocol
+        .room_registry
+        .ask(GetRoom {
+            room_jid: room.clone(),
+        })
+        .await
+        .expect("room lookup")
+        .expect("room actor");
+    let snapshot = actor.ask(GetSnapshot).await.expect("snapshot");
+    assert_eq!(snapshot.room.session_generation(&sender), Some(generation));
+}
+
+#[tokio::test]
+async fn reserved_relay_unavailable_cannot_remove_a_replacement_generation() {
+    let state = create_test_websocket_state_with_clustering(
+        crate::clustering::ClusteringHandles::default(),
+        Arc::new(InMemorySmSessionRegistry::new()),
+    )
+    .await;
+    let mut services = services_with_claims(
+        origin_identity(),
+        receiver_identity(),
+        receiver_identity(),
+        test_peer_id(),
+    )
+    .await;
+    services.web_socket_state = Arc::downgrade(&state);
+    let room: jid::BareJid = "room@muc.example.com".parse().expect("room JID");
+    let sender: jid::FullJid = "alice@example.com/phone".parse().expect("full JID");
+    let first = waddle_xmpp_core::OccupancySessionGeneration::mint();
+    let replacement = waddle_xmpp_core::OccupancySessionGeneration::mint();
+    state
+        .deps
+        .protocol
+        .room_registry
+        .ask(CreateInstantRoom {
+            room_jid: room.clone(),
+        })
+        .await
+        .expect("create room");
+    let available =
+        relayed_muc_presence(&sender, &room, "alice", xmpp_parsers::presence::Type::None);
+
+    for generation in [first, replacement] {
+        deliver_reserved_muc_proxy(
+            &services,
+            &room,
+            OrderedRelayMucProxyKind::JoinPresence,
+            MucProxyOrigin::Connection(generation),
+            &Stanza::Presence(available.clone()),
+        )
+        .await
+        .expect("relayed join delivered");
+    }
+    let unavailable = relayed_muc_presence(
+        &sender,
+        &room,
+        "alice",
+        xmpp_parsers::presence::Type::Unavailable,
+    );
+    deliver_reserved_muc_proxy(
+        &services,
+        &room,
+        OrderedRelayMucProxyKind::OccupantPresence,
+        MucProxyOrigin::Connection(first),
+        &Stanza::Presence(unavailable),
+    )
+    .await
+    .expect("superseded relayed leave is terminal");
+
+    let actor = state
+        .deps
+        .protocol
+        .room_registry
+        .ask(GetRoom {
+            room_jid: room.clone(),
+        })
+        .await
+        .expect("room lookup")
+        .expect("replacement keeps room actor alive");
+    let snapshot = actor.ask(GetSnapshot).await.expect("snapshot");
+    assert_eq!(snapshot.room.occupant_count(), 1);
+    assert_eq!(snapshot.room.session_generation(&sender), Some(replacement));
+}
 
 #[test]
 fn full_jid_bridge_rejects_groupchat_payloads() {
@@ -708,6 +852,7 @@ async fn bare_presence_direct_drops_blocked_sender_before_detached_replay() {
             stream_id: detached_stream.to_string(),
             user_id: target_bare().to_string(),
             jid: target_full(),
+            occupancy_session: waddle_xmpp_core::OccupancySessionGeneration::mint(),
             inbound_count: 0,
             shadow_ordinal: waddle_xmpp::stream_management::ShadowOrdinal::ZERO,
             outbound_count: 0,
@@ -934,6 +1079,7 @@ async fn remote_full_jid_route_reply_returns_detached_stream_identity() {
             stream_id: "remote-direct-detached-stream".to_string(),
             user_id: target_bare().to_string(),
             jid: target_full(),
+            occupancy_session: waddle_xmpp_core::OccupancySessionGeneration::mint(),
             inbound_count: 0,
             shadow_ordinal: waddle_xmpp::stream_management::ShadowOrdinal::ZERO,
             outbound_count: 0,
@@ -1036,6 +1182,7 @@ async fn remote_carbons_reply_returns_detached_stream_identity() {
             stream_id: "remote-carbon-detached-stream".to_string(),
             user_id: owner.to_string(),
             jid: detached_target.clone(),
+            occupancy_session: waddle_xmpp_core::OccupancySessionGeneration::mint(),
             inbound_count: 0,
             shadow_ordinal: waddle_xmpp::stream_management::ShadowOrdinal::ZERO,
             outbound_count: 0,

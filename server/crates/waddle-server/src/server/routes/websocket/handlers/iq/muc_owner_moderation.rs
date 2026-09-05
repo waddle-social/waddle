@@ -479,7 +479,7 @@ async fn complete_destroy_snapshot(
         };
         for recipient in &snapshot.recipients {
             for session_jid in &recipient.1 {
-                super::super::super::muc_call_sfu::unregister_participant_from_room(
+                super::super::super::muc_call_sfu::unregister_participant_from_room_ungated(
                     state,
                     &room_jid,
                     session_jid,
@@ -543,7 +543,7 @@ async fn complete_destroy_snapshot(
                     }
                 }
             }
-            super::super::super::muc_call_sfu::unregister_participant_from_room(
+            super::super::super::muc_call_sfu::unregister_participant_from_room_ungated(
                 state,
                 &room_jid,
                 &session_jid,

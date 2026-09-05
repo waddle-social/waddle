@@ -26,8 +26,8 @@ use chrono::Duration;
 use minidom::Element;
 use std::sync::Arc;
 use waddle_sfu::{
-    ApiKey, ApiSecret, CallId, LiveKitSfu, SfuConfig, SfuService, TurnHost, TurnSharedSecret,
-    WebsocketUrl,
+    ApiKey, ApiSecret, CallId, Identity, LiveKitSfu, SfuConfig, SfuService, TurnHost,
+    TurnSharedSecret, WebsocketUrl,
 };
 use waddle_xmpp::protocol::event::{OutboundEvent, StanzaContext};
 use waddle_xmpp::protocol::handlers::jingle::{calls_mixer_jid, JingleHandler};
@@ -36,6 +36,7 @@ use waddle_xmpp::xep::xep0167::{opus_audio_description, MediaKind};
 use waddle_xmpp::xep::xep0272::{find_muji, Creator, Muji, MujiContent, MujiParseError, NS_MUJI};
 use waddle_xmpp::xep::xep_waddle_livekit_transport::WaddleLiveKitTransport;
 use waddle_xmpp::Stanza;
+use waddle_xmpp_core::OccupancySessionGeneration;
 use xmpp_parsers::iq::Iq;
 use xmpp_parsers::jingle::{
     Action, Content, ContentId, Creator as JingleCreator, Jingle, SessionId, Transport,
@@ -327,12 +328,18 @@ fn test_full_jid() -> jid::FullJid {
     TEST_INITIATOR.parse().unwrap()
 }
 
+fn test_occupant_session() -> OccupancySessionGeneration {
+    static SESSION: std::sync::OnceLock<OccupancySessionGeneration> = std::sync::OnceLock::new();
+    *SESSION.get_or_init(OccupancySessionGeneration::mint)
+}
+
 fn ctx<'a>(jid: &'a jid::FullJid) -> StanzaContext<'a> {
     // Mirrors the grants the websocket layer's Muji gate derives for
     // a voiced (role ≥ participant) occupant.
     StanzaContext {
         domain: TEST_DOMAIN,
         full_jid: jid,
+        occupant_session: Some(test_occupant_session()),
         media_capabilities: Some(waddle_sfu::MediaCapabilities::from_muc_voice(
             waddle_xmpp_core::types::Voice::Voiced,
         )),
@@ -617,7 +624,12 @@ fn muji_session_terminate_to_local_mixer_passes_federation_guard() {
     let jid = test_full_jid();
     let sfu = fixture_sfu();
     let call_id = CallId::new("room@muc.waddle.test").expect("valid room call id");
-    sfu.register_call_participant(&call_id, &waddle_sfu::Identity::from_jid(jid.clone()));
+    sfu.register_call_participant_with_session(
+        &call_id,
+        &waddle_sfu::Identity::from_jid(jid.clone()),
+        &waddle_sfu::SessionBinding::new("muji-1").expect("session binding"),
+        test_occupant_session(),
+    );
     let handler = JingleHandler::new(sfu);
     let events = handler.handle(&iq, &ctx(&jid));
 
@@ -788,7 +800,12 @@ async fn muji_session_terminate_evicts_participant_via_livekit_admin() {
     let room_jid_str = "room@muc.waddle.test";
     let call_id = CallId::new(room_jid_str).expect("valid call id");
     let initiator = test_full_jid();
-    sfu.register_call_participant(&call_id, &waddle_sfu::Identity::from_jid(initiator.clone()));
+    sfu.register_call_participant_with_session(
+        &call_id,
+        &waddle_sfu::Identity::from_jid(initiator.clone()),
+        &waddle_sfu::SessionBinding::new("muji-1").expect("session binding"),
+        test_occupant_session(),
+    );
 
     let iq = muji_session_terminate_iq(
         TEST_INITIATOR,
@@ -837,7 +854,12 @@ async fn muji_session_terminate_skips_delete_room_when_call_still_has_participan
     let alice = test_full_jid();
     let bob: jid::FullJid = "bob@waddle.test/desktop".parse().unwrap();
     sfu.register_call_participant(&call_id, &waddle_sfu::Identity::from_jid(alice.clone()));
-    sfu.register_call_participant(&call_id, &waddle_sfu::Identity::from_jid(bob.clone()));
+    sfu.register_call_participant_with_session(
+        &call_id,
+        &waddle_sfu::Identity::from_jid(bob.clone()),
+        &waddle_sfu::SessionBinding::new("muji-2").expect("session binding"),
+        test_occupant_session(),
+    );
 
     let iq = muji_session_terminate_iq(
         &bob.to_string(),
@@ -952,6 +974,20 @@ fn ctx_with_caps<'a>(
     StanzaContext {
         domain: TEST_DOMAIN,
         full_jid: jid,
+        occupant_session: Some(test_occupant_session()),
+        media_capabilities: caps,
+    }
+}
+
+fn ctx_with_caps_and_session<'a>(
+    jid: &'a jid::FullJid,
+    caps: Option<waddle_sfu::MediaCapabilities>,
+    occupant_session: Option<OccupancySessionGeneration>,
+) -> StanzaContext<'a> {
+    StanzaContext {
+        domain: TEST_DOMAIN,
+        full_jid: jid,
+        occupant_session,
         media_capabilities: caps,
     }
 }
@@ -982,6 +1018,60 @@ fn muji_initiate_with_participant_grants_mints_publishing_token() {
     let grant = accepted_video_grant(&events);
     assert!(grant.can_publish && grant.can_subscribe);
     assert!(!grant.can_publish_data);
+}
+
+#[test]
+fn muji_initiate_with_context_generation_binds_the_sfu_registration() {
+    let iq = muji_session_initiate_iq(
+        TEST_INITIATOR,
+        &calls_mixer_jid(TEST_DOMAIN).to_string(),
+        "room@muc.waddle.test",
+        "muji-occupant-session-bound",
+    );
+    let jid = test_full_jid();
+    let call_id = CallId::new("room@muc.waddle.test").expect("valid room call id");
+    let identity = Identity::from_jid(jid.clone());
+    let occupant_session = OccupancySessionGeneration::mint();
+    let sfu = Arc::new(
+        LiveKitSfu::new({
+            SfuConfig {
+                api_key: ApiKey::new("APIxxxxxxxx"),
+                api_secret: ApiSecret::from_text("super-secret-secret-32-bytes-min")
+                    .expect("test secret meets min length"),
+                webhook_secret: ApiSecret::from_text("super-secret-secret-32-bytes-min")
+                    .expect("test secret meets min length"),
+                ws_url: WebsocketUrl::new("wss://livekit.test/".parse().unwrap()).unwrap(),
+                turn_host: TurnHost::new("turn.test"),
+                turn_tls_port: 443,
+                turn_udp_port: 3478,
+                turn_shared_secret: TurnSharedSecret::from_text("turn-secret"),
+                token_ttl: Duration::seconds(3600),
+                turn_ttl: Duration::seconds(3600),
+            }
+        })
+        .expect("LiveKitSfu init in test"),
+    );
+    let handler = JingleHandler::new(Arc::clone(&sfu) as Arc<dyn SfuService>);
+
+    let events = handler.handle(
+        &iq,
+        &ctx_with_caps_and_session(
+            &jid,
+            Some(waddle_sfu::MediaCapabilities::from_muc_voice(
+                waddle_xmpp_core::types::Voice::Voiced,
+            )),
+            Some(occupant_session),
+        ),
+    );
+
+    assert!(
+        first_error_condition(&events).is_none(),
+        "a generation-bound Muji initiate must succeed: {events:?}",
+    );
+    assert_eq!(
+        sfu.participant_occupant_session(&call_id, &identity),
+        Some(occupant_session)
+    );
 }
 
 /// A visitor (occupant without voice) gets a listen-only token: the
@@ -1036,6 +1126,64 @@ fn muji_initiate_without_gate_capabilities_is_refused() {
     assert!(
         session_accept_payload_to(&events, TEST_INITIATOR).is_none(),
         "no session-accept (and therefore no token) may be issued: {events:?}",
+    );
+}
+
+#[test]
+fn muji_initiate_without_context_generation_is_refused_and_does_not_register() {
+    let iq = muji_session_initiate_iq(
+        TEST_INITIATOR,
+        &calls_mixer_jid(TEST_DOMAIN).to_string(),
+        "room@muc.waddle.test",
+        "muji-occupant-session-missing",
+    );
+    let jid = test_full_jid();
+    let call_id = CallId::new("room@muc.waddle.test").expect("valid room call id");
+    let identity = Identity::from_jid(jid.clone());
+    let sfu = Arc::new(
+        LiveKitSfu::new({
+            SfuConfig {
+                api_key: ApiKey::new("APIxxxxxxxx"),
+                api_secret: ApiSecret::from_text("super-secret-secret-32-bytes-min")
+                    .expect("test secret meets min length"),
+                webhook_secret: ApiSecret::from_text("super-secret-secret-32-bytes-min")
+                    .expect("test secret meets min length"),
+                ws_url: WebsocketUrl::new("wss://livekit.test/".parse().unwrap()).unwrap(),
+                turn_host: TurnHost::new("turn.test"),
+                turn_tls_port: 443,
+                turn_udp_port: 3478,
+                turn_shared_secret: TurnSharedSecret::from_text("turn-secret"),
+                token_ttl: Duration::seconds(3600),
+                turn_ttl: Duration::seconds(3600),
+            }
+        })
+        .expect("LiveKitSfu init in test"),
+    );
+    let handler = JingleHandler::new(Arc::clone(&sfu) as Arc<dyn SfuService>);
+
+    let events = handler.handle(
+        &iq,
+        &ctx_with_caps_and_session(
+            &jid,
+            Some(waddle_sfu::MediaCapabilities::from_muc_voice(
+                waddle_xmpp_core::types::Voice::Voiced,
+            )),
+            None,
+        ),
+    );
+
+    assert_eq!(
+        first_error_condition(&events),
+        Some(DefinedCondition::InternalServerError),
+        "a Muji initiate missing its occupant generation must fail closed: {events:?}",
+    );
+    assert!(
+        session_accept_payload_to(&events, TEST_INITIATOR).is_none(),
+        "a failed-closed Muji initiate must not mint a session-accept: {events:?}",
+    );
+    assert!(
+        !sfu.has_call_participant(&call_id, &identity),
+        "a failed-closed Muji initiate must not register the participant"
     );
 }
 
@@ -1180,6 +1328,70 @@ async fn muji_session_terminate_with_matching_sid_tears_down_as_today() {
     assert!(
         !sfu.has_call_participant(&call_id, &waddle_sfu::Identity::from_jid(jid.clone())),
         "matching-sid terminate must unregister the participant",
+    );
+    assert_eq!(admin.remove_snapshot().len(), 1);
+}
+
+#[tokio::test]
+async fn same_sid_terminate_is_fenced_by_the_occupant_generation() {
+    let admin = Arc::new(RecordingAdmin::default());
+    let sfu = fixture_sfu_with_admin(Arc::clone(&admin));
+    let room_jid_str = "room@muc.waddle.test";
+    let call_id = CallId::new(room_jid_str).expect("valid call id");
+    let jid = test_full_jid();
+    let displaced = OccupancySessionGeneration::mint();
+    let replacement = OccupancySessionGeneration::mint();
+    let media_capabilities = Some(waddle_sfu::MediaCapabilities::from_muc_voice(
+        waddle_xmpp_core::types::Voice::Voiced,
+    ));
+    let handler = JingleHandler::new(Arc::clone(&sfu));
+    let initiate = muji_session_initiate_iq(
+        TEST_INITIATOR,
+        &calls_mixer_jid(TEST_DOMAIN).to_string(),
+        room_jid_str,
+        "muji-reused",
+    );
+    let events = handler.handle(
+        &initiate,
+        &ctx_with_caps_and_session(&jid, media_capabilities, Some(replacement)),
+    );
+    assert!(
+        first_error_condition(&events).is_none(),
+        "replacement initiate must succeed: {events:?}",
+    );
+
+    let terminate = muji_session_terminate_iq(
+        TEST_INITIATOR,
+        &calls_mixer_jid(TEST_DOMAIN).to_string(),
+        room_jid_str,
+        "muji-reused",
+    );
+    let stale_events = handler.handle(
+        &terminate,
+        &ctx_with_caps_and_session(&jid, media_capabilities, Some(displaced)),
+    );
+    assert_eq!(
+        first_error_condition(&stale_events),
+        Some(DefinedCondition::ItemNotFound),
+        "a stale generation must not be authorized by reusing the current SID",
+    );
+    assert!(
+        sfu.has_call_participant(&call_id, &Identity::from_jid(jid.clone())),
+        "the replacement registration must survive the stale terminate",
+    );
+
+    let matching_events = handler.handle(
+        &terminate,
+        &ctx_with_caps_and_session(&jid, media_capabilities, Some(replacement)),
+    );
+    drain_spawned_admin_tasks().await;
+    assert!(
+        first_error_condition(&matching_events).is_none(),
+        "the matching generation must still terminate successfully: {matching_events:?}",
+    );
+    assert!(
+        !sfu.has_call_participant(&call_id, &Identity::from_jid(jid)),
+        "the matching generation must remove its registration",
     );
     assert_eq!(admin.remove_snapshot().len(), 1);
 }

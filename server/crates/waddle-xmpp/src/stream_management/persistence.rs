@@ -156,6 +156,7 @@ pub struct PersistedSession {
     pub stream_id: SmSessionId,
     pub user_id: String,
     pub jid: FullJid,
+    pub occupancy_session: waddle_xmpp_core::OccupancySessionGeneration,
     pub inbound_count: u32,
     pub shadow_ordinal: ShadowOrdinal,
     pub outbound_count: u32,

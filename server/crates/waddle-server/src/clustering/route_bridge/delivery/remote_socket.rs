@@ -166,6 +166,7 @@ impl OrderedRelayDeliveryBridge {
             RemoteResourceRouteTarget::MucProxy {
                 room_jid,
                 kind,
+                origin: muc_origin,
                 stanza,
             } => {
                 // This path can execute the payload locally WITHOUT the
@@ -183,14 +184,17 @@ impl OrderedRelayDeliveryBridge {
                     stanza
                 };
                 let outcome = if let Some(remote) = self
-                    .try_proxy_muc_remote(&room_jid, &stanza.0, kind, &origin)
+                    .try_proxy_muc_remote(&room_jid, &stanza.0, kind, muc_origin, &origin)
                     .await
                 {
                     remote
                 } else {
                     muc_proxy_result_to_ordered_outcome(
                         kind,
-                        deliver_reserved_muc_proxy(&services, &room_jid, kind, &stanza.0).await,
+                        deliver_reserved_muc_proxy(
+                            &services, &room_jid, kind, muc_origin, &stanza.0,
+                        )
+                        .await,
                     )
                 };
                 match outcome {

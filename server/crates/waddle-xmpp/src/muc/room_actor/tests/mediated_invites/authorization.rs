@@ -369,6 +369,7 @@ async fn group_dm_construction_normalizes_members_only_before_admission() {
             affiliation_grant: JoinAffiliationGrant::Unaffiliated,
             local_domain: "example.com".to_string(),
             admission_revision: snapshot.admission_revision,
+            session: waddle_xmpp_core::OccupancySessionGeneration::mint(),
         })
         .await;
     assert!(matches!(

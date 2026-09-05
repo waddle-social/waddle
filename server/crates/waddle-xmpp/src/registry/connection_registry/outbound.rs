@@ -288,6 +288,11 @@ pub struct ConnectionEntry {
     /// previous `Option<String>` form violated the typed-payloads
     /// rule).
     pub sm_stream_id: Arc<std::sync::Mutex<Option<crate::pending_delivery::SmSessionId>>>,
+    /// The connection's MUC occupancy generation (#1703), published
+    /// owner-gated at registration so FullJID-keyed reconcilers can tell a
+    /// live connection's memberships from a displaced generation's.
+    pub occupancy_session:
+        Arc<std::sync::Mutex<Option<waddle_xmpp_core::OccupancySessionGeneration>>>,
     /// Sender half of this connection's force-detach control channel
     /// (ADR-0017 Phase 3 Slice 6). The receiver half is handed to the
     /// connection's own task exactly once via [`Self::take_force_detach_rx`]
@@ -339,6 +344,7 @@ impl ConnectionEntry {
             offline_flushed: Arc::new(AtomicBool::new(false)),
             pending_subscribes_flushed: Arc::new(AtomicBool::new(false)),
             sm_stream_id: Arc::new(std::sync::Mutex::new(None)),
+            occupancy_session: Arc::new(std::sync::Mutex::new(None)),
             force_detach_tx,
             force_detach_rx: Arc::new(std::sync::Mutex::new(Some(force_detach_rx))),
         }
@@ -425,6 +431,10 @@ impl ConnectionEntry {
     /// SM session) and after `<resume/>` (continuation onto a
     /// previously-stored session). Used by the offline-flush path
     /// for `claim_for_session` (locked Q7b SM-ack lifecycle).
+    pub fn occupancy_session(&self) -> Option<waddle_xmpp_core::OccupancySessionGeneration> {
+        self.occupancy_session.lock().ok().and_then(|guard| *guard)
+    }
+
     pub fn set_sm_stream_id(&self, session_id: Option<crate::pending_delivery::SmSessionId>) {
         if let Ok(mut guard) = self.sm_stream_id.lock() {
             *guard = session_id;

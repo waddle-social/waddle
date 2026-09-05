@@ -13,6 +13,7 @@ fn snapshot() -> DetachedSessionSnapshot {
     DetachedSessionSnapshot {
         user_id: "alice".to_string(),
         jid: "alice@example.com/web".parse().expect("valid full jid"),
+        occupancy_session: waddle_xmpp_core::OccupancySessionGeneration::mint(),
         carbons_enabled: false,
         roster_interested: false,
         blocklist_interested: false,
@@ -30,6 +31,7 @@ fn persisted_session(stream_id: &str, shadow_ordinal: ShadowOrdinal) -> Persiste
         stream_id: SmSessionId::new(stream_id),
         user_id: "alice".to_string(),
         jid: "alice@example.com/web".parse().expect("valid full jid"),
+        occupancy_session: waddle_xmpp_core::OccupancySessionGeneration::mint(),
         inbound_count: 3,
         shadow_ordinal,
         outbound_count: 5,

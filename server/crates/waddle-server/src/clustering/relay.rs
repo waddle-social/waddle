@@ -411,7 +411,8 @@ fn is_idempotent_join_presence_envelope(envelope: &RemoteStanzaEnvelope) -> bool
 // effect and therefore poisons the channel for the mixed-version
 // window. The version bump is what makes rolling deploys safe.
 // v2: room-lane recipient split + UnsupportedEnvelope NACK (#1597).
-#[kameo::remote_message("waddle.clustering.relay.deliver_ordered.v2")]
+// v3: MUC proxy origin/generation carried inside the ordered envelope (#1703).
+#[kameo::remote_message("waddle.clustering.relay.deliver_ordered.v3")]
 impl Message<RelayDeliverOrdered> for RelayActor {
     type Reply = kameo::reply::DelegatedReply<OrderedRelayReply>;
 
@@ -655,7 +656,9 @@ pub struct RelayRouteRemoteResourceStanzaReply {
     pub recipient_sm_append_streams: Vec<waddle_xmpp::pending_delivery::SmSessionId>,
 }
 
-#[kameo::remote_message("waddle.clustering.relay.remote_resource_route.v1")]
+// This message serializes `RemoteResourceRouteTarget`; bump the suffix whenever
+// that target's wire shape changes. v2 adds the typed MUC proxy origin (#1703).
+#[kameo::remote_message("waddle.clustering.relay.remote_resource_route.v2")]
 impl Message<RelayRouteRemoteResourceStanza> for RelayActor {
     type Reply = kameo::reply::DelegatedReply<RelayRouteRemoteResourceStanzaReply>;
 

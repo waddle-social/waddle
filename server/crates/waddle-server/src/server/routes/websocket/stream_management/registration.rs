@@ -304,6 +304,10 @@ async fn reset_registered_resume_attempt(
         unregister_remote_user_resource_if_owner(state, jid, owner).await;
     }
     conn.registry_owner = None;
+    // The adopted detached generation is rolled back too: the detached
+    // session is restored and will be invalidated with ITS generation, so a
+    // fresh bind on this connection must not share it (#1703).
+    conn.occupancy_session = waddle_xmpp_core::OccupancySessionGeneration::mint();
     conn.phase = ConnectionPhase::authenticated(jid);
     // Replace (never null) the per-connection state machine: the
     // connection loop's keepalive timer arm feeds `Tick` into

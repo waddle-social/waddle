@@ -106,6 +106,7 @@ fn ctx<'a>(jid: &'a FullJid) -> StanzaContext<'a> {
     StanzaContext {
         domain: "waddle.test",
         full_jid: jid,
+        occupant_session: None,
         media_capabilities: None,
     }
 }

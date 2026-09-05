@@ -361,7 +361,12 @@ pub(in super::super) fn room_entity(room: &jid::BareJid) -> Entity {
 pub(in super::super) enum RelayPayloadTarget<'a> {
     Full(&'a jid::FullJid, &'a Stanza),
     Bare(jid::BareJid, &'a Stanza),
-    Muc(&'a jid::BareJid, OrderedRelayMucProxyKind, &'a Stanza),
+    Muc(
+        &'a jid::BareJid,
+        OrderedRelayMucProxyKind,
+        MucProxyOrigin,
+        &'a Stanza,
+    ),
 }
 
 pub(in super::super) fn relay_payload_target(
@@ -374,8 +379,9 @@ pub(in super::super) fn relay_payload_target(
         OrderedRelayPayload::MucProxy {
             room_jid,
             kind,
+            origin,
             stanza,
-        } => return Ok(RelayPayloadTarget::Muc(room_jid, *kind, &stanza.0)),
+        } => return Ok(RelayPayloadTarget::Muc(room_jid, *kind, *origin, &stanza.0)),
     }?;
     match &envelope.channel.recipient {
         OrderedRelayRecipient::FullJid(full) if recipient == &jid::Jid::from(full.clone()) => {

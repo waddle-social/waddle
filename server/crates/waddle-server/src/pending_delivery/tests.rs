@@ -2130,6 +2130,7 @@ async fn xep0160_promoted_stanzas_carry_original_receipt_time_in_delay() {
         .to_detached_session(DetachedSessionSnapshot {
             user_id: "alice".to_string(),
             jid: alice_jid.clone(),
+            occupancy_session: waddle_xmpp_core::OccupancySessionGeneration::mint(),
             carbons_enabled: false,
             roster_interested: false,
             blocklist_interested: false,

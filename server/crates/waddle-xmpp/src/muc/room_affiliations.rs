@@ -4,6 +4,7 @@ use super::affiliation::{self, AffiliationChange, AffiliationProvenance};
 use super::room::{MucRoom, Occupant};
 use super::room_actor::OccupancyWatermark;
 use crate::types::{Affiliation, Role};
+use waddle_xmpp_core::OccupancySessionGeneration;
 
 impl MucRoom {
     /// Get the affiliation for a JID.
@@ -136,6 +137,7 @@ impl MucRoom {
         nick: String,
         local_domain: Option<&str>,
         watermark: OccupancyWatermark,
+        session: OccupancySessionGeneration,
     ) -> &Occupant {
         if let Some(existing) = self.occupants.get(&nick) {
             if existing.real_jid.to_bare() == real_jid.to_bare() {
@@ -146,7 +148,18 @@ impl MucRoom {
                 if !sessions.iter().any(|session| session == &real_jid) {
                     sessions.push(real_jid.clone());
                 }
-                self.set_session_watermark(real_jid, watermark);
+                // A rejoin by a DIFFERENT connection generation displaces the
+                // previous connection: its call/in-call advertisements are
+                // not the newcomer's. A same-generation rejoin (SM replay)
+                // keeps them.
+                if self
+                    .session_generation(&real_jid)
+                    .is_some_and(|previous| previous != session)
+                {
+                    self.clear_session_call_state(&nick, &real_jid);
+                }
+                self.set_session_watermark(real_jid.clone(), watermark);
+                self.set_session_generation(&real_jid, session);
                 return self
                     .occupants
                     .get(&nick)
@@ -189,6 +202,7 @@ impl MucRoom {
         *gen += 1;
 
         self.set_session_watermark(real_jid.clone(), watermark);
+        self.set_session_generation(&real_jid, session);
         self.occupant_sessions.insert(nick.clone(), vec![real_jid]);
         self.occupants.insert(nick.clone(), occupant);
         self.occupants
@@ -271,6 +285,7 @@ mod tests {
             "alice".to_string(),
             None,
             OccupancyWatermark::initial(),
+            OccupancySessionGeneration::mint(),
         );
 
         let alice = room.occupants.get("alice").expect("alice joined");
@@ -317,6 +332,7 @@ mod tests {
             "bob".to_string(),
             None,
             OccupancyWatermark::initial(),
+            OccupancySessionGeneration::mint(),
         );
         assert_eq!(
             room.occupants.get("bob").expect("bob joined").role,
@@ -327,5 +343,52 @@ mod tests {
         let bob = room.occupants.get("bob").expect("still in occupant map");
         assert_eq!(bob.affiliation, Affiliation::Outcast);
         assert_eq!(bob.role, Role::None);
+    }
+
+    #[test]
+    fn rejoin_under_a_different_generation_drops_the_displaced_call_state() {
+        use crate::xep::xep0272::Muji;
+        let mut room = MucRoom::new(
+            "room@muc.example.com".parse().unwrap(),
+            "w".to_string(),
+            "c".to_string(),
+            crate::muc::RoomConfig::default(),
+        );
+        let alice: FullJid = "alice@example.com/web".parse().unwrap();
+        let first = OccupancySessionGeneration::mint();
+        let second = OccupancySessionGeneration::mint();
+        room.add_occupant_with_affiliation(
+            alice.clone(),
+            "alice".to_string(),
+            None,
+            OccupancyWatermark::initial(),
+            first,
+        );
+        room.muji_state
+            .entry("alice".to_string())
+            .or_default()
+            .insert(alice.clone(), Muji::preparing());
+        assert!(room.muji_for_session("alice", &alice).is_some());
+
+        // Same generation (SM replay) keeps the advertisement.
+        room.add_occupant_with_affiliation(
+            alice.clone(),
+            "alice".to_string(),
+            None,
+            OccupancyWatermark::initial(),
+            first,
+        );
+        assert!(room.muji_for_session("alice", &alice).is_some());
+
+        // A different generation displaces it.
+        room.add_occupant_with_affiliation(
+            alice.clone(),
+            "alice".to_string(),
+            None,
+            OccupancyWatermark::initial(),
+            second,
+        );
+        assert!(room.muji_for_session("alice", &alice).is_none());
+        assert_eq!(room.session_generation(&alice), Some(second));
     }
 }

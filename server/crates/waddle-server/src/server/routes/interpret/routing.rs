@@ -1087,6 +1087,7 @@ mod tests {
             stream_id: stream_id.to_string(),
             user_id: jid.to_bare().to_string(),
             jid: jid.clone(),
+            occupancy_session: waddle_xmpp_core::OccupancySessionGeneration::mint(),
             inbound_count: 0,
             shadow_ordinal: waddle_xmpp::stream_management::ShadowOrdinal::ZERO,
             outbound_count: 0,

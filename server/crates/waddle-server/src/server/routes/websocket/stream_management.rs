@@ -443,6 +443,7 @@ pub(super) struct SmCtx<'a> {
     pub(super) phase: &'a mut ConnectionPhase,
     pub(super) sm_state: &'a mut StreamManagementState,
     pub(super) authenticated_session: &'a mut Option<Session>,
+    pub(super) occupancy_session: &'a mut waddle_xmpp_core::OccupancySessionGeneration,
     pub(super) carbons_enabled: &'a mut bool,
     pub(super) presence_available: &'a mut bool,
     pub(super) presence_show: &'a mut Option<xmpp_parsers::presence::Show>,
@@ -844,6 +845,7 @@ async fn handle_sm_resume_terminal(
         phase,
         sm_state,
         authenticated_session,
+        occupancy_session,
         carbons_enabled,
         presence_available,
         presence_show,
@@ -1201,6 +1203,7 @@ async fn handle_sm_resume_terminal(
         }
     }
     *authenticated_session = Some(resumed_session);
+    *occupancy_session = detached.occupancy_session;
     *carbons_enabled = detached.carbons_enabled;
     *roster_interested = detached.roster_interested;
     *blocklist_interested = detached.blocklist_interested;

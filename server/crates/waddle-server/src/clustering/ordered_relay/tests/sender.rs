@@ -1,4 +1,5 @@
 use super::*;
+use libp2p::identity::Keypair;
 
 #[test]
 fn sender_allocates_per_channel_sequences() {
@@ -160,4 +161,44 @@ fn sender_sticky_diversion_short_circuits_later_envelopes_for_channel() {
     );
 
     assert_eq!(result.expect_err("diverted"), diversion);
+}
+
+#[test]
+fn changing_muc_proxy_origin_invalidates_existing_signature() {
+    let keypair = Keypair::generate_ed25519();
+    let mut envelope = RemoteStanzaEnvelope {
+        asserted_origin_node: origin_node(),
+        channel: room_channel(),
+        sequence: OrderedRelaySequence(1),
+        origin_inbound_sequence: inbound(1),
+        origin_claim: origin_claim(),
+        sender_claim: sender_claim(),
+        target_claim: room_claim(),
+        payload: OrderedRelayPayload::MucProxy {
+            room_jid: room_jid(),
+            kind: OrderedRelayMucProxyKind::JoinPresence,
+            origin: connection_origin(1),
+            stanza: presence_stanza(),
+        },
+        origin_proof: None,
+    };
+    let signing_bytes = envelope.signing_bytes().expect("signing bytes");
+    let signature = keypair.sign(&signing_bytes).expect("sign envelope");
+    assert!(
+        keypair.public().verify(&signing_bytes, &signature),
+        "signature must verify before tampering"
+    );
+
+    envelope.payload = OrderedRelayPayload::MucProxy {
+        room_jid: room_jid(),
+        kind: OrderedRelayMucProxyKind::JoinPresence,
+        origin: connection_origin(2),
+        stanza: presence_stanza(),
+    };
+    let tampered_bytes = envelope.signing_bytes().expect("tampered signing bytes");
+    assert_ne!(signing_bytes, tampered_bytes);
+    assert!(
+        !keypair.public().verify(&tampered_bytes, &signature),
+        "signature over the original origin must fail after origin tampering"
+    );
 }

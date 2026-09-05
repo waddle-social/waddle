@@ -25,6 +25,37 @@ async fn enqueue_claim_and_complete_round_trip() {
 }
 
 #[tokio::test]
+async fn participant_intent_round_trips_its_occupant_generation() {
+    let store = store("call-teardown-occupant-round-trip").await;
+    let intent = participant_intent_with_occupant();
+
+    let intent_id = store.enqueue(intent.clone()).await.unwrap();
+    let stored = store.find(&intent_id).await.unwrap().unwrap();
+
+    assert_eq!(stored.intent.occupant, intent.occupant);
+}
+
+#[tokio::test]
+async fn enqueue_round_trip_preserves_occupant_generation() {
+    let store = store("call-teardown-round-trip-occupant").await;
+    let occupant = occupant_generation();
+    let intent = CallTeardownIntent {
+        occupant: Some(occupant),
+        unbound_occupant: waddle_sfu::UnboundOccupantPolicy::Keep,
+        ..participant_intent()
+    };
+
+    let intent_id = store.enqueue(intent.clone()).await.expect("enqueue");
+    let stored = store
+        .find(&intent_id)
+        .await
+        .expect("find")
+        .expect("stored intent");
+
+    assert_eq!(stored.intent, intent);
+}
+
+#[tokio::test]
 async fn raw_one_to_one_intent_round_trips_its_typed_producing_node() {
     let database = Database::in_memory("call-teardown-producing-node")
         .await
@@ -137,6 +168,8 @@ async fn differing_fence_evidence_inserts_a_second_queued_row() {
     let first = participant_intent();
     let second = CallTeardownIntent {
         generation: Some(CallGeneration::try_from(2).unwrap()),
+        occupant: None,
+        unbound_occupant: waddle_sfu::UnboundOccupantPolicy::Keep,
         room_sid: Some(RoomSid::new("RM_other").unwrap()),
         target: TeardownTarget::Participant {
             identity: FullJid::from_str("alice@example.test/device").unwrap(),
@@ -332,6 +365,8 @@ async fn muji_presence_clear_round_trips_with_typed_participant_sid() {
             participant_sid: Some(ParticipantSid::new("PA_muji").unwrap()),
         },
         generation: None,
+        occupant: None,
+        unbound_occupant: waddle_sfu::UnboundOccupantPolicy::Keep,
         room_sid: Some(RoomSid::new("RM_muji").unwrap()),
         session: None,
     };
@@ -351,6 +386,8 @@ async fn muji_room_sweep_round_trips_with_webhook_room_sid() {
             room_jid: BareJid::from_str("room@conference.example.test").unwrap(),
         },
         generation: None,
+        occupant: None,
+        unbound_occupant: waddle_sfu::UnboundOccupantPolicy::Keep,
         room_sid: Some(RoomSid::new("RM_sweep").unwrap()),
         session: None,
     };
@@ -371,6 +408,8 @@ async fn muji_presence_clear_dedupe_is_exact_match_on_participant_sid() {
             participant_sid: Some(ParticipantSid::new("PA_same").unwrap()),
         },
         generation: None,
+        occupant: None,
+        unbound_occupant: waddle_sfu::UnboundOccupantPolicy::Keep,
         room_sid: Some(RoomSid::new("RM_same").unwrap()),
         session: None,
     };
@@ -472,6 +511,8 @@ async fn ownership_release_defers_old_row_so_later_work_can_be_claimed() {
             call_id: CallId::new("room@muc.example.test").expect("room call id"),
             target: TeardownTarget::Room,
             generation: None,
+            occupant: None,
+            unbound_occupant: waddle_sfu::UnboundOccupantPolicy::Keep,
             room_sid: None,
             session: None,
         })
@@ -513,6 +554,8 @@ async fn participant_waits_for_pending_muji_presence_clear() {
                 participant_sid: None,
             },
             generation: None,
+            occupant: None,
+            unbound_occupant: waddle_sfu::UnboundOccupantPolicy::Keep,
             room_sid: None,
             session: None,
         })
@@ -527,6 +570,8 @@ async fn participant_waits_for_pending_muji_presence_clear() {
                 participant_sid: None,
             },
             generation: None,
+            occupant: None,
+            unbound_occupant: waddle_sfu::UnboundOccupantPolicy::Keep,
             room_sid: None,
             session: None,
         })

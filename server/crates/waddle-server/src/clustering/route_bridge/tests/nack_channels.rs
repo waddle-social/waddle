@@ -550,6 +550,7 @@ fn muc_join_maybe_committed_keeps_join_specific_outcome() {
     let target = RemoteResourceRouteTarget::MucProxy {
         room_jid,
         kind: OrderedRelayMucProxyKind::JoinPresence,
+        origin: MucProxyOrigin::Connection(waddle_xmpp_core::OccupancySessionGeneration::mint()),
         stanza: RemoteStanza(Stanza::Presence(xmpp_parsers::presence::Presence::new(
             xmpp_parsers::presence::Type::None,
         ))),

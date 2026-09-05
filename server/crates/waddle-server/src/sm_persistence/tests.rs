@@ -13,11 +13,33 @@ fn fixed_time() -> DateTime<Utc> {
     Utc.with_ymd_and_hms(2026, 5, 1, 12, 30, 0).unwrap()
 }
 
+fn fixed_occupancy_session() -> waddle_xmpp_core::OccupancySessionGeneration {
+    waddle_xmpp_core::OccupancySessionGeneration::from_uuid(
+        uuid::Uuid::parse_str("11111111-2222-3333-4444-555555555555").expect("uuid"),
+    )
+}
+
+async fn stored_occupancy_session_text(
+    storage: &DatabaseSmPersistence,
+    stream_id: &SmSessionId,
+) -> Option<String> {
+    let mut rows = storage
+        .query(
+            "SELECT occupancy_session FROM sm_sessions WHERE stream_id = ?",
+            crate::db_params![stream_id.as_str().to_string()],
+        )
+        .await
+        .expect("query occupancy_session");
+    let row = rows.next().await.expect("row result").expect("row present");
+    row.get(0).expect("occupancy_session column")
+}
+
 fn fixture_session(stream_id: &str) -> PersistedSession {
     PersistedSession {
         stream_id: SmSessionId::new(stream_id),
         user_id: "alice".to_string(),
         jid: full("alice@example.com/web"),
+        occupancy_session: fixed_occupancy_session(),
         inbound_count: 7,
         shadow_ordinal: waddle_xmpp::stream_management::ShadowOrdinal::from_storage(11),
         outbound_count: 12,
@@ -85,6 +107,7 @@ async fn round_trip_session_preserves_every_field() {
     assert_eq!(loaded.stream_id, s.stream_id);
     assert_eq!(loaded.user_id, s.user_id);
     assert_eq!(loaded.jid, s.jid);
+    assert_eq!(loaded.occupancy_session, s.occupancy_session);
     assert_eq!(loaded.inbound_count, s.inbound_count);
     assert_eq!(loaded.shadow_ordinal, s.shadow_ordinal);
     assert_eq!(loaded.outbound_count, s.outbound_count);
@@ -475,6 +498,71 @@ async fn plain_store_session_atomic_preserves_an_existing_principal() {
 }
 
 #[tokio::test]
+async fn null_occupancy_session_mints_and_rewrites_non_null() {
+    let storage = DatabaseSmPersistence::open(None).await.unwrap();
+    let stream_id = "null-occupancy";
+    storage
+        .upsert_session(fixture_session(stream_id))
+        .await
+        .unwrap();
+    storage
+        .execute(
+            "UPDATE sm_sessions SET occupancy_session = NULL WHERE stream_id = ?",
+            crate::db_params![stream_id.to_string()],
+        )
+        .await
+        .unwrap();
+
+    let loaded = storage
+        .get_session(&SmSessionId::new(stream_id))
+        .await
+        .unwrap()
+        .expect("session present");
+    let minted = loaded.occupancy_session;
+    storage.upsert_session(loaded).await.unwrap();
+
+    let mut rows = storage
+        .query(
+            "SELECT occupancy_session FROM sm_sessions WHERE stream_id = ?",
+            crate::db_params![stream_id.to_string()],
+        )
+        .await
+        .unwrap();
+    let row = rows.next().await.unwrap().expect("rewritten row");
+    let stored: Option<String> = row.get(0).expect("occupancy_session");
+    assert_eq!(stored.as_deref(), Some(minted.to_string().as_str()));
+}
+
+#[tokio::test]
+async fn malformed_occupancy_session_is_a_corrupt_decode_error() {
+    let storage = DatabaseSmPersistence::open(None).await.unwrap();
+    let stream_id = "bad-occupancy";
+    storage
+        .upsert_session(fixture_session(stream_id))
+        .await
+        .unwrap();
+    storage
+        .execute(
+            "UPDATE sm_sessions SET occupancy_session = ? WHERE stream_id = ?",
+            crate::db_params!["not-a-uuid".to_string(), stream_id.to_string()],
+        )
+        .await
+        .unwrap();
+
+    let error = storage
+        .get_session(&SmSessionId::new(stream_id))
+        .await
+        .expect_err("malformed occupancy_session must fail decode");
+    assert!(matches!(
+        error,
+        SmPersistenceError::Corrupt {
+            stream_id: ref corrupt_stream_id,
+            ..
+        } if corrupt_stream_id.as_str() == stream_id
+    ));
+}
+
+#[tokio::test]
 async fn detached_snapshot_refresh_preserves_principal_through_registry() {
     use waddle_xmpp::stream_management::{DetachedSession, InMemorySmSessionRegistry};
     let storage = DatabaseSmPersistence::open(None).await.unwrap();
@@ -486,6 +574,7 @@ async fn detached_snapshot_refresh_preserves_principal_through_registry() {
         stream_id: "refresh-keeps-principal".to_string(),
         user_id: "u1".to_string(),
         jid: full("alice@example.com/phone"),
+        occupancy_session: waddle_xmpp_core::OccupancySessionGeneration::mint(),
         inbound_count: 0,
         shadow_ordinal: waddle_xmpp::stream_management::ShadowOrdinal::ZERO,
         outbound_count: 0,
@@ -525,6 +614,104 @@ async fn detached_snapshot_refresh_preserves_principal_through_registry() {
         Some(principal),
         "principal must survive a detached-fanout snapshot refresh"
     );
+}
+
+#[tokio::test]
+async fn null_occupancy_session_decodes_to_minted_generation_and_rewrites_non_null() {
+    use waddle_xmpp::stream_management::{InMemorySmSessionRegistry, SmSessionRegistry as _};
+
+    let storage = DatabaseSmPersistence::open(None).await.unwrap();
+    let stream_id = SmSessionId::new("legacy-null-occupancy");
+    let mut session = fixture_session(stream_id.as_str());
+    session.detached_at = Utc::now();
+    let original_occupancy_session = session.occupancy_session;
+    storage
+        .store_session_atomic(session, Vec::new())
+        .await
+        .expect("persist session");
+    storage
+        .execute(
+            "UPDATE sm_sessions SET occupancy_session = NULL WHERE stream_id = ?",
+            crate::db_params![stream_id.as_str().to_string()],
+        )
+        .await
+        .expect("null legacy occupancy_session");
+
+    let registry = std::sync::Arc::new(
+        InMemorySmSessionRegistry::new().with_persistence(std::sync::Arc::new(storage.clone())),
+    );
+    assert_eq!(
+        registry
+            .restore_from_persistence()
+            .await
+            .expect("hydrate restored session"),
+        1
+    );
+    let hydrated = registry
+        .peek_session(stream_id.as_str())
+        .await
+        .expect("peek hydrated session")
+        .expect("hydrated detached session");
+    let minted_occupancy_session = hydrated.occupancy_session;
+    assert_ne!(
+        minted_occupancy_session, original_occupancy_session,
+        "NULL must mint a fresh typed occupancy generation at decode time"
+    );
+
+    assert!(
+        registry
+            .record_outbound_for_detached_stream(
+                stream_id.as_str(),
+                "<message xmlns='jabber:client' to='alice@example.com/web'/>".to_string(),
+                fixed_time(),
+            )
+            .await
+            .expect("persist detached refresh"),
+        "detached refresh must mutate and write the row back"
+    );
+
+    let stored = stored_occupancy_session_text(&storage, &stream_id).await;
+    let expected = minted_occupancy_session.to_string();
+    assert_eq!(
+        stored,
+        Some(expected),
+        "the next persistence write must rewrite a concrete non-NULL occupancy_session"
+    );
+}
+
+#[tokio::test]
+async fn malformed_occupancy_session_text_is_a_corrupt_decode_error() {
+    let storage = DatabaseSmPersistence::open(None).await.unwrap();
+    let stream_id = SmSessionId::new("poison-occupancy-session");
+    storage
+        .store_session_atomic(fixture_session(stream_id.as_str()), Vec::new())
+        .await
+        .expect("persist session");
+    storage
+        .execute(
+            "UPDATE sm_sessions SET occupancy_session = ? WHERE stream_id = ?",
+            crate::db_params!["not-a-uuid".to_string(), stream_id.as_str().to_string()],
+        )
+        .await
+        .expect("poison occupancy_session");
+
+    let error = storage
+        .get_session(&stream_id)
+        .await
+        .expect_err("malformed occupancy_session must fail decode");
+    match error {
+        SmPersistenceError::Corrupt {
+            stream_id: corrupt_stream,
+            detail,
+        } => {
+            assert_eq!(corrupt_stream, stream_id);
+            assert!(
+                detail.contains("occupancy_session"),
+                "decode error should name the corrupt occupancy_session field: {detail}"
+            );
+        }
+        other => panic!("expected Corrupt decode error, got {other:?}"),
+    }
 }
 
 #[tokio::test]
@@ -957,6 +1144,12 @@ async fn postgres_store_session_atomic_with_principal_round_trips() {
         .await
         .expect("persist postgres principal snapshot");
 
+    let loaded = storage
+        .get_session(&stream_id)
+        .await
+        .expect("load postgres session")
+        .expect("postgres session row");
+    assert_eq!(loaded.occupancy_session, fixed_occupancy_session());
     assert_eq!(
         storage
             .get_session_principal(&stream_id)
@@ -968,6 +1161,40 @@ async fn postgres_store_session_atomic_with_principal_round_trips() {
         .delete_session(&stream_id)
         .await
         .expect("clean up postgres principal snapshot");
+}
+
+#[tokio::test]
+async fn postgres_round_trip_session_preserves_occupancy_generation() {
+    let Ok(database_url) = std::env::var("WADDLE_TEST_POSTGRES_URL") else {
+        eprintln!(
+            "skipping: WADDLE_TEST_POSTGRES_URL not set \
+             (postgres-backed occupancy_session persistence)"
+        );
+        return;
+    };
+
+    let storage = DatabaseSmPersistence::open(Some(&database_url))
+        .await
+        .expect("open postgres sm persistence");
+    let stream_id = format!("postgres-occupancy-{}", uuid::Uuid::new_v4());
+    let session = fixture_session(&stream_id);
+    let expected_occupancy_session = session.occupancy_session;
+    storage
+        .upsert_session(session)
+        .await
+        .expect("persist session");
+
+    let loaded = storage
+        .get_session(&SmSessionId::new(&stream_id))
+        .await
+        .expect("load postgres session")
+        .expect("postgres session row");
+    assert_eq!(loaded.occupancy_session, expected_occupancy_session);
+
+    storage
+        .delete_session(&SmSessionId::new(&stream_id))
+        .await
+        .expect("cleanup postgres occupancy session row");
 }
 
 #[tokio::test]
