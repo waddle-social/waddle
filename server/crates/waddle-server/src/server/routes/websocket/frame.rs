@@ -548,6 +548,23 @@ async fn handle_xmpp_frame_impl(
         }
 
         InboundFrame::Stanza(stanza) => {
+            // A connection that lost its registry slot to a same-FullJID
+            // replacement is superseded (#1703): none of its further stanzas
+            // may perform FullJID-keyed writes (MUC joins, Muji updates,
+            // call initiates), so its inbound stream ends here exactly like a
+            // revoked authority. Its shutdown cleanup stays generation-scoped.
+            if let (Some(owner), Some(bound)) = (registry_owner.as_ref(), phase.bound_jid()) {
+                if !state
+                    .deps
+                    .protocol
+                    .connection_registry
+                    .is_owned_by(bound, owner)
+                {
+                    debug!(jid = %bound, "dropping stanza from a superseded connection");
+                    *inbound_frame_terminal = Some(InboundFrameTerminal::AuthorityRevoked);
+                    return ResponseBatch::default();
+                }
+            }
             // Resource binding is stream setup, not a countable request. Keep
             // it before SM reservation and the ordered-relay lookup so a
             // lifecycle cancellation cannot leave an unsettled inbound slot.

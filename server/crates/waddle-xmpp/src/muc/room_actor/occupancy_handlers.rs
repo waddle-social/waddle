@@ -738,9 +738,27 @@ impl kameo::message::Message<PresenceUpdateData> for RoomActor {
 /// here via `find_occupant_by_real_jid`; if the sender isn't an
 /// occupant, the actor returns `Ok(None)` and the caller falls
 /// back to the regular join path.
+impl RoomActor {
+    /// A FullJID-keyed mutation presented with an occupancy generation applies
+    /// only while the session still belongs to that generation: a connection
+    /// replaced by a same-full-JID successor is superseded (#1703).
+    fn session_is_superseded(
+        &self,
+        sender_jid: &FullJid,
+        occupant: Option<OccupancySessionGeneration>,
+    ) -> bool {
+        occupant
+            .is_some_and(|generation| self.room.session_generation(sender_jid) != Some(generation))
+    }
+}
+
 pub struct UpsertMujiPresence {
     pub sender_jid: FullJid,
     pub muji: crate::xep::xep0272::Muji,
+    /// The connection's occupancy generation (#1703): the update applies
+    /// only while the session still belongs to it (`None` = server-side
+    /// callers that carry no connection).
+    pub occupant: Option<OccupancySessionGeneration>,
 }
 
 pub struct ClearMujiPresence {
@@ -787,6 +805,9 @@ impl kameo::message::Message<UpsertMujiPresence> for RoomActor {
         _ctx: &mut Context<Self, Self::Reply>,
     ) -> Self::Reply {
         if !self.effectful_work_is_permitted().await {
+            return Ok(None);
+        }
+        if self.session_is_superseded(&msg.sender_jid, msg.occupant) {
             return Ok(None);
         }
         let Some(sender_occupant) = self.room.find_occupant_by_real_jid(&msg.sender_jid) else {
@@ -841,9 +862,7 @@ impl kameo::message::Message<ClearMujiPresence> for RoomActor {
         let Some(sender_occupant) = self.room.find_occupant_by_real_jid(&msg.sender_jid) else {
             return Ok(None);
         };
-        if msg.occupant.is_some_and(|generation| {
-            self.room.session_generation(&msg.sender_jid) != Some(generation)
-        }) {
+        if self.session_is_superseded(&msg.sender_jid, msg.occupant) {
             return Ok(Some(ClearMujiPresenceOutcome::Superseded));
         }
         let sender_nick = sender_occupant.nick.clone();
@@ -908,6 +927,8 @@ impl kameo::message::Message<GetActiveMujiSessions> for RoomActor {
 pub struct UpsertInCallState {
     pub sender_jid: FullJid,
     pub state: crate::xep::InCallPresenceState,
+    /// See [`UpsertMujiPresence::occupant`].
+    pub occupant: Option<OccupancySessionGeneration>,
 }
 
 #[derive(Debug, Clone)]
@@ -930,6 +951,9 @@ impl kameo::message::Message<UpsertInCallState> for RoomActor {
         _ctx: &mut Context<Self, Self::Reply>,
     ) -> Self::Reply {
         if !self.effectful_work_is_permitted().await {
+            return Ok(None);
+        }
+        if self.session_is_superseded(&msg.sender_jid, msg.occupant) {
             return Ok(None);
         }
         let Some(sender_occupant) = self.room.find_occupant_by_real_jid(&msg.sender_jid) else {

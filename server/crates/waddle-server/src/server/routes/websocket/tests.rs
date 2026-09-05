@@ -158,6 +158,7 @@ async fn handle_muc_join_with_occupancy_session(
         nick,
         presence_show,
         handlers::presence::MucJoinConnectionContext {
+            registry_owner: None,
             occupancy_session,
             authenticated_session,
         },

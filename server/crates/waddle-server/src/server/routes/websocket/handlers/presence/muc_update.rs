@@ -209,12 +209,16 @@ pub(crate) async fn try_handle_muc_presence_update(
         Some(muji) => match actor
             .ask(UpsertMujiPresence {
                 sender_jid: sender_jid.clone(),
+                occupant: Some(occupancy_session),
                 muji,
             })
             .await
         {
             Ok(Some(outcome)) => outcome,
-            Ok(None) => return None,
+            // The sender WAS an occupant a moment ago (the admin-context check
+            // above): a `None` now means it was removed or superseded by a
+            // replacement in between — a handled no-op, never a rejoin (#1703).
+            Ok(None) => return Some(Vec::new()),
             Err(error) => {
                 warn!(
                     room = %room_jid,
@@ -315,6 +319,7 @@ pub(crate) async fn try_handle_muc_presence_update(
     let in_call_sessions = match actor
         .ask(UpsertInCallState {
             sender_jid: sender_jid.clone(),
+            occupant: Some(occupancy_session),
             state: in_call_state,
         })
         .await

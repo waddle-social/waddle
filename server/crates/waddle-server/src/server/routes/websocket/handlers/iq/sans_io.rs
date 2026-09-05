@@ -235,13 +235,52 @@ async fn handle_sans_io_iq_with_relay_override(
                 }
             }
         }
+        let muji_terminate_room = super::jingle_muji_gate::muji_session_terminate_room(iq);
+        // A Muji initiate from this connection must still hold the room's
+        // CURRENT occupancy for its full JID (#1703): a superseded
+        // connection's initiate would otherwise mint a token and rebind the
+        // SFU registration over the replacement's. Terminates are fenced by
+        // the registry's occupant+sid gate instead. Mirrors the relayed path.
+        if muji_terminate_room.is_none() {
+            if let Some(room) = super::jingle_muji_gate::relayed_muji_room(iq) {
+                match super::jingle_muji_gate::relayed_muji_generation_is_current(
+                    state,
+                    &room,
+                    full_jid,
+                    *conn_state.occupancy_session,
+                )
+                .await
+                {
+                    Ok(true) => {}
+                    Ok(false) => {
+                        return Some(vec![build_iq_error_xml_typed(
+                            ctx.id,
+                            ctx.response_from,
+                            ctx.response_to,
+                            forbidden_iq_error(
+                                "occupant session was replaced; rejoin before retrying",
+                            ),
+                        )]);
+                    }
+                    Err(()) => {
+                        return Some(vec![build_iq_error_xml_typed(
+                            ctx.id,
+                            ctx.response_from,
+                            ctx.response_to,
+                            internal_server_error_iq_error(
+                                "could not verify the current occupant session; please retry",
+                            ),
+                        )]);
+                    }
+                }
+            }
+        }
         let ctx = ProtocolStanzaContext {
             domain,
             full_jid,
             media_capabilities,
             occupant_session: Some(*conn_state.occupancy_session),
         };
-        let muji_terminate_room = super::jingle_muji_gate::muji_session_terminate_room(iq);
         let events = state.deps.protocol.dispatcher.dispatch_iq(iq, &ctx);
         let muji_clear_after = muji_terminate_room.filter(|_| !events_contain_iq_error(&events));
         let deps = crate::server::routes::interpret::Deps {
@@ -858,6 +897,7 @@ async fn enqueue_muji_relay_teardown_fallback(
             },
             generation: None,
             occupant,
+            unbound_occupant: waddle_sfu::UnboundOccupantPolicy::TearDown,
             room_sid: None,
             session: session.cloned(),
         },
@@ -869,6 +909,7 @@ async fn enqueue_muji_relay_teardown_fallback(
             },
             generation: None,
             occupant,
+            unbound_occupant: waddle_sfu::UnboundOccupantPolicy::TearDown,
             room_sid: None,
             session: session.cloned(),
         },
@@ -1445,6 +1486,7 @@ mod tests {
             crate::server::routes::websocket::handlers::presence::MucJoinConnectionContext {
                 occupancy_session,
                 authenticated_session: &Some(owner_session),
+                registry_owner: None,
             },
         )
         .await;
@@ -1453,6 +1495,7 @@ mod tests {
             .expect("room actor")
             .ask(UpsertMujiPresence {
                 sender_jid: alice.clone(),
+                occupant: None,
                 muji: Muji {
                     room: None,
                     preparing: false,
@@ -1967,6 +2010,7 @@ mod tests {
             crate::server::routes::websocket::handlers::presence::MucJoinConnectionContext {
                 occupancy_session,
                 authenticated_session: &Some(owner_session),
+                registry_owner: None,
             },
         )
         .await;

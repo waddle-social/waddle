@@ -39,6 +39,7 @@ async fn unfenced_muji_presence_clear_rejoin_is_skipped_and_preserves_room_muji_
         .expect("room actor")
         .ask(UpsertMujiPresence {
             sender_jid: alice.clone(),
+            occupant: None,
             muji: active_muji(),
         })
         .await
@@ -61,6 +62,7 @@ async fn unfenced_muji_presence_clear_rejoin_is_skipped_and_preserves_room_muji_
                 },
                 generation: None,
                 occupant: None,
+                unbound_occupant: waddle_sfu::UnboundOccupantPolicy::Keep,
                 room_sid: None,
                 session: None,
             },
@@ -125,6 +127,7 @@ async fn unfenced_muji_presence_clear_without_live_registration_still_clears_roo
         .expect("room actor")
         .ask(UpsertMujiPresence {
             sender_jid: alice.clone(),
+            occupant: None,
             muji: active_muji(),
         })
         .await
@@ -144,6 +147,7 @@ async fn unfenced_muji_presence_clear_without_live_registration_still_clears_roo
             },
             generation: None,
             occupant: None,
+            unbound_occupant: waddle_sfu::UnboundOccupantPolicy::Keep,
             room_sid: None,
             session: None,
         })
@@ -216,6 +220,7 @@ async fn sid_fenced_muji_presence_clear_stale_rejoin_preserves_room_muji_state_a
         .expect("room actor")
         .ask(UpsertMujiPresence {
             sender_jid: alice.clone(),
+            occupant: None,
             muji: active_muji(),
         })
         .await
@@ -247,6 +252,7 @@ async fn sid_fenced_muji_presence_clear_stale_rejoin_preserves_room_muji_state_a
             },
             generation: None,
             occupant: None,
+            unbound_occupant: waddle_sfu::UnboundOccupantPolicy::Keep,
             room_sid: old_sids.room_sid.clone(),
             session: None,
         })
@@ -329,6 +335,7 @@ async fn occupant_fenced_muji_clear_rejects_stale_same_session_binding() {
         .expect("room actor")
         .ask(UpsertMujiPresence {
             sender_jid: alice.clone(),
+            occupant: None,
             muji: active_muji(),
         })
         .await
@@ -349,6 +356,7 @@ async fn occupant_fenced_muji_clear_rejects_stale_same_session_binding() {
             },
             generation: None,
             occupant: Some(displaced),
+            unbound_occupant: waddle_sfu::UnboundOccupantPolicy::Keep,
             room_sid: None,
             session: Some(reused_session),
         })
@@ -419,6 +427,7 @@ async fn sid_fenced_muji_presence_clear_matching_sid_still_clears_room_muji_stat
         .expect("room actor")
         .ask(UpsertMujiPresence {
             sender_jid: alice.clone(),
+            occupant: None,
             muji: active_muji(),
         })
         .await
@@ -442,6 +451,7 @@ async fn sid_fenced_muji_presence_clear_matching_sid_still_clears_room_muji_stat
             },
             generation: None,
             occupant: None,
+            unbound_occupant: waddle_sfu::UnboundOccupantPolicy::Keep,
             room_sid: observed_sids.room_sid.clone(),
             session: None,
         })
@@ -512,6 +522,7 @@ async fn muji_room_sweep_clears_owner_local_participants_with_matching_room_sid(
         .expect("room actor")
         .ask(UpsertMujiPresence {
             sender_jid: alice.clone(),
+            occupant: None,
             muji: active_muji(),
         })
         .await
@@ -533,6 +544,7 @@ async fn muji_room_sweep_clears_owner_local_participants_with_matching_room_sid(
             },
             generation: None,
             occupant: None,
+            unbound_occupant: waddle_sfu::UnboundOccupantPolicy::Keep,
             room_sid: observed_sids.room_sid.clone(),
             session: None,
         })
@@ -597,6 +609,7 @@ async fn muji_room_sweep_clears_actor_advertisement_absent_from_sfu_registry() {
         .expect("room actor")
         .ask(UpsertMujiPresence {
             sender_jid: alice.clone(),
+            occupant: None,
             muji: active_muji(),
         })
         .await
@@ -618,6 +631,7 @@ async fn muji_room_sweep_clears_actor_advertisement_absent_from_sfu_registry() {
             },
             generation: None,
             occupant: None,
+            unbound_occupant: waddle_sfu::UnboundOccupantPolicy::Keep,
             room_sid: Some(RoomSid::new("RM_actor_only").expect("room sid")),
             session: None,
         })
@@ -690,6 +704,7 @@ async fn muji_room_sweep_retries_when_the_owned_actor_disappears_before_enumerat
             },
             generation: None,
             occupant: None,
+            unbound_occupant: waddle_sfu::UnboundOccupantPolicy::Keep,
             room_sid: Some(RoomSid::new("RM_actor_race").expect("room sid")),
             session: None,
         })
@@ -752,6 +767,7 @@ async fn muji_room_sweep_stale_room_sid_preserves_room_muji_state_and_counts_onc
         .expect("room actor")
         .ask(UpsertMujiPresence {
             sender_jid: alice.clone(),
+            occupant: None,
             muji: active_muji(),
         })
         .await
@@ -773,6 +789,7 @@ async fn muji_room_sweep_stale_room_sid_preserves_room_muji_state_and_counts_onc
             },
             generation: None,
             occupant: None,
+            unbound_occupant: waddle_sfu::UnboundOccupantPolicy::Keep,
             room_sid: Some(RoomSid::new("RM_stale").expect("room sid")),
             session: None,
         })

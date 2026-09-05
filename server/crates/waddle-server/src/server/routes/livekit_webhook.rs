@@ -430,6 +430,7 @@ async fn enqueue_muji_room_sweep(
         },
         generation: None,
         occupant: None,
+        unbound_occupant: waddle_sfu::UnboundOccupantPolicy::Keep,
         room_sid: Some(room_sid.clone()),
         session: None,
     };
@@ -1308,6 +1309,7 @@ mod tests {
             crate::server::routes::websocket::handlers::presence::MucJoinConnectionContext {
                 occupancy_session: alice_occupancy_session,
                 authenticated_session: &Some(session),
+                registry_owner: None,
             },
         )
         .await;
@@ -1723,6 +1725,7 @@ mod tests {
             crate::server::routes::websocket::handlers::presence::MucJoinConnectionContext {
                 occupancy_session: alice_occupancy_session,
                 authenticated_session: &Some(session),
+                registry_owner: None,
             },
         )
         .await;
@@ -1777,6 +1780,7 @@ mod tests {
             crate::server::routes::websocket::handlers::presence::MucJoinConnectionContext {
                 occupancy_session: alice_occupancy_session,
                 authenticated_session: &Some(session),
+                registry_owner: None,
             },
         )
         .await;
@@ -2109,6 +2113,7 @@ mod tests {
             crate::server::routes::websocket::handlers::presence::MucJoinConnectionContext {
                 occupancy_session: alice_occupancy_session,
                 authenticated_session: &Some(session),
+                registry_owner: None,
             },
         )
         .await;
@@ -2117,6 +2122,7 @@ mod tests {
             .expect("room actor")
             .ask(UpsertMujiPresence {
                 sender_jid: alice.clone(),
+                occupant: None,
                 muji: active_muji(),
             })
             .await
@@ -2265,6 +2271,7 @@ mod tests {
             crate::server::routes::websocket::handlers::presence::MucJoinConnectionContext {
                 occupancy_session: alice_occupancy_session,
                 authenticated_session: &Some(session),
+                registry_owner: None,
             },
         )
         .await;

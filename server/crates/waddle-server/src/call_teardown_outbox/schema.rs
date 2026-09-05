@@ -48,6 +48,7 @@ pub(super) async fn initialize(db: &Database) -> Result<(), CallTeardownOutboxEr
     add_non_blank_text_column_if_missing(&connection, driver, "producing_node").await?;
     add_non_blank_text_column_if_missing(&connection, driver, "session_binding").await?;
     add_non_blank_text_column_if_missing(&connection, driver, "occupant").await?;
+    add_non_blank_text_column_if_missing(&connection, driver, "unbound_occupant").await?;
     connection
         .execute(
             "CREATE INDEX IF NOT EXISTS idx_call_teardown_outbox_status_due \

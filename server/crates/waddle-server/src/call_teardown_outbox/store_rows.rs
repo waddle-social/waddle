@@ -47,6 +47,15 @@ pub(super) fn decode_job(row: &Row) -> Result<CallTeardownJob, CallTeardownOutbo
                         .map_err(|_| CallTeardownOutboxError::InvalidOccupantGeneration(value))
                 })
                 .transpose()?,
+            unbound_occupant: match row.get::<Option<String>>(21)?.as_deref() {
+                Some("teardown") => waddle_sfu::UnboundOccupantPolicy::TearDown,
+                Some("keep") | None => waddle_sfu::UnboundOccupantPolicy::Keep,
+                Some(other) => {
+                    return Err(CallTeardownOutboxError::InvalidUnboundOccupantPolicy(
+                        other.to_string(),
+                    ))
+                }
+            },
             room_sid: row
                 .get::<Option<String>>(6)?
                 .map(RoomSid::new)

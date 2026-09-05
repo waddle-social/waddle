@@ -671,6 +671,7 @@ async fn create_websocket_state(
                             generation: lite.generation,
                             room_sid: lite.room_sid,
                             occupant: lite.occupant_session,
+                            unbound_occupant: waddle_sfu::UnboundOccupantPolicy::Keep,
                             session: None,
                         };
                         let sink_store = Arc::clone(&sink_store);

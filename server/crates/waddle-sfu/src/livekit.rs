@@ -273,6 +273,9 @@ struct ClearOutcome {
     /// executor's rebind check instead of being ejected.
     removed_session: Option<SessionBinding>,
     removed_occupant_session: Option<OccupancySessionGeneration>,
+    /// The caller's unbound-registration policy, carried into the durable
+    /// removal so a confirmed departure keeps its authority (#1703).
+    unbound_occupant: crate::UnboundOccupantPolicy,
     /// Participants still registered after the clear.
     remaining: usize,
 }
@@ -290,6 +293,7 @@ struct RemoteTeardownEvidence {
     /// by the executor's rebind check instead of being ejected.
     session: Option<SessionBinding>,
     occupant_session: Option<OccupancySessionGeneration>,
+    unbound_occupant: crate::UnboundOccupantPolicy,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -529,6 +533,10 @@ impl LiveKitTeardownExecutor {
             });
             match tracked {
                 Some(Some(bound)) if bound == *intent_occupant_session => {}
+                // Restored without a generation: only an intent minted by a
+                // CONFIRMED departure may remove it (#1703).
+                Some(None) if intent.unbound_occupant == crate::UnboundOccupantPolicy::TearDown => {
+                }
                 Some(_) => return Ok(TeardownExecution::StaleGeneration),
                 // A PARTIAL entry (another participant restored by a webhook
                 // while this identity's live replacement is known only to
@@ -1217,6 +1225,7 @@ impl LiveKitSfu {
                 room_sid,
                 participant_sid,
                 occupant_session: None,
+                unbound_occupant: crate::UnboundOccupantPolicy::Keep,
                 // Revocation authority is token state, not a signaling
                 // terminate: rejoin protection here is the
                 // registration's own clear_pending_revocation_eject,
@@ -1584,6 +1593,7 @@ impl LiveKitSfu {
             participant_sid,
             removed_session,
             removed_occupant_session,
+            unbound_occupant,
             remaining,
         ) = match clear {
             ClearDisposition::Cleared(ClearOutcome {
@@ -1594,6 +1604,7 @@ impl LiveKitSfu {
                 participant_sid,
                 removed_session,
                 removed_occupant_session,
+                unbound_occupant,
                 remaining,
             }) => (
                 was_present,
@@ -1603,6 +1614,7 @@ impl LiveKitSfu {
                 participant_sid,
                 removed_session,
                 removed_occupant_session,
+                unbound_occupant,
                 remaining,
             ),
             ClearDisposition::SessionMismatch => return SessionScopedTeardown::SessionMismatch,
@@ -1649,6 +1661,7 @@ impl LiveKitSfu {
                 participant_sid,
                 session: removed_session,
                 occupant_session: removed_occupant_session,
+                unbound_occupant,
             },
         );
 
@@ -1726,6 +1739,10 @@ impl LiveKitSfu {
             .participants
             .get(identity)
             .and_then(|participant| participant.occupant_session);
+        let unbound_occupant = match session_gate {
+            SessionGate::Occupant { unbound, .. } => unbound,
+            SessionGate::Any | SessionGate::Presented(_) => crate::UnboundOccupantPolicy::Keep,
+        };
         let room_sid = entry.room_sid.clone();
         let was_present = entry.participants.remove(identity).is_some();
         let generation = entry.generation;
@@ -1846,6 +1863,7 @@ impl LiveKitSfu {
             participant_sid,
             removed_session,
             removed_occupant_session,
+            unbound_occupant,
             remaining,
         })
     }
@@ -1887,6 +1905,7 @@ impl LiveKitSfu {
             participant_sid,
             session,
             occupant_session,
+            unbound_occupant,
         } = evidence;
         let participant_intent = CallTeardownIntentLite {
             call_id: call_id.clone(),
@@ -1897,6 +1916,7 @@ impl LiveKitSfu {
             generation,
             room_sid: room_sid.clone(),
             occupant_session,
+            unbound_occupant,
             session,
         };
         let room_intent = we_just_emptied.then(|| CallTeardownIntentLite {
@@ -1905,6 +1925,7 @@ impl LiveKitSfu {
             generation,
             room_sid,
             occupant_session: None,
+            unbound_occupant: crate::UnboundOccupantPolicy::Keep,
             session: None,
         });
         let report_all = || {

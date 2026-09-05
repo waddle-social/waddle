@@ -38,16 +38,39 @@ pub async fn handle_muc_join(
             presence_show,
             occupancy_session: connection.occupancy_session,
             authenticated_session: connection.authenticated_session,
+            registry_owner: connection.registry_owner,
             ordered_relay_origin: None,
         },
     )
     .await
 }
 
+/// Whether the joining connection still owns its registry slot at the commit
+/// boundary. A connection that lost the slot during the join's awaits is
+/// superseded: committing now would install it over the replacement (#1703).
+fn join_connection_still_owns_slot(
+    state: &WebSocketState,
+    sender_jid: &FullJid,
+    registry_owner: Option<&std::sync::Arc<std::sync::atomic::AtomicBool>>,
+) -> bool {
+    registry_owner.is_none_or(|owner| {
+        state
+            .deps
+            .protocol
+            .connection_registry
+            .is_owned_by(sender_jid, owner)
+    })
+}
+
 #[cfg(any(test, feature = "clustering"))]
 pub struct MucJoinConnectionContext<'a> {
     pub occupancy_session: waddle_xmpp_core::OccupancySessionGeneration,
     pub authenticated_session: &'a Option<Session>,
+    /// The connection's registry ownership token, re-validated right
+    /// before the join is committed (locally or relayed): a connection that
+    /// lost its slot during the join's awaits must not install itself over
+    /// the replacement (#1703). `None` for server-originated joins.
+    pub registry_owner: Option<&'a std::sync::Arc<std::sync::atomic::AtomicBool>>,
 }
 
 pub struct MucJoinRequest<'a> {
@@ -58,6 +81,7 @@ pub struct MucJoinRequest<'a> {
     pub presence_show: Option<crate::notification_activity::NotificationPresenceShow>,
     pub occupancy_session: waddle_xmpp_core::OccupancySessionGeneration,
     pub authenticated_session: &'a Option<Session>,
+    pub registry_owner: Option<&'a std::sync::Arc<std::sync::atomic::AtomicBool>>,
     pub ordered_relay_origin: Option<crate::server::routes::interpret::OrderedRelayRouteOrigin>,
 }
 
@@ -68,6 +92,7 @@ struct MucJoinWork<'a> {
     nick: String,
     presence_show: Option<crate::notification_activity::NotificationPresenceShow>,
     occupancy_session: waddle_xmpp_core::OccupancySessionGeneration,
+    registry_owner: Option<&'a std::sync::Arc<std::sync::atomic::AtomicBool>>,
     authenticated_session: &'a Option<Session>,
     ordered_relay_origin: Option<crate::server::routes::interpret::OrderedRelayRouteOrigin>,
 }
@@ -93,6 +118,7 @@ pub async fn handle_muc_join_with_ordered_relay(
             nick: request.nick.to_string(),
             presence_show: request.presence_show,
             occupancy_session: request.occupancy_session,
+            registry_owner: request.registry_owner,
             authenticated_session: request.authenticated_session,
             ordered_relay_origin: request.ordered_relay_origin,
         },
@@ -914,6 +940,7 @@ async fn handle_muc_join_unlocked(state: &WebSocketState, request: MucJoinWork<'
         presence_show,
         occupancy_session,
         authenticated_session,
+        registry_owner,
         ordered_relay_origin,
     } = request;
     #[cfg(not(feature = "clustering"))]
@@ -1296,6 +1323,10 @@ async fn handle_muc_join_unlocked(state: &WebSocketState, request: MucJoinWork<'
                                     .remote_muc_memberships
                                     .lock_membership(sender_jid, room_jid)
                                     .await;
+                                if !join_connection_still_owns_slot(state, sender_jid, registry_owner) {
+                                    debug!(room = %room_jid, sender = %sender_jid, "remote MUC join abandoned: connection superseded before relay");
+                                    return Vec::new();
+                                }
                                 match remote_muc_join_decision(
                                     bridge
                                         .try_proxy_muc_remote(
@@ -1422,6 +1453,10 @@ async fn handle_muc_join_unlocked(state: &WebSocketState, request: MucJoinWork<'
             JoinAffiliationGrant::Unaffiliated
         };
 
+        if !join_connection_still_owns_slot(state, sender_jid, registry_owner) {
+            debug!(room = %room_jid, sender = %sender_jid, "MUC join abandoned: connection superseded before commit");
+            return Vec::new();
+        }
         let join_outcome = match room_actor
             .ask(JoinWithAffiliation {
                 sender_jid: sender_jid.clone(),
@@ -3381,6 +3416,7 @@ mod occupancy_projection_handler_tests {
             nick,
             presence_show,
             MucJoinConnectionContext {
+                registry_owner: None,
                 occupancy_session: record_occupancy_session(state, sender_jid),
                 authenticated_session,
             },

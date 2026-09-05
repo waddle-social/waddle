@@ -2718,6 +2718,7 @@ async fn upsert_muji_presence_returns_none_for_non_occupant() {
     let outcome = actor
         .ask(crate::muc::room_actor::UpsertMujiPresence {
             sender_jid: stranger,
+            occupant: None,
             muji: audio_muji(),
         })
         .await
@@ -2745,6 +2746,7 @@ async fn upsert_muji_presence_active_stores_and_returns_muji() {
     let outcome = actor
         .ask(crate::muc::room_actor::UpsertMujiPresence {
             sender_jid: alice.clone(),
+            occupant: None,
             muji: audio_muji(),
         })
         .await
@@ -2808,6 +2810,7 @@ async fn upsert_muji_presence_recipients_include_every_sibling_session_of_sender
     let outcome = actor
         .ask(crate::muc::room_actor::UpsertMujiPresence {
             sender_jid: desktop.clone(),
+            occupant: None,
             muji: audio_muji(),
         })
         .await
@@ -2859,6 +2862,7 @@ async fn same_nick_sibling_preparing_does_not_clobber_active_muji_snapshot() {
     actor
         .ask(crate::muc::room_actor::UpsertMujiPresence {
             sender_jid: desktop.clone(),
+            occupant: None,
             muji: audio_muji(),
         })
         .await
@@ -2868,6 +2872,7 @@ async fn same_nick_sibling_preparing_does_not_clobber_active_muji_snapshot() {
     let preparing = actor
         .ask(crate::muc::room_actor::UpsertMujiPresence {
             sender_jid: mobile.clone(),
+            occupant: None,
             muji: preparing_muji(),
         })
         .await
@@ -2960,6 +2965,7 @@ async fn late_join_replay_includes_preparing_only_same_nick_muji_with_exact_owne
     actor
         .ask(crate::muc::room_actor::UpsertMujiPresence {
             sender_jid: mobile.clone(),
+            occupant: None,
             muji: preparing_muji(),
         })
         .await
@@ -3058,6 +3064,7 @@ async fn upsert_muji_presence_empty_clears_state_and_returns_none() {
     actor
         .ask(crate::muc::room_actor::UpsertMujiPresence {
             sender_jid: alice.clone(),
+            occupant: None,
             muji: audio_muji(),
         })
         .await
@@ -3072,6 +3079,7 @@ async fn upsert_muji_presence_empty_clears_state_and_returns_none() {
     let outcome = actor
         .ask(crate::muc::room_actor::UpsertMujiPresence {
             sender_jid: alice.clone(),
+            occupant: None,
             muji: empty_muji(),
         })
         .await
@@ -3109,6 +3117,7 @@ async fn clear_muji_presence_clears_existing_state_without_muji_payload() {
     actor
         .ask(crate::muc::room_actor::UpsertMujiPresence {
             sender_jid: alice.clone(),
+            occupant: None,
             muji: audio_muji(),
         })
         .await
@@ -3203,6 +3212,7 @@ async fn stale_generation_clear_muji_presence_is_superseded_and_preserves_live_a
     actor
         .ask(crate::muc::room_actor::UpsertMujiPresence {
             sender_jid: alice.clone(),
+            occupant: None,
             muji: audio_muji(),
         })
         .await
@@ -3214,6 +3224,7 @@ async fn stale_generation_clear_muji_presence_is_superseded_and_preserves_live_a
     actor
         .ask(crate::muc::room_actor::UpsertMujiPresence {
             sender_jid: alice.clone(),
+            occupant: None,
             muji: audio_muji(),
         })
         .await
@@ -3263,6 +3274,7 @@ async fn join_replay_includes_active_muji_from_existing_occupant() {
     actor
         .ask(crate::muc::room_actor::UpsertMujiPresence {
             sender_jid: alice.clone(),
+            occupant: None,
             muji: audio_muji(),
         })
         .await
@@ -3312,6 +3324,7 @@ async fn leaving_occupant_clears_muji_state() {
     actor
         .ask(crate::muc::room_actor::UpsertMujiPresence {
             sender_jid: alice.clone(),
+            occupant: None,
             muji: audio_muji(),
         })
         .await
@@ -3387,6 +3400,7 @@ async fn leaving_originator_session_clears_muji_state_even_with_peer_sessions_re
     let active_outcome = actor
         .ask(crate::muc::room_actor::UpsertMujiPresence {
             sender_jid: desktop.clone(),
+            occupant: None,
             muji: audio_muji(),
         })
         .await
@@ -3485,6 +3499,7 @@ async fn leaving_non_originator_session_preserves_muji_state() {
     actor
         .ask(crate::muc::room_actor::UpsertMujiPresence {
             sender_jid: desktop.clone(),
+            occupant: None,
             muji: audio_muji(),
         })
         .await
@@ -3561,6 +3576,7 @@ async fn leaving_one_active_same_nick_session_preserves_sibling_active_muji_stat
     actor
         .ask(crate::muc::room_actor::UpsertMujiPresence {
             sender_jid: desktop.clone(),
+            occupant: None,
             muji: audio_muji(),
         })
         .await
@@ -3569,6 +3585,7 @@ async fn leaving_one_active_same_nick_session_preserves_sibling_active_muji_stat
     actor
         .ask(crate::muc::room_actor::UpsertMujiPresence {
             sender_jid: mobile.clone(),
+            occupant: None,
             muji: audio_muji(),
         })
         .await
@@ -8019,6 +8036,7 @@ async fn destroy_seal_blocks_muji_upserts() {
         actor
             .ask(UpsertMujiPresence {
                 sender_jid: alice.clone(),
+                occupant: None,
                 muji: audio_muji(),
             })
             .await
@@ -8054,6 +8072,7 @@ async fn destroy_seal_blocks_muji_clears() {
     actor
         .ask(UpsertMujiPresence {
             sender_jid: alice.clone(),
+            occupant: None,
             muji: audio_muji(),
         })
         .await
@@ -8105,6 +8124,7 @@ async fn destroy_seal_blocks_in_call_state_updates() {
         actor
             .ask(UpsertInCallState {
                 sender_jid: alice,
+                occupant: None,
                 state: crate::xep::InCallPresenceState {
                     hand_raised: true,
                     muted: false,
@@ -10101,6 +10121,7 @@ async fn rejoin_under_a_new_generation_does_not_snapshot_the_displaced_muji_stat
     actor
         .ask(crate::muc::room_actor::UpsertMujiPresence {
             sender_jid: alice.clone(),
+            occupant: None,
             muji: crate::xep::xep0272::Muji::preparing(),
         })
         .await
@@ -10133,4 +10154,61 @@ async fn rejoin_under_a_new_generation_does_not_snapshot_the_displaced_muji_stat
         own.muji.is_none(),
         "the displaced generation's Muji advertisement must not be replayed to the replacement"
     );
+}
+
+/// #1703 (codex round 5): Muji and in-call updates presented with a
+/// superseded occupancy generation are refused before any room state changes.
+#[tokio::test]
+async fn muji_and_in_call_updates_from_a_superseded_generation_are_refused() {
+    let actor = spawn_room_actor().await;
+    let alice: FullJid = "alice@example.com/web".parse().unwrap();
+    let first = OccupancySessionGeneration::mint();
+    let second = OccupancySessionGeneration::mint();
+    join_as_resolver_with_session(&actor, alice.clone(), "alice", first)
+        .await
+        .expect("first join");
+    join_as_resolver_with_session(&actor, alice.clone(), "alice", second)
+        .await
+        .expect("replacement join");
+
+    let refused = actor
+        .ask(crate::muc::room_actor::UpsertMujiPresence {
+            sender_jid: alice.clone(),
+            occupant: Some(first),
+            muji: crate::xep::xep0272::Muji::preparing(),
+        })
+        .await
+        .expect("ask");
+    assert!(
+        refused.is_none(),
+        "a superseded generation's Muji update is refused"
+    );
+    let snapshot = actor.ask(GetSnapshot).await.expect("snapshot");
+    assert!(snapshot.room.muji_for_session("alice", &alice).is_none());
+
+    let refused = actor
+        .ask(crate::muc::room_actor::UpsertInCallState {
+            sender_jid: alice.clone(),
+            occupant: Some(first),
+            state: crate::xep::InCallPresenceState {
+                hand_raised: true,
+                ..Default::default()
+            },
+        })
+        .await
+        .expect("ask");
+    assert!(
+        refused.is_none(),
+        "a superseded generation's in-call update is refused"
+    );
+
+    let applied = actor
+        .ask(crate::muc::room_actor::UpsertMujiPresence {
+            sender_jid: alice.clone(),
+            occupant: Some(second),
+            muji: crate::xep::xep0272::Muji::preparing(),
+        })
+        .await
+        .expect("ask");
+    assert!(applied.is_some(), "the current generation's update applies");
 }

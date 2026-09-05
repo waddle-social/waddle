@@ -41,6 +41,7 @@ async fn enqueue_round_trip_preserves_occupant_generation() {
     let occupant = occupant_generation();
     let intent = CallTeardownIntent {
         occupant: Some(occupant),
+        unbound_occupant: waddle_sfu::UnboundOccupantPolicy::Keep,
         ..participant_intent()
     };
 
@@ -168,6 +169,7 @@ async fn differing_fence_evidence_inserts_a_second_queued_row() {
     let second = CallTeardownIntent {
         generation: Some(CallGeneration::try_from(2).unwrap()),
         occupant: None,
+        unbound_occupant: waddle_sfu::UnboundOccupantPolicy::Keep,
         room_sid: Some(RoomSid::new("RM_other").unwrap()),
         target: TeardownTarget::Participant {
             identity: FullJid::from_str("alice@example.test/device").unwrap(),
@@ -364,6 +366,7 @@ async fn muji_presence_clear_round_trips_with_typed_participant_sid() {
         },
         generation: None,
         occupant: None,
+        unbound_occupant: waddle_sfu::UnboundOccupantPolicy::Keep,
         room_sid: Some(RoomSid::new("RM_muji").unwrap()),
         session: None,
     };
@@ -384,6 +387,7 @@ async fn muji_room_sweep_round_trips_with_webhook_room_sid() {
         },
         generation: None,
         occupant: None,
+        unbound_occupant: waddle_sfu::UnboundOccupantPolicy::Keep,
         room_sid: Some(RoomSid::new("RM_sweep").unwrap()),
         session: None,
     };
@@ -405,6 +409,7 @@ async fn muji_presence_clear_dedupe_is_exact_match_on_participant_sid() {
         },
         generation: None,
         occupant: None,
+        unbound_occupant: waddle_sfu::UnboundOccupantPolicy::Keep,
         room_sid: Some(RoomSid::new("RM_same").unwrap()),
         session: None,
     };
@@ -507,6 +512,7 @@ async fn ownership_release_defers_old_row_so_later_work_can_be_claimed() {
             target: TeardownTarget::Room,
             generation: None,
             occupant: None,
+            unbound_occupant: waddle_sfu::UnboundOccupantPolicy::Keep,
             room_sid: None,
             session: None,
         })
@@ -549,6 +555,7 @@ async fn participant_waits_for_pending_muji_presence_clear() {
             },
             generation: None,
             occupant: None,
+            unbound_occupant: waddle_sfu::UnboundOccupantPolicy::Keep,
             room_sid: None,
             session: None,
         })
@@ -564,6 +571,7 @@ async fn participant_waits_for_pending_muji_presence_clear() {
             },
             generation: None,
             occupant: None,
+            unbound_occupant: waddle_sfu::UnboundOccupantPolicy::Keep,
             room_sid: None,
             session: None,
         })

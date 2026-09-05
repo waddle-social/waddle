@@ -99,6 +99,7 @@ async fn drain_skips_participant_when_intent_occupant_generation_is_stale() {
             },
             generation: None,
             occupant: Some(stale_occupant),
+            unbound_occupant: waddle_sfu::UnboundOccupantPolicy::Keep,
             room_sid: None,
             session: None,
         })
@@ -311,6 +312,7 @@ async fn drain_marks_higher_generation_stale_without_admin_call() {
         },
         generation: Some(CallGeneration::try_from_u64(1).expect("generation")),
         occupant: None,
+        unbound_occupant: waddle_sfu::UnboundOccupantPolicy::Keep,
         room_sid: None,
         session: None,
     };
@@ -360,6 +362,7 @@ async fn room_not_owned_by_this_node_remains_queued() {
         },
         generation: None,
         occupant: None,
+        unbound_occupant: waddle_sfu::UnboundOccupantPolicy::Keep,
         room_sid: None,
         session: None,
     };
@@ -417,6 +420,7 @@ async fn occupied_room_intent_is_requeued_not_consumed() {
             target: TeardownTarget::Room,
             generation: None,
             occupant: None,
+            unbound_occupant: waddle_sfu::UnboundOccupantPolicy::Keep,
             room_sid: None,
             session: None,
         })
@@ -469,6 +473,7 @@ async fn unfenced_participant_rejoin_is_skipped_without_admin_call() {
                 },
                 generation: None,
                 occupant: None,
+                unbound_occupant: waddle_sfu::UnboundOccupantPolicy::Keep,
                 room_sid: None,
                 session: None,
             },
@@ -520,6 +525,7 @@ async fn unfenced_participant_without_live_registration_still_removes_participan
             },
             generation: None,
             occupant: None,
+            unbound_occupant: waddle_sfu::UnboundOccupantPolicy::Keep,
             room_sid: None,
             session: None,
         })

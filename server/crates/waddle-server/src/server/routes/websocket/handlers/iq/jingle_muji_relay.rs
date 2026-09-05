@@ -20,30 +20,10 @@ use super::errors::{forbidden_iq_error, internal_server_error_iq_error};
 use super::jingle_muji_gate::{self, GateInvocation, GateOutcome};
 use super::sans_io::events_contain_iq_error;
 use super::ProtocolStanzaContext;
+#[cfg(test)]
 use waddle_xmpp::muc::room_actor::GetSnapshot;
-use waddle_xmpp::xep::xep0272::{find_muji, Muji};
 
-async fn relayed_muji_generation_is_current(
-    state: &WebSocketState,
-    room: &jid::BareJid,
-    sender: &jid::FullJid,
-    generation: waddle_xmpp_core::OccupancySessionGeneration,
-) -> Result<bool, ()> {
-    let actor = crate::server::routes::websocket::get_room_actor_result(state, room)
-        .await
-        .map_err(|_| ())?
-        .ok_or(())?;
-    let snapshot = actor.ask(GetSnapshot).await.map_err(|_| ())?;
-    Ok(snapshot.room.session_generation(sender) == Some(generation))
-}
-
-fn relayed_muji_room(iq: &xmpp_parsers::iq::Iq) -> Option<jid::BareJid> {
-    let xmpp_parsers::iq::Iq::Set { payload, .. } = iq else {
-        return None;
-    };
-    let muji = Muji::try_from(find_muji(payload)?).ok()?;
-    muji.room
-}
+use super::jingle_muji_gate::{relayed_muji_generation_is_current, relayed_muji_room};
 
 /// Execute a relayed Muji `session-initiate` or `session-terminate`
 /// on the room-owning node.
@@ -463,6 +443,7 @@ mod tests {
         actor
             .ask(waddle_xmpp::muc::room_actor::UpsertMujiPresence {
                 sender_jid: alice.clone(),
+                occupant: None,
                 muji: Muji::with_contents(vec![MujiContent::new(
                     "audio",
                     Creator::Initiator,

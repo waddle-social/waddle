@@ -128,6 +128,12 @@ pub struct CallTeardownIntent {
     /// only by a SID when one is present.
     pub generation: Option<CallGeneration>,
     pub occupant: Option<OccupancySessionGeneration>,
+    /// Policy for a registration restored WITHOUT a generation when
+    /// `occupant` is `Some` (#1703): `TearDown` only for an intent produced by
+    /// a confirmed departure (room actor removed the session, or the live
+    /// connection asked); `Keep` otherwise. Persisted so a retry after a
+    /// restart keeps the producer's authority.
+    pub unbound_occupant: waddle_sfu::UnboundOccupantPolicy,
     pub room_sid: Option<RoomSid>,
     /// The signaling session (Jingle sid) whose terminate produced this
     /// intent (#1608, PR #1626 review). At drain time a participant
@@ -303,6 +309,8 @@ pub enum CallTeardownOutboxError {
     GenerationOverflow(u64),
     #[error("call teardown outbox row has invalid occupant generation '{0}'")]
     InvalidOccupantGeneration(String),
+    #[error("invalid unbound occupant policy in outbox row: {0}")]
+    InvalidUnboundOccupantPolicy(String),
     #[error("call teardown outbox row has an invalid target shape for action '{0}'")]
     InvalidTargetShape(String),
     #[error("failed to encode call teardown producing node: {0}")]

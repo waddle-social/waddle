@@ -96,8 +96,8 @@ impl CallTeardownOutboxStore {
                     "INSERT INTO call_teardown_outbox (\
                         intent_id, call_id, identity, room_jid, action, generation, occupant, \
                         room_sid, participant_sid, thread_id, anchor_origin_id, thread_started_at_ms, thread_ended_at_ms, producing_node, status, attempt_count, last_error, \
-                        next_attempt_at_ms, claimed_at_ms, claim_token, created_at_ms, updated_at_ms, session_binding\
-                     ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, NULL, ?, NULL, NULL, ?, ?, ?)",
+                        next_attempt_at_ms, claimed_at_ms, claim_token, created_at_ms, updated_at_ms, session_binding, unbound_occupant\
+                     ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, NULL, ?, NULL, NULL, ?, ?, ?, ?)",
                     crate::db_params![
                         intent_id.as_str(),
                         intent.call_id.as_str(),
@@ -118,6 +118,7 @@ impl CallTeardownOutboxStore {
                         now_ms,
                         now_ms,
                         intent.session.as_ref().map(SessionBinding::as_str),
+                        unbound_occupant_db_value(intent.unbound_occupant),
                     ],
                 )
                 .await?;
@@ -196,8 +197,8 @@ impl CallTeardownOutboxStore {
                 "INSERT INTO call_teardown_outbox (\
                     intent_id, call_id, identity, room_jid, action, generation, occupant, \
                     room_sid, participant_sid, thread_id, anchor_origin_id, thread_started_at_ms, thread_ended_at_ms, producing_node, status, attempt_count, last_error, \
-                    next_attempt_at_ms, claimed_at_ms, claim_token, created_at_ms, updated_at_ms, session_binding\
-                 ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, NULL, ?, NULL, NULL, ?, ?, ?)",
+                    next_attempt_at_ms, claimed_at_ms, claim_token, created_at_ms, updated_at_ms, session_binding, unbound_occupant\
+                 ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, NULL, ?, NULL, NULL, ?, ?, ?, ?)",
                 crate::db_params![
                     intent_id.as_str(),
                     intent.call_id.as_str(),
@@ -218,6 +219,7 @@ impl CallTeardownOutboxStore {
                     now_ms,
                     now_ms,
                     intent.session.as_ref().map(SessionBinding::as_str),
+                    unbound_occupant_db_value(intent.unbound_occupant),
                 ],
             )
             .await?;
@@ -360,11 +362,20 @@ pub fn retry_delay_ms(attempt_count: i64) -> i64 {
         .min(MAX_RETRY_DELAY_MS)
 }
 
+/// Storage form of [`waddle_sfu::UnboundOccupantPolicy`] (`teardown` /
+/// `keep`); parsed back typed in `store_rows`.
+pub(super) fn unbound_occupant_db_value(policy: waddle_sfu::UnboundOccupantPolicy) -> &'static str {
+    match policy {
+        waddle_sfu::UnboundOccupantPolicy::TearDown => "teardown",
+        waddle_sfu::UnboundOccupantPolicy::Keep => "keep",
+    }
+}
+
 pub(super) fn select_columns() -> &'static str {
     "SELECT intent_id, call_id, identity, room_jid, action, generation, \
             room_sid, participant_sid, producing_node, status, attempt_count, last_error, \
             next_attempt_at_ms, claim_token, created_at_ms, thread_id, anchor_origin_id, \
-            thread_started_at_ms, thread_ended_at_ms, session_binding, occupant \
+            thread_started_at_ms, thread_ended_at_ms, session_binding, occupant, unbound_occupant \
      FROM call_teardown_outbox"
 }
 

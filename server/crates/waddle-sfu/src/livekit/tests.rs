@@ -1457,6 +1457,7 @@ async fn teardown_executor_sid_guard_skips_a_new_room_incarnation() {
         generation: None,
         room_sid: Some(fixture_room_sid("RM_old")),
         occupant_session: None,
+        unbound_occupant: crate::UnboundOccupantPolicy::Keep,
         session: None,
     };
 
@@ -1486,6 +1487,7 @@ async fn teardown_executor_defers_when_live_entry_has_not_learned_persisted_sids
         generation: None,
         room_sid: Some(fixture_room_sid("RM_old")),
         occupant_session: None,
+        unbound_occupant: crate::UnboundOccupantPolicy::Keep,
         session: None,
     };
 
@@ -1514,6 +1516,7 @@ async fn teardown_executor_requeues_fenced_missing_calls_until_a_reconcile_pass_
         generation: Some(CallGeneration::new(1)),
         room_sid: Some(fixture_room_sid("RM_restart")),
         occupant_session: None,
+        unbound_occupant: crate::UnboundOccupantPolicy::Keep,
         session: None,
     };
 
@@ -1570,6 +1573,7 @@ async fn teardown_executor_declines_missing_call_when_live_sid_disproves_the_fen
         generation: None,
         room_sid: None,
         occupant_session: None,
+        unbound_occupant: crate::UnboundOccupantPolicy::Keep,
         session: None,
     };
     assert_eq!(
@@ -1595,6 +1599,7 @@ async fn teardown_executor_declines_missing_call_when_live_sid_disproves_the_fen
         generation: None,
         room_sid: None,
         occupant_session: None,
+        unbound_occupant: crate::UnboundOccupantPolicy::Keep,
         session: None,
     };
     assert_eq!(
@@ -3229,6 +3234,7 @@ async fn adopted_participant_sid_makes_fenced_removal_decidable() {
         generation: stored_generation(&sfu, &call),
         room_sid: Some(room_sid),
         occupant_session: None,
+        unbound_occupant: crate::UnboundOccupantPolicy::Keep,
         session: None,
     };
     assert_eq!(
@@ -3621,6 +3627,7 @@ async fn executor_refuses_a_session_bearing_intent_after_a_rebind() {
         generation: None,
         room_sid: None,
         occupant_session: None,
+        unbound_occupant: crate::UnboundOccupantPolicy::Keep,
         session: Some(stale),
     };
 
@@ -3654,6 +3661,7 @@ async fn executor_applies_a_session_bearing_intent_that_matches_the_binding() {
         generation: None,
         room_sid: None,
         occupant_session: None,
+        unbound_occupant: crate::UnboundOccupantPolicy::Keep,
         session: Some(current),
     };
 
@@ -4044,6 +4052,7 @@ async fn teardown_executor_defers_occupant_fenced_missing_calls_until_reconcile(
         generation: None,
         room_sid: None,
         occupant_session: Some(fixture_occupancy_session()),
+        unbound_occupant: crate::UnboundOccupantPolicy::Keep,
         session: None,
     };
 
@@ -4082,6 +4091,7 @@ async fn teardown_executor_defers_occupant_fenced_intents_for_untracked_identiti
         generation: None,
         room_sid: None,
         occupant_session: Some(fixture_occupancy_session()),
+        unbound_occupant: crate::UnboundOccupantPolicy::Keep,
         session: None,
     };
 
@@ -4104,4 +4114,49 @@ async fn teardown_executor_defers_occupant_fenced_intents_for_untracked_identiti
             .expect("execute"),
         TeardownExecution::Executed
     );
+}
+
+/// #1703 (codex round 5): an intent minted by a CONFIRMED departure keeps its
+/// authority over a registration that reconciliation restored WITHOUT a
+/// generation; an unconfirmed one does not.
+#[tokio::test]
+async fn teardown_executor_honours_the_persisted_unbound_policy() {
+    let admin = Arc::new(RecordingAdmin::default());
+    let sfu = LiveKitSfu::with_admin(fixture_config(), Arc::clone(&admin) as Arc<_>);
+    sfu.reconcile_pass_completed.store(true, Ordering::Release);
+    let call = CallId::new("r-unbound-policy").expect("call id");
+    let alice = fixture_identity("alice");
+    // Restored after a restart: no generation.
+    sfu.register_call_participant(&call, &alice);
+    let intent = |policy| CallTeardownIntentLite {
+        call_id: call.clone(),
+        target: TeardownTargetLite::Participant {
+            identity: alice.clone(),
+            participant_sid: None,
+        },
+        generation: None,
+        room_sid: None,
+        occupant_session: Some(fixture_occupancy_session()),
+        unbound_occupant: policy,
+        session: None,
+    };
+
+    assert_eq!(
+        sfu.teardown_executor()
+            .execute(&intent(UnboundOccupantPolicy::Keep))
+            .await
+            .expect("execute"),
+        TeardownExecution::StaleGeneration,
+        "an unconfirmed intent must not remove a restored registration"
+    );
+    assert!(admin.remove_snapshot().is_empty());
+    assert_eq!(
+        sfu.teardown_executor()
+            .execute(&intent(UnboundOccupantPolicy::TearDown))
+            .await
+            .expect("execute"),
+        TeardownExecution::Executed,
+        "a confirmed departure keeps its authority across the restart"
+    );
+    assert_eq!(admin.remove_snapshot().len(), 1);
 }

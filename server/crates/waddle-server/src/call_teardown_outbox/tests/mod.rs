@@ -49,6 +49,7 @@ async fn handle_muc_join_with_occupancy_session(
         nick,
         presence_show,
         crate::server::routes::websocket::handlers::presence::MucJoinConnectionContext {
+            registry_owner: None,
             occupancy_session,
             authenticated_session,
         },
@@ -69,6 +70,7 @@ fn unfenced_participant_intent() -> CallTeardownIntent {
         },
         generation: None,
         occupant: None,
+        unbound_occupant: waddle_sfu::UnboundOccupantPolicy::Keep,
         room_sid: None,
         session: None,
     }
@@ -83,6 +85,7 @@ fn participant_intent() -> CallTeardownIntent {
         },
         generation: Some(CallGeneration::try_from(1).unwrap()),
         occupant: None,
+        unbound_occupant: waddle_sfu::UnboundOccupantPolicy::Keep,
         room_sid: Some(RoomSid::new("RM_test").unwrap()),
         session: None,
     }
@@ -91,6 +94,7 @@ fn participant_intent() -> CallTeardownIntent {
 fn participant_intent_with_occupant() -> CallTeardownIntent {
     CallTeardownIntent {
         occupant: Some(occupant_generation()),
+        unbound_occupant: waddle_sfu::UnboundOccupantPolicy::Keep,
         ..participant_intent()
     }
 }

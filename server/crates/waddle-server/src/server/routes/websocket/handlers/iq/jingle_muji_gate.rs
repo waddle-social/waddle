@@ -34,6 +34,7 @@
 use jid::{BareJid, FullJid};
 use waddle_sfu::MediaCapabilities;
 use waddle_xmpp::muc::room_actor::GetOccupantVoice;
+use waddle_xmpp::muc::room_actor::GetSnapshot;
 use waddle_xmpp::telemetry::attributes::{CallSignalEvent, SfuDenialReason};
 use waddle_xmpp::xep::xep0166::NS_JINGLE;
 use waddle_xmpp::xep::xep0272::{find_muji, Muji};
@@ -369,6 +370,31 @@ async fn verify_room_membership(
             )))
         }
     }
+}
+
+/// Whether `generation` is the room's CURRENT occupancy generation for
+/// `sender` (#1703). Used by both the relayed and the local Muji initiate
+/// paths before a token is minted.
+pub(super) async fn relayed_muji_generation_is_current(
+    state: &WebSocketState,
+    room: &jid::BareJid,
+    sender: &jid::FullJid,
+    generation: waddle_xmpp_core::OccupancySessionGeneration,
+) -> Result<bool, ()> {
+    let actor = crate::server::routes::websocket::get_room_actor_result(state, room)
+        .await
+        .map_err(|_| ())?
+        .ok_or(())?;
+    let snapshot = actor.ask(GetSnapshot).await.map_err(|_| ())?;
+    Ok(snapshot.room.session_generation(sender) == Some(generation))
+}
+
+pub(super) fn relayed_muji_room(iq: &xmpp_parsers::iq::Iq) -> Option<jid::BareJid> {
+    let xmpp_parsers::iq::Iq::Set { payload, .. } = iq else {
+        return None;
+    };
+    let muji = Muji::try_from(find_muji(payload)?).ok()?;
+    muji.room
 }
 
 #[cfg(test)]

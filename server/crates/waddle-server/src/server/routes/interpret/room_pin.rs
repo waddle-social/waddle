@@ -608,6 +608,7 @@ mod tests {
             "alice",
             None,
             crate::server::routes::websocket::handlers::presence::MucJoinConnectionContext {
+                registry_owner: None,
                 occupancy_session: alice_occupancy_session,
                 authenticated_session: &Some(alice_session),
             },
@@ -628,6 +629,7 @@ mod tests {
             "bob",
             None,
             crate::server::routes::websocket::handlers::presence::MucJoinConnectionContext {
+                registry_owner: None,
                 occupancy_session: bob_occupancy_session,
                 authenticated_session: &None,
             },

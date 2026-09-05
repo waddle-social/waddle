@@ -207,6 +207,7 @@ async fn enqueue_muji_presence_clear(
             participant_sid: observed_sids.and_then(|sids| sids.participant_sid.clone()),
         },
         generation: None,
+        unbound_occupant: waddle_sfu::UnboundOccupantPolicy::Keep,
         room_sid: observed_sids.and_then(|sids| sids.room_sid.clone()),
         occupant,
         // Carried through from the producer when the departure came
@@ -458,6 +459,7 @@ mod tests {
             crate::server::routes::websocket::handlers::presence::MucJoinConnectionContext {
                 occupancy_session: initiator_occupancy_session,
                 authenticated_session: &Some(owner_session),
+                registry_owner: None,
             },
         )
         .await;

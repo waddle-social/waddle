@@ -66,7 +66,7 @@ pub use webhook::{
 /// NO occupant generation (webhook/probe-restored after a process restart,
 /// or a 1:1 registration) — see
 /// [`SfuService::unregister_call_participant_if_occupant_matches`].
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum UnboundOccupantPolicy {
     /// The departure is confirmed by the room actor or requested by the live
     /// connection: an unbound registration belongs to nobody else provable,

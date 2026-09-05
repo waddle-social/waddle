@@ -372,6 +372,7 @@ async fn handle_presence_impl(
                 presence_show,
                 authenticated_session: context.authenticated_session,
                 occupancy_session: *context.occupancy_session,
+                registry_owner: context.registry_owner,
                 ordered_relay_origin: context.ordered_relay_origin,
             },
         )

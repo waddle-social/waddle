@@ -58,6 +58,7 @@ async fn participant_intent_with_stale_session_binding_is_skipped() {
             room_sid: None,
             session: Some(stale),
             occupant: Some(occupant),
+            unbound_occupant: waddle_sfu::UnboundOccupantPolicy::Keep,
         })
         .await
         .expect("enqueue");
@@ -137,6 +138,7 @@ async fn participant_intent_with_matching_session_binding_executes() {
             room_sid: None,
             session: Some(current),
             occupant: Some(occupant),
+            unbound_occupant: waddle_sfu::UnboundOccupantPolicy::Keep,
         })
         .await
         .expect("enqueue");
@@ -194,6 +196,7 @@ async fn actor_present_muji_clear_with_stale_session_is_refused() {
         .expect("room actor")
         .ask(UpsertMujiPresence {
             sender_jid: alice.clone(),
+            occupant: None,
             muji: Muji::with_contents(vec![MujiContent::new(
                 "audio",
                 Creator::Initiator,
@@ -272,6 +275,7 @@ async fn unbound_registration_survives_a_redriven_muji_clear_but_not_the_live_co
         .expect("room actor")
         .ask(UpsertMujiPresence {
             sender_jid: alice.clone(),
+            occupant: None,
             muji: Muji::with_contents(vec![MujiContent::new(
                 "audio",
                 Creator::Initiator,
@@ -352,6 +356,7 @@ async fn actor_present_muji_clear_with_matching_session_still_clears() {
         .expect("room actor")
         .ask(UpsertMujiPresence {
             sender_jid: alice.clone(),
+            occupant: None,
             muji: Muji::with_contents(vec![MujiContent::new(
                 "audio",
                 Creator::Initiator,
