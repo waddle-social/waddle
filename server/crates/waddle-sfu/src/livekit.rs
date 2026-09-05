@@ -519,14 +519,30 @@ impl LiveKitTeardownExecutor {
         // entry at all — lets the admin removal proceed; restored
         // registrations converge through the reconcile backstop.
         if let Some(intent_occupant_session) = intent.occupant_session.as_ref() {
-            let rebound = self.calls.get(call_id).is_some_and(|entry| {
+            // `Some(Some(_))` bound, `Some(None)` unbound, `None` the call is
+            // tracked but this identity is not.
+            let tracked = self.calls.get(call_id).and_then(|entry| {
                 entry
                     .participants
                     .get(identity)
-                    .is_some_and(|state| state.occupant_session != Some(*intent_occupant_session))
+                    .map(|state| state.occupant_session)
             });
-            if rebound {
-                return Ok(TeardownExecution::StaleGeneration);
+            match tracked {
+                Some(Some(bound)) if bound == *intent_occupant_session => {}
+                Some(_) => return Ok(TeardownExecution::StaleGeneration),
+                // A PARTIAL entry (another participant restored by a webhook
+                // while this identity's live replacement is known only to
+                // LiveKit) is as undecidable as a missing one: defer until
+                // the reconcile pass has merged the live identities
+                // (`merge_live_identities`), which then either binds nothing
+                // (removal proceeds) or restores an unbound entry (refused).
+                None if !entry_missing
+                    && !self.reconcile_pass_completed.load(Ordering::Acquire)
+                    && !self.allow_missing_entry_before_reconcile =>
+                {
+                    return Ok(TeardownExecution::Occupied);
+                }
+                None => {}
             }
         }
         self.admin.remove_participant(call_id, identity).await?;

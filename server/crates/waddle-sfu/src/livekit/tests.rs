@@ -4059,3 +4059,49 @@ async fn teardown_executor_defers_occupant_fenced_missing_calls_until_reconcile(
         "an occupant-fenced intent must not eject by identity before reconciliation"
     );
 }
+
+/// #1703 (codex round 4): a PARTIAL call entry (another participant restored
+/// by a webhook) must not let an occupant-fenced intent for an untracked
+/// identity eject it before the reconcile pass has merged live identities.
+#[tokio::test]
+async fn teardown_executor_defers_occupant_fenced_intents_for_untracked_identities_until_reconcile()
+{
+    let admin = Arc::new(RecordingAdmin::default());
+    let sfu = LiveKitSfu::with_admin(fixture_config(), Arc::clone(&admin) as Arc<_>);
+    let call = CallId::new("r-occupant-partial").expect("call id");
+    let alice = fixture_identity("alice");
+    let bob = fixture_identity("bob");
+    // Bob was restored by a webhook; alice's live replacement is known only to LiveKit.
+    sfu.register_call_participant(&call, &bob);
+    let intent = CallTeardownIntentLite {
+        call_id: call.clone(),
+        target: TeardownTargetLite::Participant {
+            identity: alice.clone(),
+            participant_sid: None,
+        },
+        generation: None,
+        room_sid: None,
+        occupant_session: Some(fixture_occupancy_session()),
+        session: None,
+    };
+
+    assert_eq!(
+        sfu.teardown_executor()
+            .execute(&intent)
+            .await
+            .expect("typed defer"),
+        TeardownExecution::Occupied
+    );
+    assert!(admin.remove_snapshot().is_empty());
+
+    // After reconciliation an untracked identity is genuinely gone from the
+    // registry, so the removal (a no-op on LiveKit's side) proceeds.
+    sfu.reconcile_pass_completed.store(true, Ordering::Release);
+    assert_eq!(
+        sfu.teardown_executor()
+            .execute(&intent)
+            .await
+            .expect("execute"),
+        TeardownExecution::Executed
+    );
+}
