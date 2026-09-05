@@ -32,19 +32,30 @@ spec:
     # it must never change across upgrades or rollbacks.
     deployment:
       uuid: b90424f8-22ca-40bb-a24e-551d171c7b84
-    # Zero-downtime rollouts (ADR-0017 Phase 4). Safe under mixed
-    # versions because the ordered-relay envelope message id is
-    # versioned (deliver_ordered.vN, #1597/#1600): an old replica
-    # rejects a newer envelope pre-handler and the sender rolls back
-    # the sequence instead of poisoning the shared channel. Any
-    # envelope or reply-type change MUST bump the version (see
-    # server/CLAUDE.md) — that invariant is what keeps this strategy
-    # sound.
+    # TEMPORARY — one-time hard cutover for the #1703 release (PR #1731,
+    # merged as 6a534db4); revert to RollingUpdate right after it is out.
+    #
+    # #1703 records a per-connection occupancy generation on every MUC
+    # occupant session and fences disconnect cleanup on it. MUC occupancy
+    # is memory-only: a room actor started by the PREVIOUS image holds
+    # sessions that carry no generation, and the new image's leave for
+    # such a session is refused as `Superseded`, leaving a ghost occupant
+    # until the janitor converges it. Under RollingUpdate the old replica
+    # keeps running while the new one starts, and the shutdown live-roster
+    # handoff would move those generation-less rooms INTO the new replica.
+    # Recreate terminates both pods (and lets them drain) before any new
+    # pod starts, so every room actor of the new image starts empty and
+    # resumed sessions re-join with a generation. The ordered-relay
+    # version bumps in #1731 (deliver_ordered.v3, remote_resource_route.v2)
+    # keep the mixed-version window itself safe; this cutover is about
+    # in-memory room state, not the wire.
+    #
+    # Cost: a brief full outage; XMPP clients reconnect via stream
+    # management. Flip back to RollingUpdate (maxSurge 1 /
+    # maxUnavailable 0) once the pods run the #1731 image — Recreate is a
+    # regression against ADR-0017 Phase 4, not a steady state.
     updateStrategy:
-      type: RollingUpdate
-      rollingUpdate:
-        maxSurge: 1
-        maxUnavailable: 0
+      type: Recreate
     image:
       repository: ghcr.io/waddle-social/waddle
       tag: main
