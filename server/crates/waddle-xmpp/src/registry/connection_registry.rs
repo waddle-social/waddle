@@ -93,6 +93,36 @@ impl ConnectionRegistry {
     /// Publish an SM stream id only while `owner` still owns the full-JID
     /// slot. The connection entry guard serializes the ownership check,
     /// entry update, and reverse-index update against same-JID replacement.
+    /// Publish `generation` onto `jid`'s entry, owner-gated like the SM
+    /// stream id: a racing same-FullJID replacement keeps its own (#1703).
+    pub fn set_occupancy_session_if_owner(
+        &self,
+        jid: &FullJid,
+        owner: &Arc<AtomicBool>,
+        generation: waddle_xmpp_core::OccupancySessionGeneration,
+    ) -> bool {
+        let Some(entry) = self.connections.get(jid) else {
+            return false;
+        };
+        if !Arc::ptr_eq(&entry.carbons_enabled, owner) {
+            return false;
+        }
+        if let Ok(mut guard) = entry.occupancy_session.lock() {
+            *guard = Some(generation);
+        }
+        true
+    }
+
+    /// The live connection's occupancy generation for `jid`, when published.
+    pub fn occupancy_session_of(
+        &self,
+        jid: &FullJid,
+    ) -> Option<waddle_xmpp_core::OccupancySessionGeneration> {
+        self.connections
+            .get(jid)
+            .and_then(|entry| entry.occupancy_session())
+    }
+
     pub fn set_sm_stream_id_if_owner(
         &self,
         jid: &FullJid,

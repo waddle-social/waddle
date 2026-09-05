@@ -139,6 +139,26 @@ pub(crate) async fn handle_relayed_muji_initiate(
     };
     let muji_terminate_room = jingle_muji_gate::muji_session_terminate_room(iq);
     let events = state.deps.protocol.dispatcher.dispatch_iq(iq, &ctx);
+    if !is_terminate && !events_contain_iq_error(&events) {
+        if let Some(room) = relayed_muji_room(iq) {
+            if !jingle_muji_gate::initiate_still_current(
+                state,
+                &room,
+                &sender,
+                occupancy_session,
+                iq,
+            )
+            .await
+            {
+                return Some(vec![build_iq_error_xml_typed(
+                    id,
+                    response_from.as_deref(),
+                    Some(response_to.as_str()),
+                    forbidden_iq_error("occupant session was replaced; rejoin before retrying"),
+                )]);
+            }
+        }
+    }
     let clear_after = muji_terminate_room.filter(|_| !events_contain_iq_error(&events));
     let session = synthetic_session(&sender);
     let deps = build_interpret_deps(

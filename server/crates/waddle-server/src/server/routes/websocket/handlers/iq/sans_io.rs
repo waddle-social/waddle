@@ -275,6 +275,7 @@ async fn handle_sans_io_iq_with_relay_override(
                 }
             }
         }
+        let (reply_id, reply_from, reply_to) = (ctx.id, ctx.response_from, ctx.response_to);
         let ctx = ProtocolStanzaContext {
             domain,
             full_jid,
@@ -282,6 +283,26 @@ async fn handle_sans_io_iq_with_relay_override(
             occupant_session: Some(*conn_state.occupancy_session),
         };
         let events = state.deps.protocol.dispatcher.dispatch_iq(iq, &ctx);
+        if muji_terminate_room.is_none() && !events_contain_iq_error(&events) {
+            if let Some(room) = super::jingle_muji_gate::relayed_muji_room(iq) {
+                if !super::jingle_muji_gate::initiate_still_current(
+                    state,
+                    &room,
+                    full_jid,
+                    *conn_state.occupancy_session,
+                    iq,
+                )
+                .await
+                {
+                    return Some(vec![build_iq_error_xml_typed(
+                        reply_id,
+                        reply_from,
+                        reply_to,
+                        forbidden_iq_error("occupant session was replaced; rejoin before retrying"),
+                    )]);
+                }
+            }
+        }
         let muji_clear_after = muji_terminate_room.filter(|_| !events_contain_iq_error(&events));
         let deps = crate::server::routes::interpret::Deps {
             connection_registry: &state.deps.protocol.connection_registry,

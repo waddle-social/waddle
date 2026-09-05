@@ -462,8 +462,11 @@ mod resolver_affiliation_sync_scheduler_tests {
         memberships.record_join(&occupant, &first_room, "alice", first);
         memberships.record_join(&occupant, &second_room, "alice", second);
 
-        let taken =
-            memberships.take_for_occupant_below_with_session(&occupant, u64::MAX, Some(first));
+        let taken = memberships.take_for_occupant_below_with_session(
+            &occupant,
+            u64::MAX,
+            MembershipGenerationFilter::Only(first),
+        );
         assert_eq!(
             taken.len(),
             1,
@@ -476,7 +479,11 @@ mod resolver_affiliation_sync_scheduler_tests {
         );
         assert_eq!(
             memberships
-                .occupancy_sessions_for_occupant_below(&occupant, u64::MAX, Some(first))
+                .occupancy_sessions_for_occupant_below(
+                    &occupant,
+                    u64::MAX,
+                    MembershipGenerationFilter::Only(first)
+                )
                 .len(),
             0,
             "the taken membership no longer appears; the other generation is filtered out"
@@ -844,6 +851,29 @@ struct RemoteMucMembership {
     occupant_session: waddle_xmpp_core::OccupancySessionGeneration,
 }
 
+/// Which remote memberships of a full JID a cleanup pass may act on (#1703).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MembershipGenerationFilter {
+    /// Every membership (membership-backed redrive with no live connection).
+    Any,
+    /// Only memberships this connection generation recorded (a
+    /// connection-scoped sweep).
+    Only(waddle_xmpp_core::OccupancySessionGeneration),
+    /// Every membership EXCEPT the live connection's (the reconciler while a
+    /// same-full-JID replacement is bound: its memberships are its own).
+    Except(waddle_xmpp_core::OccupancySessionGeneration),
+}
+
+impl MembershipGenerationFilter {
+    fn admits(self, recorded: waddle_xmpp_core::OccupancySessionGeneration) -> bool {
+        match self {
+            Self::Any => true,
+            Self::Only(generation) => recorded == generation,
+            Self::Except(generation) => recorded != generation,
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RemoteMucMembershipSnapshot {
     occupant: FullJid,
@@ -995,7 +1025,11 @@ impl RemoteMucMemberships {
         occupant: &FullJid,
         generation_ceiling: u64,
     ) -> Vec<RemoteMucMembershipSnapshot> {
-        self.take_for_occupant_below_with_session(occupant, generation_ceiling, None)
+        self.take_for_occupant_below_with_session(
+            occupant,
+            generation_ceiling,
+            MembershipGenerationFilter::Any,
+        )
     }
 
     /// [`Self::take_for_occupant_below`] restricted to memberships recorded
@@ -1006,7 +1040,7 @@ impl RemoteMucMemberships {
         &self,
         occupant: &FullJid,
         generation_ceiling: u64,
-        occupant_session: Option<waddle_xmpp_core::OccupancySessionGeneration>,
+        occupant_session: MembershipGenerationFilter,
     ) -> Vec<RemoteMucMembershipSnapshot> {
         let snapshots: Vec<RemoteMucMembershipSnapshot> = self
             .entries
@@ -1022,7 +1056,7 @@ impl RemoteMucMemberships {
                 if membership.generation >= generation_ceiling {
                     return None;
                 }
-                if occupant_session.is_some_and(|session| membership.occupant_session != session) {
+                if !occupant_session.admits(membership.occupant_session) {
                     return None;
                 }
                 Some(RemoteMucMembershipSnapshot {
@@ -1109,7 +1143,7 @@ impl RemoteMucMemberships {
         &self,
         occupant: &FullJid,
         generation_ceiling: u64,
-        occupant_session: Option<waddle_xmpp_core::OccupancySessionGeneration>,
+        occupant_session: MembershipGenerationFilter,
     ) -> std::collections::HashMap<BareJid, waddle_xmpp_core::OccupancySessionGeneration> {
         self.entries
             .iter()
@@ -1120,8 +1154,7 @@ impl RemoteMucMemberships {
                 };
                 (entry_occupant == occupant
                     && membership.generation < generation_ceiling
-                    && occupant_session
-                        .is_none_or(|session| membership.occupant_session == session))
+                    && occupant_session.admits(membership.occupant_session))
                 .then(|| (room.clone(), membership.occupant_session))
             })
             .collect()

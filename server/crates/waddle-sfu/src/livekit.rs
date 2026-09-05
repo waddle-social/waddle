@@ -1735,10 +1735,17 @@ impl LiveKitSfu {
             .participants
             .get(identity)
             .and_then(|participant| participant.session.clone());
+        // An accepted unbound clear (`TearDown`) keeps the PRESENTED generation
+        // as its durable fence: a same-FullJID replacement registering before
+        // the durable retry then fails the occupant comparison (#1703).
         let removed_occupant_session = entry
             .participants
             .get(identity)
-            .and_then(|participant| participant.occupant_session);
+            .and_then(|participant| participant.occupant_session)
+            .or(match session_gate {
+                SessionGate::Occupant { presented, .. } => Some(presented),
+                SessionGate::Any | SessionGate::Presented(_) => None,
+            });
         let unbound_occupant = match session_gate {
             SessionGate::Occupant { unbound, .. } => unbound,
             SessionGate::Any | SessionGate::Presented(_) => crate::UnboundOccupantPolicy::Keep,

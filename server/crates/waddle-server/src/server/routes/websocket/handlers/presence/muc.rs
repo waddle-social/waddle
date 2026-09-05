@@ -1341,16 +1341,29 @@ async fn handle_muc_join_unlocked(state: &WebSocketState, request: MucJoinWork<'
                                         .await,
                                 ) {
                                     Some(RemoteMucJoinDecision::Delivered(replies)) => {
-                                        state
-                                            .deps
-                                            .protocol
-                                            .remote_muc_memberships
-                                            .record_join(
-                                                sender_jid,
-                                                room_jid,
-                                                &nick,
-                                                occupancy_session,
-                                            );
+                                        // A delivered XEP-0045 presence error means the
+                                        // owner REFUSED the join: recording a membership
+                                        // would overwrite the snapshot of whoever still
+                                        // occupies the room under this full JID (#1703).
+                                        let refused = replies.iter().any(|reply| {
+                                            matches!(
+                                                reply,
+                                                Stanza::Presence(presence)
+                                                    if presence.type_ == xmpp_parsers::presence::Type::Error
+                                            )
+                                        });
+                                        if !refused {
+                                            state
+                                                .deps
+                                                .protocol
+                                                .remote_muc_memberships
+                                                .record_join(
+                                                    sender_jid,
+                                                    room_jid,
+                                                    &nick,
+                                                    occupancy_session,
+                                                );
+                                        }
                                         return replies
                                             .into_iter()
                                             .map(|reply| stanza_to_xml(&reply))

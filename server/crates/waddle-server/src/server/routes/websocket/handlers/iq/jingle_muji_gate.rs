@@ -271,6 +271,55 @@ pub(super) fn muji_session_terminate_room(iq: &Iq) -> Option<BareJid> {
 /// and its sid can be one (#1608). `None` for non-terminates and for
 /// pathological sids — the durable relay fallback then persists no
 /// session evidence and keeps its timestamp-fence-only guard.
+/// Any Muji Jingle stanza's sid as a typed binding (initiate or terminate).
+pub(super) fn muji_jingle_session(iq: &Iq) -> Option<waddle_sfu::SessionBinding> {
+    let Iq::Set { payload, .. } = iq else {
+        return None;
+    };
+    if payload.ns() != NS_JINGLE || payload.name() != "jingle" {
+        return None;
+    }
+    find_muji(payload)?;
+    let jingle = Jingle::try_from(payload.clone()).ok()?;
+    waddle_sfu::SessionBinding::new(jingle.sid.0).ok()
+}
+
+/// After a Muji initiate registered the SFU participant, re-check that the
+/// room still holds this connection's generation: a same-FullJID replacement
+/// that re-joined between the pre-dispatch check and the registration would
+/// otherwise have been overwritten. On mismatch the just-made registration
+/// (bound to this generation and sid) is revoked atomically. Returns whether
+/// the initiate stands.
+pub(super) async fn initiate_still_current(
+    state: &WebSocketState,
+    room: &BareJid,
+    full_jid: &FullJid,
+    generation: waddle_xmpp_core::OccupancySessionGeneration,
+    iq: &Iq,
+) -> bool {
+    if matches!(
+        relayed_muji_generation_is_current(state, room, full_jid, generation).await,
+        Ok(true)
+    ) {
+        return true;
+    }
+    if let (Some(sfu), Ok(call_id)) = (
+        state.deps.protocol.sfu.as_ref(),
+        waddle_sfu::CallId::new(room.to_string()),
+    ) {
+        let sid = muji_jingle_session(iq);
+        let _ = sfu.unregister_call_participant_if_occupant_matches(
+            &call_id,
+            &waddle_sfu::Identity::from_jid(full_jid.clone()),
+            generation,
+            waddle_sfu::UnboundOccupantPolicy::TearDown,
+            waddle_sfu::SidEvidence::Presented(sid.as_ref()),
+            None,
+        );
+    }
+    false
+}
+
 pub(super) fn muji_session_terminate_session(iq: &Iq) -> Option<waddle_sfu::SessionBinding> {
     let Iq::Set { payload, .. } = iq else {
         return None;

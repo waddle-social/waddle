@@ -6,22 +6,6 @@ use std::time::Duration;
 use tracing::{debug, error, info, warn, Instrument};
 use waddle_xmpp::muc::room_actor::LeaveSessionSelector;
 
-/// A retained retry's `Left` is evidence about the session's CURRENT SFU
-/// registration only when the room removed the session NOW; a replayed
-/// departure receipt may answer an owed old-nick departure while the same
-/// full JID is live again under another nick (#1703).
-fn unbound_policy_for_left(
-    outcome: &waddle_xmpp::muc::room_actor::LeaveOutcome,
-) -> waddle_sfu::UnboundOccupantPolicy {
-    match outcome.provenance {
-        waddle_xmpp::muc::room_actor::DepartureProvenance::Live => {
-            waddle_sfu::UnboundOccupantPolicy::TearDown
-        }
-        waddle_xmpp::muc::room_actor::DepartureProvenance::ReplayedReceipt => {
-            waddle_sfu::UnboundOccupantPolicy::Keep
-        }
-    }
-}
 use waddle_xmpp::telemetry::attributes::{Janitor, MetricAttribute, SweepOutcome};
 
 /// Named root span for one janitor sweep tick (#1483).
@@ -356,15 +340,30 @@ pub(crate) async fn run_local_muc_departure_sweep(state: &WebSocketState) {
                                     // See `unbound_policy_for_left`: a live removal
                                     // tears an unbound registration down, a replayed
                                     // receipt keeps it (#1703).
-                                    match selector {
-                                        LeaveSessionSelector::Generation(occupant) => {
+                                    match (outcome.provenance, selector) {
+                                        // A replayed receipt answers an owed earlier
+                                        // departure; the same connection may have
+                                        // re-joined (new nick) with the SAME generation
+                                        // since, so it is no evidence about the current
+                                        // registration (#1703).
+                                        (
+                                            waddle_xmpp::muc::room_actor::DepartureProvenance::ReplayedReceipt,
+                                            LeaveSessionSelector::Generation(_),
+                                        ) => {}
+                                        (
+                                            waddle_xmpp::muc::room_actor::DepartureProvenance::Live,
+                                            LeaveSessionSelector::Generation(occupant),
+                                        ) => {
                                             let _ = routes::websocket::muc_call_sfu::unregister_participant_from_room_if_occupant_matches(
-                                                state, &room, &jid, occupant, unbound_policy_for_left(&outcome), None,);
+                                                state, &room, &jid, occupant, waddle_sfu::UnboundOccupantPolicy::TearDown, None,);
                                         }
                                         // Membership-authoritative departures (admin removals) keep the
                                         // ungated teardown: no connection owns them.
-                                        LeaveSessionSelector::Any
-                                        | LeaveSessionSelector::JoinedAtOrBefore(_) => {
+                                        (
+                                            _,
+                                            LeaveSessionSelector::Any
+                                            | LeaveSessionSelector::JoinedAtOrBefore(_),
+                                        ) => {
                                             routes::websocket::muc_call_sfu::unregister_participant_from_room_ungated(
                                                 state, &room, &jid,
                                             );
@@ -443,15 +442,30 @@ pub(crate) async fn run_local_muc_departure_sweep(state: &WebSocketState) {
                                         }),
                                     )
                                     .await;
-                                    match selector {
-                                        LeaveSessionSelector::Generation(occupant) => {
+                                    match (outcome.provenance, selector) {
+                                        // A replayed receipt answers an owed earlier
+                                        // departure; the same connection may have
+                                        // re-joined (new nick) with the SAME generation
+                                        // since, so it is no evidence about the current
+                                        // registration (#1703).
+                                        (
+                                            waddle_xmpp::muc::room_actor::DepartureProvenance::ReplayedReceipt,
+                                            LeaveSessionSelector::Generation(_),
+                                        ) => {}
+                                        (
+                                            waddle_xmpp::muc::room_actor::DepartureProvenance::Live,
+                                            LeaveSessionSelector::Generation(occupant),
+                                        ) => {
                                             let _ = routes::websocket::muc_call_sfu::unregister_participant_from_room_if_occupant_matches(
-                                                state, &room, &jid, occupant, unbound_policy_for_left(&outcome), None,);
+                                                state, &room, &jid, occupant, waddle_sfu::UnboundOccupantPolicy::TearDown, None,);
                                         }
                                         // Membership-authoritative departures (admin removals) keep the
                                         // ungated teardown: no connection owns them.
-                                        LeaveSessionSelector::Any
-                                        | LeaveSessionSelector::JoinedAtOrBefore(_) => {
+                                        (
+                                            _,
+                                            LeaveSessionSelector::Any
+                                            | LeaveSessionSelector::JoinedAtOrBefore(_),
+                                        ) => {
                                             routes::websocket::muc_call_sfu::unregister_participant_from_room_ungated(
                                                 state, &room, &jid,
                                             );
@@ -11445,13 +11459,26 @@ async fn collect_remote_muc_reconcile_candidates(
         .remote_muc_memberships
         .occupants_with_active_memberships()
     {
-        if state
+        // A live same-full-JID replacement owns ITS memberships; snapshots
+        // recorded by other generations are still owed a redrive (#1703).
+        let live = state
             .deps
             .protocol
             .connection_registry
-            .get_entry(&occupant)
-            .is_some()
-        {
+            .occupancy_session_of(&occupant);
+        let foreign_snapshots = state
+            .deps
+            .protocol
+            .remote_muc_memberships
+            .occupancy_sessions_for_occupant_below(
+                &occupant,
+                u64::MAX,
+                live.map_or(
+                    crate::server::routes::websocket::MembershipGenerationFilter::Any,
+                    crate::server::routes::websocket::MembershipGenerationFilter::Except,
+                ),
+            );
+        if foreign_snapshots.is_empty() {
             continue;
         }
         // Cross-node guard (SM review P1 on PR #1277): a session that
@@ -11535,16 +11562,12 @@ async fn run_remote_muc_membership_sweep(state: &WebSocketState) {
             // legitimate again; the membership-generation guards
             // inside the cleanup protect the map but cannot undo a
             // relayed remote leave.
-            if state
+            let live = state
                 .deps
                 .protocol
                 .connection_registry
-                .get_entry(&occupant)
-                .is_some()
-            {
-                continue;
-            }
-            if routes::websocket::redrive_remote_muc_cleanup(state, &occupant).await
+                .occupancy_session_of(&occupant);
+            if routes::websocket::redrive_remote_muc_cleanup(state, &occupant, live).await
                 == routes::websocket::MucCleanupOutcome::Failed
             {
                 sweep_failed = true;
@@ -11610,7 +11633,8 @@ mod remote_muc_reconciler_tests {
         );
 
         let cleanup =
-            crate::server::routes::websocket::redrive_remote_muc_cleanup(&state, &occupant).await;
+            crate::server::routes::websocket::redrive_remote_muc_cleanup(&state, &occupant, None)
+                .await;
 
         assert_eq!(
             cleanup,
@@ -11630,6 +11654,44 @@ mod remote_muc_reconciler_tests {
     /// candidate; live and detached occupants are skipped (their
     /// occupancy is legitimate), and a tombstoned membership (cleanup
     /// in flight) is not re-driven.
+    /// #1703 (codex round 7): a live same-full-JID replacement owns its own
+    /// memberships, but a snapshot recorded by a displaced generation is
+    /// still a redrive candidate while the replacement is bound.
+    #[tokio::test]
+    async fn reconciler_redrives_foreign_generation_snapshots_behind_a_live_replacement() {
+        let state = create_test_websocket_state().await;
+        let memberships = &state.deps.protocol.remote_muc_memberships;
+        let alice: jid::FullJid = "alice@example.com/web".parse().unwrap();
+        let old_generation = waddle_xmpp_core::OccupancySessionGeneration::mint();
+        let live_generation = waddle_xmpp_core::OccupancySessionGeneration::mint();
+
+        // The live replacement publishes its generation on its registry entry.
+        let (tx, _rx) = tokio::sync::mpsc::channel(4);
+        let owner = state
+            .deps
+            .protocol
+            .connection_registry
+            .register(alice.clone(), tx);
+        assert!(state
+            .deps
+            .protocol
+            .connection_registry
+            .set_occupancy_session_if_owner(&alice, &owner, live_generation));
+
+        // Only the live generation's own snapshot: nothing to redrive.
+        memberships.record_join(&alice, &room("live-only"), "alice", live_generation);
+        let candidates = collect_remote_muc_reconcile_candidates(&state).await;
+        assert!(
+            candidates.occupants.is_empty(),
+            "a live connection's own memberships are its own"
+        );
+
+        // A displaced generation's snapshot behind the live replacement IS owed.
+        memberships.record_join(&alice, &room("orphaned-remote"), "alice", old_generation);
+        let candidates = collect_remote_muc_reconcile_candidates(&state).await;
+        assert_eq!(candidates.occupants, vec![alice]);
+    }
+
     #[tokio::test]
     async fn reconciler_targets_only_fully_departed_occupants() {
         let state = create_test_websocket_state().await;
@@ -11646,18 +11708,21 @@ mod remote_muc_reconciler_tests {
 
         // Live connection: not a candidate.
         let live: jid::FullJid = "live@example.com/web".parse().unwrap();
-        memberships.record_join(
-            &live,
-            &room("live-room"),
-            "live",
-            waddle_xmpp_core::OccupancySessionGeneration::mint(),
-        );
+        let live_generation = waddle_xmpp_core::OccupancySessionGeneration::mint();
+        memberships.record_join(&live, &room("live-room"), "live", live_generation);
         let (tx, _rx) = tokio::sync::mpsc::channel(4);
-        let _owner = state
+        let owner = state
             .deps
             .protocol
             .connection_registry
             .register(live.clone(), tx);
+        // A bound connection publishes its generation (#1703): only ITS
+        // memberships are exempt from the reconciler.
+        assert!(state
+            .deps
+            .protocol
+            .connection_registry
+            .set_occupancy_session_if_owner(&live, &owner, live_generation));
 
         // Detached-but-resumable session: not a candidate.
         let detached: jid::FullJid = "detached@example.com/web".parse().unwrap();

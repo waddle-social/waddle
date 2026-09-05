@@ -341,6 +341,13 @@ pub(super) async fn register_bound_connection_after_frame_with_admission(
             conn.blocklist_interested,
         );
     conn.registry_owner = Some(owner.clone());
+    // Publish the occupancy generation (#1703) owner-gated, like the SM
+    // stream id below.
+    let _ = state
+        .deps
+        .protocol
+        .connection_registry
+        .set_occupancy_session_if_owner(&jid, &owner, conn.occupancy_session);
 
     // Publish the SM stream id + restored presence onto the
     // freshly-registered entry, owner-gated against a racing same-JID

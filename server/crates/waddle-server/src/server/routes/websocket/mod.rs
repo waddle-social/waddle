@@ -120,6 +120,8 @@ pub(crate) use local_departures::{
     InFlightLease, LocalDepartureItem, PendingLocalDeparture, PendingLocalMucDepartures,
     ACK_ABSENT_ROOM_RETRIES,
 };
+#[cfg(feature = "clustering")]
+pub(crate) use state::MembershipGenerationFilter;
 pub(crate) use state::ResolvedPrincipal;
 pub use state::{
     default_link_preview_resolve_permits, ActiveCallThread, DmCallThreadKey, DmPairKey, DmPinStore,

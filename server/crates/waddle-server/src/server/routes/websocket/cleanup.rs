@@ -1,3 +1,4 @@
+use super::state::MembershipGenerationFilter;
 use super::*;
 use super::{
     frame::ResponseBatch,
@@ -492,6 +493,7 @@ pub async fn cleanup_muc_presence_for_jid_with_origin(
 pub(crate) async fn redrive_remote_muc_cleanup(
     state: &WebSocketState,
     jid: &FullJid,
+    live_generation: Option<waddle_xmpp_core::OccupancySessionGeneration>,
 ) -> MucCleanupOutcome {
     let remote_ceiling = state
         .deps
@@ -508,7 +510,9 @@ pub(crate) async fn redrive_remote_muc_cleanup(
         // authoritative membership snapshots, so this retry must not widen a
         // failed pass into a local `FullJidSweep` with selector `Any`.
         SweepFailureRecording::JanitorRequeues { remote_ceiling },
-        LocalRoomSweepScope::MembershipBacked,
+        LocalRoomSweepScope::MembershipBacked {
+            except: live_generation,
+        },
     )
     .await
     {
@@ -2365,8 +2369,13 @@ enum LocalRoomSweepScope {
     /// so only rooms backed by a retained membership snapshot are swept, each
     /// with the generation that snapshot recorded. Any other local room this
     /// full JID occupies belongs to a live (possibly cross-node) session and
-    /// is never that redrive's responsibility.
-    MembershipBacked,
+    /// is never that redrive's responsibility. `except` is the live
+    /// replacement's generation when one is bound: its own snapshots are its
+    /// own cleanup's, the other generations' are redriven (#1703).
+    #[cfg(feature = "clustering")]
+    MembershipBacked {
+        except: Option<waddle_xmpp_core::OccupancySessionGeneration>,
+    },
 }
 
 /// Whether an enumeration/lookup failure records a `FullJidSweep`. The
@@ -2425,9 +2434,18 @@ async fn cleanup_muc_presence_with_origin(
     // A connection-scoped sweep (`Generation`) only ever acts on memberships
     // ITS join recorded; a replacement's snapshot recorded in the meantime
     // stays for the replacement's own cleanup (#1703).
-    let connection_generation = match session {
-        LeaveSessionSelector::Generation(generation) => Some(generation),
-        LeaveSessionSelector::Any | LeaveSessionSelector::JoinedAtOrBefore(_) => None,
+    let connection_generation = match (session, sweep_scope) {
+        (LeaveSessionSelector::Generation(generation), LocalRoomSweepScope::EveryRoom) => {
+            MembershipGenerationFilter::Only(generation)
+        }
+        #[cfg(feature = "clustering")]
+        (_, LocalRoomSweepScope::MembershipBacked { except }) => except.map_or(
+            MembershipGenerationFilter::Any,
+            MembershipGenerationFilter::Except,
+        ),
+        (LeaveSessionSelector::Any | LeaveSessionSelector::JoinedAtOrBefore(_), _) => {
+            MembershipGenerationFilter::Any
+        }
     };
     let remote_membership_sessions = state
         .deps
@@ -2471,7 +2489,8 @@ async fn cleanup_muc_presence_with_origin(
     for room_jid in room_jids {
         let session = match remote_membership_sessions.get(&room_jid) {
             Some(occupant_session) => LeaveSessionSelector::Generation(*occupant_session),
-            None if sweep_scope == LocalRoomSweepScope::MembershipBacked => continue,
+            #[cfg(feature = "clustering")]
+            None if matches!(sweep_scope, LocalRoomSweepScope::MembershipBacked { .. }) => continue,
             None => session,
         };
         let room_actor = match get_room_actor_result(state, &room_jid).await {
@@ -2749,7 +2768,7 @@ async fn cleanup_remote_muc_presence(
     jid: &FullJid,
     cleanup_origin: Option<&crate::server::routes::interpret::OrderedRelayRouteOrigin>,
     remote_ceiling: u64,
-    connection_generation: Option<waddle_xmpp_core::OccupancySessionGeneration>,
+    connection_generation: MembershipGenerationFilter,
 ) -> bool {
     let memberships = state
         .deps
@@ -3143,7 +3162,7 @@ async fn cleanup_remote_muc_presence(
     _jid: &FullJid,
     _cleanup_origin: Option<&crate::server::routes::interpret::OrderedRelayRouteOrigin>,
     _remote_ceiling: u64,
-    _connection_generation: Option<waddle_xmpp_core::OccupancySessionGeneration>,
+    _connection_generation: MembershipGenerationFilter,
 ) -> bool {
     true
 }
@@ -4950,7 +4969,7 @@ mod local_departure_cleanup_tests {
         join_member_with_generation(&room_actor, &alice, "alice", replacement_generation).await;
 
         assert_eq!(
-            redrive_remote_muc_cleanup(state.as_ref(), &alice).await,
+            redrive_remote_muc_cleanup(state.as_ref(), &alice, None).await,
             MucCleanupOutcome::Failed,
             "the fixture has no relay bridge, so the remote responsibility stays retained"
         );
@@ -5007,7 +5026,7 @@ mod local_departure_cleanup_tests {
         join_member_with_generation(&other_actor, &alice, "alice", replacement_generation).await;
 
         assert_eq!(
-            redrive_remote_muc_cleanup(state.as_ref(), &alice).await,
+            redrive_remote_muc_cleanup(state.as_ref(), &alice, None).await,
             MucCleanupOutcome::Failed,
             "the fixture has no relay bridge, so the remote responsibility stays retained"
         );
@@ -5043,7 +5062,7 @@ mod local_departure_cleanup_tests {
         state.deps.protocol.room_registry.wait_for_shutdown().await;
 
         assert_eq!(
-            redrive_remote_muc_cleanup(state.as_ref(), &alice).await,
+            redrive_remote_muc_cleanup(state.as_ref(), &alice, None).await,
             MucCleanupOutcome::Failed
         );
         let retained = state
