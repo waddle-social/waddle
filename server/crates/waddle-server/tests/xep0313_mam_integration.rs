@@ -717,9 +717,14 @@ async fn xep_0313_uow_mam_write_is_queryable_through_the_archive_read_path() {
     let uow = IngressUnitOfWork::open(db.clone(), lineage_config)
         .expect("open PostgreSQL ingress unit of work");
     let mut transaction = uow.begin().await.expect("begin ingress unit of work");
-    match MamArchiveRepository::store(&mut transaction, &archive, &message)
-        .await
-        .expect("store MAM archive in ingress unit of work")
+    match MamArchiveRepository::store(
+        &mut transaction,
+        &archive,
+        &message,
+        waddle_xmpp::mam::ArchiveExpectation::Fresh,
+    )
+    .await
+    .expect("store MAM archive in ingress unit of work")
     {
         MamTxStoreOutcome::Inserted(stanza_id) => {
             assert_eq!(stanza_id.id, archive_id);

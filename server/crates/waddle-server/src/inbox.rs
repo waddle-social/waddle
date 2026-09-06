@@ -63,6 +63,12 @@ pub enum InboxTxError {
     Decode(#[from] InboxDecodeError),
     #[error("RETURNING produced no row")]
     ReturningRowMissing,
+    #[error("inbox projection requires a canonical message row")]
+    ProjectionMessageMissing,
+    #[error("recorded inbox projection has no inbox row")]
+    ProjectionEntryMissing,
+    #[error("inbox projection has an invalid thread identifier")]
+    InvalidProjectionThread,
 }
 
 impl From<InboxTxError> for InboxStorageError {
@@ -148,10 +154,22 @@ fn upsert_sql() -> String {
             call_thread_kind, call_thread_media, call_ended_at, call_duration
         ) VALUES (?, ?, ?, ?, ?, ?, CASE WHEN ? != 0 THEN 1 ELSE 0 END, ?, ?, ?, ?, ?, ?, ?, ?)
         ON CONFLICT(user_jid, partner_jid, thread_id) DO UPDATE SET
-            kind = excluded.kind,
-            last_stanza_id = excluded.last_stanza_id,
-            last_updated = excluded.last_updated,
-            preview = excluded.preview,
+            kind = CASE
+                WHEN (excluded.last_updated, excluded.last_stanza_id) >=
+                     (inbox_entries.last_updated, inbox_entries.last_stanza_id)
+                THEN excluded.kind ELSE inbox_entries.kind END,
+            last_stanza_id = CASE
+                WHEN (excluded.last_updated, excluded.last_stanza_id) >=
+                     (inbox_entries.last_updated, inbox_entries.last_stanza_id)
+                THEN excluded.last_stanza_id ELSE inbox_entries.last_stanza_id END,
+            last_updated = CASE
+                WHEN (excluded.last_updated, excluded.last_stanza_id) >=
+                     (inbox_entries.last_updated, inbox_entries.last_stanza_id)
+                THEN excluded.last_updated ELSE inbox_entries.last_updated END,
+            preview = CASE
+                WHEN (excluded.last_updated, excluded.last_stanza_id) >=
+                     (inbox_entries.last_updated, inbox_entries.last_stanza_id)
+                THEN excluded.preview ELSE inbox_entries.preview END,
             unread = CASE
                 WHEN ? != 0 THEN inbox_entries.unread + 1
                 ELSE inbox_entries.unread
@@ -161,7 +179,11 @@ fn upsert_sql() -> String {
                 WHEN ? != 0 THEN inbox_entries.reply_count + 1
                 ELSE inbox_entries.reply_count
             END,
-            author = COALESCE(excluded.author, inbox_entries.author),
+            author = CASE
+                WHEN (excluded.last_updated, excluded.last_stanza_id) >=
+                     (inbox_entries.last_updated, inbox_entries.last_stanza_id)
+                THEN COALESCE(excluded.author, inbox_entries.author)
+                ELSE inbox_entries.author END,
             call_thread_kind = COALESCE(excluded.call_thread_kind, inbox_entries.call_thread_kind),
             call_thread_media = COALESCE(excluded.call_thread_media, inbox_entries.call_thread_media),
             call_ended_at = COALESCE(excluded.call_ended_at, inbox_entries.call_ended_at),
@@ -266,6 +288,23 @@ pub(crate) async fn upsert_in_transaction(
         .await?
         .ok_or(InboxTxError::ReturningRowMissing)?;
 
+    Ok(decode_row(&row)?)
+}
+
+/// Read the current projection without replaying unread or reply increments.
+pub(crate) async fn get_in_transaction(
+    tx: &mut crate::db::Transaction<'_>,
+    user: &BareJid,
+    entry: &InboxEntry,
+) -> Result<InboxEntry, InboxTxError> {
+    let mut rows = tx.query(
+        &format!("SELECT {SELECT_COLS} FROM inbox_entries WHERE user_jid = ? AND partner_jid = ? AND thread_id = ?"),
+        crate::db_params![user.to_string(), entry.partner.to_string(), entry.thread_id.clone().unwrap_or_default()],
+    ).await?;
+    let row = rows
+        .next()
+        .await?
+        .ok_or(InboxTxError::ProjectionEntryMissing)?;
     Ok(decode_row(&row)?)
 }
 

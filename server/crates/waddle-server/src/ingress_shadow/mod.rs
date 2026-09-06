@@ -22,8 +22,8 @@ use crate::ingress_substrate::{
 #[cfg(feature = "clustering")]
 use crate::ingress_uow::{
     run_with_retry, CanonicalMessageRepository, ClaimRepository, EffectIntentRepository,
-    EffectIntentWriteOutcome, FrontierOutcome, IngressUnitOfWork, IngressUowError,
-    PrincipalAssertion, PrincipalRepository, SmIngressRepository, SmIngressStreamRepository,
+    FrontierOutcome, IngressUnitOfWork, IngressUowError, PrincipalAssertion, PrincipalRepository,
+    ReconcileVerdict, SmIngressRepository, SmIngressStreamRepository,
 };
 #[cfg(feature = "clustering")]
 use chrono::Utc;
@@ -2207,25 +2207,19 @@ impl IngressShadowProcessor {
             ));
         }
 
-        let effect_outcome = if matches!(alias, IngressShadowAliasOutcome::Existing) {
-            EffectIntentRepository::record_all_existing_alias(
-                &mut transaction,
-                message_key,
-                &submission.capture.intents,
-            )
-            .await?
-        } else {
-            EffectIntentRepository::record_all(
-                &mut transaction,
-                message_key,
-                &submission.capture.intents,
-            )
-            .await?
-        };
-        let decision = if matches!(effect_outcome, EffectIntentWriteOutcome::IntentDivergence) {
-            IngressShadowDecisionClass::IntentDivergence
-        } else {
-            decision
+        let verdict = EffectIntentRepository::reconcile(
+            &mut transaction,
+            message_key,
+            &submission.capture.intents,
+        )
+        .await?;
+        let decision = match verdict {
+            ReconcileVerdict::Divergent { .. } | ReconcileVerdict::Contradiction { .. } => {
+                IngressShadowDecisionClass::IntentDivergence
+            }
+            ReconcileVerdict::FirstCommit
+            | ReconcileVerdict::Consistent
+            | ReconcileVerdict::Repaired { .. } => decision,
         };
         let commit_kind =
             advance_shadow_frontier(&mut transaction, sm_ingress_id, submission.handled_ordinal)
@@ -3317,6 +3311,8 @@ mod tests {
                         Jid::from(self.principal.bare_jid().clone()),
                     ),
                     by: self.principal.bare_jid().clone(),
+                    archived_at: chrono::DateTime::<chrono::Utc>::from_timestamp(1_700_000_000, 0)
+                        .expect("fixture archive time"),
                 },
             );
             submission
@@ -3811,6 +3807,8 @@ mod tests {
                         Jid::from("romeo@example.com".parse::<BareJid>().expect("bare jid")),
                     ),
                     by: "romeo@example.com".parse().expect("bare jid"),
+                    archived_at: chrono::DateTime::<chrono::Utc>::from_timestamp(1_700_000_000, 0)
+                        .expect("fixture archive time"),
                 },
             ],
             markers: Vec::new(),
@@ -3950,6 +3948,8 @@ mod tests {
                 by: "juliet@example.com"
                     .parse()
                     .expect("fixture target bare JID"),
+                archived_at: chrono::DateTime::<chrono::Utc>::from_timestamp(1_700_000_000, 0)
+                    .expect("fixture archive time"),
             };
         assert!(matches!(
             fixture.processor.execute_submission(&payload_churn).await,

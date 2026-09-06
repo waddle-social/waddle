@@ -19,7 +19,10 @@ use schema::{
     ensure_postgres_schema, ensure_sqlite_parent_dir, infer_driver, is_in_memory_sqlite,
     MamDatabaseDriver,
 };
-pub use tx_write::{store_archived_message_on_connection, MamTxStoreError, MamTxStoreOutcome};
+pub use tx_write::{
+    store_archived_message_on_connection, store_archived_message_on_sqlite_connection,
+    ArchiveExpectation, MamTxStoreError, MamTxStoreOutcome,
+};
 
 #[derive(Clone)]
 pub(super) enum MamDatabaseBackend {

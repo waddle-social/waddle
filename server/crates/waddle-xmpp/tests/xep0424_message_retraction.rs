@@ -496,7 +496,8 @@ async fn xep0424_groupchat_retransmit_after_retraction_hits_tombstone() {
 async fn xep0424_tx_archive_retry_after_tombstone_returns_tombstone_hit() {
     use sqlx::postgres::PgPoolOptions;
     use waddle_xmpp::mam::{
-        store_archived_message_on_connection, MamStorage, MamTxStoreOutcome, SqlxMamStorage,
+        store_archived_message_on_connection, ArchiveExpectation, MamStorage, MamTxStoreOutcome,
+        SqlxMamStorage,
     };
     use waddle_xmpp_core::mam::{
         ArchivedMessage, ArchivedMucSender, ArchivedRichMessage, ArchivedTombstone,
@@ -539,9 +540,14 @@ async fn xep0424_tx_archive_retry_after_tombstone_returns_tombstone_hit() {
         )
     };
     let mut insert_tx = pool.begin().await.expect("begin insert transaction");
-    store_archived_message_on_connection(&mut insert_tx, &room, &message(original_id.clone()))
-        .await
-        .expect("store original");
+    store_archived_message_on_connection(
+        &mut insert_tx,
+        &room,
+        &message(original_id.clone()),
+        ArchiveExpectation::Fresh,
+    )
+    .await
+    .expect("store original");
     insert_tx.commit().await.expect("commit original");
     assert!(storage
         .replace_with_tombstone(
@@ -561,6 +567,7 @@ async fn xep0424_tx_archive_retry_after_tombstone_returns_tombstone_hit() {
             &mut retry_tx,
             &room,
             &message(format!("retract-retry-{}", uuid::Uuid::now_v7())),
+            ArchiveExpectation::Fresh,
         )
         .await
         .expect("retry against tombstone"),

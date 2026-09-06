@@ -120,6 +120,7 @@ pub(super) async fn broadcast_room_system_message_event(
                             jid::Jid::from(room.clone()),
                         ),
                         by: room.clone(),
+                        archived_at: result.archived_at,
                     },
                 );
                 debug!(
@@ -127,14 +128,6 @@ pub(super) async fn broadcast_room_system_message_event(
                     stanza_id = %result.stored_id,
                     "BroadcastRoomSystemMessage: archived"
                 );
-            }
-            ArchiveGroupchatOutcome::Deduplicated(result) => {
-                debug!(
-                    room = %room,
-                    stanza_id = %result.stored_id,
-                    "BroadcastRoomSystemMessage: archive write deduplicated; dropping"
-                );
-                return None;
             }
             ArchiveGroupchatOutcome::TombstoneHit => {
                 debug!(

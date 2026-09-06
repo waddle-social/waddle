@@ -288,6 +288,8 @@ mod tests {
                 archive: bare.clone(),
                 stanza_id: StanzaId::new(format!("sid-{index}"), jid::Jid::from(bare.clone())),
                 by: bare,
+                archived_at: chrono::DateTime::<chrono::Utc>::from_timestamp(1_700_000_000, 0)
+                    .expect("fixture archive time"),
             });
         }
         capture.record_marker(ShadowDecisionMarker::SemanticRejected {

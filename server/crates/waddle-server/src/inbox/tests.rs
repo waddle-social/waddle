@@ -1125,3 +1125,73 @@ async fn migration_adds_call_thread_columns_to_legacy_inbox_table() {
 
     std::fs::remove_file(&path).ok();
 }
+
+async fn assert_inbox_upsert_is_monotonic(storage: DatabaseInboxStorage) {
+    let user = jid(&format!("monotonic-{}@example.com", uuid::Uuid::new_v4()));
+    let peer = jid("peer@example.com");
+    let mut older = InboxEntry::new(peer.clone(), ConversationKind::Direct, "a", 10);
+    older.preview = Some("older".into());
+    older.author = Some("older-author".into());
+    let mut newer = InboxEntry::new(peer, ConversationKind::MucRoom, "b", 20);
+    newer.preview = Some("newer".into());
+    newer.author = Some("newer-author".into());
+    storage
+        .upsert(&user, older.clone(), true)
+        .await
+        .expect("insert A");
+    storage
+        .upsert(&user, newer.clone(), true)
+        .await
+        .expect("insert B");
+    // The ingress ledger suppresses a duplicate's increments; the storage
+    // primitive independently prevents its content from rewinding the row.
+    let actual = storage.upsert(&user, older, false).await.expect("retry A");
+    assert_eq!(actual.last_stanza_id, newer.last_stanza_id);
+    assert_eq!(actual.last_updated, newer.last_updated);
+    assert_eq!(actual.kind, newer.kind);
+    assert_eq!(actual.preview, newer.preview);
+    assert_eq!(actual.author, newer.author);
+    assert_eq!(actual.unread, 2);
+
+    let equal_timestamp = InboxEntry::new(newer.partner.clone(), ConversationKind::Direct, "a", 20);
+    let actual = storage
+        .upsert(&user, equal_timestamp, true)
+        .await
+        .expect("older id at same timestamp");
+    assert_eq!(actual.last_stanza_id, "b");
+    assert_eq!(
+        actual.unread, 3,
+        "new older messages still increment unread"
+    );
+    let newer_id = InboxEntry::new(newer.partner, ConversationKind::Direct, "c", 20);
+    let actual = storage
+        .upsert(&user, newer_id, true)
+        .await
+        .expect("newer id at same timestamp");
+    assert_eq!(actual.last_stanza_id, "c");
+    assert_eq!(actual.unread, 4);
+}
+
+#[tokio::test]
+async fn inbox_upsert_a_b_retry_a_preserves_latest_sqlite() {
+    assert_inbox_upsert_is_monotonic(
+        DatabaseInboxStorage::open(Some("sqlite::memory:"))
+            .await
+            .expect("sqlite inbox"),
+    )
+    .await;
+}
+
+#[tokio::test]
+async fn inbox_upsert_a_b_retry_a_preserves_latest_postgres() {
+    let Ok(url) = std::env::var("WADDLE_TEST_POSTGRES_URL") else {
+        eprintln!("skipping: WADDLE_TEST_POSTGRES_URL not set (monotonic inbox upsert)");
+        return;
+    };
+    assert_inbox_upsert_is_monotonic(
+        DatabaseInboxStorage::open(Some(&url))
+            .await
+            .expect("postgres inbox"),
+    )
+    .await;
+}

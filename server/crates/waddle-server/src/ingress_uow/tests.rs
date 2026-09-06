@@ -8,7 +8,7 @@ use waddle_xmpp::ingress::{
     WireHandledCount,
 };
 #[cfg(feature = "clustering")]
-use waddle_xmpp::ingress::{EffectMessageIdentity, InboxProjectionMutation, IngressEffectIntent};
+use waddle_xmpp::ingress::{InboxProjectionMutation, IngressEffectIntent};
 use waddle_xmpp::pending_delivery::SmSessionId;
 #[cfg(feature = "clustering")]
 use waddle_xmpp::{
@@ -31,15 +31,17 @@ use waddle_xmpp_core::xep0359::StanzaId;
 #[cfg(feature = "clustering")]
 use xmpp_parsers::message::MessageType;
 
+#[cfg(feature = "clustering")]
+use super::repositories::ReconcileVerdict;
 use super::{
     CanonicalMessageRepository, DeliveryEffectRepository, FrontierOutcome, IngressFencing,
     IngressUnitOfWork, IngressUowError, SmIngressRepository, SmIngressStreamRepository,
 };
 #[cfg(feature = "clustering")]
 use super::{
-    ClaimRepository, EffectIntentRepository, EffectIntentWriteOutcome, HandledFrontierOutcome,
-    HandledFrontierRepository, InboxRepository, IngressUowTransaction, MamArchiveRepository,
-    PrincipalAssertion, PrincipalRepository,
+    ClaimRepository, EffectIntentRepository, HandledFrontierOutcome, HandledFrontierRepository,
+    InboxRepository, IngressUowTransaction, MamArchiveRepository, PrincipalAssertion,
+    PrincipalRepository,
 };
 use crate::ingress_substrate::{EnvelopeVersion, MessageEnvelope};
 use crate::{
@@ -298,9 +300,20 @@ async fn spanning_proof_commits_exact_cross_store_values() {
     let mut retry = archived_message(&values);
     retry.id = format!("retry-{}", values.mam_id);
     let mut retry_transaction = fixture.begin().await;
-    match MamArchiveRepository::store(&mut retry_transaction, &values.archive_jid, &retry)
-        .await
-        .expect("deduplicate MAM retry")
+    match MamArchiveRepository::store(
+        &mut retry_transaction,
+        &values.archive_jid,
+        &retry,
+        waddle_xmpp::mam::ArchiveExpectation::Existing {
+            stanza_id: StanzaId {
+                id: values.mam_id.clone(),
+                by: values.archive_jid.clone().into(),
+            },
+            archived_at: retry.timestamp,
+        },
+    )
+    .await
+    .expect("reuse recorded MAM identity")
     {
         MamTxStoreOutcome::Existing(stanza_id) => {
             assert_eq!(stanza_id.id, values.mam_id);
@@ -311,7 +324,7 @@ async fn spanning_proof_commits_exact_cross_store_values() {
     retry_transaction
         .commit()
         .await
-        .expect("commit MAM dedup proof");
+        .expect("commit MAM identity proof");
     assert_eq!(fixture.count("mam_messages").await, 1);
     fixture.close().await;
 }
@@ -368,7 +381,7 @@ async fn epoch_one_uow_write_succeeds_and_raw_write_is_rejected() {
     .expect("UoW can enroll a guarded SM stream");
     #[cfg(feature = "clustering")]
     assert_eq!(
-        EffectIntentRepository::record_all(
+        EffectIntentRepository::reconcile(
             &mut transaction,
             message_key,
             &[IngressEffectIntent::InboxProject {
@@ -388,7 +401,7 @@ async fn epoch_one_uow_write_succeeds_and_raw_write_is_rejected() {
         )
         .await
         .expect("UoW can record guarded effect intents"),
-        EffectIntentWriteOutcome::Recorded
+        ReconcileVerdict::FirstCommit
     );
     transaction.commit().await.expect("commit UoW write");
 
@@ -691,6 +704,7 @@ async fn room_claim_fence_authorizes_a_transaction_bound_mam_archive_write() {
         &fence,
         &values.archive_jid,
         &archived_message(&values),
+        waddle_xmpp::mam::ArchiveExpectation::Fresh,
     )
     .await
     .expect("store under room claim fence")
@@ -733,6 +747,7 @@ async fn room_claim_fence_rejects_a_different_archive_room() {
             &fence,
             &wrong_archive,
             &archived_message(&values),
+            waddle_xmpp::mam::ArchiveExpectation::Fresh,
         )
         .await,
         Err(IngressUowError::ClaimFenceMissing)
@@ -817,6 +832,7 @@ async fn room_claim_fence_from_another_live_transaction_is_rejected() {
             &fence,
             &values.archive_jid,
             &archived_message(&values),
+            waddle_xmpp::mam::ArchiveExpectation::Fresh,
         )
         .await,
         Err(IngressUowError::ClaimFenceMissing)
@@ -828,6 +844,7 @@ async fn room_claim_fence_from_another_live_transaction_is_rejected() {
             &fence,
             &values.archive_jid,
             &archived_message(&values),
+            waddle_xmpp::mam::ArchiveExpectation::Fresh,
         )
         .await
         .expect("store in minting transaction"),
@@ -1100,10 +1117,10 @@ async fn every_effect_intent_kind_round_trips_through_postgres_storage() {
         .await
         .expect("record effect parent message");
     assert_eq!(
-        EffectIntentRepository::record_all(&mut transaction, message_key, &intents)
+        EffectIntentRepository::reconcile(&mut transaction, message_key, &intents)
             .await
             .expect("persist every codec kind"),
-        EffectIntentWriteOutcome::Recorded
+        ReconcileVerdict::FirstCommit
     );
     transaction.commit().await.expect("commit effect intents");
 
@@ -1132,164 +1149,215 @@ async fn effect_intents_are_keyed_by_semantic_identity_and_classify_existing_ali
     let Some(fixture) = Fixture::open("effect_intents").await else {
         return;
     };
-    let message_key = MessageKey::new();
-    let intents = vec![
-        IngressEffectIntent::RouteDirect {
-            recipient: "juliet@example.com".parse().expect("valid recipient"),
-            fanout: vec!["juliet@example.com/phone".parse().expect("valid fanout")],
-            route_identity: EffectMessageIdentity::capture_ordinal(0),
-        },
-        IngressEffectIntent::InboxProject {
-            owner: "romeo@example.com".parse().expect("valid owner"),
-            mutation: InboxProjectionMutation::Direct {
-                entry: InboxEntry::new(
-                    "juliet@example.com".parse().expect("valid recipient"),
-                    ConversationKind::Direct,
-                    "stable-1",
-                    1_752_768_000,
-                )
-                .with_unread(3)
-                .with_preview("important hello"),
-                increment_unread: true,
-            },
-        },
-        IngressEffectIntent::RouteDirect {
-            recipient: "juliet@example.com".parse().expect("valid recipient"),
-            fanout: vec!["juliet@example.com/phone".parse().expect("valid fanout")],
-            route_identity: EffectMessageIdentity::capture_ordinal(0),
-        },
-    ];
+    let key = MessageKey::new();
     let mut transaction = fixture.begin().await;
-    CanonicalMessageRepository::record_message(&mut transaction, message_key, &digest(9), None)
+    CanonicalMessageRepository::record_message(&mut transaction, key, &digest(9), None)
         .await
-        .expect("record effect parent message");
-    assert_eq!(
-        EffectIntentRepository::record_all(&mut transaction, message_key, &intents)
-            .await
-            .expect("record effect intents"),
-        EffectIntentWriteOutcome::Recorded
-    );
-    transaction.commit().await.expect("commit intents");
+        .expect("parent");
+    assert_intent_reconciliation(transaction.transaction_mut(), key).await;
+    transaction
+        .commit()
+        .await
+        .expect("commit reconciled effects");
+    fixture.close().await;
+}
 
-    let conn = fixture.db.guard().await.expect("read effect rows");
-    let mut rows = conn
-        .query(
-            "SELECT effect_ordinal::text, kind::int, octet_length(semantic_identity_hash) FROM ingress_effect_intents WHERE message_key = ?::uuid ORDER BY effect_ordinal",
-            crate::db_params![message_key.to_storage().to_string()],
+#[tokio::test]
+async fn effect_intents_reconcile_authorities_and_repair_omissions_sqlite() {
+    let db = Database::in_memory("effect_reconciliation")
+        .await
+        .expect("SQLite");
+    let mut transaction = db.begin_immediate().await.expect("write transaction");
+    transaction
+        .execute_batch(
+            "CREATE TABLE ingress_messages (message_key TEXT PRIMARY KEY);
+         CREATE TABLE ingress_effect_intents (
+             message_key TEXT NOT NULL REFERENCES ingress_messages(message_key),
+             effect_ordinal INTEGER NOT NULL, kind INTEGER NOT NULL,
+             semantic_identity_hash BLOB NOT NULL, payload_version INTEGER NOT NULL,
+             payload BLOB NOT NULL, PRIMARY KEY(message_key, kind, semantic_identity_hash),
+             UNIQUE(message_key, effect_ordinal));",
         )
         .await
-        .expect("select ordered effects");
-    let mut stored = Vec::new();
-    while let Some(row) = rows.next().await.expect("read effect row") {
-        stored.push((
-            row.get::<String>(0).expect("ordinal"),
-            row.get::<i64>(1).expect("kind"),
-            row.get::<i32>(2).expect("semantic hash length"),
-        ));
+        .expect("effect tables");
+    let key = MessageKey::new();
+    transaction
+        .execute(
+            "INSERT INTO ingress_messages VALUES (?)",
+            crate::db_params![key.to_storage().to_string()],
+        )
+        .await
+        .expect("parent");
+    assert_intent_reconciliation(&mut transaction, key).await;
+    transaction.commit().await.expect("commit repaired effects");
+}
+
+async fn assert_intent_reconciliation(
+    transaction: &mut crate::db::Transaction<'_>,
+    key: MessageKey,
+) {
+    use super::repositories::{EffectIntentRepository, ReconcileVerdict};
+    use waddle_xmpp::ingress::{EffectMessageIdentity, IngressEffectIntent, IngressEffectKind};
+    use waddle_xmpp_core::xep0359::StanzaId;
+    let archive: jid::BareJid = "romeo@example.com".parse().expect("archive");
+    let archived_at = chrono::DateTime::from_timestamp(1_753_617_600, 0).expect("timestamp");
+    let original = IngressEffectIntent::ArchiveAuthoritative {
+        archive: archive.clone(),
+        by: archive.clone(),
+        stanza_id: StanzaId::new("original", archive.clone().into()),
+        archived_at,
+    };
+    let route = IngressEffectIntent::RouteDirect {
+        recipient: "juliet@example.com".parse().expect("recipient"),
+        fanout: vec![
+            "juliet@example.com/phone".parse().expect("fanout"),
+            "juliet@example.com/laptop".parse().expect("fanout"),
+        ],
+        route_identity: EffectMessageIdentity::capture_ordinal(0),
+    };
+    assert_eq!(
+        EffectIntentRepository::reconcile_on_transaction(
+            transaction,
+            key,
+            &[original.clone(), original.clone()]
+        )
+        .await
+        .expect("first"),
+        ReconcileVerdict::FirstCommit
+    );
+    assert_eq!(
+        EffectIntentRepository::reconcile_on_transaction(
+            transaction,
+            key,
+            std::slice::from_ref(&original)
+        )
+        .await
+        .expect("consistent"),
+        ReconcileVerdict::Consistent
+    );
+    assert_eq!(
+        EffectIntentRepository::reconcile_on_transaction(
+            transaction,
+            key,
+            &[route.clone(), original.clone()]
+        )
+        .await
+        .expect("repair"),
+        ReconcileVerdict::Repaired {
+            inserted: vec![route.semantic_key()]
+        }
+    );
+    let mut reverse = route.clone();
+    if let IngressEffectIntent::RouteDirect { fanout, .. } = &mut reverse {
+        fanout.reverse();
     }
     assert_eq!(
-        stored,
-        vec![("0".to_string(), 1, 32), ("1".to_string(), 6, 32)]
+        EffectIntentRepository::reconcile_on_transaction(
+            transaction,
+            key,
+            &[reverse, original.clone()]
+        )
+        .await
+        .expect("canonical recipient order"),
+        ReconcileVerdict::Consistent
     );
-
-    let mut replay = fixture.begin().await;
-    assert_eq!(
-        EffectIntentRepository::record_all(&mut replay, message_key, &intents)
-            .await
-            .expect("byte-identical replay"),
-        EffectIntentWriteOutcome::AlreadyRecorded
-    );
-    replay.commit().await.expect("commit replay");
-
-    let differing = [IngressEffectIntent::RouteDirect {
-        recipient: "juliet@example.com".parse().expect("valid recipient"),
-        fanout: vec!["juliet@example.com/laptop".parse().expect("valid fanout")],
+    let changed = IngressEffectIntent::ArchiveAuthoritative {
+        archive: archive.clone(),
+        by: archive.clone(),
+        stanza_id: StanzaId::new("changed", archive.into()),
+        archived_at,
+    };
+    let new_route = IngressEffectIntent::RouteDirect {
+        recipient: "benvolio@example.com".parse().expect("recipient"),
+        fanout: vec![],
         route_identity: EffectMessageIdentity::capture_ordinal(1),
-    }];
-    let mut existing_alias_divergence = fixture.begin().await;
+    };
     assert_eq!(
-        EffectIntentRepository::record_all_existing_alias(
-            &mut existing_alias_divergence,
-            message_key,
-            &differing,
+        EffectIntentRepository::reconcile_on_transaction(
+            transaction,
+            key,
+            &[new_route.clone(), changed.clone(), route.clone()]
         )
         .await
-        .expect("existing-alias divergence should advance"),
-        EffectIntentWriteOutcome::IntentDivergence
+        .expect("contradiction"),
+        ReconcileVerdict::Contradiction {
+            kind: IngressEffectKind::ArchiveAuthoritative,
+            recorded: original.semantic_key(),
+            planned: changed.semantic_key()
+        }
     );
-    existing_alias_divergence
-        .commit()
-        .await
-        .expect("commit existing-alias divergence");
-    assert_eq!(fixture.count("ingress_effect_intents").await, 2);
-
-    let subset = [IngressEffectIntent::RouteDirect {
-        recipient: "juliet@example.com".parse().expect("valid recipient"),
-        fanout: vec!["juliet@example.com/phone".parse().expect("valid fanout")],
-        route_identity: EffectMessageIdentity::capture_ordinal(0),
-    }];
-    let mut subset_divergence = fixture.begin().await;
-    assert_eq!(
-        EffectIntentRepository::record_all_existing_alias(
-            &mut subset_divergence,
-            message_key,
-            &subset,
+    let postgres = transaction.postgres_connection().is_some();
+    let mut count = transaction
+        .query(
+            if postgres {
+                "SELECT COUNT(*) FROM ingress_effect_intents WHERE message_key = ?::uuid"
+            } else {
+                "SELECT COUNT(*) FROM ingress_effect_intents WHERE message_key = ?"
+            },
+            crate::db_params![key.to_storage().to_string()],
         )
         .await
-        .expect("subset divergence should advance"),
-        EffectIntentWriteOutcome::IntentDivergence
+        .expect("count after contradiction");
+    assert_eq!(
+        count
+            .next()
+            .await
+            .expect("count row")
+            .expect("row")
+            .get::<i64>(0)
+            .expect("count"),
+        2
     );
-    subset_divergence
-        .commit()
+    drop(count);
+    let mut drift = route.clone();
+    if let IngressEffectIntent::RouteDirect { fanout, .. } = &mut drift {
+        fanout.clear();
+    }
+    assert_eq!(
+        EffectIntentRepository::reconcile_on_transaction(
+            transaction,
+            key,
+            &[original.clone(), drift, new_route.clone()]
+        )
         .await
-        .expect("commit subset divergence");
-    assert_eq!(fixture.count("ingress_effect_intents").await, 2);
-
-    let mut conflict = fixture.begin().await;
+        .expect("recorded audience wins while omissions repair"),
+        ReconcileVerdict::Divergent {
+            kinds: vec![IngressEffectKind::RouteDirect]
+        }
+    );
+    assert_eq!(
+        EffectIntentRepository::reconcile_on_transaction(
+            transaction,
+            key,
+            &[original.clone(), route.clone(), new_route]
+        )
+        .await
+        .expect("omission was repaired"),
+        ReconcileVerdict::Consistent
+    );
+    assert_eq!(
+        EffectIntentRepository::reconcile_on_transaction(transaction, key, &[original, route])
+            .await
+            .expect("recorded-only audience"),
+        ReconcileVerdict::Divergent {
+            kinds: vec![IngressEffectKind::RouteDirect]
+        }
+    );
+    let postgres = transaction.postgres_connection().is_some();
+    let mut rows = transaction.query(if postgres {
+        "SELECT effect_ordinal::text FROM ingress_effect_intents WHERE message_key = ?::uuid ORDER BY effect_ordinal"
+    } else {
+        "SELECT CAST(effect_ordinal AS TEXT) FROM ingress_effect_intents WHERE message_key = ? ORDER BY effect_ordinal"
+    }, crate::db_params![key.to_storage().to_string()]).await.expect("ordinals");
+    let mut ordinals = Vec::new();
+    while let Some(row) = rows.next().await.expect("row") {
+        ordinals.push(row.get::<String>(0).expect("ordinal"));
+    }
+    assert_eq!(ordinals, ["0", "1", "2"]);
     assert!(matches!(
-        EffectIntentRepository::record_all(&mut conflict, message_key, &differing).await,
-        Err(IngressUowError::EffectIntentConflict)
-    ));
-    drop(conflict);
-
-    let empty_message_key = MessageKey::new();
-    let mut empty_original = fixture.begin().await;
-    CanonicalMessageRepository::record_message(
-        &mut empty_original,
-        empty_message_key,
-        &digest(10),
-        None,
-    )
-    .await
-    .expect("record parent with no effect intents");
-    empty_original
-        .commit()
-        .await
-        .expect("commit parent with no effect intents");
-    let mut empty_existing_alias = fixture.begin().await;
-    assert_eq!(
-        EffectIntentRepository::record_all_existing_alias(
-            &mut empty_existing_alias,
-            empty_message_key,
-            &subset,
-        )
-        .await
-        .expect("existing alias with new effects must not write"),
-        EffectIntentWriteOutcome::IntentDivergence
-    );
-    empty_existing_alias
-        .commit()
-        .await
-        .expect("commit empty existing-alias divergence");
-    assert_eq!(fixture.count("ingress_effect_intents").await, 2);
-
-    let mut missing = fixture.begin().await;
-    assert!(matches!(
-        EffectIntentRepository::record_all(&mut missing, MessageKey::new(), &intents,).await,
+        EffectIntentRepository::reconcile_on_transaction(transaction, MessageKey::new(), &[]).await,
         Err(IngressUowError::EffectIntentMessageMissing)
     ));
-    drop(missing);
-    fixture.close().await;
 }
 
 #[cfg(feature = "clustering")]
@@ -1454,9 +1522,14 @@ async fn write_spanning_rows(transaction: &mut IngressUowTransaction<'_>, values
 
 #[cfg(feature = "clustering")]
 async fn store_mam_message(transaction: &mut IngressUowTransaction<'_>, values: &FixtureValues) {
-    match MamArchiveRepository::store(transaction, &values.archive_jid, &archived_message(values))
-        .await
-        .expect("store MAM identity in UoW")
+    match MamArchiveRepository::store(
+        transaction,
+        &values.archive_jid,
+        &archived_message(values),
+        waddle_xmpp::mam::ArchiveExpectation::Fresh,
+    )
+    .await
+    .expect("store MAM identity in UoW")
     {
         MamTxStoreOutcome::Inserted(stanza_id) => {
             assert_eq!(stanza_id.id, values.mam_id);
@@ -1476,6 +1549,7 @@ async fn upsert_inbox_entry(transaction: &mut IngressUowTransaction<'_>, values:
     );
     let stored = InboxRepository::upsert_with_groupchat_notification_recovery(
         transaction,
+        values.message_key,
         values.principal.bare_jid(),
         entry,
         true,
@@ -1739,7 +1813,6 @@ impl Fixture {
             "ingress_messages",
             "ingress_origin_aliases",
             "ingress_sm_refs",
-            "ingress_deliveries",
             "mam_messages",
             "inbox_entries",
             "groupchat_notification_recovery",
@@ -1750,6 +1823,11 @@ impl Fixture {
                 "{table} visibility"
             );
         }
+        assert_eq!(
+            self.count("ingress_deliveries").await,
+            expected_count * 2,
+            "delivery plus inbox projection ledger visibility"
+        );
         if expected_count == 1 {
             let conn = self.db.guard().await.expect("fresh database connection");
             let mut rows = conn
@@ -2054,4 +2132,170 @@ async fn wait_for_lock_waiter(admin: &sqlx::PgPool, fragment: &str) {
         tokio::time::sleep(std::time::Duration::from_millis(25)).await;
     }
     panic!("no blocked backend appeared for query fragment {fragment:?}");
+}
+
+/// Construct a repository transaction while the SQLite admission port is owned
+/// by the parallel ingress cutover slice.
+async fn sqlite_uow(db: &Database) -> IngressUnitOfWork {
+    let config = fixture_lineage_config();
+    lineage::enroll(db, &config)
+        .await
+        .expect("enroll sqlite lineage");
+    IngressUnitOfWork::open(db.clone(), config).expect("open sqlite UoW")
+}
+
+async fn assert_inbox_projection_retries_apply_once(
+    transaction: &mut super::IngressUowTransaction<'_>,
+) {
+    use waddle_xmpp::inbox::{ConversationKind, InboxEntry};
+    let owner = "owner@example.com".parse().expect("owner");
+    let peer: jid::BareJid = "peer@example.com".parse().expect("peer");
+    let first_key = MessageKey::new();
+    let second_key = MessageKey::new();
+    CanonicalMessageRepository::record_message(transaction, first_key, &digest(11), None)
+        .await
+        .expect("record A");
+    CanonicalMessageRepository::record_message(transaction, second_key, &digest(12), None)
+        .await
+        .expect("record B");
+    let mut first = InboxEntry::new(peer.clone(), ConversationKind::Direct, "a", 10);
+    first.thread_id = Some("thread".into());
+    first.reply_count = 1;
+    let mut second = InboxEntry::new(peer, ConversationKind::Direct, "b", 20);
+    second.thread_id = first.thread_id.clone();
+    second.reply_count = 1;
+    super::InboxRepository::apply_once(transaction, first_key, &owner, first.clone(), true)
+        .await
+        .expect("project A");
+    super::InboxRepository::apply_once(transaction, second_key, &owner, second, true)
+        .await
+        .expect("project B");
+    let result = super::InboxRepository::apply_once(transaction, first_key, &owner, first, true)
+        .await
+        .expect("retry A projection");
+    assert_eq!(result.last_stanza_id, "b");
+    assert_eq!(result.last_updated, 20);
+    assert_eq!(result.unread, 2);
+    assert_eq!(result.reply_count, 2);
+}
+
+#[tokio::test]
+async fn inbox_projection_a_b_retry_a_applies_once_postgres() {
+    let Some(fixture) = Fixture::open("inbox_projection_once").await else {
+        return;
+    };
+    let mut transaction = fixture.begin().await;
+    assert_inbox_projection_retries_apply_once(&mut transaction).await;
+    transaction.commit().await.expect("commit projections");
+    fixture.close().await;
+}
+
+#[tokio::test]
+async fn inbox_projection_a_b_retry_a_applies_once_sqlite() {
+    let storage = crate::inbox::DatabaseInboxStorage::open(Some("sqlite::memory:"))
+        .await
+        .expect("sqlite inbox");
+    let db = storage.database();
+    MigrationRunner::single()
+        .run(&db)
+        .await
+        .expect("sqlite migrations");
+    let uow = sqlite_uow(&db).await;
+    let mut transaction = uow.begin().await.expect("begin sqlite UoW");
+    // This exercises the existing delivery repository API, including the
+    // dialect-aware substrate supplied by the parallel cutover slice.
+    assert_inbox_projection_retries_apply_once(&mut transaction).await;
+    transaction
+        .commit()
+        .await
+        .expect("commit sqlite projections");
+}
+
+#[tokio::test]
+async fn mam_repository_sqlite_preserves_recorded_identity_and_repair_timestamp() {
+    use waddle_xmpp::mam::{
+        ArchiveExpectation, ArchivedMessage, MamStorage, MamTxStoreOutcome, SqlxMamStorage,
+    };
+    use waddle_xmpp_core::xep0359::StanzaId;
+
+    let storage = SqlxMamStorage::open_in_memory().await.expect("sqlite MAM");
+    let db = Database::from_sqlite_pool(
+        "mam_repository",
+        storage.sqlite_pool().expect("sqlite pool").clone(),
+        true,
+    );
+    MigrationRunner::single()
+        .run(&db)
+        .await
+        .expect("sqlite migrations");
+    let archive: jid::BareJid = "archive@example.com".parse().expect("archive");
+    let mut message = ArchivedMessage::for_test(
+        "sender@example.com/device".parse().expect("sender"),
+        archive.clone().into(),
+    );
+    message.id = "recorded-mam-id".into();
+    message.timestamp = chrono::DateTime::from_timestamp(1_700_000_000, 0).expect("timestamp");
+    let stanza_id = StanzaId::new(message.id.clone(), archive.clone().into());
+    let existing = ArchiveExpectation::Existing {
+        stanza_id: stanza_id.clone(),
+        archived_at: message.timestamp,
+    };
+    let uow = sqlite_uow(&db).await;
+    let mut transaction = uow.begin().await.expect("begin sqlite UoW");
+    assert_eq!(
+        super::MamArchiveRepository::store(
+            &mut transaction,
+            &archive,
+            &message,
+            ArchiveExpectation::Fresh
+        )
+        .await
+        .expect("fresh row"),
+        MamTxStoreOutcome::Inserted(stanza_id.clone())
+    );
+    assert!(matches!(
+        super::MamArchiveRepository::store(
+            &mut transaction,
+            &archive,
+            &message,
+            ArchiveExpectation::Fresh
+        )
+        .await,
+        Err(IngressUowError::MamStore(
+            waddle_xmpp::mam::MamTxStoreError::Conflict { .. }
+        ))
+    ));
+    message.id = "discarded-retry-id".into();
+    message.timestamp = chrono::Utc::now();
+    assert_eq!(
+        super::MamArchiveRepository::store(&mut transaction, &archive, &message, existing.clone())
+            .await
+            .expect("existing row"),
+        MamTxStoreOutcome::Existing(stanza_id.clone())
+    );
+    transaction
+        .transaction
+        .execute(
+            "DELETE FROM mam_messages WHERE id = ?",
+            crate::db_params![stanza_id.id.clone()],
+        )
+        .await
+        .expect("simulate absent projection");
+    assert_eq!(
+        super::MamArchiveRepository::store(&mut transaction, &archive, &message, existing.clone())
+            .await
+            .expect("repair row"),
+        MamTxStoreOutcome::Repaired(stanza_id.clone())
+    );
+    transaction.commit().await.expect("commit repair");
+    let repaired = storage
+        .get_message(&stanza_id.id)
+        .await
+        .expect("read repair")
+        .expect("repaired row");
+    let ArchiveExpectation::Existing { archived_at, .. } = existing else {
+        unreachable!()
+    };
+    assert_eq!(repaired.timestamp, archived_at);
+    assert_eq!(repaired.id, stanza_id.id);
 }

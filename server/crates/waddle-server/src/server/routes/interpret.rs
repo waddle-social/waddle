@@ -360,9 +360,6 @@ enum BatchSuppression {
     /// `All` (ownership loss / subject-persist bounce) must NOT share
     /// this escape: a deposed node may not touch the archive at all.
     TombstoneSwallow,
-    NonSender {
-        sender: BareJid,
-    },
 }
 
 impl BatchSuppression {
@@ -376,15 +373,6 @@ impl BatchSuppression {
                     OutboundEvent::ApplyGroupchatRetractionTombstone { .. }
                 )
             }
-            Self::NonSender { sender } => match event {
-                // A crash can commit the retraction-request archive row before
-                // applying its target tombstone. A deduplicated retry must
-                // finish that idempotent, monotonic second effect.
-                OutboundEvent::ApplyGroupchatRetractionTombstone { .. } => true,
-                OutboundEvent::RouteToConnection { jid, .. } => &jid.to_bare() == sender,
-                OutboundEvent::ProjectGroupchatInbox { owner, .. } => owner == sender,
-                _ => false,
-            },
         }
     }
 }
@@ -635,13 +623,6 @@ async fn interpret_with_depth(
                     }
                     ArchiveGroupchatEventOutcome::Stored(None)
                     | ArchiveGroupchatEventOutcome::Skipped => {}
-                    ArchiveGroupchatEventOutcome::Deduplicated { rewrite, sender } => {
-                        if let Some(rewrite) = rewrite {
-                            archive_id_rewrites.push(rewrite);
-                        }
-                        outcome.retry_suppression = Some(GroupchatRetrySuppression::Deduplicated);
-                        batch_suppression = BatchSuppression::NonSender { sender };
-                    }
                     ArchiveGroupchatEventOutcome::TombstoneHit => {
                         debug!(
                             "ArchiveGroupchat: tombstone hit; silently suppressing remaining dispatch batch"

@@ -45,7 +45,7 @@ pub async fn load_envelope(
     key: MessageKey,
 ) -> Result<Option<MessageEnvelope>, IngressSubstrateError> {
     const POSTGRES: &str =
-        "SELECT envelope_version, envelope FROM ingress_messages WHERE message_key = ?::uuid";
+        "SELECT envelope_version::int, envelope FROM ingress_messages WHERE message_key = ?::uuid";
     const SQLITE: &str =
         "SELECT envelope_version, envelope FROM ingress_messages WHERE message_key = ?";
     let mut rows = tx

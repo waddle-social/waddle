@@ -12,8 +12,8 @@ mod retry;
 pub use error::IngressUowError;
 pub use repositories::{
     CanonicalMessageRepository, DeliveryEffectRepository, EffectIntentRepository,
-    EffectIntentWriteOutcome, EffectReceiptRepository, FrontierOutcome, InboxRepository,
-    MamArchiveRepository, PrincipalAssertion, PrincipalRepository, SmIngressRepository,
+    EffectReceiptRepository, FrontierOutcome, InboxRepository, MamArchiveRepository,
+    PrincipalAssertion, PrincipalRepository, ReconcileVerdict, SmIngressRepository,
     SmIngressStreamRepository,
 };
 #[cfg(feature = "clustering")]

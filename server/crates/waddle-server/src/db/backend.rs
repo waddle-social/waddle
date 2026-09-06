@@ -520,6 +520,15 @@ impl<'a> Transaction<'a> {
         }
     }
 
+    /// Reach the raw SQLite connection for connection-taking repositories.
+    /// Returns `None` on PostgreSQL.
+    pub(crate) fn sqlite_connection(&mut self) -> Option<&mut sqlx::SqliteConnection> {
+        match &mut self.inner {
+            TransactionInner::Sqlite(tx) => Some(&mut **tx),
+            TransactionInner::Postgres(_) => None,
+        }
+    }
+
     /// Execute a write statement inside the transaction.
     pub async fn execute(
         &mut self,

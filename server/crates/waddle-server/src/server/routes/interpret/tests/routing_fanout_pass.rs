@@ -101,13 +101,9 @@ async fn fanout_pass_blocklist_failure_falls_back_to_legacy_per_resource_deliver
 }
 
 #[tokio::test]
-async fn fanout_pass_applies_archive_id_rewrite_to_the_delivered_stanza() {
-    // XEP-0359 live/MAM id parity under origin-id retry: when the
-    // recipient archive dedupes the store to an EXISTING row (same
-    // origin-id already archived), the resulting ArchiveIdRewrite must
-    // reach the wire copy the shared fan-out pass delivers — otherwise
-    // live resources see a recipient <stanza-id/> that no archive row
-    // carries, breaking client-side live/MAM dedupe.
+async fn fanout_pass_preserves_live_archive_id_parity_for_origin_retries() {
+    // XEP-0359: each stored row retains the id delivered to the recipient,
+    // including repeated origins whose identity is resolved above storage.
     use waddle_xmpp::registry::DeliveryKind;
     use waddle_xmpp_core::xep0359::{build_origin_id_element, extract_stanza_id_by};
 
@@ -160,8 +156,7 @@ async fn fanout_pass_applies_archive_id_rewrite_to_the_delivered_stanza() {
     // Drain the first delivery.
     while bob_rx.try_recv().is_ok() {}
 
-    // Retry with the same origin-id: the archive store dedupes to the
-    // existing row and reports its id via ArchiveIdRewrite.
+    // A retry with the same origin-id stores a new archive row.
     let _ = interpret(
         vec![OutboundEvent::RouteToConnection {
             jid: "bob@example.com".parse::<jid::Jid>().expect("bare"),
@@ -193,17 +188,11 @@ async fn fanout_pass_applies_archive_id_rewrite_to_the_delivered_stanza() {
         )
         .await
         .expect("query bob archive");
-    assert_eq!(
-        archive.messages.len(),
-        1,
-        "origin-id retry dedupes to one row"
-    );
-    let archived_id = archive.messages[0].id.clone();
-
-    let delivered_stanza_id = extract_stanza_id_by(&delivered_msg, &jid::Jid::from(bob_bare));
-    assert_eq!(
-        delivered_stanza_id.as_deref(),
-        Some(archived_id.as_str()),
-        "the delivered recipient <stanza-id/> must match the deduped archive row"
-    );
+    assert_eq!(archive.messages.len(), 2, "storage does not dedupe origins");
+    let delivered_stanza_id = extract_stanza_id_by(&delivered_msg, &jid::Jid::from(bob_bare))
+        .expect("delivered archive stanza-id");
+    assert!(archive
+        .messages
+        .iter()
+        .any(|row| row.id == delivered_stanza_id));
 }
