@@ -333,19 +333,34 @@ async fn plan_pinned_retraction_freezes_system_archive_and_deliveries() {
         unrelated_pin.tombstone_suppression,
         PlanSuppressionPolicy::TombstoneSwallowed
     );
-    let system_archive = plan
+    // The unpin system message is archived after the room-pin mutation commits
+    // (its content is true only then), so it is planned as an external
+    // archive that depends on the pin, not as a Phase B durable archive.
+    let system_archive_effect = plan
         .iter()
-        .find_map(|effect| match &effect.effect {
-            Effect::Durable(DurableEffect::Room(DurableRoomEffect::ArchiveGroupchat {
+        .find(|effect| match &effect.effect {
+            Effect::External(ExternalEffect::Room(ExternalRoomEffect::ArchiveAfterPin {
                 message,
                 ..
-            })) if effect.tombstone_suppression == PlanSuppressionPolicy::Always => Some(message),
-            _ => None,
+            })) => message.from == room.clone(),
+            _ => false,
         })
-        .expect("durable system-message archive");
+        .unwrap_or_else(|| panic!("system-message archive after pin; plan = {plan:#?}"));
+    assert_eq!(
+        system_archive_effect.tombstone_suppression,
+        PlanSuppressionPolicy::Always,
+        "system archive inherits the retraction exemption"
+    );
+    let Effect::External(ExternalEffect::Room(ExternalRoomEffect::ArchiveAfterPin {
+        message: system_archive,
+        ..
+    })) = &system_archive_effect.effect
+    else {
+        unreachable!("matched above");
+    };
     assert_eq!(system_archive.from, Jid::from(room.clone()));
     assert!(capture.snapshot().intents.iter().any(|intent| matches!(intent,
-        IngressEffectIntent::ArchiveAuthoritative { archive, stanza_id, archived_at, .. }
+        IngressEffectIntent::SystemMessageArchive { archive, stanza_id, archived_at, .. }
         if archive == &room && stanza_id.id == system_archive.id && archived_at == &system_archive.timestamp)));
     for recipient in [&alice, &bob] {
         let delivery = plan
