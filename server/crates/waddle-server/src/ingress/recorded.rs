@@ -47,6 +47,7 @@ pub fn apply_recorded_intents(plan: &IngressPlan, recorded: &[IngressEffectInten
             *intent = authoritative.clone();
         }
     }
+    result.intents.retain(|intent| recorded.contains(intent));
     result
 }
 
@@ -67,6 +68,40 @@ fn recorded_match<'a>(
                 row.authority_key() == planned.authority_key() && same_mutation_shape(row, planned)
             })
         })
+}
+
+/// Member notification work belongs to the same frozen audience as its inbox
+/// projection, even when its usual duplicate policy allows idempotent replay.
+pub(super) fn external_in_recorded_audience(plan: &IngressPlan, effect: &ExternalEffect) -> bool {
+    use waddle_xmpp::ingress::EffectAuthorityKey;
+    let (owner, room) = match effect {
+        ExternalEffect::Room(ExternalRoomEffect::NotificationCandidate { owner, room, .. }) => {
+            (owner.clone(), room.clone())
+        }
+        ExternalEffect::Direct(ExternalDirectEffect::NotificationActivity { owner, mutation }) => {
+            let EffectAuthorityKey::Conversation { conversation, .. } =
+                (IngressEffectIntent::NotificationActivityPreview {
+                    owner: owner.clone(),
+                    mutation: mutation.clone(),
+                })
+                .authority_key()
+            else {
+                return true;
+            };
+            (owner.clone(), conversation)
+        }
+        _ => return true,
+    };
+    if !plan.intents.iter().any(|intent| matches!(intent,
+        IngressEffectIntent::RouteMucGroupchat { room: recorded_room, .. } if recorded_room == &room))
+    {
+        return true;
+    }
+    plan.intents.iter().any(|intent| {
+        matches!(intent.authority_key(),
+        EffectAuthorityKey::Inbox { owner: recorded_owner, partner, .. }
+            if recorded_owner == owner && partner == room)
+    })
 }
 
 fn same_mutation_shape(recorded: &IngressEffectIntent, planned: &IngressEffectIntent) -> bool {

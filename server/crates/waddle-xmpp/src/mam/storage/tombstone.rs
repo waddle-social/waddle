@@ -79,16 +79,18 @@ fn tombstone_sender_scope_matches(existing: &ArchivedMessage, incoming: &Archive
 /// A subject accompanied by body content or a thread is a timeline message
 /// and still obeys the tombstone guard.
 pub(super) fn groupchat_subject_is_state_update(message: &ArchivedMessage) -> bool {
-    matches!(message.message_type, MessageType::Groupchat)
-        && message
+    crate::muc::is_groupchat_subject_change(
+        &message.message_type,
+        message
             .rich
             .as_ref()
-            .is_some_and(|rich| !rich.subjects.is_empty())
-        && message.thread.is_none()
-        && message
+            .is_some_and(|rich| !rich.subjects.is_empty()),
+        message
             .body
             .as_deref()
-            .is_none_or(|body| body.trim().is_empty())
+            .is_some_and(|body| !body.trim().is_empty()),
+        message.thread.is_some(),
+    )
 }
 
 #[cfg(test)]
@@ -193,6 +195,10 @@ mod tests {
             .subjects
             .insert(String::new(), "Topic".to_string());
         assert!(!origin_id_tombstone_match(&tombstone, &subject_retry));
+        subject_retry.thread = Some(waddle_xmpp_core::xep0201::ThreadInfo::root(
+            waddle_xmpp_core::mam::ThreadId::new("timeline").expect("thread"),
+        ));
+        assert!(origin_id_tombstone_match(&tombstone, &subject_retry));
     }
 
     #[test]

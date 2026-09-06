@@ -142,6 +142,7 @@ impl IngressFixture {
             principal: self.principal.clone(),
             target,
             plan: IngressPlan {
+                failure: None,
                 plan: Vec::new(),
                 intents: Vec::new(),
                 sanitized_message: message,

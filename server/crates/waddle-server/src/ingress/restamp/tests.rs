@@ -21,6 +21,7 @@ fn fixture() -> (IngressPlan, BareJid, StanzaId, StanzaId) {
         .payloads
         .push(build_origin_id_element("client-origin"));
     let plan = IngressPlan {
+        failure: None,
         plan: Vec::new(),
         intents: vec![IngressEffectIntent::ArchiveAuthoritative {
             archive: owner.clone(),

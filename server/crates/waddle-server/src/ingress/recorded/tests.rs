@@ -7,6 +7,7 @@ use waddle_xmpp::{
 
 fn empty_plan() -> IngressPlan {
     IngressPlan {
+        failure: None,
         plan: Vec::new(),
         intents: Vec::new(),
         sanitized_message: xmpp_parsers::message::Message::new(None),

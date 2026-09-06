@@ -80,7 +80,7 @@ fn typed_envelope(body: &str) -> MessageEnvelope {
     message
         .bodies
         .insert(xmpp_parsers::message::Lang::new(), body.to_string());
-    MessageEnvelope::new(message).expect("typed envelope")
+    MessageEnvelope::new(message)
 }
 
 async fn insert_stream(tx: &mut Transaction<'_>, id: SmIngressId) {
@@ -173,6 +173,61 @@ async fn envelope_roundtrip(driver: DatabaseDriver) {
         Some(envelope)
     );
     tx.commit().await.expect("close read");
+    fixture.close().await;
+}
+
+async fn typed_envelope_retry_after_storage_roundtrip(driver: DatabaseDriver) {
+    let Some(fixture) = Fixture::open(driver).await else {
+        return;
+    };
+    let key = MessageKey::new();
+    let mut message = typed_envelope("typed <body> & café").message().clone();
+    message.thread = Some(xmpp_parsers::message::Thread {
+        id: "thread-id".into(),
+        parent: None,
+    });
+    message.payloads.push(
+        xmpp_parsers::message_correct::Replace {
+            id: xmpp_parsers::message::Id("previous-message".into()),
+        }
+        .into(),
+    );
+    let envelope = MessageEnvelope::new(message.clone());
+    assert_eq!(envelope.message(), &message);
+    let mut tx = fixture.db.begin_immediate().await.expect("begin write");
+    record_message(&mut tx, key, &digest(), Some(&envelope))
+        .await
+        .expect("serialize at insert");
+    tx.commit().await.expect("commit envelope");
+
+    let mut tx = fixture.db.begin_immediate().await.expect("begin retry");
+    let loaded = load_envelope(&mut tx, key)
+        .await
+        .expect("parse storage envelope")
+        .expect("stored envelope");
+    assert_eq!(loaded.message(), &message);
+    record_message(&mut tx, key, &digest(), Some(&loaded))
+        .await
+        .expect("retry with parsed typed envelope");
+    message.thread = Some(xmpp_parsers::message::Thread {
+        id: "other-thread".into(),
+        parent: None,
+    });
+    assert!(matches!(
+        record_message(
+            &mut tx,
+            key,
+            &digest(),
+            Some(&MessageEnvelope::new(message))
+        )
+        .await,
+        Err(IngressSubstrateError::MessageContentConflict)
+    ));
+    assert_eq!(
+        load_envelope(&mut tx, key).await.expect("unchanged"),
+        Some(loaded)
+    );
+    tx.commit().await.expect("commit retry");
     fixture.close().await;
 }
 
@@ -640,5 +695,16 @@ backend_test!(
 backend_test!(
     postgres_checkpoint_flush_never_regresses,
     checkpoint_flush_never_regresses,
+    Postgres
+);
+
+backend_test!(
+    sqlite_typed_envelope_retry_after_storage_roundtrip,
+    typed_envelope_retry_after_storage_roundtrip,
+    Sqlite
+);
+backend_test!(
+    postgres_typed_envelope_retry_after_storage_roundtrip,
+    typed_envelope_retry_after_storage_roundtrip,
     Postgres
 );

@@ -1,7 +1,7 @@
 //! Pure application of the policies captured before admission.
 use jid::BareJid;
 use waddle_xmpp::{mam::MamTxStoreOutcome, Stanza};
-use xmpp_parsers::message::{Message, MessageType};
+use xmpp_parsers::message::Message;
 
 use crate::{
     ingress_uow::ReconcileVerdict,
@@ -38,6 +38,9 @@ pub(crate) fn external_effect_indices(
             let Effect::External(effect) = &planned.effect else {
                 return None;
             };
+            if !super::recorded::external_in_recorded_audience(plan, effect) {
+                return None;
+            }
             if duplicate
                 && duplicate_policy(planned) == PlanSuppressionPolicy::SenderOnly
                 && !sender_delivery(effect, plan.sanitized_message.from.as_ref())
@@ -112,9 +115,7 @@ pub(super) fn tombstone_swallowed(
 }
 
 fn subject_message(message: &Message) -> bool {
-    message.type_ == MessageType::Groupchat
-        && !message.subjects.is_empty()
-        && message.bodies.is_empty()
+    waddle_xmpp::muc::is_groupchat_subject_change_message(message)
 }
 
 fn subject_stanza(stanza: &Stanza) -> bool {
@@ -142,7 +143,80 @@ mod tests {
     use super::*;
     use crate::server::routes::interpret::effects::RoomExecutionPath;
     use waddle_xmpp_core::xep0359::StanzaId;
-    use xmpp_parsers::message::Lang;
+    use xmpp_parsers::message::{Lang, MessageType};
+
+    #[test]
+    fn planned_subject_retry_only_rebroadcasts_without_thread() {
+        use crate::server::routes::interpret::effects::{
+            delivery::PeerDeliveryKind, EffectSink, PlanSink,
+        };
+        let sender: jid::FullJid = "sender@example.com/device".parse().expect("sender");
+        let peer: jid::FullJid = "peer@example.com/device".parse().expect("peer");
+        #[derive(Clone, Copy)]
+        enum ThreadShape {
+            None,
+            Typed,
+            /// The inbound parser's representation of `<thread parent='…'/>`.
+            ParentedPayload,
+        }
+        for shape in [
+            ThreadShape::None,
+            ThreadShape::Typed,
+            ThreadShape::ParentedPayload,
+        ] {
+            let has_thread = !matches!(shape, ThreadShape::None);
+            let mut message = Message::new(Some("room@example.com".parse().expect("room")));
+            message.from = Some(sender.clone().into());
+            message.type_ = MessageType::Groupchat;
+            message.subjects.insert(Lang::new(), "topic".into());
+            if has_thread {
+                message.thread = Some(xmpp_parsers::message::Thread {
+                    id: "timeline".into(),
+                    parent: None,
+                });
+            }
+            if matches!(shape, ThreadShape::ParentedPayload) {
+                waddle_xmpp_core::parser_utils::reattach_thread_parent(
+                    &mut message,
+                    "root".into(),
+                    waddle_xmpp_core::CLIENT_STANZA_NS,
+                );
+                assert!(message.thread.is_none());
+            }
+            let sink = PlanSink::new();
+            sink.observe_sender(&sender);
+            for recipient in [sender.clone(), peer.clone()] {
+                let mut reflection = message.clone();
+                reflection.to = Some(recipient.clone().into());
+                sink.record(PlannedEffect::new(Effect::External(
+                    ExternalEffect::Delivery(ExternalDeliveryEffect::RouteToPeer {
+                        jid: recipient,
+                        stanza: Box::new(Stanza::Message(reflection)),
+                        kind: PeerDeliveryKind::RegistryFrame,
+                        call_setup: None,
+                    }),
+                )));
+            }
+            let plan = IngressPlan {
+                failure: None,
+                plan: sink.snapshot(),
+                intents: vec![],
+                sanitized_message: message,
+                error_reply: None,
+                rejection: None,
+                room_execution: RoomExecutionPath::None,
+            };
+            assert_eq!(
+                external_effect_indices(&plan, &ReconcileVerdict::FirstCommit, &[]),
+                vec![0, 1]
+            );
+            let expected = if has_thread { vec![0] } else { vec![0, 1] };
+            assert_eq!(
+                external_effect_indices(&plan, &ReconcileVerdict::Consistent, &[]),
+                expected
+            );
+        }
+    }
 
     #[test]
     fn filter_external_effects_policy_table() {
@@ -173,6 +247,7 @@ mod tests {
                 effect.tombstone_suppression = PlanSuppressionPolicy::Always;
             }
             let plan = IngressPlan {
+                failure: None,
                 plan: vec![effect],
                 intents: vec![],
                 sanitized_message: message,
@@ -208,6 +283,7 @@ mod tests {
         let recipient_id = StanzaId::new("same-id", recipient.clone().into());
         let message = Message::new(Some(recipient.clone().into()));
         let plan = IngressPlan {
+            failure: None,
             plan: vec![
                 PlannedEffect::new(Effect::External(ExternalEffect::Frame(Box::new(
                     Stanza::Message(message.clone()),
@@ -261,6 +337,7 @@ mod tests {
             }))).with_dependency(dependency.clone())
         }).collect();
         let plan = IngressPlan {
+            failure: None,
             rejection: None,
             plan: effects,
             intents: vec![],

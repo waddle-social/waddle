@@ -105,10 +105,11 @@ pub(super) fn finish_plan(
     });
     let snapshot = capture.snapshot();
     let sanitized_message = sink.message().unwrap_or(incoming);
-    if snapshot.overflowed {
+    if snapshot.overflowed && sink.failure().is_none() {
         return reject_capture_overflow(sanitized_message, ingress_sender);
     }
     IngressPlan {
+        failure: sink.failure(),
         rejection: sink.rejection(),
         plan,
         intents: snapshot.intents,
@@ -125,6 +126,7 @@ pub(crate) fn reject_malformed_message(mut message: Message, sender: &jid::FullJ
     // Commit responsibility for discarding it without recording a reply obligation.
     if message.type_ == MessageType::Error {
         return IngressPlan {
+            failure: None,
             rejection: None,
             plan: vec![],
             intents: vec![],
@@ -143,6 +145,7 @@ pub(crate) fn reject_malformed_message(mut message: Message, sender: &jid::FullJ
         waddle_xmpp::protocol::handlers::errors::message_error_reply(&message, error.clone());
     let reply = Stanza::Message(reply);
     IngressPlan {
+        failure: None,
         rejection: Some(PlanRejection::SemanticMalformed(
             super::effects::SemanticMalformedReason::MalformedPayload,
         )),
@@ -183,6 +186,7 @@ fn reject_capture_overflow(message: Message, sender: Option<jid::FullJid>) -> In
         .collect();
     let reply = Stanza::Message(reply);
     IngressPlan {
+        failure: None,
         rejection: Some(PlanRejection::PolicyDenied(
             PolicyDeniedReason::CaptureOverflow,
         )),

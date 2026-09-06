@@ -103,6 +103,9 @@ async fn commit_attempt(
     uow: &IngressUnitOfWork,
     submission: &IngressSubmission,
 ) -> Result<IngressDecision, IngressUowError> {
+    if let Some(failure) = submission.plan.failure {
+        return Err(failure.into());
+    }
     let mut tx = uow
         .begin_with_timeouts(
             std::time::Duration::from_millis(100),
@@ -134,7 +137,7 @@ async fn commit_attempt(
     }
     let stream = super::commit_stream::lock_stream(&mut tx, &submission.identity).await?;
     let digest = waddle_xmpp::ingress::digest::v1::digest(&submission.digest_input);
-    let envelope = MessageEnvelope::new(submission.plan.sanitized_message.clone())?;
+    let envelope = MessageEnvelope::new(submission.plan.sanitized_message.clone());
     let mut rejection = super::rejection::planned_rejection(&submission.plan)?;
     let (key, alias) = if let Some((key, _)) = stream.as_ref().and_then(|stream| stream.bound) {
         (key, AliasOutcomeClass::Existing)

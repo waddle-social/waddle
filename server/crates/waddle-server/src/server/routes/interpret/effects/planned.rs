@@ -100,8 +100,16 @@ pub enum RoomExecutionPath {
     },
 }
 
+/// A required Phase-A read failed; this plan cannot be accepted.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, thiserror::Error)]
+pub enum PlanFailure {
+    #[error("displayed-marker inbox snapshot could not be read")]
+    InboxSnapshotRead,
+}
+
 #[derive(Clone, Debug)]
 pub struct IngressPlan {
+    pub failure: Option<PlanFailure>,
     pub rejection: Option<super::PlanRejection>,
     pub plan: Vec<PlannedEffect>,
     pub intents: Vec<IngressEffectIntent>,

@@ -175,6 +175,45 @@ backend_tests!(
     subject_rebroadcast
 );
 
+async fn subject_with_thread_retry(fixture: IngressFixture) {
+    let mut original = archive_plan(&fixture, true, "subject-thread-id");
+    original.plan.sanitized_message.bodies.clear();
+    original
+        .plan
+        .sanitized_message
+        .subjects
+        .insert(Lang::new(), "topic".into());
+    original.plan.sanitized_message.thread = Some(xmpp_parsers::message::Thread {
+        id: "timeline-thread".into(),
+        parent: None,
+    });
+    refresh_digest(&mut original);
+    add_reflections(&mut original);
+    let first = commit_submission(&fixture.uow, &original, 5)
+        .await
+        .expect("timeline acceptance");
+    assert_eq!(wire_messages(&fixture, &first).await.len(), 2);
+    let duplicate = commit_submission(&fixture.uow, &original, 5)
+        .await
+        .expect("timeline retry");
+    assert_eq!(duplicate.class, IngressDecisionClass::ExistingConsistent);
+    assert!(duplicate.class.advances());
+    assert_eq!(duplicate.message_key, first.message_key);
+    // XEP-0045 §8.1: subject plus thread is a timeline message, not room state.
+    let wire = wire_messages(&fixture, &duplicate).await;
+    assert_eq!(wire.len(), 1, "timeline retry suppresses non-senders");
+    assert_eq!(wire[0].to, Some(original.sender.clone().into()));
+    assert_eq!(wire[0].thread, original.plan.sanitized_message.thread);
+    assert_eq!(fixture.count("ingress_messages").await, 1);
+    assert_eq!(fixture.count("mam_messages").await, 1);
+    fixture.close().await;
+}
+backend_tests!(
+    alias_subject_with_thread_retry_sqlite,
+    alias_subject_with_thread_retry_postgres,
+    subject_with_thread_retry
+);
+
 async fn dm_subject_is_digest_content(fixture: IngressFixture) {
     let mut original = archive_plan(&fixture, false, "subject-chat");
     original

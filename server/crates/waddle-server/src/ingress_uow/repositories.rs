@@ -887,7 +887,13 @@ fn compare_effects<'a>(
                     );
                 }
             }
-            omissions.push(intent);
+            if !recorded.is_empty()
+                && !inbox_omission_is_recorded_audience(recorded, intent, planned)
+            {
+                divergent.insert(intent.kind());
+            } else {
+                omissions.push(intent);
+            }
         } else if !matches.iter().any(|row| row.intent == *intent) {
             if intent.kind() == IngressEffectKind::ArchiveAuthoritative {
                 return (
@@ -924,6 +930,71 @@ fn compare_effects<'a>(
         ReconcileVerdict::Consistent
     };
     (verdict, omissions)
+}
+
+/// A later room snapshot cannot turn a newly joined member into an original
+/// recipient. Repair inbox obligations only within the committed authority and
+/// audience. Remote owner first acceptance introduces a new room authority.
+fn inbox_omission_is_recorded_audience(
+    recorded: &[RecordedEffect],
+    planned: &IngressEffectIntent,
+    planned_intents: &[IngressEffectIntent],
+) -> bool {
+    use waddle_xmpp::ingress::EffectAuthorityKey;
+    // Inbox pushes have their own RouteDirect identity. They cannot add a
+    // recipient whose associated projection was rejected as audience growth.
+    if let IngressEffectIntent::RouteDirect { recipient, .. } = planned {
+        return planned_intents.iter().all(|intent| match intent {
+            IngressEffectIntent::InboxProject { owner, .. } if owner == recipient => {
+                inbox_omission_is_recorded_audience(recorded, intent, planned_intents)
+            }
+            _ => true,
+        });
+    }
+    let (owner, partner) = match planned.authority_key() {
+        EffectAuthorityKey::Inbox { owner, partner, .. } => (owner, partner),
+        EffectAuthorityKey::Recovery {
+            recipient, room, ..
+        } => (recipient, room),
+        EffectAuthorityKey::Conversation {
+            owner,
+            conversation,
+        } if recorded.iter().any(|row| {
+            matches!(&row.intent,
+                IngressEffectIntent::RouteMucGroupchat { room, .. } if room == &conversation)
+        }) =>
+        {
+            (owner, conversation)
+        }
+        _ => return true,
+    };
+    // A relayed owner is accepting the room authority for the first time, not
+    // replanning an already committed room audience.
+    if recorded.iter().any(|row| {
+        matches!(&row.intent,
+        IngressEffectIntent::DispatchToRoomRemote { room, .. } if room == &partner)
+    }) && !recorded.iter().any(|row| {
+        matches!(&row.intent,
+            IngressEffectIntent::ArchiveAuthoritative { archive, .. } if archive == &partner)
+    }) {
+        return true;
+    }
+    let has_inbox_authority = recorded.iter().any(|row| {
+        matches!(row.intent.authority_key(), EffectAuthorityKey::Inbox { partner: recorded_partner, .. }
+            if recorded_partner == partner)
+    });
+    let owner_in_audience = recorded.iter().any(|row| match &row.intent {
+        IngressEffectIntent::RouteMucGroupchat {
+            room, occupants, ..
+        } => room == &partner && occupants.iter().any(|occupant| occupant.to_bare() == owner),
+        IngressEffectIntent::InboxProject { .. } => matches!(
+            row.intent.authority_key(),
+            EffectAuthorityKey::Inbox { owner: recorded_owner, partner: recorded_partner, .. }
+                if recorded_owner == owner && recorded_partner == partner
+        ),
+        _ => false,
+    });
+    has_inbox_authority && owner_in_audience
 }
 
 async fn insert_effect(

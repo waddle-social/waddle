@@ -180,6 +180,25 @@ async fn plan_mark_read(
     use super::effects::direct::{
         external, planned_durable, DurableDirectEffect, ExternalDirectEffect,
     };
+    // RFC 0018 §2: snapshot reads must succeed before the plan can commit.
+    let entries = match thread {
+        Some(_) => storage.list_threads(owner, room).await,
+        None => storage.list(owner).await,
+    };
+    let entries = match entries {
+        Ok(entries) => entries,
+        Err(error) => {
+            warn!(%owner, %room, %error, "displayed-marker inbox planning read failed");
+            deps.effects
+                .fail_plan(super::effects::PlanFailure::InboxSnapshotRead);
+            return;
+        }
+    };
+    if !entries.iter().any(|entry| {
+        entry.partner == *room && entry.thread_id.as_deref() == thread.map(ThreadId::as_str)
+    }) {
+        return;
+    }
     let super::effects::EffectOutcome::PlannedInbox(projection) = deps
         .effects
         .execute(
@@ -203,28 +222,17 @@ async fn plan_mark_read(
             room: room.clone(),
         },
     };
-    let entries = match thread {
-        Some(_) => storage.list_threads(owner, room).await,
-        None => storage.list(owner).await,
-    };
-    if let Ok(entries) = entries {
-        for entry in entries {
-            if entry.partner == *room && entry.thread_id.as_deref() == thread.map(ThreadId::as_str)
-            {
-                deps.capture_intent(waddle_xmpp::ingress::IngressEffectIntent::InboxProject {
-                    owner: owner.clone(),
-                    mutation: mutation.clone(),
-                });
-                external(
-                    deps,
-                    ExternalDirectEffect::PushInboxUpdate {
-                        owner: owner.clone(),
-                        projection,
-                    },
-                );
-            }
-        }
-    }
+    deps.capture_intent(waddle_xmpp::ingress::IngressEffectIntent::InboxProject {
+        owner: owner.clone(),
+        mutation,
+    });
+    external(
+        deps,
+        ExternalDirectEffect::PushInboxUpdate {
+            owner: owner.clone(),
+            projection,
+        },
+    );
 }
 
 #[cfg(test)]
@@ -375,5 +383,106 @@ mod tests {
             threads[0].unread, 1,
             "thread row stays unread when MAM lookup fails"
         );
+    }
+
+    async fn snapshot_read_failure_prevents_ingress_commit(
+        fixture: crate::ingress::test_support::IngressFixture,
+    ) {
+        use crate::ingress::{
+            commit::commit_submission, IngressDecisionClass, IngressEffectCapture,
+        };
+        use crate::server::routes::interpret::{
+            build_plan_deps,
+            effects::{PlanFailure, PlanSink},
+            interpret,
+            message_plan::finish_plan,
+        };
+        let owner = fixture.principal.bare_jid().clone();
+        let room = bare("team@conf.example.com");
+        let inbox: Arc<dyn InboxStorage> = Arc::new(
+            crate::inbox::DatabaseInboxStorage::open(Some(fixture.db.database_url()))
+                .await
+                .expect("inbox storage"),
+        );
+        seed_inbox(&inbox, &owner, &room, None).await;
+        let mam: Arc<dyn MamStorage> = Arc::new(InMemoryMamStorage::new());
+        let registry = ConnectionRegistry::new();
+        let deps = deps_for_test(&registry, &mam, &inbox);
+        let sink = PlanSink::new();
+        let capture = IngressEffectCapture::new();
+        let planned =
+            build_plan_deps(&deps, &sink).with_ingress_effect_capture(Some(capture.clone()));
+        let mut submission = fixture.submission(None, "displayed marker");
+        // A real database read fails during Phase A and recovers before Phase B.
+        fixture
+            .execute(
+                "ALTER TABLE inbox_entries RENAME TO unavailable_inbox_entries",
+                (),
+            )
+            .await;
+        interpret(
+            vec![
+                waddle_xmpp::protocol::OutboundEvent::MarkInboxReadFromDisplayed {
+                    owner: owner.clone(),
+                    room: room.clone(),
+                    displayed_message_id: "displayed-message".to_owned(),
+                },
+            ],
+            &planned,
+        )
+        .await;
+        submission.plan = finish_plan(
+            &sink,
+            &capture,
+            submission.plan.sanitized_message.clone(),
+            Some(submission.sender.clone()),
+        );
+        assert_eq!(
+            submission.plan.failure,
+            Some(PlanFailure::InboxSnapshotRead)
+        );
+        fixture
+            .execute(
+                "ALTER TABLE unavailable_inbox_entries RENAME TO inbox_entries",
+                (),
+            )
+            .await;
+        let failure = commit_submission(&fixture.uow, &submission, 3)
+            .await
+            .expect_err("incomplete plan cannot commit after storage recovery");
+        assert_eq!(failure.class(), IngressDecisionClass::Storage);
+        assert!(!failure.class().advances());
+        assert!(matches!(
+            failure.source,
+            crate::ingress_uow::IngressUowError::Plan(PlanFailure::InboxSnapshotRead)
+        ));
+        assert_eq!(fixture.count("ingress_messages").await, 0);
+        assert_eq!(fixture.count("ingress_effect_intents").await, 0);
+        assert_eq!(
+            inbox.list(&owner).await.expect("recovered inbox")[0].unread,
+            1
+        );
+        drop(inbox);
+        fixture.close().await;
+    }
+
+    #[tokio::test]
+    async fn sqlite_displayed_marker_snapshot_failure_is_nonadvancing_storage() {
+        snapshot_read_failure_prevents_ingress_commit(
+            crate::ingress::test_support::IngressFixture::sqlite().await,
+        )
+        .await;
+    }
+
+    #[tokio::test]
+    async fn postgres_displayed_marker_snapshot_failure_is_nonadvancing_storage() {
+        let Some(fixture) = crate::ingress::test_support::IngressFixture::postgres(
+            "displayed_marker_snapshot_failure",
+        )
+        .await
+        else {
+            return;
+        };
+        snapshot_read_failure_prevents_ingress_commit(fixture).await;
     }
 }

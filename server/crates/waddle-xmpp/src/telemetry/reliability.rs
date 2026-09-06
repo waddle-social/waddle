@@ -588,8 +588,14 @@ mod tests {
             .skip_while(|line| !line.contains("alert: IngressGcFailing"))
             .nth(1)
             .expect("IngressGcFailing expression");
-        assert!(expression.contains("ingress_gc_runs_total{outcome=~\"failed|timed_out\"}"));
-        for outcome in [IngressGcOutcome::Failed, IngressGcOutcome::TimedOut] {
+        assert!(
+            expression.contains("ingress_gc_runs_total{outcome=~\"failed|timed_out|unattested\"}")
+        );
+        for outcome in [
+            IngressGcOutcome::Failed,
+            IngressGcOutcome::TimedOut,
+            IngressGcOutcome::Unattested,
+        ] {
             increment_ingress_gc_run(outcome);
             assert_eq!(
                 guard.counter_sum("ingress.gc.runs", &[("outcome", outcome.value())]),
@@ -758,7 +764,7 @@ mod tests {
 
         assert_eq!(
             IngressGcOutcome::ALL.map(|outcome| outcome.value()),
-            ["completed", "partial", "failed", "timed_out"]
+            ["completed", "partial", "failed", "timed_out", "unattested"]
         );
 
         for path in SmEvictionPath::ALL {

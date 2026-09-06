@@ -101,6 +101,9 @@ impl IngressUnitOfWork {
     }
 
     /// Bound even the initial epoch lock wait before taking any row locks.
+    /// SQLite acquisition (`BEGIN IMMEDIATE`, including pool checkout) uses
+    /// the lock bound rather than waiting for the pool's longer busy timeout.
+    /// Expiry is the same typed timeout as PostgreSQL's lock timeout.
     pub async fn begin_with_timeouts(
         &self,
         lock: Duration,
@@ -114,7 +117,12 @@ impl IngressUnitOfWork {
         bounds: Option<(Duration, Duration)>,
     ) -> Result<IngressUowTransaction<'_>, IngressUowError> {
         let mut transaction = match self.db.driver() {
-            DatabaseDriver::Sqlite => self.db.begin_immediate().await?,
+            DatabaseDriver::Sqlite => match bounds {
+                Some((lock, _)) => tokio::time::timeout(lock, self.db.begin_immediate())
+                    .await
+                    .map_err(|_| IngressUowError::Timeout)??,
+                None => self.db.begin_immediate().await?,
+            },
             DatabaseDriver::Postgres => self.db.begin().await?,
         };
         if let Some((lock, statement)) = bounds {
@@ -286,3 +294,6 @@ impl<'a> IngressUowTransaction<'a> {
 
 #[cfg(test)]
 mod tests;
+
+#[cfg(test)]
+mod lock_timeout_tests;

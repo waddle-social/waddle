@@ -104,6 +104,7 @@ pub(super) fn recorded_rejection_plan(
         ))));
     }
     Ok(IngressPlan {
+        failure: None,
         rejection: None,
         plan,
         intents: intents.to_vec(),
@@ -121,8 +122,7 @@ mod tests {
         let sender: jid::FullJid = "sender@example.test/device".parse().expect("sender");
         let envelope = crate::ingress_substrate::MessageEnvelope::new(
             xmpp_parsers::message::Message::new(None),
-        )
-        .expect("envelope");
+        );
         let intents = vec![IngressEffectIntent::ErrorReply {
             recipient: sender,
             error: FrozenStanzaError::new(
@@ -146,7 +146,7 @@ mod tests {
             xmpp_parsers::message::Lang::default(),
             "original body".into(),
         );
-        let envelope = crate::ingress_substrate::MessageEnvelope::new(offered).expect("envelope");
+        let envelope = crate::ingress_substrate::MessageEnvelope::new(offered);
         let intents = vec![IngressEffectIntent::ErrorReply {
             recipient: sender.clone(),
             error: FrozenStanzaError::new(

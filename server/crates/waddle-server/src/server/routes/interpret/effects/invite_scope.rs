@@ -38,6 +38,9 @@ impl EffectSink for ScopedInviteSink<'_> {
     fn record(&self, effect: PlannedEffect) {
         self.inner.record(self.bind(effect));
     }
+    fn fail_plan(&self, failure: super::PlanFailure) {
+        self.inner.fail_plan(failure);
+    }
     fn is_planning(&self) -> bool {
         self.inner.is_planning()
     }

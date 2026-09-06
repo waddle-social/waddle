@@ -166,7 +166,7 @@ async fn assert_durable(
         .expect("durable envelope");
     assert_eq!(
         envelope,
-        crate::ingress_substrate::MessageEnvelope::new(message.clone()).expect("typed envelope")
+        crate::ingress_substrate::MessageEnvelope::new(message.clone())
     );
     let intents = EffectIntentRepository::load(&mut tx, key)
         .await

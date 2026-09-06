@@ -114,8 +114,9 @@ async fn tombstoned_retry_does_not_recreate_inbox(fixture: IngressFixture) {
     .await
     .expect("replace original with tombstone");
     transaction.commit().await.expect("commit tombstone");
-    // The original transaction has no inbox projection/marker. Repair must not
-    // resurrect one after its archive authority has been retracted.
+    // The original transaction has no inbox authority. This new projection is
+    // policy divergence rather than a repairable omission, and must not
+    // resurrect an inbox after its archive authority has been retracted.
     let entry = InboxEntry::new(
         "juliet@example.com".parse().expect("peer"),
         ConversationKind::Direct,
@@ -146,19 +147,19 @@ async fn tombstoned_retry_does_not_recreate_inbox(fixture: IngressFixture) {
     let decision = commit_submission(&fixture.uow, &retry, 5)
         .await
         .expect("repair respects tombstone");
-    assert_eq!(decision.class, IngressDecisionClass::ExistingRepaired);
+    assert_eq!(decision.class, IngressDecisionClass::ExistingDivergent);
     assert_eq!(decision.message_key, first.message_key);
     assert_eq!(fixture.count("inbox_entries").await, 0);
     assert_eq!(fixture.count("ingress_deliveries").await, 0);
-    assert_eq!(fixture.count("ingress_effect_intents").await, 2);
-    assert_eq!(fixture.count("ingress_effect_receipts").await, 2);
+    assert_eq!(fixture.count("ingress_effect_intents").await, 1);
+    assert_eq!(fixture.count("ingress_effect_receipts").await, 1);
     assert!(decision.receipts_pending.is_empty());
     assert!(waddle_server::ingress::execute::terminalize_if_complete(
         &fixture.uow,
         decision.message_key.expect("canonical row"),
     )
     .await
-    .expect("suppressed projection discharges its intent"));
+    .expect("original archive obligation is complete"));
     assert_eq!(
         fixture
             .count("ingress_messages WHERE terminal_at IS NOT NULL")

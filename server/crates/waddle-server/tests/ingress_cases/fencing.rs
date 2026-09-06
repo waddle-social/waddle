@@ -188,7 +188,7 @@ async fn relayed_owner_acceptance(mut fixture: IngressFixture) {
         )
         .await
         .expect("load proxy envelope"),
-        Some(MessageEnvelope::new(proxy.plan.sanitized_message.clone()).expect("proxy envelope")),
+        Some(MessageEnvelope::new(proxy.plan.sanitized_message.clone())),
     );
     tx.commit().await.expect("close envelope read");
     let first = commit_submission(&fixture.uow, &owner, 5)

@@ -11,6 +11,7 @@ use crate::ingress_substrate::{
     gc_expired_aliases, AliasGcBudget, AliasGcError, AliasGcFailure, AliasGcOutcome,
     AliasGcProgress,
 };
+use crate::ingress_uow::{IngressUnitOfWork, IngressUowError};
 
 const RETENTION_GC_BUDGET: Duration = Duration::from_secs(2);
 /// Last-resort envelope around one GC run, sized from the longest path the
@@ -148,13 +149,14 @@ fn record_retention_gc_result(
 }
 
 impl RetentionGcCoordinator {
-    pub(crate) fn new(database: Database) -> Self {
+    pub(crate) fn new(database: Database, uow: IngressUnitOfWork) -> Self {
         Self {
             trigger: Arc::new(Notify::new()),
             run: Arc::new(move || {
                 let database = database.clone();
+                let uow = uow.clone();
                 Box::pin(async move {
-                    run_retention_gc_with_budget(&database, RetentionGcBudget::DEFAULT).await
+                    run_attested_retention_gc(&database, &uow, RetentionGcBudget::DEFAULT).await
                 })
             }),
             partial_retry_delay: RETENTION_GC_PARTIAL_RETRY_DELAY,
@@ -163,6 +165,37 @@ impl RetentionGcCoordinator {
 
     pub(crate) fn trigger(&self) {
         self.trigger.notify_one();
+    }
+}
+
+/// Re-probe the same lineage and epoch policy used by admission before every
+/// pass, including the immediate startup pass. An authority may boot unattested,
+/// but its collector never reaches the bare database until this gate succeeds.
+async fn run_attested_retention_gc(
+    database: &Database,
+    uow: &IngressUnitOfWork,
+    budget: RetentionGcBudget,
+) -> waddle_xmpp::telemetry::attributes::IngressGcOutcome {
+    use waddle_xmpp::telemetry::attributes::IngressGcOutcome;
+    let probe = tokio::time::timeout(budget.hard_deadline, async {
+        uow.begin_with_timeouts(budget.lock_timeout, budget.statement_timeout)
+            .await?
+            .commit()
+            .await
+    })
+    .await;
+    match probe {
+        Ok(Ok(())) => run_retention_gc_with_budget(database, budget).await,
+        Ok(Err(error)) => {
+            let outcome = match error {
+                IngressUowError::Lineage(_) => IngressGcOutcome::Unattested,
+                IngressUowError::Timeout => IngressGcOutcome::TimedOut,
+                _ => IngressGcOutcome::Failed,
+            };
+            tracing::warn!(%error, "ingress retention GC attestation gate failed");
+            record_retention_gc_result(outcome, 0)
+        }
+        Err(_) => record_retention_gc_result(IngressGcOutcome::TimedOut, 0),
     }
 }
 
@@ -253,6 +286,137 @@ mod tests {
             .get(0)
             .expect("decode count");
         assert_eq!(count, 0);
+    }
+
+    async fn unattested_boot_preserves_retention_rows(database: Database) {
+        let enrolled = crate::ingress::test_lineage_config();
+        crate::db::lineage::enroll(&database, &enrolled)
+            .await
+            .expect("enroll");
+        let key = MessageKey::new();
+        let digest = SemanticDigest::from_storage(1, [8; 32]).expect("digest");
+        let mut transaction = database.begin_immediate().await.expect("begin");
+        record_message(&mut transaction, key, &digest, None)
+            .await
+            .expect("message");
+        terminalize_message(
+            &mut transaction,
+            key,
+            Utc::now() - chrono::Duration::days(9),
+        )
+        .await
+        .expect("terminalize");
+        transaction.commit().await.expect("commit");
+        let wrong_lineage = crate::config::LineageConfig {
+            deployment_uuid: Some(
+                "018f47b2-4b2e-7a3a-9a4c-52a5a6a90002"
+                    .parse()
+                    .expect("different deployment UUID"),
+            ),
+            action: None,
+        };
+        let authority = crate::ingress::IngressAuthority::new(
+            crate::ingress::IngressConfig::default(),
+            database.clone(),
+            wrong_lineage,
+            #[cfg(feature = "clustering")]
+            None,
+        )
+        .await
+        .expect("unattested authority boots");
+        assert_eq!((authority.gc.run)().await, IngressGcOutcome::Unattested);
+        let connection = database.guard().await.expect("read");
+        let mut rows = connection
+            .query("SELECT COUNT(*) FROM ingress_messages", ())
+            .await
+            .expect("count");
+        let count: i64 = rows
+            .next()
+            .await
+            .expect("row")
+            .expect("count row")
+            .get(0)
+            .expect("count value");
+        assert_eq!(count, 1);
+        drop(rows);
+        drop(connection);
+        authority.cancellation.cancel();
+        if let Some(task) = authority.gc_task.lock().await.take() {
+            task.await.expect("GC exits");
+        }
+        // The exact same retained row is eligible once the policy attests.
+        let uow = IngressUnitOfWork::open(database.clone(), enrolled).expect("uow");
+        assert_eq!(
+            run_attested_retention_gc(&database, &uow, RetentionGcBudget::DEFAULT).await,
+            IngressGcOutcome::Completed
+        );
+        let connection = database.guard().await.expect("read");
+        let mut rows = connection
+            .query("SELECT COUNT(*) FROM ingress_messages", ())
+            .await
+            .expect("count");
+        let count: i64 = rows
+            .next()
+            .await
+            .expect("row")
+            .expect("count row")
+            .get(0)
+            .expect("count value");
+        assert_eq!(count, 0);
+    }
+
+    #[tokio::test]
+    async fn sqlite_ingress_unattested_boot_gc_reclaims_nothing() {
+        let directory = tempfile::tempdir().expect("SQLite directory");
+        let config = crate::db::DatabaseConfig::new(
+            crate::db::DatabaseDriver::Sqlite,
+            directory
+                .path()
+                .join("gc.db")
+                .to_string_lossy()
+                .into_owned(),
+        );
+        let database = Database::from_config("unattested-gc", &config)
+            .await
+            .expect("database");
+        MigrationRunner::single()
+            .run(&database)
+            .await
+            .expect("migrate");
+        unattested_boot_preserves_retention_rows(database).await;
+    }
+
+    #[tokio::test]
+    async fn postgres_ingress_unattested_boot_gc_reclaims_nothing() {
+        let Ok(database_url) = std::env::var("WADDLE_TEST_POSTGRES_URL") else {
+            eprintln!("skipping postgres_ingress_unattested_boot_gc_reclaims_nothing: WADDLE_TEST_POSTGRES_URL not set");
+            return;
+        };
+        let admin = sqlx::PgPool::connect(&database_url)
+            .await
+            .expect("postgres admin");
+        let schema = format!("ingress_gc_{}", uuid::Uuid::new_v4().simple());
+        sqlx::query(&format!("CREATE SCHEMA {schema}"))
+            .execute(&admin)
+            .await
+            .expect("schema");
+        let mut url = url::Url::parse(&database_url).expect("URL");
+        url.query_pairs_mut()
+            .append_pair("options", &format!("-c search_path={schema}"));
+        let config =
+            crate::db::DatabaseConfig::new(crate::db::DatabaseDriver::Postgres, url.to_string());
+        let database = Database::from_config("unattested-gc", &config)
+            .await
+            .expect("database");
+        MigrationRunner::single()
+            .run(&database)
+            .await
+            .expect("migrate");
+        unattested_boot_preserves_retention_rows(database).await;
+        sqlx::query(&format!("DROP SCHEMA {schema} CASCADE"))
+            .execute(&admin)
+            .await
+            .expect("drop schema");
     }
 
     #[tokio::test]

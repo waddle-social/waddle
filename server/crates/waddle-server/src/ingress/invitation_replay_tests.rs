@@ -130,6 +130,7 @@ async fn invitation_plan_commit_execute(fixture: IngressFixture) {
     )
     .expect("digest");
     submission.plan = IngressPlan {
+        failure: None,
         plan: effects,
         intents: capture.snapshot().intents,
         sanitized_message: message,
@@ -286,7 +287,11 @@ async fn ingress_actual_invitation_plan_replay_postgres() {
 }
 
 /// XEP-0359 §3: a client cannot assign the room's stable stanza identity.
-async fn forged_room_stamp(fixture: IngressFixture, peer_is_member: bool) {
+async fn forged_room_stamp(
+    fixture: IngressFixture,
+    peer_is_member: bool,
+    member_joins_before_retry: bool,
+) {
     let standalone = create_test_websocket_state().await;
     let pool = crate::db::DatabasePool::new(
         crate::db::DatabaseConfig::new(fixture.db.driver(), fixture.db.database_url()),
@@ -378,7 +383,8 @@ async fn forged_room_stamp(fixture: IngressFixture, peer_is_member: bool) {
     let mut dispatcher = waddle_xmpp::protocol::StanzaDispatcher::new();
     waddle_xmpp::protocol::handlers::register_default_message_handlers(&mut dispatcher);
     let mut machine = waddle_xmpp::protocol::XmppStateMachine::new("example.com", dispatcher);
-    machine.transition_to_ready(sender, false);
+    machine.transition_to_ready(sender.clone(), false);
+    let original_message = submission.plan.sanitized_message.clone();
     let deps = build_interpret_deps(state.as_ref(), None);
     submission.plan = crate::server::plan_message_dispatch(
         &mut machine,
@@ -466,9 +472,54 @@ async fn forged_room_stamp(fixture: IngressFixture, peer_is_member: bool) {
         0
     );
 
+    use waddle_xmpp::inbox::storage::InboxStorage;
+    let inbox = crate::inbox::DatabaseInboxStorage::from_database(fixture.db.clone())
+        .await
+        .expect("inbox reader");
+    let sender_inbox_before_retry = inbox.list(&sender.to_bare()).await.expect("sender inbox");
+    let peer_inbox_before_retry = inbox.list(&peer.to_bare()).await.expect("peer inbox");
+    let committed_message = submission.plan.sanitized_message.clone();
+    let new_member: jid::FullJid = "benvolio@example.com/phone".parse().expect("new member");
+    let mut new_member_rx = None;
+    let recorded_intent_count = fixture.count("ingress_effect_intents").await;
+    let recorded_delivery_count = fixture.count("ingress_deliveries").await;
+    if member_joins_before_retry {
+        create_test_session(state.as_ref(), "benvolio").await;
+        actor
+            .ask(JoinWithAffiliation {
+                sender_jid: new_member.clone(),
+                nick: "benvolio".to_owned(),
+                affiliation_grant: JoinAffiliationGrant::Resolver(waddle_xmpp::Affiliation::Member),
+                local_domain: "example.com".to_owned(),
+                admission_revision: 0,
+                session: waddle_xmpp_core::OccupancySessionGeneration::mint(),
+            })
+            .await
+            .expect("member joins after original acceptance");
+        let (tx, rx) = tokio::sync::mpsc::channel(8);
+        register_test_connection(state.as_ref(), &new_member, tx).await;
+        new_member_rx = Some(rx);
+        submission.plan =
+            crate::server::plan_message_dispatch(&mut machine, original_message, &deps).await;
+        assert!(
+            submission.plan.intents.iter().any(|intent| matches!(
+                intent,
+                IngressEffectIntent::InboxProject { owner, .. } if owner == &new_member.to_bare()
+            )),
+            "fresh Phase A must observe the new member"
+        );
+    }
+
     let duplicate = commit_submission(&fixture.uow, &submission, 5)
         .await
         .expect("real room alias retry");
+    if member_joins_before_retry {
+        assert_eq!(
+            duplicate.class,
+            crate::ingress::IngressDecisionClass::ExistingDivergent
+        );
+        assert!(duplicate.class.advances());
+    }
     assert_eq!(duplicate.message_key, decision.message_key);
     assert_eq!(duplicate.archive_ids, decision.archive_ids);
     let retry_report = execute_effects(
@@ -481,6 +532,37 @@ async fn forged_room_stamp(fixture: IngressFixture, peer_is_member: bool) {
     )
     .await;
     assert!(retry_report.receipt_failures.is_empty());
+    if let Some(mut receiver) = new_member_rx {
+        assert_eq!(
+            inbox.list(&sender.to_bare()).await.expect("sender inbox"),
+            sender_inbox_before_retry
+        );
+        assert_eq!(
+            inbox.list(&peer.to_bare()).await.expect("peer inbox"),
+            peer_inbox_before_retry
+        );
+        assert!(
+            inbox
+                .list(&new_member.to_bare())
+                .await
+                .expect("new member inbox")
+                .is_empty(),
+            "retry cannot project an old message into a new member's inbox"
+        );
+        assert!(
+            receiver.try_recv().is_err(),
+            "new member receives no retry fanout or inbox push"
+        );
+        assert_eq!(
+            fixture.count("ingress_effect_intents").await,
+            recorded_intent_count
+        );
+        assert_eq!(
+            fixture.count("ingress_deliveries").await,
+            recorded_delivery_count
+        );
+    }
+
     assert_room_inbox_rows(&fixture, &room, &room_id.1, &client_id, peer_is_member).await;
     assert_eq!(
         take_room_frames(&mut rx, &room, &room_id.1, &client_id, 0),
@@ -502,10 +584,9 @@ async fn forged_room_stamp(fixture: IngressFixture, peer_is_member: bool) {
         )
         .await
         .expect("envelope"),
-        Some(
-            crate::ingress_substrate::MessageEnvelope::new(submission.plan.sanitized_message)
-                .expect("typed envelope")
-        )
+        Some(crate::ingress_substrate::MessageEnvelope::new(
+            committed_message
+        ))
     );
     tx.commit().await.expect("read complete");
     fixture.close().await;
@@ -514,26 +595,39 @@ async fn forged_room_stamp(fixture: IngressFixture, peer_is_member: bool) {
 /// XEP-0359 §3: strip a room-authority stamp before local room acceptance.
 #[tokio::test]
 async fn ingress_forged_room_stamp_sqlite() {
-    forged_room_stamp(IngressFixture::sqlite().await, true).await;
+    forged_room_stamp(IngressFixture::sqlite().await, true, false).await;
 }
 /// XEP-0359 §3: PostgreSQL preserves the same trusted room stamp on wire and rows.
 #[tokio::test]
 async fn ingress_forged_room_stamp_postgres() {
     if let Some(fixture) = IngressFixture::postgres("forged_room_stamp").await {
-        forged_room_stamp(fixture, true).await;
+        forged_room_stamp(fixture, true, false).await;
     }
 }
 
 /// XEP-0045 open-room delivery: every live occupant confirms the recorded route.
 #[tokio::test]
 async fn ingress_local_groupchat_delivery_terminalizes_sqlite() {
-    forged_room_stamp(IngressFixture::sqlite().await, false).await;
+    forged_room_stamp(IngressFixture::sqlite().await, false, false).await;
 }
 
 #[tokio::test]
 async fn ingress_local_groupchat_delivery_terminalizes_postgres() {
     if let Some(fixture) = IngressFixture::postgres("local_groupchat_terminalizes").await {
-        forged_room_stamp(fixture, false).await;
+        forged_room_stamp(fixture, false, false).await;
+    }
+}
+
+/// XEP-0045: a retry preserves the audience at original room acceptance.
+#[tokio::test]
+async fn ingress_groupchat_retry_preserves_recorded_audience_sqlite() {
+    forged_room_stamp(IngressFixture::sqlite().await, true, true).await;
+}
+
+#[tokio::test]
+async fn ingress_groupchat_retry_preserves_recorded_audience_postgres() {
+    if let Some(fixture) = IngressFixture::postgres("retry_recorded_audience").await {
+        forged_room_stamp(fixture, true, true).await;
     }
 }
 

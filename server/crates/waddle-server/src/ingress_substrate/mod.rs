@@ -339,7 +339,7 @@ async fn insert_message(
                 i32::from(digest_version),
                 digest_bytes.to_vec(),
                 envelope.map(|value| value.version().to_storage()),
-                envelope.map(|value| value.storage_bytes().to_vec()),
+                envelope.map(authority::serialize_envelope).transpose()?,
             ],
         )
         .await

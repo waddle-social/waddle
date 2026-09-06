@@ -56,6 +56,21 @@ pub(super) async fn apply_durable(
         let Effect::Durable(effect) = &planned.effect else {
             continue;
         };
+        if matches!(
+            effect,
+            DurableEffect::Room(DurableRoomEffect::ProjectGroupchatInbox { .. })
+                | DurableEffect::Direct(
+                    DurableDirectEffect::ProjectInbox { .. }
+                        | DurableDirectEffect::DmCallThreadProjection { .. }
+                        | DurableDirectEffect::MarkInboxRead { .. }
+                )
+        ) && !plan
+            .intents
+            .iter()
+            .any(|intent| corresponds(effect, intent))
+        {
+            continue;
+        }
         let archive_effect = matches!(
             effect,
             DurableEffect::Direct(DurableDirectEffect::ArchiveDirect { .. })

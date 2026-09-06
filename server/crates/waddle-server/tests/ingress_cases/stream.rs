@@ -251,10 +251,7 @@ async fn committed_rejection_wire_replay(fixture: IngressFixture) {
         CanonicalMessageRepository::load_envelope(&mut tx, key)
             .await
             .expect("load offered envelope"),
-        Some(
-            MessageEnvelope::new(rejected.plan.sanitized_message)
-                .expect("original offered envelope")
-        )
+        Some(MessageEnvelope::new(rejected.plan.sanitized_message))
     );
     tx.commit().await.expect("close read");
     fixture.close().await;
@@ -294,7 +291,7 @@ async fn ordinal_collision_rolls_back(fixture: IngressFixture) {
         &mut tx,
         key,
         &waddle_xmpp::ingress::digest::v1::digest(&previous.digest_input),
-        Some(&MessageEnvelope::new(previous.plan.sanitized_message).expect("previous envelope")),
+        Some(&MessageEnvelope::new(previous.plan.sanitized_message)),
     )
     .await
     .expect("seed previous canonical");

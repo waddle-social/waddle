@@ -4,6 +4,7 @@ use std::sync::Mutex;
 #[derive(Debug, Default)]
 pub struct PlanSink {
     message: Mutex<Option<xmpp_parsers::message::Message>>,
+    failure: Mutex<Option<super::PlanFailure>>,
     rejection: Mutex<Option<super::PlanRejection>>,
     sender: Mutex<Option<jid::FullJid>>,
     plan: Mutex<Vec<PlannedEffect>>,
@@ -11,6 +12,9 @@ pub struct PlanSink {
 }
 
 impl PlanSink {
+    pub fn failure(&self) -> Option<super::PlanFailure> {
+        *self.failure.lock().expect("failure mutex")
+    }
     pub fn new() -> Self {
         Self::default()
     }
@@ -56,6 +60,12 @@ impl EffectSink for PlanSink {
             .lock()
             .expect("room execution mutex")
             .clone()
+    }
+    fn fail_plan(&self, failure: super::PlanFailure) {
+        self.failure
+            .lock()
+            .expect("failure mutex")
+            .get_or_insert(failure);
     }
     fn set_rejection(&self, rejection: super::PlanRejection) {
         *self.rejection.lock().expect("rejection mutex") = Some(rejection);

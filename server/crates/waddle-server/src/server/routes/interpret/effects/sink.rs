@@ -30,6 +30,7 @@ pub trait EffectSink: Send + Sync {
         None
     }
     fn observe_sender(&self, _sender: &jid::FullJid) {}
+    fn fail_plan(&self, _failure: super::PlanFailure) {}
     fn set_rejection(&self, _rejection: super::PlanRejection) {}
     fn rejection(&self) -> Option<super::PlanRejection> {
         None

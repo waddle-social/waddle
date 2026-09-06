@@ -5,11 +5,11 @@ use super::{
 };
 use jid::FullJid;
 use waddle_xmpp::Stanza;
-use xmpp_parsers::message::{Message, MessageType};
+use xmpp_parsers::message::Message;
 
 fn subject_rebroadcast(stanza: &Stanza) -> bool {
     matches!(stanza, Stanza::Message(message)
-        if message.type_ == MessageType::Groupchat && !message.subjects.is_empty() && message.bodies.is_empty())
+        if waddle_xmpp::muc::is_groupchat_subject_change_message(message))
 }
 
 pub(super) fn apply_policy(effect: &mut PlannedEffect, sender: Option<&FullJid>) {

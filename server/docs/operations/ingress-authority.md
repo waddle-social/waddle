@@ -53,7 +53,9 @@ identity consistency and the deployed binary/ledger lineage.
 `IngressFenceDecisions` covers `principal_missing`, `claim_fence_missing`,
 `room_generation_stale`, `frontier_stale` and `sm_ordinal_conflict`.
 Fence refusals sustained for 10m, alias conflicts, exhausted
-retries and failed/timed-out GC runs are warnings. `IngressTxSlow` warns on
+retries and failed, timed-out or unattested GC runs are warnings (an
+`unattested` run was skipped because lineage attestation failed; nothing
+was collected). `IngressTxSlow` warns on
 p99 above 2s. The CNPG-query-based `IngressGcBacklog` warns when eligible rows
 persist for 6h; `IngressGcAge` warns above 9 days.
 `IngressSeriesMissing` warns when all decision series disappear, or a live

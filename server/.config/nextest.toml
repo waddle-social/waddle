@@ -43,6 +43,7 @@ package(waddle-server) & (
     | test(ingress_substrate::)
     | test(ingress::)
     | test(ingress_invitation_replay_tests::)
+    | test(displayed_marker::)
     | test(committed_inbox_push)
     | test(websocket::tests::ingress_authority::)
     | test(ingress_uow::)

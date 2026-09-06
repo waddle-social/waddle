@@ -7,6 +7,7 @@ use crate::{
     db::Database,
     ingress_uow::{
         CanonicalMessageRepository, EffectReceiptRepository, IngressUnitOfWork, IngressUowError,
+        IngressUowTransaction,
     },
     server::routes::interpret::{
         effects::{
@@ -604,19 +605,28 @@ pub async fn terminalize_if_complete(
     let mut transaction = uow
         .begin_with_timeouts(Duration::from_millis(100), Duration::from_millis(250))
         .await?;
-    if !CanonicalMessageRepository::lock(&mut transaction, message_key).await? {
+    let complete = terminalize_if_complete_in_transaction(&mut transaction, message_key).await?;
+    transaction.commit().await?;
+    Ok(complete)
+}
+
+/// Share the receipt proof with stream retirement without opening a nested transaction.
+pub(super) async fn terminalize_if_complete_in_transaction(
+    transaction: &mut IngressUowTransaction<'_>,
+    message_key: MessageKey,
+) -> Result<bool, IngressUowError> {
+    if !CanonicalMessageRepository::lock(transaction, message_key).await? {
         return Ok(false);
     }
-    if !EffectReceiptRepository::receipts_complete(&mut transaction, message_key).await? {
+    if !EffectReceiptRepository::receipts_complete(transaction, message_key).await? {
         waddle_xmpp::telemetry::reliability::increment_ingress_effect_unresolved(
             waddle_xmpp::telemetry::attributes::IngressUnresolvedEffectKind::Terminalization,
         );
         return Ok(false);
     }
     let outcome =
-        CanonicalMessageRepository::terminalize(&mut transaction, message_key, chrono::Utc::now())
+        CanonicalMessageRepository::terminalize(transaction, message_key, chrono::Utc::now())
             .await?;
-    transaction.commit().await?;
     Ok(!matches!(
         outcome,
         crate::ingress_substrate::TerminalizeOutcome::MessageVanished

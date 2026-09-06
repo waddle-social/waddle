@@ -20,8 +20,8 @@ pub(crate) use tombstone::TombstoneExemptSink;
 pub use immediate::ImmediateSink;
 pub use plan::PlanSink;
 pub use planned::{
-    DurableEffect, Effect, ExternalEffect, ImmediateAction, IngressPlan, PlannedEffect,
-    RoomExecutionPath,
+    DurableEffect, Effect, ExternalEffect, ImmediateAction, IngressPlan, PlanFailure,
+    PlannedEffect, RoomExecutionPath,
 };
 pub use policy::{PlanEffectDependency, PlanSuppressionPolicy};
 pub use sink::EffectSink;

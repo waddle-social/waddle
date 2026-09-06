@@ -33,8 +33,7 @@ use crate::{
     config::{IngressConfig, IngressConfigError, LineageConfig},
     db::{Database, DatabaseConfig, DatabaseError},
     ingress_uow::{
-        CanonicalMessageRepository, IngressUnitOfWork, IngressUowError, SmIngressRepository,
-        SmIngressStreamRepository,
+        IngressUnitOfWork, IngressUowError, SmIngressRepository, SmIngressStreamRepository,
     },
 };
 use std::{
@@ -139,7 +138,7 @@ impl IngressAuthority {
             }
             Err(error) => return Err(error.into()),
         }
-        let gc = gc::RetentionGcCoordinator::new(database.clone());
+        let gc = gc::RetentionGcCoordinator::new(database.clone(), uow.clone());
         let cancellation = CancellationToken::new();
         let force_stop = CancellationToken::new();
         let gc_task = tokio::spawn(gc::run_retention_gc_coordinator(
@@ -172,7 +171,7 @@ impl IngressAuthority {
         let uow = IngressUnitOfWork::open(database.clone(), lineage)
             .expect("open test ingress unit of work");
         Self {
-            gc: gc::RetentionGcCoordinator::new(database.clone()),
+            gc: gc::RetentionGcCoordinator::new(database.clone(), uow.clone()),
             database,
             uow,
             config: IngressConfig::default(),
@@ -329,8 +328,7 @@ impl IngressAuthority {
             return Ok(IngressRetirementOutcome::StreamMissing);
         };
         for key in SmIngressRepository::message_keys_for_stream(&mut transaction, id).await? {
-            CanonicalMessageRepository::terminalize(&mut transaction, key, chrono::Utc::now())
-                .await?;
+            execute::terminalize_if_complete_in_transaction(&mut transaction, key).await?;
         }
         SmIngressRepository::delete_for_stream(&mut transaction, id).await?;
         SmIngressStreamRepository::delete_unclaimed(&mut transaction, stream_id).await?;
@@ -534,6 +532,87 @@ mod lifecycle_tests {
         );
     }
 
+    async fn seed_retirement_message(
+        authority: &IngressAuthority,
+        stream: SmIngressId,
+        position: u32,
+        receipt_complete: bool,
+    ) -> waddle_xmpp::ingress::MessageKey {
+        use crate::ingress_uow::{
+            CanonicalMessageRepository, EffectIntentRepository, EffectReceiptRepository,
+        };
+        use waddle_xmpp::ingress::{
+            IngressEffectIntent, IngressOrdinal, MessageKey, SemanticDigest,
+        };
+        let key = MessageKey::new();
+        let intent = IngressEffectIntent::RouteOccupantPm {
+            recipient: "juliet@example.com/phone".parse().expect("recipient"),
+            sender: "romeo@example.com/phone".parse().expect("sender"),
+        };
+        let mut transaction = authority
+            .uow
+            .begin()
+            .await
+            .expect("seed message transaction");
+        CanonicalMessageRepository::record_message(
+            &mut transaction,
+            key,
+            &SemanticDigest::from_storage(1, [1; 32]).expect("digest"),
+            None,
+        )
+        .await
+        .expect("record canonical message");
+        EffectIntentRepository::reconcile(&mut transaction, key, std::slice::from_ref(&intent))
+            .await
+            .expect("record pending intent");
+        if receipt_complete {
+            let receipt = super::durable::receipt_key(&intent).expect("receipt identity");
+            EffectReceiptRepository::record_receipt(
+                &mut transaction,
+                key,
+                receipt.kind,
+                &receipt.semantic_identity_hash,
+            )
+            .await
+            .expect("record completed effect");
+        }
+        SmIngressRepository::insert_sm_ref(
+            &mut transaction,
+            stream,
+            IngressOrdinal::from_storage(u64::from(position)).expect("ordinal"),
+            WireHandledCount::from_storage(position),
+            key,
+        )
+        .await
+        .expect("record stream reference");
+        transaction
+            .commit()
+            .await
+            .expect("commit retirement fixture");
+        key
+    }
+
+    async fn assert_retired_message(
+        authority: &IngressAuthority,
+        key: waddle_xmpp::ingress::MessageKey,
+        terminal: bool,
+    ) {
+        let guard = authority.database.guard().await.expect("database guard");
+        let mut rows = guard.query(
+            "SELECT terminal_at IS NOT NULL FROM ingress_messages WHERE CAST(message_key AS TEXT) = ?",
+            crate::db_params![key.to_storage().to_string()],
+        ).await.expect("read retired canonical message");
+        assert_eq!(
+            rows.next()
+                .await
+                .expect("row read")
+                .expect("canonical message retained")
+                .get::<bool>(0)
+                .expect("terminal state"),
+            terminal
+        );
+    }
+
     async fn enrollment_checkpoint_and_retirement_round_trip(authority: &IngressAuthority) {
         let stream = SmSessionId::new("enrolled-stream");
         let id = authority.enroll_stream(&stream).await.expect("enroll");
@@ -599,10 +678,22 @@ mod lifecycle_tests {
                 .await
                 .expect("confirm promotion and release claim");
         }
+        let pending = seed_retirement_message(authority, id, 1, false).await;
+        let complete = seed_retirement_message(authority, id, 2, true).await;
         assert_eq!(
             authority.forget_stream(&stream).await.expect("retire"),
             IngressRetirementOutcome::Deleted
         );
+        assert_retired_message(authority, pending, false).await;
+        assert_retired_message(authority, complete, true).await;
+        let mut transaction = authority.uow.begin().await.expect("read retired refs");
+        assert!(
+            SmIngressRepository::message_keys_for_stream(&mut transaction, id)
+                .await
+                .expect("retired refs")
+                .is_empty()
+        );
+        transaction.commit().await.expect("close retired refs read");
         assert_eq!(
             authority
                 .lookup_stream(&stream)

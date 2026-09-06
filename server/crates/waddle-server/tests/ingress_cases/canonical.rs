@@ -39,7 +39,9 @@ async fn accepted_duplicate_rows(fixture: IngressFixture) {
         CanonicalMessageRepository::load_envelope(&mut tx, key)
             .await
             .expect("load envelope"),
-        Some(MessageEnvelope::new(original.plan.sanitized_message.clone()).expect("envelope"))
+        Some(MessageEnvelope::new(
+            original.plan.sanitized_message.clone()
+        ))
     );
     tx.commit().await.expect("close read");
     let retry = archive_plan(&fixture, Some("same-origin"), "hello", "discard-this-id");
@@ -106,7 +108,7 @@ async fn alias_conflict_rejection(fixture: IngressFixture) {
         )
         .await
         .expect("rejection envelope"),
-        Some(MessageEnvelope::new(offered.plan.sanitized_message).expect("offered envelope"))
+        Some(MessageEnvelope::new(offered.plan.sanitized_message))
     );
     tx.commit().await.expect("close read");
     fixture.close().await;

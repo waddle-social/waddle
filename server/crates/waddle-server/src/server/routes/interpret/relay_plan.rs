@@ -74,6 +74,7 @@ mod tests {
         let mut peer_copy = reflected.clone();
         peer_copy.to = Some(peer.clone().into());
         let mut plan = IngressPlan {
+            failure: None,
             rejection: None,
             plan: vec![
                 PlannedEffect::new(Effect::External(ExternalEffect::Delivery(

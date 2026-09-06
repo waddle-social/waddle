@@ -118,8 +118,7 @@ async fn crash_before_commit(fixture: IngressFixture) {
     let submission = rejection(&fixture, 1, 1).await;
     let key = MessageKey::new();
     let digest = waddle_xmpp::ingress::digest::v1::digest(&submission.digest_input);
-    let envelope =
-        MessageEnvelope::new(submission.plan.sanitized_message.clone()).expect("envelope");
+    let envelope = MessageEnvelope::new(submission.plan.sanitized_message.clone());
     {
         let mut tx = fixture.uow.begin().await.expect("doomed transaction");
         CanonicalMessageRepository::record_message(&mut tx, key, &digest, Some(&envelope))

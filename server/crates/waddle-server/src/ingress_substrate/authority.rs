@@ -18,27 +18,20 @@ impl EnvelopeVersion {
 /// The typed message an accepted or rejected canonical row preserves for
 /// post-commit reconstruction (RFC 0018 §3.3).
 ///
-/// The wire form is private to this storage adapter: it is produced once at
-/// construction (the canonical serialization the equality check relies on)
-/// and parsed back into a typed [`Message`] when loaded, so no caller ever
-/// sees or supplies raw bytes.
-#[derive(Debug, Clone)]
+/// Serialization happens only in the substrate's storage-write adapter;
+/// callers carry the typed message through planning, retries and replay.
+#[derive(Debug, Clone, PartialEq)]
 pub struct MessageEnvelope {
     version: EnvelopeVersion,
     message: Message,
-    canonical: Vec<u8>,
 }
 
 impl MessageEnvelope {
-    pub fn new(message: Message) -> Result<Self, IngressSubstrateError> {
-        let canonical = waddle_xmpp::parser::message_to_string(&message)
-            .map_err(|_| IngressSubstrateError::InvalidStoredEnvelope)?
-            .into_bytes();
-        Ok(Self {
+    pub fn new(message: Message) -> Self {
+        Self {
             version: EnvelopeVersion::V1,
             message,
-            canonical,
-        })
+        }
     }
 
     pub fn version(&self) -> EnvelopeVersion {
@@ -47,10 +40,6 @@ impl MessageEnvelope {
 
     pub fn message(&self) -> &Message {
         &self.message
-    }
-
-    pub(super) fn storage_bytes(&self) -> &[u8] {
-        &self.canonical
     }
 
     pub(super) fn from_storage(
@@ -78,18 +67,18 @@ impl MessageEnvelope {
         Ok(Self {
             version: EnvelopeVersion::V1,
             message,
-            canonical: bytes,
         })
     }
 }
 
-impl PartialEq for MessageEnvelope {
-    fn eq(&self, other: &Self) -> bool {
-        self.version == other.version && self.canonical == other.canonical
-    }
+/// Encode only where the typed envelope crosses into database storage.
+pub(super) fn serialize_envelope(
+    envelope: &MessageEnvelope,
+) -> Result<Vec<u8>, IngressSubstrateError> {
+    waddle_xmpp::parser::message_to_string(envelope.message())
+        .map(String::into_bytes)
+        .map_err(|_| IngressSubstrateError::InvalidStoredEnvelope)
 }
-
-impl Eq for MessageEnvelope {}
 
 /// Stable effect codec discriminator carried by receipt identities.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -381,7 +370,9 @@ pub(super) async fn complete_message_envelope(
         return Ok(());
     };
     if let Some(stored) = load_envelope(tx, key).await? {
-        return if &stored == envelope {
+        return if stored.version() == envelope.version()
+            && serialize_envelope(&stored)? == serialize_envelope(envelope)?
+        {
             Ok(())
         } else {
             Err(IngressSubstrateError::MessageContentConflict)
@@ -393,7 +384,7 @@ pub(super) async fn complete_message_envelope(
         dialect_sql(tx.driver(), WRITE_POSTGRES, WRITE_SQLITE),
         crate::db_params![
             envelope.version().to_storage(),
-            envelope.storage_bytes().to_vec(),
+            serialize_envelope(envelope)?,
             key.to_storage().to_string()
         ],
     )

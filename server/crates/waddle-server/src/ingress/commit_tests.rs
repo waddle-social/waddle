@@ -58,6 +58,7 @@ async fn fixture() -> (Database, IngressUnitOfWork, IngressSubmission) {
         principal,
         target,
         plan: IngressPlan {
+            failure: None,
             plan: Vec::new(),
             intents: Vec::new(),
             sanitized_message: message,

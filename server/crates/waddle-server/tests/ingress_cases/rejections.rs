@@ -82,9 +82,7 @@ async fn semantic_rejections(fixture: IngressFixture) {
             )
             .await
             .expect("denial envelope"),
-            Some(
-                MessageEnvelope::new(submission.plan.sanitized_message).expect("offered envelope")
-            )
+            Some(MessageEnvelope::new(submission.plan.sanitized_message))
         );
         tx.commit().await.expect("close read");
     }

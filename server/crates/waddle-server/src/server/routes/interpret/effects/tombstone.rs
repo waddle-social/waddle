@@ -50,6 +50,9 @@ impl EffectSink for TombstoneExemptSink<'_> {
         self.0.observe_sender(sender);
     }
 
+    fn fail_plan(&self, failure: super::PlanFailure) {
+        self.0.fail_plan(failure);
+    }
     fn is_planning(&self) -> bool {
         self.0.is_planning()
     }

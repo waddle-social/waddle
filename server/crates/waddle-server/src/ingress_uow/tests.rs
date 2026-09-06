@@ -140,7 +140,7 @@ async fn sqlite_spanning_proof_commits_exact_cross_repository_values() {
     message
         .bodies
         .insert(xmpp_parsers::message::Lang::new(), "spanning".to_string());
-    let envelope = MessageEnvelope::new(message).expect("typed envelope");
+    let envelope = MessageEnvelope::new(message);
     let mut transaction = uow.begin().await.expect("begin SQLite spanning UoW");
     let id = SmIngressStreamRepository::mint(&mut transaction, &stream)
         .await

@@ -669,6 +669,8 @@ impl MetricAttribute for IngressAliasOutcome {
 /// `outcome` — how an ingress retention GC run ended.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum IngressGcOutcome {
+    /// The lineage policy did not attest, so collection was skipped.
+    Unattested,
     /// The run exhausted its cooperative budget after accounting for progress.
     Partial,
     /// The run processed all eligible work within its budgets.
@@ -680,7 +682,13 @@ pub enum IngressGcOutcome {
 }
 
 impl IngressGcOutcome {
-    pub const ALL: [Self; 4] = [Self::Completed, Self::Partial, Self::Failed, Self::TimedOut];
+    pub const ALL: [Self; 5] = [
+        Self::Completed,
+        Self::Partial,
+        Self::Failed,
+        Self::TimedOut,
+        Self::Unattested,
+    ];
 }
 
 impl sealed::Sealed for IngressGcOutcome {}
@@ -691,6 +699,7 @@ impl MetricAttribute for IngressGcOutcome {
 
     fn value(&self) -> &'static str {
         match self {
+            Self::Unattested => "unattested",
             Self::Partial => "partial",
             Self::Completed => "completed",
             Self::Failed => "failed",

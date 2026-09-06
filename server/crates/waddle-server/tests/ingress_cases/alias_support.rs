@@ -187,7 +187,7 @@ pub(super) async fn assert_canonical(
         )
         .await
         .expect("envelope"),
-        Some(MessageEnvelope::new(expected.clone()).expect("typed envelope"))
+        Some(MessageEnvelope::new(expected.clone()))
     );
     tx.commit().await.expect("finish read");
 }
