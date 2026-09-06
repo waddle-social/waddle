@@ -55,10 +55,6 @@ pub enum ExternalRoomEffect {
         room: BareJid,
         mutation: RoomActorMutation,
     },
-    BroadcastRoomSystemMessage {
-        room: BareJid,
-        message: Box<Message>,
-    },
     NotificationCandidate {
         owner: BareJid,
         room: BareJid,
@@ -97,8 +93,7 @@ pub(in super::super) fn external(
     policy: super::PlanSuppressionPolicy,
 ) {
     let dependencies = match &effect {
-        ExternalRoomEffect::ObserveRoomMessage { room, message, .. }
-        | ExternalRoomEffect::BroadcastRoomSystemMessage { room, message } => {
+        ExternalRoomEffect::ObserveRoomMessage { room, message, .. } => {
             message_dependencies(room, message)
         }
         #[cfg(feature = "clustering")]

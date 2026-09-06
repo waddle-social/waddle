@@ -44,7 +44,7 @@ pub enum ExternalDirectEffect {
     },
     PushInboxUpdate {
         owner: BareJid,
-        entry: Box<InboxEntry>,
+        projection: super::ProjectionRef,
     },
     LinkPreviewRefs {
         mutations: Vec<LinkPreviewMediaRefMutation>,
@@ -96,20 +96,6 @@ pub(crate) fn planned_durable(effect: DurableDirectEffect) -> super::PlannedEffe
 
 pub(crate) fn external(deps: &super::super::Deps<'_>, effect: ExternalDirectEffect) {
     let dependency = match &effect {
-        ExternalDirectEffect::PushInboxUpdate { owner, entry } => {
-            let archive = match entry.kind {
-                waddle_xmpp::inbox::ConversationKind::Direct => owner,
-                waddle_xmpp::inbox::ConversationKind::MucRoom => &entry.partner,
-            };
-            Some(super::PlanEffectDependency::AfterArchive {
-                archive: archive.clone(),
-                minted: StanzaId::new(
-                    entry.last_stanza_id.clone(),
-                    jid::Jid::from(archive.clone()),
-                ),
-            })
-        }
-
         ExternalDirectEffect::DmCallThreadState { state } => state
             .active
             .as_ref()
@@ -121,6 +107,9 @@ pub(crate) fn external(deps: &super::super::Deps<'_>, effect: ExternalDirectEffe
         _ => None,
     };
     let message_dependencies = match &effect {
+        ExternalDirectEffect::PushInboxUpdate { projection, .. } => {
+            deps.effects.projection_dependencies(*projection)
+        }
         ExternalDirectEffect::LinkPreviewRefs { mutations }
         | ExternalDirectEffect::ClearLinkPreviewRefs { mutations } => mutations
             .iter()
@@ -171,11 +160,14 @@ pub struct PlannedActiveDmCall {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::server::routes::interpret::{effects::PlanSink, Deps};
+    use crate::server::routes::interpret::{
+        effects::{EffectSink, PlanSink},
+        Deps,
+    };
     use waddle_xmpp::{inbox::ConversationKind, registry::ConnectionRegistry};
 
-    #[test]
-    fn inbox_push_dependency_uses_the_conversation_archive_authority() {
+    #[tokio::test]
+    async fn inbox_push_dependency_uses_the_conversation_archive_authority() {
         let registry = ConnectionRegistry::new();
         let sink = PlanSink::new();
         let mut deps = Deps::registry_only(&registry);
@@ -186,16 +178,36 @@ mod tests {
             (ConversationKind::Direct, &owner),
             (ConversationKind::MucRoom, &partner),
         ] {
+            let entry = Box::new(InboxEntry::new(partner.clone(), kind, "archive-id", 0));
+            let durable = match kind {
+                ConversationKind::Direct => planned_durable(DurableDirectEffect::ProjectInbox {
+                    owner: owner.clone(),
+                    entry,
+                    increment_unread: true,
+                }),
+                ConversationKind::MucRoom => super::super::room::planned_durable(
+                    super::super::room::DurableRoomEffect::ProjectGroupchatInbox {
+                        owner: owner.clone(),
+                        entry,
+                        is_recipient: true,
+                        recovery: None,
+                    },
+                ),
+            };
+            let super::super::EffectOutcome::PlannedInbox(projection) =
+                sink.execute(durable, &deps).await
+            else {
+                panic!("planned projection reference")
+            };
             external(
                 &deps,
                 ExternalDirectEffect::PushInboxUpdate {
                     owner: owner.clone(),
-                    entry: Box::new(InboxEntry::new(partner.clone(), kind, "archive-id", 0)),
+                    projection,
                 },
             );
-            let plan = sink.snapshot();
             assert_eq!(
-                plan.last().expect("push").dependencies,
+                sink.snapshot().last().expect("push").dependencies,
                 vec![super::super::PlanEffectDependency::AfterArchive {
                     archive: archive.clone(),
                     minted: StanzaId::new("archive-id", jid::Jid::from(archive.clone())),

@@ -637,6 +637,13 @@ async fn interpret_with_depth(
                 target_message_id,
                 retraction_message,
             } => {
+                // This entire arm heals target cleanup even when the request
+                // itself is tombstoned. Nested pin/preview/system-message
+                // effects inherit that policy without affecting sibling events.
+                let exempt_sink = effects::TombstoneExemptSink(deps.effects);
+                let mut retraction_deps = deps.clone();
+                retraction_deps.effects = &exempt_sink;
+                let deps = &retraction_deps;
                 let Some(mam_storage) = deps.mam_storage else {
                     debug!(
                         room = %room,

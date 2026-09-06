@@ -15,6 +15,13 @@ pub trait EffectSink: Send + Sync {
     fn snapshot(&self) -> Vec<PlannedEffect> {
         Vec::new()
     }
+    /// Dependencies of one frozen projection, without cloning the full plan.
+    fn projection_dependencies(
+        &self,
+        _projection: super::ProjectionRef,
+    ) -> Vec<super::PlanEffectDependency> {
+        Vec::new()
+    }
     fn room_execution(&self) -> RoomExecutionPath {
         RoomExecutionPath::None
     }

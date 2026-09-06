@@ -110,14 +110,18 @@ pub(super) async fn execute_durable(effect: DurableDirectEffect, deps: &Deps<'_>
 pub(super) async fn execute_external(
     effect: ExternalDirectEffect,
     deps: &Deps<'_>,
+    applied: &super::AppliedDurableEffects,
 ) -> EffectOutcome {
     match effect {
-        ExternalDirectEffect::PushInboxUpdate { owner, entry } => {
+        ExternalDirectEffect::PushInboxUpdate { owner, projection } => {
+            let Some(entry) = applied.inbox(projection) else {
+                return EffectOutcome::Unavailable;
+            };
             super::super::groupchat_archive::push_inbox_update(
                 deps.connection_registry,
                 deps.user_registry,
                 &owner,
-                &entry,
+                entry,
             )
             .await;
             EffectOutcome::Completed

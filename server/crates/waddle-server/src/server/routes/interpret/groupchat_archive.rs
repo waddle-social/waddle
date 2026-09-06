@@ -877,12 +877,16 @@ pub(super) async fn project_groupchat_inbox(
         )
         .await
     {
-        super::effects::EffectOutcome::Inbox(Ok(updated)) if is_recipient => {
+        updated @ (super::effects::EffectOutcome::Inbox(Ok(_))
+        | super::effects::EffectOutcome::PlannedInbox(_))
+            if is_recipient =>
+        {
             outcome.channel_committed = true;
             outcome.notification_recovery_committed = channel_records_recovery;
             outcome.channel_push_recipients = push_projected_inbox(deps, owner, updated).await;
         }
-        super::effects::EffectOutcome::Inbox(Ok(_)) => {
+        super::effects::EffectOutcome::Inbox(Ok(_))
+        | super::effects::EffectOutcome::PlannedInbox(_) => {
             outcome.channel_committed = true;
         }
         super::effects::EffectOutcome::Inbox(Err(error)) => {
@@ -928,12 +932,16 @@ pub(super) async fn project_groupchat_inbox(
         )
         .await
     {
-        super::effects::EffectOutcome::Inbox(Ok(updated)) if is_recipient => {
+        updated @ (super::effects::EffectOutcome::Inbox(Ok(_))
+        | super::effects::EffectOutcome::PlannedInbox(_))
+            if is_recipient =>
+        {
             outcome.thread_committed = true;
             outcome.notification_recovery_committed = thread_records_recovery;
             outcome.thread_push_recipients = push_projected_inbox(deps, owner, updated).await;
         }
-        super::effects::EffectOutcome::Inbox(Ok(_)) => {
+        super::effects::EffectOutcome::Inbox(Ok(_))
+        | super::effects::EffectOutcome::PlannedInbox(_) => {
             outcome.thread_committed = true;
         }
         super::effects::EffectOutcome::Inbox(Err(error)) => {
@@ -949,21 +957,27 @@ pub(super) async fn project_groupchat_inbox(
     outcome
 }
 
-async fn push_projected_inbox(deps: &Deps<'_>, owner: &BareJid, entry: InboxEntry) -> Vec<FullJid> {
-    if deps.effects.is_planning() {
+async fn push_projected_inbox(
+    deps: &Deps<'_>,
+    owner: &BareJid,
+    outcome: super::effects::EffectOutcome,
+) -> Vec<FullJid> {
+    if let super::effects::EffectOutcome::PlannedInbox(projection) = outcome {
         super::effects::direct::external(
             deps,
             super::effects::direct::ExternalDirectEffect::PushInboxUpdate {
                 owner: owner.clone(),
-                entry: Box::new(entry),
+                projection,
             },
         );
         match deps.user_registry {
             Some(registry) => waddle_xmpp::registry::get_resources_for_user(registry, owner).await,
             None => Vec::new(),
         }
-    } else {
+    } else if let super::effects::EffectOutcome::Inbox(Ok(entry)) = outcome {
         push_inbox_update(deps.connection_registry, deps.user_registry, owner, &entry).await
+    } else {
+        Vec::new()
     }
 }
 
