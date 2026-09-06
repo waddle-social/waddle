@@ -32,13 +32,22 @@ impl EffectSink for PlanSink {
             if matches!(effect.effect, super::Effect::Immediate(_)) {
                 return super::ImmediateSink.execute(effect, deps).await;
             }
-            let assumed = effect.assumed_outcome();
-            self.record(effect);
-            assumed
+            self.record_with_outcome(effect)
         })
     }
     fn snapshot(&self) -> Vec<PlannedEffect> {
         PlanSink::snapshot(self)
+    }
+    fn projection_dependencies(
+        &self,
+        projection: super::ProjectionRef,
+    ) -> Vec<super::PlanEffectDependency> {
+        self.plan
+            .lock()
+            .expect("plan mutex")
+            .get(projection.0)
+            .map(|effect| effect.dependencies.clone())
+            .unwrap_or_default()
     }
     fn room_execution(&self) -> RoomExecutionPath {
         self.room_execution
@@ -55,7 +64,16 @@ impl EffectSink for PlanSink {
             .expect("sender mutex")
             .get_or_insert_with(|| sender.clone());
     }
-    fn record(&self, mut effect: PlannedEffect) {
+    fn record(&self, effect: PlannedEffect) {
+        self.record_with_outcome(effect);
+    }
+    fn set_room_execution(&self, execution: RoomExecutionPath) {
+        *self.room_execution.lock().expect("room execution mutex") = execution;
+    }
+}
+
+impl PlanSink {
+    fn record_with_outcome(&self, mut effect: PlannedEffect) -> super::EffectOutcome {
         super::policy_metadata::apply_policy(
             &mut effect,
             self.sender.lock().expect("sender mutex").as_ref(),
@@ -69,9 +87,9 @@ impl EffectSink for PlanSink {
                 }
             }
         }
-        self.plan.lock().expect("plan mutex").push(effect);
-    }
-    fn set_room_execution(&self, execution: RoomExecutionPath) {
-        *self.room_execution.lock().expect("room execution mutex") = execution;
+        let mut plan = self.plan.lock().expect("plan mutex");
+        let outcome = effect.assumed_outcome(super::ProjectionRef(plan.len()));
+        plan.push(effect);
+        outcome
     }
 }

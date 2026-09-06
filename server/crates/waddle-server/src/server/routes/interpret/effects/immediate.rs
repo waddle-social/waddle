@@ -13,6 +13,28 @@ impl EffectSink for ImmediateSink {
         effect: PlannedEffect,
         deps: &'a super::super::Deps<'_>,
     ) -> super::sink::EffectFuture<'a> {
+        Box::pin(async move {
+            self.execute_with_applied(effect, deps, &super::AppliedDurableEffects::default())
+                .await
+        })
+    }
+    fn is_planning(&self) -> bool {
+        false
+    }
+    fn record(&self, _effect: PlannedEffect) {
+        panic!("ImmediateSink requires execute, not record");
+    }
+    fn set_room_execution(&self, _execution: RoomExecutionPath) {}
+}
+
+impl ImmediateSink {
+    /// Execute Phase C using only the outcomes published by the committed Phase B attempt.
+    pub fn execute_with_applied<'a>(
+        &'a self,
+        effect: PlannedEffect,
+        deps: &'a super::super::Deps<'_>,
+        applied: &'a super::AppliedDurableEffects,
+    ) -> super::sink::EffectFuture<'a> {
         // Box each executor before composing it into an async state machine.
         // An encompassing async match embeds its largest branch and inflates
         // every websocket future that can dispatch a message.
@@ -23,9 +45,9 @@ impl EffectSink for ImmediateSink {
             Effect::Durable(DurableEffect::Room(effect)) => {
                 Box::pin(super::room_immediate::execute_durable(effect, deps))
             }
-            Effect::External(ExternalEffect::Direct(effect)) => {
-                Box::pin(super::direct_immediate::execute_external(effect, deps))
-            }
+            Effect::External(ExternalEffect::Direct(effect)) => Box::pin(
+                super::direct_immediate::execute_external(effect, deps, applied),
+            ),
             Effect::External(ExternalEffect::Room(effect)) => {
                 Box::pin(super::room_immediate::execute_external(effect, deps))
             }
@@ -38,15 +60,6 @@ impl EffectSink for ImmediateSink {
             Effect::Immediate(action) => Box::pin(execute_recovery(action, deps)),
         }
     }
-    fn is_planning(&self) -> bool {
-        false
-    }
-    fn record(&self, _effect: PlannedEffect) {
-        // Recording is a planning-only operation. Immediate callers must await
-        // execute so storage failures and delivery outcomes are never discarded.
-        panic!("ImmediateSink requires execute, not record");
-    }
-    fn set_room_execution(&self, _execution: RoomExecutionPath) {}
 }
 
 async fn execute_recovery(

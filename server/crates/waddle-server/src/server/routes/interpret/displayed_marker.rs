@@ -177,15 +177,23 @@ async fn plan_mark_read(
     room: &BareJid,
     thread: Option<&ThreadId>,
 ) {
-    use super::effects::direct::{durable, external, DurableDirectEffect, ExternalDirectEffect};
-    durable(
-        deps,
-        DurableDirectEffect::MarkInboxRead {
-            owner: owner.clone(),
-            channel: room.clone(),
-            thread: thread.cloned(),
-        },
-    );
+    use super::effects::direct::{
+        external, planned_durable, DurableDirectEffect, ExternalDirectEffect,
+    };
+    let super::effects::EffectOutcome::PlannedInbox(projection) = deps
+        .effects
+        .execute(
+            planned_durable(DurableDirectEffect::MarkInboxRead {
+                owner: owner.clone(),
+                channel: room.clone(),
+                thread: thread.cloned(),
+            }),
+            deps,
+        )
+        .await
+    else {
+        return;
+    };
     let mutation = match thread {
         Some(thread_id) => waddle_xmpp::ingress::InboxProjectionMutation::GroupchatThreadRead {
             room: room.clone(),
@@ -200,19 +208,18 @@ async fn plan_mark_read(
         None => storage.list(owner).await,
     };
     if let Ok(entries) = entries {
-        for mut entry in entries {
+        for entry in entries {
             if entry.partner == *room && entry.thread_id.as_deref() == thread.map(ThreadId::as_str)
             {
                 deps.capture_intent(waddle_xmpp::ingress::IngressEffectIntent::InboxProject {
                     owner: owner.clone(),
                     mutation: mutation.clone(),
                 });
-                entry.unread = 0;
                 external(
                     deps,
                     ExternalDirectEffect::PushInboxUpdate {
                         owner: owner.clone(),
-                        entry: Box::new(entry),
+                        projection,
                     },
                 );
             }

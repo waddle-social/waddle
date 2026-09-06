@@ -1,7 +1,7 @@
 //! Execution of the frozen room payloads at the effect boundary.
 use super::super::Deps;
 use super::room::{DurableRoomEffect, ExternalRoomEffect, RoomActorMutation, RoomFenceRequirement};
-use super::{EffectOutcome, ImmediateSink};
+use super::EffectOutcome;
 use waddle_xmpp::{
     ingress::IngressEffectIntent,
     muc::room_actor::{ApplyPin, GetRoomSnapshot, SetSubject},
@@ -59,22 +59,6 @@ pub(super) async fn execute_external(effect: ExternalRoomEffect, deps: &Deps<'_>
     match effect {
         ExternalRoomEffect::RoomActorMutation { room, mutation } => {
             mutate_room(deps, room, mutation).await
-        }
-        ExternalRoomEffect::BroadcastRoomSystemMessage { room, message } => {
-            let mut immediate = deps.clone();
-            immediate.effects = &ImmediateSink;
-            if Box::pin(
-                super::super::room_system_message::broadcast_room_system_message_event(
-                    &immediate, room, message, 0,
-                ),
-            )
-            .await
-            .is_some()
-            {
-                EffectOutcome::Completed
-            } else {
-                EffectOutcome::Unavailable
-            }
         }
         ExternalRoomEffect::ObserveRoomMessage {
             room,

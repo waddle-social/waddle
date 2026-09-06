@@ -28,13 +28,14 @@ pub(super) async fn project_direct_inbox(
     let planned = super::effects::direct::planned_durable(
         super::effects::direct::DurableDirectEffect::ProjectInbox {
             owner: owner.clone(),
-            entry: Box::new(entry),
+            entry: Box::new(entry.clone()),
             increment_unread,
         },
     );
-    let super::effects::EffectOutcome::Inbox(result) = deps.effects.execute(planned, deps).await
-    else {
-        return;
+    let result = match deps.effects.execute(planned, deps).await {
+        super::effects::EffectOutcome::Inbox(result) => result,
+        super::effects::EffectOutcome::PlannedInbox(_) => Ok(entry),
+        _ => return,
     };
     match result {
         Ok(entry) => {

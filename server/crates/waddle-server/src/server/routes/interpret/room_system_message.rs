@@ -13,6 +13,7 @@
 //! Bypasses the occupancy gate, rich-target validation, and extension
 //! enrichment — the sender is the room itself.
 
+use super::groupchat_archive::RoomArchiveFence;
 use super::*;
 use waddle_xmpp_core::xep0359::{add_stanza_id, StanzaId};
 
@@ -22,14 +23,6 @@ pub(super) async fn broadcast_room_system_message_event(
     mut message: Box<Message>,
     recursion_depth: u8,
 ) -> Option<String> {
-    if deps.effects.is_planning() {
-        super::effects::room::external(
-            deps,
-            super::effects::room::ExternalRoomEffect::BroadcastRoomSystemMessage { room, message },
-            super::effects::PlanSuppressionPolicy::Always,
-        );
-        return None;
-    }
     let Some(room_registry) = deps.room_registry else {
         debug!(
             room = %room,
@@ -118,9 +111,55 @@ pub(super) async fn broadcast_room_system_message_event(
     // "not archived, not fanned out" contract.
     if let Some(mam_storage) = deps.mam_storage {
         let fence = resolve_room_claim_fence(deps, &room).await;
+        #[cfg(feature = "clustering")]
+        if deps.effects.is_planning() {
+            if let RoomArchiveFence::Guarded { context, .. } = &fence {
+                if snapshot.claim_fence.as_ref() != Some(context) {
+                    return None;
+                }
+            }
+        }
+
+        if deps.effects.is_planning()
+            && matches!(
+                deps.effects.room_execution(),
+                super::effects::RoomExecutionPath::None
+            )
+        {
+            let requirement = match &fence {
+                RoomArchiveFence::Unfenced => super::effects::room::RoomFenceRequirement::Unfenced,
+                #[cfg(feature = "clustering")]
+                RoomArchiveFence::Guarded { context, .. } => {
+                    super::effects::room::RoomFenceRequirement::Guarded(context.clone())
+                }
+                #[cfg(feature = "clustering")]
+                RoomArchiveFence::OwnershipLost => return None,
+            };
+            deps.effects
+                .set_room_execution(super::effects::RoomExecutionPath::Local {
+                    room: room.clone(),
+                    fence: requirement,
+                    snapshot_generation: snapshot.admission_revision,
+                });
+        }
+
         // Room-authored system messages have no occupant sender, so
         // there is no real-JID `<x xmlns='muc#user'/>` to disclose.
-        match archive_groupchat_message(mam_storage, &room, &message, 0, &fence, None).await {
+        let outcome = if deps.effects.is_planning() {
+            super::groupchat_archive::archive_groupchat_message_with_effects(
+                Some(deps),
+                mam_storage,
+                &room,
+                &message,
+                0,
+                &fence,
+                None,
+            )
+            .await
+        } else {
+            archive_groupchat_message(mam_storage, &room, &message, 0, &fence, None).await
+        };
+        match outcome {
             ArchiveGroupchatOutcome::Stored(result) => {
                 deps.capture_intent(
                     waddle_xmpp::ingress::IngressEffectIntent::ArchiveAuthoritative {

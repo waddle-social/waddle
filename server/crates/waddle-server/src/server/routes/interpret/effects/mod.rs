@@ -7,12 +7,15 @@ mod immediate;
 mod outcome;
 pub mod room;
 mod room_immediate;
-pub use outcome::EffectOutcome;
+pub use outcome::{AppliedDurableEffects, DurableOutcome, EffectOutcome, ProjectionRef};
 mod plan;
 mod planned;
 mod policy;
 mod policy_metadata;
 mod sink;
+mod tombstone;
+
+pub(crate) use tombstone::TombstoneExemptSink;
 
 pub use immediate::ImmediateSink;
 pub use plan::PlanSink;

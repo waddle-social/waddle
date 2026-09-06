@@ -13,16 +13,17 @@ fn subject_rebroadcast(stanza: &Stanza) -> bool {
 }
 
 pub(super) fn apply_policy(effect: &mut PlannedEffect, sender: Option<&FullJid>) {
-    effect.tombstone_suppression = if matches!(
-        &effect.effect,
-        Effect::Durable(super::DurableEffect::Direct(
-            super::direct::DurableDirectEffect::RetractionTombstone { .. }
-        )) | Effect::External(ExternalEffect::Direct(
-            ExternalDirectEffect::ScrubReplayForTombstone { .. }
-        )) | Effect::External(ExternalEffect::Direct(
-            ExternalDirectEffect::ClearLinkPreviewRefs { .. }
-        )) | Effect::Immediate(_)
-    ) {
+    effect.tombstone_suppression = if effect.tombstone_suppression == PlanSuppressionPolicy::Always
+        || matches!(
+            &effect.effect,
+            Effect::Durable(super::DurableEffect::Direct(
+                super::direct::DurableDirectEffect::RetractionTombstone { .. }
+            )) | Effect::External(ExternalEffect::Direct(
+                ExternalDirectEffect::ScrubReplayForTombstone { .. }
+            )) | Effect::External(ExternalEffect::Direct(
+                ExternalDirectEffect::ClearLinkPreviewRefs { .. }
+            )) | Effect::Immediate(_)
+        ) {
         PlanSuppressionPolicy::Always
     } else {
         PlanSuppressionPolicy::TombstoneSwallowed
