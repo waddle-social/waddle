@@ -1,4 +1,6 @@
 use super::*;
+use std::str::FromStr;
+use xmpp_parsers::message::Message;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum EnvelopeVersion {
@@ -13,12 +15,81 @@ impl EnvelopeVersion {
     }
 }
 
-/// Versioned serialized envelope at the storage boundary.
-#[derive(Debug, Clone, PartialEq, Eq)]
+/// The typed message an accepted or rejected canonical row preserves for
+/// post-commit reconstruction (RFC 0018 §3.3).
+///
+/// The wire form is private to this storage adapter: it is produced once at
+/// construction (the canonical serialization the equality check relies on)
+/// and parsed back into a typed [`Message`] when loaded, so no caller ever
+/// sees or supplies raw bytes.
+#[derive(Debug, Clone)]
 pub struct MessageEnvelope {
-    pub version: EnvelopeVersion,
-    pub bytes: Vec<u8>,
+    version: EnvelopeVersion,
+    message: Message,
+    canonical: Vec<u8>,
 }
+
+impl MessageEnvelope {
+    pub fn new(message: Message) -> Result<Self, IngressSubstrateError> {
+        let canonical = waddle_xmpp::parser::message_to_string(&message)
+            .map_err(|_| IngressSubstrateError::InvalidStoredEnvelope)?
+            .into_bytes();
+        Ok(Self {
+            version: EnvelopeVersion::V1,
+            message,
+            canonical,
+        })
+    }
+
+    pub fn version(&self) -> EnvelopeVersion {
+        self.version
+    }
+
+    pub fn message(&self) -> &Message {
+        &self.message
+    }
+
+    pub(super) fn storage_bytes(&self) -> &[u8] {
+        &self.canonical
+    }
+
+    pub(super) fn from_storage(
+        version: i64,
+        bytes: Vec<u8>,
+    ) -> Result<Self, IngressSubstrateError> {
+        if version != i64::from(EnvelopeVersion::V1.to_storage()) {
+            return Err(IngressSubstrateError::InvalidStoredEnvelope);
+        }
+        let text = std::str::from_utf8(&bytes)
+            .map_err(|_| IngressSubstrateError::InvalidStoredEnvelope)?;
+        let element = minidom::Element::from_str(text)
+            .map_err(|_| IngressSubstrateError::InvalidStoredEnvelope)?;
+        let stanza_ns = element.ns().to_string();
+        let thread_parent = waddle_xmpp_core::parser_utils::extract_thread_parent(&element);
+        let mut message =
+            Message::try_from(element).map_err(|_| IngressSubstrateError::InvalidStoredEnvelope)?;
+        if let Some(parent) = thread_parent {
+            waddle_xmpp_core::parser_utils::reattach_thread_parent(
+                &mut message,
+                parent,
+                &stanza_ns,
+            );
+        }
+        Ok(Self {
+            version: EnvelopeVersion::V1,
+            message,
+            canonical: bytes,
+        })
+    }
+}
+
+impl PartialEq for MessageEnvelope {
+    fn eq(&self, other: &Self) -> bool {
+        self.version == other.version && self.canonical == other.canonical
+    }
+}
+
+impl Eq for MessageEnvelope {}
 
 /// Stable effect codec discriminator carried by receipt identities.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -62,10 +133,7 @@ pub async fn load_envelope(
     let bytes: Option<Vec<u8>> = row.get(1).map_err(discard_database_error)?;
     match (version, bytes) {
         (None, None) => Ok(None),
-        (Some(1), Some(bytes)) => Ok(Some(MessageEnvelope {
-            version: EnvelopeVersion::V1,
-            bytes,
-        })),
+        (Some(version), Some(bytes)) => MessageEnvelope::from_storage(version, bytes).map(Some),
         _ => Err(IngressSubstrateError::InvalidStoredEnvelope),
     }
 }
@@ -299,8 +367,8 @@ pub(super) async fn complete_message_envelope(
     tx.execute(
         dialect_sql(tx.driver(), WRITE_POSTGRES, WRITE_SQLITE),
         crate::db_params![
-            envelope.version.to_storage(),
-            envelope.bytes.clone(),
+            envelope.version().to_storage(),
+            envelope.storage_bytes().to_vec(),
             key.to_storage().to_string()
         ],
     )

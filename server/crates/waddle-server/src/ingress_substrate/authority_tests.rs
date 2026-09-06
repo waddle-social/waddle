@@ -69,6 +69,20 @@ fn digest() -> SemanticDigest {
     SemanticDigest::from_storage(1, [1; 32]).expect("digest")
 }
 
+fn typed_envelope(body: &str) -> MessageEnvelope {
+    let mut message = xmpp_parsers::message::Message::new(Some(
+        "juliet@example.com"
+            .parse::<jid::Jid>()
+            .expect("recipient jid"),
+    ));
+    message.type_ = xmpp_parsers::message::MessageType::Chat;
+    message.id = Some(xmpp_parsers::message::Id("envelope-id".to_string()));
+    message
+        .bodies
+        .insert(xmpp_parsers::message::Lang::new(), body.to_string());
+    MessageEnvelope::new(message).expect("typed envelope")
+}
+
 async fn insert_stream(tx: &mut Transaction<'_>, id: SmIngressId) {
     const POSTGRES: &str =
         "INSERT INTO ingress_sm_streams (sm_ingress_id, stream_id) VALUES (?::uuid, ?)";
@@ -92,16 +106,49 @@ async fn insert_intent(tx: &mut Transaction<'_>, key: MessageKey, hash: [u8; 32]
     .expect("insert storage fixture intent");
 }
 
+async fn malformed_stored_envelope_fails_typed(driver: DatabaseDriver) {
+    let Some(fixture) = Fixture::open(driver).await else {
+        return;
+    };
+    let key = MessageKey::new();
+    let mut tx = fixture.db.begin_immediate().await.expect("begin");
+    record_message(&mut tx, key, &digest(), None)
+        .await
+        .expect("record row");
+    const POSTGRES: &str = "UPDATE ingress_messages SET envelope_version = 1, envelope = ? WHERE message_key = ?::uuid";
+    const SQLITE: &str =
+        "UPDATE ingress_messages SET envelope_version = 1, envelope = ? WHERE message_key = ?";
+    tx.execute(
+        dialect_sql(tx.driver(), POSTGRES, SQLITE),
+        crate::db_params![vec![0u8, 128, 255], key.to_storage().to_string()],
+    )
+    .await
+    .expect("poison stored envelope");
+    assert!(matches!(
+        load_envelope(&mut tx, key).await,
+        Err(IngressSubstrateError::InvalidStoredEnvelope)
+    ));
+    tx.commit().await.expect("close");
+    fixture.close().await;
+}
+
+#[tokio::test]
+async fn sqlite_malformed_stored_envelope_fails_typed() {
+    malformed_stored_envelope_fails_typed(DatabaseDriver::Sqlite).await;
+}
+
+#[tokio::test]
+async fn postgres_malformed_stored_envelope_fails_typed() {
+    malformed_stored_envelope_fails_typed(DatabaseDriver::Postgres).await;
+}
+
 async fn envelope_roundtrip(driver: DatabaseDriver) {
     let Some(fixture) = Fixture::open(driver).await else {
         return;
     };
     let key = MessageKey::new();
     let empty_key = MessageKey::new();
-    let envelope = MessageEnvelope {
-        version: EnvelopeVersion::V1,
-        bytes: vec![0, 128, 255],
-    };
+    let envelope = typed_envelope("round trip body");
     let mut tx = fixture.db.begin_immediate().await.expect("begin");
     assert_eq!(
         load_envelope(&mut tx, key).await.expect("missing envelope"),
@@ -349,10 +396,7 @@ async fn alias_envelope_completion(driver: DatabaseDriver) {
         load_envelope(&mut tx, key).await.expect("initial envelope"),
         None
     );
-    let envelope = MessageEnvelope {
-        version: EnvelopeVersion::V1,
-        bytes: vec![1, 2, 3],
-    };
+    let envelope = typed_envelope("alias body");
     record_message(&mut tx, key, &digest(), Some(&envelope))
         .await
         .expect("complete alias envelope");
@@ -362,10 +406,7 @@ async fn alias_envelope_completion(driver: DatabaseDriver) {
     record_message(&mut tx, key, &digest(), None)
         .await
         .expect("preserve envelope");
-    let conflicting = MessageEnvelope {
-        version: EnvelopeVersion::V1,
-        bytes: vec![9],
-    };
+    let conflicting = typed_envelope("conflicting body");
     assert!(matches!(
         record_message(&mut tx, key, &digest(), Some(&conflicting)).await,
         Err(IngressSubstrateError::MessageContentConflict)
