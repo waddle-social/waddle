@@ -51,7 +51,13 @@ pub(super) async fn assert_room<'a>(
                             &context.owner,
                             context.epoch,
                         )
-                        .await?,
+                        .await
+                        .map_err(|error| match error {
+                            IngressUowError::ClaimFenceMissing => {
+                                IngressUowError::RoomGenerationStale
+                            }
+                            other => other,
+                        })?,
                     );
                 }
                 RoomFenceRequirement::Unfenced
@@ -65,29 +71,11 @@ pub(super) async fn assert_room<'a>(
                 RoomFenceRequirement::Unfenced => {}
             }
         }
-        // Admission revisions currently exist only inside the actor. A claim
-        // proves ownership, but cannot attest that snapshot's admission policy.
-        if validate_local
-            && matches!(
-                submission.plan.room_execution,
-                crate::server::routes::interpret::effects::RoomExecutionPath::Local { .. }
-            )
-        {
-            return Err(IngressUowError::RoomGenerationStale);
-        }
         Ok(proof)
     }
     #[cfg(not(feature = "clustering"))]
     {
-        let _ = tx;
-        if validate_local
-            && matches!(
-                submission.plan.room_execution,
-                crate::server::routes::interpret::effects::RoomExecutionPath::Local { .. }
-            )
-        {
-            return Err(IngressUowError::RoomGenerationStale);
-        }
+        let _ = (tx, submission, validate_local);
         Ok(std::marker::PhantomData)
     }
 }

@@ -60,6 +60,7 @@ async fn fixture() -> (Database, IngressUnitOfWork, IngressSubmission) {
             plan: Vec::new(),
             intents: Vec::new(),
             sanitized_message: message,
+            rejection: None,
             error_reply: None,
             room_execution: RoomExecutionPath::None,
         },
@@ -150,18 +151,18 @@ fn typed_failure_matrix_is_non_advancing() {
     }
 }
 #[tokio::test]
-async fn local_snapshot_without_revision_proof_fails_closed() {
+async fn local_unfenced_room_commits_without_snapshot_revision_proof() {
     let (db, uow, mut submission) = fixture().await;
     submission.plan.room_execution = RoomExecutionPath::Local {
         room: "room@muc.example.com".parse().expect("room"),
         fence: crate::server::routes::interpret::effects::room::RoomFenceRequirement::Unfenced,
         snapshot_generation: 1,
     };
-    let failure = commit_submission(&uow, &submission, 3)
+    let decision = commit_submission(&uow, &submission, 3)
         .await
-        .expect_err("no revision proof");
-    assert_eq!(failure.class(), IngressDecisionClass::RoomGenerationStale);
-    assert_eq!(messages(&db).await, 0);
+        .expect("single-node room commit");
+    assert_eq!(decision.class, IngressDecisionClass::Accepted);
+    assert_eq!(messages(&db).await, 1);
 }
 #[tokio::test]
 async fn precommit_timeout_and_frontier_stale_leave_no_rows() {
@@ -202,5 +203,54 @@ async fn precommit_timeout_and_frontier_stale_leave_no_rows() {
                 .expect("integer");
             assert_eq!(count, 0, "{table}");
         }
+    }
+}
+
+#[tokio::test]
+async fn plan_rejection_is_authoritative_for_committed_denials() {
+    use crate::server::routes::interpret::effects::{
+        AuthorizationDeniedReason, PlanRejection, PolicyDeniedReason, SemanticMalformedReason,
+    };
+    use waddle_xmpp::ingress::{FrozenStanzaError, FrozenStanzaErrorType, IngressEffectIntent};
+    for (reason, class) in [
+        (
+            PlanRejection::AuthorizationDenied(AuthorizationDeniedReason::BlockedSender),
+            IngressDecisionClass::AuthorizationDenied,
+        ),
+        (
+            PlanRejection::PolicyDenied(PolicyDeniedReason::OperationalFenceLoss),
+            IngressDecisionClass::PolicyDenied,
+        ),
+        (
+            PlanRejection::SemanticMalformed(SemanticMalformedReason::MalformedPayload),
+            IngressDecisionClass::SemanticMalformed,
+        ),
+        (
+            PlanRejection::PolicyDenied(PolicyDeniedReason::CaptureOverflow),
+            IngressDecisionClass::CaptureOverflow,
+        ),
+    ] {
+        let (db, uow, mut submission) = fixture().await;
+        // Deliberately use one error condition for all classes: the typed reason
+        // determines the committed class, not a second classification of XML.
+        let error = FrozenStanzaError::new(
+            FrozenStanzaErrorType::Cancel,
+            waddle_xmpp::StanzaErrorCondition::Forbidden,
+        );
+        let recipient = "romeo@example.com/phone".parse().expect("recipient");
+        let mut reply = submission.plan.sanitized_message.clone();
+        reply.type_ = xmpp_parsers::message::MessageType::Error;
+        reply.payloads.push(error.to_xmpp().into());
+        submission.plan.rejection = Some(reason);
+        submission.plan.error_reply = Some(waddle_xmpp::Stanza::Message(reply));
+        submission
+            .plan
+            .intents
+            .push(IngressEffectIntent::ErrorReply { recipient, error });
+        let decision = commit_submission(&uow, &submission, 3)
+            .await
+            .expect("committed denial");
+        assert_eq!(decision.class, class);
+        assert_eq!(messages(&db).await, 1);
     }
 }

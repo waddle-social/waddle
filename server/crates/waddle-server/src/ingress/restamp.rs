@@ -34,8 +34,10 @@ pub fn restamp_plan(
         ids.stanza(stanza);
     }
     for planned in &mut stamped.plan {
-        for PlanEffectDependency::AfterArchive { minted, .. } in &mut planned.dependencies {
-            ids.id(minted);
+        for dependency in &mut planned.dependencies {
+            if let PlanEffectDependency::AfterArchive { minted, .. } = dependency {
+                ids.id(minted);
+            }
         }
         match &mut planned.effect {
             Effect::Durable(effect) => ids.durable(effect),
@@ -194,6 +196,21 @@ impl Replacements {
 
     fn external(&self, effect: &mut ExternalEffect) {
         match effect {
+            ExternalEffect::RouteToPeer(route) | ExternalEffect::QueueOfflineDelivery(route) => {
+                if let Some(waddle_xmpp::ingress::EffectMessageIdentity::StanzaId(id)) =
+                    &mut route.route_identity
+                {
+                    self.id(id);
+                }
+                self.message(&mut route.message);
+                match &mut route.fallback.payload {
+                    PendingPayload::Archived(id) => self.id(id),
+                    PendingPayload::Transient(message) => self.message(message),
+                }
+            }
+            ExternalEffect::RoomMembershipMutation(_)
+            | ExternalEffect::InviteLedger(_)
+            | ExternalEffect::DmPinMutation(_) => {}
             ExternalEffect::Frame(stanza) => self.stanza(stanza),
             ExternalEffect::Direct(effect) => self.direct(effect),
             ExternalEffect::Room(effect) => self.room(effect),
@@ -206,7 +223,8 @@ impl Replacements {
             ExternalDirectEffect::NotificationActivity { mutation, .. } => {
                 self.notification(mutation)
             }
-            ExternalDirectEffect::PushInboxUpdate { owner, entry } => self.inbox(owner, entry),
+            // The referenced durable projection owns the entry and is re-stamped above.
+            ExternalDirectEffect::PushInboxUpdate { .. } => {}
             ExternalDirectEffect::LinkPreviewRefs { mutations }
             | ExternalDirectEffect::ClearLinkPreviewRefs { mutations } => {
                 for mutation in mutations {
@@ -242,7 +260,6 @@ impl Replacements {
                 self.message(message);
                 self.message(error_request);
             }
-            ExternalRoomEffect::BroadcastRoomSystemMessage { message, .. } => self.message(message),
             ExternalRoomEffect::NotificationCandidate {
                 archive_stanza_id,
                 candidate,

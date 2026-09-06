@@ -56,6 +56,16 @@ fn recorded_match<'a>(
 fn same_mutation_shape(recorded: &IngressEffectIntent, planned: &IngressEffectIntent) -> bool {
     match (recorded, planned) {
         (
+            IngressEffectIntent::MucInviteLedger { mutation: saved },
+            IngressEffectIntent::MucInviteLedger { mutation: offered },
+        ) => saved.action == offered.action,
+        (
+            IngressEffectIntent::DmPinMutation { action: saved, .. },
+            IngressEffectIntent::DmPinMutation {
+                action: offered, ..
+            },
+        ) => std::mem::discriminant(saved) == std::mem::discriminant(offered),
+        (
             IngressEffectIntent::NotificationActivityPreview {
                 mutation: saved, ..
             },
@@ -200,7 +210,48 @@ fn apply_external(
     original: &IngressEffectIntent,
     recorded: &IngressEffectIntent,
 ) {
+    use crate::server::routes::interpret::effects::early::RoomMembershipMutation;
+    use crate::server::routes::websocket::handlers::message::muc_invite::InviteLedgerMutation;
     match (effect, original, recorded) {
+        (
+            ExternalEffect::InviteLedger(InviteLedgerMutation::Record {
+                invite,
+                recorded_at,
+                ..
+            }),
+            IngressEffectIntent::MucInviteLedger { mutation: old },
+            IngressEffectIntent::MucInviteLedger { mutation: saved },
+        ) if invite.room == old.room
+            && invite.invitee == old.invitee
+            && invite.inviter == old.inviter
+            && old.action == waddle_xmpp::ingress::MucInviteLedgerAction::Recorded
+            && saved.action == old.action =>
+        {
+            if let Some(saved_at) = saved.recorded_at {
+                *recorded_at = saved_at;
+                invite.inviter = saved.inviter.clone();
+            }
+        }
+        (
+            ExternalEffect::DmPinMutation(mutation),
+            IngressEffectIntent::DmPinMutation {
+                pair,
+                target_stanza_id,
+                action: old,
+            },
+            IngressEffectIntent::DmPinMutation { action: saved, .. },
+        ) if mutation.pair.low_peer == pair.0
+            && mutation.pair.high_peer == pair.1
+            && mutation.target_stanza_id == *target_stanza_id
+            && mutation.action == *old =>
+        {
+            mutation.action = saved.clone();
+        }
+        (
+            ExternalEffect::RoomMembershipMutation(RoomMembershipMutation::GroupDm(mutation)),
+            IngressEffectIntent::GroupDmMembershipGrant { grant: old },
+            IngressEffectIntent::GroupDmMembershipGrant { grant: saved },
+        ) if mutation.grant == *old => mutation.grant = saved.clone(),
         (
             ExternalEffect::Room(ExternalRoomEffect::NotificationCandidate {
                 recovery: Some(recovery),
@@ -223,17 +274,6 @@ fn apply_external(
                 mutation: saved, ..
             },
         ) if owner == old_owner && mutation == old => *mutation = saved.clone(),
-        (
-            ExternalEffect::Direct(ExternalDirectEffect::PushInboxUpdate { owner, entry }),
-            IngressEffectIntent::InboxProject {
-                owner: old_owner,
-                mutation: InboxProjectionMutation::Direct { entry: old, .. },
-            },
-            IngressEffectIntent::InboxProject {
-                mutation: InboxProjectionMutation::Direct { entry: saved, .. },
-                ..
-            },
-        ) if owner == old_owner && entry.as_ref() == old => **entry = saved.clone(),
         (
             ExternalEffect::Direct(
                 ExternalDirectEffect::LinkPreviewRefs { mutations }

@@ -11,13 +11,16 @@ use crate::{
     server::routes::interpret::{
         effects::{
             delivery::ExternalDeliveryEffect, direct::ExternalDirectEffect, Effect, EffectOutcome,
-            EffectSink, ExternalEffect, ImmediateSink, PlannedEffect,
+            ExternalEffect, ImmediateSink, PlannedEffect,
         },
         Deps, FullJidDeliveryOutcome,
     },
 };
 
 use super::decision::{EffectReceiptKey, IngressDecision};
+
+#[path = "execute_dependencies.rs"]
+mod dependencies;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ExternalOutcome {
@@ -57,29 +60,95 @@ pub async fn execute_effects(
     }
     let deadline = tokio::time::Instant::now() + budget;
     let mut recorded = Vec::new();
-    for (index, effect) in decision.external.iter().enumerate() {
-        let outcome = if tokio::time::Instant::now() >= deadline {
+    let mut proven = vec![Vec::new(); decision.external.len()];
+    let mut completed = vec![None; decision.external.len()];
+    let mut planned = decision
+        .external
+        .iter()
+        .cloned()
+        .enumerate()
+        .map(|(index, effect)| {
+            let mut planned = PlannedEffect::new(Effect::External(effect));
+            planned.dependencies = decision
+                .external_dependencies
+                .get(index)
+                .cloned()
+                .unwrap_or_default();
+            planned
+        })
+        .collect::<Vec<_>>();
+    report.outcomes = decision
+        .external
+        .iter()
+        .cloned()
+        .map(|effect| (effect, ExternalOutcome::Failed))
+        .collect();
+    while completed.iter().any(Option::is_none) {
+        let next = planned.iter().enumerate().find_map(|(index, effect)| {
+            if completed[index].is_some() {
+                return None;
+            }
+            dependencies::ready(&effect.dependencies, &decision.external, &completed)
+                .map(|ready| (index, ready))
+        });
+        let Some((index, ready)) = next else {
+            // A dependency cycle cannot execute; preserve and meter every obligation.
+            for (index, result) in completed.iter_mut().enumerate() {
+                if result.is_none() {
+                    *result = Some(false);
+                    meter_unresolved(&decision.external[index]);
+                }
+            }
+            break;
+        };
+        let effect = &decision.external[index];
+        let outcome = if !ready || tokio::time::Instant::now() >= deadline {
+            completed[index] = Some(false);
             ExternalOutcome::Failed
         } else {
             match tokio::time::timeout_at(
                 deadline,
-                sink.execute(PlannedEffect::new(Effect::External(effect.clone())), deps),
+                sink.execute_with_applied(planned[index].clone(), deps, &decision.applied_durable),
             )
             .await
             {
-                Ok(result) => classify_outcome(effect, result, &mut report.frames),
-                Err(_) => ExternalOutcome::Uncertain,
+                Ok(result) => {
+                    completed[index] = Some(dependencies::permits_dependents(effect, &result));
+                    proven[index] =
+                        proven_receipts(effect, &result, &decision.external_receipts[index]);
+                    if let (
+                        ExternalEffect::RoomMembershipMutation(mutation),
+                        EffectOutcome::Membership(outcome),
+                    ) = (effect, &result)
+                    {
+                        let (room, member) = dependencies::membership_identity(mutation);
+                        for dependent in &mut planned {
+                            dependent.resolve_membership_outcome(room, member, *outcome);
+                        }
+                    }
+                    classify_outcome(effect, result, &mut report.frames)
+                }
+                Err(_) => {
+                    completed[index] = Some(false);
+                    ExternalOutcome::Uncertain
+                }
             }
         };
-        report.outcomes.push((effect.clone(), outcome));
+        report.outcomes[index].1 = outcome;
         if outcome != ExternalOutcome::Done {
             meter_unresolved(effect);
             continue;
         }
+        if decision.external_receipts[index]
+            .iter()
+            .any(|key| !proven[index].contains(key))
+        {
+            meter_unresolved(effect);
+        }
         let Some(message_key) = decision.message_key else {
             continue;
         };
-        for key in completed_receipts(decision, &report.outcomes, index) {
+        for key in completed_receipts(decision, &report.outcomes, &proven, index) {
             if recorded.contains(&key) {
                 continue;
             }
@@ -111,6 +180,12 @@ pub async fn execute_effects(
         }
     }
     if let Some(key) = decision.message_key {
+        // Tokio's timeout polls its future before checking the deadline. With
+        // no budget, do not start a transaction that must immediately cancel.
+        if budget.is_zero() {
+            report.terminalization_failure = Some(ExecutionPersistenceFailure::BudgetExhausted);
+            return report;
+        }
         // Terminalization is maintenance, independently bounded from side effects.
         match tokio::time::timeout(budget, terminalize_if_complete(uow, key)).await {
             Ok(Ok(_)) => {}
@@ -129,6 +204,7 @@ pub async fn execute_effects(
 fn completed_receipts(
     decision: &IngressDecision,
     outcomes: &[(ExternalEffect, ExternalOutcome)],
+    proven: &[Vec<EffectReceiptKey>],
     index: usize,
 ) -> Vec<EffectReceiptKey> {
     let Some(keys) = decision.external_receipts.get(index) else {
@@ -145,8 +221,61 @@ fn completed_receipts(
                         || outcomes
                             .get(other_index)
                             .is_some_and(|(_, outcome)| *outcome == ExternalOutcome::Done)
+                            && proven
+                                .get(other_index)
+                                .is_some_and(|keys| keys.contains(key))
                 })
         })
+        .cloned()
+        .collect()
+}
+
+fn proven_receipts(
+    effect: &ExternalEffect,
+    outcome: &EffectOutcome,
+    candidates: &[EffectReceiptKey],
+) -> Vec<EffectReceiptKey> {
+    use crate::server::routes::interpret::effects::invite::MucUserDeliveryProof;
+    use waddle_xmpp::ingress::{IngressEffectIntent, PendingDeliveryMutation};
+    let (ExternalEffect::RouteToPeer(route) | ExternalEffect::QueueOfflineDelivery(route)) = effect
+    else {
+        return candidates.to_vec();
+    };
+    let EffectOutcome::MucUserDelivery(Ok(proof)) = outcome else {
+        return Vec::new();
+    };
+    let mut intents = Vec::new();
+    if let MucUserDeliveryProof::Queued { row_id } = proof {
+        intents.push(IngressEffectIntent::PendingDelivery {
+            mutation: PendingDeliveryMutation::Transient {
+                recipient: route.recipient.clone(),
+                row_id: row_id.clone(),
+            },
+        });
+    }
+    let route_completed = match proof {
+        MucUserDeliveryProof::Queued { .. } => route.resources.is_empty(),
+        MucUserDeliveryProof::Delivered { resources } => route
+            .resources
+            .iter()
+            .all(|resource| resources.contains(resource)),
+    };
+    if route_completed {
+        if let Some(identity) = &route.route_identity {
+            intents.push(IngressEffectIntent::RouteDirect {
+                recipient: route.recipient.clone(),
+                fanout: route.resources.clone(),
+                route_identity: identity.clone(),
+            });
+        }
+    }
+    let proven = intents
+        .iter()
+        .filter_map(|intent| super::durable::receipt_key(intent).ok())
+        .collect::<Vec<_>>();
+    candidates
+        .iter()
+        .filter(|key| proven.contains(key))
         .cloned()
         .collect()
 }
@@ -159,8 +288,49 @@ fn classify_outcome(
     match outcome {
         EffectOutcome::Frames(mut produced) => {
             frames.append(&mut produced);
-            ExternalOutcome::Done
+            if matches!(
+                effect,
+                ExternalEffect::RoomMembershipMutation(_)
+                    | ExternalEffect::DmPinMutation(_)
+                    | ExternalEffect::InviteLedger(_)
+            ) {
+                ExternalOutcome::Failed
+            } else {
+                ExternalOutcome::Done
+            }
         }
+        EffectOutcome::Membership(_) => ExternalOutcome::Done,
+        EffectOutcome::MucUserDelivery(Ok(proof)) => {
+            use crate::server::routes::interpret::effects::invite::MucUserDeliveryProof;
+            match (effect, proof) {
+                (
+                    ExternalEffect::RouteToPeer(route)
+                    | ExternalEffect::QueueOfflineDelivery(route),
+                    MucUserDeliveryProof::Delivered { resources },
+                ) if route
+                    .resources
+                    .iter()
+                    .any(|resource| !resources.contains(resource)) =>
+                {
+                    ExternalOutcome::Uncertain
+                }
+                _ => ExternalOutcome::Done,
+            }
+        }
+        EffectOutcome::InviteLedger(Ok(outcome)) => {
+            use crate::server::routes::websocket::{
+                handlers::message::muc_invite::InviteLedgerOutcome, muc_invites::RecordOutcome,
+            };
+            match outcome {
+                InviteLedgerOutcome::Recorded(RecordOutcome::New { .. })
+                | InviteLedgerOutcome::Claimed(true) => ExternalOutcome::Done,
+                InviteLedgerOutcome::Recorded(RecordOutcome::AlreadyOutstanding)
+                | InviteLedgerOutcome::Claimed(false) => ExternalOutcome::Uncertain,
+            }
+        }
+        EffectOutcome::PlannedInbox(_)
+        | EffectOutcome::MucUserDelivery(Err(_))
+        | EffectOutcome::InviteLedger(Err(_)) => ExternalOutcome::Failed,
         EffectOutcome::Completed if !has_confirmed_completion(effect) => ExternalOutcome::Uncertain,
         EffectOutcome::Completed | EffectOutcome::Archive(Ok(_)) | EffectOutcome::Inbox(Ok(_)) => {
             ExternalOutcome::Done
@@ -207,7 +377,13 @@ fn meter_unresolved(effect: &ExternalEffect) {
     let kind = match effect {
         ExternalEffect::Frame(_) => IngressUnresolvedEffectKind::Frame,
         ExternalEffect::Direct(_) => IngressUnresolvedEffectKind::Direct,
-        ExternalEffect::Room(_) => IngressUnresolvedEffectKind::Room,
+        ExternalEffect::Room(_)
+        | ExternalEffect::RoomMembershipMutation(_)
+        | ExternalEffect::InviteLedger(_) => IngressUnresolvedEffectKind::Room,
+        ExternalEffect::DmPinMutation(_) => IngressUnresolvedEffectKind::Direct,
+        ExternalEffect::RouteToPeer(_) | ExternalEffect::QueueOfflineDelivery(_) => {
+            IngressUnresolvedEffectKind::Delivery
+        }
         ExternalEffect::Delivery(_) => IngressUnresolvedEffectKind::Delivery,
     };
     waddle_xmpp::telemetry::reliability::increment_ingress_effect_unresolved(kind);
@@ -236,6 +412,10 @@ pub async fn terminalize_if_complete(
         crate::ingress_substrate::TerminalizeOutcome::MessageVanished
     ))
 }
+
+#[cfg(test)]
+#[path = "execute_dependency_tests.rs"]
+mod dependency_tests;
 
 #[cfg(test)]
 mod tests {
@@ -300,16 +480,25 @@ mod tests {
             alias: AliasOutcomeClass::NoOrigin,
             verdict: None,
             archive_ids: vec![],
+            applied_durable: Default::default(),
+            external_dependencies: vec![vec![], vec![]],
             external: vec![frame(), frame()],
             external_receipts: vec![vec![key.clone()], vec![key.clone()]],
             receipts_pending: vec![key.clone()],
         };
         let mut outcomes = vec![(frame(), ExternalOutcome::Done)];
-        assert!(completed_receipts(&decision, &outcomes, 0).is_empty());
+        assert!(
+            completed_receipts(&decision, &outcomes, &decision.external_receipts, 0).is_empty()
+        );
         outcomes.push((frame(), ExternalOutcome::Failed));
-        assert!(completed_receipts(&decision, &outcomes, 1).is_empty());
+        assert!(
+            completed_receipts(&decision, &outcomes, &decision.external_receipts, 1).is_empty()
+        );
         outcomes[1].1 = ExternalOutcome::Done;
-        assert_eq!(completed_receipts(&decision, &outcomes, 1), vec![key]);
+        assert_eq!(
+            completed_receipts(&decision, &outcomes, &decision.external_receipts, 1),
+            vec![key]
+        );
     }
 
     #[test]
@@ -348,12 +537,7 @@ mod tests {
         let owner = "peer@example.com".parse().expect("owner");
         let effect = ExternalEffect::Direct(ExternalDirectEffect::PushInboxUpdate {
             owner,
-            entry: Box::new(waddle_xmpp::inbox::InboxEntry::new(
-                "sender@example.com".parse().expect("sender"),
-                waddle_xmpp::inbox::ConversationKind::Direct,
-                "id",
-                0,
-            )),
+            projection: crate::server::routes::interpret::effects::ProjectionRef(0),
         });
         assert_eq!(
             classify_outcome(&effect, EffectOutcome::Completed, &mut Vec::new()),

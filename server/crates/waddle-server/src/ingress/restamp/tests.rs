@@ -29,6 +29,7 @@ fn fixture() -> (IngressPlan, BareJid, StanzaId, StanzaId) {
             archived_at: chrono::Utc::now(),
         }],
         sanitized_message: message,
+        rejection: None,
         error_reply: None,
         room_execution: RoomExecutionPath::None,
     };
@@ -94,7 +95,7 @@ fn restamp_updates_archive_inbox_dependencies_and_external_frames() {
         PlannedEffect::new(Effect::External(ExternalEffect::Direct(
             ExternalDirectEffect::PushInboxUpdate {
                 owner: owner.clone(),
-                entry: Box::new(entry),
+                projection: crate::server::routes::interpret::effects::ProjectionRef(1),
             },
         ))),
         PlannedEffect::new(Effect::External(ExternalEffect::Frame(Box::new(
@@ -134,13 +135,16 @@ fn restamp_updates_archive_inbox_dependencies_and_external_frames() {
         }]
     );
     let Effect::External(ExternalEffect::Direct(ExternalDirectEffect::PushInboxUpdate {
-        entry,
+        projection,
         ..
     })) = &result.plan[2].effect
     else {
         panic!("push");
     };
-    assert_eq!(entry.last_stanza_id, recorded.id);
+    assert_eq!(
+        *projection,
+        crate::server::routes::interpret::effects::ProjectionRef(1)
+    );
     let Effect::External(ExternalEffect::Frame(stanza)) = &result.plan[3].effect else {
         panic!("frame");
     };
@@ -252,4 +256,90 @@ fn restamp_requires_recorded_archive_and_assigning_authority_to_match() {
             vec![minted.clone()]
         );
     }
+}
+
+#[test]
+fn system_archive_and_peer_delivery_share_recorded_identity() {
+    use crate::server::routes::interpret::effects::invite::MucUserRoute;
+    use crate::server::routes::interpret::effects::room::RoomFenceRequirement;
+    use waddle_xmpp::pending_delivery::{PendingRow, PendingRowId};
+    let (mut plan, room, minted, recorded) = fixture();
+    let mut message = plan.sanitized_message.clone();
+    message.type_ = xmpp_parsers::message::MessageType::Groupchat;
+    message.from = Some(room.clone().into());
+    let mut archive = ArchivedMessage::for_test(room.clone().into(), room.clone().into());
+    archive.id = minted.id.clone();
+    archive.stanza_id = Some(minted.clone());
+    archive.stanza_xml = Some(String::from(&minidom::Element::from(message.clone())));
+    plan.plan
+        .push(PlannedEffect::new(Effect::Durable(DurableEffect::Room(
+            DurableRoomEffect::ArchiveGroupchat {
+                room: room.clone(),
+                message: Box::new(archive),
+                fence: RoomFenceRequirement::Unfenced,
+                archive_expectation: waddle_xmpp::mam::ArchiveExpectation::Fresh,
+            },
+        ))));
+    let recipient = jid("bob@example.test");
+    let route = MucUserRoute {
+        route_identity: Some(EffectMessageIdentity::StanzaId(minted)),
+        recipient: recipient.clone(),
+        resources: Vec::new(),
+        message: Box::new(message.clone()),
+        fallback: PendingRow {
+            id: PendingRowId::new("system-row"),
+            recipient,
+            original_receipt_at: chrono::Utc::now(),
+            payload: PendingPayload::Transient(Box::new(message)),
+            flushed_in_session: None,
+            outbound_sequence: None,
+        },
+        failure: None,
+    };
+    plan.plan.push(PlannedEffect::new(Effect::External(
+        ExternalEffect::RouteToPeer(route.clone()),
+    )));
+    plan.plan.push(PlannedEffect::new(Effect::External(
+        ExternalEffect::QueueOfflineDelivery(route),
+    )));
+    let stamped = restamp_plan(&plan, &[(room, recorded.clone())]);
+    let Effect::Durable(DurableEffect::Room(DurableRoomEffect::ArchiveGroupchat {
+        message, ..
+    })) = &stamped.plan[0].effect
+    else {
+        panic!("system archive");
+    };
+    assert_eq!(message.id, recorded.id);
+    assert_eq!(message.stanza_id.as_ref(), Some(&recorded));
+    for planned in &stamped.plan[1..] {
+        let Effect::External(
+            ExternalEffect::RouteToPeer(route) | ExternalEffect::QueueOfflineDelivery(route),
+        ) = &planned.effect
+        else {
+            panic!("system delivery");
+        };
+        assert_eq!(extract_stanza_ids(&route.message), vec![recorded.clone()]);
+        assert_eq!(
+            route.route_identity,
+            Some(EffectMessageIdentity::StanzaId(recorded.clone()))
+        );
+        let PendingPayload::Transient(message) = &route.fallback.payload else {
+            panic!("fallback");
+        };
+        assert_eq!(extract_stanza_ids(message), vec![recorded.clone()]);
+    }
+    let mut saved_intents = stamped.intents.clone();
+    let IngressEffectIntent::ArchiveAuthoritative { archived_at, .. } = &mut saved_intents[0]
+    else {
+        panic!("archive intent");
+    };
+    *archived_at = chrono::DateTime::from_timestamp(123, 0).expect("timestamp");
+    let reconciled = crate::ingress::recorded::apply_recorded_intents(&stamped, &saved_intents);
+    let Effect::Durable(DurableEffect::Room(DurableRoomEffect::ArchiveGroupchat {
+        message, ..
+    })) = &reconciled.plan[0].effect
+    else {
+        panic!("recorded archive");
+    };
+    assert_eq!(message.timestamp.timestamp(), 123);
 }

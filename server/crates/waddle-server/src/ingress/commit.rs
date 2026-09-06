@@ -208,6 +208,7 @@ async fn commit_attempt(
         accepted.plan.clear();
         accepted.intents.clear();
         accepted.error_reply = None;
+        accepted.rejection = None;
         accepted
     } else if let Some(class) = rejection {
         super::rejection::rejection_plan(&submission.plan, class)?
@@ -264,6 +265,11 @@ async fn commit_attempt(
     };
     let external =
         super::suppression::filter_external_effects(&plan, filter_verdict, &applied.archives);
+    let external_dependencies =
+        super::suppression::external_effect_indices(&plan, filter_verdict, &applied.archives)
+            .into_iter()
+            .map(|index| plan.plan[index].dependencies.clone())
+            .collect();
     let mut pending = Vec::new();
     for intent in &intents {
         let receipt = super::durable::receipt_key(intent)?;
@@ -286,6 +292,8 @@ async fn commit_attempt(
         alias,
         verdict: Some(verdict),
         archive_ids: archive_ids(&intents),
+        applied_durable: std::sync::Arc::new(applied.outcomes),
+        external_dependencies,
         external,
         external_receipts,
         receipts_pending: pending,

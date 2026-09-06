@@ -812,11 +812,13 @@ pub(super) async fn deliver_muc_user_message(
     deps: &Deps<'_>,
 ) -> Result<(), MucUserDeliveryError> {
     use crate::server::routes::interpret::effects::invite::MucUserRoute;
-    let resources = waddle_xmpp::registry::get_resources_for_user(
+    let mut resources = waddle_xmpp::registry::get_resources_for_user(
         &state.deps.protocol.user_registry,
         recipient,
     )
     .await;
+    resources.sort();
+    resources.dedup();
     let fallback = PendingRow {
         id: PendingRowId::fresh(),
         recipient: recipient.clone(),
@@ -826,6 +828,10 @@ pub(super) async fn deliver_muc_user_message(
         outbound_sequence: None,
     };
     let offline = resources.is_empty();
+    let route_identity = deps
+        .ingress_effect_capture
+        .as_ref()
+        .map(|capture| capture.next_route_identity());
     if deps.effects.is_planning() {
         // A listed resource can refuse its Phase-C write. Freeze the fallback
         // intent now as well, before the ingress transaction commits.
@@ -835,13 +841,16 @@ pub(super) async fn deliver_muc_user_message(
                 row_id: fallback.id.clone(),
             },
         });
-        super::record_route_direct_intent(
-            deps.ingress_effect_capture.as_ref(),
-            recipient.clone(),
-            resources.clone(),
-        );
+        if let Some(route_identity) = &route_identity {
+            deps.capture_intent(IngressEffectIntent::RouteDirect {
+                recipient: recipient.clone(),
+                fanout: resources.clone(),
+                route_identity: route_identity.clone(),
+            });
+        }
     }
     let route = MucUserRoute {
+        route_identity,
         recipient: recipient.clone(),
         resources,
         message: Box::new(message),
@@ -864,7 +873,7 @@ pub(super) async fn deliver_muc_user_message(
         .await
     {
         EffectOutcome::Completed => Ok(()),
-        EffectOutcome::MucUserDelivery(result) => result,
+        EffectOutcome::MucUserDelivery(result) => result.map(|_| ()),
         _ => Err(MucUserDeliveryError::Unavailable),
     }
 }

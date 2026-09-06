@@ -7,8 +7,8 @@ use crate::{
         MamArchiveRepository,
     },
     server::routes::interpret::effects::{
-        direct::DurableDirectEffect, room::DurableRoomEffect, DurableEffect, Effect,
-        ExternalEffect, IngressPlan,
+        direct::DurableDirectEffect, room::DurableRoomEffect, AppliedDurableEffects, DurableEffect,
+        DurableOutcome, Effect, ExternalEffect, IngressPlan, ProjectionRef,
     },
 };
 use jid::BareJid;
@@ -19,6 +19,7 @@ use waddle_xmpp::{
 };
 pub(super) struct AppliedDurable {
     pub archives: Vec<(BareJid, MamTxStoreOutcome)>,
+    pub outcomes: AppliedDurableEffects,
     pub receipts: Vec<EffectReceiptKey>,
 }
 
@@ -47,10 +48,11 @@ pub(super) async fn apply_durable(
 ) -> Result<AppliedDurable, IngressUowError> {
     let mut applied = AppliedDurable {
         archives: Vec::new(),
+        outcomes: AppliedDurableEffects::default(),
         receipts: Vec::new(),
     };
     let mut completed = Vec::new();
-    for planned in &plan.plan {
+    for (index, planned) in plan.plan.iter().enumerate() {
         let Effect::Durable(effect) = &planned.effect else {
             continue;
         };
@@ -117,8 +119,12 @@ pub(super) async fn apply_durable(
                 entry,
                 increment_unread,
             }) => {
-                InboxRepository::apply_once(tx, key, owner, *entry.clone(), *increment_unread)
-                    .await?;
+                let entry =
+                    InboxRepository::apply_once(tx, key, owner, *entry.clone(), *increment_unread)
+                        .await?;
+                applied
+                    .outcomes
+                    .insert(ProjectionRef(index), DurableOutcome::Inbox(entry));
             }
             DurableEffect::Room(DurableRoomEffect::ProjectGroupchatInbox {
                 owner,
@@ -126,10 +132,10 @@ pub(super) async fn apply_durable(
                 is_recipient,
                 recovery,
             }) => {
-                if let Some(recovery) = recovery.as_ref() {
+                let entry = if let Some(recovery) = recovery.as_ref() {
                     if recovery_completed(tx, key, recovery, recorded).await? {
                         InboxRepository::apply_once(tx, key, owner, *entry.clone(), *is_recipient)
-                            .await?;
+                            .await?
                     } else {
                         InboxRepository::upsert_with_groupchat_notification_recovery(
                             tx,
@@ -139,18 +145,30 @@ pub(super) async fn apply_durable(
                             *is_recipient,
                             recovery.clone(),
                         )
-                        .await?;
+                        .await?
                     }
                 } else {
                     InboxRepository::apply_once(tx, key, owner, *entry.clone(), *is_recipient)
-                        .await?;
-                }
+                        .await?
+                };
+                applied
+                    .outcomes
+                    .insert(ProjectionRef(index), DurableOutcome::Inbox(entry));
             }
+
             DurableEffect::Direct(DurableDirectEffect::MarkInboxRead {
                 owner,
                 channel,
                 thread,
-            }) => InboxRepository::mark_read(tx, owner, channel, thread.as_ref()).await?,
+            }) => {
+                if let Some(entry) =
+                    InboxRepository::mark_read(tx, owner, channel, thread.as_ref()).await?
+                {
+                    applied
+                        .outcomes
+                        .insert(ProjectionRef(index), DurableOutcome::Inbox(entry));
+                }
+            }
             DurableEffect::Direct(DurableDirectEffect::RetractionTombstone {
                 archive,
                 target,

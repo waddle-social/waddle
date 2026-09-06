@@ -10,6 +10,7 @@ fn empty_plan() -> IngressPlan {
         plan: Vec::new(),
         intents: Vec::new(),
         sanitized_message: xmpp_parsers::message::Message::new(None),
+        rejection: None,
         error_reply: None,
         room_execution: RoomExecutionPath::None,
     }
@@ -43,12 +44,27 @@ fn recorded_inbox_payload_and_receipt_identity_win_over_policy_drift() {
     plan.plan
         .push(PlannedEffect::new(Effect::Durable(DurableEffect::Direct(
             DurableDirectEffect::ProjectInbox {
-                owner,
+                owner: owner.clone(),
                 entry: Box::new(offered),
                 increment_unread: true,
             },
         ))));
+    plan.plan.push(PlannedEffect::new(Effect::External(
+        ExternalEffect::Direct(ExternalDirectEffect::PushInboxUpdate {
+            owner,
+            projection: crate::server::routes::interpret::effects::ProjectionRef(0),
+        }),
+    )));
     let result = apply_recorded_intents(&plan, std::slice::from_ref(&recorded));
+    assert!(matches!(
+        result.plan[1].effect,
+        Effect::External(ExternalEffect::Direct(
+            ExternalDirectEffect::PushInboxUpdate {
+                projection: crate::server::routes::interpret::effects::ProjectionRef(0),
+                ..
+            }
+        ))
+    ));
     assert_eq!(result.intents, vec![recorded]);
     assert_eq!(plan.intents, vec![original]);
     let Effect::Durable(DurableEffect::Direct(DurableDirectEffect::ProjectInbox {
@@ -326,4 +342,104 @@ fn recorded_recovery_payload_respects_thread_and_execution_phase() {
     assert_eq!(external.created_at_ms, 200);
     assert_eq!(durable.key.thread_id.as_deref(), Some("thread-one"));
     assert_eq!(external.key.thread_id.as_deref(), Some("thread-one"));
+}
+
+#[test]
+fn recorded_invite_timestamp_is_applied_and_receipted_without_crossing_claim() {
+    use crate::server::routes::websocket::{
+        handlers::message::muc_invite::InviteLedgerMutation, muc_invites::OutstandingInvite,
+    };
+    use waddle_xmpp::ingress::{MucInviteLedgerAction, MucInviteLedgerMutation};
+    let invite = OutstandingInvite {
+        room: "room@example.test".parse().expect("room"),
+        invitee: "invitee@example.test".parse().expect("invitee"),
+        inviter: "inviter@example.test".parse().expect("inviter"),
+    };
+    let old_time = chrono::DateTime::from_timestamp(100, 0).expect("time");
+    let new_time = chrono::DateTime::from_timestamp(200, 0).expect("time");
+    let offered = MucInviteLedgerMutation {
+        room: invite.room.clone(),
+        invitee: invite.invitee.clone(),
+        inviter: invite.inviter.clone(),
+        action: MucInviteLedgerAction::Recorded,
+        recorded_at: Some(new_time),
+    };
+    let mut saved = offered.clone();
+    saved.recorded_at = Some(old_time);
+    let mut claim = offered.clone();
+    claim.action = MucInviteLedgerAction::Claimed;
+    claim.recorded_at = None;
+    let recorded = vec![
+        IngressEffectIntent::MucInviteLedger { mutation: claim },
+        IngressEffectIntent::MucInviteLedger { mutation: saved },
+    ];
+    let mut plan = empty_plan();
+    plan.intents
+        .push(IngressEffectIntent::MucInviteLedger { mutation: offered });
+    plan.plan.push(PlannedEffect::new(Effect::External(
+        ExternalEffect::InviteLedger(InviteLedgerMutation::Record {
+            invite,
+            recorded_at: new_time,
+            failure: None,
+        }),
+    )));
+    let result = apply_recorded_intents(&plan, &recorded);
+    assert_eq!(result.intents, vec![recorded[1].clone()]);
+    let Effect::External(effect) = &result.plan[0].effect else {
+        panic!("external")
+    };
+    let ExternalEffect::InviteLedger(InviteLedgerMutation::Record { recorded_at, .. }) = effect
+    else {
+        panic!("record")
+    };
+    assert_eq!(*recorded_at, old_time);
+    let receipts =
+        crate::ingress::receipts::external_receipts(std::slice::from_ref(effect), &result.intents)
+            .expect("receipts");
+    assert_eq!(
+        receipts[0],
+        vec![crate::ingress::durable::receipt_key(&recorded[1]).expect("key")]
+    );
+}
+
+#[test]
+fn recorded_dm_pin_metadata_is_applied_and_receipted() {
+    use crate::server::routes::websocket::{handlers::message::dm_pin::DmPinMutation, DmPairKey};
+    use waddle_xmpp::ingress::DmPinMutationAction;
+    let saved = IngressEffectIntent::storage_round_trip_samples()
+        .into_iter()
+        .find(|intent| matches!(intent, IngressEffectIntent::DmPinMutation { .. }))
+        .expect("pin sample");
+    let mut offered = saved.clone();
+    let IngressEffectIntent::DmPinMutation {
+        pair,
+        target_stanza_id,
+        action,
+    } = &mut offered
+    else {
+        panic!("pin")
+    };
+    let DmPinMutationAction::Pin { entry } = action else {
+        panic!("pin action")
+    };
+    entry.pinner_jid = "another@example.test".parse().expect("actor");
+    let effect = ExternalEffect::DmPinMutation(DmPinMutation {
+        pair: DmPairKey::new(pair.0.clone(), pair.1.clone()),
+        target_stanza_id: target_stanza_id.clone(),
+        action: action.clone(),
+    });
+    let mut plan = empty_plan();
+    plan.intents.push(offered);
+    plan.plan.push(PlannedEffect::new(Effect::External(effect)));
+    let result = apply_recorded_intents(&plan, std::slice::from_ref(&saved));
+    let Effect::External(effect) = &result.plan[0].effect else {
+        panic!("external")
+    };
+    let receipts =
+        crate::ingress::receipts::external_receipts(std::slice::from_ref(effect), &result.intents)
+            .expect("receipts");
+    assert_eq!(
+        receipts[0],
+        vec![crate::ingress::durable::receipt_key(&saved).expect("key")]
+    );
 }

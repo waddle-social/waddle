@@ -137,6 +137,7 @@ mod tests {
         )));
         let mut route = PlannedEffect::new(Effect::External(ExternalEffect::QueueOfflineDelivery(
             super::super::invite::MucUserRoute {
+                route_identity: None,
                 recipient: invite.invitee.clone(),
                 resources: vec![],
                 fallback: PendingRow {

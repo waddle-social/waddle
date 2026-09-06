@@ -13,6 +13,18 @@ pub(super) fn route_receipts(
     external: &[ExternalEffect],
     intent: &IngressEffectIntent,
 ) -> Option<Vec<usize>> {
+    if let IngressEffectIntent::PendingDelivery {
+        mutation: waddle_xmpp::ingress::PendingDeliveryMutation::Transient { recipient, row_id },
+    } = intent
+    {
+        return Some(external.iter().enumerate().filter_map(|(index, effect)| {
+            matches!(effect, ExternalEffect::RouteToPeer(route) | ExternalEffect::QueueOfflineDelivery(route)
+                if &route.fallback.id == row_id && &route.fallback.recipient == recipient).then_some(index)
+        }).collect());
+    }
+    if let Some(indices) = early_mutation_receipts(external, intent) {
+        return Some(indices);
+    }
     match intent {
         IngressEffectIntent::RouteDirect {
             recipient,
@@ -90,7 +102,13 @@ fn cover_recipients(
             .enumerate()
             .filter_map(|(index, effect)| {
                 full_delivery(effect, recipient)
-                    .filter(|message| message_identity(message, identity))
+                    .filter(|message| match effect {
+                        ExternalEffect::RouteToPeer(route)
+                        | ExternalEffect::QueueOfflineDelivery(route) => {
+                            route.route_identity.as_ref() == Some(identity)
+                        }
+                        _ => message_identity(message, identity),
+                    })
                     .map(|_| index)
             })
             .collect::<Vec<_>>();
@@ -117,6 +135,11 @@ fn message(stanza: &Stanza) -> Option<&Message> {
 
 fn full_delivery<'a>(effect: &'a ExternalEffect, recipient: &FullJid) -> Option<&'a Message> {
     match effect {
+        ExternalEffect::RouteToPeer(route) | ExternalEffect::QueueOfflineDelivery(route)
+            if route.resources.contains(recipient) =>
+        {
+            Some(&route.message)
+        }
         ExternalEffect::Frame(stanza)
         | ExternalEffect::Delivery(ExternalDeliveryEffect::UndeliverableBounce { reply: stanza }) => {
             message(stanza).filter(|message| message.to.as_ref() == Some(&recipient.clone().into()))
@@ -144,6 +167,11 @@ fn bare_delivery(
     identity: &EffectMessageIdentity,
 ) -> bool {
     match effect {
+        ExternalEffect::RouteToPeer(route) | ExternalEffect::QueueOfflineDelivery(route)
+            if &route.recipient == recipient =>
+        {
+            route.route_identity.as_ref() == Some(identity)
+        }
         ExternalEffect::Delivery(ExternalDeliveryEffect::RelayBareJid {
             target, stanza, ..
         }) if target == recipient => {
@@ -165,4 +193,48 @@ fn message_identity(message: &Message, identity: &EffectMessageIdentity) -> bool
         // plan interpreter is required before these can become receipts.
         EffectMessageIdentity::CaptureOrdinal(_) => false,
     }
+}
+
+fn early_mutation_receipts(
+    external: &[ExternalEffect],
+    intent: &IngressEffectIntent,
+) -> Option<Vec<usize>> {
+    use crate::server::routes::{
+        interpret::effects::early::RoomMembershipMutation,
+        websocket::handlers::message::muc_invite::InviteLedgerMutation,
+    };
+    use waddle_xmpp::ingress::MucInviteLedgerAction;
+    if !matches!(
+        intent,
+        IngressEffectIntent::DmPinMutation { .. }
+            | IngressEffectIntent::MucInviteMembershipGrant { .. }
+            | IngressEffectIntent::GroupDmMembershipGrant { .. }
+            | IngressEffectIntent::MucInviteLedger { .. }
+            | IngressEffectIntent::GroupDmInviteLedger { .. }
+    ) {
+        return None;
+    }
+    Some(external.iter().enumerate().filter_map(|(index, effect)| {
+        let matches = match (effect, intent) {
+            (ExternalEffect::DmPinMutation(mutation), IngressEffectIntent::DmPinMutation { pair, target_stanza_id, action }) => {
+                mutation.pair.low_peer == pair.0 && mutation.pair.high_peer == pair.1 && &mutation.target_stanza_id == target_stanza_id && &mutation.action == action
+            }
+            (ExternalEffect::RoomMembershipMutation(RoomMembershipMutation::GroupDm(mutation)), IngressEffectIntent::GroupDmMembershipGrant { grant }) => &mutation.grant == grant,
+            (ExternalEffect::RoomMembershipMutation(RoomMembershipMutation::Muc(mutation)), IngressEffectIntent::MucInviteMembershipGrant { grant }) => {
+                mutation.room == grant.room && mutation.invitee == grant.invitee && external.iter().any(|effect| matches!(effect, ExternalEffect::InviteLedger(InviteLedgerMutation::Record { invite, .. }) if invite.room == grant.room && invite.invitee == grant.invitee && invite.inviter == grant.inviter))
+            }
+            (ExternalEffect::InviteLedger(mutation), IngressEffectIntent::MucInviteLedger { mutation: recorded }) => {
+                let (invite, action, recorded_at) = match mutation {
+                    InviteLedgerMutation::Record { invite, recorded_at, .. } => (invite, MucInviteLedgerAction::Recorded, Some(*recorded_at)),
+                    InviteLedgerMutation::Claim { invite } => (invite, MucInviteLedgerAction::Claimed, None),
+                };
+                invite.room == recorded.room && invite.invitee == recorded.invitee && invite.inviter == recorded.inviter && action == recorded.action && recorded_at == recorded.recorded_at
+            }
+            (ExternalEffect::InviteLedger(InviteLedgerMutation::Record { invite, .. }), IngressEffectIntent::GroupDmInviteLedger { grant }) => {
+                invite.room == grant.room && invite.invitee == grant.invitee && invite.inviter == grant.inviter && external.iter().any(|effect| matches!(effect, ExternalEffect::RoomMembershipMutation(RoomMembershipMutation::GroupDm(mutation)) if &mutation.grant == grant))
+            }
+            _ => false,
+        };
+        matches.then_some(index)
+    }).collect())
 }

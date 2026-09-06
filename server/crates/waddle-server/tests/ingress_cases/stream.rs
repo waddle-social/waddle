@@ -64,6 +64,11 @@ async fn resumable_wire_binding(fixture: IngressFixture) {
     reply.to = reply.from.take();
     reply.payloads.push(error.clone().into());
     denied_replay.plan.error_reply = Some(waddle_xmpp::Stanza::Message(reply));
+    denied_replay.plan.rejection = Some(
+        waddle_server::ingress::effects::PlanRejection::AuthorizationDenied(
+            waddle_server::ingress::effects::AuthorizationDeniedReason::Forbidden,
+        ),
+    );
     denied_replay
         .plan
         .intents
@@ -184,6 +189,11 @@ async fn committed_rejection_wire_replay(fixture: IngressFixture) {
     reply.to = reply.from.take();
     reply.payloads.push(error.into());
     rejected.plan.error_reply = Some(Stanza::Message(reply));
+    rejected.plan.rejection = Some(
+        waddle_server::ingress::effects::PlanRejection::AuthorizationDenied(
+            waddle_server::ingress::effects::AuthorizationDeniedReason::Forbidden,
+        ),
+    );
     rejected.plan.intents.push(IngressEffectIntent::ErrorReply {
         recipient: "romeo@example.com/phone".parse().expect("recipient"),
         error: frozen.clone(),

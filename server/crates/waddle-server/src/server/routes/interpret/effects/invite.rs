@@ -28,11 +28,22 @@ pub enum InviteDeliveryFailure {
 
 #[derive(Clone, Debug)]
 pub struct MucUserRoute {
+    pub route_identity: Option<waddle_xmpp::ingress::EffectMessageIdentity>,
     pub recipient: BareJid,
     pub resources: Vec<FullJid>,
     pub message: Box<Message>,
     pub fallback: PendingRow,
     pub failure: Option<Box<InviteDeliveryFailure>>,
+}
+
+#[derive(Clone, Debug)]
+pub enum MucUserDeliveryProof {
+    Delivered {
+        resources: Vec<FullJid>,
+    },
+    Queued {
+        row_id: waddle_xmpp::pending_delivery::PendingRowId,
+    },
 }
 
 pub(crate) async fn execute(route: MucUserRoute, deps: &Deps<'_>) -> super::EffectOutcome {
@@ -50,7 +61,7 @@ pub(crate) async fn execute(route: MucUserRoute, deps: &Deps<'_>) -> super::Effe
             accepted.push(resource.clone());
         }
     }
-    if accepted.is_empty() {
+    let proof = if accepted.is_empty() {
         let row_id = route.fallback.id.clone();
         let result = state
             .deps
@@ -74,20 +85,27 @@ pub(crate) async fn execute(route: MucUserRoute, deps: &Deps<'_>) -> super::Effe
         deps.capture_intent(waddle_xmpp::ingress::IngressEffectIntent::PendingDelivery {
             mutation: waddle_xmpp::ingress::PendingDeliveryMutation::Transient {
                 recipient: route.recipient.clone(),
-                row_id,
+                row_id: row_id.clone(),
             },
         });
-    }
+        MucUserDeliveryProof::Queued { row_id }
+    } else {
+        MucUserDeliveryProof::Delivered {
+            resources: accepted.clone(),
+        }
+    };
     if let Some(capture) = deps.ingress_effect_capture.as_ref() {
         accepted.sort();
         accepted.dedup();
         capture.record_intent(waddle_xmpp::ingress::IngressEffectIntent::RouteDirect {
             recipient: route.recipient,
             fanout: accepted,
-            route_identity: capture.next_route_identity(),
+            route_identity: route
+                .route_identity
+                .unwrap_or_else(|| capture.next_route_identity()),
         });
     }
-    super::EffectOutcome::MucUserDelivery(Ok(()))
+    super::EffectOutcome::MucUserDelivery(Ok(proof))
 }
 
 pub(crate) async fn compensate(failure: InviteDeliveryFailure, deps: &Deps<'_>) {

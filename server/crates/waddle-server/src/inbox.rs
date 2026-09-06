@@ -286,6 +286,23 @@ pub(crate) async fn upsert_in_transaction(
     Ok(decode_row(&row)?)
 }
 
+/// Mark a projection read and return its committed push payload.
+pub(crate) async fn mark_read_in_transaction(
+    tx: &mut crate::db::Transaction<'_>,
+    owner: &BareJid,
+    channel: &BareJid,
+    thread: Option<&waddle_xmpp_core::mam::ThreadId>,
+) -> Result<Option<InboxEntry>, InboxTxError> {
+    let mut rows = tx.query(
+        &format!("UPDATE inbox_entries SET unread = 0 WHERE user_jid = ? AND partner_jid = ? AND thread_id = ? RETURNING {SELECT_COLS}"),
+        crate::db_params![owner.to_string(), channel.to_string(), thread.map(waddle_xmpp_core::mam::ThreadId::as_str).unwrap_or("").to_owned()],
+    ).await?;
+    rows.next()
+        .await?
+        .map(|row| decode_row(&row).map_err(Into::into))
+        .transpose()
+}
+
 /// Read the current projection without replaying unread or reply increments.
 pub(crate) async fn get_in_transaction(
     tx: &mut crate::db::Transaction<'_>,

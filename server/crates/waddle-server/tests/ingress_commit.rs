@@ -74,6 +74,8 @@ mod execution;
 mod fencing;
 #[path = "ingress_cases/moderation.rs"]
 mod moderation;
+#[path = "ingress_cases/projections.rs"]
+mod projections;
 #[path = "ingress_cases/reconciliation.rs"]
 mod reconciliation;
 #[path = "ingress_cases/rejections.rs"]

@@ -14,9 +14,11 @@ impl InboxRepository {
         owner: &BareJid,
         channel: &BareJid,
         thread: Option<&ThreadId>,
-    ) -> Result<(), IngressUowError> {
-        tx.transaction_mut().execute("UPDATE inbox_entries SET unread = 0 WHERE user_jid = ? AND partner_jid = ? AND thread_id = ?", crate::db_params![owner.to_string(), channel.to_string(), thread.map(ThreadId::as_str).unwrap_or("").to_owned()]).await?;
-        Ok(())
+    ) -> Result<Option<InboxEntry>, IngressUowError> {
+        Ok(
+            crate::inbox::mark_read_in_transaction(tx.transaction_mut(), owner, channel, thread)
+                .await?,
+        )
     }
     pub async fn apply_call_thread(
         tx: &mut IngressUowTransaction<'_>,

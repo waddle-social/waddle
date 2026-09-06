@@ -1,7 +1,10 @@
 //! Committed responsibility and the bounded post-commit work it authorizes.
 use crate::{
-    ingress_substrate::EffectReceiptKind, ingress_uow::ReconcileVerdict,
-    server::routes::interpret::effects::ExternalEffect,
+    ingress_substrate::EffectReceiptKind,
+    ingress_uow::ReconcileVerdict,
+    server::routes::interpret::effects::{
+        AppliedDurableEffects, ExternalEffect, PlanEffectDependency,
+    },
 };
 use jid::BareJid;
 use waddle_xmpp::ingress::{IngressOrdinal, MessageKey};
@@ -30,7 +33,10 @@ pub struct IngressDecision {
     pub alias: AliasOutcomeClass,
     pub verdict: Option<ReconcileVerdict>,
     pub archive_ids: Vec<(BareJid, StanzaId)>,
+    pub applied_durable: std::sync::Arc<AppliedDurableEffects>,
     pub external: Vec<ExternalEffect>,
+    /// Captured dependencies aligned with external effects.
+    pub external_dependencies: Vec<Vec<PlanEffectDependency>>,
     /// Receipt identities fulfilled by each external effect, in the same order.
     pub external_receipts: Vec<Vec<EffectReceiptKey>>,
     pub receipts_pending: Vec<EffectReceiptKey>,

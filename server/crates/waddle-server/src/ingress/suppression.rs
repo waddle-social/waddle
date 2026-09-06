@@ -6,8 +6,8 @@ use xmpp_parsers::message::{Message, MessageType};
 use crate::{
     ingress_uow::ReconcileVerdict,
     server::routes::interpret::effects::{
-        delivery::ExternalDeliveryEffect, room::ExternalRoomEffect, Effect, ExternalEffect,
-        IngressPlan, PlanEffectDependency, PlanSuppressionPolicy, PlannedEffect,
+        delivery::ExternalDeliveryEffect, Effect, ExternalEffect, IngressPlan,
+        PlanEffectDependency, PlanSuppressionPolicy, PlannedEffect,
     },
 };
 
@@ -39,7 +39,8 @@ pub(crate) fn external_effect_indices(
                 return None;
             };
             if duplicate
-                && planned.suppression == PlanSuppressionPolicy::SenderOnly
+                && duplicate_policy(planned) == PlanSuppressionPolicy::SenderOnly
+                && !sender_delivery(effect, plan.sanitized_message.from.as_ref())
                 && !subject_rebroadcast(effect)
             {
                 return None;
@@ -50,6 +51,40 @@ pub(crate) fn external_effect_indices(
             Some(index)
         })
         .collect()
+}
+
+fn duplicate_policy(planned: &PlannedEffect) -> PlanSuppressionPolicy {
+    if matches!(
+        planned.effect,
+        Effect::External(
+            ExternalEffect::RoomMembershipMutation(_) | ExternalEffect::InviteLedger(_)
+        )
+    ) {
+        PlanSuppressionPolicy::Always
+    } else if planned
+        .dependencies
+        .iter()
+        .any(|dependency| matches!(dependency, PlanEffectDependency::AfterDmPinMutation { .. }))
+    {
+        PlanSuppressionPolicy::SenderOnly
+    } else {
+        planned.suppression
+    }
+}
+
+fn sender_delivery(effect: &ExternalEffect, sender: Option<&jid::Jid>) -> bool {
+    let Some(sender) = sender else {
+        return false;
+    };
+    match effect {
+        ExternalEffect::Delivery(ExternalDeliveryEffect::RouteToPeer { jid, .. }) => {
+            jid.to_bare() == sender.to_bare()
+        }
+        ExternalEffect::Frame(stanza) => {
+            matches!(stanza.as_ref(), Stanza::Message(message) if message.to.as_ref().is_some_and(|recipient| recipient.to_bare() == sender.to_bare()))
+        }
+        _ => false,
+    }
 }
 
 /// Shared by commit-time durable application and post-commit external filtering.
@@ -71,6 +106,7 @@ pub(super) fn tombstone_swallowed(
                             archive: dependency_archive,
                             minted,
                         } => dependency_archive == archive && minted == id,
+                        _ => false,
                     })
         })
 }
@@ -94,9 +130,9 @@ fn subject_rebroadcast(effect: &ExternalEffect) -> bool {
             | ExternalDeliveryEffect::RelayFullJid { stanza, .. }
             | ExternalDeliveryEffect::RelayBareJid { stanza, .. },
         ) => subject_stanza(stanza),
-        ExternalEffect::Room(ExternalRoomEffect::BroadcastRoomSystemMessage {
-            message, ..
-        }) => subject_message(message),
+        ExternalEffect::RouteToPeer(route) | ExternalEffect::QueueOfflineDelivery(route) => {
+            subject_message(&route.message)
+        }
         _ => false,
     }
 }
@@ -141,6 +177,7 @@ mod tests {
                 intents: vec![],
                 sanitized_message: message,
                 error_reply: None,
+                rejection: None,
                 room_execution: RoomExecutionPath::None,
             };
             let verdict = if duplicate {
@@ -183,6 +220,7 @@ mod tests {
             intents: vec![],
             sanitized_message: message,
             error_reply: None,
+            rejection: None,
             room_execution: RoomExecutionPath::None,
         };
         for (archive, id, expected) in [
@@ -204,5 +242,39 @@ mod tests {
                 expected,
             );
         }
+    }
+    #[test]
+    fn duplicate_pin_fanout_preserves_only_sender_resources() {
+        let sender: jid::FullJid = "sender@example.com/device".parse().expect("sender");
+        let peer: jid::FullJid = "peer@example.com/device".parse().expect("peer");
+        let pair =
+            crate::server::routes::websocket::DmPairKey::new(sender.to_bare(), peer.to_bare());
+        let target = StanzaId::new("pin", sender.to_bare().into());
+        let dependency = PlanEffectDependency::AfterDmPinMutation { pair, target };
+        let mut incoming = Message::new(Some(peer.clone().into()));
+        incoming.from = Some(sender.clone().into());
+        let effects = [sender.clone(), peer].into_iter().map(|recipient| {
+            PlannedEffect::new(Effect::External(ExternalEffect::Delivery(ExternalDeliveryEffect::RouteToPeer {
+                jid: recipient.clone(), stanza: Box::new(Stanza::Message(Message::new(Some(recipient.into())))),
+                kind: crate::server::routes::interpret::effects::delivery::PeerDeliveryKind::RegistryFrame,
+                call_setup: None,
+            }))).with_dependency(dependency.clone())
+        }).collect();
+        let plan = IngressPlan {
+            rejection: None,
+            plan: effects,
+            intents: vec![],
+            sanitized_message: incoming,
+            error_reply: None,
+            room_execution: RoomExecutionPath::None,
+        };
+        assert_eq!(
+            external_effect_indices(&plan, &ReconcileVerdict::FirstCommit, &[]),
+            vec![0, 1]
+        );
+        assert_eq!(
+            external_effect_indices(&plan, &ReconcileVerdict::Consistent, &[]),
+            vec![0]
+        );
     }
 }

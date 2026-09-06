@@ -233,6 +233,8 @@ fn non_advancing(class: IngressDecisionClass) -> IngressDecision {
         alias: AliasOutcomeClass::NoOrigin,
         verdict: None,
         archive_ids: Vec::new(),
+        applied_durable: Default::default(),
+        external_dependencies: Vec::new(),
         external: Vec::new(),
         external_receipts: Vec::new(),
         receipts_pending: Vec::new(),

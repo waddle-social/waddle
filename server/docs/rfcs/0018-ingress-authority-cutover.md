@@ -56,8 +56,9 @@ timeout 250 ms; no actor asks, no extension calls, no socket writes). Lock
 order: epoch `FOR SHARE` (begin) → principal `FOR SHARE` → [resumable] exact
 SM claim `FOR SHARE` → [resumable] `ingress_sm_streams` `FOR UPDATE`, wire
 binding lookup, ordinal := `handled_ordinal + 1` → alias resolution with the
-canonical row `FOR UPDATE` → [local room effect] room claim `FOR SHARE` +
-snapshot revalidation → load recorded intents → reconcile → durable effects via
+canonical row `FOR UPDATE` → [guarded local room effect] durable room claim
+`FOR SHARE` (owner/epoch only; no admission-snapshot revalidation, and no
+room revalidation for unfenced single-node rooms) → load recorded intents → reconcile → durable effects via
 the transaction-taking repositories with typed failures → intents → envelope →
 receipts for durable effects → sm ref (`FOR UPDATE`) → frontier CAS +
 checkpoint → commit.
@@ -170,7 +171,9 @@ so a room at maximum occupancy never overflows). Non-advancing (rolled back):
 `PrincipalMissing`, `ClaimFenceMissing`, `RoomGenerationStale`,
 `FrontierStale`, `SmOrdinalConflict`, `IntentContradiction`, `Storage`,
 `SerializationExhaustion`, `Timeout` (pre-commit), `AmbiguousCommit`,
-`Lineage`, `EpochUnsupported`.
+`Lineage`, `EpochUnsupported`; `RoomGenerationStale` means the local room
+fence context no longer matches its durable claim, never admission-revision
+or audience drift.
 
 ### 3.6 Locks and retention
 Alias resolution and sm-ref/delivery insertion lock the canonical row

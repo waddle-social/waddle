@@ -145,6 +145,7 @@ impl IngressFixture {
                 intents: Vec::new(),
                 sanitized_message: message,
                 error_reply: None,
+                rejection: None,
                 room_execution: RoomExecutionPath::None,
             },
             digest_input,

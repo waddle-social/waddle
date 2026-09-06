@@ -311,3 +311,133 @@ async fn ingress_room_generation_stale_postgres() {
     }
     fixture.close().await;
 }
+
+async fn local_room_commit(
+    fixture: IngressFixture,
+    fence: waddle_server::ingress::effects::room::RoomFenceRequirement,
+) {
+    use waddle_server::ingress::{effects::room::DurableRoomEffect, RoomExecutionPath};
+    let room: jid::BareJid = "room@conference.example.com".parse().expect("room");
+    let mut submission = archive_plan(
+        &fixture,
+        Some("local-origin"),
+        "local body",
+        "local-archive",
+    );
+    submission.target = waddle_xmpp::ingress::NormalizedTarget::Bare(room.clone());
+    submission.plan.sanitized_message.to = Some(room.clone().into());
+    submission.plan.sanitized_message.type_ = xmpp_parsers::message::MessageType::Groupchat;
+    submission.digest_input = waddle_xmpp::ingress::DigestInput::from_parsed(
+        &submission.plan.sanitized_message,
+        &waddle_xmpp::ingress::DigestContext {
+            target: submission.target.clone(),
+            server_authorities: vec![room.clone()],
+            stanza_lang: None,
+        },
+    )
+    .expect("room digest");
+    let Effect::Durable(DurableEffect::Direct(DurableDirectEffect::ArchiveDirect {
+        message, ..
+    })) = &submission.plan.plan[0].effect
+    else {
+        panic!("archive plan");
+    };
+    let mut message = message.clone();
+    message.to = room.clone().into();
+    message.message_type = xmpp_parsers::message::MessageType::Groupchat;
+    let stanza_id = StanzaId::new("local-archive", room.clone().into());
+    message.stanza_id = Some(stanza_id.clone());
+    submission.plan.intents = vec![IngressEffectIntent::ArchiveAuthoritative {
+        archive: room.clone(),
+        by: room.clone(),
+        stanza_id,
+        archived_at: message.timestamp,
+    }];
+    submission.plan.plan[0] = PlannedEffect::new(Effect::Durable(DurableEffect::Room(
+        DurableRoomEffect::ArchiveGroupchat {
+            room: room.clone(),
+            message,
+            fence: fence.clone(),
+            archive_expectation: ArchiveExpectation::Fresh,
+        },
+    )));
+    submission.plan.room_execution = RoomExecutionPath::Local {
+        room,
+        fence,
+        snapshot_generation: 999,
+    };
+    let first = commit_submission(&fixture.uow, &submission, 5)
+        .await
+        .expect("local room commits without admission revision check");
+    assert_eq!(first.class, IngressDecisionClass::Accepted);
+    if let waddle_server::ingress::RoomExecutionPath::Local {
+        snapshot_generation,
+        ..
+    } = &mut submission.plan.room_execution
+    {
+        *snapshot_generation += 1;
+    }
+    let duplicate = commit_submission(&fixture.uow, &submission, 5)
+        .await
+        .expect("admission drift does not change identity");
+    assert_eq!(duplicate.class, IngressDecisionClass::ExistingConsistent);
+    assert_eq!(duplicate.message_key, first.message_key);
+    for table in [
+        "ingress_messages",
+        "ingress_origin_aliases",
+        "ingress_effect_intents",
+        "ingress_effect_receipts",
+        "mam_messages",
+    ] {
+        assert_eq!(fixture.count(table).await, 1, "local room {table}");
+    }
+    #[cfg(feature = "clustering")]
+    if matches!(
+        submission.plan.room_execution,
+        RoomExecutionPath::Local {
+            fence: waddle_server::ingress::effects::room::RoomFenceRequirement::Guarded(_),
+            ..
+        }
+    ) {
+        fixture
+            .execute(
+                "UPDATE clustering_claims SET claim_epoch = claim_epoch + 1",
+                (),
+            )
+            .await;
+        let failure = commit_submission(&fixture.uow, &submission, 5)
+            .await
+            .expect_err("deposed local owner fails");
+        assert_eq!(failure.class(), IngressDecisionClass::RoomGenerationStale);
+        assert_eq!(fixture.count("mam_messages").await, 1);
+    }
+    fixture.close().await;
+}
+
+#[tokio::test]
+async fn ingress_local_room_commit_sqlite() {
+    local_room_commit(
+        IngressFixture::sqlite().await,
+        waddle_server::ingress::effects::room::RoomFenceRequirement::Unfenced,
+    )
+    .await;
+}
+
+#[tokio::test]
+async fn ingress_local_room_commit_postgres() {
+    let Some(mut fixture) = IngressFixture::postgres("local_room_commit").await else {
+        return;
+    };
+    #[cfg(feature = "clustering")]
+    let fence = waddle_server::ingress::effects::room::RoomFenceRequirement::Guarded(
+        fixture
+            .room_fence(&"room@conference.example.com".parse().expect("room"))
+            .await,
+    );
+    #[cfg(not(feature = "clustering"))]
+    let fence = {
+        let _ = &mut fixture;
+        waddle_server::ingress::effects::room::RoomFenceRequirement::Unfenced
+    };
+    local_room_commit(fixture, fence).await;
+}

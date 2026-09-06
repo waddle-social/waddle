@@ -10,7 +10,7 @@ pub enum EffectOutcome {
     Membership(super::MembershipOutcome),
     MucUserDelivery(
         Result<
-            (),
+            super::invite::MucUserDeliveryProof,
             crate::server::routes::websocket::handlers::message::muc_invite::MucUserDeliveryError,
         >,
     ),
@@ -45,9 +45,17 @@ impl super::PlannedEffect {
                 })
             }
             Effect::External(
-                super::ExternalEffect::RouteToPeer(_)
-                | super::ExternalEffect::QueueOfflineDelivery(_),
-            ) => EffectOutcome::MucUserDelivery(Ok(())),
+                super::ExternalEffect::RouteToPeer(route)
+                | super::ExternalEffect::QueueOfflineDelivery(route),
+            ) => EffectOutcome::MucUserDelivery(Ok(if route.resources.is_empty() {
+                super::invite::MucUserDeliveryProof::Queued {
+                    row_id: route.fallback.id.clone(),
+                }
+            } else {
+                super::invite::MucUserDeliveryProof::Delivered {
+                    resources: route.resources.clone(),
+                }
+            })),
             Effect::External(super::ExternalEffect::InviteLedger(mutation)) => {
                 use crate::server::routes::websocket::{
                     handlers::message::muc_invite::{InviteLedgerMutation, InviteLedgerOutcome},

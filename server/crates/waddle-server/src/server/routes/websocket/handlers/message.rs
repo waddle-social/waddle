@@ -1,6 +1,5 @@
 use tracing::warn;
 use waddle_xmpp::{
-    ingress::IngressEffectIntent,
     parser::stanza_to_string,
     protocol::handlers::errors::bad_request_reply,
     protocol::{frame::InboundFrame, InboundEvent, XmppStateMachine},
@@ -17,7 +16,6 @@ use super::super::{
     WebSocketState,
 };
 use crate::auth::Session;
-use crate::ingress_shadow::IngressEffectCapture;
 use crate::server::routes::interpret::{
     effects::{
         AuthorizationDeniedReason, Effect, ExternalEffect, PlanRejection, PlannedEffect,
@@ -241,23 +239,6 @@ pub(super) fn classify_rejection(error: &xmpp_parsers::stanza_error::StanzaError
                 .expect("server-built stanza error"),
         )),
     }
-}
-
-pub(super) fn record_route_direct_intent(
-    capture: Option<&IngressEffectCapture>,
-    recipient: jid::BareJid,
-    mut fanout: Vec<jid::FullJid>,
-) {
-    let Some(capture) = capture else {
-        return;
-    };
-    fanout.sort_by_key(ToString::to_string);
-    fanout.dedup();
-    capture.record_intent(IngressEffectIntent::RouteDirect {
-        recipient,
-        fanout,
-        route_identity: capture.next_route_identity(),
-    });
 }
 
 fn record_jmi_signal(message: &xmpp_parsers::message::Message, user: &jid::BareJid) {

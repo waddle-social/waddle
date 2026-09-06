@@ -1,6 +1,9 @@
 use super::*;
 
 async fn semantic_rejections(fixture: IngressFixture) {
+    use waddle_server::ingress::effects::{
+        AuthorizationDeniedReason, PlanRejection, PolicyDeniedReason, SemanticMalformedReason,
+    };
     use waddle_xmpp::{ingress::FrozenStanzaError, Stanza};
     use xmpp_parsers::stanza_error::{DefinedCondition, ErrorType, StanzaError};
     for (index, condition, class) in [
@@ -39,6 +42,20 @@ async fn semantic_rejections(fixture: IngressFixture) {
         reply.to = reply.from.take();
         reply.payloads.push(error.clone().into());
         submission.plan.error_reply = Some(Stanza::Message(reply));
+        submission.plan.rejection = Some(match class {
+            IngressDecisionClass::SemanticMalformed => {
+                PlanRejection::SemanticMalformed(SemanticMalformedReason::MalformedPayload)
+            }
+            IngressDecisionClass::AuthorizationDenied => {
+                PlanRejection::AuthorizationDenied(AuthorizationDeniedReason::Forbidden)
+            }
+            IngressDecisionClass::CaptureOverflow => {
+                PlanRejection::PolicyDenied(PolicyDeniedReason::CaptureOverflow)
+            }
+            _ => PlanRejection::PolicyDenied(PolicyDeniedReason::StanzaError(
+                FrozenStanzaError::from_xmpp(&error).expect("policy error"),
+            )),
+        });
         submission
             .plan
             .intents

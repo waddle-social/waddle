@@ -2,7 +2,8 @@ use super::decision::IngressDecisionClass;
 use crate::{
     ingress_uow::IngressUowError,
     server::routes::interpret::effects::{
-        Effect, ExternalEffect, IngressPlan, PlannedEffect, RoomExecutionPath,
+        Effect, ExternalEffect, IngressPlan, PlanRejection, PlannedEffect, PolicyDeniedReason,
+        RoomExecutionPath,
     },
 };
 use waddle_xmpp::{
@@ -11,19 +12,13 @@ use waddle_xmpp::{
 };
 
 pub(super) fn planned_rejection(plan: &IngressPlan) -> Option<IngressDecisionClass> {
-    plan.error_reply.as_ref()?;
-    plan.intents.iter().find_map(|intent| match intent {
-        IngressEffectIntent::ErrorReply { error, .. } => Some(match error.condition {
-            StanzaErrorCondition::BadRequest | StanzaErrorCondition::JidMalformed => {
-                IngressDecisionClass::SemanticMalformed
-            }
-            StanzaErrorCondition::NotAuthorized | StanzaErrorCondition::Forbidden => {
-                IngressDecisionClass::AuthorizationDenied
-            }
-            StanzaErrorCondition::ResourceConstraint => IngressDecisionClass::CaptureOverflow,
-            _ => IngressDecisionClass::PolicyDenied,
-        }),
-        _ => None,
+    plan.rejection.as_ref().map(|rejection| match rejection {
+        PlanRejection::AuthorizationDenied(_) => IngressDecisionClass::AuthorizationDenied,
+        PlanRejection::SemanticMalformed(_) => IngressDecisionClass::SemanticMalformed,
+        PlanRejection::PolicyDenied(PolicyDeniedReason::CaptureOverflow) => {
+            IngressDecisionClass::CaptureOverflow
+        }
+        PlanRejection::PolicyDenied(_) => IngressDecisionClass::PolicyDenied,
     })
 }
 pub(super) fn rejection_plan(
@@ -104,6 +99,7 @@ pub(super) fn recorded_rejection_plan(
         ))));
     }
     Ok(IngressPlan {
+        rejection: None,
         plan,
         intents: intents.to_vec(),
         sanitized_message: envelope.message().clone(),
@@ -115,6 +111,24 @@ pub(super) fn recorded_rejection_plan(
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn error_intent_alone_does_not_classify_a_plan_rejection() {
+        let sender: jid::FullJid = "sender@example.test/device".parse().expect("sender");
+        let envelope = crate::ingress_substrate::MessageEnvelope::new(
+            xmpp_parsers::message::Message::new(None),
+        )
+        .expect("envelope");
+        let intents = vec![IngressEffectIntent::ErrorReply {
+            recipient: sender,
+            error: FrozenStanzaError::new(
+                FrozenStanzaErrorType::Cancel,
+                StanzaErrorCondition::Forbidden,
+            ),
+        }];
+        let plan = recorded_rejection_plan(&envelope, &intents).expect("recorded plan");
+        assert_eq!(planned_rejection(&plan), None);
+    }
+
     #[test]
     fn recorded_denial_reconstruction_preserves_original_message_and_error() {
         let sender: jid::FullJid = "sender@example.test/device".parse().expect("sender");

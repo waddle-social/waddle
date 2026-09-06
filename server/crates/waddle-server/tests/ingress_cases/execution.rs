@@ -99,6 +99,11 @@ async fn external_reply_execution(fixture: IngressFixture) {
     reply.to = reply.from.take();
     reply.payloads.push(error.clone().into());
     submission.plan.error_reply = Some(Stanza::Message(reply));
+    submission.plan.rejection = Some(
+        waddle_server::ingress::effects::PlanRejection::AuthorizationDenied(
+            waddle_server::ingress::effects::AuthorizationDeniedReason::Forbidden,
+        ),
+    );
     submission
         .plan
         .intents
@@ -123,6 +128,10 @@ async fn external_reply_execution(fixture: IngressFixture) {
     assert_eq!(timed_out.outcomes.len(), 1);
     assert_eq!(timed_out.outcomes[0].1, ExternalOutcome::Failed);
     assert!(timed_out.frames.is_empty());
+    assert!(matches!(
+        timed_out.terminalization_failure,
+        Some(waddle_server::ingress::execute::ExecutionPersistenceFailure::BudgetExhausted)
+    ));
     assert_eq!(fixture.count("ingress_effect_receipts").await, 0);
     assert_eq!(
         fixture
