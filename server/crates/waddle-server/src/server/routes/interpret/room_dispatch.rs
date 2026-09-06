@@ -182,7 +182,8 @@ pub(super) async fn dispatch_to_room(
                         );
                         return outcome;
                     }
-                    OrderedRelayMucProxyOutcome::MaybeCommitted
+                    OrderedRelayMucProxyOutcome::PendingFrames { .. }
+                    | OrderedRelayMucProxyOutcome::MaybeCommitted
                     | OrderedRelayMucProxyOutcome::JoinMaybeCommitted => {
                         if let (Some(capture), Some(relay_target)) =
                             (deps.ingress_effect_capture.as_ref(), attempt.relay_target)

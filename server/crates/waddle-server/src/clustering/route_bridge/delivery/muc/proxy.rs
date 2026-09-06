@@ -302,7 +302,13 @@ impl OrderedRelayDeliveryBridge {
             room_fence,
             outcome: match outcome.delivery {
                 FullJidDeliveryOutcome::Delivered | FullJidDeliveryOutcome::QueuedDetached => {
-                    OrderedRelayMucProxyOutcome::Delivered(outcome.client_replies)
+                    match outcome.frame_completion {
+                        Some(completion) => OrderedRelayMucProxyOutcome::PendingFrames {
+                            frames: outcome.client_replies,
+                            completion,
+                        },
+                        None => OrderedRelayMucProxyOutcome::Delivered(outcome.client_replies),
+                    }
                 }
                 FullJidDeliveryOutcome::Unavailable => OrderedRelayMucProxyOutcome::Unavailable,
                 FullJidDeliveryOutcome::Dropped => OrderedRelayMucProxyOutcome::Dropped,

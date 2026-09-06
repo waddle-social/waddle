@@ -1,7 +1,7 @@
 use super::*;
 use super::{
     batch_write::{
-        write_response_batch_report_with_admission, write_response_batch_with_admission,
+        write_ingress_response_batch_with_admission, write_response_batch_with_admission,
         BatchAuthority, BatchSmPolicy, BatchWriteOutcome,
     },
     cleanup::cleanup_connection_shutdown,
@@ -1534,12 +1534,12 @@ async fn handle_inbound_text(
     } else {
         BatchSmPolicy::Record
     };
-    let write_report = write_response_batch_report_with_admission(
+    let write_report = write_ingress_response_batch_with_admission(
         ws_sender,
         ws_receiver,
         state.as_ref(),
         conn,
-        responses.frames.clone(),
+        &mut responses,
         policy,
         BatchAuthority {
             permit: admission_permit,

@@ -239,11 +239,17 @@ async fn commit_attempt(
         }
     }
     // Archive-free plans (for example invitations) have no archive authority to
-    // recover. Every sender archive the plan does require must be recorded.
+    // recover. A remote room origin still needs its recorded dispatch obligation
+    // until the owner has supplied the canonical archive identity.
     if alias == AliasOutcomeClass::Existing
         && !owner_first
         && rejection.is_none()
-        && missing_planned_archive_authority(&submission.plan.intents, &recorded)
+        && (missing_planned_archive_authority(&submission.plan.intents, &recorded)
+            || (recorded_ids.is_empty()
+                && matches!(
+                    &submission.plan.room_execution,
+                    super::RoomExecutionPath::Remote { .. }
+                )))
         && !owner_acceptance_pending(submission, &recorded)
         && stream.as_ref().is_none_or(|stream| stream.bound.is_none())
     {

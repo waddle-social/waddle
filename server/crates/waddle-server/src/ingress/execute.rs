@@ -42,6 +42,38 @@ pub enum ExecutionPersistenceFailure {
     BudgetExhausted,
 }
 
+/// Local owner receipts carried to the origin's actual response write boundary.
+#[cfg(feature = "clustering")]
+#[derive(Clone)]
+pub struct RelayFrameReceiptCompletion {
+    inner:
+        std::sync::Arc<tokio::sync::Mutex<crate::clustering::route_bridge::RelayFrameCompletion>>,
+}
+
+#[cfg(feature = "clustering")]
+impl std::fmt::Debug for RelayFrameReceiptCompletion {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("RelayFrameReceiptCompletion")
+            .finish_non_exhaustive()
+    }
+}
+
+#[cfg(feature = "clustering")]
+impl RelayFrameReceiptCompletion {
+    pub(crate) fn new(completion: crate::clustering::route_bridge::RelayFrameCompletion) -> Self {
+        Self {
+            inner: std::sync::Arc::new(tokio::sync::Mutex::new(completion)),
+        }
+    }
+
+    pub async fn complete(&self) -> Result<bool, ExecutionPersistenceFailure> {
+        let mut completion = self.inner.lock().await;
+        let authority = std::sync::Arc::clone(&completion.authority);
+        Box::pin(authority.complete_frame_obligations(&mut completion.report)).await
+    }
+}
+
 /// Frames belonging to one external effect, with its durable receipt obligations.
 #[derive(Debug)]
 pub struct FrameObligation {
@@ -54,6 +86,8 @@ pub struct FrameObligation {
 pub struct ExecutionReport {
     pub outcomes: Vec<(ExternalEffect, ExternalOutcome)>,
     pub frame_obligations: Vec<FrameObligation>,
+    #[cfg(feature = "clustering")]
+    relay_frame_completions: Vec<RelayFrameReceiptCompletion>,
     message_key: Option<MessageKey>,
     frame_completion_receipts: Vec<EffectReceiptKey>,
     /// A completed side effect can remain unresolved when its receipt write fails.
@@ -62,6 +96,24 @@ pub struct ExecutionReport {
 }
 
 impl ExecutionReport {
+    #[cfg(feature = "clustering")]
+    pub(crate) fn retain_relay_frame_completion(
+        &mut self,
+        completion: RelayFrameReceiptCompletion,
+    ) {
+        self.relay_frame_completions.push(completion);
+    }
+
+    #[cfg(feature = "clustering")]
+    pub(super) async fn complete_relay_frame_obligations(
+        &self,
+    ) -> Result<(), ExecutionPersistenceFailure> {
+        for completion in &self.relay_frame_completions {
+            completion.complete().await?;
+        }
+        Ok(())
+    }
+
     /// Call only after every frame in `frame_obligations` was successfully written.
     /// Dropping the report on cancellation or write failure leaves receipts pending.
     /// Receipt persistence is idempotent, so this may be retried without writing frames again.
@@ -187,6 +239,14 @@ pub async fn execute_effects(
                             dependent.resolve_membership_outcome(room, member, *outcome);
                         }
                     }
+                    #[cfg(feature = "clustering")]
+                    let result = match result {
+                        EffectOutcome::RelayFrames { frames, completion } => {
+                            report.retain_relay_frame_completion(completion);
+                            EffectOutcome::Frames(frames)
+                        }
+                        result => result,
+                    };
                     let mut frames = Vec::new();
                     let outcome = classify_outcome(effect, result, &mut frames);
                     if frames.is_empty() {
@@ -383,6 +443,8 @@ fn classify_outcome(
     frames: &mut Vec<Stanza>,
 ) -> ExternalOutcome {
     match outcome {
+        #[cfg(feature = "clustering")]
+        EffectOutcome::RelayFrames { .. } => ExternalOutcome::Failed,
         EffectOutcome::Frames(mut produced) => {
             frames.append(&mut produced);
             if matches!(

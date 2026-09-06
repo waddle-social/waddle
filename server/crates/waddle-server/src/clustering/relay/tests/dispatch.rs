@@ -44,8 +44,13 @@ async fn ordered_delivery_timeout_aborts_reserved_effect_before_commit() {
     assert!(matches!(reservation, OrderedRelayReservation::Reserved(_)));
 
     let started = std::time::Instant::now();
-    let reply =
-        finish_ordered_reservation(Arc::clone(&receiver), Arc::clone(&bridge), reservation).await;
+    let reply = finish_ordered_reservation(
+        Arc::clone(&receiver),
+        Arc::clone(&bridge),
+        reservation,
+        &mut None,
+    )
+    .await;
     assert!(
         started.elapsed() < Duration::from_millis(500),
         "reserved delivery timeout should bound a hung validation effect"

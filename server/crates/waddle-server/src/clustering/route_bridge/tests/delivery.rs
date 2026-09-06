@@ -70,6 +70,7 @@ async fn reserved_relay_join_stores_the_source_connection_generation() {
         MucProxyOrigin::Connection(generation),
         &Stanza::Presence(presence),
         None,
+        &mut None,
     )
     .await
     .expect("relayed join delivered");
@@ -127,6 +128,7 @@ async fn reserved_relay_unavailable_cannot_remove_a_replacement_generation() {
             MucProxyOrigin::Connection(generation),
             &Stanza::Presence(available.clone()),
             None,
+            &mut None,
         )
         .await
         .expect("relayed join delivered");
@@ -144,6 +146,7 @@ async fn reserved_relay_unavailable_cannot_remove_a_replacement_generation() {
         MucProxyOrigin::Connection(first),
         &Stanza::Presence(unavailable),
         None,
+        &mut None,
     )
     .await
     .expect("superseded relayed leave is terminal");
@@ -179,7 +182,7 @@ async fn unwired_bridge_reports_unreachable_without_advancing_effects() {
     );
 
     let err = bridge
-        .deliver_reserved(&envelope())
+        .deliver_reserved(&envelope(), &mut None)
         .await
         .expect_err("unwired bridge cannot deliver");
 
@@ -915,7 +918,7 @@ async fn receiver_nacks_iq_without_live_resource_instead_of_detached_queue() {
     bridge.wire(Arc::new(services));
 
     let err = bridge
-        .deliver_reserved(&envelope)
+        .deliver_reserved(&envelope, &mut None)
         .await
         .expect_err("remote full-JID IQ requires a live local resource");
 
@@ -950,7 +953,7 @@ async fn receiver_delivers_full_jid_iq_as_peer_stanza() {
     bridge.wire(Arc::new(services));
 
     bridge
-        .deliver_reserved(&envelope)
+        .deliver_reserved(&envelope, &mut None)
         .await
         .expect("remote full-JID IQ delivers to live resource");
 
@@ -1111,16 +1114,19 @@ async fn remote_full_jid_route_reply_returns_detached_stream_identity() {
     );
 
     let reply = bridge
-        .route_remote_resource_stanza_on_owner(RelayRouteRemoteResourceStanza {
-            source_jid: source,
-            registration_id,
-            socket_generation,
-            target: RemoteResourceRouteTarget::FullJid {
-                target: target_full(),
-                stanza: RemoteStanza(Stanza::Message(message)),
+        .route_remote_resource_stanza_on_owner(
+            RelayRouteRemoteResourceStanza {
+                source_jid: source,
+                registration_id,
+                socket_generation,
+                target: RemoteResourceRouteTarget::FullJid {
+                    target: target_full(),
+                    stanza: RemoteStanza(Stanza::Message(message)),
+                },
+                trace: RelayTraceContext::default(),
             },
-            trace: RelayTraceContext::default(),
-        })
+            &mut None,
+        )
         .await;
 
     assert_eq!(reply.outcome, RemoteResourceRouteOutcome::QueuedDetached);
@@ -1771,7 +1777,7 @@ async fn receiver_nacks_dropped_peer_delivery_instead_of_acknowledging_loss() {
     bridge.wire(Arc::new(services));
 
     let err = bridge
-        .deliver_reserved(&envelope)
+        .deliver_reserved(&envelope, &mut None)
         .await
         .expect_err("full outbound channel must not be ACKed as delivered");
 
@@ -1805,6 +1811,7 @@ async fn reserved_groupchat_requires_committed_origin_admission() {
             MucProxyOrigin::Server,
             &Stanza::Message(message),
             None,
+            &mut None
         )
         .await,
         Err(OrderedRelayNackReason::ParseFailure)

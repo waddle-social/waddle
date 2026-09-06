@@ -436,10 +436,9 @@ impl OrderedRelayDeliveryBridge {
             MucProxyRouteDecision::LocalRoom
             | MucProxyRouteDecision::RoomUnclaimed
             | MucProxyRouteDecision::RoomClaimUnavailable
-            | MucProxyRouteDecision::OriginUnavailable => Some(MucProxyRouteAttempt {
-                relay_target: None,
-                room_fence: None,
-                outcome: muc_proxy_result_to_ordered_outcome(
+            | MucProxyRouteDecision::OriginUnavailable => {
+                let mut completion = None;
+                let outcome = muc_proxy_result_to_ordered_outcome(
                     kind,
                     Box::pin(deliver_reserved_muc_proxy(
                         &services,
@@ -448,10 +447,27 @@ impl OrderedRelayDeliveryBridge {
                         muc_origin,
                         &stanza.0,
                         admission.as_ref(),
+                        &mut completion,
                     ))
                     .await,
-                ),
-            }),
+                );
+                let outcome = match (outcome, completion) {
+                    (OrderedRelayMucProxyOutcome::Delivered(frames), Some(completion)) => {
+                        OrderedRelayMucProxyOutcome::PendingFrames {
+                            frames,
+                            completion: crate::ingress::execute::RelayFrameReceiptCompletion::new(
+                                completion,
+                            ),
+                        }
+                    }
+                    (outcome, _) => outcome,
+                };
+                Some(MucProxyRouteAttempt {
+                    relay_target: None,
+                    room_fence: None,
+                    outcome,
+                })
+            }
         }
     }
 

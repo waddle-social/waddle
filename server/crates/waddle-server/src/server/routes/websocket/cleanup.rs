@@ -2998,7 +2998,8 @@ fn remote_muc_cleanup_disposition(
     match decision {
         MucProxyRouteDecision::Attempted(attempt) => match &attempt.outcome {
             OrderedRelayMucProxyOutcome::Delivered(_) => RemoteMucCleanupDisposition::Converged,
-            OrderedRelayMucProxyOutcome::MaybeCommitted
+            OrderedRelayMucProxyOutcome::PendingFrames { .. }
+            | OrderedRelayMucProxyOutcome::MaybeCommitted
             | OrderedRelayMucProxyOutcome::JoinMaybeCommitted => {
                 RemoteMucCleanupDisposition::UncertainCommit
             }

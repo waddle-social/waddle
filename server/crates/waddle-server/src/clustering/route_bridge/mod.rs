@@ -276,3 +276,5 @@ impl OrderedRelayDeliveryBridge {
 
 #[cfg(test)]
 mod tests;
+
+pub(crate) use delivery::RelayFrameCompletion;

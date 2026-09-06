@@ -324,6 +324,9 @@ async fn handle_presence_impl(
                                 .collect();
                         }
                         Some(
+                            crate::clustering::route_bridge::OrderedRelayMucProxyOutcome::PendingFrames { .. },
+                        )
+                        | Some(
                             crate::clustering::route_bridge::OrderedRelayMucProxyOutcome::MaybeCommitted,
                         )
                         | Some(

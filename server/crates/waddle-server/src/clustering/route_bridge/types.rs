@@ -446,6 +446,7 @@ pub(super) struct PreparedRemoteDelivery {
 }
 
 pub(super) struct RemoteDeliveryOutcome {
+    pub(super) frame_completion: Option<crate::ingress::execute::RelayFrameReceiptCompletion>,
     pub(super) delivery: FullJidDeliveryOutcome,
     pub(super) client_replies: Vec<Stanza>,
     pub(super) maybe_committed: bool,

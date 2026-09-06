@@ -1,5 +1,11 @@
 use super::*;
 
+/// Owner-side receipts retained until the relay reply is accepted by its sender.
+pub(crate) struct RelayFrameCompletion {
+    pub authority: Arc<crate::ingress::IngressAuthority>,
+    pub report: crate::ingress::execute::ExecutionReport,
+}
+
 pub(in super::super::super) async fn deliver_reserved_muc_proxy(
     services: &OrderedRelayDeliveryServices,
     room_jid: &jid::BareJid,
@@ -7,6 +13,7 @@ pub(in super::super::super) async fn deliver_reserved_muc_proxy(
     origin: MucProxyOrigin,
     stanza: &Stanza,
     admission: Option<&crate::ingress::identity::IngressRelayAdmission>,
+    completion: &mut Option<RelayFrameCompletion>,
 ) -> Result<Vec<RemoteStanza>, OrderedRelayNackReason> {
     let Some(state) = services.web_socket_state.upgrade() else {
         tracing::warn!(
@@ -26,8 +33,15 @@ pub(in super::super::super) async fn deliver_reserved_muc_proxy(
             MucProxyOrigin::Server,
             Stanza::Message(message),
         ) => {
-            deliver_reserved_muc_groupchat(services, state.as_ref(), room_jid, message, admission)
-                .await
+            deliver_reserved_muc_groupchat(
+                services,
+                state.as_ref(),
+                room_jid,
+                message,
+                admission,
+                completion,
+            )
+            .await
         }
         (
             OrderedRelayMucProxyKind::OccupantPresence,
@@ -247,6 +261,7 @@ pub(in super::super::super) async fn deliver_reserved_muc_groupchat(
     room_jid: &jid::BareJid,
     message: &xmpp_parsers::message::Message,
     admission: Option<&crate::ingress::identity::IngressRelayAdmission>,
+    completion: &mut Option<RelayFrameCompletion>,
 ) -> Result<Vec<RemoteStanza>, OrderedRelayNackReason> {
     use crate::ingress::{ImmediateSink, IngressStreamIdentity, IngressSubmission};
     use waddle_xmpp::ingress::{ConnectionGeneration, DigestContext, NormalizedTarget};
@@ -328,7 +343,17 @@ pub(in super::super::super) async fn deliver_reserved_muc_groupchat(
     }
     // This budget is independent from admission: a timeout cannot undo commit.
     let report = authority.execute(&decision, &ImmediateSink, &deps).await;
-    Ok(report.frames.into_iter().map(RemoteStanza).collect())
+    let replies = report
+        .frame_obligations
+        .iter()
+        .flat_map(|obligation| obligation.frames.iter().cloned())
+        .map(RemoteStanza)
+        .collect();
+    *completion = Some(RelayFrameCompletion {
+        authority: Arc::clone(authority),
+        report,
+    });
+    Ok(replies)
 }
 
 pub(in super::super::super) fn muc_proxy_result_to_outcome(
@@ -336,6 +361,7 @@ pub(in super::super::super) fn muc_proxy_result_to_outcome(
 ) -> RemoteDeliveryOutcome {
     match result {
         Ok(replies) => RemoteDeliveryOutcome {
+            frame_completion: None,
             delivery: FullJidDeliveryOutcome::Delivered,
             client_replies: replies.into_iter().map(|reply| reply.0).collect(),
             maybe_committed: false,

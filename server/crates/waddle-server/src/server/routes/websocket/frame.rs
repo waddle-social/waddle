@@ -119,11 +119,12 @@ impl From<StreamErrorFrame> for ResponseFrame {
     }
 }
 
-#[derive(Debug, Default, Clone)]
+#[derive(Debug, Default)]
 pub(crate) struct ResponseBatch {
     pub(super) frames: Vec<ResponseFrame>,
     pub(super) completions: Vec<RoomEffectCompletion>,
     pub(super) completion_frame_indices: Vec<usize>,
+    pub(super) ingress_reports: Vec<crate::ingress::ExecutionReport>,
 }
 
 impl ResponseBatch {
@@ -136,6 +137,7 @@ impl ResponseBatch {
             frames: frames.into_iter().map(Into::into).collect(),
             completions: Vec::new(),
             completion_frame_indices: Vec::new(),
+            ingress_reports: Vec::new(),
         }
     }
 
@@ -169,6 +171,7 @@ impl ResponseBatch {
     pub(super) fn append_batch(&mut self, mut other: Self) {
         let offset = self.frames.len();
         self.frames.append(&mut other.frames);
+        self.ingress_reports.append(&mut other.ingress_reports);
         self.completions.append(&mut other.completions);
         self.completion_frame_indices.extend(
             other
@@ -1099,7 +1102,16 @@ pub(super) async fn execute_committed_message(
     budget: std::time::Duration,
 ) -> ResponseBatch {
     match tokio::time::timeout(budget, execution).await {
-        Ok(report) => report.frames.into(),
+        Ok(report) => {
+            let mut batch = ResponseBatch::from_frames(
+                report
+                    .frame_obligations
+                    .iter()
+                    .flat_map(|obligation| obligation.frames.iter().cloned()),
+            );
+            batch.ingress_reports.push(report);
+            batch
+        }
         Err(_) => ResponseBatch::default(),
     }
 }

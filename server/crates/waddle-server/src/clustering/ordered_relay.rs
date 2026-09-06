@@ -423,6 +423,7 @@ struct RemoteStanzaEnvelopeSigningView<'a> {
 /// and must never be serialized back to clients.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct OrderedRelayAck {
+    pub reply_receipt: Option<super::relay::RelayReplyReceiptToken>,
     pub channel: OrderedRelayChannel,
     pub sequence: OrderedRelaySequence,
     pub duplicate: bool,
@@ -794,6 +795,7 @@ impl OrderedRelayReceiverState {
                 if recently_acked.fingerprint == OrderedRelayEnvelopeFingerprint::from(&envelope) {
                     return OrderedRelayReservation::Completed(OrderedRelayReply::Ack(
                         OrderedRelayAck {
+                            reply_receipt: None,
                             channel: envelope.channel,
                             sequence: envelope.sequence,
                             duplicate: true,
@@ -899,6 +901,7 @@ impl OrderedRelayReceiverState {
             &client_replies,
         );
         OrderedRelayReply::Ack(OrderedRelayAck {
+            reply_receipt: None,
             channel: envelope.channel,
             sequence: envelope.sequence,
             duplicate: false,

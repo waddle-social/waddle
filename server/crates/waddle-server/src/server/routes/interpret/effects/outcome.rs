@@ -22,6 +22,11 @@ pub enum EffectOutcome {
     ),
     Completed,
     Frames(Vec<Stanza>),
+    #[cfg(feature = "clustering")]
+    RelayFrames {
+        frames: Vec<Stanza>,
+        completion: crate::ingress::execute::RelayFrameReceiptCompletion,
+    },
     Archive(Result<StoreOutcome, MamStorageError>),
     Inbox(Result<InboxEntry, InboxStorageError>),
     PlannedInbox(ProjectionRef),

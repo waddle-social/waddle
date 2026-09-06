@@ -599,7 +599,10 @@ fn remote_muc_join_decision(
         Some(crate::clustering::route_bridge::OrderedRelayMucProxyOutcome::Delivered(replies)) => {
             Some(RemoteMucJoinDecision::Delivered(replies))
         }
-        Some(crate::clustering::route_bridge::OrderedRelayMucProxyOutcome::MaybeCommitted)
+        Some(crate::clustering::route_bridge::OrderedRelayMucProxyOutcome::PendingFrames {
+            ..
+        })
+        | Some(crate::clustering::route_bridge::OrderedRelayMucProxyOutcome::MaybeCommitted)
         | Some(crate::clustering::route_bridge::OrderedRelayMucProxyOutcome::JoinMaybeCommitted) => {
             Some(RemoteMucJoinDecision::MaybeCommitted)
         }
@@ -617,7 +620,10 @@ fn remote_muc_leave_decision(
         Some(crate::clustering::route_bridge::OrderedRelayMucProxyOutcome::Delivered(replies)) => {
             RemoteMucLeaveDecision::Delivered(replies)
         }
-        Some(crate::clustering::route_bridge::OrderedRelayMucProxyOutcome::MaybeCommitted)
+        Some(crate::clustering::route_bridge::OrderedRelayMucProxyOutcome::PendingFrames {
+            ..
+        })
+        | Some(crate::clustering::route_bridge::OrderedRelayMucProxyOutcome::MaybeCommitted)
         | Some(crate::clustering::route_bridge::OrderedRelayMucProxyOutcome::JoinMaybeCommitted) => {
             RemoteMucLeaveDecision::MaybeCommitted
         }

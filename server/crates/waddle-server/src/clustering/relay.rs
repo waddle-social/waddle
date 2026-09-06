@@ -18,6 +18,10 @@
 //! Phase 4 wires DM/MUC/presence routing through this relay. Kademlia still
 //! discovers node relays only; entity ownership remains in Postgres claims.
 
+mod frame_receipts;
+pub use frame_receipts::RelayReplyReceiptToken;
+use frame_receipts::{confirm_received_reply, PendingReplyReceipts};
+
 use super::codec::RemoteStanza;
 use super::local_claims::RoomLocalClaims;
 use super::metrics;
@@ -145,10 +149,7 @@ fn relay_dispatch_span(kind: RelayDispatchKind, trace: &RelayTraceContext) -> tr
     span
 }
 
-/// The single seam through which every delegated relay reply task is
-/// spawned (#1483): binding `ctx.spawn` to the dispatch span here means
-/// a handler cannot delegate work outside its root span without
-/// bypassing this helper — and a test pins that no handler does.
+/// Bind delegated replies to their dispatch span (#1483).
 fn spawn_in_dispatch_span<R, F>(
     ctx: &mut Context<RelayActor, R>,
     span: tracing::Span,
@@ -254,6 +255,7 @@ pub struct RelayActor {
     /// validates sequence ACK/NACK behavior only; no production delivery actor
     /// is called from this substrate.
     ordered_receiver: Arc<Mutex<OrderedRelayReceiverState>>,
+    pending_reply_receipts: Arc<Mutex<PendingReplyReceipts>>,
 }
 
 impl RelayActor {
@@ -271,6 +273,7 @@ impl RelayActor {
             room_local_claims,
             ordered_delivery_bridge,
             ordered_receiver: Arc::new(Mutex::new(OrderedRelayReceiverState::default())),
+            pending_reply_receipts: Arc::new(Mutex::new(PendingReplyReceipts::default())),
         }
     }
 }
@@ -348,6 +351,7 @@ async fn finish_ordered_reservation(
     receiver: Arc<Mutex<OrderedRelayReceiverState>>,
     delivery_bridge: Arc<OrderedRelayDeliveryBridge>,
     reservation: OrderedRelayReservation,
+    completion: &mut Option<super::route_bridge::RelayFrameCompletion>,
 ) -> OrderedRelayReply {
     match reservation {
         OrderedRelayReservation::Reserved(reserved) => {
@@ -355,7 +359,7 @@ async fn finish_ordered_reservation(
             let delivery_timeout = delivery_bridge.reserved_delivery_effect_timeout();
             match tokio::time::timeout(
                 delivery_timeout,
-                delivery_bridge.deliver_reserved(&envelope),
+                delivery_bridge.deliver_reserved(&envelope, completion),
             )
             .await
             {
@@ -413,7 +417,8 @@ fn is_idempotent_join_presence_envelope(envelope: &RemoteStanzaEnvelope) -> bool
 // v2: room-lane recipient split + UnsupportedEnvelope NACK (#1597).
 // v3: MUC proxy origin/generation carried inside the ordered envelope (#1703).
 // v4: committed ingress canonical identity and principal on MUC proxy (#1657).
-#[kameo::remote_message("waddle.clustering.relay.deliver_ordered.v4")]
+// v5: origin receipt-confirmation token on ACK replies (#1657).
+#[kameo::remote_message("waddle.clustering.relay.deliver_ordered.v5")]
 impl Message<RelayDeliverOrdered> for RelayActor {
     type Reply = kameo::reply::DelegatedReply<OrderedRelayReply>;
 
@@ -434,8 +439,17 @@ impl Message<RelayDeliverOrdered> for RelayActor {
         // The reservation must stay inline (mailbox-ordered); only the
         // delegated delivery moves onto the instrumented reply task.
         let reservation = receiver.lock().await.reserve(msg.envelope);
+        let receipts = Arc::clone(&self.pending_reply_receipts);
         spawn_in_dispatch_span(ctx, span, async move {
-            let reply = finish_ordered_reservation(receiver, delivery_bridge, reservation).await;
+            let mut completion = None;
+            let mut reply =
+                finish_ordered_reservation(receiver, delivery_bridge, reservation, &mut completion)
+                    .await;
+            if let (OrderedRelayReply::Ack(ack), Some(completion)) = (&mut reply, completion) {
+                ack.reply_receipt = receipts.lock().await.register(
+                    crate::ingress::execute::RelayFrameReceiptCompletion::new(completion),
+                );
+            }
             record_ordered_relay_reply(&reply);
             reply
         })
@@ -651,6 +665,7 @@ pub struct RelayRouteRemoteResourceStanza {
 
 #[derive(Debug, Clone, Serialize, Deserialize, Reply)]
 pub struct RelayRouteRemoteResourceStanzaReply {
+    pub reply_receipt: Option<RelayReplyReceiptToken>,
     pub outcome: RemoteResourceRouteOutcome,
     pub replies: Vec<RemoteStanza>,
     #[serde(default)]
@@ -660,7 +675,8 @@ pub struct RelayRouteRemoteResourceStanzaReply {
 // This message serializes `RemoteResourceRouteTarget`; bump the suffix whenever
 // that target's wire shape changes. v2 adds the typed MUC proxy origin (#1703).
 // v3 adds canonical ingress identity and principal for room-owner admission (#1657).
-#[kameo::remote_message("waddle.clustering.relay.remote_resource_route.v3")]
+// v4 adds origin receipt confirmation for reply frames (#1657).
+#[kameo::remote_message("waddle.clustering.relay.remote_resource_route.v4")]
 impl Message<RelayRouteRemoteResourceStanza> for RelayActor {
     type Reply = kameo::reply::DelegatedReply<RelayRouteRemoteResourceStanzaReply>;
 
@@ -672,8 +688,18 @@ impl Message<RelayRouteRemoteResourceStanza> for RelayActor {
         let span = relay_dispatch_span(RelayDispatchKind::RemoteResourceRoute, &msg.trace);
         span.record("jid", tracing::field::display(&msg.source_jid));
         let bridge = Arc::clone(&self.ordered_delivery_bridge);
+        let receipts = Arc::clone(&self.pending_reply_receipts);
         spawn_in_dispatch_span(ctx, span, async move {
-            bridge.route_remote_resource_stanza_on_owner(msg).await
+            let mut completion = None;
+            let mut reply = bridge
+                .route_remote_resource_stanza_on_owner(msg, &mut completion)
+                .await;
+            if reply.outcome == RemoteResourceRouteOutcome::Delivered {
+                if let Some(completion) = completion {
+                    reply.reply_receipt = receipts.lock().await.register(completion);
+                }
+            }
+            reply
         })
     }
 }
@@ -1666,7 +1692,12 @@ impl RelayHandle {
             .reply_timeout(self.reply_timeout)
             .await
         {
-            Ok(reply) => Ok(reply),
+            Ok(reply) => {
+                if let OrderedRelayReply::Ack(ack) = &reply {
+                    confirm_received_reply(remote_ref, ack.reply_receipt);
+                }
+                Ok(reply)
+            }
             Err(error) if is_no_effect_stale_ref_relookup_error(&error) => {
                 self.cached = None;
                 let remote_ref = self.resolve().await?;
@@ -1676,7 +1707,12 @@ impl RelayHandle {
                     .reply_timeout(self.reply_timeout)
                     .await
                 {
-                    Ok(reply) => Ok(reply),
+                    Ok(reply) => {
+                        if let OrderedRelayReply::Ack(ack) = &reply {
+                            confirm_received_reply(remote_ref, ack.reply_receipt);
+                        }
+                        Ok(reply)
+                    }
                     Err(error) => ordered_send_error(&message.envelope, error),
                 }
             }
@@ -1851,16 +1887,21 @@ impl RelayHandle {
             .reply_timeout(self.reply_timeout)
             .await
         {
-            Ok(reply) => Ok(reply),
+            Ok(reply) => {
+                confirm_received_reply(remote_ref, reply.reply_receipt);
+                Ok(reply)
+            }
             Err(error) if is_no_effect_stale_ref_relookup_error(&error) => {
                 self.cached = None;
                 let remote_ref = self.resolve().await?;
-                remote_ref
+                let reply = remote_ref
                     .ask(&message)
                     .mailbox_timeout(self.mailbox_timeout)
                     .reply_timeout(self.reply_timeout)
                     .await
-                    .map_err(send_error)
+                    .map_err(send_error)?;
+                confirm_received_reply(remote_ref, reply.reply_receipt);
+                Ok(reply)
             }
             Err(error) => Err(send_error(error)),
         }

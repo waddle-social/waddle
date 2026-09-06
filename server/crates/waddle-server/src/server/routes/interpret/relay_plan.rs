@@ -108,7 +108,14 @@ mod tests {
         return_sender_reflection(&mut plan, &sender);
         let trusted =
             waddle_xmpp_core::xep0359::StanzaId::new("recorded-room-id", room.clone().into());
-        let plan = crate::ingress::restamp::restamp_plan(&plan, &[(room.clone(), trusted.clone())]);
+        let plan = crate::ingress::restamp::restamp_plan(
+            &plan,
+            &[(
+                room.clone(),
+                waddle_xmpp::ingress::ArchiveRole::Sender,
+                trusted.clone(),
+            )],
+        );
         waddle_xmpp_core::xep0359::remove_stanza_ids_by(&mut reflected, &room.clone().into());
         waddle_xmpp_core::xep0359::add_stanza_id(&mut reflected, &trusted);
         let Effect::External(ExternalEffect::Frame(stanza)) = &plan.plan[0].effect else {

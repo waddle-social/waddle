@@ -29,7 +29,7 @@ async fn plan_events(
 ) {
     let sink = PlanSink::new();
     sink.set_room_execution(submission.plan.room_execution.clone());
-    let capture = crate::ingress_shadow::IngressEffectCapture::new(None);
+    let capture = crate::ingress::IngressEffectCapture::new();
     sink.observe_sender(
         &submission
             .plan

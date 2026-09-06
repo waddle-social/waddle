@@ -809,7 +809,8 @@ async fn relay_muji_to_room_owner(
                 unrelayable(true, &relay_failed)
             }
             // Ambiguous by construction — the owner may have committed it.
-            OrderedRelayMucProxyOutcome::MaybeCommitted
+            OrderedRelayMucProxyOutcome::PendingFrames { .. }
+            | OrderedRelayMucProxyOutcome::MaybeCommitted
             | OrderedRelayMucProxyOutcome::JoinMaybeCommitted => {
                 unrelayable_after_relay_failure("relay_maybe_committed");
                 unrelayable(true, &|| relay_uncertain("relay_maybe_committed"))

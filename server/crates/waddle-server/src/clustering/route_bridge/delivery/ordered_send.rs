@@ -163,6 +163,7 @@ impl OrderedRelayDeliveryBridge {
     ) -> Option<RemoteDeliveryOutcome> {
         match result {
             Ok(OrderedRelayReply::Ack(ack)) => Some(RemoteDeliveryOutcome {
+                frame_completion: None,
                 delivery: FullJidDeliveryOutcome::Delivered,
                 client_replies: ack
                     .client_replies

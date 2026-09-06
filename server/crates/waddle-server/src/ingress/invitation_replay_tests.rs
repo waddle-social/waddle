@@ -81,7 +81,7 @@ async fn invitation_plan_commit_execute(fixture: IngressFixture) {
             .build(),
     );
     let sink = PlanSink::new();
-    let capture = crate::ingress_shadow::IngressEffectCapture::new(None);
+    let capture = crate::ingress::IngressEffectCapture::new();
     let mut deps = build_interpret_deps(state.as_ref(), None)
         .with_ingress_effect_capture(Some(capture.clone()));
     deps.effects = &sink;

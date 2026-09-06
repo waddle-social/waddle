@@ -12,6 +12,7 @@ pub(super) mod remote_socket;
 pub(super) mod telemetry;
 
 pub(super) use local::*;
+pub(crate) use muc::reserved::RelayFrameCompletion;
 pub(super) use muc::reserved::{
     deliver_reserved_muc_proxy, muc_proxy_result_to_ordered_outcome, muc_proxy_result_to_outcome,
 };
@@ -39,6 +40,7 @@ pub(super) fn remote_resource_route_reply(
     outcome: RemoteResourceRouteOutcome,
 ) -> RelayRouteRemoteResourceStanzaReply {
     RelayRouteRemoteResourceStanzaReply {
+        reply_receipt: None,
         outcome,
         replies: Vec::new(),
         recipient_sm_append_streams: Vec::new(),
@@ -101,6 +103,7 @@ pub(super) fn no_client_reply_outcome_with_commit_state_and_join_repair(
     join_repair_allowed: bool,
 ) -> RemoteDeliveryOutcome {
     RemoteDeliveryOutcome {
+        frame_completion: None,
         delivery,
         client_replies: Vec::new(),
         maybe_committed,

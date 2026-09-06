@@ -377,3 +377,278 @@ async fn groupchat_spoofed_room_stanza_id_reaches_committed_semantic_response() 
         "unknown room must produce its standard message error: {frames:?}"
     );
 }
+
+async fn frame_receipt_state(state: &WebSocketState) -> (i64, i64) {
+    let db = state
+        .deps
+        .app_state
+        .db_pool
+        .global()
+        .guard()
+        .await
+        .expect("database");
+    let mut rows = db.query(
+        "SELECT (SELECT COUNT(*) FROM ingress_effect_receipts), (SELECT COUNT(*) FROM ingress_messages WHERE terminal_at IS NOT NULL), (SELECT COUNT(*) FROM ingress_messages)",
+        (),
+    ).await.expect("receipt state");
+    let row = rows.next().await.expect("row").expect("counts");
+    assert_eq!(row.get::<i64>(2).expect("canonical rows"), 1);
+    (
+        row.get(0).expect("receipts"),
+        row.get(1).expect("terminal rows"),
+    )
+}
+
+async fn connection_reply_receipt_after_transport_write(
+    state: Arc<WebSocketState>,
+    transport_lost: bool,
+    resumable: bool,
+    nested_owner: bool,
+) {
+    use super::super::batch_write::{
+        write_ingress_response_batch_with_admission, BatchAuthority, BatchSmPolicy,
+        BatchWriteOutcome,
+    };
+    use axum::extract::ws::Message;
+    let mut conn = connection(&state, resumable).await;
+    let lifecycle = crate::clustering::NodeLifecycle::new();
+    let permit = lifecycle.admit().expect("permit");
+    let shutdown = tokio_util::sync::CancellationToken::new();
+    let mut responses = super::super::frame::handle_xmpp_frame_with_admission(
+        &offered_message(),
+        "example.com",
+        &state,
+        &mut conn,
+        &permit,
+        &shutdown,
+    )
+    .await;
+    assert_eq!(responses.frames.len(), 1);
+    assert_eq!(responses.ingress_reports.len(), 1);
+    #[cfg(not(feature = "clustering"))]
+    assert!(!nested_owner);
+    #[cfg(feature = "clustering")]
+    if nested_owner {
+        let report = responses.ingress_reports.pop().expect("owner report");
+        let completion = crate::ingress::execute::RelayFrameReceiptCompletion::new(
+            crate::clustering::route_bridge::RelayFrameCompletion {
+                authority: Arc::clone(&state.deps.protocol.ingress),
+                report,
+            },
+        );
+        let mut origin_report = crate::ingress::ExecutionReport::default();
+        origin_report.retain_relay_frame_completion(completion);
+        responses.ingress_reports.push(origin_report);
+    }
+    assert_eq!(frame_receipt_state(&state).await, (0, 0));
+    let started = Arc::new(tokio::sync::Notify::new());
+    let release = Arc::new(tokio::sync::Semaphore::new(0));
+    let sink_started = started.clone();
+    let sink_release = release.clone();
+    let mut sink = Box::pin(futures::sink::unfold((), move |(), _: Message| {
+        let started = sink_started.clone();
+        let release = sink_release.clone();
+        async move {
+            started.notify_one();
+            let _permit = release.acquire().await.expect("release write");
+            if transport_lost {
+                Err(std::io::Error::from(std::io::ErrorKind::BrokenPipe))
+            } else {
+                Ok(())
+            }
+        }
+    }));
+    let mut reader = futures::stream::pending::<Result<Message, std::io::Error>>();
+    let mut writing = Box::pin(write_ingress_response_batch_with_admission(
+        &mut sink,
+        &mut reader,
+        &state,
+        &mut conn,
+        &mut responses,
+        BatchSmPolicy::Record,
+        BatchAuthority {
+            permit: &permit,
+            shutdown: &shutdown,
+        },
+    ));
+    tokio::select! {
+        _ = started.notified() => {},
+        _ = &mut writing => panic!("batch must await transport completion"),
+    }
+    assert_eq!(
+        frame_receipt_state(&state).await,
+        (0, 0),
+        "transport write is still pending"
+    );
+    release.add_permits(1);
+    let report = writing.await;
+    if transport_lost {
+        assert!(matches!(report.outcome, BatchWriteOutcome::TransportClosed));
+        assert_eq!(frame_receipt_state(&state).await, (0, 0));
+    } else {
+        assert!(matches!(report.outcome, BatchWriteOutcome::Continue));
+        assert_eq!(frame_receipt_state(&state).await, (1, 1));
+    }
+}
+
+#[tokio::test]
+async fn ingress_reply_receipt_waits_for_successful_connection_batch_write() {
+    connection_reply_receipt_after_transport_write(
+        create_test_websocket_state().await,
+        false,
+        true,
+        false,
+    )
+    .await;
+}
+
+#[tokio::test]
+async fn ingress_reply_transport_loss_leaves_canonical_row_non_terminal() {
+    connection_reply_receipt_after_transport_write(
+        create_test_websocket_state().await,
+        true,
+        true,
+        false,
+    )
+    .await;
+}
+
+async fn postgres_connection_reply_receipt(transport_lost: bool, nested_owner: bool) {
+    let Ok(database_url) = std::env::var("WADDLE_TEST_POSTGRES_URL") else {
+        eprintln!(
+            "skipping PostgreSQL connection reply receipt test: WADDLE_TEST_POSTGRES_URL not set"
+        );
+        return;
+    };
+    let admin = sqlx::PgPool::connect(&database_url)
+        .await
+        .expect("postgres admin");
+    let schema = format!("ingress_reply_{}", uuid::Uuid::new_v4().simple());
+    sqlx::query(&format!("CREATE SCHEMA {schema}"))
+        .execute(&admin)
+        .await
+        .expect("schema");
+    let mut url = url::Url::parse(&database_url).expect("database URL");
+    url.query_pairs_mut()
+        .append_pair("options", &format!("-c search_path={schema}"));
+    let pool = Arc::new(
+        DatabasePool::new(
+            DatabaseConfig::new(crate::db::DatabaseDriver::Postgres, url.to_string()),
+            PoolConfig,
+        )
+        .await
+        .expect("postgres pool"),
+    );
+    let state = create_test_websocket_state_with_extension_manager(
+        empty_extension_manager().await,
+        TestStateOverrides {
+            db_pool: Some(pool),
+            ..Default::default()
+        },
+    )
+    .await;
+    connection_reply_receipt_after_transport_write(state, transport_lost, false, nested_owner)
+        .await;
+    sqlx::query(&format!("DROP SCHEMA {schema} CASCADE"))
+        .execute(&admin)
+        .await
+        .expect("drop schema");
+    admin.close().await;
+}
+
+#[tokio::test]
+async fn ingress_reply_receipt_waits_for_successful_connection_batch_write_postgres() {
+    postgres_connection_reply_receipt(false, false).await;
+}
+
+#[tokio::test]
+async fn ingress_reply_transport_loss_leaves_canonical_row_non_terminal_postgres() {
+    postgres_connection_reply_receipt(true, false).await;
+}
+
+#[tokio::test]
+async fn ingress_reply_authority_revocation_leaves_canonical_row_non_terminal() {
+    use super::super::batch_write::{
+        write_ingress_response_batch_with_admission, BatchAuthority, BatchSmPolicy,
+        BatchWriteOutcome,
+    };
+    use axum::extract::ws::Message;
+    let state = create_test_websocket_state().await;
+    let mut conn = connection(&state, true).await;
+    let lifecycle = crate::clustering::NodeLifecycle::new();
+    let permit = lifecycle.admit().expect("permit");
+    let shutdown = tokio_util::sync::CancellationToken::new();
+    let mut responses = super::super::frame::handle_xmpp_frame_with_admission(
+        &offered_message(),
+        "example.com",
+        &state,
+        &mut conn,
+        &permit,
+        &shutdown,
+    )
+    .await;
+    assert_eq!(responses.frames.len(), 1);
+    shutdown.cancel();
+    let written = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let sink_written = written.clone();
+    let mut sink = Box::pin(futures::sink::unfold((), move |(), _: Message| {
+        sink_written.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        std::future::ready(Ok::<(), std::io::Error>(()))
+    }));
+    let mut reader = futures::stream::pending::<Result<Message, std::io::Error>>();
+    let report = write_ingress_response_batch_with_admission(
+        &mut sink,
+        &mut reader,
+        &state,
+        &mut conn,
+        &mut responses,
+        BatchSmPolicy::Record,
+        BatchAuthority {
+            permit: &permit,
+            shutdown: &shutdown,
+        },
+    )
+    .await;
+    assert!(matches!(
+        report.outcome,
+        BatchWriteOutcome::AuthorityRevoked
+    ));
+    assert_eq!(written.load(std::sync::atomic::Ordering::SeqCst), 0);
+    assert_eq!(frame_receipt_state(&state).await, (0, 0));
+}
+
+#[cfg(feature = "clustering")]
+#[tokio::test]
+async fn ingress_local_owner_reply_receipt_waits_for_origin_batch_write() {
+    connection_reply_receipt_after_transport_write(
+        create_test_websocket_state().await,
+        false,
+        true,
+        true,
+    )
+    .await;
+}
+
+#[cfg(feature = "clustering")]
+#[tokio::test]
+async fn ingress_local_owner_reply_transport_loss_preserves_pending_receipts() {
+    connection_reply_receipt_after_transport_write(
+        create_test_websocket_state().await,
+        true,
+        true,
+        true,
+    )
+    .await;
+}
+
+#[cfg(feature = "clustering")]
+#[tokio::test]
+async fn ingress_local_owner_reply_receipt_waits_for_origin_batch_write_postgres() {
+    postgres_connection_reply_receipt(false, true).await;
+}
+
+#[cfg(feature = "clustering")]
+#[tokio::test]
+async fn ingress_local_owner_reply_transport_loss_preserves_pending_receipts_postgres() {
+    postgres_connection_reply_receipt(true, true).await;
+}

@@ -194,6 +194,48 @@ where
     .outcome
 }
 
+/// Keep ingress receipts pending until the complete response batch reaches the wire.
+pub(super) async fn write_ingress_response_batch_with_admission<S, SE, R, RE>(
+    sender: &mut S,
+    reader: &mut R,
+    state: &WebSocketState,
+    conn: &mut WsConnState,
+    responses: &mut super::frame::ResponseBatch,
+    policy: BatchSmPolicy,
+    authority: BatchAuthority<'_>,
+) -> BatchWriteReport
+where
+    S: Sink<Message, Error = SE> + Unpin,
+    SE: std::fmt::Display,
+    R: futures::Stream<Item = Result<Message, RE>> + Unpin,
+    RE: std::fmt::Display,
+{
+    let report = write_response_batch_report_with_admission(
+        sender,
+        reader,
+        state,
+        conn,
+        responses.frames.clone(),
+        policy,
+        authority,
+    )
+    .await;
+    if matches!(report.outcome, BatchWriteOutcome::Continue) {
+        for ingress_report in &mut responses.ingress_reports {
+            if let Err(error) = state
+                .deps
+                .protocol
+                .ingress
+                .complete_frame_obligations(ingress_report)
+                .await
+            {
+                warn!(%error, "Failed to receipt written ingress response frames");
+            }
+        }
+    }
+    report
+}
+
 pub(super) async fn write_response_batch_report_with_admission<S, SE, R, RE, F>(
     sender: &mut S,
     reader: &mut R,

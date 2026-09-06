@@ -365,13 +365,22 @@ impl IngressAuthority {
         &self,
         report: &mut ExecutionReport,
     ) -> Result<bool, execute::ExecutionPersistenceFailure> {
-        let admission = self.admission.read().await;
-        if self.cancellation.is_cancelled() || !*admission {
-            return Err(IngressUowError::AuthorityStopped.into());
-        }
-        report
-            .complete_frame_obligations(&self.uow, &self.database, Duration::from_secs(5))
-            .await
+        tokio::time::timeout(Duration::from_secs(5), async {
+            // Nested local-owner replies share this authority. Complete them before
+            // taking the admission read lock: a queued drain writer must never
+            // cause recursive read acquisition to deadlock.
+            #[cfg(feature = "clustering")]
+            report.complete_relay_frame_obligations().await?;
+            let admission = self.admission.read().await;
+            if self.cancellation.is_cancelled() || !*admission {
+                return Err(IngressUowError::AuthorityStopped.into());
+            }
+            report
+                .complete_frame_obligations(&self.uow, &self.database, Duration::from_secs(5))
+                .await
+        })
+        .await
+        .map_err(|_| execute::ExecutionPersistenceFailure::BudgetExhausted)?
     }
 
     pub async fn flush_checkpoint(

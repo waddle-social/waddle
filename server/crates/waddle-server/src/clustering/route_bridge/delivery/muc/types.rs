@@ -4,6 +4,10 @@ use waddle_xmpp::ingress::RelayTargetIdentity;
 #[derive(Debug, Clone)]
 pub(crate) enum OrderedRelayMucProxyOutcome {
     Delivered(Vec<Stanza>),
+    PendingFrames {
+        frames: Vec<Stanza>,
+        completion: crate::ingress::execute::RelayFrameReceiptCompletion,
+    },
     Unavailable,
     Dropped,
     MaybeCommitted,
