@@ -6,6 +6,10 @@ use waddle_xmpp::ingress::{
 };
 use waddle_xmpp::pending_delivery::SmSessionId;
 const MAX_CAPTURE_ENTRIES: usize = 128;
+#[cfg(test)]
+tokio::task_local! {
+    pub(crate) static TEST_CAPTURE_LIMIT: usize;
+}
 #[derive(Debug, Clone, PartialEq)]
 pub struct IngressEffectCaptureSnapshot {
     pub intents: Vec<IngressEffectIntent>,
@@ -106,7 +110,13 @@ impl IngressEffectCapture {
         }
         action(&mut state);
         let entry_count = state.intents.len();
-        if entry_count > MAX_CAPTURE_ENTRIES {
+        #[cfg(test)]
+        let limit = TEST_CAPTURE_LIMIT
+            .try_with(|limit| *limit)
+            .unwrap_or(MAX_CAPTURE_ENTRIES);
+        #[cfg(not(test))]
+        let limit = MAX_CAPTURE_ENTRIES;
+        if entry_count > limit {
             state.intents.clear();
             state.intent_keys.clear();
             state.overflowed = true;

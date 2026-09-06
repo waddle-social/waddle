@@ -25,7 +25,7 @@ pub(super) struct SubjectMutationStore {
 }
 
 impl SubjectMutationStore {
-    fn new(claim_store: Arc<waddle_xmpp::ownership::InProcessClaimStore>) -> Self {
+    pub(super) fn new(claim_store: Arc<waddle_xmpp::ownership::InProcessClaimStore>) -> Self {
         Self {
             mode: std::sync::atomic::AtomicU8::new(SubjectMutationStoreMode::Succeed as u8),
             claim_store,

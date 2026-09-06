@@ -284,7 +284,7 @@ pub(super) fn test_peer_id() -> String {
         .to_string()
 }
 
-pub(super) async fn services_with_claims(
+pub(crate) async fn services_with_claims(
     origin_owner: NodeIdentity,
     target_owner: NodeIdentity,
     receiver: NodeIdentity,

@@ -153,6 +153,17 @@ impl OrderedRelayDeliveryBridge {
         let mut handle =
             RelayHandle::new(NodeId::new(owner.node_id.clone()), self.stop_token.clone())
                 .with_ask_timeouts(self.mailbox_timeout, self.reply_timeout);
+        #[cfg(test)]
+        {
+            let offered = envelope.clone();
+            let result = handle.deliver_ordered(envelope).await;
+            if matches!(&result, Err(RelayAskError::Cancelled)) {
+                let _ = crate::clustering::route_bridge::TEST_CANCELLED_ENVELOPES
+                    .try_with(|envelopes| envelopes.borrow_mut().push(offered));
+            }
+            result
+        }
+        #[cfg(not(test))]
         handle.deliver_ordered(envelope).await
     }
 

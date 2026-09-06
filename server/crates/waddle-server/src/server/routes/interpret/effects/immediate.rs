@@ -3,6 +3,11 @@ use super::{
     RoomExecutionPath,
 };
 
+#[cfg(test)]
+tokio::task_local! {
+    static HANG_EXTERNAL: std::sync::Arc<tokio::sync::Notify>;
+}
+
 /// Executes the frozen typed operation and returns its actual result.
 #[derive(Clone, Copy, Debug, Default)]
 pub struct ImmediateSink;
@@ -28,6 +33,15 @@ impl EffectSink for ImmediateSink {
 }
 
 impl ImmediateSink {
+    /// Stall a real Phase-C operation after entry, independently of commit.
+    #[cfg(test)]
+    pub(crate) async fn with_hanging_external<T>(
+        entered: std::sync::Arc<tokio::sync::Notify>,
+        future: impl std::future::Future<Output = T>,
+    ) -> T {
+        HANG_EXTERNAL.scope(entered, future).await
+    }
+
     /// Execute Phase C using only the outcomes published by the committed Phase B attempt.
     pub fn execute_with_applied<'a>(
         &'a self,
@@ -35,6 +49,14 @@ impl ImmediateSink {
         deps: &'a super::super::Deps<'_>,
         applied: &'a super::AppliedDurableEffects,
     ) -> super::sink::EffectFuture<'a> {
+        #[cfg(test)]
+        if matches!(&effect.effect, Effect::External(_))
+            && HANG_EXTERNAL
+                .try_with(|entered| entered.notify_one())
+                .is_ok()
+        {
+            return Box::pin(std::future::pending());
+        }
         // Box each executor before composing it into an async state machine.
         // An encompassing async match embeds its largest branch and inflates
         // every websocket future that can dispatch a message.

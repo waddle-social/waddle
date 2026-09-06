@@ -65,9 +65,9 @@ async fn assert_committed_projection_push(database_url: &str, conversation: Conv
             .parse()
             .expect("occupant"),
     );
-    // The projection keys the inbox row on the canonicalized archive id, which
-    // the handler stamps onto both the wire id and the XEP-0359 `stanza-id`.
-    message.id = Some(xmpp_parsers::message::Id("committed-message".to_owned()));
+    // The client wire id differs from the room-assigned archive identity.
+    // Both channel and thread projections must use the trusted room stamp.
+    message.id = Some(xmpp_parsers::message::Id("client-wire-id".to_owned()));
     message
         .payloads
         .push(waddle_xmpp_core::xep0359::build_stanza_id_element(
@@ -105,6 +105,7 @@ async fn assert_committed_projection_push(database_url: &str, conversation: Conv
             ..
         })) = &effect.effect
         {
+            assert_eq!(entry.last_stanza_id, "committed-message");
             assert_eq!(
                 entry.unread, 0,
                 "uncommitted input has no authoritative unread count"
