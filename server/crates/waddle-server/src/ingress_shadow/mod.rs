@@ -3951,15 +3951,21 @@ mod tests {
                 archived_at: chrono::DateTime::<chrono::Utc>::from_timestamp(1_700_000_000, 0)
                     .expect("fixture archive time"),
             };
-        assert!(matches!(
-            fixture.processor.execute_submission(&payload_churn).await,
-            Ok(ShadowSubmissionOutcome {
-                decision: IngressShadowDecisionClass::IntentDivergence,
-                commit_kind: Some(IngressShadowCommitKind::Advanced),
-                alias: IngressShadowAliasOutcome::Existing,
-                ..
-            })
-        ));
+        // The same archive identity claimed under a different assigning
+        // authority is a contradiction: reconciliation records nothing new.
+        let churn_outcome = fixture.processor.execute_submission(&payload_churn).await;
+        assert!(
+            matches!(
+                churn_outcome,
+                Ok(ShadowSubmissionOutcome {
+                    decision: IngressShadowDecisionClass::IntentDivergence,
+                    commit_kind: Some(IngressShadowCommitKind::Advanced),
+                    alias: IngressShadowAliasOutcome::Existing,
+                    ..
+                })
+            ),
+            "{churn_outcome:?}"
+        );
         assert_eq!(fixture.frontier().await, 3);
         fixture.assert_rows(1, 1, 3, 1).await;
         fixture.close().await;
@@ -4006,7 +4012,7 @@ mod tests {
         // A per-run schema lets this test poison only the shadow dependency;
         // the processor must roll the transaction back without advancing h.
         fixture
-            .execute("DROP TABLE ingress_effect_intents", ())
+            .execute("DROP TABLE ingress_effect_intents CASCADE", ())
             .await
             .expect("poison shadow effect table");
         assert!(fixture
@@ -4403,7 +4409,7 @@ mod tests {
             return;
         };
         fixture
-            .execute("DROP TABLE ingress_effect_intents", ())
+            .execute("DROP TABLE ingress_effect_intents CASCADE", ())
             .await
             .expect("poison shadow effect table after the first retryable attempt");
         fixture

@@ -11,7 +11,6 @@ use waddle_xmpp::ingress::{
     IngressOrdinal, MessageKey, NormalizedTarget, SemanticDigest, SmIngressId, WireHandledCount,
 };
 use waddle_xmpp::mam::{ArchiveExpectation, ArchivedMessage, MamTxStoreOutcome};
-#[cfg(feature = "clustering")]
 use waddle_xmpp::pending_delivery::SmSessionId;
 use waddle_xmpp_core::xep0359::OriginId;
 
@@ -732,6 +731,23 @@ fn compare_effects<'a>(
             .filter(|row| row.intent.authority_key() == authority)
             .collect::<Vec<_>>();
         if matches.is_empty() {
+            // A planned effect under a new authority that reuses a recorded
+            // semantic identity is a contradiction: the same immutable identity
+            // cannot be claimed by two assigning authorities. Surfacing it here
+            // keeps the insert below from failing on the identity primary key.
+            if let Some(same_identity) = recorded
+                .iter()
+                .find(|row| row.intent.semantic_key() == intent.semantic_key())
+            {
+                return (
+                    ReconcileVerdict::Contradiction {
+                        kind: intent.kind(),
+                        recorded: same_identity.intent.semantic_key(),
+                        planned: intent.semantic_key(),
+                    },
+                    Vec::new(),
+                );
+            }
             // Two proposed archive identities under one authority are contradictory
             // even on a first commit, before any row has been inserted.
             if intent.kind() == IngressEffectKind::ArchiveAuthoritative {

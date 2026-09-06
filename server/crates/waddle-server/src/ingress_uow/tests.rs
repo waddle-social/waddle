@@ -1490,9 +1490,10 @@ async fn principal_assertion_observes_concurrent_session_revocation_after_lock_r
 #[cfg(feature = "clustering")]
 async fn write_spanning_rows(transaction: &mut IngressUowTransaction<'_>, values: &FixtureValues) {
     store_mam_message(transaction, values).await;
-    upsert_inbox_entry(transaction, values).await;
     // The alias miss path mints the canonical message row itself; recording
     // `values.message_key` separately first would collide on the primary key.
+    // The inbox projection ledger needs that canonical row, so the alias is
+    // resolved before the inbox upsert.
     assert!(matches!(
         CanonicalMessageRepository::resolve_and_record_alias(
             transaction,
@@ -1506,6 +1507,7 @@ async fn write_spanning_rows(transaction: &mut IngressUowTransaction<'_>, values
         .expect("record origin alias"),
         AliasResolution::Aliased(AliasOutcome::Inserted(key)) if key == values.message_key
     ));
+    upsert_inbox_entry(transaction, values).await;
     SmIngressRepository::insert_sm_ref(
         transaction,
         values.sm_ingress_id,
