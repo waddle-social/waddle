@@ -496,3 +496,7 @@ mod tests {
         );
     }
 }
+
+#[cfg(test)]
+#[path = "../../../../ingress/invitation_replay_tests.rs"]
+mod ingress_invitation_replay_tests;

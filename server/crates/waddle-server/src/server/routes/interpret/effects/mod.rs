@@ -39,3 +39,6 @@ pub(crate) use invite_scope::ScopedInviteSink;
 pub use early::MembershipOutcome;
 
 mod membership_outcome;
+
+mod room_pin_scope;
+pub(crate) use room_pin_scope::RoomPinSink;

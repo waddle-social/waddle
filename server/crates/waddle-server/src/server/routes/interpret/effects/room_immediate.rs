@@ -57,6 +57,8 @@ pub(super) async fn execute_durable(effect: DurableRoomEffect, deps: &Deps<'_>) 
 
 pub(super) async fn execute_external(effect: ExternalRoomEffect, deps: &Deps<'_>) -> EffectOutcome {
     match effect {
+        // Deferred archives require the ingress transaction executor.
+        ExternalRoomEffect::ArchiveAfterPin { .. } => EffectOutcome::Unavailable,
         ExternalRoomEffect::RoomActorMutation { room, mutation } => {
             mutate_room(deps, room, mutation).await
         }

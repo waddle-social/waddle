@@ -43,7 +43,7 @@ fn restamp_preserves_origin_other_authorities_and_input_plan() {
     plan.sanitized_message
         .payloads
         .push(build_stanza_id_element(&foreign.id, &foreign.by));
-    let result = restamp_plan(&plan, &[(owner, recorded.clone())]);
+    let result = restamp_plan(&plan, &[(owner, ArchiveRole::Sender, recorded.clone())]);
     assert_eq!(
         extract_stanza_ids(&result.sanitized_message),
         vec![recorded, foreign]
@@ -102,7 +102,10 @@ fn restamp_updates_archive_inbox_dependencies_and_external_frames() {
             Stanza::Message(plan.sanitized_message.clone()),
         )))),
     ];
-    let result = restamp_plan(&plan, &[(owner.clone(), recorded.clone())]);
+    let result = restamp_plan(
+        &plan,
+        &[(owner.clone(), ArchiveRole::Sender, recorded.clone())],
+    );
     let Effect::Durable(DurableEffect::Direct(DurableDirectEffect::ArchiveDirect {
         message, ..
     })) = &result.plan[0].effect
@@ -170,7 +173,7 @@ fn restamp_intent_routes_and_retractions_preserve_historical_targets() {
             retraction_stanza_id: minted,
         },
     });
-    let result = restamp_plan(&plan, &[(owner, recorded.clone())]);
+    let result = restamp_plan(&plan, &[(owner, ArchiveRole::Sender, recorded.clone())]);
     let IngressEffectIntent::RouteDirect { route_identity, .. } = &result.intents[1] else {
         panic!("route");
     };
@@ -195,7 +198,7 @@ fn restamp_descends_into_forwarded_messages() {
     let mut wrapper = Message::new(Some(owner.clone().into()));
     wrapper.payloads.push(forwarded.into());
     plan.error_reply = Some(Stanza::Message(wrapper));
-    let result = restamp_plan(&plan, &[(owner, recorded.clone())]);
+    let result = restamp_plan(&plan, &[(owner, ArchiveRole::Sender, recorded.clone())]);
     let Stanza::Message(wrapper) = result.error_reply.expect("reply") else {
         panic!("message");
     };
@@ -223,7 +226,7 @@ fn restamp_updates_offline_reference_and_original_payload_together() {
             original_message: Box::new(plan.sanitized_message.clone()),
         }),
     )));
-    let result = restamp_plan(&plan, &[(owner, recorded.clone())]);
+    let result = restamp_plan(&plan, &[(owner, ArchiveRole::Sender, recorded.clone())]);
     let Effect::External(ExternalEffect::Delivery(ExternalDeliveryEffect::QueueOfflineDelivery {
         row,
         original_message,
@@ -246,9 +249,14 @@ fn restamp_requires_recorded_archive_and_assigning_authority_to_match() {
     for recorded in [
         (
             other.clone(),
+            ArchiveRole::Sender,
             StanzaId::new("recorded", owner.clone().into()),
         ),
-        (owner, StanzaId::new("recorded", other.into())),
+        (
+            owner,
+            ArchiveRole::Sender,
+            StanzaId::new("recorded", other.into()),
+        ),
     ] {
         let result = restamp_plan(&plan, &[recorded]);
         assert_eq!(
@@ -302,7 +310,7 @@ fn system_archive_and_peer_delivery_share_recorded_identity() {
     plan.plan.push(PlannedEffect::new(Effect::External(
         ExternalEffect::QueueOfflineDelivery(route),
     )));
-    let stamped = restamp_plan(&plan, &[(room, recorded.clone())]);
+    let stamped = restamp_plan(&plan, &[(room, ArchiveRole::Sender, recorded.clone())]);
     let Effect::Durable(DurableEffect::Room(DurableRoomEffect::ArchiveGroupchat {
         message, ..
     })) = &stamped.plan[0].effect
@@ -342,4 +350,65 @@ fn system_archive_and_peer_delivery_share_recorded_identity() {
         panic!("recorded archive");
     };
     assert_eq!(message.timestamp.timestamp(), 123);
+}
+
+#[test]
+fn sender_and_generated_archives_retain_distinct_recorded_identities() {
+    let (mut plan, room, sender_minted, sender_recorded) = fixture();
+    let system_minted = StanzaId::new("system-provisional", room.clone().into());
+    let system_recorded = StanzaId::new("system-committed", room.clone().into());
+    let archived_at = chrono::DateTime::from_timestamp(123, 0).expect("timestamp");
+    plan.intents
+        .push(IngressEffectIntent::SystemMessageArchive {
+            sequence: 0,
+            archive: room.clone(),
+            by: room.clone(),
+            stanza_id: system_minted.clone(),
+            archived_at,
+        });
+    assert_ne!(
+        plan.intents[0].authority_key(),
+        plan.intents[1].authority_key()
+    );
+    for minted in [&sender_minted, &system_minted] {
+        let mut message = Message::new(Some(room.clone().into()));
+        message
+            .payloads
+            .push(build_stanza_id_element(&minted.id, &minted.by));
+        plan.plan
+            .push(PlannedEffect::new(Effect::External(ExternalEffect::Frame(
+                Box::new(Stanza::Message(message)),
+            ))));
+    }
+    let recorded = [
+        (
+            room.clone(),
+            ArchiveRole::SystemMessage { sequence: 0 },
+            system_recorded.clone(),
+        ),
+        (room, ArchiveRole::Sender, sender_recorded.clone()),
+    ];
+    let stamped = restamp_plan(&plan, &recorded);
+    for (effect, expected) in stamped.plan.iter().zip([sender_recorded, system_recorded]) {
+        let Effect::External(ExternalEffect::Frame(frame)) = &effect.effect else {
+            panic!("frame");
+        };
+        let Stanza::Message(message) = frame.as_ref() else {
+            panic!("message");
+        };
+        assert_eq!(extract_stanza_ids(message), vec![expected]);
+    }
+    assert_eq!(
+        extract_stanza_ids(&plan.sanitized_message),
+        vec![sender_minted]
+    );
+    let saved = stamped.intents[1].clone();
+    saved
+        .with_encoded_v1(|kind, payload| {
+            assert_eq!(
+                IngressEffectIntent::decode_v1(kind, payload).expect("decode"),
+                saved
+            );
+        })
+        .expect("encode");
 }

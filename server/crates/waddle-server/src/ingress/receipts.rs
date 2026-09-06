@@ -43,6 +43,17 @@ pub(super) fn external_receipts(
 fn exact_mutation(effect: &ExternalEffect, intent: &IngressEffectIntent) -> bool {
     match (effect, intent) {
         (
+            ExternalEffect::Room(ExternalRoomEffect::ArchiveAfterPin { room, message, .. }),
+            IngressEffectIntent::SystemMessageArchive {
+                archive, stanza_id, ..
+            },
+        ) => {
+            room == archive
+                && waddle_xmpp_core::xep0359::StanzaId::new(&message.id, room.clone().into())
+                    == *stanza_id
+        }
+
+        (
             ExternalEffect::Direct(ExternalDirectEffect::NotificationActivity { owner, mutation }),
             IngressEffectIntent::NotificationActivityPreview {
                 owner: recorded_owner,

@@ -161,8 +161,12 @@ pub(super) async fn broadcast_room_system_message_event(
         };
         match outcome {
             ArchiveGroupchatOutcome::Stored(result) => {
+                let sequence = deps.ingress_effect_capture.as_ref().map_or(0, |capture| {
+                    system_archive_sequence(&capture.snapshot().intents, &room)
+                });
                 deps.capture_intent(
-                    waddle_xmpp::ingress::IngressEffectIntent::ArchiveAuthoritative {
+                    waddle_xmpp::ingress::IngressEffectIntent::SystemMessageArchive {
+                        sequence,
                         archive: room.clone(),
                         stanza_id: waddle_xmpp_core::xep0359::StanzaId::new(
                             result.stored_id.clone(),
@@ -226,14 +230,13 @@ pub(super) async fn broadcast_room_system_message_event(
             .map(waddle_xmpp::ingress::EntityGeneration::from_storage)
             .unwrap_or(waddle_xmpp::ingress::EntityGeneration::INITIAL);
         deps.capture_intent(
-            waddle_xmpp::ingress::IngressEffectIntent::RouteMucGroupchat {
+            waddle_xmpp::ingress::IngressEffectIntent::RouteMucSystemBroadcast {
                 room: room.clone(),
                 occupants: snapshot
                     .occupants
                     .iter()
                     .map(|occupant| occupant.full_jid.clone())
                     .collect(),
-                reflection: synthetic_sender,
                 room_generation,
                 route_identity: waddle_xmpp::ingress::EffectMessageIdentity::stanza(StanzaId::new(
                     stanza_id.clone(),
@@ -243,4 +246,45 @@ pub(super) async fn broadcast_room_system_message_event(
         );
     }
     Some(stanza_id)
+}
+
+fn system_archive_sequence(
+    intents: &[waddle_xmpp::ingress::IngressEffectIntent],
+    room: &BareJid,
+) -> u32 {
+    let count = intents
+        .iter()
+        .filter(|intent| {
+            matches!(intent,
+                waddle_xmpp::ingress::IngressEffectIntent::SystemMessageArchive { archive, .. }
+                    if archive == room
+            )
+        })
+        .count();
+    u32::try_from(count).expect("ingress capture has a bounded intent count")
+}
+
+#[cfg(test)]
+mod identity_tests {
+    use super::*;
+    #[test]
+    fn generated_archive_sequences_are_distinct_and_room_scoped() {
+        let room: BareJid = "room@conference.example.com".parse().expect("room");
+        let other: BareJid = "other@conference.example.com".parse().expect("other room");
+        let mut intents = Vec::new();
+        for expected in 0..3 {
+            let sequence = system_archive_sequence(&intents, &room);
+            assert_eq!(sequence, expected);
+            intents.push(
+                waddle_xmpp::ingress::IngressEffectIntent::SystemMessageArchive {
+                    sequence,
+                    archive: room.clone(),
+                    by: room.clone(),
+                    stanza_id: StanzaId::new(uuid::Uuid::new_v4().to_string(), room.clone().into()),
+                    archived_at: chrono::Utc::now(),
+                },
+            );
+        }
+        assert_eq!(system_archive_sequence(&intents, &other), 0);
+    }
 }

@@ -19,6 +19,9 @@ use crate::{
 
 use super::decision::{EffectReceiptKey, IngressDecision};
 
+#[path = "execute_archive.rs"]
+mod archive;
+
 #[path = "execute_dependencies.rs"]
 mod dependencies;
 
@@ -27,6 +30,8 @@ pub enum ExternalOutcome {
     Done,
     Failed,
     Uncertain,
+    /// Frames have been prepared but their transport write is not confirmed.
+    AwaitingFrameDelivery,
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -37,13 +42,62 @@ pub enum ExecutionPersistenceFailure {
     BudgetExhausted,
 }
 
+/// Frames belonging to one external effect, with its durable receipt obligations.
+#[derive(Debug)]
+pub struct FrameObligation {
+    pub frames: Vec<Stanza>,
+    pub receipt_keys: Vec<EffectReceiptKey>,
+    effect_index: usize,
+}
+
 #[derive(Debug, Default)]
 pub struct ExecutionReport {
     pub outcomes: Vec<(ExternalEffect, ExternalOutcome)>,
-    pub frames: Vec<Stanza>,
+    pub frame_obligations: Vec<FrameObligation>,
+    message_key: Option<MessageKey>,
+    frame_completion_receipts: Vec<EffectReceiptKey>,
     /// A completed side effect can remain unresolved when its receipt write fails.
     pub receipt_failures: Vec<(EffectReceiptKey, ExecutionPersistenceFailure)>,
     pub terminalization_failure: Option<ExecutionPersistenceFailure>,
+}
+
+impl ExecutionReport {
+    /// Call only after every frame in `frame_obligations` was successfully written.
+    /// Dropping the report on cancellation or write failure leaves receipts pending.
+    /// Receipt persistence is idempotent, so this may be retried without writing frames again.
+    pub async fn complete_frame_obligations(
+        &mut self,
+        uow: &IngressUnitOfWork,
+        db: &Database,
+        budget: Duration,
+    ) -> Result<bool, ExecutionPersistenceFailure> {
+        if budget.is_zero() {
+            return Err(ExecutionPersistenceFailure::BudgetExhausted);
+        }
+        let Some(message_key) = self.message_key else {
+            return Ok(false);
+        };
+        for obligation in &self.frame_obligations {
+            if self.outcomes[obligation.effect_index].1 == ExternalOutcome::AwaitingFrameDelivery {
+                self.outcomes[obligation.effect_index].1 = ExternalOutcome::Done;
+            }
+        }
+        tokio::time::timeout(budget, async {
+            for key in &self.frame_completion_receipts {
+                EffectReceiptRepository::record_receipt_pooled(
+                    db,
+                    message_key,
+                    key.kind,
+                    &key.semantic_identity_hash,
+                )
+                .await?;
+            }
+            terminalize_if_complete(uow, message_key).await
+        })
+        .await
+        .map_err(|_| ExecutionPersistenceFailure::BudgetExhausted)?
+        .map_err(ExecutionPersistenceFailure::from)
+    }
 }
 
 pub async fn execute_effects(
@@ -58,6 +112,7 @@ pub async fn execute_effects(
     if !decision.class.advances() {
         return report;
     }
+    report.message_key = decision.message_key;
     let deadline = tokio::time::Instant::now() + budget;
     let mut recorded = Vec::new();
     let mut proven = vec![Vec::new(); decision.external.len()];
@@ -108,7 +163,13 @@ pub async fn execute_effects(
         } else {
             match tokio::time::timeout_at(
                 deadline,
-                sink.execute_with_applied(planned[index].clone(), deps, &decision.applied_durable),
+                async {
+                    if let ExternalEffect::Room(room_effect @ crate::server::routes::interpret::effects::room::ExternalRoomEffect::ArchiveAfterPin { .. }) = effect {
+                        archive::execute(uow, room_effect).await
+                    } else {
+                        sink.execute_with_applied(planned[index].clone(), deps, &decision.applied_durable).await
+                    }
+                },
             )
             .await
             {
@@ -126,7 +187,26 @@ pub async fn execute_effects(
                             dependent.resolve_membership_outcome(room, member, *outcome);
                         }
                     }
-                    classify_outcome(effect, result, &mut report.frames)
+                    let mut frames = Vec::new();
+                    let outcome = classify_outcome(effect, result, &mut frames);
+                    if frames.is_empty() {
+                        outcome
+                    } else {
+                        report.frame_obligations.push(FrameObligation {
+                            frames,
+                            receipt_keys: if outcome == ExternalOutcome::Done {
+                                proven[index].clone()
+                            } else {
+                                Vec::new()
+                            },
+                            effect_index: index,
+                        });
+                        if outcome == ExternalOutcome::Done {
+                            ExternalOutcome::AwaitingFrameDelivery
+                        } else {
+                            outcome
+                        }
+                    }
                 }
                 Err(_) => {
                     completed[index] = Some(false);
@@ -178,6 +258,23 @@ pub async fn execute_effects(
                 }
             }
         }
+    }
+    // Compute receipts that become provable only when all prepared frames are written.
+    let mut confirmed = report.outcomes.clone();
+    for (_, outcome) in &mut confirmed {
+        if *outcome == ExternalOutcome::AwaitingFrameDelivery {
+            *outcome = ExternalOutcome::Done;
+        }
+    }
+    for obligation in &report.frame_obligations {
+        for key in completed_receipts(decision, &confirmed, &proven, obligation.effect_index) {
+            if !report.frame_completion_receipts.contains(&key) {
+                report.frame_completion_receipts.push(key);
+            }
+        }
+    }
+    if !report.frame_obligations.is_empty() {
+        return report;
     }
     if let Some(key) = decision.message_key {
         // Tokio's timeout polls its future before checking the deadline. With

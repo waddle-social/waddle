@@ -43,6 +43,13 @@ pub enum RoomActorMutation {
 
 #[derive(Debug, Clone)]
 pub enum ExternalRoomEffect {
+    /// A system archive whose content is true only after the room pin commits.
+    ArchiveAfterPin {
+        room: BareJid,
+        message: Box<ArchivedMessage>,
+        fence: RoomFenceRequirement,
+        archive_expectation: ArchiveExpectation,
+    },
     /// Observer hooks may invoke host mutations, so unlike enrichment they run only after commit.
     ObserveRoomMessage {
         room: BareJid,
@@ -101,7 +108,8 @@ pub(in super::super) fn external(
             waddle_xmpp::Stanza::Message(message) => message_dependencies(room, message),
             _ => Vec::new(),
         },
-        ExternalRoomEffect::RoomActorMutation { .. } => Vec::new(),
+        ExternalRoomEffect::RoomActorMutation { .. }
+        | ExternalRoomEffect::ArchiveAfterPin { .. } => Vec::new(),
         ExternalRoomEffect::NotificationCandidate {
             room,
             archive_stanza_id,

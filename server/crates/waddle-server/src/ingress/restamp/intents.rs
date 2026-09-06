@@ -31,10 +31,12 @@ impl Replacements {
     pub(super) fn intent(&self, intent: &mut IngressEffectIntent) {
         match intent {
             IngressEffectIntent::ArchiveAuthoritative { stanza_id, .. }
+            | IngressEffectIntent::SystemMessageArchive { stanza_id, .. }
             | IngressEffectIntent::CallSignal { stanza_id, .. }
             | IngressEffectIntent::Extension { stanza_id, .. } => self.id(stanza_id),
             IngressEffectIntent::RouteDirect { route_identity, .. }
-            | IngressEffectIntent::RouteMucGroupchat { route_identity, .. } => {
+            | IngressEffectIntent::RouteMucGroupchat { route_identity, .. }
+            | IngressEffectIntent::RouteMucSystemBroadcast { route_identity, .. } => {
                 if let EffectMessageIdentity::StanzaId(id) = route_identity {
                     self.id(id);
                 }

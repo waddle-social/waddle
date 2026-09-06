@@ -12,7 +12,7 @@ use crate::server::routes::interpret::effects::{
 use jid::BareJid;
 use waddle_xmpp::{
     inbox::{ConversationKind, InboxEntry},
-    ingress::IngressEffectIntent,
+    ingress::{ArchiveRole, IngressEffectIntent},
     mam::ArchivedMessage,
     pending_delivery::PendingPayload,
     Stanza,
@@ -25,7 +25,7 @@ use xmpp_parsers::message::Message;
 /// The source plan is immutable so every serialization retry starts afresh.
 pub fn restamp_plan(
     plan: &IngressPlan,
-    recorded_archive_ids: &[(BareJid, StanzaId)],
+    recorded_archive_ids: &[(BareJid, ArchiveRole, StanzaId)],
 ) -> IngressPlan {
     let ids = Replacements::new(plan, recorded_archive_ids);
     let mut stamped = plan.clone();
@@ -54,24 +54,40 @@ pub fn restamp_plan(
 struct Replacements(Vec<(StanzaId, StanzaId)>);
 
 impl Replacements {
-    fn new(plan: &IngressPlan, recorded: &[(BareJid, StanzaId)]) -> Self {
+    fn new(plan: &IngressPlan, recorded: &[(BareJid, ArchiveRole, StanzaId)]) -> Self {
         Self(
             plan.intents
                 .iter()
                 .filter_map(|intent| {
-                    let IngressEffectIntent::ArchiveAuthoritative {
-                        archive,
-                        stanza_id,
-                        by,
-                        ..
-                    } = intent
-                    else {
-                        return None;
+                    let (archive, role, stanza_id, by) = match intent {
+                        IngressEffectIntent::ArchiveAuthoritative {
+                            archive,
+                            stanza_id,
+                            by,
+                            ..
+                        } => (archive, ArchiveRole::Sender, stanza_id, by),
+                        IngressEffectIntent::SystemMessageArchive {
+                            archive,
+                            sequence,
+                            stanza_id,
+                            by,
+                            ..
+                        } => (
+                            archive,
+                            ArchiveRole::SystemMessage {
+                                sequence: *sequence,
+                            },
+                            stanza_id,
+                            by,
+                        ),
+                        _ => return None,
                     };
                     recorded
                         .iter()
-                        .find(|(recorded_archive, id)| recorded_archive == archive && id.by == *by)
-                        .map(|(_, id)| (stanza_id.clone(), id.clone()))
+                        .find(|(recorded_archive, recorded_role, id)| {
+                            recorded_archive == archive && *recorded_role == role && id.by == *by
+                        })
+                        .map(|(_, _, id)| (stanza_id.clone(), id.clone()))
                 })
                 .collect(),
         )
@@ -252,6 +268,15 @@ impl Replacements {
 
     fn room(&self, effect: &mut ExternalRoomEffect) {
         match effect {
+            ExternalRoomEffect::ArchiveAfterPin {
+                room,
+                message,
+                archive_expectation,
+                ..
+            } => {
+                self.archive(room, message);
+                self.expectation(archive_expectation);
+            }
             ExternalRoomEffect::ObserveRoomMessage {
                 message,
                 error_request,

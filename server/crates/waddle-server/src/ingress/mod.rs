@@ -20,7 +20,7 @@ pub use effects::{
     DurableEffect, ExternalEffect, ImmediateSink, IngressPlan, PlanSuppressionPolicy,
     PlannedEffect, RoomExecutionPath,
 };
-pub use execute::{ExecutionReport, ExternalOutcome};
+pub use execute::{ExecutionReport, ExternalOutcome, FrameObligation};
 pub use identity::{IngressCanonicalRef, IngressStreamIdentity};
 pub use submission::IngressSubmission;
 
@@ -154,6 +154,20 @@ impl IngressAuthority {
             Duration::from_secs(5),
         )
         .await
+    }
+
+    /// Confirm all report frames only after the transport has successfully written them.
+    pub async fn complete_frame_obligations(
+        &self,
+        report: &mut ExecutionReport,
+    ) -> Result<bool, execute::ExecutionPersistenceFailure> {
+        let admission = self.admission.read().await;
+        if self.cancellation.is_cancelled() || !*admission {
+            return Err(IngressUowError::AuthorityStopped.into());
+        }
+        report
+            .complete_frame_obligations(&self.uow, &self.database, Duration::from_secs(5))
+            .await
     }
 
     pub async fn flush_checkpoint(
@@ -309,4 +323,16 @@ mod lifecycle_tests {
         drop(admitted);
         assert!(authority.drain_and_join(Duration::from_secs(1)).await);
     }
+}
+
+#[cfg(test)]
+mod room_pin_tests;
+
+#[cfg(test)]
+pub(crate) mod test_support {
+    use crate as waddle_server;
+    include!(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/tests/ingress_support.rs"
+    ));
 }

@@ -84,3 +84,6 @@ mod rejections;
 mod stream;
 #[path = "ingress_cases/tombstone.rs"]
 mod tombstone;
+
+#[path = "ingress_cases/replay.rs"]
+mod replay;

@@ -254,3 +254,33 @@ async fn plan_rejection_is_authoritative_for_committed_denials() {
         assert_eq!(messages(&db).await, 1);
     }
 }
+
+#[test]
+fn missing_archive_guard_checks_generated_authorities_individually() {
+    let room: jid::BareJid = "room@conference.example.com".parse().expect("room");
+    let sender = IngressEffectIntent::ArchiveAuthoritative {
+        archive: room.clone(),
+        by: room.clone(),
+        stanza_id: waddle_xmpp_core::xep0359::StanzaId::new("sender", room.clone().into()),
+        archived_at: chrono::Utc::now(),
+    };
+    let generated = IngressEffectIntent::SystemMessageArchive {
+        sequence: 0,
+        archive: room.clone(),
+        by: room.clone(),
+        stanza_id: waddle_xmpp_core::xep0359::StanzaId::new("generated", room.into()),
+        archived_at: chrono::Utc::now(),
+    };
+    assert!(!missing_planned_archive_authority(&[], &[]));
+    assert!(missing_planned_archive_authority(
+        std::slice::from_ref(&generated),
+        &[]
+    ));
+    let planned = [sender.clone(), generated.clone()];
+    assert!(missing_planned_archive_authority(&planned, &[sender]));
+    assert!(!missing_planned_archive_authority(&planned, &planned));
+    assert!(!missing_planned_archive_authority(
+        std::slice::from_ref(&generated),
+        std::slice::from_ref(&generated)
+    ));
+}

@@ -132,6 +132,7 @@ async fn committed_inbox_projection(fixture: IngressFixture) {
             projection: ProjectionRef(0),
         }),
     )));
+    read.identity = super::replay::resumable_identity(&fixture, "marker-read-stream", 1).await;
     let marked = commit_submission(&fixture.uow, &read, 5)
         .await
         .expect("mark read commit");
@@ -144,6 +145,25 @@ async fn committed_inbox_projection(fixture: IngressFixture) {
         0
     );
     assert_pushed_entry(&fixture, &marked, 0).await;
+    let newer = commit_submission(
+        &fixture.uow,
+        &inbox_push_plan(&fixture, "inbox-after-marker", "inbox-after-marker-id", 30),
+        5,
+    )
+    .await
+    .expect("new message after displayed marker");
+    assert_pushed_entry(&fixture, &newer, 1).await;
+    let replay = commit_submission(&fixture.uow, &read, 5)
+        .await
+        .expect("replay bound marker");
+    assert_eq!(replay.class, IngressDecisionClass::ExistingCommitted);
+    assert_eq!(replay.message_key, marked.message_key);
+    assert_eq!(
+        replay.applied_durable.inbox(ProjectionRef(0)),
+        newer.applied_durable.inbox(projection)
+    );
+    assert_pushed_entry(&fixture, &replay, 1).await;
+
     fixture.close().await;
 }
 
@@ -159,7 +179,7 @@ async fn ingress_committed_inbox_projection_postgres() {
     }
 }
 
-async fn assert_pushed_entry(
+pub(super) async fn assert_pushed_entry(
     fixture: &IngressFixture,
     decision: &waddle_server::ingress::IngressDecision,
     unread: u32,
