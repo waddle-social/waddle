@@ -82,11 +82,16 @@ async fn sqlite_open_verifies_lineage_and_protocol_epoch() {
         .await
         .expect("remove lineage");
     drop(conn);
+    // A private in-memory SQLite database is ephemeral: nothing outlives the
+    // process, so a missing lineage row is the expected classification, not
+    // a failed attestation.
+    let transaction = uow
+        .begin()
+        .await
+        .expect("ephemeral database begins without a lineage row");
     assert!(matches!(
-        uow.begin().await,
-        Err(IngressUowError::Lineage(crate::db::DatabaseError::Lineage(
-            lineage::LineageError::MissingRow
-        )))
+        transaction.lineage(),
+        super::IngressLineage::Ephemeral
     ));
 }
 
