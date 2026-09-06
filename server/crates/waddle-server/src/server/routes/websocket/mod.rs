@@ -79,7 +79,7 @@ pub(crate) mod muc_invites;
 mod outbound;
 mod parse_errors;
 mod registration;
-mod replay;
+pub(crate) mod replay;
 mod resource_binding;
 mod sasl;
 mod send;

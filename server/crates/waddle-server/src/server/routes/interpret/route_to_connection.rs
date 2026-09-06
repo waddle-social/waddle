@@ -1,4 +1,6 @@
 use super::*;
+#[path = "route_to_connection_plan.rs"]
+pub(super) mod plan;
 use std::{future::Future, pin::Pin};
 use waddle_xmpp::ingress::IngressEffectIntent;
 use waddle_xmpp::telemetry::call::PendingCallSetupRoute;
@@ -307,7 +309,9 @@ async fn route_to_full_jid(
     // The clone is sound: the ticket is a shared one-shot guard, so
     // the relay path's copy and the local fallback's copy share the
     // same closed bit and at most one of them counts.
-    let delivery =
+    let delivery = if deps.effects.is_planning() {
+        plan::deliver_full(deps, &full, &stanza, call_setup).await
+    } else {
         match deliver_full_jid_via_ordered_relay(deps, &full, stanza.as_ref(), call_setup.clone())
             .await
         {
@@ -318,7 +322,8 @@ async fn route_to_full_jid(
                 close_call_setup_from_outcome(call_setup, outcome);
                 outcome
             }
-        };
+        }
+    };
     if delivery == FullJidDeliveryOutcome::Unavailable {
         // RFC 6121 §8.5.1: a message to a nonexistent LOCAL account is
         // bounced regardless of type (`groupchat` excluded — reflection
@@ -338,11 +343,11 @@ async fn route_to_full_jid(
             if bare.domain().as_str() == deps.local_domain
                 && !local_account_exists_for(deps, &bare).await
             {
-                return bounce_for_nonexistent_account(stanza.as_ref(), deps.sfu);
+                return plan::bounce_nonexistent(deps, stanza.as_ref());
             }
             return Vec::new();
         }
-        bounce_undeliverable_iq(stanza.as_ref(), deps.sfu)
+        plan::bounce_unavailable(deps, stanza.as_ref())
             .into_iter()
             .collect()
     } else {
@@ -427,7 +432,7 @@ async fn route_dm_to_full_jid(
                     // maybe-enqueued failure) stays terminal to avoid
                     // double delivery.
                     let live_outcome =
-                        deliver_peer_to_live_only(deps.user_registry, &full, stanza.as_ref()).await;
+                        plan::deliver_peer_to_live(deps, &full, stanza.as_ref()).await;
                     if live_outcome != FullJidDeliveryOutcome::Unavailable {
                         if is_definitive_route_capture_outcome(live_outcome) {
                             capture_route_direct_intent(deps, &full.to_bare(), vec![full.clone()]);
@@ -477,8 +482,7 @@ async fn route_dm_to_full_jid(
             } => {
                 if let Some(processed) = processed {
                     let (queued_for_replay, not_queued) = queue_processed_for_detached(
-                        deps.sm_session_registry,
-                        deps.ingress_effect_capture.as_ref(),
+                        deps,
                         vec![full.clone()],
                         &std::collections::HashSet::new(),
                         &processed,
@@ -523,8 +527,7 @@ async fn route_dm_to_full_jid(
                 // so the message is not lost while resumable. Keep the
                 // successful replay append observable with its own identity.
                 let (queued_for_replay, not_queued) = queue_processed_for_detached(
-                    deps.sm_session_registry,
-                    deps.ingress_effect_capture.as_ref(),
+                    deps,
                     vec![full],
                     &std::collections::HashSet::new(),
                     stanza.as_ref(),
@@ -663,7 +666,7 @@ async fn route_to_bare_jid(
                      bouncing with service-unavailable instead of \
                      persisting (RFC 6121 §8.5.1)"
                 );
-                return bounce_for_nonexistent_account(stanza.as_ref(), deps.sfu);
+                return plan::bounce_nonexistent(deps, stanza.as_ref());
             } else {
                 run_headless_recipient_pass(deps, &bare, *stanza, recursion_depth + 1).await;
             }
@@ -764,8 +767,7 @@ async fn route_to_bare_jid(
                             // stanza-id-parity gap documented on
                             // the legacy path).
                             let (queued_for_replay, not_queued) = queue_processed_for_detached(
-                                deps.sm_session_registry,
-                                deps.ingress_effect_capture.as_ref(),
+                                deps,
                                 detached_targets,
                                 &live_set,
                                 &processed,
@@ -876,6 +878,14 @@ async fn route_to_bare_jid(
                     // tracked as a follow-up to
                     // #229 (Copilot review on
                     // PR #276).
+                    if deps.effects.is_planning() {
+                        plan::queue_detached(deps, vec![full.clone()], stanza.as_ref());
+                        any_landed = true;
+                        if !is_dm_message {
+                            captured_fanout.push(full);
+                        }
+                        continue;
+                    }
                     let stanza_typed = (*stanza).clone();
                     match sm
                         .record_stanza_for_detached_bound_resource_with_stream(
@@ -936,7 +946,7 @@ async fn route_to_bare_jid(
                     // (or no longer does) exist — bounce instead of
                     // creating archive/inbox rows for it (RFC 6121
                     // §8.5.1).
-                    return bounce_for_nonexistent_account(stanza.as_ref(), deps.sfu);
+                    return plan::bounce_nonexistent(deps, stanza.as_ref());
                 } else {
                     debug!(
                         bare_jid = %bare,
@@ -1033,13 +1043,28 @@ fn bounce_for_nonexistent_account(
 /// see [`RouteBridge::try_deliver_full_jid_remote`]'s deferred
 /// handoff. On `None` the ticket is untouched and the caller closes
 /// it from the local delivery outcome.
-fn deliver_full_jid_via_ordered_relay<'a>(
+pub(super) fn deliver_full_jid_via_ordered_relay<'a>(
     deps: &'a Deps<'_>,
     target: &'a jid::FullJid,
     stanza: &'a Stanza,
     call_setup: Option<PendingCallSetupRoute>,
 ) -> OrderedRelayDeliveryFuture<'a> {
     Box::pin(async move {
+        if deps.effects.is_planning() {
+            if plan::remote_owner(deps, &target.to_bare()).await {
+                plan::record(
+                    deps,
+                    plan::ExternalDeliveryEffect::RelayFullJid {
+                        origin: deps.ordered_relay_origin.clone(),
+                        target: target.clone(),
+                        stanza: Box::new(stanza.clone()),
+                        call_setup,
+                    },
+                );
+                return Some(FullJidDeliveryOutcome::Delivered);
+            }
+            return None;
+        }
         #[cfg(feature = "clustering")]
         {
             let origin = deps.ordered_relay_origin.as_ref()?;
@@ -1072,11 +1097,23 @@ fn deliver_full_jid_via_ordered_relay<'a>(
     })
 }
 
-async fn deliver_peer_to_full_with_registered_remote(
+pub(super) async fn deliver_peer_to_full_with_registered_remote(
     deps: &Deps<'_>,
     target: &jid::FullJid,
     stanza: &Stanza,
 ) -> FullJidDeliveryOutcome {
+    if deps.effects.is_planning() {
+        plan::record(
+            deps,
+            plan::ExternalDeliveryEffect::RouteToPeer {
+                jid: target.clone(),
+                stanza: Box::new(stanza.clone()),
+                kind: plan::PeerDeliveryKind::PeerStanza,
+                call_setup: None,
+            },
+        );
+        return FullJidDeliveryOutcome::Delivered;
+    }
     if let Some(outcome) = deliver_registered_remote_resource(
         deps,
         target,
@@ -1097,11 +1134,23 @@ async fn deliver_peer_to_full_with_registered_remote(
     .await
 }
 
-async fn deliver_direct_to_full_with_registered_remote(
+pub(super) async fn deliver_direct_to_full_with_registered_remote(
     deps: &Deps<'_>,
     target: &jid::FullJid,
     stanza: &Stanza,
 ) -> FullJidDeliveryOutcome {
+    if deps.effects.is_planning() {
+        plan::record(
+            deps,
+            plan::ExternalDeliveryEffect::RouteToPeer {
+                jid: target.clone(),
+                stanza: Box::new(stanza.clone()),
+                kind: plan::PeerDeliveryKind::DirectFrame,
+                call_setup: None,
+            },
+        );
+        return FullJidDeliveryOutcome::Delivered;
+    }
     if let Some(outcome) = deliver_registered_remote_resource(
         deps,
         target,
@@ -1121,6 +1170,11 @@ async fn deliver_registered_remote_resource(
     stanza: &Stanza,
     kind: waddle_xmpp::registry::DeliveryKind,
 ) -> Option<FullJidDeliveryOutcome> {
+    if deps.effects.is_planning() {
+        // A same-owner registered resource remains a peer-delivery obligation;
+        // its eventual executor resolves the remote socket registration.
+        return None;
+    }
     #[cfg(feature = "clustering")]
     {
         let state = deps.web_socket_state?;
@@ -1141,12 +1195,26 @@ async fn deliver_registered_remote_resource(
     }
 }
 
-fn deliver_bare_jid_via_ordered_relay<'a>(
+pub(super) fn deliver_bare_jid_via_ordered_relay<'a>(
     deps: &'a Deps<'_>,
     target: &'a jid::BareJid,
     stanza: &'a Stanza,
 ) -> OrderedRelayDeliveryFuture<'a> {
     Box::pin(async move {
+        if deps.effects.is_planning() {
+            if plan::remote_owner(deps, target).await {
+                plan::record(
+                    deps,
+                    plan::ExternalDeliveryEffect::RelayBareJid {
+                        origin: deps.ordered_relay_origin.clone(),
+                        target: target.clone(),
+                        stanza: Box::new(stanza.clone()),
+                    },
+                );
+                return Some(FullJidDeliveryOutcome::Delivered);
+            }
+            return None;
+        }
         #[cfg(feature = "clustering")]
         {
             let origin = deps.ordered_relay_origin.as_ref()?;
@@ -1308,14 +1376,21 @@ fn jingle_action(payload: &minidom::Element) -> Option<xmpp_parsers::jingle::Act
 /// cause of `Ok(false)` is the resource resuming mid-route, in which
 /// case a direct send reaches it (the persistence already happened, so
 /// the retry is delivery-only and cannot duplicate rows).
-async fn queue_processed_for_detached(
-    sm_session_registry: Option<&Arc<InMemorySmSessionRegistry>>,
-    ingress_effect_capture: Option<&crate::ingress_shadow::IngressEffectCapture>,
+pub(super) async fn queue_processed_for_detached(
+    deps: &Deps<'_>,
     detached_targets: Vec<jid::FullJid>,
     live_set: &std::collections::HashSet<jid::FullJid>,
     stanza: &Stanza,
 ) -> (Vec<jid::FullJid>, Vec<jid::FullJid>) {
-    let Some(sm) = sm_session_registry else {
+    if deps.effects.is_planning() {
+        let targets: Vec<_> = detached_targets
+            .into_iter()
+            .filter(|full| !live_set.contains(full))
+            .collect();
+        plan::queue_detached(deps, targets.clone(), stanza);
+        return (targets, Vec::new());
+    }
+    let Some(sm) = deps.sm_session_registry else {
         return (Vec::new(), Vec::new());
     };
     let mut queued = Vec::new();
@@ -1333,7 +1408,7 @@ async fn queue_processed_for_detached(
             .await
         {
             Ok(Some(stream)) => {
-                if let Some(capture) = ingress_effect_capture {
+                if let Some(capture) = deps.ingress_effect_capture.as_ref() {
                     capture.record_recipient_sm_append(stream);
                 }
                 let queued_full = full.clone();
@@ -1375,7 +1450,7 @@ async fn queue_processed_for_detached(
 /// the live channel with the already-processed stanza. Best-effort —
 /// the shared pass already persisted archive/inbox, so a miss here
 /// degrades to MAM catch-up rather than loss.
-async fn retry_unqueued_detached_as_live(
+pub(super) async fn retry_unqueued_detached_as_live(
     deps: &Deps<'_>,
     not_queued: Vec<jid::FullJid>,
     processed: &Stanza,

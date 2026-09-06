@@ -42,6 +42,10 @@ mod xmpp_user_storage_state;
 pub(crate) mod bootstrap_membership;
 pub(crate) mod managed_channel_policy;
 pub(crate) mod routes;
+
+pub use routes::interpret::effects;
+/// Interpreter-only ingress planning seam, consumed by the authority cutover.
+pub use routes::interpret::{build_plan_deps, plan_message_dispatch};
 pub mod xmpp_state;
 
 pub use config::{XmppAcmeConfig, XmppConfig};

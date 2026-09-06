@@ -22,6 +22,14 @@ pub(super) async fn broadcast_room_system_message_event(
     mut message: Box<Message>,
     recursion_depth: u8,
 ) -> Option<String> {
+    if deps.effects.is_planning() {
+        super::effects::room::external(
+            deps,
+            super::effects::room::ExternalRoomEffect::BroadcastRoomSystemMessage { room, message },
+            super::effects::PlanSuppressionPolicy::Always,
+        );
+        return None;
+    }
     let Some(room_registry) = deps.room_registry else {
         debug!(
             room = %room,
@@ -33,6 +41,7 @@ pub(super) async fn broadcast_room_system_message_event(
         .ask(GetRoom {
             room_jid: room.clone(),
         })
+        .reply_timeout(std::time::Duration::from_secs(5))
         .await
     {
         Ok(Some(actor)) => actor,
@@ -73,6 +82,7 @@ pub(super) async fn broadcast_room_system_message_event(
         .ask(GetRoomSnapshot {
             sender_jid: synthetic_sender.clone(),
         })
+        .reply_timeout(std::time::Duration::from_secs(5))
         .await
     {
         Ok(snap) => snap,

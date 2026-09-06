@@ -1,3 +1,4 @@
+use super::effects::delivery::PreparedOfflineNotification;
 use super::*;
 
 pub(super) async fn queue_offline_delivery(
@@ -7,6 +8,26 @@ pub(super) async fn queue_offline_delivery(
     original_receipt_at: chrono::DateTime<chrono::Utc>,
     original_message: Box<Message>,
 ) {
+    let row = waddle_xmpp::pending_delivery::PendingRow {
+        id: waddle_xmpp::pending_delivery::PendingRowId::fresh(),
+        recipient,
+        original_receipt_at,
+        payload,
+        flushed_in_session: None,
+        outbound_sequence: None,
+    };
+    apply_offline_delivery_row(deps, row, original_message, None).await;
+}
+
+/// Apply the frozen row identity as well as its notification/outboxed obligation.
+pub(super) async fn apply_offline_delivery_row(
+    deps: &Deps<'_>,
+    row: waddle_xmpp::pending_delivery::PendingRow,
+    original_message: Box<Message>,
+    prepared_notification: Option<PreparedOfflineNotification>,
+) {
+    let recipient = row.recipient.clone();
+    let payload = &row.payload;
     // XEP-0160 §3 step 2/4 — persist for later delivery.
     // The classifier and OfflineDeliveryHandler have already
     // applied XEP-0160 §4 type rules and the XEP-0334 hint
@@ -19,14 +40,14 @@ pub(super) async fn queue_offline_delivery(
         );
         return;
     };
-    let notification_archive_stanza_id = match &payload {
+    let notification_archive_stanza_id = match payload {
         waddle_xmpp::pending_delivery::PendingPayload::Archived(stanza_id) => {
             Some(stanza_id.clone())
         }
         waddle_xmpp::pending_delivery::PendingPayload::Transient(_) => None,
     };
-    let row_id = waddle_xmpp::pending_delivery::PendingRowId::fresh();
-    let pending_delivery_mutation = match &payload {
+    let row_id = row.id.clone();
+    let pending_delivery_mutation = match payload {
         waddle_xmpp::pending_delivery::PendingPayload::Archived(archive_stanza_id) => {
             waddle_xmpp::ingress::PendingDeliveryMutation::Archived {
                 recipient: recipient.clone(),
@@ -41,14 +62,52 @@ pub(super) async fn queue_offline_delivery(
             }
         }
     };
-    let row = waddle_xmpp::pending_delivery::PendingRow {
-        id: row_id.clone(),
-        recipient: recipient.clone(),
-        original_receipt_at,
-        payload,
-        flushed_in_session: None,
-        outbound_sequence: None,
-    };
+    if deps.effects.is_planning() {
+        let prepared_notification = prepare_offline_notification(
+            deps,
+            &recipient,
+            notification_archive_stanza_id.as_ref(),
+            &original_message,
+        )
+        .await;
+        if matches!(
+            &prepared_notification,
+            PreparedOfflineNotification::Prepared(_)
+        ) {
+            if let Some(archive_stanza_id) = notification_archive_stanza_id.as_ref() {
+                deps.capture_intent(IngressEffectIntent::NotificationActivityPreview {
+                    owner: recipient.clone(),
+                    mutation:
+                        waddle_xmpp::ingress::NotificationActivityMutation::NotificationCandidate {
+                            conversation: recipient.clone(),
+                            archive_stanza_id: archive_stanza_id.clone(),
+                            outcome: waddle_xmpp::ingress::NotificationCandidateOutcome::Inserted,
+                        },
+                });
+            }
+        }
+        deps.capture_intent(IngressEffectIntent::PendingDelivery {
+            mutation: pending_delivery_mutation,
+        });
+        if let Some(archive_stanza_id) = notification_archive_stanza_id {
+            deps.capture_intent(IngressEffectIntent::NotificationActivityPreview {
+                owner: recipient.clone(),
+                mutation: waddle_xmpp::ingress::NotificationActivityMutation::OfflineDelivery {
+                    conversation: recipient,
+                    archive_stanza_id,
+                },
+            });
+        }
+        super::effects::delivery::record(
+            deps,
+            super::effects::delivery::ExternalDeliveryEffect::QueueOfflineDelivery {
+                prepared_notification,
+                row,
+                original_message,
+            },
+        );
+        return;
+    }
     match storage.insert(row).await {
         Ok(waddle_xmpp::pending_delivery::InsertOutcome::Inserted) => {
             debug!(
@@ -67,12 +126,19 @@ pub(super) async fn queue_offline_delivery(
                     },
                 });
             }
-            let outcome = enqueue_xep0357_notification_candidate(
-                deps,
-                &recipient,
-                notification_archive_stanza_id.as_ref(),
-            )
-            .await;
+            let outcome = match prepared_notification {
+                Some(prepared) => {
+                    insert_prepared_notification(deps.web_socket_state, prepared).await
+                }
+                None => {
+                    enqueue_xep0357_notification_candidate(
+                        deps,
+                        &recipient,
+                        notification_archive_stanza_id.as_ref(),
+                    )
+                    .await
+                }
+            };
             if let (Some(archive_stanza_id), Some(candidate_outcome)) = (
                 notification_archive_stanza_id.as_ref(),
                 outcome.candidate_outcome(),
@@ -340,6 +406,26 @@ async fn enqueue_xep0357_notification_candidate_for_message(
     archive_stanza_id: &waddle_xmpp_core::xep0359::StanzaId,
     original_message: &Message,
 ) -> NotificationCandidateQueueOutcome {
+    let prepared = prepare_notification_candidate_for_message(
+        state,
+        recipient,
+        sender,
+        sender_jid,
+        archive_stanza_id,
+        original_message,
+    )
+    .await;
+    insert_prepared_notification(Some(state), prepared).await
+}
+
+async fn prepare_notification_candidate_for_message(
+    state: &WebSocketState,
+    recipient: &BareJid,
+    sender: &BareJid,
+    sender_jid: &Jid,
+    archive_stanza_id: &waddle_xmpp_core::xep0359::StanzaId,
+    original_message: &Message,
+) -> PreparedOfflineNotification {
     // XEP-0203 `<delay/>` filter NOT applied here (Copilot review on
     // PR #738): see the matching comment in `groupchat_inbox.rs`'s
     // `enqueue_groupchat_notification_candidate`. An earlier shape
@@ -410,7 +496,7 @@ async fn enqueue_xep0357_notification_candidate_for_message(
                 sender = %sender,
                 "XEP-0357 notification candidate skipped: self-directed (sender bare JID == recipient bare JID)"
             );
-            return NotificationCandidateQueueOutcome::Completed;
+            return PreparedOfflineNotification::Suppressed;
         }
         Err(error) => {
             warn!(
@@ -419,7 +505,7 @@ async fn enqueue_xep0357_notification_candidate_for_message(
                 error = %error,
                 "XEP-0357 notification candidate rejected"
             );
-            return NotificationCandidateQueueOutcome::Completed;
+            return PreparedOfflineNotification::Suppressed;
         }
     };
     // T0 push-gate evaluation — compliance: suppressed
@@ -488,7 +574,7 @@ async fn enqueue_xep0357_notification_candidate_for_message(
                 error = ?error,
                 "push gate evaluation failed at T0; deferring offline-delivery DM candidate"
             );
-            return NotificationCandidateQueueOutcome::RetryLater;
+            return PreparedOfflineNotification::RetryLater;
         }
     };
     match outcome {
@@ -506,7 +592,7 @@ async fn enqueue_xep0357_notification_candidate_for_message(
             waddle_xmpp::telemetry::reliability::increment_push_suppressed(
                 reason.telemetry_reason(),
             );
-            return NotificationCandidateQueueOutcome::Completed;
+            return PreparedOfflineNotification::Suppressed;
         }
         crate::notification_outbox::T1PushDispatchOutcome::DeferUnknownRoomPolicy => {
             // DM evaluation does not consult room_policy, so this is
@@ -517,9 +603,28 @@ async fn enqueue_xep0357_notification_candidate_for_message(
                 "XEP-0492 evaluator returned DeferUnknownRoomPolicy for a DM candidate; \
                  this is structurally impossible — retrying"
             );
-            return NotificationCandidateQueueOutcome::RetryLater;
+            return PreparedOfflineNotification::RetryLater;
         }
     }
+    PreparedOfflineNotification::Prepared(Box::new(candidate))
+}
+
+async fn insert_prepared_notification(
+    state: Option<&WebSocketState>,
+    prepared: PreparedOfflineNotification,
+) -> NotificationCandidateQueueOutcome {
+    let candidate = match prepared {
+        PreparedOfflineNotification::Prepared(candidate) => candidate,
+        PreparedOfflineNotification::Suppressed => {
+            return NotificationCandidateQueueOutcome::Completed;
+        }
+        PreparedOfflineNotification::RetryLater => {
+            return NotificationCandidateQueueOutcome::RetryLater;
+        }
+    };
+    let Some(state) = state else {
+        return NotificationCandidateQueueOutcome::RetryLater;
+    };
     match state
         .deps
         .protocol
@@ -528,32 +633,47 @@ async fn enqueue_xep0357_notification_candidate_for_message(
         .await
     {
         Ok(crate::notification_outbox::NotificationCandidateInsertOutcome::Inserted) => {
-            debug!(
-                recipient = %recipient,
-                sender = %sender,
-                is_mention,
-                "XEP-0357 notification candidate inserted for durable outbox worker"
-            );
             NotificationCandidateQueueOutcome::Inserted
         }
         Ok(crate::notification_outbox::NotificationCandidateInsertOutcome::Duplicate) => {
-            debug!(
-                recipient = %recipient,
-                sender = %sender,
-                "Duplicate XEP-0357 notification candidate ignored"
-            );
             NotificationCandidateQueueOutcome::Duplicate
         }
         Err(error) => {
-            warn!(
-                recipient = %recipient,
-                sender = %sender,
-                error = %error,
-                "XEP-0357 notification candidate insert failed"
-            );
+            warn!(recipient = %candidate.recipient_bare_jid(), %error,
+                "XEP-0357 notification candidate insert failed");
             NotificationCandidateQueueOutcome::RetryLater
         }
     }
+}
+
+async fn prepare_offline_notification(
+    deps: &Deps<'_>,
+    recipient: &BareJid,
+    archive_stanza_id: Option<&waddle_xmpp_core::xep0359::StanzaId>,
+    message: &Message,
+) -> PreparedOfflineNotification {
+    let Some(archive_stanza_id) = archive_stanza_id else {
+        return PreparedOfflineNotification::Suppressed;
+    };
+    let Some(state) = deps.web_socket_state else {
+        return PreparedOfflineNotification::RetryLater;
+    };
+    let Some(sender_jid) = message
+        .from
+        .as_ref()
+        .filter(|sender| sender.resource().is_some())
+    else {
+        return PreparedOfflineNotification::Suppressed;
+    };
+    prepare_notification_candidate_for_message(
+        state,
+        recipient,
+        &sender_jid.to_bare(),
+        sender_jid,
+        archive_stanza_id,
+        message,
+    )
+    .await
 }
 
 /// Typed pair of message-frozen XEP-0513 mention signals for a single

@@ -112,6 +112,22 @@ pub(super) async fn record_chat_state_activity(
         return;
     };
     let now_ms = crate::time::now_ms();
+    if deps.effects.is_planning() {
+        let mutation = if matches!(state, ChatState::Gone) {
+            NotificationActivityMutation::ChatStateGone {
+                conversation: conversation.clone(),
+                committed_at_ms: now_ms,
+            }
+        } else {
+            NotificationActivityMutation::ChatState {
+                conversation: conversation.clone(),
+                state,
+                committed_at_ms: now_ms,
+            }
+        };
+        plan_notification_activity(deps, sender, mutation);
+        return;
+    }
     if matches!(state, ChatState::Gone) {
         debug!(
             owner = %sender,
@@ -179,6 +195,17 @@ pub(super) async fn record_read_marker_activity(
         return;
     };
     let now_ms = crate::time::now_ms();
+    if deps.effects.is_planning() {
+        plan_notification_activity(
+            deps,
+            owner,
+            NotificationActivityMutation::ReadMarker {
+                conversation: conversation.clone(),
+                committed_at_ms: now_ms,
+            },
+        );
+        return;
+    }
     if let Err(error) = store.record_read_marker(owner, conversation, now_ms).await {
         warn!(
             %owner,
@@ -234,6 +261,17 @@ pub(super) async fn record_outbound_message_activity(
         return;
     };
     let now_ms = crate::time::now_ms();
+    if deps.effects.is_planning() {
+        plan_notification_activity(
+            deps,
+            sender,
+            NotificationActivityMutation::OutboundMessage {
+                conversation: conversation.clone(),
+                committed_at_ms: now_ms,
+            },
+        );
+        return;
+    }
     if let Err(error) = store
         .record_outbound_message(sender, conversation, now_ms)
         .await
@@ -311,6 +349,21 @@ pub(crate) async fn record_presence_unavailable_activity_on_state(
              projection write skipped (XMPP routing unaffected)",
         );
     }
+}
+
+fn plan_notification_activity(
+    deps: &Deps<'_>,
+    owner: &BareJid,
+    mutation: NotificationActivityMutation,
+) {
+    super::effects::direct::external(
+        deps,
+        super::effects::direct::ExternalDirectEffect::NotificationActivity {
+            owner: owner.clone(),
+            mutation: mutation.clone(),
+        },
+    );
+    capture_notification_activity(deps, owner, mutation);
 }
 
 #[cfg(test)]

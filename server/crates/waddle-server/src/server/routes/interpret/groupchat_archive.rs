@@ -14,7 +14,7 @@ pub(super) enum RoomArchiveFence {
     #[cfg(feature = "clustering")]
     Guarded {
         context: RoomClaimFenceContext,
-        _identity_guard: CurrentNodeIdentityGuard,
+        _identity_guard: Option<CurrentNodeIdentityGuard>,
     },
     #[cfg(feature = "clustering")]
     OwnershipLost,
@@ -50,6 +50,28 @@ pub(super) enum ArchiveGroupchatOutcome {
 pub(super) async fn resolve_room_claim_fence(deps: &Deps<'_>, room: &BareJid) -> RoomArchiveFence {
     #[cfg(feature = "clustering")]
     {
+        if deps.effects.is_planning() {
+            if let super::effects::RoomExecutionPath::Local {
+                room: planned_room,
+                fence,
+                ..
+            } = deps.effects.room_execution()
+            {
+                if &planned_room == room {
+                    return match fence {
+                        super::effects::room::RoomFenceRequirement::Unfenced => {
+                            RoomArchiveFence::Unfenced
+                        }
+                        super::effects::room::RoomFenceRequirement::Guarded(context) => {
+                            RoomArchiveFence::Guarded {
+                                context,
+                                _identity_guard: None,
+                            }
+                        }
+                    };
+                }
+            }
+        }
         let Some(state) = deps.web_socket_state else {
             return RoomArchiveFence::Unfenced;
         };
@@ -57,6 +79,20 @@ pub(super) async fn resolve_room_claim_fence(deps: &Deps<'_>, room: &BareJid) ->
         let Some(store) = clustering.muc_durable_store.as_ref() else {
             return RoomArchiveFence::Unfenced;
         };
+        if deps.effects.is_planning() {
+            return match (
+                store.current_claim_fence(room),
+                clustering.node_identity.as_ref(),
+            ) {
+                (Some(context), Some(identity)) if context.owner == identity.current() => {
+                    RoomArchiveFence::Guarded {
+                        context,
+                        _identity_guard: None,
+                    }
+                }
+                _ => RoomArchiveFence::OwnershipLost,
+            };
+        }
         guard_clustered_room_claim_fence(
             store.current_claim_fence(room),
             clustering.node_identity.as_ref(),
@@ -83,11 +119,32 @@ async fn guard_clustered_room_claim_fence(
     };
     RoomArchiveFence::Guarded {
         context,
-        _identity_guard: identity_guard,
+        _identity_guard: Some(identity_guard),
     }
 }
 
 pub(super) async fn archive_groupchat_message(
+    mam_storage: &Arc<dyn MamStorage>,
+    room: &BareJid,
+    message: &Message,
+    sender_nickname_generation: u64,
+    fence: &RoomArchiveFence,
+    sender_item: Option<&waddle_xmpp_core::mam::ArchivedMucSender>,
+) -> ArchiveGroupchatOutcome {
+    archive_groupchat_message_with_effects(
+        None,
+        mam_storage,
+        room,
+        message,
+        sender_nickname_generation,
+        fence,
+        sender_item,
+    )
+    .await
+}
+
+pub(super) async fn archive_groupchat_message_with_effects(
+    deps: Option<&Deps<'_>>,
     mam_storage: &Arc<dyn MamStorage>,
     room: &BareJid,
     message: &Message,
@@ -137,8 +194,8 @@ pub(super) async fn archive_groupchat_message(
         }
     };
 
-    finish_archive_groupchat_message(
-        mam_storage,
+    finish_archive_groupchat_message_with_effects(
+        (deps, mam_storage),
         room,
         archive_clone,
         archive_id,
@@ -159,8 +216,8 @@ pub(super) fn extract_room_stanza_id(message: &Message, room: &BareJid) -> Optio
         .and_then(|payload| payload.attr("id").map(ToOwned::to_owned))
 }
 
-pub(super) async fn finish_archive_groupchat_message(
-    mam_storage: &Arc<dyn MamStorage>,
+async fn finish_archive_groupchat_message_with_effects(
+    storage: (Option<&Deps<'_>>, &Arc<dyn MamStorage>),
     room: &BareJid,
     archive_clone: Message,
     archive_id: String,
@@ -168,6 +225,7 @@ pub(super) async fn finish_archive_groupchat_message(
     fence: &RoomArchiveFence,
     sender_item: Option<&waddle_xmpp_core::mam::ArchivedMucSender>,
 ) -> ArchiveGroupchatOutcome {
+    let (deps, mam_storage) = storage;
     // RFC 6121 §5.2.3: `<body>` is optional. Preserve the
     // None-vs-empty distinction so subject-only / reaction-only
     // groupchat messages don't materialize a fake empty body in the
@@ -231,16 +289,46 @@ pub(super) async fn finish_archive_groupchat_message(
     // `pending_delivery::insert_fenced` establishes one table over,
     // running the `SELECT ... FOR SHARE` INSIDE the same transaction as
     // this insert.
-    let store_result = match fence {
-        #[cfg(feature = "clustering")]
-        RoomArchiveFence::Guarded { context, .. } => {
-            mam_storage
-                .store_message_fenced(room, &archived, context)
-                .await
+    let store_result = if let Some(deps) = deps {
+        let requirement = match fence {
+            RoomArchiveFence::Unfenced => super::effects::room::RoomFenceRequirement::Unfenced,
+            #[cfg(feature = "clustering")]
+            RoomArchiveFence::Guarded { context, .. } => {
+                super::effects::room::RoomFenceRequirement::Guarded(context.clone())
+            }
+            #[cfg(feature = "clustering")]
+            RoomArchiveFence::OwnershipLost => return ArchiveGroupchatOutcome::OwnershipLost,
+        };
+        match deps
+            .effects
+            .execute(
+                super::effects::room::planned_durable(
+                    super::effects::room::DurableRoomEffect::ArchiveGroupchat {
+                        room: room.clone(),
+                        message: Box::new(archived.clone()),
+                        fence: requirement,
+                        archive_expectation: waddle_xmpp::mam::ArchiveExpectation::Fresh,
+                    },
+                ),
+                deps,
+            )
+            .await
+        {
+            super::effects::EffectOutcome::Archive(result) => result,
+            _ => return ArchiveGroupchatOutcome::Skipped,
         }
-        RoomArchiveFence::Unfenced => mam_storage.store_message(room, &archived).await,
-        #[cfg(feature = "clustering")]
-        RoomArchiveFence::OwnershipLost => return ArchiveGroupchatOutcome::OwnershipLost,
+    } else {
+        match fence {
+            #[cfg(feature = "clustering")]
+            RoomArchiveFence::Guarded { context, .. } => {
+                mam_storage
+                    .store_message_fenced(room, &archived, context)
+                    .await
+            }
+            RoomArchiveFence::Unfenced => mam_storage.store_message(room, &archived).await,
+            #[cfg(feature = "clustering")]
+            RoomArchiveFence::OwnershipLost => return ArchiveGroupchatOutcome::OwnershipLost,
+        }
     };
     match store_result {
         Ok(StoreOutcome::Stored(stored_id)) => {
@@ -279,6 +367,66 @@ pub(super) async fn finish_archive_groupchat_message(
             );
             ArchiveGroupchatOutcome::Skipped
         }
+    }
+}
+
+pub(super) async fn plan_groupchat_retraction_tombstone(
+    deps: &Deps<'_>,
+    room: &BareJid,
+    target: &str,
+    message: &Message,
+) -> GroupchatRetractionTombstoneOutcome {
+    let Some(storage) = deps.mam_storage else {
+        return GroupchatRetractionTombstoneOutcome::NotFound;
+    };
+    let original = match storage.get_message(target).await {
+        Ok(Some(row)) if row.to.to_bare() == *room => row,
+        Ok(_) => return GroupchatRetractionTombstoneOutcome::NotFound,
+        Err(_) => return GroupchatRetractionTombstoneOutcome::Failed,
+    };
+    let existing = original
+        .rich
+        .as_ref()
+        .is_some_and(ArchivedRichMessage::is_tombstoned);
+    if !existing {
+        let Some(retraction_id) = message
+            .id
+            .as_ref()
+            .and_then(|id| RichMessageId::new(id.0.clone()))
+        else {
+            return GroupchatRetractionTombstoneOutcome::Failed;
+        };
+        super::effects::direct::durable(
+            deps,
+            super::effects::direct::DurableDirectEffect::RetractionTombstone {
+                archive: room.clone(),
+                target: Xep0359StanzaId::new(target, Jid::from(room.clone())),
+                tombstone: ArchivedTombstone {
+                    retraction_id: Some(retraction_id),
+                    stamp: chrono::Utc::now(),
+                    moderation: None,
+                    sender_scope: original
+                        .rich
+                        .as_ref()
+                        .and_then(|rich| rich.muc_sender.as_ref())
+                        .map(|sender| sender.jid.to_bare()),
+                },
+            },
+        );
+    }
+    super::effects::direct::external(
+        deps,
+        super::effects::direct::ExternalDirectEffect::ScrubReplayForTombstone {
+            target: waddle_xmpp::tombstone::TombstoneTarget::Groupchat {
+                stanza_id: target.to_owned(),
+                room: room.clone(),
+            },
+        },
+    );
+    if existing {
+        GroupchatRetractionTombstoneOutcome::AlreadyTombstoned
+    } else {
+        GroupchatRetractionTombstoneOutcome::Replaced
     }
 }
 
@@ -677,9 +825,7 @@ pub(super) async fn scrub_unacked_for_tombstone(
 /// projection against the inbox storage plus the delivery context it
 /// needs to push XEP-0430 updates and persist notification recovery.
 pub(super) struct GroupchatInboxProjectionInputs<'a> {
-    pub inbox_storage: &'a Arc<dyn InboxStorage>,
-    pub connection_registry: &'a waddle_xmpp::registry::ConnectionRegistry,
-    pub user_registry: Option<&'a kameo::actor::ActorRef<waddle_xmpp::registry::UserRegistryActor>>,
+    pub deps: &'a Deps<'a>,
     pub owner: &'a BareJid,
     pub room: &'a BareJid,
     pub message: &'a Message,
@@ -698,9 +844,7 @@ pub(super) async fn project_groupchat_inbox(
     inputs: GroupchatInboxProjectionInputs<'_>,
 ) -> GroupchatInboxProjectionOutcome {
     let GroupchatInboxProjectionInputs {
-        inbox_storage,
-        connection_registry,
-        user_registry,
+        deps,
         owner,
         room,
         message,
@@ -718,20 +862,30 @@ pub(super) async fn project_groupchat_inbox(
     };
     let channel_records_recovery = channel_recovery.is_some();
     let thread_records_recovery = notification_recovery.is_some();
-    match inbox_storage
-        .upsert_with_groupchat_notification_recovery(owner, entry, is_recipient, channel_recovery)
+    match deps
+        .effects
+        .execute(
+            super::effects::room::planned_durable(
+                super::effects::room::DurableRoomEffect::ProjectGroupchatInbox {
+                    owner: owner.clone(),
+                    entry: Box::new(entry),
+                    is_recipient,
+                    recovery: channel_recovery,
+                },
+            ),
+            deps,
+        )
         .await
     {
-        Ok(updated) if is_recipient => {
+        super::effects::EffectOutcome::Inbox(Ok(updated)) if is_recipient => {
             outcome.channel_committed = true;
             outcome.notification_recovery_committed = channel_records_recovery;
-            outcome.channel_push_recipients =
-                push_inbox_update(connection_registry, user_registry, owner, &updated).await;
+            outcome.channel_push_recipients = push_projected_inbox(deps, owner, updated).await;
         }
-        Ok(_) => {
+        super::effects::EffectOutcome::Inbox(Ok(_)) => {
             outcome.channel_committed = true;
         }
-        Err(error) => {
+        super::effects::EffectOutcome::Inbox(Err(error)) => {
             warn!(
                 jid = %owner,
                 room = %room,
@@ -739,6 +893,7 @@ pub(super) async fn project_groupchat_inbox(
                 "ProjectGroupchatInbox: channel-row upsert failed"
             );
         }
+        _ => {}
     }
     let Some(thread) = thread else {
         return outcome;
@@ -758,25 +913,30 @@ pub(super) async fn project_groupchat_inbox(
     if let (Some(kind), Some(media)) = (thread.call_thread_kind, thread.call_thread_media) {
         thread_entry = thread_entry.with_call_thread(kind, media);
     }
-    match inbox_storage
-        .upsert_with_groupchat_notification_recovery(
-            owner,
-            thread_entry,
-            is_recipient,
-            notification_recovery,
+    match deps
+        .effects
+        .execute(
+            super::effects::room::planned_durable(
+                super::effects::room::DurableRoomEffect::ProjectGroupchatInbox {
+                    owner: owner.clone(),
+                    entry: Box::new(thread_entry),
+                    is_recipient,
+                    recovery: notification_recovery,
+                },
+            ),
+            deps,
         )
         .await
     {
-        Ok(updated) if is_recipient => {
+        super::effects::EffectOutcome::Inbox(Ok(updated)) if is_recipient => {
             outcome.thread_committed = true;
             outcome.notification_recovery_committed = thread_records_recovery;
-            outcome.thread_push_recipients =
-                push_inbox_update(connection_registry, user_registry, owner, &updated).await;
+            outcome.thread_push_recipients = push_projected_inbox(deps, owner, updated).await;
         }
-        Ok(_) => {
+        super::effects::EffectOutcome::Inbox(Ok(_)) => {
             outcome.thread_committed = true;
         }
-        Err(error) => {
+        super::effects::EffectOutcome::Inbox(Err(error)) => {
             warn!(
                 jid = %owner,
                 room = %room,
@@ -784,8 +944,27 @@ pub(super) async fn project_groupchat_inbox(
                 "ProjectGroupchatInbox: thread-row upsert failed"
             );
         }
+        _ => {}
     }
     outcome
+}
+
+async fn push_projected_inbox(deps: &Deps<'_>, owner: &BareJid, entry: InboxEntry) -> Vec<FullJid> {
+    if deps.effects.is_planning() {
+        super::effects::direct::external(
+            deps,
+            super::effects::direct::ExternalDirectEffect::PushInboxUpdate {
+                owner: owner.clone(),
+                entry: Box::new(entry),
+            },
+        );
+        match deps.user_registry {
+            Some(registry) => waddle_xmpp::registry::get_resources_for_user(registry, owner).await,
+            None => Vec::new(),
+        }
+    } else {
+        push_inbox_update(deps.connection_registry, deps.user_registry, owner, &entry).await
+    }
 }
 
 #[derive(Debug, Default, Clone, PartialEq, Eq)]

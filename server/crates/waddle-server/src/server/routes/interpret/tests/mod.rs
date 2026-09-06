@@ -20,6 +20,7 @@ mod enrichment;
 mod groupchat_retraction;
 mod groupchat_retry;
 mod offline_delivery;
+mod plan;
 mod room_dispatch;
 mod room_subject;
 mod routing_detached_delivery;
@@ -224,6 +225,7 @@ fn offline_pass_deps<'a>(
         ordered_relay_origin: None,
         sfu: None,
         ingress_effect_capture: None,
+        effects: &crate::server::routes::interpret::effects::ImmediateSink,
     }
 }
 
@@ -349,3 +351,5 @@ fn detached_dm_session(
         pending_subscribes_flushed: false,
     }
 }
+
+mod delivery_plan;

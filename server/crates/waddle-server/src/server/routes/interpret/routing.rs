@@ -83,6 +83,7 @@ pub(super) async fn run_headless_recipient_pass(
     let mut remaining: Vec<OutboundEvent> = Vec::with_capacity(events.len());
     for event in events {
         match event {
+            OutboundEvent::SendStanza(_) if deps.effects.is_planning() => {}
             OutboundEvent::RouteToConnection { .. } => side_routes.push(event),
             other => remaining.push(other),
         }
@@ -398,7 +399,7 @@ enum ActorSendFailure {
 ///   turn out not to land by the time delivery runs, and if every target
 ///   fails to land, the message must not be silently lost.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) enum FullJidDeliveryOutcome {
+pub enum FullJidDeliveryOutcome {
     /// Delivered onto a live resource's channel.
     Delivered,
     /// Routed to the detached XEP-0198 replay buffer.

@@ -1,10 +1,9 @@
 use super::Deps;
 use jid::BareJid;
 use tracing::{debug, warn};
-use waddle_xmpp::inbox::{ConversationKind, InboxEntry};
 use waddle_xmpp::{
     ingress::{InboxProjectionMutation, IngressEffectIntent},
-    xep::{CallThreadDuration, CallThreadKind, CallThreadMedia},
+    xep::{CallThreadDuration, CallThreadMedia},
 };
 use waddle_xmpp_core::{mam::ThreadId, xep0359::StanzaId};
 
@@ -17,7 +16,7 @@ pub(super) async fn project_direct_call_thread_anchor(
     media: CallThreadMedia,
     last_updated: i64,
 ) {
-    let Some(inbox_storage) = deps.inbox_storage else {
+    let Some(_) = deps.inbox_storage else {
         debug!(
             owner = %owner,
             peer = %peer,
@@ -30,31 +29,27 @@ pub(super) async fn project_direct_call_thread_anchor(
         warn!(owner = %owner, peer = %peer, "ProjectDirectCallThreadAnchor: invalid thread id");
         return;
     };
-    let entry = InboxEntry::new(
-        peer.clone(),
-        ConversationKind::Direct,
-        stanza_id.clone(),
+    let mutation = InboxProjectionMutation::DirectCallThreadAnchor {
+        peer: peer.clone(),
+        thread_id,
+        archive_stanza_id: StanzaId::new(stanza_id, jid::Jid::from(owner.clone())),
+        media,
         last_updated,
-    )
-    .with_thread(thread_id.as_str())
-    .with_call_thread(CallThreadKind::Dm, media);
-    match inbox_storage.upsert(&owner, entry, false).await {
-        Ok(_) => deps.capture_intent(IngressEffectIntent::InboxProject {
+    };
+    let planned = super::effects::direct::planned_durable(
+        super::effects::direct::DurableDirectEffect::DmCallThreadProjection {
             owner: owner.clone(),
-            mutation: InboxProjectionMutation::DirectCallThreadAnchor {
-                peer: peer.clone(),
-                thread_id,
-                archive_stanza_id: StanzaId::new(stanza_id, jid::Jid::from(owner.clone())),
-                media,
-                last_updated,
-            },
-        }),
-        Err(error) => warn!(
-            owner = %owner,
-            peer = %peer,
-            %error,
-            "ProjectDirectCallThreadAnchor: inbox upsert failed"
-        ),
+            mutation: Box::new(mutation.clone()),
+        },
+    );
+    match deps.effects.execute(planned, deps).await {
+        super::effects::EffectOutcome::Completed | super::effects::EffectOutcome::Inbox(Ok(_)) => {
+            deps.capture_intent(IngressEffectIntent::InboxProject { owner, mutation });
+        }
+        super::effects::EffectOutcome::Inbox(Err(error)) => {
+            warn!(%owner, %peer, %error, "ProjectDirectCallThreadAnchor: inbox upsert failed")
+        }
+        _ => {}
     }
 }
 
@@ -66,7 +61,7 @@ pub(super) async fn mark_direct_call_thread_ended(
     ended: chrono::DateTime<chrono::Utc>,
     duration: CallThreadDuration,
 ) {
-    let Some(inbox_storage) = deps.inbox_storage else {
+    let Some(_) = deps.inbox_storage else {
         debug!(
             peer_a = %peer_a,
             peer_b = %peer_b,
@@ -80,26 +75,27 @@ pub(super) async fn mark_direct_call_thread_ended(
         return;
     };
     for (owner, partner) in [(peer_a.clone(), peer_b.clone()), (peer_b, peer_a)] {
-        if let Err(error) = inbox_storage
-            .mark_direct_call_thread_ended(&owner, &partner, thread_id.as_str(), ended, &duration)
-            .await
-        {
-            warn!(
-                owner = %owner,
-                partner = %partner,
-                %error,
-                "MarkDirectCallThreadEnded: inbox update failed"
-            );
-        } else {
-            deps.capture_intent(IngressEffectIntent::InboxProject {
+        let mutation = InboxProjectionMutation::DirectCallThreadEnded {
+            peer: partner.clone(),
+            thread_id: thread_id.clone(),
+            ended,
+            duration: duration.clone(),
+        };
+        let planned = super::effects::direct::planned_durable(
+            super::effects::direct::DurableDirectEffect::DmCallThreadProjection {
                 owner: owner.clone(),
-                mutation: InboxProjectionMutation::DirectCallThreadEnded {
-                    peer: partner,
-                    thread_id: thread_id.clone(),
-                    ended,
-                    duration: duration.clone(),
-                },
-            });
+                mutation: Box::new(mutation.clone()),
+            },
+        );
+        match deps.effects.execute(planned, deps).await {
+            super::effects::EffectOutcome::Completed
+            | super::effects::EffectOutcome::Inbox(Ok(_)) => {
+                deps.capture_intent(IngressEffectIntent::InboxProject { owner, mutation });
+            }
+            super::effects::EffectOutcome::Inbox(Err(error)) => {
+                warn!(%owner, %partner, %error, "MarkDirectCallThreadEnded: inbox update failed")
+            }
+            _ => {}
         }
     }
 }
@@ -116,6 +112,40 @@ mod tests {
         registry::ConnectionRegistry,
         xep::CallThreadDuration,
     };
+
+    #[tokio::test]
+    async fn plans_call_thread_projection_without_writing_inbox() {
+        let registry = ConnectionRegistry::new();
+        let mam: Arc<dyn MamStorage> = Arc::new(InMemoryMamStorage::new());
+        let inbox: Arc<dyn InboxStorage> = Arc::new(InMemoryInboxStorage::new());
+        let sink = super::super::effects::PlanSink::new();
+        let mut deps = Deps::test_with_storage(&registry, &mam, &inbox);
+        deps.effects = &sink;
+        let owner: BareJid = "alice@example.com".parse().expect("owner");
+        let peer: BareJid = "bob@example.com".parse().expect("peer");
+        project_direct_call_thread_anchor(
+            &deps,
+            owner.clone(),
+            peer.clone(),
+            "call-1".to_owned(),
+            "archive-1".to_owned(),
+            CallThreadMedia::audio_video(),
+            123,
+        )
+        .await;
+        assert!(inbox
+            .list_threads(&owner, &peer)
+            .await
+            .expect("read inbox")
+            .is_empty());
+        let planned = sink.snapshot();
+        assert_eq!(planned.len(), 1);
+        assert!(matches!(&planned[0].effect,
+            super::super::effects::Effect::Durable(super::super::effects::DurableEffect::Direct(
+                super::super::effects::direct::DurableDirectEffect::DmCallThreadProjection { owner: planned_owner, .. }
+            )) if planned_owner == &owner));
+        assert_eq!(planned[0].dependencies.len(), 1);
+    }
 
     #[tokio::test]
     async fn records_committed_direct_call_thread_inbox_mutations() {

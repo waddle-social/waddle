@@ -323,6 +323,7 @@ async fn handle_sans_io_iq_with_relay_override(
             ordered_relay_origin: conn_state.ordered_relay_origin.clone(),
             sfu: state.deps.protocol.sfu.as_deref(),
             ingress_effect_capture: None,
+            effects: &crate::server::routes::interpret::effects::ImmediateSink,
         };
         let outcome = crate::server::routes::interpret::interpret(events, &deps).await;
         if let Some(room_jid) = muji_clear_after {

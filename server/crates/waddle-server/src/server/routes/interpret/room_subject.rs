@@ -53,6 +53,7 @@ pub(super) async fn persist_room_subject_event(
         .ask(GetRoom {
             room_jid: room.clone(),
         })
+        .reply_timeout(std::time::Duration::from_secs(5))
         .await
     {
         Ok(Some(actor)) => actor,
@@ -93,6 +94,7 @@ pub(super) async fn persist_room_subject_event(
         .ask(GetRoomSnapshot {
             sender_jid: sender.clone(),
         })
+        .reply_timeout(std::time::Duration::from_secs(5))
         .await
     {
         Ok(snapshot) => snapshot,
@@ -132,7 +134,30 @@ pub(super) async fn persist_room_subject_event(
             "This room is temporarily unavailable; please retry.",
         );
     }
-    let durable_recovery_snapshot = room_actor.ask(GetSnapshot).await.ok();
+    if deps.effects.is_planning() {
+        super::effects::room::external(
+            deps,
+            super::effects::room::ExternalRoomEffect::RoomActorMutation {
+                room,
+                mutation: super::effects::room::RoomActorMutation::SetSubject {
+                    claim_fence,
+                    subject: waddle_xmpp::muc::SubjectState {
+                        texts,
+                        setter,
+                        setter_nick,
+                        set_at,
+                    },
+                },
+            },
+            super::effects::PlanSuppressionPolicy::Always,
+        );
+        return PersistRoomSubjectEventOutcome::Committed;
+    }
+    let durable_recovery_snapshot = room_actor
+        .ask(GetSnapshot)
+        .reply_timeout(std::time::Duration::from_secs(5))
+        .await
+        .ok();
 
     match room_actor
         .ask(SetSubject {
@@ -271,6 +296,7 @@ async fn reconcile_ambiguous_subject_commit(
     recovered_room
         .actor_ref
         .ask(GetSnapshot)
+        .reply_timeout(std::time::Duration::from_secs(5))
         .await
         .map(|snapshot| snapshot.room.subject == Some(intended_subject))
         .unwrap_or(false)
@@ -288,4 +314,94 @@ fn retryable_subject_bounce(
         sender,
         resource_constraint_error(text),
     )))
+}
+
+#[cfg(test)]
+mod plan_tests {
+    use super::super::effects::room::{ExternalRoomEffect, RoomActorMutation};
+    use super::super::effects::{Effect, ExternalEffect, PlanSink, PlanSuppressionPolicy};
+    use super::*;
+    use crate::server::routes::websocket::tests::create_test_websocket_state;
+    use waddle_xmpp::muc::room_registry_actor::CreateRoom;
+
+    #[tokio::test]
+    async fn plan_subject_records_mutation_without_changing_room_actor() {
+        let state = create_test_websocket_state().await;
+        let room: BareJid = "planned-subject@muc.example.com".parse().expect("room");
+        let sender: FullJid = "alice@example.com/web".parse().expect("sender");
+        let actor = state
+            .deps
+            .protocol
+            .room_registry
+            .ask(CreateRoom {
+                room_jid: room.clone(),
+                waddle_id: "test".to_owned(),
+                channel_id: "test".to_owned(),
+                config: Default::default(),
+            })
+            .await
+            .expect("create room");
+        let sink = PlanSink::new();
+        let mut deps = Deps::registry_only(&state.deps.protocol.connection_registry);
+        deps.room_registry = Some(&state.deps.protocol.room_registry);
+        deps.effects = &sink;
+        let texts = RoomSubjectTexts::from_message_subjects(&std::collections::BTreeMap::from([(
+            xmpp_parsers::message::Lang::default(),
+            "planned subject".to_owned(),
+        )]));
+        let result = persist_room_subject_event(
+            &deps,
+            PersistRoomSubjectRequest {
+                room,
+                claim_fence: None,
+                texts,
+                setter: sender.to_bare(),
+                sender,
+                message: Box::new(Message::new(None::<Jid>)),
+                setter_nick: "alice".to_owned(),
+                set_at: chrono::Utc::now(),
+            },
+        )
+        .await;
+        assert!(matches!(result, PersistRoomSubjectEventOutcome::Committed));
+        assert!(actor
+            .ask(GetSnapshot)
+            .reply_timeout(std::time::Duration::from_secs(5))
+            .await
+            .expect("snapshot")
+            .room
+            .subject
+            .is_none());
+        let (plan, _) = sink.take();
+        assert_eq!(plan.len(), 1);
+        assert_eq!(plan[0].suppression, PlanSuppressionPolicy::Always);
+        assert!(matches!(
+            &plan[0].effect,
+            Effect::External(ExternalEffect::Room(
+                ExternalRoomEffect::RoomActorMutation {
+                    mutation: RoomActorMutation::SetSubject { .. },
+                    ..
+                }
+            ))
+        ));
+        let effect = plan.into_iter().next().expect("subject effect");
+        let executed = super::super::effects::EffectSink::execute(
+            &super::super::effects::ImmediateSink,
+            effect,
+            &deps,
+        )
+        .await;
+        assert!(matches!(
+            executed,
+            super::super::effects::EffectOutcome::Completed
+        ));
+        assert!(actor
+            .ask(GetSnapshot)
+            .reply_timeout(std::time::Duration::from_secs(5))
+            .await
+            .expect("executed snapshot")
+            .room
+            .subject
+            .is_some());
+    }
 }

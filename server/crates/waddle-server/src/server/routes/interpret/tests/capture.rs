@@ -515,6 +515,7 @@ async fn offline_delivery_boundary_records_notification_preview_intent() {
     ));
     let capture = IngressEffectCapture::new(None);
     let deps = Deps {
+        effects: &crate::server::routes::interpret::effects::ImmediateSink,
         connection_registry: &registry,
         user_registry: None,
         sm_session_registry: None,
@@ -577,6 +578,7 @@ async fn transient_offline_delivery_records_pending_delivery_intent() {
     ));
     let capture = IngressEffectCapture::new(None);
     let deps = Deps {
+        effects: &crate::server::routes::interpret::effects::ImmediateSink,
         connection_registry: &registry,
         user_registry: None,
         sm_session_registry: None,

@@ -1,0 +1,90 @@
+use super::{
+    DurableEffect, Effect, EffectOutcome, EffectSink, ExternalEffect, PlannedEffect,
+    RoomExecutionPath,
+};
+
+/// Executes the frozen typed operation and returns its actual result.
+#[derive(Clone, Copy, Debug, Default)]
+pub struct ImmediateSink;
+
+impl EffectSink for ImmediateSink {
+    fn execute<'a>(
+        &'a self,
+        effect: PlannedEffect,
+        deps: &'a super::super::Deps<'_>,
+    ) -> super::sink::EffectFuture<'a> {
+        // Box each executor before composing it into an async state machine.
+        // An encompassing async match embeds its largest branch and inflates
+        // every websocket future that can dispatch a message.
+        match effect.effect {
+            Effect::Durable(DurableEffect::Direct(effect)) => {
+                Box::pin(super::direct_immediate::execute_durable(effect, deps))
+            }
+            Effect::Durable(DurableEffect::Room(effect)) => {
+                Box::pin(super::room_immediate::execute_durable(effect, deps))
+            }
+            Effect::External(ExternalEffect::Direct(effect)) => {
+                Box::pin(super::direct_immediate::execute_external(effect, deps))
+            }
+            Effect::External(ExternalEffect::Room(effect)) => {
+                Box::pin(super::room_immediate::execute_external(effect, deps))
+            }
+            Effect::External(ExternalEffect::Delivery(effect)) => {
+                Box::pin(super::delivery_immediate::execute(effect, deps))
+            }
+            Effect::External(ExternalEffect::Frame(stanza)) => {
+                Box::pin(async move { EffectOutcome::Frames(vec![*stanza]) })
+            }
+            Effect::Immediate(action) => Box::pin(execute_recovery(action, deps)),
+        }
+    }
+    fn is_planning(&self) -> bool {
+        false
+    }
+    fn record(&self, _effect: PlannedEffect) {
+        // Recording is a planning-only operation. Immediate callers must await
+        // execute so storage failures and delivery outcomes are never discarded.
+        panic!("ImmediateSink requires execute, not record");
+    }
+    fn set_room_execution(&self, _execution: RoomExecutionPath) {}
+}
+
+async fn execute_recovery(
+    action: super::ImmediateAction,
+    deps: &super::super::Deps<'_>,
+) -> EffectOutcome {
+    use waddle_xmpp::muc::room_registry_actor::{DemoteRoomIfExactActor, GetOrCreateRoom};
+    let Some(registry) = deps.room_registry else {
+        return EffectOutcome::Unavailable;
+    };
+    match action {
+        super::ImmediateAction::DemoteRoomIfExactActor { room, actor } => {
+            match registry
+                .ask(DemoteRoomIfExactActor {
+                    room_jid: room,
+                    actor_ref: actor,
+                })
+                .reply_timeout(std::time::Duration::from_secs(5))
+                .await
+            {
+                Ok(_) => EffectOutcome::Completed,
+                Err(_) => EffectOutcome::Unavailable,
+            }
+        }
+        super::ImmediateAction::GetOrCreateRoom { room, snapshot } => {
+            match registry
+                .ask(GetOrCreateRoom {
+                    room_jid: room,
+                    waddle_id: snapshot.room.waddle_id,
+                    channel_id: snapshot.room.channel_id,
+                    config: snapshot.room.config,
+                })
+                .reply_timeout(std::time::Duration::from_secs(5))
+                .await
+            {
+                Ok(_) => EffectOutcome::Completed,
+                Err(_) => EffectOutcome::Unavailable,
+            }
+        }
+    }
+}

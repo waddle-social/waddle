@@ -35,7 +35,7 @@ pub(super) async fn project_groupchat_inbox_event(input: ProjectGroupchatInboxEv
         thread,
         dispatch_timestamp,
     } = input;
-    let Some(inbox_storage) = deps.inbox_storage else {
+    let Some(_) = deps.inbox_storage else {
         debug!(
             owner = %owner,
             room = %room,
@@ -45,9 +45,7 @@ pub(super) async fn project_groupchat_inbox_event(input: ProjectGroupchatInboxEv
     };
     let notification_recovery_for_capture = notification_recovery.clone();
     let outcome = project_groupchat_inbox(GroupchatInboxProjectionInputs {
-        inbox_storage,
-        connection_registry: deps.connection_registry,
-        user_registry: deps.user_registry,
+        deps,
         owner: &owner,
         room: &room,
         message: &message,
@@ -181,6 +179,7 @@ fn groupchat_notification_recovery_item(
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum GroupchatNotificationCandidateQueueOutcome {
     Completed,
+    Planned,
     RetryLater,
 }
 
@@ -272,7 +271,7 @@ async fn enqueue_groupchat_notification_candidate(
         sender_can_broadcast_channel_mention,
         thread,
         outcome,
-        notification_recovery: _,
+        notification_recovery,
     } = input;
     if !is_recipient || !is_durable_recipient {
         return GroupchatNotificationCandidateQueueOutcome::Completed;
@@ -329,6 +328,7 @@ async fn enqueue_groupchat_notification_candidate(
         .unwrap_or_else(crate::notification_outbox::NotificationThreadId::root);
     insert_groupchat_notification_candidate(GroupchatNotificationCandidateSeed {
         deps: Some(deps),
+        recovery: notification_recovery,
         state,
         owner,
         room,
@@ -349,6 +349,7 @@ async fn enqueue_groupchat_notification_candidate(
 /// recovery (`reconcile_groupchat_notification_candidates`).
 struct GroupchatNotificationCandidateSeed<'a> {
     deps: Option<&'a Deps<'a>>,
+    recovery: Option<&'a waddle_xmpp::inbox::storage::GroupchatNotificationRecovery>,
     state: &'a WebSocketState,
     owner: &'a BareJid,
     room: &'a BareJid,
@@ -378,6 +379,7 @@ async fn insert_groupchat_notification_candidate(
 ) -> GroupchatNotificationCandidateQueueOutcome {
     let GroupchatNotificationCandidateSeed {
         deps,
+        recovery,
         state,
         owner,
         room,
@@ -580,6 +582,31 @@ async fn insert_groupchat_notification_candidate(
             return GroupchatNotificationCandidateQueueOutcome::RetryLater;
         }
     }
+    if let Some(deps) = deps.filter(|deps| deps.effects.is_planning()) {
+        super::effects::room::external(
+            deps,
+            super::effects::room::ExternalRoomEffect::NotificationCandidate {
+                candidate: Some(Box::new(candidate)),
+                owner: owner.clone(),
+                room: room.clone(),
+                archive_stanza_id: archive_stanza_id.clone(),
+                recovery: recovery.cloned(),
+            },
+            super::effects::PlanSuppressionPolicy::SenderOnly,
+        );
+        deps.capture_intent(IngressEffectIntent::NotificationActivityPreview {
+            owner: owner.clone(),
+            mutation: waddle_xmpp::ingress::NotificationActivityMutation::NotificationCandidate {
+                conversation: room.clone(),
+                archive_stanza_id,
+                outcome: waddle_xmpp::ingress::NotificationCandidateOutcome::Inserted,
+            },
+        });
+        if let Some(recovery) = recovery {
+            capture_recovery_completion(deps, recovery);
+        }
+        return GroupchatNotificationCandidateQueueOutcome::Planned;
+    }
     match state
         .deps
         .protocol
@@ -643,6 +670,21 @@ async fn mark_groupchat_notification_recovery_completed(
     deps: &Deps<'_>,
     recovery: &waddle_xmpp::inbox::storage::GroupchatNotificationRecovery,
 ) {
+    if deps.effects.is_planning() {
+        super::effects::room::external(
+            deps,
+            super::effects::room::ExternalRoomEffect::NotificationCandidate {
+                candidate: None,
+                owner: recovery.key.recipient.clone(),
+                room: recovery.key.room.clone(),
+                archive_stanza_id: recovery.key.archive_stanza_id.clone(),
+                recovery: Some(recovery.clone()),
+            },
+            super::effects::PlanSuppressionPolicy::SenderOnly,
+        );
+        capture_recovery_completion(deps, recovery);
+        return;
+    }
     let Some(inbox_storage) = deps.inbox_storage else {
         return;
     };
@@ -757,6 +799,7 @@ pub(crate) async fn reconcile_groupchat_notification_candidates_for_sweep(
             .unwrap_or_else(crate::notification_outbox::NotificationThreadId::root);
         let outcome = insert_groupchat_notification_candidate(GroupchatNotificationCandidateSeed {
             deps: None,
+            recovery: None,
             state,
             owner: &recovery.key.recipient,
             room: &recovery.key.room,
@@ -778,7 +821,8 @@ pub(crate) async fn reconcile_groupchat_notification_candidates_for_sweep(
         })
         .await;
         match outcome {
-            GroupchatNotificationCandidateQueueOutcome::Completed => {
+            GroupchatNotificationCandidateQueueOutcome::Completed
+            | GroupchatNotificationCandidateQueueOutcome::Planned => {
                 match mark_recovery_completed_from_state(state, &recovery.key).await {
                     RecoveryCompletionOutcome::Marked => completed += 1,
                     RecoveryCompletionOutcome::NotMarked => {}
@@ -1107,6 +1151,18 @@ fn xmpp_uri_bare_jid(uri: &str) -> Option<BareJid> {
         return None;
     }
     jid_part.parse::<Jid>().ok().map(|jid| jid.to_bare())
+}
+
+pub(super) fn capture_recovery_completion(
+    deps: &Deps<'_>,
+    recovery: &waddle_xmpp::inbox::storage::GroupchatNotificationRecovery,
+) {
+    deps.capture_intent(IngressEffectIntent::GroupchatNotificationRecovery {
+        mutation: groupchat_notification_recovery_mutation(
+            recovery,
+            waddle_xmpp::ingress::GroupchatNotificationRecoveryAction::Completed,
+        ),
+    });
 }
 
 #[cfg(test)]

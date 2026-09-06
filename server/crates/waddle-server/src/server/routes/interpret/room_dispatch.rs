@@ -1,8 +1,4 @@
 use super::*;
-use crate::ingress_shadow::{
-    IngressShadowRoomFence, ShadowAuthorizationDeniedReason, ShadowDecisionMarker,
-    ShadowSemanticRejectedReason,
-};
 #[cfg(feature = "clustering")]
 use waddle_xmpp::ingress::RelayTargetIdentity;
 use waddle_xmpp::ingress::{EntityGeneration, IngressEffectIntent};
@@ -99,8 +95,21 @@ pub(super) async fn dispatch_to_room(
         return outcome;
     };
 
+    deps.effects.observe_sender(&sender_full);
+
     #[cfg(feature = "clustering")]
-    if let Some(origin) = deps.ordered_relay_origin.as_ref() {
+    if deps.effects.is_planning()
+        && plan_remote_room(deps, &room_jid, &incoming, &sender_full, &mut outcome).await
+    {
+        return outcome;
+    }
+
+    #[cfg(feature = "clustering")]
+    if let Some(origin) = deps
+        .ordered_relay_origin
+        .as_ref()
+        .filter(|_| !deps.effects.is_planning())
+    {
         if let Some(bridge) = state
             .deps
             .app_state
@@ -124,11 +133,7 @@ pub(super) async fn dispatch_to_room(
             {
                 MucProxyRouteDecision::Attempted(attempt) => match attempt.outcome {
                     OrderedRelayMucProxyOutcome::Delivered(replies) => {
-                        record_remote_shadow_room_authority(
-                            deps,
-                            &room_jid,
-                            attempt.room_fence.as_ref(),
-                        );
+                        debug!(room_claim_epoch = ?attempt.room_fence.as_ref().map(|fence| fence.epoch), "remote room delivery settled");
                         if let (Some(capture), Some(relay_target)) =
                             (deps.ingress_effect_capture.as_ref(), attempt.relay_target)
                         {
@@ -164,7 +169,6 @@ pub(super) async fn dispatch_to_room(
                     // on PR #1277).
                     OrderedRelayMucProxyOutcome::Unavailable
                     | OrderedRelayMucProxyOutcome::Dropped => {
-                        clear_provisional_shadow_room_fence(deps);
                         push_sender_error_reply(
                             deps,
                             &mut outcome,
@@ -179,22 +183,16 @@ pub(super) async fn dispatch_to_room(
                     }
                     OrderedRelayMucProxyOutcome::MaybeCommitted
                     | OrderedRelayMucProxyOutcome::JoinMaybeCommitted => {
-                        record_remote_shadow_room_authority(
-                            deps,
-                            &room_jid,
-                            attempt.room_fence.as_ref(),
-                        );
                         if let (Some(capture), Some(relay_target)) =
                             (deps.ingress_effect_capture.as_ref(), attempt.relay_target)
                         {
-                            capture_ambiguous_remote_room_route(capture, &room_jid, relay_target);
+                            capture_delivered_remote_room_route(capture, &room_jid, relay_target);
                         }
                         return outcome;
                     }
                 },
                 MucProxyRouteDecision::RoomClaimUnavailable
                 | MucProxyRouteDecision::OriginUnavailable => {
-                    clear_provisional_shadow_room_fence(deps);
                     push_sender_error_reply(
                         deps,
                         &mut outcome,
@@ -234,6 +232,7 @@ pub(super) async fn dispatch_to_room(
         .ask(GetRoom {
             room_jid: room_jid.clone(),
         })
+        .reply_timeout(std::time::Duration::from_secs(5))
         .await
     {
         Ok(Some(actor)) => actor,
@@ -242,7 +241,6 @@ pub(super) async fn dispatch_to_room(
         // silently dropped. (A dormant/reaped room also has no live
         // occupancy, so the sender could not be an occupant of it.)
         Ok(None) => {
-            clear_provisional_shadow_room_fence(deps);
             debug!(
                 room = %room_jid,
                 "DispatchToRoom: room not registered; bouncing item-not-found"
@@ -255,15 +253,11 @@ pub(super) async fn dispatch_to_room(
                 &sender_full,
                 item_not_found_error("Requested room not found."),
             );
-            deps.capture_marker(ShadowDecisionMarker::SemanticRejected {
-                reason: ShadowSemanticRejectedReason::MalformedPayload,
-            });
             return outcome;
         }
         // Transient lookup failure (#1263): surface an error to the
         // sender instead of silently losing the message.
         Err(error) => {
-            clear_provisional_shadow_room_fence(deps);
             warn!(
                 room = %room_jid,
                 error = ?error,
@@ -284,13 +278,13 @@ pub(super) async fn dispatch_to_room(
         .ask(GetRoomSnapshot {
             sender_jid: sender_full.clone(),
         })
+        .reply_timeout(std::time::Duration::from_secs(5))
         .await
     {
         Ok(snapshot) => snapshot,
         // Snapshot failure (#1263): same rule — the sender must learn
         // their message did not reach the room.
         Err(error) => {
-            clear_provisional_shadow_room_fence(deps);
             warn!(
                 room = %room_jid,
                 error = ?error,
@@ -307,11 +301,17 @@ pub(super) async fn dispatch_to_room(
             return outcome;
         }
     };
-    if let (Some(capture), Some(claim_fence)) = (
-        deps.ingress_effect_capture.as_ref(),
-        snapshot.claim_fence.as_ref(),
-    ) {
-        capture.record_room_fence(IngressShadowRoomFence::from_context(&room_jid, claim_fence));
+    if deps.effects.is_planning() {
+        deps.effects
+            .set_room_execution(super::effects::RoomExecutionPath::Local {
+                room: room_jid.clone(),
+                fence: snapshot
+                    .claim_fence
+                    .clone()
+                    .map(super::effects::room::RoomFenceRequirement::Guarded)
+                    .unwrap_or(super::effects::room::RoomFenceRequirement::Unfenced),
+                snapshot_generation: snapshot.admission_revision,
+            });
     }
 
     // ADR-0017 Phase 3 Slice 7: the two-part demotion protocol's
@@ -327,7 +327,14 @@ pub(super) async fn dispatch_to_room(
     // open (logged, not blocking); only a definitive non-serving result
     // demotes. That includes a missing exact row and local identity rotation.
     #[cfg(feature = "clustering")]
-    if let Some(store) = &state.deps.app_state.clustering_claims.muc_durable_store {
+    if let Some(store) = state
+        .deps
+        .app_state
+        .clustering_claims
+        .muc_durable_store
+        .as_ref()
+        .filter(|_| !deps.effects.is_planning())
+    {
         match store.check_fenced_fanout(&room_jid).await {
             Ok(true) => {}
             Ok(false) => {
@@ -364,7 +371,7 @@ pub(super) async fn dispatch_to_room(
                         "This room is temporarily unavailable; please retry.",
                     ),
                 );
-                deps.capture_marker(ShadowDecisionMarker::OperationalFenceLoss);
+
                 return outcome;
             }
             Err(error) => {
@@ -440,9 +447,6 @@ pub(super) async fn dispatch_to_room(
         waddle_xmpp::protocol::room::occupancy_validation::OccupancyValidationHandler
             .handle(&mut gate_working, &gate_ctx);
     if let waddle_xmpp::protocol::room::RoomHandlerOutcome::Halt(gate_events) = gate_outcome {
-        deps.capture_marker(ShadowDecisionMarker::AuthorizationDenied {
-            reason: ShadowAuthorizationDeniedReason::Forbidden,
-        });
         // Fold the nested outcome's full state — frames, close
         // signal, and async-callback feedback — back into the outer
         // outcome (Copilot review on PR #279). Dropping `close` /
@@ -469,9 +473,6 @@ pub(super) async fn dispatch_to_room(
             &sender_full,
             bad_request_error("Client-authored Waddle extension envelopes are not allowed."),
         );
-        deps.capture_marker(ShadowDecisionMarker::SemanticRejected {
-            reason: ShadowSemanticRejectedReason::ClientAuthoredFrameworkEnvelope,
-        });
         return outcome;
     }
 
@@ -531,17 +532,6 @@ pub(super) async fn dispatch_to_room(
     )
     .await
     {
-        let marker = match stanza_error.defined_condition {
-            DefinedCondition::Forbidden | DefinedCondition::NotAcceptable => {
-                ShadowDecisionMarker::AuthorizationDenied {
-                    reason: ShadowAuthorizationDeniedReason::Forbidden,
-                }
-            }
-            _ => ShadowDecisionMarker::SemanticRejected {
-                reason: ShadowSemanticRejectedReason::MalformedPayload,
-            },
-        };
-        deps.capture_marker(marker);
         push_sender_error_reply(
             deps,
             &mut outcome,
@@ -600,6 +590,11 @@ pub(super) async fn dispatch_to_room(
     // the full `default_room_dispatcher()` here would re-run it.
     let dispatch_outcome =
         fanout_span.in_scope(|| default_room_pipeline_dispatcher().dispatch(&mut working, &ctx));
+    if deps.effects.is_planning() {
+        if let Some(capture) = deps.ingress_effect_capture.as_ref() {
+            capture.record_sanitized_message(&working);
+        }
+    }
     let observer_message = working.clone();
     let mut dispatch_events = dispatch_outcome.events;
     bind_room_claim_fence(&mut dispatch_events, snapshot.claim_fence.as_ref());
@@ -659,7 +654,19 @@ pub(super) async fn dispatch_to_room(
     // The marker controls only this nested room batch. Consume it here rather
     // than folding it into the returned outcome, where it could leak into an
     // unrelated sibling event in the enclosing interpreter batch.
-    if retry_suppression.is_none() {
+    if retry_suppression.is_none() && deps.effects.is_planning() {
+        super::effects::room::external(
+            deps,
+            super::effects::room::ExternalRoomEffect::ObserveRoomMessage {
+                room: room_jid.clone(),
+                message: Box::new(observer_message),
+                requester: sender_full.to_bare(),
+                sender: sender_full.clone(),
+                error_request: Box::new(incoming.clone()),
+            },
+            super::effects::PlanSuppressionPolicy::SenderOnly,
+        );
+    } else if retry_suppression.is_none() {
         let mut observer_message = observer_message;
         let observer_outcome = state
             .deps
@@ -702,35 +709,6 @@ fn room_lookup_internal_error() -> xmpp_parsers::stanza_error::StanzaError {
     )
 }
 
-fn clear_provisional_shadow_room_fence(deps: &Deps<'_>) {
-    if let Some(capture) = deps.ingress_effect_capture.as_ref() {
-        capture.clear_room_scope();
-    }
-}
-
-/// Replace parse-time room ownership with the immutable claim carried by the
-/// final proxy attempt. The proxy path only runs for a room owned by another
-/// node (`LocalRoom` returns before any attempt), so that claim is the remote
-/// owner's: it is recorded as authority context, never as a fence this node
-/// could assert. A local snapshot is never taken for a proxy delivery, so
-/// retaining the provisional frame fence would let the shadow assert an
-/// owner/epoch the actual relay no longer used.
-#[cfg(feature = "clustering")]
-pub(super) fn record_remote_shadow_room_authority(
-    deps: &Deps<'_>,
-    room: &jid::BareJid,
-    claim_fence: Option<&waddle_xmpp::muc::RoomClaimFenceContext>,
-) {
-    let Some(claim_fence) = claim_fence else {
-        clear_provisional_shadow_room_fence(deps);
-        return;
-    };
-    if let Some(capture) = deps.ingress_effect_capture.as_ref() {
-        capture
-            .record_remote_room_authority(IngressShadowRoomFence::from_context(room, claim_fence));
-    }
-}
-
 #[cfg(feature = "clustering")]
 pub(super) fn capture_delivered_remote_room_route(
     capture: &crate::ingress_shadow::IngressEffectCapture,
@@ -738,18 +716,6 @@ pub(super) fn capture_delivered_remote_room_route(
     relay_target: RelayTargetIdentity,
 ) {
     capture.record_intent(IngressEffectIntent::DispatchToRoomRemote {
-        room: room.clone(),
-        relay_target,
-    });
-}
-
-#[cfg(feature = "clustering")]
-pub(super) fn capture_ambiguous_remote_room_route(
-    capture: &crate::ingress_shadow::IngressEffectCapture,
-    room: &jid::BareJid,
-    relay_target: RelayTargetIdentity,
-) {
-    capture.record_marker(ShadowDecisionMarker::AmbiguousDispatchToRoomRemote {
         room: room.clone(),
         relay_target,
     });
@@ -770,6 +736,14 @@ pub(crate) fn push_sender_error_reply(
     let frozen_error = waddle_xmpp::ingress::FrozenStanzaError::from_xmpp(&error)
         .expect("server-built stanza error should freeze");
     let reply = build_message_error_reply(incoming, room_jid, sender_full, error);
+    if deps.effects.is_planning() {
+        deps.capture_intent(IngressEffectIntent::ErrorReply {
+            recipient: sender_full.clone(),
+            error: frozen_error,
+        });
+        super::emit_frame(deps, outcome, Stanza::Message(reply));
+        return;
+    }
     match Stanza::Message(reply).to_element_string() {
         Ok(xml) => {
             deps.capture_intent(IngressEffectIntent::ErrorReply {
@@ -946,3 +920,76 @@ mod room_claim_fence_tests {
         ));
     }
 }
+
+#[cfg(feature = "clustering")]
+async fn plan_remote_room(
+    deps: &Deps<'_>,
+    room: &BareJid,
+    message: &Message,
+    sender: &FullJid,
+    outcome: &mut InterpretOutcome,
+) -> bool {
+    let Some(state) = deps.web_socket_state else {
+        return false;
+    };
+    let clustering = &state.deps.app_state.clustering_claims;
+    let Some(origin) = deps.ordered_relay_origin.as_ref() else {
+        return false;
+    };
+    let Some(store) = clustering.claim_store.as_ref() else {
+        return false;
+    };
+    let entity = waddle_xmpp::ownership::Entity::new(
+        waddle_xmpp::ownership::EntityType::RoomActor,
+        room.to_string(),
+    );
+    let claim = match store.current_claim(&entity).await {
+        Ok(None) => return false,
+        Ok(Some(claim)) if claim.owner_lease_fresh => claim,
+        Ok(Some(_)) | Err(_) => {
+            push_sender_error_reply(
+                deps,
+                outcome,
+                message,
+                room,
+                sender,
+                resource_constraint_error("This room is temporarily unreachable; please retry."),
+            );
+            return true;
+        }
+    };
+    if clustering
+        .node_identity
+        .as_ref()
+        .is_some_and(|identity| identity.current() == claim.owner)
+    {
+        return false;
+    }
+    let relay_target = RelayTargetIdentity::owner_node(claim.owner.node_id, claim.owner.node_epoch);
+    deps.effects
+        .set_room_execution(super::effects::RoomExecutionPath::Remote {
+            room: room.clone(),
+            relay_target: relay_target.clone(),
+        });
+    deps.capture_intent(IngressEffectIntent::DispatchToRoomRemote {
+        room: room.clone(),
+        relay_target,
+    });
+    super::effects::room::external(
+        deps,
+        super::effects::room::ExternalRoomEffect::RelayMucProxy {
+            room: room.clone(),
+            stanza: Box::new(Stanza::Message(message.clone())),
+            kind: crate::clustering::ordered_relay::OrderedRelayMucProxyKind::GroupchatMessage,
+            muc_origin: crate::clustering::ordered_relay::MucProxyOrigin::Server,
+            origin: origin.clone(),
+            reflect_replies_to_sender: true,
+        },
+        super::effects::PlanSuppressionPolicy::SenderOnly,
+    );
+    true
+}
+
+#[cfg(test)]
+#[path = "room_plan_tests.rs"]
+mod plan_tests;

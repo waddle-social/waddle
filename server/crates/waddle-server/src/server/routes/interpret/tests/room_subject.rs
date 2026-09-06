@@ -416,6 +416,7 @@ async fn xep_0045_persist_room_subject_writes_state_via_room_actor() {
         ordered_relay_origin: None,
         sfu: None,
         ingress_effect_capture: None,
+        effects: &crate::server::routes::interpret::effects::ImmediateSink,
     };
 
     let setter: jid::BareJid = "alice@example.com".parse().expect("setter bare jid");
@@ -486,6 +487,7 @@ async fn xep_0045_persist_room_subject_committed_records_subject_mutation_intent
         .expect("create room");
     let capture = crate::ingress_shadow::IngressEffectCapture::new(None);
     let deps = Deps {
+        effects: &crate::server::routes::interpret::effects::ImmediateSink,
         connection_registry: &registry,
         user_registry: None,
         sm_session_registry: None,
@@ -858,6 +860,7 @@ async fn xep_0045_concurrent_non_serving_fanout_preserves_successor_and_suppress
         ordered_relay_origin: None,
         sfu: None,
         ingress_effect_capture: None,
+        effects: &crate::server::routes::interpret::effects::ImmediateSink,
     };
     let mut message = Message::new(Some(jid::Jid::from(room_jid.clone())));
     message.from = Some(jid::Jid::from(sender));

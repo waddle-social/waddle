@@ -1,9 +1,6 @@
-use super::super::room_dispatch::push_sender_error_reply;
 #[cfg(feature = "clustering")]
-use super::super::room_dispatch::{
-    capture_ambiguous_remote_room_route, capture_delivered_remote_room_route,
-    record_remote_shadow_room_authority,
-};
+use super::super::room_dispatch::capture_delivered_remote_room_route;
+use super::super::room_dispatch::push_sender_error_reply;
 use super::*;
 use crate::ingress_shadow::IngressEffectCapture;
 
@@ -32,40 +29,6 @@ fn delivered_remote_room_dispatch_captures_frozen_route_intent() {
         .snapshot()
         .intents
         .contains(&IngressEffectIntent::DispatchToRoomRemote { room, relay_target }));
-}
-
-#[cfg(feature = "clustering")]
-#[test]
-fn maybe_committed_remote_room_dispatch_captures_ambiguity_marker() {
-    let capture = IngressEffectCapture::new(None);
-    let room: BareJid = "remote@muc.example.com".parse().expect("room");
-    let relay_target = waddle_xmpp::ingress::RelayTargetIdentity::owner_node("node-b", "epoch-b");
-
-    capture_ambiguous_remote_room_route(&capture, &room, relay_target.clone());
-
-    assert!(capture.snapshot().markers.contains(
-        &crate::ingress_shadow::ShadowDecisionMarker::AmbiguousDispatchToRoomRemote {
-            room,
-            relay_target,
-        }
-    ));
-}
-
-#[cfg(feature = "clustering")]
-#[test]
-fn join_maybe_committed_remote_room_dispatch_captures_ambiguity_marker() {
-    let capture = IngressEffectCapture::new(None);
-    let room: BareJid = "remote@muc.example.com".parse().expect("room");
-    let relay_target = waddle_xmpp::ingress::RelayTargetIdentity::owner_node("node-b", "epoch-b");
-
-    capture_ambiguous_remote_room_route(&capture, &room, relay_target.clone());
-
-    assert!(capture.snapshot().markers.contains(
-        &crate::ingress_shadow::ShadowDecisionMarker::AmbiguousDispatchToRoomRemote {
-            room,
-            relay_target,
-        }
-    ));
 }
 
 // #229 PR18 — DispatchToRoom interpreter arm runs the room handler
@@ -156,6 +119,7 @@ async fn dispatch_to_room_fanout_span_and_latency_cover_recipient_enqueues() {
 
     let capture = IngressEffectCapture::new(None);
     let deps = Deps {
+        effects: &crate::server::routes::interpret::effects::ImmediateSink,
         connection_registry: &state.deps.protocol.connection_registry,
         user_registry: Some(&state.deps.protocol.user_registry),
         sm_session_registry: Some(&state.deps.protocol.sm_session_registry),
@@ -282,6 +246,7 @@ fn successful_room_error_reply_records_error_intent() {
     let registry = ConnectionRegistry::new();
     let capture = IngressEffectCapture::new(None);
     let deps = Deps {
+        effects: &crate::server::routes::interpret::effects::ImmediateSink,
         connection_registry: &registry,
         user_registry: None,
         sm_session_registry: None,
@@ -559,44 +524,4 @@ fn bot_nick_sanitizes_invalid_resource_base_before_joining() {
         available_bot_nick_with_base(&[], "GitHub\u{0}Deploys"),
         "GitHubDeploys"
     );
-}
-
-/// #1735: a proxy attempt's room fence is the remote owner's claim, so the
-/// relayed branches must record it as authority context, never as a fence the
-/// shadow transaction would assert locally (`guard_if_current` can never
-/// accept a foreign identity).
-#[cfg(feature = "clustering")]
-#[test]
-fn relayed_room_delivery_records_remote_authority_not_a_local_fence() {
-    use crate::ingress_shadow::{IngressShadowRoomFence, IngressShadowRoomScope};
-    use waddle_xmpp::muc::RoomClaimFenceContext;
-    use waddle_xmpp::ownership::{ClaimEpoch, Entity, EntityType, NodeIdentity};
-
-    let registry = ConnectionRegistry::new();
-    let capture = IngressEffectCapture::new(None);
-    let deps = Deps::registry_only(&registry).with_ingress_effect_capture(Some(capture.clone()));
-    let room: BareJid = "remote@muc.example.com".parse().expect("room");
-    // Frame-time provisional scope: this node's own published fence.
-    capture.record_room_fence(IngressShadowRoomFence {
-        room: room.clone(),
-        owner: NodeIdentity::new("this-node", "this-epoch"),
-        claim_epoch: ClaimEpoch(3),
-    });
-    let remote_owner = RoomClaimFenceContext::new(
-        Entity::new(EntityType::RoomActor, room.to_string()),
-        NodeIdentity::new("owner-node", "owner-epoch"),
-        ClaimEpoch(9),
-    );
-
-    record_remote_shadow_room_authority(&deps, &room, Some(&remote_owner));
-    assert_eq!(
-        capture.snapshot().room_scope,
-        Some(IngressShadowRoomScope::RemoteAuthority(
-            IngressShadowRoomFence::from_context(&room, &remote_owner)
-        ))
-    );
-
-    // An attempt that carried no fence leaves no room scope to assert.
-    record_remote_shadow_room_authority(&deps, &room, None);
-    assert_eq!(capture.snapshot().room_scope, None);
 }

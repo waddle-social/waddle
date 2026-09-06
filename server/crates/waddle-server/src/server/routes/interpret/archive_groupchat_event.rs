@@ -56,7 +56,8 @@ pub(super) async fn archive_groupchat_event(
     // context `dispatch_to_room`'s own pre-fan-out check reads, so the
     // fenced archive write below agrees with it by construction.
     let fence = resolve_room_claim_fence(deps, &room).await;
-    let archive_id = match archive_groupchat_message(
+    let archive_id = match super::groupchat_archive::archive_groupchat_message_with_effects(
+        Some(deps),
         mam_storage,
         &room,
         &message,
@@ -118,7 +119,7 @@ async fn update_groupchat_link_preview_refs(
     let Some(state) = deps.web_socket_state else {
         return;
     };
-    let global_db_actor = state.deps.app_state.db_pool.global_actor();
+
     let correction_target_message_id =
         if let Some(correction) = waddle_xmpp::xep::extract_correction_from_message(message) {
             Some(correction.replaces_id)
@@ -129,6 +130,21 @@ async fn update_groupchat_link_preview_refs(
         .as_deref()
         .or_else(|| message.id.as_ref().map(|id| id.0.as_str()));
     let Some(message_id) = message_id else { return };
+    if deps.effects.is_planning() {
+        let Some(message_id) = waddle_xmpp::mam::RichMessageId::new(message_id) else {
+            return;
+        };
+        super::preview_plan::update(
+            deps,
+            room,
+            &message_id,
+            &waddle_xmpp_core::xep0359::StanzaId::new(archive_id, Jid::from(room.clone())),
+            message,
+        )
+        .await;
+        return;
+    }
+    let global_db_actor = state.deps.app_state.db_pool.global_actor();
     for intent in crate::server::routes::websocket::link_preview_refs::record_current_message_preview_refs_with_effects(
         global_db_actor,
         state.deps.auth_state.base_url.as_str(),

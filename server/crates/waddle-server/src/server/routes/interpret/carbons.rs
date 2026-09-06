@@ -24,6 +24,79 @@ pub(super) async fn send_carbons(
     kind: CarbonKind,
     exclude: Vec<FullJid>,
 ) {
+    if deps.effects.is_planning() {
+        if super::route_to_connection::plan::remote_owner(deps, &owner).await {
+            super::effects::delivery::record(
+                deps,
+                super::effects::delivery::ExternalDeliveryEffect::RelayCarbons {
+                    origin: deps.ordered_relay_origin.clone(),
+                    owner,
+                    exclude,
+                    message,
+                    kind,
+                },
+            );
+            return;
+        }
+        let mut carbon_recipients = registry.get_other_carbon_resources_for_user(&owner, &exclude);
+        if let Some(sm) = deps.sm_session_registry {
+            if let Ok(detached) = sm
+                .detached_carbon_resources_for_user(&owner, &exclude)
+                .await
+            {
+                carbon_recipients.extend(detached);
+            }
+        }
+        carbon_recipients.sort();
+        carbon_recipients.dedup();
+        if let Some(excluded_source) = exclude.first().cloned() {
+            deps.capture_intent(IngressEffectIntent::Carbons {
+                carbon_recipients,
+                excluded_source,
+                kind,
+            });
+        }
+        super::effects::delivery::record(
+            deps,
+            super::effects::delivery::ExternalDeliveryEffect::Carbons {
+                owner,
+                exclude,
+                message,
+                kind,
+            },
+        );
+        return;
+    }
+    if relay_carbons_only(deps, &owner, &message, kind, &exclude)
+        .await
+        .is_some()
+    {
+        return;
+    }
+    send_carbons_to_registry(
+        registry,
+        CarbonRegistryDeps {
+            ingress_effect_capture: deps.ingress_effect_capture.as_ref(),
+            sm_session_registry: deps.sm_session_registry,
+            web_socket_state: deps.web_socket_state,
+        },
+        owner,
+        message,
+        kind,
+        exclude,
+    )
+    .await;
+}
+
+/// Executes only the frozen remote carbon obligation. A changed owner must be
+/// reported to the ingress executor, never silently expanded to local fanout.
+pub(super) async fn relay_carbons_only(
+    deps: &Deps<'_>,
+    owner: &BareJid,
+    message: &Message,
+    kind: CarbonKind,
+    exclude: &[FullJid],
+) -> Option<FullJidDeliveryOutcome> {
     #[cfg(feature = "clustering")]
     if let Some(state) = deps.web_socket_state {
         if let Some(bridge) = state
@@ -33,18 +106,18 @@ pub(super) async fn send_carbons(
             .ordered_relay_delivery_bridge
             .as_ref()
         {
-            for source_jid in &exclude {
+            for source_jid in exclude {
                 if let Some(outcome) = bridge
                     .try_fanout_remote_user_carbons(
                         source_jid,
-                        &owner,
-                        &message,
+                        owner,
+                        message,
                         kind,
-                        exclude.clone(),
+                        exclude.to_vec(),
                     )
                     .await
                 {
-                    match outcome {
+                    let delivery = match outcome {
                         crate::clustering::route_bridge::RemoteCarbonFanout::Applied {
                             carbon_recipients,
                             recipient_sm_append_streams,
@@ -64,27 +137,20 @@ pub(super) async fn send_carbons(
                                     kind,
                                 });
                             }
+                            FullJidDeliveryOutcome::Delivered
                         }
-                        crate::clustering::route_bridge::RemoteCarbonFanout::MaybeCommitted => {}
-                    }
-                    return;
+                        crate::clustering::route_bridge::RemoteCarbonFanout::MaybeCommitted => {
+                            FullJidDeliveryOutcome::MaybeCommitted
+                        }
+                    };
+                    return Some(delivery);
                 }
             }
         }
     }
-    send_carbons_to_registry(
-        registry,
-        CarbonRegistryDeps {
-            ingress_effect_capture: deps.ingress_effect_capture.as_ref(),
-            sm_session_registry: deps.sm_session_registry,
-            web_socket_state: deps.web_socket_state,
-        },
-        owner,
-        message,
-        kind,
-        exclude,
-    )
-    .await;
+    #[cfg(not(feature = "clustering"))]
+    let _ = (deps, owner, message, kind, exclude);
+    None
 }
 
 pub(crate) async fn send_carbons_to_registry(

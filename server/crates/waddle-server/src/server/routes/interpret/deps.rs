@@ -100,6 +100,7 @@ pub enum TimerCommand {
 /// churn small.
 #[derive(Clone)]
 pub struct Deps<'a> {
+    pub effects: &'a dyn super::effects::EffectSink,
     pub connection_registry: &'a ConnectionRegistry,
     /// Actor-backed per-user registry (ADR-0017 Phase 1). Threaded so bare-JID
     /// routing selection (`route_to_connection`, Slice 1) can source its
@@ -152,7 +153,8 @@ pub struct Deps<'a> {
     /// managed-room owner check (announcements room admits server
     /// owners only) without re-querying. `None` for unauthenticated
     /// flows (early connection lifecycle, unit tests).
-    pub authenticated_principal: Option<crate::server::routes::websocket::ResolvedPrincipal<'a>>,
+    pub(crate) authenticated_principal:
+        Option<crate::server::routes::websocket::ResolvedPrincipal<'a>>,
     /// Authoritative local XMPP domain. Used by the
     /// [`OutboundEvent::RouteToConnection`] arm to gate the
     /// headless offline-recipient pass (#229 PR15) to local-domain
@@ -218,12 +220,6 @@ impl<'a> Deps<'a> {
         }
     }
 
-    pub fn capture_marker(&self, marker: crate::ingress_shadow::ShadowDecisionMarker) {
-        if let Some(capture) = self.ingress_effect_capture.as_ref() {
-            capture.record_marker(marker);
-        }
-    }
-
     /// Build a minimal `Deps` with only the connection registry — a
     /// test-only convenience for unit tests that don't exercise SM
     /// fan-out, archive, or inbox storage. Defaults `local_domain` to
@@ -232,6 +228,7 @@ impl<'a> Deps<'a> {
     #[cfg(test)]
     pub fn registry_only(connection_registry: &'a ConnectionRegistry) -> Self {
         Self {
+            effects: &super::effects::ImmediateSink,
             connection_registry,
             user_registry: None,
             sm_session_registry: None,
@@ -263,6 +260,7 @@ impl<'a> Deps<'a> {
         user_registry: &'a kameo::actor::ActorRef<waddle_xmpp::registry::UserRegistryActor>,
     ) -> Self {
         Self {
+            effects: &super::effects::ImmediateSink,
             connection_registry,
             user_registry: Some(user_registry),
             sm_session_registry: None,
@@ -292,6 +290,7 @@ impl<'a> Deps<'a> {
         inbox_storage: &'a Arc<dyn InboxStorage>,
     ) -> Self {
         Self {
+            effects: &super::effects::ImmediateSink,
             connection_registry,
             user_registry: None,
             sm_session_registry: None,
@@ -319,6 +318,7 @@ impl<'a> Deps<'a> {
         extension_manager: &'a Arc<ExtensionManager>,
     ) -> Self {
         Self {
+            effects: &super::effects::ImmediateSink,
             connection_registry,
             user_registry: None,
             sm_session_registry: None,
