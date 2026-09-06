@@ -243,3 +243,57 @@ fn early_mutation_receipts(
         matches.then_some(index)
     }).collect())
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use waddle_xmpp::ingress::EntityGeneration;
+    use waddle_xmpp_core::xep0359::{add_stanza_id, StanzaId};
+
+    #[test]
+    fn groupchat_receipt_requires_every_occupants_exact_room_stamp() {
+        let room: BareJid = "room@muc.example.com".parse().expect("room");
+        let sender: FullJid = "sender@example.com/phone".parse().expect("sender");
+        let peer: FullJid = "peer@example.com/phone".parse().expect("peer");
+        let stamp = StanzaId::new("accepted", room.clone().into());
+        let intent = IngressEffectIntent::RouteMucGroupchat {
+            room,
+            occupants: vec![sender.clone(), peer.clone()],
+            reflection: sender.clone(),
+            room_generation: EntityGeneration::INITIAL,
+            route_identity: EffectMessageIdentity::stanza(stamp.clone()),
+        };
+        let delivery = |recipient: &FullJid, stamp: &StanzaId| {
+            let mut message = Message::new(Some(recipient.clone().into()));
+            message.type_ = MessageType::Groupchat;
+            add_stanza_id(&mut message, stamp);
+            ExternalEffect::Delivery(ExternalDeliveryEffect::RouteToPeer {
+                jid: recipient.clone(),
+                stanza: Box::new(Stanza::Message(message)),
+                kind: crate::server::routes::interpret::effects::delivery::PeerDeliveryKind::PeerStanza,
+                call_setup: None,
+            })
+        };
+        let wrong_authority = StanzaId::new("accepted", peer.to_bare().into());
+        assert_eq!(
+            route_receipts(
+                &[delivery(&sender, &stamp), delivery(&peer, &wrong_authority)],
+                &intent
+            ),
+            Some(vec![]),
+            "matching id text under another assigning authority is not the room delivery"
+        );
+        assert_eq!(
+            route_receipts(&[delivery(&sender, &stamp)], &intent),
+            Some(vec![]),
+            "sender reflection cannot confirm a suppressed occupant"
+        );
+        assert_eq!(
+            route_receipts(
+                &[delivery(&sender, &stamp), delivery(&peer, &stamp)],
+                &intent
+            ),
+            Some(vec![0, 1])
+        );
+    }
+}

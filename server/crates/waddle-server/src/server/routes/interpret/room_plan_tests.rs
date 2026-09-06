@@ -410,3 +410,110 @@ async fn plan_pinned_retraction_freezes_system_archive_and_deliveries() {
         .expect("preview clear");
     assert_eq!(clear.tombstone_suppression, PlanSuppressionPolicy::Always);
 }
+
+async fn large_room_plan_commits(fixture: crate::ingress::test_support::IngressFixture) {
+    use crate::ingress::{commit::commit_submission, IngressDecisionClass};
+    use crate::server::routes::websocket::tests::create_test_session;
+    use waddle_xmpp::ingress::{DigestContext, DigestInput, NormalizedTarget};
+
+    let state = create_test_websocket_state().await;
+    create_test_session(state.as_ref(), "romeo").await;
+    let sender: FullJid = "romeo@example.com/phone".parse().expect("sender");
+    let room: BareJid = "large@muc.example.com".parse().expect("room");
+    let actor = state
+        .deps
+        .protocol
+        .room_registry
+        .ask(CreateRoom {
+            room_jid: room.clone(),
+            waddle_id: "large".to_owned(),
+            channel_id: "large".to_owned(),
+            config: waddle_xmpp::muc::RoomConfig {
+                max_occupants: 256,
+                ..Default::default()
+            },
+        })
+        .await
+        .expect("room");
+    // Durable members include offline users, so occupancy alone cannot size the capture.
+    for index in 0..160 {
+        let member: BareJid = format!("member{index}@example.com")
+            .parse()
+            .expect("member");
+        actor
+            .ask(ChangeAffiliation {
+                jid: member,
+                affiliation: waddle_xmpp::Affiliation::Member,
+            })
+            .await
+            .expect("durable member");
+    }
+    actor
+        .ask(ChangeAffiliation {
+            jid: sender.to_bare(),
+            affiliation: waddle_xmpp::Affiliation::Member,
+        })
+        .await
+        .expect("sender membership");
+    actor
+        .ask(Join {
+            nick: "romeo".to_owned(),
+            real_jid: sender.clone(),
+            role: waddle_xmpp::Role::Participant,
+            affiliation: waddle_xmpp::Affiliation::Member,
+        })
+        .await
+        .expect("sender joins");
+    let (sender_tx, _sender_rx) = tokio::sync::mpsc::channel(8);
+    register_test_connection(state.as_ref(), &sender, sender_tx).await;
+    let mut submission = fixture.submission(Some("large-room-message"), "hello large room");
+    submission.target = NormalizedTarget::Bare(room.clone());
+    submission.plan.sanitized_message.to = Some(room.clone().into());
+    submission.plan.sanitized_message.type_ = XmppMessageType::Groupchat;
+    submission.digest_input = DigestInput::from_parsed(
+        &submission.plan.sanitized_message,
+        &DigestContext {
+            target: submission.target.clone(),
+            server_authorities: vec![room.clone()],
+            stanza_lang: None,
+        },
+    )
+    .expect("digest");
+    let mut dispatcher = waddle_xmpp::protocol::StanzaDispatcher::new();
+    waddle_xmpp::protocol::handlers::register_default_message_handlers(&mut dispatcher);
+    let mut machine = XmppStateMachine::new("example.com", dispatcher);
+    machine.transition_to_ready(sender, false);
+    let deps = crate::server::routes::websocket::interpret_loop::build_interpret_deps(
+        state.as_ref(),
+        None,
+    );
+    submission.plan = crate::server::plan_message_dispatch(
+        &mut machine,
+        submission.plan.sanitized_message,
+        &deps,
+    )
+    .await;
+    assert!(submission.plan.rejection.is_none());
+    assert!(submission.plan.intents.len() > 128);
+    let decision = commit_submission(&fixture.uow, &submission, 5)
+        .await
+        .expect("commit large room");
+    assert_eq!(decision.class, IngressDecisionClass::Accepted);
+    assert_eq!(fixture.count("ingress_messages").await, 1);
+    assert_eq!(fixture.count("inbox_entries").await, 161);
+    fixture.close().await;
+}
+
+#[tokio::test]
+async fn ingress_large_room_plan_commits_sqlite() {
+    large_room_plan_commits(crate::ingress::test_support::IngressFixture::sqlite().await).await;
+}
+
+#[tokio::test]
+async fn ingress_large_room_plan_commits_postgres() {
+    if let Some(fixture) =
+        crate::ingress::test_support::IngressFixture::postgres("large_room").await
+    {
+        large_room_plan_commits(fixture).await;
+    }
+}

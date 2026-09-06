@@ -58,6 +58,7 @@ struct SmEnableClaimGuard {
 /// `<enabled/>` frame was written.
 pub(super) struct SmEnableCommit {
     claim_guard: Option<SmEnableClaimGuard>,
+    fence: Option<waddle_xmpp::stream_management::persistence::SmClaimFence>,
     stream_id: waddle_xmpp::pending_delivery::SmSessionId,
     resume: bool,
     max: u32,
@@ -66,12 +67,14 @@ pub(super) struct SmEnableCommit {
 impl SmEnableCommit {
     fn new(
         claim_guard: Option<SmEnableClaimGuard>,
+        fence: Option<waddle_xmpp::stream_management::persistence::SmClaimFence>,
         stream_id: waddle_xmpp::pending_delivery::SmSessionId,
         resume: bool,
         max: u32,
     ) -> Self {
         Self {
             claim_guard,
+            fence,
             stream_id,
             resume,
             max,
@@ -82,6 +85,7 @@ impl SmEnableCommit {
         mut self,
         state: &WebSocketState,
         sm_state: &mut StreamManagementState,
+        sm_ingress_fence: &mut Option<waddle_xmpp::stream_management::persistence::SmClaimFence>,
         bound_jid: Option<&jid::FullJid>,
         registry_owner: Option<&std::sync::Arc<std::sync::atomic::AtomicBool>>,
     ) {
@@ -98,6 +102,7 @@ impl SmEnableCommit {
         // that positive reply the SM-session commit point. A concurrent
         // same-JID replacement may reject only the shared registry alias,
         // never roll back the state the peer has already observed.
+        *sm_ingress_fence = self.fence.take();
         sm_state.enable(self.stream_id.to_string(), self.resume, Some(self.max));
         if let Some(guard) = self.claim_guard.take() {
             guard.commit();
@@ -376,6 +381,8 @@ fn max_resume_secs_from_env() -> u32 {
 pub(super) struct SmCtx<'a> {
     pub(super) phase: &'a mut ConnectionPhase,
     pub(super) sm_state: &'a mut StreamManagementState,
+    pub(super) sm_ingress_fence:
+        &'a mut Option<waddle_xmpp::stream_management::persistence::SmClaimFence>,
     pub(super) sm_inbound_completion:
         &'a mut crate::server::routes::interpret::SmInboundCompletionTracker,
     pub(super) authenticated_session: &'a mut Option<Session>,
@@ -625,6 +632,11 @@ async fn handle_sm_enable(
     } else {
         None
     };
+    let fence = state
+        .deps
+        .protocol
+        .sm_session_registry
+        .current_sm_claim_fence(&stream_id);
     let claim_guard = claim_publication.map(|publication| {
         SmEnableClaimGuard::new(
             state.deps.protocol.sm_session_registry.clone(),
@@ -658,6 +670,7 @@ async fn handle_sm_enable(
     };
     *pending_commit = Some(SmEnableCommit::new(
         claim_guard,
+        fence,
         waddle_xmpp::pending_delivery::SmSessionId::new(stream_id),
         enable.resume,
         max,
@@ -804,6 +817,7 @@ async fn handle_sm_resume_terminal(
     let SmCtx {
         phase,
         sm_state,
+        sm_ingress_fence,
         authenticated_session,
         occupancy_session,
         carbons_enabled,
@@ -1154,6 +1168,11 @@ async fn handle_sm_resume_terminal(
     }
 
     // Commit the staged snapshot only after the durable recheck succeeds.
+    *sm_ingress_fence = state
+        .deps
+        .protocol
+        .sm_session_registry
+        .current_sm_claim_fence(&detached.stream_id);
     sm_state.restore_from_session(&detached);
     sm_state.acknowledge(resume.h);
     // A native-SCRAM login persisted its own resume-fence row at

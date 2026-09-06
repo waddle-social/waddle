@@ -236,8 +236,8 @@
       "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
       "targets": [
         {
-          "expr": "sum by (result) (increase(ingress_gc_runs_total[5m])) or vector(0)",
-          "legendFormat": "gc {{result}}",
+          "expr": "sum by (outcome) (increase(ingress_gc_runs_total[5m])) or vector(0)",
+          "legendFormat": "gc {{outcome}}",
           "refId": "A"
         },
         {

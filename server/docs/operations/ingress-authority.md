@@ -40,7 +40,7 @@ latency is a seconds histogram; confirm `le`-labelled buckets are present.
 | `ingress.decisions{class}` | `ingress_decisions_total` | `IngressInfraDecisions`, `IngressFenceDecisions`, `IngressRetryExhausted` |
 | `ingress.alias.outcomes{outcome}` | `ingress_alias_outcomes_total` | `IngressAliasConflicts` |
 | `ingress.tx.retries` | `ingress_tx_retries_total` | Retry pressure context |
-| `ingress.gc.runs{result}` | `ingress_gc_runs_total` | `IngressGcFailing` |
+| `ingress.gc.runs{outcome}` | `ingress_gc_runs_total` | `IngressGcFailing` |
 | `ingress.gc.reclaimed_messages` | `ingress_gc_reclaimed_messages_total` | Reclamation progress |
 | `ingress.tx.duration` | `ingress_tx_duration_seconds_bucket` (also `_sum`, `_count`) | `IngressTxSlow` |
 | `ingress.effects.unresolved{kind}` | `ingress_effects_unresolved_total` | `IngressUnresolvedEffectsGrowing` |
@@ -104,7 +104,7 @@ GC; absent metrics are not evidence of healthy zero activity:
 sum by (class) (rate(ingress_decisions_total[10m]))
 sum by (kind) (increase(ingress_effects_unresolved_total[1h]))
 histogram_quantile(0.99, sum by (le) (rate(ingress_tx_duration_seconds_bucket[10m])))
-sum by (result) (increase(ingress_gc_runs_total[1h]))
+sum by (outcome) (increase(ingress_gc_runs_total[1h]))
 max(cnpg_waddle_ingress_gc_eligible_messages)
 max(cnpg_waddle_ingress_gc_oldest_eligible_age_seconds)
 ```

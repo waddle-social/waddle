@@ -263,6 +263,22 @@ pub(crate) async fn create_test_websocket_state_with_db_pool(
     .await
 }
 
+/// Share projection storage with a caller-owned ingress transaction fixture.
+pub(crate) async fn create_test_websocket_state_with_db_pool_and_ingress(
+    db_pool: Arc<DatabasePool>,
+    ingress: Arc<crate::ingress::IngressAuthority>,
+) -> Arc<WebSocketState> {
+    create_test_websocket_state_with_extension_manager(
+        empty_extension_manager().await,
+        TestStateOverrides {
+            db_pool: Some(db_pool),
+            ingress: Some(ingress),
+            ..TestStateOverrides::default()
+        },
+    )
+    .await
+}
+
 pub(crate) async fn create_test_websocket_state_with_sm_registry(
     sm_session_registry: Arc<InMemorySmSessionRegistry>,
 ) -> Arc<WebSocketState> {

@@ -295,6 +295,7 @@ async fn handle_xmpp_frame_impl(
         authenticated_session,
         occupancy_session,
         sm_state,
+        sm_ingress_fence,
         sm_inbound_completion,
         inbound_frame_terminal,
         ordered_relay_handoff_tx,
@@ -334,6 +335,7 @@ async fn handle_xmpp_frame_impl(
             let ctx = SmCtx {
                 phase,
                 sm_state,
+                sm_ingress_fence,
                 sm_inbound_completion,
                 authenticated_session,
                 occupancy_session,
@@ -495,16 +497,7 @@ async fn handle_xmpp_frame_impl(
                     .is_owned_by(bound, owner)
                 {
                     debug!(jid = %bound, "dropping stanza from a superseded connection");
-                    let has_resumable_claim = sm_state.is_resumable()
-                        && sm_state.stream_id.as_deref().is_some_and(|stream_id| {
-                            state
-                                .deps
-                                .protocol
-                                .sm_session_registry
-                                .current_sm_claim_fence(stream_id)
-                                .is_some()
-                        });
-                    if matches!(stanza.as_ref(), Stanza::Message(_)) && !has_resumable_claim {
+                    if matches!(stanza.as_ref(), Stanza::Message(_)) && !sm_state.is_resumable() {
                         *phase = ConnectionPhase::closing(phase.bound_jid().cloned());
                         return ResponseBatch::from_frames([
                             ingress_failure_stream_error(
@@ -924,14 +917,8 @@ async fn dispatch_authoritative_message(
         .stream_id
         .as_deref()
         .map(waddle_xmpp::pending_delivery::SmSessionId::new);
-    let fence = stream_id.as_ref().and_then(|id| {
-        state
-            .deps
-            .protocol
-            .sm_session_registry
-            .current_sm_claim_fence(id.as_str())
-    });
-    let resumable = conn.sm_state.is_resumable() && sequence.is_some() && fence.is_some();
+    let fence = conn.sm_ingress_fence.clone();
+    let resumable = conn.sm_state.is_resumable();
     let deps = super::interpret_loop::build_interpret_deps(
         state,
         conn.authenticated_session
@@ -941,6 +928,12 @@ async fn dispatch_authoritative_message(
     .with_ordered_relay_origin(origin);
     let work = Box::pin(async {
         let identity = if resumable {
+            let fence = fence
+                .as_ref()
+                .ok_or(IngressDecisionClass::ClaimFenceMissing)?;
+            #[cfg(not(feature = "clustering"))]
+            let _ = fence;
+            let sequence = sequence.ok_or(IngressDecisionClass::Storage)?;
             let stream_id = stream_id.as_ref().ok_or(IngressDecisionClass::Storage)?;
             let sm_ingress_id = state
                 .deps
@@ -954,12 +947,10 @@ async fn dispatch_authoritative_message(
                 stream_id: stream_id.clone(),
                 sm_ingress_id,
                 #[cfg(feature = "clustering")]
-                owner: fence.as_ref().expect("resumable fence").owner().clone(),
+                owner: fence.owner().clone(),
                 #[cfg(feature = "clustering")]
-                claim_epoch: fence.as_ref().expect("resumable fence").epoch(),
-                reserved_wire_position: WireHandledCount::from_storage(
-                    sequence.expect("reserved sequence").0,
-                ),
+                claim_epoch: fence.epoch(),
+                reserved_wire_position: WireHandledCount::from_storage(sequence.0),
                 checkpoint_h: WireHandledCount::from_storage(
                     checkpoint.expect("reserved checkpoint"),
                 ),

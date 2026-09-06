@@ -49,12 +49,21 @@ pub(super) fn remote_resource_route_reply(
 
 pub(super) fn remote_resource_muc_outcome(
     reply: RelayRouteRemoteResourceStanzaReply,
+    owner: NodeId,
+    stop_token: CancellationToken,
 ) -> OrderedRelayMucProxyOutcome {
     match reply.outcome {
         RemoteResourceRouteOutcome::Delivered | RemoteResourceRouteOutcome::QueuedDetached => {
-            OrderedRelayMucProxyOutcome::Delivered(
-                reply.replies.into_iter().map(|reply| reply.0).collect(),
-            )
+            let frames = reply.replies.into_iter().map(|reply| reply.0).collect();
+            match reply.reply_receipt {
+                Some(token) => OrderedRelayMucProxyOutcome::PendingFrames {
+                    frames,
+                    completion: crate::ingress::execute::RelayFrameReceiptCompletion::remote(
+                        owner, token, stop_token,
+                    ),
+                },
+                None => OrderedRelayMucProxyOutcome::Delivered(frames),
+            }
         }
         RemoteResourceRouteOutcome::Unavailable | RemoteResourceRouteOutcome::StaleRegistration => {
             OrderedRelayMucProxyOutcome::Unavailable

@@ -286,8 +286,22 @@ async fn ingress_actual_invitation_plan_replay_postgres() {
 }
 
 /// XEP-0359 §3: a client cannot assign the room's stable stanza identity.
-async fn forged_room_stamp(fixture: IngressFixture) {
-    let state = create_test_websocket_state().await;
+async fn forged_room_stamp(fixture: IngressFixture, peer_is_member: bool) {
+    let standalone = create_test_websocket_state().await;
+    let pool = crate::db::DatabasePool::new(
+        crate::db::DatabaseConfig::new(fixture.db.driver(), fixture.db.database_url()),
+        crate::db::PoolConfig,
+    )
+    .await
+    .expect("shared ingress fixture pool");
+    // Phase B uses fixture.uow. Retain the unused socket authority separately so
+    // constructing the socket fixture does not re-enroll its existing lineage.
+    let state = crate::server::routes::websocket::tests::create_test_websocket_state_with_db_pool_and_ingress(
+        std::sync::Arc::new(pool),
+        std::sync::Arc::clone(&standalone.deps.protocol.ingress),
+    )
+    .await;
+    drop(standalone);
     create_test_session(state.as_ref(), "romeo").await;
     let sender: jid::FullJid = "romeo@example.com/phone".parse().expect("sender");
     let room: jid::BareJid = "stamp@muc.example.com".parse().expect("room");
@@ -299,7 +313,10 @@ async fn forged_room_stamp(fixture: IngressFixture) {
             room_jid: room.clone(),
             waddle_id: "stamp".to_owned(),
             channel_id: "stamp".to_owned(),
-            config: RoomConfig::default(),
+            config: RoomConfig {
+                members_only: peer_is_member,
+                ..RoomConfig::default()
+            },
         })
         .await
         .expect("room");
@@ -322,7 +339,11 @@ async fn forged_room_stamp(fixture: IngressFixture) {
         .ask(JoinWithAffiliation {
             sender_jid: peer.clone(),
             nick: "juliet".to_owned(),
-            affiliation_grant: JoinAffiliationGrant::Resolver(waddle_xmpp::Affiliation::Member),
+            affiliation_grant: if peer_is_member {
+                JoinAffiliationGrant::Resolver(waddle_xmpp::Affiliation::Member)
+            } else {
+                JoinAffiliationGrant::Unaffiliated
+            },
             local_domain: "example.com".to_owned(),
             admission_revision: 0,
             session: waddle_xmpp_core::OccupancySessionGeneration::mint(),
@@ -386,13 +407,46 @@ async fn forged_room_stamp(fixture: IngressFixture) {
     )
     .await;
     assert!(report.receipt_failures.is_empty());
+    let deliveries: Vec<_> = report
+        .outcomes
+        .iter()
+        .filter(|(effect, _)| matches!(effect, ExternalEffect::Delivery(_)))
+        .collect();
+    assert_eq!(deliveries.len(), 2, "sender and peer occupant deliveries");
+    assert!(
+        deliveries
+            .iter()
+            .all(|(_, outcome)| *outcome == crate::ingress::ExternalOutcome::Done),
+        "every occupant delivery must finish: {report:?}"
+    );
+    assert!(report.terminalization_failure.is_none());
+    if !peer_is_member {
+        // An ordinary unaffiliated occupant in an open room receives live
+        // groupchat without the private member inbox/notification obligations.
+        // This isolates the route's completion from legacy push helpers that
+        // deliberately cannot provide individual delivery confirmations.
+        assert_eq!(
+            fixture.count("ingress_effect_intents").await,
+            fixture.count("ingress_effect_receipts").await,
+            "every real groupchat obligation must have a confirmed receipt; intents: {:?}; report: {report:?}",
+            submission.plan.intents
+        );
+        assert_eq!(
+            fixture
+                .count("ingress_messages WHERE terminal_at IS NOT NULL")
+                .await,
+            1,
+            "successful local groupchat must terminalize; intents: {:?}; report: {report:?}",
+            submission.plan.intents
+        );
+    }
     let room_id = decision
         .archive_ids
         .iter()
         .find(|(archive, _)| archive == &room)
         .expect("room authoritative identity");
     assert_ne!(room_id.1, forged);
-    assert_room_inbox_rows(&fixture, &room, &room_id.1, &client_id).await;
+    assert_room_inbox_rows(&fixture, &room, &room_id.1, &client_id, peer_is_member).await;
     assert_eq!(
         take_room_frames(&mut rx, &room, &room_id.1, &client_id, 0),
         1,
@@ -427,7 +481,7 @@ async fn forged_room_stamp(fixture: IngressFixture) {
     )
     .await;
     assert!(retry_report.receipt_failures.is_empty());
-    assert_room_inbox_rows(&fixture, &room, &room_id.1, &client_id).await;
+    assert_room_inbox_rows(&fixture, &room, &room_id.1, &client_id, peer_is_member).await;
     assert_eq!(
         take_room_frames(&mut rx, &room, &room_id.1, &client_id, 0),
         1,
@@ -460,13 +514,26 @@ async fn forged_room_stamp(fixture: IngressFixture) {
 /// XEP-0359 §3: strip a room-authority stamp before local room acceptance.
 #[tokio::test]
 async fn ingress_forged_room_stamp_sqlite() {
-    forged_room_stamp(IngressFixture::sqlite().await).await;
+    forged_room_stamp(IngressFixture::sqlite().await, true).await;
 }
 /// XEP-0359 §3: PostgreSQL preserves the same trusted room stamp on wire and rows.
 #[tokio::test]
 async fn ingress_forged_room_stamp_postgres() {
     if let Some(fixture) = IngressFixture::postgres("forged_room_stamp").await {
-        forged_room_stamp(fixture).await;
+        forged_room_stamp(fixture, true).await;
+    }
+}
+
+/// XEP-0045 open-room delivery: every live occupant confirms the recorded route.
+#[tokio::test]
+async fn ingress_local_groupchat_delivery_terminalizes_sqlite() {
+    forged_room_stamp(IngressFixture::sqlite().await, false).await;
+}
+
+#[tokio::test]
+async fn ingress_local_groupchat_delivery_terminalizes_postgres() {
+    if let Some(fixture) = IngressFixture::postgres("local_groupchat_terminalizes").await {
+        forged_room_stamp(fixture, false).await;
     }
 }
 
@@ -530,15 +597,20 @@ async fn assert_room_inbox_rows(
     room: &jid::BareJid,
     stanza_id: &waddle_xmpp_core::xep0359::StanzaId,
     client_id: &xmpp_parsers::message::Id,
+    peer_is_member: bool,
 ) {
     use waddle_xmpp::inbox::storage::InboxStorage;
     let inbox = crate::inbox::DatabaseInboxStorage::from_database(fixture.db.clone())
         .await
         .expect("inbox reader");
-    for (owner, unread) in [
-        (fixture.principal.bare_jid().clone(), 0),
-        ("juliet@example.com".parse().expect("peer"), 1),
-    ] {
+    let peer = "juliet@example.com".parse().expect("peer");
+    let mut projections = vec![(fixture.principal.bare_jid().clone(), 0)];
+    if peer_is_member {
+        projections.push((peer, 1));
+    } else {
+        assert!(inbox.list(&peer).await.expect("guest inbox").is_empty());
+    }
+    for (owner, unread) in projections {
         let entry = inbox
             .list(&owner)
             .await

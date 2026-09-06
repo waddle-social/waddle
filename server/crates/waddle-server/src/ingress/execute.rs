@@ -38,16 +38,31 @@ pub enum ExternalOutcome {
 pub enum ExecutionPersistenceFailure {
     #[error("post-commit persistence failed: {0}")]
     Storage(#[from] IngressUowError),
+    #[cfg(feature = "clustering")]
+    #[error("relay frame receipt confirmation failed: {0}")]
+    RelayConfirmation(#[from] crate::clustering::relay::RelayAskError),
+    #[cfg(feature = "clustering")]
+    #[error("relay owner could not persist reply receipts")]
+    RelayConfirmationDeclined,
     #[error("post-commit persistence budget exhausted")]
     BudgetExhausted,
 }
 
-/// Local owner receipts carried to the origin's actual response write boundary.
+/// Owner receipts carried to the origin's actual response write boundary.
 #[cfg(feature = "clustering")]
 #[derive(Clone)]
 pub struct RelayFrameReceiptCompletion {
-    inner:
-        std::sync::Arc<tokio::sync::Mutex<crate::clustering::route_bridge::RelayFrameCompletion>>,
+    inner: std::sync::Arc<tokio::sync::Mutex<RelayFrameReceiptTarget>>,
+}
+
+#[cfg(feature = "clustering")]
+enum RelayFrameReceiptTarget {
+    Local(crate::clustering::route_bridge::RelayFrameCompletion),
+    Remote {
+        owner: crate::clustering::NodeId,
+        token: crate::clustering::relay::RelayReplyReceiptToken,
+        stop_token: tokio_util::sync::CancellationToken,
+    },
 }
 
 #[cfg(feature = "clustering")]
@@ -63,14 +78,47 @@ impl std::fmt::Debug for RelayFrameReceiptCompletion {
 impl RelayFrameReceiptCompletion {
     pub(crate) fn new(completion: crate::clustering::route_bridge::RelayFrameCompletion) -> Self {
         Self {
-            inner: std::sync::Arc::new(tokio::sync::Mutex::new(completion)),
+            inner: std::sync::Arc::new(tokio::sync::Mutex::new(RelayFrameReceiptTarget::Local(
+                completion,
+            ))),
+        }
+    }
+
+    pub(crate) fn remote(
+        owner: crate::clustering::NodeId,
+        token: crate::clustering::relay::RelayReplyReceiptToken,
+        stop_token: tokio_util::sync::CancellationToken,
+    ) -> Self {
+        Self {
+            inner: std::sync::Arc::new(tokio::sync::Mutex::new(RelayFrameReceiptTarget::Remote {
+                owner,
+                token,
+                stop_token,
+            })),
         }
     }
 
     pub async fn complete(&self) -> Result<bool, ExecutionPersistenceFailure> {
-        let mut completion = self.inner.lock().await;
-        let authority = std::sync::Arc::clone(&completion.authority);
-        Box::pin(authority.complete_frame_obligations(&mut completion.report)).await
+        let mut target = self.inner.lock().await;
+        match &mut *target {
+            RelayFrameReceiptTarget::Local(completion) => {
+                let authority = std::sync::Arc::clone(&completion.authority);
+                Box::pin(authority.complete_frame_obligations(&mut completion.report)).await
+            }
+            RelayFrameReceiptTarget::Remote {
+                owner,
+                token,
+                stop_token,
+            } => {
+                let mut handle =
+                    crate::clustering::relay::RelayHandle::new(owner.clone(), stop_token.clone());
+                if handle.confirm_reply_receipt(*token).await? {
+                    Ok(true)
+                } else {
+                    Err(ExecutionPersistenceFailure::RelayConfirmationDeclined)
+                }
+            }
+        }
     }
 }
 

@@ -339,6 +339,7 @@ async fn reset_registered_resume_attempt(
     let domain = state.deps.auth_state.xmpp_domain.clone();
     let keepalive = conn.keepalive_config;
     conn.init_prebind_state_machine(&domain, &state.deps.protocol.dispatcher, keepalive);
+    conn.sm_ingress_fence = None;
     conn.sm_state = StreamManagementState::new();
     conn.blocklist_interested = false;
     conn.suppress_sm_record_next_batch = false;

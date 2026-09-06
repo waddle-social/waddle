@@ -2233,6 +2233,7 @@ async fn refuse_detach_without_principal(
             redrive_terminal_pending_rows_to_live_resource(state, &jid.to_bare()).await;
         }
     }
+    conn.sm_ingress_fence = None;
     conn.sm_state = waddle_xmpp::stream_management::StreamManagementState::new();
     if let Some((was_presence_available, owner)) = terminal_removed {
         // The promotion await above can overlap a same-FullJID replacement

@@ -5,7 +5,11 @@ use waddle_xmpp::ingress::{
     EffectMessageIdentity, IngressEffectIntent, IngressEffectKey, RecipientSmAppendIdentity,
 };
 use waddle_xmpp::pending_delivery::SmSessionId;
-const MAX_CAPTURE_ENTRIES: usize = 128;
+// Fixed obligations cover archives, room mutation/observer/recovery and error replies.
+const BASE_CAPTURE_ENTRIES: usize = 128;
+// Each recipient can require an inbox projection, its notification, delivery,
+// SM append, push candidate, and additional notification/recovery obligations.
+const CAPTURE_ENTRIES_PER_RECIPIENT: usize = 8;
 #[cfg(test)]
 tokio::task_local! {
     pub(crate) static TEST_CAPTURE_LIMIT: usize;
@@ -32,6 +36,7 @@ struct CaptureState {
     next_append_identity: u64,
     next_route_identity: u64,
     overflowed: bool,
+    limit: usize,
 }
 
 impl IngressEffectCapture {
@@ -43,7 +48,27 @@ impl IngressEffectCapture {
                 next_append_identity: 0,
                 next_route_identity: 0,
                 overflowed: false,
+                limit: BASE_CAPTURE_ENTRIES,
             })),
+        }
+    }
+
+    /// Size the bounded plan for the room's configured occupancy and its actual
+    /// audience. XEP-0045 allows unlimited occupancy (zero), privileged overflow,
+    /// and offline durable members, so the snapshot is also a lower bound.
+    pub fn reserve_room_capacity(
+        &self,
+        configured_occupancy: u32,
+        occupants: usize,
+        durable_members: usize,
+    ) {
+        let audience = (configured_occupancy as usize)
+            .max(occupants)
+            .max(durable_members);
+        let limit = BASE_CAPTURE_ENTRIES
+            .saturating_add(audience.saturating_mul(CAPTURE_ENTRIES_PER_RECIPIENT));
+        if let Ok(mut state) = self.inner.lock() {
+            state.limit = state.limit.max(limit);
         }
     }
 
@@ -113,9 +138,9 @@ impl IngressEffectCapture {
         #[cfg(test)]
         let limit = TEST_CAPTURE_LIMIT
             .try_with(|limit| *limit)
-            .unwrap_or(MAX_CAPTURE_ENTRIES);
+            .unwrap_or(state.limit);
         #[cfg(not(test))]
-        let limit = MAX_CAPTURE_ENTRIES;
+        let limit = state.limit;
         if entry_count > limit {
             state.intents.clear();
             state.intent_keys.clear();
@@ -145,12 +170,29 @@ mod tests {
     #[test]
     fn overflow_discards_incomplete_obligations_and_stays_overflowed() {
         let capture = IngressEffectCapture::new();
-        for _ in 0..=MAX_CAPTURE_ENTRIES {
+        for _ in 0..=BASE_CAPTURE_ENTRIES {
             capture.record_recipient_sm_append(SmSessionId::new("recipient"));
         }
         capture.record_recipient_sm_append(SmSessionId::new("later"));
         assert!(capture.snapshot().overflowed);
         assert!(capture.snapshot().intents.is_empty());
+    }
+
+    #[test]
+    fn room_capacity_covers_configured_and_unlimited_audiences_but_stays_bounded() {
+        for (configured, occupants, members, audience) in
+            [(256, 1, 160, 256), (0, 200, 400, 400), (10, 20, 15, 20)]
+        {
+            let capture = IngressEffectCapture::new();
+            capture.reserve_room_capacity(configured, occupants, members);
+            for _ in 0..BASE_CAPTURE_ENTRIES + audience * CAPTURE_ENTRIES_PER_RECIPIENT {
+                capture.record_recipient_sm_append(SmSessionId::new("recipient"));
+            }
+            assert!(!capture.snapshot().overflowed);
+            capture.record_recipient_sm_append(SmSessionId::new("over-bound"));
+            assert!(capture.snapshot().overflowed);
+            assert!(capture.snapshot().intents.is_empty());
+        }
     }
 
     #[test]
