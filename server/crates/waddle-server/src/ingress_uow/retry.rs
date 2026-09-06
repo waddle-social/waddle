@@ -13,7 +13,14 @@ pub enum DbRetryClass {
 
 impl DbRetryClass {
     pub fn from_database_error(error: &DatabaseError) -> Self {
-        let DatabaseError::Internal(sqlx::Error::Database(error)) = error else {
+        let DatabaseError::Internal(error) = error else {
+            return Self::NotRetryable;
+        };
+        Self::from_sqlx_error(error)
+    }
+
+    pub(crate) fn from_sqlx_error(error: &sqlx::Error) -> Self {
+        let sqlx::Error::Database(error) = error else {
             return Self::NotRetryable;
         };
         match error.code().as_deref() {
@@ -81,6 +88,17 @@ where
         }
     }
     unreachable!("non-zero attempts return from the loop")
+}
+
+/// Recognize only driver timeout evidence, before diagnostics are discarded.
+pub(crate) fn is_database_timeout(error: &DatabaseError) -> bool {
+    match error {
+        DatabaseError::Internal(sqlx::Error::PoolTimedOut) => true,
+        DatabaseError::Internal(sqlx::Error::Database(error)) => {
+            matches!(error.code().as_deref(), Some("57014" | "55P03"))
+        }
+        _ => false,
+    }
 }
 
 #[cfg(test)]

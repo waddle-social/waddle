@@ -162,15 +162,13 @@ impl InboxRepository {
         increment_unread: bool,
         recovery: GroupchatNotificationRecovery,
     ) -> Result<InboxEntry, IngressUowError> {
-        let (entry, applied) =
+        let (entry, _) =
             Self::apply_projection(transaction, message_key, user, entry, increment_unread).await?;
-        if applied {
-            crate::inbox::insert_groupchat_notification_recovery_in_transaction(
-                transaction.transaction_mut(),
-                recovery,
-            )
-            .await?;
-        }
+        crate::inbox::insert_groupchat_notification_recovery_in_transaction(
+            transaction.transaction_mut(),
+            recovery,
+        )
+        .await?;
         Ok(entry)
     }
 }
@@ -180,6 +178,22 @@ impl InboxRepository {
 pub struct CanonicalMessageRepository;
 
 impl CanonicalMessageRepository {
+    pub async fn lock(
+        transaction: &mut IngressUowTransaction<'_>,
+        message_key: MessageKey,
+    ) -> Result<bool, IngressUowError> {
+        let sql = dialect_sql(
+            transaction,
+            "SELECT 1 FROM ingress_messages WHERE message_key = ?::uuid FOR UPDATE",
+            "SELECT 1 FROM ingress_messages WHERE message_key = ?",
+        );
+        let mut rows = transaction
+            .transaction_mut()
+            .query(sql, crate::db_params![message_key.to_storage().to_string()])
+            .await?;
+        Ok(rows.next().await?.is_some())
+    }
+
     pub async fn record_message(
         transaction: &mut IngressUowTransaction<'_>,
         message_key: MessageKey,
@@ -349,6 +363,23 @@ pub use ingress_substrate::FrontierOutcome;
 pub struct SmIngressStreamRepository;
 
 impl SmIngressStreamRepository {
+    /// Enroll the identity reserved by ingress admission, retaining the stream uniqueness check.
+    pub async fn mint_reserved(
+        transaction: &mut IngressUowTransaction<'_>,
+        stream_id: &SmSessionId,
+        id: SmIngressId,
+    ) -> Result<(), IngressUowError> {
+        let sql = dialect_sql(transaction, "INSERT INTO ingress_sm_streams (sm_ingress_id, stream_id) VALUES (?::uuid, ?) ON CONFLICT (stream_id) DO NOTHING", "INSERT INTO ingress_sm_streams (sm_ingress_id, stream_id) VALUES (?, ?) ON CONFLICT (stream_id) DO NOTHING");
+        transaction
+            .transaction_mut()
+            .execute(
+                sql,
+                crate::db_params![id.to_storage().to_string(), stream_id.as_str().to_owned()],
+            )
+            .await?;
+        Ok(())
+    }
+
     /// Mint the one durable ingress row for a freshly SM-enabled stream.
     pub async fn mint(
         transaction: &mut IngressUowTransaction<'_>,
@@ -547,6 +578,27 @@ impl SmIngressStreamRepository {
 pub struct EffectReceiptRepository;
 
 impl EffectReceiptRepository {
+    pub async fn contains(
+        transaction: &mut IngressUowTransaction<'_>,
+        message_key: MessageKey,
+        kind: EffectReceiptKind,
+        hash: &[u8; 32],
+    ) -> Result<bool, IngressUowError> {
+        let sql = dialect_sql(transaction, "SELECT 1 FROM ingress_effect_receipts WHERE message_key = ?::uuid AND kind = ? AND semantic_identity_hash = ?", "SELECT 1 FROM ingress_effect_receipts WHERE message_key = ? AND kind = ? AND semantic_identity_hash = ?");
+        let mut rows = transaction
+            .transaction_mut()
+            .query(
+                sql,
+                crate::db_params![
+                    message_key.to_storage().to_string(),
+                    kind.to_storage(),
+                    hash.to_vec()
+                ],
+            )
+            .await?;
+        Ok(rows.next().await?.is_some())
+    }
+
     pub async fn record_receipt(
         transaction: &mut IngressUowTransaction<'_>,
         message_key: MessageKey,
@@ -602,6 +654,37 @@ pub enum ReconcileVerdict {
 pub struct EffectIntentRepository;
 
 impl EffectIntentRepository {
+    /// Load payload-complete recorded authority while holding the canonical row lock.
+    pub async fn load(
+        transaction: &mut IngressUowTransaction<'_>,
+        message_key: MessageKey,
+    ) -> Result<Vec<IngressEffectIntent>, IngressUowError> {
+        let sql = dialect_sql(
+            transaction,
+            "SELECT 1 FROM ingress_messages WHERE message_key = ?::uuid FOR UPDATE",
+            "SELECT 1 FROM ingress_messages WHERE message_key = ?",
+        );
+        let mut rows = transaction
+            .transaction_mut()
+            .query(sql, crate::db_params![message_key.to_storage().to_string()])
+            .await?;
+        if rows.next().await?.is_none() {
+            return Err(IngressUowError::EffectIntentMessageMissing);
+        }
+        drop(rows);
+        let postgres = transaction
+            .transaction_mut()
+            .postgres_connection()
+            .is_some();
+        Ok(
+            load_effects(transaction.transaction_mut(), message_key, postgres)
+                .await?
+                .into_iter()
+                .map(|row| row.intent)
+                .collect(),
+        )
+    }
+
     pub async fn reconcile(
         transaction: &mut IngressUowTransaction<'_>,
         message_key: MessageKey,

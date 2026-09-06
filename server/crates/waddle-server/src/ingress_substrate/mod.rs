@@ -68,6 +68,8 @@ pub const EPOCH_GUARDED_TABLES: [&str; 7] = [
 /// opaque client value that must never appear in Debug or Display output.
 #[derive(Debug, Error)]
 pub enum IngressSubstrateError {
+    #[error("ingress storage transaction timed out")]
+    Timeout,
     #[error("malformed stored envelope")]
     InvalidStoredEnvelope,
     #[error("message key is already bound to a different digest or envelope")]
@@ -1011,6 +1013,9 @@ async fn lock_eligible_terminal_message(
 }
 
 fn discard_database_error(error: DatabaseError) -> IngressSubstrateError {
+    if crate::ingress_uow::is_database_timeout(&error) {
+        return IngressSubstrateError::Timeout;
+    }
     IngressSubstrateError::Database {
         retry_class: DbRetryClass::from_database_error(&error),
     }

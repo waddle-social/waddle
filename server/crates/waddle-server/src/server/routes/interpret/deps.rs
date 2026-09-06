@@ -220,13 +220,9 @@ impl<'a> Deps<'a> {
         }
     }
 
-    /// Build a minimal `Deps` with only the connection registry — a
-    /// test-only convenience for unit tests that don't exercise SM
-    /// fan-out, archive, or inbox storage. Defaults `local_domain` to
-    /// `"example.com"` to match the test fixtures used throughout
-    /// this module's tests.
-    #[cfg(test)]
-    pub fn registry_only(connection_registry: &'a ConnectionRegistry) -> Self {
+    /// Build an immediate execution context with optional capabilities disabled.
+    /// Callers attach the storage and actor handles required by their effects.
+    pub fn new(connection_registry: &'a ConnectionRegistry, local_domain: &'a str) -> Self {
         Self {
             effects: &super::effects::ImmediateSink,
             connection_registry,
@@ -238,7 +234,7 @@ impl<'a> Deps<'a> {
             room_registry: None,
             web_socket_state: None,
             authenticated_principal: None,
-            local_domain: "example.com",
+            local_domain,
             blocking_storage: None,
             message_dispatcher: None,
             pending_delivery_storage: None,
@@ -246,6 +242,12 @@ impl<'a> Deps<'a> {
             sfu: None,
             ingress_effect_capture: None,
         }
+    }
+
+    /// Test fixture with the conventional example domain and no optional handles.
+    #[cfg(test)]
+    pub fn registry_only(connection_registry: &'a ConnectionRegistry) -> Self {
+        Self::new(connection_registry, "example.com")
     }
 
     /// Build a `Deps` with the connection registry AND the

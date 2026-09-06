@@ -11,8 +11,8 @@
 
 use super::attributes::{
     IngressAliasOutcome, IngressCandidateOutcome, IngressDecisionClass, IngressGcOutcome,
-    IngressRetryOutcome, IngressSkipReason, Janitor, PushRetryReason, PushSuppressReason,
-    SmAckOutcome, SmEvictionPath, SmResumeOutcome, SweepOutcome,
+    IngressRetryOutcome, IngressSkipReason, IngressUnresolvedEffectKind, Janitor, PushRetryReason,
+    PushSuppressReason, SmAckOutcome, SmEvictionPath, SmResumeOutcome, SweepOutcome,
 };
 
 /// One table entry: a private `mod <helper> { fn add(count) }` holding
@@ -284,6 +284,16 @@ pub fn register_reliability_counters() {
     for outcome in IngressGcOutcome::ALL {
         add_ingress_shadow_gc_runs(0, outcome);
     }
+    for class in IngressDecisionClass::ALL {
+        add_ingress_decision(0, class);
+    }
+    for outcome in IngressAliasOutcome::ALL {
+        add_ingress_alias_outcome(0, outcome);
+    }
+    for kind in IngressUnresolvedEffectKind::ALL {
+        add_ingress_effect_unresolved(0, kind);
+    }
+    add_ingress_tx_retry(0);
     add_ingress_shadow_admissions(0);
     add_ingress_shadow_completions(0);
     add_ingress_shadow_aborted(0);
@@ -404,6 +414,66 @@ fn add_push_suppressed(count: u64, reason: PushSuppressReason) {
 pub fn increment_push_suppressed(reason: PushSuppressReason) {
     add_push_suppressed(1, reason);
     super::push_pipeline::increment_suppressed();
+}
+
+fn add_ingress_decision(count: u64, class: IngressDecisionClass) {
+    crate::counter_add!(
+        "ingress.decisions",
+        "{event}",
+        "Ingress authority decisions.",
+        count,
+        class
+    );
+}
+pub fn increment_ingress_decision(class: IngressDecisionClass) {
+    add_ingress_decision(1, class);
+}
+
+fn add_ingress_alias_outcome(count: u64, outcome: IngressAliasOutcome) {
+    crate::counter_add!(
+        "ingress.alias.outcomes",
+        "{event}",
+        "Ingress authority alias.outcomes.",
+        count,
+        outcome
+    );
+}
+pub fn increment_ingress_alias_outcome(outcome: IngressAliasOutcome) {
+    add_ingress_alias_outcome(1, outcome);
+}
+
+fn add_ingress_effect_unresolved(count: u64, kind: IngressUnresolvedEffectKind) {
+    crate::counter_add!(
+        "ingress.effects.unresolved",
+        "{event}",
+        "Ingress authority effects.unresolved.",
+        count,
+        kind
+    );
+}
+pub fn increment_ingress_effect_unresolved(kind: IngressUnresolvedEffectKind) {
+    add_ingress_effect_unresolved(1, kind);
+}
+
+fn add_ingress_tx_retry(count: u64) {
+    crate::counter_add!(
+        "ingress.tx.retries",
+        "{transaction}",
+        "Ingress authority transaction retries.",
+        count
+    );
+}
+pub fn increment_ingress_tx_retry() {
+    add_ingress_tx_retry(1);
+}
+
+pub fn record_ingress_tx_duration(duration: std::time::Duration) {
+    crate::histogram_record!(
+        "ingress.tx.duration",
+        "s",
+        "Ingress authority transaction duration.",
+        duration.as_secs_f64()
+    );
 }
 
 fn add_ingress_shadow_decisions(count: u64, class: IngressDecisionClass) {
@@ -592,6 +662,30 @@ mod tests {
             guard.counter_sum("waddle.push.pipeline", &[("stage", "suppressed")]),
             Some(1)
         );
+    }
+
+    #[tokio::test]
+    async fn ingress_authority_helpers_emit_with_typed_labels() {
+        let guard = setup().await;
+        increment_ingress_decision(IngressDecisionClass::ExistingCommitted);
+        increment_ingress_alias_outcome(IngressAliasOutcome::NoOrigin);
+        increment_ingress_tx_retry();
+        increment_ingress_effect_unresolved(IngressUnresolvedEffectKind::Delivery);
+        record_ingress_tx_duration(std::time::Duration::from_millis(250));
+        assert_eq!(
+            guard.counter_sum("ingress.decisions", &[("class", "existing_committed")]),
+            Some(1)
+        );
+        assert_eq!(
+            guard.counter_sum("ingress.alias.outcomes", &[("outcome", "no_origin")]),
+            Some(1)
+        );
+        assert_eq!(guard.counter_sum("ingress.tx.retries", &[]), Some(1));
+        assert_eq!(
+            guard.counter_sum("ingress.effects.unresolved", &[("kind", "delivery")]),
+            Some(1)
+        );
+        assert_eq!(guard.histogram_count("ingress.tx.duration", &[]), Some(1));
     }
 
     #[tokio::test]

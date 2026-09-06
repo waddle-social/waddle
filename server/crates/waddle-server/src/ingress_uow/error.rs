@@ -9,6 +9,27 @@ use waddle_xmpp::ingress::EffectIntentCodecError;
 /// Fail-closed errors from the ingress unit of work.
 #[derive(Debug, Error)]
 pub enum IngressUowError {
+    #[error("ingress transaction timed out before commit")]
+    Timeout,
+    #[error("ingress authority has stopped")]
+    AuthorityStopped,
+    #[error("authenticated principal is no longer asserted")]
+    PrincipalAssertionFailed,
+    #[error("room snapshot generation is stale")]
+    RoomGenerationStale,
+    #[error("ingress frontier is stale")]
+    IngressFrontierStale,
+    #[error("commit acknowledgement was lost")]
+    AmbiguousCommit,
+    #[error("ingress transaction timeout bounds were not proven before taking locks")]
+    TransactionBoundsUnproven,
+    #[error("ingress inbox projection mutation does not apply to this durable effect")]
+    UnsupportedInboxProjection,
+    #[error("ingress tombstone payload could not be encoded")]
+    TombstonePayloadEncoding,
+    #[error("stored archive rich payload could not be decoded")]
+    InvalidArchiveRichPayload,
+
     #[error("this operation requires single-node ingress fencing")]
     SingleNodeFencingRequired,
     #[cfg(feature = "clustering")]
@@ -70,6 +91,12 @@ impl IngressUowError {
         match self {
             Self::Database { retry_class } => *retry_class,
             Self::Substrate(IngressSubstrateError::Database { retry_class }) => *retry_class,
+            Self::MamStore(waddle_xmpp::mam::MamTxStoreError::Database(error)) => {
+                DbRetryClass::from_sqlx_error(error)
+            }
+            Self::Inbox(crate::inbox::InboxTxError::Database(error)) => {
+                DbRetryClass::from_database_error(error)
+            }
             _ => DbRetryClass::NotRetryable,
         }
     }
@@ -77,6 +104,9 @@ impl IngressUowError {
 
 impl From<DatabaseError> for IngressUowError {
     fn from(error: DatabaseError) -> Self {
+        if super::retry::is_database_timeout(&error) {
+            return Self::Timeout;
+        }
         Self::Database {
             retry_class: DbRetryClass::from_database_error(&error),
         }

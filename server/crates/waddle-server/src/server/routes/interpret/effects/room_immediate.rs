@@ -130,8 +130,10 @@ pub(super) async fn execute_external(effect: ExternalRoomEffect, deps: &Deps<'_>
                     Ok(marked) if marked > 0 => {
                         super::super::groupchat_inbox::capture_recovery_completion(deps, &recovery)
                     }
-                    Ok(_) => {}
-                    Err(_) => return EffectOutcome::Unavailable,
+                    // Zero conflates an already completed item with a missing
+                    // item or a storage implementation's no-op default. It is
+                    // not evidence for an ingress completion receipt.
+                    Ok(_) | Err(_) => return EffectOutcome::Unavailable,
                 }
             }
             EffectOutcome::Completed

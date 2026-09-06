@@ -5,6 +5,7 @@
 //! projections. Dropping an uncommitted [`IngressUowTransaction`] rolls it
 //! back through [`crate::db::Transaction`].
 
+mod durable_more;
 mod error;
 mod repositories;
 mod retry;
@@ -21,6 +22,7 @@ pub use repositories::{
     ClaimRepository, HandledFrontierOutcome, HandledFrontierRepository, RoomClaimFence,
     SmClaimFence,
 };
+pub(crate) use retry::is_database_timeout;
 pub use retry::{run_with_retry, DbRetryClass, RetryExhausted};
 
 use std::time::Duration;
@@ -98,10 +100,31 @@ impl IngressUnitOfWork {
     /// held until commit or drop, making the installed GUC proof describe the
     /// exact live epoch observed by this transaction.
     pub async fn begin(&self) -> Result<IngressUowTransaction<'_>, IngressUowError> {
+        self.begin_inner(None).await
+    }
+
+    /// Bound even the initial epoch lock wait before taking any row locks.
+    pub async fn begin_with_timeouts(
+        &self,
+        lock: Duration,
+        statement: Duration,
+    ) -> Result<IngressUowTransaction<'_>, IngressUowError> {
+        self.begin_inner(Some((lock, statement))).await
+    }
+
+    async fn begin_inner(
+        &self,
+        bounds: Option<(Duration, Duration)>,
+    ) -> Result<IngressUowTransaction<'_>, IngressUowError> {
         let mut transaction = match self.db.driver() {
             DatabaseDriver::Sqlite => self.db.begin_immediate().await?,
             DatabaseDriver::Postgres => self.db.begin().await?,
         };
+        if let Some((lock, statement)) = bounds {
+            if !set_local_transaction_timeouts(&mut transaction, lock, statement).await? {
+                return Err(IngressUowError::TransactionBoundsUnproven);
+            }
+        }
         let protocol_epoch = acquire_epoch_lock_first(&mut transaction).await?;
         let supported = supported_protocol_epoch();
         if protocol_epoch > supported {

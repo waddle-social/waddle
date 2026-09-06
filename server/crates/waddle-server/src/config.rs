@@ -1122,6 +1122,74 @@ pub struct ServerConfig {
     pub clustering: ClusteringConfig,
 }
 
+/// Dedicated ingress authority transaction limits.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct IngressConfig {
+    pub pool_size: u32,
+    pub retry_attempts: usize,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
+pub enum IngressConfigError {
+    #[error("WADDLE_INGRESS_DB_POOL_SIZE must be an integer between 1 and 32")]
+    PoolSize,
+    #[error("WADDLE_INGRESS_RETRY_ATTEMPTS must be an integer between 1 and 32")]
+    RetryAttempts,
+}
+
+impl Default for IngressConfig {
+    fn default() -> Self {
+        Self {
+            pool_size: 8,
+            retry_attempts: 5,
+        }
+    }
+}
+
+impl IngressConfig {
+    pub fn from_env() -> Result<Self, IngressConfigError> {
+        Self::from_vars(std::env::vars())
+    }
+
+    pub fn from_vars<I, K, V>(vars: I) -> Result<Self, IngressConfigError>
+    where
+        I: IntoIterator<Item = (K, V)>,
+        K: AsRef<str>,
+        V: AsRef<str>,
+    {
+        let mut config = Self::default();
+        for (key, value) in vars {
+            match key.as_ref() {
+                "WADDLE_INGRESS_DB_POOL_SIZE" => {
+                    config.pool_size = value
+                        .as_ref()
+                        .parse()
+                        .map_err(|_| IngressConfigError::PoolSize)?;
+                }
+                "WADDLE_INGRESS_RETRY_ATTEMPTS" => {
+                    config.retry_attempts = value
+                        .as_ref()
+                        .parse()
+                        .map_err(|_| IngressConfigError::RetryAttempts)?;
+                }
+                _ => {}
+            }
+        }
+        config.validate()?;
+        Ok(config)
+    }
+
+    pub fn validate(&self) -> Result<(), IngressConfigError> {
+        if !(1..=32).contains(&self.pool_size) {
+            return Err(IngressConfigError::PoolSize);
+        }
+        if !(1..=32).contains(&self.retry_attempts) {
+            return Err(IngressConfigError::RetryAttempts);
+        }
+        Ok(())
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct IngressShadowConfig {
     pub enabled: bool,
@@ -2998,5 +3066,46 @@ mod database_runtime_config_tests {
         let config = DatabaseRuntimeConfig::from_vars(std::iter::empty::<(&str, &str)>()).unwrap();
         assert_eq!(config.driver, DatabaseDriver::Sqlite);
         assert_eq!(config.database_url, "sqlite::memory:");
+    }
+}
+
+#[cfg(test)]
+mod ingress_authority_config_tests {
+    use super::{IngressConfig, IngressConfigError};
+
+    #[test]
+    fn ingress_authority_config_defaults_and_overrides() {
+        assert_eq!(
+            IngressConfig::from_vars(std::iter::empty::<(&str, &str)>()).expect("defaults"),
+            IngressConfig {
+                pool_size: 8,
+                retry_attempts: 5
+            }
+        );
+        assert_eq!(
+            IngressConfig::from_vars([
+                ("WADDLE_INGRESS_DB_POOL_SIZE", "16"),
+                ("WADDLE_INGRESS_RETRY_ATTEMPTS", "7")
+            ])
+            .expect("overrides"),
+            IngressConfig {
+                pool_size: 16,
+                retry_attempts: 7
+            }
+        );
+    }
+
+    #[test]
+    fn ingress_authority_config_rejects_invalid_limits() {
+        for value in ["0", "33", "-1", "not-a-number"] {
+            assert_eq!(
+                IngressConfig::from_vars([("WADDLE_INGRESS_DB_POOL_SIZE", value)]),
+                Err(IngressConfigError::PoolSize)
+            );
+            assert_eq!(
+                IngressConfig::from_vars([("WADDLE_INGRESS_RETRY_ATTEMPTS", value)]),
+                Err(IngressConfigError::RetryAttempts)
+            );
+        }
     }
 }
