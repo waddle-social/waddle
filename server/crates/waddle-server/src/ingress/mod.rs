@@ -26,7 +26,6 @@ pub use execute::{ExecutionReport, ExternalOutcome, FrameObligation};
 pub use identity::{IngressCanonicalRef, IngressStreamIdentity};
 pub use submission::IngressSubmission;
 
-#[cfg(feature = "clustering")]
 use crate::db::DatabaseDriver;
 use crate::{
     config::{IngressConfig, IngressConfigError, LineageConfig},
@@ -56,8 +55,6 @@ pub enum IngressStartupError {
     Config(#[from] IngressConfigError),
     #[error("clustered ingress requires the canonical node identity")]
     NodeIdentityMissing,
-    #[error("an isolated ingress pool cannot share a private in-memory SQLite database")]
-    InMemoryDatabase,
     #[error("failed to open the dedicated ingress pool")]
     Pool(#[source] DatabaseError),
     #[error(transparent)]
@@ -93,32 +90,53 @@ impl IngressAuthority {
         #[cfg(feature = "clustering")] node_identity: Option<SharedNodeIdentity>,
     ) -> Result<Self, IngressStartupError> {
         config.validate()?;
+        // SQLite is a single-writer database: the authority shares the global
+        // handle (which also keeps a private in-memory database reachable).
+        // PostgreSQL gets a dedicated, bounded pool so ingress transactions
+        // never starve or are starved by the general-purpose pool.
+        let database = match database.driver() {
+            DatabaseDriver::Sqlite => database,
+            DatabaseDriver::Postgres => {
+                let mut pool_config =
+                    DatabaseConfig::new(database.driver(), database.database_url());
+                pool_config.pool_size = config.pool_size;
+                Database::from_config("ingress", &pool_config)
+                    .await
+                    .map_err(IngressStartupError::Pool)?
+            }
+        };
+        // A canonical node identity is present exactly when clustering is
+        // enabled: claim fences are then asserted inside every transaction.
+        // Single-node deployments (SQLite, or PostgreSQL without clustering)
+        // have no claims to assert and run with single-node fencing.
         #[cfg(feature = "clustering")]
-        if database.driver() == DatabaseDriver::Postgres && node_identity.is_none() {
-            return Err(IngressStartupError::NodeIdentityMissing);
-        }
-        if database.is_in_memory_sqlite() {
-            return Err(IngressStartupError::InMemoryDatabase);
-        }
-        let mut pool_config = DatabaseConfig::new(database.driver(), database.database_url());
-        pool_config.pool_size = config.pool_size;
-        let database = Database::from_config("ingress", &pool_config)
-            .await
-            .map_err(IngressStartupError::Pool)?;
-        let uow = match database.driver() {
-            #[cfg(feature = "clustering")]
-            DatabaseDriver::Postgres => IngressUnitOfWork::open_with_node_identity(
+        let uow = match node_identity {
+            Some(node_identity) => IngressUnitOfWork::open_with_node_identity(
                 database.clone(),
                 lineage,
-                node_identity.ok_or(IngressStartupError::NodeIdentityMissing)?,
+                node_identity,
             )?,
-            _ => IngressUnitOfWork::open(database.clone(), lineage)?,
+            None => IngressUnitOfWork::open(database.clone(), lineage)?,
         };
-        // Validate epoch and lineage before publishing a usable authority.
-        uow.begin_with_timeouts(Duration::from_millis(100), Duration::from_millis(250))
-            .await?
-            .commit()
-            .await?;
+        #[cfg(not(feature = "clustering"))]
+        let uow = IngressUnitOfWork::open(database.clone(), lineage)?;
+        // Probe the epoch and lineage before publishing a usable authority. A
+        // lineage attestation failure is not fatal at boot: the readiness gate
+        // holds the node unready and every ingress transaction keeps failing
+        // closed with a typed lineage error until the operator resolves it.
+        match uow
+            .begin_with_timeouts(Duration::from_millis(100), Duration::from_millis(250))
+            .await
+        {
+            Ok(transaction) => transaction.commit().await?,
+            Err(IngressUowError::Lineage(error)) => {
+                tracing::warn!(
+                    %error,
+                    "ingress authority boots unattested; transactions fail closed until lineage verifies"
+                );
+            }
+            Err(error) => return Err(error.into()),
+        }
         let gc = gc::RetentionGcCoordinator::new(database.clone());
         let cancellation = CancellationToken::new();
         let force_stop = CancellationToken::new();
@@ -702,22 +720,31 @@ mod lifecycle_tests {
             .expect("drop schema");
     }
 
-    /// Boot refuses a database no other node could ever observe, before any
-    /// authority is published.
+    /// SQLite has one writer: the authority shares the global handle, so even
+    /// a private in-memory database (the test fleet and dev mode) boots.
     #[tokio::test]
-    async fn boot_refuses_a_private_in_memory_database() {
+    async fn boot_shares_the_global_sqlite_handle() {
         let database = Database::in_memory("ingress-boot")
             .await
             .expect("open test database");
-        let error = IngressAuthority::new(
+        crate::db::MigrationRunner::single()
+            .run(&database)
+            .await
+            .expect("migrate");
+        let lineage = test_lineage_config();
+        crate::db::lineage::enroll(&database, &lineage)
+            .await
+            .expect("enroll lineage");
+        let authority = IngressAuthority::new(
             IngressConfig::default(),
-            database,
-            LineageConfig::default(),
+            database.clone(),
+            lineage,
             #[cfg(feature = "clustering")]
             None,
         )
-        .await;
-        assert!(matches!(error, Err(IngressStartupError::InMemoryDatabase)));
+        .await
+        .expect("boot on a shared in-memory database");
+        authority.drain_and_join(Duration::from_secs(1)).await;
     }
 
     #[tokio::test]

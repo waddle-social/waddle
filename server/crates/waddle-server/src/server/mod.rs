@@ -160,11 +160,34 @@ pub async fn start_with_config(
     // permission tuples) moved behind the startup lineage attestation gate
     // in `create_websocket_state` — it mutates application state and must
     // not run against a database this node cannot vouch for.
-    let inbox_database_storage = Arc::new(
-        DatabaseInboxStorage::open(xmpp_config.inbox_database_url.as_deref())
-            .await
-            .map_err(|error| anyhow::anyhow!("Failed to initialize inbox storage: {}", error))?,
-    );
+    // The inbox projection is written inside the ingress transaction, so its
+    // rows must live in the global database: SQLite shares the global pool
+    // outright; PostgreSQL must be pointed at the same database.
+    let inbox_database_storage = Arc::new(match global_db.driver() {
+        crate::db::DatabaseDriver::Sqlite => {
+            if xmpp_config
+                .inbox_database_url
+                .as_deref()
+                .is_some_and(|url| url != global_db.database_url())
+            {
+                anyhow::bail!(
+                    "WADDLE_XMPP_INBOX_DATABASE_URL must match WADDLE_DATABASE_URL on SQLite: \
+                     inbox projections are committed by the ingress transaction"
+                );
+            }
+            DatabaseInboxStorage::from_database(global_db.as_ref().clone())
+                .await
+                .map_err(|error| anyhow::anyhow!("Failed to initialize inbox storage: {}", error))?
+        }
+        crate::db::DatabaseDriver::Postgres => DatabaseInboxStorage::open(Some(
+            xmpp_config
+                .inbox_database_url
+                .as_deref()
+                .unwrap_or_else(|| global_db.database_url()),
+        ))
+        .await
+        .map_err(|error| anyhow::anyhow!("Failed to initialize inbox storage: {}", error))?,
+    });
     let inbox_storage: Arc<dyn waddle_xmpp::inbox::storage::InboxStorage> =
         inbox_database_storage.clone();
     let spaces_metadata_database_store = Arc::new(

@@ -149,10 +149,18 @@ impl IngressUnitOfWork {
             drop(proof);
         }
 
-        let lineage =
-            lineage::verify_in_transaction(&mut transaction, self.db.driver(), &self.lineage)
-                .await
-                .map_err(IngressUowError::Lineage)?;
+        // A private in-memory SQLite database is ephemeral by the server's own
+        // lineage classification (nothing survives the process, so there is
+        // no lineage row to attest); every durable database must attest.
+        let lineage = if self.db.is_in_memory_sqlite() {
+            IngressLineage::Ephemeral
+        } else {
+            IngressLineage::Attested(
+                lineage::verify_in_transaction(&mut transaction, self.db.driver(), &self.lineage)
+                    .await
+                    .map_err(IngressUowError::Lineage)?,
+            )
+        };
 
         Ok(IngressUowTransaction {
             transaction,
@@ -167,6 +175,16 @@ impl IngressUnitOfWork {
     }
 }
 
+/// The lineage attestation an ingress transaction runs under.
+#[derive(Debug, Clone)]
+pub enum IngressLineage {
+    /// A durable database whose lineage row verified against this deployment.
+    Attested(lineage::AttestedLineage),
+    /// A private in-memory SQLite database: nothing outlives the process and
+    /// no lineage row exists to attest.
+    Ephemeral,
+}
+
 /// An ingress transaction carrying the locked epoch and verified lineage.
 ///
 /// There is intentionally no rollback method: dropping this value without
@@ -174,7 +192,7 @@ impl IngressUnitOfWork {
 pub struct IngressUowTransaction<'a> {
     transaction: Transaction<'a>,
     protocol_epoch: ProtocolEpoch,
-    lineage: lineage::AttestedLineage,
+    lineage: IngressLineage,
     /// Private capability identity that binds an in-transaction claim fence
     /// to this exact transaction, not merely another transaction sharing the
     /// same pool lifetime.
@@ -203,7 +221,7 @@ impl<'a> IngressUowTransaction<'a> {
     }
 
     /// The lineage attestation verified on this same transaction.
-    pub fn lineage(&self) -> &lineage::AttestedLineage {
+    pub fn lineage(&self) -> &IngressLineage {
         &self.lineage
     }
 

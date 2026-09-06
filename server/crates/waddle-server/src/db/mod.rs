@@ -200,7 +200,8 @@ pub struct Database {
 }
 
 impl Database {
-    #[cfg(test)]
+    /// The SQLite pool behind this handle, so colocated stores (MAM, inbox)
+    /// share the ingress database instead of opening a second one.
     pub(crate) fn sqlite_pool(&self) -> Option<&SqlitePool> {
         match &self.backend {
             DatabaseBackend::Sqlite(pool) => Some(pool),

@@ -107,7 +107,14 @@ impl TestServer {
     /// against a real on-disk SQLite backend (rather than the
     /// `sqlite::memory:` shortcut the rest of the harness uses).
     pub fn start_with_persistent_mam(mam_database_url: &str) -> Self {
-        Self::spawn(&[], None, Some(mam_database_url.to_string()), &[])
+        // MAM is colocated with the global database (ingress authority), so a
+        // persistent MAM archive means a persistent global database.
+        Self::spawn(
+            &[],
+            Some(mam_database_url.to_string()),
+            Some(mam_database_url.to_string()),
+            &[],
+        )
     }
 
     /// Start a waddle-server with additional environment variables
@@ -194,6 +201,9 @@ impl TestServer {
             .env("WADDLE_XMPP_DOMAIN", "localhost")
             .env("WADDLE_DB_DRIVER", "sqlite")
             .env("WADDLE_DATABASE_URL", &database_url);
+        if let Some(mam_database_url) = mam_database_url.as_deref() {
+            command.env("WADDLE_XMPP_MAM_DATABASE_URL", mam_database_url);
+        }
         if durable_database {
             command
                 .env(
@@ -204,12 +214,8 @@ impl TestServer {
         }
         command
             .env("WADDLE_XMPP_PUSH_SERVICE_ALLOW_IN_MEMORY", "true")
-            .env("WADDLE_XMPP_MAM_ALLOW_IN_MEMORY", "true")
-            .env(
-                "WADDLE_XMPP_MAM_DATABASE_URL",
-                mam_database_url.as_deref().unwrap_or("sqlite::memory:"),
-            )
-            .env("WADDLE_XMPP_INBOX_DATABASE_URL", "sqlite::memory:")
+            // MAM and inbox are colocated with the global database (the server
+            // falls back to WADDLE_DATABASE_URL when these are unset).
             .env("WADDLE_XMPP_SM_DATABASE_URL", "sqlite::memory:")
             .env(
                 "WADDLE_XMPP_PENDING_DELIVERY_DATABASE_URL",

@@ -194,16 +194,25 @@ async fn handle_muc_leave_with_occupancy_session(
 /// give that recipient an account first.
 pub(crate) async fn seed_local_account(state: &WebSocketState, localpart: &str) {
     use crate::db::actor::DbExecute;
+    let sql = match state.deps.app_state.db_pool.global().driver() {
+        crate::db::DatabaseDriver::Sqlite => {
+            "INSERT OR IGNORE INTO users \
+             (jid, username, xmpp_localpart, display_name, avatar_url, primary_email, created_at, updated_at) \
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?)"
+        }
+        crate::db::DatabaseDriver::Postgres => {
+            "INSERT INTO users \
+             (jid, username, xmpp_localpart, display_name, avatar_url, primary_email, created_at, updated_at) \
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?) ON CONFLICT DO NOTHING"
+        }
+    };
     state
         .deps
         .app_state
         .db_pool
         .global_actor()
         .ask(DbExecute {
-                sql: "INSERT OR IGNORE INTO users \
-                  (jid, username, xmpp_localpart, display_name, avatar_url, primary_email, created_at, updated_at) \
-                  VALUES (?, ?, ?, ?, ?, ?, ?, ?)"
-                .to_string(),
+            sql: sql.to_string(),
             params: vec![
                 format!("{localpart}@example.com").into(),
                 localpart.into(),

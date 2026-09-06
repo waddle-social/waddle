@@ -231,41 +231,45 @@ async fn ensure_mam_ingress_colocation(
 }
 
 /// Open MAM on the ingress database so archive writes participate in Phase B.
-/// PostgreSQL compares live database/schema identity; SQLite compares main files.
-/// Cluster fencing is enabled only when the cluster has a live claim pair.
+///
+/// SQLite: MAM always lives in the global database (one pool, one file or one
+/// in-memory database); a different `WADDLE_XMPP_MAM_DATABASE_URL` is a typed
+/// configuration error. PostgreSQL: the configured URL must resolve to the
+/// same live database/schema identity as the global database. Cluster
+/// fencing is enabled only when the cluster has a live claim pair.
 pub(crate) async fn create_websocket_mam_storage(
     database_url: Option<String>,
     clustering_enabled: bool,
     clustering_claim_pair_live: bool,
     global_db: &crate::db::Database,
 ) -> Result<Arc<SqlxMamStorage>> {
-    #[cfg(test)]
-    if database_url.is_none() && global_db.is_in_memory_sqlite() {
-        let pool = global_db
-            .sqlite_pool()
-            .ok_or(MamIngressColocationError::BackendMismatch)?;
-        return Ok(Arc::new(
-            SqlxMamStorage::from_sqlite_pool(pool.clone()).await?,
-        ));
-    }
-    if !cfg!(test) {
-        ensure_mam_database_is_durable(
-            database_url.as_deref(),
-            env_flag("WADDLE_XMPP_MAM_ALLOW_IN_MEMORY"),
-        )?;
-    }
-    let storage = match database_url.as_deref() {
-        Some(database_url) => {
+    let storage = match global_db.driver() {
+        crate::db::DatabaseDriver::Sqlite => {
+            if database_url
+                .as_deref()
+                .is_some_and(|url| url != global_db.database_url())
+            {
+                return Err(MamIngressColocationError::SqliteDatabaseMismatch.into());
+            }
+            let pool = global_db
+                .sqlite_pool()
+                .ok_or(MamIngressColocationError::BackendMismatch)?;
+            SqlxMamStorage::from_sqlite_pool(pool.clone()).await?
+        }
+        crate::db::DatabaseDriver::Postgres => {
+            let database_url = database_url
+                .as_deref()
+                .unwrap_or_else(|| global_db.database_url());
             let opened = SqlxMamStorage::open(database_url).await.map_err(|error| {
                 anyhow::anyhow!("Failed to initialize WebSocket MAM storage: {error}")
             })?;
             ensure_mam_ingress_colocation(&opened, global_db).await?;
-            opened.with_cluster_fencing(clustering_enabled && clustering_claim_pair_live)
+            opened
         }
-        None => return Err(MamIngressColocationError::SqliteDatabaseMismatch.into()),
     };
-
-    Ok(Arc::new(storage))
+    Ok(Arc::new(storage.with_cluster_fencing(
+        clustering_enabled && clustering_claim_pair_live,
+    )))
 }
 
 /// Explicit dependency bundle for [`create_router`]. Grouped into a
@@ -511,13 +515,25 @@ async fn open_ingress_authority(
     config: &ServerConfig,
     state: &AppState,
 ) -> Result<Arc<crate::ingress::IngressAuthority>> {
+    #[cfg(feature = "clustering")]
+    let node_identity = if config.clustering.enabled {
+        Some(
+            state
+                .clustering_claims
+                .node_identity
+                .clone()
+                .ok_or(crate::ingress::IngressStartupError::NodeIdentityMissing)?,
+        )
+    } else {
+        None
+    };
     Ok(Arc::new(
         crate::ingress::IngressAuthority::new(
             config.ingress.clone(),
             state.db_pool.global().clone(),
             state.lineage_config.clone(),
             #[cfg(feature = "clustering")]
-            state.clustering_claims.node_identity.clone(),
+            node_identity,
         )
         .await?,
     ))
@@ -980,13 +996,6 @@ async fn create_websocket_state(
     );
     let provider_dispatch_tasks =
         crate::server::routes::extension_webhooks::ProviderDispatchTracker::new();
-    #[cfg(test)]
-    let ingress = if state.db_pool.global().is_in_memory_sqlite() {
-        Arc::new(crate::ingress::IngressAuthority::for_test(state.db_pool.global().clone()).await)
-    } else {
-        open_ingress_authority(server_config, &state).await?
-    };
-    #[cfg(not(test))]
     let ingress = open_ingress_authority(server_config, &state).await?;
     let websocket_state = Arc::new(WebSocketState {
         deps: WebSocketDeps {
@@ -1573,32 +1582,6 @@ async fn create_pending_delivery_storage(
             .register_lineage_database(crate::db::lineage::DurableStore::PendingDelivery, database);
     }
     Ok(Arc::new(storage))
-}
-
-/// Fail-fast guard for XEP-0313 MAM storage durability. A missing or
-/// in-memory database URL is only acceptable for dev/test runs that
-/// explicitly opt in via `WADDLE_XMPP_MAM_ALLOW_IN_MEMORY`.
-pub(crate) fn ensure_mam_database_is_durable(
-    database_url: Option<&str>,
-    allow_in_memory: bool,
-) -> Result<()> {
-    if database_url.is_some_and(|url| !crate::db::sqlite_url_is_in_memory(url)) {
-        return Ok(());
-    }
-    if allow_in_memory {
-        warn!(
-            "WADDLE_XMPP_MAM_ALLOW_IN_MEMORY is set; the XEP-0313 MAM archive \
-             is using in-memory SQLite and will NOT survive restart. \
-             Use only in tests."
-        );
-        return Ok(());
-    }
-    anyhow::bail!(
-        "XEP-0313 MAM archive requires durable storage. Set \
-         WADDLE_XMPP_MAM_DATABASE_URL (or the WADDLE_DATABASE_URL fallback) \
-         to a durable SQLite/Postgres DSN, or set \
-         WADDLE_XMPP_MAM_ALLOW_IN_MEMORY=true only for tests."
-    );
 }
 
 fn ensure_push_service_global_database_is_durable() -> Result<()> {
