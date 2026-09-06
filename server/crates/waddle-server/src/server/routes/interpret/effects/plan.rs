@@ -3,6 +3,7 @@ use std::sync::Mutex;
 
 #[derive(Debug, Default)]
 pub struct PlanSink {
+    rejection: Mutex<Option<super::PlanRejection>>,
     sender: Mutex<Option<jid::FullJid>>,
     plan: Mutex<Vec<PlannedEffect>>,
     room_execution: Mutex<RoomExecutionPath>,
@@ -55,6 +56,12 @@ impl EffectSink for PlanSink {
             .expect("room execution mutex")
             .clone()
     }
+    fn set_rejection(&self, rejection: super::PlanRejection) {
+        *self.rejection.lock().expect("rejection mutex") = Some(rejection);
+    }
+    fn rejection(&self) -> Option<super::PlanRejection> {
+        self.rejection.lock().expect("rejection mutex").clone()
+    }
     fn is_planning(&self) -> bool {
         true
     }
@@ -80,7 +87,14 @@ impl PlanSink {
         );
         if let super::Effect::External(super::ExternalEffect::Frame(stanza)) = &effect.effect {
             if let waddle_xmpp::Stanza::Message(message) = stanza.as_ref() {
-                for dependency in super::policy_metadata::message_dependencies(message) {
+                // Rejection replies echo offered payloads, including untrusted
+                // stanza IDs. Their delivery never waits for those archives.
+                let dependencies = if message.type_ == xmpp_parsers::message::MessageType::Error {
+                    Vec::new()
+                } else {
+                    super::policy_metadata::message_dependencies(message)
+                };
+                for dependency in dependencies {
                     if !effect.dependencies.contains(&dependency) {
                         effect.dependencies.push(dependency);
                     }

@@ -1,7 +1,9 @@
-//! Phase-A interpreter entry point. The early message handlers sanitize the
-//! input before calling this seam in the subsequent ingress wiring step.
+//! Phase-A entry point for early message handlers and interpreter feedback.
 use super::{
-    effects::{Effect, ExternalEffect, IngressPlan, PlanSink},
+    effects::{
+        Effect, EffectSink, ExternalEffect, IngressPlan, PlanRejection, PlanSink,
+        PolicyDeniedReason,
+    },
     Deps, XmppStateMachine,
 };
 use waddle_xmpp::{
@@ -16,8 +18,8 @@ pub fn build_plan_deps<'a>(deps: &Deps<'a>, sink: &'a PlanSink) -> Deps<'a> {
     planned
 }
 
-/// Plan an already sanitized ingress message, including all asynchronous read
-/// feedback and transient recipient passes. No connection authority is changed.
+/// Sanitize and plan an ingress message, including early handlers, asynchronous
+/// read feedback and transient recipient passes. No connection authority is changed.
 pub async fn plan_message_dispatch(
     sm: &mut XmppStateMachine,
     mut incoming: Message,
@@ -42,10 +44,23 @@ pub async fn plan_message_dispatch(
     let capture = crate::ingress_shadow::IngressEffectCapture::new(None);
     capture.record_sanitized_message(&incoming);
     let planned = build_plan_deps(deps, &sink).with_ingress_effect_capture(Some(capture.clone()));
-    let events = sm.handle(InboundEvent::FrameReceived(InboundFrame::Stanza(Box::new(
-        Stanza::Message(incoming.clone()),
-    ))));
-    super::super::websocket::replay::drive_interpret_loop(events, sm, &planned).await;
+    let early = if let Some(sender) = ingress_sender.as_ref() {
+        super::super::websocket::handlers::message::dispatch_early_message(
+            &mut incoming,
+            sender,
+            &planned,
+        )
+        .await
+        .is_some()
+    } else {
+        false
+    };
+    if !early {
+        let events = sm.handle(InboundEvent::FrameReceived(InboundFrame::Stanza(Box::new(
+            Stanza::Message(incoming.clone()),
+        ))));
+        super::super::websocket::replay::drive_interpret_loop(events, sm, &planned).await;
+    }
     let (plan, room_execution) = sink.take();
     let error_reply = plan.iter().find_map(|effect| {
         let stanza = match &effect.effect {
@@ -92,6 +107,7 @@ pub async fn plan_message_dispatch(
         );
     }
     IngressPlan {
+        rejection: sink.rejection(),
         plan,
         intents: snapshot.intents,
         sanitized_message: snapshot.sanitized_message.unwrap_or(incoming),
@@ -123,6 +139,9 @@ fn reject_capture_overflow(message: Message, sender: Option<jid::FullJid>) -> In
         .collect();
     let reply = Stanza::Message(reply);
     IngressPlan {
+        rejection: Some(PlanRejection::PolicyDenied(
+            PolicyDeniedReason::CaptureOverflow,
+        )),
         plan: vec![super::effects::PlannedEffect::new(Effect::External(
             ExternalEffect::Frame(Box::new(reply.clone())),
         ))],
@@ -199,6 +218,42 @@ mod tests {
             .bodies
             .insert(Default::default(), "hello".to_owned());
         message
+    }
+
+    #[tokio::test]
+    async fn client_authored_inbox_plan_rejects_with_one_frame() {
+        let registry = waddle_xmpp::registry::ConnectionRegistry::new();
+        let deps = Deps::registry_only(&registry);
+        let mut incoming = message();
+        incoming
+            .payloads
+            .push(minidom::Element::builder("result", waddle_xmpp::xep::NS_INBOX).build());
+        waddle_xmpp_core::xep0359::add_stanza_id(
+            &mut incoming,
+            &waddle_xmpp_core::xep0359::StanzaId::new(
+                "untrusted-client-id",
+                "alice@example.com".parse().expect("archive"),
+            ),
+        );
+        let plan = plan_message_dispatch(&mut machine(), incoming, &deps).await;
+        assert_eq!(
+            plan.rejection,
+            Some(PlanRejection::SemanticMalformed(
+                super::super::effects::SemanticMalformedReason::ClientAuthoredInboxPayload,
+            ))
+        );
+        assert_eq!(plan.plan.len(), 1);
+        assert!(matches!(
+            plan.plan[0].effect,
+            Effect::External(ExternalEffect::Frame(_))
+        ));
+        assert!(plan.error_reply.is_some());
+        assert!(plan.plan[0].dependencies.is_empty());
+        assert_eq!(plan.intents.len(), 1);
+        assert!(matches!(
+            plan.intents[0],
+            waddle_xmpp::ingress::IngressEffectIntent::ErrorReply { .. }
+        ));
     }
 
     #[tokio::test]

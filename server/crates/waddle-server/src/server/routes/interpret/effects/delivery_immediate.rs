@@ -29,6 +29,15 @@ pub(crate) async fn execute(effect: ExternalDeliveryEffect, deps: &Deps<'_>) -> 
             call_setup,
         } => {
             let outcome = match kind {
+                PeerDeliveryKind::RegistryFrame => {
+                    if immediate.connection_registry.try_send_to(&jid, *stanza)
+                        == waddle_xmpp::registry::BroadcastOutcome::Delivered
+                    {
+                        FullJidDeliveryOutcome::Delivered
+                    } else {
+                        FullJidDeliveryOutcome::Unavailable
+                    }
+                }
                 PeerDeliveryKind::PeerStanza => {
                     route_to_connection::deliver_peer_to_full_with_registered_remote(
                         &immediate, &jid, &stanza,

@@ -7,6 +7,19 @@ use waddle_xmpp::{
 
 #[derive(Debug)]
 pub enum EffectOutcome {
+    Membership(super::MembershipOutcome),
+    MucUserDelivery(
+        Result<
+            (),
+            crate::server::routes::websocket::handlers::message::muc_invite::MucUserDeliveryError,
+        >,
+    ),
+    InviteLedger(
+        Result<
+            crate::server::routes::websocket::handlers::message::muc_invite::InviteLedgerOutcome,
+            crate::server::routes::websocket::handlers::message::muc_invite::InviteLedgerError,
+        >,
+    ),
     Completed,
     Frames(Vec<Stanza>),
     Archive(Result<StoreOutcome, MamStorageError>),
@@ -20,6 +33,35 @@ impl super::PlannedEffect {
     pub(super) fn assumed_outcome(&self, projection: ProjectionRef) -> EffectOutcome {
         use super::{direct::DurableDirectEffect, room::DurableRoomEffect, DurableEffect, Effect};
         match &self.effect {
+            Effect::External(super::ExternalEffect::RoomMembershipMutation(mutation)) => {
+                let previous_affiliation = match mutation {
+                    super::early::RoomMembershipMutation::Muc(grant) => grant.previous_affiliation,
+                    super::early::RoomMembershipMutation::GroupDm(_) => {
+                        waddle_xmpp::Affiliation::None
+                    }
+                };
+                EffectOutcome::Membership(super::MembershipOutcome::Granted {
+                    previous_affiliation,
+                })
+            }
+            Effect::External(
+                super::ExternalEffect::RouteToPeer(_)
+                | super::ExternalEffect::QueueOfflineDelivery(_),
+            ) => EffectOutcome::MucUserDelivery(Ok(())),
+            Effect::External(super::ExternalEffect::InviteLedger(mutation)) => {
+                use crate::server::routes::websocket::{
+                    handlers::message::muc_invite::{InviteLedgerMutation, InviteLedgerOutcome},
+                    muc_invites::RecordOutcome,
+                };
+                EffectOutcome::InviteLedger(Ok(match mutation {
+                    InviteLedgerMutation::Record { recorded_at, .. } => {
+                        InviteLedgerOutcome::Recorded(RecordOutcome::New {
+                            created_at: *recorded_at,
+                        })
+                    }
+                    InviteLedgerMutation::Claim { .. } => InviteLedgerOutcome::Claimed(true),
+                }))
+            }
             Effect::Durable(DurableEffect::Direct(DurableDirectEffect::ArchiveDirect {
                 message,
                 ..

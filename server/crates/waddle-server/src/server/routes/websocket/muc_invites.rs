@@ -26,8 +26,26 @@
 use jid::BareJid;
 
 use crate::db::actor::{DbActor, DbExecute, DbQuery};
-use crate::db::{row_value, ValueExt};
+use crate::db::{row_value, DatabaseError, ValueExt};
 use kameo::actor::ActorRef;
+
+/// Typed failures at the invitation ledger storage boundary.
+#[derive(Debug, thiserror::Error)]
+pub enum InviteStorageError {
+    #[error("invitation ledger actor unavailable")]
+    ActorUnavailable,
+    #[error("invitation ledger database operation failed: {0}")]
+    Database(#[from] DatabaseError),
+    #[error("stored invitation has an invalid inviter JID: {0}")]
+    InvalidInviter(#[from] jid::Error),
+}
+
+fn actor_error<M>(error: kameo::error::SendError<M, DatabaseError>) -> InviteStorageError {
+    match error {
+        kameo::error::SendError::HandlerError(error) => InviteStorageError::Database(error),
+        _ => InviteStorageError::ActorUnavailable,
+    }
+}
 
 /// How long a mediated invitation stays declinable. Bounds both ledger
 /// growth for never-answered invites and the window in which a stale
@@ -41,7 +59,7 @@ fn expiry_cutoff() -> String {
 /// One outstanding mediated invitation: `inviter` invited `invitee`
 /// to `room` and the room relayed the invite (§7.8.2).
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) struct OutstandingInvite {
+pub struct OutstandingInvite {
     pub room: BareJid,
     pub invitee: BareJid,
     pub inviter: BareJid,
@@ -53,7 +71,7 @@ pub(crate) struct OutstandingInvite {
 /// re-invite is answered with silent success instead of another
 /// delivery (and, for offline invitees, another pending-delivery row).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum RecordOutcome {
+pub enum RecordOutcome {
     New {
         created_at: chrono::DateTime<chrono::Utc>,
     },
@@ -72,7 +90,16 @@ pub(crate) enum RecordOutcome {
 pub(crate) async fn record_invite(
     actor: ActorRef<DbActor>,
     invite: &OutstandingInvite,
-) -> Result<RecordOutcome, String> {
+) -> Result<RecordOutcome, InviteStorageError> {
+    record_invite_at(actor, invite, chrono::Utc::now()).await
+}
+
+/// Record using the timestamp frozen by ingress planning.
+pub(crate) async fn record_invite_at(
+    actor: ActorRef<DbActor>,
+    invite: &OutstandingInvite,
+    created_at: chrono::DateTime<chrono::Utc>,
+) -> Result<RecordOutcome, InviteStorageError> {
     // Opportunistic hygiene: expired rows for this (room, invitee) are
     // dead weight the reads already ignore — drop them here so the
     // ledger stays bounded without a dedicated janitor.
@@ -88,8 +115,7 @@ pub(crate) async fn record_invite(
             ],
         })
         .await
-        .map_err(|error| error.to_string())?;
-    let created_at = chrono::Utc::now();
+        .map_err(actor_error)?;
     let affected = actor
         .ask(DbExecute {
             sql: "INSERT INTO muc_pending_invites (room_jid, invitee_jid, inviter_jid, \
@@ -106,7 +132,7 @@ pub(crate) async fn record_invite(
             ],
         })
         .await
-        .map_err(|error| error.to_string())?;
+        .map_err(actor_error)?;
     if affected > 0 {
         Ok(RecordOutcome::New { created_at })
     } else {
@@ -121,7 +147,7 @@ pub(crate) async fn list_invites(
     actor: ActorRef<DbActor>,
     room: &BareJid,
     invitee: &BareJid,
-) -> Result<Vec<OutstandingInvite>, String> {
+) -> Result<Vec<OutstandingInvite>, InviteStorageError> {
     let rows = actor
         .ask(DbQuery {
             sql: "SELECT inviter_jid FROM muc_pending_invites WHERE room_jid = ? AND \
@@ -134,15 +160,10 @@ pub(crate) async fn list_invites(
             ],
         })
         .await
-        .map_err(|error| error.to_string())?;
+        .map_err(actor_error)?;
     let mut invites = Vec::new();
     for row in rows {
-        let inviter = row_value(&row, 0)
-            .map_err(|error| error.to_string())?
-            .as_string()
-            .map_err(|error| error.to_string())?
-            .parse::<BareJid>()
-            .map_err(|error| format!("stored inviter JID is unparseable: {error}"))?;
+        let inviter = row_value(&row, 0)?.as_string()?.parse::<BareJid>()?;
         invites.push(OutstandingInvite {
             room: room.clone(),
             invitee: invitee.clone(),
@@ -159,7 +180,7 @@ pub(crate) async fn list_invites(
 pub(crate) async fn claim_invite(
     actor: ActorRef<DbActor>,
     invite: &OutstandingInvite,
-) -> Result<bool, String> {
+) -> Result<bool, InviteStorageError> {
     let affected = actor
         .ask(DbExecute {
             sql: "DELETE FROM muc_pending_invites WHERE room_jid = ? AND invitee_jid = ? AND \
@@ -172,7 +193,7 @@ pub(crate) async fn claim_invite(
             ],
         })
         .await
-        .map_err(|error| error.to_string())?;
+        .map_err(actor_error)?;
     Ok(affected > 0)
 }
 
@@ -181,13 +202,16 @@ pub(crate) async fn claim_invite(
 pub(crate) async fn delete_room_invites(
     actor: ActorRef<DbActor>,
     room: &BareJid,
-) -> Result<(), String> {
+) -> Result<(), InviteStorageError> {
     actor
         .ask(DbExecute {
             sql: "DELETE FROM muc_pending_invites WHERE room_jid = ?".to_string(),
             params: vec![room.to_string().into()],
         })
         .await
-        .map_err(|error| error.to_string())?;
+        .map_err(actor_error)?;
     Ok(())
 }
+
+#[cfg(test)]
+mod tests;

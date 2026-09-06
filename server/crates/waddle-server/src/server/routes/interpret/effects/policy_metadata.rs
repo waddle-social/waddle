@@ -32,6 +32,13 @@ pub(super) fn apply_policy(effect: &mut PlannedEffect, sender: Option<&FullJid>)
         return;
     };
     effect.suppression = match external {
+        ExternalEffect::RouteToPeer(route) | ExternalEffect::QueueOfflineDelivery(route) => {
+            if sender.is_some_and(|sender| route.recipient == sender.to_bare()) {
+                PlanSuppressionPolicy::Always
+            } else {
+                PlanSuppressionPolicy::SenderOnly
+            }
+        }
         ExternalEffect::Frame(_) => PlanSuppressionPolicy::Always,
         ExternalEffect::Delivery(delivery) => match delivery {
             ExternalDeliveryEffect::RouteToPeer { jid, stanza, .. }

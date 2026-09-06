@@ -19,6 +19,13 @@ pub enum DurableEffect {
 
 #[derive(Clone, Debug)]
 pub enum ExternalEffect {
+    RouteToPeer(super::invite::MucUserRoute),
+    QueueOfflineDelivery(super::invite::MucUserRoute),
+    RoomMembershipMutation(super::early::RoomMembershipMutation),
+    InviteLedger(
+        crate::server::routes::websocket::handlers::message::muc_invite::InviteLedgerMutation,
+    ),
+    DmPinMutation(crate::server::routes::websocket::handlers::message::dm_pin::DmPinMutation),
     Frame(Box<Stanza>),
     Direct(ExternalDirectEffect),
     Room(ExternalRoomEffect),
@@ -95,6 +102,7 @@ pub enum RoomExecutionPath {
 
 #[derive(Clone, Debug)]
 pub struct IngressPlan {
+    pub rejection: Option<super::PlanRejection>,
     pub plan: Vec<PlannedEffect>,
     pub intents: Vec<IngressEffectIntent>,
     pub sanitized_message: Message,

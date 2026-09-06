@@ -17,17 +17,22 @@ use super::super::{
     WebSocketState,
 };
 use crate::auth::Session;
-use crate::ingress_shadow::{
-    IngressEffectCapture, ShadowDecisionMarker, ShadowSemanticRejectedReason,
+use crate::ingress_shadow::IngressEffectCapture;
+use crate::server::routes::interpret::{
+    effects::{
+        AuthorizationDeniedReason, Effect, ExternalEffect, PlanRejection, PlannedEffect,
+        PolicyDeniedReason, SemanticMalformedReason,
+    },
+    Deps,
 };
 use crate::server::routes::websocket::ResolvedPrincipal;
 use waddle_xmpp::protocol::ConnectionPhase;
 
-mod dm_pin;
-mod group_dm_invite;
+pub mod dm_pin;
+pub mod group_dm_invite;
 mod link_preview_stamp;
-mod muc_direct;
-mod muc_invite;
+pub mod muc_direct;
+pub mod muc_invite;
 
 use dm_pin::{handle_dm_pin_message, handle_dm_pin_retraction_cascade};
 use group_dm_invite::handle_group_dm_mediated_invite;
@@ -84,129 +89,158 @@ pub async fn handle_message(
         return vec![];
     };
 
-    strip_client_authored_delay(&mut incoming);
-    if let Some(capture) = ingress_effect_capture.as_ref() {
-        capture.record_sanitized_message(&incoming);
-    }
-    consume_link_preview_request(
-        &mut incoming,
-        &bound_jid,
-        state.deps.occupant_id_secret.key(),
-        chrono::Utc::now().timestamp(),
-        state.deps.auth_state.base_url.as_str(),
-        &state.deps.link_preview,
-    );
-
-    if let Some(frames) = handle_group_dm_mediated_invite(
-        &incoming,
-        state,
-        &bound_jid,
-        authenticated_session,
-        ingress_effect_capture.as_ref(),
-    )
-    .await
-    {
-        return frames;
-    }
-    // XEP-0045 §7.8 (#1248): mediated invitations for every non-group-DM
-    // room — previously these fell through and were silently dropped.
-    if let Some(frames) = handle_muc_mediated_invite(
-        &incoming,
-        state,
-        &bound_jid,
-        authenticated_session,
-        ingress_effect_capture.as_ref(),
-    )
-    .await
-    {
-        return frames;
-    }
-    if let Some(frames) = handle_dm_pin_message(
-        &incoming,
-        state,
-        &bound_jid,
-        ingress_effect_capture.as_ref(),
-    )
-    .await
-    {
-        return frames;
-    }
-    handle_dm_pin_retraction_cascade(
-        &incoming,
-        state,
-        &bound_jid,
-        ingress_effect_capture.as_ref(),
-    )
-    .await;
-
-    if incoming.type_ != xmpp_parsers::message::MessageType::Error
-        && message_has_inbox_payload(&incoming)
-    {
-        let mut stamped = incoming.clone();
-        stamped.from = Some(jid::Jid::from(bound_jid));
-        strip_inbox_payloads(&mut stamped);
-        let reply = bad_request_reply(&stamped, "Client-authored inbox payloads are not allowed.");
-        if let Some(capture) = ingress_effect_capture.as_ref() {
-            capture.record_marker(ShadowDecisionMarker::SemanticRejected {
-                reason: ShadowSemanticRejectedReason::ClientAuthoredInboxPayload,
-            });
-        }
-        return match stanza_to_string(reply) {
-            Ok(frame) => vec![frame],
-            Err(error) => {
-                warn!(error = ?error, "failed to serialize inbox rejection");
-                vec![]
-            }
-        };
-    }
-
-    if incoming.type_ != xmpp_parsers::message::MessageType::Groupchat
-        && incoming.type_ != xmpp_parsers::message::MessageType::Error
-        && waddle_extensions::message_has_framework_envelope(&incoming)
-    {
-        let mut stamped = incoming.clone();
-        stamped.from = Some(jid::Jid::from(bound_jid));
-        remove_framework_envelopes(&mut stamped);
-        let reply = bad_request_reply(
-            &stamped,
-            "Client-authored Waddle extension envelopes are not allowed.",
-        );
-        if let Some(capture) = ingress_effect_capture.as_ref() {
-            capture.record_marker(ShadowDecisionMarker::SemanticRejected {
-                reason: ShadowSemanticRejectedReason::ClientAuthoredFrameworkEnvelope,
-            });
-        }
-        return match stanza_to_string(reply) {
-            Ok(frame) => vec![frame],
-            Err(error) => {
-                warn!(error = ?error, "failed to serialize framework-envelope rejection");
-                vec![]
-            }
-        };
-    }
-    record_jmi_signal(&incoming, &bound_jid.to_bare());
-    if let Some(frames) = handle_muc_direct_message(
-        &incoming,
-        state,
-        &bound_jid,
-        ingress_effect_capture.as_ref(),
-    )
-    .await
-    {
-        return frames;
-    }
-
-    let events = sm.handle(InboundEvent::FrameReceived(InboundFrame::Stanza(Box::new(
-        Stanza::Message(incoming),
-    ))));
     let principal = authenticated_session.map(ResolvedPrincipal::from_authenticated_session);
     let deps = build_interpret_deps(state, principal)
         .with_ordered_relay_origin(ordered_relay_origin)
         .with_ingress_effect_capture(ingress_effect_capture);
-    // Stanza dispatch never emits keepalive/timer effects (those come
-    // only from TransportReady/Tick in the connection loop), and
-    // `close` was already ignored on this path — only frames matter.
+    if let Some(frames) = dispatch_early_message(&mut incoming, &bound_jid, &deps).await {
+        return frames
+            .into_iter()
+            .filter_map(|stanza| {
+                stanza_to_string(match stanza {
+                    Stanza::Message(message) => minidom::Element::from(message),
+                    Stanza::Presence(presence) => presence.into(),
+                    Stanza::Iq(iq) => (*iq).into(),
+                })
+                .map_err(|error| warn!(?error, "failed to serialize early message reply"))
+                .ok()
+            })
+            .collect();
+    }
+    let events = sm.handle(InboundEvent::FrameReceived(InboundFrame::Stanza(Box::new(
+        Stanza::Message(incoming),
+    ))));
     drive_interpret_loop(events, sm, &deps).await.frames
+}
+
+/// The complete pre-interpreter path, shared by immediate transport dispatch
+/// and Phase A. Every returned stanza crosses the same typed frame seam.
+pub(crate) async fn dispatch_early_message(
+    incoming: &mut xmpp_parsers::message::Message,
+    bound_jid: &jid::FullJid,
+    deps: &Deps<'_>,
+) -> Option<Vec<Stanza>> {
+    deps.effects.observe_sender(bound_jid);
+    strip_client_authored_delay(incoming);
+    if let Some(capture) = &deps.ingress_effect_capture {
+        capture.record_sanitized_message(incoming);
+    }
+    let frames = dispatch_early_handlers(incoming, bound_jid, deps).await?;
+    for stanza in &frames {
+        crate::server::routes::interpret::capture_serialized_error_reply(deps, stanza);
+        let _ = deps
+            .effects
+            .execute(
+                PlannedEffect::new(Effect::External(ExternalEffect::Frame(Box::new(
+                    stanza.clone(),
+                )))),
+                deps,
+            )
+            .await;
+    }
+    Some(frames)
+}
+
+async fn dispatch_early_handlers(
+    incoming: &mut xmpp_parsers::message::Message,
+    bound_jid: &jid::FullJid,
+    deps: &Deps<'_>,
+) -> Option<Vec<Stanza>> {
+    if let Some(state) = deps.web_socket_state {
+        consume_link_preview_request(
+            incoming,
+            bound_jid,
+            state.deps.occupant_id_secret.key(),
+            chrono::Utc::now().timestamp(),
+            state.deps.auth_state.base_url.as_str(),
+            &state.deps.link_preview,
+        );
+        let session = deps.authenticated_principal.map(ResolvedPrincipal::session);
+        if let Some(frames) =
+            handle_group_dm_mediated_invite(incoming, state, bound_jid, session, deps).await
+        {
+            return Some(frames);
+        }
+        if let Some(frames) =
+            handle_muc_mediated_invite(incoming, state, bound_jid, session, deps).await
+        {
+            return Some(frames);
+        }
+        if let Some(frames) = handle_dm_pin_message(incoming, state, bound_jid, deps).await {
+            return Some(frames);
+        }
+        handle_dm_pin_retraction_cascade(incoming, state, bound_jid, deps).await;
+    }
+    if incoming.type_ != xmpp_parsers::message::MessageType::Error
+        && message_has_inbox_payload(incoming)
+    {
+        let mut stamped = incoming.clone();
+        stamped.from = Some(jid::Jid::from(bound_jid.clone()));
+        strip_inbox_payloads(&mut stamped);
+        record_rejected_envelope(deps, &stamped);
+        let reply = bad_request_reply(&stamped, "Client-authored inbox payloads are not allowed.");
+        return Some(reject_message(
+            deps,
+            Stanza::Message(reply),
+            PlanRejection::SemanticMalformed(SemanticMalformedReason::ClientAuthoredInboxPayload),
+        ));
+    }
+    if incoming.type_ != xmpp_parsers::message::MessageType::Groupchat
+        && incoming.type_ != xmpp_parsers::message::MessageType::Error
+        && waddle_extensions::message_has_framework_envelope(incoming)
+    {
+        let mut stamped = incoming.clone();
+        stamped.from = Some(jid::Jid::from(bound_jid.clone()));
+        remove_framework_envelopes(&mut stamped);
+        record_rejected_envelope(deps, &stamped);
+        let reply = bad_request_reply(
+            &stamped,
+            "Client-authored Waddle extension envelopes are not allowed.",
+        );
+        return Some(reject_message(
+            deps,
+            Stanza::Message(reply),
+            PlanRejection::SemanticMalformed(
+                SemanticMalformedReason::ClientAuthoredFrameworkEnvelope,
+            ),
+        ));
+    }
+    record_jmi_signal(incoming, &bound_jid.to_bare());
+    if let Some(state) = deps.web_socket_state {
+        return handle_muc_direct_message(incoming, state, bound_jid, deps).await;
+    }
+    None
+}
+
+fn record_rejected_envelope(deps: &Deps<'_>, message: &xmpp_parsers::message::Message) {
+    if let Some(capture) = &deps.ingress_effect_capture {
+        capture.record_sanitized_message(message);
+    }
+}
+
+pub(super) fn reject_message(
+    deps: &Deps<'_>,
+    stanza: Stanza,
+    rejection: PlanRejection,
+) -> Vec<Stanza> {
+    deps.effects.set_rejection(rejection);
+    vec![stanza]
+}
+
+pub(super) fn classify_rejection(error: &xmpp_parsers::stanza_error::StanzaError) -> PlanRejection {
+    use xmpp_parsers::stanza_error::DefinedCondition;
+    match error.defined_condition {
+        DefinedCondition::Forbidden | DefinedCondition::NotAuthorized => {
+            PlanRejection::AuthorizationDenied(AuthorizationDeniedReason::Forbidden)
+        }
+        DefinedCondition::BadRequest => {
+            PlanRejection::SemanticMalformed(SemanticMalformedReason::MalformedPayload)
+        }
+        _ => PlanRejection::PolicyDenied(PolicyDeniedReason::StanzaError(
+            waddle_xmpp::ingress::FrozenStanzaError::from_xmpp(error)
+                .expect("server-built stanza error"),
+        )),
+    }
 }
 
 pub(super) fn record_route_direct_intent(
@@ -283,9 +317,7 @@ fn remove_framework_envelopes(message: &mut xmpp_parsers::message::Message) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::ingress_shadow::{
-        IngressEffectCapture, ShadowDecisionMarker, ShadowSemanticRejectedReason,
-    };
+    use crate::ingress_shadow::IngressEffectCapture;
     use crate::server::routes::websocket::tests::create_test_websocket_state;
     use waddle_xmpp::protocol::XmppStateMachine;
     use xmpp_parsers::message::{Message, MessageType};
@@ -359,7 +391,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn fast_path_inbox_payload_rejection_records_semantic_marker() {
+    async fn fast_path_inbox_payload_rejection_emits_no_shadow_marker() {
         let state = create_test_websocket_state().await;
         let bound: jid::FullJid = "alice@example.com/web".parse().expect("jid");
         let phase = ConnectionPhase::ready(bound.clone(), false);
@@ -383,17 +415,12 @@ mod tests {
         )
         .await;
 
-        assert_eq!(
-            capture.snapshot().markers,
-            vec![ShadowDecisionMarker::SemanticRejected {
-                reason: ShadowSemanticRejectedReason::ClientAuthoredInboxPayload,
-            }]
-        );
+        assert!(capture.snapshot().markers.is_empty());
         assert_eq!(frames.len(), 1);
     }
 
     #[tokio::test]
-    async fn fast_path_framework_envelope_rejection_records_semantic_marker() {
+    async fn fast_path_framework_envelope_rejection_emits_no_shadow_marker() {
         let state = create_test_websocket_state().await;
         let bound: jid::FullJid = "alice@example.com/web".parse().expect("jid");
         let phase = ConnectionPhase::ready(bound.clone(), false);
@@ -417,12 +444,7 @@ mod tests {
         )
         .await;
 
-        assert_eq!(
-            capture.snapshot().markers,
-            vec![ShadowDecisionMarker::SemanticRejected {
-                reason: ShadowSemanticRejectedReason::ClientAuthoredFrameworkEnvelope,
-            }]
-        );
+        assert!(capture.snapshot().markers.is_empty());
         assert_eq!(frames.len(), 1);
     }
 
