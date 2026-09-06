@@ -6,10 +6,15 @@ use crate::{
 };
 use waddle_xmpp::ingress::EffectIntentCodecError;
 
-/// Fail-closed errors from the PostgreSQL ingress unit of work.
+/// Fail-closed errors from the ingress unit of work.
 #[derive(Debug, Error)]
 pub enum IngressUowError {
-    #[error("ingress unit of work requires PostgreSQL")]
+    #[error("this operation requires single-node ingress fencing")]
+    SingleNodeFencingRequired,
+    #[cfg(feature = "clustering")]
+    #[error("clustered ingress fencing requires PostgreSQL")]
+    ClusteredFencingRequiresPostgres,
+    #[error("this repository operation requires PostgreSQL")]
     PostgresRequired,
     #[error("live ingress protocol epoch exceeds what this binary supports")]
     EpochUnsupported {
@@ -38,9 +43,9 @@ pub enum IngressUowError {
     EffectIntentOrdinalOverflow,
     #[error("stored ingress stream identity is malformed")]
     InvalidStoredSmIngressId,
-    #[error("stored shadow ingress frontier is malformed")]
-    InvalidStoredShadowFrontier,
-    #[error("shadow ingress stream is missing")]
+    #[error("stored ingress frontier is malformed")]
+    InvalidStoredFrontier,
+    #[error("ingress stream is missing")]
     SmIngressStreamMissing,
     #[error("authenticated principal reference cannot be represented in storage")]
     PrincipalReferenceOutOfRange,

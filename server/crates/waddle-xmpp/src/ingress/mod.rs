@@ -35,6 +35,6 @@ pub use epoch::ProtocolEpoch;
 pub use error::IngressTypeError;
 pub use generation::{ConnectionGeneration, EntityGeneration, RowRevision};
 pub use keys::{DeliveryKey, MessageKey};
-pub use ordinal::IngressOrdinal;
+pub use ordinal::{IngressOrdinal, WireHandledCount};
 pub use stream::{IngressStreamId, SmIngressId};
 pub use target::{NormalizedTarget, NormalizedTargetStorage};

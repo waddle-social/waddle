@@ -261,7 +261,7 @@ impl Fixture {
         let key = MessageKey::new();
         let mut tx = self.store.begin().await.expect("begin message insert");
         self.store
-            .record_message(&mut tx, key, &digest)
+            .record_message(&mut tx, key, &digest, None)
             .await
             .expect("record message");
         tx.commit().await.expect("commit message insert");

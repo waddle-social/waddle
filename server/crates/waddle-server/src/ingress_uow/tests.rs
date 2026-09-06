@@ -3,15 +3,18 @@ use chrono::{TimeZone, Utc};
 #[cfg(feature = "clustering")]
 use sqlx::Connection;
 use uuid::Uuid;
+use waddle_xmpp::ingress::{
+    DeliveryKey, IngressOrdinal, MessageKey, ProtocolEpoch, SemanticDigest, SmIngressId,
+    WireHandledCount,
+};
 #[cfg(feature = "clustering")]
 use waddle_xmpp::ingress::{EffectMessageIdentity, InboxProjectionMutation, IngressEffectIntent};
-use waddle_xmpp::ingress::{MessageKey, ProtocolEpoch, SemanticDigest, SmIngressId};
+use waddle_xmpp::pending_delivery::SmSessionId;
 #[cfg(feature = "clustering")]
 use waddle_xmpp::{
     auth::{AuthContextId, AuthContextVersion, AuthenticatedPrincipalRef, PrincipalAuthEpoch},
-    ingress::{AliasOutcome, AliasResolution, DeliveryKey, IngressOrdinal, NormalizedTarget},
+    ingress::{AliasOutcome, AliasResolution, NormalizedTarget},
     ownership::{ClaimEpoch, ClaimStore, EntityType, NodeIdentity, SharedNodeIdentity},
-    pending_delivery::SmSessionId,
 };
 #[cfg(feature = "clustering")]
 use waddle_xmpp::{
@@ -28,28 +31,238 @@ use waddle_xmpp_core::xep0359::StanzaId;
 #[cfg(feature = "clustering")]
 use xmpp_parsers::message::MessageType;
 
-use super::{CanonicalMessageRepository, IngressUowError, PostgresIngressUnitOfWork};
+use super::{
+    CanonicalMessageRepository, DeliveryEffectRepository, FrontierOutcome, IngressFencing,
+    IngressUnitOfWork, IngressUowError, SmIngressRepository, SmIngressStreamRepository,
+};
 #[cfg(feature = "clustering")]
 use super::{
-    ClaimRepository, DeliveryEffectRepository, EffectIntentRepository, EffectIntentWriteOutcome,
-    HandledFrontierOutcome, HandledFrontierRepository, InboxRepository, IngressUowTransaction,
-    MamArchiveRepository, PrincipalAssertion, PrincipalRepository, ShadowFrontierOutcome,
-    SmIngressRepository, SmIngressStreamRepository,
+    ClaimRepository, EffectIntentRepository, EffectIntentWriteOutcome, HandledFrontierOutcome,
+    HandledFrontierRepository, InboxRepository, IngressUowTransaction, MamArchiveRepository,
+    PrincipalAssertion, PrincipalRepository,
 };
+use crate::ingress_substrate::{EnvelopeVersion, MessageEnvelope};
 use crate::{
     config::LineageConfig,
     db::{lineage, Database, DatabaseConfig, DatabaseDriver, IntoParams, MigrationRunner},
 };
 
 #[tokio::test]
-async fn open_rejects_sqlite() {
-    let db = Database::in_memory("ingress_uow_sqlite")
+async fn sqlite_open_verifies_lineage_and_protocol_epoch() {
+    let (db, uow) = sqlite_fixture("sqlite_open").await;
+    let mut transaction = uow.begin().await.expect("begin SQLite UoW");
+    assert!(matches!(transaction.fencing(), IngressFencing::SingleNode));
+    assert_eq!(transaction.protocol_epoch(), ProtocolEpoch::ZERO);
+    transaction
+        .set_local_timeouts(100, 250)
         .await
-        .expect("open sqlite database");
+        .expect("SQLite timeout no-op");
+    transaction.commit().await.expect("commit SQLite UoW");
+    let conn = db.guard().await.expect("SQLite guard");
+    conn.execute(
+        "UPDATE ingress_protocol_epoch SET epoch = 2, activated_at = '2026-09-06T00:00:00Z', lineage_uuid = '018f47b2-4b2e-7a3a-9a4c-52a5a6a90001' WHERE id = 1",
+        (),
+    )
+    .await
+    .expect("set unsupported epoch");
+    drop(conn);
     assert!(matches!(
-        PostgresIngressUnitOfWork::open(db, LineageConfig::default()),
-        Err(IngressUowError::PostgresRequired)
+        uow.begin().await,
+        Err(IngressUowError::EpochUnsupported { .. })
     ));
+    let conn = db.guard().await.expect("SQLite guard");
+    conn.execute(
+        "UPDATE ingress_protocol_epoch SET epoch = 0, activated_at = NULL, lineage_uuid = NULL WHERE id = 1",
+        (),
+    )
+    .await
+    .expect("restore epoch");
+    conn.execute("DELETE FROM _lineage", ())
+        .await
+        .expect("remove lineage");
+    drop(conn);
+    assert!(matches!(
+        uow.begin().await,
+        Err(IngressUowError::Lineage(crate::db::DatabaseError::Lineage(
+            lineage::LineageError::MissingRow
+        )))
+    ));
+}
+
+#[cfg(feature = "clustering")]
+#[tokio::test]
+async fn sqlite_requires_single_node_fencing_and_cannot_mint_claim_fences() {
+    let (db, uow) = sqlite_fixture("sqlite_fencing").await;
+    let owner = NodeIdentity::new("node-a", "node-a-epoch");
+    assert!(matches!(
+        IngressUnitOfWork::open_with_node_identity(
+            db,
+            fixture_lineage_config(),
+            SharedNodeIdentity::new(owner.clone())
+        ),
+        Err(IngressUowError::ClusteredFencingRequiresPostgres)
+    ));
+    let mut transaction = uow.begin().await.expect("begin single-node transaction");
+    assert!(matches!(
+        ClaimRepository::assert_sm_claim(
+            &mut transaction,
+            &SmSessionId::new("single-node-stream"),
+            &owner,
+            ClaimEpoch(1)
+        )
+        .await,
+        Err(IngressUowError::NodeIdentityUnbound)
+    ));
+    let room = "room@conference.example.com".parse().expect("room JID");
+    assert!(matches!(
+        ClaimRepository::assert_room_claim(&mut transaction, &room, &owner, ClaimEpoch(1)).await,
+        Err(IngressUowError::NodeIdentityUnbound)
+    ));
+}
+
+#[tokio::test]
+async fn sqlite_spanning_proof_commits_exact_cross_repository_values() {
+    let (_, uow) = sqlite_fixture("sqlite_spanning").await;
+    let key = MessageKey::new();
+    let stream = SmSessionId::new("sqlite-spanning-stream");
+    let envelope = MessageEnvelope {
+        version: EnvelopeVersion::V1,
+        bytes: vec![1, 2, 3],
+    };
+    let mut transaction = uow.begin().await.expect("begin SQLite spanning UoW");
+    let id = SmIngressStreamRepository::mint(&mut transaction, &stream)
+        .await
+        .expect("mint stream");
+    CanonicalMessageRepository::record_message(&mut transaction, key, &digest(42), Some(&envelope))
+        .await
+        .expect("record envelope");
+    SmIngressRepository::insert_sm_ref(
+        &mut transaction,
+        id,
+        IngressOrdinal::FIRST,
+        WireHandledCount::from_storage(7),
+        key,
+    )
+    .await
+    .expect("bind wire count");
+    DeliveryEffectRepository::record(&mut transaction, DeliveryKey::new(), key)
+        .await
+        .expect("record delivery");
+    assert_eq!(
+        SmIngressStreamRepository::advance_frontier(
+            &mut transaction,
+            id,
+            IngressOrdinal::FIRST,
+            WireHandledCount::from_storage(7)
+        )
+        .await
+        .expect("advance frontier"),
+        FrontierOutcome::Advanced
+    );
+    transaction.commit().await.expect("commit spanning writes");
+    let mut transaction = uow.begin().await.expect("read committed values");
+    assert_eq!(
+        CanonicalMessageRepository::load_envelope(&mut transaction, key)
+            .await
+            .expect("load envelope"),
+        Some(envelope)
+    );
+    assert_eq!(
+        SmIngressRepository::lookup_wire_binding(
+            &mut transaction,
+            id,
+            WireHandledCount::from_storage(7)
+        )
+        .await
+        .expect("load binding"),
+        Some((key, IngressOrdinal::FIRST))
+    );
+    assert_eq!(
+        SmIngressStreamRepository::load_stream_checkpoint(&mut transaction, id)
+            .await
+            .expect("load checkpoint"),
+        Some(WireHandledCount::from_storage(7))
+    );
+    assert_eq!(
+        SmIngressStreamRepository::lock_single_node(&mut transaction, &stream)
+            .await
+            .expect("lock single-node stream"),
+        Some((id, 1))
+    );
+    SmIngressStreamRepository::flush_checkpoint(
+        &mut transaction,
+        id,
+        WireHandledCount::from_storage(8),
+    )
+    .await
+    .expect("flush deferred checkpoint");
+    transaction.commit().await.expect("commit checkpoint flush");
+    let mut transaction = uow.begin().await.expect("read flushed checkpoint");
+    assert_eq!(
+        SmIngressStreamRepository::load_stream_checkpoint(&mut transaction, id)
+            .await
+            .expect("load flushed checkpoint"),
+        Some(WireHandledCount::from_storage(8))
+    );
+    transaction.commit().await.expect("finish committed reads");
+}
+
+#[tokio::test]
+async fn sqlite_dropping_uow_rolls_back_spanning_writes() {
+    let (db, uow) = sqlite_fixture("sqlite_rollback").await;
+    let key = MessageKey::new();
+    {
+        let mut transaction = uow.begin().await.expect("begin SQLite rollback UoW");
+        let id = SmIngressStreamRepository::mint(
+            &mut transaction,
+            &SmSessionId::new("sqlite-rollback-stream"),
+        )
+        .await
+        .expect("mint stream");
+        CanonicalMessageRepository::record_message(&mut transaction, key, &digest(42), None)
+            .await
+            .expect("record message");
+        SmIngressRepository::insert_sm_ref(
+            &mut transaction,
+            id,
+            IngressOrdinal::FIRST,
+            WireHandledCount::from_storage(1),
+            key,
+        )
+        .await
+        .expect("bind wire count");
+        DeliveryEffectRepository::record(&mut transaction, DeliveryKey::new(), key)
+            .await
+            .expect("record delivery");
+        SmIngressStreamRepository::advance_frontier(
+            &mut transaction,
+            id,
+            IngressOrdinal::FIRST,
+            WireHandledCount::from_storage(1),
+        )
+        .await
+        .expect("advance frontier");
+    }
+    let conn = db.guard().await.expect("read rolled back rows");
+    let mut rows = conn.query("SELECT (SELECT COUNT(*) FROM ingress_messages) + (SELECT COUNT(*) FROM ingress_sm_streams) + (SELECT COUNT(*) FROM ingress_sm_refs) + (SELECT COUNT(*) FROM ingress_deliveries)", ()).await.expect("count rolled back rows");
+    let row = rows.next().await.expect("read count").expect("count row");
+    assert_eq!(row.get::<i64>(0).expect("decode count"), 0);
+}
+
+async fn sqlite_fixture(name: &str) -> (Database, IngressUnitOfWork) {
+    let db = Database::in_memory(name)
+        .await
+        .expect("open SQLite database");
+    MigrationRunner::single()
+        .run(&db)
+        .await
+        .expect("migrate SQLite database");
+    let config = fixture_lineage_config();
+    lineage::enroll(&db, &config)
+        .await
+        .expect("enroll SQLite lineage");
+    let uow = IngressUnitOfWork::open(db.clone(), config).expect("open SQLite UoW");
+    (db, uow)
 }
 
 #[cfg(feature = "clustering")]
@@ -143,7 +356,7 @@ async fn epoch_one_uow_write_succeeds_and_raw_write_is_rejected() {
     let uow = fixture.uow();
     let mut transaction = uow.begin().await.expect("begin epoch-one uow");
     let message_key = MessageKey::new();
-    CanonicalMessageRepository::record(&mut transaction, message_key, &digest(1))
+    CanonicalMessageRepository::record_message(&mut transaction, message_key, &digest(1), None)
         .await
         .expect("UoW carries epoch proof");
     #[cfg(feature = "clustering")]
@@ -230,7 +443,7 @@ async fn lineage_mismatch_and_missing_row_fail_closed() {
         action: None,
     };
     let mismatch_uow =
-        PostgresIngressUnitOfWork::open(fixture.db.clone(), mismatch).expect("open mismatch UoW");
+        IngressUnitOfWork::open(fixture.db.clone(), mismatch).expect("open mismatch UoW");
     assert!(matches!(
         mismatch_uow.begin().await,
         Err(IngressUowError::Lineage(crate::db::DatabaseError::Lineage(
@@ -395,7 +608,7 @@ async fn claim_fence_requires_current_local_node_authority() {
     drop(transaction);
 
     // A unit of work with no bound canonical identity cannot mint at all.
-    let unbound = PostgresIngressUnitOfWork::open(fixture.db.clone(), fixture.lineage.clone())
+    let unbound = IngressUnitOfWork::open(fixture.db.clone(), fixture.lineage.clone())
         .expect("open unbound unit of work");
     let mut transaction = unbound.begin().await.expect("begin unbound transaction");
     assert!(matches!(
@@ -562,7 +775,7 @@ async fn room_claim_fence_requires_a_bound_node_identity() {
     };
     let values = FixtureValues::new("room-claim-unbound");
     fixture.seed_room_claim(&values).await;
-    let unbound = PostgresIngressUnitOfWork::open(fixture.db.clone(), fixture.lineage.clone())
+    let unbound = IngressUnitOfWork::open(fixture.db.clone(), fixture.lineage.clone())
         .expect("open unbound unit of work");
     let mut transaction = unbound.begin().await.expect("begin unbound transaction");
     assert!(matches!(
@@ -791,7 +1004,7 @@ async fn shadow_frontier_advances_idempotently_and_detects_gaps() {
     let values = FixtureValues::new("shadow-frontier");
     fixture.seed_claim(&values).await;
     let mut transaction = fixture.begin().await;
-    let fence = ClaimRepository::assert_sm_claim(
+    let _fence = ClaimRepository::assert_sm_claim(
         &mut transaction,
         &values.stream_id,
         &values.owner,
@@ -805,46 +1018,46 @@ async fn shadow_frontier_advances_idempotently_and_detects_gaps() {
     assert_eq!(
         SmIngressStreamRepository::advance_frontier(
             &mut transaction,
-            &fence,
             stream_id,
             IngressOrdinal::FIRST,
+            WireHandledCount::from_storage(1),
         )
         .await
         .expect("advance 0 to 1"),
-        ShadowFrontierOutcome::Advanced
+        FrontierOutcome::Advanced
     );
     assert_eq!(
         SmIngressStreamRepository::advance_frontier(
             &mut transaction,
-            &fence,
             stream_id,
             IngressOrdinal::FIRST,
+            WireHandledCount::from_storage(1),
         )
         .await
         .expect("replay is idempotent"),
-        ShadowFrontierOutcome::Idempotent
+        FrontierOutcome::Idempotent
     );
     assert_eq!(
         SmIngressStreamRepository::advance_frontier(
             &mut transaction,
-            &fence,
             stream_id,
             IngressOrdinal::from_storage(3).expect("valid ordinal"),
+            WireHandledCount::from_storage(3),
         )
         .await
         .expect("gap is observable"),
-        ShadowFrontierOutcome::Stale { stored: 1 }
+        FrontierOutcome::Stale { stored: 1 }
     );
     assert_eq!(
         SmIngressStreamRepository::advance_frontier(
             &mut transaction,
-            &fence,
             stream_id,
             IngressOrdinal::from_storage(2).expect("valid ordinal"),
+            WireHandledCount::from_storage(2),
         )
         .await
         .expect("advance 1 to 2"),
-        ShadowFrontierOutcome::Advanced
+        FrontierOutcome::Advanced
     );
     transaction.commit().await.expect("commit frontier updates");
 
@@ -883,7 +1096,7 @@ async fn every_effect_intent_kind_round_trips_through_postgres_storage() {
         })
         .collect::<std::collections::BTreeSet<_>>();
     let mut transaction = fixture.begin().await;
-    CanonicalMessageRepository::record(&mut transaction, message_key, &digest(10))
+    CanonicalMessageRepository::record_message(&mut transaction, message_key, &digest(10), None)
         .await
         .expect("record effect parent message");
     assert_eq!(
@@ -947,7 +1160,7 @@ async fn effect_intents_are_keyed_by_semantic_identity_and_classify_existing_ali
         },
     ];
     let mut transaction = fixture.begin().await;
-    CanonicalMessageRepository::record(&mut transaction, message_key, &digest(9))
+    CanonicalMessageRepository::record_message(&mut transaction, message_key, &digest(9), None)
         .await
         .expect("record effect parent message");
     assert_eq!(
@@ -1041,9 +1254,14 @@ async fn effect_intents_are_keyed_by_semantic_identity_and_classify_existing_ali
 
     let empty_message_key = MessageKey::new();
     let mut empty_original = fixture.begin().await;
-    CanonicalMessageRepository::record(&mut empty_original, empty_message_key, &digest(10))
-        .await
-        .expect("record parent with no effect intents");
+    CanonicalMessageRepository::record_message(
+        &mut empty_original,
+        empty_message_key,
+        &digest(10),
+        None,
+    )
+    .await
+    .expect("record parent with no effect intents");
     empty_original
         .commit()
         .await
@@ -1220,10 +1438,11 @@ async fn write_spanning_rows(transaction: &mut IngressUowTransaction<'_>, values
         .expect("record origin alias"),
         AliasResolution::Aliased(AliasOutcome::Inserted(key)) if key == values.message_key
     ));
-    SmIngressRepository::insert(
+    SmIngressRepository::insert_sm_ref(
         transaction,
         values.sm_ingress_id,
         values.ordinal,
+        WireHandledCount::from_storage(1),
         values.message_key,
     )
     .await
@@ -1369,7 +1588,7 @@ impl FixtureValues {
 
 struct Fixture {
     db: Database,
-    uow: PostgresIngressUnitOfWork,
+    uow: IngressUnitOfWork,
     #[cfg(feature = "clustering")]
     lineage: LineageConfig,
     /// The canonical identity source bound into `uow` (clustering only).
@@ -1416,15 +1635,14 @@ impl Fixture {
         #[cfg(feature = "clustering")]
         let node_identity = SharedNodeIdentity::new(NodeIdentity::new("node-a", "node-a-epoch"));
         #[cfg(feature = "clustering")]
-        let uow = PostgresIngressUnitOfWork::open_with_node_identity(
+        let uow = IngressUnitOfWork::open_with_node_identity(
             db.clone(),
             lineage.clone(),
             node_identity.clone(),
         )
         .expect("open fixture UoW");
         #[cfg(not(feature = "clustering"))]
-        let uow =
-            PostgresIngressUnitOfWork::open(db.clone(), lineage.clone()).expect("open fixture UoW");
+        let uow = IngressUnitOfWork::open(db.clone(), lineage.clone()).expect("open fixture UoW");
         Some(Self {
             db,
             uow,
@@ -1439,7 +1657,7 @@ impl Fixture {
         })
     }
 
-    fn uow(&self) -> PostgresIngressUnitOfWork {
+    fn uow(&self) -> IngressUnitOfWork {
         self.uow.clone()
     }
 

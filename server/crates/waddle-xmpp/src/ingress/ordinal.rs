@@ -33,3 +33,19 @@ impl IngressOrdinal {
         self.0 as u32
     }
 }
+
+/// XEP-0198 wrapping wire handled count, distinct from a durable ordinal.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
+pub struct WireHandledCount(u32);
+
+impl WireHandledCount {
+    pub const fn new(value: u32) -> Self {
+        Self(value)
+    }
+    pub const fn from_storage(value: u32) -> Self {
+        Self(value)
+    }
+    pub const fn to_storage(self) -> u32 {
+        self.0
+    }
+}

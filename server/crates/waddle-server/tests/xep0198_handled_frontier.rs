@@ -23,8 +23,8 @@ use waddle_server::clustering::claims::PostgresClaimStore;
 use waddle_server::config::LineageConfig;
 use waddle_server::db::{lineage, Database, DatabaseConfig, DatabaseDriver, MigrationRunner};
 use waddle_server::ingress_uow::{
-    ClaimRepository, HandledFrontierOutcome, HandledFrontierRepository, IngressUowError,
-    PostgresIngressUnitOfWork, SmClaimFence,
+    ClaimRepository, HandledFrontierOutcome, HandledFrontierRepository, IngressUnitOfWork,
+    IngressUowError, SmClaimFence,
 };
 use waddle_server::sm_persistence::DatabaseSmPersistence;
 use waddle_xmpp::ownership::{
@@ -36,7 +36,7 @@ use crate::ingress_shadow_support::ShadowFixture;
 
 struct Fixture {
     db: Database,
-    uow: PostgresIngressUnitOfWork,
+    uow: IngressUnitOfWork,
     owner: NodeIdentity,
     claim_epoch: ClaimEpoch,
     admin: sqlx::PgPool,
@@ -89,7 +89,7 @@ impl Fixture {
             .expect("enroll fixture lineage");
         let owner = NodeIdentity::new("node-0198", "node-0198-epoch");
         let node_identity = SharedNodeIdentity::new(owner.clone());
-        let uow = PostgresIngressUnitOfWork::open_with_node_identity(
+        let uow = IngressUnitOfWork::open_with_node_identity(
             db.clone(),
             lineage_config,
             node_identity.clone(),

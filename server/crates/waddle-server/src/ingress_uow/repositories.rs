@@ -8,15 +8,17 @@ use waddle_xmpp::inbox::storage::GroupchatNotificationRecovery;
 use waddle_xmpp::inbox::InboxEntry;
 use waddle_xmpp::ingress::{
     AliasResolution, DeliveryKey, IngressEffectIntent, IngressOrdinal, MessageKey,
-    NormalizedTarget, SemanticDigest, SmIngressId,
+    NormalizedTarget, SemanticDigest, SmIngressId, WireHandledCount,
 };
 use waddle_xmpp::mam::{ArchivedMessage, MamTxStoreOutcome};
-#[cfg(feature = "clustering")]
 use waddle_xmpp::pending_delivery::SmSessionId;
 use waddle_xmpp_core::xep0359::OriginId;
 
 use crate::{
-    ingress_substrate::{self, MessageWriteOutcome, TerminalizeOutcome},
+    db::{Database, DatabaseDriver},
+    ingress_substrate::{
+        self, EffectReceiptKind, MessageEnvelope, MessageWriteOutcome, TerminalizeOutcome,
+    },
     ingress_uow::{IngressUowError, IngressUowTransaction},
 };
 
@@ -102,12 +104,27 @@ impl InboxRepository {
 pub struct CanonicalMessageRepository;
 
 impl CanonicalMessageRepository {
-    pub async fn record(
+    pub async fn record_message(
         transaction: &mut IngressUowTransaction<'_>,
         message_key: MessageKey,
         digest: &SemanticDigest,
+        envelope: Option<&MessageEnvelope>,
     ) -> Result<(), IngressUowError> {
-        ingress_substrate::record_message(transaction.transaction_mut(), message_key, digest)
+        ingress_substrate::record_message(
+            transaction.transaction_mut(),
+            message_key,
+            digest,
+            envelope,
+        )
+        .await
+        .map_err(Into::into)
+    }
+
+    pub async fn load_envelope(
+        transaction: &mut IngressUowTransaction<'_>,
+        message_key: MessageKey,
+    ) -> Result<Option<MessageEnvelope>, IngressUowError> {
+        ingress_substrate::load_envelope(transaction.transaction_mut(), message_key)
             .await
             .map_err(Into::into)
     }
@@ -152,20 +169,32 @@ impl CanonicalMessageRepository {
 pub struct SmIngressRepository;
 
 impl SmIngressRepository {
-    pub async fn insert(
+    pub async fn insert_sm_ref(
         transaction: &mut IngressUowTransaction<'_>,
         sm_ingress_id: SmIngressId,
         ordinal: IngressOrdinal,
+        wire_h: WireHandledCount,
         message_key: MessageKey,
     ) -> Result<MessageWriteOutcome, IngressUowError> {
         ingress_substrate::insert_sm_ref(
             transaction.transaction_mut(),
             sm_ingress_id,
             ordinal,
+            wire_h,
             message_key,
         )
         .await
         .map_err(Into::into)
+    }
+
+    pub async fn lookup_wire_binding(
+        transaction: &mut IngressUowTransaction<'_>,
+        sm_ingress_id: SmIngressId,
+        wire_h: WireHandledCount,
+    ) -> Result<Option<(MessageKey, IngressOrdinal)>, IngressUowError> {
+        ingress_substrate::lookup_wire_binding(transaction.transaction_mut(), sm_ingress_id, wire_h)
+            .await
+            .map_err(Into::into)
     }
 
     pub async fn lookup(
@@ -173,12 +202,12 @@ impl SmIngressRepository {
         sm_ingress_id: SmIngressId,
         ordinal: IngressOrdinal,
     ) -> Result<Option<MessageKey>, IngressUowError> {
+        const POSTGRES: &str = "SELECT message_key::text FROM ingress_sm_refs WHERE sm_ingress_id = ?::uuid AND ingress_ordinal = ?::numeric";
+        const SQLITE: &str = "SELECT message_key FROM ingress_sm_refs WHERE sm_ingress_id = ? AND ingress_ordinal = ?";
+        let sql = dialect_sql(transaction, POSTGRES, SQLITE);
         lookup_message_key(
             transaction,
-            r#"
-            SELECT message_key::text FROM ingress_sm_refs
-            WHERE sm_ingress_id = ?::uuid AND ingress_ordinal = ?::numeric
-            "#,
+            sql,
             crate::db_params![
                 sm_ingress_id.to_storage().to_string(),
                 ordinal.to_storage().to_string(),
@@ -187,15 +216,19 @@ impl SmIngressRepository {
         .await
     }
 
-    #[cfg(feature = "clustering")]
     pub async fn message_keys_for_stream(
         transaction: &mut IngressUowTransaction<'_>,
         sm_ingress_id: SmIngressId,
     ) -> Result<Vec<MessageKey>, IngressUowError> {
+        const POSTGRES: &str =
+            "SELECT DISTINCT message_key::text FROM ingress_sm_refs WHERE sm_ingress_id = ?::uuid";
+        const SQLITE: &str =
+            "SELECT DISTINCT message_key FROM ingress_sm_refs WHERE sm_ingress_id = ?";
+        let sql = dialect_sql(transaction, POSTGRES, SQLITE);
         let mut rows = transaction
             .transaction_mut()
             .query(
-                "SELECT DISTINCT message_key::text FROM ingress_sm_refs WHERE sm_ingress_id = ?::uuid",
+                sql,
                 crate::db_params![sm_ingress_id.to_storage().to_string()],
             )
             .await?;
@@ -215,15 +248,17 @@ impl SmIngressRepository {
         Ok(keys)
     }
 
-    #[cfg(feature = "clustering")]
     pub async fn delete_for_stream(
         transaction: &mut IngressUowTransaction<'_>,
         sm_ingress_id: SmIngressId,
     ) -> Result<u64, IngressUowError> {
+        const POSTGRES: &str = "DELETE FROM ingress_sm_refs WHERE sm_ingress_id = ?::uuid";
+        const SQLITE: &str = "DELETE FROM ingress_sm_refs WHERE sm_ingress_id = ?";
+        let sql = dialect_sql(transaction, POSTGRES, SQLITE);
         transaction
             .transaction_mut()
             .execute(
-                "DELETE FROM ingress_sm_refs WHERE sm_ingress_id = ?::uuid",
+                sql,
                 crate::db_params![sm_ingress_id.to_storage().to_string()],
             )
             .await
@@ -231,44 +266,43 @@ impl SmIngressRepository {
     }
 }
 
-/// Outcome of advancing the shadow stream's non-wrapping handled frontier.
-#[cfg(feature = "clustering")]
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum ShadowFrontierOutcome {
-    Advanced,
-    Idempotent,
-    Stale { stored: u64 },
-}
+pub use ingress_substrate::FrontierOutcome;
 
-/// Repository for shadow ingress-stream enrollment and its contiguous frontier.
-#[cfg(feature = "clustering")]
+/// Repository for ingress-stream enrollment and its contiguous frontier.
 #[derive(Debug, Default, Clone, Copy)]
 pub struct SmIngressStreamRepository;
 
-#[cfg(feature = "clustering")]
 impl SmIngressStreamRepository {
-    /// Mint the one durable shadow row for a freshly SM-enabled stream.
+    /// Mint the one durable ingress row for a freshly SM-enabled stream.
     pub async fn mint(
         transaction: &mut IngressUowTransaction<'_>,
         stream_id: &SmSessionId,
     ) -> Result<SmIngressId, IngressUowError> {
+        const POSTGRES: &str = "INSERT INTO ingress_sm_streams (sm_ingress_id, stream_id) VALUES (?::uuid, ?) ON CONFLICT (stream_id) DO NOTHING";
+        const SQLITE: &str = "INSERT INTO ingress_sm_streams (sm_ingress_id, stream_id) VALUES (?, ?) ON CONFLICT (stream_id) DO NOTHING";
+        let sql = dialect_sql(transaction, POSTGRES, SQLITE);
         let minted = SmIngressId::new();
         let inserted = transaction
             .transaction_mut()
             .execute(
-                "INSERT INTO ingress_sm_streams (sm_ingress_id, stream_id) VALUES (?::uuid, ?) ON CONFLICT (stream_id) DO NOTHING",
-                crate::db_params![minted.to_storage().to_string(), stream_id.as_str().to_string()],
+                sql,
+                crate::db_params![
+                    minted.to_storage().to_string(),
+                    stream_id.as_str().to_string()
+                ],
             )
             .await?;
         if inserted == 1 {
             return Ok(minted);
         }
+        const SELECT_POSTGRES: &str =
+            "SELECT sm_ingress_id::text FROM ingress_sm_streams WHERE stream_id = ?";
+        const SELECT_SQLITE: &str =
+            "SELECT sm_ingress_id FROM ingress_sm_streams WHERE stream_id = ?";
+        let sql = dialect_sql(transaction, SELECT_POSTGRES, SELECT_SQLITE);
         let mut rows = transaction
             .transaction_mut()
-            .query(
-                "SELECT sm_ingress_id::text FROM ingress_sm_streams WHERE stream_id = ?",
-                crate::db_params![stream_id.as_str().to_string()],
-            )
+            .query(sql, crate::db_params![stream_id.as_str().to_string()])
             .await?;
         let stored: String = rows
             .next()
@@ -282,6 +316,7 @@ impl SmIngressStreamRepository {
     }
 
     /// Lock an existing enrolled stream. This path never enrolls a stream.
+    #[cfg(feature = "clustering")]
     pub async fn lock(
         transaction: &mut IngressUowTransaction<'_>,
         fence: &SmClaimFence<'_>,
@@ -290,12 +325,30 @@ impl SmIngressStreamRepository {
         if fence.transaction_identity != transaction.identity() || fence.stream_id != *stream_id {
             return Err(IngressUowError::ClaimFenceMissing);
         }
+        Self::lock_stream(transaction, stream_id).await
+    }
+
+    /// Lock a stream protected by this database's single-node write transaction.
+    pub async fn lock_single_node(
+        transaction: &mut IngressUowTransaction<'_>,
+        stream_id: &SmSessionId,
+    ) -> Result<Option<(SmIngressId, u64)>, IngressUowError> {
+        if !matches!(transaction.fencing(), super::IngressFencing::SingleNode) {
+            return Err(IngressUowError::SingleNodeFencingRequired);
+        }
+        Self::lock_stream(transaction, stream_id).await
+    }
+
+    async fn lock_stream(
+        transaction: &mut IngressUowTransaction<'_>,
+        stream_id: &SmSessionId,
+    ) -> Result<Option<(SmIngressId, u64)>, IngressUowError> {
+        const POSTGRES: &str = "SELECT sm_ingress_id::text, handled_ordinal::text FROM ingress_sm_streams WHERE stream_id = ? FOR UPDATE";
+        const SQLITE: &str = "SELECT sm_ingress_id, CAST(handled_ordinal AS TEXT) FROM ingress_sm_streams WHERE stream_id = ?";
+        let sql = dialect_sql(transaction, POSTGRES, SQLITE);
         let mut rows = transaction
             .transaction_mut()
-            .query(
-                "SELECT sm_ingress_id::text, handled_ordinal::text FROM ingress_sm_streams WHERE stream_id = ? FOR UPDATE",
-                crate::db_params![stream_id.as_str().to_string()],
-            )
+            .query(sql, crate::db_params![stream_id.as_str().to_string()])
             .await?;
         let Some(row) = rows.next().await? else {
             return Ok(None);
@@ -308,7 +361,7 @@ impl SmIngressStreamRepository {
             .map_err(|_| IngressUowError::InvalidStoredSmIngressId)?;
         let frontier = frontier
             .parse::<u64>()
-            .map_err(|_| IngressUowError::InvalidStoredShadowFrontier)?;
+            .map_err(|_| IngressUowError::InvalidStoredFrontier)?;
         Ok(Some((id, frontier)))
     }
 
@@ -316,12 +369,13 @@ impl SmIngressStreamRepository {
         transaction: &mut IngressUowTransaction<'_>,
         stream_id: &SmSessionId,
     ) -> Result<Option<SmIngressId>, IngressUowError> {
+        const POSTGRES: &str =
+            "SELECT sm_ingress_id::text FROM ingress_sm_streams WHERE stream_id = ? FOR UPDATE";
+        const SQLITE: &str = "SELECT sm_ingress_id FROM ingress_sm_streams WHERE stream_id = ?";
+        let sql = dialect_sql(transaction, POSTGRES, SQLITE);
         let mut rows = transaction
             .transaction_mut()
-            .query(
-                "SELECT sm_ingress_id::text FROM ingress_sm_streams WHERE stream_id = ? FOR UPDATE",
-                crate::db_params![stream_id.as_str().to_string()],
-            )
+            .query(sql, crate::db_params![stream_id.as_str().to_string()])
             .await?;
         let Some(row) = rows.next().await? else {
             return Ok(None);
@@ -335,12 +389,15 @@ impl SmIngressStreamRepository {
 
     /// Fence a retirement's unclaimed check against concurrent claim writes.
     /// A missing row cannot be protected by a row lock, so this rare cleanup
-    /// path holds the claims table's SHARE lock through its shadow deletion.
+    /// path holds the claims table's SHARE lock through its ingress deletion.
     #[cfg(feature = "clustering")]
     pub async fn fence_claim_absence_for_retirement(
         transaction: &mut IngressUowTransaction<'_>,
         stream_id: &SmSessionId,
     ) -> Result<bool, IngressUowError> {
+        if transaction.bound_node_identity().is_none() {
+            return Err(IngressUowError::NodeIdentityUnbound);
+        }
         transaction
             .transaction_mut()
             .execute("LOCK TABLE clustering_claims IN SHARE MODE", ())
@@ -358,59 +415,40 @@ impl SmIngressStreamRepository {
         Ok(rows.next().await?.is_none())
     }
 
-    /// Advance only the next contiguous shadow ordinal for the locked stream.
+    /// Advance the contiguous ordinal and its exposable wire checkpoint atomically.
     pub async fn advance_frontier(
         transaction: &mut IngressUowTransaction<'_>,
-        fence: &SmClaimFence<'_>,
         sm_ingress_id: SmIngressId,
-        allocated: IngressOrdinal,
-    ) -> Result<ShadowFrontierOutcome, IngressUowError> {
-        if fence.transaction_identity != transaction.identity() {
-            return Err(IngressUowError::ClaimFenceMissing);
-        }
-        let mut rows = transaction
-            .transaction_mut()
-            .query(
-                "SELECT handled_ordinal::text FROM ingress_sm_streams WHERE sm_ingress_id = ?::uuid AND stream_id = ? FOR UPDATE",
-                crate::db_params![
-                    sm_ingress_id.to_storage().to_string(),
-                    fence.stream_id.as_str().to_string(),
-                ],
-            )
-            .await?;
-        let stored: String = rows
-            .next()
-            .await?
-            .ok_or(IngressUowError::SmIngressStreamMissing)?
-            .get(0)?;
-        drop(rows);
-        let stored = stored
-            .parse::<u64>()
-            .map_err(|_| IngressUowError::InvalidStoredShadowFrontier)?;
-        let allocated = allocated.to_storage();
-        if stored >= allocated {
-            return Ok(ShadowFrontierOutcome::Idempotent);
-        }
-        if stored != allocated - 1 {
-            return Ok(ShadowFrontierOutcome::Stale { stored });
-        }
-        let updated = transaction
-            .transaction_mut()
-            .execute(
-                "UPDATE ingress_sm_streams SET handled_ordinal = ?::numeric, row_revision = row_revision + 1, updated_at = now() WHERE sm_ingress_id = ?::uuid AND stream_id = ? AND handled_ordinal = ?::numeric",
-                crate::db_params![
-                    allocated.to_string(),
-                    sm_ingress_id.to_storage().to_string(),
-                    fence.stream_id.as_str().to_string(),
-                    stored.to_string(),
-                ],
-            )
-            .await?;
-        if updated == 1 {
-            Ok(ShadowFrontierOutcome::Advanced)
-        } else {
-            Ok(ShadowFrontierOutcome::Stale { stored })
-        }
+        offered: IngressOrdinal,
+        checkpoint_h: WireHandledCount,
+    ) -> Result<FrontierOutcome, IngressUowError> {
+        ingress_substrate::advance_frontier(
+            transaction.transaction_mut(),
+            sm_ingress_id,
+            offered,
+            checkpoint_h,
+        )
+        .await
+        .map_err(Into::into)
+    }
+
+    pub async fn flush_checkpoint(
+        transaction: &mut IngressUowTransaction<'_>,
+        sm_ingress_id: SmIngressId,
+        h: WireHandledCount,
+    ) -> Result<(), IngressUowError> {
+        ingress_substrate::flush_checkpoint(transaction.transaction_mut(), sm_ingress_id, h)
+            .await
+            .map_err(Into::into)
+    }
+
+    pub async fn load_stream_checkpoint(
+        transaction: &mut IngressUowTransaction<'_>,
+        sm_ingress_id: SmIngressId,
+    ) -> Result<Option<WireHandledCount>, IngressUowError> {
+        ingress_substrate::load_stream_checkpoint(transaction.transaction_mut(), sm_ingress_id)
+            .await
+            .map_err(Into::into)
     }
 
     pub async fn delete_unclaimed(
@@ -423,6 +461,43 @@ impl SmIngressStreamRepository {
                 "DELETE FROM ingress_sm_streams WHERE stream_id = ?",
                 crate::db_params![stream_id.as_str().to_string()],
             )
+            .await
+            .map_err(Into::into)
+    }
+}
+
+/// Repository for completed durable and post-commit ingress effects.
+#[derive(Debug, Default, Clone, Copy)]
+pub struct EffectReceiptRepository;
+
+impl EffectReceiptRepository {
+    pub async fn record_receipt(
+        transaction: &mut IngressUowTransaction<'_>,
+        message_key: MessageKey,
+        kind: EffectReceiptKind,
+        hash: &[u8; 32],
+    ) -> Result<(), IngressUowError> {
+        ingress_substrate::record_receipt(transaction.transaction_mut(), message_key, kind, hash)
+            .await
+            .map_err(Into::into)
+    }
+
+    pub async fn receipts_complete(
+        transaction: &mut IngressUowTransaction<'_>,
+        message_key: MessageKey,
+    ) -> Result<bool, IngressUowError> {
+        ingress_substrate::receipts_complete(transaction.transaction_mut(), message_key)
+            .await
+            .map_err(Into::into)
+    }
+
+    pub async fn record_receipt_pooled(
+        db: &Database,
+        message_key: MessageKey,
+        kind: EffectReceiptKind,
+        hash: &[u8; 32],
+    ) -> Result<(), IngressUowError> {
+        ingress_substrate::record_receipt_pooled(db, message_key, kind, hash)
             .await
             .map_err(Into::into)
     }
@@ -635,17 +710,13 @@ impl PrincipalRepository {
         transaction: &mut IngressUowTransaction<'_>,
         principal: &AuthenticatedPrincipalRef,
     ) -> Result<PrincipalAssertion, IngressUowError> {
+        const POSTGRES: &str = "SELECT expires_at FROM sessions WHERE user_jid = ? AND auth_context_id = ? AND auth_context_version = ? AND principal_auth_epoch = ? FOR SHARE";
+        const SQLITE: &str = "SELECT expires_at FROM sessions WHERE user_jid = ? AND auth_context_id = ? AND auth_context_version = ? AND principal_auth_epoch = ?";
+        let sql = dialect_sql(transaction, POSTGRES, SQLITE);
         let mut rows = transaction
             .transaction_mut()
             .query(
-                r#"
-                SELECT expires_at FROM sessions
-                WHERE user_jid = ?
-                  AND auth_context_id = ?
-                  AND auth_context_version = ?
-                  AND principal_auth_epoch = ?
-                FOR SHARE
-                "#,
+                sql,
                 crate::db_params![
                     principal.bare_jid().to_string(),
                     principal.auth_context_id().as_uuid().to_string(),
@@ -695,18 +766,33 @@ impl DeliveryEffectRepository {
         transaction: &mut IngressUowTransaction<'_>,
         delivery_key: DeliveryKey,
     ) -> Result<Option<MessageKey>, IngressUowError> {
+        const POSTGRES: &str =
+            "SELECT message_key::text FROM ingress_deliveries WHERE delivery_key = ?::uuid";
+        const SQLITE: &str = "SELECT message_key FROM ingress_deliveries WHERE delivery_key = ?";
+        let sql = dialect_sql(transaction, POSTGRES, SQLITE);
         lookup_message_key(
             transaction,
-            "SELECT message_key::text FROM ingress_deliveries WHERE delivery_key = ?::uuid",
+            sql,
             crate::db_params![delivery_key.to_storage().to_string()],
         )
         .await
     }
 }
 
+fn dialect_sql(
+    transaction: &mut IngressUowTransaction<'_>,
+    postgres: &'static str,
+    sqlite: &'static str,
+) -> &'static str {
+    match transaction.transaction_mut().driver() {
+        DatabaseDriver::Postgres => postgres,
+        DatabaseDriver::Sqlite => sqlite,
+    }
+}
+
 async fn lookup_message_key(
     transaction: &mut IngressUowTransaction<'_>,
-    sql: &str,
+    sql: &'static str,
     params: impl crate::db::IntoParams,
 ) -> Result<Option<MessageKey>, IngressUowError> {
     let mut rows = transaction.transaction_mut().query(sql, params).await?;
@@ -736,7 +822,7 @@ pub struct ClaimRepository;
 ///
 /// It can only be minted after both the node-authority currency check
 /// (against the canonical `SharedNodeIdentity` bound at
-/// [`super::PostgresIngressUnitOfWork::open_with_node_identity`]) and the
+/// [`super::IngressUnitOfWork::open_with_node_identity`]) and the
 /// `FOR SHARE` claim assertion. The minted `CurrentNodeIdentityGuard` is
 /// retained by the transaction itself — not this independently droppable
 /// value — so identity rotation or terminal disable cannot complete until
@@ -757,7 +843,7 @@ pub struct SmClaimFence<'transaction> {
 ///
 /// It can only be minted after both the node-authority currency check
 /// (against the canonical `SharedNodeIdentity` bound at
-/// [`super::PostgresIngressUnitOfWork::open_with_node_identity`]) and the
+/// [`super::IngressUnitOfWork::open_with_node_identity`]) and the
 /// `FOR SHARE` claim assertion. The minted `CurrentNodeIdentityGuard` is
 /// retained by the transaction itself — not this independently droppable
 /// value — so identity rotation or terminal disable cannot complete until
@@ -779,7 +865,7 @@ impl ClaimRepository {
     /// row under `FOR SHARE`, after proving `owner` is still this node's
     /// current, active identity per the transaction's bound canonical
     /// identity source. Locks are taken in the fixed order
-    /// epoch (at [`super::PostgresIngressUnitOfWork::begin`]) → exact claim
+    /// epoch (at [`super::IngressUnitOfWork::begin`]) → exact claim
     /// (here) → `sm_sessions`/child rows (fenced repositories).
     pub async fn assert_sm_claim<'transaction>(
         transaction: &mut IngressUowTransaction<'transaction>,
@@ -826,7 +912,7 @@ impl ClaimRepository {
     /// row under `FOR SHARE`, after proving `owner` is still this node's
     /// current, active identity per the transaction's bound canonical
     /// identity source. Locks are taken in the fixed order
-    /// epoch (at [`super::PostgresIngressUnitOfWork::begin`]) → exact claim
+    /// epoch (at [`super::IngressUnitOfWork::begin`]) → exact claim
     /// (here) → room archive/child rows (fenced repositories).
     pub async fn assert_room_claim<'transaction>(
         transaction: &mut IngressUowTransaction<'transaction>,

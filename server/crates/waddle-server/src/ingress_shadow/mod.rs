@@ -22,8 +22,8 @@ use crate::ingress_substrate::{
 #[cfg(feature = "clustering")]
 use crate::ingress_uow::{
     run_with_retry, CanonicalMessageRepository, ClaimRepository, EffectIntentRepository,
-    EffectIntentWriteOutcome, IngressUowError, PostgresIngressUnitOfWork, PrincipalAssertion,
-    PrincipalRepository, ShadowFrontierOutcome, SmIngressRepository, SmIngressStreamRepository,
+    EffectIntentWriteOutcome, FrontierOutcome, IngressUnitOfWork, IngressUowError,
+    PrincipalAssertion, PrincipalRepository, SmIngressRepository, SmIngressStreamRepository,
 };
 #[cfg(feature = "clustering")]
 use chrono::Utc;
@@ -2010,7 +2010,7 @@ impl IngressShadowProcessor {
         &self,
         stream_id: &SmSessionId,
     ) -> Result<IngressShadowCommitKind, IngressUowError> {
-        let uow = PostgresIngressUnitOfWork::open_with_node_identity(
+        let uow = IngressUnitOfWork::open_with_node_identity(
             self.database.clone(),
             self.lineage.clone(),
             self.node_identity.clone(),
@@ -2028,7 +2028,7 @@ impl IngressShadowProcessor {
         &self,
         submission: &IngressShadowSubmission,
     ) -> Result<ShadowSubmissionOutcome, IngressUowError> {
-        let uow = PostgresIngressUnitOfWork::open_with_node_identity(
+        let uow = IngressUnitOfWork::open_with_node_identity(
             self.database.clone(),
             self.lineage.clone(),
             self.node_identity.clone(),
@@ -2102,7 +2102,6 @@ impl IngressShadowProcessor {
             Err(decision) => {
                 let commit_kind = advance_shadow_frontier(
                     &mut transaction,
-                    &fence,
                     sm_ingress_id,
                     submission.handled_ordinal,
                 )
@@ -2124,7 +2123,6 @@ impl IngressShadowProcessor {
         if let Some(decision) = rowless_decision {
             let commit_kind = advance_shadow_frontier(
                 &mut transaction,
-                &fence,
                 sm_ingress_id,
                 submission.handled_ordinal,
             )
@@ -2145,7 +2143,6 @@ impl IngressShadowProcessor {
         if capture_payload_overflow(&submission.capture.intents)? {
             let commit_kind = advance_shadow_frontier(
                 &mut transaction,
-                &fence,
                 sm_ingress_id,
                 submission.handled_ordinal,
             )
@@ -2192,7 +2189,6 @@ impl IngressShadowProcessor {
         if matches!(decision, IngressShadowDecisionClass::AliasConflict) {
             let commit_kind = advance_shadow_frontier(
                 &mut transaction,
-                &fence,
                 sm_ingress_id,
                 submission.handled_ordinal,
             )
@@ -2231,22 +2227,19 @@ impl IngressShadowProcessor {
         } else {
             decision
         };
-        let commit_kind = advance_shadow_frontier(
-            &mut transaction,
-            &fence,
-            sm_ingress_id,
-            submission.handled_ordinal,
-        )
-        .await?;
+        let commit_kind =
+            advance_shadow_frontier(&mut transaction, sm_ingress_id, submission.handled_ordinal)
+                .await?;
         if matches!(commit_kind, IngressShadowCommitKind::Stale) {
             return Ok(ShadowSubmissionOutcome::rolled_back(
                 IngressShadowDecisionClass::FrontierStale,
             ));
         }
-        let _ = SmIngressRepository::insert(
+        let _ = SmIngressRepository::insert_sm_ref(
             &mut transaction,
             sm_ingress_id,
             submission.handled_ordinal,
+            waddle_xmpp::ingress::WireHandledCount::new(submission.handled_ordinal.wire_h()),
             message_key,
         )
         .await?;
@@ -2279,7 +2272,7 @@ impl IngressShadowProcessor {
                 retry_class: crate::ingress_uow::DbRetryClass::SerializationFailure,
             });
         }
-        let uow = PostgresIngressUnitOfWork::open_with_node_identity(
+        let uow = IngressUnitOfWork::open_with_node_identity(
             self.database.clone(),
             self.lineage.clone(),
             self.node_identity.clone(),
@@ -2597,7 +2590,8 @@ async fn record_shadow_message(
                 Some(existing) => existing,
                 None => {
                     let key = minted();
-                    CanonicalMessageRepository::record(transaction, key, digest).await?;
+                    CanonicalMessageRepository::record_message(transaction, key, digest, None)
+                        .await?;
                     key
                 }
             };
@@ -2631,22 +2625,21 @@ async fn record_shadow_message(
 #[cfg(feature = "clustering")]
 async fn advance_shadow_frontier(
     transaction: &mut crate::ingress_uow::IngressUowTransaction<'_>,
-    fence: &crate::ingress_uow::SmClaimFence<'_>,
     sm_ingress_id: waddle_xmpp::ingress::SmIngressId,
     handled_ordinal: IngressOrdinal,
 ) -> Result<IngressShadowCommitKind, IngressUowError> {
     Ok(
         match SmIngressStreamRepository::advance_frontier(
             transaction,
-            fence,
             sm_ingress_id,
             handled_ordinal,
+            waddle_xmpp::ingress::WireHandledCount::new(0),
         )
         .await?
         {
-            ShadowFrontierOutcome::Advanced => IngressShadowCommitKind::Advanced,
-            ShadowFrontierOutcome::Idempotent => IngressShadowCommitKind::Idempotent,
-            ShadowFrontierOutcome::Stale { .. } => IngressShadowCommitKind::Stale,
+            FrontierOutcome::Advanced => IngressShadowCommitKind::Advanced,
+            FrontierOutcome::Idempotent => IngressShadowCommitKind::Idempotent,
+            FrontierOutcome::Stale { .. } => IngressShadowCommitKind::Stale,
         },
     )
 }
@@ -3405,7 +3398,7 @@ mod tests {
             for index in 0..count {
                 let key = MessageKey::new();
                 store
-                    .record_message(&mut transaction, key, &digest)
+                    .record_message(&mut transaction, key, &digest, None)
                     .await
                     .expect("record expired message");
                 assert_eq!(
@@ -4208,7 +4201,7 @@ mod tests {
             .await
             .expect("remove exact claim to exercise absence fence");
 
-        let uow = PostgresIngressUnitOfWork::open_with_node_identity(
+        let uow = IngressUnitOfWork::open_with_node_identity(
             fixture.db.clone(),
             fixture.processor.lineage.clone(),
             fixture.processor.node_identity.clone(),
