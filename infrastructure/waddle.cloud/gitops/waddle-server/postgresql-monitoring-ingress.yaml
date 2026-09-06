@@ -6,7 +6,8 @@ metadata:
   labels:
     cnpg.io/reload: ""
 # CloudNativePG runs these with `SET ROLE pg_monitor`; migration V1011 grants
-# that role SELECT on the ingress tables (the catalog views need no grant).
+# that role SELECT on the ingress tables; V1012 adds effect receipts
+# (the catalog views need no grant).
 data:
   queries: |
     waddle_ingress_table:
@@ -25,7 +26,8 @@ data:
           'ingress_sm_refs',
           'ingress_deliveries',
           'ingress_sm_streams',
-          'ingress_effect_intents'
+          'ingress_effect_intents',
+          'ingress_effect_receipts'
         )
         ORDER BY relname
       primary: true
@@ -159,4 +161,4 @@ data:
       metrics:
         - open_streams:
             usage: GAUGE
-            description: Number of ingress shadow stream records currently open.
+            description: Number of ingress stream records currently open.

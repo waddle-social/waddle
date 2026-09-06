@@ -29,7 +29,7 @@ and preserves links and history.
 | File | Dashboard | Status |
 |---|---|---|
 | `01-overview.json` | Waddle overview | Panel-complete. **Message rate by kind ships dark** until #1320 wires the metric label. |
-| `02-delivery-reliability.json` | Waddle delivery reliability | Panel-complete, including the ingress shadow soak row for #1695. |
+| `02-delivery-reliability.json` | Waddle delivery reliability | Panel-complete, including ingress authority decisions, aliases, retries, GC, latency, and unresolved effects for #1657; table metrics include `ingress_effect_receipts`. |
 | `03-clustering.json` | Waddle clustering | Panel-complete. **Claims released/abandoned on drain ships dark** until #1295 lands. |
 | `04-client-experience.json` | Waddle client experience | Panel-complete; all signals come from Faro in Loki. |
 | `05-calls.json` | Waddle calls | Deliberate board-wide skeleton, marked by the `skeleton` tag, until #1317, #1318, and #1319 land. |
