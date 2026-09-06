@@ -140,8 +140,10 @@ policy lookups.
   `ExistingDivergent` (advancing). A missing sender-side `ArchiveAuthoritative`
   on an `Existing` alias is unreachable by construction → `Storage`.
 - Inbox: each projection is applied once, keyed in `ingress_deliveries`
-  (`DeliveryKey::InboxProjection`); the upsert is monotonic on
-  `(timestamp, id)` so repairing an older message never rewinds a newer row.
+  (`DeliveryKey::InboxProjection`); the upsert is monotonic on the entry
+  timestamp (whole seconds, ties keep application order — archive ids can be
+  client-chosen, so they are not an ordering), so repairing an older message
+  never rewinds a newer row.
 - Replay on a duplicate: durable effects are repaired in Phase B; Phase C
   re-applies idempotent fenced effects through the existing guarded handler
   code (membership grants never demote; subject re-apply **and rebroadcast**

@@ -1153,15 +1153,17 @@ async fn assert_inbox_upsert_is_monotonic(storage: DatabaseInboxStorage) {
     assert_eq!(actual.author, newer.author);
     assert_eq!(actual.unread, 2);
 
+    // Archive ids can be client-chosen, so they carry no ordering: at an
+    // equal timestamp the most recently applied message is the latest one.
     let equal_timestamp = InboxEntry::new(newer.partner.clone(), ConversationKind::Direct, "a", 20);
     let actual = storage
         .upsert(&user, equal_timestamp, true)
         .await
-        .expect("older id at same timestamp");
-    assert_eq!(actual.last_stanza_id, "b");
+        .expect("same timestamp keeps application order");
+    assert_eq!(actual.last_stanza_id, "a");
     assert_eq!(
         actual.unread, 3,
-        "new older messages still increment unread"
+        "new messages at the same timestamp still increment unread"
     );
     let newer_id = InboxEntry::new(newer.partner, ConversationKind::Direct, "c", 20);
     let actual = storage

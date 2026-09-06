@@ -155,20 +155,16 @@ fn upsert_sql() -> String {
         ) VALUES (?, ?, ?, ?, ?, ?, CASE WHEN ? != 0 THEN 1 ELSE 0 END, ?, ?, ?, ?, ?, ?, ?, ?)
         ON CONFLICT(user_jid, partner_jid, thread_id) DO UPDATE SET
             kind = CASE
-                WHEN (excluded.last_updated, excluded.last_stanza_id) >=
-                     (inbox_entries.last_updated, inbox_entries.last_stanza_id)
+                WHEN excluded.last_updated >= inbox_entries.last_updated
                 THEN excluded.kind ELSE inbox_entries.kind END,
             last_stanza_id = CASE
-                WHEN (excluded.last_updated, excluded.last_stanza_id) >=
-                     (inbox_entries.last_updated, inbox_entries.last_stanza_id)
+                WHEN excluded.last_updated >= inbox_entries.last_updated
                 THEN excluded.last_stanza_id ELSE inbox_entries.last_stanza_id END,
             last_updated = CASE
-                WHEN (excluded.last_updated, excluded.last_stanza_id) >=
-                     (inbox_entries.last_updated, inbox_entries.last_stanza_id)
+                WHEN excluded.last_updated >= inbox_entries.last_updated
                 THEN excluded.last_updated ELSE inbox_entries.last_updated END,
             preview = CASE
-                WHEN (excluded.last_updated, excluded.last_stanza_id) >=
-                     (inbox_entries.last_updated, inbox_entries.last_stanza_id)
+                WHEN excluded.last_updated >= inbox_entries.last_updated
                 THEN excluded.preview ELSE inbox_entries.preview END,
             unread = CASE
                 WHEN ? != 0 THEN inbox_entries.unread + 1
@@ -180,8 +176,7 @@ fn upsert_sql() -> String {
                 ELSE inbox_entries.reply_count
             END,
             author = CASE
-                WHEN (excluded.last_updated, excluded.last_stanza_id) >=
-                     (inbox_entries.last_updated, inbox_entries.last_stanza_id)
+                WHEN excluded.last_updated >= inbox_entries.last_updated
                 THEN COALESCE(excluded.author, inbox_entries.author)
                 ELSE inbox_entries.author END,
             call_thread_kind = COALESCE(excluded.call_thread_kind, inbox_entries.call_thread_kind),

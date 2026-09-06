@@ -162,7 +162,7 @@ impl ShadowWsFixture {
 
     async fn poison_shadow_storage(&self) {
         sqlx::query(&format!(
-            "DROP TABLE {}.ingress_effect_intents",
+            "DROP TABLE {}.ingress_effect_intents CASCADE",
             self.schema
         ))
         .execute(&self.admin)
