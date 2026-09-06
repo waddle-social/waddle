@@ -661,6 +661,7 @@ mod tests {
         "ingress.tx.retries",
         "ingress.gc.runs",
         "ingress.gc.reclaimed_messages",
+        "ingress.effects.unresolved",
     ];
 
     /// Every metric name startup registration is expected to export.
