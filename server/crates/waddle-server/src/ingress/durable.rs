@@ -81,10 +81,18 @@ pub(super) async fn apply_durable(
                             stanza_id,
                             archived_at,
                             ..
-                        } if stored == archive => Some(ArchiveExpectation::Existing {
-                            stanza_id: stanza_id.clone(),
-                            archived_at: *archived_at,
-                        }),
+                        }
+                        | IngressEffectIntent::SystemMessageArchive {
+                            archive: stored,
+                            stanza_id,
+                            archived_at,
+                            ..
+                        } if stored == archive && stanza_id.id == message.id => {
+                            Some(ArchiveExpectation::Existing {
+                                stanza_id: stanza_id.clone(),
+                                archived_at: *archived_at,
+                            })
+                        }
                         _ => None,
                     })
                     .unwrap_or(ArchiveExpectation::Fresh);
@@ -162,7 +170,7 @@ pub(super) async fn apply_durable(
                 thread,
             }) => {
                 if let Some(entry) =
-                    InboxRepository::mark_read(tx, owner, channel, thread.as_ref()).await?
+                    InboxRepository::mark_read(tx, key, owner, channel, thread.as_ref()).await?
                 {
                     applied
                         .outcomes
@@ -203,17 +211,37 @@ pub(super) async fn apply_durable(
 fn corresponds(effect: &DurableEffect, intent: &IngressEffectIntent) -> bool {
     match (effect, intent) {
         (
-            DurableEffect::Direct(DurableDirectEffect::ArchiveDirect { archive, .. }),
+            DurableEffect::Direct(DurableDirectEffect::ArchiveDirect {
+                archive, message, ..
+            }),
             IngressEffectIntent::ArchiveAuthoritative {
-                archive: stored, ..
+                archive: stored,
+                stanza_id,
+                ..
+            }
+            | IngressEffectIntent::SystemMessageArchive {
+                archive: stored,
+                stanza_id,
+                ..
             },
         )
         | (
-            DurableEffect::Room(DurableRoomEffect::ArchiveGroupchat { room: archive, .. }),
+            DurableEffect::Room(DurableRoomEffect::ArchiveGroupchat {
+                room: archive,
+                message,
+                ..
+            }),
             IngressEffectIntent::ArchiveAuthoritative {
-                archive: stored, ..
+                archive: stored,
+                stanza_id,
+                ..
+            }
+            | IngressEffectIntent::SystemMessageArchive {
+                archive: stored,
+                stanza_id,
+                ..
             },
-        ) => archive == stored,
+        ) => archive == stored && message.id == stanza_id.id,
         (
             DurableEffect::Direct(DurableDirectEffect::ProjectInbox {
                 owner,

@@ -9,6 +9,11 @@ pub enum PlanEffectDependency {
         pair: crate::server::routes::websocket::DmPairKey,
         target: StanzaId,
     },
+    /// The room actor must confirm this exact pin state change.
+    AfterRoomPin {
+        room: BareJid,
+        change: waddle_xmpp::muc::pin::PinStateChange,
+    },
     AfterRoomMembership {
         room: BareJid,
         member: BareJid,

@@ -23,6 +23,22 @@ pub fn apply_recorded_intents(plan: &IngressPlan, recorded: &[IngressEffectInten
             continue;
         };
         for effect in &mut result.plan {
+            if let (
+                IngressEffectIntent::Pin {
+                    room,
+                    mutation: original_mutation,
+                },
+                IngressEffectIntent::Pin { mutation, .. },
+            ) = (original, authoritative)
+            {
+                for dependency in &mut effect.dependencies {
+                    if let crate::server::routes::interpret::effects::PlanEffectDependency::AfterRoomPin { room: dependent_room, change } = dependency {
+                        if dependent_room == room && *change == pin_change(original_mutation) {
+                            *change = pin_change(mutation);
+                        }
+                    }
+                }
+            }
             apply_effect(&mut effect.effect, original, authoritative);
         }
     }
@@ -137,9 +153,17 @@ fn apply_durable(
         ) if owner == old_owner && &entry.partner == room => *is_recipient = *increment_unread,
         (
             DurableEffect::Room(DurableRoomEffect::ProjectGroupchatInbox { entry, .. }),
-            IngressEffectIntent::ArchiveAuthoritative { archive, .. },
-            IngressEffectIntent::ArchiveAuthoritative { archived_at, .. },
-        ) if &entry.partner == archive => entry.last_updated = archived_at.timestamp(),
+            IngressEffectIntent::ArchiveAuthoritative {
+                archive, stanza_id, ..
+            }
+            | IngressEffectIntent::SystemMessageArchive {
+                archive, stanza_id, ..
+            },
+            IngressEffectIntent::ArchiveAuthoritative { archived_at, .. }
+            | IngressEffectIntent::SystemMessageArchive { archived_at, .. },
+        ) if &entry.partner == archive && entry.last_stanza_id == stanza_id.id => {
+            entry.last_updated = archived_at.timestamp()
+        }
         (
             DurableEffect::Direct(DurableDirectEffect::ProjectInbox {
                 owner,
@@ -185,10 +209,19 @@ fn apply_durable(
             }),
             IngressEffectIntent::ArchiveAuthoritative {
                 archive: old_archive,
+                stanza_id,
+                ..
+            }
+            | IngressEffectIntent::SystemMessageArchive {
+                archive: old_archive,
+                stanza_id,
                 ..
             },
-            IngressEffectIntent::ArchiveAuthoritative { archived_at, .. },
-        ) if archive == old_archive => message.timestamp = *archived_at,
+            IngressEffectIntent::ArchiveAuthoritative { archived_at, .. }
+            | IngressEffectIntent::SystemMessageArchive { archived_at, .. },
+        ) if archive == old_archive && message.id == stanza_id.id => {
+            message.timestamp = *archived_at
+        }
         (
             DurableEffect::Room(DurableRoomEffect::ProjectGroupchatInbox {
                 recovery: Some(recovery),
@@ -213,6 +246,24 @@ fn apply_external(
     use crate::server::routes::interpret::effects::early::RoomMembershipMutation;
     use crate::server::routes::websocket::handlers::message::muc_invite::InviteLedgerMutation;
     match (effect, original, recorded) {
+        (
+            ExternalEffect::Room(ExternalRoomEffect::ArchiveAfterPin {
+                room,
+                message,
+                archive_expectation,
+                ..
+            }),
+            IngressEffectIntent::SystemMessageArchive {
+                archive, stanza_id, ..
+            },
+            IngressEffectIntent::SystemMessageArchive { archived_at, .. },
+        ) if room == archive && message.id == stanza_id.id => {
+            message.timestamp = *archived_at;
+            *archive_expectation = waddle_xmpp::mam::ArchiveExpectation::Existing {
+                stanza_id: stanza_id.clone(),
+                archived_at: *archived_at,
+            };
+        }
         (
             ExternalEffect::InviteLedger(InviteLedgerMutation::Record {
                 invite,
@@ -304,16 +355,7 @@ fn apply_external(
             IngressEffectIntent::Pin { room: old_room, .. },
             IngressEffectIntent::Pin { mutation, .. },
         ) if room == old_room => {
-            *change = match mutation {
-                RoomPinMutation::Pin { entry } => {
-                    waddle_xmpp::muc::pin::PinStateChange::Pin(entry.clone())
-                }
-                RoomPinMutation::Unpin { target_stanza_id } => {
-                    waddle_xmpp::muc::pin::PinStateChange::Unpin {
-                        target_stanza_id: target_stanza_id.clone(),
-                    }
-                }
-            };
+            *change = pin_change(mutation);
         }
         _ => {}
     }
@@ -338,4 +380,15 @@ fn apply_recovery(
     recovery.room_members_only = saved.room_members_only;
     recovery.sender_can_broadcast_channel_mention = saved.sender_can_broadcast_channel_mention;
     recovery.created_at_ms = saved.created_at_ms;
+}
+
+fn pin_change(mutation: &RoomPinMutation) -> waddle_xmpp::muc::pin::PinStateChange {
+    match mutation {
+        RoomPinMutation::Pin { entry } => waddle_xmpp::muc::pin::PinStateChange::Pin(entry.clone()),
+        RoomPinMutation::Unpin { target_stanza_id } => {
+            waddle_xmpp::muc::pin::PinStateChange::Unpin {
+                target_stanza_id: target_stanza_id.clone(),
+            }
+        }
+    }
 }

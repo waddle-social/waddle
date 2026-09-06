@@ -53,6 +53,11 @@ pub(super) fn route_receipts(
             }
             Some(cover_recipients(external, &recipients, route_identity))
         }
+        IngressEffectIntent::RouteMucSystemBroadcast {
+            occupants,
+            route_identity,
+            ..
+        } => Some(cover_recipients(external, occupants, route_identity)),
         IngressEffectIntent::RouteOccupantPm { recipient, sender } => Some(
             external
                 .iter()

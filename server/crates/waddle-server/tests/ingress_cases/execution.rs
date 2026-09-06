@@ -127,7 +127,7 @@ async fn external_reply_execution(fixture: IngressFixture) {
     .await;
     assert_eq!(timed_out.outcomes.len(), 1);
     assert_eq!(timed_out.outcomes[0].1, ExternalOutcome::Failed);
-    assert!(timed_out.frames.is_empty());
+    assert!(timed_out.frame_obligations.is_empty());
     assert!(matches!(
         timed_out.terminalization_failure,
         Some(waddle_server::ingress::execute::ExecutionPersistenceFailure::BudgetExhausted)
@@ -150,10 +150,48 @@ async fn external_reply_execution(fixture: IngressFixture) {
     )
     .await;
     assert_eq!(report.outcomes.len(), 1);
-    assert_eq!(report.outcomes[0].1, ExternalOutcome::Done);
-    assert_eq!(report.frames.len(), 1);
+    assert_eq!(report.outcomes[0].1, ExternalOutcome::AwaitingFrameDelivery);
+    assert_eq!(report.frame_obligations.len(), 1);
     assert!(report.receipt_failures.is_empty());
     assert!(report.terminalization_failure.is_none());
+    assert_eq!(fixture.count("ingress_effect_receipts").await, 0);
+    assert_eq!(
+        fixture
+            .count("ingress_messages WHERE terminal_at IS NOT NULL")
+            .await,
+        0
+    );
+    assert_eq!(
+        report.frame_obligations[0].receipt_keys,
+        decision.receipts_pending
+    );
+    // Cancellation or a failed transport write must drop this report without confirmation.
+    drop(report);
+    assert!(!waddle_server::ingress::execute::terminalize_if_complete(
+        &fixture.uow,
+        decision.message_key.expect("key")
+    )
+    .await
+    .expect("still pending"));
+    let mut report = execute_effects(
+        &fixture.uow,
+        &fixture.db,
+        &decision,
+        &ImmediateSink,
+        &deps,
+        std::time::Duration::from_secs(5),
+    )
+    .await;
+    assert!(report
+        .complete_frame_obligations(&fixture.uow, &fixture.db, std::time::Duration::ZERO,)
+        .await
+        .is_err());
+    assert_eq!(fixture.count("ingress_effect_receipts").await, 0);
+    assert!(report
+        .complete_frame_obligations(&fixture.uow, &fixture.db, std::time::Duration::from_secs(5),)
+        .await
+        .expect("confirm successful transport write"));
+    assert_eq!(report.outcomes[0].1, ExternalOutcome::Done);
     assert_eq!(fixture.count("ingress_effect_receipts").await, 1);
     assert_eq!(
         fixture

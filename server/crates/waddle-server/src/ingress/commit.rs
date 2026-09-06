@@ -217,24 +217,33 @@ async fn commit_attempt(
     } else {
         super::restamp::restamp_plan(&submission.plan, &recorded_ids)
     };
-    // Timestamp is part of immutable archive authority, alongside the trusted ID.
+    // Each generated message retains its own timestamp and assigning authority.
     for intent in &mut plan.intents {
-        if let IngressEffectIntent::ArchiveAuthoritative {
-            archive,
-            by,
-            archived_at,
-            ..
-        } = intent
+        let authority = intent.authority_key();
+        if let IngressEffectIntent::ArchiveAuthoritative { archived_at, .. }
+        | IngressEffectIntent::SystemMessageArchive { archived_at, .. } = intent
         {
-            if let Some(IngressEffectIntent::ArchiveAuthoritative { archived_at: stored, .. }) = recorded.iter().find(|row| matches!(row, IngressEffectIntent::ArchiveAuthoritative { archive: a, by: b, .. } if a == archive && b == by)) {
+            if let Some(
+                IngressEffectIntent::ArchiveAuthoritative {
+                    archived_at: stored,
+                    ..
+                }
+                | IngressEffectIntent::SystemMessageArchive {
+                    archived_at: stored,
+                    ..
+                },
+            ) = recorded.iter().find(|row| row.authority_key() == authority)
+            {
                 *archived_at = *stored;
             }
         }
     }
+    // Archive-free plans (for example invitations) have no archive authority to
+    // recover. Every sender archive the plan does require must be recorded.
     if alias == AliasOutcomeClass::Existing
         && !owner_first
         && rejection.is_none()
-        && recorded_ids.is_empty()
+        && missing_planned_archive_authority(&submission.plan.intents, &recorded)
         && !owner_acceptance_pending(submission, &recorded)
         && stream.as_ref().is_none_or(|stream| stream.bound.is_none())
     {
@@ -317,7 +326,10 @@ async fn commit_attempt(
         ordinal,
         alias,
         verdict: Some(verdict),
-        archive_ids: archive_ids(&intents),
+        archive_ids: archive_ids(&intents)
+            .into_iter()
+            .map(|(archive, _, id)| (archive, id))
+            .collect(),
         applied_durable: std::sync::Arc::new(applied.outcomes),
         external_dependencies,
         external,
@@ -366,15 +378,50 @@ pub(crate) async fn commit_transaction(
         }
     })
 }
+fn missing_planned_archive_authority(
+    planned: &[IngressEffectIntent],
+    recorded: &[IngressEffectIntent],
+) -> bool {
+    planned.iter().any(|intent| {
+        matches!(
+            intent,
+            IngressEffectIntent::ArchiveAuthoritative { .. }
+                | IngressEffectIntent::SystemMessageArchive { .. }
+        ) && !recorded
+            .iter()
+            .any(|stored| stored.authority_key() == intent.authority_key())
+    })
+}
+
 fn archive_ids(
     intents: &[IngressEffectIntent],
-) -> Vec<(jid::BareJid, waddle_xmpp_core::xep0359::StanzaId)> {
+) -> Vec<(
+    jid::BareJid,
+    waddle_xmpp::ingress::ArchiveRole,
+    waddle_xmpp_core::xep0359::StanzaId,
+)> {
     intents
         .iter()
         .filter_map(|intent| match intent {
             IngressEffectIntent::ArchiveAuthoritative {
                 archive, stanza_id, ..
-            } => Some((archive.clone(), stanza_id.clone())),
+            } => Some((
+                archive.clone(),
+                waddle_xmpp::ingress::ArchiveRole::Sender,
+                stanza_id.clone(),
+            )),
+            IngressEffectIntent::SystemMessageArchive {
+                archive,
+                sequence,
+                stanza_id,
+                ..
+            } => Some((
+                archive.clone(),
+                waddle_xmpp::ingress::ArchiveRole::SystemMessage {
+                    sequence: *sequence,
+                },
+                stanza_id.clone(),
+            )),
             _ => None,
         })
         .collect()

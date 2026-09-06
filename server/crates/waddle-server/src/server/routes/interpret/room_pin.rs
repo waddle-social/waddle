@@ -156,7 +156,9 @@ async fn apply_pin(deps: &Deps<'_>, room: BareJid, request: PinChangeRequest, re
     }
     deps.capture_intent(IngressEffectIntent::Pin {
         room: room.clone(),
-        mutation: waddle_xmpp::ingress::RoomPinMutation::Pin { entry },
+        mutation: waddle_xmpp::ingress::RoomPinMutation::Pin {
+            entry: entry.clone(),
+        },
     });
 
     let system_message = build_pinned_system_message(
@@ -167,8 +169,23 @@ async fn apply_pin(deps: &Deps<'_>, room: BareJid, request: PinChangeRequest, re
         Some(&preview),
         None,
     );
+    let sink = effects::RoomPinSink {
+        inner: deps.effects,
+        dependency: effects::PlanEffectDependency::AfterRoomPin {
+            room: room.clone(),
+            change: PinStateChange::Pin(entry),
+        },
+    };
+    let scoped = Deps {
+        effects: &sink,
+        ..deps.clone()
+    };
     super::room_system_message::broadcast_room_system_message_event(
-        deps,
+        if deps.effects.is_planning() {
+            &scoped
+        } else {
+            deps
+        },
         room,
         Box::new(system_message),
         recursion_depth,
@@ -252,8 +269,23 @@ async fn apply_unpin(
         &target_stanza_id,
         reason.as_deref(),
     );
+    let sink = effects::RoomPinSink {
+        inner: deps.effects,
+        dependency: effects::PlanEffectDependency::AfterRoomPin {
+            room: room.clone(),
+            change: PinStateChange::Unpin { target_stanza_id },
+        },
+    };
+    let scoped = Deps {
+        effects: &sink,
+        ..deps.clone()
+    };
     super::room_system_message::broadcast_room_system_message_event(
-        deps,
+        if deps.effects.is_planning() {
+            &scoped
+        } else {
+            deps
+        },
         room,
         Box::new(system_message),
         recursion_depth,

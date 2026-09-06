@@ -70,7 +70,10 @@ impl super::PlannedEffect {
                     InviteLedgerMutation::Claim { .. } => InviteLedgerOutcome::Claimed(true),
                 }))
             }
-            Effect::Durable(DurableEffect::Direct(DurableDirectEffect::ArchiveDirect {
+            Effect::External(super::ExternalEffect::Room(
+                super::room::ExternalRoomEffect::ArchiveAfterPin { message, .. },
+            ))
+            | Effect::Durable(DurableEffect::Direct(DurableDirectEffect::ArchiveDirect {
                 message,
                 ..
             }))

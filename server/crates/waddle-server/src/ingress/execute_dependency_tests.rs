@@ -141,12 +141,12 @@ async fn membership_runs_before_dependents_and_preserved_grant_cannot_be_compens
             .collect::<Vec<_>>(),
         vec![
             ExternalOutcome::Failed,
-            ExternalOutcome::Done,
+            ExternalOutcome::AwaitingFrameDelivery,
             ExternalOutcome::Done
         ]
     );
     assert_eq!(
-        report.frames.len(),
+        report.frame_obligations.len(),
         1,
         "dependency executes even when placed after its dependent"
     );
@@ -198,7 +198,7 @@ async fn failed_dependency_withholds_and_meters_each_dependent() {
         Duration::from_secs(5),
     )
     .await;
-    assert!(report.frames.is_empty());
+    assert!(report.frame_obligations.is_empty());
     assert!(report
         .outcomes
         .iter()

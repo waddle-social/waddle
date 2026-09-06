@@ -9,17 +9,32 @@ use waddle_xmpp::{
 use waddle_xmpp_core::{mam::ThreadId, xep0359::StanzaId};
 
 impl InboxRepository {
+    /// Mark this message's projection read once; retries return the current row.
     pub async fn mark_read(
         tx: &mut IngressUowTransaction<'_>,
+        key: MessageKey,
         owner: &BareJid,
         channel: &BareJid,
         thread: Option<&ThreadId>,
     ) -> Result<Option<InboxEntry>, IngressUowError> {
-        Ok(
-            crate::inbox::mark_read_in_transaction(tx.transaction_mut(), owner, channel, thread)
+        if Self::record_projection(tx, key, owner, channel, thread).await? {
+            Ok(
+                crate::inbox::mark_read_in_transaction(
+                    tx.transaction_mut(),
+                    owner,
+                    channel,
+                    thread,
+                )
                 .await?,
-        )
+            )
+        } else {
+            Ok(
+                crate::inbox::find_in_transaction(tx.transaction_mut(), owner, channel, thread)
+                    .await?,
+            )
+        }
     }
+
     pub async fn apply_call_thread(
         tx: &mut IngressUowTransaction<'_>,
         key: MessageKey,

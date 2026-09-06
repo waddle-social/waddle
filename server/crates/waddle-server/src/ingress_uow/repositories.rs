@@ -119,25 +119,14 @@ impl InboxRepository {
                     .ok_or(crate::inbox::InboxTxError::InvalidProjectionThread)
             })
             .transpose()?;
-        let key =
-            DeliveryKey::inbox_projection(message_key, user, (&entry.partner, thread.as_ref()));
-        let recorded = DeliveryEffectRepository::lookup(transaction, key).await?;
-        if recorded.is_some_and(|recorded| recorded != message_key) {
-            return Err(ingress_substrate::IngressSubstrateError::DeliveryKeyConflict.into());
-        }
-        let apply = if recorded.is_some() {
-            false
-        } else {
-            // Recording locks the canonical row before the projection write.
-            // A concurrent retry that wins that lock first returns AlreadyRecorded.
-            match DeliveryEffectRepository::record(transaction, key, message_key).await? {
-                MessageWriteOutcome::Recorded => true,
-                MessageWriteOutcome::AlreadyRecorded => false,
-                MessageWriteOutcome::MessageVanished => {
-                    return Err(crate::inbox::InboxTxError::ProjectionMessageMissing.into());
-                }
-            }
-        };
+        let apply = Self::record_projection(
+            transaction,
+            message_key,
+            user,
+            &entry.partner,
+            thread.as_ref(),
+        )
+        .await?;
         let entry = if apply {
             crate::inbox::upsert_in_transaction(
                 transaction.transaction_mut(),
@@ -150,6 +139,33 @@ impl InboxRepository {
             crate::inbox::get_in_transaction(transaction.transaction_mut(), user, &entry).await?
         };
         Ok((entry, apply))
+    }
+
+    pub(super) async fn record_projection(
+        transaction: &mut IngressUowTransaction<'_>,
+        message_key: MessageKey,
+        user: &BareJid,
+        partner: &BareJid,
+        thread: Option<&waddle_xmpp_core::mam::ThreadId>,
+    ) -> Result<bool, IngressUowError> {
+        let key = DeliveryKey::inbox_projection(message_key, user, (partner, thread));
+        let recorded = DeliveryEffectRepository::lookup(transaction, key).await?;
+        if recorded.is_some_and(|recorded| recorded != message_key) {
+            return Err(ingress_substrate::IngressSubstrateError::DeliveryKeyConflict.into());
+        }
+        Ok(if recorded.is_some() {
+            false
+        } else {
+            // Recording locks the canonical row before the projection write.
+            // A concurrent retry that wins that lock first returns AlreadyRecorded.
+            match DeliveryEffectRepository::record(transaction, key, message_key).await? {
+                MessageWriteOutcome::Recorded => true,
+                MessageWriteOutcome::AlreadyRecorded => false,
+                MessageWriteOutcome::MessageVanished => {
+                    return Err(crate::inbox::InboxTxError::ProjectionMessageMissing.into());
+                }
+            }
+        })
     }
 
     /// Upsert an inbox row and its groupchat notification recovery item once in

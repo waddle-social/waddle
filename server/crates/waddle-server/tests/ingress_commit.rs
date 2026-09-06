@@ -88,3 +88,5 @@ mod tombstone;
 #[cfg(feature = "clustering")]
 #[path = "ingress_cases/owner_pending.rs"]
 mod owner_pending;
+#[path = "ingress_cases/replay.rs"]
+mod replay;
