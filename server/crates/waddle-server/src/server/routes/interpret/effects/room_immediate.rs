@@ -124,6 +124,7 @@ pub(super) async fn execute_external(effect: ExternalRoomEffect, deps: &Deps<'_>
         }
         #[cfg(feature = "clustering")]
         ExternalRoomEffect::RelayMucProxy {
+            admission,
             room,
             stanza,
             kind,
@@ -142,7 +143,14 @@ pub(super) async fn execute_external(effect: ExternalRoomEffect, deps: &Deps<'_>
                 return EffectOutcome::Unavailable;
             };
             match bridge
-                .try_proxy_muc_remote(&room, &stanza, kind, muc_origin, &origin)
+                .try_proxy_muc_remote(
+                    &room,
+                    &stanza,
+                    kind,
+                    muc_origin,
+                    &origin,
+                    admission.as_ref(),
+                )
                 .await
             {
                 Some(crate::clustering::route_bridge::OrderedRelayMucProxyOutcome::Delivered(

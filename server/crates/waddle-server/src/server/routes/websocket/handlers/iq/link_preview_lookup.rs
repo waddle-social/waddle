@@ -1440,7 +1440,6 @@ mod tests {
                 jid: requester.clone(),
                 occupancy_session: waddle_xmpp_core::OccupancySessionGeneration::mint(),
                 inbound_count: 1,
-                shadow_ordinal: waddle_xmpp::stream_management::ShadowOrdinal::ZERO,
                 outbound_count: 4,
                 last_acked: 4,
                 replay_gap_through: None,

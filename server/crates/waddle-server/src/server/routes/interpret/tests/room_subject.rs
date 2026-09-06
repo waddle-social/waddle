@@ -485,7 +485,7 @@ async fn xep_0045_persist_room_subject_committed_records_subject_mutation_intent
         })
         .await
         .expect("create room");
-    let capture = crate::ingress_shadow::IngressEffectCapture::new(None);
+    let capture = crate::ingress::IngressEffectCapture::new();
     let deps = Deps {
         effects: &crate::server::routes::interpret::effects::ImmediateSink,
         connection_registry: &registry,
@@ -580,7 +580,7 @@ async fn xep_0045_persist_room_subject_with_no_registry_bounces_and_halts_batch(
 #[tokio::test]
 async fn xep_0045_rejected_room_subject_does_not_record_subject_mutation_intent() {
     let registry = ConnectionRegistry::new();
-    let capture = crate::ingress_shadow::IngressEffectCapture::new(None);
+    let capture = crate::ingress::IngressEffectCapture::new();
     let mut deps = Deps::registry_only(&registry);
     deps.ingress_effect_capture = Some(capture.clone());
 
@@ -620,7 +620,7 @@ async fn xep_0045_rejected_room_subject_records_error_reply_intent() {
     use xmpp_parsers::stanza_error::{DefinedCondition, ErrorType, StanzaError};
 
     let registry = ConnectionRegistry::new();
-    let capture = crate::ingress_shadow::IngressEffectCapture::new(None);
+    let capture = crate::ingress::IngressEffectCapture::new();
     let mut deps = Deps::registry_only(&registry);
     deps.ingress_effect_capture = Some(capture.clone());
 

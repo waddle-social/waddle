@@ -75,7 +75,7 @@ async fn plan_local_groupchat_prepares_archive_and_inboxes_without_delivery() {
     register_test_connection(state.as_ref(), &alice, alice_tx).await;
     register_test_connection(state.as_ref(), &bob, bob_tx).await;
     let sink = PlanSink::new();
-    let capture = crate::ingress_shadow::IngressEffectCapture::new(None);
+    let capture = crate::ingress::IngressEffectCapture::new();
     let mut deps = crate::server::routes::websocket::interpret_loop::build_interpret_deps(
         state.as_ref(),
         None,
@@ -87,8 +87,7 @@ async fn plan_local_groupchat_prepares_archive_and_inboxes_without_delivery() {
     assert!(alice_rx.try_recv().is_err());
     assert!(bob_rx.try_recv().is_err());
     let captured = capture.snapshot();
-    assert!(captured.markers.is_empty());
-    assert!(captured.room_scope.is_none());
+    assert!(!captured.overflowed);
     assert!(!captured.intents.is_empty());
     let (plan, execution) = sink.take();
     assert!(matches!(execution, RoomExecutionPath::Local { room: planned, .. } if planned == room));
@@ -142,7 +141,7 @@ async fn plan_remote_groupchat_resolves_owner_without_a_proxy_bridge() {
         )
         .await;
     let sink = PlanSink::new();
-    let capture = crate::ingress_shadow::IngressEffectCapture::new(None);
+    let capture = crate::ingress::IngressEffectCapture::new();
     let mut deps = Deps::registry_only(&state.deps.protocol.connection_registry);
     deps.effects = &sink;
     deps.web_socket_state = Some(state.as_ref());
@@ -158,8 +157,7 @@ async fn plan_remote_groupchat_resolves_owner_without_a_proxy_bridge() {
     let outcome = dispatch_to_room(&deps, room.clone(), message(&room, &alice), 0).await;
     assert!(outcome.frames.is_empty());
     let captured = capture.snapshot();
-    assert!(captured.markers.is_empty());
-    assert!(captured.room_scope.is_none());
+    assert!(!captured.overflowed);
     let (plan, execution) = sink.take();
     assert!(
         matches!(execution, RoomExecutionPath::Remote { room: planned, .. } if planned == room)
@@ -171,6 +169,11 @@ async fn plan_remote_groupchat_resolves_owner_without_a_proxy_bridge() {
             ..
         }))
     ));
+    assert_eq!(
+        plan[0].suppression,
+        super::super::effects::PlanSuppressionPolicy::Always,
+        "origin duplicates must reach owner reconciliation and sender reflection"
+    );
     assert!(capture.snapshot().intents.iter().any(|intent| matches!(intent, IngressEffectIntent::DispatchToRoomRemote { room: planned, .. } if planned == &room)));
 }
 
@@ -271,7 +274,7 @@ async fn plan_pinned_retraction_freezes_system_archive_and_deliveries() {
     register_test_connection(state.as_ref(), &alice, alice_tx).await;
     register_test_connection(state.as_ref(), &bob, bob_tx).await;
     let sink = PlanSink::new();
-    let capture = crate::ingress_shadow::IngressEffectCapture::new(None);
+    let capture = crate::ingress::IngressEffectCapture::new();
     let mut deps = crate::server::routes::websocket::interpret_loop::build_interpret_deps(
         state.as_ref(),
         None,

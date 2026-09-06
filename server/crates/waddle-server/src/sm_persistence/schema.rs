@@ -37,7 +37,6 @@ pub(super) async fn initialize(storage: &DatabaseSmPersistence) -> Result<(), Sm
                 full_jid TEXT NOT NULL,
                 occupancy_session TEXT,
                 inbound_count {bigint} NOT NULL,
-                shadow_ordinal TEXT NOT NULL DEFAULT '0',
                 outbound_count {bigint} NOT NULL,
                 last_acked {bigint} NOT NULL,
                 max_resume_secs {bigint},
@@ -80,12 +79,7 @@ pub(super) async fn initialize(storage: &DatabaseSmPersistence) -> Result<(), Sm
         )
         .await?;
     add_column_if_missing(storage, "sm_sessions", "occupancy_session TEXT").await?;
-    add_column_if_missing(
-        storage,
-        "sm_sessions",
-        "shadow_ordinal TEXT NOT NULL DEFAULT '0'",
-    )
-    .await?;
+    drop_shadow_ordinal(storage).await?;
     add_column_if_missing(
         storage,
         "sm_sessions",
@@ -178,5 +172,37 @@ async fn widen_existing_postgres_i64_columns(
             .map_err(|error| SmPersistenceError::Other(error.to_string()))?;
     }
 
+    Ok(())
+}
+
+async fn drop_shadow_ordinal(storage: &DatabaseSmPersistence) -> Result<(), SmPersistenceError> {
+    if storage.db.driver() == DatabaseDriver::Postgres {
+        storage
+            .execute(
+                "ALTER TABLE sm_sessions DROP COLUMN IF EXISTS shadow_ordinal",
+                (),
+            )
+            .await?;
+    } else {
+        // SQLite has no DROP COLUMN IF EXISTS syntax.
+        let mut rows = storage.query("PRAGMA table_info(sm_sessions)", ()).await?;
+        let mut exists = false;
+        while let Some(row) = rows
+            .next()
+            .await
+            .map_err(|error| SmPersistenceError::Other(error.to_string()))?
+        {
+            let name: String = row
+                .get(1)
+                .map_err(|error| SmPersistenceError::Other(error.to_string()))?;
+            exists |= name == "shadow_ordinal";
+        }
+        drop(rows);
+        if exists {
+            storage
+                .execute("ALTER TABLE sm_sessions DROP COLUMN shadow_ordinal", ())
+                .await?;
+        }
+    }
     Ok(())
 }

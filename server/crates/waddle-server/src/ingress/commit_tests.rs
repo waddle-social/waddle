@@ -51,6 +51,7 @@ async fn fixture() -> (Database, IngressUnitOfWork, IngressSubmission) {
     )
     .expect("digest");
     let submission = IngressSubmission {
+        sender: "romeo@example.com/phone".parse().expect("sender"),
         identity: IngressStreamIdentity::Ephemeral {
             principal: principal.clone(),
         },

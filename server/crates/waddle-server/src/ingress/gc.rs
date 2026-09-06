@@ -138,9 +138,9 @@ fn record_retention_gc_result(
     outcome: waddle_xmpp::telemetry::attributes::IngressGcOutcome,
     deleted_messages: usize,
 ) -> waddle_xmpp::telemetry::attributes::IngressGcOutcome {
-    waddle_xmpp::telemetry::reliability::increment_ingress_shadow_gc_run(outcome);
+    waddle_xmpp::telemetry::reliability::increment_ingress_gc_run(outcome);
     if deleted_messages > 0 {
-        waddle_xmpp::telemetry::reliability::add_ingress_shadow_gc_reclaimed_messages(
+        waddle_xmpp::telemetry::reliability::add_ingress_gc_reclaimed_messages(
             u64::try_from(deleted_messages).unwrap_or(u64::MAX),
         );
     }

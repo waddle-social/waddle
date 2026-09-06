@@ -135,6 +135,7 @@ impl IngressFixture {
         )
         .expect("digest");
         IngressSubmission {
+            sender: "romeo@example.com/phone".parse().expect("sender"),
             identity: IngressStreamIdentity::Ephemeral {
                 principal: self.principal.clone(),
             },

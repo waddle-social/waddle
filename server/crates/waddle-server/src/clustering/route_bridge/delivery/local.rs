@@ -21,8 +21,16 @@ impl OrderedRelayDeliveryBridge {
                     .await
                     .map(|()| Vec::new())
             }
-            RelayPayloadTarget::Muc(room, kind, origin, stanza) => {
-                deliver_reserved_muc_proxy(&services, room, kind, origin, stanza).await
+            RelayPayloadTarget::Muc(room, kind, origin, stanza, admission) => {
+                deliver_reserved_muc_proxy(
+                    &services,
+                    room,
+                    kind,
+                    origin,
+                    stanza,
+                    admission.as_ref(),
+                )
+                .await
             }
         }
     }
@@ -36,13 +44,26 @@ pub(in super::super) async fn deliver_local_after_target_refresh_outcome(
 ) -> RemoteDeliveryOutcome {
     match payload {
         OrderedRelayPayload::MucProxy {
+            canonical,
+            principal,
+            stanza_lang,
             room_jid,
             kind,
             origin,
             stanza,
         } => muc_proxy_result_to_outcome(
             Box::pin(deliver_reserved_muc_proxy(
-                services, room_jid, *kind, *origin, &stanza.0,
+                services,
+                room_jid,
+                *kind,
+                *origin,
+                &stanza.0,
+                crate::ingress::identity::IngressRelayAdmission::from_parts(
+                    canonical.clone(),
+                    principal.clone(),
+                    stanza_lang.clone(),
+                )
+                .as_ref(),
             ))
             .await,
         ),

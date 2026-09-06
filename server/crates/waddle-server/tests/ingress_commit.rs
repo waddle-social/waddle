@@ -84,3 +84,7 @@ mod rejections;
 mod stream;
 #[path = "ingress_cases/tombstone.rs"]
 mod tombstone;
+
+#[cfg(feature = "clustering")]
+#[path = "ingress_cases/owner_pending.rs"]
+mod owner_pending;

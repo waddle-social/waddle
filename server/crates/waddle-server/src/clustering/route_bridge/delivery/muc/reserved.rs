@@ -6,6 +6,7 @@ pub(in super::super::super) async fn deliver_reserved_muc_proxy(
     kind: OrderedRelayMucProxyKind,
     origin: MucProxyOrigin,
     stanza: &Stanza,
+    admission: Option<&crate::ingress::identity::IngressRelayAdmission>,
 ) -> Result<Vec<RemoteStanza>, OrderedRelayNackReason> {
     let Some(state) = services.web_socket_state.upgrade() else {
         tracing::warn!(
@@ -24,7 +25,10 @@ pub(in super::super::super) async fn deliver_reserved_muc_proxy(
             OrderedRelayMucProxyKind::GroupchatMessage,
             MucProxyOrigin::Server,
             Stanza::Message(message),
-        ) => deliver_reserved_muc_groupchat(state.as_ref(), room_jid, message).await,
+        ) => {
+            deliver_reserved_muc_groupchat(services, state.as_ref(), room_jid, message, admission)
+                .await
+        }
         (
             OrderedRelayMucProxyKind::OccupantPresence,
             MucProxyOrigin::Connection(generation),
@@ -238,55 +242,93 @@ pub(in super::super::super) async fn deliver_reserved_muc_leave(
 }
 
 pub(in super::super::super) async fn deliver_reserved_muc_groupchat(
+    services: &OrderedRelayDeliveryServices,
     state: &WebSocketState,
     room_jid: &jid::BareJid,
     message: &xmpp_parsers::message::Message,
+    admission: Option<&crate::ingress::identity::IngressRelayAdmission>,
 ) -> Result<Vec<RemoteStanza>, OrderedRelayNackReason> {
-    let synthetic_session = message
+    use crate::ingress::{ImmediateSink, IngressStreamIdentity, IngressSubmission};
+    use waddle_xmpp::ingress::{ConnectionGeneration, DigestContext, NormalizedTarget};
+    let admission = admission.ok_or(OrderedRelayNackReason::ParseFailure)?;
+    let sender = message
         .from
         .as_ref()
-        .and_then(|jid| jid.clone().try_into_full().ok())
-        .map(|sender| synthetic_session_for_full_jid(&sender));
+        .and_then(|jid| jid.try_as_full().ok())
+        .ok_or(OrderedRelayNackReason::ParseFailure)?;
+    if sender.to_bare() != admission.canonical.sender_bare
+        || sender.to_bare() != *admission.principal.bare_jid()
+    {
+        return Err(OrderedRelayNackReason::ParseFailure);
+    }
+    let synthetic_session = synthetic_session_for_full_jid(sender);
     let sender_entity = room_entity(room_jid);
     let deps = build_interpret_deps(
         state,
-        synthetic_session
-            .as_ref()
-            .map(crate::server::routes::websocket::ResolvedPrincipal::from_authenticated_session),
+        Some(
+            crate::server::routes::websocket::ResolvedPrincipal::from_authenticated_session(
+                &synthetic_session,
+            ),
+        ),
     )
     .with_ordered_relay_origin(Some(OrderedRelayRouteOrigin {
         kind: OrderedRelayRouteOriginKind::Entity(sender_entity.clone()),
-        sender_entity,
+        sender_entity: sender_entity.clone(),
         inbound_sequence: 0,
         handoff: None,
     }));
-    let outcome = tokio::time::timeout(
-        ORDERED_RECEIVER_DELIVERY_TIMEOUT,
-        crate::server::routes::interpret::dispatch_muc_to_room_for_relay(
+    let authority = &state.deps.protocol.ingress;
+    let decision = tokio::time::timeout(ORDERED_RECEIVER_DELIVERY_TIMEOUT, async {
+        let claim = current_claim(services, &sender_entity)
+            .await
+            .ok_or(OrderedRelayNackReason::TargetUnavailable)?;
+        if !claim.owner_lease_fresh || claim.owner != services.node_identity.current() {
+            return Err(OrderedRelayNackReason::TargetUnavailable);
+        }
+        let room_fence = waddle_xmpp::muc::RoomClaimFenceContext::new(
+            sender_entity.clone(),
+            claim.owner,
+            claim.claim_epoch,
+        );
+        let target = NormalizedTarget::Bare(room_jid.clone());
+        let digest_input = crate::ingress::submission::digest_input(
+            message,
+            &DigestContext {
+                target: target.clone(),
+                server_authorities: vec![sender.to_bare(), room_jid.clone()],
+                stanza_lang: admission.stanza_lang.clone(),
+            },
+        )
+        .map_err(|_| OrderedRelayNackReason::ParseFailure)?;
+        let plan = crate::server::routes::interpret::plan_muc_for_relay(
             &deps,
             room_jid.clone(),
             message.clone(),
-        ),
-    )
+        )
+        .await;
+        let submission = IngressSubmission {
+            identity: IngressStreamIdentity::Relayed {
+                canonical: admission.canonical.clone(),
+                room: room_jid.clone(),
+                room_fence,
+            },
+            principal: admission.principal.clone(),
+            sender: sender.clone(),
+            target,
+            plan,
+            digest_input,
+            connection_generation: ConnectionGeneration::INITIAL,
+        };
+        Ok(authority.commit(&submission).await)
+    })
     .await
-    .map_err(|_| OrderedRelayNackReason::MaybeCommitted)?;
-    Ok(outcome
-        .frames
-        .into_iter()
-        .filter_map(|frame| {
-            match super::super::super::super::codec::decode_stanza(frame.as_str()) {
-                Ok(stanza) => Some(RemoteStanza(stanza)),
-                Err(error) => {
-                    tracing::warn!(
-                        room = %room_jid,
-                        %error,
-                        "ordered relay: MUC groupchat reply frame was not a stanza"
-                    );
-                    None
-                }
-            }
-        })
-        .collect())
+    .map_err(|_| OrderedRelayNackReason::MaybeCommitted)??;
+    if !decision.class.advances() {
+        return Err(OrderedRelayNackReason::MaybeCommitted);
+    }
+    // This budget is independent from admission: a timeout cannot undo commit.
+    let report = authority.execute(&decision, &ImmediateSink, &deps).await;
+    Ok(report.frames.into_iter().map(RemoteStanza).collect())
 }
 
 pub(in super::super::super) fn muc_proxy_result_to_outcome(

@@ -41,7 +41,6 @@ fn fixture_session(stream_id: &str) -> PersistedSession {
         jid: full("alice@example.com/web"),
         occupancy_session: fixed_occupancy_session(),
         inbound_count: 7,
-        shadow_ordinal: waddle_xmpp::stream_management::ShadowOrdinal::from_storage(11),
         outbound_count: 12,
         last_acked: 10,
         replay_gap_through: Some(9),
@@ -109,7 +108,6 @@ async fn round_trip_session_preserves_every_field() {
     assert_eq!(loaded.jid, s.jid);
     assert_eq!(loaded.occupancy_session, s.occupancy_session);
     assert_eq!(loaded.inbound_count, s.inbound_count);
-    assert_eq!(loaded.shadow_ordinal, s.shadow_ordinal);
     assert_eq!(loaded.outbound_count, s.outbound_count);
     assert_eq!(loaded.last_acked, s.last_acked);
     assert_eq!(loaded.replay_gap_through, s.replay_gap_through);
@@ -576,7 +574,6 @@ async fn detached_snapshot_refresh_preserves_principal_through_registry() {
         jid: full("alice@example.com/phone"),
         occupancy_session: waddle_xmpp_core::OccupancySessionGeneration::mint(),
         inbound_count: 0,
-        shadow_ordinal: waddle_xmpp::stream_management::ShadowOrdinal::ZERO,
         outbound_count: 0,
         last_acked: 0,
         replay_gap_through: None,
@@ -1247,4 +1244,71 @@ async fn delete_unacked_removes_only_named_sequences_for_stream() {
         .await
         .unwrap();
     assert_eq!(removed, 0);
+}
+
+#[tokio::test]
+async fn sqlite_schema_drops_shadow_ordinal_and_preserves_session() {
+    let storage = DatabaseSmPersistence::open(None)
+        .await
+        .expect("open SQLite SM store");
+    let session = fixture_session("shadow-column-removal");
+    storage
+        .upsert_session(session.clone())
+        .await
+        .expect("store session");
+    storage
+        .execute(
+            "ALTER TABLE sm_sessions ADD COLUMN shadow_ordinal TEXT NOT NULL DEFAULT '0'",
+            (),
+        )
+        .await
+        .expect("install former shadow column");
+
+    schema::initialize(&storage)
+        .await
+        .expect("remove shadow column");
+    schema::initialize(&storage)
+        .await
+        .expect("repeat schema initialization");
+
+    let mut rows = storage
+        .query("PRAGMA table_info(sm_sessions)", ())
+        .await
+        .expect("inspect schema");
+    while let Some(row) = rows.next().await.expect("schema row") {
+        let column: String = row.get(1).expect("column name");
+        assert_ne!(column, "shadow_ordinal");
+    }
+    drop(rows);
+    let restored = storage
+        .get_session(&session.stream_id)
+        .await
+        .expect("load session")
+        .expect("session retained");
+    assert_eq!(restored.inbound_count, session.inbound_count);
+    assert_eq!(restored.outbound_count, session.outbound_count);
+    assert_eq!(restored.occupancy_session, session.occupancy_session);
+}
+
+#[tokio::test]
+async fn postgres_schema_has_no_shadow_ordinal() {
+    let Ok(database_url) = std::env::var("WADDLE_TEST_POSTGRES_URL") else {
+        eprintln!("skipping: WADDLE_TEST_POSTGRES_URL not set (Postgres shadow column removal)");
+        return;
+    };
+    let storage = DatabaseSmPersistence::open(Some(&database_url))
+        .await
+        .expect("open Postgres SM store");
+    schema::initialize(&storage)
+        .await
+        .expect("repeat schema initialization");
+    let mut rows = storage.query("SELECT COUNT(*) FROM information_schema.columns WHERE table_schema = current_schema() AND table_name = 'sm_sessions' AND column_name = 'shadow_ordinal'", ()).await.expect("inspect schema");
+    let count: i64 = rows
+        .next()
+        .await
+        .expect("schema query")
+        .expect("count row")
+        .get(0)
+        .expect("column count");
+    assert_eq!(count, 0);
 }

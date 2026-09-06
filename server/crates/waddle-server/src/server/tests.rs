@@ -1020,12 +1020,10 @@ async fn test_app() -> Router {
 
 async fn test_app_for_state(state: Arc<AppState>) -> Router {
     let server_config = ServerConfig::test_homeserver();
-    let test_global_db = crate::db::Database::in_memory("test-mam-global")
-        .await
-        .expect("test global db");
-    let mam_storage = http::create_websocket_mam_storage(None, false, false, &test_global_db)
-        .await
-        .unwrap();
+    let mam_storage =
+        http::create_websocket_mam_storage(None, false, false, state.db_pool.global())
+            .await
+            .unwrap();
     let pubsub_database_storage = Arc::new(
         crate::pubsub::DatabasePubSubStorage::open(Some("sqlite::memory:"))
             .await

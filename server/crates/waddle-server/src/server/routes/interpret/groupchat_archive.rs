@@ -543,7 +543,7 @@ pub(super) async fn apply_groupchat_retraction_tombstone_outcome(
     room: &BareJid,
     target_message_id: &str,
     retraction_message: &Message,
-    capture: Option<&crate::ingress_shadow::IngressEffectCapture>,
+    capture: Option<&crate::ingress::IngressEffectCapture>,
 ) -> GroupchatRetractionTombstoneOutcome {
     // XEP-0424 §3 (xep-0424.xml lines 158, 230-232): a groupchat
     // retraction names the target by the room-assigned XEP-0359
@@ -738,7 +738,7 @@ pub(super) async fn scrub_unacked_for_tombstone(
     >,
     target: &waddle_xmpp::tombstone::TombstoneTarget,
     site: &'static str,
-    capture: Option<&crate::ingress_shadow::IngressEffectCapture>,
+    capture: Option<&crate::ingress::IngressEffectCapture>,
 ) {
     let mut sm_entries = Vec::new();
     let mut pending_rows = Vec::new();

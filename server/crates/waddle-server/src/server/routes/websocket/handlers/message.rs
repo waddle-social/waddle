@@ -73,7 +73,7 @@ pub async fn handle_message(
     state_machine: Option<&mut XmppStateMachine>,
     authenticated_session: Option<&Session>,
     ordered_relay_origin: Option<crate::server::routes::interpret::OrderedRelayRouteOrigin>,
-    ingress_effect_capture: Option<crate::ingress_shadow::IngressEffectCapture>,
+    ingress_effect_capture: Option<crate::ingress::IngressEffectCapture>,
 ) -> Vec<String> {
     let Some(bound_jid) = phase.bound_jid().cloned() else {
         warn!("Message received without authenticated session");
@@ -120,9 +120,7 @@ pub(crate) async fn dispatch_early_message(
 ) -> Option<Vec<Stanza>> {
     deps.effects.observe_sender(bound_jid);
     strip_client_authored_delay(incoming);
-    if let Some(capture) = &deps.ingress_effect_capture {
-        capture.record_sanitized_message(incoming);
-    }
+    deps.effects.observe_message(incoming);
     let frames = dispatch_early_handlers(incoming, bound_jid, deps).await?;
     for stanza in &frames {
         crate::server::routes::interpret::capture_serialized_error_reply(deps, stanza);
@@ -211,9 +209,7 @@ async fn dispatch_early_handlers(
 }
 
 fn record_rejected_envelope(deps: &Deps<'_>, message: &xmpp_parsers::message::Message) {
-    if let Some(capture) = &deps.ingress_effect_capture {
-        capture.record_sanitized_message(message);
-    }
+    deps.effects.observe_message(message);
 }
 
 pub(super) fn reject_message(
@@ -298,7 +294,7 @@ fn remove_framework_envelopes(message: &mut xmpp_parsers::message::Message) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::ingress_shadow::IngressEffectCapture;
+    use crate::ingress::IngressEffectCapture;
     use crate::server::routes::websocket::tests::create_test_websocket_state;
     use waddle_xmpp::protocol::XmppStateMachine;
     use xmpp_parsers::message::{Message, MessageType};
@@ -376,7 +372,7 @@ mod tests {
         let state = create_test_websocket_state().await;
         let bound: jid::FullJid = "alice@example.com/web".parse().expect("jid");
         let phase = ConnectionPhase::ready(bound.clone(), false);
-        let capture = IngressEffectCapture::new(None);
+        let capture = IngressEffectCapture::new();
         let mut sm = XmppStateMachine::new("example.com", Default::default());
         let mut incoming = Message::new(Some("bob@example.com".parse::<jid::Jid>().expect("jid")));
         incoming.type_ = MessageType::Chat;
@@ -396,7 +392,7 @@ mod tests {
         )
         .await;
 
-        assert!(capture.snapshot().markers.is_empty());
+        assert!(!capture.snapshot().overflowed);
         assert_eq!(frames.len(), 1);
     }
 
@@ -405,7 +401,7 @@ mod tests {
         let state = create_test_websocket_state().await;
         let bound: jid::FullJid = "alice@example.com/web".parse().expect("jid");
         let phase = ConnectionPhase::ready(bound.clone(), false);
-        let capture = IngressEffectCapture::new(None);
+        let capture = IngressEffectCapture::new();
         let mut sm = XmppStateMachine::new("example.com", Default::default());
         let mut incoming = Message::new(Some("bob@example.com".parse::<jid::Jid>().expect("jid")));
         incoming.type_ = MessageType::Chat;
@@ -425,7 +421,7 @@ mod tests {
         )
         .await;
 
-        assert!(capture.snapshot().markers.is_empty());
+        assert!(!capture.snapshot().overflowed);
         assert_eq!(frames.len(), 1);
     }
 
@@ -433,8 +429,6 @@ mod tests {
     async fn sanitized_snapshot_keeps_pre_enrichment_link_preview_request() {
         let state = create_test_websocket_state().await;
         let bound: jid::FullJid = "alice@example.com/web".parse().expect("jid");
-        let phase = ConnectionPhase::ready(bound.clone(), false);
-        let capture = IngressEffectCapture::new(None);
         let mut sm = XmppStateMachine::new("example.com", Default::default());
         let preview = waddle_xmpp::xep::LinkPreviewTokenData {
             sender_jid: bound.to_bare(),
@@ -468,31 +462,20 @@ mod tests {
             .payloads
             .push(waddle_xmpp::xep::build_link_preview_request_element(&token));
 
-        let _ = handle_message(
-            incoming,
-            state.as_ref(),
-            &phase,
-            Some(&mut sm),
-            None,
-            None,
-            Some(capture.clone()),
-        )
-        .await;
-
-        let snapshot = capture.snapshot();
-        let sanitized = snapshot
-            .sanitized_message
-            .expect("capture should keep a sanitized message snapshot");
+        let deps = build_interpret_deps(state.as_ref(), None);
+        let plan =
+            crate::server::routes::interpret::plan_message_dispatch(&mut sm, incoming, &deps).await;
+        let sanitized = plan.sanitized_message;
         assert!(
             waddle_xmpp::xep::extract_link_preview_request_from_message(&sanitized).is_some(),
-            "the shadow snapshot must retain the pre-enrichment request token"
+            "the planned envelope must retain the pre-enrichment request token"
         );
         assert!(
             sanitized.payloads.iter().all(|payload| {
                 !waddle_xmpp::xep::xep0511::is_link_metadata_element(payload)
                     && !waddle_xmpp::xep::xep0447::is_file_sharing_element(payload)
             }),
-            "the shadow snapshot must not include server-stamped link preview metadata"
+            "the planned envelope must not include server-stamped link preview metadata"
         );
     }
 }

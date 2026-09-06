@@ -212,3 +212,82 @@ async fn ingress_missing_archive_repair_postgres() {
         missing_archive_repaired(fixture).await;
     }
 }
+
+async fn groupchat_alias_conflict_replies_to_authenticated_sender(fixture: IngressFixture) {
+    let room: jid::BareJid = "room@muc.example.com".parse().expect("room");
+    let make_submission = |body: &str| {
+        let mut submission = fixture.submission(Some("room-conflict"), body);
+        let target = waddle_xmpp::ingress::NormalizedTarget::Bare(room.clone());
+        let message = &mut submission.plan.sanitized_message;
+        message.to = Some(room.clone().into());
+        message.type_ = xmpp_parsers::message::MessageType::Groupchat;
+        submission.digest_input = waddle_xmpp::ingress::DigestInput::from_parsed(
+            message,
+            &waddle_xmpp::ingress::DigestContext {
+                target: target.clone(),
+                server_authorities: vec![submission.principal.bare_jid().clone(), room.clone()],
+                stanza_lang: None,
+            },
+        )
+        .expect("groupchat digest");
+        submission.target = target;
+        // Phase A freezes the canonical room prototype with its occupant address.
+        message.from = Some(room.with_resource_str("romeo").expect("occupant").into());
+        let stanza_id = StanzaId::new("room-recorded-id", room.clone().into());
+        waddle_xmpp_core::xep0359::add_stanza_id(message, &stanza_id);
+        submission
+            .plan
+            .intents
+            .push(IngressEffectIntent::ArchiveAuthoritative {
+                archive: room.clone(),
+                by: room.clone(),
+                stanza_id,
+                archived_at: chrono::Utc::now(),
+            });
+        submission
+    };
+    let original = make_submission("original");
+    let accepted = commit_submission(&fixture.uow, &original, 5)
+        .await
+        .expect("first commit");
+    assert!(accepted.class.advances());
+    let offered = make_submission("different");
+    let decision = commit_submission(&fixture.uow, &offered, 5)
+        .await
+        .expect("conflict commit");
+    assert_eq!(decision.class, IngressDecisionClass::AliasConflict);
+    let [waddle_server::ingress::effects::ExternalEffect::Frame(stanza)] =
+        decision.external.as_slice()
+    else {
+        panic!("one standard error frame")
+    };
+    let waddle_xmpp::Stanza::Message(reply) = stanza.as_ref() else {
+        panic!("message error")
+    };
+    assert_eq!(reply.to, Some(offered.sender.clone().into()));
+    assert_eq!(reply.from, Some(room.into()));
+    let mut tx = fixture.uow.begin().await.expect("read intents");
+    let intents = waddle_server::ingress_uow::EffectIntentRepository::load(
+        &mut tx,
+        decision.message_key.expect("rejection key"),
+    )
+    .await
+    .expect("recorded error intent");
+    assert!(
+        matches!(intents.as_slice(), [IngressEffectIntent::ErrorReply { recipient, .. }] if recipient == &offered.sender)
+    );
+    tx.commit().await.expect("finish read");
+    fixture.close().await;
+}
+
+#[tokio::test]
+async fn ingress_groupchat_alias_conflict_sender_sqlite() {
+    groupchat_alias_conflict_replies_to_authenticated_sender(IngressFixture::sqlite().await).await;
+}
+
+#[tokio::test]
+async fn ingress_groupchat_alias_conflict_sender_postgres() {
+    if let Some(fixture) = IngressFixture::postgres("groupchat_conflict_sender").await {
+        groupchat_alias_conflict_replies_to_authenticated_sender(fixture).await;
+    }
+}

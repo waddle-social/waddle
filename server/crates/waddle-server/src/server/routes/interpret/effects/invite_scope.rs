@@ -41,6 +41,12 @@ impl EffectSink for ScopedInviteSink<'_> {
     fn is_planning(&self) -> bool {
         self.inner.is_planning()
     }
+    fn observe_message(&self, message: &xmpp_parsers::message::Message) {
+        self.inner.observe_message(message);
+    }
+    fn message(&self) -> Option<xmpp_parsers::message::Message> {
+        self.inner.message()
+    }
     fn observe_sender(&self, sender: &jid::FullJid) {
         self.inner.observe_sender(sender);
     }

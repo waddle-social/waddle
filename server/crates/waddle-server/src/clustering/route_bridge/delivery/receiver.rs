@@ -366,6 +366,7 @@ pub(in super::super) enum RelayPayloadTarget<'a> {
         OrderedRelayMucProxyKind,
         MucProxyOrigin,
         &'a Stanza,
+        Option<crate::ingress::identity::IngressRelayAdmission>,
     ),
 }
 
@@ -377,11 +378,26 @@ pub(in super::super) fn relay_payload_target(
         | OrderedRelayPayload::Iq { recipient, stanza }
         | OrderedRelayPayload::Presence { recipient, stanza } => Ok((recipient, &stanza.0)),
         OrderedRelayPayload::MucProxy {
+            canonical,
+            principal,
+            stanza_lang,
             room_jid,
             kind,
             origin,
             stanza,
-        } => return Ok(RelayPayloadTarget::Muc(room_jid, *kind, *origin, &stanza.0)),
+        } => {
+            return Ok(RelayPayloadTarget::Muc(
+                room_jid,
+                *kind,
+                *origin,
+                &stanza.0,
+                crate::ingress::identity::IngressRelayAdmission::from_parts(
+                    canonical.clone(),
+                    principal.clone(),
+                    stanza_lang.clone(),
+                ),
+            ))
+        }
     }?;
     match &envelope.channel.recipient {
         OrderedRelayRecipient::FullJid(full) if recipient == &jid::Jid::from(full.clone()) => {

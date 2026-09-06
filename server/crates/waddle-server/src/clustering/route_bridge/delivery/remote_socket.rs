@@ -164,11 +164,19 @@ impl OrderedRelayDeliveryBridge {
                 }
             }
             RemoteResourceRouteTarget::MucProxy {
+                canonical,
+                principal,
+                stanza_lang,
                 room_jid,
                 kind,
                 origin: muc_origin,
                 stanza,
             } => {
+                let admission = crate::ingress::identity::IngressRelayAdmission::from_parts(
+                    canonical,
+                    principal,
+                    stanza_lang,
+                );
                 // This path can execute the payload locally WITHOUT the
                 // envelope validation (`envelope_is_consistent` /
                 // `validate_claims`) that the ordered-relay receiver
@@ -184,7 +192,14 @@ impl OrderedRelayDeliveryBridge {
                     stanza
                 };
                 let outcome = if let Some(remote) = self
-                    .try_proxy_muc_remote(&room_jid, &stanza.0, kind, muc_origin, &origin)
+                    .try_proxy_muc_remote(
+                        &room_jid,
+                        &stanza.0,
+                        kind,
+                        muc_origin,
+                        &origin,
+                        admission.as_ref(),
+                    )
                     .await
                 {
                     remote
@@ -192,7 +207,12 @@ impl OrderedRelayDeliveryBridge {
                     muc_proxy_result_to_ordered_outcome(
                         kind,
                         deliver_reserved_muc_proxy(
-                            &services, &room_jid, kind, muc_origin, &stanza.0,
+                            &services,
+                            &room_jid,
+                            kind,
+                            muc_origin,
+                            &stanza.0,
+                            admission.as_ref(),
                         )
                         .await,
                     )

@@ -128,6 +128,7 @@ pub(super) async fn dispatch_to_room(
                     crate::clustering::ordered_relay::OrderedRelayMucProxyKind::GroupchatMessage,
                     crate::clustering::ordered_relay::MucProxyOrigin::Server,
                     origin,
+                    None,
                 )
                 .await
             {
@@ -590,11 +591,7 @@ pub(super) async fn dispatch_to_room(
     // the full `default_room_dispatcher()` here would re-run it.
     let dispatch_outcome =
         fanout_span.in_scope(|| default_room_pipeline_dispatcher().dispatch(&mut working, &ctx));
-    if deps.effects.is_planning() {
-        if let Some(capture) = deps.ingress_effect_capture.as_ref() {
-            capture.record_sanitized_message(&working);
-        }
-    }
+    deps.effects.observe_message(&working);
     let observer_message = working.clone();
     let mut dispatch_events = dispatch_outcome.events;
     bind_room_claim_fence(&mut dispatch_events, snapshot.claim_fence.as_ref());
@@ -711,7 +708,7 @@ fn room_lookup_internal_error() -> xmpp_parsers::stanza_error::StanzaError {
 
 #[cfg(feature = "clustering")]
 pub(super) fn capture_delivered_remote_room_route(
-    capture: &crate::ingress_shadow::IngressEffectCapture,
+    capture: &crate::ingress::IngressEffectCapture,
     room: &jid::BareJid,
     relay_target: RelayTargetIdentity,
 ) {
@@ -978,6 +975,7 @@ async fn plan_remote_room(
     super::effects::room::external(
         deps,
         super::effects::room::ExternalRoomEffect::RelayMucProxy {
+            admission: None,
             room: room.clone(),
             stanza: Box::new(Stanza::Message(message.clone())),
             kind: crate::clustering::ordered_relay::OrderedRelayMucProxyKind::GroupchatMessage,
@@ -985,7 +983,8 @@ async fn plan_remote_room(
             origin: origin.clone(),
             reflect_replies_to_sender: true,
         },
-        super::effects::PlanSuppressionPolicy::SenderOnly,
+        // The owner reconciles duplicates and returns the recorded sender reflection.
+        super::effects::PlanSuppressionPolicy::Always,
     );
     true
 }

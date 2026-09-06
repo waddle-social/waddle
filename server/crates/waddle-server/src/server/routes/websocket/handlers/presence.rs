@@ -310,8 +310,7 @@ async fn handle_presence_impl(
                             crate::clustering::ordered_relay::MucProxyOrigin::Connection(
                                 *context.occupancy_session,
                             ),
-                            origin,
-                        )
+                            origin, None)
                         .await
                     {
                         Some(

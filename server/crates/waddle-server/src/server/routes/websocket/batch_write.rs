@@ -534,7 +534,7 @@ where
             return SendWindowOutcome::Recovered;
         }
         if let Err(outcome) =
-            service_paused_sm_requests_from_deferred(sender, conn, authority).await
+            service_paused_sm_requests_from_deferred(sender, state, conn, authority).await
         {
             return outcome;
         }
@@ -622,6 +622,16 @@ where
                     if !batch_authoritative(authority) {
                         return SendWindowOutcome::AuthorityRevoked;
                     }
+                    if super::stream_management::flush_ingress_checkpoint(
+                        state,
+                        &conn.sm_state,
+                        &mut conn.sm_inbound_completion,
+                    )
+                    .await
+                    .is_err()
+                    {
+                        return SendWindowOutcome::TransportClosed;
+                    }
                     if let Err(outcome) = send_window_message(
                         sender,
                         Message::Text(
@@ -674,6 +684,7 @@ where
 
 async fn service_paused_sm_requests_from_deferred<S, E>(
     sender: &mut S,
+    state: &WebSocketState,
     conn: &mut WsConnState,
     authority: Option<(
         &crate::clustering::NodeAdmissionPermit,
@@ -700,6 +711,13 @@ where
         if !batch_authoritative(authority) {
             return Err(SendWindowOutcome::AuthorityRevoked);
         }
+        super::stream_management::flush_ingress_checkpoint(
+            state,
+            &conn.sm_state,
+            &mut conn.sm_inbound_completion,
+        )
+        .await
+        .map_err(|_| SendWindowOutcome::TransportClosed)?;
         send_window_message(
             sender,
             Message::Text(

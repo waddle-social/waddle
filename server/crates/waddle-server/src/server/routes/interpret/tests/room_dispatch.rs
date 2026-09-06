@@ -2,7 +2,7 @@
 use super::super::room_dispatch::capture_delivered_remote_room_route;
 use super::super::room_dispatch::push_sender_error_reply;
 use super::*;
-use crate::ingress_shadow::IngressEffectCapture;
+use crate::ingress::IngressEffectCapture;
 
 // XEP-0372 — RequestEnrichment callback round-trip
 // -----------------------------------------------------------------
@@ -19,7 +19,7 @@ fn extension_waddle_scope_matches_managed_room_context() {
 #[cfg(feature = "clustering")]
 #[test]
 fn delivered_remote_room_dispatch_captures_frozen_route_intent() {
-    let capture = IngressEffectCapture::new(None);
+    let capture = IngressEffectCapture::new();
     let room: BareJid = "remote@muc.example.com".parse().expect("room");
     let relay_target = waddle_xmpp::ingress::RelayTargetIdentity::owner_node("node-b", "epoch-b");
 
@@ -117,7 +117,7 @@ async fn dispatch_to_room_fanout_span_and_latency_cover_recipient_enqueues() {
     )
     .await;
 
-    let capture = IngressEffectCapture::new(None);
+    let capture = IngressEffectCapture::new();
     let deps = Deps {
         effects: &crate::server::routes::interpret::effects::ImmediateSink,
         connection_registry: &state.deps.protocol.connection_registry,
@@ -244,7 +244,7 @@ async fn dispatch_to_room_fanout_span_and_latency_cover_recipient_enqueues() {
 #[test]
 fn successful_room_error_reply_records_error_intent() {
     let registry = ConnectionRegistry::new();
-    let capture = IngressEffectCapture::new(None);
+    let capture = IngressEffectCapture::new();
     let deps = Deps {
         effects: &crate::server::routes::interpret::effects::ImmediateSink,
         connection_registry: &registry,

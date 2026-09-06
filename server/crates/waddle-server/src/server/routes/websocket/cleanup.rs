@@ -687,7 +687,14 @@ pub(super) async fn cleanup_connection_shutdown(
     conn: &mut WsConnState,
     superseded: bool,
 ) -> ConnectionShutdownOutcome {
-    cleanup_connection_shutdown_inner(state, outbound_rx, conn, superseded, None).await
+    Box::pin(cleanup_connection_shutdown_inner(
+        state,
+        outbound_rx,
+        conn,
+        superseded,
+        None,
+    ))
+    .await
 }
 
 /// Force-detach cleanup has a stricter completion boundary than ordinary
@@ -702,7 +709,14 @@ pub(super) async fn cleanup_force_detach_connection_shutdown(
     superseded: bool,
     origin: waddle_xmpp::registry::ForceDetachOrigin,
 ) -> ConnectionShutdownOutcome {
-    cleanup_connection_shutdown_inner(state, outbound_rx, conn, superseded, Some(origin)).await
+    Box::pin(cleanup_connection_shutdown_inner(
+        state,
+        outbound_rx,
+        conn,
+        superseded,
+        Some(origin),
+    ))
+    .await
 }
 
 async fn cleanup_connection_shutdown_inner(
@@ -718,7 +732,7 @@ async fn cleanup_connection_shutdown_inner(
     // promotes this task's already accepted delivery and leaves those shared
     // resources alone.
     if superseded && !conn.sm_recovery_required {
-        forget_terminal_shadow_stream_and_release_claim(state, &conn.sm_state).await;
+        forget_terminal_ingress_stream_and_release_claim(state, &conn.sm_state).await;
         return ConnectionShutdownOutcome::NotPersisted;
     }
     // Note: we deliberately do NOT mirror `conn.phase` Closing into
@@ -762,7 +776,7 @@ async fn cleanup_connection_shutdown_inner(
         })
     {
         conn.begin_terminal_sm_recovery();
-        let _ = forget_terminal_shadow_stream_and_wait(state, &conn.sm_state).await;
+        let _ = forget_terminal_ingress_stream_and_wait(state, &conn.sm_state).await;
         return promote_terminal_recovery(state, outbound_rx, &jid, conn).await;
     }
 
@@ -781,7 +795,7 @@ async fn cleanup_connection_shutdown_inner(
         }
         let Some(owner) = conn.registry_owner.as_ref() else {
             debug!(jid = %jid, "Skipped SM detach for connection without registry ownership");
-            forget_terminal_shadow_stream_and_release_claim(state, &conn.sm_state).await;
+            forget_terminal_ingress_stream_and_release_claim(state, &conn.sm_state).await;
             return ConnectionShutdownOutcome::NotPersisted;
         };
         let presence_state = state
@@ -800,11 +814,11 @@ async fn cleanup_connection_shutdown_inner(
             }
             // No pre-drain claim deferral here: the release-retry janitor
             // could release the deferred fence while admitted shadow
-            // submissions still hold it. `forget_terminal_shadow_stream_and_
+            // submissions still hold it. `forget_terminal_ingress_stream_and_
             // release_claim` drains to idle first and then terminalizes the
             // exact claim itself.
             debug!(jid = %jid, "Skipped SM detach for non-owned registry entry");
-            forget_terminal_shadow_stream_and_release_claim(state, &conn.sm_state).await;
+            forget_terminal_ingress_stream_and_release_claim(state, &conn.sm_state).await;
             return ConnectionShutdownOutcome::NotPersisted;
         };
 
@@ -865,14 +879,14 @@ async fn cleanup_connection_shutdown_inner(
             if !state
                 .deps
                 .protocol
-                .ingress_shadow
+                .ingress
                 .wait_for_stream_idle(&stream_id, std::time::Duration::from_secs(30))
                 .await
             {
                 warn!(
                     jid = %jid,
                     %stream_id,
-                    "refusing resumable SM handoff with unfinished ingress shadow work"
+                    "refusing resumable SM handoff with unfinished ingress authority work"
                 );
                 return promote_terminal_recovery(state, outbound_rx, &jid, conn).await;
             }
@@ -1013,9 +1027,11 @@ async fn cleanup_connection_shutdown_inner(
                                 )
                                 .await;
                                 for completed in outcome.completed_stream_ids() {
-                                    state.deps.protocol.ingress_shadow.forget_stream(
+                                    retire_ingress_stream(
+                                        state,
                                         &waddle_xmpp::pending_delivery::SmSessionId::new(completed),
-                                    );
+                                    )
+                                    .await;
                                 }
                             }
                             Ok(None) => {}
@@ -1248,7 +1264,7 @@ async fn cleanup_connection_shutdown_inner(
                             );
                         }
                     }
-                    forget_terminal_shadow_stream_and_release_claim(state, &conn.sm_state).await;
+                    forget_terminal_ingress_stream_and_release_claim(state, &conn.sm_state).await;
                     if !recovered_any {
                         // Nothing came back from displacement: either the
                         // store failed before its in-memory insert, or a
@@ -1377,7 +1393,7 @@ async fn cleanup_connection_shutdown_inner(
     }
     // Every path reaching here is a non-detach (full-cleanup or no-op)
     // teardown — never a persisted resumable snapshot.
-    forget_terminal_shadow_stream_and_release_claim(state, &conn.sm_state).await;
+    forget_terminal_ingress_stream_and_release_claim(state, &conn.sm_state).await;
     ConnectionShutdownOutcome::NotPersisted
 }
 
@@ -1429,11 +1445,11 @@ async fn displace_failed_detach_snapshot(
     }
 }
 
-async fn forget_terminal_shadow_stream_and_release_claim(
+async fn forget_terminal_ingress_stream_and_release_claim(
     state: &WebSocketState,
     sm_state: &waddle_xmpp::stream_management::StreamManagementState,
 ) {
-    let Some(stream_id) = forget_terminal_shadow_stream_and_wait(state, sm_state).await else {
+    let Some(stream_id) = forget_terminal_ingress_stream_and_wait(state, sm_state).await else {
         return;
     };
     state
@@ -1442,48 +1458,29 @@ async fn forget_terminal_shadow_stream_and_release_claim(
         .sm_session_registry
         .release_attached_session_claim(&stream_id)
         .await;
+    retire_ingress_stream(state, &stream_id).await;
 }
 
-async fn forget_terminal_shadow_stream_and_wait(
+async fn forget_terminal_ingress_stream_and_wait(
     state: &WebSocketState,
     sm_state: &waddle_xmpp::stream_management::StreamManagementState,
 ) -> Option<waddle_xmpp::pending_delivery::SmSessionId> {
-    // Retire first to close admission, then wait for every previously
-    // admitted submission task to drain before ending the fence those tasks
-    // captured at observation time. Enroll/Retire tasks are not counted in
-    // per-stream pending activity; the retirement task fences on claim
-    // absence itself and self-reschedules (`DeferredClaim`) when it runs
-    // before the release below.
-    forget_terminal_shadow_stream(state, sm_state);
+    // Finish admitted commits before releasing the claim and retiring its refs.
     let session_id =
         waddle_xmpp::pending_delivery::SmSessionId::new(sm_state.stream_id.as_deref()?);
     while !state
         .deps
         .protocol
-        .ingress_shadow
+        .ingress
         .wait_for_stream_idle(&session_id, std::time::Duration::from_secs(30))
         .await
     {
         warn!(
             %session_id,
-            "terminal SM cleanup is still waiting for admitted ingress shadow work to drain"
+            "terminal SM cleanup is still waiting for admitted ingress authority work to drain"
         );
     }
     Some(session_id)
-}
-
-fn forget_terminal_shadow_stream(
-    state: &WebSocketState,
-    sm_state: &waddle_xmpp::stream_management::StreamManagementState,
-) {
-    let Some(stream_id) = sm_state.stream_id.as_deref() else {
-        return;
-    };
-    state
-        .deps
-        .protocol
-        .ingress_shadow
-        .forget_stream(&waddle_xmpp::pending_delivery::SmSessionId::new(stream_id));
 }
 
 /// Promote terminal recovery without creating a resumable snapshot. This is
@@ -2128,7 +2125,7 @@ async fn refuse_detach_without_principal(
     row_recovery: TerminalRowRecovery,
     terminal_route_removal: TerminalRouteRemoval,
 ) -> ConnectionShutdownOutcome {
-    let _ = forget_terminal_shadow_stream_and_wait(state, &conn.sm_state).await;
+    let _ = forget_terminal_ingress_stream_and_wait(state, &conn.sm_state).await;
     // A terminal session must disappear from the exact-FullJID routing table
     // before promotion. Otherwise `send_to` can successfully target this
     // closed channel and drop a <no-store/> stanza instead of taking the
@@ -2205,11 +2202,11 @@ async fn refuse_detach_without_principal(
         )
         .await;
         for completed in outcome.completed_stream_ids() {
-            state
-                .deps
-                .protocol
-                .ingress_shadow
-                .forget_stream(&waddle_xmpp::pending_delivery::SmSessionId::new(completed));
+            retire_ingress_stream(
+                state,
+                &waddle_xmpp::pending_delivery::SmSessionId::new(completed),
+            )
+            .await;
         }
         (
             conn.sm_state
@@ -2870,6 +2867,7 @@ async fn cleanup_remote_muc_presence(
                 crate::clustering::ordered_relay::OrderedRelayMucProxyKind::OccupantPresence,
                 remote_membership_leave_origin(&membership),
                 &origin,
+                None,
             )
             .await;
         match remote_muc_cleanup_disposition(&decision) {
@@ -3175,9 +3173,11 @@ pub(super) async fn cleanup_invalidated_detached_session(
     // Terminal invalidation: this stream can never resume, so its ingress-
     // shadow enrollment gate must not outlive it (a fresh bind mints a new
     // stream id, and the expiry janitor never sees an invalidated session).
-    state.deps.protocol.ingress_shadow.forget_stream(
+    retire_ingress_stream(
+        state,
         &waddle_xmpp::pending_delivery::SmSessionId::new(detached.stream_id.clone()),
-    );
+    )
+    .await;
     // `entry_if_owner` is a READ-ONLY ownership check — it does NOT remove the
     // DashMap entry. It gates whether we attempt cleanup at all: if the
     // replacement (the freshly-bound session that triggered this invalidation)
@@ -5440,5 +5440,14 @@ mod local_departure_cleanup_tests {
         .await;
 
         assert!(matches!(result, Err(LeaveAskFailure::Transport)));
+    }
+}
+
+async fn retire_ingress_stream(
+    state: &WebSocketState,
+    stream_id: &waddle_xmpp::pending_delivery::SmSessionId,
+) {
+    if let Err(error) = Box::pin(state.deps.protocol.ingress.forget_stream(stream_id)).await {
+        warn!(%stream_id, %error, "failed to retire ingress stream");
     }
 }

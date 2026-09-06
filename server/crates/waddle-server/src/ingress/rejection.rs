@@ -24,6 +24,7 @@ pub(super) fn planned_rejection(plan: &IngressPlan) -> Option<IngressDecisionCla
 pub(super) fn rejection_plan(
     plan: &IngressPlan,
     class: IngressDecisionClass,
+    sender: &jid::FullJid,
 ) -> Result<IngressPlan, IngressUowError> {
     let mut rejected = plan.clone();
     rejected.plan.clear();
@@ -32,13 +33,7 @@ pub(super) fn rejection_plan(
         .retain(|intent| matches!(intent, IngressEffectIntent::ErrorReply { .. }));
     rejected.room_execution = RoomExecutionPath::None;
     let reply = if class == IngressDecisionClass::AliasConflict {
-        let recipient = plan
-            .sanitized_message
-            .from
-            .as_ref()
-            .and_then(|jid| jid.try_as_full().ok())
-            .cloned()
-            .ok_or(IngressUowError::EffectIntentConflict)?;
+        let recipient = sender.clone();
         let error = FrozenStanzaError::new(
             FrozenStanzaErrorType::Cancel,
             StanzaErrorCondition::Conflict,

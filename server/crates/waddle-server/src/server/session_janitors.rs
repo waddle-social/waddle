@@ -1023,11 +1023,7 @@ pub(crate) async fn run_sm_expiry_sweep(state: &Arc<WebSocketState>) {
                 count = drained.len(),
                 "SM janitor: cleaning up expired detached sessions"
             );
-            for session in &drained {
-                state.deps.protocol.ingress_shadow.forget_stream(
-                    &waddle_xmpp::pending_delivery::SmSessionId::new(session.stream_id.clone()),
-                );
-            }
+
         }
         let mut promotion_batch = crate::sm_promotion::PromotionBatchGuard::new(
             &state.deps.protocol.sm_session_registry,
@@ -1127,12 +1123,7 @@ pub(crate) async fn run_sm_expiry_sweep(state: &Arc<WebSocketState>) {
                         "SM janitor: row reconciliation has repeatedly failed; \
                          dead-lettering the durable row to break the retry loop"
                     );
-                    if state
-                        .deps
-                        .protocol
-                        .sm_session_registry
-                        .confirm_drained(&session.stream_id)
-                        .await
+                    if confirm_expired_ingress_stream(state, &waddle_xmpp::pending_delivery::SmSessionId::new(session.stream_id.clone())).await
                     {
                         promotion_guard.complete();
                         // Dead-lettering discards the replay queue, but the
@@ -1245,12 +1236,7 @@ pub(crate) async fn run_sm_expiry_sweep(state: &Arc<WebSocketState>) {
                             "SM janitor: blocklist load has repeatedly failed; \
                              dead-lettering the durable row to break the retry loop"
                         );
-                        if state
-                            .deps
-                            .protocol
-                            .sm_session_registry
-                            .confirm_drained(&session.stream_id)
-                            .await
+                        if confirm_expired_ingress_stream(state, &waddle_xmpp::pending_delivery::SmSessionId::new(session.stream_id.clone())).await
                         {
                             promotion_guard.complete();
                         }
@@ -1378,12 +1364,7 @@ pub(crate) async fn run_sm_expiry_sweep(state: &Arc<WebSocketState>) {
                         "SM janitor: Q6 promotion repeatedly failed; \
                          dead-lettering the durable row to break the retry loop"
                     );
-                    if state
-                        .deps
-                        .protocol
-                        .sm_session_registry
-                        .confirm_drained(&session.stream_id)
-                        .await
+                    if confirm_expired_ingress_stream(state, &waddle_xmpp::pending_delivery::SmSessionId::new(session.stream_id.clone())).await
                     {
                         promotion_guard.complete();
                     }
@@ -1407,12 +1388,7 @@ pub(crate) async fn run_sm_expiry_sweep(state: &Arc<WebSocketState>) {
                 }
                 continue;
             }
-            if state
-                .deps
-                .protocol
-                .sm_session_registry
-                .confirm_drained(&session.stream_id)
-                .await
+            if confirm_expired_ingress_stream(state, &waddle_xmpp::pending_delivery::SmSessionId::new(session.stream_id.clone())).await
             {
                 promotion_guard.complete();
             } else {
@@ -1580,6 +1556,9 @@ pub(crate) async fn run_sm_expiry_sweep(state: &Arc<WebSocketState>) {
         if !retry_pending_sm_ownership(state).await {
             sweep_failed = true;
         }
+        if !run_ingress_retirement_sweep(state).await {
+            sweep_failed = true;
+        }
         waddle_xmpp::telemetry::reliability::record_janitor_sweep(
             Janitor::SmExpiry,
             if sweep_failed {
@@ -1591,6 +1570,62 @@ pub(crate) async fn run_sm_expiry_sweep(state: &Arc<WebSocketState>) {
     }
     .instrument(janitor_sweep_span(Janitor::SmExpiry))
     .await;
+}
+
+/// Retry abandoned enrollment and failed terminal retirement from their durable rows.
+pub(crate) async fn run_ingress_retirement_sweep(state: &WebSocketState) -> bool {
+    const BUDGET: std::time::Duration = std::time::Duration::from_secs(2);
+    tokio::time::timeout(BUDGET, async {
+        let candidates = match state
+            .deps
+            .protocol
+            .ingress
+            .next_retirement_candidates()
+            .await
+        {
+            Ok(candidates) => candidates,
+            Err(error) => {
+                warn!(%error, "SM janitor: ingress retirement scan failed");
+                return false;
+            }
+        };
+        let mut completed = true;
+        for stream in candidates {
+            state
+                .deps
+                .protocol
+                .ingress
+                .mark_retirement_candidate_attempted(&stream)
+                .await;
+
+            // Enrollment follows claim acquisition. Snapshot after listing each row,
+            // so a fresh <enable/> cannot disappear behind an earlier snapshot.
+            match state
+                .deps
+                .protocol
+                .sm_session_registry
+                .has_retirement_protection(&stream)
+                .await
+            {
+                Ok(true) => continue,
+                Ok(false) => {}
+                Err(error) => {
+                    warn!(%stream, %error, "SM janitor: ingress retirement ownership probe failed");
+                    completed = false;
+                    continue;
+                }
+            }
+            // PostgreSQL checks claim absence under a transaction-held table lock,
+            // protecting foreign owners and claims acquired after the local check.
+            if let Err(error) = state.deps.protocol.ingress.forget_stream(&stream).await {
+                warn!(%stream, %error, "SM janitor: orphan ingress retirement failed");
+                completed = false;
+            }
+        }
+        completed
+    })
+    .await
+    .unwrap_or(false)
 }
 
 async fn retry_pending_sm_ownership(state: &WebSocketState) -> bool {
@@ -1654,6 +1689,26 @@ mod sm_retry_budget_tests {
     }
 }
 
+async fn confirm_expired_ingress_stream(
+    state: &routes::websocket::WebSocketState,
+    stream_id: &waddle_xmpp::pending_delivery::SmSessionId,
+) -> bool {
+    if !state
+        .deps
+        .protocol
+        .sm_session_registry
+        .confirm_drained(stream_id.as_str())
+        .await
+    {
+        return false;
+    }
+    // The SM claim must be released before the ingress retirement's absence fence.
+    if let Err(error) = state.deps.protocol.ingress.forget_stream(stream_id).await {
+        warn!(%stream_id, %error, "SM janitor: ingress stream retirement failed");
+    }
+    true
+}
+
 #[cfg(test)]
 mod sm_expiry_tests {
     use super::run_sm_expiry_sweep;
@@ -1665,7 +1720,7 @@ mod sm_expiry_tests {
     use waddle_xmpp::muc::room_actor::{GetSnapshot, JoinAffiliationGrant, JoinWithAffiliation};
     use waddle_xmpp::muc::room_registry_actor::CreateRoom;
     use waddle_xmpp::muc::RoomConfig;
-    use waddle_xmpp::stream_management::{DetachedSession, ShadowOrdinal, SmSessionRegistry};
+    use waddle_xmpp::stream_management::{DetachedSession, SmSessionRegistry};
     use waddle_xmpp::Affiliation;
     use waddle_xmpp_core::OccupancySessionGeneration;
 
@@ -1690,7 +1745,6 @@ mod sm_expiry_tests {
             jid,
             occupancy_session,
             inbound_count: 0,
-            shadow_ordinal: ShadowOrdinal::ZERO,
             outbound_count: 0,
             last_acked: 0,
             replay_gap_through: None,
@@ -1756,6 +1810,225 @@ mod sm_expiry_tests {
             })
             .await
             .expect("join occupant");
+    }
+
+    #[tokio::test]
+    async fn retirement_timeout_does_not_skip_unattempted_page_suffix() {
+        let state = create_test_websocket_state().await;
+        let first = waddle_xmpp::pending_delivery::SmSessionId::new("a-blocked-retirement");
+        let second = waddle_xmpp::pending_delivery::SmSessionId::new("b-ready-retirement");
+        for stream in [&first, &second] {
+            state
+                .deps
+                .protocol
+                .ingress
+                .enroll_stream(stream)
+                .await
+                .expect("enroll");
+        }
+        let stalled = state.deps.protocol.ingress.block_test_stream(&first).await;
+        assert!(!super::run_ingress_retirement_sweep(&state).await);
+        // The first retirement still cannot progress, but the untouched suffix can.
+        assert!(super::run_ingress_retirement_sweep(&state).await);
+        assert!(state
+            .deps
+            .protocol
+            .ingress
+            .lookup_stream(&second)
+            .await
+            .expect("second retired")
+            .is_none());
+        assert!(state
+            .deps
+            .protocol
+            .ingress
+            .lookup_stream(&first)
+            .await
+            .expect("first retained")
+            .is_some());
+        drop(stalled);
+        assert!(super::run_ingress_retirement_sweep(&state).await);
+        assert!(state
+            .deps
+            .protocol
+            .ingress
+            .lookup_stream(&first)
+            .await
+            .expect("wrapped retry retired")
+            .is_none());
+    }
+
+    #[tokio::test]
+    async fn orphan_scan_preserves_persisted_sessions_missing_from_local_restore() {
+        use waddle_xmpp::stream_management::persistence::{
+            InMemorySmPersistence, SmPersistenceStorage,
+        };
+        use waddle_xmpp::stream_management::InMemorySmSessionRegistry;
+        let persistence = std::sync::Arc::new(InMemorySmPersistence::new());
+        let original = InMemorySmSessionRegistry::new().with_persistence(persistence.clone());
+        let stream = waddle_xmpp::pending_delivery::SmSessionId::new("unhydrated-ingress");
+        original
+            .store_session(expired_detached_session(
+                stream.as_str(),
+                full_jid("alice@example.com/web"),
+                OccupancySessionGeneration::mint(),
+            ))
+            .await
+            .expect("persist detached session");
+        let unhydrated = std::sync::Arc::new(
+            InMemorySmSessionRegistry::new().with_persistence(persistence.clone()),
+        );
+        let state =
+            crate::server::routes::websocket::tests::create_test_websocket_state_with_sm_registry(
+                unhydrated,
+            )
+            .await;
+        state
+            .deps
+            .protocol
+            .ingress
+            .enroll_stream(&stream)
+            .await
+            .expect("enroll");
+        assert!(super::run_ingress_retirement_sweep(&state).await);
+        assert!(state
+            .deps
+            .protocol
+            .ingress
+            .lookup_stream(&stream)
+            .await
+            .expect("persisted stream protected")
+            .is_some());
+        persistence
+            .delete_session(&stream)
+            .await
+            .expect("terminal durable cleanup");
+        assert!(super::run_ingress_retirement_sweep(&state).await);
+        assert!(state
+            .deps
+            .protocol
+            .ingress
+            .lookup_stream(&stream)
+            .await
+            .expect("retired stream")
+            .is_none());
+    }
+
+    #[tokio::test]
+    async fn orphan_scan_preserves_live_enrollment_then_retires_released_claim() {
+        let state = create_test_websocket_state().await;
+        let stream = waddle_xmpp::pending_delivery::SmSessionId::new("orphan-enrollment");
+        let registry = &state.deps.protocol.sm_session_registry;
+        let publication = registry
+            .ensure_session_claim(stream.as_str())
+            .await
+            .expect("acquire enable claim");
+        state
+            .deps
+            .protocol
+            .ingress
+            .enroll_stream(&stream)
+            .await
+            .expect("enroll");
+        assert!(super::run_ingress_retirement_sweep(&state).await);
+        assert!(state
+            .deps
+            .protocol
+            .ingress
+            .lookup_stream(&stream)
+            .await
+            .expect("live stream")
+            .is_some());
+        drop(publication);
+        assert!(registry.defer_unpublished_enabled_claim_release(stream.as_str()));
+        assert!(super::run_ingress_retirement_sweep(&state).await);
+        assert!(state
+            .deps
+            .protocol
+            .ingress
+            .lookup_stream(&stream)
+            .await
+            .expect("claim release pending")
+            .is_some());
+        registry.retry_pending_claim_releases(64).await;
+        assert!(super::run_ingress_retirement_sweep(&state).await);
+        assert!(state
+            .deps
+            .protocol
+            .ingress
+            .lookup_stream(&stream)
+            .await
+            .expect("retired stream")
+            .is_none());
+    }
+
+    #[tokio::test]
+    async fn orphan_scan_retries_failed_retirement_from_durable_stream_row() {
+        let state = create_test_websocket_state().await;
+        let stream = waddle_xmpp::pending_delivery::SmSessionId::new("retirement-retry");
+        state
+            .deps
+            .protocol
+            .ingress
+            .enroll_stream(&stream)
+            .await
+            .expect("enroll");
+        let db = state.deps.app_state.db_pool.global();
+        db.execute("CREATE TRIGGER block_ingress_retirement BEFORE DELETE ON ingress_sm_streams BEGIN SELECT RAISE(ABORT, 'retirement test failure'); END").await.expect("block retirement");
+        assert!(!super::run_ingress_retirement_sweep(&state).await);
+        assert!(state
+            .deps
+            .protocol
+            .ingress
+            .lookup_stream(&stream)
+            .await
+            .expect("retained retry row")
+            .is_some());
+        db.execute("DROP TRIGGER block_ingress_retirement")
+            .await
+            .expect("unblock retirement");
+        assert!(super::run_ingress_retirement_sweep(&state).await);
+        assert!(state
+            .deps
+            .protocol
+            .ingress
+            .lookup_stream(&stream)
+            .await
+            .expect("retired on retry")
+            .is_none());
+    }
+
+    #[tokio::test]
+    async fn expired_session_retires_ingress_after_successful_confirmation() {
+        let state = create_test_websocket_state().await;
+        let stream = waddle_xmpp::pending_delivery::SmSessionId::new("expiry-ingress");
+        state
+            .deps
+            .protocol
+            .ingress
+            .enroll_stream(&stream)
+            .await
+            .expect("enroll");
+        state
+            .deps
+            .protocol
+            .sm_session_registry
+            .store_session(expired_detached_session(
+                stream.as_str(),
+                full_jid("alice@example.com/web"),
+                OccupancySessionGeneration::mint(),
+            ))
+            .await
+            .expect("store expired session");
+        run_sm_expiry_sweep(&state).await;
+        assert!(state
+            .deps
+            .protocol
+            .ingress
+            .lookup_stream(&stream)
+            .await
+            .expect("lookup retired stream")
+            .is_none());
     }
 
     #[tokio::test]
@@ -6073,7 +6346,6 @@ mod orphan_reaper_sweep_tests {
             jid: full("alice@example.com/web"),
             occupancy_session: waddle_xmpp_core::OccupancySessionGeneration::mint(),
             inbound_count: 7,
-            shadow_ordinal: waddle_xmpp::stream_management::ShadowOrdinal::ZERO,
             outbound_count: 12,
             last_acked: 10,
             replay_gap_through: Some(9),
@@ -7589,11 +7861,15 @@ async fn run_graceful_shutdown_drain(
                 }
                 let session_id =
                     waddle_xmpp::pending_delivery::SmSessionId::new(session.stream_id.clone());
-                websocket_state
+                if let Err(error) = websocket_state
                     .deps
                     .protocol
-                    .ingress_shadow
-                    .forget_stream(&session_id);
+                    .ingress
+                    .forget_stream(&session_id)
+                    .await
+                {
+                    warn!(%error, "Graceful shutdown: ingress stream retirement failed");
+                }
                 if let Err(error) = websocket_state
                     .deps
                     .protocol
@@ -7629,20 +7905,20 @@ async fn run_graceful_shutdown_drain(
         total_drained,
         "Graceful shutdown: SM Q6 drain complete (iterative)"
     );
-    let shadow_budget = drain_deadline.saturating_duration_since(std::time::Instant::now());
+    let ingress_budget = drain_deadline.saturating_duration_since(std::time::Instant::now());
     if !websocket_state
         .deps
         .protocol
-        .ingress_shadow
-        .drain_and_join(shadow_budget)
+        .ingress
+        .drain_and_join(ingress_budget)
         .await
     {
         warn!(
-            timeout_ms = shadow_budget.as_millis(),
-            "Graceful shutdown: ingress shadow drain exceeded the shutdown budget; stopping unfinished shadow work"
+            timeout_ms = ingress_budget.as_millis(),
+            "Graceful shutdown: ingress authority drain exceeded the shutdown budget; stopping unfinished ingress work"
         );
     } else {
-        info!("Graceful shutdown: ingress shadow drain complete");
+        info!("Graceful shutdown: ingress authority drain complete");
     }
     #[cfg(feature = "clustering")]
     crate::clustering::metrics::record_drain_duration_ms(
@@ -11602,7 +11878,6 @@ mod remote_muc_reconciler_tests {
             jid,
             occupancy_session: waddle_xmpp_core::OccupancySessionGeneration::mint(),
             inbound_count: 0,
-            shadow_ordinal: waddle_xmpp::stream_management::ShadowOrdinal::ZERO,
             outbound_count: 0,
             last_acked: 0,
             replay_gap_through: None,
@@ -11765,24 +12040,16 @@ mod remote_muc_reconciler_tests {
 #[cfg(all(test, feature = "clustering"))]
 mod graceful_shutdown_drain_tests {
     use super::{run_graceful_shutdown_drain, HangingSmReadPersistence};
-    use crate::ingress_shadow::{
-        IngressShadowHandle, IngressShadowSubmission, IngressShadowTestTaskKind,
-    };
     use crate::server::routes::websocket::tests::{
-        create_test_websocket_state_with_sm_registry_and_ingress_shadow,
+        create_test_websocket_state_with_sm_registry,
         create_test_websocket_state_with_sm_registry_and_pending_storage,
         create_test_websocket_state_with_sm_registry_pending_and_blocking,
     };
     use std::sync::Arc;
     use std::time::{Duration, Instant};
     use tokio::sync::Notify;
-    use waddle_xmpp::auth::{
-        AuthContextId, AuthContextVersion, AuthenticatedPrincipalRef, PrincipalAuthEpoch,
-    };
-    use waddle_xmpp::ingress::{ConnectionGeneration, IngressOrdinal, NormalizedTarget};
     use waddle_xmpp::ownership::{
-        ClaimEpoch, ClaimStore, Entity, EntityType, InProcessClaimStore, NodeIdentity,
-        SharedNodeIdentity,
+        ClaimStore, Entity, EntityType, InProcessClaimStore, NodeIdentity, SharedNodeIdentity,
     };
     use waddle_xmpp::pending_delivery::storage::{
         InMemoryPendingDeliveryStorage, PendingDeliveryStorage,
@@ -11791,20 +12058,10 @@ mod graceful_shutdown_drain_tests {
     use waddle_xmpp::pending_delivery::{PendingPayload, PendingRow, PendingRowId};
     use waddle_xmpp::stream_management::persistence::SmPersistenceStorage;
     use waddle_xmpp::stream_management::{
-        DetachedSession, DetachedUnackedStanza, InMemorySmSessionRegistry, ShadowOrdinal,
-        SmSessionRegistry,
+        DetachedSession, DetachedUnackedStanza, InMemorySmSessionRegistry, SmSessionRegistry,
     };
     use waddle_xmpp::Stanza;
     use xmpp_parsers::message::{Message, MessageType};
-
-    fn principal() -> AuthenticatedPrincipalRef {
-        AuthenticatedPrincipalRef::new(
-            "romeo@example.com".parse().expect("bare jid"),
-            AuthContextId::new(uuid::Uuid::new_v4()),
-            AuthContextVersion::new(1),
-            PrincipalAuthEpoch::new(1),
-        )
-    }
 
     fn detached_session(stream_id: &str, jid: jid::FullJid) -> DetachedSession {
         DetachedSession {
@@ -11813,7 +12070,6 @@ mod graceful_shutdown_drain_tests {
             jid,
             occupancy_session: waddle_xmpp_core::OccupancySessionGeneration::mint(),
             inbound_count: 0,
-            shadow_ordinal: ShadowOrdinal::ZERO,
             outbound_count: 0,
             last_acked: 0,
             replay_gap_through: None,
@@ -11863,57 +12119,18 @@ mod graceful_shutdown_drain_tests {
         }
     }
 
-    fn held_shadow_submission(stream_id: &str) -> IngressShadowSubmission {
-        let mut message = Message::new(Some(jid::Jid::from(
-            "juliet@example.com"
-                .parse::<jid::BareJid>()
-                .expect("bare jid"),
-        )));
-        message.type_ = MessageType::Chat;
-        IngressShadowSubmission {
-            stream_id: SmSessionId::new(stream_id),
-            owner: NodeIdentity::new("node-a", "epoch-a"),
-            claim_epoch: ClaimEpoch(1),
-            handled_ordinal: IngressOrdinal::FIRST,
-            principal: principal(),
-            target: NormalizedTarget::Bare("juliet@example.com".parse().expect("bare jid")),
-            message,
-            capture: crate::ingress_shadow::IngressEffectCaptureSnapshot {
-                stanza_lang: None,
-                sanitized_message: None,
-                room_scope: None,
-                intents: Vec::new(),
-                markers: Vec::new(),
-            },
-            connection_generation: Some(ConnectionGeneration::INITIAL),
-        }
-    }
-
     #[tokio::test]
-    async fn graceful_shutdown_successful_confirm_drains_and_retires_shadow_stream() {
-        let retired = Arc::new(Notify::new());
-        let retired_stream = Arc::new(tokio::sync::Mutex::new(None::<SmSessionId>));
-        let ingress_shadow = IngressShadowHandle::spawn_test_worker(8, 1, {
-            let retired = Arc::clone(&retired);
-            let retired_stream = Arc::clone(&retired_stream);
-            move |kind, stream_id| {
-                let retired = Arc::clone(&retired);
-                let retired_stream = Arc::clone(&retired_stream);
-                async move {
-                    if matches!(kind, IngressShadowTestTaskKind::Retire) {
-                        *retired_stream.lock().await = Some(stream_id);
-                        retired.notify_one();
-                    }
-                }
-            }
-        });
+    async fn graceful_shutdown_successful_confirm_drains_and_retires_ingress_stream() {
         let sm_registry = Arc::new(InMemorySmSessionRegistry::new());
-        let state = create_test_websocket_state_with_sm_registry_and_ingress_shadow(
-            Arc::clone(&sm_registry),
-            ingress_shadow,
-        )
-        .await;
+        let state = create_test_websocket_state_with_sm_registry(Arc::clone(&sm_registry)).await;
         let stream_id = "shutdown-retire-stream";
+        state
+            .deps
+            .protocol
+            .ingress
+            .enroll_stream(&SmSessionId::new(stream_id))
+            .await
+            .expect("enroll ingress");
         sm_registry
             .store_session(detached_session(
                 stream_id,
@@ -11931,17 +12148,30 @@ mod graceful_shutdown_drain_tests {
         ));
 
         drain_token.cancel();
-        tokio::time::timeout(Duration::from_secs(1), retired.notified())
-            .await
-            .expect("successful confirm_drained should retire the shadow stream");
-        assert_eq!(
-            retired_stream.lock().await.clone(),
-            Some(SmSessionId::new(stream_id)),
-        );
         tokio::time::timeout(Duration::from_secs(2), drain_notify.notified())
             .await
             .expect("graceful shutdown drain should finish");
         drain_task.await.expect("graceful drain task");
+        let connection = state
+            .deps
+            .app_state
+            .db_pool
+            .global()
+            .guard()
+            .await
+            .expect("database connection");
+        let mut rows = connection
+            .query(
+                "SELECT 1 FROM ingress_sm_streams WHERE stream_id = ?",
+                crate::db_params![stream_id],
+            )
+            .await
+            .expect("query retired ingress stream");
+        assert!(rows
+            .next()
+            .await
+            .expect("read retired ingress stream")
+            .is_none());
     }
 
     #[tokio::test]
@@ -12101,39 +12331,17 @@ mod graceful_shutdown_drain_tests {
     }
 
     #[tokio::test]
-    async fn graceful_shutdown_completes_after_shadow_budget_timeout() {
-        let submit_started = Arc::new(Notify::new());
-        let release_submit = Arc::new(Notify::new());
-        let ingress_shadow = IngressShadowHandle::spawn_test_worker(8, 1, {
-            let submit_started = Arc::clone(&submit_started);
-            let release_submit = Arc::clone(&release_submit);
-            move |kind, stream_id| {
-                let submit_started = Arc::clone(&submit_started);
-                let release_submit = Arc::clone(&release_submit);
-                async move {
-                    if matches!(kind, IngressShadowTestTaskKind::Submit)
-                        && stream_id == SmSessionId::new("shadow-held")
-                    {
-                        submit_started.notify_one();
-                        release_submit.notified().await;
-                    }
-                }
-            }
-        });
-        assert_eq!(
-            ingress_shadow.try_submit(held_shadow_submission("shadow-held")),
-            crate::ingress_shadow::IngressShadowDisposition::Enqueued,
-            "the held shadow submission must be accepted before shutdown starts"
-        );
-        tokio::time::timeout(Duration::from_secs(1), submit_started.notified())
-            .await
-            .expect("shadow submit should enter the worker");
-
-        let state = create_test_websocket_state_with_sm_registry_and_ingress_shadow(
-            Arc::new(InMemorySmSessionRegistry::new()),
-            ingress_shadow,
-        )
+    async fn graceful_shutdown_completes_after_ingress_budget_timeout() {
+        let state = create_test_websocket_state_with_sm_registry(Arc::new(
+            InMemorySmSessionRegistry::new(),
+        ))
         .await;
+        let held = state
+            .deps
+            .protocol
+            .ingress
+            .hold_test_commit(&SmSessionId::new("ingress-held"))
+            .await;
         let drain_token = tokio_util::sync::CancellationToken::new();
         let drain_notify = Arc::new(Notify::new());
         let drain_task = tokio::spawn(run_graceful_shutdown_drain(
@@ -12146,15 +12354,18 @@ mod graceful_shutdown_drain_tests {
         drain_token.cancel();
         tokio::time::timeout(Duration::from_millis(400), drain_notify.notified())
             .await
-            .expect("shutdown should complete once the shadow drain budget expires");
+            .expect("shutdown should complete once the ingress drain budget expires");
         drain_task.await.expect("graceful drain task");
 
-        tokio::time::timeout(
-            Duration::from_secs(2),
-            state.deps.protocol.ingress_shadow.wait_for_completion(),
-        )
-        .await
-        .expect("shutdown deadline should stop the held shadow work");
+        drop(held);
+        assert!(
+            state
+                .deps
+                .protocol
+                .ingress
+                .drain_and_join(Duration::from_secs(1))
+                .await
+        );
     }
 
     #[tokio::test]
@@ -12175,11 +12386,7 @@ mod graceful_shutdown_drain_tests {
                     SharedNodeIdentity::new(NodeIdentity::new("sm-node", "shutdown-timeout")),
                 ),
         );
-        let state = create_test_websocket_state_with_sm_registry_and_ingress_shadow(
-            Arc::clone(&sm_registry),
-            IngressShadowHandle::spawn_test_worker(8, 1, |_, _| async move {}),
-        )
-        .await;
+        let state = create_test_websocket_state_with_sm_registry(Arc::clone(&sm_registry)).await;
         let stream_id = "shutdown-hung-promotion-retry";
         let mut session = detached_session(
             stream_id,

@@ -267,7 +267,7 @@ groups:
             team: waddle
           annotations:
             runbook: https://github.com/waddle-social/waddle/blob/main/server/docs/operations/ingress-authority.md ; https://github.com/waddle-social/waddle/issues/1695
-            summary: PostgreSQL backend utilization exceeded 80% of max_connections for 10m. Derivation (2026-08-20 preflight) - max_connections=100, 44 in use; the shadow adds 4 per pod, a 3-pod surge ≈77 peak, so 80% leaves headroom above the worst rollout case.
+            summary: PostgreSQL backend utilization exceeded 80% of max_connections for 10m. Derivation (2026-08-20 preflight) - max_connections=100, 44 in use; the ingress authority adds 4 per pod, a 3-pod surge ≈77 peak, so 80% leaves headroom above the worst rollout case.
         - alert: PostgresWalVolumeHigh
           expr: max by (instance) (cnpg_collector_pg_wal{value="size"} / on (instance) group_left() cnpg_collector_pg_wal{value="volume_size"}) > 0.7
           for: 10m

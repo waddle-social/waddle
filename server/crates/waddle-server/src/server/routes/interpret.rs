@@ -199,8 +199,7 @@ use groupchat_validation::{
 #[cfg(feature = "clustering")]
 pub use handoff::OrderedRelayHandoffHandle;
 pub use handoff::{
-    OrderedRelayHandoffCompletion, OrderedRelayInboundSequence, ParkedIngressShadowSubmission,
-    SmInboundCompletionTracker,
+    OrderedRelayHandoffCompletion, OrderedRelayInboundSequence, SmInboundCompletionTracker,
 };
 use offline_delivery::queue_offline_delivery;
 #[cfg(test)]
@@ -252,13 +251,9 @@ pub(crate) async fn broadcast_room_system_message(
 }
 
 #[cfg(feature = "clustering")]
-pub(crate) async fn dispatch_muc_to_room_for_relay(
-    deps: &Deps<'_>,
-    room: BareJid,
-    message: Message,
-) -> InterpretOutcome {
-    dispatch_to_room(deps, room, message, 0).await
-}
+mod relay_plan;
+#[cfg(feature = "clustering")]
+pub(crate) use relay_plan::plan_muc_for_relay;
 
 /// Execute the side effects described by `events`.
 ///
@@ -960,7 +955,7 @@ pub(crate) fn capture_serialized_error_reply(deps: &Deps<'_>, stanza: &Stanza) {
         return;
     };
     let Ok(frozen_error) = waddle_xmpp::ingress::FrozenStanzaError::from_xmpp(&error) else {
-        warn!("serialized message error could not be frozen for ingress shadow");
+        warn!("serialized message error could not be frozen for ingress");
         return;
     };
     deps.capture_intent(IngressEffectIntent::ErrorReply {

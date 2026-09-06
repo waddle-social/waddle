@@ -380,6 +380,29 @@ impl SmIngressStreamRepository {
         Ok(())
     }
 
+    /// Bounded keyset scan; stream rows themselves retain retirement responsibility.
+    pub async fn retirement_candidates(
+        transaction: &mut IngressUowTransaction<'_>,
+        after: Option<&SmSessionId>,
+        limit: u32,
+    ) -> Result<Vec<SmSessionId>, IngressUowError> {
+        let mut rows = match after {
+            Some(after) => transaction.transaction_mut().query(
+                "SELECT stream_id FROM ingress_sm_streams WHERE stream_id > ? ORDER BY stream_id LIMIT ?",
+                crate::db_params![after.as_str(), i64::from(limit)],
+            ).await?,
+            None => transaction.transaction_mut().query(
+                "SELECT stream_id FROM ingress_sm_streams ORDER BY stream_id LIMIT ?",
+                crate::db_params![i64::from(limit)],
+            ).await?,
+        };
+        let mut streams = Vec::new();
+        while let Some(row) = rows.next().await? {
+            streams.push(SmSessionId::new(row.get::<String>(0)?));
+        }
+        Ok(streams)
+    }
+
     /// Mint the one durable ingress row for a freshly SM-enabled stream.
     pub async fn mint(
         transaction: &mut IngressUowTransaction<'_>,
@@ -1180,67 +1203,5 @@ impl ClaimRepository {
             transaction_identity: transaction.identity(),
             _transaction: PhantomData,
         })
-    }
-}
-
-/// Result of offering a handled XEP-0198 frontier to an SM session.
-#[cfg(feature = "clustering")]
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum HandledFrontierOutcome {
-    Idempotent,
-    Advanced,
-}
-
-/// Repository that advances the fenced, wrapping SM handled frontier.
-#[cfg(feature = "clustering")]
-#[derive(Debug, Default, Clone, Copy)]
-pub struct HandledFrontierRepository;
-
-#[cfg(feature = "clustering")]
-impl HandledFrontierRepository {
-    pub async fn advance(
-        transaction: &mut IngressUowTransaction<'_>,
-        fence: &SmClaimFence<'_>,
-        stream_id: &SmSessionId,
-        offered: u32,
-    ) -> Result<HandledFrontierOutcome, IngressUowError> {
-        if fence.transaction_identity != transaction.identity() || fence.stream_id != *stream_id {
-            return Err(IngressUowError::ClaimFenceMissing);
-        }
-        let mut rows = transaction
-            .transaction_mut()
-            .query(
-                "SELECT inbound_count FROM sm_sessions WHERE stream_id = ? FOR UPDATE",
-                crate::db_params![stream_id.as_str().to_string()],
-            )
-            .await?;
-        let Some(row) = rows.next().await? else {
-            return Err(IngressUowError::StreamMissing);
-        };
-        let stored: i64 = row.get(0)?;
-        let stored = stored as u32;
-        drop(rows);
-
-        if offered == stored {
-            return Ok(HandledFrontierOutcome::Idempotent);
-        }
-        if offered != stored.wrapping_add(1) {
-            return Err(IngressUowError::FrontierStale { stored, offered });
-        }
-        let advanced = transaction
-            .transaction_mut()
-            .execute(
-                "UPDATE sm_sessions SET inbound_count = ? WHERE stream_id = ? AND inbound_count = ?",
-                crate::db_params![
-                    i64::from(offered),
-                    stream_id.as_str().to_string(),
-                    i64::from(stored),
-                ],
-            )
-            .await?;
-        if advanced != 1 {
-            return Err(IngressUowError::FrontierStale { stored, offered });
-        }
-        Ok(HandledFrontierOutcome::Advanced)
     }
 }

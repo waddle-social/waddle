@@ -40,6 +40,12 @@ impl EffectSink for TombstoneExemptSink<'_> {
         self.0.set_room_execution(execution);
     }
 
+    fn observe_message(&self, message: &xmpp_parsers::message::Message) {
+        self.0.observe_message(message);
+    }
+    fn message(&self) -> Option<xmpp_parsers::message::Message> {
+        self.0.message()
+    }
     fn observe_sender(&self, sender: &jid::FullJid) {
         self.0.observe_sender(sender);
     }

@@ -78,12 +78,6 @@ pub enum IngressUowError {
     #[cfg(feature = "clustering")]
     #[error("the exact ownership claim is not held")]
     ClaimFenceMissing,
-    #[cfg(feature = "clustering")]
-    #[error("the SM stream does not exist")]
-    StreamMissing,
-    #[cfg(feature = "clustering")]
-    #[error("the offered SM handled frontier is not the next wrapping value")]
-    FrontierStale { stored: u32, offered: u32 },
 }
 
 impl IngressUowError {

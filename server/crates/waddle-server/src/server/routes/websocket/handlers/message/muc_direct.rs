@@ -7,7 +7,7 @@ use waddle_xmpp::{
 use xmpp_parsers::message::{Message, MessageType};
 use xmpp_parsers::stanza_error::{DefinedCondition, ErrorType, StanzaError};
 
-use crate::ingress_shadow::{IngressEffectCapture, IngressShadowRoomFence};
+use crate::ingress::IngressEffectCapture;
 use crate::server::routes::interpret::{
     effects::{Effect, ExternalEffect, PlannedEffect},
     Deps,
@@ -102,11 +102,6 @@ async fn handle_muc_private_message(
                 .unwrap_or(RoomFenceRequirement::Unfenced),
             snapshot_generation: snapshot.admission_revision,
         });
-    }
-    if let (Some(capture), Some(claim_fence)) =
-        (ingress_effect_capture, snapshot.claim_fence.as_ref())
-    {
-        capture.record_room_fence(IngressShadowRoomFence::from_context(&room_jid, claim_fence));
     }
     let Some(sender_occupant) = snapshot.room.find_occupant_by_real_jid(bound_jid) else {
         return Some(vec![message_error_frame(
@@ -238,11 +233,7 @@ async fn handle_muc_private_message(
     }
     // Bodyless PMs with carbon suppression emit no interpreter events, but
     // their committed envelope still needs the canonical sender-side payload.
-    if deps.effects.is_planning() {
-        if let Some(capture) = ingress_effect_capture {
-            capture.record_sanitized_message(&sent_form);
-        }
-    }
+    deps.effects.observe_message(&sent_form);
     // XEP-0280 eligibility (review P2 on PR #1277): honor §6.1
     // `<private/>` and XEP-0334 `<no-copy/>` suppression — the shared
     // `should_copy_message` rule the 1:1 CarbonsMessageHandler applies —
@@ -449,15 +440,6 @@ async fn handle_muc_mediated_decline(
         return None;
     }
     let inbound_decline = mediated_decline(incoming)?;
-    // Declines are authorized exclusively against the durable outstanding
-    // invite ledger, not a live room actor. The frame-level MUC classifier
-    // has no actor-bound fence to contribute here, so retaining its
-    // provisional lookup would make the shadow assert authority that the
-    // live decision never used.
-    if let Some(capture) = ingress_effect_capture {
-        capture.clear_room_scope();
-    }
-
     let decliner = bound_jid.to_bare();
     let db_actor = state.deps.app_state.db_pool.global_actor().clone();
     let outstanding = match crate::server::routes::websocket::muc_invites::list_invites(
@@ -725,7 +707,7 @@ fn message_error_frame(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::ingress_shadow::IngressEffectCapture;
+    use crate::ingress::IngressEffectCapture;
     use crate::server::routes::websocket::tests::{
         create_test_websocket_state, register_test_connection,
     };
@@ -898,7 +880,7 @@ mod tests {
 
     #[test]
     fn capture_muc_private_routes_records_each_recipient_once() {
-        let capture = IngressEffectCapture::new(None);
+        let capture = IngressEffectCapture::new();
         let sender: jid::FullJid = "room@muc.example.com/alice".parse().expect("sender");
         let bob_phone: jid::FullJid = "bob@example.com/phone".parse().expect("bob phone");
         let bob_laptop: jid::FullJid = "bob@example.com/laptop".parse().expect("bob laptop");
@@ -953,7 +935,7 @@ mod tests {
         let room: jid::BareJid = "pm@muc.example.com".parse().expect("room");
         let _room_actor = create_test_room(state.as_ref(), room.clone()).await;
         let sender: jid::FullJid = "mallory@example.com/web".parse().expect("sender");
-        let capture = IngressEffectCapture::new(None);
+        let capture = IngressEffectCapture::new();
         let mut incoming = Message::new(Some(
             "pm@muc.example.com/bob"
                 .parse::<jid::Jid>()
@@ -1018,7 +1000,7 @@ mod tests {
         let _owner = register_test_connection(state.as_ref(), &recipient, recipient_tx).await;
         drop(recipient_rx);
 
-        let capture = IngressEffectCapture::new(None);
+        let capture = IngressEffectCapture::new();
         let mut incoming = Message::new(Some(
             format!("{room}/bob")
                 .parse::<jid::Jid>()

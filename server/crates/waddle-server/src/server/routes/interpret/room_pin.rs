@@ -443,7 +443,7 @@ fn plan_pin_mutation(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::ingress_shadow::IngressEffectCapture;
+    use crate::ingress::IngressEffectCapture;
     use crate::server::routes::interpret::Deps;
     use crate::server::routes::websocket::handlers::presence::handle_muc_join;
     use crate::server::routes::websocket::tests::{
@@ -564,7 +564,7 @@ mod tests {
     #[tokio::test]
     async fn missing_room_actor_does_not_capture_pin_intent() {
         let registry = ConnectionRegistry::new();
-        let capture = IngressEffectCapture::new(None);
+        let capture = IngressEffectCapture::new();
         let mut deps = Deps::registry_only(&registry);
         deps.ingress_effect_capture = Some(capture.clone());
         let room: BareJid = "room@muc.example.com".parse().expect("room");
@@ -594,7 +594,7 @@ mod tests {
     #[tokio::test]
     async fn missing_room_actor_does_not_capture_unpin_intent() {
         let registry = ConnectionRegistry::new();
-        let capture = IngressEffectCapture::new(None);
+        let capture = IngressEffectCapture::new();
         let mut deps = Deps::registry_only(&registry);
         deps.ingress_effect_capture = Some(capture.clone());
         let room: BareJid = "room@muc.example.com".parse().expect("room");

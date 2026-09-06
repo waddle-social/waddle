@@ -36,7 +36,6 @@ use xmpp_parsers::message::{Message, MessageType};
 use xmpp_parsers::stanza_error::{DefinedCondition, ErrorType, StanzaError};
 
 use crate::auth::Session;
-use crate::ingress_shadow::IngressShadowRoomFence;
 use crate::server::routes::websocket::muc_invites::{
     claim_invite, record_invite_at, OutstandingInvite, RecordOutcome,
 };
@@ -276,11 +275,6 @@ pub(super) async fn handle_muc_mediated_invite(
             "Internal server error.",
         )]);
     };
-    if let (Some(capture), Some(claim_fence)) =
-        (ingress_effect_capture, snapshot.claim_fence.as_ref())
-    {
-        capture.record_room_fence(IngressShadowRoomFence::from_context(&room_jid, claim_fence));
-    }
     // XEP-0045 §7.8: a mediated invitation is an occupant action ("a
     // room in which one is an occupant").
     if snapshot.room.find_nick_by_real_jid(bound_jid).is_none() {
@@ -385,18 +379,17 @@ pub(super) async fn handle_muc_mediated_invite(
                 error = %error,
                 "Suppressing mediated invite because blocklist lookup failed"
             );
-            deps.effects.set_rejection(crate::server::routes::interpret::effects::PlanRejection::PolicyDenied(
-                crate::server::routes::interpret::effects::PolicyDeniedReason::OperationalFenceLoss,
-            ));
-            return Some(vec![]);
+            return Some(vec![error_frame(
+                incoming,
+                bound_jid,
+                deps,
+                ErrorType::Wait,
+                DefinedCondition::InternalServerError,
+                "Internal server error.",
+            )]);
         }
     };
     if invitee_blocklist.contains_jid(&jid::Jid::from(bound_jid.clone())) {
-        deps.effects.set_rejection(
-            crate::server::routes::interpret::effects::PlanRejection::AuthorizationDenied(
-                crate::server::routes::interpret::effects::AuthorizationDeniedReason::BlockedSender,
-            ),
-        );
         return Some(vec![]);
     }
 
@@ -937,7 +930,7 @@ fn error_frame(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::ingress_shadow::IngressEffectCapture;
+    use crate::ingress::IngressEffectCapture;
     use crate::server::routes::websocket::tests::{
         create_test_websocket_state, register_test_connection,
     };
@@ -1007,7 +1000,7 @@ mod tests {
     #[tokio::test]
     async fn deliver_muc_user_message_records_live_direct_route_intent() {
         let state = create_test_websocket_state().await;
-        let capture = IngressEffectCapture::new(None);
+        let capture = IngressEffectCapture::new();
         let recipient: jid::BareJid = "bob@example.com".parse().expect("recipient");
         let bob_phone: jid::FullJid = "bob@example.com/phone".parse().expect("bob phone");
         let (bob_tx, _bob_rx) = tokio::sync::mpsc::channel(4);
@@ -1040,7 +1033,7 @@ mod tests {
     #[tokio::test]
     async fn deliver_muc_user_message_records_offline_direct_route_intent() {
         let state = create_test_websocket_state().await;
-        let capture = IngressEffectCapture::new(None);
+        let capture = IngressEffectCapture::new();
         let recipient: jid::BareJid = "offline@example.com".parse().expect("recipient");
         let mut message = Message::new(Some(jid::Jid::from(recipient.clone())));
         message.type_ = MessageType::Normal;
@@ -1080,7 +1073,7 @@ mod tests {
     #[tokio::test]
     async fn deliver_muc_user_message_excludes_rejected_live_resources_from_route_intent() {
         let state = create_test_websocket_state().await;
-        let capture = IngressEffectCapture::new(None);
+        let capture = IngressEffectCapture::new();
         let recipient: jid::BareJid = "bob@example.com".parse().expect("recipient");
         let bob_phone: jid::FullJid = "bob@example.com/phone".parse().expect("bob phone");
         let bob_laptop: jid::FullJid = "bob@example.com/laptop".parse().expect("bob laptop");
@@ -1118,7 +1111,7 @@ mod tests {
     async fn mediated_invite_auth_rejection_records_error_reply_intent() {
         let state = create_test_websocket_state().await;
         let sender: jid::FullJid = "alice@example.com/web".parse().expect("sender");
-        let capture = IngressEffectCapture::new(None);
+        let capture = IngressEffectCapture::new();
         let mut message = Message::new(Some(
             "room@muc.example.com"
                 .parse::<jid::Jid>()
@@ -1411,7 +1404,7 @@ mod tests {
                 .build(),
         );
         let sink = PlanSink::new();
-        let capture = IngressEffectCapture::new(None);
+        let capture = IngressEffectCapture::new();
         let mut deps = crate::server::routes::websocket::interpret_loop::build_interpret_deps(
             state.as_ref(),
             None,

@@ -542,7 +542,7 @@ fn classify_send_error<M, E>(error: &kameo::error::SendError<M, E>) -> ActorSend
 async fn deliver_one_via_actor(
     user_registry: &kameo::actor::ActorRef<waddle_xmpp::registry::UserRegistryActor>,
     sm_session_registry: Option<&Arc<InMemorySmSessionRegistry>>,
-    ingress_effect_capture: Option<&crate::ingress_shadow::IngressEffectCapture>,
+    ingress_effect_capture: Option<&crate::ingress::IngressEffectCapture>,
     target: &jid::FullJid,
     stanza: &Stanza,
     kind: ActorSendKind,
@@ -562,7 +562,7 @@ async fn deliver_one_via_actor(
 async fn deliver_one_via_actor_capturing_detached(
     user_registry: &kameo::actor::ActorRef<waddle_xmpp::registry::UserRegistryActor>,
     sm_session_registry: Option<&Arc<InMemorySmSessionRegistry>>,
-    ingress_effect_capture: Option<&crate::ingress_shadow::IngressEffectCapture>,
+    ingress_effect_capture: Option<&crate::ingress::IngressEffectCapture>,
     target: &jid::FullJid,
     stanza: &Stanza,
     kind: ActorSendKind,
@@ -755,7 +755,7 @@ pub(crate) async fn deliver_peer_to_full(
 pub(crate) async fn deliver_peer_to_full_capturing_detached(
     user_registry: Option<&kameo::actor::ActorRef<waddle_xmpp::registry::UserRegistryActor>>,
     sm_session_registry: Option<&Arc<InMemorySmSessionRegistry>>,
-    ingress_effect_capture: Option<&crate::ingress_shadow::IngressEffectCapture>,
+    ingress_effect_capture: Option<&crate::ingress::IngressEffectCapture>,
     target: &jid::FullJid,
     stanza: &Stanza,
 ) -> FullJidDeliveryOutcome {
@@ -944,7 +944,7 @@ pub(super) async fn deliver_peer_to_live_only(
 /// under its own lock, so we never infer a stale stream from the full JID.
 pub(super) async fn deliver_to_detached_with_capture(
     sm_session_registry: Option<&Arc<InMemorySmSessionRegistry>>,
-    ingress_effect_capture: Option<&crate::ingress_shadow::IngressEffectCapture>,
+    ingress_effect_capture: Option<&crate::ingress::IngressEffectCapture>,
     target: &jid::FullJid,
     stanza: &Stanza,
 ) -> DetachedDeliveryOutcome {
@@ -960,7 +960,7 @@ pub(super) async fn deliver_to_detached_with_capture(
 
 async fn deliver_to_detached_with_capture_details(
     sm_session_registry: Option<&Arc<InMemorySmSessionRegistry>>,
-    ingress_effect_capture: Option<&crate::ingress_shadow::IngressEffectCapture>,
+    ingress_effect_capture: Option<&crate::ingress::IngressEffectCapture>,
     target: &jid::FullJid,
     stanza: &Stanza,
 ) -> DetachedDeliveryCapture {
@@ -1090,7 +1090,6 @@ mod tests {
             jid: jid.clone(),
             occupancy_session: waddle_xmpp_core::OccupancySessionGeneration::mint(),
             inbound_count: 0,
-            shadow_ordinal: waddle_xmpp::stream_management::ShadowOrdinal::ZERO,
             outbound_count: 0,
             last_acked: 0,
             replay_gap_through: None,

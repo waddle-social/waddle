@@ -38,11 +38,11 @@ impl OrderedRelayDeliveryBridge {
         origin_stanza: &Stanza,
         origin: &OrderedRelayRouteOrigin,
         call_setup: Option<waddle_xmpp::telemetry::call::PendingCallSetupRoute>,
-        deferred_capture: Option<crate::ingress_shadow::IngressEffectCapture>,
+        deferred_capture: Option<crate::ingress::IngressEffectCapture>,
     ) -> Option<CapturedRemoteDeliveryOutcome> {
         let outcome_log = route_outcome_log(&target);
         if let Some(handoff) = origin.handoff.clone() {
-            if handoff.mark_deferred() {
+            if defer_until_relay_completion(&handoff, origin_stanza) {
                 let bridge = Arc::clone(&self);
                 let origin_stanza = origin_stanza.clone();
                 tokio::spawn(async move {
@@ -400,6 +400,9 @@ impl OrderedRelayDeliveryBridge {
     ) -> Option<MucProxyRouteAttempt> {
         let services = self.services.get().cloned()?;
         let RemoteResourceRouteTarget::MucProxy {
+            canonical,
+            principal,
+            stanza_lang,
             room_jid,
             kind,
             origin: muc_origin,
@@ -413,9 +416,19 @@ impl OrderedRelayDeliveryBridge {
             });
         };
         let origin = local_origin_for_remote_resource(remote_origin);
+        let admission = crate::ingress::identity::IngressRelayAdmission::from_parts(
+            canonical,
+            principal,
+            stanza_lang,
+        );
         match self
             .try_proxy_muc_remote_from_local_origin_decision(
-                &room_jid, &stanza.0, kind, muc_origin, &origin,
+                &room_jid,
+                &stanza.0,
+                kind,
+                muc_origin,
+                &origin,
+                admission.as_ref(),
             )
             .await
         {
@@ -429,7 +442,12 @@ impl OrderedRelayDeliveryBridge {
                 outcome: muc_proxy_result_to_ordered_outcome(
                     kind,
                     Box::pin(deliver_reserved_muc_proxy(
-                        &services, &room_jid, kind, muc_origin, &stanza.0,
+                        &services,
+                        &room_jid,
+                        kind,
+                        muc_origin,
+                        &stanza.0,
+                        admission.as_ref(),
                     ))
                     .await,
                 ),

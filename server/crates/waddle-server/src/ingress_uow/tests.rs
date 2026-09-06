@@ -39,9 +39,8 @@ use super::{
 };
 #[cfg(feature = "clustering")]
 use super::{
-    ClaimRepository, EffectIntentRepository, HandledFrontierOutcome, HandledFrontierRepository,
-    InboxRepository, IngressUowTransaction, MamArchiveRepository, PrincipalAssertion,
-    PrincipalRepository,
+    ClaimRepository, EffectIntentRepository, InboxRepository, IngressUowTransaction,
+    MamArchiveRepository, PrincipalAssertion, PrincipalRepository,
 };
 use crate::ingress_substrate::MessageEnvelope;
 use crate::{
@@ -283,7 +282,7 @@ async fn spanning_proof_commits_exact_cross_store_values() {
     fixture.seed_claim(&values).await;
 
     let mut transaction = fixture.begin().await;
-    let fence = ClaimRepository::assert_sm_claim(
+    let _fence = ClaimRepository::assert_sm_claim(
         &mut transaction,
         &values.stream_id,
         &values.owner,
@@ -291,13 +290,7 @@ async fn spanning_proof_commits_exact_cross_store_values() {
     )
     .await
     .expect("exact claim mints fence");
-    insert_session_in_uow(&mut transaction, &values, 0).await;
-    assert_eq!(
-        HandledFrontierRepository::advance(&mut transaction, &fence, &values.stream_id, 1)
-            .await
-            .expect("advance handled frontier"),
-        HandledFrontierOutcome::Advanced
-    );
+    insert_session_in_uow(&mut transaction, &values, 1).await;
     write_spanning_rows(&mut transaction, &values).await;
     transaction.commit().await.expect("commit spanning proof");
 
@@ -346,7 +339,7 @@ async fn dropping_uow_rolls_back_spanning_writes() {
 
     {
         let mut transaction = fixture.begin().await;
-        let fence = ClaimRepository::assert_sm_claim(
+        let _fence = ClaimRepository::assert_sm_claim(
             &mut transaction,
             &values.stream_id,
             &values.owner,
@@ -354,10 +347,7 @@ async fn dropping_uow_rolls_back_spanning_writes() {
         )
         .await
         .expect("exact claim mints fence");
-        insert_session_in_uow(&mut transaction, &values, 0).await;
-        HandledFrontierRepository::advance(&mut transaction, &fence, &values.stream_id, 1)
-            .await
-            .expect("advance handled frontier");
+        insert_session_in_uow(&mut transaction, &values, 1).await;
         write_spanning_rows(&mut transaction, &values).await;
     }
 
@@ -667,18 +657,17 @@ async fn claim_fence_from_another_live_transaction_is_rejected() {
     // writes in another live transaction, even for the same stream.
     let mut other_transaction = fixture.begin().await;
     assert!(matches!(
-        HandledFrontierRepository::advance(&mut other_transaction, &fence, &values.stream_id, 1)
-            .await,
+        SmIngressStreamRepository::lock(&mut other_transaction, &fence, &values.stream_id).await,
         Err(IngressUowError::ClaimFenceMissing)
     ));
     drop(other_transaction);
 
     // The same fence keeps working in the transaction that minted it.
     assert_eq!(
-        HandledFrontierRepository::advance(&mut minting_transaction, &fence, &values.stream_id, 1)
+        SmIngressStreamRepository::lock(&mut minting_transaction, &fence, &values.stream_id)
             .await
-            .expect("advance in the minting transaction"),
-        HandledFrontierOutcome::Advanced
+            .expect("lock in the minting transaction"),
+        None
     );
     minting_transaction
         .commit()
@@ -860,82 +849,6 @@ async fn room_claim_fence_from_another_live_transaction_is_rejected() {
         .commit()
         .await
         .expect("commit minting transaction");
-    fixture.close().await;
-}
-
-#[cfg(feature = "clustering")]
-#[tokio::test]
-async fn handled_frontier_uses_wrapping_single_step_cas() {
-    let Some(fixture) = Fixture::open("frontier_cas").await else {
-        return;
-    };
-    let values = FixtureValues::new("frontier-cas");
-    fixture.seed_claim_and_session(&values, u32::MAX).await;
-    let mut transaction = fixture.begin().await;
-    let fence = ClaimRepository::assert_sm_claim(
-        &mut transaction,
-        &values.stream_id,
-        &values.owner,
-        values.claim_epoch,
-    )
-    .await
-    .expect("mint fence");
-    assert_eq!(
-        HandledFrontierRepository::advance(&mut transaction, &fence, &values.stream_id, u32::MAX)
-            .await
-            .expect("equal frontier is idempotent"),
-        HandledFrontierOutcome::Idempotent
-    );
-    assert_eq!(
-        HandledFrontierRepository::advance(&mut transaction, &fence, &values.stream_id, 0)
-            .await
-            .expect("wrapping frontier advances"),
-        HandledFrontierOutcome::Advanced
-    );
-    assert_eq!(
-        HandledFrontierRepository::advance(&mut transaction, &fence, &values.stream_id, 1)
-            .await
-            .expect("next frontier advances"),
-        HandledFrontierOutcome::Advanced
-    );
-    assert!(matches!(
-        HandledFrontierRepository::advance(&mut transaction, &fence, &values.stream_id, 3).await,
-        Err(IngressUowError::FrontierStale {
-            stored: 1,
-            offered: 3
-        })
-    ));
-    let missing = SmSessionId::new("missing-frontier-stream");
-    assert!(matches!(
-        HandledFrontierRepository::advance(&mut transaction, &fence, &missing, 1).await,
-        Err(IngressUowError::ClaimFenceMissing)
-    ));
-    transaction
-        .commit()
-        .await
-        .expect("commit frontier outcomes");
-
-    let mut missing_transaction = fixture.begin().await;
-    let missing_fence = ClaimRepository::assert_sm_claim(
-        &mut missing_transaction,
-        &values.stream_id,
-        &values.owner,
-        values.claim_epoch,
-    )
-    .await
-    .expect("mint fence for missing stream proof");
-    fixture.delete_session(&values.stream_id).await;
-    assert!(matches!(
-        HandledFrontierRepository::advance(
-            &mut missing_transaction,
-            &missing_fence,
-            &values.stream_id,
-            1,
-        )
-        .await,
-        Err(IngressUowError::StreamMissing)
-    ));
-    drop(missing_transaction);
     fixture.close().await;
 }
 
@@ -1936,16 +1849,6 @@ impl Fixture {
                 .await,
             "principal-bearing session row must roll back with the UoW"
         );
-    }
-
-    #[cfg(feature = "clustering")]
-    async fn delete_session(&self, stream_id: &SmSessionId) {
-        self.execute(
-            "DELETE FROM sm_sessions WHERE stream_id = ?",
-            crate::db_params![stream_id.as_str().to_string()],
-        )
-        .await
-        .expect("delete fixture session");
     }
 
     async fn close(self) {

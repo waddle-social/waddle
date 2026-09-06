@@ -42,6 +42,14 @@ pub(super) fn external_receipts(
 
 fn exact_mutation(effect: &ExternalEffect, intent: &IngressEffectIntent) -> bool {
     match (effect, intent) {
+        #[cfg(feature = "clustering")]
+        (
+            ExternalEffect::Room(ExternalRoomEffect::RelayMucProxy { room, .. }),
+            IngressEffectIntent::DispatchToRoomRemote {
+                room: recorded_room,
+                ..
+            },
+        ) => room == recorded_room,
         (
             ExternalEffect::Direct(ExternalDirectEffect::NotificationActivity { owner, mutation }),
             IngressEffectIntent::NotificationActivityPreview {

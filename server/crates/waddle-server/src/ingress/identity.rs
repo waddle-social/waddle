@@ -45,6 +45,52 @@ pub struct IngressCanonicalRef {
     pub origin_id: Option<OriginId>,
 }
 
+/// Authenticated origin context propagated with a committed room proxy.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct IngressRelayAdmission {
+    pub canonical: IngressCanonicalRef,
+    pub principal: AuthenticatedPrincipalRef,
+    /// Original top-level xml:lang, which the parsed Message does not retain.
+    #[serde(with = "stanza_lang_serde")]
+    pub stanza_lang: Option<xmpp_parsers::message::Lang>,
+}
+
+impl IngressRelayAdmission {
+    pub fn from_parts(
+        canonical: Option<IngressCanonicalRef>,
+        principal: Option<AuthenticatedPrincipalRef>,
+        stanza_lang: Option<xmpp_parsers::message::Lang>,
+    ) -> Option<Self> {
+        Some(Self {
+            canonical: canonical?,
+            principal: principal?,
+            stanza_lang,
+        })
+    }
+}
+
+/// Language remains typed until encoding the relay envelope.
+pub(crate) mod stanza_lang_serde {
+    use serde::{Deserialize, Deserializer, Serialize, Serializer};
+    use xmpp_parsers::message::Lang;
+
+    pub fn serialize<S: Serializer>(
+        language: &Option<Lang>,
+        serializer: S,
+    ) -> Result<S::Ok, S::Error> {
+        language
+            .as_ref()
+            .map(|language| language.0.as_str())
+            .serialize(serializer)
+    }
+
+    pub fn deserialize<'de, D: Deserializer<'de>>(
+        deserializer: D,
+    ) -> Result<Option<Lang>, D::Error> {
+        Option::<String>::deserialize(deserializer).map(|language| language.map(Lang))
+    }
+}
+
 mod message_key_serde {
     use serde::{Deserialize, Deserializer, Serialize, Serializer};
     use waddle_xmpp::ingress::MessageKey;

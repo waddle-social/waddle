@@ -2,7 +2,7 @@ use super::*;
 use waddle_xmpp::ingress::IngressEffectIntent;
 
 pub(crate) struct CarbonRegistryDeps<'a> {
-    pub ingress_effect_capture: Option<&'a crate::ingress_shadow::IngressEffectCapture>,
+    pub ingress_effect_capture: Option<&'a crate::ingress::IngressEffectCapture>,
     pub sm_session_registry: Option<&'a Arc<InMemorySmSessionRegistry>>,
     pub web_socket_state: Option<&'a WebSocketState>,
 }

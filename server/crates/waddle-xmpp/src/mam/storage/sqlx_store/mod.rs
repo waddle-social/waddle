@@ -47,6 +47,17 @@ pub struct SqlxMamStorage {
 }
 
 impl SqlxMamStorage {
+    /// Initialize MAM on an existing SQLite pool so ingress transactions and
+    /// archive reads share the same physical database, including private tests.
+    pub async fn from_sqlite_pool(pool: SqlitePool) -> Result<Self, MamStorageError> {
+        let storage = Self {
+            backend: MamDatabaseBackend::Sqlite(pool),
+            fencing_enabled: false,
+        };
+        storage.initialize().await?;
+        Ok(storage)
+    }
+
     pub async fn open(database_url: &str) -> Result<Self, MamStorageError> {
         let driver = infer_driver(database_url)?;
         let backend = match driver {

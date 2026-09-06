@@ -177,7 +177,7 @@ pub(super) async fn execute(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::ingress_shadow::IngressEffectCapture;
+    use crate::ingress::IngressEffectCapture;
     use crate::server::routes::interpret::effects::PlanSink;
     use waddle_xmpp::registry::ConnectionRegistry;
 
@@ -185,7 +185,7 @@ mod tests {
     async fn clear_freezes_prior_planned_references_and_captures_the_mutations() {
         let registry = ConnectionRegistry::new();
         let sink = PlanSink::new();
-        let capture = IngressEffectCapture::new(None);
+        let capture = IngressEffectCapture::new();
         let mut deps =
             Deps::registry_only(&registry).with_ingress_effect_capture(Some(capture.clone()));
         deps.effects = &sink;

@@ -25,6 +25,10 @@ pub trait EffectSink: Send + Sync {
     fn room_execution(&self) -> RoomExecutionPath {
         RoomExecutionPath::None
     }
+    fn observe_message(&self, _message: &xmpp_parsers::message::Message) {}
+    fn message(&self) -> Option<xmpp_parsers::message::Message> {
+        None
+    }
     fn observe_sender(&self, _sender: &jid::FullJid) {}
     fn set_rejection(&self, _rejection: super::PlanRejection) {}
     fn rejection(&self) -> Option<super::PlanRejection> {

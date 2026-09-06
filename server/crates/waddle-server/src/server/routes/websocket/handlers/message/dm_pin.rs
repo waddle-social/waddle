@@ -9,7 +9,7 @@ use waddle_xmpp::{
 use waddle_xmpp_core::xep0359::StanzaId;
 use xmpp_parsers::stanza_error::{DefinedCondition, ErrorType, StanzaError};
 
-use crate::ingress_shadow::IngressEffectCapture;
+use crate::ingress::IngressEffectCapture;
 use crate::server::routes::interpret::{
     effects::{
         delivery::{ExternalDeliveryEffect, PeerDeliveryKind},
@@ -671,7 +671,7 @@ mod tests {
     #[tokio::test]
     async fn fanout_dm_pin_event_records_direct_routes_per_participant() {
         let state = create_test_websocket_state().await;
-        let capture = IngressEffectCapture::new(None);
+        let capture = IngressEffectCapture::new();
         let deps = crate::server::routes::websocket::interpret_loop::build_interpret_deps(
             state.as_ref(),
             None,
@@ -720,7 +720,7 @@ mod tests {
     #[tokio::test]
     async fn fanout_dm_pin_event_ignores_closed_resources_in_route_intent() {
         let state = create_test_websocket_state().await;
-        let capture = IngressEffectCapture::new(None);
+        let capture = IngressEffectCapture::new();
         let deps = crate::server::routes::websocket::interpret_loop::build_interpret_deps(
             state.as_ref(),
             None,
@@ -770,7 +770,7 @@ mod tests {
     #[tokio::test]
     async fn missing_dm_pin_target_records_error_reply_intent() {
         let state = create_test_websocket_state().await;
-        let capture = IngressEffectCapture::new(None);
+        let capture = IngressEffectCapture::new();
         let deps = crate::server::routes::websocket::interpret_loop::build_interpret_deps(
             state.as_ref(),
             None,
@@ -823,7 +823,7 @@ mod tests {
     #[tokio::test]
     async fn dm_pin_capture_preserves_the_committed_entry() {
         let state = create_test_websocket_state().await;
-        let capture = IngressEffectCapture::new(None);
+        let capture = IngressEffectCapture::new();
         let deps = crate::server::routes::websocket::interpret_loop::build_interpret_deps(
             state.as_ref(),
             None,
@@ -918,7 +918,7 @@ mod tests {
         message.type_ = xmpp_parsers::message::MessageType::Chat;
         message.payloads.push(build_pinned_message_element(&target));
         let sink = PlanSink::new();
-        let capture = IngressEffectCapture::new(None);
+        let capture = IngressEffectCapture::new();
         let mut deps = crate::server::routes::websocket::interpret_loop::build_interpret_deps(
             state.as_ref(),
             None,

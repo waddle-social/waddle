@@ -53,9 +53,6 @@ use crate::server::routes::websocket::handlers::iq::errors::{
     feature_not_implemented_iq_error, not_authorized_iq_error,
 };
 
-#[cfg(test)]
-use waddle_xmpp::mam::InMemoryMamStorage;
-
 use waddle_extensions::ExtensionManager;
 
 use super::auth::AuthState;

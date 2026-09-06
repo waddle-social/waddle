@@ -1,4 +1,6 @@
 //! Typed room mutations and delivery work retained by an ingress plan.
+#[cfg(feature = "clustering")]
+pub use super::super::{OrderedRelayRouteOrigin, OrderedRelayRouteOriginKind};
 use jid::BareJid;
 use waddle_xmpp::{
     inbox::{storage::GroupchatNotificationRecovery, InboxEntry},
@@ -65,6 +67,7 @@ pub enum ExternalRoomEffect {
     },
     #[cfg(feature = "clustering")]
     RelayMucProxy {
+        admission: Option<crate::ingress::identity::IngressRelayAdmission>,
         room: BareJid,
         stanza: Box<waddle_xmpp::Stanza>,
         kind: crate::clustering::ordered_relay::OrderedRelayMucProxyKind,

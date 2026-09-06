@@ -94,8 +94,6 @@ pub fn classify_failure(error: &IngressUowError) -> IngressDecisionClass {
         IngressUowError::ClaimFenceMissing | IngressUowError::NodeIdentityUnbound => {
             IngressDecisionClass::ClaimFenceMissing
         }
-        #[cfg(feature = "clustering")]
-        IngressUowError::FrontierStale { .. } => IngressDecisionClass::FrontierStale,
         _ => IngressDecisionClass::Storage,
     }
 }
@@ -129,6 +127,10 @@ async fn commit_attempt(
     #[cfg(test)]
     if let Some(error) = forced_failures::take_failure() {
         return Err(error);
+    }
+    // A relayed retry must prove the room claim before touching canonical identity.
+    if matches!(submission.identity, IngressStreamIdentity::Relayed { .. }) {
+        super::commit_room::assert_room(&mut tx, submission, false).await?;
     }
     let stream = super::commit_stream::lock_stream(&mut tx, &submission.identity).await?;
     let digest = waddle_xmpp::ingress::digest::v1::digest(&submission.digest_input);
@@ -211,7 +213,7 @@ async fn commit_attempt(
         accepted.rejection = None;
         accepted
     } else if let Some(class) = rejection {
-        super::rejection::rejection_plan(&submission.plan, class)?
+        super::rejection::rejection_plan(&submission.plan, class, &submission.sender)?
     } else {
         super::restamp::restamp_plan(&submission.plan, &recorded_ids)
     };
@@ -233,6 +235,7 @@ async fn commit_attempt(
         && !owner_first
         && rejection.is_none()
         && recorded_ids.is_empty()
+        && !owner_acceptance_pending(submission, &recorded)
         && stream.as_ref().is_none_or(|stream| stream.bound.is_none())
     {
         return Err(IngressUowError::EffectIntentMessageMissing);
@@ -265,6 +268,29 @@ async fn commit_attempt(
     };
     let external =
         super::suppression::filter_external_effects(&plan, filter_verdict, &applied.archives);
+    #[cfg(feature = "clustering")]
+    let external = {
+        use crate::server::routes::interpret::effects::room::ExternalRoomEffect;
+        let mut external = external;
+        for effect in &mut external {
+            if let super::ExternalEffect::Room(ExternalRoomEffect::RelayMucProxy {
+                admission,
+                ..
+            }) = effect
+            {
+                *admission = Some(super::identity::IngressRelayAdmission {
+                    canonical: super::IngressCanonicalRef {
+                        message_key: key,
+                        sender_bare: submission.principal.bare_jid().clone(),
+                        origin_id: submission.digest_input.origin().cloned(),
+                    },
+                    principal: submission.principal.clone(),
+                    stanza_lang: submission.digest_input.stanza_lang().cloned(),
+                });
+            }
+        }
+        external
+    };
     let external_dependencies =
         super::suppression::external_effect_indices(&plan, filter_verdict, &applied.archives)
             .into_iter()
@@ -300,6 +326,25 @@ async fn commit_attempt(
     };
     commit_transaction(tx).await?;
     Ok(decision)
+}
+
+/// A remote groupchat origin commits before the owner can assign its archive ID.
+/// Only that recorded room obligation can justify an alias without archive IDs.
+fn owner_acceptance_pending(
+    submission: &IngressSubmission,
+    recorded: &[IngressEffectIntent],
+) -> bool {
+    use super::RoomExecutionPath;
+    use waddle_xmpp::ingress::NormalizedTarget;
+    let NormalizedTarget::Bare(target) = &submission.target else {
+        return false;
+    };
+    submission.plan.sanitized_message.type_ == xmpp_parsers::message::MessageType::Groupchat
+        && matches!(&submission.plan.room_execution, RoomExecutionPath::Remote { room, .. } if room == target)
+        && recorded.iter().any(|intent| {
+            matches!(intent,
+            IngressEffectIntent::DispatchToRoomRemote { room, .. } if room == target)
+        })
 }
 
 pub(crate) async fn commit_transaction(

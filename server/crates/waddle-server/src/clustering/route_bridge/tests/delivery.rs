@@ -69,6 +69,7 @@ async fn reserved_relay_join_stores_the_source_connection_generation() {
         OrderedRelayMucProxyKind::JoinPresence,
         MucProxyOrigin::Connection(generation),
         &Stanza::Presence(presence),
+        None,
     )
     .await
     .expect("relayed join delivered");
@@ -125,6 +126,7 @@ async fn reserved_relay_unavailable_cannot_remove_a_replacement_generation() {
             OrderedRelayMucProxyKind::JoinPresence,
             MucProxyOrigin::Connection(generation),
             &Stanza::Presence(available.clone()),
+            None,
         )
         .await
         .expect("relayed join delivered");
@@ -141,6 +143,7 @@ async fn reserved_relay_unavailable_cannot_remove_a_replacement_generation() {
         OrderedRelayMucProxyKind::OccupantPresence,
         MucProxyOrigin::Connection(first),
         &Stanza::Presence(unavailable),
+        None,
     )
     .await
     .expect("superseded relayed leave is terminal");
@@ -854,7 +857,6 @@ async fn bare_presence_direct_drops_blocked_sender_before_detached_replay() {
             jid: target_full(),
             occupancy_session: waddle_xmpp_core::OccupancySessionGeneration::mint(),
             inbound_count: 0,
-            shadow_ordinal: waddle_xmpp::stream_management::ShadowOrdinal::ZERO,
             outbound_count: 0,
             last_acked: 0,
             replay_gap_through: None,
@@ -1081,7 +1083,6 @@ async fn remote_full_jid_route_reply_returns_detached_stream_identity() {
             jid: target_full(),
             occupancy_session: waddle_xmpp_core::OccupancySessionGeneration::mint(),
             inbound_count: 0,
-            shadow_ordinal: waddle_xmpp::stream_management::ShadowOrdinal::ZERO,
             outbound_count: 0,
             last_acked: 0,
             replay_gap_through: None,
@@ -1184,7 +1185,6 @@ async fn remote_carbons_reply_returns_detached_stream_identity() {
             jid: detached_target.clone(),
             occupancy_session: waddle_xmpp_core::OccupancySessionGeneration::mint(),
             inbound_count: 0,
-            shadow_ordinal: waddle_xmpp::stream_management::ShadowOrdinal::ZERO,
             outbound_count: 0,
             last_acked: 0,
             replay_gap_through: None,
@@ -1776,4 +1776,37 @@ async fn receiver_nacks_dropped_peer_delivery_instead_of_acknowledging_loss() {
         .expect_err("full outbound channel must not be ACKed as delivered");
 
     assert_eq!(err, OrderedRelayNackReason::Backpressure);
+}
+
+#[tokio::test]
+async fn reserved_groupchat_requires_committed_origin_admission() {
+    let state = create_test_websocket_state_with_clustering(
+        crate::clustering::ClusteringHandles::default(),
+        Arc::new(InMemorySmSessionRegistry::new()),
+    )
+    .await;
+    let mut services = services_with_claims(
+        origin_identity(),
+        receiver_identity(),
+        receiver_identity(),
+        test_peer_id(),
+    )
+    .await;
+    services.web_socket_state = Arc::downgrade(&state);
+    let room: jid::BareJid = "room@muc.example.com".parse().expect("room");
+    let mut message = Message::new(Some(room.clone().into()));
+    message.from = Some("alice@example.com/web".parse().expect("sender"));
+    message.type_ = xmpp_parsers::message::MessageType::Groupchat;
+    assert!(matches!(
+        deliver_reserved_muc_proxy(
+            &services,
+            &room,
+            OrderedRelayMucProxyKind::GroupchatMessage,
+            MucProxyOrigin::Server,
+            &Stanza::Message(message),
+            None,
+        )
+        .await,
+        Err(OrderedRelayNackReason::ParseFailure)
+    ));
 }

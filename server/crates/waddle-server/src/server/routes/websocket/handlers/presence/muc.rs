@@ -1336,8 +1336,7 @@ async fn handle_muc_join_unlocked(state: &WebSocketState, request: MucJoinWork<'
                                             crate::clustering::ordered_relay::MucProxyOrigin::Connection(
                                                 occupancy_session,
                                             ),
-                                            origin,
-                                        )
+                                            origin, None)
                                         .await,
                                 ) {
                                     Some(RemoteMucJoinDecision::Delivered(replies)) => {
@@ -2008,8 +2007,7 @@ pub async fn handle_muc_leave(
                             crate::clustering::ordered_relay::MucProxyOrigin::Connection(
                                 occupancy_session,
                             ),
-                            origin,
-                        )
+                            origin, None)
                         .await,
                 ) {
                     RemoteMucLeaveDecision::Delivered(replies) => {

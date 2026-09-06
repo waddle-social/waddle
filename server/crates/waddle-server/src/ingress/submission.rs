@@ -12,10 +12,30 @@ use xmpp_parsers::message::{Message, MessageType};
 pub struct IngressSubmission {
     pub identity: IngressStreamIdentity,
     pub principal: AuthenticatedPrincipalRef,
+    /// Authenticated sender before room canonicalization changes the envelope address.
+    pub sender: jid::FullJid,
     pub target: NormalizedTarget,
     pub plan: IngressPlan,
     pub digest_input: DigestInput,
     pub connection_generation: ConnectionGeneration,
+}
+
+/// Normalize client-supplied XEP-0359 stamps at the admission binding before
+/// computing the pre-enrichment digest. Planning retains its own stamp handling.
+pub fn digest_input(
+    message: &Message,
+    context: &waddle_xmpp::ingress::DigestContext,
+) -> Result<DigestInput, waddle_xmpp::ingress::DigestInputError> {
+    let normalized = message_for_digest(message, &context.server_authorities);
+    DigestInput::from_parsed(&normalized, context)
+}
+
+fn message_for_digest(message: &Message, authorities: &[BareJid]) -> Message {
+    let mut normalized = message.clone();
+    for authority in authorities {
+        waddle_xmpp_core::xep0359::remove_stanza_ids_by(&mut normalized, &authority.clone().into());
+    }
+    normalized
 }
 
 /// Determine the assigning room authority from message shape before handlers run.
@@ -117,5 +137,45 @@ mod tests {
             digest_authorities(&message, &sender, sender.domain()),
             vec![sender]
         );
+    }
+}
+
+#[cfg(test)]
+mod digest_binding_tests {
+    use super::*;
+    use waddle_xmpp::ingress::DigestContext;
+    use waddle_xmpp_core::xep0359::{add_stanza_id, StanzaId, NS_SID};
+
+    #[test]
+    fn digest_binding_strips_only_trusted_stamps_without_mutating_the_offered_message() {
+        let sender: BareJid = "alice@example.com".parse().expect("sender");
+        let foreign: BareJid = "other.example.net".parse().expect("foreign authority");
+        let mut offered = Message::new(None);
+        add_stanza_id(
+            &mut offered,
+            &StanzaId::new("forged", sender.clone().into()),
+        );
+        add_stanza_id(
+            &mut offered,
+            &StanzaId::new("foreign", foreign.clone().into()),
+        );
+        let context = DigestContext {
+            target: NormalizedTarget::Absent,
+            server_authorities: vec![sender],
+            stanza_lang: None,
+        };
+        assert!(matches!(
+            DigestInput::from_parsed(&offered, &context),
+            Err(waddle_xmpp::ingress::DigestInputError::ForgedServerStanzaId { .. })
+        ));
+        let normalized = message_for_digest(&offered, &context.server_authorities);
+        assert_eq!(normalized.payloads.len(), 1);
+        assert!(normalized.payloads[0].is("stanza-id", NS_SID));
+        assert_eq!(
+            normalized.payloads[0].attr("by"),
+            Some(foreign.to_string().as_str())
+        );
+        assert_eq!(offered.payloads.len(), 2);
+        digest_input(&offered, &context).expect("normalization permits admission");
     }
 }

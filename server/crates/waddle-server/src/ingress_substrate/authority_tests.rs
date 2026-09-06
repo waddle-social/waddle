@@ -276,7 +276,7 @@ async fn checkpoint_frontier(driver: DatabaseDriver) {
             .expect("gap preserves checkpoint"),
         Some(WireHandledCount::from_storage(7))
     );
-    flush_checkpoint(&mut tx, id, WireHandledCount::from_storage(u32::MAX))
+    flush_checkpoint(&mut tx, id, WireHandledCount::from_storage(9))
         .await
         .expect("flush");
     tx.commit().await.expect("commit checkpoint");
@@ -285,7 +285,7 @@ async fn checkpoint_frontier(driver: DatabaseDriver) {
         load_stream_checkpoint(&mut tx, id)
             .await
             .expect("durable checkpoint"),
-        Some(WireHandledCount::from_storage(u32::MAX))
+        Some(WireHandledCount::from_storage(9))
     );
     tx.commit().await.expect("close read");
     fixture.close().await;
@@ -574,3 +574,71 @@ async fn postgres_already_terminal_row_is_unconditionally_locked() {
         .expect("commit second terminal transaction");
     fixture.close().await;
 }
+
+async fn checkpoint_flush_never_regresses(driver: DatabaseDriver) {
+    let Some(fixture) = Fixture::open(driver).await else {
+        return;
+    };
+    let id = SmIngressId::new();
+    let mut tx = fixture.db.begin_immediate().await.expect("begin");
+    insert_stream(&mut tx, id).await;
+    advance_frontier(
+        &mut tx,
+        id,
+        IngressOrdinal::FIRST,
+        WireHandledCount::from_storage(u32::MAX - 1),
+    )
+    .await
+    .expect("seed near wrap");
+    tx.commit().await.expect("commit initial checkpoint");
+
+    // Each offered count comes from a separate transaction: a newer owner's
+    // commit is visible before the displaced owner's delayed flush arrives.
+    for (offered, expected) in [
+        (u32::MAX, u32::MAX),
+        (0, 0),
+        (u32::MAX, 0),
+        (4, 4),
+        (3, 4),
+        (4, 4),
+    ] {
+        let mut tx = fixture.db.begin_immediate().await.expect("begin flush");
+        flush_checkpoint(&mut tx, id, WireHandledCount::from_storage(offered))
+            .await
+            .expect("flush");
+        tx.commit().await.expect("commit flush");
+        let mut tx = fixture.db.begin_immediate().await.expect("read checkpoint");
+        assert_eq!(
+            load_stream_checkpoint(&mut tx, id).await.expect("load"),
+            Some(WireHandledCount::from_storage(expected))
+        );
+        tx.commit().await.expect("close read");
+    }
+    let mut tx = fixture
+        .db
+        .begin_immediate()
+        .await
+        .expect("missing stream flush");
+    assert!(matches!(
+        flush_checkpoint(
+            &mut tx,
+            SmIngressId::new(),
+            WireHandledCount::from_storage(1)
+        )
+        .await,
+        Err(IngressSubstrateError::StreamMissing)
+    ));
+    drop(tx);
+    fixture.close().await;
+}
+
+backend_test!(
+    sqlite_checkpoint_flush_never_regresses,
+    checkpoint_flush_never_regresses,
+    Sqlite
+);
+backend_test!(
+    postgres_checkpoint_flush_never_regresses,
+    checkpoint_flush_never_regresses,
+    Postgres
+);

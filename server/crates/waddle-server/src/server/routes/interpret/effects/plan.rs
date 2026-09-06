@@ -3,6 +3,7 @@ use std::sync::Mutex;
 
 #[derive(Debug, Default)]
 pub struct PlanSink {
+    message: Mutex<Option<xmpp_parsers::message::Message>>,
     rejection: Mutex<Option<super::PlanRejection>>,
     sender: Mutex<Option<jid::FullJid>>,
     plan: Mutex<Vec<PlannedEffect>>,
@@ -64,6 +65,12 @@ impl EffectSink for PlanSink {
     }
     fn is_planning(&self) -> bool {
         true
+    }
+    fn observe_message(&self, message: &xmpp_parsers::message::Message) {
+        *self.message.lock().expect("message mutex") = Some(message.clone());
+    }
+    fn message(&self) -> Option<xmpp_parsers::message::Message> {
+        self.message.lock().expect("message mutex").clone()
     }
     fn observe_sender(&self, sender: &jid::FullJid) {
         self.sender

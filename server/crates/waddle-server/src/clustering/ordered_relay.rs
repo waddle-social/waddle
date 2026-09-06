@@ -230,6 +230,10 @@ pub enum OrderedRelayPayload {
         stanza: RemoteStanza,
     },
     MucProxy {
+        canonical: Option<crate::ingress::IngressCanonicalRef>,
+        principal: Option<waddle_xmpp::auth::AuthenticatedPrincipalRef>,
+        #[serde(with = "crate::ingress::identity::stanza_lang_serde")]
+        stanza_lang: Option<xmpp_parsers::message::Lang>,
         room_jid: jid::BareJid,
         kind: OrderedRelayMucProxyKind,
         origin: MucProxyOrigin,
@@ -341,11 +345,17 @@ impl OrderedRelayPayload {
                 }
             }
             OrderedRelayPayload::MucProxy {
+                canonical,
+                principal,
+                stanza_lang,
                 room_jid,
                 kind,
                 origin,
                 stanza,
             } => OrderedRelayPayloadFingerprint::MucProxy {
+                canonical: canonical.clone(),
+                principal: principal.clone(),
+                stanza_lang: stanza_lang.clone(),
                 room_jid: room_jid.clone(),
                 kind: *kind,
                 origin: *origin,
@@ -573,6 +583,9 @@ enum OrderedRelayPayloadFingerprint {
         stanza: minidom::Element,
     },
     MucProxy {
+        canonical: Option<crate::ingress::IngressCanonicalRef>,
+        principal: Option<waddle_xmpp::auth::AuthenticatedPrincipalRef>,
+        stanza_lang: Option<xmpp_parsers::message::Lang>,
         room_jid: jid::BareJid,
         kind: OrderedRelayMucProxyKind,
         origin: MucProxyOrigin,

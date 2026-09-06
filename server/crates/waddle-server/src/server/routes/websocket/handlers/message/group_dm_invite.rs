@@ -14,9 +14,6 @@ use xmpp_parsers::stanza_error::{DefinedCondition, ErrorType, StanzaError};
 use crate::auth::Session;
 use crate::db::ValueExt;
 use crate::server::routes::interpret::effects::{
-    AuthorizationDeniedReason, PlanRejection, PolicyDeniedReason,
-};
-use crate::server::routes::interpret::effects::{
     Effect, EffectOutcome, ExternalEffect, PlannedEffect,
 };
 use crate::server::routes::websocket::WebSocketState;
@@ -106,17 +103,16 @@ pub(super) async fn handle_group_dm_mediated_invite(
                 error = %error,
                 "Suppressing group-DM invite because blocklist lookup failed"
             );
-            deps.effects.set_rejection(PlanRejection::PolicyDenied(
-                PolicyDeniedReason::OperationalFenceLoss,
-            ));
-            return Some(vec![]);
+            return Some(vec![error_reply(
+                incoming,
+                bound_jid,
+                deps,
+                GroupDmInviteError::InternalServerError,
+                "Internal server error.",
+            )]);
         }
     };
     if invitee_blocklist.contains_jid(&jid::Jid::from(bound_jid.clone())) {
-        deps.effects
-            .set_rejection(PlanRejection::AuthorizationDenied(
-                AuthorizationDeniedReason::BlockedSender,
-            ));
         return Some(vec![]);
     }
 
@@ -677,7 +673,7 @@ async fn record_group_dm_archive_boundary(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::ingress_shadow::IngressEffectCapture;
+    use crate::ingress::IngressEffectCapture;
     use kameo::actor::Spawn;
     use std::sync::Arc;
     use waddle_xmpp::muc::room_actor::{GetRoomSnapshot, HydrateDurableRecipients, RoomActor};
@@ -838,7 +834,7 @@ mod tests {
     #[tokio::test]
     async fn non_member_group_dm_invite_records_error_reply_intent() {
         let state = crate::server::routes::websocket::tests::create_test_websocket_state().await;
-        let capture = IngressEffectCapture::new(None);
+        let capture = IngressEffectCapture::new();
         let deps = crate::server::routes::websocket::interpret_loop::build_interpret_deps(
             state.as_ref(),
             None,
@@ -878,7 +874,7 @@ mod tests {
     #[tokio::test]
     async fn successful_group_dm_invite_records_membership_and_ledger_intents() {
         let state = crate::server::routes::websocket::tests::create_test_websocket_state().await;
-        let capture = IngressEffectCapture::new(None);
+        let capture = IngressEffectCapture::new();
         let deps = crate::server::routes::websocket::interpret_loop::build_interpret_deps(
             state.as_ref(),
             None,
@@ -1212,14 +1208,108 @@ mod tests {
             .is_none());
     }
 
-    #[tokio::test]
-    async fn blocklist_lookup_failure_sets_operational_plan_rejection() {
-        struct FailingBlocking;
+    async fn invite_plan_with_blocking(
+        blocking: Arc<dyn BlockingStorage>,
+        group_dm: bool,
+    ) -> crate::server::routes::interpret::effects::IngressPlan {
+        let state = crate::server::routes::websocket::tests::create_test_websocket_state_with_sm_registry_pending_and_blocking(
+            Arc::new(InMemorySmSessionRegistry::new()),
+            Arc::new(InMemoryPendingDeliveryStorage::unlimited()),
+            blocking,
+        ).await;
+        let room: jid::BareJid = "blocking@muc.example.com".parse().expect("room");
+        let sender: jid::FullJid = "alice@example.com/web".parse().expect("sender");
+        crate::server::routes::websocket::tests::seed_local_account(&state, "bob").await;
+        let actor = if group_dm {
+            create_group_dm_room(&state, &room, "blocking").await
+        } else {
+            state
+                .deps
+                .protocol
+                .room_registry
+                .ask(CreateRoom {
+                    room_jid: room.clone(),
+                    waddle_id: "test".into(),
+                    channel_id: "blocking".into(),
+                    config: RoomConfig::default(),
+                })
+                .await
+                .expect("room")
+        };
+        actor
+            .ask(waddle_xmpp::muc::room_actor::JoinWithAffiliation {
+                sender_jid: sender.clone(),
+                nick: "alice".into(),
+                affiliation_grant: waddle_xmpp::muc::room_actor::JoinAffiliationGrant::Resolver(
+                    waddle_xmpp::Affiliation::Member,
+                ),
+                local_domain: "example.com".into(),
+                admission_revision: 0,
+                session: waddle_xmpp_core::OccupancySessionGeneration::mint(),
+            })
+            .await
+            .expect("join inviter");
+        // Default MUC rooms are members-only; invitations require an admin.
+        // Establish that precondition so both branches reach the invitee blocklist.
+        actor
+            .ask(ChangeAffiliation {
+                jid: sender.to_bare(),
+                affiliation: waddle_xmpp::Affiliation::Admin,
+            })
+            .await
+            .expect("grant inviter invitation permission");
+        let snapshot = actor.ask(GetSnapshot).await.expect("room snapshot");
+        assert!(snapshot.room.find_nick_by_real_jid(&sender).is_some());
+        assert_eq!(
+            snapshot.room.get_affiliation(&sender.to_bare()),
+            waddle_xmpp::Affiliation::Admin
+        );
+        let mut machine =
+            waddle_xmpp::protocol::XmppStateMachine::new("example.com", Default::default());
+        machine.transition_to_ready(sender.clone(), false);
+        let session = crate::auth::Session::new("alice@example.com", "alice", "alice");
+        let principal =
+            crate::server::routes::websocket::ResolvedPrincipal::from_authenticated_session(
+                &session,
+            );
+        let deps = crate::server::routes::websocket::interpret_loop::build_interpret_deps(
+            &state,
+            Some(principal),
+        );
+        crate::server::routes::interpret::plan_message_dispatch(
+            &mut machine,
+            group_dm_invite_message(&room, &sender, "bob@example.com"),
+            &deps,
+        )
+        .await
+    }
 
+    #[tokio::test]
+    async fn blocked_invitee_is_a_silent_accepted_plan_for_group_dm_and_muc() {
+        for group_dm in [false, true] {
+            let blocking = Arc::new(waddle_xmpp::xep::xep0191::InMemoryBlockingStorage::new());
+            blocking.set_blocklist(
+                "bob@example.com".parse().expect("invitee"),
+                vec!["alice@example.com".parse().expect("sender")],
+            );
+            let plan = invite_plan_with_blocking(blocking, group_dm).await;
+            assert!(
+                plan.rejection.is_none(),
+                "blocked invitations are silent success (group_dm={group_dm}): {:?}",
+                plan.rejection
+            );
+            assert!(plan.error_reply.is_none());
+            assert!(plan.intents.is_empty());
+            assert!(plan.plan.is_empty());
+        }
+    }
+
+    #[tokio::test]
+    async fn blocklist_lookup_failure_plans_a_complete_generic_error_for_group_dm_and_muc() {
+        struct FailingBlocking;
         #[derive(Debug, thiserror::Error)]
         #[error("synthetic blocking lookup failure")]
         struct FailingBlockingError;
-
         #[async_trait::async_trait]
         impl BlockingStorage for FailingBlocking {
             async fn list_blocked_jids(
@@ -1228,7 +1318,6 @@ mod tests {
             ) -> Result<Vec<jid::BareJid>, BlockingStorageError> {
                 Err(BlockingStorageError::new(FailingBlockingError))
             }
-
             async fn list_blocked_jid_entries(
                 &self,
                 _user_jid: &jid::BareJid,
@@ -1236,61 +1325,36 @@ mod tests {
                 Err(BlockingStorageError::new(FailingBlockingError))
             }
         }
-
-        let sm_registry = Arc::new(InMemorySmSessionRegistry::new());
-        let pending = Arc::new(InMemoryPendingDeliveryStorage::unlimited());
-        let blocking: Arc<dyn BlockingStorage> = Arc::new(FailingBlocking);
-        let state = crate::server::routes::websocket::tests::create_test_websocket_state_with_sm_registry_pending_and_blocking(
-            sm_registry,
-            pending,
-            blocking,
-        )
-        .await;
-        let capture = IngressEffectCapture::new(None);
-        let sink = crate::server::routes::interpret::effects::PlanSink::new();
-        let mut deps = crate::server::routes::websocket::interpret_loop::build_interpret_deps(
-            state.as_ref(),
-            None,
-        )
-        .with_ingress_effect_capture(Some(capture.clone()));
-        deps.effects = &sink;
-        let room_jid: jid::BareJid = "group-dm-blocking@muc.example.com"
-            .parse()
-            .expect("room jid");
-        let sender: jid::FullJid = "alice@example.com/web".parse().expect("sender");
-        let room_actor = create_group_dm_room(state.as_ref(), &room_jid, "group-dm-blocking").await;
-        crate::server::routes::websocket::tests::seed_local_account(state.as_ref(), "bob").await;
-        room_actor
-            .ask(ChangeAffiliation {
-                jid: sender.to_bare(),
-                affiliation: waddle_xmpp::Affiliation::Member,
-            })
-            .await
-            .expect("grant inviter membership");
-        let session = crate::auth::Session::new("alice@example.com", "alice", "alice");
-
-        let response = handle_group_dm_mediated_invite(
-            &group_dm_invite_message(&room_jid, &sender, "bob@example.com"),
-            state.as_ref(),
-            &sender,
-            Some(&session),
-            &deps,
-        )
-        .await
-        .expect("handler should consume invite");
-
-        assert!(
-            response.is_empty(),
-            "blocklist outage should fail closed without leaking an auth outcome"
-        );
-        assert!(capture.snapshot().markers.is_empty());
-        assert_eq!(
-            deps.effects.rejection(),
-            Some(PlanRejection::PolicyDenied(
-                PolicyDeniedReason::OperationalFenceLoss
-            ))
-        );
-        assert!(sink.snapshot().is_empty());
+        for group_dm in [false, true] {
+            let plan = invite_plan_with_blocking(Arc::new(FailingBlocking), group_dm).await;
+            assert!(matches!(
+                plan.rejection,
+                Some(crate::server::routes::interpret::effects::PlanRejection::PolicyDenied(_))
+            ));
+            let Some(waddle_xmpp::Stanza::Message(reply)) = plan.error_reply else {
+                panic!("standard error reply")
+            };
+            assert_eq!(
+                reply.to,
+                Some("alice@example.com/web".parse().expect("sender"))
+            );
+            let payload = reply
+                .payloads
+                .iter()
+                .find(|payload| payload.name() == "error")
+                .expect("error payload");
+            let error = StanzaError::try_from(payload.clone()).expect("typed error");
+            assert_eq!(
+                error.defined_condition,
+                DefinedCondition::InternalServerError
+            );
+            assert_eq!(plan.intents.len(), 1);
+            assert!(matches!(
+                plan.intents[0],
+                IngressEffectIntent::ErrorReply { .. }
+            ));
+            assert_eq!(plan.plan.len(), 1);
+        }
     }
 }
 

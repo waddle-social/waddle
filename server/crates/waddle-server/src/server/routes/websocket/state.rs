@@ -1511,7 +1511,7 @@ pub struct ProtocolServices {
     /// WebSocket has closed but may still resume within the session timeout.
     pub sm_session_registry: Arc<InMemorySmSessionRegistry>,
     /// Non-blocking shadow executor for durable SM handled-frontier writes.
-    pub ingress_shadow: crate::ingress_shadow::IngressShadowHandle,
+    pub ingress: Arc<crate::ingress::IngressAuthority>,
     /// Bounded admission for deferred link-preview resolver fetches
     /// (#1470). Serial frame dispatch used to throttle lookups to one in
     /// flight per connection as a side effect of blocking; once resolution
@@ -1666,6 +1666,7 @@ impl std::ops::Deref for ResolvedPrincipal<'_> {
 }
 
 pub(super) struct WsConnState {
+    pub(super) ingress_generation: waddle_xmpp::ingress::ConnectionGeneration,
     pub(super) phase: ConnectionPhase,
     /// Semantic state: the frame dispatcher has handled the client's current
     /// RFC 7395 `<open/>`. This resets on an actual XMPP stream close or
@@ -1825,7 +1826,12 @@ pub(super) struct WsConnState {
 
 impl WsConnState {
     pub(super) fn new() -> Self {
+        static NEXT_INGRESS_GENERATION: std::sync::atomic::AtomicU64 =
+            std::sync::atomic::AtomicU64::new(1);
         Self {
+            ingress_generation: waddle_xmpp::ingress::ConnectionGeneration::from_storage(
+                NEXT_INGRESS_GENERATION.fetch_add(1, std::sync::atomic::Ordering::Relaxed),
+            ),
             phase: ConnectionPhase::new(),
             stream_open_handled: false,
             stream_open_wire_state: StreamOpenWireState::NotCommitted,

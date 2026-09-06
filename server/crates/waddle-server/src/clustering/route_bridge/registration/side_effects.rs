@@ -2,7 +2,7 @@ use super::super::*;
 
 /// Whether the remote owner supplied an authoritative XEP-0280 recipient
 /// snapshot. A timeout after send can be maybe-committed, but must never be
-/// represented as a known empty audience in ingress shadow capture.
+/// represented as a known empty audience in ingress intent capture.
 pub(crate) enum RemoteCarbonFanout {
     Applied {
         carbon_recipients: Vec<jid::FullJid>,

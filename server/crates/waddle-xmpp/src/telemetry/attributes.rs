@@ -667,77 +667,7 @@ impl MetricAttribute for IngressAliasOutcome {
     }
 }
 
-/// `outcome` — whether a whole ingress transaction retried and recovered or
-/// exhausted its retry budget.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum IngressRetryOutcome {
-    Retried,
-    Exhausted,
-}
-
-impl IngressRetryOutcome {
-    pub const ALL: [Self; 2] = [Self::Retried, Self::Exhausted];
-}
-
-impl sealed::Sealed for IngressRetryOutcome {}
-impl MetricAttribute for IngressRetryOutcome {
-    fn key(&self) -> &'static str {
-        "outcome"
-    }
-
-    fn value(&self) -> &'static str {
-        match self {
-            Self::Retried => "retried",
-            Self::Exhausted => "exhausted",
-        }
-    }
-}
-
-/// `outcome` — whether a message stanza was eligible to park a shadow-ingress
-/// submission.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum IngressCandidateOutcome {
-    Parked,
-    Disabled,
-    NoStream,
-    NonResumable,
-    NoClaimFence,
-    NoPrincipal,
-    NoCapture,
-}
-
-impl IngressCandidateOutcome {
-    pub const ALL: [Self; 7] = [
-        Self::Parked,
-        Self::Disabled,
-        Self::NoStream,
-        Self::NonResumable,
-        Self::NoClaimFence,
-        Self::NoPrincipal,
-        Self::NoCapture,
-    ];
-}
-
-impl sealed::Sealed for IngressCandidateOutcome {}
-impl MetricAttribute for IngressCandidateOutcome {
-    fn key(&self) -> &'static str {
-        "outcome"
-    }
-
-    fn value(&self) -> &'static str {
-        match self {
-            Self::Parked => "parked",
-            Self::Disabled => "disabled",
-            Self::NoStream => "no_stream",
-            Self::NonResumable => "non_resumable",
-            Self::NoClaimFence => "no_claim_fence",
-            Self::NoPrincipal => "no_principal",
-            Self::NoCapture => "no_capture",
-        }
-    }
-}
-
-/// `outcome` — how a shadow-ingress retention GC run ended.
+/// `outcome` — how an ingress retention GC run ended.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum IngressGcOutcome {
     /// The run exhausted its cooperative budget after accounting for progress.
@@ -766,43 +696,6 @@ impl MetricAttribute for IngressGcOutcome {
             Self::Completed => "completed",
             Self::Failed => "failed",
             Self::TimedOut => "timed_out",
-        }
-    }
-}
-
-/// `reason` — why shadow ingress intentionally skipped or dropped work.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum IngressSkipReason {
-    Disabled,
-    QueueFull,
-    ParkingFull,
-    Closed,
-    Unenrolled,
-}
-
-impl IngressSkipReason {
-    pub const ALL: [Self; 5] = [
-        Self::Disabled,
-        Self::QueueFull,
-        Self::ParkingFull,
-        Self::Closed,
-        Self::Unenrolled,
-    ];
-}
-
-impl sealed::Sealed for IngressSkipReason {}
-impl MetricAttribute for IngressSkipReason {
-    fn key(&self) -> &'static str {
-        "reason"
-    }
-
-    fn value(&self) -> &'static str {
-        match self {
-            Self::Disabled => "disabled",
-            Self::QueueFull => "queue_full",
-            Self::ParkingFull => "parking_full",
-            Self::Closed => "closed",
-            Self::Unenrolled => "unenrolled",
         }
     }
 }

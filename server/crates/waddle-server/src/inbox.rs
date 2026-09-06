@@ -84,6 +84,13 @@ impl From<InboxDecodeError> for InboxStorageError {
 }
 
 impl DatabaseInboxStorage {
+    /// Share the ingress database for transactional projections and their reads.
+    pub async fn from_database(db: Database) -> Result<Self, InboxStorageError> {
+        let storage = Self { db };
+        schema::initialize(&storage).await?;
+        Ok(storage)
+    }
+
     pub fn database(&self) -> Database {
         self.db.clone()
     }
@@ -95,8 +102,7 @@ impl DatabaseInboxStorage {
                 .await
                 .map_err(|error| InboxStorageError::Other(error.to_string()))?,
         };
-        let storage = Self { db };
-        schema::initialize(&storage).await?;
+        let storage = Self::from_database(db).await?;
         info!(driver = ?storage.db.driver(), "Inbox storage initialized");
         Ok(storage)
     }

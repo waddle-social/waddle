@@ -191,7 +191,7 @@ pub struct Deps<'a> {
     /// Typed, infallible capture handle for the shadow ingress seam.
     /// `None` on paths that are intentionally outside the message-ingress
     /// capture surface (tests, replay, IQ/presence).
-    pub ingress_effect_capture: Option<crate::ingress_shadow::IngressEffectCapture>,
+    pub ingress_effect_capture: Option<crate::ingress::IngressEffectCapture>,
 }
 
 impl<'a> Deps<'a> {
@@ -202,7 +202,7 @@ impl<'a> Deps<'a> {
 
     pub fn with_ingress_effect_capture(
         mut self,
-        capture: Option<crate::ingress_shadow::IngressEffectCapture>,
+        capture: Option<crate::ingress::IngressEffectCapture>,
     ) -> Self {
         self.ingress_effect_capture = capture;
         self

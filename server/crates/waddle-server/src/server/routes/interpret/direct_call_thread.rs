@@ -105,7 +105,7 @@ mod tests {
     use std::sync::Arc;
 
     use super::*;
-    use crate::ingress_shadow::IngressEffectCapture;
+    use crate::ingress::IngressEffectCapture;
     use waddle_xmpp::{
         inbox::storage::{InMemoryInboxStorage, InboxStorage},
         mam::{storage::InMemoryMamStorage, MamStorage},
@@ -152,7 +152,7 @@ mod tests {
         let registry = ConnectionRegistry::new();
         let mam: Arc<dyn MamStorage> = Arc::new(InMemoryMamStorage::new());
         let inbox: Arc<dyn InboxStorage> = Arc::new(InMemoryInboxStorage::new());
-        let capture = IngressEffectCapture::new(None);
+        let capture = IngressEffectCapture::new();
         let deps = Deps::test_with_storage(&registry, &mam, &inbox)
             .with_ingress_effect_capture(Some(capture.clone()));
         let owner: BareJid = "alice@example.com".parse().expect("owner");

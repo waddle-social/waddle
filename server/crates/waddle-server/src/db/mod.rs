@@ -200,6 +200,14 @@ pub struct Database {
 }
 
 impl Database {
+    #[cfg(test)]
+    pub(crate) fn sqlite_pool(&self) -> Option<&SqlitePool> {
+        match &self.backend {
+            DatabaseBackend::Sqlite(pool) => Some(pool),
+            DatabaseBackend::Postgres(_) => None,
+        }
+    }
+
     /// Wrap a physical external SQLx pool so shared database helpers can run
     /// against that exact pool without opening a second connection set.
     pub(crate) fn from_sqlite_pool(name: &str, pool: SqlitePool, in_memory: bool) -> Self {

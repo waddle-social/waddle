@@ -6,18 +6,17 @@ use jid::{BareJid, Jid};
 use uuid::Uuid;
 use waddle_server::{
     clustering::claims::PostgresClaimStore,
-    config::{IngressShadowConfig, LineageConfig},
+    config::{IngressConfig, LineageConfig},
     db::{lineage, Database, DatabaseConfig, DatabaseDriver, MigrationRunner},
-    ingress_shadow::{
-        IngressEffectCaptureSnapshot, IngressShadowDisposition, IngressShadowHandle,
-        IngressShadowSubmission,
-    },
+    ingress::{IngressAuthority, IngressStreamIdentity, IngressSubmission},
+    server::effects::{IngressPlan, RoomExecutionPath},
     sm_persistence::DatabaseSmPersistence,
 };
 use waddle_xmpp::{
     auth::{AuthContextId, AuthContextVersion, AuthenticatedPrincipalRef, PrincipalAuthEpoch},
     ingress::{
-        ConnectionGeneration, IngressEffectIntent, IngressOrdinal, MessageKey, NormalizedTarget,
+        ConnectionGeneration, DigestContext, DigestInput, IngressEffectIntent, MessageKey,
+        NormalizedTarget, SmIngressId, WireHandledCount,
     },
     ownership::{ClaimEpoch, ClaimStore, NodeIdentity, SharedNodeIdentity},
     pending_delivery::SmSessionId,
@@ -27,11 +26,12 @@ use xmpp_parsers::message::{Message, MessageType};
 const WAIT_TIMEOUT: Duration = Duration::from_secs(5);
 const POLL_INTERVAL: Duration = Duration::from_millis(10);
 
-pub struct ShadowFixture {
+pub struct IngressFixture {
     pub db: Database,
-    pub handle: IngressShadowHandle,
+    pub handle: IngressAuthority,
     pub stream_id: SmSessionId,
     pub principal: AuthenticatedPrincipalRef,
+    sm_ingress_id: SmIngressId,
     owner: NodeIdentity,
     claim_epoch: ClaimEpoch,
     target: BareJid,
@@ -39,14 +39,14 @@ pub struct ShadowFixture {
     schema: String,
 }
 
-impl ShadowFixture {
+impl IngressFixture {
     pub async fn open(test_name: &str) -> Option<Self> {
         let Ok(database_url) = std::env::var("WADDLE_TEST_POSTGRES_URL") else {
-            eprintln!("skipping: WADDLE_TEST_POSTGRES_URL not set (ingress shadow support)");
+            eprintln!("skipping: WADDLE_TEST_POSTGRES_URL not set (ingress ingress support)");
             return None;
         };
         let schema = format!(
-            "waddle_test_ingress_shadow_{test_name}_{}",
+            "waddle_test_ingress_ingress_{test_name}_{}",
             Uuid::new_v4().simple()
         );
         let admin = sqlx::PgPool::connect(&database_url)
@@ -59,7 +59,7 @@ impl ShadowFixture {
         let schema_url = postgres_url_with_search_path(&database_url, &schema);
         let mut database_config = DatabaseConfig::new(DatabaseDriver::Postgres, schema_url.clone());
         database_config.pool_size = 8;
-        let db = Database::from_config("ingress-shadow-test", &database_config)
+        let db = Database::from_config("ingress-ingress-test", &database_config)
             .await
             .expect("open isolated PostgreSQL database");
         MigrationRunner::single()
@@ -86,8 +86,8 @@ impl ShadowFixture {
             .await
             .expect("enroll fixture lineage");
 
-        let owner = NodeIdentity::new("shadow-node", "shadow-incarnation");
-        let stream_id = SmSessionId::new(format!("shadow-stream-{}", Uuid::new_v4().simple()));
+        let owner = NodeIdentity::new("ingress-node", "ingress-incarnation");
+        let stream_id = SmSessionId::new(format!("ingress-stream-{}", Uuid::new_v4().simple()));
         let principal = AuthenticatedPrincipalRef::new(
             "romeo@example.com".parse().expect("fixture bare JID"),
             AuthContextId::new(Uuid::new_v4()),
@@ -98,10 +98,8 @@ impl ShadowFixture {
             .parse()
             .expect("fixture target bare JID");
         let claim_epoch = ClaimEpoch(17);
-        let handle = IngressShadowHandle::new(
-            IngressShadowConfig {
-                enabled: true,
-                queue_capacity: 16,
+        let handle = IngressAuthority::new(
+            IngressConfig {
                 pool_size: 4,
                 retry_attempts: 5,
             },
@@ -110,17 +108,18 @@ impl ShadowFixture {
             Some(SharedNodeIdentity::new(owner.clone())),
         )
         .await
-        .expect("clustering shadow worker should initialize");
-        assert!(
-            handle.is_enabled(),
-            "clustering shadow worker must be enabled"
-        );
+        .expect("clustering ingress worker should initialize");
+        let sm_ingress_id = handle
+            .enroll_stream(&stream_id)
+            .await
+            .expect("enroll ingress stream");
 
         let fixture = Self {
             db,
             handle,
             stream_id,
             principal,
+            sm_ingress_id,
             owner,
             claim_epoch,
             target,
@@ -128,12 +127,6 @@ impl ShadowFixture {
             schema,
         };
         fixture.seed_principal_and_claim().await;
-        assert_eq!(
-            fixture.handle.try_enroll_stream(fixture.stream_id.clone()),
-            IngressShadowDisposition::Enqueued,
-            "fresh SM stream enrollment must enter the shadow worker"
-        );
-        fixture.wait_for_enrollment().await;
         Some(fixture)
     }
 
@@ -142,8 +135,8 @@ impl ShadowFixture {
         ordinal: u64,
         origin: Option<&str>,
         body: &str,
-        intents: Vec<IngressEffectIntent>,
-    ) -> IngressShadowSubmission {
+        mut intents: Vec<IngressEffectIntent>,
+    ) -> IngressSubmission {
         let mut message = Message::new(Some(Jid::from(self.target.clone())));
         message.type_ = MessageType::Chat;
         message
@@ -152,30 +145,74 @@ impl ShadowFixture {
         if let Some(origin) = origin {
             waddle_xmpp_core::xep0359::add_origin_id(&mut message, origin);
         }
-        IngressShadowSubmission {
-            stream_id: self.stream_id.clone(),
-            owner: self.owner.clone(),
-            claim_epoch: self.claim_epoch,
-            handled_ordinal: IngressOrdinal::from_storage(ordinal).expect("valid ingress ordinal"),
-            principal: self.principal.clone(),
-            target: NormalizedTarget::Bare(self.target.clone()),
-            message,
-            capture: IngressEffectCaptureSnapshot {
+        message.from = Some(
+            self.principal
+                .bare_jid()
+                .with_resource_str("web")
+                .expect("sender")
+                .into(),
+        );
+        let target = NormalizedTarget::Bare(self.target.clone());
+        let digest_input = DigestInput::from_parsed(
+            &message,
+            &DigestContext {
+                target: target.clone(),
+                server_authorities: vec![self.principal.bare_jid().clone()],
                 stanza_lang: None,
-                sanitized_message: None,
-                room_scope: None,
-                intents,
-                markers: Vec::new(),
             },
-            connection_generation: Some(ConnectionGeneration::INITIAL),
+        )
+        .expect("valid digest");
+        if intents.is_empty() {
+            let archive = self.principal.bare_jid().clone();
+            let stanza_id = waddle_xmpp_core::xep0359::StanzaId::new(
+                "fixture-archive-id",
+                archive.clone().into(),
+            );
+            waddle_xmpp_core::xep0359::add_stanza_id(&mut message, &stanza_id);
+            intents.push(IngressEffectIntent::ArchiveAuthoritative {
+                archive: archive.clone(),
+                stanza_id,
+                by: archive,
+                archived_at: chrono::DateTime::from_timestamp(1_700_000_000, 0)
+                    .expect("archive time"),
+            });
+        }
+        IngressSubmission {
+            sender: self
+                .principal
+                .bare_jid()
+                .with_resource_str("web")
+                .expect("sender"),
+            identity: IngressStreamIdentity::Resumable {
+                stream_id: self.stream_id.clone(),
+                sm_ingress_id: self.sm_ingress_id,
+                owner: self.owner.clone(),
+                claim_epoch: self.claim_epoch,
+                reserved_wire_position: WireHandledCount::new(
+                    u32::try_from(ordinal).expect("wire count"),
+                ),
+                checkpoint_h: WireHandledCount::new(u32::try_from(ordinal).expect("checkpoint")),
+            },
+            principal: self.principal.clone(),
+            target,
+            digest_input,
+            plan: IngressPlan {
+                sanitized_message: message,
+                intents,
+                plan: Vec::new(),
+                error_reply: None,
+                room_execution: RoomExecutionPath::None,
+                rejection: None,
+            },
+            connection_generation: ConnectionGeneration::INITIAL,
         }
     }
 
-    pub async fn enqueue(&self, submission: IngressShadowSubmission) {
-        assert_eq!(
-            self.handle.try_submit(submission),
-            IngressShadowDisposition::Enqueued,
-            "shadow submission must enqueue"
+    pub async fn commit(&self, submission: IngressSubmission) {
+        let decision = self.handle.commit(&submission).await;
+        assert!(
+            decision.class.advances(),
+            "ingress commit must advance: {decision:?}"
         );
     }
 
@@ -192,7 +229,7 @@ impl ShadowFixture {
                 waddle_server::db_params![self.stream_id.as_str().to_string()],
             )
             .await
-            .expect("read shadow frontier");
+            .expect("read ingress frontier");
         rows.next().await.expect("read frontier row").map(|row| {
             row.get::<String>(0)
                 .expect("decode frontier")
@@ -231,6 +268,7 @@ impl ShadowFixture {
             schema,
             ..
         } = self;
+        assert!(handle.drain_and_join(Duration::from_secs(5)).await);
         drop(handle);
         drop(db);
         sqlx::query(&format!("DROP SCHEMA {schema} CASCADE"))
@@ -245,8 +283,8 @@ impl ShadowFixture {
             "INSERT INTO users (jid, username, xmpp_localpart, created_at, updated_at) VALUES (?, ?, ?, now(), now())",
             waddle_server::db_params![
                 self.principal.bare_jid().to_string(),
-                format!("shadow-{suffix}"),
-                format!("shadow-{suffix}"),
+                format!("ingress-{suffix}"),
+                format!("ingress-{suffix}"),
             ],
         )
         .await
@@ -254,9 +292,9 @@ impl ShadowFixture {
         self.execute(
             "INSERT INTO sessions (id, user_jid, token_hash, auth_context_id, auth_context_version, principal_auth_epoch, created_at, last_used_at) VALUES (?, ?, ?, ?, ?, ?, now(), now())",
             waddle_server::db_params![
-                format!("shadow-session-{suffix}"),
+                format!("ingress-session-{suffix}"),
                 self.principal.bare_jid().to_string(),
-                format!("shadow-token-{suffix}"),
+                format!("ingress-token-{suffix}"),
                 self.principal.auth_context_id().as_uuid().to_string(),
                 i64::try_from(self.principal.auth_context_version().get()).expect("version fits"),
                 i64::try_from(self.principal.auth_epoch().get()).expect("epoch fits"),
@@ -278,11 +316,6 @@ impl ShadowFixture {
         .expect("seed exact SM claim");
     }
 
-    async fn wait_for_enrollment(&self) {
-        self.wait_until(|| async { self.frontier().await == Some(0) })
-            .await;
-    }
-
     async fn wait_until<F, Fut>(&self, mut condition: F)
     where
         F: FnMut() -> Fut,
@@ -295,7 +328,7 @@ impl ShadowFixture {
             }
             assert!(
                 Instant::now() < deadline,
-                "timed out waiting for ingress shadow worker progress"
+                "timed out waiting for ingress ingress worker progress"
             );
             tokio::time::sleep(POLL_INTERVAL).await;
         }

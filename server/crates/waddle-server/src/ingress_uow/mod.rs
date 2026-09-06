@@ -18,10 +18,7 @@ pub use repositories::{
     SmIngressStreamRepository,
 };
 #[cfg(feature = "clustering")]
-pub use repositories::{
-    ClaimRepository, HandledFrontierOutcome, HandledFrontierRepository, RoomClaimFence,
-    SmClaimFence,
-};
+pub use repositories::{ClaimRepository, RoomClaimFence, SmClaimFence};
 pub(crate) use retry::is_database_timeout;
 pub use retry::{run_with_retry, DbRetryClass, RetryExhausted};
 

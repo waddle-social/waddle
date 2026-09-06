@@ -230,12 +230,37 @@ pub async fn flush_checkpoint(
     id: SmIngressId,
     h: WireHandledCount,
 ) -> Result<(), IngressSubstrateError> {
+    const READ_POSTGRES: &str =
+        "SELECT checkpoint_h FROM ingress_sm_streams WHERE sm_ingress_id = ?::uuid FOR UPDATE";
+    const READ_SQLITE: &str = "SELECT checkpoint_h FROM ingress_sm_streams WHERE sm_ingress_id = ?";
+    acquire_epoch_lock_first(tx).await?;
+    let mut rows = tx
+        .query(
+            dialect_sql(tx.driver(), READ_POSTGRES, READ_SQLITE),
+            crate::db_params![id.to_storage().to_string()],
+        )
+        .await
+        .map_err(discard_database_error)?;
+    let row = rows
+        .next()
+        .await
+        .map_err(discard_database_error)?
+        .ok_or(IngressSubstrateError::StreamMissing)?;
+    let stored: i64 = row.get(0).map_err(discard_database_error)?;
+    let stored = u32::try_from(stored).map_err(|_| IngressSubstrateError::InvalidStoredStream)?;
+    drop(rows);
+    // A delayed ACK flush from a displaced connection must never rewind the
+    // checkpoint committed by its replacement, including across counter wrap.
+    let offered = waddle_xmpp::stream_management::sequence::max_in_window(stored, h.to_storage());
+    if offered == stored {
+        return Ok(());
+    }
     const POSTGRES: &str =
         "UPDATE ingress_sm_streams SET checkpoint_h = ? WHERE sm_ingress_id = ?::uuid";
     const SQLITE: &str = "UPDATE ingress_sm_streams SET checkpoint_h = ? WHERE sm_ingress_id = ?";
     tx.execute(
         dialect_sql(tx.driver(), POSTGRES, SQLITE),
-        crate::db_params![i64::from(h.to_storage()), id.to_storage().to_string()],
+        crate::db_params![i64::from(offered), id.to_storage().to_string()],
     )
     .await
     .map_err(discard_database_error)?;

@@ -41,8 +41,8 @@ pub async fn plan_message_dispatch(
         .as_ref()
         .and_then(|jid| jid.try_as_full().ok())
         .cloned();
-    let capture = crate::ingress_shadow::IngressEffectCapture::new(None);
-    capture.record_sanitized_message(&incoming);
+    let capture = crate::ingress::IngressEffectCapture::new();
+    sink.observe_message(&incoming);
     let planned = build_plan_deps(deps, &sink).with_ingress_effect_capture(Some(capture.clone()));
     let early = if let Some(sender) = ingress_sender.as_ref() {
         super::super::websocket::handlers::message::dispatch_early_message(
@@ -61,6 +61,15 @@ pub async fn plan_message_dispatch(
         ))));
         super::super::websocket::replay::drive_interpret_loop(events, sm, &planned).await;
     }
+    finish_plan(&sink, &capture, incoming, ingress_sender)
+}
+
+pub(super) fn finish_plan(
+    sink: &PlanSink,
+    capture: &crate::ingress::IngressEffectCapture,
+    incoming: Message,
+    ingress_sender: Option<jid::FullJid>,
+) -> IngressPlan {
     let (plan, room_execution) = sink.take();
     let error_reply = plan.iter().find_map(|effect| {
         let stanza = match &effect.effect {
@@ -95,22 +104,15 @@ pub async fn plan_message_dispatch(
         }
     });
     let snapshot = capture.snapshot();
-    if snapshot.markers.iter().any(|marker| {
-        matches!(
-            marker,
-            crate::ingress_shadow::ShadowDecisionMarker::Overflow
-        )
-    }) {
-        return reject_capture_overflow(
-            snapshot.sanitized_message.unwrap_or(incoming),
-            ingress_sender,
-        );
+    let sanitized_message = sink.message().unwrap_or(incoming);
+    if snapshot.overflowed {
+        return reject_capture_overflow(sanitized_message, ingress_sender);
     }
     IngressPlan {
         rejection: sink.rejection(),
         plan,
         intents: snapshot.intents,
-        sanitized_message: snapshot.sanitized_message.unwrap_or(incoming),
+        sanitized_message,
         error_reply,
         room_execution,
     }
@@ -159,10 +161,7 @@ pub(super) fn observe_message(deps: &Deps<'_>, event: &super::OutboundEvent, dep
     if !deps.effects.is_planning() || depth != 0 {
         return;
     }
-    let Some(capture) = &deps.ingress_effect_capture else {
-        return;
-    };
-    let Some(original) = capture.snapshot().sanitized_message else {
+    let Some(original) = deps.effects.message() else {
         return;
     };
     use super::OutboundEvent;
@@ -189,12 +188,12 @@ pub(super) fn observe_message(deps: &Deps<'_>, event: &super::OutboundEvent, dep
         sanitized
             .payloads
             .retain(|payload| payload.name() != "error");
-        capture.record_sanitized_message(&sanitized);
+        deps.effects.observe_message(&sanitized);
     } else if message.to == original.to && message.from == original.from {
         if let Some(sender) = message.from.as_ref().and_then(|jid| jid.try_as_full().ok()) {
             deps.effects.observe_sender(sender);
         }
-        capture.record_sanitized_message(message);
+        deps.effects.observe_message(message);
     }
 }
 

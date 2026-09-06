@@ -22,6 +22,15 @@ use receiver::*;
 pub(super) use remote_route_helpers::*;
 pub(crate) use remote_socket::RegisteredRemoteWriteAcceptedDelivery;
 
+/// Message responsibility is already committed before relay execution. IQ and
+/// presence retain socket-acceptance completion as their handled boundary.
+fn defer_until_relay_completion(
+    handoff: &crate::server::routes::interpret::OrderedRelayHandoffHandle,
+    stanza: &Stanza,
+) -> bool {
+    !matches!(stanza, Stanza::Message(_)) && handoff.mark_deferred()
+}
+
 pub(super) fn no_client_reply_outcome(delivery: FullJidDeliveryOutcome) -> RemoteDeliveryOutcome {
     no_client_reply_outcome_with_commit_state(delivery, false)
 }
@@ -129,4 +138,37 @@ pub(super) fn synthetic_session_for_full_jid(sender_jid: &jid::FullJid) -> crate
         localpart.as_str(),
         localpart.as_str(),
     )
+}
+
+#[cfg(test)]
+mod ingress_handoff_tests {
+    use super::*;
+    use crate::server::routes::interpret::{
+        OrderedRelayHandoffHandle, OrderedRelayInboundSequence,
+    };
+
+    #[tokio::test]
+    async fn committed_message_never_defers_but_iq_keeps_completion_notification() {
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+        let message_handoff =
+            OrderedRelayHandoffHandle::new(OrderedRelayInboundSequence(1), tx.clone());
+        let message = Stanza::Message(xmpp_parsers::message::Message::new(None));
+        assert!(!defer_until_relay_completion(&message_handoff, &message));
+        assert!(!message_handoff.was_deferred());
+        let iq_handoff = OrderedRelayHandoffHandle::new(OrderedRelayInboundSequence(2), tx);
+        let iq = Stanza::Iq(Box::new(xmpp_parsers::iq::Iq::Result {
+            from: None,
+            to: None,
+            id: "reply".to_owned(),
+            payload: None,
+        }));
+        assert!(defer_until_relay_completion(&iq_handoff, &iq));
+        assert!(iq_handoff.was_deferred());
+        iq_handoff.complete(Vec::new());
+        assert_eq!(
+            rx.recv().await.expect("IQ completion").inbound_sequence,
+            OrderedRelayInboundSequence(2)
+        );
+        assert!(rx.try_recv().is_err());
+    }
 }

@@ -16,6 +16,16 @@ pub(crate) fn sequence_gt(a: u32, b: u32) -> bool {
     diff < 0x8000_0000
 }
 
+/// Returns the later counter within an unambiguous XEP-0198 receive window.
+/// Callers must keep the two values less than half the sequence space apart.
+pub fn max_in_window(a: u32, b: u32) -> u32 {
+    if sequence_gt(a, b) {
+        a
+    } else {
+        b
+    }
+}
+
 /// Returns whether `a` is at or behind `b` in the XEP-0198 wrapping sequence
 /// space.
 pub(crate) fn sequence_lte(a: u32, b: u32) -> bool {
@@ -26,7 +36,7 @@ pub(crate) fn sequence_lte(a: u32, b: u32) -> bool {
 mod tests {
     use proptest::prelude::*;
 
-    use super::{sequence_gt, sequence_lte};
+    use super::{max_in_window, sequence_gt, sequence_lte};
 
     proptest! {
         #[test]
@@ -75,6 +85,15 @@ mod tests {
         fn sequence_lte_is_the_negation_of_sequence_gt(a in any::<u32>(), b in any::<u32>()) {
             prop_assert_eq!(sequence_lte(a, b), !sequence_gt(a, b));
         }
+    }
+
+    #[test]
+    fn max_in_window_selects_the_later_counter_across_wrap() {
+        assert_eq!(max_in_window(7, 9), 9);
+        assert_eq!(max_in_window(9, 7), 9);
+        assert_eq!(max_in_window(7, 7), 7);
+        assert_eq!(max_in_window(u32::MAX, 0), 0);
+        assert_eq!(max_in_window(0, u32::MAX), 0);
     }
 
     #[test]
