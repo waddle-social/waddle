@@ -4,7 +4,24 @@ use waddle_xmpp_core::xep0359::StanzaId;
 /// The archive authority whose minted identity occurs in this effect.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum PlanEffectDependency {
-    AfterArchive { archive: BareJid, minted: StanzaId },
+    /// Execute only after this pin mutation reports `Completed`.
+    AfterDmPinMutation {
+        pair: crate::server::routes::websocket::DmPairKey,
+        target: StanzaId,
+    },
+    AfterRoomMembership {
+        room: BareJid,
+        member: BareJid,
+    },
+    /// Execute only for a newly recorded invite or a successful claim.
+    /// `AlreadyOutstanding` and `Claimed(false)` suppress dependent delivery.
+    AfterInviteLedger {
+        invite: crate::server::routes::websocket::muc_invites::OutstandingInvite,
+    },
+    AfterArchive {
+        archive: BareJid,
+        minted: StanzaId,
+    },
 }
 
 /// Duplicate and tombstone rules are retained until the transaction resolves identity.

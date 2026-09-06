@@ -927,7 +927,7 @@ fn groupchat_retraction_stanza_id(
 /// the transport frame. Direct `SendStanza` errors include XEP-0191 sender
 /// blocks as well as route fallbacks, so derive the frozen error from the
 /// actual typed payload rather than reconstructing a particular error shape.
-fn capture_serialized_error_reply(deps: &Deps<'_>, stanza: &Stanza) {
+pub(crate) fn capture_serialized_error_reply(deps: &Deps<'_>, stanza: &Stanza) {
     let Stanza::Message(message) = stanza else {
         return;
     };

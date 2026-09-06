@@ -3,17 +3,20 @@ use std::collections::BTreeMap;
 use tracing::{debug, warn};
 use waddle_xmpp::{
     ingress::{FrozenStanzaError, IngressEffectIntent},
-    parser::stanza_to_string,
     protocol::handlers::errors::message_error_reply,
-    registry::BroadcastOutcome,
     Stanza,
 };
 use waddle_xmpp_core::xep0359::StanzaId;
 use xmpp_parsers::stanza_error::{DefinedCondition, ErrorType, StanzaError};
 
-use crate::ingress_shadow::{
-    IngressEffectCapture, ShadowAuthorizationDeniedReason, ShadowDecisionMarker,
-    ShadowSemanticRejectedReason,
+use crate::ingress_shadow::IngressEffectCapture;
+use crate::server::routes::interpret::{
+    effects::{
+        delivery::{ExternalDeliveryEffect, PeerDeliveryKind},
+        Effect, EffectOutcome, ExternalEffect, PlanEffectDependency, PlanSuppressionPolicy,
+        PlannedEffect,
+    },
+    Deps,
 };
 use crate::server::routes::websocket::WebSocketState;
 
@@ -21,8 +24,8 @@ pub(super) async fn handle_dm_pin_message(
     incoming: &xmpp_parsers::message::Message,
     state: &WebSocketState,
     bound_jid: &jid::FullJid,
-    ingress_effect_capture: Option<&IngressEffectCapture>,
-) -> Option<Vec<String>> {
+    deps: &Deps<'_>,
+) -> Option<Vec<Stanza>> {
     if incoming.type_ != xmpp_parsers::message::MessageType::Chat {
         return None;
     }
@@ -34,15 +37,10 @@ pub(super) async fn handle_dm_pin_message(
                 .iter()
                 .any(|payload| payload.ns() == waddle_xmpp::xep::NS_WADDLE_PIN_V0)
             {
-                if let Some(capture) = ingress_effect_capture {
-                    capture.record_marker(ShadowDecisionMarker::SemanticRejected {
-                        reason: ShadowSemanticRejectedReason::MalformedPayload,
-                    });
-                }
                 return dm_pin_error_frame(
                     incoming,
                     bound_jid,
-                    ingress_effect_capture,
+                    deps,
                     StanzaError::new(
                         ErrorType::Modify,
                         DefinedCondition::BadRequest,
@@ -50,22 +48,17 @@ pub(super) async fn handle_dm_pin_message(
                         "Malformed DM pin marker.",
                     ),
                 )
-                .map(|frame| vec![frame]);
+                .await;
             }
             return None;
         }
     };
     let target = intent.target().to_string();
     let Some(peer) = incoming.to.as_ref().map(|to| to.to_bare()) else {
-        if let Some(capture) = ingress_effect_capture {
-            capture.record_marker(ShadowDecisionMarker::SemanticRejected {
-                reason: ShadowSemanticRejectedReason::MalformedPayload,
-            });
-        }
         return dm_pin_error_frame(
             incoming,
             bound_jid,
-            ingress_effect_capture,
+            deps,
             StanzaError::new(
                 ErrorType::Modify,
                 DefinedCondition::BadRequest,
@@ -73,18 +66,13 @@ pub(super) async fn handle_dm_pin_message(
                 "DM pin marker requires a local peer JID.",
             ),
         )
-        .map(|frame| vec![frame]);
+        .await;
     };
     if peer.domain() != bound_jid.domain() {
-        if let Some(capture) = ingress_effect_capture {
-            capture.record_marker(ShadowDecisionMarker::AuthorizationDenied {
-                reason: ShadowAuthorizationDeniedReason::Forbidden,
-            });
-        }
         return dm_pin_error_frame(
             incoming,
             bound_jid,
-            ingress_effect_capture,
+            deps,
             xmpp_parsers::stanza_error::StanzaError::new(
                 xmpp_parsers::stanza_error::ErrorType::Auth,
                 xmpp_parsers::stanza_error::DefinedCondition::Forbidden,
@@ -92,7 +80,7 @@ pub(super) async fn handle_dm_pin_message(
                 "DM pins are only supported for local peers.",
             ),
         )
-        .map(|frame| vec![frame]);
+        .await;
     }
 
     let sender = bound_jid.to_bare();
@@ -107,16 +95,18 @@ pub(super) async fn handle_dm_pin_message(
             .deps
             .protocol
             .dm_pin_store
-            .unpin(&key, &target.canonical_stanza_id)
+            .contains(&key, &target.canonical_stanza_id)
         {
             return Some(Vec::new());
         }
-        record_dm_pin_mutation(
-            ingress_effect_capture,
-            &key,
-            target.canonical_stanza_id.clone(),
-            waddle_xmpp::ingress::DmPinMutationAction::Unpin,
-        );
+        let mutation = DmPinMutation {
+            pair: key,
+            target_stanza_id: target.canonical_stanza_id.clone(),
+            action: waddle_xmpp::ingress::DmPinMutationAction::Unpin,
+        };
+        if !plan_dm_pin_mutation(deps, &mutation).await {
+            return Some(Vec::new());
+        }
         let event = build_dm_pin_event_message(
             &sender,
             &peer,
@@ -130,7 +120,8 @@ pub(super) async fn handle_dm_pin_message(
             &sender,
             &[sender.clone(), peer],
             event,
-            ingress_effect_capture,
+            Some(&mutation),
+            deps,
         )
         .await;
         return Some(Vec::new());
@@ -142,7 +133,7 @@ pub(super) async fn handle_dm_pin_message(
             return dm_pin_error_frame(
                 incoming,
                 bound_jid,
-                ingress_effect_capture,
+                deps,
                 xmpp_parsers::stanza_error::StanzaError::new(
                     xmpp_parsers::stanza_error::ErrorType::Cancel,
                     xmpp_parsers::stanza_error::DefinedCondition::ItemNotFound,
@@ -150,7 +141,7 @@ pub(super) async fn handle_dm_pin_message(
                     "Pinned DM target was not found.",
                 ),
             )
-            .map(|frame| vec![frame]);
+            .await;
         }
     };
     let body = target.archived.body.as_deref().unwrap_or("");
@@ -167,19 +158,16 @@ pub(super) async fn handle_dm_pin_message(
         pinned_at: chrono::Utc::now(),
         preview,
     };
-    state
-        .deps
-        .protocol
-        .dm_pin_store
-        .apply_pin(key.clone(), entry.clone());
-    record_dm_pin_mutation(
-        ingress_effect_capture,
-        &key,
-        entry.target_stanza_id.clone(),
-        waddle_xmpp::ingress::DmPinMutationAction::Pin {
+    let mutation = DmPinMutation {
+        pair: key,
+        target_stanza_id: entry.target_stanza_id.clone(),
+        action: waddle_xmpp::ingress::DmPinMutationAction::Pin {
             entry: entry.clone(),
         },
-    );
+    };
+    if !plan_dm_pin_mutation(deps, &mutation).await {
+        return Some(Vec::new());
+    }
 
     let event = build_dm_pin_event_message(
         &sender,
@@ -194,7 +182,8 @@ pub(super) async fn handle_dm_pin_message(
         &sender,
         &[sender.clone(), peer],
         event,
-        ingress_effect_capture,
+        Some(&mutation),
+        deps,
     )
     .await;
     Some(Vec::new())
@@ -355,7 +344,8 @@ async fn fanout_dm_pin_event(
     sender: &jid::BareJid,
     recipients: &[jid::BareJid],
     event: xmpp_parsers::message::Message,
-    ingress_effect_capture: Option<&IngressEffectCapture>,
+    mutation: Option<&DmPinMutation>,
+    deps: &Deps<'_>,
 ) {
     let mut deliverable_resources = Vec::new();
     for resource in state
@@ -383,17 +373,34 @@ async fn fanout_dm_pin_event(
     }
     let mut accepted_resources = Vec::new();
     for resource in deliverable_resources {
-        if state
-            .deps
-            .protocol
-            .connection_registry
-            .try_send_to(&resource, Stanza::Message(event.clone()))
-            == BroadcastOutcome::Delivered
-        {
+        let mut effect = PlannedEffect::new(Effect::External(ExternalEffect::Delivery(
+            ExternalDeliveryEffect::RouteToPeer {
+                jid: resource.clone(),
+                stanza: Box::new(Stanza::Message(event.clone())),
+                kind: PeerDeliveryKind::RegistryFrame,
+                call_setup: None,
+            },
+        )));
+        if let Some(mutation) = mutation {
+            effect
+                .dependencies
+                .push(PlanEffectDependency::AfterDmPinMutation {
+                    pair: mutation.pair.clone(),
+                    target: mutation.target_stanza_id.clone(),
+                });
+            preserve_retraction_cascade(&mut effect, mutation);
+        }
+        let outcome = deps.effects.execute(effect, deps).await;
+        if matches!(
+            outcome,
+            EffectOutcome::Delivery(
+                crate::server::routes::interpret::FullJidDeliveryOutcome::Delivered
+            )
+        ) {
             accepted_resources.push(resource);
         }
     }
-    capture_dm_pin_routes(ingress_effect_capture, &accepted_resources);
+    capture_dm_pin_routes(deps.ingress_effect_capture.as_ref(), &accepted_resources);
 }
 
 async fn dm_pin_delivery_blocked(
@@ -452,7 +459,7 @@ pub(super) async fn handle_dm_pin_retraction_cascade(
     incoming: &xmpp_parsers::message::Message,
     state: &WebSocketState,
     bound_jid: &jid::FullJid,
-    ingress_effect_capture: Option<&IngressEffectCapture>,
+    deps: &Deps<'_>,
 ) {
     if incoming.type_ != xmpp_parsers::message::MessageType::Chat {
         return;
@@ -492,20 +499,14 @@ pub(super) async fn handle_dm_pin_retraction_cascade(
     {
         return;
     }
-    if !state
-        .deps
-        .protocol
-        .dm_pin_store
-        .unpin(&key, &target.canonical_stanza_id)
-    {
+    let mutation = DmPinMutation {
+        pair: key,
+        target_stanza_id: target.canonical_stanza_id.clone(),
+        action: waddle_xmpp::ingress::DmPinMutationAction::RetractionCascadeUnpin,
+    };
+    if !plan_dm_pin_mutation(deps, &mutation).await {
         return;
     }
-    record_dm_pin_mutation(
-        ingress_effect_capture,
-        &key,
-        target.canonical_stanza_id.clone(),
-        waddle_xmpp::ingress::DmPinMutationAction::RetractionCascadeUnpin,
-    );
     let event = build_dm_pin_event_message(
         &sender,
         &peer,
@@ -529,7 +530,8 @@ pub(super) async fn handle_dm_pin_retraction_cascade(
         &sender,
         &[sender.clone(), peer],
         event,
-        ingress_effect_capture,
+        Some(&mutation),
+        deps,
     )
     .await;
 }
@@ -575,29 +577,86 @@ fn capture_dm_pin_routes(
     }
 }
 
-fn dm_pin_error_frame(
+async fn dm_pin_error_frame(
     incoming: &xmpp_parsers::message::Message,
     bound_jid: &jid::FullJid,
-    ingress_effect_capture: Option<&IngressEffectCapture>,
+    deps: &Deps<'_>,
     error: StanzaError,
-) -> Option<String> {
+) -> Option<Vec<Stanza>> {
     let frozen_error =
         FrozenStanzaError::from_xmpp(&error).expect("server-built stanza error should freeze");
     let mut stamped = incoming.clone();
     stamped.from = Some(jid::Jid::from(bound_jid.clone()));
-    let reply = message_error_reply(&stamped, error);
-    match stanza_to_string(reply) {
-        Ok(frame) => {
-            if let Some(capture) = ingress_effect_capture {
-                capture.record_intent(IngressEffectIntent::ErrorReply {
-                    recipient: bound_jid.clone(),
-                    error: frozen_error,
-                });
-            }
-            Some(frame)
-        }
-        Err(_) => None,
+    let rejection = super::classify_rejection(&error);
+    let reply = Stanza::Message(message_error_reply(&stamped, error));
+    if !deps.effects.is_planning() {
+        deps.capture_intent(IngressEffectIntent::ErrorReply {
+            recipient: bound_jid.clone(),
+            error: frozen_error,
+        });
     }
+    Some(super::reject_message(deps, reply, rejection))
+}
+
+#[derive(Clone, Debug)]
+pub struct DmPinMutation {
+    pub pair: crate::server::routes::websocket::DmPairKey,
+    pub target_stanza_id: StanzaId,
+    pub action: waddle_xmpp::ingress::DmPinMutationAction,
+}
+
+fn preserve_retraction_cascade(effect: &mut PlannedEffect, mutation: &DmPinMutation) {
+    if matches!(
+        mutation.action,
+        waddle_xmpp::ingress::DmPinMutationAction::RetractionCascadeUnpin
+    ) {
+        effect.tombstone_suppression = PlanSuppressionPolicy::Always;
+    }
+}
+
+async fn plan_dm_pin_mutation(deps: &Deps<'_>, mutation: &DmPinMutation) -> bool {
+    let mut effect = PlannedEffect::new(Effect::External(ExternalEffect::DmPinMutation(
+        mutation.clone(),
+    )));
+    preserve_retraction_cascade(&mut effect, mutation);
+    let completed = matches!(
+        deps.effects.execute(effect, deps).await,
+        EffectOutcome::Completed
+    );
+    if completed && deps.effects.is_planning() {
+        record_dm_pin_mutation(
+            deps.ingress_effect_capture.as_ref(),
+            &mutation.pair,
+            mutation.target_stanza_id.clone(),
+            mutation.action.clone(),
+        );
+    }
+    completed
+}
+
+pub(crate) async fn execute_dm_pin(mutation: DmPinMutation, deps: &Deps<'_>) -> EffectOutcome {
+    let Some(state) = deps.web_socket_state else {
+        return EffectOutcome::Unavailable;
+    };
+    let store = &state.deps.protocol.dm_pin_store;
+    match &mutation.action {
+        waddle_xmpp::ingress::DmPinMutationAction::Pin { entry } => {
+            store.apply_pin(mutation.pair.clone(), entry.clone());
+        }
+        waddle_xmpp::ingress::DmPinMutationAction::Unpin
+        | waddle_xmpp::ingress::DmPinMutationAction::RetractionCascadeUnpin => {
+            if !store.unpin(&mutation.pair, &mutation.target_stanza_id) {
+                return EffectOutcome::Unavailable;
+            }
+        }
+    }
+    record_dm_pin_mutation(
+        deps.ingress_effect_capture.as_ref(),
+        &mutation.pair,
+        mutation.target_stanza_id,
+        mutation.action,
+    );
+    EffectOutcome::Completed
 }
 
 #[cfg(test)]
@@ -613,6 +672,11 @@ mod tests {
     async fn fanout_dm_pin_event_records_direct_routes_per_participant() {
         let state = create_test_websocket_state().await;
         let capture = IngressEffectCapture::new(None);
+        let deps = crate::server::routes::websocket::interpret_loop::build_interpret_deps(
+            state.as_ref(),
+            None,
+        )
+        .with_ingress_effect_capture(Some(capture.clone()));
         let alice_phone: jid::FullJid = "alice@example.com/phone".parse().expect("alice phone");
         let alice_laptop: jid::FullJid = "alice@example.com/laptop".parse().expect("alice laptop");
         let bob_phone: jid::FullJid = "bob@example.com/phone".parse().expect("bob phone");
@@ -643,7 +707,8 @@ mod tests {
                 "bob@example.com".parse().expect("bob"),
             ],
             event,
-            Some(&capture),
+            None,
+            &deps,
         )
         .await;
 
@@ -656,6 +721,11 @@ mod tests {
     async fn fanout_dm_pin_event_ignores_closed_resources_in_route_intent() {
         let state = create_test_websocket_state().await;
         let capture = IngressEffectCapture::new(None);
+        let deps = crate::server::routes::websocket::interpret_loop::build_interpret_deps(
+            state.as_ref(),
+            None,
+        )
+        .with_ingress_effect_capture(Some(capture.clone()));
         let alice_phone: jid::FullJid = "alice@example.com/phone".parse().expect("alice phone");
         let alice_laptop: jid::FullJid = "alice@example.com/laptop".parse().expect("alice laptop");
         let bob_phone: jid::FullJid = "bob@example.com/phone".parse().expect("bob phone");
@@ -687,7 +757,8 @@ mod tests {
                 "bob@example.com".parse().expect("bob"),
             ],
             event,
-            Some(&capture),
+            None,
+            &deps,
         )
         .await;
 
@@ -700,6 +771,11 @@ mod tests {
     async fn missing_dm_pin_target_records_error_reply_intent() {
         let state = create_test_websocket_state().await;
         let capture = IngressEffectCapture::new(None);
+        let deps = crate::server::routes::websocket::interpret_loop::build_interpret_deps(
+            state.as_ref(),
+            None,
+        )
+        .with_ingress_effect_capture(Some(capture.clone()));
         let sender: jid::FullJid = "alice@example.com/web".parse().expect("sender");
         let mut message = xmpp_parsers::message::Message::new(Some(
             "bob@example.com".parse::<jid::Jid>().expect("peer jid"),
@@ -717,12 +793,17 @@ mod tests {
                 ),
             )));
 
-        let frames = handle_dm_pin_message(&message, state.as_ref(), &sender, Some(&capture))
+        let frames = handle_dm_pin_message(&message, state.as_ref(), &sender, &deps)
             .await
             .expect("handler should reply");
 
         assert_eq!(frames.len(), 1);
-        assert!(frames[0].contains("item-not-found"));
+        let Stanza::Message(reply) = &frames[0] else {
+            panic!("expected message reply");
+        };
+        assert!(waddle_xmpp::parser::stanza_to_string(reply.clone())
+            .expect("serialize")
+            .contains("item-not-found"));
         let expected_error = FrozenStanzaError::from_xmpp(&StanzaError::new(
             ErrorType::Cancel,
             DefinedCondition::ItemNotFound,
@@ -743,6 +824,11 @@ mod tests {
     async fn dm_pin_capture_preserves_the_committed_entry() {
         let state = create_test_websocket_state().await;
         let capture = IngressEffectCapture::new(None);
+        let deps = crate::server::routes::websocket::interpret_loop::build_interpret_deps(
+            state.as_ref(),
+            None,
+        )
+        .with_ingress_effect_capture(Some(capture.clone()));
         let sender: jid::FullJid = "alice@example.com/web".parse().expect("sender");
         let sender_bare = sender.to_bare();
         let peer: jid::BareJid = "bob@example.com".parse().expect("peer");
@@ -780,7 +866,7 @@ mod tests {
                 jid::Jid::from(sender_bare.clone()),
             )));
 
-        let frames = handle_dm_pin_message(&message, state.as_ref(), &sender, Some(&capture))
+        let frames = handle_dm_pin_message(&message, state.as_ref(), &sender, &deps)
             .await
             .expect("handler should complete");
         assert!(
@@ -798,5 +884,143 @@ mod tests {
                 && entry.pinner_jid == sender_bare
                 && entry.preview.text == "important body"
         )));
+    }
+    #[tokio::test]
+    async fn dm_pin_and_retraction_plan_external_effects_without_store_mutation() {
+        use crate::server::routes::interpret::effects::{PlanSink, PlanSuppressionPolicy};
+        let state = create_test_websocket_state().await;
+        let sender: jid::FullJid = "alice@example.com/web".parse().expect("sender");
+        let peer: jid::FullJid = "bob@example.com/web".parse().expect("peer");
+        let sender_bare = sender.to_bare();
+        let peer_bare = peer.to_bare();
+        let (sender_tx, mut sender_rx) = tokio::sync::mpsc::channel(4);
+        let (peer_tx, mut peer_rx) = tokio::sync::mpsc::channel(4);
+        register_test_connection(state.as_ref(), &sender, sender_tx).await;
+        register_test_connection(state.as_ref(), &peer, peer_tx).await;
+        let target = StanzaId::new("plan-pin-target", jid::Jid::from(sender_bare.clone()));
+        state
+            .deps
+            .protocol
+            .mam_storage
+            .store_message(
+                &sender_bare,
+                &ArchivedMessage {
+                    id: "plan-pin-archive".to_owned(),
+                    body: Some("important body".to_owned()),
+                    message_type: xmpp_parsers::message::MessageType::Chat,
+                    stanza_id: Some(target.clone()),
+                    ..ArchivedMessage::for_test(sender.clone().into(), peer_bare.clone().into())
+                },
+            )
+            .await
+            .expect("seed archive");
+        let mut message = xmpp_parsers::message::Message::new(Some(peer_bare.clone().into()));
+        message.type_ = xmpp_parsers::message::MessageType::Chat;
+        message.payloads.push(build_pinned_message_element(&target));
+        let sink = PlanSink::new();
+        let capture = IngressEffectCapture::new(None);
+        let mut deps = crate::server::routes::websocket::interpret_loop::build_interpret_deps(
+            state.as_ref(),
+            None,
+        );
+        deps.effects = &sink;
+        deps.ingress_effect_capture = Some(capture.clone());
+        handle_dm_pin_message(&message, state.as_ref(), &sender, &deps)
+            .await
+            .expect("pin handled");
+        let pair = crate::server::routes::websocket::DmPairKey::new(sender_bare, peer_bare);
+        assert!(state.deps.protocol.dm_pin_store.list(&pair).is_empty());
+        assert!(sender_rx.try_recv().is_err());
+        assert!(peer_rx.try_recv().is_err());
+        assert!(capture.snapshot().intents.iter().any(|intent| matches!(
+            intent,
+            IngressEffectIntent::DmPinMutation {
+                action: waddle_xmpp::ingress::DmPinMutationAction::Pin { .. },
+                ..
+            }
+        )));
+        let effects = sink.snapshot();
+        let mutation = effects
+            .iter()
+            .find_map(|effect| match &effect.effect {
+                Effect::External(ExternalEffect::DmPinMutation(mutation)) => {
+                    assert_eq!(effect.suppression, PlanSuppressionPolicy::Always);
+                    Some(mutation.clone())
+                }
+                _ => None,
+            })
+            .expect("planned pin mutation");
+        assert_eq!(
+            effects
+                .iter()
+                .filter(|effect| matches!(
+                    effect.effect,
+                    Effect::External(ExternalEffect::Delivery(
+                        ExternalDeliveryEffect::RouteToPeer { .. }
+                    ))
+                ))
+                .count(),
+            2
+        );
+        for effect in &effects {
+            assert_eq!(
+                effect.tombstone_suppression,
+                PlanSuppressionPolicy::TombstoneSwallowed
+            );
+            if matches!(effect.effect, Effect::External(ExternalEffect::Delivery(_))) {
+                assert!(effect
+                    .dependencies
+                    .contains(&PlanEffectDependency::AfterDmPinMutation {
+                        pair: pair.clone(),
+                        target: target.clone(),
+                    }));
+            }
+        }
+        execute_dm_pin(mutation, &deps).await;
+        assert!(state.deps.protocol.dm_pin_store.contains(&pair, &target));
+        sink.take();
+        message.payloads.clear();
+        message
+            .payloads
+            .push(waddle_xmpp::xep::build_retract_element("plan-pin-target"));
+        handle_dm_pin_retraction_cascade(&message, state.as_ref(), &sender, &deps).await;
+        assert!(state.deps.protocol.dm_pin_store.contains(&pair, &target));
+        assert!(sender_rx.try_recv().is_err());
+        assert!(peer_rx.try_recv().is_err());
+        let effects = sink.snapshot();
+        for effect in &effects {
+            assert_eq!(
+                effect.tombstone_suppression,
+                PlanSuppressionPolicy::Always,
+                "retraction cleanup survives the tombstone it creates"
+            );
+            if matches!(effect.effect, Effect::External(ExternalEffect::Delivery(_))) {
+                assert!(effect
+                    .dependencies
+                    .contains(&PlanEffectDependency::AfterDmPinMutation {
+                        pair: pair.clone(),
+                        target: target.clone(),
+                    }));
+            }
+        }
+        assert!(effects.iter().any(|effect| matches!(
+            &effect.effect,
+            Effect::External(ExternalEffect::DmPinMutation(DmPinMutation {
+                action: waddle_xmpp::ingress::DmPinMutationAction::RetractionCascadeUnpin,
+                ..
+            }))
+        )));
+        assert_eq!(
+            effects
+                .iter()
+                .filter(|effect| matches!(
+                    effect.effect,
+                    Effect::External(ExternalEffect::Delivery(
+                        ExternalDeliveryEffect::RouteToPeer { .. }
+                    ))
+                ))
+                .count(),
+            2
+        );
     }
 }

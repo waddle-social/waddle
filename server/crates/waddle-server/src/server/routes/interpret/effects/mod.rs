@@ -22,3 +22,17 @@ pub use planned::{
 };
 pub use policy::{PlanEffectDependency, PlanSuppressionPolicy};
 pub use sink::EffectSink;
+
+pub mod early;
+mod rejection;
+pub use rejection::{
+    AuthorizationDeniedReason, PlanRejection, PolicyDeniedReason, SemanticMalformedReason,
+};
+
+pub mod invite;
+mod invite_scope;
+pub(crate) use invite_scope::ScopedInviteSink;
+
+pub use early::MembershipOutcome;
+
+mod membership_outcome;

@@ -17,6 +17,13 @@ impl EffectSink for ImmediateSink {
         // An encompassing async match embeds its largest branch and inflates
         // every websocket future that can dispatch a message.
         match effect.effect {
+            Effect::External(ExternalEffect::RouteToPeer(route) | ExternalEffect::QueueOfflineDelivery(route)) => Box::pin(super::invite::execute(route, deps)),
+            Effect::External(ExternalEffect::RoomMembershipMutation(mutation)) => match mutation {
+                super::early::RoomMembershipMutation::GroupDm(mutation) => Box::pin(crate::server::routes::websocket::handlers::message::group_dm_invite::execute_group_dm_membership(*mutation, deps)),
+                super::early::RoomMembershipMutation::Muc(mutation) => Box::pin(crate::server::routes::websocket::handlers::message::muc_invite::execute_muc_membership(*mutation, deps)),
+            },
+            Effect::External(ExternalEffect::InviteLedger(mutation)) => Box::pin(crate::server::routes::websocket::handlers::message::muc_invite::execute_invite_ledger(mutation, deps)),
+            Effect::External(ExternalEffect::DmPinMutation(mutation)) => Box::pin(crate::server::routes::websocket::handlers::message::dm_pin::execute_dm_pin(mutation, deps)),
             Effect::Durable(DurableEffect::Direct(effect)) => {
                 Box::pin(super::direct_immediate::execute_durable(effect, deps))
             }

@@ -6,6 +6,7 @@ use xmpp_parsers::message::Message;
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PeerDeliveryKind {
     PeerStanza,
+    RegistryFrame,
     DirectFrame,
 }
 

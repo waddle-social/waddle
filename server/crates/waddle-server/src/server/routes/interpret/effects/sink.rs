@@ -19,6 +19,10 @@ pub trait EffectSink: Send + Sync {
         RoomExecutionPath::None
     }
     fn observe_sender(&self, _sender: &jid::FullJid) {}
+    fn set_rejection(&self, _rejection: super::PlanRejection) {}
+    fn rejection(&self) -> Option<super::PlanRejection> {
+        None
+    }
     fn is_planning(&self) -> bool;
     fn record(&self, effect: PlannedEffect);
     fn set_room_execution(&self, execution: RoomExecutionPath);
