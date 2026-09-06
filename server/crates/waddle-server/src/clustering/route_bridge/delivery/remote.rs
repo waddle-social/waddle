@@ -218,7 +218,11 @@ impl OrderedRelayDeliveryBridge {
                                     refreshed.user_owner.as_str(),
                                 )),
                                 room_fence: None,
-                                outcome: remote_resource_muc_outcome(reply),
+                                outcome: remote_resource_muc_outcome(
+                                    reply,
+                                    refreshed.user_owner.clone(),
+                                    self.stop_token.clone(),
+                                ),
                             }),
                             Err(error) => {
                                 tracing::warn!(
@@ -256,7 +260,11 @@ impl OrderedRelayDeliveryBridge {
                     remote_origin.user_owner.as_str(),
                 )),
                 room_fence: None,
-                outcome: remote_resource_muc_outcome(reply),
+                outcome: remote_resource_muc_outcome(
+                    reply,
+                    remote_origin.user_owner.clone(),
+                    self.stop_token.clone(),
+                ),
             }),
             Err(error) => {
                 tracing::warn!(
@@ -275,7 +283,11 @@ impl OrderedRelayDeliveryBridge {
                                         refreshed.user_owner.as_str(),
                                     )),
                                     room_fence: None,
-                                    outcome: remote_resource_muc_outcome(reply),
+                                    outcome: remote_resource_muc_outcome(
+                                        reply,
+                                        refreshed.user_owner.clone(),
+                                        self.stop_token.clone(),
+                                    ),
                                 }),
                                 Err(error) => {
                                     tracing::warn!(

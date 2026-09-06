@@ -407,6 +407,13 @@ pub(super) async fn dispatch_to_room(
     //    The gate handler (`OccupancyValidationHandler`) is sync and
     //    pure — calling it directly here is equivalent to running a
     //    one-handler dispatcher, with no extra allocation.
+    if let Some(capture) = deps.ingress_effect_capture.as_ref() {
+        capture.reserve_room_capacity(
+            snapshot.config.max_occupants,
+            snapshot.occupants.len(),
+            snapshot.durable_recipient_bare_jids.len(),
+        );
+    }
     let occupants: Vec<OccupantSnapshot> = snapshot
         .occupants
         .iter()
@@ -644,7 +651,14 @@ pub(super) async fn dispatch_to_room(
                     .collect(),
                 reflection: sender_full.clone(),
                 room_generation,
-                route_identity: capture.next_route_identity(),
+                // The room canonicalizer stamped this identity before creating
+                // occupant deliveries; receipts correlate those exact copies.
+                route_identity: waddle_xmpp::ingress::EffectMessageIdentity::stanza(
+                    waddle_xmpp_core::xep0359::extract_stanza_ids(&working)
+                        .into_iter()
+                        .find(|id| id.by == room_jid)
+                        .expect("canonicalized room delivery has a room stanza-id"),
+                ),
             });
         }
     }

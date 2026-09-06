@@ -18,9 +18,9 @@
 //! Phase 4 wires DM/MUC/presence routing through this relay. Kademlia still
 //! discovers node relays only; entity ownership remains in Postgres claims.
 
-mod frame_receipts;
+pub(crate) mod frame_receipts;
+use frame_receipts::PendingReplyReceipts;
 pub use frame_receipts::RelayReplyReceiptToken;
-use frame_receipts::{confirm_received_reply, PendingReplyReceipts};
 
 use super::codec::RemoteStanza;
 use super::local_claims::RoomLocalClaims;
@@ -1692,12 +1692,7 @@ impl RelayHandle {
             .reply_timeout(self.reply_timeout)
             .await
         {
-            Ok(reply) => {
-                if let OrderedRelayReply::Ack(ack) = &reply {
-                    confirm_received_reply(remote_ref, ack.reply_receipt);
-                }
-                Ok(reply)
-            }
+            Ok(reply) => Ok(reply),
             Err(error) if is_no_effect_stale_ref_relookup_error(&error) => {
                 self.cached = None;
                 let remote_ref = self.resolve().await?;
@@ -1707,12 +1702,7 @@ impl RelayHandle {
                     .reply_timeout(self.reply_timeout)
                     .await
                 {
-                    Ok(reply) => {
-                        if let OrderedRelayReply::Ack(ack) = &reply {
-                            confirm_received_reply(remote_ref, ack.reply_receipt);
-                        }
-                        Ok(reply)
-                    }
+                    Ok(reply) => Ok(reply),
                     Err(error) => ordered_send_error(&message.envelope, error),
                 }
             }
@@ -1887,10 +1877,7 @@ impl RelayHandle {
             .reply_timeout(self.reply_timeout)
             .await
         {
-            Ok(reply) => {
-                confirm_received_reply(remote_ref, reply.reply_receipt);
-                Ok(reply)
-            }
+            Ok(reply) => Ok(reply),
             Err(error) if is_no_effect_stale_ref_relookup_error(&error) => {
                 self.cached = None;
                 let remote_ref = self.resolve().await?;
@@ -1900,7 +1887,6 @@ impl RelayHandle {
                     .reply_timeout(self.reply_timeout)
                     .await
                     .map_err(send_error)?;
-                confirm_received_reply(remote_ref, reply.reply_receipt);
                 Ok(reply)
             }
             Err(error) => Err(send_error(error)),

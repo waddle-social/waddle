@@ -196,7 +196,7 @@ groups:
             runbook: https://github.com/waddle-social/waddle/blob/main/server/docs/operations/ingress-authority.md
             summary: "Ingress transaction retries exhausted in the last hour; messages were refused."
         - alert: IngressGcFailing
-          expr: sum(increase(ingress_gc_runs_total{result=~"failed|timed_out"}[1h])) > 0
+          expr: sum(increase(ingress_gc_runs_total{outcome=~"failed|timed_out"}[1h])) > 0
           labels:
             severity: warning
             team: waddle

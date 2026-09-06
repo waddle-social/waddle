@@ -34,6 +34,11 @@ async fn connection(state: &WebSocketState, resumable: bool) -> WsConnState {
             .enroll_stream(&id)
             .await
             .expect("enroll");
+        conn.sm_ingress_fence = state
+            .deps
+            .protocol
+            .sm_session_registry
+            .current_sm_claim_fence(id.as_str());
         conn.sm_state
             .enable(id.as_str().to_owned(), true, Some(300));
     }
@@ -405,6 +410,23 @@ async fn connection_reply_receipt_after_transport_write(
     resumable: bool,
     nested_owner: bool,
 ) {
+    connection_reply_receipt_after_transport_write_with_remote(
+        state,
+        transport_lost,
+        resumable,
+        nested_owner,
+        false,
+    )
+    .await;
+}
+
+async fn connection_reply_receipt_after_transport_write_with_remote(
+    state: Arc<WebSocketState>,
+    transport_lost: bool,
+    resumable: bool,
+    nested_owner: bool,
+    remote_owner: bool,
+) {
     use super::super::batch_write::{
         write_ingress_response_batch_with_admission, BatchAuthority, BatchSmPolicy,
         BatchWriteOutcome,
@@ -426,7 +448,10 @@ async fn connection_reply_receipt_after_transport_write(
     assert_eq!(responses.frames.len(), 1);
     assert_eq!(responses.ingress_reports.len(), 1);
     #[cfg(not(feature = "clustering"))]
-    assert!(!nested_owner);
+    assert!(!nested_owner && !remote_owner);
+    #[cfg(feature = "clustering")]
+    let mut pending_remote_receipts =
+        crate::clustering::relay::frame_receipts::PendingReplyReceipts::default();
     #[cfg(feature = "clustering")]
     if nested_owner {
         let report = responses.ingress_reports.pop().expect("owner report");
@@ -436,6 +461,51 @@ async fn connection_reply_receipt_after_transport_write(
                 report,
             },
         );
+        let completion = if remote_owner {
+            use crate::clustering::ordered_relay::{
+                OrderedRelayAck, OrderedRelayChannel, OrderedRelayOrigin, OrderedRelayRecipient,
+                OrderedRelaySequence,
+            };
+            let token = pending_remote_receipts
+                .register(completion)
+                .expect("owner token");
+            let ack = OrderedRelayAck {
+                reply_receipt: Some(token),
+                channel: OrderedRelayChannel {
+                    origin: OrderedRelayOrigin::SmSession(
+                        waddle_xmpp::pending_delivery::SmSessionId::new("remote-origin"),
+                    ),
+                    recipient: OrderedRelayRecipient::BareJid(
+                        "room@example.com".parse().expect("room"),
+                    ),
+                    target_epoch: waddle_xmpp::ownership::ClaimEpoch(0),
+                },
+                sequence: OrderedRelaySequence::FIRST,
+                duplicate: false,
+                next_expected: OrderedRelaySequence::FIRST,
+                client_replies: responses
+                    .frames
+                    .iter()
+                    .map(|frame| {
+                        let super::super::frame::ResponseFrame::Stanza(stanza) = frame else {
+                            panic!("owner reply must be a stanza");
+                        };
+                        crate::clustering::codec::RemoteStanza((**stanza).clone())
+                    })
+                    .collect(),
+            };
+            let encoded = serde_json::to_vec(&ack).expect("encode owner ACK");
+            let decoded: OrderedRelayAck =
+                serde_json::from_slice(&encoded).expect("receive owner ACK");
+            let (frames, completion) = decoded.into_frame_delivery(
+                crate::clustering::NodeId::new("owner".to_owned()),
+                shutdown.clone(),
+            );
+            responses.frames = frames.into_iter().map(Into::into).collect();
+            completion.expect("remote receipt follows frames")
+        } else {
+            completion
+        };
         let mut origin_report = crate::ingress::ExecutionReport::default();
         origin_report.retain_relay_frame_completion(completion);
         responses.ingress_reports.push(origin_report);
@@ -514,6 +584,14 @@ async fn ingress_reply_transport_loss_leaves_canonical_row_non_terminal() {
 }
 
 async fn postgres_connection_reply_receipt(transport_lost: bool, nested_owner: bool) {
+    postgres_connection_reply_receipt_with_remote(transport_lost, nested_owner, false).await;
+}
+
+async fn postgres_connection_reply_receipt_with_remote(
+    transport_lost: bool,
+    nested_owner: bool,
+    remote_owner: bool,
+) {
     let Ok(database_url) = std::env::var("WADDLE_TEST_POSTGRES_URL") else {
         eprintln!(
             "skipping PostgreSQL connection reply receipt test: WADDLE_TEST_POSTGRES_URL not set"
@@ -547,8 +625,14 @@ async fn postgres_connection_reply_receipt(transport_lost: bool, nested_owner: b
         },
     )
     .await;
-    connection_reply_receipt_after_transport_write(state, transport_lost, false, nested_owner)
-        .await;
+    connection_reply_receipt_after_transport_write_with_remote(
+        state,
+        transport_lost,
+        false,
+        nested_owner,
+        remote_owner,
+    )
+    .await;
     sqlx::query(&format!("DROP SCHEMA {schema} CASCADE"))
         .execute(&admin)
         .await
@@ -662,3 +746,25 @@ mod timeout;
 #[cfg(feature = "clustering")]
 #[path = "ingress_authority_relay.rs"]
 mod relay;
+
+#[path = "ingress_authority_fence.rs"]
+mod fence;
+
+#[cfg(feature = "clustering")]
+#[tokio::test]
+async fn ingress_remote_owner_ack_transport_loss_preserves_pending_receipts() {
+    connection_reply_receipt_after_transport_write_with_remote(
+        create_test_websocket_state().await,
+        true,
+        true,
+        true,
+        true,
+    )
+    .await;
+}
+
+#[cfg(feature = "clustering")]
+#[tokio::test]
+async fn ingress_remote_owner_ack_transport_loss_preserves_pending_receipts_postgres() {
+    postgres_connection_reply_receipt_with_remote(true, true, true).await;
+}

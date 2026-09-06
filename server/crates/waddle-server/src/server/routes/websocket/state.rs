@@ -1684,6 +1684,8 @@ pub(super) struct WsConnState {
     /// XEP-0198 state for this WebSocket. Counts stanzas in both directions
     /// once enabled and holds the unacked queue used for resumption.
     pub(super) sm_state: StreamManagementState,
+    /// Exact claim acquired by this connection; registry demotion must never erase its ingress identity.
+    pub(super) sm_ingress_fence: Option<waddle_xmpp::stream_management::persistence::SmClaimFence>,
     pub(super) sm_inbound_completion: crate::server::routes::interpret::SmInboundCompletionTracker,
     /// Set only after a selected stanza's reserved SM slot has been settled
     /// as unhandled because its serving generation was revoked.
@@ -1838,6 +1840,7 @@ impl WsConnState {
             authenticated_session: None,
             occupancy_session: waddle_xmpp_core::OccupancySessionGeneration::mint(),
             sm_state: StreamManagementState::new(),
+            sm_ingress_fence: None,
             sm_inbound_completion:
                 crate::server::routes::interpret::SmInboundCompletionTracker::default(),
             inbound_frame_terminal: None,
@@ -1990,6 +1993,7 @@ impl WsConnState {
         commit.publish(
             state,
             &mut self.sm_state,
+            &mut self.sm_ingress_fence,
             bound_jid.as_ref(),
             self.registry_owner.as_ref(),
         );

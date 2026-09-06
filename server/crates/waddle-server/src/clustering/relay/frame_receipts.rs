@@ -1,5 +1,6 @@
-//! An origin must receive the reply before the owner receipts its frames.
+//! The origin confirms reply receipts only after the client transport writes its frames.
 use super::*;
+use crate::clustering::ordered_relay::OrderedRelayAck;
 use crate::ingress::execute::RelayFrameReceiptCompletion;
 use std::collections::HashMap;
 
@@ -11,7 +12,7 @@ const REPLY_RECEIPT_TTL: Duration = Duration::from_secs(30);
 pub struct RelayReplyReceiptToken(uuid::Uuid);
 
 #[derive(Default)]
-pub(super) struct PendingReplyReceipts {
+pub(crate) struct PendingReplyReceipts {
     entries: HashMap<RelayReplyReceiptToken, PendingReplyReceipt>,
 }
 
@@ -21,7 +22,7 @@ struct PendingReplyReceipt {
 }
 
 impl PendingReplyReceipts {
-    pub(super) fn register(
+    pub(crate) fn register(
         &mut self,
         completion: RelayFrameReceiptCompletion,
     ) -> Option<RelayReplyReceiptToken> {
@@ -85,22 +86,49 @@ impl Message<RelayConfirmReplyReceipt> for RelayActor {
     }
 }
 
-/// Confirmation is independent of returning the decoded reply to its caller.
-/// Failure leaves durable obligations pending and never retries client effects.
-pub(super) fn confirm_received_reply(
-    remote: RemoteActorRef<RelayActor>,
-    token: Option<RelayReplyReceiptToken>,
-) {
-    let Some(token) = token else {
-        return;
-    };
-    tokio::spawn(async move {
-        let _ = remote
-            .ask(&RelayConfirmReplyReceipt { token })
-            .mailbox_timeout(Duration::from_secs(1))
-            .reply_timeout(Duration::from_secs(5))
-            .await;
-    });
+impl RelayHandle {
+    /// Called only after the client transport successfully writes the reply batch.
+    pub(crate) async fn confirm_reply_receipt(
+        &mut self,
+        token: RelayReplyReceiptToken,
+    ) -> Result<bool, RelayAskError> {
+        let stop_token = self.stop_token.clone();
+        tokio::select! {
+            biased;
+            _ = stop_token.cancelled() => Err(RelayAskError::Cancelled),
+            result = async {
+                let remote = self.resolve().await?;
+                remote
+                    .ask(&RelayConfirmReplyReceipt { token })
+                    .mailbox_timeout(Duration::from_secs(1))
+                    .reply_timeout(Duration::from_secs(5))
+                    .await
+                    .map_err(send_error)
+            } => result,
+        }
+    }
+}
+
+impl OrderedRelayAck {
+    /// Preserve the owner's receipt obligation through the origin's client write.
+    pub(crate) fn into_frame_delivery(
+        self,
+        owner: NodeId,
+        stop_token: CancellationToken,
+    ) -> (
+        Vec<waddle_xmpp::Stanza>,
+        Option<RelayFrameReceiptCompletion>,
+    ) {
+        let completion = self
+            .reply_receipt
+            .map(|token| RelayFrameReceiptCompletion::remote(owner, token, stop_token));
+        let frames = self
+            .client_replies
+            .into_iter()
+            .map(|remote| remote.0)
+            .collect();
+        (frames, completion)
+    }
 }
 
 #[cfg(test)]
@@ -127,7 +155,7 @@ mod tests {
         assert_eq!(pending.entries.len(), 1, "unreceived replies stay pending");
         assert!(
             pending.take(token).is_some(),
-            "the decoded reply proves receipt"
+            "the transport completion confirms receipt"
         );
         assert!(
             pending.take(token).is_none(),

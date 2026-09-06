@@ -175,11 +175,65 @@ pub(crate) async fn start_http_server(deps: HttpServerDeps) -> Result<()> {
 }
 
 #[derive(Debug, thiserror::Error)]
-enum MamIngressColocationError {
-    #[error("MAM and ingress must use the same database backend")]
-    BackendMismatch,
-    #[error("MAM and ingress must share one durable SQLite database")]
-    SqliteDatabaseMismatch,
+enum IngressColocationError {
+    #[error("Projection storage and ingress must use the same database backend")]
+    Backend,
+    #[error("projection storage and ingress must share the same PostgreSQL database/schema: {identities:?}")]
+    PostgresIdentity {
+        identities: Box<waddle_xmpp::ClusterColocationIdentities>,
+    },
+    #[error("Projection storage and ingress must share one durable SQLite database")]
+    SqliteDatabase,
+}
+
+async fn ensure_postgres_ingress_colocation(
+    store_identity: &crate::db::lineage::PgIdentity,
+    global: &crate::db::Database,
+) -> Result<()> {
+    if global.driver() != crate::db::DatabaseDriver::Postgres {
+        return Err(IngressColocationError::Backend.into());
+    }
+    let global_identity = crate::db::lineage::live_postgres_identity(global).await?;
+    if *store_identity != global_identity {
+        return Err(IngressColocationError::PostgresIdentity {
+            identities: Box::new(waddle_xmpp::ClusterColocationIdentities {
+                store: store_identity.into(),
+                global: (&global_identity).into(),
+            }),
+        }
+        .into());
+    }
+    Ok(())
+}
+
+/// Open inbox reads on the database/schema used by ingress projection writes.
+/// This startup invariant applies with or without clustering.
+pub(crate) async fn create_ingress_inbox_storage(
+    database_url: Option<&str>,
+    global: &crate::db::Database,
+) -> Result<Arc<crate::inbox::DatabaseInboxStorage>> {
+    let storage = match global.driver() {
+        crate::db::DatabaseDriver::Sqlite => {
+            if database_url.is_some_and(|url| url != global.database_url()) {
+                return Err(IngressColocationError::SqliteDatabase.into());
+            }
+            crate::inbox::DatabaseInboxStorage::from_database(global.clone()).await?
+        }
+        crate::db::DatabaseDriver::Postgres => {
+            let storage = crate::inbox::DatabaseInboxStorage::open(Some(
+                database_url.unwrap_or_else(|| global.database_url()),
+            ))
+            .await?;
+            let database = storage.database();
+            if database.driver() != crate::db::DatabaseDriver::Postgres {
+                return Err(IngressColocationError::Backend.into());
+            }
+            let identity = crate::db::lineage::live_postgres_identity(&database).await?;
+            ensure_postgres_ingress_colocation(&identity, global).await?;
+            storage
+        }
+    };
+    Ok(Arc::new(storage))
 }
 
 async fn ensure_mam_ingress_colocation(
@@ -188,29 +242,18 @@ async fn ensure_mam_ingress_colocation(
 ) -> Result<()> {
     if let Some(pool) = storage.postgres_pool() {
         if global.driver() != crate::db::DatabaseDriver::Postgres {
-            return Err(MamIngressColocationError::BackendMismatch.into());
+            return Err(IngressColocationError::Backend.into());
         }
         let mam_identity = crate::db::lineage::live_postgres_identity_via_pg_pool(pool).await?;
-        let global_identity = crate::db::lineage::live_postgres_identity(global).await?;
-        if mam_identity != global_identity {
-            return Err(
-                waddle_xmpp::mam::MamStorageError::ClusterColocationMismatch {
-                    identities: Box::new(waddle_xmpp::ClusterColocationIdentities {
-                        store: (&mam_identity).into(),
-                        global: (&global_identity).into(),
-                    }),
-                }
-                .into(),
-            );
-        }
+        ensure_postgres_ingress_colocation(&mam_identity, global).await?;
         return Ok(());
     }
     if global.driver() != crate::db::DatabaseDriver::Sqlite {
-        return Err(MamIngressColocationError::BackendMismatch.into());
+        return Err(IngressColocationError::Backend.into());
     }
     let pool = storage
         .sqlite_pool()
-        .ok_or(MamIngressColocationError::BackendMismatch)?;
+        .ok_or(IngressColocationError::Backend)?;
     let (_, _, mam_file): (i64, String, String) = sqlx::query_as("PRAGMA database_list")
         .fetch_one(pool)
         .await?;
@@ -219,13 +262,13 @@ async fn ensure_mam_ingress_colocation(
     let global_file: String = rows
         .next()
         .await?
-        .ok_or(MamIngressColocationError::SqliteDatabaseMismatch)?
+        .ok_or(IngressColocationError::SqliteDatabase)?
         .get(2)?;
     if mam_file.is_empty()
         || global_file.is_empty()
         || std::fs::canonicalize(mam_file)? != std::fs::canonicalize(global_file)?
     {
-        return Err(MamIngressColocationError::SqliteDatabaseMismatch.into());
+        return Err(IngressColocationError::SqliteDatabase.into());
     }
     Ok(())
 }
@@ -249,11 +292,11 @@ pub(crate) async fn create_websocket_mam_storage(
                 .as_deref()
                 .is_some_and(|url| url != global_db.database_url())
             {
-                return Err(MamIngressColocationError::SqliteDatabaseMismatch.into());
+                return Err(IngressColocationError::SqliteDatabase.into());
             }
             let pool = global_db
                 .sqlite_pool()
-                .ok_or(MamIngressColocationError::BackendMismatch)?;
+                .ok_or(IngressColocationError::Backend)?;
             SqlxMamStorage::from_sqlite_pool(pool.clone()).await?
         }
         crate::db::DatabaseDriver::Postgres => {
@@ -1736,7 +1779,7 @@ mod ingress_colocation_tests {
         .await
         .err()
         .expect("reject separate file");
-        assert!(error.downcast_ref::<MamIngressColocationError>().is_some());
+        assert!(error.downcast_ref::<IngressColocationError>().is_some());
     }
 
     #[tokio::test]
@@ -1791,6 +1834,102 @@ mod ingress_colocation_tests {
                 .await
                 .expect("drop schema");
         }
+    }
+
+    #[tokio::test]
+    async fn postgres_inbox_requires_the_same_schema_without_clustering() {
+        let Ok(database_url) = std::env::var("WADDLE_TEST_POSTGRES_URL") else {
+            eprintln!("skipping postgres_inbox_requires_the_same_schema_without_clustering: WADDLE_TEST_POSTGRES_URL not set");
+            return;
+        };
+        let admin = sqlx::PgPool::connect(&database_url)
+            .await
+            .expect("postgres admin");
+        let global_schema = format!("ingress_colocation_{}", uuid::Uuid::new_v4().simple());
+        let separate_schema = format!("inbox_colocation_{}", uuid::Uuid::new_v4().simple());
+        for schema in [&global_schema, &separate_schema] {
+            sqlx::query(&format!("CREATE SCHEMA {schema}"))
+                .execute(&admin)
+                .await
+                .expect("create schema");
+        }
+        let mut global_url = url::Url::parse(&database_url).expect("database URL");
+        global_url
+            .query_pairs_mut()
+            .append_pair("options", &format!("-c search_path={global_schema}"));
+        let mut separate_url = url::Url::parse(&database_url).expect("database URL");
+        separate_url
+            .query_pairs_mut()
+            .append_pair("options", &format!("-c search_path={separate_schema}"));
+        let config = crate::db::DatabaseConfig::new(
+            crate::db::DatabaseDriver::Postgres,
+            global_url.to_string(),
+        );
+        let global = crate::db::Database::from_config("ingress-colocation", &config)
+            .await
+            .expect("global");
+        let shared = create_ingress_inbox_storage(Some(global_url.as_str()), &global)
+            .await
+            .expect("colocated inbox");
+        let error = create_ingress_inbox_storage(Some(separate_url.as_str()), &global)
+            .await
+            .err()
+            .expect("startup rejects split inbox schema without clustering");
+        assert!(matches!(
+            error.downcast_ref::<IngressColocationError>(),
+            Some(IngressColocationError::PostgresIdentity { .. })
+        ));
+        drop(shared);
+        drop(global);
+        for schema in [&global_schema, &separate_schema] {
+            sqlx::query(&format!("DROP SCHEMA {schema} CASCADE"))
+                .execute(&admin)
+                .await
+                .expect("drop schema");
+        }
+    }
+
+    #[tokio::test]
+    async fn sqlite_inbox_requires_the_same_file_without_clustering() {
+        let directory = tempfile::tempdir().expect("temporary directory");
+        let global =
+            crate::db::Database::open_local("inbox-colocation", directory.path().join("global.db"))
+                .await
+                .expect("global");
+        create_ingress_inbox_storage(Some(global.database_url()), &global)
+            .await
+            .expect("colocated inbox");
+        let separate =
+            crate::db::Database::open_local("separate-inbox", directory.path().join("inbox.db"))
+                .await
+                .expect("separate");
+        let error = create_ingress_inbox_storage(Some(separate.database_url()), &global)
+            .await
+            .err()
+            .expect("startup rejects split inbox database");
+        assert!(matches!(
+            error.downcast_ref::<IngressColocationError>(),
+            Some(IngressColocationError::SqliteDatabase)
+        ));
+    }
+
+    #[tokio::test]
+    async fn sqlite_inbox_private_memory_shares_the_ingress_pool() {
+        let global = crate::db::Database::in_memory("inbox-colocation")
+            .await
+            .expect("global");
+        global
+            .execute("CREATE TABLE shared_pool_marker (id INTEGER)")
+            .await
+            .expect("marker");
+        let inbox = create_ingress_inbox_storage(None, &global)
+            .await
+            .expect("shared inbox");
+        inbox
+            .database()
+            .execute("INSERT INTO shared_pool_marker VALUES (1)")
+            .await
+            .expect("inbox uses the same private database");
     }
 
     #[tokio::test]

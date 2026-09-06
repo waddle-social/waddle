@@ -577,6 +577,32 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn ingress_gc_failure_rule_matches_exported_outcome_label() {
+        let guard = setup().await;
+        let rules_path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../../infrastructure/waddle.cloud/rules/mimir/waddle-reliability.yaml");
+        let rules = std::fs::read_to_string(&rules_path)
+            .unwrap_or_else(|error| panic!("read {}: {error}", rules_path.display()));
+        let expression = rules
+            .lines()
+            .skip_while(|line| !line.contains("alert: IngressGcFailing"))
+            .nth(1)
+            .expect("IngressGcFailing expression");
+        assert!(expression.contains("ingress_gc_runs_total{outcome=~\"failed|timed_out\"}"));
+        for outcome in [IngressGcOutcome::Failed, IngressGcOutcome::TimedOut] {
+            increment_ingress_gc_run(outcome);
+            assert_eq!(
+                guard.counter_sum("ingress.gc.runs", &[("outcome", outcome.value())]),
+                Some(1)
+            );
+            assert_eq!(
+                guard.counter_sum("ingress.gc.runs", &[("result", outcome.value())]),
+                Some(0)
+            );
+        }
+    }
+
+    #[tokio::test]
     async fn pending_delivery_helper_emits() {
         let guard = setup().await;
         add_pending_delivery_aged_out(4);
