@@ -333,7 +333,9 @@ async fn forged_room_stamp(fixture: IngressFixture) {
     register_test_connection(state.as_ref(), &peer, peer_tx).await;
     let mut submission = fixture.submission(Some("forged-room-origin"), "hello");
     submission.target = NormalizedTarget::Bare(room.clone());
+    let client_id = xmpp_parsers::message::Id("client-wire-id".to_owned());
     let incoming = &mut submission.plan.sanitized_message;
+    incoming.id = Some(client_id.clone());
     incoming.to = Some(room.clone().into());
     incoming.type_ = xmpp_parsers::message::MessageType::Groupchat;
     let forged = waddle_xmpp_core::xep0359::StanzaId::new("client-forged", room.clone().into());
@@ -390,14 +392,14 @@ async fn forged_room_stamp(fixture: IngressFixture) {
         .find(|(archive, _)| archive == &room)
         .expect("room authoritative identity");
     assert_ne!(room_id.1, forged);
-    assert_room_inbox_rows(&fixture, &room, &room_id.1).await;
+    assert_room_inbox_rows(&fixture, &room, &room_id.1, &client_id).await;
     assert_eq!(
-        take_room_frames(&mut rx, &room, &room_id.1, 0),
+        take_room_frames(&mut rx, &room, &room_id.1, &client_id, 0),
         1,
         "first sender reflection"
     );
     assert_eq!(
-        take_room_frames(&mut peer_rx, &room, &room_id.1, 1),
+        take_room_frames(&mut peer_rx, &room, &room_id.1, &client_id, 1),
         1,
         "first peer fanout"
     );
@@ -425,14 +427,14 @@ async fn forged_room_stamp(fixture: IngressFixture) {
     )
     .await;
     assert!(retry_report.receipt_failures.is_empty());
-    assert_room_inbox_rows(&fixture, &room, &room_id.1).await;
+    assert_room_inbox_rows(&fixture, &room, &room_id.1, &client_id).await;
     assert_eq!(
-        take_room_frames(&mut rx, &room, &room_id.1, 0),
+        take_room_frames(&mut rx, &room, &room_id.1, &client_id, 0),
         1,
         "duplicate sender reflection"
     );
     assert_eq!(
-        take_room_frames(&mut peer_rx, &room, &room_id.1, 1),
+        take_room_frames(&mut peer_rx, &room, &room_id.1, &client_id, 1),
         0,
         "duplicate must not fan out groupchat to non-sender"
     );
@@ -474,6 +476,7 @@ fn take_room_frames(
     receiver: &mut tokio::sync::mpsc::Receiver<waddle_xmpp::registry::OutboundStanza>,
     room: &jid::BareJid,
     stanza_id: &waddle_xmpp_core::xep0359::StanzaId,
+    client_id: &xmpp_parsers::message::Id,
     unread: u32,
 ) -> usize {
     use waddle_xmpp::xep::xep0430::{parse_inbox_entry_with_metadata, NS_INBOX, NS_WADDLE_INBOX};
@@ -497,6 +500,7 @@ fn take_room_frames(
                     .map(String::as_str),
                 Some("hello")
             );
+            assert_eq!(wire.id.as_ref(), Some(client_id));
             let ids = waddle_xmpp_core::xep0359::extract_stanza_ids(&wire);
             assert!(ids.contains(stanza_id));
             assert!(!ids.iter().any(|id| id.id == "client-forged"));
@@ -514,7 +518,7 @@ fn take_room_frames(
             )
             .expect("typed inbox push");
             assert_eq!(&entry.partner, room);
-            assert_eq!(entry.last_stanza_id, stanza_id.id);
+            assert_eq!(entry.last_stanza_id, client_id.0);
             assert_eq!(entry.unread, unread);
         }
     }
@@ -525,6 +529,7 @@ async fn assert_room_inbox_rows(
     fixture: &IngressFixture,
     room: &jid::BareJid,
     stanza_id: &waddle_xmpp_core::xep0359::StanzaId,
+    client_id: &xmpp_parsers::message::Id,
 ) {
     use waddle_xmpp::inbox::storage::InboxStorage;
     let inbox = crate::inbox::DatabaseInboxStorage::from_database(fixture.db.clone())
@@ -541,13 +546,13 @@ async fn assert_room_inbox_rows(
             .into_iter()
             .find(|entry| &entry.partner == room)
             .expect("room projection");
-        assert_eq!(entry.last_stanza_id, stanza_id.id);
+        assert_eq!(entry.last_stanza_id, client_id.0);
         assert_eq!(entry.unread, unread);
         let connection = fixture.db.guard().await.expect("archive reference read");
         let mut rows = connection
             .query(
                 "SELECT COUNT(*) FROM mam_messages WHERE room_jid = ? AND id = ?",
-                crate::db_params![room.to_string(), entry.last_stanza_id],
+                crate::db_params![room.to_string(), stanza_id.id.clone()],
             )
             .await
             .expect("resolve projected archive reference");
@@ -560,7 +565,7 @@ async fn assert_room_inbox_rows(
             .expect("integer count");
         assert_eq!(
             count, 1,
-            "inbox reference resolves under the room assigning authority"
+            "trusted archive identity resolves under the room assigning authority"
         );
     }
 }

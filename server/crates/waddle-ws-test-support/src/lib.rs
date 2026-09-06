@@ -241,14 +241,22 @@ impl TestServer {
         } else {
             command.stdout(Stdio::null()).stderr(Stdio::null());
         }
-        let child = command
+        let mut child = command
             .spawn()
             .unwrap_or_else(|e| panic!("Failed to start waddle-server at {}: {e}", bin.display()));
 
         // Poll the port file until the server writes it
         let deadline = Instant::now() + SERVER_STARTUP_TIMEOUT;
         let http_port = loop {
+            if let Some(status) = child.try_wait().expect("poll server startup status") {
+                panic!(
+                    "Server exited before writing its port file: {status}; \
+                     set WADDLE_TEST_SERVER_STDIO=inherit to see the startup error"
+                );
+            }
             if Instant::now() > deadline {
+                let _ = child.kill();
+                let _ = child.wait();
                 panic!("Server failed to write port file within {SERVER_STARTUP_TIMEOUT:?}");
             }
             if let Ok(contents) = std::fs::read_to_string(&port_file) {

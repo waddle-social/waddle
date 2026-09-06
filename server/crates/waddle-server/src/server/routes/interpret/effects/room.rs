@@ -7,6 +7,7 @@ use waddle_xmpp::{
     mam::{ArchiveExpectation, ArchivedMessage},
     muc::{pin::PinStateChange, RoomClaimFenceContext, SubjectState},
 };
+use waddle_xmpp_core::xep0359::StanzaId;
 use xmpp_parsers::message::Message;
 
 #[derive(Debug, Clone)]
@@ -24,6 +25,7 @@ pub enum DurableRoomEffect {
         archive_expectation: ArchiveExpectation,
     },
     ProjectGroupchatInbox {
+        archive_stanza_id: StanzaId,
         owner: BareJid,
         entry: Box<InboxEntry>,
         is_recipient: bool,
@@ -89,9 +91,14 @@ pub(in super::super) fn planned_durable(effect: DurableRoomEffect) -> super::Pla
         DurableRoomEffect::ArchiveGroupchat { room, message, .. } => {
             after_archive(room, &message.id)
         }
-        DurableRoomEffect::ProjectGroupchatInbox { entry, .. } => {
-            after_archive(&entry.partner, &entry.last_stanza_id)
-        }
+        DurableRoomEffect::ProjectGroupchatInbox {
+            entry,
+            archive_stanza_id,
+            ..
+        } => super::PlanEffectDependency::AfterArchive {
+            archive: entry.partner.clone(),
+            minted: archive_stanza_id.clone(),
+        },
     };
     super::PlannedEffect::new(super::Effect::Durable(super::DurableEffect::Room(effect)))
         .with_dependency(dependency)

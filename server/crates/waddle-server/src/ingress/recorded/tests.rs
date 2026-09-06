@@ -302,6 +302,7 @@ fn recorded_recovery_payload_respects_thread_and_execution_phase() {
     plan.plan
         .push(PlannedEffect::new(Effect::Durable(DurableEffect::Room(
             DurableRoomEffect::ProjectGroupchatInbox {
+                archive_stanza_id: recovery.key.archive_stanza_id.clone(),
                 owner: owner.clone(),
                 entry: Box::new(InboxEntry::new(
                     room.clone(),
@@ -442,4 +443,45 @@ fn recorded_dm_pin_metadata_is_applied_and_receipted() {
         receipts[0],
         vec![crate::ingress::durable::receipt_key(&saved).expect("key")]
     );
+}
+
+#[test]
+fn recorded_room_archive_timestamp_matches_typed_stamp_not_client_id() {
+    let room: jid::BareJid = "room@conference.example.test".parse().expect("room");
+    let stamp = waddle_xmpp_core::xep0359::StanzaId::new("archive-id", room.clone().into());
+    let archive_intent = |seconds| IngressEffectIntent::ArchiveAuthoritative {
+        archive: room.clone(),
+        stanza_id: stamp.clone(),
+        by: room.clone(),
+        archived_at: chrono::DateTime::from_timestamp(seconds, 0).expect("timestamp"),
+    };
+    let mut plan = empty_plan();
+    plan.intents.push(archive_intent(300));
+    plan.plan
+        .push(PlannedEffect::new(Effect::Durable(DurableEffect::Room(
+            DurableRoomEffect::ProjectGroupchatInbox {
+                archive_stanza_id: stamp.clone(),
+                owner: "alice@example.test".parse().expect("owner"),
+                entry: Box::new(InboxEntry::new(
+                    room.clone(),
+                    ConversationKind::MucRoom,
+                    "client-wire-id",
+                    300,
+                )),
+                is_recipient: true,
+                recovery: None,
+            },
+        ))));
+    let result = apply_recorded_intents(&plan, &[archive_intent(100)]);
+    let Effect::Durable(DurableEffect::Room(DurableRoomEffect::ProjectGroupchatInbox {
+        entry,
+        archive_stanza_id,
+        ..
+    })) = &result.plan[0].effect
+    else {
+        panic!("room inbox projection");
+    };
+    assert_eq!(entry.last_updated, 100);
+    assert_eq!(entry.last_stanza_id, "client-wire-id");
+    assert_eq!(archive_stanza_id, &stamp);
 }

@@ -118,6 +118,48 @@ pub(super) fn finish_plan(
     }
 }
 
+/// Reject digest-level semantic errors before invoking handlers or planning effects.
+pub(crate) fn reject_malformed_message(mut message: Message, sender: &jid::FullJid) -> IngressPlan {
+    message.from = Some(sender.clone().into());
+    // RFC 6120 §8.3.1: never send an error in response to an error stanza.
+    // Commit responsibility for discarding it without recording a reply obligation.
+    if message.type_ == MessageType::Error {
+        return IngressPlan {
+            rejection: None,
+            plan: vec![],
+            intents: vec![],
+            sanitized_message: message,
+            error_reply: None,
+            room_execution: super::effects::RoomExecutionPath::None,
+        };
+    }
+    let error = xmpp_parsers::stanza_error::StanzaError::new(
+        xmpp_parsers::stanza_error::ErrorType::Modify,
+        xmpp_parsers::stanza_error::DefinedCondition::BadRequest,
+        "en",
+        "The message contains malformed protocol payloads.",
+    );
+    let reply =
+        waddle_xmpp::protocol::handlers::errors::message_error_reply(&message, error.clone());
+    let reply = Stanza::Message(reply);
+    IngressPlan {
+        rejection: Some(PlanRejection::SemanticMalformed(
+            super::effects::SemanticMalformedReason::MalformedPayload,
+        )),
+        plan: vec![super::effects::PlannedEffect::new(Effect::External(
+            ExternalEffect::Frame(Box::new(reply.clone())),
+        ))],
+        intents: vec![waddle_xmpp::ingress::IngressEffectIntent::ErrorReply {
+            recipient: sender.clone(),
+            error: waddle_xmpp::ingress::FrozenStanzaError::from_xmpp(&error)
+                .expect("server error is typed"),
+        }],
+        sanitized_message: message,
+        error_reply: Some(reply),
+        room_execution: super::effects::RoomExecutionPath::None,
+    }
+}
+
 /// The retained capture is bounded. Never return an executable plan whose
 /// obligations were discarded by that bound; Phase B can commit this standard
 /// rejection instead of accepting a message with incomplete intents.

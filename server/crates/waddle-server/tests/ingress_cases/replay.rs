@@ -252,6 +252,7 @@ fn room_projection(
     if let Some(thread) = thread {
         entry = entry.with_thread(thread.as_str());
     }
+    let archive_stanza_id = waddle_xmpp_core::xep0359::StanzaId::new(id, room.clone().into());
     let mutation = match thread {
         Some(thread_id) => InboxProjectionMutation::GroupchatThread {
             room,
@@ -274,6 +275,7 @@ fn room_projection(
         .plan
         .push(PlannedEffect::new(Effect::Durable(DurableEffect::Room(
             DurableRoomEffect::ProjectGroupchatInbox {
+                archive_stanza_id,
                 owner: owner.clone(),
                 entry: Box::new(entry),
                 is_recipient: true,

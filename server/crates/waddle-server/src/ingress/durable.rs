@@ -139,6 +139,7 @@ pub(super) async fn apply_durable(
                 entry,
                 is_recipient,
                 recovery,
+                ..
             }) => {
                 let entry = if let Some(recovery) = recovery.as_ref() {
                     if recovery_completed(tx, key, recovery, recorded).await? {

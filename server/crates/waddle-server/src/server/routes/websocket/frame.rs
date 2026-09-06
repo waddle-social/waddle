@@ -982,19 +982,34 @@ async fn dispatch_authoritative_message(
             .muc
             .parse()
             .map_err(|_| IngressDecisionClass::Storage)?;
-        let digest_input = crate::ingress::submission::digest_input(
-            &message,
-            &DigestContext {
-                target: target.clone(),
-                server_authorities: crate::ingress::submission::digest_authorities(
-                    &message,
-                    principal.bare_jid(),
-                    muc.domain(),
+        let digest_context = DigestContext {
+            target: target.clone(),
+            server_authorities: crate::ingress::submission::digest_authorities(
+                &message,
+                principal.bare_jid(),
+                muc.domain(),
+            ),
+            stanza_lang,
+        };
+        let (digest_input, malformed) =
+            match crate::ingress::submission::digest_input(&message, &digest_context) {
+                Ok(input) => (input, false),
+                Err(
+                    waddle_xmpp::ingress::DigestInputError::DuplicateOriginId
+                    | waddle_xmpp::ingress::DigestInputError::MalformedOriginId
+                    | waddle_xmpp::ingress::DigestInputError::DuplicateThread
+                    | waddle_xmpp::ingress::DigestInputError::DuplicateReply
+                    | waddle_xmpp::ingress::DigestInputError::ReplyMalformed,
+                ) => (
+                    waddle_xmpp::ingress::DigestInput::from_rejected_parsed(
+                        &message,
+                        &digest_context,
+                    )
+                    .map_err(|_| IngressDecisionClass::Storage)?,
+                    true,
                 ),
-                stanza_lang,
-            },
-        )
-        .map_err(|_| IngressDecisionClass::Storage)?;
+                Err(_) => return Err(IngressDecisionClass::Storage),
+            };
         let sender = conn
             .phase
             .bound_jid()
@@ -1004,8 +1019,11 @@ async fn dispatch_authoritative_message(
             .state_machine
             .as_mut()
             .ok_or(IngressDecisionClass::Storage)?;
-        let plan =
-            crate::server::routes::interpret::plan_message_dispatch(machine, message, &deps).await;
+        let plan = if malformed {
+            crate::server::routes::interpret::reject_malformed_message(message, &sender)
+        } else {
+            crate::server::routes::interpret::plan_message_dispatch(machine, message, &deps).await
+        };
         let submission = IngressSubmission {
             sender,
             identity,

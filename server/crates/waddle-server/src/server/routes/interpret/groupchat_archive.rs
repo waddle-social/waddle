@@ -861,10 +861,7 @@ pub(super) async fn project_groupchat_inbox(
         warn!(room = %room, "ProjectGroupchatInbox: missing room-assigned stanza-id");
         return outcome;
     };
-    let mut entry = groupchat_entry(room.clone(), message, dispatch_timestamp);
-    // The wire message id belongs to the client; inbox references and ingress
-    // archive dependencies belong to the room's XEP-0359 assigning authority.
-    entry.last_stanza_id = archive_id.id.clone();
+    let entry = groupchat_entry(room.clone(), message, dispatch_timestamp);
     let channel_recovery = if thread.is_none() {
         notification_recovery.clone()
     } else {
@@ -879,6 +876,7 @@ pub(super) async fn project_groupchat_inbox(
                 super::effects::room::DurableRoomEffect::ProjectGroupchatInbox {
                     owner: owner.clone(),
                     entry: Box::new(entry),
+                    archive_stanza_id: archive_id.clone(),
                     is_recipient,
                     recovery: channel_recovery,
                 },
@@ -920,7 +918,6 @@ pub(super) async fn project_groupchat_inbox(
         thread.title.as_deref(),
         thread.author_nick.as_deref(),
     );
-    thread_entry.last_stanza_id = archive_id.id;
     // Persist the call-thread anchor metadata (Task 2 storage supports
     // it). The MUC call anchor's `kind`/`media` ride along on the
     // thread-root projection; replies carry neither, so a later reply's
@@ -935,6 +932,7 @@ pub(super) async fn project_groupchat_inbox(
                 super::effects::room::DurableRoomEffect::ProjectGroupchatInbox {
                     owner: owner.clone(),
                     entry: Box::new(thread_entry),
+                    archive_stanza_id: archive_id,
                     is_recipient,
                     recovery: notification_recovery,
                 },

@@ -412,3 +412,50 @@ fn sender_and_generated_archives_retain_distinct_recorded_identities() {
         })
         .expect("encode");
 }
+
+#[test]
+fn restamp_room_projection_preserves_client_id_and_updates_archive_dependency() {
+    let (mut plan, room, minted, recorded) = fixture();
+    let owner = jid("recipient@example.test");
+    plan.plan.push(
+        PlannedEffect::new(Effect::Durable(DurableEffect::Room(
+            DurableRoomEffect::ProjectGroupchatInbox {
+                archive_stanza_id: minted.clone(),
+                owner,
+                entry: Box::new(InboxEntry::new(
+                    room.clone(),
+                    ConversationKind::MucRoom,
+                    "client-wire-id",
+                    0,
+                )),
+                is_recipient: true,
+                recovery: None,
+            },
+        )))
+        .with_dependency(PlanEffectDependency::AfterArchive {
+            archive: room.clone(),
+            minted,
+        }),
+    );
+    let result = restamp_plan(
+        &plan,
+        &[(room.clone(), ArchiveRole::Sender, recorded.clone())],
+    );
+    let Effect::Durable(DurableEffect::Room(DurableRoomEffect::ProjectGroupchatInbox {
+        entry,
+        archive_stanza_id,
+        ..
+    })) = &result.plan[0].effect
+    else {
+        panic!("room inbox projection");
+    };
+    assert_eq!(entry.last_stanza_id, "client-wire-id");
+    assert_eq!(archive_stanza_id, &recorded);
+    assert_eq!(
+        result.plan[0].dependencies,
+        vec![PlanEffectDependency::AfterArchive {
+            archive: room,
+            minted: recorded,
+        }]
+    );
+}

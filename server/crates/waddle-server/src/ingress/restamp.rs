@@ -196,12 +196,11 @@ impl Replacements {
                     self.expectation(archive_expectation);
                 }
                 DurableRoomEffect::ProjectGroupchatInbox {
-                    owner,
-                    entry,
+                    archive_stanza_id,
                     recovery,
                     ..
                 } => {
-                    self.inbox(owner, entry);
+                    self.id(archive_stanza_id);
                     if let Some(recovery) = recovery {
                         self.id(&mut recovery.key.archive_stanza_id);
                     }

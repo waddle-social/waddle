@@ -37,6 +37,7 @@ pub(super) async fn execute_durable(effect: DurableRoomEffect, deps: &Deps<'_>) 
             entry,
             is_recipient,
             recovery,
+            ..
         } => {
             let Some(storage) = deps.inbox_storage else {
                 return EffectOutcome::Unavailable;

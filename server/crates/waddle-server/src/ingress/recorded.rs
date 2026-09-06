@@ -152,7 +152,11 @@ fn apply_durable(
             },
         ) if owner == old_owner && &entry.partner == room => *is_recipient = *increment_unread,
         (
-            DurableEffect::Room(DurableRoomEffect::ProjectGroupchatInbox { entry, .. }),
+            DurableEffect::Room(DurableRoomEffect::ProjectGroupchatInbox {
+                entry,
+                archive_stanza_id,
+                ..
+            }),
             IngressEffectIntent::ArchiveAuthoritative {
                 archive, stanza_id, ..
             }
@@ -161,7 +165,7 @@ fn apply_durable(
             },
             IngressEffectIntent::ArchiveAuthoritative { archived_at, .. }
             | IngressEffectIntent::SystemMessageArchive { archived_at, .. },
-        ) if &entry.partner == archive && entry.last_stanza_id == stanza_id.id => {
+        ) if &entry.partner == archive && archive_stanza_id == stanza_id => {
             entry.last_updated = archived_at.timestamp()
         }
         (

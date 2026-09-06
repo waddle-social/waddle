@@ -152,6 +152,30 @@ pub enum DigestInputError {
 }
 
 impl DigestInput {
+    /// Digest an offered stanza which failed semantic validation. Retain the
+    /// complete typed XML, including malformed reference attributes, under a
+    /// separate hash domain. Rejections never bind an origin alias.
+    pub fn from_rejected_parsed(
+        message: &Message,
+        context: &DigestContext,
+    ) -> Result<Self, DigestInputError> {
+        let mut offered = Message::new(None);
+        offered.payloads.push(Element::from(message.clone()));
+        let mut input = Self::from_parsed(&offered, context)?;
+        let fields = DigestFields {
+            message_type: input.message_type.clone(),
+            stanza_lang: input.stanza_lang.clone(),
+            target: input.target.clone(),
+            bodies: input.bodies.clone(),
+            subjects: input.subjects.clone(),
+            thread: input.thread.clone(),
+            reply: input.reply.clone(),
+            extensions: input.extensions.clone(),
+        };
+        input.digest = super::v1::digest_rejected_fields(&fields)?;
+        Ok(input)
+    }
+
     /// Capture the semantic fields of a parsed message before routing enrichment.
     pub fn from_parsed(
         message: &Message,
@@ -426,4 +450,47 @@ fn validate_name(value: &str) -> Result<(), DigestInputError> {
         return Err(DigestInputError::NameLengthExceeded);
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod rejected_tests {
+    use super::*;
+
+    #[test]
+    fn rejected_digest_retains_malformed_payload_and_never_binds_an_alias() {
+        let context = DigestContext {
+            target: NormalizedTarget::Absent,
+            server_authorities: vec![],
+            stanza_lang: None,
+        };
+        let mut message = Message::new(None);
+        message.payloads.push(
+            Element::builder("reply", NS_REPLY)
+                .attr(minidom::rxml::xml_ncname!("to").to_owned(), " ")
+                .attr(minidom::rxml::xml_ncname!("id").to_owned(), "parent-1")
+                .build(),
+        );
+        message.payloads.push(
+            Element::builder("origin-id", NS_SID)
+                .attr(minidom::rxml::xml_ncname!("id").to_owned(), "origin-1")
+                .build(),
+        );
+        let first = DigestInput::from_rejected_parsed(&message, &context).expect("rejected digest");
+        assert!(first.origin().is_none());
+        assert_eq!(first.extensions(), &[Element::from(message.clone())]);
+        message.payloads[0] = Element::builder("reply", NS_REPLY)
+            .attr(minidom::rxml::xml_ncname!("to").to_owned(), "  ")
+            .attr(minidom::rxml::xml_ncname!("id").to_owned(), "parent-1")
+            .build();
+        let second =
+            DigestInput::from_rejected_parsed(&message, &context).expect("rejected digest");
+        assert_ne!(first.digest, second.digest);
+        let mut wrapper = Message::new(None);
+        wrapper.payloads.push(first.extensions()[0].clone());
+        let accepted = DigestInput::from_parsed(&wrapper, &context).expect("accepted digest");
+        assert_ne!(
+            first.digest, accepted.digest,
+            "rejections have a separate hash domain"
+        );
+    }
 }

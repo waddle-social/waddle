@@ -90,3 +90,76 @@ async fn non_advancing_matrix_case(state: Arc<WebSocketState>) {
         }
     }
 }
+
+/// XEP-0461 Use Cases and RFC 0018 §3.5: malformed references are stanza denials.
+#[tokio::test]
+async fn semantic_malformed_replies_commit_on_ephemeral_and_resumable_connections() {
+    malformed_reply_case(create_test_websocket_state().await).await;
+}
+
+#[tokio::test]
+async fn semantic_malformed_replies_commit_on_ephemeral_and_resumable_connections_postgres() {
+    postgres_case(malformed_reply_case).await;
+}
+
+async fn malformed_reply_case(state: Arc<WebSocketState>) {
+    for resumable in [false, true] {
+        let mut conn = connection(&state, resumable).await;
+        let mut message = xmpp_parsers::message::Message::new(Some(
+            "room@muc.example.com".parse().expect("room"),
+        ));
+        message.type_ = xmpp_parsers::message::MessageType::Groupchat;
+        message.id = Some(xmpp_parsers::message::Id("malformed-reply".into()));
+        message.payloads.push(
+            minidom::Element::builder("reply", waddle_xmpp::xep::xep0461::NS_REPLY)
+                .attr(minidom::rxml::xml_ncname!("to").to_owned(), " ")
+                .attr(minidom::rxml::xml_ncname!("id").to_owned(), "parent-1")
+                .build(),
+        );
+        let wire = crate::server::routes::websocket::transport_xml::stanza_to_xml(
+            &Stanza::Message(message.clone()),
+        );
+        forced_failures::OBSERVED_CLASS
+            .scope(std::cell::Cell::new(None), async {
+                let frames = handle_xmpp_frame(&wire, "example.com", &state, &mut conn).await;
+                assert_eq!(
+                    forced_failures::OBSERVED_CLASS.with(std::cell::Cell::get),
+                    Some(IngressDecisionClass::SemanticMalformed)
+                );
+                assert_eq!(frames.len(), 1);
+                let reply = xmpp_parsers::message::Message::try_from(
+                    frames[0].parse::<minidom::Element>().expect("reply XML"),
+                )
+                .expect("standard message reply");
+                assert_eq!(reply.type_, xmpp_parsers::message::MessageType::Error);
+                assert_eq!(reply.id, message.id);
+                assert_eq!(
+                    reply.to,
+                    Some("alice@example.com/web".parse().expect("sender"))
+                );
+                assert!(reply.payloads.iter().any(|payload| payload
+                    .get_child("bad-request", xmpp_parsers::ns::XMPP_STANZAS)
+                    .is_some()));
+            })
+            .await;
+        assert!(!conn.sm_inbound_completion.has_unhandled_hole());
+        if resumable {
+            assert_ack(&state, &mut conn, 1).await;
+        }
+        // RFC 6120 §8.3.1 forbids replying to an error with another error.
+        message.type_ = xmpp_parsers::message::MessageType::Error;
+        let wire = crate::server::routes::websocket::transport_xml::stanza_to_xml(
+            &Stanza::Message(message),
+        );
+        let frames = handle_xmpp_frame(&wire, "example.com", &state, &mut conn).await;
+        assert!(frames.is_empty());
+        assert!(!conn.sm_inbound_completion.has_unhandled_hole());
+        if resumable {
+            assert_ack(&state, &mut conn, 2).await;
+        }
+    }
+    assert_eq!(row_count(&state, "ingress_messages").await, 4);
+    assert_eq!(row_count(&state, "ingress_effect_intents").await, 2);
+    assert_eq!(row_count(&state, "ingress_sm_refs").await, 2);
+    assert_eq!(row_count(&state, "mam_messages").await, 0);
+}

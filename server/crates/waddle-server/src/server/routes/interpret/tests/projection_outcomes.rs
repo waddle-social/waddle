@@ -66,7 +66,7 @@ async fn assert_committed_projection_push(database_url: &str, conversation: Conv
             .expect("occupant"),
     );
     // The client wire id differs from the room-assigned archive identity.
-    // Both channel and thread projections must use the trusted room stamp.
+    // Dependencies use the room stamp while inbox entries preserve the client id.
     message.id = Some(xmpp_parsers::message::Id("client-wire-id".to_owned()));
     message
         .payloads
@@ -101,11 +101,14 @@ async fn assert_committed_projection_push(database_url: &str, conversation: Conv
         if let Effect::Durable(DurableEffect::Room(DurableRoomEffect::ProjectGroupchatInbox {
             owner,
             entry,
+            archive_stanza_id,
             is_recipient,
             ..
         })) = &effect.effect
         {
-            assert_eq!(entry.last_stanza_id, "committed-message");
+            assert_eq!(entry.last_stanza_id, "client-wire-id");
+            assert_eq!(archive_stanza_id.id, "committed-message");
+            assert_eq!(archive_stanza_id.by, room);
             assert_eq!(
                 entry.unread, 0,
                 "uncommitted input has no authoritative unread count"
@@ -166,7 +169,7 @@ async fn assert_committed_projection_push(database_url: &str, conversation: Conv
             push.get_child("metadata", NS_WADDLE_INBOX),
         )
         .expect("decode actual pushed contents");
-        assert_eq!(entry.last_stanza_id, "committed-message");
+        assert_eq!(entry.last_stanza_id, "client-wire-id");
         if entry.thread_id.is_some() {
             assert_eq!(entry.unread, 4);
             assert_eq!(entry.reply_count, 3);

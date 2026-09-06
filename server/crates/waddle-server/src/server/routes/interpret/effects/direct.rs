@@ -187,6 +187,7 @@ mod tests {
                 }),
                 ConversationKind::MucRoom => super::super::room::planned_durable(
                     super::super::room::DurableRoomEffect::ProjectGroupchatInbox {
+                        archive_stanza_id: StanzaId::new("archive-id", partner.clone().into()),
                         owner: owner.clone(),
                         entry,
                         is_recipient: true,
