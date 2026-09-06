@@ -201,6 +201,15 @@ async fn invitation_plan_commit_execute(fixture: IngressFixture) {
     .await
     .expect("ledger");
     assert_eq!(invites.len(), 1);
+    // XEP-0045 §9.2: replaying an earlier membership grant cannot demote
+    // an administrator appointed after the original invitation committed.
+    actor
+        .ask(ChangeAffiliation {
+            jid: recipient.clone(),
+            affiliation: waddle_xmpp::Affiliation::Admin,
+        })
+        .await
+        .expect("promote invitee before retry");
     if let IngressStreamIdentity::Resumable {
         reserved_wire_position,
         checkpoint_h,
@@ -233,7 +242,7 @@ async fn invitation_plan_commit_execute(fixture: IngressFixture) {
             .expect("snapshot")
             .room
             .get_affiliation(&recipient),
-        waddle_xmpp::Affiliation::Member
+        waddle_xmpp::Affiliation::Admin
     );
     assert_eq!(
         crate::server::routes::websocket::muc_invites::list_invites(
@@ -273,5 +282,285 @@ async fn ingress_actual_invitation_plan_replay_sqlite() {
 async fn ingress_actual_invitation_plan_replay_postgres() {
     if let Some(fixture) = IngressFixture::postgres("actual_invitation_replay").await {
         invitation_plan_commit_execute(fixture).await;
+    }
+}
+
+/// XEP-0359 §3: a client cannot assign the room's stable stanza identity.
+async fn forged_room_stamp(fixture: IngressFixture) {
+    let state = create_test_websocket_state().await;
+    create_test_session(state.as_ref(), "romeo").await;
+    let sender: jid::FullJid = "romeo@example.com/phone".parse().expect("sender");
+    let room: jid::BareJid = "stamp@muc.example.com".parse().expect("room");
+    let actor = state
+        .deps
+        .protocol
+        .room_registry
+        .ask(CreateRoom {
+            room_jid: room.clone(),
+            waddle_id: "stamp".to_owned(),
+            channel_id: "stamp".to_owned(),
+            config: RoomConfig::default(),
+        })
+        .await
+        .expect("room");
+    actor
+        .ask(JoinWithAffiliation {
+            sender_jid: sender.clone(),
+            nick: "romeo".to_owned(),
+            affiliation_grant: JoinAffiliationGrant::Resolver(waddle_xmpp::Affiliation::Member),
+            local_domain: "example.com".to_owned(),
+            admission_revision: 0,
+            session: waddle_xmpp_core::OccupancySessionGeneration::mint(),
+        })
+        .await
+        .expect("join sender");
+    let (tx, mut rx) = tokio::sync::mpsc::channel(8);
+    register_test_connection(state.as_ref(), &sender, tx).await;
+    let peer: jid::FullJid = "juliet@example.com/phone".parse().expect("peer");
+    create_test_session(state.as_ref(), "juliet").await;
+    actor
+        .ask(JoinWithAffiliation {
+            sender_jid: peer.clone(),
+            nick: "juliet".to_owned(),
+            affiliation_grant: JoinAffiliationGrant::Resolver(waddle_xmpp::Affiliation::Member),
+            local_domain: "example.com".to_owned(),
+            admission_revision: 0,
+            session: waddle_xmpp_core::OccupancySessionGeneration::mint(),
+        })
+        .await
+        .expect("join peer");
+    let (peer_tx, mut peer_rx) = tokio::sync::mpsc::channel(8);
+    register_test_connection(state.as_ref(), &peer, peer_tx).await;
+    let mut submission = fixture.submission(Some("forged-room-origin"), "hello");
+    submission.target = NormalizedTarget::Bare(room.clone());
+    let incoming = &mut submission.plan.sanitized_message;
+    incoming.to = Some(room.clone().into());
+    incoming.type_ = xmpp_parsers::message::MessageType::Groupchat;
+    let forged = waddle_xmpp_core::xep0359::StanzaId::new("client-forged", room.clone().into());
+    waddle_xmpp_core::xep0359::add_stanza_id(incoming, &forged);
+    let domain: jid::BareJid = "muc.example.com".parse().expect("domain");
+    submission.digest_input = crate::ingress::submission::digest_input(
+        incoming,
+        &DigestContext {
+            target: submission.target.clone(),
+            server_authorities: crate::ingress::submission::digest_authorities(
+                incoming,
+                fixture.principal.bare_jid(),
+                domain.domain(),
+            ),
+            stanza_lang: None,
+        },
+    )
+    .expect("digest ignores forged room identity");
+    let mut dispatcher = waddle_xmpp::protocol::StanzaDispatcher::new();
+    waddle_xmpp::protocol::handlers::register_default_message_handlers(&mut dispatcher);
+    let mut machine = waddle_xmpp::protocol::XmppStateMachine::new("example.com", dispatcher);
+    machine.transition_to_ready(sender, false);
+    let deps = build_interpret_deps(state.as_ref(), None);
+    submission.plan = crate::server::plan_message_dispatch(
+        &mut machine,
+        submission.plan.sanitized_message,
+        &deps,
+    )
+    .await;
+    assert!(
+        !waddle_xmpp_core::xep0359::extract_stanza_ids(&submission.plan.sanitized_message)
+            .contains(&forged)
+    );
+    let decision = commit_submission(&fixture.uow, &submission, 5)
+        .await
+        .expect("commit sanitized room message");
+    assert_eq!(
+        decision.class,
+        crate::ingress::IngressDecisionClass::Accepted
+    );
+    let report = execute_effects(
+        &fixture.uow,
+        &fixture.db,
+        &decision,
+        &ImmediateSink,
+        &deps,
+        std::time::Duration::from_secs(5),
+    )
+    .await;
+    assert!(report.receipt_failures.is_empty());
+    let room_id = decision
+        .archive_ids
+        .iter()
+        .find(|(archive, _)| archive == &room)
+        .expect("room authoritative identity");
+    assert_ne!(room_id.1, forged);
+    assert_room_inbox_rows(&fixture, &room, &room_id.1).await;
+    assert_eq!(
+        take_room_frames(&mut rx, &room, &room_id.1, 0),
+        1,
+        "first sender reflection"
+    );
+    assert_eq!(
+        take_room_frames(&mut peer_rx, &room, &room_id.1, 1),
+        1,
+        "first peer fanout"
+    );
+    assert_eq!(fixture.count("ingress_messages").await, 1);
+    assert_eq!(fixture.count("ingress_origin_aliases").await, 1);
+    assert_eq!(
+        fixture
+            .count("mam_messages WHERE id = 'client-forged'")
+            .await,
+        0
+    );
+
+    let duplicate = commit_submission(&fixture.uow, &submission, 5)
+        .await
+        .expect("real room alias retry");
+    assert_eq!(duplicate.message_key, decision.message_key);
+    assert_eq!(duplicate.archive_ids, decision.archive_ids);
+    let retry_report = execute_effects(
+        &fixture.uow,
+        &fixture.db,
+        &duplicate,
+        &ImmediateSink,
+        &deps,
+        std::time::Duration::from_secs(5),
+    )
+    .await;
+    assert!(retry_report.receipt_failures.is_empty());
+    assert_room_inbox_rows(&fixture, &room, &room_id.1).await;
+    assert_eq!(
+        take_room_frames(&mut rx, &room, &room_id.1, 0),
+        1,
+        "duplicate sender reflection"
+    );
+    assert_eq!(
+        take_room_frames(&mut peer_rx, &room, &room_id.1, 1),
+        0,
+        "duplicate must not fan out groupchat to non-sender"
+    );
+    assert_eq!(fixture.count("ingress_messages").await, 1);
+    assert_eq!(fixture.count("ingress_origin_aliases").await, 1);
+    let mut tx = fixture.uow.begin().await.expect("read canonical envelope");
+    assert_eq!(
+        crate::ingress_uow::CanonicalMessageRepository::load_envelope(
+            &mut tx,
+            decision.message_key.expect("key")
+        )
+        .await
+        .expect("envelope"),
+        Some(
+            crate::ingress_substrate::MessageEnvelope::new(submission.plan.sanitized_message)
+                .expect("typed envelope")
+        )
+    );
+    tx.commit().await.expect("read complete");
+    fixture.close().await;
+}
+
+/// XEP-0359 §3: strip a room-authority stamp before local room acceptance.
+#[tokio::test]
+async fn ingress_forged_room_stamp_sqlite() {
+    forged_room_stamp(IngressFixture::sqlite().await).await;
+}
+/// XEP-0359 §3: PostgreSQL preserves the same trusted room stamp on wire and rows.
+#[tokio::test]
+async fn ingress_forged_room_stamp_postgres() {
+    if let Some(fixture) = IngressFixture::postgres("forged_room_stamp").await {
+        forged_room_stamp(fixture).await;
+    }
+}
+
+/// Consume one completed execution's output without assuming inbox and groupchat
+/// ordering. Replayed inbox projections are idempotent; groupchat fanout is not.
+fn take_room_frames(
+    receiver: &mut tokio::sync::mpsc::Receiver<waddle_xmpp::registry::OutboundStanza>,
+    room: &jid::BareJid,
+    stanza_id: &waddle_xmpp_core::xep0359::StanzaId,
+    unread: u32,
+) -> usize {
+    use waddle_xmpp::xep::xep0430::{parse_inbox_entry_with_metadata, NS_INBOX, NS_WADDLE_INBOX};
+    let mut groupchats = 0;
+    while let Ok(outbound) = receiver.try_recv() {
+        let waddle_xmpp::Stanza::Message(message) = outbound.stanza else {
+            panic!("expected message")
+        };
+        let mut bytes = Vec::new();
+        minidom::Element::from(message)
+            .write_to(&mut bytes)
+            .expect("wire serialization");
+        let wire = xmpp_parsers::message::Message::try_from(
+            minidom::Element::from_reader(bytes.as_slice()).expect("wire XML"),
+        )
+        .expect("wire message");
+        if wire.type_ == xmpp_parsers::message::MessageType::Groupchat {
+            assert_eq!(
+                wire.bodies
+                    .get(&xmpp_parsers::message::Lang::new())
+                    .map(String::as_str),
+                Some("hello")
+            );
+            let ids = waddle_xmpp_core::xep0359::extract_stanza_ids(&wire);
+            assert!(ids.contains(stanza_id));
+            assert!(!ids.iter().any(|id| id.id == "client-forged"));
+            groupchats += 1;
+        } else {
+            assert_eq!(wire.type_, xmpp_parsers::message::MessageType::Headline);
+            let push = wire
+                .payloads
+                .iter()
+                .find(|payload| payload.is("push", NS_WADDLE_INBOX))
+                .expect("only inbox pushes may accompany groupchat");
+            let entry = parse_inbox_entry_with_metadata(
+                push.get_child("entry", NS_INBOX).expect("inbox entry"),
+                push.get_child("metadata", NS_WADDLE_INBOX),
+            )
+            .expect("typed inbox push");
+            assert_eq!(&entry.partner, room);
+            assert_eq!(entry.last_stanza_id, stanza_id.id);
+            assert_eq!(entry.unread, unread);
+        }
+    }
+    groupchats
+}
+
+async fn assert_room_inbox_rows(
+    fixture: &IngressFixture,
+    room: &jid::BareJid,
+    stanza_id: &waddle_xmpp_core::xep0359::StanzaId,
+) {
+    use waddle_xmpp::inbox::storage::InboxStorage;
+    let inbox = crate::inbox::DatabaseInboxStorage::from_database(fixture.db.clone())
+        .await
+        .expect("inbox reader");
+    for (owner, unread) in [
+        (fixture.principal.bare_jid().clone(), 0),
+        ("juliet@example.com".parse().expect("peer"), 1),
+    ] {
+        let entry = inbox
+            .list(&owner)
+            .await
+            .expect("stored inbox")
+            .into_iter()
+            .find(|entry| &entry.partner == room)
+            .expect("room projection");
+        assert_eq!(entry.last_stanza_id, stanza_id.id);
+        assert_eq!(entry.unread, unread);
+        let connection = fixture.db.guard().await.expect("archive reference read");
+        let mut rows = connection
+            .query(
+                "SELECT COUNT(*) FROM mam_messages WHERE room_jid = ? AND id = ?",
+                crate::db_params![room.to_string(), entry.last_stanza_id],
+            )
+            .await
+            .expect("resolve projected archive reference");
+        let count: i64 = rows
+            .next()
+            .await
+            .expect("count row")
+            .expect("count")
+            .get(0)
+            .expect("integer count");
+        assert_eq!(
+            count, 1,
+            "inbox reference resolves under the room assigning authority"
+        );
     }
 }

@@ -854,7 +854,17 @@ pub(super) async fn project_groupchat_inbox(
         notification_recovery,
     } = inputs;
     let mut outcome = GroupchatInboxProjectionOutcome::default();
-    let entry = groupchat_entry(room.clone(), message, dispatch_timestamp);
+    let Some(archive_id) = waddle_xmpp_core::xep0359::extract_stanza_ids(message)
+        .into_iter()
+        .find(|id| id.by == *room)
+    else {
+        warn!(room = %room, "ProjectGroupchatInbox: missing room-assigned stanza-id");
+        return outcome;
+    };
+    let mut entry = groupchat_entry(room.clone(), message, dispatch_timestamp);
+    // The wire message id belongs to the client; inbox references and ingress
+    // archive dependencies belong to the room's XEP-0359 assigning authority.
+    entry.last_stanza_id = archive_id.id.clone();
     let channel_recovery = if thread.is_none() {
         notification_recovery.clone()
     } else {
@@ -910,6 +920,7 @@ pub(super) async fn project_groupchat_inbox(
         thread.title.as_deref(),
         thread.author_nick.as_deref(),
     );
+    thread_entry.last_stanza_id = archive_id.id;
     // Persist the call-thread anchor metadata (Task 2 storage supports
     // it). The MUC call anchor's `kind`/`media` ride along on the
     // thread-root projection; replies carry neither, so a later reply's

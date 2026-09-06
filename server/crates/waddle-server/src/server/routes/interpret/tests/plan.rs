@@ -285,7 +285,10 @@ async fn retraction_plans_tombstone_and_scrub_without_mutating_archive() {
 }
 
 mod invariant;
+mod phase_ab;
 mod poison;
+#[cfg(feature = "clustering")]
+mod poison_muc;
 mod sqlite_writes;
 
 mod errors;

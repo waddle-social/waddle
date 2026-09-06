@@ -275,6 +275,11 @@ impl OrderedRelayDeliveryBridge {
 }
 
 #[cfg(test)]
-mod tests;
+pub(crate) mod tests;
 
 pub(crate) use delivery::RelayFrameCompletion;
+
+#[cfg(test)]
+tokio::task_local! {
+    pub(crate) static TEST_CANCELLED_ENVELOPES: std::cell::RefCell<Vec<RemoteStanzaEnvelope>>;
+}

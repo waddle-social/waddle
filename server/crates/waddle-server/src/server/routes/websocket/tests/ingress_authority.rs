@@ -652,3 +652,13 @@ async fn ingress_local_owner_reply_receipt_waits_for_origin_batch_write_postgres
 async fn ingress_local_owner_reply_transport_loss_preserves_pending_receipts_postgres() {
     postgres_connection_reply_receipt(true, true).await;
 }
+
+#[path = "ingress_authority_recovery.rs"]
+mod recovery;
+
+#[path = "ingress_authority_timeout.rs"]
+mod timeout;
+
+#[cfg(feature = "clustering")]
+#[path = "ingress_authority_relay.rs"]
+mod relay;

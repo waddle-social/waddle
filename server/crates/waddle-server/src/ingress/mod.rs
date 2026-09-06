@@ -1,5 +1,7 @@
 //! Durable ingress authority: immutable planning, atomic commit, bounded execution.
 mod capture;
+#[cfg(test)]
+pub(crate) use capture::TEST_CAPTURE_LIMIT;
 pub use capture::{IngressEffectCapture, IngressEffectCaptureSnapshot};
 pub mod commit;
 mod commit_room;
@@ -487,7 +489,7 @@ fn non_advancing(class: IngressDecisionClass) -> IngressDecision {
 }
 
 #[cfg(test)]
-fn test_lineage_config() -> LineageConfig {
+pub(crate) fn test_lineage_config() -> LineageConfig {
     LineageConfig {
         deployment_uuid: Some(
             "018f47b2-4b2e-7a3a-9a4c-52a5a6a90001"

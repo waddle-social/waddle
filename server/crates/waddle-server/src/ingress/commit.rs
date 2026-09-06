@@ -57,6 +57,8 @@ pub async fn commit_submission(
         Err(failure) => failure.class,
     };
     waddle_xmpp::telemetry::reliability::increment_ingress_decision(class);
+    #[cfg(test)]
+    let _ = forced_failures::OBSERVED_CLASS.try_with(|observed| observed.set(Some(class)));
     if let Ok(decision) = &result {
         use waddle_xmpp::telemetry::attributes::IngressAliasOutcome;
         waddle_xmpp::telemetry::reliability::increment_ingress_alias_outcome(
@@ -460,11 +462,12 @@ fn decision_class(
 }
 
 #[cfg(test)]
-mod forced_failures {
+pub(crate) mod forced_failures {
     use crate::ingress_uow::IngressUowError;
     tokio::task_local! {
         pub static SERIALIZATION_FAILURES: std::cell::Cell<usize>;
         pub static AMBIGUOUS_COMMIT: bool;
+        pub static OBSERVED_CLASS: std::cell::Cell<Option<super::IngressDecisionClass>>;
         pub static FAILURE: std::cell::RefCell<Option<IngressUowError>>;
     }
     pub(super) fn consume_serialization_failure() -> bool {
