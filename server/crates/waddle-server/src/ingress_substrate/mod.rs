@@ -336,8 +336,8 @@ async fn insert_message(
                 message_key.to_storage().to_string(),
                 i32::from(digest_version),
                 digest_bytes.to_vec(),
-                envelope.map(|value| value.version.to_storage()),
-                envelope.map(|value| value.bytes.clone()),
+                envelope.map(|value| value.version().to_storage()),
+                envelope.map(|value| value.storage_bytes().to_vec()),
             ],
         )
         .await

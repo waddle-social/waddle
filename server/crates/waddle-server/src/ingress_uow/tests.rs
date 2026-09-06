@@ -43,7 +43,7 @@ use super::{
     InboxRepository, IngressUowTransaction, MamArchiveRepository, PrincipalAssertion,
     PrincipalRepository,
 };
-use crate::ingress_substrate::{EnvelopeVersion, MessageEnvelope};
+use crate::ingress_substrate::MessageEnvelope;
 use crate::{
     config::LineageConfig,
     db::{lineage, Database, DatabaseConfig, DatabaseDriver, IntoParams, MigrationRunner},
@@ -127,10 +127,16 @@ async fn sqlite_spanning_proof_commits_exact_cross_repository_values() {
     let (_, uow) = sqlite_fixture("sqlite_spanning").await;
     let key = MessageKey::new();
     let stream = SmSessionId::new("sqlite-spanning-stream");
-    let envelope = MessageEnvelope {
-        version: EnvelopeVersion::V1,
-        bytes: vec![1, 2, 3],
-    };
+    let mut message = xmpp_parsers::message::Message::new(Some(
+        "juliet@example.com"
+            .parse::<jid::Jid>()
+            .expect("recipient jid"),
+    ));
+    message.type_ = xmpp_parsers::message::MessageType::Chat;
+    message
+        .bodies
+        .insert(xmpp_parsers::message::Lang::new(), "spanning".to_string());
+    let envelope = MessageEnvelope::new(message).expect("typed envelope");
     let mut transaction = uow.begin().await.expect("begin SQLite spanning UoW");
     let id = SmIngressStreamRepository::mint(&mut transaction, &stream)
         .await
