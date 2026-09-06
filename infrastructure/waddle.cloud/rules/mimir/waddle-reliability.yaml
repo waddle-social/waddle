@@ -171,7 +171,7 @@ groups:
             runbook: https://github.com/waddle-social/waddle/blob/main/server/docs/operations/ingress-authority.md
             summary: "Ingress infrastructure failures are refusing messages without advancing the handled count."
         - alert: IngressFenceDecisions
-          expr: sum(rate(ingress_decisions_total{class=~"principal_missing|claim_fence_missing|frontier_stale"}[10m])) > 0
+          expr: sum(rate(ingress_decisions_total{class=~"principal_missing|claim_fence_missing|room_generation_stale|frontier_stale|sm_ordinal_conflict"}[10m])) > 0
           for: 10m
           labels:
             severity: warning
@@ -179,6 +179,23 @@ groups:
           annotations:
             runbook: https://github.com/waddle-social/waddle/blob/main/server/docs/operations/ingress-authority.md
             summary: "Sustained ingress fence failures are refusing messages without advancing the handled count."
+        - alert: IngressIdentityDecisions
+          expr: sum(increase(ingress_decisions_total{class=~"intent_contradiction|lineage|epoch_unsupported"}[1h])) > 0
+          labels:
+            severity: critical
+            team: waddle
+          annotations:
+            runbook: https://github.com/waddle-social/waddle/blob/main/server/docs/operations/ingress-authority.md
+            summary: "Ingress durable identity diverged or a wrong-lineage/unsupported-epoch binary refused a message."
+        - alert: IngressSeriesMissing
+          expr: absent(ingress_decisions_total) or (group by (instance) (target_info{job="waddle-server"}) unless group by (instance) (ingress_decisions_total))
+          for: 15m
+          labels:
+            severity: warning
+            team: waddle
+          annotations:
+            runbook: https://github.com/waddle-social/waddle/blob/main/server/docs/operations/ingress-authority.md
+            summary: "Zero-registered ingress decision series are absent; check OTLP export before treating silent ingress alerts as healthy."
         - alert: IngressAliasConflicts
           expr: sum(increase(ingress_alias_outcomes_total{outcome="conflict"}[1h])) > 0
           labels:
@@ -267,7 +284,7 @@ groups:
             team: waddle
           annotations:
             runbook: https://github.com/waddle-social/waddle/blob/main/server/docs/operations/ingress-authority.md ; https://github.com/waddle-social/waddle/issues/1695
-            summary: PostgreSQL backend utilization exceeded 80% of max_connections for 10m. Derivation (2026-08-20 preflight) - max_connections=100, 44 in use; the ingress authority adds 4 per pod, a 3-pod surge ≈77 peak, so 80% leaves headroom above the worst rollout case.
+            summary: PostgreSQL backend utilization exceeded 80% of max_connections for 10m. Derivation (2026-08-20 preflight) - max_connections=100, 44 in use; the dedicated ingress authority pool is bounded at 4 connections per pod; including the existing pools on the surge pod, the 3-pod rollout peaks at approximately 77 connections, so 80% leaves headroom above the worst rollout case.
         - alert: PostgresWalVolumeHigh
           expr: max by (instance) (cnpg_collector_pg_wal{value="size"} / on (instance) group_left() cnpg_collector_pg_wal{value="volume_size"}) > 0.7
           for: 10m

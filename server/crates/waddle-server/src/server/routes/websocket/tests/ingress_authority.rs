@@ -78,6 +78,80 @@ async fn committed_message_advances_h_and_records_checkpoint() {
     );
 }
 
+/// XEP-0198 §4: every handled stanza must survive an ACK followed by a crash.
+async fn presence_after_committed_message_flushes_checkpoint_case(state: Arc<WebSocketState>) {
+    let mut conn = connection(&state, true).await;
+    handle_xmpp_frame(&offered_message(), "example.com", &state, &mut conn).await;
+    let stream = SmSessionId::new("authority-connection");
+    let presence = super::super::transport_xml::stanza_to_xml(&Stanza::Presence(
+        xmpp_parsers::presence::Presence::new(xmpp_parsers::presence::Type::Unavailable),
+    ));
+    handle_xmpp_frame(&presence, "example.com", &state, &mut conn).await;
+    assert_eq!(conn.sm_state.get_inbound_count(), 2);
+    assert!(conn.sm_inbound_completion.checkpoint_dirty());
+    assert_eq!(
+        state
+            .deps
+            .protocol
+            .ingress
+            .load_resume_checkpoint(&stream)
+            .await
+            .expect("checkpoint")
+            .expect("stream")
+            .to_storage(),
+        1
+    );
+    let frames = handle_xmpp_frame(
+        &waddle_xmpp::stream_management::SmRequest::to_xml(),
+        "example.com",
+        &state,
+        &mut conn,
+    )
+    .await;
+    // The ACK is not handed to the transport until the durable count is 2.
+    assert_eq!(
+        state
+            .deps
+            .protocol
+            .ingress
+            .load_resume_checkpoint(&stream)
+            .await
+            .expect("checkpoint")
+            .expect("stream")
+            .to_storage(),
+        2
+    );
+    let ack: minidom::Element = frames.first().expect("ACK").parse().expect("ACK XML");
+    assert!(ack.is("a", waddle_xmpp::stream_management::SM_NS));
+    assert_eq!(ack.attr("h"), Some("2"));
+    assert!(!conn.sm_inbound_completion.checkpoint_dirty());
+    // No detach write is needed to retain the count exposed to the client.
+    drop(conn);
+    assert_eq!(
+        state
+            .deps
+            .protocol
+            .ingress
+            .load_resume_checkpoint(&stream)
+            .await
+            .expect("checkpoint")
+            .expect("stream")
+            .to_storage(),
+        2
+    );
+}
+
+#[tokio::test]
+async fn presence_after_committed_message_flushes_checkpoint_before_ack() {
+    presence_after_committed_message_flushes_checkpoint_case(create_test_websocket_state().await)
+        .await;
+}
+
+#[tokio::test]
+async fn presence_after_committed_message_flushes_checkpoint_before_ack_postgres() {
+    recovery::postgres_case(presence_after_committed_message_flushes_checkpoint_case).await;
+}
+
 #[tokio::test]
 async fn non_advancing_resumable_message_leaves_an_ordinary_hole() {
     let state = create_test_websocket_state().await;

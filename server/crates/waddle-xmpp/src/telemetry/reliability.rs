@@ -602,6 +602,30 @@ mod tests {
         }
     }
 
+    #[test]
+    fn ingress_rules_cover_every_non_advancing_decision() {
+        let rules_path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../../infrastructure/waddle.cloud/rules/mimir/waddle-reliability.yaml");
+        let rules = std::fs::read_to_string(&rules_path)
+            .unwrap_or_else(|error| panic!("read {}: {error}", rules_path.display()));
+        let alerted_classes: Vec<_> = rules
+            .lines()
+            .filter(|line| line.trim_start().starts_with("expr:"))
+            .filter_map(|line| line.split_once("ingress_decisions_total{class=~\""))
+            .filter_map(|(_, selector)| selector.split_once('"'))
+            .flat_map(|(classes, _)| classes.split('|'))
+            .collect();
+        for class in IngressDecisionClass::ALL {
+            if !class.advances() {
+                assert!(
+                    alerted_classes.contains(&class.value()),
+                    "non-advancing ingress decision {} has no alert",
+                    class.value()
+                );
+            }
+        }
+    }
+
     #[tokio::test]
     async fn pending_delivery_helper_emits() {
         let guard = setup().await;
@@ -751,6 +775,14 @@ mod tests {
                 Some(0),
                 "ingress decision class {} not registered",
                 class.value()
+            );
+        }
+        for kind in IngressUnresolvedEffectKind::ALL {
+            assert_eq!(
+                guard.counter_sum("ingress.effects.unresolved", &[("kind", kind.value())]),
+                Some(0),
+                "ingress unresolved effect kind {} not registered",
+                kind.value()
             );
         }
         for outcome in IngressAliasOutcome::ALL {

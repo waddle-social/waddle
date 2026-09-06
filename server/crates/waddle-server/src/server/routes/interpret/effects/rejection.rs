@@ -20,6 +20,7 @@ pub enum PolicyDeniedReason {
 }
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum PlanRejection {
+    MissingRoomStanzaId,
     AuthorizationDenied(AuthorizationDeniedReason),
     SemanticMalformed(SemanticMalformedReason),
     PolicyDenied(PolicyDeniedReason),

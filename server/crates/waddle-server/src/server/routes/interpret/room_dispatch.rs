@@ -643,6 +643,14 @@ pub(super) async fn dispatch_to_room(
                 .and_then(|fence| u64::try_from(fence.epoch.0).ok())
                 .map(EntityGeneration::from_storage)
                 .unwrap_or(EntityGeneration::INITIAL);
+            let Some(stanza_id) = waddle_xmpp_core::xep0359::extract_stanza_ids(&working)
+                .into_iter()
+                .find(|id| id.by == room_jid)
+            else {
+                deps.effects
+                    .set_rejection(super::effects::PlanRejection::MissingRoomStanzaId);
+                return outcome;
+            };
             capture.record_intent(IngressEffectIntent::RouteMucGroupchat {
                 room: room_jid.clone(),
                 occupants: occupants
@@ -653,12 +661,7 @@ pub(super) async fn dispatch_to_room(
                 room_generation,
                 // The room canonicalizer stamped this identity before creating
                 // occupant deliveries; receipts correlate those exact copies.
-                route_identity: waddle_xmpp::ingress::EffectMessageIdentity::stanza(
-                    waddle_xmpp_core::xep0359::extract_stanza_ids(&working)
-                        .into_iter()
-                        .find(|id| id.by == room_jid)
-                        .expect("canonicalized room delivery has a room stanza-id"),
-                ),
+                route_identity: waddle_xmpp::ingress::EffectMessageIdentity::stanza(stanza_id),
             });
         }
     }

@@ -91,7 +91,7 @@ async fn demotion_before_message_dispatch_keeps_resumable_fence_postgres() {
 
 #[cfg(feature = "clustering")]
 async fn demotion_case(base: Arc<WebSocketState>) {
-    use crate::ingress::commit::forced_failures;
+    use crate::ingress::commit::commit_hooks;
     use waddle_xmpp::ownership::{ClaimStore, SharedNodeIdentity};
     let mut conn = enabled_connection(&base).await;
     create_test_session(&base, "bob").await;
@@ -146,13 +146,13 @@ async fn demotion_case(base: Arc<WebSocketState>) {
         .current_sm_claim_fence(stream.as_str())
         .is_none());
     assert_eq!(conn.sm_ingress_fence.as_ref(), Some(&fence));
-    forced_failures::OBSERVED_CLASS
+    commit_hooks::OBSERVED_CLASS
         .scope(std::cell::Cell::new(None), async {
             let frames =
                 handle_xmpp_frame(&ordinary_message(), "example.com", &state, &mut conn).await;
             assert!(frames.is_empty());
             assert_eq!(
-                forced_failures::OBSERVED_CLASS.with(std::cell::Cell::get),
+                commit_hooks::OBSERVED_CLASS.with(std::cell::Cell::get),
                 Some(crate::ingress::IngressDecisionClass::ClaimFenceMissing)
             );
         })

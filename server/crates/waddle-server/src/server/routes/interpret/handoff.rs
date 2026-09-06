@@ -1,4 +1,4 @@
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::BTreeSet;
 #[cfg(feature = "clustering")]
 use std::sync::{
     atomic::{AtomicBool, Ordering},
@@ -63,7 +63,7 @@ pub struct SmInboundCompletionTracker {
     contiguous: u32,
     pending: BTreeSet<u32>,
     completed: BTreeSet<u32>,
-    committed: BTreeMap<u32, u32>,
+    last_flushed: Option<u32>,
     checkpoint_dirty: bool,
     first_unhandled: Option<u32>,
 }
@@ -72,6 +72,7 @@ impl SmInboundCompletionTracker {
     pub fn reserve(&mut self, sm_state: &StreamManagementState) -> OrderedRelayInboundSequence {
         let current = sm_state.get_inbound_count();
         self.contiguous = current;
+        self.last_flushed.get_or_insert(current);
         let next = self
             .next_reserved
             .filter(|next| *next != current)
@@ -97,7 +98,10 @@ impl SmInboundCompletionTracker {
 
     pub fn mark_committed(&mut self, sequence: OrderedRelayInboundSequence, checkpoint_h: u32) {
         if self.pending.contains(&sequence.0) {
-            self.committed.insert(sequence.0, checkpoint_h);
+            // Phase B already persisted this checkpoint. Equality, rather than
+            // numeric ordering, preserves the XEP-0198 wrapping counter.
+            self.last_flushed = Some(checkpoint_h);
+            self.checkpoint_dirty = self.contiguous != checkpoint_h;
         }
     }
 
@@ -117,21 +121,16 @@ impl SmInboundCompletionTracker {
             }
             sm_state.increment_inbound();
             self.contiguous = next;
-            if self
-                .committed
-                .remove(&next)
-                .is_some_and(|checkpoint| checkpoint != next)
-            {
-                self.checkpoint_dirty = true;
-            }
         }
+        self.checkpoint_dirty = self.last_flushed != Some(sm_state.get_inbound_count());
     }
 
     pub fn checkpoint_dirty(&self) -> bool {
         self.checkpoint_dirty
     }
-    pub fn checkpoint_flushed(&mut self) {
-        self.checkpoint_dirty = false;
+    pub fn checkpoint_flushed(&mut self, checkpoint_h: u32) {
+        self.last_flushed = Some(checkpoint_h);
+        self.checkpoint_dirty = self.contiguous != checkpoint_h;
     }
 
     pub fn abandon(&mut self, sequence: OrderedRelayInboundSequence) {
@@ -139,7 +138,6 @@ impl SmInboundCompletionTracker {
             return;
         }
         self.completed.remove(&sequence.0);
-        self.committed.remove(&sequence.0);
         if self.first_unhandled.is_none() {
             self.first_unhandled = Some(sequence.0);
         }
@@ -183,7 +181,7 @@ mod tests {
         tracker.complete(iq, &mut sm);
         assert_eq!(sm.get_inbound_count(), 3);
         assert!(tracker.checkpoint_dirty());
-        tracker.checkpoint_flushed();
+        tracker.checkpoint_flushed(sm.get_inbound_count());
         assert!(!tracker.checkpoint_dirty());
     }
     #[test]
@@ -195,6 +193,22 @@ mod tests {
         tracker.mark_committed(seq, 1);
         tracker.complete(seq, &mut sm);
         assert_eq!(sm.get_inbound_count(), 1);
+        assert!(!tracker.checkpoint_dirty());
+    }
+    #[test]
+    fn non_message_completion_dirties_checkpoint_across_wrap() {
+        let mut sm = state();
+        sm.inbound_count = u32::MAX - 1;
+        let mut tracker = SmInboundCompletionTracker::default();
+        let message = tracker.reserve(&sm);
+        tracker.mark_committed(message, u32::MAX);
+        tracker.complete(message, &mut sm);
+        assert!(!tracker.checkpoint_dirty());
+        let presence = tracker.reserve(&sm);
+        tracker.complete(presence, &mut sm);
+        assert_eq!(sm.get_inbound_count(), 0);
+        assert!(tracker.checkpoint_dirty());
+        tracker.checkpoint_flushed(sm.get_inbound_count());
         assert!(!tracker.checkpoint_dirty());
     }
     #[test]

@@ -69,7 +69,7 @@ async fn non_advancing_matrix_case(state: Arc<WebSocketState>) {
     for (failure, expected) in failures {
         let mut conn = connection(&state, true).await;
         assert_ack(&state, &mut conn, 0).await;
-        let observed = forced_failures::FAILURE
+        let observed = commit_hooks::FAILURE
             .scope(
                 std::cell::RefCell::new(Some(failure)),
                 observed_dispatch(&state, &mut conn, &offered_message()),
@@ -119,11 +119,11 @@ async fn malformed_reply_case(state: Arc<WebSocketState>) {
         let wire = crate::server::routes::websocket::transport_xml::stanza_to_xml(
             &Stanza::Message(message.clone()),
         );
-        forced_failures::OBSERVED_CLASS
+        commit_hooks::OBSERVED_CLASS
             .scope(std::cell::Cell::new(None), async {
                 let frames = handle_xmpp_frame(&wire, "example.com", &state, &mut conn).await;
                 assert_eq!(
-                    forced_failures::OBSERVED_CLASS.with(std::cell::Cell::get),
+                    commit_hooks::OBSERVED_CLASS.with(std::cell::Cell::get),
                     Some(IngressDecisionClass::SemanticMalformed)
                 );
                 assert_eq!(frames.len(), 1);

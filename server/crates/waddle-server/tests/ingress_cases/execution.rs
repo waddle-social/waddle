@@ -5,6 +5,10 @@ async fn receipts_terminalization(fixture: IngressFixture) {
     use waddle_server::ingress_uow::EffectReceiptRepository;
     use waddle_xmpp::{ingress::FrozenStanzaError, Stanza};
     use xmpp_parsers::stanza_error::{DefinedCondition, ErrorType, StanzaError};
+    let metrics = waddle_xmpp::telemetry::test_support::acquire().await;
+    let unresolved_before = metrics
+        .counter_sum("ingress.effects.unresolved", &[("kind", "terminalization")])
+        .unwrap_or(0);
     let mut submission = archive_plan(
         &fixture,
         Some("receipt-origin"),
@@ -43,6 +47,10 @@ async fn receipts_terminalization(fixture: IngressFixture) {
     assert!(!terminalize_if_complete(&fixture.uow, key)
         .await
         .expect("partial receipts"));
+    let unresolved_after = metrics
+        .counter_sum("ingress.effects.unresolved", &[("kind", "terminalization")])
+        .expect("missing receipts export an unresolved terminalization sample");
+    assert_eq!(unresolved_after, unresolved_before + 1);
     assert_eq!(
         fixture
             .count("ingress_messages WHERE terminal_at IS NOT NULL")
@@ -63,6 +71,11 @@ async fn receipts_terminalization(fixture: IngressFixture) {
     assert!(terminalize_if_complete(&fixture.uow, key)
         .await
         .expect("complete receipts"));
+    assert_eq!(
+        metrics.counter_sum("ingress.effects.unresolved", &[("kind", "terminalization")]),
+        Some(unresolved_after),
+        "successful terminalization adds no unresolved sample"
+    );
     assert_eq!(fixture.count("ingress_effect_receipts").await, 2);
     assert_eq!(
         fixture

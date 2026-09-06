@@ -151,8 +151,20 @@ async fn tombstoned_retry_does_not_recreate_inbox(fixture: IngressFixture) {
     assert_eq!(fixture.count("inbox_entries").await, 0);
     assert_eq!(fixture.count("ingress_deliveries").await, 0);
     assert_eq!(fixture.count("ingress_effect_intents").await, 2);
-    assert_eq!(fixture.count("ingress_effect_receipts").await, 1);
-    assert_eq!(decision.receipts_pending.len(), 1);
+    assert_eq!(fixture.count("ingress_effect_receipts").await, 2);
+    assert!(decision.receipts_pending.is_empty());
+    assert!(waddle_server::ingress::execute::terminalize_if_complete(
+        &fixture.uow,
+        decision.message_key.expect("canonical row"),
+    )
+    .await
+    .expect("suppressed projection discharges its intent"));
+    assert_eq!(
+        fixture
+            .count("ingress_messages WHERE terminal_at IS NOT NULL")
+            .await,
+        1
+    );
     assert_eq!(
         fixture
             .optional_text("SELECT body FROM mam_messages WHERE id = 'tombstoned-inbox-id'")

@@ -1,4 +1,4 @@
-//! Bounded retention collection shared by ingress authority and the shadow observer.
+//! Bounded retention collection for terminal ingress authority records.
 
 use std::{future::Future, pin::Pin, sync::Arc, time::Duration};
 

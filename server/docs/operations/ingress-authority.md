@@ -37,7 +37,7 @@ latency is a seconds histogram; confirm `le`-labelled buckets are present.
 
 | Instrument | Prometheus family | Alert(s) |
 | --- | --- | --- |
-| `ingress.decisions{class}` | `ingress_decisions_total` | `IngressInfraDecisions`, `IngressFenceDecisions`, `IngressRetryExhausted` |
+| `ingress.decisions{class}` | `ingress_decisions_total` | `IngressInfraDecisions`, `IngressFenceDecisions`, `IngressIdentityDecisions`, `IngressRetryExhausted`, `IngressSeriesMissing` |
 | `ingress.alias.outcomes{outcome}` | `ingress_alias_outcomes_total` | `IngressAliasConflicts` |
 | `ingress.tx.retries` | `ingress_tx_retries_total` | Retry pressure context |
 | `ingress.gc.runs{outcome}` | `ingress_gc_runs_total` | `IngressGcFailing` |
@@ -47,14 +47,29 @@ latency is a seconds histogram; confirm `le`-labelled buckets are present.
 
 `IngressInfraDecisions` is critical: a positive rate of storage, serialization
 exhaustion, timeout or ambiguous-commit decisions for 10m means messages are
-being refused. Fence refusals sustained for 10m, alias conflicts, exhausted
+being refused. `IngressIdentityDecisions` pages on any `intent_contradiction`,
+`lineage` or `epoch_unsupported` occurrence in the last hour; check durable
+identity consistency and the deployed binary/ledger lineage.
+`IngressFenceDecisions` covers `principal_missing`, `claim_fence_missing`,
+`room_generation_stale`, `frontier_stale` and `sm_ordinal_conflict`.
+Fence refusals sustained for 10m, alias conflicts, exhausted
 retries and failed/timed-out GC runs are warnings. `IngressTxSlow` warns on
 p99 above 2s. The CNPG-query-based `IngressGcBacklog` warns when eligible rows
 persist for 6h; `IngressGcAge` warns above 9 days.
+`IngressSeriesMissing` warns when all decision series disappear, or a live
+`waddle-server` instance has none, for 15m. These counters are zero-registered
+at startup, so absence indicates missing telemetry even on idle pods.
 `IngressCnpgQueriesMissing` warns if either eligibility or age series is
 absent for 15m, so missing custom queries cannot masquerade as healthy GC.
 `IngressUnresolvedEffectsGrowing` warns on a positive counter increase over
 1h, grouped by kind: this is observed unresolved work, not a current queue gauge.
+
+The dedicated ingress authority pool defaults to 4 connections per pod;
+`WADDLE_INGRESS_DB_POOL_SIZE` overrides it. Transactions and retries are
+bounded (the soak measured 23 ms p99 transaction time). The connection
+budget is approximately 77 at a 3-pod rollout peak against 100 PostgreSQL
+connections, below the 80% alert threshold; re-derive it before raising
+the pool override.
 
 ## Retention and unresolved effects
 

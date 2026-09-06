@@ -1140,7 +1140,7 @@ pub enum IngressConfigError {
 impl Default for IngressConfig {
     fn default() -> Self {
         Self {
-            pool_size: 8,
+            pool_size: 4,
             retry_attempts: 5,
         }
     }
@@ -2961,7 +2961,7 @@ mod ingress_authority_config_tests {
         assert_eq!(
             IngressConfig::from_vars(std::iter::empty::<(&str, &str)>()).expect("defaults"),
             IngressConfig {
-                pool_size: 8,
+                pool_size: 4,
                 retry_attempts: 5
             }
         );

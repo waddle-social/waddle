@@ -489,7 +489,7 @@ impl MetricAttribute for PushRetryReason {
     }
 }
 
-/// `class` — the closed ingress decision vocabulary, including retained shadow outcomes.
+/// `class` — the closed ingress authority decision vocabulary.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum IngressDecisionClass {
     Accepted,
@@ -516,12 +516,9 @@ pub enum IngressDecisionClass {
     AmbiguousCommit,
     Lineage,
     EpochUnsupported,
-    ExistingSameDigest,
-    IntentDivergence,
-    RemoteRouteAmbiguous,
 }
 impl IngressDecisionClass {
-    pub const ALL: [Self; 27] = [
+    pub const ALL: [Self; 24] = [
         Self::Accepted,
         Self::ExistingCommitted,
         Self::ExistingConsistent,
@@ -546,9 +543,6 @@ impl IngressDecisionClass {
         Self::AmbiguousCommit,
         Self::Lineage,
         Self::EpochUnsupported,
-        Self::ExistingSameDigest,
-        Self::IntentDivergence,
-        Self::RemoteRouteAmbiguous,
     ];
     /// Only committed Phase-B decisions authorize the handled count to advance.
     pub const fn advances(&self) -> bool {
@@ -600,9 +594,6 @@ impl MetricAttribute for IngressDecisionClass {
             Self::AmbiguousCommit => "ambiguous_commit",
             Self::Lineage => "lineage",
             Self::EpochUnsupported => "epoch_unsupported",
-            Self::ExistingSameDigest => "existing_same_digest",
-            Self::IntentDivergence => "intent_divergence",
-            Self::RemoteRouteAmbiguous => "remote_route_ambiguous",
         }
     }
 }
@@ -614,9 +605,16 @@ pub enum IngressUnresolvedEffectKind {
     Direct,
     Room,
     Delivery,
+    Terminalization,
 }
 impl IngressUnresolvedEffectKind {
-    pub const ALL: [Self; 4] = [Self::Frame, Self::Direct, Self::Room, Self::Delivery];
+    pub const ALL: [Self; 5] = [
+        Self::Frame,
+        Self::Direct,
+        Self::Room,
+        Self::Delivery,
+        Self::Terminalization,
+    ];
 }
 impl sealed::Sealed for IngressUnresolvedEffectKind {}
 impl MetricAttribute for IngressUnresolvedEffectKind {
@@ -629,11 +627,12 @@ impl MetricAttribute for IngressUnresolvedEffectKind {
             Self::Direct => "direct",
             Self::Room => "room",
             Self::Delivery => "delivery",
+            Self::Terminalization => "terminalization",
         }
     }
 }
 
-/// `outcome` — the closed alias-resolution result set for shadow ingress.
+/// `outcome` — the closed alias-resolution result set for ingress authority.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum IngressAliasOutcome {
     NoOrigin,

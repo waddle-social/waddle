@@ -608,6 +608,9 @@ pub async fn terminalize_if_complete(
         return Ok(false);
     }
     if !EffectReceiptRepository::receipts_complete(&mut transaction, message_key).await? {
+        waddle_xmpp::telemetry::reliability::increment_ingress_effect_unresolved(
+            waddle_xmpp::telemetry::attributes::IngressUnresolvedEffectKind::Terminalization,
+        );
         return Ok(false);
     }
     let outcome =

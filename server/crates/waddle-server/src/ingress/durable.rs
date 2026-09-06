@@ -62,6 +62,9 @@ pub(super) async fn apply_durable(
                 | DurableEffect::Room(DurableRoomEffect::ArchiveGroupchat { .. })
         );
         if !archive_effect && super::suppression::tombstone_swallowed(planned, &applied.archives) {
+            // Retraction deliberately discharges this obligation without applying
+            // it. Receipt it too, including intents introduced by a duplicate replan.
+            completed.push(effect);
             continue;
         }
         match effect {

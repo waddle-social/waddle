@@ -57,8 +57,7 @@ pub async fn commit_submission(
         Err(failure) => failure.class,
     };
     waddle_xmpp::telemetry::reliability::increment_ingress_decision(class);
-    #[cfg(test)]
-    let _ = forced_failures::OBSERVED_CLASS.try_with(|observed| observed.set(Some(class)));
+    commit_hooks::observe_class(class);
     if let Ok(decision) = &result {
         use waddle_xmpp::telemetry::attributes::IngressAliasOutcome;
         waddle_xmpp::telemetry::reliability::increment_ingress_alias_outcome(
@@ -126,8 +125,7 @@ async fn commit_attempt(
             return Err(IngressUowError::PrincipalAssertionFailed);
         }
     }
-    #[cfg(test)]
-    if let Some(error) = forced_failures::take_failure() {
+    if let Some(error) = commit_hooks::take_failure() {
         return Err(error);
     }
     // A relayed retry must prove the room claim before touching canonical identity.
@@ -137,7 +135,7 @@ async fn commit_attempt(
     let stream = super::commit_stream::lock_stream(&mut tx, &submission.identity).await?;
     let digest = waddle_xmpp::ingress::digest::v1::digest(&submission.digest_input);
     let envelope = MessageEnvelope::new(submission.plan.sanitized_message.clone())?;
-    let mut rejection = super::rejection::planned_rejection(&submission.plan);
+    let mut rejection = super::rejection::planned_rejection(&submission.plan)?;
     let (key, alias) = if let Some((key, _)) = stream.as_ref().and_then(|stream| stream.bound) {
         (key, AliasOutcomeClass::Existing)
     } else if rejection.is_some() {
@@ -182,8 +180,7 @@ async fn commit_attempt(
     {
         CanonicalMessageRepository::record_message(&mut tx, key, &digest, None).await?;
     }
-    #[cfg(test)]
-    if forced_failures::consume_serialization_failure() {
+    if commit_hooks::consume_serialization_failure() {
         return Err(IngressUowError::Database {
             retry_class: DbRetryClass::SerializationFailure,
         });
@@ -371,8 +368,7 @@ pub(crate) async fn commit_transaction(
     tx: IngressUowTransaction<'_>,
 ) -> Result<(), IngressUowError> {
     let result = tx.commit().await;
-    #[cfg(test)]
-    if result.is_ok() && forced_failures::ambiguous_commit() {
+    if result.is_ok() && commit_hooks::ambiguous_commit() {
         return Err(IngressUowError::AmbiguousCommit);
     }
     result.map_err(|error| {
@@ -461,34 +457,7 @@ fn decision_class(
     }
 }
 
-#[cfg(test)]
-pub(crate) mod forced_failures {
-    use crate::ingress_uow::IngressUowError;
-    tokio::task_local! {
-        pub static SERIALIZATION_FAILURES: std::cell::Cell<usize>;
-        pub static AMBIGUOUS_COMMIT: bool;
-        pub static OBSERVED_CLASS: std::cell::Cell<Option<super::IngressDecisionClass>>;
-        pub static FAILURE: std::cell::RefCell<Option<IngressUowError>>;
-    }
-    pub(super) fn consume_serialization_failure() -> bool {
-        SERIALIZATION_FAILURES
-            .try_with(|remaining| {
-                let count = remaining.get();
-                remaining.set(count.saturating_sub(1));
-                count > 0
-            })
-            .unwrap_or(false)
-    }
-    pub(super) fn take_failure() -> Option<IngressUowError> {
-        FAILURE
-            .try_with(|failure| failure.borrow_mut().take())
-            .ok()
-            .flatten()
-    }
-    pub(super) fn ambiguous_commit() -> bool {
-        AMBIGUOUS_COMMIT.try_with(|value| *value).unwrap_or(false)
-    }
-}
+pub(crate) mod commit_hooks;
 #[cfg(test)]
 #[path = "commit_tests.rs"]
 mod tests;

@@ -11,15 +11,25 @@ use waddle_xmpp::{
     Stanza, StanzaErrorCondition,
 };
 
-pub(super) fn planned_rejection(plan: &IngressPlan) -> Option<IngressDecisionClass> {
-    plan.rejection.as_ref().map(|rejection| match rejection {
-        PlanRejection::AuthorizationDenied(_) => IngressDecisionClass::AuthorizationDenied,
-        PlanRejection::SemanticMalformed(_) => IngressDecisionClass::SemanticMalformed,
-        PlanRejection::PolicyDenied(PolicyDeniedReason::CaptureOverflow) => {
-            IngressDecisionClass::CaptureOverflow
-        }
-        PlanRejection::PolicyDenied(_) => IngressDecisionClass::PolicyDenied,
-    })
+pub(super) fn planned_rejection(
+    plan: &IngressPlan,
+) -> Result<Option<IngressDecisionClass>, IngressUowError> {
+    plan.rejection
+        .as_ref()
+        .map(|rejection| {
+            Ok(match rejection {
+                PlanRejection::MissingRoomStanzaId => {
+                    return Err(IngressUowError::MissingRoomStanzaId)
+                }
+                PlanRejection::AuthorizationDenied(_) => IngressDecisionClass::AuthorizationDenied,
+                PlanRejection::SemanticMalformed(_) => IngressDecisionClass::SemanticMalformed,
+                PlanRejection::PolicyDenied(PolicyDeniedReason::CaptureOverflow) => {
+                    IngressDecisionClass::CaptureOverflow
+                }
+                PlanRejection::PolicyDenied(_) => IngressDecisionClass::PolicyDenied,
+            })
+        })
+        .transpose()
 }
 pub(super) fn rejection_plan(
     plan: &IngressPlan,
@@ -121,7 +131,7 @@ mod tests {
             ),
         }];
         let plan = recorded_rejection_plan(&envelope, &intents).expect("recorded plan");
-        assert_eq!(planned_rejection(&plan), None);
+        assert!(matches!(planned_rejection(&plan), Ok(None)));
     }
 
     #[test]

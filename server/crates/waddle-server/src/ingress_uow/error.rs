@@ -9,6 +9,8 @@ use waddle_xmpp::ingress::EffectIntentCodecError;
 /// Fail-closed errors from the ingress unit of work.
 #[derive(Debug, Error)]
 pub enum IngressUowError {
+    #[error("planned room delivery is missing its authoritative stanza-id")]
+    MissingRoomStanzaId,
     #[error("ingress transaction timed out before commit")]
     Timeout,
     #[error("ingress authority has stopped")]

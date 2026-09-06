@@ -1,5 +1,5 @@
 use super::*;
-use crate::ingress::commit::forced_failures;
+use crate::ingress::commit::commit_hooks;
 use crate::ingress_uow::IngressUowError;
 use waddle_xmpp::stream_management::{DetachedSession, DetachedSessionSnapshot};
 
@@ -127,7 +127,7 @@ async fn serialization_exhaustion_is_a_resumable_wire_hole() {
 async fn serialization_exhaustion_is_a_resumable_wire_hole_case(state: Arc<WebSocketState>) {
     let mut conn = connection(&state, true).await;
     assert_ack(&state, &mut conn, 0).await;
-    let observed = forced_failures::SERIALIZATION_FAILURES
+    let observed = commit_hooks::SERIALIZATION_FAILURES
         .scope(
             std::cell::Cell::new(100),
             observed_dispatch(&state, &mut conn, &offered_message()),
@@ -163,11 +163,9 @@ async fn recovery_after_ambiguity(state: Arc<WebSocketState>, landed: bool) {
     let wire = offered_message();
     let dispatch = handle_xmpp_frame(&wire, "example.com", &state, &mut conn);
     let frames = if landed {
-        forced_failures::AMBIGUOUS_COMMIT
-            .scope(true, dispatch)
-            .await
+        commit_hooks::AMBIGUOUS_COMMIT.scope(true, dispatch).await
     } else {
-        forced_failures::FAILURE
+        commit_hooks::FAILURE
             .scope(
                 std::cell::RefCell::new(Some(IngressUowError::AmbiguousCommit)),
                 dispatch,
@@ -299,7 +297,7 @@ async fn ephemeral_principal_loss_is_not_authorized_and_writes_no_rows_case(
     state: Arc<WebSocketState>,
 ) {
     let mut conn = connection(&state, false).await;
-    let frames = forced_failures::FAILURE
+    let frames = commit_hooks::FAILURE
         .scope(
             std::cell::RefCell::new(Some(IngressUowError::PrincipalAssertionFailed)),
             handle_xmpp_frame(&offered_message(), "example.com", &state, &mut conn),
@@ -319,10 +317,10 @@ async fn observed_dispatch(
     conn: &mut WsConnState,
     wire: &str,
 ) -> crate::ingress::IngressDecisionClass {
-    forced_failures::OBSERVED_CLASS
+    commit_hooks::OBSERVED_CLASS
         .scope(std::cell::Cell::new(None), async {
             handle_xmpp_frame(wire, "example.com", state, conn).await;
-            forced_failures::OBSERVED_CLASS
+            commit_hooks::OBSERVED_CLASS
                 .with(std::cell::Cell::get)
                 .expect("actual transaction decision")
         })
@@ -436,11 +434,11 @@ async fn accepted_consistent_repaired_and_divergent_aliases_advance_the_wire_che
         .bodies
         .insert(Default::default(), "conflicting content".into());
     let changed_wire = super::super::super::transport_xml::stanza_to_xml(&Stanza::Message(message));
-    forced_failures::OBSERVED_CLASS
+    commit_hooks::OBSERVED_CLASS
         .scope(std::cell::Cell::new(None), async {
             let frames = handle_xmpp_frame(&changed_wire, "example.com", &state, &mut conn).await;
             assert_eq!(
-                forced_failures::OBSERVED_CLASS.with(std::cell::Cell::get),
+                commit_hooks::OBSERVED_CLASS.with(std::cell::Cell::get),
                 Some(IngressDecisionClass::AliasConflict)
             );
             assert!(frames.iter().any(|frame| {
@@ -632,7 +630,7 @@ async fn capture_overflow_case(state: Arc<WebSocketState>) {
         .insert(Default::default(), "capture limit".into());
     let wire = super::super::super::transport_xml::stanza_to_xml(&Stanza::Message(message));
     assert_ack(&state, &mut conn, 0).await;
-    forced_failures::OBSERVED_CLASS
+    commit_hooks::OBSERVED_CLASS
         .scope(std::cell::Cell::new(None), async {
             let frames = crate::ingress::TEST_CAPTURE_LIMIT
                 .scope(
@@ -641,7 +639,7 @@ async fn capture_overflow_case(state: Arc<WebSocketState>) {
                 )
                 .await;
             assert_eq!(
-                forced_failures::OBSERVED_CLASS.with(std::cell::Cell::get),
+                commit_hooks::OBSERVED_CLASS.with(std::cell::Cell::get),
                 Some(crate::ingress::IngressDecisionClass::CaptureOverflow)
             );
             assert!(frames.iter().any(|frame| {
@@ -728,11 +726,11 @@ async fn room_denials_case(state: Arc<WebSocketState>) {
     ] {
         assert_ack(&state, &mut conn, h - 1).await;
         let wire = super::super::super::transport_xml::stanza_to_xml(&Stanza::Message(message));
-        forced_failures::OBSERVED_CLASS
+        commit_hooks::OBSERVED_CLASS
             .scope(std::cell::Cell::new(None), async {
                 let frames = handle_xmpp_frame(&wire, "example.com", &state, &mut conn).await;
                 assert_eq!(
-                    forced_failures::OBSERVED_CLASS.with(std::cell::Cell::get),
+                    commit_hooks::OBSERVED_CLASS.with(std::cell::Cell::get),
                     Some(expected)
                 );
                 assert!(

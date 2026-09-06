@@ -52,11 +52,12 @@ impl PrincipalAuthEpoch {
     }
 }
 
-/// Nonforgeable authority reference persisted beside an SM snapshot.
+/// Authenticated principal reference persisted beside an SM snapshot and
+/// deserialized from ordered-relay envelopes.
 ///
-/// Fields remain private so protocol code cannot manufacture a reference
-/// from a String or a token. Creation is restricted to an authenticated
-/// server boundary that has already validated the principal.
+/// Private fields keep construction at authenticated server boundaries.
+/// Deserialization does not confer authority: the receiving owner re-asserts
+/// the reference against durable principal state before committing effects.
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq, Hash)]
 pub struct AuthenticatedPrincipalRef {
     bare_jid: BareJid,

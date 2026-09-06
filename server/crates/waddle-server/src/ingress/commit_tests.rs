@@ -86,7 +86,7 @@ async fn messages(db: &Database) -> i64 {
 #[tokio::test]
 async fn serialization_exhaustion_rolls_back_every_attempt() {
     let (db, uow, submission) = fixture().await;
-    let result = forced_failures::SERIALIZATION_FAILURES
+    let result = commit_hooks::SERIALIZATION_FAILURES
         .scope(
             std::cell::Cell::new(5),
             commit_submission(&uow, &submission, 3),
@@ -101,7 +101,7 @@ async fn serialization_exhaustion_rolls_back_every_attempt() {
 #[tokio::test]
 async fn serialization_retry_reuses_plan_with_fresh_transactions() {
     let (db, uow, submission) = fixture().await;
-    let result = forced_failures::SERIALIZATION_FAILURES
+    let result = commit_hooks::SERIALIZATION_FAILURES
         .scope(
             std::cell::Cell::new(2),
             commit_submission(&uow, &submission, 3),
@@ -114,7 +114,7 @@ async fn serialization_retry_reuses_plan_with_fresh_transactions() {
 #[tokio::test]
 async fn ambiguous_commit_preserves_committed_row_without_retrying() {
     let (db, uow, submission) = fixture().await;
-    let result = forced_failures::AMBIGUOUS_COMMIT
+    let result = commit_hooks::AMBIGUOUS_COMMIT
         .scope(true, commit_submission(&uow, &submission, 3))
         .await;
     assert_eq!(
@@ -175,7 +175,7 @@ async fn precommit_timeout_and_frontier_stale_leave_no_rows() {
         ),
     ] {
         let (db, uow, submission) = fixture().await;
-        let failure = forced_failures::FAILURE
+        let failure = commit_hooks::FAILURE
             .scope(
                 std::cell::RefCell::new(Some(error)),
                 commit_submission(&uow, &submission, 3),
@@ -284,4 +284,20 @@ fn missing_archive_guard_checks_generated_authorities_individually() {
         std::slice::from_ref(&generated),
         std::slice::from_ref(&generated)
     ));
+}
+
+#[tokio::test]
+async fn missing_room_stanza_id_is_storage_failure_without_commit() {
+    let (db, uow, mut submission) = fixture().await;
+    submission.plan.rejection =
+        Some(crate::server::routes::interpret::effects::PlanRejection::MissingRoomStanzaId);
+    let failure = commit_submission(&uow, &submission, 1)
+        .await
+        .expect_err("missing room identity must fail closed");
+    assert_eq!(failure.class(), IngressDecisionClass::Storage);
+    assert!(matches!(
+        failure.source,
+        IngressUowError::MissingRoomStanzaId
+    ));
+    assert_eq!(messages(&db).await, 0);
 }

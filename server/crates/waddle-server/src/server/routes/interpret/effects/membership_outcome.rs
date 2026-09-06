@@ -45,13 +45,11 @@ impl PlannedEffect {
             Effect::External(ExternalEffect::InviteLedger(InviteLedgerMutation::Record {
                 failure,
                 ..
-            })) => {
-                if failure
-                    .as_deref()
-                    .is_some_and(|failure| owns_membership(failure, room, member))
-                {
-                    *failure = None;
-                }
+            })) if failure
+                .as_deref()
+                .is_some_and(|failure| owns_membership(failure, room, member)) =>
+            {
+                *failure = None;
             }
             Effect::External(
                 ExternalEffect::RouteToPeer(route) | ExternalEffect::QueueOfflineDelivery(route),

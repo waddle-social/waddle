@@ -836,7 +836,7 @@ async fn handle_sm_resume_terminal(
         roster_interested,
         blocklist_interested,
         pending_sm_enable_commit: _,
-        sm_inbound_completion,
+        sm_inbound_completion: _,
     } = ctx;
 
     // Stream resumption is only legal before this transport has established a
@@ -999,16 +999,6 @@ async fn handle_sm_resume_terminal(
         resume.previd.clone(),
     );
     if restore_ingress_checkpoint(state, &mut detached)
-        .await
-        .is_err()
-    {
-        claim_guard.release().await;
-        return SmResumeTerminal::failed(
-            waddle_xmpp::pending_delivery::SmSessionId::new(resume.previd),
-            SmResumeOutcome::Storage,
-        );
-    }
-    if flush_ingress_checkpoint(state, sm_state, sm_inbound_completion)
         .await
         .is_err()
     {
@@ -1277,7 +1267,7 @@ pub(super) async fn flush_ingress_checkpoint(
             waddle_xmpp::ingress::WireHandledCount::from_storage(sm_state.get_inbound_count()),
         )
         .await?;
-    tracker.checkpoint_flushed();
+    tracker.checkpoint_flushed(sm_state.get_inbound_count());
     Ok(())
 }
 
