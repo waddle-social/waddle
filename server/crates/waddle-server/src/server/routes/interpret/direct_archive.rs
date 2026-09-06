@@ -63,12 +63,12 @@ pub(super) async fn archive_direct(
     match mam_storage.store_message(&archive_jid, &archived).await {
         Ok(outcome) => {
             let archive_id = match outcome {
-                StoreOutcome::Stored(id) | StoreOutcome::Deduplicated(id) => id,
+                StoreOutcome::Stored(id) => id,
                 StoreOutcome::TombstoneHit(id) => {
                     warn!(
                         archive_jid = %archive_jid,
                         archive_id = %id,
-                        "ArchiveDirect: unexpected groupchat tombstone outcome; treating as deduplicated"
+                        "ArchiveDirect: unexpected groupchat tombstone outcome; retaining its archive id"
                     );
                     id
                 }
@@ -78,9 +78,7 @@ pub(super) async fn archive_direct(
                 archive_id,
                 "ArchiveDirect: persisted"
             );
-            // Capture at the successful storage boundary. A retry-deduped
-            // write can resolve to an existing authoritative archive id,
-            // which is the only id that may be bound into the shadow intent.
+            // Capture the authoritative archive identity at the storage boundary.
             deps.capture_intent(IngressEffectIntent::ArchiveAuthoritative {
                 archive: archive_jid.clone(),
                 stanza_id: waddle_xmpp_core::xep0359::StanzaId::new(
@@ -88,6 +86,7 @@ pub(super) async fn archive_direct(
                     jid::Jid::from(archive_jid.clone()),
                 ),
                 by: archive_jid.clone(),
+                archived_at: archived.timestamp,
             });
             // Notification activity ingest (slice 2b): the sender's
             // own archive commit is the strongest "currently active"

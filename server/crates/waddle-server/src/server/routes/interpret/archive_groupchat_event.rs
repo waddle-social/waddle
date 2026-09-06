@@ -3,16 +3,17 @@ use waddle_xmpp::ingress::IngressEffectIntent;
 
 pub(super) enum ArchiveGroupchatEventOutcome {
     Stored(Option<ArchiveIdRewrite>),
-    Deduplicated {
-        rewrite: Option<ArchiveIdRewrite>,
-        sender: BareJid,
-    },
     TombstoneHit,
     Skipped,
     OwnershipLost(Box<Message>),
 }
 
-fn capture_archive_authoritative_intent(deps: &Deps<'_>, room: &BareJid, archive_id: &str) {
+fn capture_archive_authoritative_intent(
+    deps: &Deps<'_>,
+    room: &BareJid,
+    archive_id: &str,
+    archived_at: chrono::DateTime<chrono::Utc>,
+) {
     deps.capture_intent(IngressEffectIntent::ArchiveAuthoritative {
         archive: room.clone(),
         stanza_id: waddle_xmpp_core::xep0359::StanzaId::new(
@@ -20,6 +21,7 @@ fn capture_archive_authoritative_intent(deps: &Deps<'_>, room: &BareJid, archive
             jid::Jid::from(room.clone()),
         ),
         by: room.clone(),
+        archived_at,
     });
 }
 
@@ -65,13 +67,6 @@ pub(super) async fn archive_groupchat_event(
     .await
     {
         ArchiveGroupchatOutcome::Stored(result) => result,
-        ArchiveGroupchatOutcome::Deduplicated(result) => {
-            capture_archive_authoritative_intent(deps, &room, &result.stored_id);
-            return ArchiveGroupchatEventOutcome::Deduplicated {
-                rewrite: result.rewrite,
-                sender: sender.to_bare(),
-            };
-        }
         ArchiveGroupchatOutcome::TombstoneHit => {
             return ArchiveGroupchatEventOutcome::TombstoneHit;
         }
@@ -91,7 +86,12 @@ pub(super) async fn archive_groupchat_event(
         archive_id = %archive_id.stored_id,
         "ArchiveGroupchat: persisted"
     );
-    capture_archive_authoritative_intent(deps, &room, &archive_id.stored_id);
+    capture_archive_authoritative_intent(
+        deps,
+        &room,
+        &archive_id.stored_id,
+        archive_id.archived_at,
+    );
     update_groupchat_link_preview_refs(deps, &room, &archive_id.stored_id, &message).await;
     // Notification activity ingest (slice 2b): committing the sender's
     // groupchat message into the room archive is the strongest

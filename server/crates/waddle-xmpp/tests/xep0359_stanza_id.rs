@@ -14,7 +14,6 @@
 
 use chrono::Utc;
 use jid::{BareJid, Jid};
-use waddle_xmpp::mam::{InMemoryMamStorage, MamStorage, StoreOutcome};
 use waddle_xmpp::pending_delivery::flush::{
     build_replay_stanza, MaterializedPayload, ReplayReason,
 };
@@ -33,123 +32,6 @@ fn dm(from: &str, to: &str, body: &str) -> Message {
     m.bodies
         .insert(xmpp_parsers::message::Lang::new(), body.to_string());
     m
-}
-
-/// XEP-0359 §2: an origin-id remains stable when the originating client
-/// retries. A MUC leave/rejoin changes the nickname generation and the real
-/// full-JID resource, but the same real bare account and occupant JID still
-/// identify the retry for storage dedupe (issue #1374).
-#[tokio::test]
-async fn xep0359_groupchat_origin_retry_after_rejoin_reuses_archive_id() {
-    use waddle_xmpp_core::mam::{ArchivedMessage, ArchivedMucSender, ArchivedRichMessage};
-    use waddle_xmpp_core::types::{Affiliation, Role};
-    use waddle_xmpp_core::xep0359::OriginId;
-
-    fn archived(id: &str, real_jid: &str, generation: u64) -> ArchivedMessage {
-        ArchivedMessage {
-            id: id.to_string(),
-            body: Some("retry me".to_string()),
-            origin_id: Some(OriginId::new("stable-client-origin")),
-            message_type: MessageType::Groupchat,
-            nickname_generation: Some(generation),
-            rich: Some(ArchivedRichMessage {
-                muc_sender: Some(ArchivedMucSender {
-                    jid: real_jid.parse().expect("real sender JID"),
-                    affiliation: Affiliation::Member,
-                    role: Role::Participant,
-                }),
-                ..ArchivedRichMessage::default()
-            }),
-            ..ArchivedMessage::for_test(
-                "room@conference.example.com/alice"
-                    .parse()
-                    .expect("occupant JID"),
-                "room@conference.example.com".parse().expect("room JID"),
-            )
-        }
-    }
-
-    let storage = InMemoryMamStorage::new();
-    let room = bare("room@conference.example.com");
-    let first = archived("archive-first", "alice@example.com/session-a", 7);
-    let retry = archived("archive-retry", "alice@example.com/session-b", 8);
-
-    assert_eq!(
-        storage.store_message(&room, &first).await.expect("store"),
-        StoreOutcome::Stored("archive-first".to_string())
-    );
-    assert_eq!(
-        storage.store_message(&room, &retry).await.expect("retry"),
-        StoreOutcome::Deduplicated("archive-first".to_string())
-    );
-    assert_eq!(
-        storage.count_messages(&room).await.expect("count"),
-        1,
-        "the retry must not create a second MAM row"
-    );
-}
-
-/// XEP-0359 §2 keeps an origin-id stable for a retry. XEP-0045 §8.1 room
-/// subjects are state operations rather than timeline content, so their retries
-/// deliberately remain outside conversational-content dedupe and fail open.
-#[tokio::test]
-async fn xep0359_groupchat_subjects_are_exempt_from_origin_retry_dedup() {
-    use waddle_xmpp_core::mam::{ArchivedMessage, ArchivedMucSender, ArchivedRichMessage};
-    use waddle_xmpp_core::types::{Affiliation, Role};
-    use waddle_xmpp_core::xep0359::OriginId;
-
-    fn archived(id: &str, subject: &str) -> ArchivedMessage {
-        let mut rich = ArchivedRichMessage {
-            muc_sender: Some(ArchivedMucSender {
-                jid: "alice@example.com/session"
-                    .parse()
-                    .expect("real sender JID"),
-                affiliation: Affiliation::Member,
-                role: Role::Participant,
-            }),
-            ..ArchivedRichMessage::default()
-        };
-        rich.subjects.insert(String::new(), subject.to_string());
-        ArchivedMessage {
-            id: id.to_string(),
-            body: None,
-            origin_id: Some(OriginId::new("stable-subject-origin")),
-            message_type: MessageType::Groupchat,
-            nickname_generation: Some(7),
-            rich: Some(rich),
-            ..ArchivedMessage::for_test(
-                "room@conference.example.com/alice"
-                    .parse()
-                    .expect("occupant JID"),
-                "room@conference.example.com".parse().expect("room JID"),
-            )
-        }
-    }
-
-    let storage = InMemoryMamStorage::new();
-    let room = bare("room@conference.example.com");
-    assert_eq!(
-        storage
-            .store_message(&room, &archived("subject-first", "First topic"))
-            .await
-            .expect("first store"),
-        StoreOutcome::Stored("subject-first".to_string())
-    );
-    assert_eq!(
-        storage
-            .store_message(&room, &archived("subject-changed", "Changed topic"))
-            .await
-            .expect("changed store"),
-        StoreOutcome::Stored("subject-changed".to_string())
-    );
-    assert_eq!(
-        storage
-            .store_message(&room, &archived("subject-identical-retry", "Changed topic"),)
-            .await
-            .expect("identical retry"),
-        StoreOutcome::Stored("subject-identical-retry".to_string())
-    );
-    assert_eq!(storage.count_messages(&room).await.expect("count"), 3);
 }
 
 /// XEP-0359 §3: `<stanza-id/>` MUST carry the `by` attribute (the
@@ -285,7 +167,7 @@ fn xep0359_typed_stanza_id_round_trips_through_element() {
 async fn xep0359_tx_archive_outcome_keeps_archive_as_stanza_id_authority() {
     use sqlx::postgres::PgPoolOptions;
     use waddle_xmpp::mam::{
-        store_archived_message_on_connection, MamTxStoreOutcome, SqlxMamStorage,
+        store_archived_message_on_connection, ArchiveExpectation, MamTxStoreOutcome, SqlxMamStorage,
     };
     use waddle_xmpp_core::mam::ArchivedMessage;
 
@@ -311,9 +193,14 @@ async fn xep0359_tx_archive_outcome_keeps_archive_as_stanza_id_authority() {
         )
     };
     let mut tx = pool.begin().await.expect("begin transaction");
-    let outcome = store_archived_message_on_connection(&mut tx, &archive, &message)
-        .await
-        .expect("store archive row");
+    let outcome = store_archived_message_on_connection(
+        &mut tx,
+        &archive,
+        &message,
+        ArchiveExpectation::Fresh,
+    )
+    .await
+    .expect("store archive row");
     assert!(matches!(
         outcome,
         MamTxStoreOutcome::Inserted(ref stanza_id)

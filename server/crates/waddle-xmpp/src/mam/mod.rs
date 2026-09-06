@@ -17,9 +17,9 @@ pub mod projection;
 pub mod storage;
 
 pub use storage::{
-    store_archived_message_on_connection, InMemoryMamStorage, MamArchiveKind, MamStorage,
-    MamStorageError, MamTxStoreError, MamTxStoreOutcome, SqlxMamStorage, StoreOutcome,
-    TerminalTombstoneOutcome,
+    store_archived_message_on_connection, store_archived_message_on_sqlite_connection,
+    ArchiveExpectation, InMemoryMamStorage, MamArchiveKind, MamStorage, MamStorageError,
+    MamTxStoreError, MamTxStoreOutcome, SqlxMamStorage, StoreOutcome, TerminalTombstoneOutcome,
 };
 pub use waddle_xmpp_core::mam::{
     archived_inner_message, build_fin_iq, build_query_form_iq, build_result_messages, is_mam_query,

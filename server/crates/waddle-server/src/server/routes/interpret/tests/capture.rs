@@ -704,7 +704,7 @@ async fn archive_direct_boundary_records_notification_activity_preview_after_pro
 }
 
 #[tokio::test]
-async fn direct_archive_capture_uses_the_deduplicated_authoritative_id() {
+async fn direct_archive_capture_uses_the_new_authoritative_id_for_an_origin_retry() {
     use waddle_xmpp::inbox::storage::InMemoryInboxStorage;
     use waddle_xmpp::mam::{ArchivedMessage, InMemoryMamStorage};
     use waddle_xmpp_core::xep0359::{build_origin_id_element, OriginId};
@@ -757,13 +757,34 @@ async fn direct_archive_capture_uses_the_deduplicated_authoritative_id() {
     )
     .await;
 
-    assert!(capture_snapshot(&capture).intents.iter().any(|intent| {
-        matches!(
-            intent,
-            IngressEffectIntent::ArchiveAuthoritative { archive, stanza_id, .. }
-                if archive == &owner && stanza_id.id == "authoritative-archive-id"
-        )
-    }));
+    assert_eq!(
+        mam_concrete
+            .count_messages(&owner)
+            .await
+            .expect("count archive"),
+        2
+    );
+    let snapshot = capture_snapshot(&capture);
+    let (stanza_id, archived_at) = snapshot
+        .intents
+        .iter()
+        .find_map(|intent| match intent {
+            IngressEffectIntent::ArchiveAuthoritative {
+                archive,
+                stanza_id,
+                archived_at,
+                ..
+            } if archive == &owner => Some((stanza_id, archived_at)),
+            _ => None,
+        })
+        .expect("captured archive identity");
+    assert_ne!(stanza_id.id, "authoritative-archive-id");
+    let row = mam_concrete
+        .get_message(stanza_id.as_str())
+        .await
+        .expect("read archive")
+        .expect("captured row exists");
+    assert_eq!(row.timestamp, *archived_at);
 }
 
 #[tokio::test]

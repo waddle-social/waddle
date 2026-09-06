@@ -1017,6 +1017,7 @@ pub enum IngressEffectIntent {
         archive: BareJid,
         stanza_id: StanzaId,
         by: BareJid,
+        archived_at: chrono::DateTime<chrono::Utc>,
     },
     RouteDirect {
         recipient: BareJid,
@@ -1108,6 +1109,101 @@ pub enum IngressEffectIntent {
     ErrorReply {
         recipient: FullJid,
         error: FrozenStanzaError,
+    },
+}
+
+/// Closed classification of an ingress effect, independent of its storage tag.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub enum IngressEffectKind {
+    ArchiveAuthoritative,
+    RouteDirect,
+    RouteMucGroupchat,
+    RouteOccupantPm,
+    DispatchToRoomRemote,
+    RecipientSmAppend,
+    Carbons,
+    InboxProject,
+    NotificationActivityPreview,
+    GroupchatNotificationRecovery,
+    PendingDelivery,
+    LinkPreviewMediaRef,
+    RetractionTombstone,
+    DmPinMutation,
+    MucInviteMembershipGrant,
+    MucInviteLedger,
+    GroupDmMembershipGrant,
+    GroupDmInviteLedger,
+    RoomSubjectMutation,
+    CallSignal,
+    Pin,
+    Extension,
+    TombstoneReplayDeletion,
+    ErrorReply,
+}
+
+/// The entity assigning an effect's identity. Audience and mutable policy are
+/// deliberately excluded so reconciliation can preserve the recorded decision.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum EffectAuthorityKey {
+    Archive {
+        by: BareJid,
+        archive: BareJid,
+    },
+    Route {
+        recipient: Jid,
+    },
+    Inbox {
+        owner: BareJid,
+        partner: BareJid,
+        thread: Option<ThreadId>,
+    },
+    Room {
+        kind: IngressEffectKind,
+        room: BareJid,
+    },
+    Recipient {
+        kind: IngressEffectKind,
+        recipient: Jid,
+    },
+    Stream {
+        stream: SmSessionId,
+        append: RecipientSmAppendIdentity,
+    },
+    Carbons {
+        source: FullJid,
+        kind: CarbonKind,
+    },
+    Conversation {
+        owner: BareJid,
+        conversation: BareJid,
+    },
+    Recovery {
+        recipient: BareJid,
+        room: BareJid,
+        thread: Option<ThreadId>,
+    },
+    Media {
+        archive: BareJid,
+        slot: Uuid,
+    },
+    Retraction {
+        archive: BareJid,
+        target: StanzaId,
+    },
+    DirectPin {
+        pair: (BareJid, BareJid),
+        target: StanzaId,
+    },
+    Membership {
+        kind: IngressEffectKind,
+        room: BareJid,
+        invitee: BareJid,
+    },
+    Tombstone {
+        target: TombstoneReplayTarget,
+    },
+    ErrorReply {
+        recipient: FullJid,
     },
 }
 
@@ -1272,6 +1368,8 @@ impl IngressEffectIntent {
                 archive: bare("archive@example.test"),
                 stanza_id: stanza(),
                 by: bare("archive@example.test"),
+                archived_at: chrono::DateTime::from_timestamp(1_753_617_600, 0)
+                    .expect("fixture timestamp"),
             },
             Self::RouteDirect {
                 recipient: bare("romeo@example.test"),
@@ -1481,6 +1579,181 @@ impl IngressEffectIntent {
                 ),
             },
         ]
+    }
+
+    pub fn kind(&self) -> IngressEffectKind {
+        match self {
+            Self::ArchiveAuthoritative { .. } => IngressEffectKind::ArchiveAuthoritative,
+            Self::RouteDirect { .. } => IngressEffectKind::RouteDirect,
+            Self::RouteMucGroupchat { .. } => IngressEffectKind::RouteMucGroupchat,
+            Self::RouteOccupantPm { .. } => IngressEffectKind::RouteOccupantPm,
+            Self::DispatchToRoomRemote { .. } => IngressEffectKind::DispatchToRoomRemote,
+            Self::RecipientSmAppend { .. } => IngressEffectKind::RecipientSmAppend,
+            Self::Carbons { .. } => IngressEffectKind::Carbons,
+            Self::InboxProject { .. } => IngressEffectKind::InboxProject,
+            Self::NotificationActivityPreview { .. } => {
+                IngressEffectKind::NotificationActivityPreview
+            }
+            Self::GroupchatNotificationRecovery { .. } => {
+                IngressEffectKind::GroupchatNotificationRecovery
+            }
+            Self::PendingDelivery { .. } => IngressEffectKind::PendingDelivery,
+            Self::LinkPreviewMediaRef { .. } => IngressEffectKind::LinkPreviewMediaRef,
+            Self::RetractionTombstone { .. } => IngressEffectKind::RetractionTombstone,
+            Self::DmPinMutation { .. } => IngressEffectKind::DmPinMutation,
+            Self::MucInviteMembershipGrant { .. } => IngressEffectKind::MucInviteMembershipGrant,
+            Self::MucInviteLedger { .. } => IngressEffectKind::MucInviteLedger,
+            Self::GroupDmMembershipGrant { .. } => IngressEffectKind::GroupDmMembershipGrant,
+            Self::GroupDmInviteLedger { .. } => IngressEffectKind::GroupDmInviteLedger,
+            Self::RoomSubjectMutation { .. } => IngressEffectKind::RoomSubjectMutation,
+            Self::CallSignal { .. } => IngressEffectKind::CallSignal,
+            Self::Pin { .. } => IngressEffectKind::Pin,
+            Self::Extension { .. } => IngressEffectKind::Extension,
+            Self::TombstoneReplayDeletion { .. } => IngressEffectKind::TombstoneReplayDeletion,
+            Self::ErrorReply { .. } => IngressEffectKind::ErrorReply,
+        }
+    }
+
+    pub fn authority_key(&self) -> EffectAuthorityKey {
+        let kind = self.kind();
+        match self {
+            Self::ArchiveAuthoritative { archive, by, .. } => EffectAuthorityKey::Archive {
+                by: by.clone(),
+                archive: archive.clone(),
+            },
+            Self::RouteDirect { recipient, .. } => EffectAuthorityKey::Route {
+                recipient: recipient.clone().into(),
+            },
+            Self::RouteOccupantPm { recipient, .. } => EffectAuthorityKey::Route {
+                recipient: recipient.clone().into(),
+            },
+            Self::RouteMucGroupchat { room, .. }
+            | Self::DispatchToRoomRemote { room, .. }
+            | Self::RoomSubjectMutation { room, .. }
+            | Self::Pin { room, .. } => EffectAuthorityKey::Room {
+                kind,
+                room: room.clone(),
+            },
+            Self::RecipientSmAppend {
+                stream,
+                append_identity,
+            } => EffectAuthorityKey::Stream {
+                stream: stream.clone(),
+                append: *append_identity,
+            },
+            Self::Carbons {
+                excluded_source,
+                kind,
+                ..
+            } => EffectAuthorityKey::Carbons {
+                source: excluded_source.clone(),
+                kind: *kind,
+            },
+            Self::InboxProject { owner, mutation } => {
+                let (partner, thread) = match mutation {
+                    InboxProjectionMutation::Direct { entry, .. } => (
+                        entry.partner.clone(),
+                        entry.thread_id.clone().and_then(ThreadId::new),
+                    ),
+                    InboxProjectionMutation::GroupchatChannel { room, .. }
+                    | InboxProjectionMutation::GroupchatChannelRead { room } => {
+                        (room.clone(), None)
+                    }
+                    InboxProjectionMutation::GroupchatThread { room, thread_id }
+                    | InboxProjectionMutation::GroupchatThreadRead { room, thread_id }
+                    | InboxProjectionMutation::GroupchatChannelAndThread {
+                        room, thread_id, ..
+                    } => (room.clone(), Some(thread_id.clone())),
+                    InboxProjectionMutation::DirectCallThreadAnchor {
+                        peer, thread_id, ..
+                    }
+                    | InboxProjectionMutation::DirectCallThreadEnded {
+                        peer, thread_id, ..
+                    } => (peer.clone(), Some(thread_id.clone())),
+                };
+                EffectAuthorityKey::Inbox {
+                    owner: owner.clone(),
+                    partner,
+                    thread,
+                }
+            }
+            Self::NotificationActivityPreview { owner, mutation } => {
+                let conversation = match mutation {
+                    NotificationActivityMutation::ChatState { conversation, .. }
+                    | NotificationActivityMutation::ChatStateGone { conversation, .. }
+                    | NotificationActivityMutation::ReadMarker { conversation, .. }
+                    | NotificationActivityMutation::OutboundMessage { conversation, .. }
+                    | NotificationActivityMutation::OfflineDelivery { conversation, .. }
+                    | NotificationActivityMutation::NotificationCandidate {
+                        conversation, ..
+                    } => conversation,
+                };
+                EffectAuthorityKey::Conversation {
+                    owner: owner.clone(),
+                    conversation: conversation.clone(),
+                }
+            }
+            Self::GroupchatNotificationRecovery { mutation } => EffectAuthorityKey::Recovery {
+                recipient: mutation.recipient.clone(),
+                room: mutation.room.clone(),
+                thread: mutation.thread_id.clone(),
+            },
+            Self::PendingDelivery { mutation } => {
+                let (PendingDeliveryMutation::Archived { recipient, .. }
+                | PendingDeliveryMutation::Transient { recipient, .. }) = mutation;
+                EffectAuthorityKey::Recipient {
+                    kind,
+                    recipient: recipient.clone().into(),
+                }
+            }
+            Self::LinkPreviewMediaRef { mutation } => EffectAuthorityKey::Media {
+                archive: mutation.archive.clone(),
+                slot: mutation.upload_slot_id,
+            },
+            Self::RetractionTombstone { mutation } => EffectAuthorityKey::Retraction {
+                archive: mutation.archive.clone(),
+                target: mutation.target_stanza_id.clone(),
+            },
+            Self::DmPinMutation {
+                pair,
+                target_stanza_id,
+                ..
+            } => EffectAuthorityKey::DirectPin {
+                pair: pair.clone(),
+                target: target_stanza_id.clone(),
+            },
+            Self::MucInviteMembershipGrant { grant } => EffectAuthorityKey::Membership {
+                kind,
+                room: grant.room.clone(),
+                invitee: grant.invitee.clone(),
+            },
+            Self::MucInviteLedger { mutation } => EffectAuthorityKey::Membership {
+                kind,
+                room: mutation.room.clone(),
+                invitee: mutation.invitee.clone(),
+            },
+            Self::GroupDmMembershipGrant { grant } | Self::GroupDmInviteLedger { grant } => {
+                EffectAuthorityKey::Membership {
+                    kind,
+                    room: grant.room.clone(),
+                    invitee: grant.invitee.clone(),
+                }
+            }
+            Self::CallSignal { recipient, .. } => EffectAuthorityKey::Recipient {
+                kind,
+                recipient: recipient.clone().into(),
+            },
+            Self::Extension { recipient, .. } => EffectAuthorityKey::Recipient {
+                kind,
+                recipient: recipient.clone().into(),
+            },
+            Self::TombstoneReplayDeletion { target, .. } => EffectAuthorityKey::Tombstone {
+                target: target.clone(),
+            },
+            Self::ErrorReply { recipient, .. } => EffectAuthorityKey::ErrorReply {
+                recipient: recipient.clone(),
+            },
+        }
     }
 
     pub fn semantic_key(&self) -> IngressEffectKey {
@@ -2551,6 +2824,7 @@ enum StoredEffectIntent {
         archive: BareJid,
         stanza_id: StanzaId,
         by: BareJid,
+        archived_at: chrono::DateTime<chrono::Utc>,
     },
     RouteDirect {
         recipient: BareJid,
@@ -2684,10 +2958,12 @@ impl StoredEffectIntent {
                 archive,
                 stanza_id,
                 by,
+                archived_at,
             } => Self::ArchiveAuthoritative {
                 archive,
                 stanza_id,
                 by,
+                archived_at,
             },
             IngressEffectIntent::RouteDirect {
                 recipient,
@@ -2843,10 +3119,12 @@ impl StoredEffectIntent {
                 archive,
                 stanza_id,
                 by,
+                archived_at,
             } => IngressEffectIntent::ArchiveAuthoritative {
                 archive,
                 stanza_id,
                 by,
+                archived_at,
             },
             Self::RouteDirect {
                 recipient,
@@ -3270,6 +3548,8 @@ mod tests {
                 archive: bare("archive@example.test"),
                 stanza_id: stanza_id(),
                 by: bare("archive@example.test"),
+                archived_at: chrono::DateTime::from_timestamp(1_753_617_600, 0)
+                    .expect("fixture timestamp"),
             },
             IngressEffectIntent::RouteDirect {
                 recipient: bare("romeo@example.test"),
@@ -3482,7 +3762,7 @@ mod tests {
     #[test]
     fn every_kind_round_trips_through_its_fixed_golden_vector() {
         let golden = [
-            r#"{"version":1,"intent":{"type":"archive_authoritative","archive":"archive@example.test","stanza_id":{"id":"stable-1","by":"archive@example.test"},"by":"archive@example.test"}}"#,
+            r#"{"version":1,"intent":{"type":"archive_authoritative","archive":"archive@example.test","stanza_id":{"id":"stable-1","by":"archive@example.test"},"by":"archive@example.test","archived_at":"2025-07-27T12:00:00Z"}}"#,
             r#"{"version":1,"intent":{"type":"route_direct","recipient":"romeo@example.test","fanout":["romeo@example.test/phone"],"route_identity":{"type":"stanza_id","stanza_id":{"id":"stable-1","by":"archive@example.test"}}}}"#,
             r#"{"version":1,"intent":{"type":"route_muc_groupchat","room":"room@conference.example.test","occupants":["juliet@example.test/laptop"],"reflection":"romeo@example.test/phone","room_generation":7,"route_identity":{"type":"stanza_id","stanza_id":{"id":"stable-1","by":"archive@example.test"}}}}"#,
             r#"{"version":1,"intent":{"type":"route_occupant_pm","recipient":"juliet@example.test/laptop","sender":"romeo@example.test/phone"}}"#,
@@ -3648,6 +3928,8 @@ mod tests {
             archive: bare("archive@example.test"),
             stanza_id: stanza_id(),
             by: bare("archive@example.test"),
+            archived_at: chrono::DateTime::from_timestamp(1_753_617_600, 0)
+                .expect("fixture timestamp"),
         };
         let archive_two = IngressEffectIntent::ArchiveAuthoritative {
             archive: bare("archive@example.test"),
@@ -3656,8 +3938,11 @@ mod tests {
                 "archive@example.test".parse::<Jid>().expect("valid JID"),
             ),
             by: bare("archive@example.test"),
+            archived_at: chrono::DateTime::from_timestamp(1_753_617_600, 0)
+                .expect("fixture timestamp"),
         };
         assert_ne!(archive_one.semantic_key(), archive_two.semantic_key());
+        assert_eq!(archive_one.authority_key(), archive_two.authority_key());
 
         let route_one = IngressEffectIntent::RouteDirect {
             recipient: bare("romeo@example.test"),

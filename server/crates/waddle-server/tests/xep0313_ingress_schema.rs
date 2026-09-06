@@ -151,6 +151,7 @@ async fn shadow_pipeline_binds_archive_authoritative_intent_to_archive_stanza_id
         archive: archive.clone(),
         stanza_id: StanzaId::new("mam-archive-uid-1", Jid::from(archive.clone())),
         by: archive,
+        archived_at: chrono::Utc::now(),
     };
 
     fixture

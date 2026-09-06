@@ -403,7 +403,7 @@ fn xep0313_result_envelope_from_is_the_room_jid() {
 async fn xep0313_tx_archive_write_rolls_back_with_caller_transaction() {
     use sqlx::postgres::PgPoolOptions;
     use waddle_xmpp::mam::{
-        store_archived_message_on_connection, MamTxStoreOutcome, SqlxMamStorage,
+        store_archived_message_on_connection, ArchiveExpectation, MamTxStoreOutcome, SqlxMamStorage,
     };
     use waddle_xmpp_core::mam::{ArchivedMucSender, ArchivedRichMessage};
     use waddle_xmpp_core::types::{Affiliation, Role};
@@ -445,7 +445,7 @@ async fn xep0313_tx_archive_write_rolls_back_with_caller_transaction() {
     };
     let mut tx = pool.begin().await.expect("begin transaction");
     assert!(matches!(
-        store_archived_message_on_connection(&mut tx, &archive, &message)
+        store_archived_message_on_connection(&mut tx, &archive, &message, ArchiveExpectation::Fresh)
             .await
             .expect("store archive row"),
         MamTxStoreOutcome::Inserted(ref stanza_id)

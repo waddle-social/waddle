@@ -28,7 +28,6 @@ pub(super) enum RoomArchiveFence {
 /// actual write.
 pub(super) enum ArchiveGroupchatOutcome {
     Stored(ArchiveStoreResult),
-    Deduplicated(ArchiveStoreResult),
     TombstoneHit,
     /// Not an error: a chain-bug guard or a non-fencing storage failure
     /// declined the write. The reflection still goes out (today's
@@ -252,16 +251,7 @@ pub(super) async fn finish_archive_groupchat_message(
                     stored_id.clone(),
                 ),
                 stored_id,
-            })
-        }
-        Ok(StoreOutcome::Deduplicated(stored_id)) => {
-            ArchiveGroupchatOutcome::Deduplicated(ArchiveStoreResult {
-                rewrite: ArchiveIdRewrite::from_store_result(
-                    jid::Jid::from(room.clone()),
-                    archive_id,
-                    stored_id.clone(),
-                ),
-                stored_id,
+                archived_at: archived.timestamp,
             })
         }
         Ok(StoreOutcome::TombstoneHit(existing_id)) => {
@@ -354,6 +344,7 @@ mod room_archive_fence_tests {
 
 pub(super) struct ArchiveStoreResult {
     pub stored_id: String,
+    pub archived_at: chrono::DateTime<chrono::Utc>,
     pub rewrite: Option<ArchiveIdRewrite>,
 }
 
