@@ -156,8 +156,12 @@ async fn ingress_planning_backstop_meters_timeout_once() {
         .await
         .expect("planning must reach blocklist read");
     assert!(!dispatch.is_finished(), "planning read must be stalled");
+    // Pause only while the dispatch is provably blocked, and resume before
+    // it does any further I/O: under paused time an idle runtime auto-advances
+    // to the next timer, which would expire pool acquisition instantly.
     tokio::time::pause();
     tokio::time::advance(std::time::Duration::from_secs(16)).await;
+    tokio::time::resume();
     let (conn, frames) = dispatch.await.expect("dispatch");
     assert!(frames.is_empty());
     assert_eq!(conn.sm_state.get_inbound_count(), 0);
@@ -195,9 +199,32 @@ async fn ingress_stalled_commit_backstop_meters_timeout_once() {
     let state = create_test_websocket_state().await;
     let mut conn = connection(&state, true).await;
     let stream = SmSessionId::new("authority-connection");
+    let waiting = state.deps.protocol.ingress.observe_stream_wait();
     let blocked = state.deps.protocol.ingress.block_test_stream(&stream).await;
+    let dispatch_state = state.clone();
+    let dispatch = tokio::spawn(async move {
+        let frames = handle_xmpp_frame(
+            &offered_message(),
+            "example.com",
+            &dispatch_state,
+            &mut conn,
+        )
+        .await;
+        (conn, frames)
+    });
+    tokio::time::timeout(std::time::Duration::from_secs(10), waiting.notified())
+        .await
+        .expect("commit must reach the stream lock wait");
+    assert!(
+        !dispatch.is_finished(),
+        "commit must be stalled on the stream lock"
+    );
+    // Pause only while the commit is provably blocked on the lock, and resume
+    // before the dispatch does any further I/O (see the planning test).
     tokio::time::pause();
-    let frames = handle_xmpp_frame(&offered_message(), "example.com", &state, &mut conn).await;
+    tokio::time::advance(std::time::Duration::from_secs(16)).await;
+    tokio::time::resume();
+    let (conn, frames) = dispatch.await.expect("dispatch");
     assert!(frames.is_empty());
     assert_eq!(conn.sm_state.get_inbound_count(), 0);
     assert!(conn.sm_inbound_completion.has_unhandled_hole());

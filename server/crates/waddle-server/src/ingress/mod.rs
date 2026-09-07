@@ -81,6 +81,9 @@ pub struct IngressAuthority {
     admission: RwLock<bool>,
     streams: StdMutex<HashMap<SmSessionId, Weak<RwLock<()>>>>,
     retirement_cursor: Mutex<Option<SmSessionId>>,
+    /// Test-only: fires when a commit is about to wait for its stream lock.
+    #[cfg(test)]
+    stream_wait_observer: StdMutex<Option<Arc<tokio::sync::Notify>>>,
 }
 
 impl IngressAuthority {
@@ -156,6 +159,8 @@ impl IngressAuthority {
             gc_task: Mutex::new(Some(gc_task)),
             admission: RwLock::new(true),
             streams: StdMutex::new(HashMap::new()),
+            #[cfg(test)]
+            stream_wait_observer: StdMutex::new(None),
             retirement_cursor: Mutex::new(None),
         })
     }
@@ -180,6 +185,8 @@ impl IngressAuthority {
             gc_task: Mutex::new(None),
             admission: RwLock::new(true),
             streams: StdMutex::new(HashMap::new()),
+            #[cfg(test)]
+            stream_wait_observer: StdMutex::new(None),
             retirement_cursor: Mutex::new(None),
         }
     }
@@ -218,6 +225,18 @@ impl IngressAuthority {
         stream_id: &SmSessionId,
     ) -> tokio::sync::OwnedRwLockWriteGuard<()> {
         self.stream_activity(stream_id).write_owned().await
+    }
+
+    /// Test-only: returns a notifier that fires when a commit starts waiting
+    /// for a stream lock, so tests pause time only once the wait is real.
+    #[cfg(test)]
+    pub(crate) fn observe_stream_wait(&self) -> Arc<tokio::sync::Notify> {
+        let observer = Arc::new(tokio::sync::Notify::new());
+        *self
+            .stream_wait_observer
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(observer.clone());
+        observer
     }
 
     pub async fn wait_for_stream_idle(&self, stream_id: &SmSessionId, budget: Duration) -> bool {
@@ -344,7 +363,17 @@ impl IngressAuthority {
         }
         let _stream_guard = match &submission.identity {
             IngressStreamIdentity::Resumable { stream_id, .. } => {
-                Some(self.stream_activity(stream_id).read_owned().await)
+                let activity = self.stream_activity(stream_id);
+                #[cfg(test)]
+                if let Some(observer) = self
+                    .stream_wait_observer
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner)
+                    .as_ref()
+                {
+                    observer.notify_one();
+                }
+                Some(activity.read_owned().await)
             }
             _ => None,
         };
