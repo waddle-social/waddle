@@ -93,3 +93,6 @@ mod replay;
 
 #[path = "ingress_cases/retention.rs"]
 mod retention;
+
+#[path = "ingress_cases/recipient_drift.rs"]
+mod recipient_drift;

@@ -222,6 +222,9 @@ async fn commit_attempt(
     } else {
         super::restamp::restamp_plan(&submission.plan, &recorded_ids)
     };
+    if alias == AliasOutcomeClass::Existing {
+        retain_live_recipient_plan(submission, &recorded, &mut plan);
+    }
     // Each generated message retains its own timestamp and assigning authority.
     for intent in &mut plan.intents {
         let authority = intent.authority_key();
@@ -249,7 +252,7 @@ async fn commit_attempt(
     if alias == AliasOutcomeClass::Existing
         && !owner_first
         && rejection.is_none()
-        && (missing_planned_archive_authority(&submission.plan.intents, &recorded)
+        && (missing_planned_archive_authority(&plan.intents, &recorded)
             || (recorded_ids.is_empty()
                 && matches!(
                     &submission.plan.room_execution,
@@ -411,6 +414,84 @@ pub(crate) async fn commit_transaction(
         }
     })
 }
+/// A live full-JID route delegates recipient preparation to that connection.
+/// Disconnecting later cannot move those obligations into the sender transaction.
+fn retain_live_recipient_plan(
+    submission: &IngressSubmission,
+    recorded: &[IngressEffectIntent],
+    plan: &mut super::IngressPlan,
+) {
+    use super::effects::{
+        delivery::ExternalDeliveryEffect,
+        direct::{DurableDirectEffect, ExternalDirectEffect},
+        DurableEffect, Effect, ExternalEffect,
+    };
+    use waddle_xmpp::ingress::{
+        EffectAuthorityKey, EffectMessageIdentity, NormalizedTarget, PendingDeliveryMutation,
+    };
+    let NormalizedTarget::Full(full) = &submission.target else {
+        return;
+    };
+    let recipient = full.to_bare();
+    if recipient == *submission.principal.bare_jid()
+        || recorded.iter().any(|intent| matches!(intent,
+            IngressEffectIntent::ArchiveAuthoritative { archive, .. } if archive == &recipient))
+        || !recorded.iter().any(|intent| matches!(intent,
+            IngressEffectIntent::RouteDirect { recipient: saved, fanout, route_identity: EffectMessageIdentity::CaptureOrdinal(_) }
+                if saved == &recipient && fanout.as_slice() == [full.clone()]))
+    {
+        return;
+    }
+    plan.intents.retain(|intent| {
+        let recipient_preparation = match intent.authority_key() {
+            EffectAuthorityKey::Archive { archive, .. }
+            | EffectAuthorityKey::Media { archive, .. }
+            | EffectAuthorityKey::Retraction { archive, .. } => archive == recipient,
+            EffectAuthorityKey::Inbox { owner, .. }
+            | EffectAuthorityKey::Conversation { owner, .. } => owner == recipient,
+            _ => matches!(intent,
+                IngressEffectIntent::PendingDelivery {
+                    mutation: PendingDeliveryMutation::Archived { recipient: owner, .. }
+                        | PendingDeliveryMutation::Transient { recipient: owner, .. },
+                } if owner == &recipient),
+        };
+        !recipient_preparation || recorded.contains(intent)
+    });
+    // Archive references describe ordering, not ownership: a sender archive
+    // or sent carbon can reference a recipient-assigned stanza-id sibling.
+    plan.plan.retain_mut(|planned| {
+        if let Effect::External(ExternalEffect::Direct(
+            ExternalDirectEffect::LinkPreviewRefs { mutations }
+            | ExternalDirectEffect::ClearLinkPreviewRefs { mutations },
+        )) = &mut planned.effect
+        {
+            mutations.retain(|mutation| mutation.archive != recipient);
+            return !mutations.is_empty();
+        }
+        match &planned.effect {
+            Effect::Durable(DurableEffect::Direct(effect)) => match effect {
+                DurableDirectEffect::ArchiveDirect { archive, .. }
+                | DurableDirectEffect::RetractionTombstone { archive, .. } => archive != &recipient,
+                DurableDirectEffect::ProjectInbox { owner, .. }
+                | DurableDirectEffect::MarkInboxRead { owner, .. }
+                | DurableDirectEffect::DmCallThreadProjection { owner, .. } => owner != &recipient,
+            },
+            Effect::External(ExternalEffect::Direct(
+                ExternalDirectEffect::NotificationActivity { owner, .. }
+                | ExternalDirectEffect::PushInboxUpdate { owner, .. },
+            )) => owner != &recipient,
+            Effect::External(ExternalEffect::Delivery(
+                ExternalDeliveryEffect::QueueOfflineDelivery { row, .. },
+            )) => row.recipient != recipient,
+            Effect::External(ExternalEffect::Delivery(
+                ExternalDeliveryEffect::Carbons { owner, .. }
+                | ExternalDeliveryEffect::RelayCarbons { owner, .. },
+            )) => owner != &recipient,
+            _ => true,
+        }
+    });
+}
+
 fn missing_planned_archive_authority(
     planned: &[IngressEffectIntent],
     recorded: &[IngressEffectIntent],

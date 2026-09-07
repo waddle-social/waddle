@@ -1838,3 +1838,71 @@ async fn reserved_groupchat_requires_committed_origin_admission() {
         Err(OrderedRelayNackReason::ParseFailure)
     ));
 }
+
+#[tokio::test]
+async fn relayed_ingress_backstop_timeout_is_metered_once() {
+    use crate::ingress::identity::{IngressCanonicalRef, IngressRelayAdmission};
+    use waddle_xmpp::auth::{
+        AuthContextId, AuthContextVersion, AuthenticatedPrincipalRef, PrincipalAuthEpoch,
+    };
+
+    let metrics = waddle_xmpp::telemetry::test_support::acquire().await;
+    let state = create_test_websocket_state_with_clustering(
+        crate::clustering::ClusteringHandles::default(),
+        Arc::new(InMemorySmSessionRegistry::new()),
+    )
+    .await;
+    let mut services = services_with_claims(
+        origin_identity(),
+        receiver_identity(),
+        receiver_identity(),
+        test_peer_id(),
+    )
+    .await;
+    services.web_socket_state = Arc::downgrade(&state);
+    services.claim_store = Arc::new(super::reassert::stalled_claim::StalledClaimStore);
+    let room: jid::BareJid = "room@muc.example.com".parse().expect("room");
+    let sender: jid::FullJid = "alice@example.com/web".parse().expect("sender");
+    let admission = IngressRelayAdmission {
+        canonical: IngressCanonicalRef {
+            message_key: waddle_xmpp::ingress::MessageKey::new(),
+            sender_bare: sender.to_bare(),
+            origin_id: None,
+        },
+        principal: AuthenticatedPrincipalRef::new(
+            sender.to_bare(),
+            AuthContextId::new(uuid::Uuid::new_v4()),
+            AuthContextVersion::INITIAL,
+            PrincipalAuthEpoch::INITIAL,
+        ),
+        stanza_lang: None,
+    };
+    let mut message = Message::new(Some(room.clone().into()));
+    message.from = Some(sender.into());
+    message.type_ = xmpp_parsers::message::MessageType::Groupchat;
+    let mut completion = None;
+    let result = tokio::time::timeout(
+        ORDERED_RECEIVER_DELIVERY_TIMEOUT + Duration::from_secs(3),
+        deliver_reserved_muc_proxy(
+            &services,
+            &room,
+            OrderedRelayMucProxyKind::GroupchatMessage,
+            MucProxyOrigin::Server,
+            &Stanza::Message(message),
+            Some(&admission),
+            &mut completion,
+        ),
+    )
+    .await
+    .expect("relayed admission must be bounded");
+    assert!(matches!(
+        result,
+        Err(OrderedRelayNackReason::MaybeCommitted)
+    ));
+    assert!(completion.is_none());
+    assert_eq!(
+        metrics.counter_sum("ingress.decisions", &[("class", "timeout")]),
+        Some(1)
+    );
+    assert_eq!(metrics.counter_sum("ingress.decisions", &[]), Some(1));
+}

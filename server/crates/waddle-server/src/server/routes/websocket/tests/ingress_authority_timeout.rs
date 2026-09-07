@@ -108,3 +108,103 @@ async fn committed_external_effect_timeout_preserves_wire_ack_and_pending_rows()
         0
     );
 }
+
+struct HangingPlanningBlocklist {
+    entered: Arc<tokio::sync::Notify>,
+}
+
+#[async_trait::async_trait]
+impl waddle_xmpp::xep::xep0191::BlockingStorage for HangingPlanningBlocklist {
+    async fn list_blocked_jids(
+        &self,
+        _user: &jid::BareJid,
+    ) -> Result<Vec<jid::BareJid>, waddle_xmpp::xep::xep0191::BlockingStorageError> {
+        self.entered.notify_one();
+        std::future::pending().await
+    }
+}
+
+#[tokio::test]
+async fn ingress_planning_backstop_meters_timeout_once() {
+    let metrics = waddle_xmpp::telemetry::test_support::acquire().await;
+    let entered = Arc::new(tokio::sync::Notify::new());
+    let state = create_test_websocket_state_with_extension_manager(
+        empty_extension_manager().await,
+        TestStateOverrides {
+            blocking_storage: Some(Arc::new(HangingPlanningBlocklist {
+                entered: entered.clone(),
+            })),
+            ..Default::default()
+        },
+    )
+    .await;
+    let mut conn = connection(&state, true).await;
+    let mut message =
+        xmpp_parsers::message::Message::new(Some("bob@example.com".parse().expect("recipient")));
+    message.type_ = xmpp_parsers::message::MessageType::Chat;
+    message
+        .bodies
+        .insert(Default::default(), "planning timeout".to_owned());
+    let wire = super::super::super::transport_xml::stanza_to_xml(&Stanza::Message(message));
+    create_test_session(&state, "bob").await;
+    let dispatch_state = state.clone();
+    let dispatch = tokio::spawn(async move {
+        let frames = handle_xmpp_frame(&wire, "example.com", &dispatch_state, &mut conn).await;
+        (conn, frames)
+    });
+    tokio::time::timeout(std::time::Duration::from_secs(5), entered.notified())
+        .await
+        .expect("planning must reach blocklist read");
+    assert!(!dispatch.is_finished(), "planning read must be stalled");
+    tokio::time::pause();
+    tokio::time::advance(std::time::Duration::from_secs(16)).await;
+    let (conn, frames) = dispatch.await.expect("dispatch");
+    assert!(frames.is_empty());
+    assert_eq!(conn.sm_state.get_inbound_count(), 0);
+    assert!(conn.sm_inbound_completion.has_unhandled_hole());
+    assert_eq!(
+        metrics.counter_sum("ingress.decisions", &[("class", "timeout")]),
+        Some(1)
+    );
+    assert_eq!(metrics.counter_sum("ingress.decisions", &[]), Some(1));
+    assert_eq!(
+        count(&state, "SELECT COUNT(*) FROM ingress_messages").await,
+        0
+    );
+}
+
+#[tokio::test]
+async fn ingress_committed_frame_meters_decision_once() {
+    let metrics = waddle_xmpp::telemetry::test_support::acquire().await;
+    let state = create_test_websocket_state().await;
+    let mut conn = connection(&state, true).await;
+    handle_xmpp_frame(&offered_message(), "example.com", &state, &mut conn).await;
+    assert_eq!(conn.sm_state.get_inbound_count(), 1);
+    assert_eq!(metrics.counter_sum("ingress.decisions", &[]), Some(1));
+    assert_eq!(
+        metrics
+            .counter_sum("ingress.decisions", &[("class", "timeout")])
+            .unwrap_or(0),
+        0
+    );
+}
+
+#[tokio::test]
+async fn ingress_stalled_commit_backstop_meters_timeout_once() {
+    let metrics = waddle_xmpp::telemetry::test_support::acquire().await;
+    let state = create_test_websocket_state().await;
+    let mut conn = connection(&state, true).await;
+    let stream = SmSessionId::new("authority-connection");
+    let blocked = state.deps.protocol.ingress.block_test_stream(&stream).await;
+    tokio::time::pause();
+    let frames = handle_xmpp_frame(&offered_message(), "example.com", &state, &mut conn).await;
+    assert!(frames.is_empty());
+    assert_eq!(conn.sm_state.get_inbound_count(), 0);
+    assert!(conn.sm_inbound_completion.has_unhandled_hole());
+    assert_eq!(
+        metrics.counter_sum("ingress.decisions", &[("class", "timeout")]),
+        Some(1)
+    );
+    assert_eq!(metrics.counter_sum("ingress.decisions", &[]), Some(1));
+    drop(blocked);
+}

@@ -1045,7 +1045,18 @@ async fn dispatch_authoritative_message(
             let class = match failure {
                 Ok(Ok(decision)) => decision.class,
                 Ok(Err(class)) => class,
-                Err(_) => IngressDecisionClass::Timeout,
+                Err(error) => {
+                    let class = match error {
+                        StanzaTimeout::AdmissionRevoked => IngressDecisionClass::ClaimFenceMissing,
+                        StanzaTimeout::Unhandled | StanzaTimeout::HandledIq(_) => {
+                            IngressDecisionClass::Timeout
+                        }
+                    };
+                    // Cancellation drops planning/commit before commit_submission
+                    // can meter its result. Returned decisions are already metered.
+                    waddle_xmpp::telemetry::reliability::increment_ingress_decision(class);
+                    class
+                }
             };
             settle_inbound_dispatch(
                 InboundDisposition::Unhandled,

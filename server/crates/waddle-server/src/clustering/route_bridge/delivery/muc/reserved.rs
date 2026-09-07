@@ -337,7 +337,14 @@ pub(in super::super::super) async fn deliver_reserved_muc_groupchat(
         Ok(authority.commit(&submission).await)
     })
     .await
-    .map_err(|_| OrderedRelayNackReason::MaybeCommitted)??;
+    .map_err(|_| {
+        // Completed decisions are metered by commit_submission; cancellation
+        // drops that future before it can record the timeout decision.
+        waddle_xmpp::telemetry::reliability::increment_ingress_decision(
+            waddle_xmpp::telemetry::attributes::IngressDecisionClass::Timeout,
+        );
+        OrderedRelayNackReason::MaybeCommitted
+    })??;
     if !decision.class.advances() {
         return Err(OrderedRelayNackReason::MaybeCommitted);
     }

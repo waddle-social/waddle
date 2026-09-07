@@ -898,3 +898,6 @@ async fn ingress_remote_owner_ack_transport_loss_preserves_pending_receipts() {
 async fn ingress_remote_owner_ack_transport_loss_preserves_pending_receipts_postgres() {
     postgres_connection_reply_receipt_with_remote(true, true, true).await;
 }
+
+#[path = "ingress_authority_recipient_drift.rs"]
+mod recipient_drift;
