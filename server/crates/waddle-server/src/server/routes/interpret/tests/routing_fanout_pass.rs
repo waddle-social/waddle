@@ -68,6 +68,7 @@ async fn fanout_pass_blocklist_failure_falls_back_to_legacy_per_resource_deliver
         ordered_relay_origin: None,
         sfu: None,
         ingress_effect_capture: None,
+        direct_route_identity: None,
         effects: &crate::server::routes::interpret::effects::ImmediateSink,
     };
 

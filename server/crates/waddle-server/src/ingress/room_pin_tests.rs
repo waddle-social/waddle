@@ -661,3 +661,354 @@ async fn unpin_snapshot_failure_plan_is_nonadvancing_postgres() {
         room_pin_snapshot_failure(fixture, true).await;
     }
 }
+
+/// Queue a real blocked actor operation only after the prerequisite effect has
+/// been captured, so the next snapshot ask fails inside the real interpreter.
+struct BlockAfterRoomEffect {
+    inner: PlanSink,
+    actor: kameo::actor::ActorRef<waddle_xmpp::muc::room_actor::RoomActor>,
+    store: std::sync::Arc<BlockedRoomRestore>,
+    fence: waddle_xmpp::muc::RoomClaimFenceContext,
+    subject: bool,
+    armed: std::sync::atomic::AtomicBool,
+}
+
+impl BlockAfterRoomEffect {
+    fn block_after(&self, effect: &effects::PlannedEffect) {
+        let matches = if self.subject {
+            matches!(
+                effect.effect,
+                effects::Effect::Durable(effects::DurableEffect::Room(
+                    effects::room::DurableRoomEffect::ArchiveGroupchat { .. }
+                ))
+            )
+        } else {
+            matches!(
+                effect.effect,
+                effects::Effect::External(ExternalEffect::Room(
+                    effects::room::ExternalRoomEffect::RoomActorMutation {
+                        mutation: effects::room::RoomActorMutation::ApplyPin { .. },
+                        ..
+                    }
+                ))
+            )
+        };
+        if matches && self.armed.swap(false, std::sync::atomic::Ordering::SeqCst) {
+            self.actor
+                .tell(waddle_xmpp::muc::room_actor::RestoreDurableRoomState {
+                    store: self.store.clone(),
+                    claim_fence: self.fence.clone(),
+                })
+                .try_send()
+                .expect("queue blocked restore before secondary read");
+        }
+    }
+}
+
+impl EffectSink for BlockAfterRoomEffect {
+    fn execute<'a>(
+        &'a self,
+        effect: effects::PlannedEffect,
+        deps: &'a Deps<'_>,
+    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = effects::EffectOutcome> + Send + 'a>>
+    {
+        Box::pin(async move {
+            let outcome = self.inner.execute(effect.clone(), deps).await;
+            self.block_after(&effect);
+            outcome
+        })
+    }
+    fn record(&self, effect: effects::PlannedEffect) {
+        self.inner.record(effect.clone());
+        self.block_after(&effect);
+    }
+    fn is_planning(&self) -> bool {
+        true
+    }
+    fn fail_plan(&self, failure: effects::PlanFailure) {
+        self.inner.fail_plan(failure);
+    }
+    fn set_room_execution(&self, execution: RoomExecutionPath) {
+        self.inner.set_room_execution(execution);
+    }
+    fn room_execution(&self) -> RoomExecutionPath {
+        self.inner.room_execution()
+    }
+    fn snapshot(&self) -> Vec<effects::PlannedEffect> {
+        self.inner.snapshot()
+    }
+    fn observe_sender(&self, sender: &FullJid) {
+        self.inner.observe_sender(sender);
+    }
+}
+
+async fn secondary_room_snapshot_failure(fixture: IngressFixture, subject: bool, unpin: bool) {
+    use crate::ingress_uow::SmIngressStreamRepository;
+    use waddle_xmpp::{ingress::WireHandledCount, pending_delivery::SmSessionId};
+    let room: BareJid = "secondary-snapshot@muc.example.com".parse().expect("room");
+    let sender: FullJid = "romeo@example.com/phone".parse().expect("sender");
+    let registry = ConnectionRegistry::new();
+    let rooms = RoomRegistryActor::spawn(RoomRegistryActor::new(
+        "muc.example.com".into(),
+        OccupantIdSecret::new(vec![b'p'; 32]).expect("secret"),
+    ));
+    let actor = rooms
+        .ask(CreateRoom {
+            room_jid: room.clone(),
+            waddle_id: "waddle".into(),
+            channel_id: "secondary".into(),
+            config: Default::default(),
+        })
+        .await
+        .expect("room actor");
+    actor
+        .ask(Join {
+            nick: "romeo".into(),
+            real_jid: sender.clone(),
+            role: waddle_xmpp::Role::Moderator,
+            affiliation: waddle_xmpp::Affiliation::Owner,
+        })
+        .await
+        .expect("join sender");
+    let target_stanza_id = StanzaId::new("target", room.clone().into());
+    if unpin {
+        actor
+            .ask(ApplyPin {
+                change: PinStateChange::Pin(PinnedEntry {
+                    target_stanza_id: target_stanza_id.clone(),
+                    pinner_jid: sender.to_bare(),
+                    pinned_at: chrono::Utc::now(),
+                    preview: PinPreview::new(sender.to_bare(), None, "target", chrono::Utc::now()),
+                }),
+            })
+            .await
+            .expect("existing pin");
+    }
+    let fence = waddle_xmpp::muc::RoomClaimFenceContext::new(
+        waddle_xmpp::ownership::Entity::new(
+            waddle_xmpp::ownership::EntityType::RoomActor,
+            room.to_string(),
+        ),
+        waddle_xmpp::ownership::NodeIdentity::local(),
+        waddle_xmpp::ownership::ClaimEpoch(1),
+    );
+    let store = std::sync::Arc::new(BlockedRoomRestore::default());
+    let sink = BlockAfterRoomEffect {
+        inner: PlanSink::new(),
+        actor: actor.clone(),
+        store: store.clone(),
+        fence: fence.clone(),
+        subject,
+        armed: std::sync::atomic::AtomicBool::new(true),
+    };
+    let mam: std::sync::Arc<dyn MamStorage> = std::sync::Arc::new(
+        SqlxMamStorage::open(fixture.db.database_url())
+            .await
+            .expect("MAM"),
+    );
+    let mut deps = Deps::registry_only(&registry);
+    deps.room_registry = Some(&rooms);
+    deps.mam_storage = Some(&mam);
+    let mut submission = fixture.submission(Some("secondary-snapshot-retry"), "offered");
+    submission.target = waddle_xmpp::ingress::NormalizedTarget::Bare(room.clone());
+    submission.plan.sanitized_message.to = Some(room.clone().into());
+    submission.plan.sanitized_message.type_ = xmpp_parsers::message::MessageType::Groupchat;
+    if subject {
+        submission.plan.sanitized_message.bodies.clear();
+        submission
+            .plan
+            .sanitized_message
+            .subjects
+            .insert(xmpp_parsers::message::Lang::new(), "new subject".into());
+    }
+    submission.digest_input = waddle_xmpp::ingress::DigestInput::from_parsed(
+        &submission.plan.sanitized_message,
+        &waddle_xmpp::ingress::DigestContext {
+            target: submission.target.clone(),
+            server_authorities: vec![room.clone()],
+            stanza_lang: None,
+        },
+    )
+    .expect("digest");
+    // Digest the offered stanza before server canonicalization stamps its ID.
+    add_stanza_id(
+        &mut submission.plan.sanitized_message,
+        &StanzaId::new("offered-archive", room.clone().into()),
+    );
+    let stream_id = SmSessionId::new("secondary-snapshot");
+    let mut tx = fixture.uow.begin().await.expect("begin stream");
+    let sm_ingress_id = SmIngressStreamRepository::mint(&mut tx, &stream_id)
+        .await
+        .expect("stream");
+    tx.commit().await.expect("stream commit");
+    submission.identity = IngressStreamIdentity::Resumable {
+        stream_id,
+        sm_ingress_id,
+        #[cfg(feature = "clustering")]
+        owner: waddle_xmpp::ownership::NodeIdentity::new("unused", "single-node"),
+        #[cfg(feature = "clustering")]
+        claim_epoch: waddle_xmpp::ownership::ClaimEpoch(1),
+        reserved_wire_position: WireHandledCount::new(1),
+        checkpoint_h: WireHandledCount::new(1),
+    };
+    let events = |retry| {
+        if subject {
+            vec![
+                OutboundEvent::ArchiveGroupchat {
+                    room: room.clone(),
+                    sender: sender.clone(),
+                    message: Box::new(submission.plan.sanitized_message.clone()),
+                    sender_nickname_generation: 0,
+                    sender_item: None,
+                },
+                OutboundEvent::PersistRoomSubject {
+                    room: room.clone(),
+                    claim_fence: if retry { Some(fence.clone()) } else { None },
+                    texts: waddle_xmpp::muc::RoomSubjectTexts::from_message_subjects(
+                        &submission.plan.sanitized_message.subjects,
+                    ),
+                    setter: sender.to_bare(),
+                    sender: sender.clone(),
+                    message: Box::new(submission.plan.sanitized_message.clone()),
+                    setter_nick: "romeo".into(),
+                    set_at: chrono::Utc::now(),
+                },
+            ]
+        } else {
+            vec![OutboundEvent::ApplyPinChange {
+                room: room.clone(),
+                request: if unpin {
+                    PinChangeRequest::Unpin {
+                        target_stanza_id: target_stanza_id.clone(),
+                        pinner_jid: sender.to_bare(),
+                        pinner_nick: "romeo".into(),
+                        reason: None,
+                    }
+                } else {
+                    PinChangeRequest::Pin {
+                        target_stanza_id: target_stanza_id.clone(),
+                        pinner_jid: sender.to_bare(),
+                        pinner_nick: "romeo".into(),
+                        pinned_at: chrono::Utc::now(),
+                    }
+                },
+            }]
+        }
+    };
+    let failed_events = events(false);
+    let retry_events = events(true);
+    let capture = IngressEffectCapture::new();
+    let mut planning = deps.clone();
+    planning.effects = &sink;
+    planning.ingress_effect_capture = Some(capture.clone());
+    interpret(failed_events, &planning).await;
+    assert!(
+        !sink.armed.load(std::sync::atomic::Ordering::SeqCst),
+        "prerequisite effect was captured before blocking the actor"
+    );
+    let (plan, execution) = sink.inner.take();
+    submission.plan.plan = plan;
+    submission.plan.room_execution = execution;
+    submission.plan.intents = capture.snapshot().intents;
+    submission.plan.failure = sink.inner.failure();
+    assert_eq!(
+        submission.plan.failure,
+        Some(effects::PlanFailure::RoomSnapshotUnavailable)
+    );
+    assert!(submission.plan.intents.iter().any(|intent| if subject {
+        matches!(intent, IngressEffectIntent::ArchiveAuthoritative { .. })
+    } else {
+        matches!(intent, IngressEffectIntent::Pin { .. })
+    }));
+    let failure = commit_submission(&fixture.uow, &submission, 3)
+        .await
+        .expect_err("partial plan refused");
+    assert_eq!(failure.class(), IngressDecisionClass::Storage);
+    assert!(!failure.class().advances());
+    for table in [
+        "ingress_messages",
+        "ingress_origin_aliases",
+        "ingress_effect_intents",
+        "ingress_effect_receipts",
+        "ingress_sm_refs",
+        "ingress_deliveries",
+        "mam_messages",
+        "inbox_entries",
+    ] {
+        assert_eq!(fixture.count(table).await, 0, "no writes to {table}");
+    }
+    assert_eq!(
+        fixture
+            .count("ingress_sm_streams WHERE handled_ordinal = 0 AND checkpoint_h = 0")
+            .await,
+        1
+    );
+    store.release.notify_one();
+    actor.ask(GetPinList).await.expect("actor recovered");
+    plan_events(&mut submission, &deps, retry_events).await;
+    assert_eq!(submission.plan.failure, None);
+    if subject {
+        assert!(submission
+            .plan
+            .intents
+            .iter()
+            .any(|intent| matches!(intent, IngressEffectIntent::RoomSubjectMutation { .. })));
+    } else {
+        assert!(submission
+            .plan
+            .intents
+            .iter()
+            .any(|intent| matches!(intent, IngressEffectIntent::SystemMessageArchive { .. })));
+        assert!(submission
+            .plan
+            .intents
+            .iter()
+            .any(|intent| matches!(intent, IngressEffectIntent::RouteMucSystemBroadcast { .. })));
+    }
+    let decision = commit_submission(&fixture.uow, &submission, 3)
+        .await
+        .expect("healthy retry commits");
+    assert!(decision.class.advances());
+    assert_eq!(fixture.count("ingress_origin_aliases").await, 1);
+    assert_eq!(
+        fixture
+            .count("ingress_sm_streams WHERE handled_ordinal = 1 AND checkpoint_h = 1")
+            .await,
+        1
+    );
+    actor.kill();
+    rooms.kill();
+    drop(mam);
+    fixture.close().await;
+}
+
+#[tokio::test]
+async fn pin_secondary_snapshot_failure_nonadvancing_retry_sqlite() {
+    secondary_room_snapshot_failure(IngressFixture::sqlite().await, false, false).await;
+}
+#[tokio::test]
+async fn pin_secondary_snapshot_failure_nonadvancing_retry_postgres() {
+    if let Some(fixture) = IngressFixture::postgres("pin_secondary_snapshot").await {
+        secondary_room_snapshot_failure(fixture, false, false).await;
+    }
+}
+#[tokio::test]
+async fn unpin_secondary_snapshot_failure_nonadvancing_retry_sqlite() {
+    secondary_room_snapshot_failure(IngressFixture::sqlite().await, false, true).await;
+}
+#[tokio::test]
+async fn unpin_secondary_snapshot_failure_nonadvancing_retry_postgres() {
+    if let Some(fixture) = IngressFixture::postgres("unpin_secondary_snapshot").await {
+        secondary_room_snapshot_failure(fixture, false, true).await;
+    }
+}
+#[tokio::test]
+async fn subject_snapshot_failure_nonadvancing_retry_sqlite() {
+    secondary_room_snapshot_failure(IngressFixture::sqlite().await, true, false).await;
+}
+#[tokio::test]
+async fn subject_snapshot_failure_nonadvancing_retry_postgres() {
+    if let Some(fixture) = IngressFixture::postgres("subject_snapshot").await {
+        secondary_room_snapshot_failure(fixture, true, false).await;
+    }
+}

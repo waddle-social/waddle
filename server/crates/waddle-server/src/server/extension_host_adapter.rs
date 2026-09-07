@@ -277,6 +277,7 @@ impl ExtensionHostAdapter {
             ordered_relay_origin: None,
             sfu: self.state.deps.protocol.sfu.as_deref(),
             ingress_effect_capture: None,
+            direct_route_identity: None,
         }
     }
 

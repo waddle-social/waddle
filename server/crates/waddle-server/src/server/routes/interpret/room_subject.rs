@@ -75,6 +75,8 @@ pub(super) async fn persist_room_subject_event(
                 error = ?error,
                 "PersistRoomSubject: room registry lookup failed; rejecting subject change"
             );
+            deps.effects
+                .fail_plan(effects::PlanFailure::RoomSnapshotUnavailable);
             return retryable_subject_bounce(
                 &message,
                 &room,
@@ -104,6 +106,8 @@ pub(super) async fn persist_room_subject_event(
                 error = ?error,
                 "PersistRoomSubject: exact actor snapshot failed; rejecting subject change"
             );
+            deps.effects
+                .fail_plan(effects::PlanFailure::RoomSnapshotUnavailable);
             return retryable_subject_bounce(
                 &message,
                 &room,

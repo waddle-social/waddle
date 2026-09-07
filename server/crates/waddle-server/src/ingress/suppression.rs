@@ -215,6 +215,7 @@ mod tests {
                 reflection.to = Some(recipient.clone().into());
                 sink.record(PlannedEffect::new(Effect::External(
                     ExternalEffect::Delivery(ExternalDeliveryEffect::RouteToPeer {
+                        route_identity: None,
                         jid: recipient,
                         stanza: Box::new(Stanza::Message(reflection)),
                         kind: PeerDeliveryKind::RegistryFrame,
@@ -356,6 +357,7 @@ mod tests {
         incoming.from = Some(sender.clone().into());
         let effects = [sender.clone(), peer].into_iter().map(|recipient| {
             PlannedEffect::new(Effect::External(ExternalEffect::Delivery(ExternalDeliveryEffect::RouteToPeer {
+                route_identity: None,
                 jid: recipient.clone(), stanza: Box::new(Stanza::Message(Message::new(Some(recipient.into())))),
                 kind: crate::server::routes::interpret::effects::delivery::PeerDeliveryKind::RegistryFrame,
                 call_setup: None,

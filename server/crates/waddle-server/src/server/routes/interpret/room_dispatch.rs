@@ -265,6 +265,8 @@ pub(super) async fn dispatch_to_room(
                 error = ?error,
                 "DispatchToRoom: room registry lookup failed; bouncing internal-server-error"
             );
+            deps.effects
+                .fail_plan(super::effects::PlanFailure::RoomSnapshotUnavailable);
             push_sender_error_reply(
                 deps,
                 &mut outcome,
@@ -292,6 +294,8 @@ pub(super) async fn dispatch_to_room(
                 error = ?error,
                 "DispatchToRoom: GetRoomSnapshot failed; bouncing internal-server-error"
             );
+            deps.effects
+                .fail_plan(super::effects::PlanFailure::RoomSnapshotUnavailable);
             push_sender_error_reply(
                 deps,
                 &mut outcome,
@@ -968,10 +972,20 @@ async fn plan_remote_room(
         waddle_xmpp::ownership::EntityType::RoomActor,
         room.to_string(),
     );
-    let claim = match store.current_claim(&entity).await {
+    use super::effects::PlanFailure;
+    let claim = store
+        .current_claim(&entity)
+        .await
+        .map_err(|_| PlanFailure::OwnershipLookup)
+        .and_then(|claim| match claim {
+            Some(claim) if !claim.owner_lease_fresh => Err(PlanFailure::RoomClaimStale),
+            claim => Ok(claim),
+        });
+    let claim = match claim {
         Ok(None) => return false,
-        Ok(Some(claim)) if claim.owner_lease_fresh => claim,
-        Ok(Some(_)) | Err(_) => {
+        Ok(Some(claim)) => claim,
+        Err(failure) => {
+            deps.effects.fail_plan(failure);
             push_sender_error_reply(
                 deps,
                 outcome,
@@ -1020,3 +1034,7 @@ async fn plan_remote_room(
 #[cfg(test)]
 #[path = "room_plan_tests.rs"]
 mod plan_tests;
+
+#[cfg(test)]
+#[path = "room_dispatch_failure_tests.rs"]
+mod failure_tests;

@@ -784,6 +784,7 @@ mod tests {
     #[test]
     fn partial_detached_success_is_not_a_complete_receipt() {
         let effect = ExternalEffect::Delivery(ExternalDeliveryEffect::QueueDetached {
+            route_identity: None,
             call_setup: None,
             bare: "peer@example.com".parse().expect("bare"),
             resources: vec![
@@ -836,3 +837,7 @@ mod observer_tests;
 #[cfg(test)]
 #[path = "execute_inbox_offline_tests.rs"]
 mod inbox_offline_tests;
+
+#[cfg(test)]
+#[path = "execute_direct_receipt_tests.rs"]
+mod direct_receipt_tests;

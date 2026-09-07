@@ -24,18 +24,21 @@ pub enum ExternalDeliveryEffect {
         jti: waddle_sfu::Jti,
     },
     RouteToPeer {
+        route_identity: Option<waddle_xmpp::ingress::EffectMessageIdentity>,
         jid: FullJid,
         stanza: Box<Stanza>,
         kind: PeerDeliveryKind,
         call_setup: Option<PendingCallSetupRoute>,
     },
     QueueDetached {
+        route_identity: Option<waddle_xmpp::ingress::EffectMessageIdentity>,
         call_setup: Option<PendingCallSetupRoute>,
         bare: BareJid,
         resources: Vec<FullJid>,
         stanza: Box<Stanza>,
     },
     RelayFullJid {
+        route_identity: Option<waddle_xmpp::ingress::EffectMessageIdentity>,
         origin: Option<OrderedRelayRouteOrigin>,
         target: FullJid,
         stanza: Box<Stanza>,

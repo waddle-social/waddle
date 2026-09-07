@@ -100,9 +100,13 @@ pub enum RoomExecutionPath {
     },
 }
 
-/// A required Phase-A read failed; this plan cannot be accepted.
+/// A required Phase-A read or authority check failed; this plan cannot be accepted.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, thiserror::Error)]
 pub enum PlanFailure {
+    #[error("ownership lookup infrastructure is unavailable")]
+    OwnershipLookup,
+    #[error("room ownership claim is stale")]
+    RoomClaimStale,
     #[error("preview references could not be read")]
     PreviewReferenceRead,
     #[error("rich target lookup infrastructure is unavailable")]

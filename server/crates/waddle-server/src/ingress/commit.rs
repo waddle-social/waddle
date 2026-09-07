@@ -79,7 +79,10 @@ pub fn classify_failure(error: &IngressUowError) -> IngressDecisionClass {
             IngressDecisionClass::Timeout
         }
         IngressUowError::PrincipalAssertionFailed => IngressDecisionClass::PrincipalMissing,
-        IngressUowError::RoomGenerationStale => IngressDecisionClass::RoomGenerationStale,
+        IngressUowError::RoomGenerationStale
+        | IngressUowError::Plan(
+            crate::server::routes::interpret::effects::PlanFailure::RoomClaimStale,
+        ) => IngressDecisionClass::RoomGenerationStale,
         IngressUowError::IngressFrontierStale => IngressDecisionClass::FrontierStale,
         IngressUowError::AmbiguousCommit => IngressDecisionClass::AmbiguousCommit,
         IngressUowError::EffectIntentConflict => IngressDecisionClass::IntentContradiction,

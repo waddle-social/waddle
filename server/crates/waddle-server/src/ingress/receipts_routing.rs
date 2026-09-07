@@ -174,6 +174,16 @@ fn cover_recipients(
                         | ExternalEffect::QueueOfflineDelivery(route) => {
                             route.route_identity.as_ref() == Some(identity)
                         }
+                        ExternalEffect::Delivery(
+                            ExternalDeliveryEffect::RouteToPeer { route_identity, .. }
+                            | ExternalDeliveryEffect::RelayFullJid { route_identity, .. }
+                            | ExternalDeliveryEffect::QueueDetached { route_identity, .. },
+                        ) => match identity {
+                            EffectMessageIdentity::CaptureOrdinal(_) => {
+                                route_identity.as_ref() == Some(identity)
+                            }
+                            _ => message_identity(message, identity),
+                        },
                         _ => message_identity(message, identity),
                     })
                     .map(|_| index)
@@ -313,6 +323,31 @@ mod tests {
     use waddle_xmpp_core::xep0359::{add_stanza_id, StanzaId};
 
     #[test]
+    fn direct_receipts_distinguish_captures_to_the_same_resource() {
+        let peer: FullJid = "peer@example.com/phone".parse().expect("peer");
+        let first = EffectMessageIdentity::capture_ordinal(1);
+        let second = EffectMessageIdentity::capture_ordinal(2);
+        let delivery = |identity| {
+            ExternalEffect::Delivery(ExternalDeliveryEffect::RouteToPeer {
+            route_identity: Some(identity),
+            jid: peer.clone(),
+            stanza: Box::new(Stanza::Message(Message::new(Some(peer.clone().into())))),
+            kind: crate::server::routes::interpret::effects::delivery::PeerDeliveryKind::PeerStanza,
+            call_setup: None,
+        })
+        };
+        let intent = IngressEffectIntent::RouteDirect {
+            recipient: peer.to_bare(),
+            fanout: vec![peer.clone()],
+            route_identity: second.clone(),
+        };
+        assert_eq!(
+            route_receipts(&[delivery(first), delivery(second)], &intent),
+            Some(vec![1])
+        );
+    }
+
+    #[test]
     fn groupchat_receipt_requires_every_occupants_exact_room_stamp() {
         let room: BareJid = "room@muc.example.com".parse().expect("room");
         let sender: FullJid = "sender@example.com/phone".parse().expect("sender");
@@ -330,6 +365,7 @@ mod tests {
             message.type_ = MessageType::Groupchat;
             add_stanza_id(&mut message, stamp);
             ExternalEffect::Delivery(ExternalDeliveryEffect::RouteToPeer {
+                route_identity: None,
                 jid: recipient.clone(),
                 stanza: Box::new(Stanza::Message(message)),
                 kind: crate::server::routes::interpret::effects::delivery::PeerDeliveryKind::PeerStanza,

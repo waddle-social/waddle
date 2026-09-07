@@ -100,6 +100,8 @@ pub enum TimerCommand {
 /// churn small.
 #[derive(Clone)]
 pub struct Deps<'a> {
+    /// Identity scoped to the current direct-routing invocation.
+    pub direct_route_identity: Option<waddle_xmpp::ingress::EffectMessageIdentity>,
     pub effects: &'a dyn super::effects::EffectSink,
     pub connection_registry: &'a ConnectionRegistry,
     /// Actor-backed per-user registry (ADR-0017 Phase 1). Threaded so bare-JID
@@ -241,6 +243,7 @@ impl<'a> Deps<'a> {
             ordered_relay_origin: None,
             sfu: None,
             ingress_effect_capture: None,
+            direct_route_identity: None,
         }
     }
 
@@ -279,6 +282,7 @@ impl<'a> Deps<'a> {
             ordered_relay_origin: None,
             sfu: None,
             ingress_effect_capture: None,
+            direct_route_identity: None,
         }
     }
 
@@ -309,6 +313,7 @@ impl<'a> Deps<'a> {
             ordered_relay_origin: None,
             sfu: None,
             ingress_effect_capture: None,
+            direct_route_identity: None,
         }
     }
 
@@ -337,6 +342,7 @@ impl<'a> Deps<'a> {
             ordered_relay_origin: None,
             sfu: None,
             ingress_effect_capture: None,
+            direct_route_identity: None,
         }
     }
 }

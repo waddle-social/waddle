@@ -307,10 +307,29 @@ impl Replacements {
     fn delivery(&self, effect: &mut ExternalDeliveryEffect) {
         match effect {
             ExternalDeliveryEffect::UndeliverableBounce { reply } => self.stanza(reply),
-            ExternalDeliveryEffect::RouteToPeer { stanza, .. }
-            | ExternalDeliveryEffect::QueueDetached { stanza, .. }
-            | ExternalDeliveryEffect::RelayFullJid { stanza, .. }
-            | ExternalDeliveryEffect::RelayBareJid { stanza, .. } => self.stanza(stanza),
+            ExternalDeliveryEffect::RouteToPeer {
+                stanza,
+                route_identity,
+                ..
+            }
+            | ExternalDeliveryEffect::QueueDetached {
+                stanza,
+                route_identity,
+                ..
+            }
+            | ExternalDeliveryEffect::RelayFullJid {
+                stanza,
+                route_identity,
+                ..
+            } => {
+                self.stanza(stanza);
+                if let Some(waddle_xmpp::ingress::EffectMessageIdentity::StanzaId(id)) =
+                    route_identity
+                {
+                    self.id(id);
+                }
+            }
+            ExternalDeliveryEffect::RelayBareJid { stanza, .. } => self.stanza(stanza),
             ExternalDeliveryEffect::RelayCarbons { message, .. }
             | ExternalDeliveryEffect::Carbons { message, .. } => self.message(message),
             ExternalDeliveryEffect::QueueOfflineDelivery {

@@ -532,6 +532,7 @@ async fn offline_delivery_boundary_only_confirms_written_steps() {
         ordered_relay_origin: None,
         sfu: None,
         ingress_effect_capture: Some(capture.clone()),
+        direct_route_identity: None,
     };
     let recipient: jid::BareJid = "bob@example.com".parse().expect("recipient");
     let archive_jid: jid::BareJid = "bob@example.com".parse().expect("archive");
@@ -595,6 +596,7 @@ async fn transient_offline_delivery_records_pending_delivery_intent() {
         ordered_relay_origin: None,
         sfu: None,
         ingress_effect_capture: Some(capture.clone()),
+        direct_route_identity: None,
     };
     let recipient: jid::BareJid = "bob@example.com".parse().expect("recipient");
     let transient = chat_msg(

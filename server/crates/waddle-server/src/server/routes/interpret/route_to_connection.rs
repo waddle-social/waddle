@@ -102,7 +102,10 @@ fn capture_route_direct_intent(
     deps.capture_intent(IngressEffectIntent::RouteDirect {
         recipient: recipient.clone(),
         fanout,
-        route_identity: capture.next_route_identity(),
+        route_identity: deps
+            .direct_route_identity
+            .clone()
+            .unwrap_or_else(|| capture.next_route_identity()),
     });
 }
 
@@ -133,6 +136,12 @@ pub(crate) async fn route_to_connection(
     recursion_depth: u8,
     call_setup: Option<PendingCallSetupRoute>,
 ) -> Vec<Stanza> {
+    let mut scoped_deps = deps.clone();
+    scoped_deps.direct_route_identity = deps
+        .ingress_effect_capture
+        .as_ref()
+        .map(|capture| capture.next_route_identity());
+    let deps = &scoped_deps;
     // #229 PR12 cutover: the destination's main loop is
     // now wired (PR11) to dispatch on `DeliveryKind` and
     // run the recipient-pass pipeline for `PeerStanza`
@@ -1055,6 +1064,7 @@ pub(super) fn deliver_full_jid_via_ordered_relay<'a>(
                 plan::record(
                     deps,
                     plan::ExternalDeliveryEffect::RelayFullJid {
+                        route_identity: deps.direct_route_identity.clone(),
                         origin: deps.ordered_relay_origin.clone(),
                         target: target.clone(),
                         stanza: Box::new(stanza.clone()),
@@ -1106,6 +1116,7 @@ pub(super) async fn deliver_peer_to_full_with_registered_remote(
         plan::record(
             deps,
             plan::ExternalDeliveryEffect::RouteToPeer {
+                route_identity: deps.direct_route_identity.clone(),
                 jid: target.clone(),
                 stanza: Box::new(stanza.clone()),
                 kind: plan::PeerDeliveryKind::PeerStanza,
@@ -1143,6 +1154,7 @@ pub(super) async fn deliver_direct_to_full_with_registered_remote(
         plan::record(
             deps,
             plan::ExternalDeliveryEffect::RouteToPeer {
+                route_identity: deps.direct_route_identity.clone(),
                 jid: target.clone(),
                 stanza: Box::new(stanza.clone()),
                 kind: plan::PeerDeliveryKind::DirectFrame,

@@ -204,6 +204,7 @@ mod tests {
         let mut message = Message::new(Some(recipient.clone().into()));
         waddle_xmpp_core::xep0359::add_origin_id(&mut message, "offered-origin");
         ExternalEffect::Delivery(crate::server::routes::interpret::effects::delivery::ExternalDeliveryEffect::RouteToPeer {
+            route_identity: None,
             jid: recipient.clone(), stanza: Box::new(Stanza::Message(message)),
             kind: crate::server::routes::interpret::effects::delivery::PeerDeliveryKind::PeerStanza,
             call_setup: None,

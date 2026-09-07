@@ -387,3 +387,7 @@ mod tests {
 #[cfg(test)]
 #[path = "rich_target_plan_tests.rs"]
 mod rich_target_plan_tests;
+
+#[cfg(all(test, feature = "clustering"))]
+#[path = "ownership_plan_tests.rs"]
+pub(crate) mod ownership_plan_tests;

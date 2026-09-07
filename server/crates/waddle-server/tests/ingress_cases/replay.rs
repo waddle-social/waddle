@@ -97,6 +97,7 @@ async fn archive_free_invitation_retry(fixture: IngressFixture) {
         .plan
         .push(PlannedEffect::new(Effect::External(
             ExternalEffect::Delivery(ExternalDeliveryEffect::RouteToPeer {
+                route_identity: None,
                 jid: recipient.clone(),
                 stanza: Box::new(waddle_xmpp::Stanza::Message(
                     submission.plan.sanitized_message.clone(),

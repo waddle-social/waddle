@@ -23,6 +23,7 @@ pub(crate) async fn execute(effect: ExternalDeliveryEffect, deps: &Deps<'_>) -> 
             EffectOutcome::Completed
         }
         ExternalDeliveryEffect::RouteToPeer {
+            route_identity: _,
             jid,
             stanza,
             kind,
@@ -81,6 +82,7 @@ pub(crate) async fn execute(effect: ExternalDeliveryEffect, deps: &Deps<'_>) -> 
             EffectOutcome::Delivery(outcome)
         }
         ExternalDeliveryEffect::RelayFullJid {
+            route_identity: _,
             origin,
             target,
             stanza,

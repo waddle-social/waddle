@@ -375,6 +375,7 @@ async fn fanout_dm_pin_event(
     for resource in deliverable_resources {
         let mut effect = PlannedEffect::new(Effect::External(ExternalEffect::Delivery(
             ExternalDeliveryEffect::RouteToPeer {
+                route_identity: None,
                 jid: resource.clone(),
                 stanza: Box::new(Stanza::Message(event.clone())),
                 kind: PeerDeliveryKind::RegistryFrame,

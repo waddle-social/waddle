@@ -12,6 +12,7 @@ pub(super) fn queue_detached(deps: &Deps<'_>, resources: Vec<FullJid>, stanza: &
     record(
         deps,
         ExternalDeliveryEffect::QueueDetached {
+            route_identity: deps.direct_route_identity.clone(),
             call_setup: None,
             bare: first.to_bare(),
             resources,
@@ -40,6 +41,7 @@ pub(super) async fn deliver_peer_to_live(
     record(
         deps,
         ExternalDeliveryEffect::RouteToPeer {
+            route_identity: deps.direct_route_identity.clone(),
             jid: target.clone(),
             stanza: Box::new(stanza.clone()),
             kind: PeerDeliveryKind::PeerStanza,
@@ -79,8 +81,15 @@ pub(in crate::server::routes::interpret) async fn remote_owner(
             waddle_xmpp::ownership::EntityType::UserActor,
             target.to_string(),
         );
-        matches!(store.current_claim(&entity).await, Ok(Some(claim))
-            if claim.owner_lease_fresh && claim.owner != identity.current())
+        match store.current_claim(&entity).await {
+            Ok(Some(claim)) => claim.owner_lease_fresh && claim.owner != identity.current(),
+            Ok(None) => false,
+            Err(_) => {
+                deps.effects
+                    .fail_plan(super::super::effects::PlanFailure::OwnershipLookup);
+                false
+            }
+        }
     }
     #[cfg(not(feature = "clustering"))]
     {
@@ -135,6 +144,7 @@ pub(super) async fn deliver_full(
         record(
             deps,
             ExternalDeliveryEffect::RelayFullJid {
+                route_identity: deps.direct_route_identity.clone(),
                 origin: deps.ordered_relay_origin.clone(),
                 target: target.clone(),
                 stanza: Box::new(stanza.clone()),
@@ -153,6 +163,7 @@ pub(super) async fn deliver_full(
         record(
             deps,
             ExternalDeliveryEffect::RouteToPeer {
+                route_identity: deps.direct_route_identity.clone(),
                 jid: target.clone(),
                 stanza: Box::new(stanza.clone()),
                 kind: PeerDeliveryKind::PeerStanza,
@@ -172,6 +183,7 @@ pub(super) async fn deliver_full(
         record(
             deps,
             ExternalDeliveryEffect::QueueDetached {
+                route_identity: deps.direct_route_identity.clone(),
                 bare: target.to_bare(),
                 resources: vec![target.clone()],
                 stanza: Box::new(stanza.clone()),

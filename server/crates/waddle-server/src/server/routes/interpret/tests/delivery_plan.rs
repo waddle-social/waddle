@@ -114,6 +114,7 @@ async fn relay_executor_reports_unavailable_without_local_recipient_fallback() {
     let target: jid::FullJid = "bob@example.com/phone".parse().expect("recipient");
     for effect in [
         ExternalDeliveryEffect::RelayFullJid {
+            route_identity: None,
             origin: None,
             target: target.clone(),
             stanza: Box::new(reflection(&target)),

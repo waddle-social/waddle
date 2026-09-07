@@ -382,6 +382,7 @@ async fn deliver_pm_to_session(
     };
     let mut effect = PlannedEffect::new(Effect::External(ExternalEffect::Delivery(
         ExternalDeliveryEffect::RouteToPeer {
+            route_identity: None,
             jid: target.clone(),
             stanza: Box::new(stanza.clone()),
             kind: PeerDeliveryKind::DirectFrame,

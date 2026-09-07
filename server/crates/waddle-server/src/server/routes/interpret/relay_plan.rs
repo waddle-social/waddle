@@ -79,6 +79,7 @@ mod tests {
             plan: vec![
                 PlannedEffect::new(Effect::External(ExternalEffect::Delivery(
                     ExternalDeliveryEffect::RelayFullJid {
+                        route_identity: None,
                         origin: None,
                         target: sender.clone(),
                         stanza: Box::new(Stanza::Message(reflected.clone())),
@@ -87,6 +88,7 @@ mod tests {
                 ))),
                 PlannedEffect::new(Effect::External(ExternalEffect::Delivery(
                     ExternalDeliveryEffect::RelayFullJid {
+                        route_identity: None,
                         origin: None,
                         target: peer.clone(),
                         stanza: Box::new(Stanza::Message(peer_copy)),

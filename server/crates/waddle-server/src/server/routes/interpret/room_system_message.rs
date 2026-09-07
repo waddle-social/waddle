@@ -51,6 +51,8 @@ pub(super) async fn broadcast_room_system_message_event(
                 error = ?error,
                 "BroadcastRoomSystemMessage: room registry lookup failed; dropping"
             );
+            deps.effects
+                .fail_plan(effects::PlanFailure::RoomSnapshotUnavailable);
             return None;
         }
     };
@@ -85,6 +87,8 @@ pub(super) async fn broadcast_room_system_message_event(
                 error = ?error,
                 "BroadcastRoomSystemMessage: GetRoomSnapshot failed; dropping"
             );
+            deps.effects
+                .fail_plan(effects::PlanFailure::RoomSnapshotUnavailable);
             return None;
         }
     };

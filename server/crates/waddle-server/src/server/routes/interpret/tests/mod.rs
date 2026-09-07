@@ -226,6 +226,7 @@ fn offline_pass_deps<'a>(
         ordered_relay_origin: None,
         sfu: None,
         ingress_effect_capture: None,
+        direct_route_identity: None,
         effects: &crate::server::routes::interpret::effects::ImmediateSink,
     }
 }
