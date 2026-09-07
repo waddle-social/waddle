@@ -486,3 +486,143 @@ async fn sent_carbon_is_delivered_after_authority_commit() {
         .any(|frame| frame.contains("urn:xmpp:carbons:2") && frame.contains("<sent")));
     fixture.close().await;
 }
+
+pub mod ingress_support;
+
+async fn frozen_carbon_destinations_retry(fixture: ingress_support::IngressFixture) {
+    use std::time::Duration;
+    use waddle_server::ingress::{
+        commit::commit_submission,
+        effects::{delivery::ExternalDeliveryEffect, Effect},
+        execute::{execute_effects, terminalize_if_complete},
+        Deps, ExternalEffect, ExternalOutcome, ImmediateSink, PlannedEffect,
+    };
+    use waddle_xmpp::{
+        ingress::IngressEffectIntent, protocol::CarbonKind, registry::ConnectionRegistry, Stanza,
+    };
+
+    let registry = ConnectionRegistry::new();
+    let mut submission = fixture.submission(Some("xep0280-partial-carbon"), "carbon fanout");
+    let source = submission.sender.clone();
+    let owner = source.to_bare();
+    let first = owner.with_resource_str("a-first").expect("first");
+    let middle = owner.with_resource_str("b-middle").expect("middle");
+    let last = owner.with_resource_str("c-last").expect("last");
+    let (first_tx, mut first_rx) = tokio::sync::mpsc::channel(8);
+    let (middle_tx, middle_rx) = tokio::sync::mpsc::channel(8);
+    let (last_tx, mut last_rx) = tokio::sync::mpsc::channel(8);
+    registry.register_with_carbons(first.clone(), first_tx, true);
+    registry.register_with_carbons(middle.clone(), middle_tx, true);
+    registry.register_with_carbons(last.clone(), last_tx, true);
+    for recipient in [&first, &middle, &last] {
+        submission.plan.intents.push(IngressEffectIntent::Carbons {
+            carbon_recipients: vec![recipient.clone()],
+            excluded_source: source.clone(),
+            kind: CarbonKind::Sent,
+        });
+        submission
+            .plan
+            .plan
+            .push(PlannedEffect::new(Effect::External(
+                ExternalEffect::Delivery(ExternalDeliveryEffect::Carbons {
+                    owner: owner.clone(),
+                    recipient: recipient.clone(),
+                    exclude: vec![source.clone()],
+                    message: Box::new(submission.plan.sanitized_message.clone()),
+                    kind: CarbonKind::Sent,
+                }),
+            )));
+    }
+    let decision = commit_submission(&fixture.uow, &submission, 1)
+        .await
+        .expect("commit carbons");
+    drop(middle_rx);
+    let deps = Deps::new(&registry, "example.com");
+    let report = execute_effects(
+        &fixture.uow,
+        &fixture.db,
+        &decision,
+        &ImmediateSink,
+        &deps,
+        Duration::from_secs(5),
+    )
+    .await;
+    assert_eq!(
+        report
+            .outcomes
+            .iter()
+            .filter(|(_, outcome)| *outcome == ExternalOutcome::Done)
+            .count(),
+        2
+    );
+    assert_eq!(
+        report
+            .outcomes
+            .iter()
+            .filter(|(_, outcome)| *outcome == ExternalOutcome::Failed)
+            .count(),
+        1
+    );
+    assert!(report.receipt_failures.is_empty());
+    let key = decision.message_key.expect("canonical key");
+    assert!(!terminalize_if_complete(&fixture.uow, key)
+        .await
+        .expect("partial receipts"));
+    for (recipient, receiver) in [(first, &mut first_rx), (last, &mut last_rx)] {
+        let delivered = receiver.try_recv().expect("healthy carbon destination");
+        let Stanza::Message(copy) = delivered.stanza else {
+            panic!("carbon must be a message")
+        };
+        assert_eq!(copy.from, Some(owner.clone().into()));
+        assert_eq!(copy.to, Some(recipient.into()));
+        assert!(copy
+            .payloads
+            .iter()
+            .any(|payload| xmpp_parsers::carbons::Sent::try_from(payload.clone()).is_ok()));
+    }
+    let (retry_tx, mut retry_rx) = tokio::sync::mpsc::channel(8);
+    registry.register_with_carbons(middle, retry_tx, true);
+    let retry = commit_submission(&fixture.uow, &submission, 1)
+        .await
+        .expect("retry carbons");
+    let report = execute_effects(
+        &fixture.uow,
+        &fixture.db,
+        &retry,
+        &ImmediateSink,
+        &deps,
+        Duration::from_secs(5),
+    )
+    .await;
+    assert!(report
+        .outcomes
+        .iter()
+        .all(|(_, outcome)| *outcome == ExternalOutcome::Done));
+    assert!(report.receipt_failures.is_empty());
+    assert!(retry_rx.try_recv().is_ok());
+    assert!(
+        first_rx.try_recv().is_err(),
+        "confirmed first destination is not repeated"
+    );
+    assert!(
+        last_rx.try_recv().is_err(),
+        "confirmed last destination is not repeated"
+    );
+    assert!(terminalize_if_complete(&fixture.uow, key)
+        .await
+        .expect("complete receipts"));
+    fixture.close().await;
+}
+
+#[tokio::test]
+async fn sqlite_xep0280_closed_resource_preserves_destinations_and_retries_missing_only() {
+    frozen_carbon_destinations_retry(ingress_support::IngressFixture::sqlite().await).await;
+}
+
+#[tokio::test]
+async fn postgres_xep0280_closed_resource_preserves_destinations_and_retries_missing_only() {
+    if let Some(fixture) = ingress_support::IngressFixture::postgres("xep0280_partial_carbon").await
+    {
+        frozen_carbon_destinations_retry(fixture).await;
+    }
+}

@@ -18,6 +18,7 @@ async fn local_carbons_retry_on_remote_owner(fixture: IngressFixture) {
     submission.plan.plan = vec![PlannedEffect::new(Effect::External(
         ExternalEffect::Delivery(ExternalDeliveryEffect::Carbons {
             owner: owner.clone(),
+            recipient: owner.with_resource_str("laptop").expect("sibling"),
             exclude: exclude.clone(),
             message: Box::new(submission.plan.sanitized_message.clone()),
             kind: CarbonKind::Sent,

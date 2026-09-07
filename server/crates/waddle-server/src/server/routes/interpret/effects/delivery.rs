@@ -58,6 +58,7 @@ pub enum ExternalDeliveryEffect {
     },
     Carbons {
         owner: BareJid,
+        recipient: FullJid,
         exclude: Vec<FullJid>,
         message: Box<Message>,
         kind: CarbonKind,
@@ -115,8 +116,7 @@ pub(crate) fn record(deps: &super::super::Deps<'_>, effect: ExternalDeliveryEffe
         );
     }
     let suppression = match &effect {
-        ExternalDeliveryEffect::Carbons { .. }
-        | ExternalDeliveryEffect::QueueOfflineDelivery { .. }
+        ExternalDeliveryEffect::QueueOfflineDelivery { .. }
         | ExternalDeliveryEffect::QueueDetached { .. } => super::PlanSuppressionPolicy::SenderOnly,
         _ => super::PlanSuppressionPolicy::Always,
     };

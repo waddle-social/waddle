@@ -37,6 +37,19 @@ pub(super) fn route_receipts(
         return Some(indices);
     }
     match intent {
+        IngressEffectIntent::Carbons { carbon_recipients, excluded_source, kind } => {
+            let mut indices = Vec::new();
+            for recipient in carbon_recipients {
+                let index = external.iter().position(|effect| matches!(effect,
+                    ExternalEffect::Delivery(ExternalDeliveryEffect::Carbons {
+                        recipient: actual, owner, exclude, kind: actual_kind, ..
+                    }) if actual == recipient && owner == &excluded_source.to_bare()
+                        && exclude.iter().find(|source| &source.to_bare() == owner) == Some(excluded_source) && kind == actual_kind));
+                let Some(index) = index else { return Some(Vec::new()); };
+                indices.push(index);
+            }
+            Some(indices)
+        }
         IngressEffectIntent::RelayCarbons { owner, exclude, kind } => Some(external.iter().enumerate().filter_map(|(index, effect)| {
             matches!(effect, ExternalEffect::Delivery(ExternalDeliveryEffect::RelayCarbons { owner: actual_owner, exclude: actual_exclude, kind: actual_kind, .. }) if owner == actual_owner && exclude == actual_exclude && kind == actual_kind).then_some(index)
         }).collect()),

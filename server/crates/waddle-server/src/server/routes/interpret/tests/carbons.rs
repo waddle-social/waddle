@@ -401,3 +401,42 @@ async fn self_dm_and_sent_carbon_to_same_detached_stream_keep_distinct_append_id
 }
 
 // -----------------------------------------------------------------
+
+#[tokio::test]
+async fn xep_0280_closed_middle_resource_preserves_other_carbon_deliveries() {
+    use crate::server::routes::interpret::carbons::{
+        send_carbons_to_registry_with_capture, CarbonFanoutFailure, CarbonRegistryDeps,
+    };
+    let registry = ConnectionRegistry::new();
+    let owner: jid::BareJid = "alice@example.com".parse().expect("owner");
+    let source = owner.with_resource_str("source").expect("source");
+    let first = owner.with_resource_str("a-first").expect("first");
+    let middle = owner.with_resource_str("b-middle").expect("middle");
+    let last = owner.with_resource_str("c-last").expect("last");
+    let (first_tx, mut first_rx) = tokio::sync::mpsc::channel(8);
+    let (middle_tx, middle_rx) = tokio::sync::mpsc::channel(8);
+    let (last_tx, mut last_rx) = tokio::sync::mpsc::channel(8);
+    registry.register_with_carbons(first.clone(), first_tx, true);
+    registry.register_with_carbons(middle, middle_tx, true);
+    registry.register_with_carbons(last.clone(), last_tx, true);
+    drop(middle_rx);
+    let message = chat_msg(source.clone().into(), jid("bob@example.com"), "hi");
+    let incomplete = send_carbons_to_registry_with_capture(
+        &registry,
+        CarbonRegistryDeps {
+            ingress_effect_capture: None,
+            sm_session_registry: None,
+            web_socket_state: None,
+        },
+        owner,
+        Box::new(message),
+        CarbonKind::Sent,
+        vec![source],
+    )
+    .await
+    .expect_err("closed resource leaves incomplete fanout");
+    assert_eq!(incomplete.reason, CarbonFanoutFailure::Delivery);
+    assert_eq!(incomplete.completed.carbon_recipients, vec![first, last]);
+    assert_eq!(drain_inbound(&mut first_rx).len(), 1);
+    assert_eq!(drain_inbound(&mut last_rx).len(), 1);
+}

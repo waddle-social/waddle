@@ -184,6 +184,23 @@ fn recorded_match<'a>(
 /// projection, even when its usual duplicate policy allows idempotent replay.
 pub(super) fn external_in_recorded_audience(plan: &IngressPlan, effect: &ExternalEffect) -> bool {
     use waddle_xmpp::ingress::EffectAuthorityKey;
+    if let ExternalEffect::Delivery(
+        crate::server::routes::interpret::effects::delivery::ExternalDeliveryEffect::Carbons {
+            owner,
+            recipient,
+            exclude,
+            kind,
+            ..
+        },
+    ) = effect
+    {
+        return plan.intents.iter().any(|intent| {
+            matches!(intent,
+            IngressEffectIntent::Carbons { carbon_recipients, excluded_source, kind: recorded_kind }
+                if carbon_recipients.contains(recipient) && owner == &excluded_source.to_bare()
+                    && exclude.iter().find(|source| &source.to_bare() == owner) == Some(excluded_source) && kind == recorded_kind)
+        });
+    }
     if let ExternalEffect::Room(ExternalRoomEffect::ObserveRoomMessage { room, .. }) = effect {
         return plan.intents.iter().any(|intent| matches!(intent, IngressEffectIntent::RoomObserver { room: recorded_room, .. } if room == recorded_room));
     }
@@ -219,6 +236,16 @@ pub(super) fn external_in_recorded_audience(plan: &IngressPlan, effect: &Externa
 
 fn same_mutation_shape(recorded: &IngressEffectIntent, planned: &IngressEffectIntent) -> bool {
     match (recorded, planned) {
+        (
+            IngressEffectIntent::Carbons {
+                carbon_recipients: saved,
+                ..
+            },
+            IngressEffectIntent::Carbons {
+                carbon_recipients: offered,
+                ..
+            },
+        ) => saved == offered,
         (
             IngressEffectIntent::MucInviteLedger { mutation: saved },
             IngressEffectIntent::MucInviteLedger { mutation: offered },

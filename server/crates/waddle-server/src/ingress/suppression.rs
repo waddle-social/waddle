@@ -1,5 +1,4 @@
 //! Pure application of the policies captured before admission.
-use jid::BareJid;
 use waddle_xmpp::{mam::MamTxStoreOutcome, Stanza};
 use xmpp_parsers::message::Message;
 
@@ -14,7 +13,7 @@ use crate::{
 pub fn filter_external_effects(
     plan: &IngressPlan,
     verdict: &ReconcileVerdict,
-    archive_outcomes: &[(BareJid, MamTxStoreOutcome)],
+    archive_outcomes: &[(PlanEffectDependency, MamTxStoreOutcome)],
 ) -> Vec<ExternalEffect> {
     external_effect_indices(plan, verdict, archive_outcomes)
         .into_iter()
@@ -28,7 +27,7 @@ pub fn filter_external_effects(
 pub(crate) fn external_effect_indices(
     plan: &IngressPlan,
     verdict: &ReconcileVerdict,
-    archive_outcomes: &[(BareJid, MamTxStoreOutcome)],
+    archive_outcomes: &[(PlanEffectDependency, MamTxStoreOutcome)],
 ) -> Vec<usize> {
     let duplicate = !matches!(verdict, ReconcileVerdict::FirstCommit);
     plan.plan
@@ -116,26 +115,17 @@ fn sender_delivery(effect: &ExternalEffect, sender: Option<&jid::Jid>) -> bool {
 }
 
 /// Shared by commit-time durable application and post-commit external filtering.
+/// Match the attempted archive dependency: after alias retention, a tombstone
+/// can retain a historical stanza-id different from this attempt's minted id.
 pub(super) fn tombstone_swallowed(
     planned: &PlannedEffect,
-    archive_outcomes: &[(BareJid, MamTxStoreOutcome)],
+    archive_outcomes: &[(PlanEffectDependency, MamTxStoreOutcome)],
 ) -> bool {
     planned.tombstone_suppression == PlanSuppressionPolicy::TombstoneSwallowed
-        && archive_outcomes.iter().any(|(archive, outcome)| {
-            let MamTxStoreOutcome::TombstoneHit(id) = outcome else {
-                return false;
-            };
-            planned.dependencies.is_empty()
-                || planned
-                    .dependencies
-                    .iter()
-                    .any(|dependency| match dependency {
-                        PlanEffectDependency::AfterArchive {
-                            archive: dependency_archive,
-                            minted,
-                        } => dependency_archive == archive && minted == id,
-                        _ => false,
-                    })
+        && archive_outcomes.iter().any(|(attempted_archive, outcome)| {
+            matches!(outcome, MamTxStoreOutcome::TombstoneHit(_))
+                && (planned.dependencies.is_empty()
+                    || planned.dependencies.contains(attempted_archive))
         })
 }
 
@@ -167,6 +157,7 @@ fn subject_rebroadcast(effect: &ExternalEffect) -> bool {
 mod tests {
     use super::*;
     use crate::server::routes::interpret::effects::RoomExecutionPath;
+    use jid::BareJid;
     use waddle_xmpp_core::xep0359::StanzaId;
     use xmpp_parsers::message::{Lang, MessageType};
 
@@ -288,7 +279,10 @@ mod tests {
             };
             let outcomes = if tombstone {
                 vec![(
-                    archive.clone(),
+                    PlanEffectDependency::AfterArchive {
+                        archive: archive.clone(),
+                        minted: StanzaId::new("attempted", archive.clone().into()),
+                    },
                     MamTxStoreOutcome::TombstoneHit(StanzaId::new("id", archive.clone().into())),
                 )]
             } else {
@@ -332,13 +326,22 @@ mod tests {
                 StanzaId::new("other-id", recipient.clone().into()),
                 1,
             ),
-            (recipient, recipient_id, 0),
+            (recipient.clone(), recipient_id, 0),
         ] {
             assert_eq!(
                 filter_external_effects(
                     &plan,
                     &ReconcileVerdict::Consistent,
-                    &[(archive, MamTxStoreOutcome::TombstoneHit(id))],
+                    &[(
+                        PlanEffectDependency::AfterArchive {
+                            archive,
+                            minted: id
+                        },
+                        MamTxStoreOutcome::TombstoneHit(StanzaId::new(
+                            "historical-id",
+                            recipient.clone().into(),
+                        )),
+                    )],
                 )
                 .len(),
                 expected,

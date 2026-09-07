@@ -136,21 +136,16 @@ pub(crate) async fn execute(effect: ExternalDeliveryEffect, deps: &Deps<'_>) -> 
         }
         ExternalDeliveryEffect::Carbons {
             owner,
-            exclude,
+            recipient,
+            exclude: _,
             message,
             kind,
-        } => {
-            super::super::carbons::send_carbons(
-                immediate.connection_registry,
-                &immediate,
-                owner,
-                message,
-                kind,
-                exclude,
+        } => EffectOutcome::Delivery(
+            super::super::carbons::send_carbon_to_resource(
+                &immediate, &owner, &recipient, &message, kind,
             )
-            .await;
-            EffectOutcome::Completed
-        }
+            .await,
+        ),
         ExternalDeliveryEffect::QueueOfflineDelivery {
             prepared_notification,
             row,

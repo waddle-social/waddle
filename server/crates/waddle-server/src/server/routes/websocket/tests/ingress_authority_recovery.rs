@@ -341,6 +341,16 @@ async fn accepted_consistent_repaired_and_divergent_aliases_advance_the_wire_che
 ) {
     use crate::ingress::IngressDecisionClass;
     let mut conn = connection(&state, true).await;
+    // Keep a real non-routing obligation when the RouteDirect intent is removed.
+    // Empty carbon audiences intentionally no longer leave placeholder intents.
+    let sibling: jid::FullJid = "alice@example.com/sibling".parse().expect("sibling");
+    let (carbon_sender, mut carbon_receiver) = tokio::sync::mpsc::channel(8);
+    register_test_connection(&state, &sibling, carbon_sender).await;
+    assert!(state
+        .deps
+        .protocol
+        .connection_registry
+        .set_carbons_enabled(&sibling, true));
     create_test_session(&state, "bob").await;
     let (initial_sender, mut initial_receiver) = tokio::sync::mpsc::channel(8);
     register_test_connection(
@@ -373,6 +383,9 @@ async fn accepted_consistent_repaired_and_divergent_aliases_advance_the_wire_che
     initial_receiver
         .try_recv()
         .expect("first acceptance reaches original recipient");
+    carbon_receiver
+        .try_recv()
+        .expect("first acceptance reaches carbon sibling");
     assert_eq!(
         observed_dispatch(&state, &mut conn, &wire).await,
         IngressDecisionClass::ExistingConsistent
@@ -384,7 +397,7 @@ async fn accepted_consistent_repaired_and_divergent_aliases_advance_the_wire_che
         "XEP-0334 no-store suppresses archive projections"
     );
     // Remove a non-authoritative routing obligation, simulating an omitted projection.
-    // ArchiveAuthoritative remains intact and continues assigning canonical identity.
+    // The sibling's carbon obligation remains recorded during route repair.
     {
         let db = state
             .deps

@@ -1254,7 +1254,7 @@ pub enum IngressEffectKey {
     RouteOccupantPm(FullJid),
     DispatchToRoomRemote(BareJid, RelayTargetIdentity),
     RecipientSmAppend(SmSessionId, RecipientSmAppendIdentity),
-    Carbons(FullJid, CarbonKind),
+    Carbons(FullJid, CarbonKind, Vec<FullJid>),
     RelayCarbons(BareJid, CarbonKind),
     InboxProject(BareJid, String),
     NotificationActivityPreview(BareJid, String),
@@ -1298,8 +1298,23 @@ impl IngressEffectKey {
             Self::RelayCarbons(owner, kind) => {
                 format!("{}|{}", owner, carbon_kind_storage_identity(*kind))
             }
-            Self::Carbons(value, kind) => {
-                format!("{}|{}", value, carbon_kind_storage_identity(*kind))
+            Self::Carbons(value, kind, recipients) => {
+                let source = value.to_string();
+                let audience = recipients
+                    .iter()
+                    .map(|recipient| {
+                        let recipient = recipient.to_string();
+                        format!("{}:{}", recipient.len(), recipient)
+                    })
+                    .collect::<Vec<_>>()
+                    .join("");
+                format!(
+                    "{}:{}|{}|{}",
+                    source.len(),
+                    source,
+                    carbon_kind_storage_identity(*kind),
+                    audience
+                )
             }
             Self::InboxProject(owner, mutation) => format!("{}|{}", owner, mutation),
             Self::NotificationActivityPreview(owner, mutation) => {
@@ -1880,8 +1895,13 @@ impl IngressEffectIntent {
             Self::Carbons {
                 excluded_source,
                 kind,
-                ..
-            } => IngressEffectKey::Carbons(excluded_source.clone(), *kind),
+                carbon_recipients,
+            } => {
+                let mut recipients = carbon_recipients.clone();
+                recipients.sort();
+                recipients.dedup();
+                IngressEffectKey::Carbons(excluded_source.clone(), *kind, recipients)
+            }
             Self::InboxProject { owner, mutation } => {
                 IngressEffectKey::InboxProject(owner.clone(), mutation.storage_identity())
             }
@@ -4326,6 +4346,29 @@ mod tests {
                 .with_text("en", "warning two"),
         };
         assert_ne!(warning_one.semantic_key(), warning_two.semantic_key());
+    }
+
+    #[test]
+    fn carbons_resource_obligations_have_distinct_keys_and_shared_authority() {
+        let intent = |resources: Vec<FullJid>| IngressEffectIntent::Carbons {
+            carbon_recipients: resources,
+            excluded_source: full("romeo@example.test/laptop"),
+            kind: CarbonKind::Sent,
+        };
+        let first = full("romeo@example.test/phone");
+        let second = full("romeo@example.test/tablet");
+        let phone = intent(vec![first.clone()]);
+        let tablet = intent(vec![second.clone()]);
+        assert_ne!(phone.semantic_key(), tablet.semantic_key());
+        assert_ne!(
+            phone.semantic_key().storage_identity(),
+            tablet.semantic_key().storage_identity()
+        );
+        assert_eq!(phone.authority_key(), tablet.authority_key());
+        assert_eq!(
+            intent(vec![first.clone(), second.clone()]).semantic_key(),
+            intent(vec![second, first.clone(), first]).semantic_key(),
+        );
     }
 
     #[test]

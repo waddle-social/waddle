@@ -1052,6 +1052,16 @@ mod tests {
         }
         let (tx, mut rx) = tokio::sync::mpsc::channel(8);
         let _owner = register_test_connection(state.as_ref(), &recipient, tx).await;
+        // A carbon-enabled sibling makes the sender's carbon obligation
+        // non-empty; an empty audience plans no carbon effect at all.
+        let sibling: jid::FullJid = "alice@example.com/phone".parse().expect("sibling");
+        let (sibling_tx, _sibling_rx) = tokio::sync::mpsc::channel(8);
+        let _sibling = register_test_connection(state.as_ref(), &sibling, sibling_tx).await;
+        assert!(state
+            .deps
+            .protocol
+            .connection_registry
+            .set_carbons_enabled(&sibling, true));
         let sink = PlanSink::new();
         let base = crate::server::routes::websocket::interpret_loop::build_interpret_deps(
             state.as_ref(),
@@ -1100,12 +1110,10 @@ mod tests {
             crate::server::routes::interpret::effects::PlanEffectDependency::AfterArchive { archive, .. }
                 if archive == &recipient.to_bare())),
             "private-message delivery waits for its recipient archive");
-        assert!(effects.iter().any(|effect| matches!(
-            effect.effect,
+        assert!(effects.iter().any(|effect| matches!(&effect.effect,
             Effect::External(ExternalEffect::Delivery(
-                ExternalDeliveryEffect::Carbons { .. }
-            ))
-        )));
+                ExternalDeliveryEffect::Carbons { recipient, .. }
+            )) if recipient == &sibling)));
     }
 
     #[tokio::test]

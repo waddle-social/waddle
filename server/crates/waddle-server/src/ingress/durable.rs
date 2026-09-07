@@ -8,17 +8,16 @@ use crate::{
     },
     server::routes::interpret::effects::{
         direct::DurableDirectEffect, room::DurableRoomEffect, AppliedDurableEffects, DurableEffect,
-        DurableOutcome, Effect, ExternalEffect, IngressPlan, ProjectionRef,
+        DurableOutcome, Effect, ExternalEffect, IngressPlan, PlanEffectDependency, ProjectionRef,
     },
 };
-use jid::BareJid;
 use sha2::{Digest, Sha256};
 use waddle_xmpp::{
     ingress::{IngressEffectIntent, MessageKey},
     mam::{ArchiveExpectation, MamTxStoreOutcome},
 };
 pub(super) struct AppliedDurable {
-    pub archives: Vec<(BareJid, MamTxStoreOutcome)>,
+    pub archives: Vec<(PlanEffectDependency, MamTxStoreOutcome)>,
     pub outcomes: AppliedDurableEffects,
     pub receipts: Vec<EffectReceiptKey>,
 }
@@ -138,7 +137,16 @@ pub(super) async fn apply_durable(
                     let _ = room_proof;
                     MamArchiveRepository::store(tx, archive, message, expectation).await?
                 };
-                applied.archives.push((archive.clone(), outcome));
+                applied.archives.push((
+                    PlanEffectDependency::AfterArchive {
+                        archive: archive.clone(),
+                        minted: waddle_xmpp_core::xep0359::StanzaId::new(
+                            message.id.clone(),
+                            archive.clone().into(),
+                        ),
+                    },
+                    outcome,
+                ));
             }
             DurableEffect::Direct(DurableDirectEffect::ProjectInbox {
                 owner,
@@ -434,6 +442,7 @@ fn durable_intent_complete(completed: &[&DurableEffect], intent: &IngressEffectI
 #[cfg(test)]
 mod tests {
     use super::*;
+    use jid::BareJid;
     #[test]
     fn inbox_receipt_requires_the_applied_projection_payload() {
         let owner: BareJid = "owner@example.test".parse().expect("owner");

@@ -901,11 +901,13 @@ fn compare_effects<'a>(
                     );
                 }
             }
-            // A reconnect must not invent a remote carbon obligation after a
-            // committed local fanout. Only an existing relay obligation retries.
+            // A reconnect must not invent a new carbon audience after commit.
+            // Only obligations in the original local or remote fanout retry.
             if !recorded.is_empty()
-                && (matches!(intent, IngressEffectIntent::RelayCarbons { .. })
-                    || !inbox_omission_is_recorded_audience(recorded, intent, planned))
+                && (matches!(
+                    intent,
+                    IngressEffectIntent::RelayCarbons { .. } | IngressEffectIntent::Carbons { .. }
+                ) || !inbox_omission_is_recorded_audience(recorded, intent, planned))
             {
                 divergent.insert(intent.kind());
             } else {

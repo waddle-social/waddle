@@ -310,10 +310,12 @@ impl OrderedRelayDeliveryBridge {
                             outcome.carbon_recipients,
                             outcome.recipient_sm_append_streams,
                         ),
-                        Err(reason) => (
-                            RelayRemoteUserSideEffectStatus::Incomplete { reason },
-                            Vec::new(),
-                            Vec::new(),
+                        Err(incomplete) => (
+                            RelayRemoteUserSideEffectStatus::Incomplete {
+                                reason: incomplete.reason,
+                            },
+                            incomplete.completed.carbon_recipients,
+                            incomplete.completed.recipient_sm_append_streams,
                         ),
                     }
                 }

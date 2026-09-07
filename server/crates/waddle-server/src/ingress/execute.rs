@@ -262,7 +262,7 @@ pub async fn execute_effects(
         // A same-origin retry must not duplicate an already confirmed fanout.
         let already_receipted = matches!(
             effect,
-            ExternalEffect::Delivery(ExternalDeliveryEffect::RelayCarbons { .. })
+            ExternalEffect::Delivery(ExternalDeliveryEffect::RelayCarbons { .. } | ExternalDeliveryEffect::Carbons { .. })
                 | ExternalEffect::Room(crate::server::routes::interpret::effects::room::ExternalRoomEffect::ObserveRoomMessage { .. })
         ) && !decision.external_receipts[index].is_empty()
             && decision.external_receipts[index]
@@ -885,3 +885,7 @@ mod inbox_offline_tests;
 #[cfg(test)]
 #[path = "execute_direct_receipt_tests.rs"]
 mod direct_receipt_tests;
+
+#[cfg(test)]
+#[path = "execute_local_carbons_tests.rs"]
+mod local_carbons_tests;
