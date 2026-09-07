@@ -548,6 +548,9 @@ fn muc_join_maybe_committed_keeps_join_specific_outcome() {
 
     let room_jid: jid::BareJid = "room@muc.example.test".parse().expect("room jid");
     let target = RemoteResourceRouteTarget::MucProxy {
+        canonical: None,
+        principal: None,
+        stanza_lang: None,
         room_jid,
         kind: OrderedRelayMucProxyKind::JoinPresence,
         origin: MucProxyOrigin::Connection(waddle_xmpp_core::OccupancySessionGeneration::mint()),

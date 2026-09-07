@@ -230,6 +230,10 @@ pub enum OrderedRelayPayload {
         stanza: RemoteStanza,
     },
     MucProxy {
+        canonical: Option<crate::ingress::IngressCanonicalRef>,
+        principal: Option<waddle_xmpp::auth::AuthenticatedPrincipalRef>,
+        #[serde(with = "crate::ingress::identity::stanza_lang_serde")]
+        stanza_lang: Option<xmpp_parsers::message::Lang>,
         room_jid: jid::BareJid,
         kind: OrderedRelayMucProxyKind,
         origin: MucProxyOrigin,
@@ -341,11 +345,17 @@ impl OrderedRelayPayload {
                 }
             }
             OrderedRelayPayload::MucProxy {
+                canonical,
+                principal,
+                stanza_lang,
                 room_jid,
                 kind,
                 origin,
                 stanza,
             } => OrderedRelayPayloadFingerprint::MucProxy {
+                canonical: canonical.clone(),
+                principal: principal.clone(),
+                stanza_lang: stanza_lang.clone(),
                 room_jid: room_jid.clone(),
                 kind: *kind,
                 origin: *origin,
@@ -413,6 +423,7 @@ struct RemoteStanzaEnvelopeSigningView<'a> {
 /// and must never be serialized back to clients.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct OrderedRelayAck {
+    pub reply_receipt: Option<super::relay::RelayReplyReceiptToken>,
     pub channel: OrderedRelayChannel,
     pub sequence: OrderedRelaySequence,
     pub duplicate: bool,
@@ -573,6 +584,9 @@ enum OrderedRelayPayloadFingerprint {
         stanza: minidom::Element,
     },
     MucProxy {
+        canonical: Option<crate::ingress::IngressCanonicalRef>,
+        principal: Option<waddle_xmpp::auth::AuthenticatedPrincipalRef>,
+        stanza_lang: Option<xmpp_parsers::message::Lang>,
         room_jid: jid::BareJid,
         kind: OrderedRelayMucProxyKind,
         origin: MucProxyOrigin,
@@ -781,6 +795,7 @@ impl OrderedRelayReceiverState {
                 if recently_acked.fingerprint == OrderedRelayEnvelopeFingerprint::from(&envelope) {
                     return OrderedRelayReservation::Completed(OrderedRelayReply::Ack(
                         OrderedRelayAck {
+                            reply_receipt: None,
                             channel: envelope.channel,
                             sequence: envelope.sequence,
                             duplicate: true,
@@ -886,6 +901,7 @@ impl OrderedRelayReceiverState {
             &client_replies,
         );
         OrderedRelayReply::Ack(OrderedRelayAck {
+            reply_receipt: None,
             channel: envelope.channel,
             sequence: envelope.sequence,
             duplicate: false,

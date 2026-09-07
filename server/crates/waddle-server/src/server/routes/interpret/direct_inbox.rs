@@ -9,7 +9,7 @@ pub(super) async fn project_direct_inbox(
     archive_ref: ArchiveStanzaId,
     increment_unread: bool,
 ) {
-    let Some(inbox_storage) = deps.inbox_storage else {
+    let Some(_) = deps.inbox_storage else {
         debug!(
             owner = %owner,
             peer = %peer,
@@ -25,7 +25,19 @@ pub(super) async fn project_direct_inbox(
     let timestamp = chrono::Utc::now().timestamp();
     let mut entry = direct_message_entry(peer.clone(), &message, timestamp);
     entry.last_stanza_id = archive_ref.as_str().to_string();
-    match inbox_storage.upsert(&owner, entry, increment_unread).await {
+    let planned = super::effects::direct::planned_durable(
+        super::effects::direct::DurableDirectEffect::ProjectInbox {
+            owner: owner.clone(),
+            entry: Box::new(entry.clone()),
+            increment_unread,
+        },
+    );
+    let result = match deps.effects.execute(planned, deps).await {
+        super::effects::EffectOutcome::Inbox(result) => result,
+        super::effects::EffectOutcome::PlannedInbox(_) => Ok(entry),
+        _ => return,
+    };
+    match result {
         Ok(entry) => {
             deps.capture_intent(IngressEffectIntent::InboxProject {
                 owner: owner.clone(),

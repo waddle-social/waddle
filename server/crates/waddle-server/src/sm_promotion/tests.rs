@@ -86,7 +86,6 @@ fn detached_session_with_unacked(
         jid,
         occupancy_session: fixed_occupancy_session(),
         inbound_count: 0,
-        shadow_ordinal: waddle_xmpp::stream_management::ShadowOrdinal::ZERO,
         outbound_count: unacked_xml.len() as u32,
         last_acked: 0,
         replay_gap_through: None,
@@ -803,7 +802,6 @@ async fn promoted_pending_row_carries_per_stanza_original_receipt_at() {
         jid: full("alice@example.com/laptop"),
         occupancy_session: fixed_occupancy_session(),
         inbound_count: 0,
-        shadow_ordinal: waddle_xmpp::stream_management::ShadowOrdinal::ZERO,
         outbound_count: 1,
         last_acked: 0,
         replay_gap_through: None,
@@ -1035,7 +1033,6 @@ async fn restart_outlasting_resume_window_promotes_queue_into_pending_delivery()
             jid: full("alice@example.com/laptop"),
             occupancy_session: waddle_xmpp_core::OccupancySessionGeneration::mint(),
             inbound_count: 0,
-            shadow_ordinal: waddle_xmpp::stream_management::ShadowOrdinal::ZERO,
             outbound_count: 1,
             last_acked: 0,
             replay_gap_through: None,
@@ -1159,7 +1156,7 @@ async fn displaced_sessions_are_promoted_and_confirmed() {
     .await;
 
     // Terminal completion is reported so callers evict per-stream state
-    // (the ingress-shadow enrollment gate) that nothing else will ever
+    // (the ingress enrollment gate) that nothing else will ever
     // see again.
     assert_eq!(
         outcome.completed_stream_ids().collect::<Vec<_>>(),

@@ -1,10 +1,11 @@
-//! Atomic PostgreSQL ingress write boundary.
+//! Atomic dialect-aware ingress write boundary.
 //!
 //! A transaction takes locks in the fixed order epoch, exact ownership claim,
 //! then fenced child rows such as `sm_sessions`, room archives, and ingress
 //! projections. Dropping an uncommitted [`IngressUowTransaction`] rolls it
 //! back through [`crate::db::Transaction`].
 
+mod durable_more;
 mod error;
 mod repositories;
 mod retry;
@@ -12,14 +13,13 @@ mod retry;
 pub use error::IngressUowError;
 pub use repositories::{
     CanonicalMessageRepository, DeliveryEffectRepository, EffectIntentRepository,
-    EffectIntentWriteOutcome, InboxRepository, MamArchiveRepository, PrincipalAssertion,
-    PrincipalRepository, SmIngressRepository,
+    EffectReceiptRepository, FrontierOutcome, InboxRepository, MamArchiveRepository,
+    PrincipalAssertion, PrincipalRepository, ReconcileVerdict, SmIngressRepository,
+    SmIngressStreamRepository,
 };
 #[cfg(feature = "clustering")]
-pub use repositories::{
-    ClaimRepository, HandledFrontierOutcome, HandledFrontierRepository, RoomClaimFence,
-    ShadowFrontierOutcome, SmClaimFence, SmIngressStreamRepository,
-};
+pub use repositories::{ClaimRepository, RoomClaimFence, SmClaimFence};
+pub(crate) use retry::is_database_timeout;
 pub use retry::{run_with_retry, DbRetryClass, RetryExhausted};
 
 use std::time::Duration;
@@ -37,33 +37,41 @@ use waddle_xmpp::ingress::ProtocolEpoch;
 #[cfg(feature = "clustering")]
 use waddle_xmpp::ownership::{CurrentNodeIdentityGuard, SharedNodeIdentity};
 
-/// PostgreSQL-only factory for ingress transactions bound to one lineage policy.
+/// Ownership authority available to an ingress unit of work.
 #[derive(Clone)]
-pub struct PostgresIngressUnitOfWork {
+pub enum IngressFencing {
+    #[cfg(feature = "clustering")]
+    Clustered(SharedNodeIdentity),
+    SingleNode,
+}
+
+/// Dialect-aware factory for ingress transactions bound to one lineage policy.
+#[derive(Clone)]
+pub struct IngressUnitOfWork {
     db: Database,
     lineage: LineageConfig,
     /// The server's canonical node identity source. Bound once at
     /// construction so claim fences can only be minted against the real
     /// rotation gate, never a caller-constructed one.
-    #[cfg(feature = "clustering")]
-    node_identity: Option<SharedNodeIdentity>,
+    fencing: IngressFencing,
 }
 
-impl PostgresIngressUnitOfWork {
-    /// Open against the main PostgreSQL database pool.
+impl IngressUnitOfWork {
+    /// Open against the main database pool in single-node mode.
     ///
     /// A unit of work opened this way cannot mint claim fences; use
     /// [`Self::open_with_node_identity`] where fenced SM writes are needed.
     pub fn open(db: Database, lineage: LineageConfig) -> Result<Self, IngressUowError> {
-        if db.driver() != DatabaseDriver::Postgres {
-            return Err(IngressUowError::PostgresRequired);
-        }
         Ok(Self {
             db,
             lineage,
-            #[cfg(feature = "clustering")]
-            node_identity: None,
+            fencing: IngressFencing::SingleNode,
         })
+    }
+
+    /// Ownership fencing configured for transactions opened by this factory.
+    pub fn fencing(&self) -> &IngressFencing {
+        &self.fencing
     }
 
     /// Open with the server's canonical [`SharedNodeIdentity`] bound, so
@@ -76,7 +84,10 @@ impl PostgresIngressUnitOfWork {
         node_identity: SharedNodeIdentity,
     ) -> Result<Self, IngressUowError> {
         let mut uow = Self::open(db, lineage)?;
-        uow.node_identity = Some(node_identity);
+        if uow.db.driver() != DatabaseDriver::Postgres {
+            return Err(IngressUowError::ClusteredFencingRequiresPostgres);
+        }
+        uow.fencing = IngressFencing::Clustered(node_identity);
         Ok(uow)
     }
 
@@ -86,7 +97,40 @@ impl PostgresIngressUnitOfWork {
     /// held until commit or drop, making the installed GUC proof describe the
     /// exact live epoch observed by this transaction.
     pub async fn begin(&self) -> Result<IngressUowTransaction<'_>, IngressUowError> {
-        let mut transaction = self.db.begin().await?;
+        self.begin_inner(None).await
+    }
+
+    /// Bound even the initial epoch lock wait before taking any row locks.
+    /// Transaction acquisition, including pool checkout on both backends and
+    /// SQLite's `BEGIN IMMEDIATE`, uses the lock bound. PostgreSQL's local
+    /// timeouts apply only after checkout; acquisition expiry is also typed.
+    pub async fn begin_with_timeouts(
+        &self,
+        lock: Duration,
+        statement: Duration,
+    ) -> Result<IngressUowTransaction<'_>, IngressUowError> {
+        self.begin_inner(Some((lock, statement))).await
+    }
+
+    async fn begin_inner(
+        &self,
+        bounds: Option<(Duration, Duration)>,
+    ) -> Result<IngressUowTransaction<'_>, IngressUowError> {
+        let acquisition = async {
+            match self.db.driver() {
+                DatabaseDriver::Sqlite => self.db.begin_immediate().await,
+                DatabaseDriver::Postgres => self.db.begin().await,
+            }
+        };
+        let mut transaction = match bounds {
+            Some((lock, _)) => acquire_transaction_with_timeout(lock, acquisition).await?,
+            None => acquisition.await?,
+        };
+        if let Some((lock, statement)) = bounds {
+            if !set_local_transaction_timeouts(&mut transaction, lock, statement).await? {
+                return Err(IngressUowError::TransactionBoundsUnproven);
+            }
+        }
         let protocol_epoch = acquire_epoch_lock_first(&mut transaction).await?;
         let supported = supported_protocol_epoch();
         if protocol_epoch > supported {
@@ -96,26 +140,36 @@ impl PostgresIngressUnitOfWork {
             });
         }
 
-        let mut proof = transaction
-            .query(
-                r#"
+        if self.db.driver() == DatabaseDriver::Postgres {
+            let mut proof = transaction
+                .query(
+                    r#"
                 SELECT
                     set_config('waddle.protocol_epoch', ?, true),
                     set_config('waddle.protocol_epoch_xid', pg_current_xact_id()::text, true)
                 "#,
-                crate::db_params![protocol_epoch.to_storage().to_string()],
-            )
-            .await?;
-        proof
-            .next()
-            .await?
-            .ok_or(IngressUowError::EpochProofMissing)?;
-        drop(proof);
+                    crate::db_params![protocol_epoch.to_storage().to_string()],
+                )
+                .await?;
+            proof
+                .next()
+                .await?
+                .ok_or(IngressUowError::EpochProofMissing)?;
+            drop(proof);
+        }
 
-        let lineage =
-            lineage::verify_in_transaction(&mut transaction, self.db.driver(), &self.lineage)
-                .await
-                .map_err(IngressUowError::Lineage)?;
+        // A private in-memory SQLite database is ephemeral by the server's own
+        // lineage classification (nothing survives the process, so there is
+        // no lineage row to attest); every durable database must attest.
+        let lineage = if self.db.is_in_memory_sqlite() {
+            IngressLineage::Ephemeral
+        } else {
+            IngressLineage::Attested(
+                lineage::verify_in_transaction(&mut transaction, self.db.driver(), &self.lineage)
+                    .await
+                    .map_err(IngressUowError::Lineage)?,
+            )
+        };
 
         Ok(IngressUowTransaction {
             transaction,
@@ -123,12 +177,30 @@ impl PostgresIngressUnitOfWork {
             lineage,
             #[cfg(feature = "clustering")]
             identity: Uuid::new_v4(),
-            #[cfg(feature = "clustering")]
-            node_identity: self.node_identity.clone(),
+            fencing: self.fencing.clone(),
             #[cfg(feature = "clustering")]
             authority_guards: Vec::new(),
         })
     }
+}
+
+async fn acquire_transaction_with_timeout<'a>(
+    lock: Duration,
+    acquisition: impl std::future::Future<Output = Result<Transaction<'a>, crate::db::DatabaseError>>,
+) -> Result<Transaction<'a>, IngressUowError> {
+    Ok(tokio::time::timeout(lock, acquisition)
+        .await
+        .map_err(|_| IngressUowError::Timeout)??)
+}
+
+/// The lineage attestation an ingress transaction runs under.
+#[derive(Debug, Clone)]
+pub enum IngressLineage {
+    /// A durable database whose lineage row verified against this deployment.
+    Attested(lineage::AttestedLineage),
+    /// A private in-memory SQLite database: nothing outlives the process and
+    /// no lineage row exists to attest.
+    Ephemeral,
 }
 
 /// An ingress transaction carrying the locked epoch and verified lineage.
@@ -138,16 +210,15 @@ impl PostgresIngressUnitOfWork {
 pub struct IngressUowTransaction<'a> {
     transaction: Transaction<'a>,
     protocol_epoch: ProtocolEpoch,
-    lineage: lineage::AttestedLineage,
+    lineage: IngressLineage,
     /// Private capability identity that binds an in-transaction claim fence
     /// to this exact transaction, not merely another transaction sharing the
     /// same pool lifetime.
     #[cfg(feature = "clustering")]
     identity: Uuid,
-    /// The canonical identity source bound at [`PostgresIngressUnitOfWork`]
-    /// construction; `None` when this unit of work cannot mint fences.
-    #[cfg(feature = "clustering")]
-    node_identity: Option<SharedNodeIdentity>,
+    /// The canonical identity source bound at [`IngressUnitOfWork`]
+    /// construction; single-node transactions cannot mint claim fences.
+    fencing: IngressFencing,
     /// Node-authority guards minted for this transaction's claim fences.
     /// Held here — not on the independently droppable fence — so identity
     /// rotation or terminal disable cannot complete until this transaction
@@ -162,8 +233,13 @@ impl<'a> IngressUowTransaction<'a> {
         self.protocol_epoch
     }
 
+    /// The fencing mode bound to this transaction.
+    pub fn fencing(&self) -> &IngressFencing {
+        &self.fencing
+    }
+
     /// The lineage attestation verified on this same transaction.
-    pub fn lineage(&self) -> &lineage::AttestedLineage {
+    pub fn lineage(&self) -> &IngressLineage {
         &self.lineage
     }
 
@@ -188,6 +264,9 @@ impl<'a> IngressUowTransaction<'a> {
         lock_timeout_ms: u64,
         statement_timeout_ms: u64,
     ) -> Result<(), IngressUowError> {
+        if self.transaction.driver() == DatabaseDriver::Sqlite {
+            return Ok(());
+        }
         if set_local_transaction_timeouts(
             &mut self.transaction,
             Duration::from_millis(lock_timeout_ms),
@@ -210,7 +289,10 @@ impl<'a> IngressUowTransaction<'a> {
     /// fences against.
     #[cfg(feature = "clustering")]
     fn bound_node_identity(&self) -> Option<&SharedNodeIdentity> {
-        self.node_identity.as_ref()
+        match &self.fencing {
+            IngressFencing::Clustered(identity) => Some(identity),
+            IngressFencing::SingleNode => None,
+        }
     }
 
     /// Retain a minted node-authority guard until this transaction ends.
@@ -222,3 +304,6 @@ impl<'a> IngressUowTransaction<'a> {
 
 #[cfg(test)]
 mod tests;
+
+#[cfg(test)]
+mod lock_timeout_tests;

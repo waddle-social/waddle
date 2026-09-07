@@ -58,38 +58,23 @@ struct SmEnableClaimGuard {
 /// `<enabled/>` frame was written.
 pub(super) struct SmEnableCommit {
     claim_guard: Option<SmEnableClaimGuard>,
+    fence: Option<waddle_xmpp::stream_management::persistence::SmClaimFence>,
     stream_id: waddle_xmpp::pending_delivery::SmSessionId,
     resume: bool,
     max: u32,
 }
 
-fn try_enqueue_shadow_stream_enrollment(
-    ingress_shadow: &crate::ingress_shadow::IngressShadowHandle,
-    stream_id: &waddle_xmpp::pending_delivery::SmSessionId,
-) {
-    try_enqueue_shadow_stream_enrollment_with(stream_id, |stream_id| {
-        ingress_shadow.ensure_stream_enrollment(stream_id)
-    });
-}
-
-fn try_enqueue_shadow_stream_enrollment_with(
-    stream_id: &waddle_xmpp::pending_delivery::SmSessionId,
-    mut ensure_enrollment: impl FnMut(
-        waddle_xmpp::pending_delivery::SmSessionId,
-    ) -> crate::ingress_shadow::IngressShadowDisposition,
-) {
-    let _ = ensure_enrollment(stream_id.clone());
-}
-
 impl SmEnableCommit {
     fn new(
         claim_guard: Option<SmEnableClaimGuard>,
+        fence: Option<waddle_xmpp::stream_management::persistence::SmClaimFence>,
         stream_id: waddle_xmpp::pending_delivery::SmSessionId,
         resume: bool,
         max: u32,
     ) -> Self {
         Self {
             claim_guard,
+            fence,
             stream_id,
             resume,
             max,
@@ -100,6 +85,7 @@ impl SmEnableCommit {
         mut self,
         state: &WebSocketState,
         sm_state: &mut StreamManagementState,
+        sm_ingress_fence: &mut Option<waddle_xmpp::stream_management::persistence::SmClaimFence>,
         bound_jid: Option<&jid::FullJid>,
         registry_owner: Option<&std::sync::Arc<std::sync::atomic::AtomicBool>>,
     ) {
@@ -116,11 +102,11 @@ impl SmEnableCommit {
         // that positive reply the SM-session commit point. A concurrent
         // same-JID replacement may reject only the shared registry alias,
         // never roll back the state the peer has already observed.
+        *sm_ingress_fence = self.fence.take();
         sm_state.enable(self.stream_id.to_string(), self.resume, Some(self.max));
         if let Some(guard) = self.claim_guard.take() {
             guard.commit();
         }
-        try_enqueue_shadow_stream_enrollment(&state.deps.protocol.ingress_shadow, &self.stream_id);
         // Only a RESUMABLE enable mints a claim fence (`ensure_session_claim`
         // is skipped for resume='false'), so only a resumable publication can
         // have raced a demotion — a fenceless non-resumable stream is the
@@ -325,53 +311,6 @@ mod enable_claim_guard_tests {
     }
 }
 
-#[cfg(test)]
-mod shadow_enrollment_tests {
-    use super::try_enqueue_shadow_stream_enrollment_with;
-    use crate::ingress_shadow::IngressShadowDisposition;
-    use std::sync::{
-        atomic::{AtomicUsize, Ordering},
-        Arc,
-    };
-
-    #[test]
-    fn every_fresh_sm_enable_attempts_shadow_enrollment_once() {
-        let stream_id = waddle_xmpp::pending_delivery::SmSessionId::new("sm-enable-stream");
-        let attempts = Arc::new(AtomicUsize::new(0));
-
-        try_enqueue_shadow_stream_enrollment_with(&stream_id, {
-            let attempts = attempts.clone();
-            move |_stream_id| {
-                attempts.fetch_add(1, Ordering::SeqCst);
-                IngressShadowDisposition::Enqueued
-            }
-        });
-
-        assert_eq!(attempts.load(Ordering::SeqCst), 1);
-    }
-
-    #[test]
-    fn shadow_enrollment_result_never_changes_enable_commit() {
-        let stream_id = waddle_xmpp::pending_delivery::SmSessionId::new("shadow-result-stream");
-        for disposition in [
-            IngressShadowDisposition::Disabled,
-            IngressShadowDisposition::QueueFull,
-            IngressShadowDisposition::Closed,
-            IngressShadowDisposition::Enqueued,
-        ] {
-            let attempts = Arc::new(AtomicUsize::new(0));
-            try_enqueue_shadow_stream_enrollment_with(&stream_id, {
-                let attempts = attempts.clone();
-                move |_stream_id| {
-                    attempts.fetch_add(1, Ordering::SeqCst);
-                    disposition
-                }
-            });
-            assert_eq!(attempts.load(Ordering::SeqCst), 1);
-        }
-    }
-}
-
 mod registration;
 
 pub(super) use observe::observe_sm_resume_finalized;
@@ -442,6 +381,10 @@ fn max_resume_secs_from_env() -> u32 {
 pub(super) struct SmCtx<'a> {
     pub(super) phase: &'a mut ConnectionPhase,
     pub(super) sm_state: &'a mut StreamManagementState,
+    pub(super) sm_ingress_fence:
+        &'a mut Option<waddle_xmpp::stream_management::persistence::SmClaimFence>,
+    pub(super) sm_inbound_completion:
+        &'a mut crate::server::routes::interpret::SmInboundCompletionTracker,
     pub(super) authenticated_session: &'a mut Option<Session>,
     pub(super) occupancy_session: &'a mut waddle_xmpp_core::OccupancySessionGeneration,
     pub(super) carbons_enabled: &'a mut bool,
@@ -487,9 +430,18 @@ pub(super) async fn handle_sm_stanza(
             )
             .await
         }
-        SmStanza::Request => vec![ResponseFrame::from_serialized_xml(
-            SmAck::new(ctx.sm_state.get_inbound_count()).to_xml(),
-        )],
+        SmStanza::Request => {
+            if flush_ingress_checkpoint(state, ctx.sm_state, ctx.sm_inbound_completion)
+                .await
+                .is_err()
+            {
+                *ctx.phase = ConnectionPhase::closing(ctx.phase.bound_jid().cloned());
+                return vec![];
+            }
+            vec![ResponseFrame::from_serialized_xml(
+                SmAck::new(ctx.sm_state.get_inbound_count()).to_xml(),
+            )]
+        }
         SmStanza::Ack(ack) => apply_sm_ack(state, ctx.sm_state, ctx.phase, ack.h).await,
         SmStanza::Resume(resume) => {
             handle_sm_resume(resume, state, ctx, finalized_resume_outcome).await
@@ -680,6 +632,11 @@ async fn handle_sm_enable(
     } else {
         None
     };
+    let fence = state
+        .deps
+        .protocol
+        .sm_session_registry
+        .current_sm_claim_fence(&stream_id);
     let claim_guard = claim_publication.map(|publication| {
         SmEnableClaimGuard::new(
             state.deps.protocol.sm_session_registry.clone(),
@@ -687,6 +644,21 @@ async fn handle_sm_enable(
             publication,
         )
     });
+    if enable.resume
+        && state
+            .deps
+            .protocol
+            .ingress
+            .enroll_stream(&waddle_xmpp::pending_delivery::SmSessionId::new(
+                stream_id.clone(),
+            ))
+            .await
+            .is_err()
+    {
+        return vec![ResponseFrame::from(
+            SmFailed::with_condition("resource-constraint").to_element(),
+        )];
+    }
     // The pending commit retains both exact cleanup responsibility and the
     // identity-publication guard through the `<enabled/>` transport write.
     // Identity rotation therefore cannot demote the durable claim in the gap
@@ -698,6 +670,7 @@ async fn handle_sm_enable(
     };
     *pending_commit = Some(SmEnableCommit::new(
         claim_guard,
+        fence,
         waddle_xmpp::pending_delivery::SmSessionId::new(stream_id),
         enable.resume,
         max,
@@ -844,6 +817,7 @@ async fn handle_sm_resume_terminal(
     let SmCtx {
         phase,
         sm_state,
+        sm_ingress_fence,
         authenticated_session,
         occupancy_session,
         carbons_enabled,
@@ -862,6 +836,7 @@ async fn handle_sm_resume_terminal(
         roster_interested,
         blocklist_interested,
         pending_sm_enable_commit: _,
+        sm_inbound_completion: _,
     } = ctx;
 
     // Stream resumption is only legal before this transport has established a
@@ -873,7 +848,7 @@ async fn handle_sm_resume_terminal(
         );
     }
 
-    let detached = match state
+    let mut detached = match state
         .deps
         .protocol
         .sm_session_registry
@@ -1047,6 +1022,17 @@ async fn handle_sm_resume_terminal(
         }
     };
 
+    if restore_ingress_checkpoint(state, &mut detached)
+        .await
+        .is_err()
+    {
+        claim_guard.release().await;
+        return SmResumeTerminal::failed(
+            waddle_xmpp::pending_delivery::SmSessionId::new(resume.previd),
+            SmResumeOutcome::Storage,
+        );
+    }
+
     let early_resolution = state
         .deps
         .auth_state
@@ -1173,6 +1159,11 @@ async fn handle_sm_resume_terminal(
     }
 
     // Commit the staged snapshot only after the durable recheck succeeds.
+    *sm_ingress_fence = state
+        .deps
+        .protocol
+        .sm_session_registry
+        .current_sm_claim_fence(&detached.stream_id);
     sm_state.restore_from_session(&detached);
     sm_state.acknowledge(resume.h);
     // A native-SCRAM login persisted its own resume-fence row at
@@ -1244,4 +1235,246 @@ async fn handle_sm_resume_terminal(
         detached.jid,
         replay,
     )
+}
+
+/// Persist a newly exposed contiguous frontier before acknowledging it.
+pub(super) async fn flush_ingress_checkpoint(
+    state: &WebSocketState,
+    sm_state: &StreamManagementState,
+    tracker: &mut crate::server::routes::interpret::SmInboundCompletionTracker,
+) -> Result<(), crate::ingress_uow::IngressUowError> {
+    if !tracker.checkpoint_dirty() || !sm_state.is_resumable() {
+        return Ok(());
+    }
+    let stream_id = sm_state
+        .stream_id
+        .as_ref()
+        .ok_or(crate::ingress_uow::IngressUowError::SmIngressStreamMissing)?;
+    let stream = state
+        .deps
+        .protocol
+        .ingress
+        .lookup_stream(&waddle_xmpp::pending_delivery::SmSessionId::new(
+            stream_id.clone(),
+        ))
+        .await?
+        .ok_or(crate::ingress_uow::IngressUowError::SmIngressStreamMissing)?;
+    state
+        .deps
+        .protocol
+        .ingress
+        .flush_checkpoint(
+            stream,
+            waddle_xmpp::ingress::WireHandledCount::from_storage(sm_state.get_inbound_count()),
+        )
+        .await?;
+    tracker.checkpoint_flushed(sm_state.get_inbound_count());
+    Ok(())
+}
+
+async fn restore_ingress_checkpoint(
+    state: &WebSocketState,
+    detached: &mut waddle_xmpp::stream_management::DetachedSession,
+) -> Result<(), crate::ingress_uow::IngressUowError> {
+    let checkpoint = state
+        .deps
+        .protocol
+        .ingress
+        .load_resume_checkpoint(&waddle_xmpp::pending_delivery::SmSessionId::new(
+            detached.stream_id.clone(),
+        ))
+        .await?
+        .ok_or(crate::ingress_uow::IngressUowError::SmIngressStreamMissing)?;
+    detached.inbound_count = waddle_xmpp::stream_management::sequence::max_in_window(
+        detached.inbound_count,
+        checkpoint.to_storage(),
+    );
+    Ok(())
+}
+
+#[cfg(test)]
+mod ingress_checkpoint_tests {
+    use super::*;
+    use crate::server::routes::websocket::{
+        state::WsConnState, tests::create_test_websocket_state,
+    };
+    use waddle_xmpp::ingress::WireHandledCount;
+    use waddle_xmpp::pending_delivery::SmSessionId;
+
+    #[tokio::test]
+    async fn pending_iq_completion_flushes_committed_message_frontier_before_ack() {
+        let state = create_test_websocket_state().await;
+        let stream = SmSessionId::new("checkpoint-before-ack");
+        state
+            .deps
+            .protocol
+            .ingress
+            .enroll_stream(&stream)
+            .await
+            .expect("enroll");
+        let mut conn = WsConnState::new();
+        conn.sm_state.enable(stream.to_string(), true, Some(300));
+        conn.phase = ConnectionPhase::ready("alice@example.com/web".parse().expect("jid"), false);
+        let iq = conn.sm_inbound_completion.reserve(&conn.sm_state);
+        for _ in 0..2 {
+            let message = conn.sm_inbound_completion.reserve(&conn.sm_state);
+            let checkpoint = conn.sm_inbound_completion.checkpoint_for(message);
+            assert_eq!(checkpoint, 0);
+            conn.sm_inbound_completion
+                .mark_committed(message, checkpoint);
+            conn.sm_inbound_completion
+                .complete(message, &mut conn.sm_state);
+        }
+        assert_eq!(conn.sm_state.get_inbound_count(), 0);
+        conn.sm_inbound_completion.complete(iq, &mut conn.sm_state);
+        assert_eq!(conn.sm_state.get_inbound_count(), 3);
+        assert!(conn.sm_inbound_completion.checkpoint_dirty());
+        let request = waddle_xmpp::stream_management::SmRequest::to_xml();
+        let frames =
+            super::super::frame::handle_xmpp_frame(&request, "example.com", &state, &mut conn)
+                .await;
+        let ack = frames
+            .first()
+            .expect("ack frame")
+            .parse::<Element>()
+            .expect("XML");
+        assert_eq!(ack.attr("h"), Some("3"));
+        assert_eq!(
+            state
+                .deps
+                .protocol
+                .ingress
+                .load_resume_checkpoint(&stream)
+                .await
+                .expect("load"),
+            Some(WireHandledCount::from_storage(3))
+        );
+        assert!(!conn.sm_inbound_completion.checkpoint_dirty());
+    }
+
+    #[tokio::test]
+    async fn resume_checkpoint_restores_wrap_aware_maximum() {
+        let state = create_test_websocket_state().await;
+        let stream = SmSessionId::new("resume-checkpoint-wrap");
+        let id = state
+            .deps
+            .protocol
+            .ingress
+            .enroll_stream(&stream)
+            .await
+            .expect("enroll");
+        let mut sm = StreamManagementState::new();
+        sm.enable(stream.to_string(), true, Some(300));
+        sm.inbound_count = u32::MAX;
+        let mut detached = sm
+            .to_detached_session(waddle_xmpp::stream_management::DetachedSessionSnapshot {
+                user_id: "alice@example.com".into(),
+                jid: "alice@example.com/web".parse().expect("jid"),
+                occupancy_session: waddle_xmpp_core::OccupancySessionGeneration::mint(),
+                carbons_enabled: false,
+                roster_interested: false,
+                blocklist_interested: false,
+                presence_available: false,
+                presence_show: None,
+                presence_status: None,
+                presence_priority: 0,
+                presence_payloads: Vec::new(),
+                pending_subscribes_flushed: false,
+            })
+            .expect("detached");
+        state
+            .deps
+            .protocol
+            .ingress
+            .flush_checkpoint(id, WireHandledCount::from_storage(1))
+            .await
+            .expect("flush");
+        restore_ingress_checkpoint(&state, &mut detached)
+            .await
+            .expect("restore checkpoint");
+        assert_eq!(detached.inbound_count, 1);
+        detached.inbound_count = 2;
+        restore_ingress_checkpoint(&state, &mut detached)
+            .await
+            .expect("restore checkpoint");
+        assert_eq!(
+            detached.inbound_count, 2,
+            "snapshot ahead of checkpoint wins"
+        );
+    }
+
+    #[tokio::test]
+    async fn cancelled_enabled_write_retires_unpublished_ingress_stream() {
+        let state = create_test_websocket_state().await;
+        let mut sm = StreamManagementState::new();
+        let phase = ConnectionPhase::ready("alice@example.com/web".parse().expect("jid"), false);
+        let mut pending = None;
+        let frames = handle_sm_enable(
+            SmEnable::with_resume(Some(300)),
+            &state,
+            &mut sm,
+            &phase,
+            &mut pending,
+        )
+        .await;
+        let enabled = frames
+            .into_iter()
+            .next()
+            .expect("enabled")
+            .into_serialized_xml()
+            .parse::<Element>()
+            .expect("enabled XML");
+        assert_eq!(enabled.name(), "enabled");
+        let stream = SmSessionId::new(enabled.attr("id").expect("stream id"));
+        assert!(state
+            .deps
+            .protocol
+            .ingress
+            .lookup_stream(&stream)
+            .await
+            .expect("lookup")
+            .is_some());
+        assert!(!sm.enabled, "unwritten enabled cannot publish SM");
+        drop(pending.take());
+        state
+            .deps
+            .protocol
+            .sm_session_registry
+            .retry_pending_claim_releases(64)
+            .await;
+        crate::server::session_janitors::run_ingress_retirement_sweep(&state).await;
+        assert!(state
+            .deps
+            .protocol
+            .ingress
+            .lookup_stream(&stream)
+            .await
+            .expect("lookup")
+            .is_none());
+    }
+
+    #[tokio::test]
+    async fn checkpoint_failure_never_exposes_ack() {
+        let state = create_test_websocket_state().await;
+        let mut conn = WsConnState::new();
+        conn.sm_state
+            .enable("missing-ingress-stream".into(), true, Some(300));
+        conn.phase = ConnectionPhase::ready("alice@example.com/web".parse().expect("jid"), false);
+        let iq = conn.sm_inbound_completion.reserve(&conn.sm_state);
+        let message = conn.sm_inbound_completion.reserve(&conn.sm_state);
+        conn.sm_inbound_completion.mark_committed(message, 0);
+        conn.sm_inbound_completion
+            .complete(message, &mut conn.sm_state);
+        conn.sm_inbound_completion.complete(iq, &mut conn.sm_state);
+        let frames = super::super::frame::handle_xmpp_frame(
+            &waddle_xmpp::stream_management::SmRequest::to_xml(),
+            "example.com",
+            &state,
+            &mut conn,
+        )
+        .await;
+        assert!(frames.is_empty());
+        assert!(conn.sm_inbound_completion.checkpoint_dirty());
+        assert!(matches!(conn.phase, ConnectionPhase::Closing { .. }));
+    }
 }

@@ -53,21 +53,21 @@ fn attr_value(frame: &str, attr: &str) -> Option<String> {
 }
 
 #[cfg(feature = "clustering")]
-struct ShadowWsFixture {
+struct IngressWsFixture {
     server: TestServer,
     admin: PgPool,
     schema: String,
 }
 
 #[cfg(feature = "clustering")]
-impl ShadowWsFixture {
-    async fn open(test_name: &str, shadow_enabled: bool) -> Option<Self> {
+impl IngressWsFixture {
+    async fn open(test_name: &str) -> Option<Self> {
         let Ok(database_url) = std::env::var("WADDLE_TEST_POSTGRES_URL") else {
-            eprintln!("skipping: WADDLE_TEST_POSTGRES_URL not set (xep0280 shadow parity)");
+            eprintln!("skipping: WADDLE_TEST_POSTGRES_URL not set (xep0280 ingress authority)");
             return None;
         };
         let schema = format!(
-            "waddle_test_x0280_shadow_{test_name}_{}",
+            "waddle_test_x0280_ingress_{test_name}_{}",
             uuid::Uuid::new_v4().simple()
         );
         let admin = PgPool::connect(&database_url)
@@ -93,7 +93,7 @@ impl ShadowWsFixture {
             use waddle_server::clustering::lease::KeypairSlotLease as _;
             use waddle_server::db::{Database, DatabaseConfig, DatabaseDriver};
             let control_db = Database::from_config(
-                "xep0280-shadow-fixture",
+                "xep0280-ingress-fixture",
                 &DatabaseConfig::new(DatabaseDriver::Postgres, schema_url.clone()),
             )
             .await
@@ -114,7 +114,6 @@ impl ShadowWsFixture {
             .await
             .expect("enroll fixture pool peer");
         }
-        let shadow_enabled_env = if shadow_enabled { "true" } else { "false" };
         let envs: Vec<(String, String)> = vec![
             ("WADDLE_DB_DRIVER".to_string(), "postgres".to_string()),
             ("WADDLE_DATABASE_URL".to_string(), schema_url.clone()),
@@ -143,10 +142,6 @@ impl ShadowWsFixture {
             ("WADDLE_DB_LINEAGE_ACTION".to_string(), "enroll".to_string()),
             ("WADDLE_CLUSTERING_LISTEN_ADDRS".to_string(), listen_addr),
             ("WADDLE_CLUSTERING_KEYPAIR_POOL".to_string(), pool_env),
-            (
-                "WADDLE_INGRESS_SHADOW_ENABLED".to_string(),
-                shadow_enabled_env.to_string(),
-            ),
         ];
         let env_refs: Vec<(&str, &str)> = envs
             .iter()
@@ -158,16 +153,6 @@ impl ShadowWsFixture {
             admin,
             schema,
         })
-    }
-
-    async fn poison_shadow_storage(&self) {
-        sqlx::query(&format!(
-            "DROP TABLE {}.ingress_effect_intents",
-            self.schema
-        ))
-        .execute(&self.admin)
-        .await
-        .expect("drop shadow effect-intent table");
     }
 
     async fn close(self) {
@@ -275,7 +260,7 @@ fn normalize_attr_value(frame: &str, attr: &str, replacement: &str) -> String {
 }
 
 #[cfg(feature = "clustering")]
-async fn run_shadow_parity_exchange(server: &TestServer) -> Vec<String> {
+async fn run_ingress_exchange(server: &TestServer) -> Vec<String> {
     let password = server.fixed_account_password().to_string();
     let mut transcript = Vec::new();
     let mut desktop = WsXmppClient::connect_and_auth(
@@ -283,18 +268,18 @@ async fn run_shadow_parity_exchange(server: &TestServer) -> Vec<String> {
         DOMAIN,
         USERNAME,
         &password,
-        "shadow-desktop",
+        "ingress-desktop",
     )
     .await
     .expect("desktop connection");
     desktop
         .send(
-            r#"<iq xmlns="jabber:client" type="set" id="shadow-enable-desktop"><enable xmlns="urn:xmpp:carbons:2"/></iq>"#,
+            r#"<iq xmlns="jabber:client" type="set" id="ingress-enable-desktop"><enable xmlns="urn:xmpp:carbons:2"/></iq>"#,
         )
         .await
         .expect("send carbons enable");
     for frame in desktop
-        .recv_until(|frame| frame.contains("shadow-enable-desktop"))
+        .recv_until(|frame| frame.contains("ingress-enable-desktop"))
         .await
         .expect("enable carbons on desktop")
     {
@@ -306,7 +291,7 @@ async fn run_shadow_parity_exchange(server: &TestServer) -> Vec<String> {
         DOMAIN,
         USERNAME,
         &password,
-        "shadow-phone",
+        "ingress-phone",
     )
     .await
     .expect("phone connection");
@@ -324,7 +309,7 @@ async fn run_shadow_parity_exchange(server: &TestServer) -> Vec<String> {
 
     phone
         .send(
-            r#"<message xmlns="jabber:client" to="ghost@localhost" type="chat" id="shadow-carbon-1"><body>shadow parity body</body></message>"#,
+            r#"<message xmlns="jabber:client" to="ghost@localhost" type="chat" id="ingress-carbon-1"><body>ingress authority body</body></message>"#,
         )
         .await
         .expect("send message");
@@ -333,7 +318,7 @@ async fn run_shadow_parity_exchange(server: &TestServer) -> Vec<String> {
         .recv_until(|frame| {
             frame.contains("urn:xmpp:carbons:2")
                 && frame.contains("<sent")
-                && frame.contains("shadow parity body")
+                && frame.contains("ingress authority body")
         })
         .await
         .expect("desktop receives sent carbon")
@@ -490,47 +475,14 @@ async fn sent_carbon_replays_to_detached_resumable_sibling() {
 
 #[cfg(feature = "clustering")]
 #[tokio::test]
-async fn sent_carbon_wire_is_byte_identical_with_shadow_disabled_and_enabled() {
+async fn sent_carbon_is_delivered_after_authority_commit() {
     let _guard = POSTGRES_SERIAL.lock().await;
-
-    let Some(disabled) = ShadowWsFixture::open("wire_disabled", false).await else {
+    let Some(fixture) = IngressWsFixture::open("authority_carbon").await else {
         return;
     };
-    let disabled_frame = run_shadow_parity_exchange(&disabled.server).await;
-    disabled.close().await;
-
-    let Some(enabled) = ShadowWsFixture::open("wire_enabled", true).await else {
-        return;
-    };
-    let enabled_frame = run_shadow_parity_exchange(&enabled.server).await;
-    enabled.close().await;
-
-    assert_eq!(
-        enabled_frame, disabled_frame,
-        "enabling ingress shadow must not change the deterministic sent-carbon transcript"
-    );
-}
-
-#[cfg(feature = "clustering")]
-#[tokio::test]
-async fn sent_carbon_wire_is_byte_identical_when_shadow_storage_is_poisoned() {
-    let _guard = POSTGRES_SERIAL.lock().await;
-
-    let Some(disabled) = ShadowWsFixture::open("wire_poison_baseline", false).await else {
-        return;
-    };
-    let disabled_frame = run_shadow_parity_exchange(&disabled.server).await;
-    disabled.close().await;
-
-    let Some(poisoned) = ShadowWsFixture::open("wire_poisoned", true).await else {
-        return;
-    };
-    poisoned.poison_shadow_storage().await;
-    let poisoned_frame = run_shadow_parity_exchange(&poisoned.server).await;
-    poisoned.close().await;
-
-    assert_eq!(
-        poisoned_frame, disabled_frame,
-        "poisoned shadow storage must not change the deterministic sent-carbon transcript"
-    );
+    let transcript = run_ingress_exchange(&fixture.server).await;
+    assert!(transcript
+        .iter()
+        .any(|frame| frame.contains("urn:xmpp:carbons:2") && frame.contains("<sent")));
+    fixture.close().await;
 }

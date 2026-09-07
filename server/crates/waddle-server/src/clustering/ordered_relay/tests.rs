@@ -146,6 +146,9 @@ fn muji_envelope(kind: OrderedRelayMucProxyKind, stanza: RemoteStanza) -> Remote
         sender_claim: sender_claim(),
         target_claim: room_claim(),
         payload: OrderedRelayPayload::MucProxy {
+            canonical: None,
+            principal: None,
+            stanza_lang: None,
             room_jid: room_jid(),
             kind,
             origin: connection_origin(1),

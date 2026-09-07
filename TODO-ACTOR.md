@@ -50,13 +50,13 @@ Merge order within the wave: **#1642 lands first** (advisory remediation + −6k
 - [OK] **#1655** `feat(server): transaction-taking MAM and inbox repositories` (after #1654) — MERGED 61726ad1 (PR #1691, 2026-08-12). MAM leaves its private pool; call sites untouched until cutover.
 - [OK] ⚠ **#1656** `feat(server): shadow atomic ingress transaction` (after #1655 + #1643 + #1644) — MERGED 0818f7fd (PR #1693, 2026-08-14); issue stays open as the soak-gate record. Full boundary transaction on live traffic, new-tables-only; shadow health via P0.5 closed-variant vocabulary.
 
-**⏸ Soak gate:** deploy #1656 and let the shadow run in prod until decision-class / alias-outcome / retry counts look clean. Do not collapse #1656 and #1657 into one step — the gap is the de-risking.
+**✓ Soak gate completed:** #1695 closed early on 2026-09-05 by operator decision; all evaluable criteria passed. #1657 is unblocked.
 
-- [ ] **#1695** `ops(server): enable WADDLE_INGRESS_SHADOW_ENABLED in prod and run the #1656 soak` — the shadow shipped **off** (prod ConfigMap verified 2026-08-20: no `WADDLE_INGRESS_SHADOW_*` key); the soak had not started. Enables the flag via `config.extraEnv` in the prod HelmRelease, adds the `waddle-ingress-shadow` Mimir alert group + dashboard row, and the runbook `server/docs/operations/ingress-shadow-soak.md` with the pass criteria and observation window. #1657 stays blocked until the window is recorded as passed on #1695.
+- [OK] **#1695** `ops(server): run the #1656 production soak` — closed early 2026-09-05 by operator decision; all evaluable criteria passed. Finding #1735 fixed by PR #1736. Ongoing operations: [ingress authority](server/docs/operations/ingress-authority.md).
 
 ## Wave 5
 
-- [ ] ⚠ **#1657** `feat(server): ingress authority cutover with canonical identity` (after #1656 + #1645) — `h` advances post-commit by decision class; **MUC origin-id dedupe retires here** with its scenarios migrated; "no reachable pool-per-operation correctness write" asserted; shadow scaffolding removed in the same PR. Riskiest flip on the roadmap; small PR by design.
+- [ ] ⚠ **#1657** `feat(server): ingress authority cutover with canonical identity` (after #1656 + #1645) — **IN PROGRESS, PR #1738**: committed ingress decisions advance `h`, post-commit effects have durable payload-complete intents, and cluster-global aliases decide and repair duplicates, replacing MAM dedupe and the parallel observation path (RFC 0018 §1).
 
 ## Wave 6–7
 

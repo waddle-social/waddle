@@ -6,10 +6,40 @@ use crate::{
 };
 use waddle_xmpp::ingress::EffectIntentCodecError;
 
-/// Fail-closed errors from the PostgreSQL ingress unit of work.
+/// Fail-closed errors from the ingress unit of work.
 #[derive(Debug, Error)]
 pub enum IngressUowError {
-    #[error("ingress unit of work requires PostgreSQL")]
+    #[error(transparent)]
+    Plan(#[from] crate::server::routes::interpret::effects::PlanFailure),
+    #[error("planned room delivery is missing its authoritative stanza-id")]
+    MissingRoomStanzaId,
+    #[error("ingress transaction timed out before commit")]
+    Timeout,
+    #[error("ingress authority has stopped")]
+    AuthorityStopped,
+    #[error("authenticated principal is no longer asserted")]
+    PrincipalAssertionFailed,
+    #[error("room snapshot generation is stale")]
+    RoomGenerationStale,
+    #[error("ingress frontier is stale")]
+    IngressFrontierStale,
+    #[error("commit acknowledgement was lost")]
+    AmbiguousCommit,
+    #[error("ingress transaction timeout bounds were not proven before taking locks")]
+    TransactionBoundsUnproven,
+    #[error("ingress inbox projection mutation does not apply to this durable effect")]
+    UnsupportedInboxProjection,
+    #[error("ingress tombstone payload could not be encoded")]
+    TombstonePayloadEncoding,
+    #[error("stored archive rich payload could not be decoded")]
+    InvalidArchiveRichPayload,
+
+    #[error("this operation requires single-node ingress fencing")]
+    SingleNodeFencingRequired,
+    #[cfg(feature = "clustering")]
+    #[error("clustered ingress fencing requires PostgreSQL")]
+    ClusteredFencingRequiresPostgres,
+    #[error("this repository operation requires PostgreSQL")]
     PostgresRequired,
     #[error("live ingress protocol epoch exceeds what this binary supports")]
     EpochUnsupported {
@@ -38,9 +68,9 @@ pub enum IngressUowError {
     EffectIntentOrdinalOverflow,
     #[error("stored ingress stream identity is malformed")]
     InvalidStoredSmIngressId,
-    #[error("stored shadow ingress frontier is malformed")]
-    InvalidStoredShadowFrontier,
-    #[error("shadow ingress stream is missing")]
+    #[error("stored ingress frontier is malformed")]
+    InvalidStoredFrontier,
+    #[error("ingress stream is missing")]
     SmIngressStreamMissing,
     #[error("authenticated principal reference cannot be represented in storage")]
     PrincipalReferenceOutOfRange,
@@ -52,12 +82,6 @@ pub enum IngressUowError {
     #[cfg(feature = "clustering")]
     #[error("the exact ownership claim is not held")]
     ClaimFenceMissing,
-    #[cfg(feature = "clustering")]
-    #[error("the SM stream does not exist")]
-    StreamMissing,
-    #[cfg(feature = "clustering")]
-    #[error("the offered SM handled frontier is not the next wrapping value")]
-    FrontierStale { stored: u32, offered: u32 },
 }
 
 impl IngressUowError {
@@ -65,6 +89,12 @@ impl IngressUowError {
         match self {
             Self::Database { retry_class } => *retry_class,
             Self::Substrate(IngressSubstrateError::Database { retry_class }) => *retry_class,
+            Self::MamStore(waddle_xmpp::mam::MamTxStoreError::Database(error)) => {
+                DbRetryClass::from_sqlx_error(error)
+            }
+            Self::Inbox(crate::inbox::InboxTxError::Database(error)) => {
+                DbRetryClass::from_database_error(error)
+            }
             _ => DbRetryClass::NotRetryable,
         }
     }
@@ -72,6 +102,9 @@ impl IngressUowError {
 
 impl From<DatabaseError> for IngressUowError {
     fn from(error: DatabaseError) -> Self {
+        if super::retry::is_database_timeout(&error) {
+            return Self::Timeout;
+        }
         Self::Database {
             retry_class: DbRetryClass::from_database_error(&error),
         }

@@ -69,6 +69,8 @@ async fn reserved_relay_join_stores_the_source_connection_generation() {
         OrderedRelayMucProxyKind::JoinPresence,
         MucProxyOrigin::Connection(generation),
         &Stanza::Presence(presence),
+        None,
+        &mut None,
     )
     .await
     .expect("relayed join delivered");
@@ -125,6 +127,8 @@ async fn reserved_relay_unavailable_cannot_remove_a_replacement_generation() {
             OrderedRelayMucProxyKind::JoinPresence,
             MucProxyOrigin::Connection(generation),
             &Stanza::Presence(available.clone()),
+            None,
+            &mut None,
         )
         .await
         .expect("relayed join delivered");
@@ -141,6 +145,8 @@ async fn reserved_relay_unavailable_cannot_remove_a_replacement_generation() {
         OrderedRelayMucProxyKind::OccupantPresence,
         MucProxyOrigin::Connection(first),
         &Stanza::Presence(unavailable),
+        None,
+        &mut None,
     )
     .await
     .expect("superseded relayed leave is terminal");
@@ -176,7 +182,7 @@ async fn unwired_bridge_reports_unreachable_without_advancing_effects() {
     );
 
     let err = bridge
-        .deliver_reserved(&envelope())
+        .deliver_reserved(&envelope(), &mut None)
         .await
         .expect_err("unwired bridge cannot deliver");
 
@@ -854,7 +860,6 @@ async fn bare_presence_direct_drops_blocked_sender_before_detached_replay() {
             jid: target_full(),
             occupancy_session: waddle_xmpp_core::OccupancySessionGeneration::mint(),
             inbound_count: 0,
-            shadow_ordinal: waddle_xmpp::stream_management::ShadowOrdinal::ZERO,
             outbound_count: 0,
             last_acked: 0,
             replay_gap_through: None,
@@ -913,7 +918,7 @@ async fn receiver_nacks_iq_without_live_resource_instead_of_detached_queue() {
     bridge.wire(Arc::new(services));
 
     let err = bridge
-        .deliver_reserved(&envelope)
+        .deliver_reserved(&envelope, &mut None)
         .await
         .expect_err("remote full-JID IQ requires a live local resource");
 
@@ -948,7 +953,7 @@ async fn receiver_delivers_full_jid_iq_as_peer_stanza() {
     bridge.wire(Arc::new(services));
 
     bridge
-        .deliver_reserved(&envelope)
+        .deliver_reserved(&envelope, &mut None)
         .await
         .expect("remote full-JID IQ delivers to live resource");
 
@@ -1081,7 +1086,6 @@ async fn remote_full_jid_route_reply_returns_detached_stream_identity() {
             jid: target_full(),
             occupancy_session: waddle_xmpp_core::OccupancySessionGeneration::mint(),
             inbound_count: 0,
-            shadow_ordinal: waddle_xmpp::stream_management::ShadowOrdinal::ZERO,
             outbound_count: 0,
             last_acked: 0,
             replay_gap_through: None,
@@ -1110,16 +1114,19 @@ async fn remote_full_jid_route_reply_returns_detached_stream_identity() {
     );
 
     let reply = bridge
-        .route_remote_resource_stanza_on_owner(RelayRouteRemoteResourceStanza {
-            source_jid: source,
-            registration_id,
-            socket_generation,
-            target: RemoteResourceRouteTarget::FullJid {
-                target: target_full(),
-                stanza: RemoteStanza(Stanza::Message(message)),
+        .route_remote_resource_stanza_on_owner(
+            RelayRouteRemoteResourceStanza {
+                source_jid: source,
+                registration_id,
+                socket_generation,
+                target: RemoteResourceRouteTarget::FullJid {
+                    target: target_full(),
+                    stanza: RemoteStanza(Stanza::Message(message)),
+                },
+                trace: RelayTraceContext::default(),
             },
-            trace: RelayTraceContext::default(),
-        })
+            &mut None,
+        )
         .await;
 
     assert_eq!(reply.outcome, RemoteResourceRouteOutcome::QueuedDetached);
@@ -1129,25 +1136,30 @@ async fn remote_full_jid_route_reply_returns_detached_stream_identity() {
     );
 }
 
-#[tokio::test]
-async fn remote_carbons_reply_returns_detached_stream_identity() {
-    let services = Arc::new(
-        services_with_claims(
-            origin_identity(),
-            receiver_identity(),
-            receiver_identity(),
-            test_peer_id(),
-        )
-        .await,
-    );
+pub(crate) async fn remote_carbon_owner_reply(
+    source: jid::FullJid,
+    sm: Arc<InMemorySmSessionRegistry>,
+    before_fanout: impl std::future::Future<Output = ()>,
+) -> RelayRemoteUserSideEffectReply {
+    let mut services = services_with_claims(
+        origin_identity(),
+        receiver_identity(),
+        receiver_identity(),
+        test_peer_id(),
+    )
+    .await;
+    services.sm_session_registry = sm;
+    let services = Arc::new(services);
     let bridge = OrderedRelayDeliveryBridge::new(
         CancellationToken::new(),
         &ClusteringMessagingConfig::default(),
     );
     bridge.wire(Arc::clone(&services));
 
-    let source: jid::FullJid = "alice@example.com/web".parse().expect("source");
-    let detached_target: jid::FullJid = "alice@example.com/phone".parse().expect("target");
+    let detached_target = source
+        .to_bare()
+        .with_resource_str("carbon-sibling")
+        .expect("target");
     let owner = source.to_bare();
     let (source_tx, _source_rx) = mpsc::channel(1);
     let source_entry = ConnectionEntry::new(source_tx);
@@ -1184,7 +1196,6 @@ async fn remote_carbons_reply_returns_detached_stream_identity() {
             jid: detached_target.clone(),
             occupancy_session: waddle_xmpp_core::OccupancySessionGeneration::mint(),
             inbound_count: 0,
-            shadow_ordinal: waddle_xmpp::stream_management::ShadowOrdinal::ZERO,
             outbound_count: 0,
             last_acked: 0,
             replay_gap_through: None,
@@ -1212,28 +1223,44 @@ async fn remote_carbons_reply_returns_detached_stream_identity() {
         "remote carbon".to_string(),
     );
 
-    let reply = bridge
+    before_fanout.await;
+    bridge
         .apply_remote_user_side_effect_on_owner(RelayRemoteUserSideEffect {
-            source_jid: source,
+            source_jid: source.clone(),
             registration_id,
             socket_generation,
             effect: RemoteUserSideEffect::Carbons {
                 owner: owner.clone(),
                 message: RemoteStanza(Stanza::Message(message)),
                 kind: RemoteCarbonKind::Sent,
-                exclude: vec!["alice@example.com/web".parse().expect("exclude")],
+                exclude: vec![source],
             },
             trace: RelayTraceContext::default(),
         })
-        .await;
+        .await
+}
 
+#[tokio::test]
+async fn remote_carbons_reply_returns_detached_stream_identity() {
+    let reply = remote_carbon_owner_reply(
+        "alice@example.com/web".parse().expect("source"),
+        Arc::new(InMemorySmSessionRegistry::new()),
+        async {},
+    )
+    .await;
     assert_eq!(reply.status, RelayRemoteUserSideEffectStatus::Applied);
-    assert_eq!(reply.carbon_recipients, vec![detached_target]);
+    assert_eq!(
+        reply.carbon_recipients,
+        vec!["alice@example.com/carbon-sibling"
+            .parse::<jid::FullJid>()
+            .expect("target")]
+    );
     assert_eq!(
         reply.recipient_sm_append_streams,
-        vec![SmSessionId::new("remote-carbon-detached-stream")],
+        vec![SmSessionId::new("remote-carbon-detached-stream")]
     );
 }
+
 #[tokio::test]
 async fn stale_force_detach_error_cleans_old_socket_mirror() {
     let services = Arc::new(
@@ -1771,9 +1798,43 @@ async fn receiver_nacks_dropped_peer_delivery_instead_of_acknowledging_loss() {
     bridge.wire(Arc::new(services));
 
     let err = bridge
-        .deliver_reserved(&envelope)
+        .deliver_reserved(&envelope, &mut None)
         .await
         .expect_err("full outbound channel must not be ACKed as delivered");
 
     assert_eq!(err, OrderedRelayNackReason::Backpressure);
+}
+
+#[tokio::test]
+async fn reserved_groupchat_requires_committed_origin_admission() {
+    let state = create_test_websocket_state_with_clustering(
+        crate::clustering::ClusteringHandles::default(),
+        Arc::new(InMemorySmSessionRegistry::new()),
+    )
+    .await;
+    let mut services = services_with_claims(
+        origin_identity(),
+        receiver_identity(),
+        receiver_identity(),
+        test_peer_id(),
+    )
+    .await;
+    services.web_socket_state = Arc::downgrade(&state);
+    let room: jid::BareJid = "room@muc.example.com".parse().expect("room");
+    let mut message = Message::new(Some(room.clone().into()));
+    message.from = Some("alice@example.com/web".parse().expect("sender"));
+    message.type_ = xmpp_parsers::message::MessageType::Groupchat;
+    assert!(matches!(
+        deliver_reserved_muc_proxy(
+            &services,
+            &room,
+            OrderedRelayMucProxyKind::GroupchatMessage,
+            MucProxyOrigin::Server,
+            &Stanza::Message(message),
+            None,
+            &mut None
+        )
+        .await,
+        Err(OrderedRelayNackReason::ParseFailure)
+    ));
 }

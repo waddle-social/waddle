@@ -1,5 +1,5 @@
 use super::*;
-use crate::ingress_shadow::IngressEffectCapture;
+use crate::ingress::IngressEffectCapture;
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
 use waddle_xmpp::inbox::storage::InboxStorageError;
@@ -12,14 +12,14 @@ use waddle_xmpp_core::xep0359::{build_stanza_id_element, StanzaId as XepStanzaId
 
 fn capture_snapshot(
     capture: &IngressEffectCapture,
-) -> crate::ingress_shadow::IngressEffectCaptureSnapshot {
+) -> crate::ingress::IngressEffectCaptureSnapshot {
     capture.snapshot()
 }
 
 #[tokio::test]
 async fn direct_send_stanza_captures_serialized_xep_0191_block_error() {
     let registry = ConnectionRegistry::new();
-    let capture = IngressEffectCapture::new(None);
+    let capture = IngressEffectCapture::new();
     let deps = Deps::registry_only(&registry).with_ingress_effect_capture(Some(capture.clone()));
     let original = chat_msg(
         jid("alice@example.com/web"),
@@ -123,7 +123,7 @@ async fn direct_inbox_boundary_records_inbox_project_intent() {
     let registry = ConnectionRegistry::new();
     let mam: Arc<dyn MamStorage> = Arc::new(InMemoryMamStorage::new());
     let inbox: Arc<dyn InboxStorage> = Arc::new(InMemoryInboxStorage::new());
-    let capture = IngressEffectCapture::new(None);
+    let capture = IngressEffectCapture::new();
     let deps = Deps::test_with_storage(&registry, &mam, &inbox)
         .with_ingress_effect_capture(Some(capture.clone()));
 
@@ -170,7 +170,7 @@ async fn direct_inbox_boundary_skips_inbox_project_intent_when_upsert_fails() {
     let registry = ConnectionRegistry::new();
     let mam: Arc<dyn MamStorage> = Arc::new(InMemoryMamStorage::new());
     let inbox: Arc<dyn InboxStorage> = Arc::new(FailingInboxStorage);
-    let capture = IngressEffectCapture::new(None);
+    let capture = IngressEffectCapture::new();
     let deps = Deps::test_with_storage(&registry, &mam, &inbox)
         .with_ingress_effect_capture(Some(capture.clone()));
 
@@ -215,7 +215,7 @@ async fn displayed_marker_boundary_records_read_timestamp_and_push_route() {
     let user_registry = &state.deps.protocol.user_registry;
     let mam = Arc::clone(&state.deps.protocol.mam_storage);
     let inbox = Arc::clone(&state.deps.protocol.inbox_storage);
-    let capture = IngressEffectCapture::new(None);
+    let capture = IngressEffectCapture::new();
     let deps = Deps::test_with_storage(registry, &mam, &inbox)
         .with_ingress_effect_capture(Some(capture.clone()));
     let mut deps = deps;
@@ -301,7 +301,7 @@ async fn groupchat_inbox_boundary_records_inbox_and_notification_intents() {
     let registry = ConnectionRegistry::new();
     let mam: Arc<dyn MamStorage> = Arc::new(InMemoryMamStorage::new());
     let inbox: Arc<dyn InboxStorage> = Arc::new(InMemoryInboxStorage::new());
-    let capture = IngressEffectCapture::new(None);
+    let capture = IngressEffectCapture::new();
     let deps = Deps::test_with_storage(&registry, &mam, &inbox)
         .with_ingress_effect_capture(Some(capture.clone()));
 
@@ -360,7 +360,7 @@ async fn groupchat_inbox_boundary_records_notification_intent_after_candidate_ac
     let registry = state.deps.protocol.connection_registry.as_ref();
     let mam = Arc::clone(&state.deps.protocol.mam_storage);
     let inbox = Arc::clone(&state.deps.protocol.inbox_storage);
-    let capture = IngressEffectCapture::new(None);
+    let capture = IngressEffectCapture::new();
     let deps = Deps::test_with_storage(registry, &mam, &inbox)
         .with_ingress_effect_capture(Some(capture.clone()));
     let mut deps = deps;
@@ -433,7 +433,7 @@ async fn groupchat_inbox_boundary_skips_notification_intent_when_t0_policy_suppr
     let registry = state.deps.protocol.connection_registry.as_ref();
     let mam = Arc::clone(&state.deps.protocol.mam_storage);
     let inbox = Arc::clone(&state.deps.protocol.inbox_storage);
-    let capture = IngressEffectCapture::new(None);
+    let capture = IngressEffectCapture::new();
     let deps = Deps::test_with_storage(registry, &mam, &inbox)
         .with_ingress_effect_capture(Some(capture.clone()));
     let mut deps = deps;
@@ -508,13 +508,14 @@ async fn groupchat_inbox_boundary_skips_notification_intent_when_t0_policy_suppr
 }
 
 #[tokio::test]
-async fn offline_delivery_boundary_records_notification_preview_intent() {
+async fn offline_delivery_boundary_only_confirms_written_steps() {
     let registry = ConnectionRegistry::new();
     let pending: Arc<dyn PendingDeliveryStorage> = Arc::new(InMemoryPendingDeliveryStorage::new(
         waddle_xmpp::pending_delivery::QuotaPolicy::default_policy(),
     ));
-    let capture = IngressEffectCapture::new(None);
+    let capture = IngressEffectCapture::new();
     let deps = Deps {
+        effects: &crate::server::routes::interpret::effects::ImmediateSink,
         connection_registry: &registry,
         user_registry: None,
         sm_session_registry: None,
@@ -553,7 +554,7 @@ async fn offline_delivery_boundary_records_notification_preview_intent() {
     .await;
 
     let snapshot = capture_snapshot(&capture);
-    assert!(snapshot.intents.iter().any(|intent| matches!(
+    assert!(!snapshot.intents.iter().any(|intent| matches!(
         intent,
         IngressEffectIntent::NotificationActivityPreview { owner, .. }
             if *owner == recipient
@@ -575,8 +576,9 @@ async fn transient_offline_delivery_records_pending_delivery_intent() {
     let pending: Arc<dyn PendingDeliveryStorage> = Arc::new(InMemoryPendingDeliveryStorage::new(
         waddle_xmpp::pending_delivery::QuotaPolicy::default_policy(),
     ));
-    let capture = IngressEffectCapture::new(None);
+    let capture = IngressEffectCapture::new();
     let deps = Deps {
+        effects: &crate::server::routes::interpret::effects::ImmediateSink,
         connection_registry: &registry,
         user_registry: None,
         sm_session_registry: None,
@@ -635,7 +637,7 @@ async fn archive_direct_boundary_records_notification_activity_preview_intent() 
     let registry = ConnectionRegistry::new();
     let mam: Arc<dyn MamStorage> = Arc::new(InMemoryMamStorage::new());
     let inbox: Arc<dyn InboxStorage> = Arc::new(InMemoryInboxStorage::new());
-    let capture = IngressEffectCapture::new(None);
+    let capture = IngressEffectCapture::new();
     let deps = Deps::test_with_storage(&registry, &mam, &inbox)
         .with_ingress_effect_capture(Some(capture.clone()));
     let owner: jid::BareJid = "alice@example.com".parse().expect("owner");
@@ -672,7 +674,7 @@ async fn archive_direct_boundary_records_notification_activity_preview_after_pro
     let registry = state.deps.protocol.connection_registry.as_ref();
     let mam = Arc::clone(&state.deps.protocol.mam_storage);
     let inbox = Arc::clone(&state.deps.protocol.inbox_storage);
-    let capture = IngressEffectCapture::new(None);
+    let capture = IngressEffectCapture::new();
     let deps = Deps::test_with_storage(registry, &mam, &inbox)
         .with_ingress_effect_capture(Some(capture.clone()));
     let mut deps = deps;
@@ -704,7 +706,7 @@ async fn archive_direct_boundary_records_notification_activity_preview_after_pro
 }
 
 #[tokio::test]
-async fn direct_archive_capture_uses_the_deduplicated_authoritative_id() {
+async fn direct_archive_capture_uses_the_new_authoritative_id_for_an_origin_retry() {
     use waddle_xmpp::inbox::storage::InMemoryInboxStorage;
     use waddle_xmpp::mam::{ArchivedMessage, InMemoryMamStorage};
     use waddle_xmpp_core::xep0359::{build_origin_id_element, OriginId};
@@ -713,7 +715,7 @@ async fn direct_archive_capture_uses_the_deduplicated_authoritative_id() {
     let mam_concrete = Arc::new(InMemoryMamStorage::new());
     let mam: Arc<dyn MamStorage> = mam_concrete.clone();
     let inbox: Arc<dyn InboxStorage> = Arc::new(InMemoryInboxStorage::new());
-    let capture = IngressEffectCapture::new(None);
+    let capture = IngressEffectCapture::new();
     let deps = Deps::test_with_storage(&registry, &mam, &inbox)
         .with_ingress_effect_capture(Some(capture.clone()));
     let owner: jid::BareJid = "alice@example.com".parse().expect("owner");
@@ -757,13 +759,34 @@ async fn direct_archive_capture_uses_the_deduplicated_authoritative_id() {
     )
     .await;
 
-    assert!(capture_snapshot(&capture).intents.iter().any(|intent| {
-        matches!(
-            intent,
-            IngressEffectIntent::ArchiveAuthoritative { archive, stanza_id, .. }
-                if archive == &owner && stanza_id.id == "authoritative-archive-id"
-        )
-    }));
+    assert_eq!(
+        mam_concrete
+            .count_messages(&owner)
+            .await
+            .expect("count archive"),
+        2
+    );
+    let snapshot = capture_snapshot(&capture);
+    let (stanza_id, archived_at) = snapshot
+        .intents
+        .iter()
+        .find_map(|intent| match intent {
+            IngressEffectIntent::ArchiveAuthoritative {
+                archive,
+                stanza_id,
+                archived_at,
+                ..
+            } if archive == &owner => Some((stanza_id, archived_at)),
+            _ => None,
+        })
+        .expect("captured archive identity");
+    assert_ne!(stanza_id.id, "authoritative-archive-id");
+    let row = mam_concrete
+        .get_message(stanza_id.as_str())
+        .await
+        .expect("read archive")
+        .expect("captured row exists");
+    assert_eq!(row.timestamp, *archived_at);
 }
 
 #[tokio::test]
@@ -788,7 +811,7 @@ async fn shared_recipient_pass_records_recipient_side_effects_once_across_multi_
     let inbox: Arc<dyn InboxStorage> = Arc::new(InMemoryInboxStorage::new());
     let blocking: Arc<dyn BlockingStorage> = Arc::new(InMemoryBlockingStorage::new());
     let dispatcher = pipelined_dispatcher();
-    let capture = IngressEffectCapture::new(None);
+    let capture = IngressEffectCapture::new();
     let deps = offline_pass_deps_with_user_registry(
         &registry,
         &user_registry,

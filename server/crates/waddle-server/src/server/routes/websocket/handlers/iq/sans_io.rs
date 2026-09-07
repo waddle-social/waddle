@@ -323,6 +323,7 @@ async fn handle_sans_io_iq_with_relay_override(
             ordered_relay_origin: conn_state.ordered_relay_origin.clone(),
             sfu: state.deps.protocol.sfu.as_deref(),
             ingress_effect_capture: None,
+            effects: &crate::server::routes::interpret::effects::ImmediateSink,
         };
         let outcome = crate::server::routes::interpret::interpret(events, &deps).await;
         if let Some(room_jid) = muji_clear_after {
@@ -779,6 +780,7 @@ async fn relay_muji_to_room_owner(
                 *conn_state.occupancy_session,
             ),
             origin,
+            None,
         )
         .await
     {
@@ -807,7 +809,8 @@ async fn relay_muji_to_room_owner(
                 unrelayable(true, &relay_failed)
             }
             // Ambiguous by construction — the owner may have committed it.
-            OrderedRelayMucProxyOutcome::MaybeCommitted
+            OrderedRelayMucProxyOutcome::PendingFrames { .. }
+            | OrderedRelayMucProxyOutcome::MaybeCommitted
             | OrderedRelayMucProxyOutcome::JoinMaybeCommitted => {
                 unrelayable_after_relay_failure("relay_maybe_committed");
                 unrelayable(true, &|| relay_uncertain("relay_maybe_committed"))

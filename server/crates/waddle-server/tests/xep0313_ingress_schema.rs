@@ -5,7 +5,7 @@
 //! the archive identifier and clients must not rely on stanza-id for it.
 
 #[cfg(feature = "clustering")]
-mod ingress_shadow_support;
+mod ingress_authority_support;
 
 use std::time::Duration as StdDuration;
 
@@ -26,7 +26,7 @@ use waddle_xmpp_core::xep0359::OriginId;
 use waddle_xmpp_core::xep0359::StanzaId;
 
 #[cfg(feature = "clustering")]
-use ingress_shadow_support::ShadowFixture;
+use ingress_authority_support::IngressFixture;
 
 #[tokio::test]
 async fn internal_message_association_and_digest_are_stable() {
@@ -137,13 +137,13 @@ async fn retention_is_non_cascading_and_child_foreign_keys_are_no_action() {
 }
 
 /// XEP-0313 §5.1.3 and §6.3 require the archive to assign the authoritative
-/// UID while XEP-0359's stanza-id is merely the replay binding. The shadow
+/// UID while XEP-0359's stanza-id is merely the replay binding. The authority
 /// pipeline must therefore persist the captured archive stanza-id exactly on
 /// the authoritative effect row for the handled message.
 #[cfg(feature = "clustering")]
 #[tokio::test]
-async fn shadow_pipeline_binds_archive_authoritative_intent_to_archive_stanza_id() {
-    let Some(fixture) = ShadowFixture::open("xep0313_pipeline").await else {
+async fn authority_pipeline_binds_archive_authoritative_intent_to_archive_stanza_id() {
+    let Some(fixture) = IngressFixture::open("xep0313_pipeline").await else {
         return;
     };
     let archive = fixture.principal.bare_jid().clone();
@@ -151,10 +151,11 @@ async fn shadow_pipeline_binds_archive_authoritative_intent_to_archive_stanza_id
         archive: archive.clone(),
         stanza_id: StanzaId::new("mam-archive-uid-1", Jid::from(archive.clone())),
         by: archive,
+        archived_at: chrono::Utc::now(),
     };
 
     fixture
-        .enqueue(fixture.submission_with_intents(
+        .commit(fixture.submission_with_intents(
             1,
             Some("mam-origin"),
             "archive authoritative body",
@@ -180,7 +181,7 @@ async fn shadow_pipeline_binds_archive_authoritative_intent_to_archive_stanza_id
 
 #[cfg(feature = "clustering")]
 async fn effect_intents_for_message(
-    fixture: &ShadowFixture,
+    fixture: &IngressFixture,
     message_key: MessageKey,
 ) -> Vec<IngressEffectIntent> {
     let conn = fixture.db.guard().await.expect("database connection");
@@ -261,7 +262,7 @@ impl Fixture {
         let key = MessageKey::new();
         let mut tx = self.store.begin().await.expect("begin message insert");
         self.store
-            .record_message(&mut tx, key, &digest)
+            .record_message(&mut tx, key, &digest, None)
             .await
             .expect("record message");
         tx.commit().await.expect("commit message insert");

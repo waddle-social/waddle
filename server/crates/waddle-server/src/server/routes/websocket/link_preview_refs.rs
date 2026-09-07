@@ -142,7 +142,10 @@ async fn cleared_current_message_preview_refs(
     }
 }
 
-fn cached_preview_upload_slot_ids(message: &Message, trusted_media_base_url: &str) -> Vec<String> {
+pub(crate) fn cached_preview_upload_slot_ids(
+    message: &Message,
+    trusted_media_base_url: &str,
+) -> Vec<String> {
     let mut seen = HashSet::new();
     message
         .payloads

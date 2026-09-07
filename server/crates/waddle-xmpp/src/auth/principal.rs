@@ -6,9 +6,10 @@
 //! time and fails closed if the exact version or epoch is no longer current.
 
 use jid::BareJid;
+use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq, Hash)]
 pub struct AuthContextId(Uuid);
 
 impl AuthContextId {
@@ -21,7 +22,7 @@ impl AuthContextId {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
+#[derive(Serialize, Deserialize, Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub struct AuthContextVersion(u64);
 
 impl AuthContextVersion {
@@ -36,7 +37,7 @@ impl AuthContextVersion {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
+#[derive(Serialize, Deserialize, Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub struct PrincipalAuthEpoch(u64);
 
 impl PrincipalAuthEpoch {
@@ -51,12 +52,13 @@ impl PrincipalAuthEpoch {
     }
 }
 
-/// Nonforgeable authority reference persisted beside an SM snapshot.
+/// Authenticated principal reference persisted beside an SM snapshot and
+/// deserialized from ordered-relay envelopes.
 ///
-/// Fields remain private so protocol code cannot manufacture a reference
-/// from a String or a token. Creation is restricted to an authenticated
-/// server boundary that has already validated the principal.
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+/// Private fields keep construction at authenticated server boundaries.
+/// Deserialization does not confer authority: the receiving owner re-asserts
+/// the reference against durable principal state before committing effects.
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq, Hash)]
 pub struct AuthenticatedPrincipalRef {
     bare_jid: BareJid,
     auth_context_id: AuthContextId,

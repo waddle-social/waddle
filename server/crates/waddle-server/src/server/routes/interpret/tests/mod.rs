@@ -20,6 +20,8 @@ mod enrichment;
 mod groupchat_retraction;
 mod groupchat_retry;
 mod offline_delivery;
+mod plan;
+mod projection_outcomes;
 mod room_dispatch;
 mod room_subject;
 mod routing_detached_delivery;
@@ -224,6 +226,7 @@ fn offline_pass_deps<'a>(
         ordered_relay_origin: None,
         sfu: None,
         ingress_effect_capture: None,
+        effects: &crate::server::routes::interpret::effects::ImmediateSink,
     }
 }
 
@@ -331,7 +334,6 @@ fn detached_dm_session(
         jid: jid.clone(),
         occupancy_session: waddle_xmpp_core::OccupancySessionGeneration::mint(),
         inbound_count: 0,
-        shadow_ordinal: waddle_xmpp::stream_management::ShadowOrdinal::ZERO,
         outbound_count: 0,
         last_acked: 0,
         replay_gap_through: None,
@@ -349,3 +351,5 @@ fn detached_dm_session(
         pending_subscribes_flushed: false,
     }
 }
+
+mod delivery_plan;

@@ -1201,6 +1201,80 @@ impl PendingDeliveryStorage for DatabasePendingDeliveryStorage {
             .removed_count)
     }
 
+    async fn snapshot_for_tombstone(
+        &self,
+        target: &waddle_xmpp::tombstone::TombstoneTarget,
+    ) -> Result<Vec<PendingRowId>, PendingStorageError> {
+        let db = self
+            .db
+            .guard()
+            .await
+            .map_err(|e| PendingStorageError::Other(e.to_string()))?;
+        // Archived pointers: exact (stanza-id, archive-by) match —
+        // pure SQL; retain the pointer until ingress commits the tombstone.
+        let mut matched_ids = Vec::new();
+        let mut archived_rows = db
+            .query(
+                "SELECT row_id FROM pending_delivery \
+                 WHERE payload_kind = ? \
+                   AND archive_stanza_id = ? \
+                   AND archive_stanza_by = ?",
+                crate::db_params![
+                    PAYLOAD_KIND_ARCHIVED,
+                    target.id().to_string(),
+                    target.archive_jid().to_string(),
+                ],
+            )
+            .await
+            .map_err(|e| PendingStorageError::Other(e.to_string()))?;
+        while let Some(row) = archived_rows
+            .next()
+            .await
+            .map_err(|e| PendingStorageError::Other(e.to_string()))?
+        {
+            let row_id: String = row
+                .get(0)
+                .map_err(|e| PendingStorageError::Other(e.to_string()))?;
+            matched_ids.push(PendingRowId::new(row_id));
+        }
+        // Transient rows carry inline XML — match in Rust with the
+        // shared XEP-0424/0425 predicate and retain their exact identities.
+        // COST NOTE: scans every transient row; scrubs are rare
+        // (retraction / moderation only), so a full listing is
+        // acceptable — mirrors the SM registry's durable sweep.
+        let mut rows = db
+            .query(
+                "SELECT row_id, transient_xml FROM pending_delivery WHERE payload_kind = ?",
+                crate::db_params![PAYLOAD_KIND_TRANSIENT],
+            )
+            .await
+            .map_err(|e| PendingStorageError::Other(e.to_string()))?;
+        while let Some(row) = rows
+            .next()
+            .await
+            .map_err(|e| PendingStorageError::Other(e.to_string()))?
+        {
+            let row_id: String = row
+                .get(0)
+                .map_err(|e| PendingStorageError::Other(e.to_string()))?;
+            let transient_xml: Option<String> = row
+                .get(1)
+                .map_err(|e| PendingStorageError::Other(e.to_string()))?;
+            let Some(xml) = transient_xml else {
+                continue;
+            };
+            let Ok(element) = xml.parse::<xmpp_parsers::minidom::Element>() else {
+                // Undecodable rows are skipped, matching the shared
+                // matcher's parse-error semantics.
+                continue;
+            };
+            if target.matches_message_element(&element) {
+                matched_ids.push(PendingRowId::new(row_id));
+            }
+        }
+        Ok(matched_ids)
+    }
+
     async fn scrub_for_tombstone_with_row_ids(
         &self,
         target: &waddle_xmpp::tombstone::TombstoneTarget,

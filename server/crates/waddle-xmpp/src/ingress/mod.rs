@@ -20,12 +20,13 @@ pub const MAX_ORIGIN_ID_BYTES: usize = 1024;
 pub use alias::{resolve_alias, AliasConflict, AliasOutcome, AliasResolution, StoredAlias};
 pub use digest::{DigestContext, DigestInput, DigestInputError, DigestVersion, SemanticDigest};
 pub use effect_intent::{
-    DmPinMutationAction, EffectIntentCodecError, EffectMessageIdentity, FrozenStanzaError,
-    FrozenStanzaErrorAddress, FrozenStanzaErrorConditionPayload, FrozenStanzaErrorText,
-    FrozenStanzaErrorTexts, FrozenStanzaErrorType, GroupDmHistoryVisibility,
-    GroupDmMembershipGrant, GroupchatNotificationRecoveryAction,
-    GroupchatNotificationRecoveryMutation, InboxProjectionMutation, IngressEffectIntent,
-    IngressEffectKey, LinkPreviewMediaRefMutation, LinkPreviewMediaRefState, MucInviteLedgerAction,
+    ArchiveRole, DmPinMutationAction, EffectAuthorityKey, EffectIntentCodecError,
+    EffectMessageIdentity, FrozenStanzaError, FrozenStanzaErrorAddress,
+    FrozenStanzaErrorConditionPayload, FrozenStanzaErrorText, FrozenStanzaErrorTexts,
+    FrozenStanzaErrorType, GroupDmHistoryVisibility, GroupDmMembershipGrant,
+    GroupchatNotificationRecoveryAction, GroupchatNotificationRecoveryMutation,
+    InboxProjectionMutation, IngressEffectIntent, IngressEffectKey, IngressEffectKind,
+    LinkPreviewMediaRefMutation, LinkPreviewMediaRefState, MucInviteLedgerAction,
     MucInviteLedgerMutation, MucInviteMembershipGrant, NotificationActivityMutation,
     NotificationCandidateOutcome, PendingDeliveryMutation, RecipientSmAppendIdentity,
     RelayNodeEpoch, RelayNodeId, RelayTargetIdentity, RetractionTombstoneMutation, RoomPinMutation,
@@ -35,6 +36,6 @@ pub use epoch::ProtocolEpoch;
 pub use error::IngressTypeError;
 pub use generation::{ConnectionGeneration, EntityGeneration, RowRevision};
 pub use keys::{DeliveryKey, MessageKey};
-pub use ordinal::IngressOrdinal;
+pub use ordinal::{IngressOrdinal, WireHandledCount};
 pub use stream::{IngressStreamId, SmIngressId};
 pub use target::{NormalizedTarget, NormalizedTargetStorage};

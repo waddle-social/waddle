@@ -14,7 +14,7 @@ pub(super) enum RoomArchiveFence {
     #[cfg(feature = "clustering")]
     Guarded {
         context: RoomClaimFenceContext,
-        _identity_guard: CurrentNodeIdentityGuard,
+        _identity_guard: Option<CurrentNodeIdentityGuard>,
     },
     #[cfg(feature = "clustering")]
     OwnershipLost,
@@ -28,7 +28,6 @@ pub(super) enum RoomArchiveFence {
 /// actual write.
 pub(super) enum ArchiveGroupchatOutcome {
     Stored(ArchiveStoreResult),
-    Deduplicated(ArchiveStoreResult),
     TombstoneHit,
     /// Not an error: a chain-bug guard or a non-fencing storage failure
     /// declined the write. The reflection still goes out (today's
@@ -51,6 +50,28 @@ pub(super) enum ArchiveGroupchatOutcome {
 pub(super) async fn resolve_room_claim_fence(deps: &Deps<'_>, room: &BareJid) -> RoomArchiveFence {
     #[cfg(feature = "clustering")]
     {
+        if deps.effects.is_planning() {
+            if let super::effects::RoomExecutionPath::Local {
+                room: planned_room,
+                fence,
+                ..
+            } = deps.effects.room_execution()
+            {
+                if &planned_room == room {
+                    return match fence {
+                        super::effects::room::RoomFenceRequirement::Unfenced => {
+                            RoomArchiveFence::Unfenced
+                        }
+                        super::effects::room::RoomFenceRequirement::Guarded(context) => {
+                            RoomArchiveFence::Guarded {
+                                context,
+                                _identity_guard: None,
+                            }
+                        }
+                    };
+                }
+            }
+        }
         let Some(state) = deps.web_socket_state else {
             return RoomArchiveFence::Unfenced;
         };
@@ -58,6 +79,20 @@ pub(super) async fn resolve_room_claim_fence(deps: &Deps<'_>, room: &BareJid) ->
         let Some(store) = clustering.muc_durable_store.as_ref() else {
             return RoomArchiveFence::Unfenced;
         };
+        if deps.effects.is_planning() {
+            return match (
+                store.current_claim_fence(room),
+                clustering.node_identity.as_ref(),
+            ) {
+                (Some(context), Some(identity)) if context.owner == identity.current() => {
+                    RoomArchiveFence::Guarded {
+                        context,
+                        _identity_guard: None,
+                    }
+                }
+                _ => RoomArchiveFence::OwnershipLost,
+            };
+        }
         guard_clustered_room_claim_fence(
             store.current_claim_fence(room),
             clustering.node_identity.as_ref(),
@@ -84,11 +119,32 @@ async fn guard_clustered_room_claim_fence(
     };
     RoomArchiveFence::Guarded {
         context,
-        _identity_guard: identity_guard,
+        _identity_guard: Some(identity_guard),
     }
 }
 
 pub(super) async fn archive_groupchat_message(
+    mam_storage: &Arc<dyn MamStorage>,
+    room: &BareJid,
+    message: &Message,
+    sender_nickname_generation: u64,
+    fence: &RoomArchiveFence,
+    sender_item: Option<&waddle_xmpp_core::mam::ArchivedMucSender>,
+) -> ArchiveGroupchatOutcome {
+    archive_groupchat_message_with_effects(
+        None,
+        mam_storage,
+        room,
+        message,
+        sender_nickname_generation,
+        fence,
+        sender_item,
+    )
+    .await
+}
+
+pub(super) async fn archive_groupchat_message_with_effects(
+    deps: Option<&Deps<'_>>,
     mam_storage: &Arc<dyn MamStorage>,
     room: &BareJid,
     message: &Message,
@@ -138,8 +194,8 @@ pub(super) async fn archive_groupchat_message(
         }
     };
 
-    finish_archive_groupchat_message(
-        mam_storage,
+    finish_archive_groupchat_message_with_effects(
+        (deps, mam_storage),
         room,
         archive_clone,
         archive_id,
@@ -160,8 +216,8 @@ pub(super) fn extract_room_stanza_id(message: &Message, room: &BareJid) -> Optio
         .and_then(|payload| payload.attr("id").map(ToOwned::to_owned))
 }
 
-pub(super) async fn finish_archive_groupchat_message(
-    mam_storage: &Arc<dyn MamStorage>,
+async fn finish_archive_groupchat_message_with_effects(
+    storage: (Option<&Deps<'_>>, &Arc<dyn MamStorage>),
     room: &BareJid,
     archive_clone: Message,
     archive_id: String,
@@ -169,6 +225,7 @@ pub(super) async fn finish_archive_groupchat_message(
     fence: &RoomArchiveFence,
     sender_item: Option<&waddle_xmpp_core::mam::ArchivedMucSender>,
 ) -> ArchiveGroupchatOutcome {
+    let (deps, mam_storage) = storage;
     // RFC 6121 §5.2.3: `<body>` is optional. Preserve the
     // None-vs-empty distinction so subject-only / reaction-only
     // groupchat messages don't materialize a fake empty body in the
@@ -232,16 +289,46 @@ pub(super) async fn finish_archive_groupchat_message(
     // `pending_delivery::insert_fenced` establishes one table over,
     // running the `SELECT ... FOR SHARE` INSIDE the same transaction as
     // this insert.
-    let store_result = match fence {
-        #[cfg(feature = "clustering")]
-        RoomArchiveFence::Guarded { context, .. } => {
-            mam_storage
-                .store_message_fenced(room, &archived, context)
-                .await
+    let store_result = if let Some(deps) = deps {
+        let requirement = match fence {
+            RoomArchiveFence::Unfenced => super::effects::room::RoomFenceRequirement::Unfenced,
+            #[cfg(feature = "clustering")]
+            RoomArchiveFence::Guarded { context, .. } => {
+                super::effects::room::RoomFenceRequirement::Guarded(context.clone())
+            }
+            #[cfg(feature = "clustering")]
+            RoomArchiveFence::OwnershipLost => return ArchiveGroupchatOutcome::OwnershipLost,
+        };
+        match deps
+            .effects
+            .execute(
+                super::effects::room::planned_durable(
+                    super::effects::room::DurableRoomEffect::ArchiveGroupchat {
+                        room: room.clone(),
+                        message: Box::new(archived.clone()),
+                        fence: requirement,
+                        archive_expectation: waddle_xmpp::mam::ArchiveExpectation::Fresh,
+                    },
+                ),
+                deps,
+            )
+            .await
+        {
+            super::effects::EffectOutcome::Archive(result) => result,
+            _ => return ArchiveGroupchatOutcome::Skipped,
         }
-        RoomArchiveFence::Unfenced => mam_storage.store_message(room, &archived).await,
-        #[cfg(feature = "clustering")]
-        RoomArchiveFence::OwnershipLost => return ArchiveGroupchatOutcome::OwnershipLost,
+    } else {
+        match fence {
+            #[cfg(feature = "clustering")]
+            RoomArchiveFence::Guarded { context, .. } => {
+                mam_storage
+                    .store_message_fenced(room, &archived, context)
+                    .await
+            }
+            RoomArchiveFence::Unfenced => mam_storage.store_message(room, &archived).await,
+            #[cfg(feature = "clustering")]
+            RoomArchiveFence::OwnershipLost => return ArchiveGroupchatOutcome::OwnershipLost,
+        }
     };
     match store_result {
         Ok(StoreOutcome::Stored(stored_id)) => {
@@ -252,16 +339,7 @@ pub(super) async fn finish_archive_groupchat_message(
                     stored_id.clone(),
                 ),
                 stored_id,
-            })
-        }
-        Ok(StoreOutcome::Deduplicated(stored_id)) => {
-            ArchiveGroupchatOutcome::Deduplicated(ArchiveStoreResult {
-                rewrite: ArchiveIdRewrite::from_store_result(
-                    jid::Jid::from(room.clone()),
-                    archive_id,
-                    stored_id.clone(),
-                ),
-                stored_id,
+                archived_at: archived.timestamp,
             })
         }
         Ok(StoreOutcome::TombstoneHit(existing_id)) => {
@@ -289,6 +367,72 @@ pub(super) async fn finish_archive_groupchat_message(
             );
             ArchiveGroupchatOutcome::Skipped
         }
+    }
+}
+
+pub(super) async fn plan_groupchat_retraction_tombstone(
+    deps: &Deps<'_>,
+    room: &BareJid,
+    target: &str,
+    message: &Message,
+) -> GroupchatRetractionTombstoneOutcome {
+    let Some(storage) = deps.mam_storage else {
+        return GroupchatRetractionTombstoneOutcome::NotFound;
+    };
+    let original = match storage.get_message(target).await {
+        Ok(Some(row)) if row.to.to_bare() == *room => row,
+        Ok(_) => return GroupchatRetractionTombstoneOutcome::NotFound,
+        Err(_) => {
+            deps.effects
+                .fail_plan(super::effects::PlanFailure::RetractionTargetRead);
+            return GroupchatRetractionTombstoneOutcome::Failed;
+        }
+    };
+    let existing = original
+        .rich
+        .as_ref()
+        .is_some_and(ArchivedRichMessage::is_tombstoned);
+    if !existing {
+        let Some(retraction_id) = message
+            .id
+            .as_ref()
+            .and_then(|id| RichMessageId::new(id.0.clone()))
+        else {
+            return GroupchatRetractionTombstoneOutcome::Failed;
+        };
+        super::effects::direct::durable(
+            deps,
+            super::effects::direct::DurableDirectEffect::RetractionTombstone {
+                archive: room.clone(),
+                target: Xep0359StanzaId::new(target, Jid::from(room.clone())),
+                tombstone: ArchivedTombstone {
+                    retraction_id: Some(retraction_id),
+                    stamp: chrono::Utc::now(),
+                    moderation: None,
+                    sender_scope: original
+                        .rich
+                        .as_ref()
+                        .and_then(|rich| rich.muc_sender.as_ref())
+                        .map(|sender| sender.jid.to_bare()),
+                },
+            },
+        );
+    }
+    if !plan_tombstone_replay(
+        deps,
+        waddle_xmpp::tombstone::TombstoneTarget::Groupchat {
+            stanza_id: target.to_owned(),
+            room: room.clone(),
+        },
+    )
+    .await
+    {
+        return GroupchatRetractionTombstoneOutcome::Failed;
+    }
+    if existing {
+        GroupchatRetractionTombstoneOutcome::AlreadyTombstoned
+    } else {
+        GroupchatRetractionTombstoneOutcome::Replaced
     }
 }
 
@@ -354,6 +498,7 @@ mod room_archive_fence_tests {
 
 pub(super) struct ArchiveStoreResult {
     pub stored_id: String,
+    pub archived_at: chrono::DateTime<chrono::Utc>,
     pub rewrite: Option<ArchiveIdRewrite>,
 }
 
@@ -389,7 +534,6 @@ pub(super) async fn apply_groupchat_retraction_tombstone(
         room,
         target_message_id,
         retraction_message,
-        None,
     )
     .await
     .tombstoned()
@@ -404,7 +548,6 @@ pub(super) async fn apply_groupchat_retraction_tombstone_outcome(
     room: &BareJid,
     target_message_id: &str,
     retraction_message: &Message,
-    capture: Option<&crate::ingress_shadow::IngressEffectCapture>,
 ) -> GroupchatRetractionTombstoneOutcome {
     // XEP-0424 §3 (xep-0424.xml lines 158, 230-232): a groupchat
     // retraction names the target by the room-assigned XEP-0359
@@ -462,7 +605,6 @@ pub(super) async fn apply_groupchat_retraction_tombstone_outcome(
             pending_storage,
             &scrub_target,
             "ApplyGroupchatRetractionTombstone",
-            capture,
         )
         .await;
         return GroupchatRetractionTombstoneOutcome::AlreadyTombstoned;
@@ -517,7 +659,6 @@ pub(super) async fn apply_groupchat_retraction_tombstone_outcome(
                 pending_storage,
                 &scrub_target,
                 "ApplyGroupchatRetractionTombstone",
-                capture,
             )
             .await;
             return GroupchatRetractionTombstoneOutcome::AlreadyTombstoned;
@@ -533,7 +674,6 @@ pub(super) async fn apply_groupchat_retraction_tombstone_outcome(
                 pending_storage,
                 &scrub_target,
                 "ApplyGroupchatRetractionTombstone",
-                capture,
             )
             .await;
             return GroupchatRetractionTombstoneOutcome::NotFound;
@@ -550,7 +690,6 @@ pub(super) async fn apply_groupchat_retraction_tombstone_outcome(
                 pending_storage,
                 &scrub_target,
                 "ApplyGroupchatRetractionTombstone",
-                capture,
             )
             .await;
             return GroupchatRetractionTombstoneOutcome::Failed;
@@ -569,29 +708,82 @@ pub(super) async fn apply_groupchat_retraction_tombstone_outcome(
         pending_storage,
         &scrub_target,
         "ApplyGroupchatRetractionTombstone",
-        capture,
     )
     .await;
     GroupchatRetractionTombstoneOutcome::Replaced
 }
 
-/// Walk the SM session registry AND the pending-delivery store and
-/// drop every cached `<message/>` copy that matches a XEP-0424 /
-/// XEP-0425 tombstone. `target` carries the typed identity
-/// ([`waddle_xmpp::tombstone::TombstoneTarget`]): groupchat scrubs
-/// match only the room-assigned XEP-0359 stanza-id; 1:1 scrubs match
-/// the author's wire id only for messages FROM that author. Both are
-/// scoped to the conversation archive so cross-conversation (and
-/// cross-sender wire-id-collision) collateral damage is impossible.
-/// Returns silently on any storage error (logged at WARN) — the
-/// archive scrub has already happened, and dropping the in-flight
-/// copies is best-effort.
-///
-/// Both layers are scrubbed from the same call sites because
-/// promotion (#1097/#1098) moves unacked SM stanzas into
-/// pending_delivery: scrubbing only the SM registry would let a
-/// promoted copy deliver the retracted content verbatim at the
-/// recipient's next login.
+fn replay_target(
+    target: &waddle_xmpp::tombstone::TombstoneTarget,
+) -> waddle_xmpp::ingress::TombstoneReplayTarget {
+    use waddle_xmpp::{ingress::TombstoneReplayTarget, tombstone::TombstoneTarget};
+    match target {
+        TombstoneTarget::Groupchat { stanza_id, room } => TombstoneReplayTarget::Groupchat {
+            stanza_id: stanza_id.clone(),
+            room: room.clone(),
+        },
+        TombstoneTarget::Direct {
+            wire_id,
+            author,
+            archive,
+        } => TombstoneReplayTarget::Direct {
+            wire_id: wire_id.clone(),
+            author: author.clone(),
+            archive: archive.clone(),
+        },
+    }
+}
+
+pub(super) async fn plan_tombstone_replay(
+    deps: &Deps<'_>,
+    target: waddle_xmpp::tombstone::TombstoneTarget,
+) -> bool {
+    let mut sm_entries = Vec::new();
+    if let Some(sm) = deps.sm_session_registry {
+        match sm.snapshot_unacked_for_tombstone(&target).await {
+            Ok(entries) => sm_entries.extend(entries.into_iter().map(|entry| {
+                waddle_xmpp::ingress::TombstoneReplaySmEntry {
+                    stream: entry.stream_id,
+                    sequence: entry.sequence,
+                }
+            })),
+            Err(error) => {
+                warn!(%error, "tombstone SM snapshot failed");
+                deps.effects
+                    .fail_plan(super::effects::PlanFailure::TombstoneReplaySnapshotRead);
+                return false;
+            }
+        }
+    }
+    let pending_rows = if let Some(pending) = deps.pending_delivery_storage {
+        match pending.snapshot_for_tombstone(&target).await {
+            Ok(rows) => rows,
+            Err(error) => {
+                warn!(%error, "tombstone pending snapshot failed");
+                deps.effects
+                    .fail_plan(super::effects::PlanFailure::TombstoneReplaySnapshotRead);
+                return false;
+            }
+        }
+    } else {
+        Vec::new()
+    };
+    if let Some(capture) = deps.ingress_effect_capture.as_ref() {
+        capture.record_intent(IngressEffectIntent::TombstoneReplayDeletion {
+            target: replay_target(&target),
+            sm_entries,
+            pending_rows,
+        });
+    }
+    super::effects::direct::external(
+        deps,
+        super::effects::direct::ExternalDirectEffect::ScrubReplayForTombstone { target },
+    );
+    true
+}
+
+/// Scrub both replay stores, returning confirmation only when both succeed.
+/// A failed store leaves the durable ingress obligation unreceipted for retry.
 pub(super) async fn scrub_unacked_for_tombstone(
     sm_session_registry: Option<&Arc<InMemorySmSessionRegistry>>,
     pending_storage: Option<
@@ -599,96 +791,29 @@ pub(super) async fn scrub_unacked_for_tombstone(
     >,
     target: &waddle_xmpp::tombstone::TombstoneTarget,
     site: &'static str,
-    capture: Option<&crate::ingress_shadow::IngressEffectCapture>,
-) {
-    let mut sm_entries = Vec::new();
-    let mut pending_rows = Vec::new();
+) -> bool {
+    let mut completed = true;
     if let Some(sm) = sm_session_registry {
         use waddle_xmpp::stream_management::SmSessionRegistry as _;
-        match sm.scrub_unacked_for_tombstone_with_entries(target).await {
-            Ok(removed) if removed.removed_count > 0 => {
-                debug!(
-                    target = target.id(),
-                    archive = %target.archive_jid(),
-                    removed = removed.removed_count,
-                    "{site}: scrubbed unacked SM queue entries for tombstoned message"
-                );
-                sm_entries.extend(removed.entries.into_iter().map(|entry| {
-                    waddle_xmpp::ingress::TombstoneReplaySmEntry {
-                        stream: entry.stream_id,
-                        sequence: entry.sequence,
-                    }
-                }));
-            }
-            Ok(_) => {}
-            Err(error) => {
-                warn!(
-                    target = target.id(),
-                    archive = %target.archive_jid(),
-                    %error,
-                    "{site}: scrub_unacked_for_tombstone failed; pre-scrub stanza may still replay on resume"
-                );
-            }
+        if let Err(error) = sm.scrub_unacked_for_tombstone_with_entries(target).await {
+            warn!(%error, "{site}: tombstone SM scrub failed");
+            completed = false;
         }
     }
     if let Some(pending) = pending_storage {
-        match pending.scrub_for_tombstone_with_row_ids(target).await {
-            Ok(removed) if removed.removed_count > 0 => {
-                debug!(
-                    target = target.id(),
-                    archive = %target.archive_jid(),
-                    removed = removed.removed_count,
-                    "{site}: scrubbed pending_delivery rows for tombstoned message"
-                );
-                pending_rows.extend(removed.row_ids);
-            }
-            Ok(_) => {}
-            Err(error) => {
-                warn!(
-                    target = target.id(),
-                    archive = %target.archive_jid(),
-                    %error,
-                    "{site}: pending_delivery scrub_for_tombstone failed; retracted \
-                     content may still deliver at the recipient's next login"
-                );
-            }
+        if let Err(error) = pending.scrub_for_tombstone_with_row_ids(target).await {
+            warn!(%error, "{site}: tombstone pending scrub failed");
+            completed = false;
         }
     }
-    if !sm_entries.is_empty() || !pending_rows.is_empty() {
-        if let Some(capture) = capture {
-            let target = match target {
-                waddle_xmpp::tombstone::TombstoneTarget::Groupchat { stanza_id, room } => {
-                    waddle_xmpp::ingress::TombstoneReplayTarget::Groupchat {
-                        stanza_id: stanza_id.clone(),
-                        room: room.clone(),
-                    }
-                }
-                waddle_xmpp::tombstone::TombstoneTarget::Direct {
-                    wire_id,
-                    author,
-                    archive,
-                } => waddle_xmpp::ingress::TombstoneReplayTarget::Direct {
-                    wire_id: wire_id.clone(),
-                    author: author.clone(),
-                    archive: archive.clone(),
-                },
-            };
-            capture.record_intent(IngressEffectIntent::TombstoneReplayDeletion {
-                target,
-                sm_entries,
-                pending_rows,
-            });
-        }
-    }
+    completed
 }
 
 /// Inputs for [`project_groupchat_inbox`]: one `(owner, room, message)`
 /// projection against the inbox storage plus the delivery context it
 /// needs to push XEP-0430 updates and persist notification recovery.
 pub(super) struct GroupchatInboxProjectionInputs<'a> {
-    pub inbox_storage: &'a Arc<dyn InboxStorage>,
-    pub connection_registry: &'a waddle_xmpp::registry::ConnectionRegistry,
-    pub user_registry: Option<&'a kameo::actor::ActorRef<waddle_xmpp::registry::UserRegistryActor>>,
+    pub deps: &'a Deps<'a>,
     pub owner: &'a BareJid,
     pub room: &'a BareJid,
     pub message: &'a Message,
@@ -707,9 +832,7 @@ pub(super) async fn project_groupchat_inbox(
     inputs: GroupchatInboxProjectionInputs<'_>,
 ) -> GroupchatInboxProjectionOutcome {
     let GroupchatInboxProjectionInputs {
-        inbox_storage,
-        connection_registry,
-        user_registry,
+        deps,
         owner,
         room,
         message,
@@ -719,6 +842,13 @@ pub(super) async fn project_groupchat_inbox(
         notification_recovery,
     } = inputs;
     let mut outcome = GroupchatInboxProjectionOutcome::default();
+    let Some(archive_id) = waddle_xmpp_core::xep0359::extract_stanza_ids(message)
+        .into_iter()
+        .find(|id| id.by == *room)
+    else {
+        warn!(room = %room, "ProjectGroupchatInbox: missing room-assigned stanza-id");
+        return outcome;
+    };
     let entry = groupchat_entry(room.clone(), message, dispatch_timestamp);
     let channel_recovery = if thread.is_none() {
         notification_recovery.clone()
@@ -727,20 +857,35 @@ pub(super) async fn project_groupchat_inbox(
     };
     let channel_records_recovery = channel_recovery.is_some();
     let thread_records_recovery = notification_recovery.is_some();
-    match inbox_storage
-        .upsert_with_groupchat_notification_recovery(owner, entry, is_recipient, channel_recovery)
+    match deps
+        .effects
+        .execute(
+            super::effects::room::planned_durable(
+                super::effects::room::DurableRoomEffect::ProjectGroupchatInbox {
+                    owner: owner.clone(),
+                    entry: Box::new(entry),
+                    archive_stanza_id: archive_id.clone(),
+                    is_recipient,
+                    recovery: channel_recovery,
+                },
+            ),
+            deps,
+        )
         .await
     {
-        Ok(updated) if is_recipient => {
+        updated @ (super::effects::EffectOutcome::Inbox(Ok(_))
+        | super::effects::EffectOutcome::PlannedInbox(_))
+            if is_recipient =>
+        {
             outcome.channel_committed = true;
             outcome.notification_recovery_committed = channel_records_recovery;
-            outcome.channel_push_recipients =
-                push_inbox_update(connection_registry, user_registry, owner, &updated).await;
+            outcome.channel_push_recipients = push_projected_inbox(deps, owner, updated).await;
         }
-        Ok(_) => {
+        super::effects::EffectOutcome::Inbox(Ok(_))
+        | super::effects::EffectOutcome::PlannedInbox(_) => {
             outcome.channel_committed = true;
         }
-        Err(error) => {
+        super::effects::EffectOutcome::Inbox(Err(error)) => {
             warn!(
                 jid = %owner,
                 room = %room,
@@ -748,6 +893,7 @@ pub(super) async fn project_groupchat_inbox(
                 "ProjectGroupchatInbox: channel-row upsert failed"
             );
         }
+        _ => {}
     }
     let Some(thread) = thread else {
         return outcome;
@@ -767,25 +913,35 @@ pub(super) async fn project_groupchat_inbox(
     if let (Some(kind), Some(media)) = (thread.call_thread_kind, thread.call_thread_media) {
         thread_entry = thread_entry.with_call_thread(kind, media);
     }
-    match inbox_storage
-        .upsert_with_groupchat_notification_recovery(
-            owner,
-            thread_entry,
-            is_recipient,
-            notification_recovery,
+    match deps
+        .effects
+        .execute(
+            super::effects::room::planned_durable(
+                super::effects::room::DurableRoomEffect::ProjectGroupchatInbox {
+                    owner: owner.clone(),
+                    entry: Box::new(thread_entry),
+                    archive_stanza_id: archive_id,
+                    is_recipient,
+                    recovery: notification_recovery,
+                },
+            ),
+            deps,
         )
         .await
     {
-        Ok(updated) if is_recipient => {
+        updated @ (super::effects::EffectOutcome::Inbox(Ok(_))
+        | super::effects::EffectOutcome::PlannedInbox(_))
+            if is_recipient =>
+        {
             outcome.thread_committed = true;
             outcome.notification_recovery_committed = thread_records_recovery;
-            outcome.thread_push_recipients =
-                push_inbox_update(connection_registry, user_registry, owner, &updated).await;
+            outcome.thread_push_recipients = push_projected_inbox(deps, owner, updated).await;
         }
-        Ok(_) => {
+        super::effects::EffectOutcome::Inbox(Ok(_))
+        | super::effects::EffectOutcome::PlannedInbox(_) => {
             outcome.thread_committed = true;
         }
-        Err(error) => {
+        super::effects::EffectOutcome::Inbox(Err(error)) => {
             warn!(
                 jid = %owner,
                 room = %room,
@@ -793,8 +949,48 @@ pub(super) async fn project_groupchat_inbox(
                 "ProjectGroupchatInbox: thread-row upsert failed"
             );
         }
+        _ => {}
     }
     outcome
+}
+
+async fn push_projected_inbox(
+    deps: &Deps<'_>,
+    owner: &BareJid,
+    outcome: super::effects::EffectOutcome,
+) -> Vec<FullJid> {
+    if let super::effects::EffectOutcome::PlannedInbox(projection) = outcome {
+        let resources = match deps.user_registry {
+            Some(registry) => waddle_xmpp::registry::get_resources_for_user(registry, owner).await,
+            None => Vec::new(),
+        };
+        let receipt = deps
+            .ingress_effect_capture
+            .as_ref()
+            .filter(|_| !resources.is_empty())
+            .map(|capture| {
+                let intent = IngressEffectIntent::RouteDirect {
+                    recipient: owner.clone(),
+                    fanout: resources.clone(),
+                    route_identity: capture.next_route_identity(),
+                };
+                capture.record_intent(intent.clone());
+                Box::new(intent)
+            });
+        super::effects::direct::external(
+            deps,
+            super::effects::direct::ExternalDirectEffect::PushInboxUpdate {
+                owner: owner.clone(),
+                projection,
+                receipt,
+            },
+        );
+        resources
+    } else if let super::effects::EffectOutcome::Inbox(Ok(entry)) = outcome {
+        push_inbox_update(deps.connection_registry, deps.user_registry, owner, &entry).await
+    } else {
+        Vec::new()
+    }
 }
 
 #[derive(Debug, Default, Clone, PartialEq, Eq)]

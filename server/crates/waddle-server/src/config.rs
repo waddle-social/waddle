@@ -1115,92 +1115,78 @@ pub struct ServerConfig {
     /// every stamping site reads the same key. Required at startup;
     /// see [`parse_occupant_id_secret`] for the validation rules.
     pub occupant_id_secret: OccupantIdSecret,
-    /// Non-blocking shadow executor for durable SM ingress frontiers.
-    pub ingress_shadow: IngressShadowConfig,
+    /// Durable ingress authority transaction limits.
+    pub ingress: IngressConfig,
     /// ADR-0017 Phase 2 clustering (owned libp2p swarm) configuration. With
     /// `enabled` false (the default) the swarm subsystem never starts.
     pub clustering: ClusteringConfig,
 }
 
+/// Dedicated ingress authority transaction limits.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct IngressShadowConfig {
-    pub enabled: bool,
-    pub queue_capacity: usize,
-    /// Isolated Postgres connection cap for the shadow executor.
+pub struct IngressConfig {
     pub pool_size: u32,
     pub retry_attempts: usize,
 }
 
-impl Default for IngressShadowConfig {
+#[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
+pub enum IngressConfigError {
+    #[error("WADDLE_INGRESS_DB_POOL_SIZE must be an integer between 1 and 32")]
+    PoolSize,
+    #[error("WADDLE_INGRESS_RETRY_ATTEMPTS must be an integer between 1 and 32")]
+    RetryAttempts,
+}
+
+impl Default for IngressConfig {
     fn default() -> Self {
         Self {
-            enabled: false,
-            queue_capacity: 256,
             pool_size: 4,
             retry_attempts: 5,
         }
     }
 }
 
-impl IngressShadowConfig {
-    const MAX_QUEUE_CAPACITY: usize = 16_384;
-    const MAX_POOL_SIZE: usize = 32;
-    const MAX_RETRY_ATTEMPTS: usize = 32;
-
-    pub fn from_env() -> Result<Self, String> {
+impl IngressConfig {
+    pub fn from_env() -> Result<Self, IngressConfigError> {
         Self::from_vars(std::env::vars())
     }
 
-    pub fn from_vars<I, K, V>(vars: I) -> Result<Self, String>
+    pub fn from_vars<I, K, V>(vars: I) -> Result<Self, IngressConfigError>
     where
         I: IntoIterator<Item = (K, V)>,
         K: AsRef<str>,
         V: AsRef<str>,
     {
-        let vars = vars
-            .into_iter()
-            .map(|(key, value)| (key.as_ref().to_string(), value.as_ref().to_string()))
-            .collect::<std::collections::HashMap<_, _>>();
-        let enabled = parse_bool_var(&vars, "WADDLE_INGRESS_SHADOW_ENABLED", false)?;
-        let queue_capacity = parse_usize_var(
-            &vars,
-            "WADDLE_INGRESS_SHADOW_QUEUE_CAPACITY",
-            Self::default().queue_capacity,
-        )?;
-        if queue_capacity == 0 || queue_capacity > Self::MAX_QUEUE_CAPACITY {
-            return Err(format!(
-                "WADDLE_INGRESS_SHADOW_QUEUE_CAPACITY must be between 1 and {}",
-                Self::MAX_QUEUE_CAPACITY
-            ));
+        let mut config = Self::default();
+        for (key, value) in vars {
+            match key.as_ref() {
+                "WADDLE_INGRESS_DB_POOL_SIZE" => {
+                    config.pool_size = value
+                        .as_ref()
+                        .parse()
+                        .map_err(|_| IngressConfigError::PoolSize)?;
+                }
+                "WADDLE_INGRESS_RETRY_ATTEMPTS" => {
+                    config.retry_attempts = value
+                        .as_ref()
+                        .parse()
+                        .map_err(|_| IngressConfigError::RetryAttempts)?;
+                }
+                _ => {}
+            }
         }
-        let pool_size = parse_usize_var(
-            &vars,
-            "WADDLE_INGRESS_SHADOW_DB_POOL_SIZE",
-            Self::default().pool_size as usize,
-        )?;
-        if pool_size == 0 || pool_size > Self::MAX_POOL_SIZE {
-            return Err(format!(
-                "WADDLE_INGRESS_SHADOW_DB_POOL_SIZE must be between 1 and {}",
-                Self::MAX_POOL_SIZE
-            ));
+        config.validate()?;
+        Ok(config)
+    }
+
+    pub fn validate(&self) -> Result<(), IngressConfigError> {
+        if !(1..=32).contains(&self.pool_size) {
+            return Err(IngressConfigError::PoolSize);
         }
-        let retry_attempts = parse_usize_var(
-            &vars,
-            "WADDLE_INGRESS_SHADOW_RETRY_ATTEMPTS",
-            Self::default().retry_attempts,
-        )?;
-        if retry_attempts == 0 || retry_attempts > Self::MAX_RETRY_ATTEMPTS {
-            return Err(format!(
-                "WADDLE_INGRESS_SHADOW_RETRY_ATTEMPTS must be between 1 and {}",
-                Self::MAX_RETRY_ATTEMPTS
-            ));
+        if !(1..=32).contains(&self.retry_attempts) {
+            return Err(IngressConfigError::RetryAttempts);
         }
-        Ok(Self {
-            enabled,
-            queue_capacity,
-            pool_size: pool_size as u32,
-            retry_attempts,
-        })
+        Ok(())
     }
 }
 
@@ -1593,7 +1579,7 @@ impl Default for ServerConfig {
             ws_keepalive: waddle_xmpp::protocol::KeepaliveConfig::default(),
             spicedb: None,
             occupant_id_secret: test_occupant_id_secret(),
-            ingress_shadow: IngressShadowConfig::default(),
+            ingress: IngressConfig::default(),
             clustering: ClusteringConfig::default(),
         }
     }
@@ -1621,7 +1607,7 @@ impl ServerConfig {
 
         let occupant_id_secret =
             parse_occupant_id_secret(std::env::var("WADDLE_OCCUPANT_ID_SECRET").ok().as_deref())?;
-        let ingress_shadow = IngressShadowConfig::from_env()?;
+        let ingress = IngressConfig::from_env().map_err(|error| error.to_string())?;
 
         let clustering = ClusteringConfig::from_env()?;
 
@@ -1635,7 +1621,7 @@ impl ServerConfig {
             ws_keepalive,
             spicedb,
             occupant_id_secret,
-            ingress_shadow,
+            ingress,
             clustering,
         })
     }
@@ -1670,7 +1656,7 @@ impl ServerConfig {
             ws_keepalive: waddle_xmpp::protocol::KeepaliveConfig::default(),
             spicedb: None,
             occupant_id_secret: test_occupant_id_secret(),
-            ingress_shadow: IngressShadowConfig::default(),
+            ingress: IngressConfig::default(),
             clustering: ClusteringConfig::default(),
         }
     }
@@ -1687,7 +1673,7 @@ impl ServerConfig {
             ws_keepalive: waddle_xmpp::protocol::KeepaliveConfig::default(),
             spicedb: None,
             occupant_id_secret: test_occupant_id_secret(),
-            ingress_shadow: IngressShadowConfig::default(),
+            ingress: IngressConfig::default(),
             clustering: ClusteringConfig::default(),
         }
     }
@@ -1706,41 +1692,6 @@ mod tests {
         assert_eq!(config.messaging, ClusteringMessagingConfig::default());
         // Byte-for-byte-identical guarantee: the whole struct equals Default.
         assert_eq!(config, ClusteringConfig::default());
-    }
-
-    #[test]
-    fn ingress_shadow_defaults_are_disabled() {
-        assert_eq!(
-            IngressShadowConfig::from_vars(std::iter::empty::<(&str, &str)>()).unwrap(),
-            IngressShadowConfig::default()
-        );
-    }
-
-    #[test]
-    fn ingress_shadow_parses_isolated_pool_size() {
-        let config = IngressShadowConfig::from_vars([
-            ("WADDLE_INGRESS_SHADOW_ENABLED", "true"),
-            ("WADDLE_INGRESS_SHADOW_DB_POOL_SIZE", "7"),
-        ])
-        .expect("valid shadow configuration");
-
-        assert!(config.enabled);
-        assert_eq!(config.pool_size, 7);
-    }
-
-    #[test]
-    fn ingress_shadow_rejects_out_of_range_bounds() {
-        for (key, value) in [
-            ("WADDLE_INGRESS_SHADOW_QUEUE_CAPACITY", "0"),
-            ("WADDLE_INGRESS_SHADOW_DB_POOL_SIZE", "0"),
-            ("WADDLE_INGRESS_SHADOW_RETRY_ATTEMPTS", "0"),
-            ("WADDLE_INGRESS_SHADOW_QUEUE_CAPACITY", "20000"),
-            ("WADDLE_INGRESS_SHADOW_DB_POOL_SIZE", "33"),
-            ("WADDLE_INGRESS_SHADOW_RETRY_ATTEMPTS", "64"),
-        ] {
-            let error = IngressShadowConfig::from_vars([(key, value)]).unwrap_err();
-            assert!(error.contains(key), "{key} should appear in '{error}'");
-        }
     }
 
     #[test]
@@ -2998,5 +2949,46 @@ mod database_runtime_config_tests {
         let config = DatabaseRuntimeConfig::from_vars(std::iter::empty::<(&str, &str)>()).unwrap();
         assert_eq!(config.driver, DatabaseDriver::Sqlite);
         assert_eq!(config.database_url, "sqlite::memory:");
+    }
+}
+
+#[cfg(test)]
+mod ingress_authority_config_tests {
+    use super::{IngressConfig, IngressConfigError};
+
+    #[test]
+    fn ingress_authority_config_defaults_and_overrides() {
+        assert_eq!(
+            IngressConfig::from_vars(std::iter::empty::<(&str, &str)>()).expect("defaults"),
+            IngressConfig {
+                pool_size: 4,
+                retry_attempts: 5
+            }
+        );
+        assert_eq!(
+            IngressConfig::from_vars([
+                ("WADDLE_INGRESS_DB_POOL_SIZE", "16"),
+                ("WADDLE_INGRESS_RETRY_ATTEMPTS", "7")
+            ])
+            .expect("overrides"),
+            IngressConfig {
+                pool_size: 16,
+                retry_attempts: 7
+            }
+        );
+    }
+
+    #[test]
+    fn ingress_authority_config_rejects_invalid_limits() {
+        for value in ["0", "33", "-1", "not-a-number"] {
+            assert_eq!(
+                IngressConfig::from_vars([("WADDLE_INGRESS_DB_POOL_SIZE", value)]),
+                Err(IngressConfigError::PoolSize)
+            );
+            assert_eq!(
+                IngressConfig::from_vars([("WADDLE_INGRESS_RETRY_ATTEMPTS", value)]),
+                Err(IngressConfigError::RetryAttempts)
+            );
+        }
     }
 }

@@ -3,9 +3,10 @@ use super::*;
 impl OrderedRelayDeliveryBridge {
     /// Receiver-side effect for one already-reserved envelope. The caller
     /// commits the reservation only when this returns `Ok(())`.
-    pub async fn deliver_reserved(
+    pub(crate) async fn deliver_reserved(
         &self,
         envelope: &RemoteStanzaEnvelope,
+        completion: &mut Option<RelayFrameCompletion>,
     ) -> Result<Vec<RemoteStanza>, OrderedRelayNackReason> {
         let Some(services) = self.services.get().cloned() else {
             return Err(OrderedRelayNackReason::Unreachable);
@@ -21,8 +22,17 @@ impl OrderedRelayDeliveryBridge {
                     .await
                     .map(|()| Vec::new())
             }
-            RelayPayloadTarget::Muc(room, kind, origin, stanza) => {
-                deliver_reserved_muc_proxy(&services, room, kind, origin, stanza).await
+            RelayPayloadTarget::Muc(room, kind, origin, stanza, admission) => {
+                deliver_reserved_muc_proxy(
+                    &services,
+                    room,
+                    kind,
+                    origin,
+                    stanza,
+                    admission.as_ref(),
+                    completion,
+                )
+                .await
             }
         }
     }
@@ -36,16 +46,36 @@ pub(in super::super) async fn deliver_local_after_target_refresh_outcome(
 ) -> RemoteDeliveryOutcome {
     match payload {
         OrderedRelayPayload::MucProxy {
+            canonical,
+            principal,
+            stanza_lang,
             room_jid,
             kind,
             origin,
             stanza,
-        } => muc_proxy_result_to_outcome(
-            Box::pin(deliver_reserved_muc_proxy(
-                services, room_jid, *kind, *origin, &stanza.0,
-            ))
-            .await,
-        ),
+        } => {
+            let mut completion = None;
+            let mut outcome = muc_proxy_result_to_outcome(
+                Box::pin(deliver_reserved_muc_proxy(
+                    services,
+                    room_jid,
+                    *kind,
+                    *origin,
+                    &stanza.0,
+                    crate::ingress::identity::IngressRelayAdmission::from_parts(
+                        canonical.clone(),
+                        principal.clone(),
+                        stanza_lang.clone(),
+                    )
+                    .as_ref(),
+                    &mut completion,
+                ))
+                .await,
+            );
+            outcome.frame_completion =
+                completion.map(crate::ingress::execute::RelayFrameReceiptCompletion::new);
+            outcome
+        }
         OrderedRelayPayload::Message { .. }
         | OrderedRelayPayload::Iq { .. }
         | OrderedRelayPayload::Presence { .. } => no_client_reply_outcome(

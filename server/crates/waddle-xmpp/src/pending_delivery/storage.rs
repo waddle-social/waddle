@@ -23,6 +23,9 @@ pub enum PendingStorageError {
     #[error("pending_delivery storage error: {0}")]
     Other(String),
 
+    #[error("pending delivery store does not support tombstone snapshots")]
+    TombstoneSnapshotUnsupported,
+
     /// ADR-0017 Phase 3 Slice 5 FIX 3 (council-adjudicated): a fenced
     /// `insert_fenced` call's own `SELECT ... FOR SHARE` fencing check
     /// (against `clustering_claims`, mirroring
@@ -470,6 +473,14 @@ pub trait PendingDeliveryStorage: Send + Sync {
         &self,
         target: &crate::tombstone::TombstoneTarget,
     ) -> Result<u64, PendingStorageError>;
+
+    /// Read exact replay obligations without modifying the queues.
+    async fn snapshot_for_tombstone(
+        &self,
+        _target: &crate::tombstone::TombstoneTarget,
+    ) -> Result<Vec<PendingRowId>, PendingStorageError> {
+        Err(PendingStorageError::TombstoneSnapshotUnsupported)
+    }
 
     /// Typed sibling of [`Self::scrub_for_tombstone`] that returns exact row
     /// identities when the implementation can provide them.
@@ -1140,6 +1151,22 @@ impl PendingDeliveryStorage for InMemoryPendingDeliveryStorage {
             .scrub_for_tombstone_with_row_ids(target)
             .await?
             .removed_count)
+    }
+
+    async fn snapshot_for_tombstone(
+        &self,
+        target: &crate::tombstone::TombstoneTarget,
+    ) -> Result<Vec<PendingRowId>, PendingStorageError> {
+        let guard = self
+            .inner
+            .lock()
+            .map_err(|e| PendingStorageError::Other(e.to_string()))?;
+        Ok(guard
+            .values()
+            .flat_map(|queue| queue.iter())
+            .filter(|row| pending_row_matches_tombstone(row, target))
+            .map(|row| row.id.clone())
+            .collect())
     }
 
     async fn scrub_for_tombstone_with_row_ids(

@@ -1510,8 +1510,8 @@ pub struct ProtocolServices {
     /// XEP-0198 detached-session registry — holds state for clients whose
     /// WebSocket has closed but may still resume within the session timeout.
     pub sm_session_registry: Arc<InMemorySmSessionRegistry>,
-    /// Non-blocking shadow executor for durable SM handled-frontier writes.
-    pub ingress_shadow: crate::ingress_shadow::IngressShadowHandle,
+    /// Durable ingress authority for message commits and SM handled-frontier writes.
+    pub ingress: Arc<crate::ingress::IngressAuthority>,
     /// Bounded admission for deferred link-preview resolver fetches
     /// (#1470). Serial frame dispatch used to throttle lookups to one in
     /// flight per connection as a side effect of blocking; once resolution
@@ -1666,6 +1666,7 @@ impl std::ops::Deref for ResolvedPrincipal<'_> {
 }
 
 pub(super) struct WsConnState {
+    pub(super) ingress_generation: waddle_xmpp::ingress::ConnectionGeneration,
     pub(super) phase: ConnectionPhase,
     /// Semantic state: the frame dispatcher has handled the client's current
     /// RFC 7395 `<open/>`. This resets on an actual XMPP stream close or
@@ -1683,6 +1684,8 @@ pub(super) struct WsConnState {
     /// XEP-0198 state for this WebSocket. Counts stanzas in both directions
     /// once enabled and holds the unacked queue used for resumption.
     pub(super) sm_state: StreamManagementState,
+    /// Exact claim acquired by this connection; registry demotion must never erase its ingress identity.
+    pub(super) sm_ingress_fence: Option<waddle_xmpp::stream_management::persistence::SmClaimFence>,
     pub(super) sm_inbound_completion: crate::server::routes::interpret::SmInboundCompletionTracker,
     /// Set only after a selected stanza's reserved SM slot has been settled
     /// as unhandled because its serving generation was revoked.
@@ -1825,13 +1828,19 @@ pub(super) struct WsConnState {
 
 impl WsConnState {
     pub(super) fn new() -> Self {
+        static NEXT_INGRESS_GENERATION: std::sync::atomic::AtomicU64 =
+            std::sync::atomic::AtomicU64::new(1);
         Self {
+            ingress_generation: waddle_xmpp::ingress::ConnectionGeneration::from_storage(
+                NEXT_INGRESS_GENERATION.fetch_add(1, std::sync::atomic::Ordering::Relaxed),
+            ),
             phase: ConnectionPhase::new(),
             stream_open_handled: false,
             stream_open_wire_state: StreamOpenWireState::NotCommitted,
             authenticated_session: None,
             occupancy_session: waddle_xmpp_core::OccupancySessionGeneration::mint(),
             sm_state: StreamManagementState::new(),
+            sm_ingress_fence: None,
             sm_inbound_completion:
                 crate::server::routes::interpret::SmInboundCompletionTracker::default(),
             inbound_frame_terminal: None,
@@ -1984,6 +1993,7 @@ impl WsConnState {
         commit.publish(
             state,
             &mut self.sm_state,
+            &mut self.sm_ingress_fence,
             bound_jid.as_ref(),
             self.registry_owner.as_ref(),
         );

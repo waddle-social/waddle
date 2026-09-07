@@ -833,15 +833,12 @@ async fn store_resumable_test_session(
 
 #[test]
 fn timed_out_inbound_stanza_preserves_sender_responsibility() {
-    let runtime = tokio::runtime::Runtime::new().expect("runtime");
-    let websocket_state = runtime.block_on(create_test_websocket_state());
     let mut state = waddle_xmpp::stream_management::StreamManagementState::new();
     state.enable("timeout-regression".to_string(), true, Some(300));
     let mut completion = crate::server::routes::interpret::SmInboundCompletionTracker::default();
     let sequence = completion.reserve(&state);
 
     settle_inbound_dispatch(
-        &websocket_state.deps.protocol.ingress_shadow,
         InboundDisposition::Unhandled,
         true,
         Some(sequence),
@@ -855,7 +852,7 @@ fn timed_out_inbound_stanza_preserves_sender_responsibility() {
 
     // A late ordered-relay completion cannot turn the cancelled dispatch into
     // an acknowledgement: the sender must retain and replay this stanza.
-    completion.complete(sequence, &mut state, |_submission| {});
+    completion.complete(sequence, &mut state);
     assert_eq!(state.get_inbound_count(), 0);
 }
 
@@ -876,6 +873,15 @@ async fn timed_out_inbound_stanza_detaches_and_resumes_before_the_hole() {
     conn.registry_owner = Some(owner);
     conn.sm_state
         .enable("timeout-detach".to_string(), true, Some(300));
+    state
+        .deps
+        .protocol
+        .ingress
+        .enroll_stream(&waddle_xmpp::pending_delivery::SmSessionId::new(
+            "timeout-detach",
+        ))
+        .await
+        .expect("enabled stream ingress enrollment");
     // A production enabled stream always carries a live claim fence;
     // without one the fenceless teardown promotes terminally instead of
     // taking the detach path this test exercises.
@@ -891,7 +897,6 @@ async fn timed_out_inbound_stanza_detaches_and_resumes_before_the_hole() {
 
     let handled = conn.sm_inbound_completion.reserve(&conn.sm_state);
     settle_inbound_dispatch(
-        &crate::ingress_shadow::IngressShadowHandle::disabled(),
         InboundDisposition::Handled,
         false,
         Some(handled),
@@ -900,7 +905,6 @@ async fn timed_out_inbound_stanza_detaches_and_resumes_before_the_hole() {
     );
     let timed_out = conn.sm_inbound_completion.reserve(&conn.sm_state);
     settle_inbound_dispatch(
-        &crate::ingress_shadow::IngressShadowHandle::disabled(),
         InboundDisposition::Unhandled,
         false,
         Some(timed_out),
@@ -4874,7 +4878,6 @@ async fn sm_resume_rejects_when_replay_window_has_gap() {
         jid: format!("alice@{domain}/web").parse().expect("jid"),
         occupancy_session: waddle_xmpp_core::OccupancySessionGeneration::mint(),
         inbound_count: 5,
-        shadow_ordinal: waddle_xmpp::stream_management::ShadowOrdinal::ZERO,
         outbound_count: 0,
         last_acked: 0,
         replay_gap_through: None,
@@ -4954,7 +4957,6 @@ async fn sm_resume_rejects_authenticated_identity_mismatch_and_preserves_session
         jid: format!("alice@{domain}/web").parse().expect("jid"),
         occupancy_session: waddle_xmpp_core::OccupancySessionGeneration::mint(),
         inbound_count: 0,
-        shadow_ordinal: waddle_xmpp::stream_management::ShadowOrdinal::ZERO,
         outbound_count: 0,
         last_acked: 0,
         replay_gap_through: None,
@@ -5016,7 +5018,6 @@ async fn sm_resume_final_principal_recheck_rejects_without_committing_staged_sta
             jid: jid.clone(),
             occupancy_session: waddle_xmpp_core::OccupancySessionGeneration::mint(),
             inbound_count: 4,
-            shadow_ordinal: waddle_xmpp::stream_management::ShadowOrdinal::ZERO,
             outbound_count: 1,
             last_acked: 0,
             replay_gap_through: None,
@@ -5127,7 +5128,6 @@ async fn dropping_resume_after_claim_returns_the_snapshot_via_the_claim_guard() 
             jid: jid.clone(),
             occupancy_session: waddle_xmpp_core::OccupancySessionGeneration::mint(),
             inbound_count: 0,
-            shadow_ordinal: waddle_xmpp::stream_management::ShadowOrdinal::ZERO,
             outbound_count: 0,
             last_acked: 0,
             replay_gap_through: None,
@@ -5195,7 +5195,6 @@ async fn sm_resume_legacy_snapshot_without_a_principal_is_not_authorized() {
             jid: jid.clone(),
             occupancy_session: waddle_xmpp_core::OccupancySessionGeneration::mint(),
             inbound_count: 0,
-            shadow_ordinal: waddle_xmpp::stream_management::ShadowOrdinal::ZERO,
             outbound_count: 0,
             last_acked: 0,
             replay_gap_through: None,
@@ -5248,7 +5247,6 @@ async fn sm_resume_storage_error_is_reported_as_internal_server_error() {
             jid: jid.clone(),
             occupancy_session: waddle_xmpp_core::OccupancySessionGeneration::mint(),
             inbound_count: 0,
-            shadow_ordinal: waddle_xmpp::stream_management::ShadowOrdinal::ZERO,
             outbound_count: 0,
             last_acked: 0,
             replay_gap_through: None,
@@ -5321,7 +5319,6 @@ async fn sm_resume_matching_authenticated_identity_restores_durable_principal_se
             jid: detached_jid.clone(),
             occupancy_session: waddle_xmpp_core::OccupancySessionGeneration::mint(),
             inbound_count: 2,
-            shadow_ordinal: waddle_xmpp::stream_management::ShadowOrdinal::ZERO,
             outbound_count: 3,
             last_acked: 3,
             replay_gap_through: None,
@@ -5394,6 +5391,13 @@ async fn sm_resume_matching_authenticated_identity_restores_detached_principal_s
     state
         .deps
         .protocol
+        .ingress
+        .enroll_stream(&waddle_xmpp::pending_delivery::SmSessionId::new(stream_id))
+        .await
+        .expect("ingress enrollment");
+    state
+        .deps
+        .protocol
         .sm_session_registry
         .store_session_with_principal(
             DetachedSession {
@@ -5402,7 +5406,6 @@ async fn sm_resume_matching_authenticated_identity_restores_detached_principal_s
                 jid: detached_jid.clone(),
                 occupancy_session: waddle_xmpp_core::OccupancySessionGeneration::mint(),
                 inbound_count: 0,
-                shadow_ordinal: waddle_xmpp::stream_management::ShadowOrdinal::ZERO,
                 outbound_count: 0,
                 last_acked: 0,
                 replay_gap_through: None,
@@ -5678,7 +5681,7 @@ async fn replaced_connection_commits_written_enable_without_publishing_stale_ali
         super::super::cleanup::ConnectionShutdownOutcome::NotPersisted
     );
     // The superseded teardown now exact-releases immediately after the
-    // ingress-shadow idle barrier (pre-drain deferral would let the retry
+    // ingress idle barrier (pre-drain deferral would let the retry
     // janitor free the fence under in-flight shadow submissions); the
     // pending inventory is only the failed-release path.
     assert_eq!(registry.pending_claim_release_count(), 0);
@@ -6122,7 +6125,6 @@ async fn handoff_expired_claimed_session(
             jid: jid.clone(),
             occupancy_session: waddle_xmpp_core::OccupancySessionGeneration::mint(),
             inbound_count: 0,
-            shadow_ordinal: waddle_xmpp::stream_management::ShadowOrdinal::ZERO,
             outbound_count: unacked_stanzas.len() as u32,
             last_acked: 0,
             replay_gap_through: None,
@@ -6334,7 +6336,6 @@ async fn sm_live_ack_is_wrap_aware_past_u32_max() {
         jid: jid.clone(),
         occupancy_session: waddle_xmpp_core::OccupancySessionGeneration::mint(),
         inbound_count: 0,
-        shadow_ordinal: waddle_xmpp::stream_management::ShadowOrdinal::ZERO,
         outbound_count: 2,
         last_acked: u32::MAX - 1,
         replay_gap_through: None,
@@ -6518,7 +6519,6 @@ async fn sm_resume_at_half_window_distance_is_rejected_as_handled_count_too_high
             jid: jid.clone(),
             occupancy_session: waddle_xmpp_core::OccupancySessionGeneration::mint(),
             inbound_count: 0,
-            shadow_ordinal: waddle_xmpp::stream_management::ShadowOrdinal::ZERO,
             outbound_count: 2,
             last_acked: 2,
             replay_gap_through: None,
@@ -6579,7 +6579,6 @@ async fn sm_resume_with_regressed_h_fails_resume_instead_of_stream_error() {
             jid: jid.clone(),
             occupancy_session: waddle_xmpp_core::OccupancySessionGeneration::mint(),
             inbound_count: 0,
-            shadow_ordinal: waddle_xmpp::stream_management::ShadowOrdinal::ZERO,
             outbound_count: 2,
             last_acked: 2,
             replay_gap_through: None,
@@ -6639,7 +6638,6 @@ async fn sm_resume_restores_session_and_replays_unacked() {
         jid: jid.clone(),
         occupancy_session,
         inbound_count: 7,
-        shadow_ordinal: waddle_xmpp::stream_management::ShadowOrdinal::ZERO,
         outbound_count: 10,
         last_acked: 8,
         replay_gap_through: None,
@@ -6668,6 +6666,25 @@ async fn sm_resume_restores_session_and_replays_unacked() {
         pending_subscribes_flushed: false,
     };
     let _detached_session = store_resumable_test_session(state.as_ref(), detached).await;
+    let ingress_id = state
+        .deps
+        .protocol
+        .ingress
+        .enroll_stream(&waddle_xmpp::pending_delivery::SmSessionId::new(
+            stream_id.clone(),
+        ))
+        .await
+        .expect("enroll stream");
+    state
+        .deps
+        .protocol
+        .ingress
+        .flush_checkpoint(
+            ingress_id,
+            waddle_xmpp::ingress::WireHandledCount::from_storage(9),
+        )
+        .await
+        .expect("committed checkpoint ahead of detached snapshot");
 
     let mut conn = WsConnState::new();
     conn.phase = ConnectionPhase::authenticated(&jid);
@@ -6679,6 +6696,8 @@ async fn sm_resume_restores_session_and_replays_unacked() {
     assert!(!responses.is_empty());
     let resumed = Element::from_str(&responses[0]).expect("resumed xml");
     assert_eq!(resumed.name(), "resumed");
+    assert_eq!(resumed.attr("h"), Some("9"));
+    assert_eq!(conn.sm_state.get_inbound_count(), 9);
     assert_eq!(resumed.attr("previd"), Some(stream_id.as_str()));
 
     let replay_count = responses.len() - 1;
@@ -6729,7 +6748,6 @@ async fn sm_resume_rejects_impossible_client_handled_count() {
             jid: jid.clone(),
             occupancy_session: waddle_xmpp_core::OccupancySessionGeneration::mint(),
             inbound_count: 4,
-            shadow_ordinal: waddle_xmpp::stream_management::ShadowOrdinal::ZERO,
             outbound_count: 2,
             last_acked: 0,
             replay_gap_through: None,
@@ -6815,7 +6833,6 @@ async fn sm_resume_replays_roster_push_recorded_while_detached() {
             jid: jid.clone(),
             occupancy_session: waddle_xmpp_core::OccupancySessionGeneration::mint(),
             inbound_count: 0,
-            shadow_ordinal: waddle_xmpp::stream_management::ShadowOrdinal::ZERO,
             outbound_count: 0,
             last_acked: 0,
             replay_gap_through: None,
@@ -6892,7 +6909,6 @@ async fn direct_full_jid_message_records_for_detached_resource_replay() {
             jid: alice_jid,
             occupancy_session: waddle_xmpp_core::OccupancySessionGeneration::mint(),
             inbound_count: 0,
-            shadow_ordinal: waddle_xmpp::stream_management::ShadowOrdinal::ZERO,
             outbound_count: 0,
             last_acked: 0,
             replay_gap_through: None,
@@ -6965,7 +6981,6 @@ async fn bare_jid_message_records_for_detached_resource_replay() {
             jid: alice_jid,
             occupancy_session: waddle_xmpp_core::OccupancySessionGeneration::mint(),
             inbound_count: 0,
-            shadow_ordinal: waddle_xmpp::stream_management::ShadowOrdinal::ZERO,
             outbound_count: 0,
             last_acked: 0,
             replay_gap_through: None,
@@ -7050,7 +7065,6 @@ async fn message_carbons_record_for_detached_enabled_resources() {
             jid: alice_laptop.clone(),
             occupancy_session: waddle_xmpp_core::OccupancySessionGeneration::mint(),
             inbound_count: 0,
-            shadow_ordinal: waddle_xmpp::stream_management::ShadowOrdinal::ZERO,
             outbound_count: 0,
             last_acked: 0,
             replay_gap_through: None,
@@ -7117,7 +7131,6 @@ async fn message_carbons_record_for_detached_enabled_resources() {
             jid: alice_laptop,
             occupancy_session: waddle_xmpp_core::OccupancySessionGeneration::mint(),
             inbound_count: 0,
-            shadow_ordinal: waddle_xmpp::stream_management::ShadowOrdinal::ZERO,
             outbound_count: 0,
             last_acked: 0,
             replay_gap_through: None,
@@ -7308,7 +7321,6 @@ async fn roster_set_records_push_for_detached_interested_resource() {
             jid: detached_jid.clone(),
             occupancy_session: waddle_xmpp_core::OccupancySessionGeneration::mint(),
             inbound_count: 0,
-            shadow_ordinal: waddle_xmpp::stream_management::ShadowOrdinal::ZERO,
             outbound_count: 0,
             last_acked: 0,
             replay_gap_through: None,
@@ -7374,7 +7386,6 @@ async fn blocking_set_records_push_for_detached_blocklist_interested_resource() 
             jid: detached_jid.clone(),
             occupancy_session: waddle_xmpp_core::OccupancySessionGeneration::mint(),
             inbound_count: 0,
-            shadow_ordinal: waddle_xmpp::stream_management::ShadowOrdinal::ZERO,
             outbound_count: 0,
             last_acked: 0,
             replay_gap_through: None,
@@ -7472,7 +7483,6 @@ async fn subscription_approval_replays_current_presence_from_detached_available_
             jid: alice_web_jid.clone(),
             occupancy_session: waddle_xmpp_core::OccupancySessionGeneration::mint(),
             inbound_count: 0,
-            shadow_ordinal: waddle_xmpp::stream_management::ShadowOrdinal::ZERO,
             outbound_count: 0,
             last_acked: 0,
             replay_gap_through: None,
@@ -7564,7 +7574,6 @@ async fn presence_probe_returns_detached_available_resource_presence() {
             jid: alice_jid,
             occupancy_session: waddle_xmpp_core::OccupancySessionGeneration::mint(),
             inbound_count: 0,
-            shadow_ordinal: waddle_xmpp::stream_management::ShadowOrdinal::ZERO,
             outbound_count: 0,
             last_acked: 0,
             replay_gap_through: None,
@@ -7667,7 +7676,6 @@ async fn full_jid_presence_probe_returns_only_that_resources_availability() {
                 jid,
                 occupancy_session: waddle_xmpp_core::OccupancySessionGeneration::mint(),
                 inbound_count: 0,
-                shadow_ordinal: waddle_xmpp::stream_management::ShadowOrdinal::ZERO,
                 outbound_count: 0,
                 last_acked: 0,
                 replay_gap_through: None,
@@ -7743,7 +7751,6 @@ async fn presence_probe_without_subscription_does_not_reveal_detached_presence()
             jid: alice_jid,
             occupancy_session: waddle_xmpp_core::OccupancySessionGeneration::mint(),
             inbound_count: 0,
-            shadow_ordinal: waddle_xmpp::stream_management::ShadowOrdinal::ZERO,
             outbound_count: 0,
             last_acked: 0,
             replay_gap_through: None,
@@ -7902,7 +7909,6 @@ async fn subscription_approval_records_roster_push_for_detached_interested_resou
             jid: bob_jid.clone(),
             occupancy_session: waddle_xmpp_core::OccupancySessionGeneration::mint(),
             inbound_count: 0,
-            shadow_ordinal: waddle_xmpp::stream_management::ShadowOrdinal::ZERO,
             outbound_count: 0,
             last_acked: 0,
             replay_gap_through: None,
@@ -7963,7 +7969,6 @@ async fn subscribe_to_detached_available_resource_replays_on_resume() {
             jid: alice_jid.clone(),
             occupancy_session: waddle_xmpp_core::OccupancySessionGeneration::mint(),
             inbound_count: 0,
-            shadow_ordinal: waddle_xmpp::stream_management::ShadowOrdinal::ZERO,
             outbound_count: 0,
             last_acked: 0,
             replay_gap_through: None,
@@ -8042,7 +8047,6 @@ async fn presence_broadcast_to_detached_available_subscriber_replays_on_resume()
             jid: bob_jid.clone(),
             occupancy_session: waddle_xmpp_core::OccupancySessionGeneration::mint(),
             inbound_count: 0,
-            shadow_ordinal: waddle_xmpp::stream_management::ShadowOrdinal::ZERO,
             outbound_count: 0,
             last_acked: 0,
             replay_gap_through: None,
@@ -8140,7 +8144,6 @@ async fn sm_resume_signals_suppress_record_so_main_loop_skips_replay() {
         jid: jid.clone(),
         occupancy_session: waddle_xmpp_core::OccupancySessionGeneration::mint(),
         inbound_count: 0,
-        shadow_ordinal: waddle_xmpp::stream_management::ShadowOrdinal::ZERO,
         outbound_count: 2,
         last_acked: 0,
         replay_gap_through: None,
@@ -8752,7 +8755,6 @@ async fn sm_janitor_helper_drains_expired_and_cleans_muc() {
             jid: jid.clone(),
             occupancy_session,
             inbound_count: 0,
-            shadow_ordinal: waddle_xmpp::stream_management::ShadowOrdinal::ZERO,
             outbound_count: 0,
             last_acked: 0,
             replay_gap_through: None,
@@ -8877,7 +8879,6 @@ async fn sm_resume_replay_stamps_xep0203_delay_with_original_receipt_time() {
             jid: detached_jid.clone(),
             occupancy_session: waddle_xmpp_core::OccupancySessionGeneration::mint(),
             inbound_count: 1,
-            shadow_ordinal: waddle_xmpp::stream_management::ShadowOrdinal::ZERO,
             outbound_count: 2,
             last_acked: 0,
             replay_gap_through: None,
@@ -9385,7 +9386,6 @@ mod fix_a_post_cas_shutdown {
             jid: jid.clone(),
             occupancy_session: waddle_xmpp_core::OccupancySessionGeneration::mint(),
             inbound_count: 0,
-            shadow_ordinal: waddle_xmpp::stream_management::ShadowOrdinal::ZERO,
             outbound_count: 0,
             last_acked: 0,
             replay_gap_through: None,
@@ -9466,6 +9466,15 @@ mod fix_a_post_cas_shutdown {
         // seed the account + session row and persist the snapshot WITH its
         // principal, exactly as production detach does.
         let alice_session = super::create_test_session(state.as_ref(), "alice").await;
+        state
+            .deps
+            .protocol
+            .ingress
+            .enroll_stream(&waddle_xmpp::pending_delivery::SmSessionId::new(
+                owner_detached.stream_id.clone(),
+            ))
+            .await
+            .expect("ingress enrollment");
         owner_registry
             .store_session_with_principal(
                 owner_detached,
@@ -9535,7 +9544,6 @@ async fn sm_resume_accepts_handled_count_behind_wrapped_outbound() {
             jid: jid.clone(),
             occupancy_session: waddle_xmpp_core::OccupancySessionGeneration::mint(),
             inbound_count: 0,
-            shadow_ordinal: waddle_xmpp::stream_management::ShadowOrdinal::ZERO,
             // The server's send counter wrapped past 2^32: it now
             // reads 2, while the client last handled u32::MAX.
             outbound_count: 2,
@@ -9624,7 +9632,6 @@ async fn sm_resume_restores_presence_payloads_to_the_live_registry() {
             jid: jid.clone(),
             occupancy_session: waddle_xmpp_core::OccupancySessionGeneration::mint(),
             inbound_count: 0,
-            shadow_ordinal: waddle_xmpp::stream_management::ShadowOrdinal::ZERO,
             outbound_count: 0,
             last_acked: 0,
             replay_gap_through: None,
@@ -9696,7 +9703,6 @@ async fn sm_resume_adopts_the_detached_occupancy_generation_without_changing_res
             jid: jid.clone(),
             occupancy_session: detached_generation,
             inbound_count: 0,
-            shadow_ordinal: waddle_xmpp::stream_management::ShadowOrdinal::ZERO,
             outbound_count: 0,
             last_acked: 0,
             replay_gap_through: None,
@@ -9771,7 +9777,6 @@ async fn sm_resume_preserves_the_pending_subscribe_once_per_session_claim() {
             jid: jid.clone(),
             occupancy_session: waddle_xmpp_core::OccupancySessionGeneration::mint(),
             inbound_count: 0,
-            shadow_ordinal: waddle_xmpp::stream_management::ShadowOrdinal::ZERO,
             outbound_count: 0,
             last_acked: 0,
             replay_gap_through: None,
@@ -9851,7 +9856,6 @@ async fn sm_resume_preserves_consumed_claim_when_detached_unavailable() {
             jid: jid.clone(),
             occupancy_session: waddle_xmpp_core::OccupancySessionGeneration::mint(),
             inbound_count: 0,
-            shadow_ordinal: waddle_xmpp::stream_management::ShadowOrdinal::ZERO,
             outbound_count: 0,
             last_acked: 0,
             replay_gap_through: None,
@@ -9928,7 +9932,6 @@ async fn sm_resume_keeps_unconsumed_claim_armed() {
             jid: jid.clone(),
             occupancy_session: waddle_xmpp_core::OccupancySessionGeneration::mint(),
             inbound_count: 0,
-            shadow_ordinal: waddle_xmpp::stream_management::ShadowOrdinal::ZERO,
             outbound_count: 0,
             last_acked: 0,
             replay_gap_through: None,
@@ -10071,7 +10074,6 @@ async fn sm_resume_rejects_handled_count_behind_last_acked() {
             jid: jid.clone(),
             occupancy_session: waddle_xmpp_core::OccupancySessionGeneration::mint(),
             inbound_count: 0,
-            shadow_ordinal: waddle_xmpp::stream_management::ShadowOrdinal::ZERO,
             outbound_count: 4,
             last_acked: 3,
             replay_gap_through: None,

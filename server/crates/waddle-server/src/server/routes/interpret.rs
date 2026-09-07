@@ -147,6 +147,11 @@ mod archive_lookup;
 mod bot;
 pub(crate) mod carbons;
 mod deps;
+pub mod effects;
+mod message_plan;
+mod preview_plan;
+pub(crate) use message_plan::reject_malformed_message;
+pub use message_plan::{build_plan_deps, plan_message_dispatch};
 mod direct_archive;
 mod direct_call_thread;
 mod direct_inbox;
@@ -195,8 +200,7 @@ use groupchat_validation::{
 #[cfg(feature = "clustering")]
 pub use handoff::OrderedRelayHandoffHandle;
 pub use handoff::{
-    OrderedRelayHandoffCompletion, OrderedRelayInboundSequence, ParkedIngressShadowSubmission,
-    SmInboundCompletionTracker,
+    OrderedRelayHandoffCompletion, OrderedRelayInboundSequence, SmInboundCompletionTracker,
 };
 use offline_delivery::queue_offline_delivery;
 #[cfg(test)]
@@ -248,13 +252,9 @@ pub(crate) async fn broadcast_room_system_message(
 }
 
 #[cfg(feature = "clustering")]
-pub(crate) async fn dispatch_muc_to_room_for_relay(
-    deps: &Deps<'_>,
-    room: BareJid,
-    message: Message,
-) -> InterpretOutcome {
-    dispatch_to_room(deps, room, message, 0).await
-}
+mod relay_plan;
+#[cfg(feature = "clustering")]
+pub(crate) use relay_plan::plan_muc_for_relay;
 
 /// Execute the side effects described by `events`.
 ///
@@ -360,9 +360,6 @@ enum BatchSuppression {
     /// `All` (ownership loss / subject-persist bounce) must NOT share
     /// this escape: a deposed node may not touch the archive at all.
     TombstoneSwallow,
-    NonSender {
-        sender: BareJid,
-    },
 }
 
 impl BatchSuppression {
@@ -376,15 +373,6 @@ impl BatchSuppression {
                     OutboundEvent::ApplyGroupchatRetractionTombstone { .. }
                 )
             }
-            Self::NonSender { sender } => match event {
-                // A crash can commit the retraction-request archive row before
-                // applying its target tombstone. A deduplicated retry must
-                // finish that idempotent, monotonic second effect.
-                OutboundEvent::ApplyGroupchatRetractionTombstone { .. } => true,
-                OutboundEvent::RouteToConnection { jid, .. } => &jid.to_bare() == sender,
-                OutboundEvent::ProjectGroupchatInbox { owner, .. } => owner == sender,
-                _ => false,
-            },
         }
     }
 }
@@ -447,16 +435,9 @@ async fn interpret_with_depth(
             continue;
         }
         apply_archive_id_rewrites(&mut event, &archive_id_rewrites);
+        message_plan::observe_message(deps, &event, recursion_depth);
         match event {
-            OutboundEvent::SendStanza(stanza) => match stanza.to_element_string() {
-                Ok(xml) => {
-                    capture_serialized_error_reply(deps, &stanza);
-                    outcome.frames.push(xml);
-                }
-                Err(err) => {
-                    error!(error = %err, "failed to serialize outbound stanza; dropping frame");
-                }
-            },
+            OutboundEvent::SendStanza(stanza) => emit_frame(deps, &mut outcome, *stanza),
             OutboundEvent::CloseTransport => {
                 outcome.close = true;
             }
@@ -493,18 +474,7 @@ async fn interpret_with_depth(
                 for stanza in
                     route_to_connection(deps, jid, stanza, recursion_depth, call_setup).await
                 {
-                    match stanza.to_element_string() {
-                        Ok(xml) => {
-                            capture_serialized_error_reply(deps, &stanza);
-                            outcome.frames.push(xml);
-                        }
-                        Err(err) => {
-                            error!(
-                                error = %err,
-                                "failed to serialize route fallback stanza; dropping frame"
-                            );
-                        }
-                    }
+                    emit_frame(deps, &mut outcome, stanza);
                 }
             }
             OutboundEvent::DispatchToRoom { room, message } => {
@@ -635,13 +605,6 @@ async fn interpret_with_depth(
                     }
                     ArchiveGroupchatEventOutcome::Stored(None)
                     | ArchiveGroupchatEventOutcome::Skipped => {}
-                    ArchiveGroupchatEventOutcome::Deduplicated { rewrite, sender } => {
-                        if let Some(rewrite) = rewrite {
-                            archive_id_rewrites.push(rewrite);
-                        }
-                        outcome.retry_suppression = Some(GroupchatRetrySuppression::Deduplicated);
-                        batch_suppression = BatchSuppression::NonSender { sender };
-                    }
                     ArchiveGroupchatEventOutcome::TombstoneHit => {
                         debug!(
                             "ArchiveGroupchat: tombstone hit; silently suppressing remaining dispatch batch"
@@ -657,15 +620,7 @@ async fn interpret_with_depth(
                         // bounce the sender with the same typed
                         // recoverable error `dispatch_to_room`'s own
                         // pre-fan-out check uses.
-                        match Stanza::Message(*bounce).to_element_string() {
-                            Ok(xml) => outcome.frames.push(xml),
-                            Err(error) => {
-                                warn!(
-                                    %error,
-                                    "ArchiveGroupchat: failed to serialize ownership-gap bounce reply"
-                                );
-                            }
-                        }
+                        emit_frame(deps, &mut outcome, Stanza::Message(*bounce));
                         batch_suppression = BatchSuppression::All;
                     }
                 }
@@ -678,6 +633,13 @@ async fn interpret_with_depth(
                 target_message_id,
                 retraction_message,
             } => {
+                // This entire arm heals target cleanup even when the request
+                // itself is tombstoned. Nested pin/preview/system-message
+                // effects inherit that policy without affecting sibling events.
+                let exempt_sink = effects::TombstoneExemptSink(deps.effects);
+                let mut retraction_deps = deps.clone();
+                retraction_deps.effects = &exempt_sink;
+                let deps = &retraction_deps;
                 let Some(mam_storage) = deps.mam_storage else {
                     debug!(
                         room = %room,
@@ -686,16 +648,25 @@ async fn interpret_with_depth(
                     );
                     continue;
                 };
-                let tombstone_outcome = apply_groupchat_retraction_tombstone_outcome(
-                    mam_storage,
-                    deps.sm_session_registry,
-                    deps.pending_delivery_storage,
-                    &room,
-                    &target_message_id,
-                    &retraction_message,
-                    deps.ingress_effect_capture.as_ref(),
-                )
-                .await;
+                let tombstone_outcome = if deps.effects.is_planning() {
+                    groupchat_archive::plan_groupchat_retraction_tombstone(
+                        deps,
+                        &room,
+                        &target_message_id,
+                        &retraction_message,
+                    )
+                    .await
+                } else {
+                    apply_groupchat_retraction_tombstone_outcome(
+                        mam_storage,
+                        deps.sm_session_registry,
+                        deps.pending_delivery_storage,
+                        &room,
+                        &target_message_id,
+                        &retraction_message,
+                    )
+                    .await
+                };
                 if tombstone_outcome == GroupchatRetractionTombstoneOutcome::Replaced {
                     if let Some(retraction_stanza_id) =
                         groupchat_retraction_stanza_id(&retraction_message, &room)
@@ -712,7 +683,12 @@ async fn interpret_with_depth(
                         });
                     }
                 }
-                if tombstone_outcome.tombstoned() {
+                if tombstone_outcome.tombstoned() && deps.effects.is_planning() {
+                    if let Some(message_id) = RichMessageId::new(target_message_id.clone()) {
+                        preview_plan::clear(deps, &room, &message_id).await;
+                    }
+                }
+                if tombstone_outcome.tombstoned() && !deps.effects.is_planning() {
                     if let Some(state) = deps.web_socket_state {
                         for intent in crate::server::routes::websocket::link_preview_refs::clear_current_message_preview_refs(
                             state.deps.app_state.db_pool.global_actor(),
@@ -756,7 +732,6 @@ async fn interpret_with_depth(
                         set_at,
                     },
                 };
-                let sender_for_error = sender.clone();
                 match persist_room_subject_event(
                     deps,
                     PersistRoomSubjectRequest {
@@ -776,24 +751,24 @@ async fn interpret_with_depth(
                         deps.capture_intent(subject_intent);
                     }
                     PersistRoomSubjectEventOutcome::BounceAndHalt(bounce) => {
-                        let bounce_error = waddle_xmpp::ingress::FrozenStanzaError::from_xmpp(
-                            &resource_constraint_error(
-                                "The room subject could not be saved; please retry.",
-                            ),
-                        )
-                        .expect("server-built stanza error should freeze");
-                        match Stanza::Message(*bounce).to_element_string() {
-                            Ok(xml) => {
-                                deps.capture_intent(IngressEffectIntent::ErrorReply {
-                                    recipient: sender_for_error,
-                                    error: bounce_error,
-                                });
-                                outcome.frames.push(xml);
+                        let stanza = Stanza::Message(*bounce);
+                        if deps.effects.is_planning() {
+                            capture_serialized_error_reply(deps, &stanza);
+                            deps.effects.record(effects::PlannedEffect::new(
+                                effects::Effect::External(effects::ExternalEffect::Frame(
+                                    Box::new(stanza),
+                                )),
+                            ));
+                        } else {
+                            match stanza.to_element_string() {
+                                Ok(xml) => {
+                                    capture_serialized_error_reply(deps, &stanza);
+                                    outcome.frames.push(xml);
+                                }
+                                Err(error) => {
+                                    warn!(%error, "failed to serialize subject error reply")
+                                }
                             }
-                            Err(error) => warn!(
-                                %error,
-                                "PersistRoomSubject: failed to serialize retryable bounce reply"
-                            ),
                         }
                         batch_suppression = BatchSuppression::All;
                     }
@@ -908,6 +883,26 @@ async fn interpret_with_depth(
     outcome
 }
 
+/// Sender output remains typed throughout planning; immediate dispatch serializes
+/// only when returning the transport frame, preserving error-intent timing.
+pub(super) fn emit_frame(deps: &Deps<'_>, outcome: &mut InterpretOutcome, stanza: Stanza) {
+    if deps.effects.is_planning() {
+        capture_serialized_error_reply(deps, &stanza);
+        deps.effects
+            .record(effects::PlannedEffect::new(effects::Effect::External(
+                effects::ExternalEffect::Frame(Box::new(stanza)),
+            )));
+    } else {
+        match stanza.to_element_string() {
+            Ok(xml) => {
+                capture_serialized_error_reply(deps, &stanza);
+                outcome.frames.push(xml);
+            }
+            Err(error) => warn!(%error, "failed to serialize outbound stanza"),
+        }
+    }
+}
+
 fn groupchat_retraction_stanza_id(
     message: &Message,
     room: &BareJid,
@@ -921,7 +916,7 @@ fn groupchat_retraction_stanza_id(
 /// the transport frame. Direct `SendStanza` errors include XEP-0191 sender
 /// blocks as well as route fallbacks, so derive the frozen error from the
 /// actual typed payload rather than reconstructing a particular error shape.
-fn capture_serialized_error_reply(deps: &Deps<'_>, stanza: &Stanza) {
+pub(crate) fn capture_serialized_error_reply(deps: &Deps<'_>, stanza: &Stanza) {
     let Stanza::Message(message) = stanza else {
         return;
     };
@@ -947,7 +942,7 @@ fn capture_serialized_error_reply(deps: &Deps<'_>, stanza: &Stanza) {
         return;
     };
     let Ok(frozen_error) = waddle_xmpp::ingress::FrozenStanzaError::from_xmpp(&error) else {
-        warn!("serialized message error could not be frozen for ingress shadow");
+        warn!("serialized message error could not be frozen for ingress");
         return;
     };
     deps.capture_intent(IngressEffectIntent::ErrorReply {
@@ -981,3 +976,6 @@ async fn enrich_message_event(deps: &Deps<'_>, message: Message) -> Message {
 
 #[cfg(test)]
 mod tests;
+
+#[cfg(test)]
+mod retraction_ingress_tests;

@@ -3,16 +3,15 @@ use super::*;
 use waddle_xmpp_core::xep0359::StanzaId;
 
 pub(super) async fn apply_retraction_tombstone(
-    mam_storage: &Arc<dyn MamStorage>,
-    sm_session_registry: Option<&Arc<InMemorySmSessionRegistry>>,
-    pending_storage: Option<
-        &Arc<dyn waddle_xmpp::pending_delivery::storage::PendingDeliveryStorage>,
-    >,
+    deps: &Deps<'_>,
     archive: &jid::BareJid,
     target_wire_id: &str,
     retraction_message: &Message,
-    capture: Option<&crate::ingress_shadow::IngressEffectCapture>,
 ) -> Option<StanzaId> {
+    let mam_storage = deps.mam_storage?;
+    let sm_session_registry = deps.sm_session_registry;
+    let pending_storage = deps.pending_delivery_storage;
+    let effects = deps.effects;
     // XEP-0424 §"Using the correct ID": a non-groupchat retraction
     // names the target by the SENDER's wire id, which is client-chosen
     // and unique only per author. The scrub identity therefore carries
@@ -56,6 +55,7 @@ pub(super) async fn apply_retraction_tombstone(
             return None;
         }
         Err(error) => {
+            effects.fail_plan(super::effects::PlanFailure::RetractionTargetRead);
             warn!(
                 archive = %archive,
                 target = target_wire_id,
@@ -85,6 +85,23 @@ pub(super) async fn apply_retraction_tombstone(
         // match; there is no occupant identity to retain.
         sender_scope: None,
     };
+    if effects.is_planning() {
+        use super::effects::{direct::DurableDirectEffect, DurableEffect, Effect, PlannedEffect};
+        let target = StanzaId::new(original.id, jid::Jid::from(archive.clone()));
+        effects.record(PlannedEffect::new(Effect::Durable(DurableEffect::Direct(
+            DurableDirectEffect::RetractionTombstone {
+                archive: archive.clone(),
+                target: target.clone(),
+                tombstone,
+            },
+        ))));
+        if let Some(target) = scrub_target {
+            if !super::groupchat_archive::plan_tombstone_replay(deps, target).await {
+                return None;
+            }
+        }
+        return Some(target);
+    }
     match mam_storage
         .replace_with_tombstone(&original.id, tombstone)
         .await
@@ -108,7 +125,6 @@ pub(super) async fn apply_retraction_tombstone(
                     pending_storage,
                     scrub_target,
                     "ApplyRetractionTombstone",
-                    capture,
                 )
                 .await;
             }
@@ -127,7 +143,6 @@ pub(super) async fn apply_retraction_tombstone(
                     pending_storage,
                     scrub_target,
                     "ApplyRetractionTombstone",
-                    capture,
                 )
                 .await;
             }
@@ -148,7 +163,6 @@ pub(super) async fn apply_retraction_tombstone(
             pending_storage,
             scrub_target,
             "ApplyRetractionTombstone",
-            capture,
         )
         .await;
     }

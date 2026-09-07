@@ -1,7 +1,7 @@
 use super::*;
 use super::{
     batch_write::{
-        write_response_batch_report_with_admission, write_response_batch_with_admission,
+        write_ingress_response_batch_with_admission, write_response_batch_with_admission,
         BatchAuthority, BatchSmPolicy, BatchWriteOutcome,
     },
     cleanup::cleanup_connection_shutdown,
@@ -734,8 +734,8 @@ async fn handle_xmpp_websocket(
     }
     if superseded {
         // Claim terminalization for the superseded stream happens inside
-        // cleanup's superseded branch AFTER the ingress-shadow idle barrier
-        // (`forget_terminal_shadow_stream_and_release_claim`). Deferring the
+        // cleanup's superseded branch AFTER the ingress authority idle barrier
+        // (`forget_terminal_ingress_stream_and_release_claim`). Deferring the
         // claim here, pre-drain, would hand the still-captured fence to the
         // release-retry janitor while admitted submissions are in flight.
     } else {
@@ -777,12 +777,7 @@ async fn handle_xmpp_websocket(
             )
             .await;
         }
-        drain_ordered_relay_handoffs_before_cleanup(
-            &state.deps.protocol.ingress_shadow,
-            &mut handoff_rx,
-            &mut conn,
-        )
-        .await;
+        drain_ordered_relay_handoffs_before_cleanup(&mut handoff_rx, &mut conn).await;
     }
 
     // Connection is ending. Decide between two paths:
@@ -1539,12 +1534,12 @@ async fn handle_inbound_text(
     } else {
         BatchSmPolicy::Record
     };
-    let write_report = write_response_batch_report_with_admission(
+    let write_report = write_ingress_response_batch_with_admission(
         ws_sender,
         ws_receiver,
         state.as_ref(),
         conn,
-        responses.frames.clone(),
+        &mut responses,
         policy,
         BatchAuthority {
             permit: admission_permit,
@@ -1689,13 +1684,8 @@ where
             .abandon(completion.inbound_sequence);
         return false;
     }
-    conn.sm_inbound_completion.complete(
-        completion.inbound_sequence,
-        &mut conn.sm_state,
-        |submission| {
-            let _ = state.deps.protocol.ingress_shadow.try_submit(submission);
-        },
-    );
+    conn.sm_inbound_completion
+        .complete(completion.inbound_sequence, &mut conn.sm_state);
     let replies = serialize_ordered_relay_handoff_replies(completion.replies);
     if replies.is_empty() {
         return true;
@@ -1718,7 +1708,6 @@ where
 }
 
 async fn drain_ordered_relay_handoffs_before_cleanup(
-    ingress_shadow: &crate::ingress_shadow::IngressShadowHandle,
     handoff_rx: &mut mpsc::UnboundedReceiver<
         crate::server::routes::interpret::OrderedRelayHandoffCompletion,
     >,
@@ -1741,7 +1730,7 @@ async fn drain_ordered_relay_handoffs_before_cleanup(
             let Some(completion) = handoff_rx.recv().await else {
                 break;
             };
-            apply_ordered_relay_handoff_completion(ingress_shadow, conn, completion);
+            apply_ordered_relay_handoff_completion(conn, completion);
         }
         conn.sm_inbound_completion.reset();
         return;
@@ -1768,7 +1757,7 @@ async fn drain_ordered_relay_handoffs_before_cleanup(
         let Ok(Some(completion)) = tokio::time::timeout(remaining, handoff_rx.recv()).await else {
             break;
         };
-        apply_ordered_relay_handoff_completion(ingress_shadow, conn, completion);
+        apply_ordered_relay_handoff_completion(conn, completion);
         drained += 1;
         // Tokio timeouts cannot preempt a future that continuously consumes a
         // ready unbounded-channel backlog. Yield so the deadline is observable
@@ -1787,17 +1776,11 @@ async fn drain_ordered_relay_handoffs_before_cleanup(
 }
 
 fn apply_ordered_relay_handoff_completion(
-    ingress_shadow: &crate::ingress_shadow::IngressShadowHandle,
     conn: &mut WsConnState,
     completion: crate::server::routes::interpret::OrderedRelayHandoffCompletion,
 ) {
-    conn.sm_inbound_completion.complete(
-        completion.inbound_sequence,
-        &mut conn.sm_state,
-        |submission| {
-            let _ = ingress_shadow.try_submit(submission);
-        },
-    );
+    conn.sm_inbound_completion
+        .complete(completion.inbound_sequence, &mut conn.sm_state);
     let replies = serialize_ordered_relay_handoff_replies(completion.replies);
     batch_write::record_remaining_for_replay(conn, replies.into_iter(), BatchSmPolicy::Record);
 }
@@ -2705,7 +2688,6 @@ mod tests {
 
     #[tokio::test]
     async fn abandoned_inbound_slot_does_not_block_handoff_cleanup() {
-        let state = super::super::tests::create_test_websocket_state().await;
         let mut conn = WsConnState::new();
         conn.sm_state
             .enable("stream-timeout".to_string(), true, Some(300));
@@ -2717,11 +2699,7 @@ mod tests {
         let (_tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
         tokio::time::timeout(
             std::time::Duration::from_millis(50),
-            drain_ordered_relay_handoffs_before_cleanup(
-                &state.deps.protocol.ingress_shadow,
-                &mut rx,
-                &mut conn,
-            ),
+            drain_ordered_relay_handoffs_before_cleanup(&mut rx, &mut conn),
         )
         .await
         .expect("abandoned sequence must not block cleanup");
@@ -2763,11 +2741,7 @@ mod tests {
         );
         tokio::time::timeout(
             std::time::Duration::from_millis(50),
-            drain_ordered_relay_handoffs_before_cleanup(
-                &state.deps.protocol.ingress_shadow,
-                &mut handoff_rx,
-                &mut conn,
-            ),
+            drain_ordered_relay_handoffs_before_cleanup(&mut handoff_rx, &mut conn),
         )
         .await
         .expect("abandoned consumed completion must not block cleanup");
@@ -2796,13 +2770,7 @@ mod tests {
             tx.send(completion).expect("cleanup receiver remains open");
         });
 
-        let state = super::super::tests::create_test_websocket_state().await;
-        drain_ordered_relay_handoffs_before_cleanup(
-            &state.deps.protocol.ingress_shadow,
-            &mut rx,
-            &mut conn,
-        )
-        .await;
+        drain_ordered_relay_handoffs_before_cleanup(&mut rx, &mut conn).await;
 
         assert_eq!(
             conn.sm_state.get_inbound_count(),
@@ -2814,8 +2782,6 @@ mod tests {
 
     #[test]
     fn terminal_recovery_handoff_replies_bypass_the_capped_sm_queue() {
-        let runtime = tokio::runtime::Runtime::new().expect("runtime");
-        let state = runtime.block_on(super::super::tests::create_test_websocket_state());
         let mut conn = WsConnState::new();
         conn.sm_state = waddle_xmpp::stream_management::StreamManagementState::with_config(8, 100);
         conn.sm_state
@@ -2837,7 +2803,6 @@ mod tests {
         ));
 
         apply_ordered_relay_handoff_completion(
-            &state.deps.protocol.ingress_shadow,
             &mut conn,
             crate::server::routes::interpret::OrderedRelayHandoffCompletion {
                 inbound_sequence,
@@ -3636,11 +3601,8 @@ mod tests {
         // The connection itself still owns a sender in production, so keep
         // this one alive to prove cleanup cannot rely on channel closure.
         let (_tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
-        let ingress_shadow = crate::ingress_shadow::IngressShadowHandle::disabled();
         let mut drain = Box::pin(drain_ordered_relay_handoffs_before_cleanup(
-            &ingress_shadow,
-            &mut rx,
-            &mut conn,
+            &mut rx, &mut conn,
         ));
         assert!(futures::poll!(drain.as_mut()).is_pending());
 
@@ -3671,13 +3633,7 @@ mod tests {
         let abandoned = conn.sm_inbound_completion.reserve(&conn.sm_state);
         conn.sm_inbound_completion.abandon(abandoned);
 
-        let state = super::super::tests::create_test_websocket_state().await;
-        drain_ordered_relay_handoffs_before_cleanup(
-            &state.deps.protocol.ingress_shadow,
-            &mut rx,
-            &mut conn,
-        )
-        .await;
+        drain_ordered_relay_handoffs_before_cleanup(&mut rx, &mut conn).await;
 
         assert_eq!(
             conn.sm_state.get_inbound_count(),

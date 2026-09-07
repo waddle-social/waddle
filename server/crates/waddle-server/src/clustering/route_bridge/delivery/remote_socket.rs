@@ -48,6 +48,7 @@ impl OrderedRelayDeliveryBridge {
     pub(crate) async fn route_remote_resource_stanza_on_owner(
         self: &Arc<Self>,
         msg: RelayRouteRemoteResourceStanza,
+        completion: &mut Option<crate::ingress::execute::RelayFrameReceiptCompletion>,
     ) -> RelayRouteRemoteResourceStanzaReply {
         let Some(services) = self.services.get().cloned() else {
             return remote_resource_route_reply(RemoteResourceRouteOutcome::Dropped);
@@ -144,6 +145,7 @@ impl OrderedRelayDeliveryBridge {
                     }
                 };
                 RelayRouteRemoteResourceStanzaReply {
+                    reply_receipt: None,
                     outcome: outcome.outcome.into(),
                     replies: Vec::new(),
                     recipient_sm_append_streams: outcome.recipient_sm_append_streams,
@@ -164,11 +166,19 @@ impl OrderedRelayDeliveryBridge {
                 }
             }
             RemoteResourceRouteTarget::MucProxy {
+                canonical,
+                principal,
+                stanza_lang,
                 room_jid,
                 kind,
                 origin: muc_origin,
                 stanza,
             } => {
+                let admission = crate::ingress::identity::IngressRelayAdmission::from_parts(
+                    canonical,
+                    principal,
+                    stanza_lang,
+                );
                 // This path can execute the payload locally WITHOUT the
                 // envelope validation (`envelope_is_consistent` /
                 // `validate_claims`) that the ordered-relay receiver
@@ -183,8 +193,16 @@ impl OrderedRelayDeliveryBridge {
                 } else {
                     stanza
                 };
+                let mut local_completion = None;
                 let outcome = if let Some(remote) = self
-                    .try_proxy_muc_remote(&room_jid, &stanza.0, kind, muc_origin, &origin)
+                    .try_proxy_muc_remote(
+                        &room_jid,
+                        &stanza.0,
+                        kind,
+                        muc_origin,
+                        &origin,
+                        admission.as_ref(),
+                    )
                     .await
                 {
                     remote
@@ -192,14 +210,35 @@ impl OrderedRelayDeliveryBridge {
                     muc_proxy_result_to_ordered_outcome(
                         kind,
                         deliver_reserved_muc_proxy(
-                            &services, &room_jid, kind, muc_origin, &stanza.0,
+                            &services,
+                            &room_jid,
+                            kind,
+                            muc_origin,
+                            &stanza.0,
+                            admission.as_ref(),
+                            &mut local_completion,
                         )
                         .await,
                     )
                 };
+                *completion =
+                    local_completion.map(crate::ingress::execute::RelayFrameReceiptCompletion::new);
                 match outcome {
+                    OrderedRelayMucProxyOutcome::PendingFrames {
+                        frames,
+                        completion: pending,
+                    } => {
+                        *completion = Some(pending);
+                        RelayRouteRemoteResourceStanzaReply {
+                            reply_receipt: None,
+                            outcome: RemoteResourceRouteOutcome::Delivered,
+                            replies: frames.into_iter().map(RemoteStanza).collect(),
+                            recipient_sm_append_streams: Vec::new(),
+                        }
+                    }
                     OrderedRelayMucProxyOutcome::Delivered(replies) => {
                         RelayRouteRemoteResourceStanzaReply {
+                            reply_receipt: None,
                             outcome: RemoteResourceRouteOutcome::Delivered,
                             replies: replies.into_iter().map(RemoteStanza).collect(),
                             recipient_sm_append_streams: Vec::new(),

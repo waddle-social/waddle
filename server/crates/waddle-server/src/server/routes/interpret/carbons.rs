@@ -2,9 +2,24 @@ use super::*;
 use waddle_xmpp::ingress::IngressEffectIntent;
 
 pub(crate) struct CarbonRegistryDeps<'a> {
-    pub ingress_effect_capture: Option<&'a crate::ingress_shadow::IngressEffectCapture>,
+    pub ingress_effect_capture: Option<&'a crate::ingress::IngressEffectCapture>,
     pub sm_session_registry: Option<&'a Arc<InMemorySmSessionRegistry>>,
     pub web_socket_state: Option<&'a WebSocketState>,
+}
+
+/// Why an owner could not finish its frozen carbon obligation.
+#[derive(
+    Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize, thiserror::Error,
+)]
+pub enum CarbonFanoutFailure {
+    #[error("detached carbon inventory unavailable")]
+    DetachedInventory,
+    #[error("detached carbon append failed")]
+    DetachedAppend,
+    #[error("carbon envelope construction failed")]
+    Envelope,
+    #[error("carbon resource delivery failed")]
+    Delivery,
 }
 
 pub(crate) struct CarbonRegistryFanoutOutcome {
@@ -24,53 +39,59 @@ pub(super) async fn send_carbons(
     kind: CarbonKind,
     exclude: Vec<FullJid>,
 ) {
-    #[cfg(feature = "clustering")]
-    if let Some(state) = deps.web_socket_state {
-        if let Some(bridge) = state
-            .deps
-            .app_state
-            .clustering_claims
-            .ordered_relay_delivery_bridge
-            .as_ref()
-        {
-            for source_jid in &exclude {
-                if let Some(outcome) = bridge
-                    .try_fanout_remote_user_carbons(
-                        source_jid,
-                        &owner,
-                        &message,
-                        kind,
-                        exclude.clone(),
-                    )
-                    .await
-                {
-                    match outcome {
-                        crate::clustering::route_bridge::RemoteCarbonFanout::Applied {
-                            carbon_recipients,
-                            recipient_sm_append_streams,
-                        } => {
-                            if let Some(capture) = deps.ingress_effect_capture.as_ref() {
-                                for stream in recipient_sm_append_streams {
-                                    capture.record_recipient_sm_append(stream);
-                                }
-                            }
-                            if let (Some(capture), Some(excluded_source)) = (
-                                deps.ingress_effect_capture.as_ref(),
-                                exclude.first().cloned(),
-                            ) {
-                                capture.record_intent(IngressEffectIntent::Carbons {
-                                    carbon_recipients,
-                                    excluded_source,
-                                    kind,
-                                });
-                            }
-                        }
-                        crate::clustering::route_bridge::RemoteCarbonFanout::MaybeCommitted => {}
-                    }
-                    return;
-                }
+    if deps.effects.is_planning() {
+        if super::route_to_connection::plan::remote_owner(deps, &owner).await {
+            deps.capture_intent(IngressEffectIntent::RelayCarbons {
+                owner: owner.clone(),
+                exclude: exclude.clone(),
+                kind,
+            });
+            super::effects::delivery::record(
+                deps,
+                super::effects::delivery::ExternalDeliveryEffect::RelayCarbons {
+                    origin: deps.ordered_relay_origin.clone(),
+                    owner,
+                    exclude,
+                    message,
+                    kind,
+                },
+            );
+            return;
+        }
+        let mut carbon_recipients = registry.get_other_carbon_resources_for_user(&owner, &exclude);
+        if let Some(sm) = deps.sm_session_registry {
+            if let Ok(detached) = sm
+                .detached_carbon_resources_for_user(&owner, &exclude)
+                .await
+            {
+                carbon_recipients.extend(detached);
             }
         }
+        carbon_recipients.sort();
+        carbon_recipients.dedup();
+        if let Some(excluded_source) = exclude.first().cloned() {
+            deps.capture_intent(IngressEffectIntent::Carbons {
+                carbon_recipients,
+                excluded_source,
+                kind,
+            });
+        }
+        super::effects::delivery::record(
+            deps,
+            super::effects::delivery::ExternalDeliveryEffect::Carbons {
+                owner,
+                exclude,
+                message,
+                kind,
+            },
+        );
+        return;
+    }
+    if relay_carbons_only(deps, &owner, &message, kind, &exclude)
+        .await
+        .is_some()
+    {
+        return;
     }
     send_carbons_to_registry(
         registry,
@@ -87,6 +108,85 @@ pub(super) async fn send_carbons(
     .await;
 }
 
+/// Executes only the frozen remote carbon obligation. A changed owner must be
+/// reported to the ingress executor, never silently expanded to local fanout.
+pub(super) async fn relay_carbons_only(
+    deps: &Deps<'_>,
+    owner: &BareJid,
+    message: &Message,
+    kind: CarbonKind,
+    exclude: &[FullJid],
+) -> Option<FullJidDeliveryOutcome> {
+    #[cfg(feature = "clustering")]
+    if let Some(state) = deps.web_socket_state {
+        if let Some(bridge) = state
+            .deps
+            .app_state
+            .clustering_claims
+            .ordered_relay_delivery_bridge
+            .as_ref()
+        {
+            for source_jid in exclude {
+                if let Some(outcome) = bridge
+                    .try_fanout_remote_user_carbons(
+                        source_jid,
+                        owner,
+                        message,
+                        kind,
+                        exclude.to_vec(),
+                    )
+                    .await
+                {
+                    return Some(remote_carbon_delivery(outcome, deps, owner, exclude, kind));
+                }
+            }
+        }
+    }
+    #[cfg(not(feature = "clustering"))]
+    let _ = (deps, owner, message, kind, exclude);
+    None
+}
+
+#[cfg(feature = "clustering")]
+pub(crate) fn remote_carbon_delivery(
+    outcome: crate::clustering::route_bridge::RemoteCarbonFanout,
+    deps: &Deps<'_>,
+    owner: &BareJid,
+    exclude: &[FullJid],
+    kind: CarbonKind,
+) -> FullJidDeliveryOutcome {
+    match outcome {
+        crate::clustering::route_bridge::RemoteCarbonFanout::Applied {
+            carbon_recipients,
+            recipient_sm_append_streams,
+        } => {
+            if let Some(capture) = deps.ingress_effect_capture.as_ref() {
+                for stream in recipient_sm_append_streams {
+                    capture.record_recipient_sm_append(stream);
+                }
+            }
+            if let (Some(capture), Some(excluded_source)) = (
+                deps.ingress_effect_capture.as_ref(),
+                exclude.first().cloned(),
+            ) {
+                capture.record_intent(IngressEffectIntent::Carbons {
+                    carbon_recipients,
+                    excluded_source,
+                    kind,
+                });
+            }
+            FullJidDeliveryOutcome::Delivered
+        }
+        crate::clustering::route_bridge::RemoteCarbonFanout::Incomplete { reason } => {
+            warn!(%owner, %reason, "remote carbon fanout incomplete");
+            FullJidDeliveryOutcome::Unavailable
+        }
+        crate::clustering::route_bridge::RemoteCarbonFanout::MaybeCommitted => {
+            FullJidDeliveryOutcome::MaybeCommitted
+        }
+    }
+}
+
 pub(crate) async fn send_carbons_to_registry(
     registry: &ConnectionRegistry,
     deps: CarbonRegistryDeps<'_>,
@@ -95,9 +195,14 @@ pub(crate) async fn send_carbons_to_registry(
     kind: CarbonKind,
     exclude: Vec<FullJid>,
 ) -> Vec<FullJid> {
-    send_carbons_to_registry_with_capture(registry, deps, owner, message, kind, exclude)
-        .await
-        .carbon_recipients
+    match send_carbons_to_registry_with_capture(registry, deps, owner, message, kind, exclude).await
+    {
+        Ok(outcome) => outcome.carbon_recipients,
+        Err(reason) => {
+            warn!(%reason, "carbon fanout incomplete");
+            Vec::new()
+        }
+    }
 }
 
 pub(crate) async fn send_carbons_to_registry_with_capture(
@@ -107,7 +212,7 @@ pub(crate) async fn send_carbons_to_registry_with_capture(
     message: Box<Message>,
     kind: CarbonKind,
     exclude: Vec<FullJid>,
-) -> CarbonRegistryFanoutOutcome {
+) -> Result<CarbonRegistryFanoutOutcome, CarbonFanoutFailure> {
     // Per XEP-0280 §5, a carbon copy is the original
     // <message/> wrapped in <sent>/<received> →
     // <forwarded xmlns='urn:xmpp:forward:0'> → original.
@@ -145,15 +250,10 @@ pub(crate) async fn send_carbons_to_registry_with_capture(
         Some(sm) => sm
             .detached_carbon_resources_for_user(&owner, &exclude)
             .await
-            .unwrap_or_else(|error| {
-                warn!(
-                    owner = %owner,
-                    %error,
-                    "SendCarbons: failed to enumerate detached SM resources; \
-                     falling back to live-only fan-out"
-                );
-                Vec::new()
-            }),
+            .map_err(|error| {
+                warn!(%owner, %error, "SendCarbons: detached inventory failed");
+                CarbonFanoutFailure::DetachedInventory
+            })?,
         None => Vec::new(),
     };
     if live_targets.is_empty() && detached_targets.is_empty() {
@@ -162,10 +262,10 @@ pub(crate) async fn send_carbons_to_registry_with_capture(
             kind = ?kind,
             "SendCarbons: no carbon-enabled resources to fan out to"
         );
-        return CarbonRegistryFanoutOutcome {
+        return Ok(CarbonRegistryFanoutOutcome {
             carbon_recipients: Vec::new(),
             recipient_sm_append_streams: Vec::new(),
-        };
+        });
     }
     let mut carbon_recipients = Vec::new();
     let mut recipient_sm_append_streams = Vec::new();
@@ -179,7 +279,7 @@ pub(crate) async fn send_carbons_to_registry_with_capture(
                     %error,
                     "SendCarbons: failed to build envelope; skipping target"
                 );
-                continue;
+                return Err(CarbonFanoutFailure::Envelope);
             }
         };
         let stanza = Stanza::Message(envelope);
@@ -197,6 +297,7 @@ pub(crate) async fn send_carbons_to_registry_with_capture(
                         kind = ?kind,
                         "SendCarbons: remote target unavailable at fan-out time, dropping"
                     );
+                    return Err(CarbonFanoutFailure::Delivery);
                 }
                 FullJidDeliveryOutcome::Dropped => {
                     warn!(
@@ -204,6 +305,7 @@ pub(crate) async fn send_carbons_to_registry_with_capture(
                         kind = ?kind,
                         "SendCarbons: remote target backpressured or relay failed, dropping"
                     );
+                    return Err(CarbonFanoutFailure::Delivery);
                 }
                 #[cfg(feature = "clustering")]
                 FullJidDeliveryOutcome::MaybeCommitted => {
@@ -212,6 +314,7 @@ pub(crate) async fn send_carbons_to_registry_with_capture(
                         kind = ?kind,
                         "SendCarbons: remote delivery maybe committed; suppressing local fallback without recording a definitive carbon recipient"
                     );
+                    return Err(CarbonFanoutFailure::Delivery);
                 }
             }
             continue;
@@ -240,6 +343,7 @@ pub(crate) async fn send_carbons_to_registry_with_capture(
                     kind = ?kind,
                     "SendCarbons: target channel closed, dropping"
                 );
+                return Err(CarbonFanoutFailure::Delivery);
             }
         }
     }
@@ -256,7 +360,7 @@ pub(crate) async fn send_carbons_to_registry_with_capture(
                         %error,
                         "SendCarbons: failed to build detached envelope; skipping"
                     );
-                    continue;
+                    return Err(CarbonFanoutFailure::Envelope);
                 }
             };
             let stanza = Stanza::Message(envelope);
@@ -295,6 +399,7 @@ pub(crate) async fn send_carbons_to_registry_with_capture(
                         %error,
                         "SendCarbons: failed to queue carbon for detached resource"
                     );
+                    return Err(CarbonFanoutFailure::DetachedAppend);
                 }
             }
         }
@@ -312,10 +417,10 @@ pub(crate) async fn send_carbons_to_registry_with_capture(
             });
         }
     }
-    CarbonRegistryFanoutOutcome {
+    Ok(CarbonRegistryFanoutOutcome {
         carbon_recipients,
         recipient_sm_append_streams,
-    }
+    })
 }
 
 async fn try_deliver_registered_remote_resource(

@@ -2,7 +2,6 @@ use super::*;
 use waddle_xmpp::auth::{
     AuthContextId, AuthContextVersion, AuthenticatedPrincipalRef, PrincipalAuthEpoch,
 };
-use waddle_xmpp::stream_management::ShadowOrdinal;
 use waddle_xmpp_core::OccupancySessionGeneration;
 
 pub(crate) struct EncodedSessionPrincipal {
@@ -108,50 +107,47 @@ pub(crate) fn decode_session(row: &crate::db::Row) -> Result<PersistedSession, S
     let inbound_count: i64 = row
         .get(4)
         .map_err(|e| SmPersistenceError::Other(e.to_string()))?;
-    let shadow_ordinal_raw: Option<String> = row
+    let outbound_count: i64 = row
         .get(5)
         .map_err(|e| SmPersistenceError::Other(e.to_string()))?;
-    let outbound_count: i64 = row
+    let last_acked: i64 = row
         .get(6)
         .map_err(|e| SmPersistenceError::Other(e.to_string()))?;
-    let last_acked: i64 = row
+    let max_resume_secs: Option<i64> = row
         .get(7)
         .map_err(|e| SmPersistenceError::Other(e.to_string()))?;
-    let max_resume_secs: Option<i64> = row
+    let detached_at_ms: i64 = row
         .get(8)
         .map_err(|e| SmPersistenceError::Other(e.to_string()))?;
-    let detached_at_ms: i64 = row
+    let max_resume_duration_ms: i64 = row
         .get(9)
         .map_err(|e| SmPersistenceError::Other(e.to_string()))?;
-    let max_resume_duration_ms: i64 = row
+    let carbons_enabled: i64 = row
         .get(10)
         .map_err(|e| SmPersistenceError::Other(e.to_string()))?;
-    let carbons_enabled: i64 = row
+    let roster_interested: i64 = row
         .get(11)
         .map_err(|e| SmPersistenceError::Other(e.to_string()))?;
-    let roster_interested: i64 = row
+    let blocklist_interested: i64 = row
         .get(12)
         .map_err(|e| SmPersistenceError::Other(e.to_string()))?;
-    let blocklist_interested: i64 = row
+    let presence_available: i64 = row
         .get(13)
         .map_err(|e| SmPersistenceError::Other(e.to_string()))?;
-    let presence_available: i64 = row
+    let presence_show_raw: Option<String> = row
         .get(14)
         .map_err(|e| SmPersistenceError::Other(e.to_string()))?;
-    let presence_show_raw: Option<String> = row
+    let presence_status: Option<String> = row
         .get(15)
         .map_err(|e| SmPersistenceError::Other(e.to_string()))?;
-    let presence_status: Option<String> = row
+    let presence_priority: i64 = row
         .get(16)
         .map_err(|e| SmPersistenceError::Other(e.to_string()))?;
-    let presence_priority: i64 = row
+    let replay_gap_through: Option<i64> = row
         .get(17)
         .map_err(|e| SmPersistenceError::Other(e.to_string()))?;
-    let replay_gap_through: Option<i64> = row
-        .get(18)
-        .map_err(|e| SmPersistenceError::Other(e.to_string()))?;
     let presence_payloads_raw: Option<String> = row
-        .get(19)
+        .get(18)
         .map_err(|e| SmPersistenceError::Other(e.to_string()))?;
 
     let detached_at = DateTime::<Utc>::from_timestamp_millis(detached_at_ms)
@@ -160,12 +156,6 @@ pub(crate) fn decode_session(row: &crate::db::Row) -> Result<PersistedSession, S
         std::time::Duration::from_millis(max_resume_duration_ms.max(0) as u64);
     let presence_show = presence_show_raw.as_deref().map(parse_show).transpose()?;
     let occupancy_session = decode_occupancy_session(occupancy_session_raw)?;
-    let shadow_ordinal = shadow_ordinal_raw
-        .as_deref()
-        .unwrap_or("0")
-        .parse::<u64>()
-        .map(ShadowOrdinal::from_storage)
-        .map_err(|error| SmPersistenceError::Other(format!("invalid shadow_ordinal: {error}")))?;
     // Degrade a malformed `presence_payloads` cell to caps-less rather than
     // failing the whole session decode. Presence extension payloads are
     // non-essential decoration that the client re-advertises on its next
@@ -192,7 +182,6 @@ pub(crate) fn decode_session(row: &crate::db::Row) -> Result<PersistedSession, S
         jid,
         occupancy_session,
         inbound_count: inbound_count.max(0) as u32,
-        shadow_ordinal,
         outbound_count: outbound_count.max(0) as u32,
         last_acked: last_acked.max(0) as u32,
         replay_gap_through: replay_gap_through.map(|v| v.max(0) as u32),
@@ -259,7 +248,7 @@ pub(crate) fn decode_unacked(
 /// `stanza_xml` from column 20, and `original_receipt_at_ms`
 /// from column 21. Caller already has `sequence` (column 19).
 /// The unacked columns sit after the 19 session columns
-/// (0..=18, `shadow_ordinal` added at 4 and `presence_payloads` at 18).
+/// (0..=18, `presence_payloads` at 18).
 /// Used by `list_all_sessions_with_unacked` (issue #209 PR #405).
 pub(super) fn decode_unacked_join_row(
     row: &crate::db::Row,
@@ -269,10 +258,10 @@ pub(super) fn decode_unacked_join_row(
         .get(0)
         .map_err(|e| SmPersistenceError::Other(e.to_string()))?;
     let stanza_xml: String = row
-        .get(21)
+        .get(20)
         .map_err(|e| SmPersistenceError::Other(e.to_string()))?;
     let receipt_ms: i64 = row
-        .get(22)
+        .get(21)
         .map_err(|e| SmPersistenceError::Other(e.to_string()))?;
     let original_receipt_at = DateTime::<Utc>::from_timestamp_millis(receipt_ms)
         .ok_or_else(|| SmPersistenceError::Other("invalid unacked receipt timestamp".into()))?;

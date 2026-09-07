@@ -80,6 +80,9 @@ fn receiver_nacks_same_sequence_muc_proxy_with_different_generation() {
         sender_claim: sender_claim(),
         target_claim: room_claim(),
         payload: OrderedRelayPayload::MucProxy {
+            canonical: None,
+            principal: None,
+            stanza_lang: None,
             room_jid: room_jid(),
             kind: OrderedRelayMucProxyKind::JoinPresence,
             origin: connection_origin(1),
@@ -97,6 +100,9 @@ fn receiver_nacks_same_sequence_muc_proxy_with_different_generation() {
 
     let replacement_generation = RemoteStanzaEnvelope {
         payload: OrderedRelayPayload::MucProxy {
+            canonical: None,
+            principal: None,
+            stanza_lang: None,
             room_jid: room_jid(),
             kind: OrderedRelayMucProxyKind::JoinPresence,
             origin: connection_origin(2),

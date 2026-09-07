@@ -194,6 +194,48 @@ where
     .outcome
 }
 
+/// Keep ingress receipts pending until the complete response batch reaches the wire.
+pub(super) async fn write_ingress_response_batch_with_admission<S, SE, R, RE>(
+    sender: &mut S,
+    reader: &mut R,
+    state: &WebSocketState,
+    conn: &mut WsConnState,
+    responses: &mut super::frame::ResponseBatch,
+    policy: BatchSmPolicy,
+    authority: BatchAuthority<'_>,
+) -> BatchWriteReport
+where
+    S: Sink<Message, Error = SE> + Unpin,
+    SE: std::fmt::Display,
+    R: futures::Stream<Item = Result<Message, RE>> + Unpin,
+    RE: std::fmt::Display,
+{
+    let report = write_response_batch_report_with_admission(
+        sender,
+        reader,
+        state,
+        conn,
+        responses.frames.clone(),
+        policy,
+        authority,
+    )
+    .await;
+    if matches!(report.outcome, BatchWriteOutcome::Continue) {
+        for ingress_report in &mut responses.ingress_reports {
+            if let Err(error) = state
+                .deps
+                .protocol
+                .ingress
+                .complete_frame_obligations(ingress_report)
+                .await
+            {
+                warn!(%error, "Failed to receipt written ingress response frames");
+            }
+        }
+    }
+    report
+}
+
 pub(super) async fn write_response_batch_report_with_admission<S, SE, R, RE, F>(
     sender: &mut S,
     reader: &mut R,
@@ -534,7 +576,7 @@ where
             return SendWindowOutcome::Recovered;
         }
         if let Err(outcome) =
-            service_paused_sm_requests_from_deferred(sender, conn, authority).await
+            service_paused_sm_requests_from_deferred(sender, state, conn, authority).await
         {
             return outcome;
         }
@@ -622,6 +664,16 @@ where
                     if !batch_authoritative(authority) {
                         return SendWindowOutcome::AuthorityRevoked;
                     }
+                    if super::stream_management::flush_ingress_checkpoint(
+                        state,
+                        &conn.sm_state,
+                        &mut conn.sm_inbound_completion,
+                    )
+                    .await
+                    .is_err()
+                    {
+                        return SendWindowOutcome::TransportClosed;
+                    }
                     if let Err(outcome) = send_window_message(
                         sender,
                         Message::Text(
@@ -674,6 +726,7 @@ where
 
 async fn service_paused_sm_requests_from_deferred<S, E>(
     sender: &mut S,
+    state: &WebSocketState,
     conn: &mut WsConnState,
     authority: Option<(
         &crate::clustering::NodeAdmissionPermit,
@@ -700,6 +753,13 @@ where
         if !batch_authoritative(authority) {
             return Err(SendWindowOutcome::AuthorityRevoked);
         }
+        super::stream_management::flush_ingress_checkpoint(
+            state,
+            &conn.sm_state,
+            &mut conn.sm_inbound_completion,
+        )
+        .await
+        .map_err(|_| SendWindowOutcome::TransportClosed)?;
         send_window_message(
             sender,
             Message::Text(

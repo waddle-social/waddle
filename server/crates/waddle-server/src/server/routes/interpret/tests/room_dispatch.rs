@@ -1,11 +1,8 @@
-use super::super::room_dispatch::push_sender_error_reply;
 #[cfg(feature = "clustering")]
-use super::super::room_dispatch::{
-    capture_ambiguous_remote_room_route, capture_delivered_remote_room_route,
-    record_remote_shadow_room_authority,
-};
+use super::super::room_dispatch::capture_delivered_remote_room_route;
+use super::super::room_dispatch::push_sender_error_reply;
 use super::*;
-use crate::ingress_shadow::IngressEffectCapture;
+use crate::ingress::IngressEffectCapture;
 
 // XEP-0372 — RequestEnrichment callback round-trip
 // -----------------------------------------------------------------
@@ -22,7 +19,7 @@ fn extension_waddle_scope_matches_managed_room_context() {
 #[cfg(feature = "clustering")]
 #[test]
 fn delivered_remote_room_dispatch_captures_frozen_route_intent() {
-    let capture = IngressEffectCapture::new(None);
+    let capture = IngressEffectCapture::new();
     let room: BareJid = "remote@muc.example.com".parse().expect("room");
     let relay_target = waddle_xmpp::ingress::RelayTargetIdentity::owner_node("node-b", "epoch-b");
 
@@ -32,40 +29,6 @@ fn delivered_remote_room_dispatch_captures_frozen_route_intent() {
         .snapshot()
         .intents
         .contains(&IngressEffectIntent::DispatchToRoomRemote { room, relay_target }));
-}
-
-#[cfg(feature = "clustering")]
-#[test]
-fn maybe_committed_remote_room_dispatch_captures_ambiguity_marker() {
-    let capture = IngressEffectCapture::new(None);
-    let room: BareJid = "remote@muc.example.com".parse().expect("room");
-    let relay_target = waddle_xmpp::ingress::RelayTargetIdentity::owner_node("node-b", "epoch-b");
-
-    capture_ambiguous_remote_room_route(&capture, &room, relay_target.clone());
-
-    assert!(capture.snapshot().markers.contains(
-        &crate::ingress_shadow::ShadowDecisionMarker::AmbiguousDispatchToRoomRemote {
-            room,
-            relay_target,
-        }
-    ));
-}
-
-#[cfg(feature = "clustering")]
-#[test]
-fn join_maybe_committed_remote_room_dispatch_captures_ambiguity_marker() {
-    let capture = IngressEffectCapture::new(None);
-    let room: BareJid = "remote@muc.example.com".parse().expect("room");
-    let relay_target = waddle_xmpp::ingress::RelayTargetIdentity::owner_node("node-b", "epoch-b");
-
-    capture_ambiguous_remote_room_route(&capture, &room, relay_target.clone());
-
-    assert!(capture.snapshot().markers.contains(
-        &crate::ingress_shadow::ShadowDecisionMarker::AmbiguousDispatchToRoomRemote {
-            room,
-            relay_target,
-        }
-    ));
 }
 
 // #229 PR18 — DispatchToRoom interpreter arm runs the room handler
@@ -154,8 +117,9 @@ async fn dispatch_to_room_fanout_span_and_latency_cover_recipient_enqueues() {
     )
     .await;
 
-    let capture = IngressEffectCapture::new(None);
+    let capture = IngressEffectCapture::new();
     let deps = Deps {
+        effects: &crate::server::routes::interpret::effects::ImmediateSink,
         connection_registry: &state.deps.protocol.connection_registry,
         user_registry: Some(&state.deps.protocol.user_registry),
         sm_session_registry: Some(&state.deps.protocol.sm_session_registry),
@@ -277,180 +241,12 @@ async fn dispatch_to_room_fanout_span_and_latency_cover_recipient_enqueues() {
     }));
 }
 
-#[tokio::test(flavor = "current_thread")]
-async fn dispatch_to_room_deduplicated_retry_records_authoritative_archive_id_but_no_route_intent()
-{
-    use waddle_xmpp::inbox::storage::InMemoryInboxStorage;
-    use waddle_xmpp::mam::{
-        ArchivedMessage, ArchivedRichMessage, InMemoryMamStorage, StoreOutcome,
-    };
-    use waddle_xmpp::muc::room_actor::Join;
-    use waddle_xmpp::muc::room_registry_actor::CreateRoom;
-    use waddle_xmpp::muc::RoomConfig;
-    use waddle_xmpp::registry::DeliveryKind;
-    use waddle_xmpp::{Affiliation, Role};
-    use waddle_xmpp_core::mam::ArchivedMucSender;
-    use waddle_xmpp_core::xep0359::{build_origin_id_element, extract_stanza_id_by, OriginId};
-
-    let state = crate::server::routes::websocket::tests::create_test_websocket_state().await;
-    let room_jid: jid::BareJid = "retry@muc.example.com".parse().expect("room JID");
-    let alice: jid::FullJid = "alice@example.com/web".parse().expect("alice JID");
-    let old_sender: jid::FullJid = "alice@example.com/old-session"
-        .parse()
-        .expect("old sender JID");
-    let bob: jid::FullJid = "bob@example.com/phone".parse().expect("bob JID");
-    let occupant_alice: jid::FullJid = "retry@muc.example.com/alice".parse().expect("occupant JID");
-    let room = state
-        .deps
-        .protocol
-        .room_registry
-        .ask(CreateRoom {
-            room_jid: room_jid.clone(),
-            waddle_id: "w-retry".to_string(),
-            channel_id: "c-retry".to_string(),
-            config: RoomConfig::default(),
-        })
-        .await
-        .expect("create room");
-    for (nick, real_jid) in [("alice", alice.clone()), ("bob", bob.clone())] {
-        room.ask(Join {
-            nick: nick.to_string(),
-            real_jid,
-            role: Role::Participant,
-            affiliation: Affiliation::Member,
-        })
-        .await
-        .expect("join room");
-    }
-
-    let original_archive_id = "authoritative-room-archive-id";
-    let origin_id = "stable-room-origin";
-    let mam_concrete = Arc::new(InMemoryMamStorage::new());
-    let mam: Arc<dyn MamStorage> = mam_concrete.clone();
-    let inbox: Arc<dyn InboxStorage> = Arc::new(InMemoryInboxStorage::new());
-    assert_eq!(
-        mam_concrete
-            .store_message(
-                &room_jid,
-                &ArchivedMessage {
-                    id: original_archive_id.to_string(),
-                    body: Some("retry me".to_string()),
-                    origin_id: Some(OriginId::new(origin_id)),
-                    message_type: xmpp_parsers::message::MessageType::Groupchat,
-                    nickname_generation: Some(7),
-                    rich: Some(ArchivedRichMessage {
-                        muc_sender: Some(ArchivedMucSender {
-                            jid: jid::Jid::from(old_sender),
-                            affiliation: waddle_xmpp_core::types::Affiliation::Member,
-                            role: waddle_xmpp_core::types::Role::Participant,
-                        }),
-                        ..ArchivedRichMessage::default()
-                    }),
-                    ..ArchivedMessage::for_test(
-                        jid::Jid::from(occupant_alice.clone()),
-                        jid::Jid::from(room_jid.clone()),
-                    )
-                },
-            )
-            .await
-            .expect("seed original row"),
-        StoreOutcome::Stored(original_archive_id.to_string())
-    );
-
-    let (alice_tx, mut alice_rx) = tokio::sync::mpsc::channel(8);
-    let (bob_tx, mut bob_rx) = tokio::sync::mpsc::channel(8);
-    register_into_both_tiers(
-        &state.deps.protocol.connection_registry,
-        &state.deps.protocol.user_registry,
-        &alice,
-        alice_tx,
-    )
-    .await;
-    register_into_both_tiers(
-        &state.deps.protocol.connection_registry,
-        &state.deps.protocol.user_registry,
-        &bob,
-        bob_tx,
-    )
-    .await;
-
-    let capture = IngressEffectCapture::new(None);
-    let deps = Deps {
-        connection_registry: &state.deps.protocol.connection_registry,
-        user_registry: Some(&state.deps.protocol.user_registry),
-        sm_session_registry: Some(&state.deps.protocol.sm_session_registry),
-        mam_storage: Some(&mam),
-        inbox_storage: Some(&inbox),
-        extension_manager: Some(&state.deps.protocol.extension_manager),
-        room_registry: Some(&state.deps.protocol.room_registry),
-        web_socket_state: Some(state.as_ref()),
-        authenticated_principal: None,
-        local_domain: state.deps.auth_state.xmpp_domain.as_str(),
-        blocking_storage: Some(&state.deps.protocol.blocking_storage),
-        message_dispatcher: Some(&state.deps.protocol.dispatcher),
-        pending_delivery_storage: Some(&state.deps.protocol.pending_delivery_storage),
-        ordered_relay_origin: None,
-        sfu: None,
-        ingress_effect_capture: Some(capture.clone()),
-    };
-    let mut message = Message::new(Some(jid::Jid::from(room_jid.clone())));
-    message.from = Some(jid::Jid::from(alice.clone()));
-    message.type_ = XmppMessageType::Groupchat;
-    message.id = Some(xmpp_parsers::message::Id("fresh-retry-id".into()));
-    message
-        .bodies
-        .insert(xmpp_parsers::message::Lang::new(), "retry me".to_string());
-    message.payloads.push(build_origin_id_element(origin_id));
-
-    let outcome = interpret(
-        vec![OutboundEvent::DispatchToRoom {
-            room: room_jid.clone(),
-            message: Box::new(message),
-        }],
-        &deps,
-    )
-    .await;
-
-    assert!(outcome.frames.is_empty());
-    assert_eq!(
-        mam_concrete.count_messages(&room_jid).await.expect("count"),
-        1
-    );
-    let delivery = alice_rx.try_recv().expect("sender reflection survives");
-    assert_eq!(delivery.kind, DeliveryKind::PeerStanza);
-    let Stanza::Message(sender_copy) = &delivery.stanza else {
-        panic!("expected sender reflection");
-    };
-    assert_eq!(
-        extract_stanza_id_by(sender_copy, &jid::Jid::from(room_jid.clone())).as_deref(),
-        Some(original_archive_id)
-    );
-    assert!(
-        bob_rx.try_recv().is_err(),
-        "non-sender fanout must be suppressed on deduplicated retry"
-    );
-    let snapshot = capture.snapshot();
-    assert!(
-        !snapshot.intents.iter().any(|intent| matches!(
-            intent,
-            IngressEffectIntent::RouteMucGroupchat { room, .. } if room == &room_jid
-        )),
-        "suppressed fanout must not capture a room route intent"
-    );
-    assert!(snapshot.intents.iter().any(|intent| {
-        matches!(
-            intent,
-            IngressEffectIntent::ArchiveAuthoritative { archive, stanza_id, .. }
-                if archive == &room_jid && stanza_id.id == original_archive_id
-        )
-    }));
-}
-
 #[test]
 fn successful_room_error_reply_records_error_intent() {
     let registry = ConnectionRegistry::new();
-    let capture = IngressEffectCapture::new(None);
+    let capture = IngressEffectCapture::new();
     let deps = Deps {
+        effects: &crate::server::routes::interpret::effects::ImmediateSink,
         connection_registry: &registry,
         user_registry: None,
         sm_session_registry: None,
@@ -730,42 +526,180 @@ fn bot_nick_sanitizes_invalid_resource_base_before_joining() {
     );
 }
 
-/// #1735: a proxy attempt's room fence is the remote owner's claim, so the
-/// relayed branches must record it as authority context, never as a fence the
-/// shadow transaction would assert locally (`guard_if_current` can never
-/// accept a foreign identity).
-#[cfg(feature = "clustering")]
-#[test]
-fn relayed_room_delivery_records_remote_authority_not_a_local_fence() {
-    use crate::ingress_shadow::{IngressShadowRoomFence, IngressShadowRoomScope};
-    use waddle_xmpp::muc::RoomClaimFenceContext;
-    use waddle_xmpp::ownership::{ClaimEpoch, Entity, EntityType, NodeIdentity};
+#[tokio::test]
+async fn room_observer_planning_captures_complete_replayable_invocation() {
+    assert_room_observer_planning(ObserverConfiguration::Observer, true).await;
+}
 
-    let registry = ConnectionRegistry::new();
-    let capture = IngressEffectCapture::new(None);
-    let deps = Deps::registry_only(&registry).with_ingress_effect_capture(Some(capture.clone()));
-    let room: BareJid = "remote@muc.example.com".parse().expect("room");
-    // Frame-time provisional scope: this node's own published fence.
-    capture.record_room_fence(IngressShadowRoomFence {
-        room: room.clone(),
-        owner: NodeIdentity::new("this-node", "this-epoch"),
-        claim_epoch: ClaimEpoch(3),
+#[tokio::test]
+async fn room_observer_planning_disabled_extensions_records_no_obligation() {
+    assert_room_observer_planning(ObserverConfiguration::Disabled, false).await;
+}
+
+#[tokio::test]
+async fn room_observer_planning_empty_manager_records_no_obligation() {
+    assert_room_observer_planning(ObserverConfiguration::Empty, false).await;
+}
+
+#[tokio::test]
+async fn room_observer_planning_enrichment_only_records_no_obligation() {
+    assert_room_observer_planning(ObserverConfiguration::EnrichmentOnly, false).await;
+}
+
+#[derive(Clone, Copy)]
+enum ObserverConfiguration {
+    Disabled,
+    Empty,
+    EnrichmentOnly,
+    Observer,
+}
+
+async fn room_observer_test_manager(
+    configuration: ObserverConfiguration,
+) -> Arc<waddle_extensions::ExtensionManager> {
+    use waddle_extensions::types::ExtensionCapability;
+    use waddle_extensions::{ExtensionConfig, ExtensionManager, ExtensionModuleConfig};
+    let capability = match configuration {
+        ObserverConfiguration::Disabled | ObserverConfiguration::Empty => None,
+        ObserverConfiguration::EnrichmentOnly => Some(ExtensionCapability::MessageEnrich),
+        ObserverConfiguration::Observer => Some(ExtensionCapability::MessageObserve),
+    };
+    let modules = capability
+        .map(|capability| ExtensionModuleConfig {
+            name: "message-hook-fixture".to_owned(),
+            namespace: "urn:test:message-hook".to_owned(),
+            registry: Default::default(),
+            digest: None,
+            tag: None,
+            config: serde_json::json!(u8::from(capability == ExtensionCapability::MessageObserve)),
+            capability_grants: vec![capability],
+            allowed_http_origins: Vec::new(),
+            provider_room_grants: Vec::new(),
+            config_secret_files: Default::default(),
+            local_path: Some(
+                std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+                    .join("../waddle-extensions/tests/fixtures/message_hook.wat")
+                    .display()
+                    .to_string(),
+            ),
+        })
+        .into_iter()
+        .collect();
+    Arc::new(
+        ExtensionManager::from_config(ExtensionConfig {
+            enabled: !matches!(configuration, ObserverConfiguration::Disabled),
+            modules,
+            ..Default::default()
+        })
+        .await
+        .expect("message hook fixture manager"),
+    )
+}
+
+async fn assert_room_observer_planning(configuration: ObserverConfiguration, expected: bool) {
+    use crate::server::routes::interpret::effects::{
+        room::ExternalRoomEffect, Effect, ExternalEffect, PlanSink, PlanSuppressionPolicy,
+    };
+    use waddle_xmpp::muc::{room_actor::Join, room_registry_actor::CreateRoom, RoomConfig};
+    use waddle_xmpp::{Affiliation, Role};
+
+    let mut state = crate::server::routes::websocket::tests::create_test_websocket_state().await;
+    Arc::get_mut(&mut state)
+        .expect("unique test state")
+        .deps
+        .protocol
+        .extension_manager = room_observer_test_manager(configuration).await;
+    let room_jid: jid::BareJid = "observer@muc.example.com".parse().expect("room");
+    let sender: jid::FullJid = "alice@example.com/web".parse().expect("sender");
+    let room = state
+        .deps
+        .protocol
+        .room_registry
+        .ask(CreateRoom {
+            room_jid: room_jid.clone(),
+            waddle_id: "space".to_owned(),
+            channel_id: "observer".to_owned(),
+            config: RoomConfig::default(),
+        })
+        .await
+        .expect("room");
+    room.ask(Join {
+        nick: "alice".to_owned(),
+        real_jid: sender.clone(),
+        role: Role::Participant,
+        affiliation: Affiliation::Member,
+    })
+    .await
+    .expect("occupant");
+    let capture = IngressEffectCapture::new();
+    let sink = PlanSink::new();
+    let mut deps = Deps::new(&state.deps.protocol.connection_registry, "example.com");
+    deps.effects = &sink;
+    deps.ingress_effect_capture = Some(capture.clone());
+    deps.web_socket_state = Some(state.as_ref());
+    deps.room_registry = Some(&state.deps.protocol.room_registry);
+    deps.extension_manager = Some(&state.deps.protocol.extension_manager);
+    deps.mam_storage = Some(&state.deps.protocol.mam_storage);
+    deps.inbox_storage = Some(&state.deps.protocol.inbox_storage);
+    let mut message = Message::new(Some(room_jid.clone().into()));
+    message.from = Some(sender.clone().into());
+    message.type_ = XmppMessageType::Groupchat;
+    message
+        .bodies
+        .insert(Default::default(), "observe after commit".to_owned());
+    let incoming = message.clone();
+    interpret(
+        vec![OutboundEvent::DispatchToRoom {
+            room: room_jid.clone(),
+            message: Box::new(message),
+        }],
+        &deps,
+    )
+    .await;
+    let snapshot = capture.snapshot();
+    let intent = snapshot
+        .intents
+        .iter()
+        .find(|intent| matches!(intent, IngressEffectIntent::RoomObserver { .. }));
+    let plan = sink.take().0;
+    let planned = plan.iter().find(|planned| {
+        matches!(
+            planned.effect,
+            Effect::External(ExternalEffect::Room(
+                ExternalRoomEffect::ObserveRoomMessage { .. }
+            ))
+        )
     });
-    let remote_owner = RoomClaimFenceContext::new(
-        Entity::new(EntityType::RoomActor, room.to_string()),
-        NodeIdentity::new("owner-node", "owner-epoch"),
-        ClaimEpoch(9),
-    );
-
-    record_remote_shadow_room_authority(&deps, &room, Some(&remote_owner));
+    assert_eq!(intent.is_some(), expected, "observer intent eligibility");
     assert_eq!(
-        capture.snapshot().room_scope,
-        Some(IngressShadowRoomScope::RemoteAuthority(
-            IngressShadowRoomFence::from_context(&room, &remote_owner)
-        ))
+        planned.is_some(),
+        expected,
+        "observer scheduling eligibility"
     );
-
-    // An attempt that carried no fence leaves no room scope to assert.
-    record_remote_shadow_room_authority(&deps, &room, None);
-    assert_eq!(capture.snapshot().room_scope, None);
+    if !expected {
+        return;
+    }
+    let intent = intent.expect("observer intent captured before commit");
+    let planned = planned.expect("deferred observer invocation");
+    assert_eq!(planned.suppression, PlanSuppressionPolicy::Always);
+    let Effect::External(ExternalEffect::Room(ExternalRoomEffect::ObserveRoomMessage {
+        room,
+        message,
+        requester,
+        sender,
+        error_request,
+    })) = &planned.effect
+    else {
+        panic!("observer effect");
+    };
+    assert_eq!(error_request.as_ref(), &incoming);
+    assert_eq!(message.bodies, incoming.bodies);
+    assert_eq!(
+        intent,
+        &IngressEffectIntent::RoomObserver {
+            room: room.clone(),
+            requester: requester.clone(),
+            sender: sender.clone(),
+        }
+    );
 }

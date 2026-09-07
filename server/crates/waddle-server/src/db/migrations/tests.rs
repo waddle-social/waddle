@@ -36,10 +36,10 @@ async fn test_migration_runner_global() {
     assert_eq!(auth_context_columns, 3);
 
     // Check version (global + shared waddle schema). `current_version` reads
-    // the ledger max, which the waddle namespace (V1011) still dominates
+    // the ledger max, which the waddle namespace (V1012) still dominates
     // after global V0012.
     let version = runner.current_version(&db).await.unwrap();
-    assert_eq!(version, Some(1011));
+    assert_eq!(version, Some(1012));
 }
 
 #[tokio::test]
@@ -154,7 +154,7 @@ async fn test_waddle_v1002_adds_pin_permission_to_existing_v1001_schema() {
     let applied = runner.run(&db).await.unwrap();
     assert_eq!(
         applied,
-        vec![1002, 1003, 1004, 1005, 1006, 1007, 1008, 1009, 1010, 1011]
+        vec![1002, 1003, 1004, 1005, 1006, 1007, 1008, 1009, 1010, 1011, 1012]
     );
 
     let conn = db.guard().await.unwrap();
@@ -174,7 +174,7 @@ async fn test_waddle_v1002_adds_pin_permission_to_existing_v1001_schema() {
     assert_eq!(public_room, 1);
 
     let version = runner.current_version(&db).await.unwrap();
-    assert_eq!(version, Some(1011));
+    assert_eq!(version, Some(1012));
 }
 
 #[tokio::test]
@@ -233,7 +233,7 @@ async fn test_global_v0004_adds_policy_digest_to_existing_v0003_schema() {
     drop(conn);
 
     // `MigrationRunner::global()` composes global + waddle migrations,
-    // so the runner also reports applying 1001 through 1011 (the waddle
+    // so the runner also reports applying 1001 through 1012 (the waddle
     // schema tables) on top of V0004. The test's invariant is V0004
     // specifically, asserted via the `pragma_table_info` probe below;
     // the version list is included in the assertion so a future PR
@@ -244,7 +244,7 @@ async fn test_global_v0004_adds_policy_digest_to_existing_v0003_schema() {
         applied,
         vec![
             4, 5, 6, 7, 8, 9, 10, 11, 12, 1001, 1002, 1003, 1004, 1005, 1006, 1007, 1008, 1009,
-            1010, 1011
+            1010, 1011, 1012
         ]
     );
 
@@ -308,7 +308,7 @@ async fn test_global_v0004_adds_policy_digest_to_existing_v0003_schema() {
     let version = runner.current_version(&db).await.unwrap();
     assert_eq!(
         version,
-        Some(1011),
+        Some(1012),
         "current version reflects the highest applied across global+waddle"
     );
 }
@@ -466,7 +466,7 @@ async fn sqlite_pre_ledger_history_is_adopted_once_before_pending_migrations() {
     let runner = MigrationRunner::waddle();
     assert_eq!(
         runner.run(&db).await.unwrap(),
-        vec![1002, 1003, 1004, 1005, 1006, 1007, 1008, 1009, 1010, 1011]
+        vec![1002, 1003, 1004, 1005, 1006, 1007, 1008, 1009, 1010, 1011, 1012]
     );
     let expected_checksum = migration_checksum(&first, DatabaseDriver::Sqlite);
     assert_eq!(
@@ -551,7 +551,7 @@ async fn sqlite_single_runner_backfills_checksums_when_legacy_ledger_has_no_pend
         .await
         .unwrap();
     let runner = MigrationRunner::single();
-    assert_eq!(runner.migrations.len(), 23);
+    assert_eq!(runner.migrations.len(), 24);
     runner.run(&db).await.unwrap();
 
     let conn = db.guard().await.unwrap();
@@ -561,7 +561,7 @@ async fn sqlite_single_runner_backfills_checksums_when_legacy_ledger_has_no_pend
     drop(conn);
 
     assert!(runner.run(&db).await.unwrap().is_empty());
-    assert_eq!(migration_ledger_row_count(&db).await, 23);
+    assert_eq!(migration_ledger_row_count(&db).await, 24);
     assert_all_migration_checksums(&db, DatabaseDriver::Sqlite).await;
     assert!(runner.run(&db).await.unwrap().is_empty());
 }
@@ -741,7 +741,7 @@ async fn v1010_rolls_forward_from_a_v1009_ledger() {
     drop(conn);
 
     let applied = MigrationRunner::single().run(&db).await.unwrap();
-    assert_eq!(applied, vec![1010, 1011]);
+    assert_eq!(applied, vec![1010, 1011, 1012]);
     assert_eq!(
         migration_ledger_checksum(&db, 1010).await.as_deref(),
         Some(migration_checksum(&migration_by_version(1010), DatabaseDriver::Sqlite).as_str())
@@ -910,7 +910,7 @@ async fn postgres_pre_ledger_history_is_adopted_once_before_pending_migrations()
     let runner = MigrationRunner::waddle();
     assert_eq!(
         runner.run(&db).await.expect("adopt and run migrations"),
-        vec![1002, 1003, 1004, 1005, 1006, 1007, 1008, 1009, 1010, 1011]
+        vec![1002, 1003, 1004, 1005, 1006, 1007, 1008, 1009, 1010, 1011, 1012]
     );
     let expected_checksum = migration_checksum(&first, DatabaseDriver::Postgres);
     assert_eq!(
@@ -1025,7 +1025,7 @@ async fn postgres_single_runner_backfills_checksums_when_legacy_ledger_has_no_pe
     let schema = unique_postgres_schema_name("ledger_pure_adoption");
     let (db, admin) = open_isolated_postgres_database(&database_url, &schema).await;
     let runner = MigrationRunner::single();
-    assert_eq!(runner.migrations.len(), 23);
+    assert_eq!(runner.migrations.len(), 24);
     runner.run(&db).await.expect("initial single migration run");
 
     let conn = db.guard().await.expect("postgres guard");
@@ -1039,7 +1039,7 @@ async fn postgres_single_runner_backfills_checksums_when_legacy_ledger_has_no_pe
         .await
         .expect("pure adoption rerun")
         .is_empty());
-    assert_eq!(migration_ledger_row_count(&db).await, 23);
+    assert_eq!(migration_ledger_row_count(&db).await, 24);
     assert_all_migration_checksums(&db, DatabaseDriver::Postgres).await;
     assert!(runner
         .run(&db)
@@ -1358,6 +1358,7 @@ async fn postgres_monitoring_queries_match_migrated_ingress_schema() {
                     [
                         "ingress_deliveries",
                         "ingress_effect_intents",
+                        "ingress_effect_receipts",
                         "ingress_messages",
                         "ingress_origin_aliases",
                         "ingress_sm_refs",
@@ -1886,7 +1887,7 @@ async fn postgres_v0006_widens_existing_upload_slot_size_bytes() {
         applied,
         vec![
             6, 7, 8, 9, 10, 11, 12, 1001, 1002, 1003, 1004, 1005, 1006, 1007, 1008, 1009, 1010,
-            1011
+            1011, 1012
         ]
     );
     assert_postgres_column_type(&db, "upload_slots", "size_bytes", "bigint").await;
@@ -1961,7 +1962,10 @@ async fn sqlite_v0007_tracks_link_preview_media_refs() {
     let applied = MigrationRunner::global().run(&db).await.unwrap();
     assert_eq!(
         applied,
-        vec![7, 8, 9, 10, 11, 12, 1001, 1002, 1003, 1004, 1005, 1006, 1007, 1008, 1009, 1010, 1011]
+        vec![
+            7, 8, 9, 10, 11, 12, 1001, 1002, 1003, 1004, 1005, 1006, 1007, 1008, 1009, 1010, 1011,
+            1012
+        ]
     );
 
     let conn = db.guard().await.unwrap();
@@ -2468,7 +2472,10 @@ async fn postgres_v0007_tracks_link_preview_media_refs() {
         .expect("run global migration");
     assert_eq!(
         applied,
-        vec![7, 8, 9, 10, 11, 12, 1001, 1002, 1003, 1004, 1005, 1006, 1007, 1008, 1009, 1010, 1011]
+        vec![
+            7, 8, 9, 10, 11, 12, 1001, 1002, 1003, 1004, 1005, 1006, 1007, 1008, 1009, 1010, 1011,
+            1012
+        ]
     );
 
     let conn = db.guard().await.expect("postgres guard");
@@ -2739,7 +2746,7 @@ async fn postgres_v1003_widens_existing_attachment_size_bytes() {
         .expect("run waddle migration");
     assert_eq!(
         applied,
-        vec![1003, 1004, 1005, 1006, 1007, 1008, 1009, 1010, 1011]
+        vec![1003, 1004, 1005, 1006, 1007, 1008, 1009, 1010, 1011, 1012]
     );
     assert_postgres_column_type(&db, "attachments", "size_bytes", "bigint").await;
 
@@ -3377,4 +3384,321 @@ fn postgres_url_with_search_path(database_url: &str, schema: &str) -> String {
         .extend_pairs(retained.iter().map(|(key, value)| (key, value)))
         .append_pair("options", &format!("-c search_path={schema}"));
     url.to_string()
+}
+
+#[tokio::test]
+async fn sqlite_v1012_rolls_forward_from_v1011() {
+    let db = Database::in_memory("v1012-roll-forward")
+        .await
+        .expect("SQLite database");
+    let preceding = MigrationRunner::new(
+        global::all()
+            .into_iter()
+            .chain(
+                waddle::all()
+                    .into_iter()
+                    .filter(|migration| migration.version < 1012),
+            )
+            .collect(),
+    );
+    preceding
+        .run(&db)
+        .await
+        .expect("apply preceding migrations");
+    assert!(!sqlite_table_exists(&db, "ingress_messages").await);
+    seed_retained_sm_session(&db).await;
+    assert_eq!(
+        MigrationRunner::single()
+            .run(&db)
+            .await
+            .expect("apply V1012"),
+        vec![1012]
+    );
+    assert!(!sqlite_table_exists(&db, "sm_sessions").await);
+    assert!(!sqlite_table_exists(&db, "sm_unacked").await);
+    for table in [
+        "ingress_protocol_epoch",
+        "ingress_messages",
+        "ingress_origin_aliases",
+        "ingress_sm_refs",
+        "ingress_deliveries",
+        "ingress_sm_streams",
+        "ingress_effect_intents",
+        "ingress_effect_receipts",
+    ] {
+        assert!(
+            sqlite_table_exists(&db, table).await,
+            "V1012 creates {table}"
+        );
+    }
+}
+
+#[tokio::test]
+async fn postgres_v1012_resets_epoch_zero_soak_rows() {
+    let Ok(database_url) = std::env::var("WADDLE_TEST_POSTGRES_URL") else {
+        eprintln!("skipping: WADDLE_TEST_POSTGRES_URL not set (V1012 soak reset)");
+        return;
+    };
+    let schema = unique_postgres_schema_name("v1012_reset");
+    let (db, admin) = open_isolated_postgres_database(&database_url, &schema).await;
+    MigrationRunner::new(
+        global::all()
+            .into_iter()
+            .chain(
+                waddle::all()
+                    .into_iter()
+                    .filter(|migration| migration.version < 1012),
+            )
+            .collect(),
+    )
+    .run(&db)
+    .await
+    .expect("apply preceding migrations");
+    seed_retained_sm_session(&db).await;
+    let conn = db.guard().await.expect("Postgres guard");
+    for sql in [
+        "INSERT INTO ingress_messages (message_key, digest_version, digest) VALUES ('00000000-0000-0000-0000-000000000001', 1, decode(repeat('00', 32), 'hex'))",
+        "INSERT INTO ingress_origin_aliases (alias_key_hash, sender_bare_jid, target_kind, target_jid, origin_id, message_key) VALUES (decode(repeat('00', 32), 'hex'), 'sender@example.com', 0, '', 'origin', '00000000-0000-0000-0000-000000000001')",
+        "INSERT INTO ingress_sm_refs (sm_ingress_id, ingress_ordinal, message_key) VALUES ('00000000-0000-0000-0000-000000000002', 1, '00000000-0000-0000-0000-000000000001')",
+        "INSERT INTO ingress_deliveries (delivery_key, message_key) VALUES ('00000000-0000-0000-0000-000000000003', '00000000-0000-0000-0000-000000000001')",
+        "INSERT INTO ingress_sm_streams (sm_ingress_id, stream_id) VALUES ('00000000-0000-0000-0000-000000000002', 'soak')",
+        "INSERT INTO ingress_effect_intents (message_key, effect_ordinal, kind, semantic_identity_hash, payload_version, payload) VALUES ('00000000-0000-0000-0000-000000000001', 0, 0, decode(repeat('00', 32), 'hex'), 1, decode('01', 'hex'))",
+    ] {
+        conn.execute(sql, ()).await.expect("seed epoch-zero soak row");
+    }
+    drop(conn);
+    assert_eq!(
+        MigrationRunner::single()
+            .run(&db)
+            .await
+            .expect("apply V1012"),
+        vec![1012]
+    );
+    assert!(!postgres_table_exists(&db, "sm_sessions").await);
+    assert!(!postgres_table_exists(&db, "sm_unacked").await);
+    let conn = db.guard().await.expect("Postgres guard");
+    let mut rows = conn.query("SELECT (SELECT COUNT(*) FROM ingress_messages) + (SELECT COUNT(*) FROM ingress_origin_aliases) + (SELECT COUNT(*) FROM ingress_sm_refs) + (SELECT COUNT(*) FROM ingress_deliveries) + (SELECT COUNT(*) FROM ingress_sm_streams) + (SELECT COUNT(*) FROM ingress_effect_intents) + (SELECT COUNT(*) FROM ingress_effect_receipts)", ()).await.expect("count remaining soak rows");
+    let count: i64 = rows
+        .next()
+        .await
+        .expect("count result")
+        .expect("count row")
+        .get(0)
+        .expect("decode count");
+    assert_eq!(count, 0);
+    drop(rows);
+    drop(conn);
+    drop(db);
+    drop_postgres_schema(&admin, &schema).await;
+}
+
+/// Store-owned tables exist only on upgrades, not on a fresh catalog install.
+async fn seed_retained_sm_session(db: &Database) {
+    let conn = db.guard().await.expect("retained SM schema");
+    for sql in [
+        "CREATE TABLE sm_sessions (stream_id TEXT PRIMARY KEY, inbound_count BIGINT NOT NULL)",
+        "CREATE TABLE sm_unacked (stream_id TEXT NOT NULL, sequence BIGINT NOT NULL, stanza_xml TEXT NOT NULL, PRIMARY KEY (stream_id, sequence))",
+        "INSERT INTO sm_sessions (stream_id, inbound_count) VALUES ('retained-before-cutover', 7)",
+        r#"INSERT INTO sm_unacked (stream_id, sequence, stanza_xml) VALUES ('retained-before-cutover', 1, '<message xmlns="jabber:client"/>')"#,
+    ] {
+        conn.execute(sql, ()).await.expect("retained SM row");
+    }
+}
+
+use crate::sm_persistence::DatabaseSmPersistence;
+use std::sync::Arc;
+use waddle_xmpp::stream_management::persistence::SmPersistenceStorage;
+
+async fn migration_v1012_recreates_sql_sm_store(database_url: &str) {
+    let storage = DatabaseSmPersistence::open(Some(database_url))
+        .await
+        .expect("initialize real SQL SM store");
+    MigrationRunner::new(
+        global::all()
+            .into_iter()
+            .chain(waddle::all())
+            .filter(|migration| migration.version < 1012)
+            .collect(),
+    )
+    .run(&storage.database())
+    .await
+    .expect("apply pre-cutover catalog");
+    let session = cutover_sm_session("retained-cutover-session");
+    let principal = cutover_sm_principal();
+    storage
+        .store_session_atomic_with_principal(
+            &principal,
+            session.clone(),
+            vec![cutover_sm_unacked(session.stream_id.as_str(), 11)],
+        )
+        .await
+        .expect("persist retained SQL session and replay stanza");
+    assert!(storage
+        .get_session(&session.stream_id)
+        .await
+        .expect("retained snapshot read")
+        .is_some());
+    assert_eq!(
+        storage
+            .list_unacked(&session.stream_id)
+            .await
+            .expect("retained replay read")
+            .len(),
+        1
+    );
+    assert_eq!(
+        MigrationRunner::single()
+            .run(&storage.database())
+            .await
+            .expect("cutover migration"),
+        vec![1012]
+    );
+    drop(storage);
+
+    // Production startup initializes the store only after migrations complete.
+    let reopened = DatabaseSmPersistence::open(Some(database_url))
+        .await
+        .expect("recreate SQL SM schema after cutover");
+    assert!(reopened
+        .get_session(&session.stream_id)
+        .await
+        .expect("old session lookup")
+        .is_none());
+    assert!(reopened
+        .get_session_principal(&session.stream_id)
+        .await
+        .expect("old principal lookup")
+        .is_none());
+    assert!(reopened
+        .list_unacked(&session.stream_id)
+        .await
+        .expect("old replay lookup")
+        .is_empty());
+    let registry = waddle_xmpp::stream_management::InMemorySmSessionRegistry::new()
+        .with_persistence(Arc::new(reopened.clone()));
+    assert_eq!(
+        registry
+            .restore_from_persistence()
+            .await
+            .expect("startup recovery"),
+        0
+    );
+    reopened
+        .store_session_atomic_with_principal(
+            &principal,
+            session.clone(),
+            vec![cutover_sm_unacked(session.stream_id.as_str(), 11)],
+        )
+        .await
+        .expect("new session writes after recreation");
+    assert!(reopened
+        .get_session(&session.stream_id)
+        .await
+        .expect("new snapshot lookup")
+        .is_some());
+    assert_eq!(
+        reopened
+            .list_unacked(&session.stream_id)
+            .await
+            .expect("new replay lookup")
+            .len(),
+        1
+    );
+    assert_eq!(
+        reopened
+            .get_session_principal(&session.stream_id)
+            .await
+            .expect("new principal lookup"),
+        Some(principal)
+    );
+}
+
+#[tokio::test]
+async fn migration_v1012_recreates_sql_sm_store_sqlite() {
+    let directory = tempfile::tempdir().expect("SQL SM test directory");
+    let database_url = directory.path().join("sm-cutover.db");
+    migration_v1012_recreates_sql_sm_store(database_url.to_str().expect("SQLite path")).await;
+}
+
+#[tokio::test]
+async fn migration_v1012_recreates_sql_sm_store_postgres() {
+    let Ok(database_url) = std::env::var("WADDLE_TEST_POSTGRES_URL") else {
+        eprintln!("skipping: WADDLE_TEST_POSTGRES_URL not set (SQL SM cutover recovery)");
+        return;
+    };
+    let admin = sqlx::PgPool::connect(&database_url)
+        .await
+        .expect("PostgreSQL admin");
+    let schema = format!("sm_cutover_{}", uuid::Uuid::new_v4().simple());
+    sqlx::query(&format!("CREATE SCHEMA {schema}"))
+        .execute(&admin)
+        .await
+        .expect("isolated SM schema");
+    let mut url = url::Url::parse(&database_url).expect("PostgreSQL URL");
+    let retained: Vec<(String, String)> = url
+        .query_pairs()
+        .filter(|(key, _)| key != "options")
+        .map(|(key, value)| (key.into_owned(), value.into_owned()))
+        .collect();
+    url.query_pairs_mut()
+        .clear()
+        .extend_pairs(retained)
+        .append_pair("options", &format!("-c search_path={schema}"));
+    migration_v1012_recreates_sql_sm_store(url.as_str()).await;
+    sqlx::query(&format!("DROP SCHEMA {schema} CASCADE"))
+        .execute(&admin)
+        .await
+        .expect("remove isolated SM schema");
+    admin.close().await;
+}
+
+fn cutover_sm_session(
+    stream: &str,
+) -> waddle_xmpp::stream_management::persistence::PersistedSession {
+    waddle_xmpp::stream_management::persistence::PersistedSession {
+        stream_id: waddle_xmpp::pending_delivery::SmSessionId::new(stream),
+        user_id: "alice".into(),
+        jid: "alice@example.com/web".parse().expect("session JID"),
+        occupancy_session: waddle_xmpp_core::OccupancySessionGeneration::mint(),
+        inbound_count: 7,
+        outbound_count: 12,
+        last_acked: 10,
+        replay_gap_through: None,
+        max_resume_time: Some(300),
+        detached_at: chrono::Utc::now(),
+        max_resume_duration: std::time::Duration::from_secs(300),
+        carbons_enabled: false,
+        roster_interested: false,
+        blocklist_interested: false,
+        presence_available: false,
+        presence_show: None,
+        presence_status: None,
+        presence_priority: 0,
+        presence_payloads: Vec::new(),
+    }
+}
+
+fn cutover_sm_principal() -> waddle_xmpp::auth::AuthenticatedPrincipalRef {
+    use waddle_xmpp::auth::{
+        AuthContextId, AuthContextVersion, AuthenticatedPrincipalRef, PrincipalAuthEpoch,
+    };
+    AuthenticatedPrincipalRef::new(
+        "alice@example.com".parse().expect("principal JID"),
+        AuthContextId::new(uuid::Uuid::new_v4()),
+        AuthContextVersion::INITIAL,
+        PrincipalAuthEpoch::INITIAL,
+    )
+}
+
+fn cutover_sm_unacked(
+    stream: &str,
+    sequence: u32,
+) -> waddle_xmpp::stream_management::persistence::PersistedUnackedStanza {
+    let message = xmpp_parsers::message::Message::new(None::<jid::Jid>);
+    waddle_xmpp::stream_management::persistence::PersistedUnackedStanza {
+        stream_id: waddle_xmpp::pending_delivery::SmSessionId::new(stream),
+        sequence,
+        stanza: Box::new(waddle_xmpp::Stanza::Message(message)),
+        original_receipt_at: chrono::Utc::now(),
+    }
 }

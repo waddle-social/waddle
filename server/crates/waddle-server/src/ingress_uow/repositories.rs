@@ -7,16 +7,18 @@ use waddle_xmpp::auth::AuthenticatedPrincipalRef;
 use waddle_xmpp::inbox::storage::GroupchatNotificationRecovery;
 use waddle_xmpp::inbox::InboxEntry;
 use waddle_xmpp::ingress::{
-    AliasResolution, DeliveryKey, IngressEffectIntent, IngressOrdinal, MessageKey,
-    NormalizedTarget, SemanticDigest, SmIngressId,
+    AliasResolution, DeliveryKey, IngressEffectIntent, IngressEffectKey, IngressEffectKind,
+    IngressOrdinal, MessageKey, NormalizedTarget, SemanticDigest, SmIngressId, WireHandledCount,
 };
-use waddle_xmpp::mam::{ArchivedMessage, MamTxStoreOutcome};
-#[cfg(feature = "clustering")]
+use waddle_xmpp::mam::{ArchiveExpectation, ArchivedMessage, MamTxStoreOutcome};
 use waddle_xmpp::pending_delivery::SmSessionId;
 use waddle_xmpp_core::xep0359::OriginId;
 
 use crate::{
-    ingress_substrate::{self, MessageWriteOutcome, TerminalizeOutcome},
+    db::{Database, DatabaseDriver},
+    ingress_substrate::{
+        self, EffectReceiptKind, MessageEnvelope, MessageWriteOutcome, TerminalizeOutcome,
+    },
     ingress_uow::{IngressUowError, IngressUowTransaction},
 };
 
@@ -29,14 +31,29 @@ impl MamArchiveRepository {
         transaction: &mut IngressUowTransaction<'_>,
         archive_jid: &BareJid,
         message: &ArchivedMessage,
+        expectation: ArchiveExpectation,
     ) -> Result<MamTxStoreOutcome, IngressUowError> {
-        let outcome = {
+        let outcome = if let Some(connection) = transaction.transaction_mut().postgres_connection()
+        {
+            waddle_xmpp::mam::store_archived_message_on_connection(
+                connection,
+                archive_jid,
+                message,
+                expectation,
+            )
+            .await?
+        } else {
             let connection = transaction
                 .transaction_mut()
-                .postgres_connection()
+                .sqlite_connection()
                 .ok_or(IngressUowError::PostgresRequired)?;
-            waddle_xmpp::mam::store_archived_message_on_connection(connection, archive_jid, message)
-                .await?
+            waddle_xmpp::mam::store_archived_message_on_sqlite_connection(
+                connection,
+                archive_jid,
+                message,
+                expectation,
+            )
+            .await?
         };
         Ok(outcome)
     }
@@ -49,11 +66,12 @@ impl MamArchiveRepository {
         fence: &RoomClaimFence<'_>,
         archive_jid: &BareJid,
         message: &ArchivedMessage,
+        expectation: ArchiveExpectation,
     ) -> Result<MamTxStoreOutcome, IngressUowError> {
         if fence.transaction_identity != transaction.identity() || fence.room != *archive_jid {
             return Err(IngressUowError::ClaimFenceMissing);
         }
-        Self::store(transaction, archive_jid, message).await
+        Self::store(transaction, archive_jid, message, expectation).await
     }
 }
 
@@ -64,30 +82,104 @@ pub struct InboxRepository;
 impl InboxRepository {
     pub async fn upsert(
         transaction: &mut IngressUowTransaction<'_>,
+        message_key: MessageKey,
         user: &BareJid,
         entry: InboxEntry,
         increment_unread: bool,
     ) -> Result<InboxEntry, IngressUowError> {
-        crate::inbox::upsert_in_transaction(
-            transaction.transaction_mut(),
-            user,
-            entry,
-            increment_unread,
-        )
-        .await
-        .map_err(Into::into)
+        Self::apply_once(transaction, message_key, user, entry, increment_unread).await
     }
 
-    /// Upsert an inbox row and its groupchat notification recovery item in
+    /// Apply a message's projection once, including its unread/reply increments.
+    pub async fn apply_once(
+        transaction: &mut IngressUowTransaction<'_>,
+        message_key: MessageKey,
+        user: &BareJid,
+        entry: InboxEntry,
+        increment_unread: bool,
+    ) -> Result<InboxEntry, IngressUowError> {
+        Self::apply_projection(transaction, message_key, user, entry, increment_unread)
+            .await
+            .map(|(entry, _)| entry)
+    }
+
+    async fn apply_projection(
+        transaction: &mut IngressUowTransaction<'_>,
+        message_key: MessageKey,
+        user: &BareJid,
+        entry: InboxEntry,
+        increment_unread: bool,
+    ) -> Result<(InboxEntry, bool), IngressUowError> {
+        let thread = entry
+            .thread_id
+            .as_ref()
+            .filter(|thread| !thread.is_empty())
+            .map(|thread| {
+                waddle_xmpp_core::mam::ThreadId::new(thread.clone())
+                    .ok_or(crate::inbox::InboxTxError::InvalidProjectionThread)
+            })
+            .transpose()?;
+        let apply = Self::record_projection(
+            transaction,
+            message_key,
+            user,
+            &entry.partner,
+            thread.as_ref(),
+        )
+        .await?;
+        let entry = if apply {
+            crate::inbox::upsert_in_transaction(
+                transaction.transaction_mut(),
+                user,
+                entry,
+                increment_unread,
+            )
+            .await?
+        } else {
+            crate::inbox::get_in_transaction(transaction.transaction_mut(), user, &entry).await?
+        };
+        Ok((entry, apply))
+    }
+
+    pub(super) async fn record_projection(
+        transaction: &mut IngressUowTransaction<'_>,
+        message_key: MessageKey,
+        user: &BareJid,
+        partner: &BareJid,
+        thread: Option<&waddle_xmpp_core::mam::ThreadId>,
+    ) -> Result<bool, IngressUowError> {
+        let key = DeliveryKey::inbox_projection(message_key, user, (partner, thread));
+        let recorded = DeliveryEffectRepository::lookup(transaction, key).await?;
+        if recorded.is_some_and(|recorded| recorded != message_key) {
+            return Err(ingress_substrate::IngressSubstrateError::DeliveryKeyConflict.into());
+        }
+        Ok(if recorded.is_some() {
+            false
+        } else {
+            // Recording locks the canonical row before the projection write.
+            // A concurrent retry that wins that lock first returns AlreadyRecorded.
+            match DeliveryEffectRepository::record(transaction, key, message_key).await? {
+                MessageWriteOutcome::Recorded => true,
+                MessageWriteOutcome::AlreadyRecorded => false,
+                MessageWriteOutcome::MessageVanished => {
+                    return Err(crate::inbox::InboxTxError::ProjectionMessageMissing.into());
+                }
+            }
+        })
+    }
+
+    /// Upsert an inbox row and its groupchat notification recovery item once in
     /// the same ingress transaction.
     pub async fn upsert_with_groupchat_notification_recovery(
         transaction: &mut IngressUowTransaction<'_>,
+        message_key: MessageKey,
         user: &BareJid,
         entry: InboxEntry,
         increment_unread: bool,
         recovery: GroupchatNotificationRecovery,
     ) -> Result<InboxEntry, IngressUowError> {
-        let entry = Self::upsert(transaction, user, entry, increment_unread).await?;
+        let (entry, _) =
+            Self::apply_projection(transaction, message_key, user, entry, increment_unread).await?;
         crate::inbox::insert_groupchat_notification_recovery_in_transaction(
             transaction.transaction_mut(),
             recovery,
@@ -102,12 +194,57 @@ impl InboxRepository {
 pub struct CanonicalMessageRepository;
 
 impl CanonicalMessageRepository {
-    pub async fn record(
+    pub async fn lock(
+        transaction: &mut IngressUowTransaction<'_>,
+        message_key: MessageKey,
+    ) -> Result<bool, IngressUowError> {
+        let sql = dialect_sql(
+            transaction,
+            "SELECT 1 FROM ingress_messages WHERE message_key = ?::uuid FOR UPDATE",
+            "SELECT 1 FROM ingress_messages WHERE message_key = ?",
+        );
+        let mut rows = transaction
+            .transaction_mut()
+            .query(sql, crate::db_params![message_key.to_storage().to_string()])
+            .await?;
+        Ok(rows.next().await?.is_some())
+    }
+
+    pub async fn record_message(
         transaction: &mut IngressUowTransaction<'_>,
         message_key: MessageKey,
         digest: &SemanticDigest,
+        envelope: Option<&MessageEnvelope>,
     ) -> Result<(), IngressUowError> {
-        ingress_substrate::record_message(transaction.transaction_mut(), message_key, digest)
+        ingress_substrate::record_message(
+            transaction.transaction_mut(),
+            message_key,
+            digest,
+            envelope,
+        )
+        .await
+        .map_err(Into::into)
+    }
+
+    pub async fn record_room_observer_envelope(
+        transaction: &mut IngressUowTransaction<'_>,
+        message_key: MessageKey,
+        envelope: &MessageEnvelope,
+    ) -> Result<(), IngressUowError> {
+        ingress_substrate::record_room_observer_envelope(
+            transaction.transaction_mut(),
+            message_key,
+            envelope,
+        )
+        .await
+        .map_err(Into::into)
+    }
+
+    pub async fn load_envelope(
+        transaction: &mut IngressUowTransaction<'_>,
+        message_key: MessageKey,
+    ) -> Result<Option<MessageEnvelope>, IngressUowError> {
+        ingress_substrate::load_envelope(transaction.transaction_mut(), message_key)
             .await
             .map_err(Into::into)
     }
@@ -152,20 +289,32 @@ impl CanonicalMessageRepository {
 pub struct SmIngressRepository;
 
 impl SmIngressRepository {
-    pub async fn insert(
+    pub async fn insert_sm_ref(
         transaction: &mut IngressUowTransaction<'_>,
         sm_ingress_id: SmIngressId,
         ordinal: IngressOrdinal,
+        wire_h: WireHandledCount,
         message_key: MessageKey,
     ) -> Result<MessageWriteOutcome, IngressUowError> {
         ingress_substrate::insert_sm_ref(
             transaction.transaction_mut(),
             sm_ingress_id,
             ordinal,
+            wire_h,
             message_key,
         )
         .await
         .map_err(Into::into)
+    }
+
+    pub async fn lookup_wire_binding(
+        transaction: &mut IngressUowTransaction<'_>,
+        sm_ingress_id: SmIngressId,
+        wire_h: WireHandledCount,
+    ) -> Result<Option<(MessageKey, IngressOrdinal)>, IngressUowError> {
+        ingress_substrate::lookup_wire_binding(transaction.transaction_mut(), sm_ingress_id, wire_h)
+            .await
+            .map_err(Into::into)
     }
 
     pub async fn lookup(
@@ -173,12 +322,12 @@ impl SmIngressRepository {
         sm_ingress_id: SmIngressId,
         ordinal: IngressOrdinal,
     ) -> Result<Option<MessageKey>, IngressUowError> {
+        const POSTGRES: &str = "SELECT message_key::text FROM ingress_sm_refs WHERE sm_ingress_id = ?::uuid AND ingress_ordinal = ?::numeric";
+        const SQLITE: &str = "SELECT message_key FROM ingress_sm_refs WHERE sm_ingress_id = ? AND ingress_ordinal = ?";
+        let sql = dialect_sql(transaction, POSTGRES, SQLITE);
         lookup_message_key(
             transaction,
-            r#"
-            SELECT message_key::text FROM ingress_sm_refs
-            WHERE sm_ingress_id = ?::uuid AND ingress_ordinal = ?::numeric
-            "#,
+            sql,
             crate::db_params![
                 sm_ingress_id.to_storage().to_string(),
                 ordinal.to_storage().to_string(),
@@ -187,15 +336,19 @@ impl SmIngressRepository {
         .await
     }
 
-    #[cfg(feature = "clustering")]
     pub async fn message_keys_for_stream(
         transaction: &mut IngressUowTransaction<'_>,
         sm_ingress_id: SmIngressId,
     ) -> Result<Vec<MessageKey>, IngressUowError> {
+        const POSTGRES: &str =
+            "SELECT DISTINCT message_key::text FROM ingress_sm_refs WHERE sm_ingress_id = ?::uuid";
+        const SQLITE: &str =
+            "SELECT DISTINCT message_key FROM ingress_sm_refs WHERE sm_ingress_id = ?";
+        let sql = dialect_sql(transaction, POSTGRES, SQLITE);
         let mut rows = transaction
             .transaction_mut()
             .query(
-                "SELECT DISTINCT message_key::text FROM ingress_sm_refs WHERE sm_ingress_id = ?::uuid",
+                sql,
                 crate::db_params![sm_ingress_id.to_storage().to_string()],
             )
             .await?;
@@ -215,15 +368,17 @@ impl SmIngressRepository {
         Ok(keys)
     }
 
-    #[cfg(feature = "clustering")]
     pub async fn delete_for_stream(
         transaction: &mut IngressUowTransaction<'_>,
         sm_ingress_id: SmIngressId,
     ) -> Result<u64, IngressUowError> {
+        const POSTGRES: &str = "DELETE FROM ingress_sm_refs WHERE sm_ingress_id = ?::uuid";
+        const SQLITE: &str = "DELETE FROM ingress_sm_refs WHERE sm_ingress_id = ?";
+        let sql = dialect_sql(transaction, POSTGRES, SQLITE);
         transaction
             .transaction_mut()
             .execute(
-                "DELETE FROM ingress_sm_refs WHERE sm_ingress_id = ?::uuid",
+                sql,
                 crate::db_params![sm_ingress_id.to_storage().to_string()],
             )
             .await
@@ -231,44 +386,83 @@ impl SmIngressRepository {
     }
 }
 
-/// Outcome of advancing the shadow stream's non-wrapping handled frontier.
-#[cfg(feature = "clustering")]
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum ShadowFrontierOutcome {
-    Advanced,
-    Idempotent,
-    Stale { stored: u64 },
-}
+pub use ingress_substrate::FrontierOutcome;
 
-/// Repository for shadow ingress-stream enrollment and its contiguous frontier.
-#[cfg(feature = "clustering")]
+/// Repository for ingress-stream enrollment and its contiguous frontier.
 #[derive(Debug, Default, Clone, Copy)]
 pub struct SmIngressStreamRepository;
 
-#[cfg(feature = "clustering")]
 impl SmIngressStreamRepository {
-    /// Mint the one durable shadow row for a freshly SM-enabled stream.
+    /// Enroll the identity reserved by ingress admission, retaining the stream uniqueness check.
+    pub async fn mint_reserved(
+        transaction: &mut IngressUowTransaction<'_>,
+        stream_id: &SmSessionId,
+        id: SmIngressId,
+    ) -> Result<(), IngressUowError> {
+        let sql = dialect_sql(transaction, "INSERT INTO ingress_sm_streams (sm_ingress_id, stream_id) VALUES (?::uuid, ?) ON CONFLICT (stream_id) DO NOTHING", "INSERT INTO ingress_sm_streams (sm_ingress_id, stream_id) VALUES (?, ?) ON CONFLICT (stream_id) DO NOTHING");
+        transaction
+            .transaction_mut()
+            .execute(
+                sql,
+                crate::db_params![id.to_storage().to_string(), stream_id.as_str().to_owned()],
+            )
+            .await?;
+        Ok(())
+    }
+
+    /// Bounded keyset scan; stream rows themselves retain retirement responsibility.
+    pub async fn retirement_candidates(
+        transaction: &mut IngressUowTransaction<'_>,
+        after: Option<&SmSessionId>,
+        limit: u32,
+    ) -> Result<Vec<SmSessionId>, IngressUowError> {
+        let mut rows = match after {
+            Some(after) => transaction.transaction_mut().query(
+                "SELECT stream_id FROM ingress_sm_streams WHERE stream_id > ? ORDER BY stream_id LIMIT ?",
+                crate::db_params![after.as_str(), i64::from(limit)],
+            ).await?,
+            None => transaction.transaction_mut().query(
+                "SELECT stream_id FROM ingress_sm_streams ORDER BY stream_id LIMIT ?",
+                crate::db_params![i64::from(limit)],
+            ).await?,
+        };
+        let mut streams = Vec::new();
+        while let Some(row) = rows.next().await? {
+            streams.push(SmSessionId::new(row.get::<String>(0)?));
+        }
+        Ok(streams)
+    }
+
+    /// Mint the one durable ingress row for a freshly SM-enabled stream.
     pub async fn mint(
         transaction: &mut IngressUowTransaction<'_>,
         stream_id: &SmSessionId,
     ) -> Result<SmIngressId, IngressUowError> {
+        const POSTGRES: &str = "INSERT INTO ingress_sm_streams (sm_ingress_id, stream_id) VALUES (?::uuid, ?) ON CONFLICT (stream_id) DO NOTHING";
+        const SQLITE: &str = "INSERT INTO ingress_sm_streams (sm_ingress_id, stream_id) VALUES (?, ?) ON CONFLICT (stream_id) DO NOTHING";
+        let sql = dialect_sql(transaction, POSTGRES, SQLITE);
         let minted = SmIngressId::new();
         let inserted = transaction
             .transaction_mut()
             .execute(
-                "INSERT INTO ingress_sm_streams (sm_ingress_id, stream_id) VALUES (?::uuid, ?) ON CONFLICT (stream_id) DO NOTHING",
-                crate::db_params![minted.to_storage().to_string(), stream_id.as_str().to_string()],
+                sql,
+                crate::db_params![
+                    minted.to_storage().to_string(),
+                    stream_id.as_str().to_string()
+                ],
             )
             .await?;
         if inserted == 1 {
             return Ok(minted);
         }
+        const SELECT_POSTGRES: &str =
+            "SELECT sm_ingress_id::text FROM ingress_sm_streams WHERE stream_id = ?";
+        const SELECT_SQLITE: &str =
+            "SELECT sm_ingress_id FROM ingress_sm_streams WHERE stream_id = ?";
+        let sql = dialect_sql(transaction, SELECT_POSTGRES, SELECT_SQLITE);
         let mut rows = transaction
             .transaction_mut()
-            .query(
-                "SELECT sm_ingress_id::text FROM ingress_sm_streams WHERE stream_id = ?",
-                crate::db_params![stream_id.as_str().to_string()],
-            )
+            .query(sql, crate::db_params![stream_id.as_str().to_string()])
             .await?;
         let stored: String = rows
             .next()
@@ -282,6 +476,7 @@ impl SmIngressStreamRepository {
     }
 
     /// Lock an existing enrolled stream. This path never enrolls a stream.
+    #[cfg(feature = "clustering")]
     pub async fn lock(
         transaction: &mut IngressUowTransaction<'_>,
         fence: &SmClaimFence<'_>,
@@ -290,12 +485,30 @@ impl SmIngressStreamRepository {
         if fence.transaction_identity != transaction.identity() || fence.stream_id != *stream_id {
             return Err(IngressUowError::ClaimFenceMissing);
         }
+        Self::lock_stream(transaction, stream_id).await
+    }
+
+    /// Lock a stream protected by this database's single-node write transaction.
+    pub async fn lock_single_node(
+        transaction: &mut IngressUowTransaction<'_>,
+        stream_id: &SmSessionId,
+    ) -> Result<Option<(SmIngressId, u64)>, IngressUowError> {
+        if !matches!(transaction.fencing(), super::IngressFencing::SingleNode) {
+            return Err(IngressUowError::SingleNodeFencingRequired);
+        }
+        Self::lock_stream(transaction, stream_id).await
+    }
+
+    async fn lock_stream(
+        transaction: &mut IngressUowTransaction<'_>,
+        stream_id: &SmSessionId,
+    ) -> Result<Option<(SmIngressId, u64)>, IngressUowError> {
+        const POSTGRES: &str = "SELECT sm_ingress_id::text, handled_ordinal::text FROM ingress_sm_streams WHERE stream_id = ? FOR UPDATE";
+        const SQLITE: &str = "SELECT sm_ingress_id, CAST(handled_ordinal AS TEXT) FROM ingress_sm_streams WHERE stream_id = ?";
+        let sql = dialect_sql(transaction, POSTGRES, SQLITE);
         let mut rows = transaction
             .transaction_mut()
-            .query(
-                "SELECT sm_ingress_id::text, handled_ordinal::text FROM ingress_sm_streams WHERE stream_id = ? FOR UPDATE",
-                crate::db_params![stream_id.as_str().to_string()],
-            )
+            .query(sql, crate::db_params![stream_id.as_str().to_string()])
             .await?;
         let Some(row) = rows.next().await? else {
             return Ok(None);
@@ -308,7 +521,7 @@ impl SmIngressStreamRepository {
             .map_err(|_| IngressUowError::InvalidStoredSmIngressId)?;
         let frontier = frontier
             .parse::<u64>()
-            .map_err(|_| IngressUowError::InvalidStoredShadowFrontier)?;
+            .map_err(|_| IngressUowError::InvalidStoredFrontier)?;
         Ok(Some((id, frontier)))
     }
 
@@ -316,12 +529,13 @@ impl SmIngressStreamRepository {
         transaction: &mut IngressUowTransaction<'_>,
         stream_id: &SmSessionId,
     ) -> Result<Option<SmIngressId>, IngressUowError> {
+        const POSTGRES: &str =
+            "SELECT sm_ingress_id::text FROM ingress_sm_streams WHERE stream_id = ? FOR UPDATE";
+        const SQLITE: &str = "SELECT sm_ingress_id FROM ingress_sm_streams WHERE stream_id = ?";
+        let sql = dialect_sql(transaction, POSTGRES, SQLITE);
         let mut rows = transaction
             .transaction_mut()
-            .query(
-                "SELECT sm_ingress_id::text FROM ingress_sm_streams WHERE stream_id = ? FOR UPDATE",
-                crate::db_params![stream_id.as_str().to_string()],
-            )
+            .query(sql, crate::db_params![stream_id.as_str().to_string()])
             .await?;
         let Some(row) = rows.next().await? else {
             return Ok(None);
@@ -335,12 +549,15 @@ impl SmIngressStreamRepository {
 
     /// Fence a retirement's unclaimed check against concurrent claim writes.
     /// A missing row cannot be protected by a row lock, so this rare cleanup
-    /// path holds the claims table's SHARE lock through its shadow deletion.
+    /// path holds the claims table's SHARE lock through its ingress deletion.
     #[cfg(feature = "clustering")]
     pub async fn fence_claim_absence_for_retirement(
         transaction: &mut IngressUowTransaction<'_>,
         stream_id: &SmSessionId,
     ) -> Result<bool, IngressUowError> {
+        if transaction.bound_node_identity().is_none() {
+            return Err(IngressUowError::NodeIdentityUnbound);
+        }
         transaction
             .transaction_mut()
             .execute("LOCK TABLE clustering_claims IN SHARE MODE", ())
@@ -358,59 +575,40 @@ impl SmIngressStreamRepository {
         Ok(rows.next().await?.is_none())
     }
 
-    /// Advance only the next contiguous shadow ordinal for the locked stream.
+    /// Advance the contiguous ordinal and its exposable wire checkpoint atomically.
     pub async fn advance_frontier(
         transaction: &mut IngressUowTransaction<'_>,
-        fence: &SmClaimFence<'_>,
         sm_ingress_id: SmIngressId,
-        allocated: IngressOrdinal,
-    ) -> Result<ShadowFrontierOutcome, IngressUowError> {
-        if fence.transaction_identity != transaction.identity() {
-            return Err(IngressUowError::ClaimFenceMissing);
-        }
-        let mut rows = transaction
-            .transaction_mut()
-            .query(
-                "SELECT handled_ordinal::text FROM ingress_sm_streams WHERE sm_ingress_id = ?::uuid AND stream_id = ? FOR UPDATE",
-                crate::db_params![
-                    sm_ingress_id.to_storage().to_string(),
-                    fence.stream_id.as_str().to_string(),
-                ],
-            )
-            .await?;
-        let stored: String = rows
-            .next()
-            .await?
-            .ok_or(IngressUowError::SmIngressStreamMissing)?
-            .get(0)?;
-        drop(rows);
-        let stored = stored
-            .parse::<u64>()
-            .map_err(|_| IngressUowError::InvalidStoredShadowFrontier)?;
-        let allocated = allocated.to_storage();
-        if stored >= allocated {
-            return Ok(ShadowFrontierOutcome::Idempotent);
-        }
-        if stored != allocated - 1 {
-            return Ok(ShadowFrontierOutcome::Stale { stored });
-        }
-        let updated = transaction
-            .transaction_mut()
-            .execute(
-                "UPDATE ingress_sm_streams SET handled_ordinal = ?::numeric, row_revision = row_revision + 1, updated_at = now() WHERE sm_ingress_id = ?::uuid AND stream_id = ? AND handled_ordinal = ?::numeric",
-                crate::db_params![
-                    allocated.to_string(),
-                    sm_ingress_id.to_storage().to_string(),
-                    fence.stream_id.as_str().to_string(),
-                    stored.to_string(),
-                ],
-            )
-            .await?;
-        if updated == 1 {
-            Ok(ShadowFrontierOutcome::Advanced)
-        } else {
-            Ok(ShadowFrontierOutcome::Stale { stored })
-        }
+        offered: IngressOrdinal,
+        checkpoint_h: WireHandledCount,
+    ) -> Result<FrontierOutcome, IngressUowError> {
+        ingress_substrate::advance_frontier(
+            transaction.transaction_mut(),
+            sm_ingress_id,
+            offered,
+            checkpoint_h,
+        )
+        .await
+        .map_err(Into::into)
+    }
+
+    pub async fn flush_checkpoint(
+        transaction: &mut IngressUowTransaction<'_>,
+        sm_ingress_id: SmIngressId,
+        h: WireHandledCount,
+    ) -> Result<(), IngressUowError> {
+        ingress_substrate::flush_checkpoint(transaction.transaction_mut(), sm_ingress_id, h)
+            .await
+            .map_err(Into::into)
+    }
+
+    pub async fn load_stream_checkpoint(
+        transaction: &mut IngressUowTransaction<'_>,
+        sm_ingress_id: SmIngressId,
+    ) -> Result<Option<WireHandledCount>, IngressUowError> {
+        ingress_substrate::load_stream_checkpoint(transaction.transaction_mut(), sm_ingress_id)
+            .await
+            .map_err(Into::into)
     }
 
     pub async fn delete_unclaimed(
@@ -428,12 +626,80 @@ impl SmIngressStreamRepository {
     }
 }
 
-/// Outcome of writing the immutable logical effects required by a message.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum EffectIntentWriteOutcome {
-    Recorded,
-    AlreadyRecorded,
-    IntentDivergence,
+/// Repository for completed durable and post-commit ingress effects.
+#[derive(Debug, Default, Clone, Copy)]
+pub struct EffectReceiptRepository;
+
+impl EffectReceiptRepository {
+    pub async fn contains(
+        transaction: &mut IngressUowTransaction<'_>,
+        message_key: MessageKey,
+        kind: EffectReceiptKind,
+        hash: &[u8; 32],
+    ) -> Result<bool, IngressUowError> {
+        let sql = dialect_sql(transaction, "SELECT 1 FROM ingress_effect_receipts WHERE message_key = ?::uuid AND kind = ? AND semantic_identity_hash = ?", "SELECT 1 FROM ingress_effect_receipts WHERE message_key = ? AND kind = ? AND semantic_identity_hash = ?");
+        let mut rows = transaction
+            .transaction_mut()
+            .query(
+                sql,
+                crate::db_params![
+                    message_key.to_storage().to_string(),
+                    kind.to_storage(),
+                    hash.to_vec()
+                ],
+            )
+            .await?;
+        Ok(rows.next().await?.is_some())
+    }
+
+    pub async fn record_receipt(
+        transaction: &mut IngressUowTransaction<'_>,
+        message_key: MessageKey,
+        kind: EffectReceiptKind,
+        hash: &[u8; 32],
+    ) -> Result<(), IngressUowError> {
+        ingress_substrate::record_receipt(transaction.transaction_mut(), message_key, kind, hash)
+            .await
+            .map_err(Into::into)
+    }
+
+    pub async fn receipts_complete(
+        transaction: &mut IngressUowTransaction<'_>,
+        message_key: MessageKey,
+    ) -> Result<bool, IngressUowError> {
+        ingress_substrate::receipts_complete(transaction.transaction_mut(), message_key)
+            .await
+            .map_err(Into::into)
+    }
+
+    pub async fn record_receipt_pooled(
+        db: &Database,
+        message_key: MessageKey,
+        kind: EffectReceiptKind,
+        hash: &[u8; 32],
+    ) -> Result<(), IngressUowError> {
+        ingress_substrate::record_receipt_pooled(db, message_key, kind, hash)
+            .await
+            .map_err(Into::into)
+    }
+}
+
+/// Reconciliation preserves committed authority while repairing missing effects.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ReconcileVerdict {
+    FirstCommit,
+    Consistent,
+    Repaired {
+        inserted: Vec<IngressEffectKey>,
+    },
+    Contradiction {
+        kind: IngressEffectKind,
+        recorded: IngressEffectKey,
+        planned: IngressEffectKey,
+    },
+    Divergent {
+        kinds: Vec<IngressEffectKind>,
+    },
 }
 
 /// Repository for inert, deterministic effect-intent rows.
@@ -441,32 +707,58 @@ pub enum EffectIntentWriteOutcome {
 pub struct EffectIntentRepository;
 
 impl EffectIntentRepository {
-    pub async fn record_all(
+    /// Load payload-complete recorded authority while holding the canonical row lock.
+    pub async fn load(
         transaction: &mut IngressUowTransaction<'_>,
         message_key: MessageKey,
-        intents: &[IngressEffectIntent],
-    ) -> Result<EffectIntentWriteOutcome, IngressUowError> {
-        Self::record_all_inner(transaction, message_key, intents, false).await
-    }
-
-    pub async fn record_all_existing_alias(
-        transaction: &mut IngressUowTransaction<'_>,
-        message_key: MessageKey,
-        intents: &[IngressEffectIntent],
-    ) -> Result<EffectIntentWriteOutcome, IngressUowError> {
-        Self::record_all_inner(transaction, message_key, intents, true).await
-    }
-
-    async fn record_all_inner(
-        transaction: &mut IngressUowTransaction<'_>,
-        message_key: MessageKey,
-        intents: &[IngressEffectIntent],
-        allow_existing_alias_divergence: bool,
-    ) -> Result<EffectIntentWriteOutcome, IngressUowError> {
-        let mut message = transaction
+    ) -> Result<Vec<IngressEffectIntent>, IngressUowError> {
+        let sql = dialect_sql(
+            transaction,
+            "SELECT 1 FROM ingress_messages WHERE message_key = ?::uuid FOR UPDATE",
+            "SELECT 1 FROM ingress_messages WHERE message_key = ?",
+        );
+        let mut rows = transaction
             .transaction_mut()
+            .query(sql, crate::db_params![message_key.to_storage().to_string()])
+            .await?;
+        if rows.next().await?.is_none() {
+            return Err(IngressUowError::EffectIntentMessageMissing);
+        }
+        drop(rows);
+        let postgres = transaction
+            .transaction_mut()
+            .postgres_connection()
+            .is_some();
+        Ok(
+            load_effects(transaction.transaction_mut(), message_key, postgres)
+                .await?
+                .into_iter()
+                .map(|row| row.intent)
+                .collect(),
+        )
+    }
+
+    pub async fn reconcile(
+        transaction: &mut IngressUowTransaction<'_>,
+        message_key: MessageKey,
+        planned: &[IngressEffectIntent],
+    ) -> Result<ReconcileVerdict, IngressUowError> {
+        Self::reconcile_on_transaction(transaction.transaction_mut(), message_key, planned).await
+    }
+
+    pub(super) async fn reconcile_on_transaction(
+        transaction: &mut crate::db::Transaction<'_>,
+        message_key: MessageKey,
+        planned: &[IngressEffectIntent],
+    ) -> Result<ReconcileVerdict, IngressUowError> {
+        let postgres = transaction.postgres_connection().is_some();
+        let mut message = transaction
             .query(
-                "SELECT 1 FROM ingress_messages WHERE message_key = ?::uuid FOR UPDATE",
+                if postgres {
+                    "SELECT 1 FROM ingress_messages WHERE message_key = ?::uuid FOR UPDATE"
+                } else {
+                    "SELECT 1 FROM ingress_messages WHERE message_key = ?"
+                },
                 crate::db_params![message_key.to_storage().to_string()],
             )
             .await?;
@@ -475,148 +767,275 @@ impl EffectIntentRepository {
         }
         drop(message);
 
-        let mut ordered = intents
+        let planned = canonical_effects(planned)?;
+        let recorded = load_effects(transaction, message_key, postgres).await?;
+        let (verdict, omissions) = compare_effects(&recorded, &planned);
+        if matches!(verdict, ReconcileVerdict::Contradiction { .. }) {
+            return Ok(verdict);
+        }
+        let mut ordinal = recorded
             .iter()
-            .map(|intent| {
-                let semantic_key = intent.semantic_key();
-                intent
-                    .with_encoded_v1(|kind, payload| {
-                        (
-                            semantic_key,
-                            CanonicalEffectIntentRow {
-                                kind,
-                                semantic_identity_hash: semantic_identity_hash(intent),
-                                effect_ordinal: 0,
-                                payload: payload.to_vec(),
-                            },
-                        )
-                    })
-                    .map_err(IngressUowError::from)
+            .map(|row| row.ordinal)
+            .max()
+            .map(|ordinal| {
+                ordinal
+                    .checked_add(1)
+                    .ok_or(IngressUowError::EffectIntentOrdinalOverflow)
             })
-            .collect::<Result<Vec<_>, IngressUowError>>()?;
-        ordered.sort_by(|left, right| left.0.cmp(&right.0));
-        let mut canonical = Vec::with_capacity(ordered.len());
-        for (key, row) in ordered {
-            if let Some((previous_key, previous_row)) = canonical.last() {
-                if *previous_key == key {
-                    if previous_row != &row {
-                        return Err(IngressUowError::EffectIntentConflict);
-                    }
-                    continue;
-                }
-            }
-            canonical.push((key, row));
+            .transpose()?
+            .unwrap_or(0);
+        for intent in omissions {
+            insert_effect(transaction, message_key, ordinal, intent, postgres).await?;
+            ordinal = ordinal
+                .checked_add(1)
+                .ok_or(IngressUowError::EffectIntentOrdinalOverflow)?;
         }
-        for (ordinal, (_, row)) in canonical.iter_mut().enumerate() {
-            row.effect_ordinal =
-                u64::try_from(ordinal).map_err(|_| IngressUowError::EffectIntentOrdinalOverflow)?;
-        }
-
-        let mut existing_rows = transaction
-            .transaction_mut()
-            .query(
-                "SELECT kind::int, semantic_identity_hash, effect_ordinal::text, payload_version::int, payload FROM ingress_effect_intents WHERE message_key = ?::uuid ORDER BY effect_ordinal FOR SHARE",
-                crate::db_params![message_key.to_storage().to_string()],
-            )
-            .await?;
-        let mut existing = BTreeMap::new();
-        while let Some(row) = existing_rows.next().await? {
-            let kind: i64 = row.get(0)?;
-            let semantic_identity_hash: Vec<u8> = row.get(1)?;
-            let effect_ordinal: String = row.get(2)?;
-            let payload_version: i64 = row.get(3)?;
-            let payload: Vec<u8> = row.get(4)?;
-            existing.insert(
-                (
-                    i32::try_from(kind).map_err(|_| IngressUowError::EffectIntentConflict)?,
-                    storage_hash(&semantic_identity_hash)?,
-                ),
-                StoredEffectIntentRow {
-                    effect_ordinal: effect_ordinal
-                        .parse::<u64>()
-                        .map_err(|_| IngressUowError::EffectIntentConflict)?,
-                    payload_version,
-                    payload,
-                },
-            );
-        }
-
-        if existing.is_empty() && allow_existing_alias_divergence {
-            return Ok(if canonical.is_empty() {
-                EffectIntentWriteOutcome::AlreadyRecorded
-            } else {
-                EffectIntentWriteOutcome::IntentDivergence
-            });
-        }
-
-        if !existing.is_empty() {
-            let mut matches_existing = true;
-            for (_, row) in &canonical {
-                let key = (row.kind, row.semantic_identity_hash);
-                let Some(stored) = existing.remove(&key) else {
-                    matches_existing = false;
-                    break;
-                };
-                if stored.effect_ordinal != row.effect_ordinal
-                    || stored.payload_version != 1
-                    || stored.payload != row.payload
-                {
-                    matches_existing = false;
-                    break;
-                }
-            }
-            if matches_existing && existing.is_empty() {
-                return Ok(EffectIntentWriteOutcome::AlreadyRecorded);
-            }
-            return if allow_existing_alias_divergence {
-                Ok(EffectIntentWriteOutcome::IntentDivergence)
-            } else {
-                Err(IngressUowError::EffectIntentConflict)
-            };
-        }
-
-        for (_, row) in canonical {
-            transaction
-                .transaction_mut()
-                .execute(
-                    "INSERT INTO ingress_effect_intents (message_key, effect_ordinal, kind, semantic_identity_hash, payload_version, payload) VALUES (?::uuid, ?::numeric, ?, ?, 1, ?)",
-                    crate::db_params![
-                        message_key.to_storage().to_string(),
-                        row.effect_ordinal.to_string(),
-                        i64::from(row.kind),
-                        row.semantic_identity_hash.to_vec(),
-                        row.payload,
-                    ],
-                )
-                .await?;
-        }
-
-        Ok(EffectIntentWriteOutcome::Recorded)
+        Ok(verdict)
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
-struct CanonicalEffectIntentRow {
-    kind: i32,
-    semantic_identity_hash: [u8; 32],
-    effect_ordinal: u64,
-    payload: Vec<u8>,
+struct RecordedEffect {
+    ordinal: u64,
+    intent: IngressEffectIntent,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
-struct StoredEffectIntentRow {
-    effect_ordinal: u64,
-    payload_version: i64,
-    payload: Vec<u8>,
+fn canonical_effects(
+    planned: &[IngressEffectIntent],
+) -> Result<Vec<IngressEffectIntent>, IngressUowError> {
+    let mut canonical = BTreeMap::new();
+    for intent in planned {
+        // Normalize recipient ordering through the frozen codec before comparing.
+        let normalized = intent.with_encoded_v1(IngressEffectIntent::decode_v1)??;
+        let key = normalized.semantic_key();
+        if let Some(previous) = canonical.insert(key, normalized.clone()) {
+            if previous != normalized {
+                return Err(IngressUowError::EffectIntentConflict);
+            }
+        }
+    }
+    Ok(canonical.into_values().collect())
+}
+
+async fn load_effects(
+    transaction: &mut crate::db::Transaction<'_>,
+    message_key: MessageKey,
+    postgres: bool,
+) -> Result<Vec<RecordedEffect>, IngressUowError> {
+    let mut rows = transaction.query(
+        if postgres {
+            "SELECT kind::int, semantic_identity_hash, effect_ordinal::text, payload_version::int, payload FROM ingress_effect_intents WHERE message_key = ?::uuid ORDER BY effect_ordinal"
+        } else {
+            "SELECT kind, semantic_identity_hash, CAST(effect_ordinal AS TEXT), payload_version, payload FROM ingress_effect_intents WHERE message_key = ? ORDER BY effect_ordinal"
+        },
+        crate::db_params![message_key.to_storage().to_string()],
+    ).await?;
+    let mut recorded = Vec::new();
+    while let Some(row) = rows.next().await? {
+        let kind =
+            i32::try_from(row.get::<i64>(0)?).map_err(|_| IngressUowError::EffectIntentConflict)?;
+        let hash: Vec<u8> = row.get(1)?;
+        let ordinal: String = row.get(2)?;
+        let version: i64 = row.get(3)?;
+        let payload: Vec<u8> = row.get(4)?;
+        if version != 1 {
+            return Err(IngressUowError::EffectIntentConflict);
+        }
+        let intent = IngressEffectIntent::decode_v1(kind, &payload)?;
+        if hash.as_slice() != semantic_identity_hash(&intent) {
+            return Err(IngressUowError::EffectIntentConflict);
+        }
+        recorded.push(RecordedEffect {
+            ordinal: ordinal
+                .parse()
+                .map_err(|_| IngressUowError::EffectIntentConflict)?,
+            intent,
+        });
+    }
+    Ok(recorded)
+}
+
+fn compare_effects<'a>(
+    recorded: &[RecordedEffect],
+    planned: &'a [IngressEffectIntent],
+) -> (ReconcileVerdict, Vec<&'a IngressEffectIntent>) {
+    let mut omissions = Vec::new();
+    let mut divergent = std::collections::BTreeSet::new();
+    for intent in planned {
+        let authority = intent.authority_key();
+        let matches = recorded
+            .iter()
+            .filter(|row| row.intent.authority_key() == authority)
+            .collect::<Vec<_>>();
+        if matches.is_empty() {
+            // A planned effect under a new authority that reuses a recorded
+            // semantic identity is a contradiction: the same immutable identity
+            // cannot be claimed by two assigning authorities. Surfacing it here
+            // keeps the insert below from failing on the identity primary key.
+            if let Some(same_identity) = recorded
+                .iter()
+                .find(|row| row.intent.semantic_key() == intent.semantic_key())
+            {
+                return (
+                    ReconcileVerdict::Contradiction {
+                        kind: intent.kind(),
+                        recorded: same_identity.intent.semantic_key(),
+                        planned: intent.semantic_key(),
+                    },
+                    Vec::new(),
+                );
+            }
+            // Two proposed archive identities under one authority are contradictory
+            // even on a first commit, before any row has been inserted.
+            if intent.kind() == IngressEffectKind::ArchiveAuthoritative {
+                if let Some(other) = planned
+                    .iter()
+                    .find(|other| other.authority_key() == authority && *other != intent)
+                {
+                    return (
+                        ReconcileVerdict::Contradiction {
+                            kind: intent.kind(),
+                            recorded: other.semantic_key(),
+                            planned: intent.semantic_key(),
+                        },
+                        Vec::new(),
+                    );
+                }
+            }
+            // A reconnect must not invent a remote carbon obligation after a
+            // committed local fanout. Only an existing relay obligation retries.
+            if !recorded.is_empty()
+                && (matches!(intent, IngressEffectIntent::RelayCarbons { .. })
+                    || !inbox_omission_is_recorded_audience(recorded, intent, planned))
+            {
+                divergent.insert(intent.kind());
+            } else {
+                omissions.push(intent);
+            }
+        } else if !matches.iter().any(|row| row.intent == *intent) {
+            if intent.kind() == IngressEffectKind::ArchiveAuthoritative {
+                return (
+                    ReconcileVerdict::Contradiction {
+                        kind: intent.kind(),
+                        recorded: matches[0].intent.semantic_key(),
+                        planned: intent.semantic_key(),
+                    },
+                    Vec::new(),
+                );
+            }
+            divergent.insert(intent.kind());
+        }
+    }
+    for row in recorded {
+        if !planned.contains(&row.intent) {
+            divergent.insert(row.intent.kind());
+        }
+    }
+    let verdict = if recorded.is_empty() {
+        ReconcileVerdict::FirstCommit
+    } else if !divergent.is_empty() {
+        ReconcileVerdict::Divergent {
+            kinds: divergent.into_iter().collect(),
+        }
+    } else if !omissions.is_empty() {
+        ReconcileVerdict::Repaired {
+            inserted: omissions
+                .iter()
+                .map(|intent| intent.semantic_key())
+                .collect(),
+        }
+    } else {
+        ReconcileVerdict::Consistent
+    };
+    (verdict, omissions)
+}
+
+/// A later room snapshot cannot turn a newly joined member into an original
+/// recipient. Repair inbox obligations only within the committed authority and
+/// audience. Remote owner first acceptance introduces a new room authority.
+fn inbox_omission_is_recorded_audience(
+    recorded: &[RecordedEffect],
+    planned: &IngressEffectIntent,
+    planned_intents: &[IngressEffectIntent],
+) -> bool {
+    use waddle_xmpp::ingress::EffectAuthorityKey;
+    // Inbox pushes have their own RouteDirect identity. They cannot add a
+    // recipient whose associated projection was rejected as audience growth.
+    if let IngressEffectIntent::RouteDirect { recipient, .. } = planned {
+        return planned_intents.iter().all(|intent| match intent {
+            IngressEffectIntent::InboxProject { owner, .. } if owner == recipient => {
+                inbox_omission_is_recorded_audience(recorded, intent, planned_intents)
+            }
+            _ => true,
+        });
+    }
+    let (owner, partner) = match planned.authority_key() {
+        EffectAuthorityKey::Inbox { owner, partner, .. } => (owner, partner),
+        EffectAuthorityKey::Recovery {
+            recipient, room, ..
+        } => (recipient, room),
+        EffectAuthorityKey::Conversation {
+            owner,
+            conversation,
+        } if recorded.iter().any(|row| {
+            matches!(&row.intent,
+                IngressEffectIntent::RouteMucGroupchat { room, .. } if room == &conversation)
+        }) =>
+        {
+            (owner, conversation)
+        }
+        _ => return true,
+    };
+    // A relayed owner is accepting the room authority for the first time, not
+    // replanning an already committed room audience.
+    if recorded.iter().any(|row| {
+        matches!(&row.intent,
+        IngressEffectIntent::DispatchToRoomRemote { room, .. } if room == &partner)
+    }) && !recorded.iter().any(|row| {
+        matches!(&row.intent,
+            IngressEffectIntent::ArchiveAuthoritative { archive, .. } if archive == &partner)
+    }) {
+        return true;
+    }
+    let has_inbox_authority = recorded.iter().any(|row| {
+        matches!(row.intent.authority_key(), EffectAuthorityKey::Inbox { partner: recorded_partner, .. }
+            if recorded_partner == partner)
+    });
+    let owner_in_audience = recorded.iter().any(|row| match &row.intent {
+        IngressEffectIntent::RouteMucGroupchat {
+            room, occupants, ..
+        } => room == &partner && occupants.iter().any(|occupant| occupant.to_bare() == owner),
+        IngressEffectIntent::InboxProject { .. } => matches!(
+            row.intent.authority_key(),
+            EffectAuthorityKey::Inbox { owner: recorded_owner, partner: recorded_partner, .. }
+                if recorded_owner == owner && recorded_partner == partner
+        ),
+        _ => false,
+    });
+    has_inbox_authority && owner_in_audience
+}
+
+async fn insert_effect(
+    transaction: &mut crate::db::Transaction<'_>,
+    message_key: MessageKey,
+    ordinal: u64,
+    intent: &IngressEffectIntent,
+    postgres: bool,
+) -> Result<(), IngressUowError> {
+    let (kind, payload) = intent.with_encoded_v1(|kind, payload| (kind, payload.to_vec()))?;
+    transaction.execute(
+        if postgres {
+            "INSERT INTO ingress_effect_intents (message_key, effect_ordinal, kind, semantic_identity_hash, payload_version, payload) VALUES (?::uuid, ?::numeric, ?, ?, 1, ?)"
+        } else {
+            "INSERT INTO ingress_effect_intents (message_key, effect_ordinal, kind, semantic_identity_hash, payload_version, payload) VALUES (?, ?, ?, ?, 1, ?)"
+        },
+        crate::db_params![message_key.to_storage().to_string(), ordinal.to_string(), i64::from(kind), semantic_identity_hash(intent).to_vec(), payload],
+    ).await?;
+    Ok(())
 }
 
 fn semantic_identity_hash(intent: &IngressEffectIntent) -> [u8; 32] {
     let identity = intent.semantic_key().storage_identity();
     Sha256::digest(identity.as_bytes()).into()
-}
-
-fn storage_hash(value: &[u8]) -> Result<[u8; 32], IngressUowError> {
-    <[u8; 32]>::try_from(value).map_err(|_| IngressUowError::EffectIntentConflict)
 }
 
 /// Result of checking a persisted authenticated principal under a share lock.
@@ -635,17 +1054,13 @@ impl PrincipalRepository {
         transaction: &mut IngressUowTransaction<'_>,
         principal: &AuthenticatedPrincipalRef,
     ) -> Result<PrincipalAssertion, IngressUowError> {
+        const POSTGRES: &str = "SELECT expires_at FROM sessions WHERE user_jid = ? AND auth_context_id = ? AND auth_context_version = ? AND principal_auth_epoch = ? FOR SHARE";
+        const SQLITE: &str = "SELECT expires_at FROM sessions WHERE user_jid = ? AND auth_context_id = ? AND auth_context_version = ? AND principal_auth_epoch = ?";
+        let sql = dialect_sql(transaction, POSTGRES, SQLITE);
         let mut rows = transaction
             .transaction_mut()
             .query(
-                r#"
-                SELECT expires_at FROM sessions
-                WHERE user_jid = ?
-                  AND auth_context_id = ?
-                  AND auth_context_version = ?
-                  AND principal_auth_epoch = ?
-                FOR SHARE
-                "#,
+                sql,
                 crate::db_params![
                     principal.bare_jid().to_string(),
                     principal.auth_context_id().as_uuid().to_string(),
@@ -695,20 +1110,49 @@ impl DeliveryEffectRepository {
         transaction: &mut IngressUowTransaction<'_>,
         delivery_key: DeliveryKey,
     ) -> Result<Option<MessageKey>, IngressUowError> {
+        const POSTGRES: &str =
+            "SELECT message_key::text FROM ingress_deliveries WHERE delivery_key = ?::uuid";
+        const SQLITE: &str = "SELECT message_key FROM ingress_deliveries WHERE delivery_key = ?";
+        let sql = dialect_sql(transaction, POSTGRES, SQLITE);
         lookup_message_key(
             transaction,
-            "SELECT message_key::text FROM ingress_deliveries WHERE delivery_key = ?::uuid",
+            sql,
             crate::db_params![delivery_key.to_storage().to_string()],
         )
         .await
     }
 }
 
+fn dialect_sql(
+    transaction: &mut IngressUowTransaction<'_>,
+    postgres: &'static str,
+    sqlite: &'static str,
+) -> &'static str {
+    match transaction.transaction_mut().driver() {
+        DatabaseDriver::Postgres => postgres,
+        DatabaseDriver::Sqlite => sqlite,
+    }
+}
+
 async fn lookup_message_key(
     transaction: &mut IngressUowTransaction<'_>,
-    sql: &str,
+    sql: &'static str,
     params: impl crate::db::IntoParams,
 ) -> Result<Option<MessageKey>, IngressUowError> {
+    let sqlite_sql;
+    let sql = if transaction
+        .transaction_mut()
+        .postgres_connection()
+        .is_some()
+    {
+        sql
+    } else {
+        sqlite_sql = sql
+            .replace("::text", "")
+            .replace("::uuid", "")
+            .replace("::numeric", "");
+        &sqlite_sql
+    };
     let mut rows = transaction.transaction_mut().query(sql, params).await?;
     let Some(row) = rows.next().await? else {
         return Ok(None);
@@ -736,7 +1180,7 @@ pub struct ClaimRepository;
 ///
 /// It can only be minted after both the node-authority currency check
 /// (against the canonical `SharedNodeIdentity` bound at
-/// [`super::PostgresIngressUnitOfWork::open_with_node_identity`]) and the
+/// [`super::IngressUnitOfWork::open_with_node_identity`]) and the
 /// `FOR SHARE` claim assertion. The minted `CurrentNodeIdentityGuard` is
 /// retained by the transaction itself — not this independently droppable
 /// value — so identity rotation or terminal disable cannot complete until
@@ -757,7 +1201,7 @@ pub struct SmClaimFence<'transaction> {
 ///
 /// It can only be minted after both the node-authority currency check
 /// (against the canonical `SharedNodeIdentity` bound at
-/// [`super::PostgresIngressUnitOfWork::open_with_node_identity`]) and the
+/// [`super::IngressUnitOfWork::open_with_node_identity`]) and the
 /// `FOR SHARE` claim assertion. The minted `CurrentNodeIdentityGuard` is
 /// retained by the transaction itself — not this independently droppable
 /// value — so identity rotation or terminal disable cannot complete until
@@ -779,7 +1223,7 @@ impl ClaimRepository {
     /// row under `FOR SHARE`, after proving `owner` is still this node's
     /// current, active identity per the transaction's bound canonical
     /// identity source. Locks are taken in the fixed order
-    /// epoch (at [`super::PostgresIngressUnitOfWork::begin`]) → exact claim
+    /// epoch (at [`super::IngressUnitOfWork::begin`]) → exact claim
     /// (here) → `sm_sessions`/child rows (fenced repositories).
     pub async fn assert_sm_claim<'transaction>(
         transaction: &mut IngressUowTransaction<'transaction>,
@@ -826,7 +1270,7 @@ impl ClaimRepository {
     /// row under `FOR SHARE`, after proving `owner` is still this node's
     /// current, active identity per the transaction's bound canonical
     /// identity source. Locks are taken in the fixed order
-    /// epoch (at [`super::PostgresIngressUnitOfWork::begin`]) → exact claim
+    /// epoch (at [`super::IngressUnitOfWork::begin`]) → exact claim
     /// (here) → room archive/child rows (fenced repositories).
     pub async fn assert_room_claim<'transaction>(
         transaction: &mut IngressUowTransaction<'transaction>,
@@ -863,67 +1307,5 @@ impl ClaimRepository {
             transaction_identity: transaction.identity(),
             _transaction: PhantomData,
         })
-    }
-}
-
-/// Result of offering a handled XEP-0198 frontier to an SM session.
-#[cfg(feature = "clustering")]
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum HandledFrontierOutcome {
-    Idempotent,
-    Advanced,
-}
-
-/// Repository that advances the fenced, wrapping SM handled frontier.
-#[cfg(feature = "clustering")]
-#[derive(Debug, Default, Clone, Copy)]
-pub struct HandledFrontierRepository;
-
-#[cfg(feature = "clustering")]
-impl HandledFrontierRepository {
-    pub async fn advance(
-        transaction: &mut IngressUowTransaction<'_>,
-        fence: &SmClaimFence<'_>,
-        stream_id: &SmSessionId,
-        offered: u32,
-    ) -> Result<HandledFrontierOutcome, IngressUowError> {
-        if fence.transaction_identity != transaction.identity() || fence.stream_id != *stream_id {
-            return Err(IngressUowError::ClaimFenceMissing);
-        }
-        let mut rows = transaction
-            .transaction_mut()
-            .query(
-                "SELECT inbound_count FROM sm_sessions WHERE stream_id = ? FOR UPDATE",
-                crate::db_params![stream_id.as_str().to_string()],
-            )
-            .await?;
-        let Some(row) = rows.next().await? else {
-            return Err(IngressUowError::StreamMissing);
-        };
-        let stored: i64 = row.get(0)?;
-        let stored = stored as u32;
-        drop(rows);
-
-        if offered == stored {
-            return Ok(HandledFrontierOutcome::Idempotent);
-        }
-        if offered != stored.wrapping_add(1) {
-            return Err(IngressUowError::FrontierStale { stored, offered });
-        }
-        let advanced = transaction
-            .transaction_mut()
-            .execute(
-                "UPDATE sm_sessions SET inbound_count = ? WHERE stream_id = ? AND inbound_count = ?",
-                crate::db_params![
-                    i64::from(offered),
-                    stream_id.as_str().to_string(),
-                    i64::from(stored),
-                ],
-            )
-            .await?;
-        if advanced != 1 {
-            return Err(IngressUowError::FrontierStale { stored, offered });
-        }
-        Ok(HandledFrontierOutcome::Advanced)
     }
 }

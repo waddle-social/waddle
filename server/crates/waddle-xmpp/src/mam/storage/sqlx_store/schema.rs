@@ -47,8 +47,6 @@ CREATE TABLE IF NOT EXISTS mam_messages (
     rich_payload TEXT,
     nickname_generation INTEGER,
     parent_thread_id TEXT,
-    origin_dedup_sender_scope TEXT,
-    origin_dedup_fingerprint TEXT,
     created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
 );
 CREATE INDEX IF NOT EXISTS idx_mam_room_timestamp
@@ -67,33 +65,13 @@ CREATE INDEX IF NOT EXISTS idx_mam_room_stanza
     ON mam_messages(room_jid, stanza_id);
 "#;
 
-// Groupchat retry identity is the real bare JID inside the typed rich payload,
-// not nickname_generation. The separately persisted sender scope preserves the
-// conflict guard for concurrent exact retries; Rust still performs the final
-// typed identity and content match after a conflict.
 const SQLITE_MAM_ORIGIN_DEDUP_INDEXES: &str = r#"
 DROP INDEX IF EXISTS idx_mam_origin_groupchat_unique;
 DROP INDEX IF EXISTS idx_mam_origin_direct_unique;
 DROP INDEX IF EXISTS idx_mam_origin_groupchat_content_unique;
 DROP INDEX IF EXISTS idx_mam_origin_groupchat_candidates;
-CREATE UNIQUE INDEX IF NOT EXISTS idx_mam_origin_groupchat_sender_content_unique
-    ON mam_messages(room_jid, origin_id, from_jid, origin_dedup_sender_scope, origin_dedup_fingerprint)
-    WHERE origin_id IS NOT NULL AND origin_dedup_sender_scope IS NOT NULL AND origin_dedup_fingerprint IS NOT NULL AND message_type = 'groupchat';
-CREATE UNIQUE INDEX IF NOT EXISTS idx_mam_origin_direct_content_unique
-    ON mam_messages(
-        room_jid,
-        origin_id,
-        CASE
-            WHEN instr(from_jid, '/') = 0 THEN from_jid
-            ELSE substr(from_jid, 1, instr(from_jid, '/') - 1)
-        END,
-        CASE
-            WHEN instr(to_jid, '/') = 0 THEN to_jid
-            ELSE substr(to_jid, 1, instr(to_jid, '/') - 1)
-        END,
-        origin_dedup_fingerprint
-    )
-    WHERE origin_id IS NOT NULL AND origin_dedup_fingerprint IS NOT NULL AND message_type <> 'groupchat';
+DROP INDEX IF EXISTS idx_mam_origin_groupchat_sender_content_unique;
+DROP INDEX IF EXISTS idx_mam_origin_direct_content_unique;
 "#;
 
 // See `SQLITE_MAM_SCHEMA` for the body-nullability rationale.
@@ -115,8 +93,6 @@ CREATE TABLE IF NOT EXISTS mam_messages (
     rich_payload TEXT,
     nickname_generation BIGINT,
     parent_thread_id TEXT,
-    origin_dedup_sender_scope TEXT,
-    origin_dedup_fingerprint TEXT,
     created_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP
 );
 CREATE INDEX IF NOT EXISTS idx_mam_room_timestamp
@@ -140,18 +116,8 @@ DROP INDEX IF EXISTS idx_mam_origin_groupchat_unique;
 DROP INDEX IF EXISTS idx_mam_origin_direct_unique;
 DROP INDEX IF EXISTS idx_mam_origin_groupchat_content_unique;
 DROP INDEX IF EXISTS idx_mam_origin_groupchat_candidates;
-CREATE UNIQUE INDEX IF NOT EXISTS idx_mam_origin_groupchat_sender_content_unique
-    ON mam_messages(room_jid, origin_id, from_jid, origin_dedup_sender_scope, origin_dedup_fingerprint)
-    WHERE origin_id IS NOT NULL AND origin_dedup_sender_scope IS NOT NULL AND origin_dedup_fingerprint IS NOT NULL AND message_type = 'groupchat';
-CREATE UNIQUE INDEX IF NOT EXISTS idx_mam_origin_direct_content_unique
-    ON mam_messages(
-        room_jid,
-        origin_id,
-        (split_part(from_jid, '/', 1)),
-        (split_part(to_jid, '/', 1)),
-        origin_dedup_fingerprint
-    )
-    WHERE origin_id IS NOT NULL AND origin_dedup_fingerprint IS NOT NULL AND message_type <> 'groupchat';
+DROP INDEX IF EXISTS idx_mam_origin_groupchat_sender_content_unique;
+DROP INDEX IF EXISTS idx_mam_origin_direct_content_unique;
 "#;
 
 pub(super) fn infer_driver(database_url: &str) -> Result<MamDatabaseDriver, MamStorageError> {
@@ -255,8 +221,21 @@ pub(super) async fn ensure_sqlite_schema(pool: &SqlitePool) -> Result<(), MamSto
     ensure_sqlite_column(pool, "stanza_xml", "TEXT").await?;
     ensure_sqlite_column(pool, "nickname_generation", "INTEGER").await?;
     ensure_sqlite_column(pool, "parent_thread_id", "TEXT").await?;
-    ensure_sqlite_column(pool, "origin_dedup_sender_scope", "TEXT").await?;
-    ensure_sqlite_column(pool, "origin_dedup_fingerprint", "TEXT").await?;
+    execute_sqlite_batch(pool, SQLITE_MAM_ORIGIN_DEDUP_INDEXES).await?;
+    // SQLite has no DROP COLUMN IF EXISTS; inspect the schema first.
+    for column in ["origin_dedup_sender_scope", "origin_dedup_fingerprint"] {
+        let columns = sqlx::query("PRAGMA table_info(mam_messages)")
+            .fetch_all(pool)
+            .await?;
+        if columns
+            .iter()
+            .any(|row| row.get::<String, _>("name") == column)
+        {
+            sqlx::query(&format!("ALTER TABLE mam_messages DROP COLUMN {column}"))
+                .execute(pool)
+                .await?;
+        }
+    }
     // Same body-NULL constraint risk as Postgres (see
     // `ensure_postgres_schema`): SQLite tables created before #228
     // retained `body TEXT NOT NULL` and `CREATE TABLE IF NOT EXISTS`
@@ -265,7 +244,7 @@ pub(super) async fn ensure_sqlite_schema(pool: &SqlitePool) -> Result<(), MamSto
     // requires the 12-step table rebuild. Detect the legacy shape
     // and rebuild only when needed.
     ensure_sqlite_body_nullable(pool).await?;
-    execute_sqlite_batch(pool, SQLITE_MAM_ORIGIN_DEDUP_INDEXES).await
+    Ok(())
 }
 
 async fn ensure_sqlite_body_nullable(pool: &SqlitePool) -> Result<(), MamStorageError> {
@@ -317,16 +296,13 @@ async fn ensure_sqlite_body_nullable(pool: &SqlitePool) -> Result<(), MamStorage
             rich_payload TEXT,
             nickname_generation INTEGER,
             parent_thread_id TEXT,
-            origin_dedup_sender_scope TEXT,
-            origin_dedup_fingerprint TEXT,
             created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
         )"#,
         r#"INSERT INTO mam_messages__new
             SELECT id, room_jid, timestamp, from_jid, to_jid, body,
                    stanza_id, thread_id, reply_to_id, reply_to_jid,
                    origin_id, message_type, stanza_xml, rich_payload,
-                   nickname_generation, parent_thread_id, origin_dedup_sender_scope,
-                   origin_dedup_fingerprint, created_at
+                   nickname_generation, parent_thread_id, created_at
             FROM mam_messages"#,
         "DROP TABLE mam_messages",
         "ALTER TABLE mam_messages__new RENAME TO mam_messages",
@@ -337,8 +313,6 @@ async fn ensure_sqlite_body_nullable(pool: &SqlitePool) -> Result<(), MamStorage
         "CREATE INDEX IF NOT EXISTS idx_mam_room_thread ON mam_messages(room_jid, thread_id, timestamp DESC)",
         "CREATE INDEX IF NOT EXISTS idx_mam_room_reply_to ON mam_messages(room_jid, reply_to_id, timestamp DESC)",
         "CREATE INDEX IF NOT EXISTS idx_mam_room_origin ON mam_messages(room_jid, origin_id)",
-        "CREATE UNIQUE INDEX IF NOT EXISTS idx_mam_origin_groupchat_sender_content_unique ON mam_messages(room_jid, origin_id, from_jid, origin_dedup_sender_scope, origin_dedup_fingerprint) WHERE origin_id IS NOT NULL AND origin_dedup_sender_scope IS NOT NULL AND origin_dedup_fingerprint IS NOT NULL AND message_type = 'groupchat'",
-        "CREATE UNIQUE INDEX IF NOT EXISTS idx_mam_origin_direct_content_unique ON mam_messages(room_jid, origin_id, CASE WHEN instr(from_jid, '/') = 0 THEN from_jid ELSE substr(from_jid, 1, instr(from_jid, '/') - 1) END, CASE WHEN instr(to_jid, '/') = 0 THEN to_jid ELSE substr(to_jid, 1, instr(to_jid, '/') - 1) END, origin_dedup_fingerprint) WHERE origin_id IS NOT NULL AND origin_dedup_fingerprint IS NOT NULL AND message_type <> 'groupchat'",
     ] {
         sqlx::query(statement).execute(&mut *tx).await?;
     }
@@ -399,10 +373,11 @@ async fn ensure_postgres_schema_locked(
     sqlx::query("ALTER TABLE mam_messages ADD COLUMN IF NOT EXISTS parent_thread_id TEXT")
         .execute(&mut *conn)
         .await?;
-    sqlx::query("ALTER TABLE mam_messages ADD COLUMN IF NOT EXISTS origin_dedup_sender_scope TEXT")
+    execute_postgres_batch(&mut *conn, POSTGRES_MAM_ORIGIN_DEDUP_INDEXES).await?;
+    sqlx::query("ALTER TABLE mam_messages DROP COLUMN IF EXISTS origin_dedup_sender_scope")
         .execute(&mut *conn)
         .await?;
-    sqlx::query("ALTER TABLE mam_messages ADD COLUMN IF NOT EXISTS origin_dedup_fingerprint TEXT")
+    sqlx::query("ALTER TABLE mam_messages DROP COLUMN IF EXISTS origin_dedup_fingerprint")
         .execute(&mut *conn)
         .await?;
     // RFC 6121 §5.2.3 / XEP-0313 §3: `body` is nullable. Older
@@ -441,5 +416,95 @@ async fn ensure_postgres_schema_locked(
             .execute(&mut *conn)
             .await?;
     }
-    execute_postgres_batch(&mut *conn, POSTGRES_MAM_ORIGIN_DEDUP_INDEXES).await
+    Ok(())
+}
+
+#[cfg(test)]
+mod cutover_tests {
+    use super::*;
+
+    const LEGACY_COLUMNS_AND_INDEXES: &[&str] = &[
+        "ALTER TABLE mam_messages ADD COLUMN origin_dedup_sender_scope TEXT",
+        "ALTER TABLE mam_messages ADD COLUMN origin_dedup_fingerprint TEXT",
+        "CREATE UNIQUE INDEX idx_mam_origin_groupchat_sender_content_unique ON mam_messages(room_jid, origin_id, origin_dedup_sender_scope, origin_dedup_fingerprint) WHERE origin_id IS NOT NULL AND message_type = 'groupchat'",
+        "CREATE UNIQUE INDEX idx_mam_origin_direct_content_unique ON mam_messages(room_jid, origin_id, origin_dedup_fingerprint) WHERE origin_id IS NOT NULL AND message_type <> 'groupchat'",
+    ];
+
+    #[tokio::test]
+    async fn sqlite_schema_cutover_drops_origin_dedupe_and_preserves_origin_lookup() {
+        let pool = sqlx::sqlite::SqlitePoolOptions::new()
+            .max_connections(1)
+            .connect("sqlite::memory:")
+            .await
+            .expect("SQLite pool");
+        ensure_sqlite_schema(&pool).await.expect("initial schema");
+        for statement in LEGACY_COLUMNS_AND_INDEXES {
+            sqlx::query(statement)
+                .execute(&pool)
+                .await
+                .expect("legacy schema");
+        }
+        ensure_sqlite_schema(&pool).await.expect("cutover");
+        ensure_sqlite_schema(&pool)
+            .await
+            .expect("idempotent cutover");
+        let columns = sqlx::query("PRAGMA table_info(mam_messages)")
+            .fetch_all(&pool)
+            .await
+            .expect("columns");
+        let names: Vec<String> = columns.iter().map(|row| row.get("name")).collect();
+        assert!(names.contains(&"origin_id".to_owned()));
+        assert!(!names.iter().any(|name| name.starts_with("origin_dedup_")));
+        let indexes: Vec<String> = sqlx::query_scalar(
+            "SELECT name FROM sqlite_master WHERE type = 'index' AND tbl_name = 'mam_messages'",
+        )
+        .fetch_all(&pool)
+        .await
+        .expect("indexes");
+        assert!(indexes.contains(&"idx_mam_room_origin".to_owned()));
+        assert!(!indexes.iter().any(|name| name.ends_with("content_unique")));
+    }
+
+    #[tokio::test]
+    async fn postgres_schema_cutover_drops_origin_dedupe_and_preserves_origin_lookup() {
+        let Ok(url) = std::env::var("WADDLE_TEST_POSTGRES_URL") else {
+            eprintln!("skipping Postgres MAM schema test: WADDLE_TEST_POSTGRES_URL is unset");
+            return;
+        };
+        let pool = sqlx::postgres::PgPoolOptions::new()
+            .max_connections(1)
+            .connect(&url)
+            .await
+            .expect("Postgres pool");
+        let schema = format!("mam_cutover_{}", uuid::Uuid::new_v4().simple());
+        sqlx::query(&format!("CREATE SCHEMA {schema}"))
+            .execute(&pool)
+            .await
+            .expect("isolated schema");
+        sqlx::query(&format!("SET search_path TO {schema}"))
+            .execute(&pool)
+            .await
+            .expect("set schema");
+        ensure_postgres_schema(&pool).await.expect("initial schema");
+        for statement in LEGACY_COLUMNS_AND_INDEXES {
+            sqlx::query(statement)
+                .execute(&pool)
+                .await
+                .expect("legacy schema");
+        }
+        ensure_postgres_schema(&pool).await.expect("cutover");
+        ensure_postgres_schema(&pool)
+            .await
+            .expect("idempotent cutover");
+        let names: Vec<String> = sqlx::query_scalar("SELECT column_name FROM information_schema.columns WHERE table_schema = current_schema() AND table_name = 'mam_messages'").fetch_all(&pool).await.expect("columns");
+        assert!(names.contains(&"origin_id".to_owned()));
+        assert!(!names.iter().any(|name| name.starts_with("origin_dedup_")));
+        let indexes: Vec<String> = sqlx::query_scalar("SELECT indexname FROM pg_indexes WHERE schemaname = current_schema() AND tablename = 'mam_messages'").fetch_all(&pool).await.expect("indexes");
+        assert!(indexes.contains(&"idx_mam_room_origin".to_owned()));
+        assert!(!indexes.iter().any(|name| name.ends_with("content_unique")));
+        sqlx::query(&format!("DROP SCHEMA {schema} CASCADE"))
+            .execute(&pool)
+            .await
+            .expect("drop schema");
+    }
 }

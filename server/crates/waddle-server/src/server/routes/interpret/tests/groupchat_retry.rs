@@ -164,125 +164,6 @@ fn archive_id_rewrite_updates_groupchat_inbox_projection_message() {
 }
 
 #[tokio::test]
-async fn groupchat_origin_retry_suppresses_non_sender_fanout_and_rewrites_sender_copy() {
-    use waddle_xmpp::inbox::storage::InMemoryInboxStorage;
-    use waddle_xmpp::mam::{InMemoryMamStorage, StoreOutcome};
-    use waddle_xmpp::registry::{DeliveryKind, UserRegistryActor};
-    use waddle_xmpp_core::xep0359::extract_stanza_id_by;
-
-    let registry = ConnectionRegistry::new();
-    let user_registry = UserRegistryActor::spawn(UserRegistryActor::new());
-    let sender: jid::FullJid = "alice@example.com/new-session".parse().expect("sender JID");
-    let sender_second: jid::FullJid = "alice@example.com/second-session"
-        .parse()
-        .expect("sender JID");
-    let old_sender: jid::FullJid = "alice@example.com/old-session".parse().expect("sender JID");
-    let other: jid::FullJid = "bob@example.com/phone".parse().expect("other JID");
-    let occupant: jid::FullJid = "room@conference.example.com/alice"
-        .parse()
-        .expect("occupant JID");
-    let room = occupant.to_bare();
-    let (sender_tx, mut sender_rx) = tokio::sync::mpsc::channel(8);
-    let (sender_second_tx, mut sender_second_rx) = tokio::sync::mpsc::channel(8);
-    let (other_tx, mut other_rx) = tokio::sync::mpsc::channel(8);
-    register_into_both_tiers(&registry, &user_registry, &sender, sender_tx).await;
-    register_into_both_tiers(&registry, &user_registry, &sender_second, sender_second_tx).await;
-    register_into_both_tiers(&registry, &user_registry, &other, other_tx).await;
-
-    let mam_concrete = Arc::new(InMemoryMamStorage::new());
-    let mam: Arc<dyn MamStorage> = mam_concrete.clone();
-    let inbox_concrete = Arc::new(InMemoryInboxStorage::new());
-    let inbox: Arc<dyn InboxStorage> = inbox_concrete.clone();
-    let mut deps = Deps::test_with_storage(&registry, &mam, &inbox);
-    deps.user_registry = Some(&user_registry);
-    let original_id = "original-room-archive-id";
-    let origin_id = "stable-groupchat-origin";
-    assert_eq!(
-        mam_concrete
-            .store_message(
-                &room,
-                &archived_groupchat_retry_fixture(
-                    &room,
-                    &occupant,
-                    &old_sender,
-                    original_id,
-                    origin_id,
-                ),
-            )
-            .await
-            .expect("seed original row"),
-        StoreOutcome::Stored(original_id.to_string())
-    );
-    let retry = groupchat_retry_message(&room, &occupant, "fresh-retry-id", origin_id);
-    let mut second_reflection = retry.clone();
-    second_reflection.to = Some(jid::Jid::from(sender_second.clone()));
-    let mut batch = groupchat_retry_batch(&room, &sender, &other, &retry);
-    batch.insert(
-        2,
-        OutboundEvent::RouteToConnection {
-            jid: jid::Jid::from(sender_second),
-            stanza: Box::new(Stanza::Message(second_reflection)),
-            call_setup: None,
-        },
-    );
-
-    let outcome = interpret(batch, &deps).await;
-
-    assert!(outcome.frames.is_empty(), "dedupe emits no error frame");
-    assert_eq!(
-        outcome.retry_suppression,
-        Some(GroupchatRetrySuppression::Deduplicated)
-    );
-    assert_eq!(
-        mam_concrete.count_messages(&room).await.expect("count"),
-        1,
-        "dedupe must not create a second room archive row"
-    );
-    assert!(
-        drain_inbound(&mut other_rx).is_empty(),
-        "non-sender reflection and inbox push must both be suppressed"
-    );
-    let sender_deliveries = drain_inbound(&mut sender_rx);
-    assert_eq!(sender_deliveries.len(), 1, "sender reflection survives");
-    assert_eq!(sender_deliveries[0].kind, DeliveryKind::PeerStanza);
-    let Stanza::Message(sender_copy) = &sender_deliveries[0].stanza else {
-        panic!("expected sender message reflection");
-    };
-    assert_eq!(
-        extract_stanza_id_by(sender_copy, &jid::Jid::from(room.clone())).as_deref(),
-        Some(original_id),
-        "sender reflection must use the retained archive stanza-id"
-    );
-    let second_sender_deliveries = drain_inbound(&mut sender_second_rx);
-    assert_eq!(
-        second_sender_deliveries.len(),
-        1,
-        "every session of the sender's bare JID receives the reflection"
-    );
-    let Stanza::Message(second_sender_copy) = &second_sender_deliveries[0].stanza else {
-        panic!("expected second sender message reflection");
-    };
-    assert_eq!(
-        extract_stanza_id_by(second_sender_copy, &jid::Jid::from(room.clone())).as_deref(),
-        Some(original_id)
-    );
-    let sender_inbox = inbox_concrete
-        .list(&sender.to_bare())
-        .await
-        .expect("sender inbox");
-    assert_eq!(sender_inbox.len(), 1, "sender inbox projection survives");
-    assert_eq!(sender_inbox[0].preview.as_deref(), Some("retry me"));
-    assert!(
-        inbox_concrete
-            .list(&other.to_bare())
-            .await
-            .expect("other inbox")
-            .is_empty(),
-        "non-sender inbox projection must be suppressed"
-    );
-}
-
-#[tokio::test]
 async fn groupchat_origin_retry_after_tombstone_silently_suppresses_entire_batch() {
     use waddle_xmpp::inbox::storage::InMemoryInboxStorage;
     use waddle_xmpp::mam::{ArchivedTombstone, InMemoryMamStorage};
@@ -367,7 +248,7 @@ async fn groupchat_origin_retry_after_tombstone_silently_suppresses_entire_batch
 }
 
 #[tokio::test]
-async fn groupchat_retraction_retry_finishes_tombstone_after_archive_deduplication() {
+async fn groupchat_retraction_retry_finishes_tombstone_after_archive_write() {
     use waddle_xmpp::inbox::storage::InMemoryInboxStorage;
     use waddle_xmpp::mam::{
         ArchivedMessage, ArchivedRichPayload, InMemoryMamStorage, StoreOutcome,
@@ -475,10 +356,7 @@ async fn groupchat_retraction_retry_finishes_tombstone_after_archive_deduplicati
     )
     .await;
 
-    assert_eq!(
-        outcome.retry_suppression,
-        Some(GroupchatRetrySuppression::Deduplicated)
-    );
+    assert_eq!(outcome.retry_suppression, None);
     let target = mam_concrete
         .get_message(target_id)
         .await
@@ -488,7 +366,7 @@ async fn groupchat_retraction_retry_finishes_tombstone_after_archive_deduplicati
         target.rich.as_ref().and_then(|rich| rich.payload.as_ref()),
         Some(ArchivedRichPayload::Tombstone(_))
     ));
-    assert!(drain_inbound(&mut other_rx).is_empty());
+    assert_eq!(drain_inbound(&mut other_rx).len(), 1);
     assert_eq!(drain_inbound(&mut sender_rx).len(), 1);
 }
 

@@ -467,6 +467,14 @@ enum TransactionInner<'a> {
 }
 
 impl<'a> Transaction<'a> {
+    /// SQL dialect of the connection held by this transaction.
+    pub fn driver(&self) -> DatabaseDriver {
+        match &self.inner {
+            TransactionInner::Sqlite(_) => DatabaseDriver::Sqlite,
+            TransactionInner::Postgres(_) => DatabaseDriver::Postgres,
+        }
+    }
+
     pub(super) async fn begin(backend: &'a DatabaseBackend) -> Result<Self, DatabaseError> {
         let inner = match backend {
             DatabaseBackend::Sqlite(pool) => TransactionInner::Sqlite(pool.begin().await?),
@@ -509,6 +517,15 @@ impl<'a> Transaction<'a> {
         match &mut self.inner {
             TransactionInner::Postgres(tx) => Some(&mut **tx),
             TransactionInner::Sqlite(_) => None,
+        }
+    }
+
+    /// Reach the raw SQLite connection for connection-taking repositories.
+    /// Returns `None` on PostgreSQL.
+    pub(crate) fn sqlite_connection(&mut self) -> Option<&mut sqlx::SqliteConnection> {
+        match &mut self.inner {
+            TransactionInner::Sqlite(tx) => Some(&mut **tx),
+            TransactionInner::Postgres(_) => None,
         }
     }
 

@@ -1,0 +1,126 @@
+use super::{EffectSink, PlannedEffect, RoomExecutionPath};
+use std::sync::Mutex;
+
+#[derive(Debug, Default)]
+pub struct PlanSink {
+    message: Mutex<Option<xmpp_parsers::message::Message>>,
+    failure: Mutex<Option<super::PlanFailure>>,
+    rejection: Mutex<Option<super::PlanRejection>>,
+    sender: Mutex<Option<jid::FullJid>>,
+    plan: Mutex<Vec<PlannedEffect>>,
+    room_execution: Mutex<RoomExecutionPath>,
+}
+
+impl PlanSink {
+    pub fn failure(&self) -> Option<super::PlanFailure> {
+        *self.failure.lock().expect("failure mutex")
+    }
+    pub fn new() -> Self {
+        Self::default()
+    }
+    pub fn take(&self) -> (Vec<PlannedEffect>, RoomExecutionPath) {
+        let plan = std::mem::take(&mut *self.plan.lock().expect("plan mutex"));
+        let room = std::mem::take(&mut *self.room_execution.lock().expect("room execution mutex"));
+        (plan, room)
+    }
+    pub fn snapshot(&self) -> Vec<PlannedEffect> {
+        self.plan.lock().expect("plan mutex").clone()
+    }
+}
+
+impl EffectSink for PlanSink {
+    fn execute<'a>(
+        &'a self,
+        effect: PlannedEffect,
+        deps: &'a super::super::Deps<'_>,
+    ) -> super::sink::EffectFuture<'a> {
+        Box::pin(async move {
+            if matches!(effect.effect, super::Effect::Immediate(_)) {
+                return super::ImmediateSink.execute(effect, deps).await;
+            }
+            self.record_with_outcome(effect)
+        })
+    }
+    fn snapshot(&self) -> Vec<PlannedEffect> {
+        PlanSink::snapshot(self)
+    }
+    fn projection_dependencies(
+        &self,
+        projection: super::ProjectionRef,
+    ) -> Vec<super::PlanEffectDependency> {
+        self.plan
+            .lock()
+            .expect("plan mutex")
+            .get(projection.0)
+            .map(|effect| effect.dependencies.clone())
+            .unwrap_or_default()
+    }
+    fn room_execution(&self) -> RoomExecutionPath {
+        self.room_execution
+            .lock()
+            .expect("room execution mutex")
+            .clone()
+    }
+    fn fail_plan(&self, failure: super::PlanFailure) {
+        self.failure
+            .lock()
+            .expect("failure mutex")
+            .get_or_insert(failure);
+    }
+    fn set_rejection(&self, rejection: super::PlanRejection) {
+        *self.rejection.lock().expect("rejection mutex") = Some(rejection);
+    }
+    fn rejection(&self) -> Option<super::PlanRejection> {
+        self.rejection.lock().expect("rejection mutex").clone()
+    }
+    fn is_planning(&self) -> bool {
+        true
+    }
+    fn observe_message(&self, message: &xmpp_parsers::message::Message) {
+        *self.message.lock().expect("message mutex") = Some(message.clone());
+    }
+    fn message(&self) -> Option<xmpp_parsers::message::Message> {
+        self.message.lock().expect("message mutex").clone()
+    }
+    fn observe_sender(&self, sender: &jid::FullJid) {
+        self.sender
+            .lock()
+            .expect("sender mutex")
+            .get_or_insert_with(|| sender.clone());
+    }
+    fn record(&self, effect: PlannedEffect) {
+        self.record_with_outcome(effect);
+    }
+    fn set_room_execution(&self, execution: RoomExecutionPath) {
+        *self.room_execution.lock().expect("room execution mutex") = execution;
+    }
+}
+
+impl PlanSink {
+    fn record_with_outcome(&self, mut effect: PlannedEffect) -> super::EffectOutcome {
+        super::policy_metadata::apply_policy(
+            &mut effect,
+            self.sender.lock().expect("sender mutex").as_ref(),
+        );
+        if let super::Effect::External(super::ExternalEffect::Frame(stanza)) = &effect.effect {
+            if let waddle_xmpp::Stanza::Message(message) = stanza.as_ref() {
+                // Rejection replies echo offered payloads, including untrusted
+                // stanza IDs. Their delivery never waits for those archives.
+                let dependencies = if message.type_ == xmpp_parsers::message::MessageType::Error {
+                    Vec::new()
+                } else {
+                    super::policy_metadata::message_dependencies(message)
+                };
+                for dependency in dependencies {
+                    if !effect.dependencies.contains(&dependency) {
+                        effect.dependencies.push(dependency);
+                    }
+                }
+            }
+        }
+        let mut plan = self.plan.lock().expect("plan mutex");
+        let outcome = effect.assumed_outcome(super::ProjectionRef(plan.len()));
+        plan.push(effect);
+        outcome
+    }
+}

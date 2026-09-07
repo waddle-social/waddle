@@ -175,6 +175,9 @@ fn changing_muc_proxy_origin_invalidates_existing_signature() {
         sender_claim: sender_claim(),
         target_claim: room_claim(),
         payload: OrderedRelayPayload::MucProxy {
+            canonical: None,
+            principal: None,
+            stanza_lang: None,
             room_jid: room_jid(),
             kind: OrderedRelayMucProxyKind::JoinPresence,
             origin: connection_origin(1),
@@ -190,6 +193,9 @@ fn changing_muc_proxy_origin_invalidates_existing_signature() {
     );
 
     envelope.payload = OrderedRelayPayload::MucProxy {
+        canonical: None,
+        principal: None,
+        stanza_lang: None,
         room_jid: room_jid(),
         kind: OrderedRelayMucProxyKind::JoinPresence,
         origin: connection_origin(2),

@@ -1,5 +1,5 @@
 use super::*;
-use crate::ingress_shadow::IngressEffectCapture;
+use crate::ingress::IngressEffectCapture;
 use waddle_xmpp::stream_management::SmSessionRegistry;
 
 // -----------------------------------------------------------------
@@ -107,7 +107,7 @@ async fn xep_0280_capture_skips_closed_carbon_targets() {
     registry.register_with_carbons(alice_phone, phone_tx, true);
     drop(phone_rx);
 
-    let capture = IngressEffectCapture::new(None);
+    let capture = IngressEffectCapture::new();
     let deps = Deps::registry_only(&registry).with_ingress_effect_capture(Some(capture.clone()));
 
     let _ = interpret(
@@ -195,7 +195,6 @@ async fn xep_0280_send_carbons_queues_for_detached_xep_0198_resources() {
         jid: alice_phone.clone(),
         occupancy_session: waddle_xmpp_core::OccupancySessionGeneration::mint(),
         inbound_count: 0,
-        shadow_ordinal: waddle_xmpp::stream_management::ShadowOrdinal::ZERO,
         outbound_count: 0,
         last_acked: 0,
         replay_gap_through: None,
@@ -233,6 +232,7 @@ async fn xep_0280_send_carbons_queues_for_detached_xep_0198_resources() {
         ordered_relay_origin: None,
         sfu: None,
         ingress_effect_capture: None,
+        effects: &crate::server::routes::interpret::effects::ImmediateSink,
     };
     let _outcome = interpret(
         vec![OutboundEvent::SendCarbons {
@@ -272,8 +272,9 @@ async fn detached_carbon_append_records_the_actual_sm_stream() {
     sm.store_session(detached)
         .await
         .expect("store detached session");
-    let capture = IngressEffectCapture::new(None);
+    let capture = IngressEffectCapture::new();
     let deps = Deps {
+        effects: &crate::server::routes::interpret::effects::ImmediateSink,
         connection_registry: &registry,
         user_registry: None,
         sm_session_registry: Some(&sm),
@@ -331,8 +332,9 @@ async fn self_dm_and_sent_carbon_to_same_detached_stream_keep_distinct_append_id
         .await
         .expect("store detached session");
 
-    let capture = IngressEffectCapture::new(None);
+    let capture = IngressEffectCapture::new();
     let deps = Deps {
+        effects: &crate::server::routes::interpret::effects::ImmediateSink,
         connection_registry: &registry,
         user_registry: None,
         sm_session_registry: Some(&sm),

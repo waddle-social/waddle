@@ -146,11 +146,7 @@ pub(crate) async fn start_http_server(deps: HttpServerDeps) -> Result<()> {
         .with_graceful_shutdown(async move {
             stop_token.cancelled().await;
             info!("HTTP server received shutdown signal; awaiting SM Q6 drain");
-            // The drain task may spend up to FORCED_TEARDOWN_JOIN past its own
-            // deadline letting forcibly aborted ingress-shadow work record its
-            // telemetry; wait through that margin so the pre-exit metrics
-            // flush (server/mod.rs) never races those counters.
-            let drain_wait = drain_timeout + crate::ingress_shadow::FORCED_TEARDOWN_JOIN;
+            let drain_wait = drain_timeout;
             if tokio::time::timeout(drain_wait, drain_complete.notified())
                 .await
                 .is_err()
@@ -178,86 +174,161 @@ pub(crate) async fn start_http_server(deps: HttpServerDeps) -> Result<()> {
     Ok(())
 }
 
-/// ADR-0017 Phase 3 Slice 7 FIX 1 (council-adjudicated): open MAM storage
-/// for cluster mode, mirroring
-/// `pending_delivery::open_for_cluster_mode`'s/`sm_persistence::open_for_cluster_mode`'s
-/// identical co-location-then-construct pattern, one table over. Lives here
-/// (in `waddle-server`, not `waddle-xmpp` where `SqlxMamStorage` itself is
-/// defined) because the clustering global database identity is available on
-/// this side of the crate boundary.
+#[derive(Debug, thiserror::Error)]
+enum IngressColocationError {
+    #[error("Projection storage and ingress must use the same database backend")]
+    Backend,
+    #[error("projection storage and ingress must share the same PostgreSQL database/schema: {identities:?}")]
+    PostgresIdentity {
+        identities: Box<waddle_xmpp::ClusterColocationIdentities>,
+    },
+    #[error("Projection storage and ingress must share one durable SQLite database")]
+    SqliteDatabase,
+}
+
+async fn ensure_postgres_ingress_colocation(
+    store_identity: &crate::db::lineage::PgIdentity,
+    global: &crate::db::Database,
+) -> Result<()> {
+    if global.driver() != crate::db::DatabaseDriver::Postgres {
+        return Err(IngressColocationError::Backend.into());
+    }
+    let global_identity = crate::db::lineage::live_postgres_identity(global).await?;
+    if *store_identity != global_identity {
+        return Err(IngressColocationError::PostgresIdentity {
+            identities: Box::new(waddle_xmpp::ClusterColocationIdentities {
+                store: store_identity.into(),
+                global: (&global_identity).into(),
+            }),
+        }
+        .into());
+    }
+    Ok(())
+}
+
+/// Open inbox reads on the database/schema used by ingress projection writes.
+/// This startup invariant applies with or without clustering.
+pub(crate) async fn create_ingress_inbox_storage(
+    database_url: Option<&str>,
+    global: &crate::db::Database,
+) -> Result<Arc<crate::inbox::DatabaseInboxStorage>> {
+    let storage = match global.driver() {
+        crate::db::DatabaseDriver::Sqlite => {
+            if database_url.is_some_and(|url| url != global.database_url()) {
+                return Err(IngressColocationError::SqliteDatabase.into());
+            }
+            crate::inbox::DatabaseInboxStorage::from_database(global.clone()).await?
+        }
+        crate::db::DatabaseDriver::Postgres => {
+            let database_url = database_url.unwrap_or_else(|| global.database_url());
+            // Opening inbox storage mutates its schema. Check the live identity
+            // through a plain pool before initializing the configured database.
+            let probe = sqlx::postgres::PgPoolOptions::new()
+                .max_connections(1)
+                .connect(database_url)
+                .await?;
+            let identity = crate::db::lineage::live_postgres_identity_via_pg_pool(&probe).await;
+            probe.close().await;
+            ensure_postgres_ingress_colocation(&identity?, global).await?;
+            let storage = crate::inbox::DatabaseInboxStorage::open(Some(database_url)).await?;
+            let database = storage.database();
+            if database.driver() != crate::db::DatabaseDriver::Postgres {
+                return Err(IngressColocationError::Backend.into());
+            }
+            let identity = crate::db::lineage::live_postgres_identity(&database).await?;
+            ensure_postgres_ingress_colocation(&identity, global).await?;
+            storage
+        }
+    };
+    Ok(Arc::new(storage))
+}
+
+async fn ensure_mam_ingress_colocation(
+    storage: &SqlxMamStorage,
+    global: &crate::db::Database,
+) -> Result<()> {
+    if let Some(pool) = storage.postgres_pool() {
+        if global.driver() != crate::db::DatabaseDriver::Postgres {
+            return Err(IngressColocationError::Backend.into());
+        }
+        let mam_identity = crate::db::lineage::live_postgres_identity_via_pg_pool(pool).await?;
+        ensure_postgres_ingress_colocation(&mam_identity, global).await?;
+        return Ok(());
+    }
+    if global.driver() != crate::db::DatabaseDriver::Sqlite {
+        return Err(IngressColocationError::Backend.into());
+    }
+    let pool = storage
+        .sqlite_pool()
+        .ok_or(IngressColocationError::Backend)?;
+    let (_, _, mam_file): (i64, String, String) = sqlx::query_as("PRAGMA database_list")
+        .fetch_one(pool)
+        .await?;
+    let connection = global.guard().await?;
+    let mut rows = connection.query("PRAGMA database_list", ()).await?;
+    let global_file: String = rows
+        .next()
+        .await?
+        .ok_or(IngressColocationError::SqliteDatabase)?
+        .get(2)?;
+    if mam_file.is_empty()
+        || global_file.is_empty()
+        || std::fs::canonicalize(mam_file)? != std::fs::canonicalize(global_file)?
+    {
+        return Err(IngressColocationError::SqliteDatabase.into());
+    }
+    Ok(())
+}
+
+/// Open MAM on the ingress database so archive writes participate in Phase B.
 ///
-/// When clustering is enabled AND the resolved `database_url` is a
-/// Postgres pool, the co-location invariant is checked BEFORE fencing is
-/// ever attached by comparing its live PostgreSQL identity with the global
-/// database identity — the fencing
-/// `SELECT ... FOR SHARE` `SqlxMamStorage::store_message_fenced` issues
-/// targets `clustering_claims`, which only exists in the clustering global
-/// database. A mismatch fails startup with
-/// [`waddle_xmpp::mam::storage::MamStorageError::ClusterColocationMismatch`]
-/// rather than silently fencing (or, on a build without this check,
-/// silently NOT fencing) against a table that may not exist wherever
-/// `database_url` actually points.
-///
-/// When clustering is disabled, `database_url` is not a
-/// `postgres://`/`postgresql://` DSN, or the clustering subsystem produced
-/// no live claim pair, this is exactly `SqlxMamStorage::open` + `quota` —
-/// no fencing attached, the unfenced path exactly as before.
+/// SQLite: MAM always lives in the global database (one pool, one file or one
+/// in-memory database); a different `WADDLE_XMPP_MAM_DATABASE_URL` is a typed
+/// configuration error. PostgreSQL: the configured URL must resolve to the
+/// same live database/schema identity as the global database. Cluster
+/// fencing is enabled only when the cluster has a live claim pair.
 pub(crate) async fn create_websocket_mam_storage(
     database_url: Option<String>,
     clustering_enabled: bool,
     clustering_claim_pair_live: bool,
     global_db: &crate::db::Database,
 ) -> Result<Arc<SqlxMamStorage>> {
-    if !cfg!(test) {
-        ensure_mam_database_is_durable(
-            database_url.as_deref(),
-            env_flag("WADDLE_XMPP_MAM_ALLOW_IN_MEMORY"),
-        )?;
-    }
-    let storage = match database_url.as_deref() {
-        Some(database_url) => {
+    let storage = match global_db.driver() {
+        crate::db::DatabaseDriver::Sqlite => {
+            if database_url
+                .as_deref()
+                .is_some_and(|url| url != global_db.database_url())
+            {
+                return Err(IngressColocationError::SqliteDatabase.into());
+            }
+            let pool = global_db
+                .sqlite_pool()
+                .ok_or(IngressColocationError::Backend)?;
+            SqlxMamStorage::from_sqlite_pool(pool.clone()).await?
+        }
+        crate::db::DatabaseDriver::Postgres => {
+            let database_url = database_url
+                .as_deref()
+                .unwrap_or_else(|| global_db.database_url());
+            // Opening MAM mutates its schema. Prove colocation using a plain
+            // connection before allowing those migrations to touch this URL.
+            let probe = sqlx::postgres::PgPoolOptions::new()
+                .max_connections(1)
+                .connect(database_url)
+                .await?;
+            let identity = crate::db::lineage::live_postgres_identity_via_pg_pool(&probe).await;
+            probe.close().await;
+            ensure_postgres_ingress_colocation(&identity?, global_db).await?;
             let opened = SqlxMamStorage::open(database_url).await.map_err(|error| {
                 anyhow::anyhow!("Failed to initialize WebSocket MAM storage: {error}")
             })?;
-            #[cfg(feature = "clustering")]
-            {
-                if clustering_enabled && clustering_claim_pair_live {
-                    if let Some(mam_pool) = opened.postgres_pool() {
-                        let mam_identity =
-                            crate::db::lineage::live_postgres_identity_via_pg_pool(mam_pool)
-                                .await?;
-                        let global_identity =
-                            crate::db::lineage::live_postgres_identity(global_db).await?;
-                        if mam_identity != global_identity {
-                            return Err(anyhow::anyhow!(
-                                waddle_xmpp::mam::MamStorageError::ClusterColocationMismatch {
-                                    identities: Box::new(
-                                        waddle_xmpp::ClusterColocationIdentities {
-                                            store: (&mam_identity).into(),
-                                            global: (&global_identity).into(),
-                                        }
-                                    ),
-                                }
-                            ));
-                        }
-                    }
-                    opened.with_cluster_fencing(true)
-                } else {
-                    opened
-                }
-            }
-            #[cfg(not(feature = "clustering"))]
-            {
-                let _ = (clustering_enabled, clustering_claim_pair_live, global_db);
-                opened
-            }
+            ensure_mam_ingress_colocation(&opened, global_db).await?;
+            opened
         }
-        None => SqlxMamStorage::open_in_memory().await.map_err(|error| {
-            anyhow::anyhow!("Failed to initialize WebSocket MAM storage: {error}")
-        })?,
     };
-
-    Ok(Arc::new(storage))
+    Ok(Arc::new(storage.with_cluster_fencing(
+        clustering_enabled && clustering_claim_pair_live,
+    )))
 }
 
 /// Explicit dependency bundle for [`create_router`]. Grouped into a
@@ -497,6 +568,34 @@ pub(crate) async fn create_router(deps: RouterDeps) -> Result<Router> {
                 .on_response(observe_http_response),
         );
     Ok(router)
+}
+
+async fn open_ingress_authority(
+    config: &ServerConfig,
+    state: &AppState,
+) -> Result<Arc<crate::ingress::IngressAuthority>> {
+    #[cfg(feature = "clustering")]
+    let node_identity = if config.clustering.enabled {
+        Some(
+            state
+                .clustering_claims
+                .node_identity
+                .clone()
+                .ok_or(crate::ingress::IngressStartupError::NodeIdentityMissing)?,
+        )
+    } else {
+        None
+    };
+    Ok(Arc::new(
+        crate::ingress::IngressAuthority::new(
+            config.ingress.clone(),
+            state.db_pool.global().clone(),
+            state.lineage_config.clone(),
+            #[cfg(feature = "clustering")]
+            node_identity,
+        )
+        .await?,
+    ))
 }
 
 async fn create_websocket_state(
@@ -956,14 +1055,7 @@ async fn create_websocket_state(
     );
     let provider_dispatch_tasks =
         crate::server::routes::extension_webhooks::ProviderDispatchTracker::new();
-    let ingress_shadow = crate::ingress_shadow::IngressShadowHandle::new(
-        server_config.ingress_shadow.clone(),
-        state.db_pool.global().clone(),
-        state.lineage_config.clone(),
-        state.clustering_claims.node_identity.clone(),
-    )
-    .await
-    .map_err(|error| anyhow::anyhow!("failed to initialize ingress shadow: {error}"))?;
+    let ingress = open_ingress_authority(server_config, &state).await?;
     let websocket_state = Arc::new(WebSocketState {
         deps: WebSocketDeps {
             app_state: state.clone(),
@@ -1003,7 +1095,7 @@ async fn create_websocket_state(
                 dnd_reader,
                 notification_activity,
                 sm_session_registry,
-                ingress_shadow,
+                ingress,
                 link_preview_resolves:
                     crate::server::routes::websocket::default_link_preview_resolve_permits(),
                 caps_resolver,
@@ -1551,32 +1643,6 @@ async fn create_pending_delivery_storage(
     Ok(Arc::new(storage))
 }
 
-/// Fail-fast guard for XEP-0313 MAM storage durability. A missing or
-/// in-memory database URL is only acceptable for dev/test runs that
-/// explicitly opt in via `WADDLE_XMPP_MAM_ALLOW_IN_MEMORY`.
-pub(crate) fn ensure_mam_database_is_durable(
-    database_url: Option<&str>,
-    allow_in_memory: bool,
-) -> Result<()> {
-    if database_url.is_some_and(|url| !crate::db::sqlite_url_is_in_memory(url)) {
-        return Ok(());
-    }
-    if allow_in_memory {
-        warn!(
-            "WADDLE_XMPP_MAM_ALLOW_IN_MEMORY is set; the XEP-0313 MAM archive \
-             is using in-memory SQLite and will NOT survive restart. \
-             Use only in tests."
-        );
-        return Ok(());
-    }
-    anyhow::bail!(
-        "XEP-0313 MAM archive requires durable storage. Set \
-         WADDLE_XMPP_MAM_DATABASE_URL (or the WADDLE_DATABASE_URL fallback) \
-         to a durable SQLite/Postgres DSN, or set \
-         WADDLE_XMPP_MAM_ALLOW_IN_MEMORY=true only for tests."
-    );
-}
-
 fn ensure_push_service_global_database_is_durable() -> Result<()> {
     if cfg!(test) {
         return Ok(());
@@ -1671,5 +1737,307 @@ mod admin_failure_observer_tests {
             metrics.counter_sum("waddle.call.admin.call_failed", &[("op", "list_rooms")]),
             Some(1)
         );
+    }
+}
+
+#[cfg(test)]
+mod ingress_colocation_tests {
+    use super::*;
+
+    const LEGACY_MAM_OBJECTS: &[&str] = &[
+        "ALTER TABLE mam_messages ADD COLUMN origin_dedup_sender_scope TEXT",
+        "ALTER TABLE mam_messages ADD COLUMN origin_dedup_fingerprint TEXT",
+        "CREATE UNIQUE INDEX idx_mam_origin_groupchat_sender_content_unique ON mam_messages(room_jid, origin_id, origin_dedup_sender_scope, origin_dedup_fingerprint) WHERE origin_id IS NOT NULL AND message_type = 'groupchat'",
+        "CREATE UNIQUE INDEX idx_mam_origin_direct_content_unique ON mam_messages(room_jid, origin_id, origin_dedup_fingerprint) WHERE origin_id IS NOT NULL AND message_type <> 'groupchat'",
+    ];
+
+    #[tokio::test]
+    async fn private_memory_router_fixture_shares_the_ingress_pool() {
+        let global = crate::db::Database::in_memory("router-ingress")
+            .await
+            .expect("global");
+        global
+            .execute("CREATE TABLE shared_pool_marker (id INTEGER)")
+            .await
+            .expect("marker");
+        let mam = create_websocket_mam_storage(None, false, false, &global)
+            .await
+            .expect("shared fixture MAM");
+        let count: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM sqlite_master WHERE name = 'shared_pool_marker'",
+        )
+        .fetch_one(mam.sqlite_pool().expect("SQLite pool"))
+        .await
+        .expect("shared marker");
+        assert_eq!(count, 1);
+    }
+
+    #[tokio::test]
+    async fn sqlite_requires_the_same_durable_file_without_clustering() {
+        let directory = tempfile::tempdir().expect("temporary directory");
+        let global = crate::db::Database::open_local(
+            "ingress-colocation",
+            directory.path().join("global.db"),
+        )
+        .await
+        .expect("global database");
+        let colocated = create_websocket_mam_storage(
+            Some(global.database_url().to_owned()),
+            false,
+            false,
+            &global,
+        )
+        .await;
+        assert!(colocated.is_ok());
+        let separate =
+            crate::db::Database::open_local("separate-mam", directory.path().join("mam.db"))
+                .await
+                .expect("separate database");
+        let split_mam = SqlxMamStorage::from_sqlite_pool(
+            separate.sqlite_pool().expect("split SQLite pool").clone(),
+        )
+        .await
+        .expect("seed split MAM schema");
+        let split_pool = split_mam.sqlite_pool().expect("split SQLite pool");
+        for statement in LEGACY_MAM_OBJECTS {
+            sqlx::query(statement)
+                .execute(split_pool)
+                .await
+                .expect("seed legacy MAM object");
+        }
+        let error = create_websocket_mam_storage(
+            Some(separate.database_url().to_owned()),
+            false,
+            false,
+            &global,
+        )
+        .await
+        .err()
+        .expect("reject separate file");
+        assert!(error.downcast_ref::<IngressColocationError>().is_some());
+        let columns: Vec<String> = sqlx::query_scalar(
+            "SELECT name FROM pragma_table_info('mam_messages') WHERE name LIKE 'origin_dedup_%' ORDER BY name",
+        )
+        .fetch_all(split_pool)
+        .await
+        .expect("legacy columns survive rejection");
+        assert_eq!(
+            columns,
+            ["origin_dedup_fingerprint", "origin_dedup_sender_scope"]
+        );
+        let indexes: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM sqlite_master WHERE type = 'index' AND name IN ('idx_mam_origin_groupchat_sender_content_unique', 'idx_mam_origin_direct_content_unique')",
+        )
+        .fetch_one(split_pool)
+        .await
+        .expect("legacy indexes survive rejection");
+        assert_eq!(indexes, 2);
+    }
+
+    #[tokio::test]
+    async fn postgres_requires_the_same_schema_without_clustering() {
+        let Ok(database_url) = std::env::var("WADDLE_TEST_POSTGRES_URL") else {
+            eprintln!("skipping postgres_requires_the_same_schema_without_clustering: WADDLE_TEST_POSTGRES_URL not set");
+            return;
+        };
+        let admin = sqlx::PgPool::connect(&database_url)
+            .await
+            .expect("postgres admin");
+        let global_schema = format!("ingress_colocation_{}", uuid::Uuid::new_v4().simple());
+        let separate_schema = format!("mam_colocation_{}", uuid::Uuid::new_v4().simple());
+        for schema in [&global_schema, &separate_schema] {
+            sqlx::query(&format!("CREATE SCHEMA {schema}"))
+                .execute(&admin)
+                .await
+                .expect("create schema");
+        }
+        let mut global_url = url::Url::parse(&database_url).expect("database URL");
+        global_url
+            .query_pairs_mut()
+            .append_pair("options", &format!("-c search_path={global_schema}"));
+        let mut separate_url = url::Url::parse(&database_url).expect("database URL");
+        separate_url
+            .query_pairs_mut()
+            .append_pair("options", &format!("-c search_path={separate_schema}"));
+        let config = crate::db::DatabaseConfig::new(
+            crate::db::DatabaseDriver::Postgres,
+            global_url.to_string(),
+        );
+        let global = crate::db::Database::from_config("ingress-colocation", &config)
+            .await
+            .expect("global");
+        let shared =
+            create_websocket_mam_storage(Some(global_url.to_string()), false, false, &global)
+                .await
+                .expect("colocated MAM");
+        let split_mam = SqlxMamStorage::open(separate_url.as_str())
+            .await
+            .expect("seed split MAM schema");
+        let split_pool = split_mam.postgres_pool().expect("split Postgres pool");
+        for statement in LEGACY_MAM_OBJECTS {
+            sqlx::query(statement)
+                .execute(split_pool)
+                .await
+                .expect("seed legacy MAM object");
+        }
+        let error =
+            create_websocket_mam_storage(Some(separate_url.to_string()), false, false, &global)
+                .await
+                .err()
+                .expect("reject split MAM before schema initialization");
+        assert!(matches!(
+            error.downcast_ref::<IngressColocationError>(),
+            Some(IngressColocationError::PostgresIdentity { .. })
+        ));
+        let columns: Vec<String> = sqlx::query_scalar(
+            "SELECT column_name FROM information_schema.columns WHERE table_schema = current_schema() AND table_name = 'mam_messages' AND column_name LIKE 'origin_dedup_%' ORDER BY column_name",
+        )
+        .fetch_all(split_pool)
+        .await
+        .expect("legacy columns survive rejection");
+        assert_eq!(
+            columns,
+            ["origin_dedup_fingerprint", "origin_dedup_sender_scope"]
+        );
+        let indexes: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM pg_indexes WHERE schemaname = current_schema() AND indexname IN ('idx_mam_origin_groupchat_sender_content_unique', 'idx_mam_origin_direct_content_unique')",
+        )
+        .fetch_one(split_pool)
+        .await
+        .expect("legacy indexes survive rejection");
+        assert_eq!(indexes, 2);
+        split_pool.close().await;
+        drop(shared);
+        drop(global);
+        for schema in [&global_schema, &separate_schema] {
+            sqlx::query(&format!("DROP SCHEMA {schema} CASCADE"))
+                .execute(&admin)
+                .await
+                .expect("drop schema");
+        }
+    }
+
+    #[tokio::test]
+    async fn postgres_inbox_requires_the_same_schema_without_clustering() {
+        let Ok(database_url) = std::env::var("WADDLE_TEST_POSTGRES_URL") else {
+            eprintln!("skipping postgres_inbox_requires_the_same_schema_without_clustering: WADDLE_TEST_POSTGRES_URL not set");
+            return;
+        };
+        let admin = sqlx::PgPool::connect(&database_url)
+            .await
+            .expect("postgres admin");
+        let global_schema = format!("ingress_colocation_{}", uuid::Uuid::new_v4().simple());
+        let separate_schema = format!("inbox_colocation_{}", uuid::Uuid::new_v4().simple());
+        for schema in [&global_schema, &separate_schema] {
+            sqlx::query(&format!("CREATE SCHEMA {schema}"))
+                .execute(&admin)
+                .await
+                .expect("create schema");
+        }
+        let mut global_url = url::Url::parse(&database_url).expect("database URL");
+        global_url
+            .query_pairs_mut()
+            .append_pair("options", &format!("-c search_path={global_schema}"));
+        let mut separate_url = url::Url::parse(&database_url).expect("database URL");
+        separate_url
+            .query_pairs_mut()
+            .append_pair("options", &format!("-c search_path={separate_schema}"));
+        let config = crate::db::DatabaseConfig::new(
+            crate::db::DatabaseDriver::Postgres,
+            global_url.to_string(),
+        );
+        let global = crate::db::Database::from_config("ingress-colocation", &config)
+            .await
+            .expect("global");
+        let shared = create_ingress_inbox_storage(Some(global_url.as_str()), &global)
+            .await
+            .expect("colocated inbox");
+        let error = create_ingress_inbox_storage(Some(separate_url.as_str()), &global)
+            .await
+            .err()
+            .expect("startup rejects split inbox schema without clustering");
+        assert!(matches!(
+            error.downcast_ref::<IngressColocationError>(),
+            Some(IngressColocationError::PostgresIdentity { .. })
+        ));
+        let objects: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM pg_class WHERE relnamespace = (SELECT oid FROM pg_namespace WHERE nspname = $1)",
+        )
+        .bind(&separate_schema)
+        .fetch_one(&admin)
+        .await
+        .expect("split inbox schema remains empty");
+        assert_eq!(
+            objects, 0,
+            "rejected inbox URL must not create schema objects"
+        );
+        drop(shared);
+        drop(global);
+        for schema in [&global_schema, &separate_schema] {
+            sqlx::query(&format!("DROP SCHEMA {schema} CASCADE"))
+                .execute(&admin)
+                .await
+                .expect("drop schema");
+        }
+    }
+
+    #[tokio::test]
+    async fn sqlite_inbox_requires_the_same_file_without_clustering() {
+        let directory = tempfile::tempdir().expect("temporary directory");
+        let global =
+            crate::db::Database::open_local("inbox-colocation", directory.path().join("global.db"))
+                .await
+                .expect("global");
+        create_ingress_inbox_storage(Some(global.database_url()), &global)
+            .await
+            .expect("colocated inbox");
+        let separate =
+            crate::db::Database::open_local("separate-inbox", directory.path().join("inbox.db"))
+                .await
+                .expect("separate");
+        let error = create_ingress_inbox_storage(Some(separate.database_url()), &global)
+            .await
+            .err()
+            .expect("startup rejects split inbox database");
+        assert!(matches!(
+            error.downcast_ref::<IngressColocationError>(),
+            Some(IngressColocationError::SqliteDatabase)
+        ));
+        let objects: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM sqlite_master")
+            .fetch_one(separate.sqlite_pool().expect("split SQLite pool"))
+            .await
+            .expect("split inbox database remains empty");
+        assert_eq!(
+            objects, 0,
+            "rejected inbox URL must not create schema objects"
+        );
+    }
+
+    #[tokio::test]
+    async fn sqlite_inbox_private_memory_shares_the_ingress_pool() {
+        let global = crate::db::Database::in_memory("inbox-colocation")
+            .await
+            .expect("global");
+        global
+            .execute("CREATE TABLE shared_pool_marker (id INTEGER)")
+            .await
+            .expect("marker");
+        let inbox = create_ingress_inbox_storage(None, &global)
+            .await
+            .expect("shared inbox");
+        inbox
+            .database()
+            .execute("INSERT INTO shared_pool_marker VALUES (1)")
+            .await
+            .expect("inbox uses the same private database");
+    }
+
+    #[tokio::test]
+    async fn sqlite_rejects_private_memory_as_colocated() {
+        let global = crate::db::Database::in_memory("ingress-colocation")
+            .await
+            .expect("global");
+        let mam = SqlxMamStorage::open_in_memory().await.expect("MAM");
+        assert!(ensure_mam_ingress_colocation(&mam, &global).await.is_err());
     }
 }

@@ -13,6 +13,7 @@
 //! Bypasses the occupancy gate, rich-target validation, and extension
 //! enrichment — the sender is the room itself.
 
+use super::groupchat_archive::RoomArchiveFence;
 use super::*;
 use waddle_xmpp_core::xep0359::{add_stanza_id, StanzaId};
 
@@ -33,6 +34,7 @@ pub(super) async fn broadcast_room_system_message_event(
         .ask(GetRoom {
             room_jid: room.clone(),
         })
+        .reply_timeout(std::time::Duration::from_secs(5))
         .await
     {
         Ok(Some(actor)) => actor,
@@ -73,6 +75,7 @@ pub(super) async fn broadcast_room_system_message_event(
         .ask(GetRoomSnapshot {
             sender_jid: synthetic_sender.clone(),
         })
+        .reply_timeout(std::time::Duration::from_secs(5))
         .await
     {
         Ok(snap) => snap,
@@ -108,18 +111,69 @@ pub(super) async fn broadcast_room_system_message_event(
     // "not archived, not fanned out" contract.
     if let Some(mam_storage) = deps.mam_storage {
         let fence = resolve_room_claim_fence(deps, &room).await;
+        #[cfg(feature = "clustering")]
+        if deps.effects.is_planning() {
+            if let RoomArchiveFence::Guarded { context, .. } = &fence {
+                if snapshot.claim_fence.as_ref() != Some(context) {
+                    return None;
+                }
+            }
+        }
+
+        if deps.effects.is_planning()
+            && matches!(
+                deps.effects.room_execution(),
+                super::effects::RoomExecutionPath::None
+            )
+        {
+            let requirement = match &fence {
+                RoomArchiveFence::Unfenced => super::effects::room::RoomFenceRequirement::Unfenced,
+                #[cfg(feature = "clustering")]
+                RoomArchiveFence::Guarded { context, .. } => {
+                    super::effects::room::RoomFenceRequirement::Guarded(context.clone())
+                }
+                #[cfg(feature = "clustering")]
+                RoomArchiveFence::OwnershipLost => return None,
+            };
+            deps.effects
+                .set_room_execution(super::effects::RoomExecutionPath::Local {
+                    room: room.clone(),
+                    fence: requirement,
+                    snapshot_generation: snapshot.admission_revision,
+                });
+        }
+
         // Room-authored system messages have no occupant sender, so
         // there is no real-JID `<x xmlns='muc#user'/>` to disclose.
-        match archive_groupchat_message(mam_storage, &room, &message, 0, &fence, None).await {
+        let outcome = if deps.effects.is_planning() {
+            super::groupchat_archive::archive_groupchat_message_with_effects(
+                Some(deps),
+                mam_storage,
+                &room,
+                &message,
+                0,
+                &fence,
+                None,
+            )
+            .await
+        } else {
+            archive_groupchat_message(mam_storage, &room, &message, 0, &fence, None).await
+        };
+        match outcome {
             ArchiveGroupchatOutcome::Stored(result) => {
+                let sequence = deps.ingress_effect_capture.as_ref().map_or(0, |capture| {
+                    system_archive_sequence(&capture.snapshot().intents, &room)
+                });
                 deps.capture_intent(
-                    waddle_xmpp::ingress::IngressEffectIntent::ArchiveAuthoritative {
+                    waddle_xmpp::ingress::IngressEffectIntent::SystemMessageArchive {
+                        sequence,
                         archive: room.clone(),
                         stanza_id: waddle_xmpp_core::xep0359::StanzaId::new(
                             result.stored_id.clone(),
                             jid::Jid::from(room.clone()),
                         ),
                         by: room.clone(),
+                        archived_at: result.archived_at,
                     },
                 );
                 debug!(
@@ -127,14 +181,6 @@ pub(super) async fn broadcast_room_system_message_event(
                     stanza_id = %result.stored_id,
                     "BroadcastRoomSystemMessage: archived"
                 );
-            }
-            ArchiveGroupchatOutcome::Deduplicated(result) => {
-                debug!(
-                    room = %room,
-                    stanza_id = %result.stored_id,
-                    "BroadcastRoomSystemMessage: archive write deduplicated; dropping"
-                );
-                return None;
             }
             ArchiveGroupchatOutcome::TombstoneHit => {
                 debug!(
@@ -184,14 +230,13 @@ pub(super) async fn broadcast_room_system_message_event(
             .map(waddle_xmpp::ingress::EntityGeneration::from_storage)
             .unwrap_or(waddle_xmpp::ingress::EntityGeneration::INITIAL);
         deps.capture_intent(
-            waddle_xmpp::ingress::IngressEffectIntent::RouteMucGroupchat {
+            waddle_xmpp::ingress::IngressEffectIntent::RouteMucSystemBroadcast {
                 room: room.clone(),
                 occupants: snapshot
                     .occupants
                     .iter()
                     .map(|occupant| occupant.full_jid.clone())
                     .collect(),
-                reflection: synthetic_sender,
                 room_generation,
                 route_identity: waddle_xmpp::ingress::EffectMessageIdentity::stanza(StanzaId::new(
                     stanza_id.clone(),
@@ -201,4 +246,45 @@ pub(super) async fn broadcast_room_system_message_event(
         );
     }
     Some(stanza_id)
+}
+
+fn system_archive_sequence(
+    intents: &[waddle_xmpp::ingress::IngressEffectIntent],
+    room: &BareJid,
+) -> u32 {
+    let count = intents
+        .iter()
+        .filter(|intent| {
+            matches!(intent,
+                waddle_xmpp::ingress::IngressEffectIntent::SystemMessageArchive { archive, .. }
+                    if archive == room
+            )
+        })
+        .count();
+    u32::try_from(count).expect("ingress capture has a bounded intent count")
+}
+
+#[cfg(test)]
+mod identity_tests {
+    use super::*;
+    #[test]
+    fn generated_archive_sequences_are_distinct_and_room_scoped() {
+        let room: BareJid = "room@conference.example.com".parse().expect("room");
+        let other: BareJid = "other@conference.example.com".parse().expect("other room");
+        let mut intents = Vec::new();
+        for expected in 0..3 {
+            let sequence = system_archive_sequence(&intents, &room);
+            assert_eq!(sequence, expected);
+            intents.push(
+                waddle_xmpp::ingress::IngressEffectIntent::SystemMessageArchive {
+                    sequence,
+                    archive: room.clone(),
+                    by: room.clone(),
+                    stanza_id: StanzaId::new(uuid::Uuid::new_v4().to_string(), room.clone().into()),
+                    archived_at: chrono::Utc::now(),
+                },
+            );
+        }
+        assert_eq!(system_archive_sequence(&intents, &other), 0);
+    }
 }
