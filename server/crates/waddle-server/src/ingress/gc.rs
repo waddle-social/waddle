@@ -20,7 +20,7 @@ const RETENTION_GC_BUDGET: Duration = Duration::from_secs(2);
 /// (`RETENTION_GC_SCAN_TIMEOUT`), then one candidate transaction — the epoch
 /// lock wait plus the nine single-row statements it issues — and margin, so
 /// slowness inside the bounds is classified by the run itself rather than
-/// cancelled from outside.  2 s + 1 s + 0.1 s + 9 × 0.25 s ≈ 5.4 s.
+/// cancelled from outside.  2 s + 1 s + 0.1 s + 10 × 0.25 s ≈ 5.6 s.
 const RETENTION_GC_HARD_DEADLINE: Duration = Duration::from_secs(6);
 /// Strictly below the statement bound: PostgreSQL's statement timer covers
 /// the lock wait, so an equal or larger lock bound would surface every lock

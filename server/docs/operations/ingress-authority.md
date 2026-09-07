@@ -77,22 +77,28 @@ the pool override.
 
 GC retains canonical messages for eight days from `terminal_at`, and keeps
 rows with live stream references. Intents without matching receipts prevent
-terminalization, so unresolved effects protect the message from GC. #1658
-adds the recovery executor; #1657 durably records unfinished effects but does
-not replay them automatically. Never delete protected rows to silence alerts.
+terminalization. Reconciliation that adds omitted intents clears `terminal_at`
+in the same transaction. GC also checks receipt completeness while holding the
+canonical-row lock, so unresolved effects protect a message even when its
+terminal timestamp is stale. #1658 adds the recovery executor; #1657 durably
+records unfinished effects but does not replay them automatically. Never delete protected rows to silence alerts.
 Watch table bytes/live/dead tuples including `ingress_effect_receipts`, and
 CNPG eligible/retained-reference counts alongside reclamation totals.
 
 The collector and CNPG backlog/oldest-age queries share this eligibility
 predicate: `terminal_at IS NOT NULL AND terminal_at <= now() - interval '8 days'
-AND (has_alias OR has_delivery OR NOT has_ref)`, where the three booleans
-mean a matching row exists in `ingress_origin_aliases`, `ingress_deliveries`,
-and `ingress_sm_refs`, respectively. Expired delivery markers are GC work,
+AND receipts_complete AND (has_alias OR has_delivery OR NOT has_ref)`, where
+the three reference booleans mean a matching row exists in
+`ingress_origin_aliases`, `ingress_deliveries`, and `ingress_sm_refs`, respectively. `receipts_complete` means every recorded
+intent has a receipt with the same message key, kind, and semantic identity
+hash. Expired delivery markers are GC work only when receipts are complete,
 including when no alias or stream reference remains. GC removes aliases and
 delivery markers even when a stream reference retains the canonical row.
-The retained-reference gauge counts expired rows with `has_ref`. These can
-also be eligible until their aliases and delivery markers are removed; the
-stream reference retains the canonical row itself. Eligible age is measured
+The retained-reference gauge counts expired rows with `has_ref OR NOT
+receipts_complete`; this includes stale terminal rows with pending intents.
+Receipt-complete rows with stream references can also be eligible until their
+aliases and delivery markers are removed; the stream reference retains the
+canonical row itself. Eligible age is measured
 from `terminal_at`, not from expiry. The Rust predicate parity test pins both
 collector dialects and both CNPG eligibility aggregates to this definition.
 

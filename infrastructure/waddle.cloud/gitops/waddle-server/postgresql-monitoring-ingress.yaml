@@ -61,19 +61,29 @@ data:
             message.terminal_at,
             message.message_key IN (SELECT alias.message_key FROM ingress_origin_aliases alias) AS has_alias,
             message.message_key IN (SELECT ref.message_key FROM ingress_sm_refs ref) AS has_ref,
-            message.message_key IN (SELECT delivery.message_key FROM ingress_deliveries delivery) AS has_delivery
+            message.message_key IN (SELECT delivery.message_key FROM ingress_deliveries delivery) AS has_delivery,
+            NOT EXISTS (
+              SELECT 1 FROM ingress_effect_intents intent
+              WHERE intent.message_key = message.message_key
+                AND NOT EXISTS (
+                  SELECT 1 FROM ingress_effect_receipts receipt
+                  WHERE receipt.message_key = intent.message_key
+                    AND receipt.kind = intent.kind
+                    AND receipt.semantic_identity_hash = intent.semantic_identity_hash
+                )
+            ) AS receipts_complete
           FROM ingress_messages message
           CROSS JOIN cutoff
           WHERE message.terminal_at IS NOT NULL
             AND message.terminal_at <= cutoff.value
         )
         SELECT
-          count(*) FILTER (WHERE has_alias OR has_delivery OR NOT has_ref) AS eligible_messages,
+          count(*) FILTER (WHERE receipts_complete AND (has_alias OR has_delivery OR NOT has_ref)) AS eligible_messages,
           coalesce(
-            extract(epoch FROM now() - min(terminal_at) FILTER (WHERE has_alias OR has_delivery OR NOT has_ref)),
+            extract(epoch FROM now() - min(terminal_at) FILTER (WHERE receipts_complete AND (has_alias OR has_delivery OR NOT has_ref))),
             0
           ) AS oldest_eligible_age_seconds,
-          count(*) FILTER (WHERE has_ref) AS retained_referenced_messages
+          count(*) FILTER (WHERE has_ref OR NOT receipts_complete) AS retained_referenced_messages
         FROM expired
       primary: true
       metrics:
@@ -85,7 +95,7 @@ data:
             description: Age in seconds of the oldest ingress message eligible for retention GC.
         - retained_referenced_messages:
             usage: GAUGE
-            description: Expired terminal ingress messages retained because they still have an SM reference.
+            description: Expired terminal ingress messages retained by an SM reference or pending effect intents.
 
     waddle_ingress_messages:
       target_databases: ["waddle"]

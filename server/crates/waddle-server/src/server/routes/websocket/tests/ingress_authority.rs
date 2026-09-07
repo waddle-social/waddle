@@ -506,6 +506,7 @@ async fn connection_reply_receipt_after_transport_write_with_remote(
         BatchWriteOutcome,
     };
     use axum::extract::ws::Message;
+    let metrics = waddle_xmpp::telemetry::test_support::acquire().await;
     let mut conn = connection(&state, resumable).await;
     let lifecycle = crate::clustering::NodeLifecycle::new();
     let permit = lifecycle.admit().expect("permit");
@@ -624,6 +625,13 @@ async fn connection_reply_receipt_after_transport_write_with_remote(
         (0, 0),
         "transport write is still pending"
     );
+    assert_eq!(
+        metrics
+            .counter_sum("ingress.effects.unresolved", &[])
+            .unwrap_or(0),
+        0,
+        "a pending transport write is not an unresolved effect"
+    );
     release.add_permits(1);
     let report = writing.await;
     if transport_lost {
@@ -633,6 +641,16 @@ async fn connection_reply_receipt_after_transport_write_with_remote(
         assert!(matches!(report.outcome, BatchWriteOutcome::Continue));
         assert_eq!(frame_receipt_state(&state).await, (1, 1));
     }
+    drop(responses);
+    #[cfg(feature = "clustering")]
+    drop(pending_remote_receipts);
+    assert_eq!(
+        metrics
+            .counter_sum("ingress.effects.unresolved", &[])
+            .unwrap_or(0),
+        u64::from(transport_lost),
+        "only a failed frame completion increments unresolved effects, exactly once"
+    );
 }
 
 #[tokio::test]
@@ -725,7 +743,40 @@ async fn ingress_reply_transport_loss_leaves_canonical_row_non_terminal_postgres
 }
 
 #[tokio::test]
+async fn ingress_reply_abandoned_before_write_meters_unresolved_once() {
+    let metrics = waddle_xmpp::telemetry::test_support::acquire().await;
+    let state = create_test_websocket_state().await;
+    let mut conn = connection(&state, true).await;
+    let lifecycle = crate::clustering::NodeLifecycle::new();
+    let permit = lifecycle.admit().expect("permit");
+    let shutdown = tokio_util::sync::CancellationToken::new();
+    let responses = super::super::frame::handle_xmpp_frame_with_admission(
+        &offered_message(),
+        "example.com",
+        &state,
+        &mut conn,
+        &permit,
+        &shutdown,
+    )
+    .await;
+    assert_eq!(responses.ingress_reports.len(), 1);
+    assert_eq!(
+        metrics
+            .counter_sum("ingress.effects.unresolved", &[])
+            .unwrap_or(0),
+        0
+    );
+    drop(responses);
+    assert_eq!(
+        metrics.counter_sum("ingress.effects.unresolved", &[]),
+        Some(1)
+    );
+    assert_eq!(frame_receipt_state(&state).await, (0, 0));
+}
+
+#[tokio::test]
 async fn ingress_reply_authority_revocation_leaves_canonical_row_non_terminal() {
+    let metrics = waddle_xmpp::telemetry::test_support::acquire().await;
     use super::super::batch_write::{
         write_ingress_response_batch_with_admission, BatchAuthority, BatchSmPolicy,
         BatchWriteOutcome,
@@ -773,6 +824,11 @@ async fn ingress_reply_authority_revocation_leaves_canonical_row_non_terminal() 
     ));
     assert_eq!(written.load(std::sync::atomic::Ordering::SeqCst), 0);
     assert_eq!(frame_receipt_state(&state).await, (0, 0));
+    drop(responses);
+    assert_eq!(
+        metrics.counter_sum("ingress.effects.unresolved", &[]),
+        Some(1)
+    );
 }
 
 #[cfg(feature = "clustering")]

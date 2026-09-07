@@ -265,6 +265,11 @@ async fn commit_attempt(
         return Err(IngressUowError::EffectIntentConflict);
     }
     let intents = EffectIntentRepository::load(&mut tx, key).await?;
+    // Divergent and initially empty plans can also insert omitted obligations.
+    // Reopen under the canonical lock before committing any newly pending work.
+    if intents.len() > recorded.len() {
+        CanonicalMessageRepository::clear_terminal(&mut tx, key).await?;
+    }
     let mut plan = super::recorded::apply_recorded_intents(&plan, &intents);
     if let Some(observer_envelope) = super::recorded::room_observer_envelope(&plan) {
         CanonicalMessageRepository::record_room_observer_envelope(&mut tx, key, &observer_envelope)

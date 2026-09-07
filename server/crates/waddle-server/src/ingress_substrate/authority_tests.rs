@@ -797,3 +797,65 @@ fn room_observer_envelope_codec_stores_maximum_body_and_subject_once() {
     assert_eq!(decoded.message(), &message);
     assert_eq!(decoded.room_observer_request(), Some(message));
 }
+
+async fn gc_rechecks_pending_intents_under_canonical_lock(driver: DatabaseDriver) {
+    let Some(fixture) = Fixture::open(driver).await else {
+        return;
+    };
+    let key = MessageKey::new();
+    let now = Utc::now();
+    let mut tx = fixture.db.begin_immediate().await.expect("begin");
+    record_message(&mut tx, key, &digest(), None)
+        .await
+        .expect("canonical message");
+    terminalize_message(&mut tx, key, now - Duration::days(9))
+        .await
+        .expect("terminal proof");
+    tx.commit().await.expect("commit terminal message");
+    let budget = AliasGcBudget {
+        deadline: Instant::now() + StdDuration::from_secs(10),
+        lock_timeout: StdDuration::from_secs(1),
+        statement_timeout: StdDuration::from_secs(2),
+        scan_timeout: StdDuration::from_secs(2),
+        progress: AliasGcProgress::default(),
+    };
+    let cutoff = (now - ALIAS_RETENTION).to_rfc3339();
+    let candidates = expired_candidates(&fixture.db, &cutoff, &budget)
+        .await
+        .expect("scan before new intent");
+    assert_eq!(candidates, vec![key]);
+    let mut tx = fixture
+        .db
+        .begin_immediate()
+        .await
+        .expect("new intent transaction");
+    insert_intent(&mut tx, key, [3; 32]).await;
+    tx.commit().await.expect("commit pending intent after scan");
+    let outcome = gc_candidate_batch(&fixture.db, &cutoff, candidates, &budget)
+        .await
+        .expect("locked candidate recheck");
+    assert_eq!(outcome.deleted_messages, 0);
+    let mut tx = fixture
+        .db
+        .begin_immediate()
+        .await
+        .expect("verify retained message");
+    assert!(message_exists(&mut tx, key)
+        .await
+        .expect("message survives"));
+    assert!(!receipts_complete(&mut tx, key)
+        .await
+        .expect("pending intent survives"));
+    tx.commit().await.expect("close read");
+    fixture.close().await;
+}
+
+#[tokio::test]
+async fn sqlite_gc_rechecks_pending_intents_under_canonical_lock() {
+    gc_rechecks_pending_intents_under_canonical_lock(DatabaseDriver::Sqlite).await;
+}
+
+#[tokio::test]
+async fn postgres_gc_rechecks_pending_intents_under_canonical_lock() {
+    gc_rechecks_pending_intents_under_canonical_lock(DatabaseDriver::Postgres).await;
+}

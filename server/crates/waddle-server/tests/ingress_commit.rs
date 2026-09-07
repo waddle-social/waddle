@@ -90,3 +90,6 @@ mod tombstone;
 mod owner_pending;
 #[path = "ingress_cases/replay.rs"]
 mod replay;
+
+#[path = "ingress_cases/retention.rs"]
+mod retention;

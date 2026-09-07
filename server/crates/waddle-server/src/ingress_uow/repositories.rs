@@ -269,6 +269,26 @@ impl CanonicalMessageRepository {
         .map_err(Into::into)
     }
 
+    /// Reopen a canonical row when reconciliation adds a new obligation.
+    pub async fn clear_terminal(
+        transaction: &mut IngressUowTransaction<'_>,
+        message_key: MessageKey,
+    ) -> Result<(), IngressUowError> {
+        if !Self::lock(transaction, message_key).await? {
+            return Err(IngressUowError::EffectIntentMessageMissing);
+        }
+        let sql = dialect_sql(
+            transaction,
+            "UPDATE ingress_messages SET terminal_at = NULL WHERE message_key = ?::uuid AND terminal_at IS NOT NULL",
+            "UPDATE ingress_messages SET terminal_at = NULL WHERE message_key = ? AND terminal_at IS NOT NULL",
+        );
+        transaction
+            .transaction_mut()
+            .execute(sql, crate::db_params![message_key.to_storage().to_string()])
+            .await?;
+        Ok(())
+    }
+
     pub async fn terminalize(
         transaction: &mut IngressUowTransaction<'_>,
         message_key: MessageKey,
@@ -667,9 +687,16 @@ impl EffectReceiptRepository {
         transaction: &mut IngressUowTransaction<'_>,
         message_key: MessageKey,
     ) -> Result<bool, IngressUowError> {
-        ingress_substrate::receipts_complete(transaction.transaction_mut(), message_key)
+        Self::receipts_complete_on_transaction(transaction.transaction_mut(), message_key)
             .await
             .map_err(Into::into)
+    }
+
+    pub(crate) async fn receipts_complete_on_transaction(
+        transaction: &mut crate::db::Transaction<'_>,
+        message_key: MessageKey,
+    ) -> Result<bool, ingress_substrate::IngressSubstrateError> {
+        ingress_substrate::receipts_complete(transaction, message_key).await
     }
 
     pub async fn record_receipt_pooled(

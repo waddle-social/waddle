@@ -31,7 +31,7 @@ pub enum ExternalOutcome {
     Done,
     Failed,
     Uncertain,
-    /// Frames have been prepared but their transport write is not confirmed.
+    /// Frames are prepared but their transport write and delivery receipts are not confirmed.
     AwaitingFrameDelivery,
 }
 
@@ -144,6 +144,18 @@ pub struct ExecutionReport {
     pub terminalization_failure: Option<ExecutionPersistenceFailure>,
 }
 
+impl Drop for ExecutionReport {
+    fn drop(&mut self) {
+        // Awaiting a write is healthy. Only abandoned completion obligations
+        // represent unresolved effects (including cancellation and disconnect).
+        for (effect, outcome) in &self.outcomes {
+            if *outcome == ExternalOutcome::AwaitingFrameDelivery {
+                meter_unresolved(effect);
+            }
+        }
+    }
+}
+
 impl ExecutionReport {
     #[cfg(feature = "clustering")]
     pub(crate) fn retain_relay_frame_completion(
@@ -178,11 +190,7 @@ impl ExecutionReport {
         let Some(message_key) = self.message_key else {
             return Ok(false);
         };
-        for obligation in &self.frame_obligations {
-            if self.outcomes[obligation.effect_index].1 == ExternalOutcome::AwaitingFrameDelivery {
-                self.outcomes[obligation.effect_index].1 = ExternalOutcome::Done;
-            }
-        }
+        let started = tokio::time::Instant::now();
         tokio::time::timeout(budget, async {
             for key in &self.frame_completion_receipts {
                 EffectReceiptRepository::record_receipt_pooled(
@@ -193,11 +201,27 @@ impl ExecutionReport {
                 )
                 .await?;
             }
-            terminalize_if_complete(uow, message_key).await
+            Ok::<(), IngressUowError>(())
         })
         .await
         .map_err(|_| ExecutionPersistenceFailure::BudgetExhausted)?
-        .map_err(ExecutionPersistenceFailure::from)
+        .map_err(ExecutionPersistenceFailure::from)?;
+        // The frames are written and their receipts are durable: these
+        // obligations are resolved regardless of how terminalization below
+        // fares, so dropping the report must not meter them as unresolved.
+        for obligation in &self.frame_obligations {
+            if self.outcomes[obligation.effect_index].1 == ExternalOutcome::AwaitingFrameDelivery {
+                self.outcomes[obligation.effect_index].1 = ExternalOutcome::Done;
+            }
+        }
+        let remaining = budget.saturating_sub(started.elapsed());
+        if remaining.is_zero() {
+            return Err(ExecutionPersistenceFailure::BudgetExhausted);
+        }
+        tokio::time::timeout(remaining, terminalize_if_complete(uow, message_key))
+            .await
+            .map_err(|_| ExecutionPersistenceFailure::BudgetExhausted)?
+            .map_err(ExecutionPersistenceFailure::from)
     }
 }
 
@@ -338,6 +362,9 @@ pub async fn execute_effects(
             }
         };
         report.outcomes[index].1 = outcome;
+        if outcome == ExternalOutcome::AwaitingFrameDelivery {
+            continue;
+        }
         if outcome != ExternalOutcome::Done {
             meter_unresolved(effect);
             continue;
@@ -889,3 +916,7 @@ mod direct_receipt_tests;
 #[cfg(test)]
 #[path = "execute_local_carbons_tests.rs"]
 mod local_carbons_tests;
+
+#[cfg(test)]
+#[path = "execute_frame_completion_tests.rs"]
+mod frame_completion_tests;

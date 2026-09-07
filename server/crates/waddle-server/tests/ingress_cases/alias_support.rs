@@ -159,8 +159,8 @@ pub(super) async fn wire_messages(
     assert!(report.receipt_failures.is_empty());
     report
         .frame_obligations
-        .into_iter()
-        .flat_map(|obligation| obligation.frames)
+        .iter()
+        .flat_map(|obligation| obligation.frames.iter().cloned())
         .map(|stanza| {
             let Stanza::Message(message) = stanza else {
                 panic!("message frame")

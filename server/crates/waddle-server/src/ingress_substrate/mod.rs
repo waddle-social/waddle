@@ -701,6 +701,20 @@ async fn gc_candidate_batch(
                 continue;
             }
         }
+        // Recheck receipt completeness after acquiring the canonical lock: a
+        // reconciliation may have added intents since the candidate scan.
+        if !crate::ingress_uow::EffectReceiptRepository::receipts_complete_on_transaction(
+            &mut tx,
+            message_key,
+        )
+        .await
+        .map_err(|error| gc_failure(deleted_messages, error.into()))?
+        {
+            tx.commit()
+                .await
+                .map_err(|error| gc_database_failure(deleted_messages, error))?;
+            continue;
+        }
         // Alias retention has elapsed: the aliases go unconditionally, even
         // when live SM refs keep the message row itself alive —
         // otherwise a reused sender/target/origin-id would keep resolving
@@ -1221,6 +1235,14 @@ const GC_CANDIDATES_POSTGRES: &str = r#"
             SELECT m.message_key::text
             FROM ingress_messages m
             WHERE m.terminal_at IS NOT NULL AND m.terminal_at <= ?::timestamptz
+              AND NOT EXISTS (
+                  SELECT 1 FROM ingress_effect_intents i WHERE i.message_key = m.message_key
+                    AND NOT EXISTS (
+                        SELECT 1 FROM ingress_effect_receipts r
+                        WHERE r.message_key = i.message_key AND r.kind = i.kind
+                          AND r.semantic_identity_hash = i.semantic_identity_hash
+                    )
+              )
               AND (
                   EXISTS (
                       SELECT 1 FROM ingress_origin_aliases a WHERE a.message_key = m.message_key
@@ -1239,6 +1261,14 @@ const GC_CANDIDATES_SQLITE: &str = r#"
             SELECT m.message_key
             FROM ingress_messages m
             WHERE m.terminal_at IS NOT NULL AND m.terminal_at <= ?
+              AND NOT EXISTS (
+                  SELECT 1 FROM ingress_effect_intents i WHERE i.message_key = m.message_key
+                    AND NOT EXISTS (
+                        SELECT 1 FROM ingress_effect_receipts r
+                        WHERE r.message_key = i.message_key AND r.kind = i.kind
+                          AND r.semantic_identity_hash = i.semantic_identity_hash
+                    )
+              )
               AND (
                   EXISTS (
                       SELECT 1 FROM ingress_origin_aliases a WHERE a.message_key = m.message_key
@@ -1315,7 +1345,10 @@ mod tests {
         )
         .expect("read deployed ingress monitoring SQL");
         let monitoring = normalized(&monitoring);
-        let eligibility = "has_alias OR has_delivery OR NOT has_ref";
+        let eligibility = "receipts_complete AND (has_alias OR has_delivery OR NOT has_ref)";
+        let receipt_predicate = "NOT EXISTS ( SELECT 1 FROM ingress_effect_intents intent WHERE intent.message_key = message.message_key AND NOT EXISTS ( SELECT 1 FROM ingress_effect_receipts receipt WHERE receipt.message_key = intent.message_key AND receipt.kind = intent.kind AND receipt.semantic_identity_hash = intent.semantic_identity_hash ) )";
+        assert!(monitoring.contains(&format!("{receipt_predicate} AS receipts_complete")));
+
         assert!(monitoring.contains("SELECT now() - interval '8 days' AS value"));
         assert!(monitoring.contains(
             "WHERE message.terminal_at IS NOT NULL AND message.terminal_at <= cutoff.value"
@@ -1328,13 +1361,17 @@ mod tests {
             "backlog and oldest-age must use the same collector eligibility"
         );
         assert!(
-            monitoring.contains("count(*) FILTER (WHERE has_ref) AS retained_referenced_messages")
+            monitoring.contains("count(*) FILTER (WHERE has_ref OR NOT receipts_complete) AS retained_referenced_messages")
         );
         for (sql, cutoff) in [
             (GC_CANDIDATES_POSTGRES, "?::timestamptz"),
             (GC_CANDIDATES_SQLITE, "?"),
         ] {
             let sql = normalized(sql)
+                .replace(
+                    "NOT EXISTS ( SELECT 1 FROM ingress_effect_intents i WHERE i.message_key = m.message_key AND NOT EXISTS ( SELECT 1 FROM ingress_effect_receipts r WHERE r.message_key = i.message_key AND r.kind = i.kind AND r.semantic_identity_hash = i.semantic_identity_hash ) )",
+                    "receipts_complete",
+                )
                 .replace(
                     "EXISTS ( SELECT 1 FROM ingress_origin_aliases a WHERE a.message_key = m.message_key )",
                     "has_alias",
@@ -1357,7 +1394,7 @@ mod tests {
             assert_eq!(
                 predicate,
                 format!(
-                    "m.terminal_at IS NOT NULL AND m.terminal_at <= {cutoff} AND ( {eligibility} )"
+                    "m.terminal_at IS NOT NULL AND m.terminal_at <= {cutoff} AND receipts_complete AND ( has_alias OR has_delivery OR NOT has_ref )"
                 )
             );
         }
