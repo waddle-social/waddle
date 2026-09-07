@@ -873,6 +873,15 @@ async fn timed_out_inbound_stanza_detaches_and_resumes_before_the_hole() {
     conn.registry_owner = Some(owner);
     conn.sm_state
         .enable("timeout-detach".to_string(), true, Some(300));
+    state
+        .deps
+        .protocol
+        .ingress
+        .enroll_stream(&waddle_xmpp::pending_delivery::SmSessionId::new(
+            "timeout-detach",
+        ))
+        .await
+        .expect("enabled stream ingress enrollment");
     // A production enabled stream always carries a live claim fence;
     // without one the fenceless teardown promotes terminally instead of
     // taking the detach path this test exercises.
@@ -5382,6 +5391,13 @@ async fn sm_resume_matching_authenticated_identity_restores_detached_principal_s
     state
         .deps
         .protocol
+        .ingress
+        .enroll_stream(&waddle_xmpp::pending_delivery::SmSessionId::new(stream_id))
+        .await
+        .expect("ingress enrollment");
+    state
+        .deps
+        .protocol
         .sm_session_registry
         .store_session_with_principal(
             DetachedSession {
@@ -9450,6 +9466,15 @@ mod fix_a_post_cas_shutdown {
         // seed the account + session row and persist the snapshot WITH its
         // principal, exactly as production detach does.
         let alice_session = super::create_test_session(state.as_ref(), "alice").await;
+        state
+            .deps
+            .protocol
+            .ingress
+            .enroll_stream(&waddle_xmpp::pending_delivery::SmSessionId::new(
+                owner_detached.stream_id.clone(),
+            ))
+            .await
+            .expect("ingress enrollment");
         owner_registry
             .store_session_with_principal(
                 owner_detached,

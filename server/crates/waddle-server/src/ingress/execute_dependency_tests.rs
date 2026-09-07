@@ -265,6 +265,17 @@ fn invite_receipts_require_the_exact_captured_route_and_actual_delivery_proof() 
     let route_key = super::super::durable::receipt_key(&route_intent).expect("route key");
     let pending_key = super::super::durable::receipt_key(&pending_intent).expect("pending key");
     assert_eq!(mapped, vec![vec![route_key.clone(), pending_key.clone()]]);
+    assert!(
+        proven_receipts(
+            &effect,
+            &EffectOutcome::MucUserDelivery(Ok(MucUserDeliveryProof::Delivered {
+                resources: vec![]
+            })),
+            &mapped[0],
+        )
+        .is_empty(),
+        "partial live delivery cannot discharge the fallback"
+    );
     assert_eq!(
         proven_receipts(
             &effect,
@@ -273,7 +284,7 @@ fn invite_receipts_require_the_exact_captured_route_and_actual_delivery_proof() 
             })),
             &mapped[0]
         ),
-        vec![route_key]
+        vec![route_key, pending_key.clone()]
     );
     assert_eq!(
         proven_receipts(

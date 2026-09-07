@@ -1136,25 +1136,30 @@ async fn remote_full_jid_route_reply_returns_detached_stream_identity() {
     );
 }
 
-#[tokio::test]
-async fn remote_carbons_reply_returns_detached_stream_identity() {
-    let services = Arc::new(
-        services_with_claims(
-            origin_identity(),
-            receiver_identity(),
-            receiver_identity(),
-            test_peer_id(),
-        )
-        .await,
-    );
+pub(crate) async fn remote_carbon_owner_reply(
+    source: jid::FullJid,
+    sm: Arc<InMemorySmSessionRegistry>,
+    before_fanout: impl std::future::Future<Output = ()>,
+) -> RelayRemoteUserSideEffectReply {
+    let mut services = services_with_claims(
+        origin_identity(),
+        receiver_identity(),
+        receiver_identity(),
+        test_peer_id(),
+    )
+    .await;
+    services.sm_session_registry = sm;
+    let services = Arc::new(services);
     let bridge = OrderedRelayDeliveryBridge::new(
         CancellationToken::new(),
         &ClusteringMessagingConfig::default(),
     );
     bridge.wire(Arc::clone(&services));
 
-    let source: jid::FullJid = "alice@example.com/web".parse().expect("source");
-    let detached_target: jid::FullJid = "alice@example.com/phone".parse().expect("target");
+    let detached_target = source
+        .to_bare()
+        .with_resource_str("carbon-sibling")
+        .expect("target");
     let owner = source.to_bare();
     let (source_tx, _source_rx) = mpsc::channel(1);
     let source_entry = ConnectionEntry::new(source_tx);
@@ -1218,28 +1223,44 @@ async fn remote_carbons_reply_returns_detached_stream_identity() {
         "remote carbon".to_string(),
     );
 
-    let reply = bridge
+    before_fanout.await;
+    bridge
         .apply_remote_user_side_effect_on_owner(RelayRemoteUserSideEffect {
-            source_jid: source,
+            source_jid: source.clone(),
             registration_id,
             socket_generation,
             effect: RemoteUserSideEffect::Carbons {
                 owner: owner.clone(),
                 message: RemoteStanza(Stanza::Message(message)),
                 kind: RemoteCarbonKind::Sent,
-                exclude: vec!["alice@example.com/web".parse().expect("exclude")],
+                exclude: vec![source],
             },
             trace: RelayTraceContext::default(),
         })
-        .await;
+        .await
+}
 
+#[tokio::test]
+async fn remote_carbons_reply_returns_detached_stream_identity() {
+    let reply = remote_carbon_owner_reply(
+        "alice@example.com/web".parse().expect("source"),
+        Arc::new(InMemorySmSessionRegistry::new()),
+        async {},
+    )
+    .await;
     assert_eq!(reply.status, RelayRemoteUserSideEffectStatus::Applied);
-    assert_eq!(reply.carbon_recipients, vec![detached_target]);
+    assert_eq!(
+        reply.carbon_recipients,
+        vec!["alice@example.com/carbon-sibling"
+            .parse::<jid::FullJid>()
+            .expect("target")]
+    );
     assert_eq!(
         reply.recipient_sm_append_streams,
-        vec![SmSessionId::new("remote-carbon-detached-stream")],
+        vec![SmSessionId::new("remote-carbon-detached-stream")]
     );
 }
+
 #[tokio::test]
 async fn stale_force_detach_error_cleans_old_socket_mirror() {
     let services = Arc::new(

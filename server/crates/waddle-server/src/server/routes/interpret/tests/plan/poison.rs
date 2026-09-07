@@ -330,6 +330,12 @@ impl PendingDeliveryStorage for PoisonPending {
     ) -> Result<u64, PendingStorageError> {
         panic!("planning wrote PendingDeliveryStorage::scrub_for_tombstone")
     }
+    async fn snapshot_for_tombstone(
+        &self,
+        target: &waddle_xmpp::tombstone::TombstoneTarget,
+    ) -> Result<Vec<PendingRowId>, PendingStorageError> {
+        self.0.snapshot_for_tombstone(target).await
+    }
     async fn scrub_for_tombstone_with_row_ids(
         &self,
         _target: &waddle_xmpp::tombstone::TombstoneTarget,

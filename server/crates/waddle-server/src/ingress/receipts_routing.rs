@@ -26,6 +26,9 @@ pub(super) fn route_receipts(
         return Some(indices);
     }
     match intent {
+        IngressEffectIntent::RelayCarbons { owner, exclude, kind } => Some(external.iter().enumerate().filter_map(|(index, effect)| {
+            matches!(effect, ExternalEffect::Delivery(ExternalDeliveryEffect::RelayCarbons { owner: actual_owner, exclude: actual_exclude, kind: actual_kind, .. }) if owner == actual_owner && exclude == actual_exclude && kind == actual_kind).then_some(index)
+        }).collect()),
         IngressEffectIntent::RouteDirect {
             recipient,
             fanout,

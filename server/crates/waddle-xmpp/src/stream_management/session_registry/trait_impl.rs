@@ -693,10 +693,14 @@ impl SmSessionRegistry for InMemorySmSessionRegistry {
         // listing is acceptable here.
         if let Some(storage) = &self.persistence {
             let stored = storage
-                .list_all_sessions_with_unacked()
+                .list_all_sessions()
                 .await
                 .map_err(|e| SmRegistryError::Internal(e.to_string()))?;
-            for (persisted, unacked) in stored {
+            for persisted in stored {
+                let unacked = storage
+                    .list_unacked(&persisted.stream_id)
+                    .await
+                    .map_err(|e| SmRegistryError::Internal(e.to_string()))?;
                 let stream_id = persisted.stream_id.as_str().to_string();
                 // Stream lock first: serializes with store_session /
                 // reinsert_for_retry so the durable delete and the
@@ -776,5 +780,63 @@ impl SmSessionRegistry for InMemorySmSessionRegistry {
             removed_count: removed_entries.len(),
             entries: removed_entries,
         })
+    }
+}
+
+impl InMemorySmSessionRegistry {
+    /// Snapshot all local and durable replay entries before ingress commits.
+    /// Unlike startup recovery, a failed durable read fails the whole snapshot.
+    pub async fn snapshot_unacked_for_tombstone(
+        &self,
+        target: &TombstoneTarget,
+    ) -> Result<Vec<TombstoneScrubbedSmEntry>, SmRegistryError> {
+        let mut matched = Vec::new();
+        for inventory in [
+            &self.sessions,
+            &self.claimed_sessions,
+            &self.pending_promotion_retries,
+        ] {
+            let sessions = inventory
+                .read()
+                .map_err(|_| SmRegistryError::Internal("Lock poisoned".into()))?;
+            for (stream, session) in sessions.iter() {
+                for entry in &session.unacked_stanzas {
+                    if entry
+                        .stanza_xml
+                        .parse::<xmpp_parsers::minidom::Element>()
+                        .is_ok_and(|element| target.matches_message_element(&element))
+                    {
+                        matched.push(TombstoneScrubbedSmEntry {
+                            stream_id: SmSessionId::new(stream.clone()),
+                            sequence: entry.sequence,
+                        });
+                    }
+                }
+            }
+        }
+        if let Some(storage) = &self.persistence {
+            for session in storage
+                .list_all_sessions()
+                .await
+                .map_err(|e| SmRegistryError::Internal(e.to_string()))?
+            {
+                for entry in storage
+                    .list_unacked(&session.stream_id)
+                    .await
+                    .map_err(|e| SmRegistryError::Internal(e.to_string()))?
+                {
+                    if target.matches_message_element(&entry.stanza.to_element()) {
+                        let identity = TombstoneScrubbedSmEntry {
+                            stream_id: session.stream_id.clone(),
+                            sequence: entry.sequence,
+                        };
+                        if !matched.contains(&identity) {
+                            matched.push(identity);
+                        }
+                    }
+                }
+            }
+        }
+        Ok(matched)
     }
 }

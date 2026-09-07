@@ -575,3 +575,70 @@ async fn xep0424_tx_archive_retry_after_tombstone_returns_tombstone_hit() {
     ));
     retry_tx.commit().await.expect("commit retry transaction");
 }
+
+#[tokio::test]
+async fn tombstone_replay_snapshot_precedes_pending_deletion_and_preserves_other_authors() {
+    use waddle_xmpp::{
+        pending_delivery::{
+            storage::{InMemoryPendingDeliveryStorage, PendingDeliveryStorage},
+            PendingPayload, PendingRow, PendingRowId,
+        },
+        tombstone::TombstoneTarget,
+    };
+    let storage =
+        InMemoryPendingDeliveryStorage::new(waddle_xmpp::pending_delivery::QuotaPolicy::Unlimited);
+    let recipient: jid::BareJid = "reader@example.com".parse().expect("reader");
+    let target = TombstoneTarget::Direct {
+        wire_id: "original".into(),
+        author: "author@example.com".parse().expect("author"),
+        archive: recipient.clone(),
+    };
+    let mut rows = Vec::new();
+    for author in ["author@example.com/phone", "other@example.com/phone"] {
+        let mut message = xmpp_parsers::message::Message::new(Some(recipient.clone().into()));
+        message.from = Some(author.parse().expect("sender"));
+        message.id = Some(xmpp_parsers::message::Id("original".into()));
+        let row = PendingRow {
+            id: PendingRowId::fresh(),
+            recipient: recipient.clone(),
+            original_receipt_at: chrono::Utc::now(),
+            payload: PendingPayload::Transient(Box::new(message)),
+            flushed_in_session: None,
+            outbound_sequence: None,
+        };
+        rows.push(row.id.clone());
+        storage.insert(row).await.expect("queued");
+    }
+    assert_eq!(
+        storage
+            .snapshot_for_tombstone(&target)
+            .await
+            .expect("snapshot"),
+        vec![rows[0].clone()]
+    );
+    assert_eq!(
+        storage
+            .count(&recipient)
+            .await
+            .expect("snapshot preserves queue"),
+        2
+    );
+    let scrub = storage
+        .scrub_for_tombstone_with_row_ids(&target)
+        .await
+        .expect("scrub");
+    assert_eq!(scrub.row_ids, vec![rows[0].clone()]);
+    assert_eq!(
+        storage
+            .list(&recipient)
+            .await
+            .expect("other author retained")[0]
+            .id,
+        rows[1]
+    );
+    assert!(storage
+        .snapshot_for_tombstone(&target)
+        .await
+        .expect("retry snapshot")
+        .is_empty());
+}

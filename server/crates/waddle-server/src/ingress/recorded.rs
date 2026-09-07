@@ -286,6 +286,16 @@ fn apply_external(
     use crate::server::routes::websocket::handlers::message::muc_invite::InviteLedgerMutation;
     match (effect, original, recorded) {
         (
+            ExternalEffect::Delivery(crate::server::routes::interpret::effects::delivery::ExternalDeliveryEffect::RelayCarbons { owner, exclude, kind, .. }),
+            IngressEffectIntent::RelayCarbons { owner: original_owner, kind: original_kind, .. },
+            IngressEffectIntent::RelayCarbons { owner: recorded_owner, exclude: recorded_exclude, kind: recorded_kind },
+        ) if owner == original_owner && kind == original_kind => {
+            *owner = recorded_owner.clone();
+            *exclude = recorded_exclude.clone();
+            *kind = *recorded_kind;
+        }
+
+        (
             ExternalEffect::Room(ExternalRoomEffect::ArchiveAfterPin {
                 room,
                 message,

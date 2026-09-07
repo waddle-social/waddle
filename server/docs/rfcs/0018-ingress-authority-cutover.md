@@ -74,6 +74,14 @@ intent has a receipt, a follow-up transaction terminalizes the canonical row
 metered `ingress.effects.unresolved`). A Phase-C timeout never changes the
 disposition: `StanzaTimeout` maps to `Unhandled` only before commit.
 
+Remote carbon obligations receive a receipt only on the owner's complete
+`Applied` reply. Detached inventory or append errors return typed
+`Incomplete { reason }`; the origin records a failed external effect and leaves
+its intent unresolved. The reply change uses remote message ids
+`waddle.clustering.relay.remote_user_side_effect.v2` and
+`waddle.clustering.relay.deliver_ordered.v6`.
+
+
 ## 3. Identity
 
 ### 3.1 Admission identity

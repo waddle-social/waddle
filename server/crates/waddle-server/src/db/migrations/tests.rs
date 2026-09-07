@@ -3406,6 +3406,7 @@ async fn sqlite_v1012_rolls_forward_from_v1011() {
         .await
         .expect("apply preceding migrations");
     assert!(!sqlite_table_exists(&db, "ingress_messages").await);
+    seed_retained_sm_session(&db).await;
     assert_eq!(
         MigrationRunner::single()
             .run(&db)
@@ -3413,6 +3414,8 @@ async fn sqlite_v1012_rolls_forward_from_v1011() {
             .expect("apply V1012"),
         vec![1012]
     );
+    assert!(!sqlite_table_exists(&db, "sm_sessions").await);
+    assert!(!sqlite_table_exists(&db, "sm_unacked").await);
     for table in [
         "ingress_protocol_epoch",
         "ingress_messages",
@@ -3451,6 +3454,7 @@ async fn postgres_v1012_resets_epoch_zero_soak_rows() {
     .run(&db)
     .await
     .expect("apply preceding migrations");
+    seed_retained_sm_session(&db).await;
     let conn = db.guard().await.expect("Postgres guard");
     for sql in [
         "INSERT INTO ingress_messages (message_key, digest_version, digest) VALUES ('00000000-0000-0000-0000-000000000001', 1, decode(repeat('00', 32), 'hex'))",
@@ -3470,6 +3474,8 @@ async fn postgres_v1012_resets_epoch_zero_soak_rows() {
             .expect("apply V1012"),
         vec![1012]
     );
+    assert!(!postgres_table_exists(&db, "sm_sessions").await);
+    assert!(!postgres_table_exists(&db, "sm_unacked").await);
     let conn = db.guard().await.expect("Postgres guard");
     let mut rows = conn.query("SELECT (SELECT COUNT(*) FROM ingress_messages) + (SELECT COUNT(*) FROM ingress_origin_aliases) + (SELECT COUNT(*) FROM ingress_sm_refs) + (SELECT COUNT(*) FROM ingress_deliveries) + (SELECT COUNT(*) FROM ingress_sm_streams) + (SELECT COUNT(*) FROM ingress_effect_intents) + (SELECT COUNT(*) FROM ingress_effect_receipts)", ()).await.expect("count remaining soak rows");
     let count: i64 = rows
@@ -3484,4 +3490,215 @@ async fn postgres_v1012_resets_epoch_zero_soak_rows() {
     drop(conn);
     drop(db);
     drop_postgres_schema(&admin, &schema).await;
+}
+
+/// Store-owned tables exist only on upgrades, not on a fresh catalog install.
+async fn seed_retained_sm_session(db: &Database) {
+    let conn = db.guard().await.expect("retained SM schema");
+    for sql in [
+        "CREATE TABLE sm_sessions (stream_id TEXT PRIMARY KEY, inbound_count BIGINT NOT NULL)",
+        "CREATE TABLE sm_unacked (stream_id TEXT NOT NULL, sequence BIGINT NOT NULL, stanza_xml TEXT NOT NULL, PRIMARY KEY (stream_id, sequence))",
+        "INSERT INTO sm_sessions (stream_id, inbound_count) VALUES ('retained-before-cutover', 7)",
+        r#"INSERT INTO sm_unacked (stream_id, sequence, stanza_xml) VALUES ('retained-before-cutover', 1, '<message xmlns="jabber:client"/>')"#,
+    ] {
+        conn.execute(sql, ()).await.expect("retained SM row");
+    }
+}
+
+use crate::sm_persistence::DatabaseSmPersistence;
+use std::sync::Arc;
+use waddle_xmpp::stream_management::persistence::SmPersistenceStorage;
+
+async fn migration_v1012_recreates_sql_sm_store(database_url: &str) {
+    let storage = DatabaseSmPersistence::open(Some(database_url))
+        .await
+        .expect("initialize real SQL SM store");
+    MigrationRunner::new(
+        global::all()
+            .into_iter()
+            .chain(waddle::all())
+            .filter(|migration| migration.version < 1012)
+            .collect(),
+    )
+    .run(&storage.database())
+    .await
+    .expect("apply pre-cutover catalog");
+    let session = cutover_sm_session("retained-cutover-session");
+    let principal = cutover_sm_principal();
+    storage
+        .store_session_atomic_with_principal(
+            &principal,
+            session.clone(),
+            vec![cutover_sm_unacked(session.stream_id.as_str(), 11)],
+        )
+        .await
+        .expect("persist retained SQL session and replay stanza");
+    assert!(storage
+        .get_session(&session.stream_id)
+        .await
+        .expect("retained snapshot read")
+        .is_some());
+    assert_eq!(
+        storage
+            .list_unacked(&session.stream_id)
+            .await
+            .expect("retained replay read")
+            .len(),
+        1
+    );
+    assert_eq!(
+        MigrationRunner::single()
+            .run(&storage.database())
+            .await
+            .expect("cutover migration"),
+        vec![1012]
+    );
+    drop(storage);
+
+    // Production startup initializes the store only after migrations complete.
+    let reopened = DatabaseSmPersistence::open(Some(database_url))
+        .await
+        .expect("recreate SQL SM schema after cutover");
+    assert!(reopened
+        .get_session(&session.stream_id)
+        .await
+        .expect("old session lookup")
+        .is_none());
+    assert!(reopened
+        .get_session_principal(&session.stream_id)
+        .await
+        .expect("old principal lookup")
+        .is_none());
+    assert!(reopened
+        .list_unacked(&session.stream_id)
+        .await
+        .expect("old replay lookup")
+        .is_empty());
+    let registry = waddle_xmpp::stream_management::InMemorySmSessionRegistry::new()
+        .with_persistence(Arc::new(reopened.clone()));
+    assert_eq!(
+        registry
+            .restore_from_persistence()
+            .await
+            .expect("startup recovery"),
+        0
+    );
+    reopened
+        .store_session_atomic_with_principal(
+            &principal,
+            session.clone(),
+            vec![cutover_sm_unacked(session.stream_id.as_str(), 11)],
+        )
+        .await
+        .expect("new session writes after recreation");
+    assert!(reopened
+        .get_session(&session.stream_id)
+        .await
+        .expect("new snapshot lookup")
+        .is_some());
+    assert_eq!(
+        reopened
+            .list_unacked(&session.stream_id)
+            .await
+            .expect("new replay lookup")
+            .len(),
+        1
+    );
+    assert_eq!(
+        reopened
+            .get_session_principal(&session.stream_id)
+            .await
+            .expect("new principal lookup"),
+        Some(principal)
+    );
+}
+
+#[tokio::test]
+async fn migration_v1012_recreates_sql_sm_store_sqlite() {
+    let directory = tempfile::tempdir().expect("SQL SM test directory");
+    let database_url = directory.path().join("sm-cutover.db");
+    migration_v1012_recreates_sql_sm_store(database_url.to_str().expect("SQLite path")).await;
+}
+
+#[tokio::test]
+async fn migration_v1012_recreates_sql_sm_store_postgres() {
+    let Ok(database_url) = std::env::var("WADDLE_TEST_POSTGRES_URL") else {
+        eprintln!("skipping: WADDLE_TEST_POSTGRES_URL not set (SQL SM cutover recovery)");
+        return;
+    };
+    let admin = sqlx::PgPool::connect(&database_url)
+        .await
+        .expect("PostgreSQL admin");
+    let schema = format!("sm_cutover_{}", uuid::Uuid::new_v4().simple());
+    sqlx::query(&format!("CREATE SCHEMA {schema}"))
+        .execute(&admin)
+        .await
+        .expect("isolated SM schema");
+    let mut url = url::Url::parse(&database_url).expect("PostgreSQL URL");
+    let retained: Vec<(String, String)> = url
+        .query_pairs()
+        .filter(|(key, _)| key != "options")
+        .map(|(key, value)| (key.into_owned(), value.into_owned()))
+        .collect();
+    url.query_pairs_mut()
+        .clear()
+        .extend_pairs(retained)
+        .append_pair("options", &format!("-c search_path={schema}"));
+    migration_v1012_recreates_sql_sm_store(url.as_str()).await;
+    sqlx::query(&format!("DROP SCHEMA {schema} CASCADE"))
+        .execute(&admin)
+        .await
+        .expect("remove isolated SM schema");
+    admin.close().await;
+}
+
+fn cutover_sm_session(
+    stream: &str,
+) -> waddle_xmpp::stream_management::persistence::PersistedSession {
+    waddle_xmpp::stream_management::persistence::PersistedSession {
+        stream_id: waddle_xmpp::pending_delivery::SmSessionId::new(stream),
+        user_id: "alice".into(),
+        jid: "alice@example.com/web".parse().expect("session JID"),
+        occupancy_session: waddle_xmpp_core::OccupancySessionGeneration::mint(),
+        inbound_count: 7,
+        outbound_count: 12,
+        last_acked: 10,
+        replay_gap_through: None,
+        max_resume_time: Some(300),
+        detached_at: chrono::Utc::now(),
+        max_resume_duration: std::time::Duration::from_secs(300),
+        carbons_enabled: false,
+        roster_interested: false,
+        blocklist_interested: false,
+        presence_available: false,
+        presence_show: None,
+        presence_status: None,
+        presence_priority: 0,
+        presence_payloads: Vec::new(),
+    }
+}
+
+fn cutover_sm_principal() -> waddle_xmpp::auth::AuthenticatedPrincipalRef {
+    use waddle_xmpp::auth::{
+        AuthContextId, AuthContextVersion, AuthenticatedPrincipalRef, PrincipalAuthEpoch,
+    };
+    AuthenticatedPrincipalRef::new(
+        "alice@example.com".parse().expect("principal JID"),
+        AuthContextId::new(uuid::Uuid::new_v4()),
+        AuthContextVersion::INITIAL,
+        PrincipalAuthEpoch::INITIAL,
+    )
+}
+
+fn cutover_sm_unacked(
+    stream: &str,
+    sequence: u32,
+) -> waddle_xmpp::stream_management::persistence::PersistedUnackedStanza {
+    let message = xmpp_parsers::message::Message::new(None::<jid::Jid>);
+    waddle_xmpp::stream_management::persistence::PersistedUnackedStanza {
+        stream_id: waddle_xmpp::pending_delivery::SmSessionId::new(stream),
+        sequence,
+        stanza: Box::new(waddle_xmpp::Stanza::Message(message)),
+        original_receipt_at: chrono::Utc::now(),
+    }
 }

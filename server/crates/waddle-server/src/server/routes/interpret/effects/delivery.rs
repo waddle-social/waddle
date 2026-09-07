@@ -113,7 +113,6 @@ pub(crate) fn record(deps: &super::super::Deps<'_>, effect: ExternalDeliveryEffe
     }
     let suppression = match &effect {
         ExternalDeliveryEffect::Carbons { .. }
-        | ExternalDeliveryEffect::RelayCarbons { .. }
         | ExternalDeliveryEffect::QueueOfflineDelivery { .. }
         | ExternalDeliveryEffect::QueueDetached { .. } => super::PlanSuppressionPolicy::SenderOnly,
         _ => super::PlanSuppressionPolicy::Always,

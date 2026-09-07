@@ -560,7 +560,7 @@ pub async fn gc_expired_aliases(
             });
         }
         // Bounded batches of rows with work left to do: expired rows kept
-        // alive by refs/deliveries stop matching once their aliases are gone,
+        // alive by SM refs stop matching once aliases and delivery markers are gone,
         // so retained history does not grow the scan or the candidate vector.
         let candidates = expired_candidates(db, &cutoff, &budget)
             .await
@@ -702,11 +702,24 @@ async fn gc_candidate_batch(
             }
         }
         // Alias retention has elapsed: the aliases go unconditionally, even
-        // when live refs/deliveries keep the message row itself alive —
+        // when live SM refs keep the message row itself alive —
         // otherwise a reused sender/target/origin-id would keep resolving
         // against the stale message indefinitely.
         tx.execute(
             dialect_sql(tx.driver(), DELETE_ALIASES_POSTGRES, DELETE_ALIASES_SQLITE),
+            crate::db_params![message_key.to_storage().to_string()],
+        )
+        .await
+        .map_err(|error| gc_database_failure(deleted_messages, error))?;
+        // Delivery markers protect inbox projection retries only during the
+        // canonical message's retention window. Delete children before their
+        // parent under the same candidate lock, transaction, and timeout budget.
+        tx.execute(
+            dialect_sql(
+                tx.driver(),
+                GC_DELETE_DELIVERIES_POSTGRES,
+                GC_DELETE_DELIVERIES_SQLITE,
+            ),
             crate::db_params![message_key.to_storage().to_string()],
         )
         .await
@@ -1153,6 +1166,9 @@ const TERMINALIZE_MESSAGE_SQLITE: &str = r#"
 const DELETE_ALIASES_POSTGRES: &str =
     r#"DELETE FROM ingress_origin_aliases WHERE message_key = ?::uuid"#;
 const DELETE_ALIASES_SQLITE: &str = r#"DELETE FROM ingress_origin_aliases WHERE message_key = ?"#;
+const GC_DELETE_DELIVERIES_POSTGRES: &str =
+    r#"DELETE FROM ingress_deliveries WHERE message_key = ?::uuid"#;
+const GC_DELETE_DELIVERIES_SQLITE: &str = r#"DELETE FROM ingress_deliveries WHERE message_key = ?"#;
 const GC_DELETE_MESSAGE_POSTGRES: &str = r#"
                 DELETE FROM ingress_messages m
                 WHERE m.message_key = ?::uuid
@@ -1207,13 +1223,11 @@ const GC_CANDIDATES_POSTGRES: &str = r#"
                   EXISTS (
                       SELECT 1 FROM ingress_origin_aliases a WHERE a.message_key = m.message_key
                   )
-                  OR (
-                      NOT EXISTS (
-                          SELECT 1 FROM ingress_sm_refs r WHERE r.message_key = m.message_key
-                      )
-                      AND NOT EXISTS (
-                          SELECT 1 FROM ingress_deliveries d WHERE d.message_key = m.message_key
-                      )
+                  OR EXISTS (
+                      SELECT 1 FROM ingress_deliveries d WHERE d.message_key = m.message_key
+                  )
+                  OR NOT EXISTS (
+                      SELECT 1 FROM ingress_sm_refs r WHERE r.message_key = m.message_key
                   )
               )
             ORDER BY m.terminal_at, m.message_key
@@ -1227,13 +1241,11 @@ const GC_CANDIDATES_SQLITE: &str = r#"
                   EXISTS (
                       SELECT 1 FROM ingress_origin_aliases a WHERE a.message_key = m.message_key
                   )
-                  OR (
-                      NOT EXISTS (
-                          SELECT 1 FROM ingress_sm_refs r WHERE r.message_key = m.message_key
-                      )
-                      AND NOT EXISTS (
-                          SELECT 1 FROM ingress_deliveries d WHERE d.message_key = m.message_key
-                      )
+                  OR EXISTS (
+                      SELECT 1 FROM ingress_deliveries d WHERE d.message_key = m.message_key
+                  )
+                  OR NOT EXISTS (
+                      SELECT 1 FROM ingress_sm_refs r WHERE r.message_key = m.message_key
                   )
               )
             ORDER BY m.terminal_at, m.message_key
@@ -2023,7 +2035,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn gc_expires_aliases_but_preserves_messages_with_live_sm_refs_or_deliveries() {
+    async fn gc_expires_aliases_and_deliveries_but_preserves_messages_with_live_sm_refs() {
         let Some(fixture) = Fixture::open("gc_live_children").await else {
             return;
         };
@@ -2080,12 +2092,12 @@ mod tests {
                 .deleted_messages,
             0
         );
-        // The expired alias is gone even though live children keep the
-        // message row itself alive.
+        // Expired aliases and delivery markers are gone even though the SM
+        // reference keeps the message row itself alive.
         assert_eq!(fixture.count("ingress_origin_aliases").await, 0);
         assert_eq!(fixture.count("ingress_messages").await, 1);
         assert_eq!(fixture.count("ingress_sm_refs").await, 1);
-        assert_eq!(fixture.count("ingress_deliveries").await, 1);
+        assert_eq!(fixture.count("ingress_deliveries").await, 0);
         // Alias-less retained rows drop out of the candidate scan: a second
         // pass finds no work and touches nothing.
         assert_eq!(

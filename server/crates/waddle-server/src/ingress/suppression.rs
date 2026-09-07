@@ -41,6 +41,9 @@ pub(crate) fn external_effect_indices(
             if !super::recorded::external_in_recorded_audience(plan, effect) {
                 return None;
             }
+            if duplicate && !relay_carbons_recorded(plan, effect) {
+                return None;
+            }
             if duplicate
                 && duplicate_policy(planned) == PlanSuppressionPolicy::SenderOnly
                 && !sender_delivery(effect, plan.sanitized_message.from.as_ref())
@@ -54,6 +57,28 @@ pub(crate) fn external_effect_indices(
             Some(index)
         })
         .collect()
+}
+
+/// A reconnect can change a local fanout plan into a remote-owner plan. Only
+/// the obligation retained by reconciliation authorizes that remote fanout;
+/// execution separately skips matching obligations that already have receipts.
+fn relay_carbons_recorded(plan: &IngressPlan, effect: &ExternalEffect) -> bool {
+    let ExternalEffect::Delivery(ExternalDeliveryEffect::RelayCarbons {
+        owner,
+        exclude,
+        kind,
+        ..
+    }) = effect
+    else {
+        return true;
+    };
+    plan.intents.iter().any(|intent| {
+        matches!(intent, waddle_xmpp::ingress::IngressEffectIntent::RelayCarbons {
+            owner: recorded_owner,
+            exclude: recorded_exclude,
+            kind: recorded_kind,
+        } if owner == recorded_owner && exclude == recorded_exclude && kind == recorded_kind)
+    })
 }
 
 fn duplicate_policy(planned: &PlannedEffect) -> PlanSuppressionPolicy {

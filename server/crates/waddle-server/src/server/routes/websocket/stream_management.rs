@@ -998,16 +998,6 @@ async fn handle_sm_resume_terminal(
         state.deps.protocol.sm_session_registry.clone(),
         resume.previd.clone(),
     );
-    if restore_ingress_checkpoint(state, &mut detached)
-        .await
-        .is_err()
-    {
-        claim_guard.release().await;
-        return SmResumeTerminal::failed(
-            waddle_xmpp::pending_delivery::SmSessionId::new(resume.previd),
-            SmResumeOutcome::Storage,
-        );
-    }
     let principal = match state
         .deps
         .protocol
@@ -1031,6 +1021,17 @@ async fn handle_sm_resume_terminal(
             );
         }
     };
+
+    if restore_ingress_checkpoint(state, &mut detached)
+        .await
+        .is_err()
+    {
+        claim_guard.release().await;
+        return SmResumeTerminal::failed(
+            waddle_xmpp::pending_delivery::SmSessionId::new(resume.previd),
+            SmResumeOutcome::Storage,
+        );
+    }
 
     let early_resolution = state
         .deps
@@ -1275,7 +1276,7 @@ async fn restore_ingress_checkpoint(
     state: &WebSocketState,
     detached: &mut waddle_xmpp::stream_management::DetachedSession,
 ) -> Result<(), crate::ingress_uow::IngressUowError> {
-    if let Some(checkpoint) = state
+    let checkpoint = state
         .deps
         .protocol
         .ingress
@@ -1283,12 +1284,11 @@ async fn restore_ingress_checkpoint(
             detached.stream_id.clone(),
         ))
         .await?
-    {
-        detached.inbound_count = waddle_xmpp::stream_management::sequence::max_in_window(
-            detached.inbound_count,
-            checkpoint.to_storage(),
-        );
-    }
+        .ok_or(crate::ingress_uow::IngressUowError::SmIngressStreamMissing)?;
+    detached.inbound_count = waddle_xmpp::stream_management::sequence::max_in_window(
+        detached.inbound_count,
+        checkpoint.to_storage(),
+    );
     Ok(())
 }
 

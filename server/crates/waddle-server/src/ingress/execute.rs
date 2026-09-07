@@ -258,7 +258,20 @@ pub async fn execute_effects(
             break;
         };
         let effect = &decision.external[index];
-        let outcome = if !ready || tokio::time::Instant::now() >= deadline {
+        // Remote fanout is replayable only until its owner supplied a receipt.
+        // A same-origin retry must not duplicate an already confirmed fanout.
+        let already_receipted = matches!(
+            effect,
+            ExternalEffect::Delivery(ExternalDeliveryEffect::RelayCarbons { .. })
+        ) && !decision.external_receipts[index].is_empty()
+            && decision.external_receipts[index]
+                .iter()
+                .all(|key| !decision.receipts_pending.contains(key));
+        let outcome = if already_receipted {
+            completed[index] = Some(true);
+            proven[index] = decision.external_receipts[index].clone();
+            ExternalOutcome::Done
+        } else if !ready || tokio::time::Instant::now() >= deadline {
             completed[index] = Some(false);
             ExternalOutcome::Failed
         } else {
@@ -467,6 +480,14 @@ fn proven_receipts(
             .all(|resource| resources.contains(resource)),
     };
     if route_completed {
+        if matches!(proof, MucUserDeliveryProof::Delivered { .. }) {
+            intents.push(IngressEffectIntent::PendingDelivery {
+                mutation: PendingDeliveryMutation::Transient {
+                    recipient: route.fallback.recipient.clone(),
+                    row_id: route.fallback.id.clone(),
+                },
+            });
+        }
         if let Some(identity) = &route.route_identity {
             intents.push(IngressEffectIntent::RouteDirect {
                 recipient: route.recipient.clone(),
@@ -573,10 +594,7 @@ fn has_confirmed_completion(effect: &ExternalEffect) -> bool {
         ExternalEffect::Delivery(
             ExternalDeliveryEffect::Carbons { .. }
                 | ExternalDeliveryEffect::QueueOfflineDelivery { .. }
-        ) | ExternalEffect::Direct(
-            ExternalDirectEffect::PushInboxUpdate { .. }
-                | ExternalDirectEffect::ScrubReplayForTombstone { .. }
-        )
+        ) | ExternalEffect::Direct(ExternalDirectEffect::PushInboxUpdate { .. })
     )
 }
 
@@ -765,3 +783,15 @@ mod tests {
         );
     }
 }
+
+#[cfg(test)]
+#[path = "execute_delivery_tests.rs"]
+mod delivery_tests;
+
+#[cfg(test)]
+#[path = "execute_carbons_retry_tests.rs"]
+mod carbons_retry_tests;
+
+#[cfg(all(test, feature = "clustering"))]
+#[path = "execute_carbon_fanout_tests.rs"]
+mod carbon_fanout_tests;

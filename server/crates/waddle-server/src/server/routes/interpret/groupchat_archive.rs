@@ -382,7 +382,11 @@ pub(super) async fn plan_groupchat_retraction_tombstone(
     let original = match storage.get_message(target).await {
         Ok(Some(row)) if row.to.to_bare() == *room => row,
         Ok(_) => return GroupchatRetractionTombstoneOutcome::NotFound,
-        Err(_) => return GroupchatRetractionTombstoneOutcome::Failed,
+        Err(_) => {
+            deps.effects
+                .fail_plan(super::effects::PlanFailure::RetractionTargetRead);
+            return GroupchatRetractionTombstoneOutcome::Failed;
+        }
     };
     let existing = original
         .rich
@@ -414,15 +418,17 @@ pub(super) async fn plan_groupchat_retraction_tombstone(
             },
         );
     }
-    super::effects::direct::external(
+    if !plan_tombstone_replay(
         deps,
-        super::effects::direct::ExternalDirectEffect::ScrubReplayForTombstone {
-            target: waddle_xmpp::tombstone::TombstoneTarget::Groupchat {
-                stanza_id: target.to_owned(),
-                room: room.clone(),
-            },
+        waddle_xmpp::tombstone::TombstoneTarget::Groupchat {
+            stanza_id: target.to_owned(),
+            room: room.clone(),
         },
-    );
+    )
+    .await
+    {
+        return GroupchatRetractionTombstoneOutcome::Failed;
+    }
     if existing {
         GroupchatRetractionTombstoneOutcome::AlreadyTombstoned
     } else {
@@ -528,7 +534,6 @@ pub(super) async fn apply_groupchat_retraction_tombstone(
         room,
         target_message_id,
         retraction_message,
-        None,
     )
     .await
     .tombstoned()
@@ -543,7 +548,6 @@ pub(super) async fn apply_groupchat_retraction_tombstone_outcome(
     room: &BareJid,
     target_message_id: &str,
     retraction_message: &Message,
-    capture: Option<&crate::ingress::IngressEffectCapture>,
 ) -> GroupchatRetractionTombstoneOutcome {
     // XEP-0424 §3 (xep-0424.xml lines 158, 230-232): a groupchat
     // retraction names the target by the room-assigned XEP-0359
@@ -601,7 +605,6 @@ pub(super) async fn apply_groupchat_retraction_tombstone_outcome(
             pending_storage,
             &scrub_target,
             "ApplyGroupchatRetractionTombstone",
-            capture,
         )
         .await;
         return GroupchatRetractionTombstoneOutcome::AlreadyTombstoned;
@@ -656,7 +659,6 @@ pub(super) async fn apply_groupchat_retraction_tombstone_outcome(
                 pending_storage,
                 &scrub_target,
                 "ApplyGroupchatRetractionTombstone",
-                capture,
             )
             .await;
             return GroupchatRetractionTombstoneOutcome::AlreadyTombstoned;
@@ -672,7 +674,6 @@ pub(super) async fn apply_groupchat_retraction_tombstone_outcome(
                 pending_storage,
                 &scrub_target,
                 "ApplyGroupchatRetractionTombstone",
-                capture,
             )
             .await;
             return GroupchatRetractionTombstoneOutcome::NotFound;
@@ -689,7 +690,6 @@ pub(super) async fn apply_groupchat_retraction_tombstone_outcome(
                 pending_storage,
                 &scrub_target,
                 "ApplyGroupchatRetractionTombstone",
-                capture,
             )
             .await;
             return GroupchatRetractionTombstoneOutcome::Failed;
@@ -708,29 +708,82 @@ pub(super) async fn apply_groupchat_retraction_tombstone_outcome(
         pending_storage,
         &scrub_target,
         "ApplyGroupchatRetractionTombstone",
-        capture,
     )
     .await;
     GroupchatRetractionTombstoneOutcome::Replaced
 }
 
-/// Walk the SM session registry AND the pending-delivery store and
-/// drop every cached `<message/>` copy that matches a XEP-0424 /
-/// XEP-0425 tombstone. `target` carries the typed identity
-/// ([`waddle_xmpp::tombstone::TombstoneTarget`]): groupchat scrubs
-/// match only the room-assigned XEP-0359 stanza-id; 1:1 scrubs match
-/// the author's wire id only for messages FROM that author. Both are
-/// scoped to the conversation archive so cross-conversation (and
-/// cross-sender wire-id-collision) collateral damage is impossible.
-/// Returns silently on any storage error (logged at WARN) — the
-/// archive scrub has already happened, and dropping the in-flight
-/// copies is best-effort.
-///
-/// Both layers are scrubbed from the same call sites because
-/// promotion (#1097/#1098) moves unacked SM stanzas into
-/// pending_delivery: scrubbing only the SM registry would let a
-/// promoted copy deliver the retracted content verbatim at the
-/// recipient's next login.
+fn replay_target(
+    target: &waddle_xmpp::tombstone::TombstoneTarget,
+) -> waddle_xmpp::ingress::TombstoneReplayTarget {
+    use waddle_xmpp::{ingress::TombstoneReplayTarget, tombstone::TombstoneTarget};
+    match target {
+        TombstoneTarget::Groupchat { stanza_id, room } => TombstoneReplayTarget::Groupchat {
+            stanza_id: stanza_id.clone(),
+            room: room.clone(),
+        },
+        TombstoneTarget::Direct {
+            wire_id,
+            author,
+            archive,
+        } => TombstoneReplayTarget::Direct {
+            wire_id: wire_id.clone(),
+            author: author.clone(),
+            archive: archive.clone(),
+        },
+    }
+}
+
+pub(super) async fn plan_tombstone_replay(
+    deps: &Deps<'_>,
+    target: waddle_xmpp::tombstone::TombstoneTarget,
+) -> bool {
+    let mut sm_entries = Vec::new();
+    if let Some(sm) = deps.sm_session_registry {
+        match sm.snapshot_unacked_for_tombstone(&target).await {
+            Ok(entries) => sm_entries.extend(entries.into_iter().map(|entry| {
+                waddle_xmpp::ingress::TombstoneReplaySmEntry {
+                    stream: entry.stream_id,
+                    sequence: entry.sequence,
+                }
+            })),
+            Err(error) => {
+                warn!(%error, "tombstone SM snapshot failed");
+                deps.effects
+                    .fail_plan(super::effects::PlanFailure::TombstoneReplaySnapshotRead);
+                return false;
+            }
+        }
+    }
+    let pending_rows = if let Some(pending) = deps.pending_delivery_storage {
+        match pending.snapshot_for_tombstone(&target).await {
+            Ok(rows) => rows,
+            Err(error) => {
+                warn!(%error, "tombstone pending snapshot failed");
+                deps.effects
+                    .fail_plan(super::effects::PlanFailure::TombstoneReplaySnapshotRead);
+                return false;
+            }
+        }
+    } else {
+        Vec::new()
+    };
+    if let Some(capture) = deps.ingress_effect_capture.as_ref() {
+        capture.record_intent(IngressEffectIntent::TombstoneReplayDeletion {
+            target: replay_target(&target),
+            sm_entries,
+            pending_rows,
+        });
+    }
+    super::effects::direct::external(
+        deps,
+        super::effects::direct::ExternalDirectEffect::ScrubReplayForTombstone { target },
+    );
+    true
+}
+
+/// Scrub both replay stores, returning confirmation only when both succeed.
+/// A failed store leaves the durable ingress obligation unreceipted for retry.
 pub(super) async fn scrub_unacked_for_tombstone(
     sm_session_registry: Option<&Arc<InMemorySmSessionRegistry>>,
     pending_storage: Option<
@@ -738,87 +791,22 @@ pub(super) async fn scrub_unacked_for_tombstone(
     >,
     target: &waddle_xmpp::tombstone::TombstoneTarget,
     site: &'static str,
-    capture: Option<&crate::ingress::IngressEffectCapture>,
-) {
-    let mut sm_entries = Vec::new();
-    let mut pending_rows = Vec::new();
+) -> bool {
+    let mut completed = true;
     if let Some(sm) = sm_session_registry {
         use waddle_xmpp::stream_management::SmSessionRegistry as _;
-        match sm.scrub_unacked_for_tombstone_with_entries(target).await {
-            Ok(removed) if removed.removed_count > 0 => {
-                debug!(
-                    target = target.id(),
-                    archive = %target.archive_jid(),
-                    removed = removed.removed_count,
-                    "{site}: scrubbed unacked SM queue entries for tombstoned message"
-                );
-                sm_entries.extend(removed.entries.into_iter().map(|entry| {
-                    waddle_xmpp::ingress::TombstoneReplaySmEntry {
-                        stream: entry.stream_id,
-                        sequence: entry.sequence,
-                    }
-                }));
-            }
-            Ok(_) => {}
-            Err(error) => {
-                warn!(
-                    target = target.id(),
-                    archive = %target.archive_jid(),
-                    %error,
-                    "{site}: scrub_unacked_for_tombstone failed; pre-scrub stanza may still replay on resume"
-                );
-            }
+        if let Err(error) = sm.scrub_unacked_for_tombstone_with_entries(target).await {
+            warn!(%error, "{site}: tombstone SM scrub failed");
+            completed = false;
         }
     }
     if let Some(pending) = pending_storage {
-        match pending.scrub_for_tombstone_with_row_ids(target).await {
-            Ok(removed) if removed.removed_count > 0 => {
-                debug!(
-                    target = target.id(),
-                    archive = %target.archive_jid(),
-                    removed = removed.removed_count,
-                    "{site}: scrubbed pending_delivery rows for tombstoned message"
-                );
-                pending_rows.extend(removed.row_ids);
-            }
-            Ok(_) => {}
-            Err(error) => {
-                warn!(
-                    target = target.id(),
-                    archive = %target.archive_jid(),
-                    %error,
-                    "{site}: pending_delivery scrub_for_tombstone failed; retracted \
-                     content may still deliver at the recipient's next login"
-                );
-            }
+        if let Err(error) = pending.scrub_for_tombstone_with_row_ids(target).await {
+            warn!(%error, "{site}: tombstone pending scrub failed");
+            completed = false;
         }
     }
-    if !sm_entries.is_empty() || !pending_rows.is_empty() {
-        if let Some(capture) = capture {
-            let target = match target {
-                waddle_xmpp::tombstone::TombstoneTarget::Groupchat { stanza_id, room } => {
-                    waddle_xmpp::ingress::TombstoneReplayTarget::Groupchat {
-                        stanza_id: stanza_id.clone(),
-                        room: room.clone(),
-                    }
-                }
-                waddle_xmpp::tombstone::TombstoneTarget::Direct {
-                    wire_id,
-                    author,
-                    archive,
-                } => waddle_xmpp::ingress::TombstoneReplayTarget::Direct {
-                    wire_id: wire_id.clone(),
-                    author: author.clone(),
-                    archive: archive.clone(),
-                },
-            };
-            capture.record_intent(IngressEffectIntent::TombstoneReplayDeletion {
-                target,
-                sm_entries,
-                pending_rows,
-            });
-        }
-    }
+    completed
 }
 
 /// Inputs for [`project_groupchat_inbox`]: one `(owner, room, message)`

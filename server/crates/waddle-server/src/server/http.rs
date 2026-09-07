@@ -303,6 +303,15 @@ pub(crate) async fn create_websocket_mam_storage(
             let database_url = database_url
                 .as_deref()
                 .unwrap_or_else(|| global_db.database_url());
+            // Opening MAM mutates its schema. Prove colocation using a plain
+            // connection before allowing those migrations to touch this URL.
+            let probe = sqlx::postgres::PgPoolOptions::new()
+                .max_connections(1)
+                .connect(database_url)
+                .await?;
+            let identity = crate::db::lineage::live_postgres_identity_via_pg_pool(&probe).await;
+            probe.close().await;
+            ensure_postgres_ingress_colocation(&identity?, global_db).await?;
             let opened = SqlxMamStorage::open(database_url).await.map_err(|error| {
                 anyhow::anyhow!("Failed to initialize WebSocket MAM storage: {error}")
             })?;
@@ -1728,6 +1737,13 @@ mod admin_failure_observer_tests {
 mod ingress_colocation_tests {
     use super::*;
 
+    const LEGACY_MAM_OBJECTS: &[&str] = &[
+        "ALTER TABLE mam_messages ADD COLUMN origin_dedup_sender_scope TEXT",
+        "ALTER TABLE mam_messages ADD COLUMN origin_dedup_fingerprint TEXT",
+        "CREATE UNIQUE INDEX idx_mam_origin_groupchat_sender_content_unique ON mam_messages(room_jid, origin_id, origin_dedup_sender_scope, origin_dedup_fingerprint) WHERE origin_id IS NOT NULL AND message_type = 'groupchat'",
+        "CREATE UNIQUE INDEX idx_mam_origin_direct_content_unique ON mam_messages(room_jid, origin_id, origin_dedup_fingerprint) WHERE origin_id IS NOT NULL AND message_type <> 'groupchat'",
+    ];
+
     #[tokio::test]
     async fn private_memory_router_fixture_shares_the_ingress_pool() {
         let global = crate::db::Database::in_memory("router-ingress")
@@ -1770,6 +1786,18 @@ mod ingress_colocation_tests {
             crate::db::Database::open_local("separate-mam", directory.path().join("mam.db"))
                 .await
                 .expect("separate database");
+        let split_mam = SqlxMamStorage::from_sqlite_pool(
+            separate.sqlite_pool().expect("split SQLite pool").clone(),
+        )
+        .await
+        .expect("seed split MAM schema");
+        let split_pool = split_mam.sqlite_pool().expect("split SQLite pool");
+        for statement in LEGACY_MAM_OBJECTS {
+            sqlx::query(statement)
+                .execute(split_pool)
+                .await
+                .expect("seed legacy MAM object");
+        }
         let error = create_websocket_mam_storage(
             Some(separate.database_url().to_owned()),
             false,
@@ -1780,6 +1808,23 @@ mod ingress_colocation_tests {
         .err()
         .expect("reject separate file");
         assert!(error.downcast_ref::<IngressColocationError>().is_some());
+        let columns: Vec<String> = sqlx::query_scalar(
+            "SELECT name FROM pragma_table_info('mam_messages') WHERE name LIKE 'origin_dedup_%' ORDER BY name",
+        )
+        .fetch_all(split_pool)
+        .await
+        .expect("legacy columns survive rejection");
+        assert_eq!(
+            columns,
+            ["origin_dedup_fingerprint", "origin_dedup_sender_scope"]
+        );
+        let indexes: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM sqlite_master WHERE type = 'index' AND name IN ('idx_mam_origin_groupchat_sender_content_unique', 'idx_mam_origin_direct_content_unique')",
+        )
+        .fetch_one(split_pool)
+        .await
+        .expect("legacy indexes survive rejection");
+        assert_eq!(indexes, 2);
     }
 
     #[tokio::test]
@@ -1818,14 +1863,43 @@ mod ingress_colocation_tests {
             create_websocket_mam_storage(Some(global_url.to_string()), false, false, &global)
                 .await
                 .expect("colocated MAM");
-        assert!(create_websocket_mam_storage(
-            Some(separate_url.to_string()),
-            false,
-            false,
-            &global
+        let split_mam = SqlxMamStorage::open(separate_url.as_str())
+            .await
+            .expect("seed split MAM schema");
+        let split_pool = split_mam.postgres_pool().expect("split Postgres pool");
+        for statement in LEGACY_MAM_OBJECTS {
+            sqlx::query(statement)
+                .execute(split_pool)
+                .await
+                .expect("seed legacy MAM object");
+        }
+        let error =
+            create_websocket_mam_storage(Some(separate_url.to_string()), false, false, &global)
+                .await
+                .err()
+                .expect("reject split MAM before schema initialization");
+        assert!(matches!(
+            error.downcast_ref::<IngressColocationError>(),
+            Some(IngressColocationError::PostgresIdentity { .. })
+        ));
+        let columns: Vec<String> = sqlx::query_scalar(
+            "SELECT column_name FROM information_schema.columns WHERE table_schema = current_schema() AND table_name = 'mam_messages' AND column_name LIKE 'origin_dedup_%' ORDER BY column_name",
         )
+        .fetch_all(split_pool)
         .await
-        .is_err());
+        .expect("legacy columns survive rejection");
+        assert_eq!(
+            columns,
+            ["origin_dedup_fingerprint", "origin_dedup_sender_scope"]
+        );
+        let indexes: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM pg_indexes WHERE schemaname = current_schema() AND indexname IN ('idx_mam_origin_groupchat_sender_content_unique', 'idx_mam_origin_direct_content_unique')",
+        )
+        .fetch_one(split_pool)
+        .await
+        .expect("legacy indexes survive rejection");
+        assert_eq!(indexes, 2);
+        split_pool.close().await;
         drop(shared);
         drop(global);
         for schema in [&global_schema, &separate_schema] {

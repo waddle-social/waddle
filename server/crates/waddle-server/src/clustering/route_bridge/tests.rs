@@ -338,6 +338,6 @@ async fn services_with_claims_and_blocking(
     }
 }
 
-mod delivery;
+pub(crate) mod delivery;
 mod nack_channels;
 mod reassert;

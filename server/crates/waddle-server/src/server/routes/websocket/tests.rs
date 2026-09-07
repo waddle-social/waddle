@@ -1232,6 +1232,15 @@ pub(crate) async fn store_resumable_detached_session(
     session: &Session,
     detached: waddle_xmpp::stream_management::DetachedSession,
 ) {
+    state
+        .deps
+        .protocol
+        .ingress
+        .enroll_stream(&waddle_xmpp::pending_delivery::SmSessionId::new(
+            detached.stream_id.clone(),
+        ))
+        .await
+        .expect("enroll resumable test stream");
     let principal = session
         .authenticated_principal_ref()
         .expect("test session carries an auth context");

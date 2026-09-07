@@ -65,9 +65,9 @@ pub(super) fn apply_policy(effect: &mut PlannedEffect, sender: Option<&FullJid>)
             ExternalDeliveryEffect::RelayBareJid { stanza, .. } if subject_rebroadcast(stanza) => {
                 PlanSuppressionPolicy::Always
             }
+            ExternalDeliveryEffect::RelayCarbons { .. } => PlanSuppressionPolicy::Always,
             ExternalDeliveryEffect::RelayBareJid { .. }
             | ExternalDeliveryEffect::Carbons { .. }
-            | ExternalDeliveryEffect::RelayCarbons { .. }
             | ExternalDeliveryEffect::QueueOfflineDelivery { .. } => {
                 PlanSuppressionPolicy::SenderOnly
             }

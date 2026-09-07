@@ -1063,6 +1063,11 @@ pub enum IngressEffectIntent {
         stream: SmSessionId,
         append_identity: RecipientSmAppendIdentity,
     },
+    RelayCarbons {
+        owner: BareJid,
+        exclude: Vec<FullJid>,
+        kind: CarbonKind,
+    },
     Carbons {
         carbon_recipients: Vec<FullJid>,
         excluded_source: FullJid,
@@ -1142,6 +1147,7 @@ pub enum IngressEffectKind {
     DispatchToRoomRemote,
     RecipientSmAppend,
     Carbons,
+    RelayCarbons,
     InboxProject,
     NotificationActivityPreview,
     GroupchatNotificationRecovery,
@@ -1189,6 +1195,10 @@ pub enum EffectAuthorityKey {
     Stream {
         stream: SmSessionId,
         append: RecipientSmAppendIdentity,
+    },
+    RelayCarbons {
+        owner: BareJid,
+        kind: CarbonKind,
     },
     Carbons {
         source: FullJid,
@@ -1238,6 +1248,7 @@ pub enum IngressEffectKey {
     DispatchToRoomRemote(BareJid, RelayTargetIdentity),
     RecipientSmAppend(SmSessionId, RecipientSmAppendIdentity),
     Carbons(FullJid, CarbonKind),
+    RelayCarbons(BareJid, CarbonKind),
     InboxProject(BareJid, String),
     NotificationActivityPreview(BareJid, String),
     GroupchatNotificationRecovery(String),
@@ -1276,6 +1287,9 @@ impl IngressEffectKey {
             Self::RecipientSmAppend(stream, append_identity) => {
                 format!("{}|{}", stream.as_str(), append_identity.storage_identity())
             }
+            Self::RelayCarbons(owner, kind) => {
+                format!("{}|{}", owner, carbon_kind_storage_identity(*kind))
+            }
             Self::Carbons(value, kind) => {
                 format!("{}|{}", value, carbon_kind_storage_identity(*kind))
             }
@@ -1310,6 +1324,7 @@ impl IngressEffectKey {
             Self::DispatchToRoomRemote(..) => 4,
             Self::RecipientSmAppend(..) => 5,
             Self::Carbons(..) => 6,
+            Self::RelayCarbons(..) => 24,
             Self::InboxProject(..) => 7,
             Self::NotificationActivityPreview(..) => 8,
             Self::GroupchatNotificationRecovery(..) => 9,
@@ -1411,6 +1426,11 @@ impl IngressEffectIntent {
             Self::DispatchToRoomRemote {
                 room: bare("room@conference.example.test"),
                 relay_target: RelayTargetIdentity::owner_node("relay-node", "relay-epoch"),
+            },
+            Self::RelayCarbons {
+                owner: bare("romeo@example.test"),
+                exclude: vec![full("romeo@example.test/laptop")],
+                kind: CarbonKind::Sent,
             },
             Self::RecipientSmAppend {
                 stream: SmSessionId::new("stream-1"),
@@ -1615,6 +1635,7 @@ impl IngressEffectIntent {
             Self::DispatchToRoomRemote { .. } => IngressEffectKind::DispatchToRoomRemote,
             Self::RecipientSmAppend { .. } => IngressEffectKind::RecipientSmAppend,
             Self::Carbons { .. } => IngressEffectKind::Carbons,
+            Self::RelayCarbons { .. } => IngressEffectKind::RelayCarbons,
             Self::InboxProject { .. } => IngressEffectKind::InboxProject,
             Self::NotificationActivityPreview { .. } => {
                 IngressEffectKind::NotificationActivityPreview
@@ -1679,6 +1700,10 @@ impl IngressEffectIntent {
             } => EffectAuthorityKey::Stream {
                 stream: stream.clone(),
                 append: *append_identity,
+            },
+            Self::RelayCarbons { owner, kind, .. } => EffectAuthorityKey::RelayCarbons {
+                owner: owner.clone(),
+                kind: *kind,
             },
             Self::Carbons {
                 excluded_source,
@@ -1835,6 +1860,9 @@ impl IngressEffectIntent {
                 stream,
                 append_identity,
             } => IngressEffectKey::RecipientSmAppend(stream.clone(), *append_identity),
+            Self::RelayCarbons { owner, kind, .. } => {
+                IngressEffectKey::RelayCarbons(owner.clone(), *kind)
+            }
             Self::Carbons {
                 excluded_source,
                 kind,
@@ -2910,6 +2938,11 @@ enum StoredEffectIntent {
         stream: SmSessionId,
         append_identity: u64,
     },
+    RelayCarbons {
+        owner: BareJid,
+        exclude: Vec<FullJid>,
+        kind: u8,
+    },
     Carbons {
         carbon_recipients: Vec<FullJid>,
         excluded_source: FullJid,
@@ -2992,6 +3025,7 @@ impl StoredEffectIntent {
             Self::DispatchToRoomRemote { .. } => 12,
             Self::RecipientSmAppend { .. } => 4,
             Self::Carbons { .. } => 5,
+            Self::RelayCarbons { .. } => 24,
             Self::InboxProject { .. } => 6,
             Self::NotificationActivityPreview { .. } => 7,
             Self::GroupchatNotificationRecovery { .. } => 21,
@@ -3096,6 +3130,18 @@ impl StoredEffectIntent {
                 stream,
                 append_identity: append_identity.as_u64(),
             },
+            IngressEffectIntent::RelayCarbons {
+                owner,
+                mut exclude,
+                kind,
+            } => {
+                canonicalize(&mut exclude);
+                Self::RelayCarbons {
+                    owner,
+                    exclude,
+                    kind: carbon_kind_tag(kind),
+                }
+            }
             IngressEffectIntent::Carbons {
                 mut carbon_recipients,
                 excluded_source,
@@ -3274,6 +3320,15 @@ impl StoredEffectIntent {
             } => IngressEffectIntent::RecipientSmAppend {
                 stream,
                 append_identity: RecipientSmAppendIdentity::new(append_identity),
+            },
+            Self::RelayCarbons {
+                owner,
+                exclude,
+                kind,
+            } => IngressEffectIntent::RelayCarbons {
+                owner,
+                exclude,
+                kind: carbon_kind_from_tag(kind)?,
             },
             Self::Carbons {
                 carbon_recipients,
@@ -3682,6 +3737,11 @@ mod tests {
                 room: bare("room@conference.example.test"),
                 relay_target: RelayTargetIdentity::owner_node("relay-node", "relay-epoch"),
             },
+            IngressEffectIntent::RelayCarbons {
+                owner: bare("romeo@example.test"),
+                exclude: vec![full("romeo@example.test/laptop")],
+                kind: CarbonKind::Sent,
+            },
             IngressEffectIntent::RecipientSmAppend {
                 stream: SmSessionId::new("stream-1"),
                 append_identity: RecipientSmAppendIdentity::new(0),
@@ -3878,6 +3938,7 @@ mod tests {
             r#"{"version":1,"intent":{"type":"route_muc_groupchat","room":"room@conference.example.test","occupants":["juliet@example.test/laptop"],"reflection":"romeo@example.test/phone","room_generation":7,"route_identity":{"type":"stanza_id","stanza_id":{"id":"stable-1","by":"archive@example.test"}}}}"#,
             r#"{"version":1,"intent":{"type":"route_occupant_pm","recipient":"juliet@example.test/laptop","sender":"romeo@example.test/phone"}}"#,
             r#"{"version":1,"intent":{"type":"dispatch_to_room_remote","room":"room@conference.example.test","relay_target":{"node_id":"relay-node","node_epoch":"relay-epoch"}}}"#,
+            r#"{"version":1,"intent":{"type":"relay_carbons","owner":"romeo@example.test","exclude":["romeo@example.test/laptop"],"kind":0}}"#,
             r#"{"version":1,"intent":{"type":"recipient_sm_append","stream":"stream-1","append_identity":0}}"#,
             r#"{"version":1,"intent":{"type":"carbons","carbon_recipients":["romeo@example.test/phone"],"excluded_source":"romeo@example.test/laptop","kind":0}}"#,
             r#"{"version":1,"intent":{"type":"inbox_project","owner":"romeo@example.test","mutation":{"type":"direct","entry":{"partner":"juliet@example.test","kind":"Direct","last_stanza_id":"stable-1","last_updated":1752768000,"unread":3,"preview":"important hello","thread_id":null,"thread_title":null,"reply_count":0,"author":null,"call_thread_kind":null,"call_thread_media":null,"call_ended_at":null,"call_duration":null},"increment_unread":true}}}"#,

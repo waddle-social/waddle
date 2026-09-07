@@ -418,7 +418,8 @@ fn is_idempotent_join_presence_envelope(envelope: &RemoteStanzaEnvelope) -> bool
 // v3: MUC proxy origin/generation carried inside the ordered envelope (#1703).
 // v4: committed ingress canonical identity and principal on MUC proxy (#1657).
 // v5: origin receipt-confirmation token on ACK replies (#1657).
-#[kameo::remote_message("waddle.clustering.relay.deliver_ordered.v5")]
+// v6: ingress carbon fanout failure cutover; side-effect replies use v2.
+#[kameo::remote_message("waddle.clustering.relay.deliver_ordered.v6")]
 impl Message<RelayDeliverOrdered> for RelayActor {
     type Reply = kameo::reply::DelegatedReply<OrderedRelayReply>;
 
@@ -617,6 +618,9 @@ pub struct RelayRemoteUserSideEffect {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum RelayRemoteUserSideEffectStatus {
     Applied,
+    Incomplete {
+        reason: crate::server::routes::interpret::carbons::CarbonFanoutFailure,
+    },
     StaleRegistration,
     Unavailable,
 }
@@ -632,7 +636,7 @@ pub struct RelayRemoteUserSideEffectReply {
     pub recipient_sm_append_streams: Vec<waddle_xmpp::pending_delivery::SmSessionId>,
 }
 
-#[kameo::remote_message("waddle.clustering.relay.remote_user_side_effect.v1")]
+#[kameo::remote_message("waddle.clustering.relay.remote_user_side_effect.v2")]
 impl Message<RelayRemoteUserSideEffect> for RelayActor {
     type Reply = kameo::reply::DelegatedReply<RelayRemoteUserSideEffectReply>;
 

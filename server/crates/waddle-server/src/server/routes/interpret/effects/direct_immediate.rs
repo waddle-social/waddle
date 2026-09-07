@@ -127,15 +127,18 @@ pub(super) async fn execute_external(
             EffectOutcome::Completed
         }
         ExternalDirectEffect::ScrubReplayForTombstone { target } => {
-            super::super::groupchat_archive::scrub_unacked_for_tombstone(
+            if super::super::groupchat_archive::scrub_unacked_for_tombstone(
                 deps.sm_session_registry,
                 deps.pending_delivery_storage,
                 &target,
                 "PlannedRetraction",
-                deps.ingress_effect_capture.as_ref(),
             )
-            .await;
-            EffectOutcome::Completed
+            .await
+            {
+                EffectOutcome::Completed
+            } else {
+                EffectOutcome::Unavailable
+            }
         }
         ExternalDirectEffect::DmCallThreadState { state } => {
             let Some(socket) = deps.web_socket_state else {

@@ -106,3 +106,23 @@ async fn xep0280_carbon_enumeration_excludes_whole_delivery_set() {
         "only the resource outside the delivery set gets the carbon"
     );
 }
+
+#[test]
+fn xep0280_remote_carbon_intent_freezes_all_excluded_resources() {
+    use waddle_xmpp::{ingress::IngressEffectIntent, protocol::CarbonKind};
+    let intent = IngressEffectIntent::RelayCarbons {
+        owner: "alice@example.com".parse().expect("owner"),
+        exclude: vec![
+            "alice@example.com/laptop".parse().expect("laptop"),
+            "alice@example.com/phone".parse().expect("phone"),
+        ],
+        kind: CarbonKind::Received,
+    };
+    let decoded = intent
+        .with_encoded_v1(IngressEffectIntent::decode_v1)
+        .expect("encode frozen owner obligation")
+        .expect("decode frozen owner obligation");
+    assert_eq!(intent, decoded);
+    assert_eq!(intent.authority_key(), decoded.authority_key());
+    assert_eq!(intent.semantic_key(), decoded.semantic_key());
+}

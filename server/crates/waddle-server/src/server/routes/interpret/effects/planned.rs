@@ -105,6 +105,10 @@ pub enum RoomExecutionPath {
 pub enum PlanFailure {
     #[error("displayed-marker inbox snapshot could not be read")]
     InboxSnapshotRead,
+    #[error("retraction target could not be read")]
+    RetractionTargetRead,
+    #[error("tombstone replay snapshot could not be read")]
+    TombstoneReplaySnapshotRead,
 }
 
 #[derive(Clone, Debug)]

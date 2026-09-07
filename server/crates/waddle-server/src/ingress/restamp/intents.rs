@@ -67,6 +67,7 @@ impl Replacements {
             | IngressEffectIntent::DispatchToRoomRemote { .. }
             | IngressEffectIntent::RecipientSmAppend { .. }
             | IngressEffectIntent::Carbons { .. }
+            | IngressEffectIntent::RelayCarbons { .. }
             | IngressEffectIntent::PendingDelivery {
                 mutation: PendingDeliveryMutation::Transient { .. },
             }

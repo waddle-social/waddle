@@ -42,6 +42,40 @@ pub(super) fn external_receipts(
 
 fn exact_mutation(effect: &ExternalEffect, intent: &IngressEffectIntent) -> bool {
     match (effect, intent) {
+        (
+            ExternalEffect::Direct(ExternalDirectEffect::ScrubReplayForTombstone { target }),
+            IngressEffectIntent::TombstoneReplayDeletion {
+                target: recorded, ..
+            },
+        ) => {
+            use waddle_xmpp::{ingress::TombstoneReplayTarget, tombstone::TombstoneTarget};
+            match (target, recorded) {
+                (
+                    TombstoneTarget::Groupchat { stanza_id, room },
+                    TombstoneReplayTarget::Groupchat {
+                        stanza_id: recorded_id,
+                        room: recorded_room,
+                    },
+                ) => stanza_id == recorded_id && room == recorded_room,
+                (
+                    TombstoneTarget::Direct {
+                        wire_id,
+                        author,
+                        archive,
+                    },
+                    TombstoneReplayTarget::Direct {
+                        wire_id: recorded_id,
+                        author: recorded_author,
+                        archive: recorded_archive,
+                    },
+                ) => {
+                    wire_id == recorded_id
+                        && author == recorded_author
+                        && archive == recorded_archive
+                }
+                _ => false,
+            }
+        }
         #[cfg(feature = "clustering")]
         (
             ExternalEffect::Room(ExternalRoomEffect::RelayMucProxy { room, .. }),

@@ -19,6 +19,28 @@ fn bare(s: &str) -> jid::BareJid {
     s.parse().expect("valid bare jid")
 }
 
+#[tokio::test]
+async fn detached_carbons_inventory_lock_failure_is_not_an_empty_audience() {
+    for claimed in [false, true] {
+        let registry = InMemorySmSessionRegistry::new();
+        let poisoned = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let _guard = if claimed {
+                registry.claimed_sessions.write().expect("claimed lock")
+            } else {
+                registry.sessions.write().expect("sessions lock")
+            };
+            panic!("simulate an inventory lock failure");
+        }));
+        assert!(poisoned.is_err());
+        assert!(matches!(
+            registry
+                .detached_carbon_resources_for_user(&bare("user@example.com"), &[])
+                .await,
+            Err(SmRegistryError::Internal(_))
+        ));
+    }
+}
+
 fn direct_target(wire_id: &str, author: &str, archive: &str) -> crate::tombstone::TombstoneTarget {
     crate::tombstone::TombstoneTarget::Direct {
         wire_id: wire_id.to_string(),

@@ -16,11 +16,28 @@ use waddle_xmpp::ownership::{
 fn changed_muc_proxy_wire_shapes_have_new_remote_message_ids() {
     assert_eq!(
         <RelayActor as kameo::remote::RemoteMessage<RelayDeliverOrdered>>::REMOTE_ID,
-        "waddle.clustering.relay.deliver_ordered.v5"
+        "waddle.clustering.relay.deliver_ordered.v6"
     );
     assert_eq!(
         <RelayActor as kameo::remote::RemoteMessage<RelayRouteRemoteResourceStanza>>::REMOTE_ID,
         "waddle.clustering.relay.remote_resource_route.v4"
+    );
+}
+
+#[test]
+fn incomplete_carbons_reply_has_new_remote_message_id() {
+    assert_eq!(
+        <RelayActor as kameo::remote::RemoteMessage<RelayRemoteUserSideEffect>>::REMOTE_ID,
+        "waddle.clustering.relay.remote_user_side_effect.v2"
+    );
+    let status = RelayRemoteUserSideEffectStatus::Incomplete {
+        reason: crate::server::routes::interpret::carbons::CarbonFanoutFailure::DetachedAppend,
+    };
+    let encoded = serde_json::to_vec(&status).expect("encode typed fanout failure");
+    assert_eq!(
+        serde_json::from_slice::<RelayRemoteUserSideEffectStatus>(&encoded)
+            .expect("decode typed fanout failure"),
+        status
     );
 }
 

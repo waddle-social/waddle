@@ -532,6 +532,12 @@ TO pg_monitor;
 
 /// Authority-cutover ingress schema for the single-node SQLite backend.
 pub const V1012_INGRESS_AUTHORITY_CUTOVER: &str = r#"
+-- Store-owned SM tables may not exist on a fresh database. Retained sessions
+-- cannot resume after their ingress enrollment is reset. Recreate these stores
+-- at startup, clearing replay children before their session snapshots.
+DROP TABLE IF EXISTS sm_unacked;
+DROP TABLE IF EXISTS sm_sessions;
+
 CREATE TABLE ingress_protocol_epoch (
     id INTEGER PRIMARY KEY CHECK (id = 1),
     epoch BIGINT NOT NULL DEFAULT 0 CHECK (epoch BETWEEN 0 AND 4294967295),
@@ -651,6 +657,12 @@ DELETE FROM ingress_sm_refs;
 DELETE FROM ingress_origin_aliases;
 DELETE FROM ingress_messages;
 DELETE FROM ingress_sm_streams;
+
+-- Store-owned SM tables may not exist on a fresh database. Retained sessions
+-- cannot resume after their ingress enrollment is reset. Recreate these stores
+-- at startup, clearing replay children before their session snapshots.
+DROP TABLE IF EXISTS sm_unacked;
+DROP TABLE IF EXISTS sm_sessions;
 
 ALTER TABLE ingress_messages
     ADD COLUMN envelope_version SMALLINT NULL,

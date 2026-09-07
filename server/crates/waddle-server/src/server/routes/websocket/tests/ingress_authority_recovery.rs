@@ -757,3 +757,53 @@ async fn room_denials_case(state: Arc<WebSocketState>) {
 
 #[path = "ingress_authority_matrix.rs"]
 mod matrix;
+
+/// XEP-0198 §5–§6: a retained snapshot cannot resume without ingress authority.
+#[tokio::test]
+async fn resume_without_ingress_enrollment_fails_closed() {
+    resume_without_ingress_enrollment_case(create_test_websocket_state().await).await;
+}
+
+#[tokio::test]
+async fn resume_without_ingress_enrollment_fails_closed_postgres() {
+    postgres_case(resume_without_ingress_enrollment_case).await;
+}
+
+async fn resume_without_ingress_enrollment_case(state: Arc<WebSocketState>) {
+    let mut conn = connection(&state, true).await;
+    let stale = snapshot(&mut conn);
+    let session = conn.authenticated_session.clone().expect("session");
+    store_resumable_detached_session(&state, &session, stale.clone()).await;
+    drop(conn);
+    state
+        .deps
+        .app_state
+        .db_pool
+        .global()
+        .guard()
+        .await
+        .expect("database")
+        .execute("DELETE FROM ingress_sm_streams", ())
+        .await
+        .expect("remove ingress enrollment");
+    let mut resumed = WsConnState::new();
+    resumed.phase = ConnectionPhase::authenticated(&stale.jid);
+    resumed.authenticated_session = Some(session);
+    let resume = minidom::Element::builder("resume", waddle_xmpp::stream_management::SM_NS)
+        .attr(
+            minidom::rxml::xml_ncname!("previd").to_owned(),
+            stale.stream_id,
+        )
+        .attr(minidom::rxml::xml_ncname!("h").to_owned(), "0")
+        .build();
+    let wire = super::super::super::transport_xml::element_to_xml(resume);
+    let frames = handle_xmpp_frame(&wire, "example.com", &state, &mut resumed).await;
+    assert_eq!(frames.len(), 1);
+    let reply: minidom::Element = frames[0].parse().expect("resume response XML");
+    assert!(reply.is("failed", waddle_xmpp::stream_management::SM_NS));
+    assert!(reply
+        .get_child("internal-server-error", xmpp_parsers::ns::XMPP_STANZAS)
+        .is_some());
+    assert!(!resumed.sm_state.enabled);
+    assert_eq!(row_count(&state, "ingress_sm_streams").await, 0);
+}

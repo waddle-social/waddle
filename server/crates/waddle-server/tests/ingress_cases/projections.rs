@@ -239,3 +239,117 @@ pub(super) async fn assert_pushed_entry(
     assert_eq!(entry.unread, unread);
     assert!(receiver.try_recv().is_err(), "one push per projection");
 }
+
+async fn ingress_gc_reclaims_expired_inbox_delivery(fixture: IngressFixture) {
+    use chrono::{Duration, Utc};
+    use std::time::Duration as StdDuration;
+    use tokio::time::Instant;
+    use waddle_server::{
+        db::DatabaseDriver,
+        ingress_substrate::{
+            gc_expired_aliases, AliasGcBudget, AliasGcProgress, TerminalizeOutcome, ALIAS_RETENTION,
+        },
+        ingress_uow::EffectReceiptRepository,
+    };
+
+    let now = Utc::now();
+    let expired = commit_submission(
+        &fixture.uow,
+        &inbox_push_plan(&fixture, "gc-expired", "gc-expired-id", 10),
+        5,
+    )
+    .await
+    .expect("commit expired inbox projection")
+    .message_key
+    .expect("expired canonical key");
+    let retained = commit_submission(
+        &fixture.uow,
+        &inbox_push_plan(&fixture, "gc-retained", "gc-retained-id", 20),
+        5,
+    )
+    .await
+    .expect("commit retained inbox projection")
+    .message_key
+    .expect("retained canonical key");
+    let mut tx = fixture.uow.begin().await.expect("terminalize projections");
+    for (key, terminal_at) in [
+        (expired, now - ALIAS_RETENTION),
+        (retained, now - ALIAS_RETENTION + Duration::seconds(1)),
+    ] {
+        assert!(EffectReceiptRepository::receipts_complete(&mut tx, key)
+            .await
+            .expect("durable projection receipts complete"));
+        assert_eq!(
+            CanonicalMessageRepository::terminalize(&mut tx, key, terminal_at)
+                .await
+                .expect("terminalize inbox projection"),
+            TerminalizeOutcome::Terminalized
+        );
+    }
+    tx.commit().await.expect("commit terminal timestamps");
+    // Reproduce a previous GC pass that removed the alias but left its marker.
+    fixture
+        .execute(
+            match fixture.db.driver() {
+                DatabaseDriver::Postgres => {
+                    "DELETE FROM ingress_origin_aliases WHERE message_key = ?::uuid"
+                }
+                DatabaseDriver::Sqlite => {
+                    "DELETE FROM ingress_origin_aliases WHERE message_key = ?"
+                }
+            },
+            waddle_server::db_params![expired.to_storage().to_string()],
+        )
+        .await;
+    assert_eq!(fixture.count("ingress_deliveries").await, 2);
+    assert_eq!(fixture.count("ingress_effect_intents").await, 4);
+    assert_eq!(fixture.count("ingress_effect_receipts").await, 4);
+
+    let outcome = gc_expired_aliases(
+        &fixture.db,
+        now,
+        AliasGcBudget {
+            deadline: Instant::now() + StdDuration::from_secs(10),
+            lock_timeout: StdDuration::from_secs(1),
+            statement_timeout: StdDuration::from_secs(2),
+            scan_timeout: StdDuration::from_secs(2),
+            progress: AliasGcProgress::default(),
+        },
+    )
+    .await
+    .expect("collect expired inbox delivery and canonical message");
+    assert!(outcome.completed);
+    assert_eq!(outcome.deleted_messages, 1);
+    assert_eq!(fixture.count("ingress_messages").await, 1);
+    assert_eq!(fixture.count("ingress_deliveries").await, 1);
+    assert_eq!(fixture.count("ingress_origin_aliases").await, 1);
+    assert_eq!(fixture.count("ingress_effect_intents").await, 2);
+    assert_eq!(fixture.count("ingress_effect_receipts").await, 2);
+    let mut tx = fixture
+        .uow
+        .begin()
+        .await
+        .expect("verify retained canonical");
+    assert!(CanonicalMessageRepository::load_envelope(&mut tx, expired)
+        .await
+        .expect("expired envelope read")
+        .is_none());
+    assert!(CanonicalMessageRepository::load_envelope(&mut tx, retained)
+        .await
+        .expect("retained envelope read")
+        .is_some());
+    tx.commit().await.expect("finish verification");
+    fixture.close().await;
+}
+
+#[tokio::test]
+async fn ingress_gc_reclaims_expired_inbox_delivery_sqlite() {
+    ingress_gc_reclaims_expired_inbox_delivery(IngressFixture::sqlite().await).await;
+}
+
+#[tokio::test]
+async fn ingress_gc_reclaims_expired_inbox_delivery_postgres() {
+    if let Some(fixture) = IngressFixture::postgres("gc_inbox_delivery").await {
+        ingress_gc_reclaims_expired_inbox_delivery(fixture).await;
+    }
+}

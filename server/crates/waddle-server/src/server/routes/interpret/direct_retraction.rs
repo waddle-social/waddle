@@ -11,7 +11,6 @@ pub(super) async fn apply_retraction_tombstone(
     let mam_storage = deps.mam_storage?;
     let sm_session_registry = deps.sm_session_registry;
     let pending_storage = deps.pending_delivery_storage;
-    let capture = deps.ingress_effect_capture.as_ref();
     let effects = deps.effects;
     // XEP-0424 §"Using the correct ID": a non-groupchat retraction
     // names the target by the SENDER's wire id, which is client-chosen
@@ -56,6 +55,7 @@ pub(super) async fn apply_retraction_tombstone(
             return None;
         }
         Err(error) => {
+            effects.fail_plan(super::effects::PlanFailure::RetractionTargetRead);
             warn!(
                 archive = %archive,
                 target = target_wire_id,
@@ -86,10 +86,7 @@ pub(super) async fn apply_retraction_tombstone(
         sender_scope: None,
     };
     if effects.is_planning() {
-        use super::effects::{
-            direct::{DurableDirectEffect, ExternalDirectEffect},
-            DurableEffect, Effect, ExternalEffect, PlannedEffect,
-        };
+        use super::effects::{direct::DurableDirectEffect, DurableEffect, Effect, PlannedEffect};
         let target = StanzaId::new(original.id, jid::Jid::from(archive.clone()));
         effects.record(PlannedEffect::new(Effect::Durable(DurableEffect::Direct(
             DurableDirectEffect::RetractionTombstone {
@@ -99,9 +96,9 @@ pub(super) async fn apply_retraction_tombstone(
             },
         ))));
         if let Some(target) = scrub_target {
-            effects.record(PlannedEffect::new(Effect::External(
-                ExternalEffect::Direct(ExternalDirectEffect::ScrubReplayForTombstone { target }),
-            )));
+            if !super::groupchat_archive::plan_tombstone_replay(deps, target).await {
+                return None;
+            }
         }
         return Some(target);
     }
@@ -128,7 +125,6 @@ pub(super) async fn apply_retraction_tombstone(
                     pending_storage,
                     scrub_target,
                     "ApplyRetractionTombstone",
-                    capture,
                 )
                 .await;
             }
@@ -147,7 +143,6 @@ pub(super) async fn apply_retraction_tombstone(
                     pending_storage,
                     scrub_target,
                     "ApplyRetractionTombstone",
-                    capture,
                 )
                 .await;
             }
@@ -168,7 +163,6 @@ pub(super) async fn apply_retraction_tombstone(
             pending_storage,
             scrub_target,
             "ApplyRetractionTombstone",
-            capture,
         )
         .await;
     }
