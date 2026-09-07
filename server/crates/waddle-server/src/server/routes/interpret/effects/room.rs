@@ -38,6 +38,7 @@ pub enum RoomActorMutation {
     SetSubject {
         claim_fence: Option<RoomClaimFenceContext>,
         subject: SubjectState,
+        rejection_reply: Box<Message>,
     },
     ApplyPin {
         claim_fence: Option<RoomClaimFenceContext>,

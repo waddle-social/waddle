@@ -393,7 +393,7 @@ async fn maybe_project_dm_call_thread(
     .await;
 }
 
-fn prune_dm_call_thread_state(
+pub(super) fn prune_dm_call_thread_state(
     state: &crate::server::routes::websocket::WebSocketState,
     now: chrono::DateTime<chrono::Utc>,
 ) {

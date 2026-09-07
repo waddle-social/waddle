@@ -461,3 +461,45 @@ fn restamp_room_projection_preserves_client_id_and_updates_archive_dependency() 
         }]
     );
 }
+
+#[test]
+fn restamp_subject_rejection_reply_uses_committed_archive_identity() {
+    use crate::server::routes::interpret::effects::room::RoomActorMutation;
+    use waddle_xmpp::muc::{RoomSubjectTexts, SubjectState};
+
+    let (mut plan, owner, minted, recorded) = fixture();
+    plan.plan
+        .push(PlannedEffect::new(Effect::External(ExternalEffect::Room(
+            ExternalRoomEffect::RoomActorMutation {
+                room: owner.clone(),
+                mutation: RoomActorMutation::SetSubject {
+                    claim_fence: None,
+                    subject: SubjectState {
+                        texts: RoomSubjectTexts::from_iter([(String::new(), "subject".to_owned())]),
+                        setter: jid("alice@example.test"),
+                        setter_nick: "alice".to_owned(),
+                        set_at: chrono::DateTime::from_timestamp(100, 0).expect("timestamp"),
+                    },
+                    rejection_reply: Box::new(plan.sanitized_message.clone()),
+                },
+            },
+        ))));
+    let stamped = restamp_plan(&plan, &[(owner, ArchiveRole::Sender, recorded.clone())]);
+    for (current, expected) in [(&plan, minted), (&stamped, recorded)] {
+        let Effect::External(ExternalEffect::Room(ExternalRoomEffect::RoomActorMutation {
+            mutation:
+                RoomActorMutation::SetSubject {
+                    rejection_reply, ..
+                },
+            ..
+        })) = &current.plan[0].effect
+        else {
+            panic!("subject mutation")
+        };
+        assert_eq!(extract_stanza_ids(rejection_reply), vec![expected]);
+        assert_eq!(
+            extract_origin_id(rejection_reply).expect("origin").id,
+            "client-origin"
+        );
+    }
+}

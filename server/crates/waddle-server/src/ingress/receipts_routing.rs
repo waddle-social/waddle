@@ -88,7 +88,8 @@ pub(super) fn route_receipts(
                 .iter()
                 .enumerate()
                 .filter_map(|(index, effect)| {
-                    full_delivery(effect, recipient)
+                    subject_rejection_reply(effect, recipient)
+                        .or_else(|| full_delivery(effect, recipient))
                         .filter(|message| {
                             message.type_ == MessageType::Error
                                 && message.payloads.iter().any(|element| {
@@ -105,6 +106,25 @@ pub(super) fn route_receipts(
                 })
                 .collect(),
         ),
+        _ => None,
+    }
+}
+
+fn subject_rejection_reply<'a>(
+    effect: &'a ExternalEffect,
+    recipient: &FullJid,
+) -> Option<&'a Message> {
+    use crate::server::routes::interpret::effects::room::{ExternalRoomEffect, RoomActorMutation};
+    match effect {
+        ExternalEffect::Room(ExternalRoomEffect::RoomActorMutation {
+            mutation:
+                RoomActorMutation::SetSubject {
+                    rejection_reply, ..
+                },
+            ..
+        }) if rejection_reply.to.as_ref() == Some(&recipient.clone().into()) => {
+            Some(rejection_reply)
+        }
         _ => None,
     }
 }

@@ -39,6 +39,24 @@ pub fn apply_recorded_intents(plan: &IngressPlan, recorded: &[IngressEffectInten
                     }
                 }
             }
+            if let (
+                IngressEffectIntent::RoomSubjectMutation {
+                    room,
+                    state: original_state,
+                },
+                IngressEffectIntent::RoomSubjectMutation {
+                    state: saved_state, ..
+                },
+            ) = (original, authoritative)
+            {
+                for dependency in &mut effect.dependencies {
+                    if let crate::server::routes::interpret::effects::PlanEffectDependency::AfterRoomSubject { room: dependent_room, state } = dependency {
+                        if dependent_room == room && state == original_state {
+                            *state = saved_state.clone();
+                        }
+                    }
+                }
+            }
             apply_effect(&mut effect.effect, original, authoritative);
         }
     }
@@ -68,6 +86,48 @@ pub fn restore_room_observer_envelope(
                 .room_observer_request()
                 .ok_or(crate::ingress_uow::IngressUowError::EffectIntentMessageMissing)?;
         }
+    }
+    Ok(())
+}
+
+/// Rebuild the conditional subject bounce from the committed message and error,
+/// so a retry never substitutes today's provisional payload or error text.
+pub fn restore_subject_rejection_replies(
+    plan: &mut IngressPlan,
+    envelope: &crate::ingress_substrate::MessageEnvelope,
+) -> Result<(), crate::ingress_uow::IngressUowError> {
+    use crate::ingress_uow::IngressUowError;
+    for effect in &mut plan.plan {
+        let Effect::External(ExternalEffect::Room(ExternalRoomEffect::RoomActorMutation {
+            room,
+            mutation:
+                RoomActorMutation::SetSubject {
+                    subject,
+                    rejection_reply,
+                    ..
+                },
+        })) = &mut effect.effect
+        else {
+            continue;
+        };
+        let mut errors = plan.intents.iter().filter_map(|intent| match intent {
+            IngressEffectIntent::ErrorReply { recipient, error }
+                if recipient.to_bare() == subject.setter =>
+            {
+                Some((recipient, error))
+            }
+            _ => None,
+        });
+        let (recipient, error) = errors.next().ok_or(IngressUowError::EffectIntentConflict)?;
+        if errors.next().is_some() {
+            return Err(IngressUowError::EffectIntentConflict);
+        }
+        let mut reply = envelope.message().clone();
+        reply.type_ = xmpp_parsers::message::MessageType::Error;
+        reply.from = Some(room.clone().into());
+        reply.to = Some(recipient.clone().into());
+        reply.payloads.push(error.to_xmpp().into());
+        **rejection_reply = reply;
     }
     Ok(())
 }

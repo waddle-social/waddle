@@ -20,6 +20,10 @@ pub(super) fn produces(effect: &ExternalEffect, dependency: &PlanEffectDependenc
             PlanEffectDependency::AfterArchive { archive, minted },
         ) => room == archive && waddle_xmpp_core::xep0359::StanzaId::new(&message.id, room.clone().into()) == *minted,
         (
+            ExternalEffect::Room(crate::server::routes::interpret::effects::room::ExternalRoomEffect::RoomActorMutation { room: actual, mutation: crate::server::routes::interpret::effects::room::RoomActorMutation::SetSubject { subject, .. } }),
+            PlanEffectDependency::AfterRoomSubject { room, state },
+        ) => actual == room && subject == state,
+        (
             ExternalEffect::RoomMembershipMutation(mutation),
             PlanEffectDependency::AfterRoomMembership { room, member },
         ) => {
@@ -57,7 +61,7 @@ pub(super) fn permits_dependents(effect: &ExternalEffect, outcome: &EffectOutcom
     matches!(
         (effect, outcome),
         (
-            ExternalEffect::Room(crate::server::routes::interpret::effects::room::ExternalRoomEffect::RoomActorMutation { mutation: crate::server::routes::interpret::effects::room::RoomActorMutation::ApplyPin { .. }, .. }),
+            ExternalEffect::Room(crate::server::routes::interpret::effects::room::ExternalRoomEffect::RoomActorMutation { mutation: crate::server::routes::interpret::effects::room::RoomActorMutation::ApplyPin { .. } | crate::server::routes::interpret::effects::room::RoomActorMutation::SetSubject { .. }, .. }),
             EffectOutcome::Completed
         ) | (
             ExternalEffect::Room(crate::server::routes::interpret::effects::room::ExternalRoomEffect::ArchiveAfterPin { .. }),

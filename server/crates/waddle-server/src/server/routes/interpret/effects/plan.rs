@@ -119,6 +119,9 @@ impl PlanSink {
             }
         }
         let mut plan = self.plan.lock().expect("plan mutex");
+        if let Some(dependency) = super::policy_metadata::subject_dependency(&effect, &plan) {
+            effect = effect.with_dependency(dependency);
+        }
         let outcome = effect.assumed_outcome(super::ProjectionRef(plan.len()));
         plan.push(effect);
         outcome

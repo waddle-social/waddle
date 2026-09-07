@@ -14,6 +14,11 @@ pub enum PlanEffectDependency {
         room: BareJid,
         change: waddle_xmpp::muc::pin::PinStateChange,
     },
+    /// The room actor must confirm this exact subject before reflection.
+    AfterRoomSubject {
+        room: BareJid,
+        state: waddle_xmpp::muc::SubjectState,
+    },
     AfterRoomMembership {
         room: BareJid,
         member: BareJid,

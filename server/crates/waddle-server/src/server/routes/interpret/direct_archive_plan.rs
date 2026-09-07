@@ -276,4 +276,141 @@ mod tests {
             .expect("read")
             .is_empty());
     }
+
+    fn call_state(index: usize, started: chrono::DateTime<chrono::Utc>) -> PlannedDmCallState {
+        let alice: BareJid = "alice@example.com".parse().expect("alice");
+        let bob: BareJid = "bob@example.com".parse().expect("bob");
+        let sid = format!("call-{index}");
+        PlannedDmCallState {
+            key: DmCallThreadKey::new(
+                alice.clone(),
+                bob.clone(),
+                xmpp_parsers::jingle::SessionId(sid.clone()),
+            ),
+            pending: Some(PendingDmCallOffer {
+                media: waddle_xmpp::xep::CallThreadMedia::audio_only(),
+                initiator: alice.clone(),
+                started,
+            }),
+            active: Some(PlannedActiveDmCall {
+                anchor: None,
+                initiator: alice.clone(),
+                media: waddle_xmpp::xep::CallThreadMedia::audio_only(),
+                started,
+                thread: waddle_xmpp_core::mam::ThreadId::new(sid).expect("thread"),
+            }),
+            projected: [alice, bob].into_iter().collect(),
+        }
+    }
+
+    async fn apply_call_plan(deps: &Deps<'_>, sink: &PlanSink, state: PlannedDmCallState) {
+        use super::super::effects::{EffectOutcome, EffectSink, ImmediateSink};
+
+        record(deps, state);
+        for effect in sink.take().0 {
+            assert!(matches!(
+                ImmediateSink.execute(effect, deps).await,
+                EffectOutcome::Completed
+            ));
+        }
+    }
+
+    #[tokio::test]
+    async fn planned_call_state_prunes_expired_offers_threads_and_orphan_projections() {
+        let socket = crate::server::routes::websocket::tests::create_test_websocket_state().await;
+        let protocol = &socket.deps.protocol;
+        let sink = PlanSink::new();
+        let mut deps = Deps::test_with_storage(
+            &protocol.connection_registry,
+            &protocol.mam_storage,
+            &protocol.inbox_storage,
+        );
+        deps.web_socket_state = Some(&socket);
+        deps.effects = &sink;
+        let now = chrono::Utc::now();
+        let active_expired = call_state(
+            0,
+            now - chrono::Duration::seconds(DM_CALL_ACTIVE_TTL_SECS + 2),
+        );
+        let active_key = active_expired.key.clone();
+        apply_call_plan(&deps, &sink, active_expired).await;
+        let pending_expired = call_state(
+            1,
+            now - chrono::Duration::seconds(DM_CALL_PENDING_TTL_SECS + 2),
+        );
+        let pending_key = pending_expired.key.clone();
+        apply_call_plan(&deps, &sink, pending_expired).await;
+        let mut orphan = call_state(2, now);
+        orphan.active = None;
+        let orphan_key = orphan.key.clone();
+        apply_call_plan(&deps, &sink, orphan).await;
+        let fresh = call_state(3, now);
+        let fresh_key = fresh.key.clone();
+        apply_call_plan(&deps, &sink, fresh).await;
+
+        assert!(!protocol.pending_dm_call_offers.contains_key(&active_key));
+        assert!(!protocol.dm_call_threads.contains_key(&active_key));
+        assert!(!protocol.pending_dm_call_offers.contains_key(&pending_key));
+        assert!(protocol.dm_call_threads.contains_key(&pending_key));
+        assert!(protocol.pending_dm_call_offers.contains_key(&fresh_key));
+        assert!(protocol.dm_call_threads.contains_key(&fresh_key));
+        for key in [&active_key, &orphan_key] {
+            for owner in [&key.low_peer, &key.high_peer] {
+                assert!(!protocol
+                    .dm_call_thread_projections
+                    .contains(&(owner.clone(), key.clone())));
+            }
+        }
+        assert_eq!(protocol.dm_call_thread_projections.len(), 4);
+    }
+
+    #[tokio::test]
+    async fn planned_call_state_prunes_oldest_keys_at_the_immediate_path_cap() {
+        let socket = crate::server::routes::websocket::tests::create_test_websocket_state().await;
+        let protocol = &socket.deps.protocol;
+        let sink = PlanSink::new();
+        let mut deps = Deps::test_with_storage(
+            &protocol.connection_registry,
+            &protocol.mam_storage,
+            &protocol.inbox_storage,
+        );
+        deps.web_socket_state = Some(&socket);
+        deps.effects = &sink;
+        let now = chrono::Utc::now();
+        for index in 0..DM_CALL_STATE_MAX_KEYS + 2 {
+            let started =
+                now - chrono::Duration::milliseconds((DM_CALL_STATE_MAX_KEYS + 2 - index) as i64);
+            apply_call_plan(&deps, &sink, call_state(index, started)).await;
+        }
+        // The immediate path prunes before insertion: the new key may take the
+        // maps one above the cap until the following committed mutation.
+        assert_eq!(
+            protocol.pending_dm_call_offers.len(),
+            DM_CALL_STATE_MAX_KEYS + 1
+        );
+        assert_eq!(protocol.dm_call_threads.len(), DM_CALL_STATE_MAX_KEYS + 1);
+        apply_call_plan(&deps, &sink, call_state(DM_CALL_STATE_MAX_KEYS + 1, now)).await;
+        assert_eq!(
+            protocol.pending_dm_call_offers.len(),
+            DM_CALL_STATE_MAX_KEYS
+        );
+        assert_eq!(protocol.dm_call_threads.len(), DM_CALL_STATE_MAX_KEYS);
+        assert_eq!(
+            protocol.dm_call_thread_projections.len(),
+            DM_CALL_STATE_MAX_KEYS * 2
+        );
+        for index in 0..2 {
+            let key = call_state(index, now).key;
+            assert!(!protocol.pending_dm_call_offers.contains_key(&key));
+            assert!(!protocol.dm_call_threads.contains_key(&key));
+            for owner in [&key.low_peer, &key.high_peer] {
+                assert!(!protocol
+                    .dm_call_thread_projections
+                    .contains(&(owner.clone(), key.clone())));
+            }
+        }
+        assert!(protocol
+            .dm_call_threads
+            .contains_key(&call_state(2, now).key));
+    }
 }

@@ -93,3 +93,40 @@ pub(super) fn message_dependencies(message: &Message) -> Vec<super::PlanEffectDe
         })
         .collect()
 }
+
+/// Subject reflection is truthful only after its planned room mutation succeeds.
+pub(super) fn subject_dependency(
+    effect: &PlannedEffect,
+    plan: &[PlannedEffect],
+) -> Option<super::PlanEffectDependency> {
+    let stanza = match &effect.effect {
+        Effect::External(ExternalEffect::Frame(stanza)) => stanza,
+        Effect::External(ExternalEffect::Delivery(
+            ExternalDeliveryEffect::RouteToPeer { stanza, .. }
+            | ExternalDeliveryEffect::QueueDetached { stanza, .. }
+            | ExternalDeliveryEffect::RelayFullJid { stanza, .. }
+            | ExternalDeliveryEffect::RelayBareJid { stanza, .. },
+        )) => stanza,
+        _ => return None,
+    };
+    let Stanza::Message(message) = stanza.as_ref() else {
+        return None;
+    };
+    if !waddle_xmpp::muc::is_groupchat_subject_change_message(message) {
+        return None;
+    }
+    let source = message.from.as_ref()?.to_bare();
+    let texts = waddle_xmpp::muc::RoomSubjectTexts::from_message_subjects(&message.subjects);
+    plan.iter().rev().find_map(|planned| match &planned.effect {
+        Effect::External(ExternalEffect::Room(ExternalRoomEffect::RoomActorMutation {
+            room,
+            mutation: super::room::RoomActorMutation::SetSubject { subject, .. },
+        })) if *room == source && subject.texts == texts => {
+            Some(super::PlanEffectDependency::AfterRoomSubject {
+                room: room.clone(),
+                state: subject.clone(),
+            })
+        }
+        _ => None,
+    })
+}

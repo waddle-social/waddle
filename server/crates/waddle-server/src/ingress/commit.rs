@@ -274,6 +274,16 @@ async fn commit_attempt(
             .ok_or(IngressUowError::EffectIntentMessageMissing)?;
         super::recorded::restore_room_observer_envelope(&mut plan, &recorded_envelope)?;
     }
+    if plan
+        .intents
+        .iter()
+        .any(|intent| matches!(intent, IngressEffectIntent::RoomSubjectMutation { .. }))
+    {
+        let recorded_envelope = CanonicalMessageRepository::load_envelope(&mut tx, key)
+            .await?
+            .ok_or(IngressUowError::EffectIntentMessageMissing)?;
+        super::recorded::restore_subject_rejection_replies(&mut plan, &recorded_envelope)?;
+    }
     let applied =
         super::durable::apply_durable(&mut tx, key, &plan, &recorded, &room_proof).await?;
     let ordinal = stream.as_ref().map(|stream| stream.ordinal);

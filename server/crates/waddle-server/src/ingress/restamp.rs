@@ -300,6 +300,14 @@ impl Replacements {
             }
             #[cfg(feature = "clustering")]
             ExternalRoomEffect::RelayMucProxy { stanza, .. } => self.stanza(stanza),
+            ExternalRoomEffect::RoomActorMutation {
+                mutation:
+                    crate::server::routes::interpret::effects::room::RoomActorMutation::SetSubject {
+                        rejection_reply,
+                        ..
+                    },
+                ..
+            } => self.message(rejection_reply),
             ExternalRoomEffect::RoomActorMutation { .. } => {}
         }
     }

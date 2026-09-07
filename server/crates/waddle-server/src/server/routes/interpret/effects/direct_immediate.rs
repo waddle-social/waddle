@@ -146,6 +146,7 @@ pub(super) async fn execute_external(
             let Some(socket) = deps.web_socket_state else {
                 return EffectOutcome::Unavailable;
             };
+            super::super::direct_archive::prune_dm_call_thread_state(socket, chrono::Utc::now());
             let protocol = &socket.deps.protocol;
             match state.pending {
                 Some(pending) => {

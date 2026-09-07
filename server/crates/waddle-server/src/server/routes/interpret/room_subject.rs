@@ -139,12 +139,22 @@ pub(super) async fn persist_room_subject_event(
         );
     }
     if deps.effects.is_planning() {
+        let rejection_reply = build_message_error_reply(
+            &message,
+            &room,
+            &sender,
+            resource_constraint_error(
+                "This room is temporarily unavailable; please retry the subject change.",
+            ),
+        );
+        super::capture_serialized_error_reply(deps, &Stanza::Message(rejection_reply.clone()));
         super::effects::room::external(
             deps,
             super::effects::room::ExternalRoomEffect::RoomActorMutation {
-                room,
+                room: room.clone(),
                 mutation: super::effects::room::RoomActorMutation::SetSubject {
                     claim_fence,
+                    rejection_reply: Box::new(rejection_reply),
                     subject: waddle_xmpp::muc::SubjectState {
                         texts,
                         setter,

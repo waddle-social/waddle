@@ -18,6 +18,74 @@ fn empty_plan() -> IngressPlan {
 }
 
 #[test]
+fn recorded_subject_state_rebinds_broadcast_completion_dependency() {
+    use crate::server::routes::interpret::effects::PlanEffectDependency;
+    use waddle_xmpp::{muc::RoomSubjectTexts, Stanza};
+
+    let room: jid::BareJid = "room@muc.example.test".parse().expect("room");
+    let saved = waddle_xmpp::muc::SubjectState {
+        texts: RoomSubjectTexts::from_iter([(String::new(), "subject".to_owned())]),
+        setter: "alice@example.test".parse().expect("setter"),
+        setter_nick: "alice".to_owned(),
+        set_at: chrono::DateTime::from_timestamp(100, 0).expect("timestamp"),
+    };
+    let mut offered = saved.clone();
+    offered.set_at = chrono::DateTime::from_timestamp(200, 0).expect("retry timestamp");
+    let recorded = IngressEffectIntent::RoomSubjectMutation {
+        room: room.clone(),
+        state: saved.clone(),
+    };
+    let mut plan = empty_plan();
+    plan.intents.push(IngressEffectIntent::RoomSubjectMutation {
+        room: room.clone(),
+        state: offered.clone(),
+    });
+    plan.plan
+        .push(PlannedEffect::new(Effect::External(ExternalEffect::Room(
+            ExternalRoomEffect::RoomActorMutation {
+                room: room.clone(),
+                mutation: RoomActorMutation::SetSubject {
+                    claim_fence: None,
+                    subject: offered.clone(),
+                    rejection_reply: Box::new(xmpp_parsers::message::Message::new(None)),
+                },
+            },
+        ))));
+    plan.plan.push(
+        PlannedEffect::new(Effect::External(ExternalEffect::Frame(Box::new(
+            Stanza::Message(xmpp_parsers::message::Message::new(None)),
+        ))))
+        .with_dependency(PlanEffectDependency::AfterRoomSubject {
+            room: room.clone(),
+            state: offered,
+        }),
+    );
+    let result = apply_recorded_intents(&plan, std::slice::from_ref(&recorded));
+    let Effect::External(effect) = &result.plan[0].effect else {
+        panic!("subject mutation");
+    };
+    let ExternalEffect::Room(ExternalRoomEffect::RoomActorMutation {
+        mutation: RoomActorMutation::SetSubject { subject, .. },
+        ..
+    }) = effect
+    else {
+        panic!("subject mutation");
+    };
+    assert_eq!(subject, &saved);
+    assert_eq!(
+        result.plan[1].dependencies,
+        vec![PlanEffectDependency::AfterRoomSubject { room, state: saved }]
+    );
+    let receipts =
+        crate::ingress::receipts::external_receipts(std::slice::from_ref(effect), &result.intents)
+            .expect("subject receipts");
+    assert_eq!(
+        receipts[0],
+        vec![crate::ingress::durable::receipt_key(&recorded).expect("key")]
+    );
+}
+
+#[test]
 fn recorded_inbox_payload_and_receipt_identity_win_over_policy_drift() {
     let owner = "alice@example.test".parse::<jid::BareJid>().expect("owner");
     let partner = "bob@example.test".parse().expect("partner");
@@ -486,4 +554,91 @@ fn recorded_room_archive_timestamp_matches_typed_stamp_not_client_id() {
     assert_eq!(entry.last_updated, 100);
     assert_eq!(entry.last_stanza_id, "client-wire-id");
     assert_eq!(archive_stanza_id, &stamp);
+}
+
+#[test]
+fn recorded_subject_bounce_reconstructs_exact_frame_without_transient_reply() {
+    use waddle_xmpp::ingress::{FrozenStanzaError, FrozenStanzaErrorType};
+    use waddle_xmpp::{muc::RoomSubjectTexts, Stanza, StanzaErrorCondition};
+    use xmpp_parsers::message::{Id, Lang, Message, MessageType};
+
+    let room: jid::BareJid = "room@muc.example.test".parse().expect("room");
+    let recipient: jid::FullJid = "alice@example.test/first".parse().expect("sender");
+    let mut message = Message::new(Some(room.clone().into()));
+    message.from = Some("room@muc.example.test/alice".parse().expect("occupant"));
+    message.id = Some(Id("original-request".to_owned()));
+    message.type_ = MessageType::Groupchat;
+    message
+        .subjects
+        .insert(Lang::default(), "saved subject".to_owned());
+    message
+        .payloads
+        .push(waddle_xmpp_core::xep0359::build_stanza_id_element(
+            "saved-archive-id",
+            &room.clone().into(),
+        ));
+    let envelope = crate::ingress_substrate::MessageEnvelope::new(message.clone());
+    let error = FrozenStanzaError::new(
+        FrozenStanzaErrorType::Wait,
+        StanzaErrorCondition::ResourceConstraint,
+    )
+    .with_text(
+        "",
+        "This room is temporarily unavailable; please retry the subject change.",
+    );
+    let intent = IngressEffectIntent::ErrorReply {
+        recipient: recipient.clone(),
+        error: error.clone(),
+    };
+    let mut expected = message;
+    expected.type_ = MessageType::Error;
+    expected.from = Some(room.clone().into());
+    expected.to = Some(recipient.clone().into());
+    expected.payloads.push(error.to_xmpp().into());
+    let mut plan = empty_plan();
+    plan.intents.push(intent.clone());
+    plan.plan
+        .push(PlannedEffect::new(Effect::External(ExternalEffect::Room(
+            ExternalRoomEffect::RoomActorMutation {
+                room,
+                mutation: RoomActorMutation::SetSubject {
+                    claim_fence: None,
+                    subject: waddle_xmpp::muc::SubjectState {
+                        texts: RoomSubjectTexts::from_message_subjects(&expected.subjects),
+                        setter: recipient.to_bare(),
+                        setter_nick: "alice".to_owned(),
+                        set_at: chrono::DateTime::from_timestamp(100, 0).expect("timestamp"),
+                    },
+                    rejection_reply: Box::new(Message::new(None)),
+                },
+            },
+        ))));
+    restore_subject_rejection_replies(&mut plan, &envelope).expect("restore durable bounce");
+    let Effect::External(ExternalEffect::Room(ExternalRoomEffect::RoomActorMutation {
+        mutation: RoomActorMutation::SetSubject {
+            rejection_reply, ..
+        },
+        ..
+    })) = &plan.plan[0].effect
+    else {
+        panic!("subject mutation")
+    };
+    let mut restored_wire = Vec::new();
+    minidom::Element::from((**rejection_reply).clone())
+        .write_to(&mut restored_wire)
+        .expect("restored frame");
+    let mut original_wire = Vec::new();
+    minidom::Element::from(expected)
+        .write_to(&mut original_wire)
+        .expect("original frame");
+    assert_eq!(restored_wire, original_wire);
+    let frame = ExternalEffect::Frame(Box::new(Stanza::Message((**rejection_reply).clone())));
+    let receipts = crate::ingress::receipts::external_receipts(&[frame], &plan.intents)
+        .expect("bounce receipts");
+    assert_eq!(
+        receipts,
+        vec![vec![
+            crate::ingress::durable::receipt_key(&intent).expect("bounce key")
+        ]]
+    );
 }

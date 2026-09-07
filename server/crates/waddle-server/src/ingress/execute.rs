@@ -457,6 +457,30 @@ fn proven_receipts(
 ) -> Vec<EffectReceiptKey> {
     use crate::server::routes::interpret::effects::invite::MucUserDeliveryProof;
     use waddle_xmpp::ingress::{IngressEffectIntent, PendingDeliveryMutation};
+    if let ExternalEffect::Room(
+        crate::server::routes::interpret::effects::room::ExternalRoomEffect::RoomActorMutation {
+            mutation:
+                crate::server::routes::interpret::effects::room::RoomActorMutation::SetSubject {
+                    rejection_reply,
+                    ..
+                },
+            ..
+        },
+    ) = effect
+    {
+        let bounce = subject_bounce_receipt(rejection_reply);
+        // A successful mutation discharges its mutually exclusive bounce.
+        // Failure proves only the bounce, and only after its frame is written.
+        return candidates
+            .iter()
+            .filter(|key| match outcome {
+                EffectOutcome::Completed => true,
+                EffectOutcome::Unavailable => Some(*key) == bounce.as_ref(),
+                _ => false,
+            })
+            .cloned()
+            .collect();
+    }
     if let EffectOutcome::ConfirmedIntents(intents) = outcome {
         let proven = intents
             .iter()
@@ -533,6 +557,19 @@ fn proven_receipts(
         .collect()
 }
 
+fn subject_bounce_receipt(message: &xmpp_parsers::message::Message) -> Option<EffectReceiptKey> {
+    let recipient = message.to.as_ref()?.try_as_full().ok()?.clone();
+    let error = message.payloads.iter().find_map(|payload| {
+        xmpp_parsers::stanza_error::StanzaError::try_from(payload.clone()).ok()
+    })?;
+    let error = waddle_xmpp::ingress::FrozenStanzaError::from_xmpp(&error).ok()?;
+    super::durable::receipt_key(&waddle_xmpp::ingress::IngressEffectIntent::ErrorReply {
+        recipient,
+        error,
+    })
+    .ok()
+}
+
 fn classify_outcome(
     effect: &ExternalEffect,
     outcome: EffectOutcome,
@@ -596,9 +633,16 @@ fn classify_outcome(
         EffectOutcome::Completed | EffectOutcome::Archive(Ok(_)) | EffectOutcome::Inbox(Ok(_)) => {
             ExternalOutcome::Done
         }
-        EffectOutcome::Unavailable
-        | EffectOutcome::Archive(Err(_))
-        | EffectOutcome::Inbox(Err(_)) => ExternalOutcome::Failed,
+        EffectOutcome::Unavailable => {
+            if let ExternalEffect::Room(crate::server::routes::interpret::effects::room::ExternalRoomEffect::RoomActorMutation {
+                mutation: crate::server::routes::interpret::effects::room::RoomActorMutation::SetSubject { rejection_reply, .. }, ..
+            }) = effect {
+                frames.push(Stanza::Message((**rejection_reply).clone()));
+                return ExternalOutcome::Done;
+            }
+            ExternalOutcome::Failed
+        }
+        EffectOutcome::Archive(Err(_)) | EffectOutcome::Inbox(Err(_)) => ExternalOutcome::Failed,
         EffectOutcome::Delivery(outcome) => match outcome {
             FullJidDeliveryOutcome::Delivered | FullJidDeliveryOutcome::QueuedDetached => {
                 if matches!(effect, ExternalEffect::Delivery(ExternalDeliveryEffect::QueueDetached { resources, .. }) if resources.len() > 1)
