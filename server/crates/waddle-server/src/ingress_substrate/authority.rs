@@ -24,6 +24,7 @@ impl EnvelopeVersion {
 pub struct MessageEnvelope {
     version: EnvelopeVersion,
     message: Message,
+    observer_request: Option<Message>,
 }
 
 impl MessageEnvelope {
@@ -31,6 +32,7 @@ impl MessageEnvelope {
         Self {
             version: EnvelopeVersion::V1,
             message,
+            observer_request: None,
         }
     }
 
@@ -42,6 +44,27 @@ impl MessageEnvelope {
         &self.message
     }
 
+    /// Preserve the original request shape while sharing its body and subjects
+    /// with the canonical observed message. Room enrichment does not change either.
+    pub fn with_room_observer(message: Message, mut request: Message) -> Self {
+        request.bodies.clear();
+        request.subjects.clear();
+        Self {
+            version: EnvelopeVersion::V1,
+            message,
+            observer_request: Some(request),
+        }
+    }
+
+    pub fn room_observer_request(&self) -> Option<Message> {
+        self.observer_request.as_ref().map(|request| {
+            let mut request = request.clone();
+            request.bodies = self.message.bodies.clone();
+            request.subjects = self.message.subjects.clone();
+            request
+        })
+    }
+
     pub(super) fn from_storage(
         version: i64,
         bytes: Vec<u8>,
@@ -49,35 +72,95 @@ impl MessageEnvelope {
         if version != i64::from(EnvelopeVersion::V1.to_storage()) {
             return Err(IngressSubstrateError::InvalidStoredEnvelope);
         }
-        let text = std::str::from_utf8(&bytes)
+        let stored: StoredEnvelope = serde_json::from_slice(&bytes)
             .map_err(|_| IngressSubstrateError::InvalidStoredEnvelope)?;
-        let element = minidom::Element::from_str(text)
-            .map_err(|_| IngressSubstrateError::InvalidStoredEnvelope)?;
-        let stanza_ns = element.ns().to_string();
-        let thread_parent = waddle_xmpp_core::parser_utils::extract_thread_parent(&element);
-        let mut message =
-            Message::try_from(element).map_err(|_| IngressSubstrateError::InvalidStoredEnvelope)?;
-        if let Some(parent) = thread_parent {
-            waddle_xmpp_core::parser_utils::reattach_thread_parent(
-                &mut message,
-                parent,
-                &stanza_ns,
-            );
+        let observer_request = stored
+            .observer_request
+            .as_deref()
+            .map(parse_envelope_message)
+            .transpose()?;
+        if observer_request
+            .as_ref()
+            .is_some_and(|request| !request.bodies.is_empty() || !request.subjects.is_empty())
+        {
+            return Err(IngressSubstrateError::InvalidStoredEnvelope);
         }
         Ok(Self {
             version: EnvelopeVersion::V1,
-            message,
+            message: parse_envelope_message(&stored.message)?,
+            observer_request,
         })
     }
+}
+
+#[derive(serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+struct StoredEnvelope {
+    message: String,
+    observer_request: Option<String>,
+}
+
+fn parse_envelope_message(text: &str) -> Result<Message, IngressSubstrateError> {
+    let element = minidom::Element::from_str(text)
+        .map_err(|_| IngressSubstrateError::InvalidStoredEnvelope)?;
+    let stanza_ns = element.ns().to_string();
+    let thread_parent = waddle_xmpp_core::parser_utils::extract_thread_parent(&element);
+    let mut message =
+        Message::try_from(element).map_err(|_| IngressSubstrateError::InvalidStoredEnvelope)?;
+    if let Some(parent) = thread_parent {
+        waddle_xmpp_core::parser_utils::reattach_thread_parent(&mut message, parent, &stanza_ns);
+    }
+    Ok(message)
 }
 
 /// Encode only where the typed envelope crosses into database storage.
 pub(super) fn serialize_envelope(
     envelope: &MessageEnvelope,
 ) -> Result<Vec<u8>, IngressSubstrateError> {
-    waddle_xmpp::parser::message_to_string(envelope.message())
-        .map(String::into_bytes)
-        .map_err(|_| IngressSubstrateError::InvalidStoredEnvelope)
+    let encode = |message: &Message| {
+        waddle_xmpp::parser::message_to_string(message)
+            .map_err(|_| IngressSubstrateError::InvalidStoredEnvelope)
+    };
+    let stored = StoredEnvelope {
+        message: encode(envelope.message())?,
+        observer_request: envelope.observer_request.as_ref().map(encode).transpose()?,
+    };
+    serde_json::to_vec(&stored).map_err(|_| IngressSubstrateError::InvalidStoredEnvelope)
+}
+
+/// Attach the owner's canonical observation under the canonical row lock.
+/// An existing observer context is immutable across retries.
+pub async fn record_room_observer_envelope(
+    tx: &mut Transaction<'_>,
+    key: MessageKey,
+    envelope: &MessageEnvelope,
+) -> Result<(), IngressSubstrateError> {
+    if !lock_message_for_child(tx, key).await? {
+        return Err(IngressSubstrateError::MessageContentConflict);
+    }
+    let stored = load_envelope(tx, key)
+        .await?
+        .ok_or(IngressSubstrateError::MessageContentConflict)?;
+    if stored.observer_request.is_some() {
+        return Ok(());
+    }
+    if envelope.observer_request.is_none() {
+        return Err(IngressSubstrateError::InvalidStoredEnvelope);
+    }
+    const POSTGRES: &str = "UPDATE ingress_messages SET envelope_version = ?, envelope = ? WHERE message_key = ?::uuid";
+    const SQLITE: &str =
+        "UPDATE ingress_messages SET envelope_version = ?, envelope = ? WHERE message_key = ?";
+    tx.execute(
+        dialect_sql(tx.driver(), POSTGRES, SQLITE),
+        crate::db_params![
+            envelope.version().to_storage(),
+            serialize_envelope(envelope)?,
+            key.to_storage().to_string()
+        ],
+    )
+    .await
+    .map_err(discard_database_error)?;
+    Ok(())
 }
 
 /// Stable effect codec discriminator carried by receipt identities.

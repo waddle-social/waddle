@@ -3,6 +3,7 @@
 use std::{future::Future, pin::Pin, sync::Arc, time::Duration};
 
 use chrono::Utc;
+use futures::FutureExt;
 use tokio::sync::Notify;
 use tokio_util::sync::CancellationToken;
 
@@ -103,9 +104,13 @@ pub(crate) async fn run_retention_gc_coordinator(
             tokio::select! {
                 biased;
                 () = cancellation.cancelled() => return,
-                () = coordinator.trigger.notified() => {}
+                () = force_stop.cancelled() => return,
                 () = tokio::time::sleep(coordinator.partial_retry_delay) => {}
             }
+            // Commits during the pass or pause are covered by the pending
+            // continuation. Consume their coalesced permit only after the
+            // pause, so active traffic cannot bypass the pool's rest period.
+            let _ = coordinator.trigger.notified().now_or_never();
         }
     }
 }
@@ -429,5 +434,83 @@ mod tests {
             partial_retry_delay: RETENTION_GC_PARTIAL_RETRY_DELAY,
         };
         run_retention_gc_coordinator(coordinator, cancellation, CancellationToken::new()).await;
+    }
+
+    fn partial_coordinator_with_pending_trigger() -> (
+        RetentionGcCoordinator,
+        tokio::sync::mpsc::UnboundedReceiver<usize>,
+    ) {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+
+        let trigger = Arc::new(Notify::new());
+        let run_trigger = trigger.clone();
+        let runs = AtomicUsize::new(0);
+        let (sender, receiver) = tokio::sync::mpsc::unbounded_channel();
+        let coordinator = RetentionGcCoordinator {
+            trigger,
+            run: Arc::new(move || {
+                let run = runs.fetch_add(1, Ordering::SeqCst);
+                sender.send(run).expect("test observes every GC pass");
+                let outcome = if run == 0 {
+                    // A commit while the first pass is running leaves a
+                    // stored permit that must not short-circuit the pause.
+                    run_trigger.notify_one();
+                    IngressGcOutcome::Partial
+                } else {
+                    IngressGcOutcome::Completed
+                };
+                Box::pin(async move { outcome })
+            }),
+            partial_retry_delay: Duration::from_secs(1),
+        };
+        (coordinator, receiver)
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn retention_coordinator_partial_waits_with_pending_trigger_and_coalesces_it() {
+        let (coordinator, mut runs) = partial_coordinator_with_pending_trigger();
+        let trigger = coordinator.trigger.clone();
+        let cancellation = CancellationToken::new();
+        let task = tokio::spawn(run_retention_gc_coordinator(
+            coordinator,
+            cancellation.clone(),
+            CancellationToken::new(),
+        ));
+        assert_eq!(runs.recv().await, Some(0));
+        tokio::time::advance(Duration::from_millis(999)).await;
+        tokio::task::yield_now().await;
+        assert!(runs.try_recv().is_err(), "pending trigger bypassed pause");
+        // A later trigger in the pause must coalesce with the continuation.
+        trigger.notify_one();
+        tokio::time::advance(Duration::from_millis(1)).await;
+        assert_eq!(runs.recv().await, Some(1));
+        tokio::task::yield_now().await;
+        assert!(runs.try_recv().is_err(), "trigger caused an extra pass");
+        cancellation.cancel();
+        task.await.expect("coordinator exits");
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn retention_coordinator_partial_pause_cancellation_exits_promptly() {
+        for force in [false, true] {
+            let (coordinator, mut runs) = partial_coordinator_with_pending_trigger();
+            let cancellation = CancellationToken::new();
+            let force_stop = CancellationToken::new();
+            let task = tokio::spawn(run_retention_gc_coordinator(
+                coordinator,
+                cancellation.clone(),
+                force_stop.clone(),
+            ));
+            assert_eq!(runs.recv().await, Some(0));
+            let started = tokio::time::Instant::now();
+            if force {
+                force_stop.cancel();
+            } else {
+                cancellation.cancel();
+            }
+            task.await.expect("cancellation interrupts the pause");
+            assert_eq!(started.elapsed(), Duration::ZERO);
+            assert!(runs.try_recv().is_err(), "cancellation started a new pass");
+        }
     }
 }

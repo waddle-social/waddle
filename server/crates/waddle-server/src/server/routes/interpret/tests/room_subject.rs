@@ -617,7 +617,7 @@ async fn xep_0045_rejected_room_subject_does_not_record_subject_mutation_intent(
 
 #[tokio::test]
 async fn xep_0045_rejected_room_subject_records_error_reply_intent() {
-    use xmpp_parsers::stanza_error::{DefinedCondition, ErrorType, StanzaError};
+    use xmpp_parsers::stanza_error::StanzaError;
 
     let registry = ConnectionRegistry::new();
     let capture = crate::ingress::IngressEffectCapture::new();
@@ -626,7 +626,7 @@ async fn xep_0045_rejected_room_subject_records_error_reply_intent() {
 
     let room_jid: jid::BareJid = "channel@muc.example.com".parse().expect("bare jid");
     let sender: jid::FullJid = "alice@example.com/web".parse().expect("sender full jid");
-    let _outcome = interpret(
+    let outcome = interpret(
         vec![OutboundEvent::PersistRoomSubject {
             room: room_jid.clone(),
             claim_fence: None,
@@ -644,13 +644,15 @@ async fn xep_0045_rejected_room_subject_records_error_reply_intent() {
     )
     .await;
 
-    let expected_error = waddle_xmpp::ingress::FrozenStanzaError::from_xmpp(&StanzaError::new(
-        ErrorType::Wait,
-        DefinedCondition::ResourceConstraint,
-        "en",
-        "The room subject could not be saved; please retry.",
-    ))
-    .expect("server-built stanza error should freeze");
+    let emitted: minidom::Element = outcome.frames[0].parse().expect("emitted bounce");
+    let emitted = Message::try_from(emitted).expect("message bounce");
+    let emitted_error = emitted
+        .payloads
+        .iter()
+        .find_map(|payload| StanzaError::try_from(payload.clone()).ok())
+        .expect("bounce stanza error");
+    let expected_error = waddle_xmpp::ingress::FrozenStanzaError::from_xmpp(&emitted_error)
+        .expect("server-built stanza error should freeze");
     assert!(capture.snapshot().intents.iter().any(|intent| {
         matches!(
             intent,

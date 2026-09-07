@@ -97,6 +97,7 @@ fn restamp_updates_archive_inbox_dependencies_and_external_frames() {
             ExternalDirectEffect::PushInboxUpdate {
                 owner: owner.clone(),
                 projection: crate::server::routes::interpret::effects::ProjectionRef(1),
+                receipt: None,
             },
         ))),
         PlannedEffect::new(Effect::External(ExternalEffect::Frame(Box::new(

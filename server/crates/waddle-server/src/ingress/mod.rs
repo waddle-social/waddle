@@ -881,3 +881,6 @@ pub(crate) mod test_support {
         "/tests/ingress_support.rs"
     ));
 }
+
+#[cfg(test)]
+mod subject_receipt_tests;

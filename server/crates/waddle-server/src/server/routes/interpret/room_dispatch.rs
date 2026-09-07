@@ -669,7 +669,17 @@ pub(super) async fn dispatch_to_room(
     // The marker controls only this nested room batch. Consume it here rather
     // than folding it into the returned outcome, where it could leak into an
     // unrelated sibling event in the enclosing interpreter batch.
-    if retry_suppression.is_none() && deps.effects.is_planning() {
+    let has_observers = state
+        .deps
+        .protocol
+        .extension_manager
+        .has_message_observers(&observer_message);
+    if retry_suppression.is_none() && has_observers && deps.effects.is_planning() {
+        deps.capture_intent(IngressEffectIntent::RoomObserver {
+            room: room_jid.clone(),
+            requester: sender_full.to_bare(),
+            sender: sender_full.clone(),
+        });
         super::effects::room::external(
             deps,
             super::effects::room::ExternalRoomEffect::ObserveRoomMessage {
@@ -679,9 +689,9 @@ pub(super) async fn dispatch_to_room(
                 sender: sender_full.clone(),
                 error_request: Box::new(incoming.clone()),
             },
-            super::effects::PlanSuppressionPolicy::SenderOnly,
+            super::effects::PlanSuppressionPolicy::Always,
         );
-    } else if retry_suppression.is_none() {
+    } else if retry_suppression.is_none() && has_observers {
         let mut observer_message = observer_message;
         let observer_outcome = state
             .deps

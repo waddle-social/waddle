@@ -68,12 +68,12 @@ data:
             AND message.terminal_at <= cutoff.value
         )
         SELECT
-          count(*) FILTER (WHERE has_alias OR (NOT has_ref AND NOT has_delivery)) AS eligible_messages,
+          count(*) FILTER (WHERE has_alias OR has_delivery OR NOT has_ref) AS eligible_messages,
           coalesce(
-            extract(epoch FROM now() - min(terminal_at) FILTER (WHERE has_alias OR (NOT has_ref AND NOT has_delivery))),
+            extract(epoch FROM now() - min(terminal_at) FILTER (WHERE has_alias OR has_delivery OR NOT has_ref)),
             0
           ) AS oldest_eligible_age_seconds,
-          count(*) FILTER (WHERE has_ref OR has_delivery) AS retained_referenced_messages
+          count(*) FILTER (WHERE has_ref) AS retained_referenced_messages
         FROM expired
       primary: true
       metrics:
@@ -85,7 +85,7 @@ data:
             description: Age in seconds of the oldest ingress message eligible for retention GC.
         - retained_referenced_messages:
             usage: GAUGE
-            description: Terminal ingress messages retained because they still have an SM reference or delivery.
+            description: Expired terminal ingress messages retained because they still have an SM reference.
 
     waddle_ingress_messages:
       target_databases: ["waddle"]

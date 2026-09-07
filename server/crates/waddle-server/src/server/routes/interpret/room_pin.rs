@@ -98,6 +98,8 @@ async fn apply_pin(deps: &Deps<'_>, room: BareJid, request: PinChangeRequest, re
                 error = ?error,
                 "ApplyPinChange::Pin: GetRoomSnapshot failed; dropping"
             );
+            deps.effects
+                .fail_plan(effects::PlanFailure::RoomSnapshotUnavailable);
             return;
         }
     };
@@ -221,6 +223,8 @@ async fn apply_unpin(
             .reply_timeout(std::time::Duration::from_secs(5))
             .await
         else {
+            deps.effects
+                .fail_plan(effects::PlanFailure::RoomSnapshotUnavailable);
             return;
         };
         plan_pin_mutation(
@@ -329,6 +333,8 @@ async fn lookup_room_actor(
                 error = ?error,
                 "room registry lookup failed; skipping"
             );
+            deps.effects
+                .fail_plan(effects::PlanFailure::RoomSnapshotUnavailable);
             None
         }
     }
@@ -428,6 +434,8 @@ pub(super) async fn cascade_retraction_to_pin_list(
                 error = ?error,
                 "Pin retraction cascade: GetPinList ask failed"
             );
+            deps.effects
+                .fail_plan(effects::PlanFailure::RoomSnapshotUnavailable);
             return;
         }
     };

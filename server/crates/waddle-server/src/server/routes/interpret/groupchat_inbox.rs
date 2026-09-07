@@ -61,7 +61,9 @@ pub(super) async fn project_groupchat_inbox_event(input: ProjectGroupchatInboxEv
             mutation,
         });
     }
-    capture_groupchat_inbox_pushes(deps, &owner, &outcome);
+    if !deps.effects.is_planning() {
+        capture_groupchat_inbox_pushes(deps, &owner, &outcome);
+    }
     if outcome.notification_recovery_committed {
         if let Some(recovery) = notification_recovery_for_capture.as_ref() {
             deps.capture_intent(IngressEffectIntent::GroupchatNotificationRecovery {

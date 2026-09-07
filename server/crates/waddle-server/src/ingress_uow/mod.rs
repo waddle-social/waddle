@@ -101,9 +101,9 @@ impl IngressUnitOfWork {
     }
 
     /// Bound even the initial epoch lock wait before taking any row locks.
-    /// SQLite acquisition (`BEGIN IMMEDIATE`, including pool checkout) uses
-    /// the lock bound rather than waiting for the pool's longer busy timeout.
-    /// Expiry is the same typed timeout as PostgreSQL's lock timeout.
+    /// Transaction acquisition, including pool checkout on both backends and
+    /// SQLite's `BEGIN IMMEDIATE`, uses the lock bound. PostgreSQL's local
+    /// timeouts apply only after checkout; acquisition expiry is also typed.
     pub async fn begin_with_timeouts(
         &self,
         lock: Duration,
@@ -116,14 +116,15 @@ impl IngressUnitOfWork {
         &self,
         bounds: Option<(Duration, Duration)>,
     ) -> Result<IngressUowTransaction<'_>, IngressUowError> {
-        let mut transaction = match self.db.driver() {
-            DatabaseDriver::Sqlite => match bounds {
-                Some((lock, _)) => tokio::time::timeout(lock, self.db.begin_immediate())
-                    .await
-                    .map_err(|_| IngressUowError::Timeout)??,
-                None => self.db.begin_immediate().await?,
-            },
-            DatabaseDriver::Postgres => self.db.begin().await?,
+        let acquisition = async {
+            match self.db.driver() {
+                DatabaseDriver::Sqlite => self.db.begin_immediate().await,
+                DatabaseDriver::Postgres => self.db.begin().await,
+            }
+        };
+        let mut transaction = match bounds {
+            Some((lock, _)) => acquire_transaction_with_timeout(lock, acquisition).await?,
+            None => acquisition.await?,
         };
         if let Some((lock, statement)) = bounds {
             if !set_local_transaction_timeouts(&mut transaction, lock, statement).await? {
@@ -181,6 +182,15 @@ impl IngressUnitOfWork {
             authority_guards: Vec::new(),
         })
     }
+}
+
+async fn acquire_transaction_with_timeout<'a>(
+    lock: Duration,
+    acquisition: impl std::future::Future<Output = Result<Transaction<'a>, crate::db::DatabaseError>>,
+) -> Result<Transaction<'a>, IngressUowError> {
+    Ok(tokio::time::timeout(lock, acquisition)
+        .await
+        .map_err(|_| IngressUowError::Timeout)??)
 }
 
 /// The lineage attestation an ingress transaction runs under.

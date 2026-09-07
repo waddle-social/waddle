@@ -960,17 +960,32 @@ async fn push_projected_inbox(
     outcome: super::effects::EffectOutcome,
 ) -> Vec<FullJid> {
     if let super::effects::EffectOutcome::PlannedInbox(projection) = outcome {
+        let resources = match deps.user_registry {
+            Some(registry) => waddle_xmpp::registry::get_resources_for_user(registry, owner).await,
+            None => Vec::new(),
+        };
+        let receipt = deps
+            .ingress_effect_capture
+            .as_ref()
+            .filter(|_| !resources.is_empty())
+            .map(|capture| {
+                let intent = IngressEffectIntent::RouteDirect {
+                    recipient: owner.clone(),
+                    fanout: resources.clone(),
+                    route_identity: capture.next_route_identity(),
+                };
+                capture.record_intent(intent.clone());
+                Box::new(intent)
+            });
         super::effects::direct::external(
             deps,
             super::effects::direct::ExternalDirectEffect::PushInboxUpdate {
                 owner: owner.clone(),
                 projection,
+                receipt,
             },
         );
-        match deps.user_registry {
-            Some(registry) => waddle_xmpp::registry::get_resources_for_user(registry, owner).await,
-            None => Vec::new(),
-        }
+        resources
     } else if let super::effects::EffectOutcome::Inbox(Ok(entry)) = outcome {
         push_inbox_update(deps.connection_registry, deps.user_registry, owner, &entry).await
     } else {

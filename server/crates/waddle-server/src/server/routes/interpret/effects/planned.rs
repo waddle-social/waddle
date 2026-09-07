@@ -103,6 +103,12 @@ pub enum RoomExecutionPath {
 /// A required Phase-A read failed; this plan cannot be accepted.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, thiserror::Error)]
 pub enum PlanFailure {
+    #[error("preview references could not be read")]
+    PreviewReferenceRead,
+    #[error("rich target lookup infrastructure is unavailable")]
+    RichTargetLookup,
+    #[error("room snapshot is unavailable")]
+    RoomSnapshotUnavailable,
     #[error("displayed-marker inbox snapshot could not be read")]
     InboxSnapshotRead,
     #[error("retraction target could not be read")]

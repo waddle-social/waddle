@@ -54,6 +54,7 @@ fn recorded_inbox_payload_and_receipt_identity_win_over_policy_drift() {
         ExternalEffect::Direct(ExternalDirectEffect::PushInboxUpdate {
             owner,
             projection: crate::server::routes::interpret::effects::ProjectionRef(0),
+            receipt: None,
         }),
     )));
     let result = apply_recorded_intents(&plan, std::slice::from_ref(&recorded));

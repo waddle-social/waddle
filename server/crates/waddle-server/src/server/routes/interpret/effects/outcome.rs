@@ -21,6 +21,10 @@ pub enum EffectOutcome {
         >,
     ),
     Completed,
+    /// Resources that accepted the committed inbox projection push.
+    InboxPush(Vec<jid::FullJid>),
+    /// Independently completed storage steps; absent obligations stay pending.
+    ConfirmedIntents(Vec<waddle_xmpp::ingress::IngressEffectIntent>),
     Frames(Vec<Stanza>),
     #[cfg(feature = "clustering")]
     RelayFrames {

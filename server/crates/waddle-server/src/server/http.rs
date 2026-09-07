@@ -220,10 +220,17 @@ pub(crate) async fn create_ingress_inbox_storage(
             crate::inbox::DatabaseInboxStorage::from_database(global.clone()).await?
         }
         crate::db::DatabaseDriver::Postgres => {
-            let storage = crate::inbox::DatabaseInboxStorage::open(Some(
-                database_url.unwrap_or_else(|| global.database_url()),
-            ))
-            .await?;
+            let database_url = database_url.unwrap_or_else(|| global.database_url());
+            // Opening inbox storage mutates its schema. Check the live identity
+            // through a plain pool before initializing the configured database.
+            let probe = sqlx::postgres::PgPoolOptions::new()
+                .max_connections(1)
+                .connect(database_url)
+                .await?;
+            let identity = crate::db::lineage::live_postgres_identity_via_pg_pool(&probe).await;
+            probe.close().await;
+            ensure_postgres_ingress_colocation(&identity?, global).await?;
+            let storage = crate::inbox::DatabaseInboxStorage::open(Some(database_url)).await?;
             let database = storage.database();
             if database.driver() != crate::db::DatabaseDriver::Postgres {
                 return Err(IngressColocationError::Backend.into());
@@ -1953,6 +1960,17 @@ mod ingress_colocation_tests {
             error.downcast_ref::<IngressColocationError>(),
             Some(IngressColocationError::PostgresIdentity { .. })
         ));
+        let objects: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM pg_class WHERE relnamespace = (SELECT oid FROM pg_namespace WHERE nspname = $1)",
+        )
+        .bind(&separate_schema)
+        .fetch_one(&admin)
+        .await
+        .expect("split inbox schema remains empty");
+        assert_eq!(
+            objects, 0,
+            "rejected inbox URL must not create schema objects"
+        );
         drop(shared);
         drop(global);
         for schema in [&global_schema, &separate_schema] {
@@ -1985,6 +2003,14 @@ mod ingress_colocation_tests {
             error.downcast_ref::<IngressColocationError>(),
             Some(IngressColocationError::SqliteDatabase)
         ));
+        let objects: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM sqlite_master")
+            .fetch_one(separate.sqlite_pool().expect("split SQLite pool"))
+            .await
+            .expect("split inbox database remains empty");
+        assert_eq!(
+            objects, 0,
+            "rejected inbox URL must not create schema objects"
+        );
     }
 
     #[tokio::test]

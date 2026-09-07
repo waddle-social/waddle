@@ -45,6 +45,8 @@ pub enum ExternalDirectEffect {
     PushInboxUpdate {
         owner: BareJid,
         projection: super::ProjectionRef,
+        /// Frozen resource set and capture identity for this projection push.
+        receipt: Option<Box<waddle_xmpp::ingress::IngressEffectIntent>>,
     },
     LinkPreviewRefs {
         mutations: Vec<LinkPreviewMediaRefMutation>,
@@ -205,6 +207,7 @@ mod tests {
                 ExternalDirectEffect::PushInboxUpdate {
                     owner: owner.clone(),
                     projection,
+                    receipt: None,
                 },
             );
             assert_eq!(

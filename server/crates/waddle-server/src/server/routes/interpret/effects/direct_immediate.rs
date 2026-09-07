@@ -113,18 +113,20 @@ pub(super) async fn execute_external(
     applied: &super::AppliedDurableEffects,
 ) -> EffectOutcome {
     match effect {
-        ExternalDirectEffect::PushInboxUpdate { owner, projection } => {
+        ExternalDirectEffect::PushInboxUpdate {
+            owner, projection, ..
+        } => {
             let Some(entry) = applied.inbox(projection) else {
                 return EffectOutcome::Unavailable;
             };
-            super::super::groupchat_archive::push_inbox_update(
+            let resources = super::super::groupchat_archive::push_inbox_update(
                 deps.connection_registry,
                 deps.user_registry,
                 &owner,
                 entry,
             )
             .await;
-            EffectOutcome::Completed
+            EffectOutcome::InboxPush(resources)
         }
         ExternalDirectEffect::ScrubReplayForTombstone { target } => {
             if super::super::groupchat_archive::scrub_unacked_for_tombstone(

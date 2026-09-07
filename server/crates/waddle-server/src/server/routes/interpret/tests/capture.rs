@@ -508,7 +508,7 @@ async fn groupchat_inbox_boundary_skips_notification_intent_when_t0_policy_suppr
 }
 
 #[tokio::test]
-async fn offline_delivery_boundary_records_notification_preview_intent() {
+async fn offline_delivery_boundary_only_confirms_written_steps() {
     let registry = ConnectionRegistry::new();
     let pending: Arc<dyn PendingDeliveryStorage> = Arc::new(InMemoryPendingDeliveryStorage::new(
         waddle_xmpp::pending_delivery::QuotaPolicy::default_policy(),
@@ -554,7 +554,7 @@ async fn offline_delivery_boundary_records_notification_preview_intent() {
     .await;
 
     let snapshot = capture_snapshot(&capture);
-    assert!(snapshot.intents.iter().any(|intent| matches!(
+    assert!(!snapshot.intents.iter().any(|intent| matches!(
         intent,
         IngressEffectIntent::NotificationActivityPreview { owner, .. }
             if *owner == recipient

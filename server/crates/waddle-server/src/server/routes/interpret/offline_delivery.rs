@@ -25,7 +25,8 @@ pub(super) async fn apply_offline_delivery_row(
     row: waddle_xmpp::pending_delivery::PendingRow,
     original_message: Box<Message>,
     prepared_notification: Option<PreparedOfflineNotification>,
-) {
+) -> Vec<IngressEffectIntent> {
+    let mut confirmed = Vec::new();
     let recipient = row.recipient.clone();
     let payload = &row.payload;
     // XEP-0160 §3 step 2/4 — persist for later delivery.
@@ -38,7 +39,7 @@ pub(super) async fn apply_offline_delivery_row(
             "QueueOfflineDelivery emitted but pending_delivery_storage is not wired; \
              dropping (test fixture or unwired deployment)"
         );
-        return;
+        return confirmed;
     };
     let notification_archive_stanza_id = match payload {
         waddle_xmpp::pending_delivery::PendingPayload::Archived(stanza_id) => {
@@ -106,7 +107,7 @@ pub(super) async fn apply_offline_delivery_row(
                 original_message,
             },
         );
-        return;
+        return confirmed;
     }
     match storage.insert(row).await {
         Ok(waddle_xmpp::pending_delivery::InsertOutcome::Inserted) => {
@@ -114,18 +115,9 @@ pub(super) async fn apply_offline_delivery_row(
                 recipient = %recipient,
                 "pending_delivery row inserted"
             );
-            deps.capture_intent(IngressEffectIntent::PendingDelivery {
+            confirmed.push(IngressEffectIntent::PendingDelivery {
                 mutation: pending_delivery_mutation,
             });
-            if let Some(archive_stanza_id) = notification_archive_stanza_id.as_ref() {
-                deps.capture_intent(IngressEffectIntent::NotificationActivityPreview {
-                    owner: recipient.clone(),
-                    mutation: waddle_xmpp::ingress::NotificationActivityMutation::OfflineDelivery {
-                        conversation: recipient.clone(),
-                        archive_stanza_id: archive_stanza_id.clone(),
-                    },
-                });
-            }
             let outcome = match prepared_notification {
                 Some(prepared) => {
                     insert_prepared_notification(deps.web_socket_state, prepared).await
@@ -143,18 +135,36 @@ pub(super) async fn apply_offline_delivery_row(
                 notification_archive_stanza_id.as_ref(),
                 outcome.candidate_outcome(),
             ) {
-                deps.capture_intent(IngressEffectIntent::NotificationActivityPreview {
+                confirmed.push(IngressEffectIntent::NotificationActivityPreview {
                     owner: recipient.clone(),
                     mutation:
                         waddle_xmpp::ingress::NotificationActivityMutation::NotificationCandidate {
                             conversation: recipient.clone(),
                             archive_stanza_id: archive_stanza_id.clone(),
-                            outcome: candidate_outcome,
+                            // A duplicate confirms the same durable candidate exists.
+                            // The frozen planning obligation is always Inserted.
+                            outcome: match candidate_outcome {
+                                waddle_xmpp::ingress::NotificationCandidateOutcome::Duplicate => {
+                                    waddle_xmpp::ingress::NotificationCandidateOutcome::Inserted
+                                }
+                                outcome => outcome,
+                            },
                         },
                 });
             }
-            if notification_archive_stanza_id.is_some() && outcome.completed() {
-                mark_pending_notification_outboxed(storage.as_ref(), &row_id, &recipient).await;
+            if outcome.completed() {
+                if let Some(archive_stanza_id) = notification_archive_stanza_id {
+                    if mark_pending_notification_outboxed(storage.as_ref(), &row_id, &recipient)
+                        .await
+                    {
+                        confirmed.push(IngressEffectIntent::NotificationActivityPreview {
+                            owner: recipient.clone(),
+                            mutation: waddle_xmpp::ingress::NotificationActivityMutation::OfflineDelivery {
+                                conversation: recipient.clone(), archive_stanza_id,
+                            },
+                        });
+                    }
+                }
             }
         }
         Ok(waddle_xmpp::pending_delivery::InsertOutcome::QuotaExceeded) => {
@@ -198,7 +208,7 @@ pub(super) async fn apply_offline_delivery_row(
                         recipient = %recipient,
                         "bounce target JID missing; dropping bounce"
                     );
-                    return;
+                    return confirmed;
                 }
             };
             let bounce_stanza = waddle_xmpp::Stanza::Message(bounce);
@@ -264,6 +274,10 @@ pub(super) async fn apply_offline_delivery_row(
             );
         }
     }
+    for intent in &confirmed {
+        deps.capture_intent(intent.clone());
+    }
+    confirmed
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

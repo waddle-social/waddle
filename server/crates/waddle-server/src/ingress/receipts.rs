@@ -76,6 +76,19 @@ fn exact_mutation(effect: &ExternalEffect, intent: &IngressEffectIntent) -> bool
                 _ => false,
             }
         }
+        (
+            ExternalEffect::Room(ExternalRoomEffect::ObserveRoomMessage {
+                room,
+                requester,
+                sender,
+                ..
+            }),
+            IngressEffectIntent::RoomObserver {
+                room: recorded_room,
+                requester: recorded_requester,
+                sender: recorded_sender,
+            },
+        ) => room == recorded_room && requester == recorded_requester && sender == recorded_sender,
         #[cfg(feature = "clustering")]
         (
             ExternalEffect::Room(ExternalRoomEffect::RelayMucProxy { room, .. }),

@@ -148,7 +148,7 @@ async fn assert_committed_projection_push(database_url: &str, conversation: Conv
                 ImmediateSink
                     .execute_with_applied(effect, &deps, &applied)
                     .await,
-                EffectOutcome::Completed
+                EffectOutcome::InboxPush(_)
             ));
             pushes += 1;
         }
@@ -240,6 +240,7 @@ async fn committed_inbox_push_requires_the_projection_outcome() {
             super::super::effects::direct::ExternalDirectEffect::PushInboxUpdate {
                 owner: "alice@example.com".parse().expect("owner"),
                 projection: ProjectionRef(0),
+                receipt: None,
             },
         )));
     assert!(matches!(

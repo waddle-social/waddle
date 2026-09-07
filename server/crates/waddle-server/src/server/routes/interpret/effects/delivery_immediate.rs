@@ -154,14 +154,14 @@ pub(crate) async fn execute(effect: ExternalDeliveryEffect, deps: &Deps<'_>) -> 
             row,
             original_message,
         } => {
-            super::super::offline_delivery::apply_offline_delivery_row(
+            let confirmed = super::super::offline_delivery::apply_offline_delivery_row(
                 &immediate,
                 row,
                 original_message,
                 Some(prepared_notification),
             )
             .await;
-            EffectOutcome::Completed
+            EffectOutcome::ConfirmedIntents(confirmed)
         }
     }
 }

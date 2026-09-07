@@ -51,6 +51,56 @@ pub fn apply_recorded_intents(plan: &IngressPlan, recorded: &[IngressEffectInten
     result
 }
 
+/// Restore observer payloads from the canonical envelope before receipt matching.
+pub fn restore_room_observer_envelope(
+    plan: &mut IngressPlan,
+    envelope: &crate::ingress_substrate::MessageEnvelope,
+) -> Result<(), crate::ingress_uow::IngressUowError> {
+    for effect in &mut plan.plan {
+        if let Effect::External(ExternalEffect::Room(ExternalRoomEffect::ObserveRoomMessage {
+            message,
+            error_request,
+            ..
+        })) = &mut effect.effect
+        {
+            **message = envelope.message().clone();
+            **error_request = envelope
+                .room_observer_request()
+                .ok_or(crate::ingress_uow::IngressUowError::EffectIntentMessageMissing)?;
+        }
+    }
+    Ok(())
+}
+
+pub fn room_observer_envelope(
+    plan: &IngressPlan,
+) -> Option<crate::ingress_substrate::MessageEnvelope> {
+    if !plan
+        .intents
+        .iter()
+        .any(|intent| matches!(intent, IngressEffectIntent::RoomObserver { .. }))
+    {
+        return None;
+    }
+    plan.plan.iter().find_map(|effect| {
+        if let Effect::External(ExternalEffect::Room(ExternalRoomEffect::ObserveRoomMessage {
+            message,
+            error_request,
+            ..
+        })) = &effect.effect
+        {
+            Some(
+                crate::ingress_substrate::MessageEnvelope::with_room_observer(
+                    (**message).clone(),
+                    (**error_request).clone(),
+                ),
+            )
+        } else {
+            None
+        }
+    })
+}
+
 fn recorded_match<'a>(
     recorded: &'a [IngressEffectIntent],
     planned: &IngressEffectIntent,
@@ -74,6 +124,9 @@ fn recorded_match<'a>(
 /// projection, even when its usual duplicate policy allows idempotent replay.
 pub(super) fn external_in_recorded_audience(plan: &IngressPlan, effect: &ExternalEffect) -> bool {
     use waddle_xmpp::ingress::EffectAuthorityKey;
+    if let ExternalEffect::Room(ExternalRoomEffect::ObserveRoomMessage { room, .. }) = effect {
+        return plan.intents.iter().any(|intent| matches!(intent, IngressEffectIntent::RoomObserver { room: recorded_room, .. } if room == recorded_room));
+    }
     let (owner, room) = match effect {
         ExternalEffect::Room(ExternalRoomEffect::NotificationCandidate { owner, room, .. }) => {
             (owner.clone(), room.clone())
@@ -285,6 +338,16 @@ fn apply_external(
     use crate::server::routes::interpret::effects::early::RoomMembershipMutation;
     use crate::server::routes::websocket::handlers::message::muc_invite::InviteLedgerMutation;
     match (effect, original, recorded) {
+        (
+            ExternalEffect::Room(ExternalRoomEffect::ObserveRoomMessage { room, requester, sender, .. }),
+            IngressEffectIntent::RoomObserver { room: original_room, .. },
+            IngressEffectIntent::RoomObserver { room: saved_room, requester: saved_requester, sender: saved_sender },
+        ) if room == original_room => {
+            *room = saved_room.clone();
+            *requester = saved_requester.clone();
+            *sender = saved_sender.clone();
+        }
+
         (
             ExternalEffect::Delivery(crate::server::routes::interpret::effects::delivery::ExternalDeliveryEffect::RelayCarbons { owner, exclude, kind, .. }),
             IngressEffectIntent::RelayCarbons { owner: original_owner, kind: original_kind, .. },

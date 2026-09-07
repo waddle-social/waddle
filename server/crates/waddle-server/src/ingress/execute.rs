@@ -263,6 +263,7 @@ pub async fn execute_effects(
         let already_receipted = matches!(
             effect,
             ExternalEffect::Delivery(ExternalDeliveryEffect::RelayCarbons { .. })
+                | ExternalEffect::Room(crate::server::routes::interpret::effects::room::ExternalRoomEffect::ObserveRoomMessage { .. })
         ) && !decision.external_receipts[index].is_empty()
             && decision.external_receipts[index]
                 .iter()
@@ -456,6 +457,31 @@ fn proven_receipts(
 ) -> Vec<EffectReceiptKey> {
     use crate::server::routes::interpret::effects::invite::MucUserDeliveryProof;
     use waddle_xmpp::ingress::{IngressEffectIntent, PendingDeliveryMutation};
+    if let EffectOutcome::ConfirmedIntents(intents) = outcome {
+        let proven = intents
+            .iter()
+            .filter_map(|intent| super::durable::receipt_key(intent).ok())
+            .collect::<Vec<_>>();
+        return candidates
+            .iter()
+            .filter(|key| proven.contains(key))
+            .cloned()
+            .collect();
+    }
+    if let ExternalEffect::Direct(ExternalDirectEffect::PushInboxUpdate { receipt, .. }) = effect {
+        let (
+            Some(IngressEffectIntent::RouteDirect { fanout, .. }),
+            EffectOutcome::InboxPush(resources),
+        ) = (receipt.as_deref(), outcome)
+        else {
+            return Vec::new();
+        };
+        return if fanout.iter().all(|resource| resources.contains(resource)) {
+            candidates.to_vec()
+        } else {
+            Vec::new()
+        };
+    }
     let (ExternalEffect::RouteToPeer(route) | ExternalEffect::QueueOfflineDelivery(route)) = effect
     else {
         return candidates.to_vec();
@@ -516,6 +542,10 @@ fn classify_outcome(
         #[cfg(feature = "clustering")]
         EffectOutcome::RelayFrames { .. } => ExternalOutcome::Failed,
         EffectOutcome::Frames(mut produced) => {
+            if matches!(effect, ExternalEffect::Room(crate::server::routes::interpret::effects::room::ExternalRoomEffect::ObserveRoomMessage { .. })) && !produced.is_empty() {
+                frames.append(&mut produced);
+                return ExternalOutcome::Failed;
+            }
             frames.append(&mut produced);
             if matches!(
                 effect,
@@ -528,7 +558,9 @@ fn classify_outcome(
                 ExternalOutcome::Done
             }
         }
-        EffectOutcome::Membership(_) => ExternalOutcome::Done,
+        EffectOutcome::Membership(_)
+        | EffectOutcome::InboxPush(_)
+        | EffectOutcome::ConfirmedIntents(_) => ExternalOutcome::Done,
         EffectOutcome::MucUserDelivery(Ok(proof)) => {
             use crate::server::routes::interpret::effects::invite::MucUserDeliveryProof;
             match (effect, proof) {
@@ -776,6 +808,7 @@ mod tests {
         let effect = ExternalEffect::Direct(ExternalDirectEffect::PushInboxUpdate {
             owner,
             projection: crate::server::routes::interpret::effects::ProjectionRef(0),
+            receipt: None,
         });
         assert_eq!(
             classify_outcome(&effect, EffectOutcome::Completed, &mut Vec::new()),
@@ -795,3 +828,11 @@ mod carbons_retry_tests;
 #[cfg(all(test, feature = "clustering"))]
 #[path = "execute_carbon_fanout_tests.rs"]
 mod carbon_fanout_tests;
+
+#[cfg(test)]
+#[path = "execute_observer_tests.rs"]
+mod observer_tests;
+
+#[cfg(test)]
+#[path = "execute_inbox_offline_tests.rs"]
+mod inbox_offline_tests;

@@ -289,6 +289,7 @@ fn room_projection(
             ExternalEffect::Direct(ExternalDirectEffect::PushInboxUpdate {
                 owner,
                 projection: ProjectionRef(1),
+                receipt: None,
             }),
         )));
     submission
@@ -359,6 +360,7 @@ async fn displayed_marker_replay(fixture: IngressFixture) {
             ExternalEffect::Direct(ExternalDirectEffect::PushInboxUpdate {
                 owner,
                 projection: ProjectionRef(0),
+                receipt: None,
             }),
         )));
         let marked = commit_submission(&fixture.uow, &read, 5)

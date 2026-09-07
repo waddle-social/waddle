@@ -83,6 +83,19 @@ not replay them automatically. Never delete protected rows to silence alerts.
 Watch table bytes/live/dead tuples including `ingress_effect_receipts`, and
 CNPG eligible/retained-reference counts alongside reclamation totals.
 
+The collector and CNPG backlog/oldest-age queries share this eligibility
+predicate: `terminal_at IS NOT NULL AND terminal_at <= now() - interval '8 days'
+AND (has_alias OR has_delivery OR NOT has_ref)`, where the three booleans
+mean a matching row exists in `ingress_origin_aliases`, `ingress_deliveries`,
+and `ingress_sm_refs`, respectively. Expired delivery markers are GC work,
+including when no alias or stream reference remains. GC removes aliases and
+delivery markers even when a stream reference retains the canonical row.
+The retained-reference gauge counts expired rows with `has_ref`. These can
+also be eligible until their aliases and delivery markers are removed; the
+stream reference retains the canonical row itself. Eligible age is measured
+from `terminal_at`, not from expiry. The Rust predicate parity test pins both
+collector dialects and both CNPG eligibility aggregates to this definition.
+
 GC takes the epoch lock before canonical rows and uses `FOR UPDATE SKIP LOCKED`.
 A `partial` result means bounded progress with more work pending, not failure;
 `failed` or `timed_out` requires investigation. See

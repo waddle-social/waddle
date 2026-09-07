@@ -46,6 +46,7 @@ async fn plan_events(
     deps.ingress_effect_capture = Some(capture.clone());
     interpret(events, &deps).await;
     let (plan, room_execution) = sink.take();
+    submission.plan.failure = sink.failure();
     submission.plan.plan = plan;
     submission.plan.room_execution = room_execution;
     submission.plan.intents = capture.snapshot().intents;
@@ -476,5 +477,187 @@ async fn unpin_system_broadcast_plan_commit_execute_sqlite() {
 async fn unpin_system_broadcast_plan_commit_execute_postgres() {
     if let Some(fixture) = IngressFixture::postgres("unpin_broadcast").await {
         room_pin_seam(fixture, false, false, true).await;
+    }
+}
+
+#[derive(Default)]
+struct BlockedRoomRestore {
+    entered: tokio::sync::Notify,
+    release: tokio::sync::Notify,
+}
+
+impl waddle_xmpp::muc::durable::MucDurableStore for BlockedRoomRestore {
+    fn load_room_state_fenced<'a>(
+        &'a self,
+        _room: &'a BareJid,
+        _fence: &'a waddle_xmpp::muc::RoomClaimFenceContext,
+    ) -> waddle_xmpp::muc::durable::MucDurableFuture<
+        'a,
+        Option<waddle_xmpp::muc::durable::DurableRoomState>,
+    > {
+        Box::pin(async move {
+            self.entered.notify_one();
+            self.release.notified().await;
+            Ok(None)
+        })
+    }
+
+    fn commit_room_mutation<'a>(
+        &'a self,
+        _room: &'a BareJid,
+        _fence: &'a waddle_xmpp::muc::RoomClaimFenceContext,
+        _intent: waddle_xmpp::muc::RoomDurableMutation,
+        _effects: waddle_xmpp::muc::RoomMutationEffects,
+    ) -> waddle_xmpp::muc::RoomCommitFuture<'a> {
+        Box::pin(async { panic!("an incomplete pin plan must not mutate the room") })
+    }
+
+    fn check_exact_claim_fence<'a>(
+        &'a self,
+        _room: &'a BareJid,
+        _fence: &'a waddle_xmpp::muc::RoomClaimFenceContext,
+    ) -> waddle_xmpp::muc::durable::MucDurableFuture<'a, bool> {
+        Box::pin(async { Ok(true) })
+    }
+}
+
+async fn room_pin_snapshot_failure(fixture: IngressFixture, unpin: bool) {
+    let room: BareJid = "snapshot-failure@muc.example.com".parse().expect("room");
+    let sender: FullJid = "romeo@example.com/phone".parse().expect("sender");
+    let registry = ConnectionRegistry::new();
+    let (tx, mut rx) = tokio::sync::mpsc::channel(16);
+    registry.register(sender.clone(), tx);
+    let rooms = RoomRegistryActor::spawn(RoomRegistryActor::new(
+        "muc.example.com".into(),
+        OccupantIdSecret::new(vec![b'p'; 32]).expect("secret"),
+    ));
+    let actor = rooms
+        .ask(CreateRoom {
+            room_jid: room.clone(),
+            waddle_id: "waddle".into(),
+            channel_id: "pins".into(),
+            config: Default::default(),
+        })
+        .await
+        .expect("room actor");
+    let target_stanza_id = StanzaId::new("pin-target", room.clone().into());
+    let entry = PinnedEntry {
+        target_stanza_id: target_stanza_id.clone(),
+        pinner_jid: sender.to_bare(),
+        pinned_at: chrono::Utc::now(),
+        preview: PinPreview::new(sender.to_bare(), None, "target", chrono::Utc::now()),
+    };
+    if unpin {
+        actor
+            .ask(ApplyPin {
+                change: PinStateChange::Pin(entry.clone()),
+            })
+            .await
+            .expect("existing pin");
+    }
+    let store = std::sync::Arc::new(BlockedRoomRestore::default());
+    let blocked_actor = actor.clone();
+    let blocked_store = store.clone();
+    let fence = waddle_xmpp::muc::RoomClaimFenceContext::new(
+        waddle_xmpp::ownership::Entity::new(
+            waddle_xmpp::ownership::EntityType::RoomActor,
+            room.to_string(),
+        ),
+        waddle_xmpp::ownership::NodeIdentity::local(),
+        waddle_xmpp::ownership::ClaimEpoch(1),
+    );
+    let restore = tokio::spawn(async move {
+        blocked_actor
+            .ask(waddle_xmpp::muc::room_actor::RestoreDurableRoomState {
+                store: blocked_store,
+                claim_fence: fence,
+            })
+            .await
+            .expect("release blocked restore");
+    });
+    store.entered.notified().await;
+    // The registry can resolve this live actor, but GetRoomSnapshot really
+    // times out behind the blocked restore in the actor's mailbox.
+    let mut deps = Deps::registry_only(&registry);
+    deps.room_registry = Some(&rooms);
+    let mut submission = fixture.submission(Some("pin-snapshot-failure"), "pin request");
+    let request = if unpin {
+        PinChangeRequest::Unpin {
+            target_stanza_id,
+            pinner_jid: sender.to_bare(),
+            pinner_nick: "romeo".into(),
+            reason: Some("manual".into()),
+        }
+    } else {
+        PinChangeRequest::Pin {
+            target_stanza_id,
+            pinner_jid: sender.to_bare(),
+            pinner_nick: "romeo".into(),
+            pinned_at: chrono::Utc::now(),
+        }
+    };
+    plan_events(
+        &mut submission,
+        &deps,
+        vec![OutboundEvent::ApplyPinChange { room, request }],
+    )
+    .await;
+    assert_eq!(
+        submission.plan.failure,
+        Some(effects::PlanFailure::RoomSnapshotUnavailable)
+    );
+    assert!(submission.plan.plan.is_empty());
+    assert!(submission.plan.intents.is_empty());
+    let failure = commit_submission(&fixture.uow, &submission, 3)
+        .await
+        .expect_err("incomplete pin plan cannot commit");
+    assert_eq!(failure.class(), IngressDecisionClass::Storage);
+    assert!(!failure.class().advances());
+    for table in [
+        "ingress_messages",
+        "ingress_origin_aliases",
+        "ingress_effect_intents",
+        "ingress_effect_receipts",
+        "ingress_sm_streams",
+        "ingress_sm_refs",
+        "ingress_deliveries",
+        "mam_messages",
+        "inbox_entries",
+    ] {
+        assert_eq!(fixture.count(table).await, 0, "no writes to {table}");
+    }
+    assert!(rx.try_recv().is_err(), "no reply or broadcast");
+    store.release.notify_one();
+    restore.await.expect("restore task");
+    assert_eq!(
+        actor.ask(GetPinList).await.expect("unchanged pins"),
+        if unpin { vec![entry] } else { vec![] }
+    );
+    actor.kill();
+    rooms.kill();
+    fixture.close().await;
+}
+
+#[tokio::test]
+async fn pin_snapshot_failure_plan_is_nonadvancing_sqlite() {
+    room_pin_snapshot_failure(IngressFixture::sqlite().await, false).await;
+}
+
+#[tokio::test]
+async fn pin_snapshot_failure_plan_is_nonadvancing_postgres() {
+    if let Some(fixture) = IngressFixture::postgres("pin_snapshot_failure").await {
+        room_pin_snapshot_failure(fixture, false).await;
+    }
+}
+
+#[tokio::test]
+async fn unpin_snapshot_failure_plan_is_nonadvancing_sqlite() {
+    room_pin_snapshot_failure(IngressFixture::sqlite().await, true).await;
+}
+
+#[tokio::test]
+async fn unpin_snapshot_failure_plan_is_nonadvancing_postgres() {
+    if let Some(fixture) = IngressFixture::postgres("unpin_snapshot_failure").await {
+        room_pin_snapshot_failure(fixture, true).await;
     }
 }

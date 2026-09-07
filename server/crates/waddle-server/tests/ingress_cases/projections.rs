@@ -48,7 +48,11 @@ fn inbox_push_plan(
         .plan
         .plan
         .push(PlannedEffect::new(Effect::External(
-            ExternalEffect::Direct(ExternalDirectEffect::PushInboxUpdate { owner, projection }),
+            ExternalEffect::Direct(ExternalDirectEffect::PushInboxUpdate {
+                owner,
+                projection,
+                receipt: None,
+            }),
         )));
     submission
 }
@@ -130,6 +134,7 @@ async fn committed_inbox_projection(fixture: IngressFixture) {
         ExternalEffect::Direct(ExternalDirectEffect::PushInboxUpdate {
             owner: fixture.principal.bare_jid().clone(),
             projection: ProjectionRef(0),
+            receipt: None,
         }),
     )));
     read.identity = super::replay::resumable_identity(&fixture, "marker-read-stream", 1).await;
@@ -219,8 +224,7 @@ pub(super) async fn assert_pushed_entry(
     )
     .await;
     assert_eq!(report.outcomes.len(), 1);
-    // The sink exposes no delivery receipt; inspect the actual pushed stanza.
-    assert_eq!(report.outcomes[0].1, ExternalOutcome::Uncertain);
+    assert_eq!(report.outcomes[0].1, ExternalOutcome::Done);
     assert!(report.receipt_failures.is_empty());
     assert!(report.terminalization_failure.is_none());
     let Stanza::Message(message) = receiver.try_recv().expect("committed inbox push").stanza else {

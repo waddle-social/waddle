@@ -493,7 +493,11 @@ async fn monotonic_inbox(fixture: IngressFixture) {
             .plan
             .plan
             .push(PlannedEffect::new(Effect::External(
-                ExternalEffect::Direct(ExternalDirectEffect::PushInboxUpdate { owner, projection }),
+                ExternalEffect::Direct(ExternalDirectEffect::PushInboxUpdate {
+                    owner,
+                    projection,
+                    receipt: None,
+                }),
             )));
         submission
     };

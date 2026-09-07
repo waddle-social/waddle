@@ -13,6 +13,17 @@ pub(super) fn route_receipts(
     external: &[ExternalEffect],
     intent: &IngressEffectIntent,
 ) -> Option<Vec<usize>> {
+    let direct = external.iter().enumerate().filter_map(|(index, effect)| {
+        match effect {
+            ExternalEffect::Direct(crate::server::routes::interpret::effects::direct::ExternalDirectEffect::PushInboxUpdate { receipt: Some(recorded), .. }) if recorded.as_ref() == intent => Some(index),
+            ExternalEffect::Delivery(ExternalDeliveryEffect::QueueOfflineDelivery { row, prepared_notification, .. }) if offline_intents(row, prepared_notification).contains(intent) => Some(index),
+            effect if groupchat_notification_receipt(effect, intent) => Some(index),
+            _ => None,
+        }
+    }).collect::<Vec<_>>();
+    if !direct.is_empty() {
+        return Some(direct);
+    }
     if let IngressEffectIntent::PendingDelivery {
         mutation: waddle_xmpp::ingress::PendingDeliveryMutation::Transient { recipient, row_id },
     } = intent
@@ -96,6 +107,54 @@ pub(super) fn route_receipts(
         ),
         _ => None,
     }
+}
+
+fn groupchat_notification_receipt(effect: &ExternalEffect, intent: &IngressEffectIntent) -> bool {
+    use crate::server::routes::interpret::effects::room::ExternalRoomEffect;
+    use waddle_xmpp::ingress::{NotificationActivityMutation, NotificationCandidateOutcome};
+    matches!((effect, intent), (
+        ExternalEffect::Room(ExternalRoomEffect::NotificationCandidate { owner, room, archive_stanza_id, candidate: Some(candidate), .. }),
+        IngressEffectIntent::NotificationActivityPreview { owner: recorded_owner, mutation: NotificationActivityMutation::NotificationCandidate { conversation, archive_stanza_id: recorded_stamp, outcome: NotificationCandidateOutcome::Inserted } }
+    ) if owner == recorded_owner && room == conversation && archive_stanza_id == recorded_stamp
+        && candidate.recipient_bare_jid() == recorded_owner && candidate.conversation_jid() == conversation && candidate.archive_stanza_id() == recorded_stamp)
+}
+
+fn offline_intents(
+    row: &waddle_xmpp::pending_delivery::PendingRow,
+    notification: &crate::server::routes::interpret::effects::delivery::PreparedOfflineNotification,
+) -> Vec<IngressEffectIntent> {
+    use waddle_xmpp::ingress::{
+        NotificationActivityMutation, NotificationCandidateOutcome, PendingDeliveryMutation,
+    };
+    use waddle_xmpp::pending_delivery::PendingPayload;
+    let mutation = match &row.payload {
+        PendingPayload::Archived(archive_stanza_id) => PendingDeliveryMutation::Archived {
+            recipient: row.recipient.clone(),
+            row_id: row.id.clone(),
+            archive_stanza_id: archive_stanza_id.clone(),
+        },
+        PendingPayload::Transient(_) => PendingDeliveryMutation::Transient {
+            recipient: row.recipient.clone(),
+            row_id: row.id.clone(),
+        },
+    };
+    let mut intents = vec![IngressEffectIntent::PendingDelivery { mutation }];
+    if let PendingPayload::Archived(archive_stanza_id) = &row.payload {
+        intents.push(IngressEffectIntent::NotificationActivityPreview {
+            owner: row.recipient.clone(),
+            mutation: NotificationActivityMutation::OfflineDelivery {
+                conversation: row.recipient.clone(),
+                archive_stanza_id: archive_stanza_id.clone(),
+            },
+        });
+        if matches!(notification, crate::server::routes::interpret::effects::delivery::PreparedOfflineNotification::Prepared(_)) {
+            intents.push(IngressEffectIntent::NotificationActivityPreview {
+                owner: row.recipient.clone(),
+                mutation: NotificationActivityMutation::NotificationCandidate { conversation: row.recipient.clone(), archive_stanza_id: archive_stanza_id.clone(), outcome: NotificationCandidateOutcome::Inserted },
+            });
+        }
+    }
+    intents
 }
 
 fn cover_recipients(

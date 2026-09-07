@@ -708,3 +708,92 @@ backend_test!(
     typed_envelope_retry_after_storage_roundtrip,
     Postgres
 );
+
+async fn room_observer_owner_envelope_attachment(driver: DatabaseDriver) {
+    let Some(fixture) = Fixture::open(driver).await else {
+        return;
+    };
+    let key = MessageKey::new();
+    let mut request = typed_envelope("observer owner body").message().clone();
+    request.id = None;
+    request.thread = Some(xmpp_parsers::message::Thread {
+        id: "thread".into(),
+        parent: None,
+    });
+    waddle_xmpp_core::parser_utils::reattach_thread_parent(
+        &mut request,
+        "parent".into(),
+        waddle_xmpp_core::xep0201::CLIENT_STANZA_NS,
+    );
+    let origin = MessageEnvelope::new(request.clone());
+    let mut observed = request.clone();
+    observed.id = Some(xmpp_parsers::message::Id("owner-generated".into()));
+    observed.from = Some("room@muc.example.com/nick".parse().expect("occupant"));
+    // The parser canonicalizes parent-bearing threads after extension payloads.
+    observed.payloads.insert(
+        0,
+        minidom::Element::builder("enrichment", "urn:test:observer")
+            .append("owner only")
+            .build(),
+    );
+    let owner = MessageEnvelope::with_room_observer(observed.clone(), request.clone());
+    let mut tx = fixture.db.begin_immediate().await.expect("begin origin");
+    record_message(&mut tx, key, &digest(), Some(&origin))
+        .await
+        .expect("origin commits first");
+    tx.commit().await.expect("origin commit");
+    let mut tx = fixture.db.begin_immediate().await.expect("begin owner");
+    authority::record_room_observer_envelope(&mut tx, key, &owner)
+        .await
+        .expect("owner attaches observed envelope");
+    tx.commit().await.expect("owner commit");
+    let mut tx = fixture.db.begin_immediate().await.expect("begin retry");
+    let loaded = load_envelope(&mut tx, key)
+        .await
+        .expect("read owner envelope")
+        .expect("envelope");
+    assert_eq!(loaded.message(), &observed);
+    assert_eq!(loaded.room_observer_request(), Some(request.clone()));
+    observed
+        .bodies
+        .insert(Default::default(), "retry change".into());
+    let retry = MessageEnvelope::with_room_observer(observed, request);
+    authority::record_room_observer_envelope(&mut tx, key, &retry)
+        .await
+        .expect("retry retains owner payload");
+    assert_eq!(
+        load_envelope(&mut tx, key).await.expect("immutable owner"),
+        Some(loaded)
+    );
+    tx.commit().await.expect("retry commit");
+    fixture.close().await;
+}
+
+#[tokio::test]
+async fn sqlite_room_observer_owner_attaches_envelope_once() {
+    room_observer_owner_envelope_attachment(DatabaseDriver::Sqlite).await;
+}
+
+#[tokio::test]
+async fn postgres_room_observer_owner_attaches_envelope_once() {
+    room_observer_owner_envelope_attachment(DatabaseDriver::Postgres).await;
+}
+
+#[test]
+fn room_observer_envelope_codec_stores_maximum_body_and_subject_once() {
+    let mut message = typed_envelope(&"&".repeat(waddle_xmpp::ingress::digest::MAX_TEXT_LEN))
+        .message()
+        .clone();
+    message
+        .subjects
+        .insert(Default::default(), "subject".into());
+    let envelope = MessageEnvelope::with_room_observer(message.clone(), message.clone());
+    let encoded = authority::serialize_envelope(&envelope).expect("storage encoding");
+    let json: serde_json::Value = serde_json::from_slice(&encoded).expect("storage JSON");
+    let request = json["observer_request"].as_str().expect("request metadata");
+    assert!(!request.contains("<body"));
+    assert!(!request.contains("<subject"));
+    let decoded = MessageEnvelope::from_storage(1, encoded).expect("decode maximum body");
+    assert_eq!(decoded.message(), &message);
+    assert_eq!(decoded.room_observer_request(), Some(message));
+}

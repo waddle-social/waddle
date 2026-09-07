@@ -525,3 +525,181 @@ fn bot_nick_sanitizes_invalid_resource_base_before_joining() {
         "GitHubDeploys"
     );
 }
+
+#[tokio::test]
+async fn room_observer_planning_captures_complete_replayable_invocation() {
+    assert_room_observer_planning(ObserverConfiguration::Observer, true).await;
+}
+
+#[tokio::test]
+async fn room_observer_planning_disabled_extensions_records_no_obligation() {
+    assert_room_observer_planning(ObserverConfiguration::Disabled, false).await;
+}
+
+#[tokio::test]
+async fn room_observer_planning_empty_manager_records_no_obligation() {
+    assert_room_observer_planning(ObserverConfiguration::Empty, false).await;
+}
+
+#[tokio::test]
+async fn room_observer_planning_enrichment_only_records_no_obligation() {
+    assert_room_observer_planning(ObserverConfiguration::EnrichmentOnly, false).await;
+}
+
+#[derive(Clone, Copy)]
+enum ObserverConfiguration {
+    Disabled,
+    Empty,
+    EnrichmentOnly,
+    Observer,
+}
+
+async fn room_observer_test_manager(
+    configuration: ObserverConfiguration,
+) -> Arc<waddle_extensions::ExtensionManager> {
+    use waddle_extensions::types::ExtensionCapability;
+    use waddle_extensions::{ExtensionConfig, ExtensionManager, ExtensionModuleConfig};
+    let capability = match configuration {
+        ObserverConfiguration::Disabled | ObserverConfiguration::Empty => None,
+        ObserverConfiguration::EnrichmentOnly => Some(ExtensionCapability::MessageEnrich),
+        ObserverConfiguration::Observer => Some(ExtensionCapability::MessageObserve),
+    };
+    let modules = capability
+        .map(|capability| ExtensionModuleConfig {
+            name: "message-hook-fixture".to_owned(),
+            namespace: "urn:test:message-hook".to_owned(),
+            registry: Default::default(),
+            digest: None,
+            tag: None,
+            config: serde_json::json!(u8::from(capability == ExtensionCapability::MessageObserve)),
+            capability_grants: vec![capability],
+            allowed_http_origins: Vec::new(),
+            provider_room_grants: Vec::new(),
+            config_secret_files: Default::default(),
+            local_path: Some(
+                std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+                    .join("../waddle-extensions/tests/fixtures/message_hook.wat")
+                    .display()
+                    .to_string(),
+            ),
+        })
+        .into_iter()
+        .collect();
+    Arc::new(
+        ExtensionManager::from_config(ExtensionConfig {
+            enabled: !matches!(configuration, ObserverConfiguration::Disabled),
+            modules,
+            ..Default::default()
+        })
+        .await
+        .expect("message hook fixture manager"),
+    )
+}
+
+async fn assert_room_observer_planning(configuration: ObserverConfiguration, expected: bool) {
+    use crate::server::routes::interpret::effects::{
+        room::ExternalRoomEffect, Effect, ExternalEffect, PlanSink, PlanSuppressionPolicy,
+    };
+    use waddle_xmpp::muc::{room_actor::Join, room_registry_actor::CreateRoom, RoomConfig};
+    use waddle_xmpp::{Affiliation, Role};
+
+    let mut state = crate::server::routes::websocket::tests::create_test_websocket_state().await;
+    Arc::get_mut(&mut state)
+        .expect("unique test state")
+        .deps
+        .protocol
+        .extension_manager = room_observer_test_manager(configuration).await;
+    let room_jid: jid::BareJid = "observer@muc.example.com".parse().expect("room");
+    let sender: jid::FullJid = "alice@example.com/web".parse().expect("sender");
+    let room = state
+        .deps
+        .protocol
+        .room_registry
+        .ask(CreateRoom {
+            room_jid: room_jid.clone(),
+            waddle_id: "space".to_owned(),
+            channel_id: "observer".to_owned(),
+            config: RoomConfig::default(),
+        })
+        .await
+        .expect("room");
+    room.ask(Join {
+        nick: "alice".to_owned(),
+        real_jid: sender.clone(),
+        role: Role::Participant,
+        affiliation: Affiliation::Member,
+    })
+    .await
+    .expect("occupant");
+    let capture = IngressEffectCapture::new();
+    let sink = PlanSink::new();
+    let mut deps = Deps::new(&state.deps.protocol.connection_registry, "example.com");
+    deps.effects = &sink;
+    deps.ingress_effect_capture = Some(capture.clone());
+    deps.web_socket_state = Some(state.as_ref());
+    deps.room_registry = Some(&state.deps.protocol.room_registry);
+    deps.extension_manager = Some(&state.deps.protocol.extension_manager);
+    deps.mam_storage = Some(&state.deps.protocol.mam_storage);
+    deps.inbox_storage = Some(&state.deps.protocol.inbox_storage);
+    let mut message = Message::new(Some(room_jid.clone().into()));
+    message.from = Some(sender.clone().into());
+    message.type_ = XmppMessageType::Groupchat;
+    message
+        .bodies
+        .insert(Default::default(), "observe after commit".to_owned());
+    let incoming = message.clone();
+    interpret(
+        vec![OutboundEvent::DispatchToRoom {
+            room: room_jid.clone(),
+            message: Box::new(message),
+        }],
+        &deps,
+    )
+    .await;
+    let snapshot = capture.snapshot();
+    let intent = snapshot
+        .intents
+        .iter()
+        .find(|intent| matches!(intent, IngressEffectIntent::RoomObserver { .. }));
+    let plan = sink.take().0;
+    let planned = plan.iter().find(|planned| {
+        matches!(
+            planned.effect,
+            Effect::External(ExternalEffect::Room(
+                ExternalRoomEffect::ObserveRoomMessage { .. }
+            ))
+        )
+    });
+    assert_eq!(intent.is_some(), expected, "observer intent eligibility");
+    assert_eq!(
+        planned.is_some(),
+        expected,
+        "observer scheduling eligibility"
+    );
+    if !expected {
+        return;
+    }
+    let intent = intent.expect("observer intent captured before commit");
+    let planned = planned.expect("deferred observer invocation");
+    assert_eq!(planned.suppression, PlanSuppressionPolicy::Always);
+    let Effect::External(ExternalEffect::Room(ExternalRoomEffect::ObserveRoomMessage {
+        room,
+        message,
+        requester,
+        sender,
+        error_request,
+    })) = &planned.effect
+    else {
+        panic!("observer effect");
+    };
+    assert_eq!(error_request.as_ref(), &incoming);
+    assert_eq!(message.bodies, incoming.bodies);
+    assert_eq!(
+        intent,
+        &IngressEffectIntent::RoomObserver {
+            room: room.clone(),
+            requester: requester.clone(),
+            sender: sender.clone(),
+        }
+    );
+}

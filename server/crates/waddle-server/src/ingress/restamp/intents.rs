@@ -77,6 +77,7 @@ impl Replacements {
             | IngressEffectIntent::GroupDmMembershipGrant { .. }
             | IngressEffectIntent::GroupDmInviteLedger { .. }
             | IngressEffectIntent::RoomSubjectMutation { .. }
+            | IngressEffectIntent::RoomObserver { .. }
             | IngressEffectIntent::Pin { .. }
             | IngressEffectIntent::TombstoneReplayDeletion { .. }
             | IngressEffectIntent::ErrorReply { .. } => {}

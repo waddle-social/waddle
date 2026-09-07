@@ -5,8 +5,8 @@ mod authority;
 mod authority_tests;
 pub use authority::{
     advance_frontier, flush_checkpoint, load_envelope, load_stream_checkpoint, lookup_wire_binding,
-    receipts_complete, record_receipt, record_receipt_pooled, EffectReceiptKind, EnvelopeVersion,
-    FrontierOutcome, MessageEnvelope,
+    receipts_complete, record_receipt, record_receipt_pooled, record_room_observer_envelope,
+    EffectReceiptKind, EnvelopeVersion, FrontierOutcome, MessageEnvelope,
 };
 
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -1215,6 +1215,8 @@ const LOCK_MESSAGE_SQLITE: &str = r#"SELECT 1 FROM ingress_messages WHERE messag
 const MESSAGE_EXISTS_POSTGRES: &str =
     r#"SELECT 1 FROM ingress_messages WHERE message_key = ?::uuid"#;
 const MESSAGE_EXISTS_SQLITE: &str = r#"SELECT 1 FROM ingress_messages WHERE message_key = ?"#;
+// Eligibility is shared with the CNPG query; see the retention predicate in
+// docs/operations/ingress-authority.md and gc_monitoring_predicate_matches_collector.
 const GC_CANDIDATES_POSTGRES: &str = r#"
             SELECT m.message_key::text
             FROM ingress_messages m
@@ -1297,6 +1299,67 @@ mod tests {
             statement_timeout: StdDuration::from_secs(10),
             scan_timeout: StdDuration::from_secs(10),
             progress: AliasGcProgress::default(),
+        }
+    }
+
+    #[test]
+    fn gc_monitoring_predicate_matches_collector() {
+        fn normalized(sql: &str) -> String {
+            sql.split_whitespace().collect::<Vec<_>>().join(" ")
+        }
+
+        let monitoring = std::fs::read_to_string(
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join(
+                "../../../infrastructure/waddle.cloud/gitops/waddle-server/postgresql-monitoring-ingress.yaml",
+            ),
+        )
+        .expect("read deployed ingress monitoring SQL");
+        let monitoring = normalized(&monitoring);
+        let eligibility = "has_alias OR has_delivery OR NOT has_ref";
+        assert!(monitoring.contains("SELECT now() - interval '8 days' AS value"));
+        assert!(monitoring.contains(
+            "WHERE message.terminal_at IS NOT NULL AND message.terminal_at <= cutoff.value"
+        ));
+        assert_eq!(
+            monitoring
+                .matches(&format!("FILTER (WHERE {eligibility})"))
+                .count(),
+            2,
+            "backlog and oldest-age must use the same collector eligibility"
+        );
+        assert!(
+            monitoring.contains("count(*) FILTER (WHERE has_ref) AS retained_referenced_messages")
+        );
+        for (sql, cutoff) in [
+            (GC_CANDIDATES_POSTGRES, "?::timestamptz"),
+            (GC_CANDIDATES_SQLITE, "?"),
+        ] {
+            let sql = normalized(sql)
+                .replace(
+                    "EXISTS ( SELECT 1 FROM ingress_origin_aliases a WHERE a.message_key = m.message_key )",
+                    "has_alias",
+                )
+                .replace(
+                    "EXISTS ( SELECT 1 FROM ingress_deliveries d WHERE d.message_key = m.message_key )",
+                    "has_delivery",
+                )
+                .replace(
+                    "EXISTS ( SELECT 1 FROM ingress_sm_refs r WHERE r.message_key = m.message_key )",
+                    "has_ref",
+                );
+            let predicate = sql
+                .split_once(" WHERE ")
+                .expect("candidate WHERE")
+                .1
+                .split_once(" ORDER BY ")
+                .expect("candidate ordering")
+                .0;
+            assert_eq!(
+                predicate,
+                format!(
+                    "m.terminal_at IS NOT NULL AND m.terminal_at <= {cutoff} AND ( {eligibility} )"
+                )
+            );
         }
     }
 

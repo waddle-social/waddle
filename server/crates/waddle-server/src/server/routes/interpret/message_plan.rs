@@ -383,3 +383,7 @@ mod tests {
         );
     }
 }
+
+#[cfg(test)]
+#[path = "rich_target_plan_tests.rs"]
+mod rich_target_plan_tests;

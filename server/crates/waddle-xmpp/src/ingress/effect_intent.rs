@@ -1122,6 +1122,12 @@ pub enum IngressEffectIntent {
         room: BareJid,
         mutation: RoomPinMutation,
     },
+    /// Post-commit message.observe invocation referencing its canonical row envelope.
+    RoomObserver {
+        room: BareJid,
+        requester: BareJid,
+        sender: FullJid,
+    },
     Extension {
         recipient: BareJid,
         stanza_id: StanzaId,
@@ -1163,6 +1169,7 @@ pub enum IngressEffectKind {
     CallSignal,
     Pin,
     Extension,
+    RoomObserver,
     TombstoneReplayDeletion,
     ErrorReply,
 }
@@ -1264,6 +1271,7 @@ pub enum IngressEffectKey {
     CallSignal(FullJid),
     Pin(BareJid, String),
     Extension(BareJid),
+    RoomObserver(BareJid),
     TombstoneReplayDeletion(String),
     ErrorReply(FullJid, String),
 }
@@ -1309,7 +1317,7 @@ impl IngressEffectKey {
             Self::RoomSubjectMutation(value) => value.to_string(),
             Self::CallSignal(value) => value.to_string(),
             Self::Pin(room, pin_identity) => format!("{}|{}", room, pin_identity),
-            Self::Extension(value) => value.to_string(),
+            Self::Extension(value) | Self::RoomObserver(value) => value.to_string(),
             Self::TombstoneReplayDeletion(identity) => identity.clone(),
             Self::ErrorReply(value, error_identity) => format!("{}|{}", value, error_identity),
         }
@@ -1340,6 +1348,7 @@ impl IngressEffectKey {
             Self::CallSignal(..) => 19,
             Self::Pin(..) => 20,
             Self::Extension(..) => 21,
+            Self::RoomObserver(..) => 25,
             Self::TombstoneReplayDeletion(..) => 22,
             Self::ErrorReply(..) => 23,
         };
@@ -1655,6 +1664,7 @@ impl IngressEffectIntent {
             Self::CallSignal { .. } => IngressEffectKind::CallSignal,
             Self::Pin { .. } => IngressEffectKind::Pin,
             Self::Extension { .. } => IngressEffectKind::Extension,
+            Self::RoomObserver { .. } => IngressEffectKind::RoomObserver,
             Self::TombstoneReplayDeletion { .. } => IngressEffectKind::TombstoneReplayDeletion,
             Self::ErrorReply { .. } => IngressEffectKind::ErrorReply,
         }
@@ -1807,6 +1817,10 @@ impl IngressEffectIntent {
                 kind,
                 recipient: recipient.clone().into(),
             },
+            Self::RoomObserver { room, .. } => EffectAuthorityKey::Room {
+                kind,
+                room: room.clone(),
+            },
             Self::Extension { recipient, .. } => EffectAuthorityKey::Recipient {
                 kind,
                 recipient: recipient.clone().into(),
@@ -1919,6 +1933,7 @@ impl IngressEffectIntent {
             Self::Pin { room, mutation } => {
                 IngressEffectKey::Pin(room.clone(), mutation.storage_identity())
             }
+            Self::RoomObserver { room, .. } => IngressEffectKey::RoomObserver(room.clone()),
             Self::Extension { recipient, .. } => IngressEffectKey::Extension(recipient.clone()),
             Self::TombstoneReplayDeletion {
                 target,
@@ -2998,6 +3013,11 @@ enum StoredEffectIntent {
         room: BareJid,
         mutation: StoredRoomPinMutation,
     },
+    RoomObserver {
+        room: BareJid,
+        requester: BareJid,
+        sender: FullJid,
+    },
     Extension {
         recipient: BareJid,
         stanza_id: StanzaId,
@@ -3041,6 +3061,7 @@ impl StoredEffectIntent {
             Self::CallSignal { .. } => 8,
             Self::Pin { .. } => 9,
             Self::Extension { .. } => 10,
+            Self::RoomObserver { .. } => 25,
             Self::TombstoneReplayDeletion { .. } => 23,
             Self::ErrorReply { .. } => 11,
         }
@@ -3215,6 +3236,15 @@ impl StoredEffectIntent {
             IngressEffectIntent::Pin { room, mutation } => Self::Pin {
                 room,
                 mutation: mutation.into(),
+            },
+            IngressEffectIntent::RoomObserver {
+                room,
+                requester,
+                sender,
+            } => Self::RoomObserver {
+                room,
+                requester,
+                sender,
             },
             IngressEffectIntent::Extension {
                 recipient,
@@ -3400,6 +3430,15 @@ impl StoredEffectIntent {
             Self::Pin { room, mutation } => IngressEffectIntent::Pin {
                 room,
                 mutation: mutation.into(),
+            },
+            Self::RoomObserver {
+                room,
+                requester,
+                sender,
+            } => IngressEffectIntent::RoomObserver {
+                room,
+                requester,
+                sender,
             },
             Self::Extension {
                 recipient,
@@ -3928,6 +3967,88 @@ mod tests {
                 ),
             },
         ]
+    }
+
+    #[test]
+    fn room_observer_intent_round_trips_fixed_golden_payload_and_authority() {
+        let intent = IngressEffectIntent::RoomObserver {
+            room: bare("room@conference.example.test"),
+            requester: bare("romeo@example.test"),
+            sender: full("romeo@example.test/phone"),
+        };
+        let encoded = intent.encode_v1().expect("observer codec");
+        assert_eq!(encoded.kind(), 25);
+        assert_eq!(
+            std::str::from_utf8(encoded.payload()).expect("JSON"),
+            r#"{"version":1,"intent":{"type":"room_observer","room":"room@conference.example.test","requester":"romeo@example.test","sender":"romeo@example.test/phone"}}"#
+        );
+        assert_eq!(
+            IngressEffectIntent::decode_v1(25, encoded.payload()).expect("observer decode"),
+            intent
+        );
+        assert_eq!(intent.kind(), IngressEffectKind::RoomObserver);
+        assert_eq!(
+            intent.semantic_key(),
+            IngressEffectKey::RoomObserver(bare("room@conference.example.test"))
+        );
+        assert_eq!(
+            intent.authority_key(),
+            EffectAuthorityKey::Room {
+                kind: IngressEffectKind::RoomObserver,
+                room: bare("room@conference.example.test"),
+            }
+        );
+    }
+
+    #[test]
+    fn room_observer_codec_has_headroom_with_maximum_jid_parts() {
+        let domain = [
+            "d".repeat(63),
+            "d".repeat(63),
+            "d".repeat(63),
+            "d".repeat(61),
+        ]
+        .join(".");
+        let address = ["n".repeat(1023), domain].join("@");
+        let room = BareJid::new(&address).expect("maximum bare JID");
+        let sender = room
+            .with_resource_str(&"r".repeat(1023))
+            .expect("maximum full JID");
+        let intent = IngressEffectIntent::RoomObserver {
+            room: room.clone(),
+            requester: room,
+            sender,
+        };
+        let encoded = intent.encode_v1().expect("bounded observer metadata");
+        assert!(encoded.payload().len() < 16_384);
+        assert_eq!(
+            IngressEffectIntent::decode_v1(25, encoded.payload()).expect("maximum JIDs decode"),
+            intent
+        );
+    }
+
+    #[test]
+    fn room_observer_codec_rejects_payload_one_byte_above_intent_limit() {
+        let intent = IngressEffectIntent::RoomObserver {
+            room: bare("room@conference.example.test"),
+            requester: bare("romeo@example.test"),
+            sender: full("romeo@example.test/phone"),
+        };
+        let mut payload = intent
+            .encode_v1()
+            .expect("compact observer")
+            .payload()
+            .to_vec();
+        payload.resize(MAX_EFFECT_INTENT_PAYLOAD_BYTES, b' ');
+        assert_eq!(
+            IngressEffectIntent::decode_v1(25, &payload).expect("at limit"),
+            intent
+        );
+        payload.push(b' ');
+        assert_eq!(
+            IngressEffectIntent::decode_v1(25, &payload),
+            Err(EffectIntentCodecError::PayloadTooLarge)
+        );
     }
 
     #[test]

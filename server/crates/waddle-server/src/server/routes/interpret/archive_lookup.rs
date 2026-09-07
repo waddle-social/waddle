@@ -15,12 +15,8 @@ pub(super) fn waddle_id_for_room_jid(room_jid: &BareJid) -> WaddleId {
 /// [`waddle_xmpp::protocol::handlers::rich_target_validation::RichTargetValidationHandler`]
 /// expects on the [`InboundEvent::ArchivedMessageLoaded`] callback.
 ///
-/// Storage failures are demoted to `Ok(None)` with a WARN log so the
-/// handler treats them as `<item-not-found>` per XEP-0308 / 0424 /
-/// 0425 / 0461 — the same surface clients see when the target
-/// genuinely doesn't exist. We do not propagate the storage error
-/// shape into the callback because the protocol-side type does not
-/// model it and the resulting reply would be the same.
+/// A failed read marks a planning sink as incomplete before producing feedback.
+/// Only a successful absent-row result represents a semantic missing target.
 pub(super) async fn lookup_archived_message(
     deps: &Deps<'_>,
     archive: &jid::BareJid,
@@ -62,8 +58,10 @@ pub(super) async fn lookup_archived_message(
             warn!(
                 archive = %archive,
                 %error,
-                "LookupArchivedMessage: storage error; treating as not-found"
+                "LookupArchivedMessage: storage error; ingress plan cannot commit"
             );
+            deps.effects
+                .fail_plan(effects::PlanFailure::RichTargetLookup);
             None
         }
     }

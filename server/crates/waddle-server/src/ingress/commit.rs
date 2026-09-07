@@ -262,7 +262,15 @@ async fn commit_attempt(
         return Err(IngressUowError::EffectIntentConflict);
     }
     let intents = EffectIntentRepository::load(&mut tx, key).await?;
-    let plan = super::recorded::apply_recorded_intents(&plan, &intents);
+    let mut plan = super::recorded::apply_recorded_intents(&plan, &intents);
+    if let Some(observer_envelope) = super::recorded::room_observer_envelope(&plan) {
+        CanonicalMessageRepository::record_room_observer_envelope(&mut tx, key, &observer_envelope)
+            .await?;
+        let recorded_envelope = CanonicalMessageRepository::load_envelope(&mut tx, key)
+            .await?
+            .ok_or(IngressUowError::EffectIntentMessageMissing)?;
+        super::recorded::restore_room_observer_envelope(&mut plan, &recorded_envelope)?;
+    }
     let applied =
         super::durable::apply_durable(&mut tx, key, &plan, &recorded, &room_proof).await?;
     let ordinal = stream.as_ref().map(|stream| stream.ordinal);

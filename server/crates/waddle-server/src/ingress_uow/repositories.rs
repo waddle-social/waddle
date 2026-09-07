@@ -226,6 +226,20 @@ impl CanonicalMessageRepository {
         .map_err(Into::into)
     }
 
+    pub async fn record_room_observer_envelope(
+        transaction: &mut IngressUowTransaction<'_>,
+        message_key: MessageKey,
+        envelope: &MessageEnvelope,
+    ) -> Result<(), IngressUowError> {
+        ingress_substrate::record_room_observer_envelope(
+            transaction.transaction_mut(),
+            message_key,
+            envelope,
+        )
+        .await
+        .map_err(Into::into)
+    }
+
     pub async fn load_envelope(
         transaction: &mut IngressUowTransaction<'_>,
         message_key: MessageKey,
