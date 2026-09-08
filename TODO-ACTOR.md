@@ -48,7 +48,7 @@ Merge order within the wave: **#1642 lands first** (advisory remediation + −6k
 ## Wave 4
 
 - [OK] **#1655** `feat(server): transaction-taking MAM and inbox repositories` (after #1654) — MERGED 61726ad1 (PR #1691, 2026-08-12). MAM leaves its private pool; call sites untouched until cutover.
-- [OK] ⚠ **#1656** `feat(server): shadow atomic ingress transaction` (after #1655 + #1643 + #1644) — MERGED 0818f7fd (PR #1693, 2026-08-14); issue stays open as the soak-gate record. Full boundary transaction on live traffic, new-tables-only; shadow health via P0.5 closed-variant vocabulary.
+- [OK] ⚠ **#1656** `feat(server): shadow atomic ingress transaction` (after #1655 + #1643 + #1644) — MERGED 0818f7fd (PR #1693, 2026-08-14); issue closed 2026-09-08 with #1657. Full boundary transaction on live traffic, new-tables-only; shadow health via P0.5 closed-variant vocabulary.
 
 **✓ Soak gate completed:** #1695 closed early on 2026-09-05 by operator decision; all evaluable criteria passed. #1657 is unblocked.
 
@@ -56,7 +56,7 @@ Merge order within the wave: **#1642 lands first** (advisory remediation + −6k
 
 ## Wave 5
 
-- [ ] ⚠ **#1657** `feat(server): ingress authority cutover with canonical identity` (after #1656 + #1645) — **IN PROGRESS, PR #1738**: committed ingress decisions advance `h`, post-commit effects have durable payload-complete intents, and cluster-global aliases decide and repair duplicates, replacing MAM dedupe and the parallel observation path (RFC 0018 §1).
+- [OK] ⚠ **#1657** `feat(server): ingress authority cutover with canonical identity` (after #1656 + #1645) — MERGED ebdc3f34 (PR #1738, 2026-09-08): committed ingress decisions advance `h`, post-commit effects have durable payload-complete intents, and cluster-global aliases decide and repair duplicates, replacing MAM dedupe and the parallel observation path (RFC 0018 §1). Ten review rounds (90 findings) fixed in-branch; five remaining gaps recorded as RFC stated limitations and filed under #1658. Deployed as a Recreate cutover; flip the HelmRelease back to RollingUpdate once verified.
 
 ## Wave 6–7
 
