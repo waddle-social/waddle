@@ -36,22 +36,12 @@ pub(super) async fn execute_durable(effect: DurableRoomEffect, deps: &Deps<'_>) 
             owner,
             entry,
             is_recipient,
-            recovery,
             ..
         } => {
             let Some(storage) = deps.inbox_storage else {
                 return EffectOutcome::Unavailable;
             };
-            EffectOutcome::Inbox(
-                storage
-                    .upsert_with_groupchat_notification_recovery(
-                        &owner,
-                        *entry,
-                        is_recipient,
-                        recovery,
-                    )
-                    .await,
-            )
+            EffectOutcome::Inbox(storage.upsert(&owner, *entry, is_recipient).await)
         }
     }
 }
@@ -65,11 +55,23 @@ pub(super) async fn execute_external(effect: ExternalRoomEffect, deps: &Deps<'_>
         }
         ExternalRoomEffect::ObserveRoomMessage {
             room,
+            plugin,
             message,
             requester,
             sender,
             error_request,
-        } => observe_room(deps, room, message, requester, sender, error_request).await,
+        } => {
+            observe_room(
+                deps,
+                room,
+                plugin,
+                message,
+                requester,
+                sender,
+                error_request,
+            )
+            .await
+        }
         ExternalRoomEffect::NotificationCandidate {
             owner,
             room,
@@ -242,7 +244,8 @@ async fn mutate_room(
 async fn observe_room(
     deps: &Deps<'_>,
     room: jid::BareJid,
-    mut message: Box<xmpp_parsers::message::Message>,
+    plugin: waddle_extensions::PluginId,
+    message: Box<xmpp_parsers::message::Message>,
     requester: jid::BareJid,
     sender: jid::FullJid,
     error_request: Box<xmpp_parsers::message::Message>,
@@ -250,16 +253,20 @@ async fn observe_room(
     let Some(state) = deps.web_socket_state else {
         return EffectOutcome::Unavailable;
     };
-    let outcome = state
+    let Some(outcome) = state
         .deps
         .protocol
         .extension_manager
-        .process_message_observers_for_waddle_with_requester(
-            &mut message,
+        .process_message_observer(
+            &plugin,
+            &message,
             super::super::waddle_id_for_room_jid(&room),
             Some(requester),
         )
-        .await;
+        .await
+    else {
+        return EffectOutcome::Unavailable;
+    };
     let replies = outcome
         .effects
         .into_iter()

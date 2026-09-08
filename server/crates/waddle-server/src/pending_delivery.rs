@@ -47,7 +47,7 @@ use waddle_xmpp_core::xep0359::StanzaId;
 use crate::db::{Database, DatabaseConfig, DatabaseDriver, IntoParams};
 
 mod codec;
-mod database;
+pub(crate) mod database;
 mod flush;
 
 pub use database::DatabasePendingDeliveryStorage;

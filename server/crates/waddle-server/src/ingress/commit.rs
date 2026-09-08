@@ -361,10 +361,15 @@ async fn commit_attempt(
     if let Some(observer_envelope) = super::recorded::room_observer_envelope(&plan) {
         CanonicalMessageRepository::record_room_observer_envelope(&mut tx, key, &observer_envelope)
             .await?;
+    }
+    if intents
+        .iter()
+        .any(|intent| matches!(intent, IngressEffectIntent::RoomObserver { .. }))
+    {
         let recorded_envelope = CanonicalMessageRepository::load_envelope(&mut tx, key)
             .await?
             .ok_or(IngressUowError::EffectIntentMessageMissing)?;
-        super::recorded::restore_room_observer_envelope(&mut plan, &recorded_envelope)?;
+        super::recorded::restore_room_observer_envelope(&mut plan, &intents, &recorded_envelope)?;
     }
     if plan
         .intents

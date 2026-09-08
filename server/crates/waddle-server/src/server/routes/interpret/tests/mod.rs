@@ -22,7 +22,7 @@ mod groupchat_retry;
 mod offline_delivery;
 mod plan;
 mod projection_outcomes;
-mod room_dispatch;
+pub(crate) mod room_dispatch;
 mod room_subject;
 mod routing_detached_delivery;
 mod routing_fanout_pass;

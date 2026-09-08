@@ -4,9 +4,14 @@ use crate::server::routes::interpret::effects::{room::ExternalRoomEffect, PlanSu
 use waddle_xmpp::{ingress::IngressEffectIntent, registry::ConnectionRegistry};
 use xmpp_parsers::message::Message;
 
+fn observer_plugin() -> waddle_extensions::PluginId {
+    waddle_extensions::PluginId::new("message-hook-fixture").expect("fixture plugin")
+}
+
 fn observer_intent(effect: &ExternalRoomEffect) -> IngressEffectIntent {
     let ExternalRoomEffect::ObserveRoomMessage {
         room,
+        plugin,
         requester,
         sender,
         ..
@@ -18,6 +23,7 @@ fn observer_intent(effect: &ExternalRoomEffect) -> IngressEffectIntent {
         room: room.clone(),
         requester: requester.clone(),
         sender: sender.clone(),
+        plugin: plugin.clone(),
     }
 }
 
@@ -26,6 +32,7 @@ async fn observer_failure_retry_and_receipt(fixture: IngressFixture) {
     let room: jid::BareJid = "room@muc.example.com".parse().expect("room");
     let effect = ExternalRoomEffect::ObserveRoomMessage {
         room,
+        plugin: observer_plugin(),
         message: Box::new(submission.plan.sanitized_message.clone()),
         requester: submission.sender.to_bare(),
         sender: submission.sender.clone(),
@@ -92,7 +99,16 @@ async fn observer_failure_retry_and_receipt(fixture: IngressFixture) {
         "observed message"
     );
 
-    let state = crate::server::routes::websocket::tests::create_test_websocket_state().await;
+    let mut state = crate::server::routes::websocket::tests::create_test_websocket_state().await;
+    std::sync::Arc::get_mut(&mut state)
+        .expect("unique test websocket state")
+        .deps
+        .protocol
+        .extension_manager =
+        crate::server::routes::interpret::tests::room_dispatch::room_observer_test_manager(
+            crate::server::routes::interpret::tests::room_dispatch::ObserverConfiguration::Observer,
+        )
+        .await;
     let mut deps = Deps::new(&registry, "example.com");
     deps.web_socket_state = Some(state.as_ref());
     let completed = execute_effects(
@@ -148,6 +164,7 @@ async fn postgres_observer_failure_retries_recorded_payload_and_receipts_success
 fn observer_warning_reply_does_not_receipt_failed_invocation() {
     let effect = ExternalEffect::Room(ExternalRoomEffect::ObserveRoomMessage {
         room: "room@muc.example.com".parse().expect("room"),
+        plugin: observer_plugin(),
         message: Box::new(Message::new(None)),
         requester: "romeo@example.com".parse().expect("requester"),
         sender: "romeo@example.com/phone".parse().expect("sender"),
@@ -190,6 +207,7 @@ async fn observer_maximum_body_envelope(fixture: IngressFixture) {
     submission.plan.sanitized_message = observed.clone();
     let effect = ExternalRoomEffect::ObserveRoomMessage {
         room: "room@muc.example.com".parse().expect("room"),
+        plugin: observer_plugin(),
         message: Box::new(observed.clone()),
         requester: submission.sender.to_bare(),
         sender: submission.sender.clone(),
@@ -239,6 +257,53 @@ async fn observer_maximum_body_envelope(fixture: IngressFixture) {
     assert_eq!(message.as_ref(), &observed);
     assert_eq!(error_request.as_ref(), &original);
     fixture.close().await;
+}
+
+async fn two_observer_plugins_record_distinct_obligations(fixture: IngressFixture) {
+    let mut submission = fixture.submission(Some("two-observer-plugins"), "observed message");
+    let room: jid::BareJid = "room@muc.example.com".parse().expect("room");
+    let make_effect = |plugin: &str| ExternalRoomEffect::ObserveRoomMessage {
+        room: room.clone(),
+        plugin: waddle_extensions::PluginId::new(plugin).expect("plugin"),
+        message: Box::new(submission.plan.sanitized_message.clone()),
+        requester: submission.sender.to_bare(),
+        sender: submission.sender.clone(),
+        error_request: Box::new(submission.plan.sanitized_message.clone()),
+    };
+    let effects = vec![make_effect("observer-one"), make_effect("observer-two")];
+    submission.plan.intents = effects.iter().map(observer_intent).collect();
+    submission.plan.plan = effects
+        .into_iter()
+        .map(|effect| {
+            PlannedEffect::new(Effect::External(ExternalEffect::Room(effect)))
+                .with_suppression(PlanSuppressionPolicy::Always)
+        })
+        .collect();
+
+    let decision = commit_submission(&fixture.uow, &submission, 1)
+        .await
+        .expect("commit per-plugin observer obligations");
+    assert_eq!(fixture.count("ingress_effect_intents").await, 2);
+    assert_eq!(decision.external.len(), 2);
+    assert_eq!(decision.external_receipts.len(), 2);
+    assert!(decision
+        .external_receipts
+        .iter()
+        .all(|receipts| receipts.len() == 1));
+    assert_ne!(decision.external_receipts[0], decision.external_receipts[1]);
+    fixture.close().await;
+}
+
+#[tokio::test]
+async fn sqlite_two_observer_plugins_record_distinct_obligations() {
+    two_observer_plugins_record_distinct_obligations(IngressFixture::sqlite().await).await;
+}
+
+#[tokio::test]
+async fn postgres_two_observer_plugins_record_distinct_obligations() {
+    if let Some(fixture) = IngressFixture::postgres("two_observer_plugins").await {
+        two_observer_plugins_record_distinct_obligations(fixture).await;
+    }
 }
 
 #[tokio::test]

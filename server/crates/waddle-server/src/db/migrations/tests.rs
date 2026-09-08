@@ -36,10 +36,10 @@ async fn test_migration_runner_global() {
     assert_eq!(auth_context_columns, 3);
 
     // Check version (global + shared waddle schema). `current_version` reads
-    // the ledger max, which the waddle namespace (V1013) still dominates
+    // the ledger max, which the waddle namespace (V1014) still dominates
     // after global V0012.
     let version = runner.current_version(&db).await.unwrap();
-    assert_eq!(version, Some(1013));
+    assert_eq!(version, Some(1014));
 }
 
 #[tokio::test]
@@ -154,7 +154,7 @@ async fn test_waddle_v1002_adds_pin_permission_to_existing_v1001_schema() {
     let applied = runner.run(&db).await.unwrap();
     assert_eq!(
         applied,
-        vec![1002, 1003, 1004, 1005, 1006, 1007, 1008, 1009, 1010, 1011, 1012, 1013]
+        vec![1002, 1003, 1004, 1005, 1006, 1007, 1008, 1009, 1010, 1011, 1012, 1013, 1014]
     );
 
     let conn = db.guard().await.unwrap();
@@ -174,7 +174,7 @@ async fn test_waddle_v1002_adds_pin_permission_to_existing_v1001_schema() {
     assert_eq!(public_room, 1);
 
     let version = runner.current_version(&db).await.unwrap();
-    assert_eq!(version, Some(1013));
+    assert_eq!(version, Some(1014));
 }
 
 #[tokio::test]
@@ -233,7 +233,7 @@ async fn test_global_v0004_adds_policy_digest_to_existing_v0003_schema() {
     drop(conn);
 
     // `MigrationRunner::global()` composes global + waddle migrations,
-    // so the runner also reports applying 1001 through 1013 (the waddle
+    // so the runner also reports applying 1001 through 1014 (the waddle
     // schema tables) on top of V0004. The test's invariant is V0004
     // specifically, asserted via the `pragma_table_info` probe below;
     // the version list is included in the assertion so a future PR
@@ -244,7 +244,7 @@ async fn test_global_v0004_adds_policy_digest_to_existing_v0003_schema() {
         applied,
         vec![
             4, 5, 6, 7, 8, 9, 10, 11, 12, 1001, 1002, 1003, 1004, 1005, 1006, 1007, 1008, 1009,
-            1010, 1011, 1012, 1013
+            1010, 1011, 1012, 1013, 1014
         ]
     );
 
@@ -308,7 +308,7 @@ async fn test_global_v0004_adds_policy_digest_to_existing_v0003_schema() {
     let version = runner.current_version(&db).await.unwrap();
     assert_eq!(
         version,
-        Some(1013),
+        Some(1014),
         "current version reflects the highest applied across global+waddle"
     );
 }
@@ -466,7 +466,7 @@ async fn sqlite_pre_ledger_history_is_adopted_once_before_pending_migrations() {
     let runner = MigrationRunner::waddle();
     assert_eq!(
         runner.run(&db).await.unwrap(),
-        vec![1002, 1003, 1004, 1005, 1006, 1007, 1008, 1009, 1010, 1011, 1012, 1013]
+        vec![1002, 1003, 1004, 1005, 1006, 1007, 1008, 1009, 1010, 1011, 1012, 1013, 1014]
     );
     let expected_checksum = migration_checksum(&first, DatabaseDriver::Sqlite);
     assert_eq!(
@@ -551,7 +551,7 @@ async fn sqlite_single_runner_backfills_checksums_when_legacy_ledger_has_no_pend
         .await
         .unwrap();
     let runner = MigrationRunner::single();
-    assert_eq!(runner.migrations.len(), 25);
+    assert_eq!(runner.migrations.len(), 26);
     runner.run(&db).await.unwrap();
 
     let conn = db.guard().await.unwrap();
@@ -561,7 +561,7 @@ async fn sqlite_single_runner_backfills_checksums_when_legacy_ledger_has_no_pend
     drop(conn);
 
     assert!(runner.run(&db).await.unwrap().is_empty());
-    assert_eq!(migration_ledger_row_count(&db).await, 25);
+    assert_eq!(migration_ledger_row_count(&db).await, 26);
     assert_all_migration_checksums(&db, DatabaseDriver::Sqlite).await;
     assert!(runner.run(&db).await.unwrap().is_empty());
 }
@@ -741,7 +741,7 @@ async fn v1010_rolls_forward_from_a_v1009_ledger() {
     drop(conn);
 
     let applied = MigrationRunner::single().run(&db).await.unwrap();
-    assert_eq!(applied, vec![1010, 1011, 1012, 1013]);
+    assert_eq!(applied, vec![1010, 1011, 1012, 1013, 1014]);
     assert_eq!(
         migration_ledger_checksum(&db, 1010).await.as_deref(),
         Some(migration_checksum(&migration_by_version(1010), DatabaseDriver::Sqlite).as_str())
@@ -910,7 +910,7 @@ async fn postgres_pre_ledger_history_is_adopted_once_before_pending_migrations()
     let runner = MigrationRunner::waddle();
     assert_eq!(
         runner.run(&db).await.expect("adopt and run migrations"),
-        vec![1002, 1003, 1004, 1005, 1006, 1007, 1008, 1009, 1010, 1011, 1012, 1013]
+        vec![1002, 1003, 1004, 1005, 1006, 1007, 1008, 1009, 1010, 1011, 1012, 1013, 1014]
     );
     let expected_checksum = migration_checksum(&first, DatabaseDriver::Postgres);
     assert_eq!(
@@ -1025,7 +1025,7 @@ async fn postgres_single_runner_backfills_checksums_when_legacy_ledger_has_no_pe
     let schema = unique_postgres_schema_name("ledger_pure_adoption");
     let (db, admin) = open_isolated_postgres_database(&database_url, &schema).await;
     let runner = MigrationRunner::single();
-    assert_eq!(runner.migrations.len(), 25);
+    assert_eq!(runner.migrations.len(), 26);
     runner.run(&db).await.expect("initial single migration run");
 
     let conn = db.guard().await.expect("postgres guard");
@@ -1039,7 +1039,7 @@ async fn postgres_single_runner_backfills_checksums_when_legacy_ledger_has_no_pe
         .await
         .expect("pure adoption rerun")
         .is_empty());
-    assert_eq!(migration_ledger_row_count(&db).await, 25);
+    assert_eq!(migration_ledger_row_count(&db).await, 26);
     assert_all_migration_checksums(&db, DatabaseDriver::Postgres).await;
     assert!(runner
         .run(&db)
@@ -1842,6 +1842,74 @@ fn all_migrations_have_non_empty_postgres_sql() {
 }
 
 #[test]
+fn v1014_reset_scope_and_postgres_epoch_proof_are_pinned() {
+    const RESET_TABLES: [&str; 11] = [
+        "ingress_carbon_receipts",
+        "ingress_effect_receipts",
+        "ingress_effect_intents",
+        "ingress_deliveries",
+        "ingress_sm_refs",
+        "ingress_origin_aliases",
+        "muc_invite_claims",
+        "ingress_messages",
+        "ingress_sm_streams",
+        "sm_unacked",
+        "sm_sessions",
+    ];
+    const PROOF: &str = "SELECT set_config('waddle.protocol_epoch', (SELECT epoch FROM ingress_protocol_epoch WHERE id = 1 FOR UPDATE)::text, true), set_config('waddle.protocol_epoch_xid', pg_current_xact_id()::text, true);";
+
+    for sql in [
+        waddle::V1014_INGRESS_RECOVERY_FOLLOWUPS,
+        waddle::V1014_INGRESS_RECOVERY_FOLLOWUPS_POSTGRES,
+    ] {
+        assert_eq!(
+            sql.matches("DELETE FROM ").count(),
+            RESET_TABLES.len(),
+            "V1014 must delete exactly the registered ledger/SM tables"
+        );
+        let mut previous = 0;
+        for table in RESET_TABLES {
+            let statement = format!("DELETE FROM {table};");
+            let position = sql.find(&statement).expect("V1014 reset target present");
+            assert!(
+                position >= previous,
+                "V1014 reset must retain child-before-parent order: {table}"
+            );
+            previous = position + statement.len();
+        }
+        assert!(
+            !sql.contains("pending_delivery") && !sql.contains("groupchat_notification_recovery"),
+            "store-owned tables must stay outside the migration ledger"
+        );
+    }
+
+    let postgres = waddle::V1014_INGRESS_RECOVERY_FOLLOWUPS_POSTGRES;
+    assert!(
+        postgres.contains(PROOF),
+        "V1014 must install the exact epoch proof"
+    );
+    assert!(
+        postgres.find(PROOF) < postgres.find("DELETE FROM "),
+        "the epoch proof must precede every guarded reset write"
+    );
+    assert!(
+        !postgres.contains("requires ingress epoch zero"),
+        "V1014 is valid at live epoch zero and one"
+    );
+    assert!(postgres.contains(
+        "INSERT INTO ingress_epoch_guard_manifest (table_name) VALUES ('ingress_delivery_receipts');"
+    ));
+    assert!(postgres.contains("GRANT SELECT ON TABLE ingress_delivery_receipts TO pg_monitor;"));
+    assert_eq!(
+        postgres
+            .matches("ALTER TABLE ingress_delivery_receipts ENABLE ALWAYS TRIGGER")
+            .count(),
+        2,
+        "both delivery-receipt epoch guards must be enabled for replica writes"
+    );
+}
+
+#[test]
 fn migration_catalog_obeys_namespace_boundary() {
     assert_eq!(WADDLE_NAMESPACE_START, 1000);
 
@@ -2025,7 +2093,7 @@ async fn postgres_v0006_widens_existing_upload_slot_size_bytes() {
         applied,
         vec![
             6, 7, 8, 9, 10, 11, 12, 1001, 1002, 1003, 1004, 1005, 1006, 1007, 1008, 1009, 1010,
-            1011, 1012, 1013
+            1011, 1012, 1013, 1014
         ]
     );
     assert_postgres_column_type(&db, "upload_slots", "size_bytes", "bigint").await;
@@ -2102,7 +2170,7 @@ async fn sqlite_v0007_tracks_link_preview_media_refs() {
         applied,
         vec![
             7, 8, 9, 10, 11, 12, 1001, 1002, 1003, 1004, 1005, 1006, 1007, 1008, 1009, 1010, 1011,
-            1012, 1013
+            1012, 1013, 1014
         ]
     );
 
@@ -2612,7 +2680,7 @@ async fn postgres_v0007_tracks_link_preview_media_refs() {
         applied,
         vec![
             7, 8, 9, 10, 11, 12, 1001, 1002, 1003, 1004, 1005, 1006, 1007, 1008, 1009, 1010, 1011,
-            1012, 1013
+            1012, 1013, 1014
         ]
     );
 
@@ -2884,7 +2952,7 @@ async fn postgres_v1003_widens_existing_attachment_size_bytes() {
         .expect("run waddle migration");
     assert_eq!(
         applied,
-        vec![1003, 1004, 1005, 1006, 1007, 1008, 1009, 1010, 1011, 1012, 1013]
+        vec![1003, 1004, 1005, 1006, 1007, 1008, 1009, 1010, 1011, 1012, 1013, 1014]
     );
     assert_postgres_column_type(&db, "attachments", "size_bytes", "bigint").await;
 
@@ -3578,8 +3646,8 @@ async fn sqlite_v1012_rolls_forward_from_v1011() {
         MigrationRunner::single()
             .run(&db)
             .await
-            .expect("apply V1012 and V1013"),
-        vec![1012, 1013]
+            .expect("apply V1012 through V1014"),
+        vec![1012, 1013, 1014]
     );
     assert_nonterminal_monitoring_index(&db).await;
     assert!(sqlite_table_exists(&db, "sm_sessions").await);
@@ -3594,10 +3662,11 @@ async fn sqlite_v1012_rolls_forward_from_v1011() {
         "ingress_effect_intents",
         "ingress_effect_receipts",
         "ingress_carbon_receipts",
+        "ingress_delivery_receipts",
     ] {
         assert!(
             sqlite_table_exists(&db, table).await,
-            "V1012 creates {table}"
+            "the V1012-V1014 cutover catalog creates {table}"
         );
     }
 }
@@ -3640,8 +3709,8 @@ async fn postgres_v1012_resets_epoch_zero_soak_rows() {
         MigrationRunner::single()
             .run(&db)
             .await
-            .expect("apply V1012 and V1013"),
-        vec![1012, 1013]
+            .expect("apply V1012 through V1014"),
+        vec![1012, 1013, 1014]
     );
     assert!(postgres_table_exists(&db, "sm_sessions").await);
     assert!(postgres_table_exists(&db, "sm_unacked").await);
@@ -3659,6 +3728,239 @@ async fn postgres_v1012_resets_epoch_zero_soak_rows() {
     drop(conn);
     drop(db);
     drop_postgres_schema(&admin, &schema).await;
+}
+
+#[tokio::test]
+async fn sqlite_v1014_resets_only_ledger_owned_ingress_and_sm_state() {
+    let db = Database::in_memory("v1014-reset")
+        .await
+        .expect("SQLite database");
+    migrate_through_v1013(&db).await;
+    seed_v1014_cutover_rows(&db).await;
+
+    assert_eq!(
+        MigrationRunner::single()
+            .run(&db)
+            .await
+            .expect("apply V1014"),
+        vec![1014]
+    );
+
+    assert_v1014_cutover_result(&db, 0).await;
+}
+
+#[tokio::test]
+async fn postgres_v1014_resets_at_epoch_zero_and_epoch_one_with_trigger_proof() {
+    let Ok(database_url) = std::env::var("WADDLE_TEST_POSTGRES_URL") else {
+        eprintln!("skipping: WADDLE_TEST_POSTGRES_URL not set (V1014 fenced reset)");
+        return;
+    };
+
+    for epoch in [0_i64, 1_i64] {
+        let schema = unique_postgres_schema_name(&format!("v1014_reset_epoch_{epoch}"));
+        let (db, admin) = open_isolated_postgres_database(&database_url, &schema).await;
+        migrate_through_v1013(&db).await;
+        seed_v1014_cutover_rows(&db).await;
+        if epoch == 1 {
+            db.execute(
+                "UPDATE ingress_protocol_epoch SET epoch = 1, activated_at = now(), \
+                 lineage_uuid = '8a1d35a6-5e5a-41f1-8e2e-b864e60a4a92' WHERE id = 1",
+            )
+            .await
+            .expect("activate epoch one before V1014");
+        }
+
+        assert_eq!(
+            MigrationRunner::single()
+                .run(&db)
+                .await
+                .expect("apply V1014 at live epoch"),
+            vec![1014]
+        );
+        assert_v1014_cutover_result(&db, epoch).await;
+
+        if epoch == 1 {
+            let error = db
+                .execute(
+                    "INSERT INTO ingress_delivery_receipts \
+                     (message_key, kind, semantic_identity_hash, resource) VALUES \
+                     ('00000000-0000-0000-0000-000000000099', 0, decode(repeat('00', 32), 'hex'), 'alice@example.com/web')",
+                )
+                .await
+                .expect_err("proof must be transaction-local, not leaked by migration");
+            assert!(
+                error.to_string().contains("transaction-local epoch proof"),
+                "new delivery-receipt table must reject an unproved epoch-one write: {error}"
+            );
+
+            let mut tx = db.begin().await.expect("begin proved V1014 write");
+            tx.execute("SET LOCAL waddle.protocol_epoch = '1'", ())
+                .await
+                .expect("set epoch proof");
+            tx.execute(
+                "SELECT set_config('waddle.protocol_epoch_xid', pg_current_xact_id()::text, true)",
+                (),
+            )
+            .await
+            .expect("bind epoch proof to transaction");
+            for sql in [
+                "INSERT INTO ingress_messages (message_key, digest_version, digest) VALUES ('00000000-0000-0000-0000-000000000099', 1, decode(repeat('00', 32), 'hex'))",
+                "INSERT INTO ingress_effect_intents (message_key, effect_ordinal, kind, semantic_identity_hash, payload_version, payload) VALUES ('00000000-0000-0000-0000-000000000099', 0, 0, decode(repeat('00', 32), 'hex'), 1, decode('01', 'hex'))",
+                "INSERT INTO ingress_delivery_receipts (message_key, kind, semantic_identity_hash, resource) VALUES ('00000000-0000-0000-0000-000000000099', 0, decode(repeat('00', 32), 'hex'), 'alice@example.com/web')",
+            ] {
+                tx.execute(sql, ())
+                    .await
+                    .expect("epoch proof authorizes V1014 table write");
+            }
+            tx.commit().await.expect("commit proved V1014 write");
+        }
+
+        drop(db);
+        drop_postgres_schema(&admin, &schema).await;
+    }
+}
+
+async fn migrate_through_v1013(db: &Database) {
+    MigrationRunner::new(
+        global::all()
+            .into_iter()
+            .chain(
+                waddle::all()
+                    .into_iter()
+                    .filter(|migration| migration.version < 1014),
+            )
+            .collect(),
+    )
+    .run(db)
+    .await
+    .expect("apply catalog through V1013");
+}
+
+async fn seed_v1014_cutover_rows(db: &Database) {
+    let conn = db.guard().await.expect("V1014 seed connection");
+    let (message, alias, intent, receipt, carbon) = match db.driver() {
+        DatabaseDriver::Sqlite => (
+            "INSERT INTO ingress_messages (message_key, digest_version, digest) VALUES ('00000000-0000-0000-0000-000000000041', 1, zeroblob(32))",
+            "INSERT INTO ingress_origin_aliases (alias_key_hash, sender_bare_jid, target_kind, target_jid, origin_id, message_key) VALUES (zeroblob(32), 'sender@example.com', 0, '', 'v1014-origin', '00000000-0000-0000-0000-000000000041')",
+            "INSERT INTO ingress_effect_intents (message_key, effect_ordinal, kind, semantic_identity_hash, payload_version, payload) VALUES ('00000000-0000-0000-0000-000000000041', '0', 0, zeroblob(32), 1, X'01')",
+            "INSERT INTO ingress_effect_receipts (message_key, kind, semantic_identity_hash) VALUES ('00000000-0000-0000-0000-000000000041', 0, zeroblob(32))",
+            "INSERT INTO ingress_carbon_receipts (message_key, kind, semantic_identity_hash, recipient) VALUES ('00000000-0000-0000-0000-000000000041', 0, zeroblob(32), 'alice@example.com/web')",
+        ),
+        DatabaseDriver::Postgres => (
+            "INSERT INTO ingress_messages (message_key, digest_version, digest) VALUES ('00000000-0000-0000-0000-000000000041', 1, decode(repeat('00', 32), 'hex'))",
+            "INSERT INTO ingress_origin_aliases (alias_key_hash, sender_bare_jid, target_kind, target_jid, origin_id, message_key) VALUES (decode(repeat('00', 32), 'hex'), 'sender@example.com', 0, '', 'v1014-origin', '00000000-0000-0000-0000-000000000041')",
+            "INSERT INTO ingress_effect_intents (message_key, effect_ordinal, kind, semantic_identity_hash, payload_version, payload) VALUES ('00000000-0000-0000-0000-000000000041', 0, 0, decode(repeat('00', 32), 'hex'), 1, decode('01', 'hex'))",
+            "INSERT INTO ingress_effect_receipts (message_key, kind, semantic_identity_hash) VALUES ('00000000-0000-0000-0000-000000000041', 0, decode(repeat('00', 32), 'hex'))",
+            "INSERT INTO ingress_carbon_receipts (message_key, kind, semantic_identity_hash, recipient) VALUES ('00000000-0000-0000-0000-000000000041', 0, decode(repeat('00', 32), 'hex'), 'alice@example.com/web')",
+        ),
+    };
+    for sql in [
+        "INSERT INTO channels (id, name) VALUES ('v1014-sentinel', 'V1014 sentinel')",
+        "CREATE TABLE pending_delivery (marker TEXT PRIMARY KEY)",
+        "INSERT INTO pending_delivery (marker) VALUES ('store-owned-pending')",
+        "CREATE TABLE groupchat_notification_recovery (marker TEXT PRIMARY KEY)",
+        "INSERT INTO groupchat_notification_recovery (marker) VALUES ('store-owned-recovery')",
+        message,
+        "INSERT INTO ingress_sm_streams (sm_ingress_id, stream_id) VALUES ('00000000-0000-0000-0000-000000000042', 'v1014-stream')",
+        alias,
+        "INSERT INTO ingress_sm_refs (sm_ingress_id, ingress_ordinal, wire_h, wire_generation, message_key) VALUES ('00000000-0000-0000-0000-000000000042', '1', 1, 0, '00000000-0000-0000-0000-000000000041')",
+        "INSERT INTO ingress_deliveries (delivery_key, message_key) VALUES ('00000000-0000-0000-0000-000000000043', '00000000-0000-0000-0000-000000000041')",
+        intent,
+        receipt,
+        carbon,
+        "INSERT INTO muc_invite_claims (message_key, room_jid, invitee_jid, inviter_jid, claimed) VALUES ('00000000-0000-0000-0000-000000000041', 'room@example.com', 'alice@example.com', 'bob@example.com', 1)",
+        "INSERT INTO sm_sessions (stream_id, user_id, full_jid, inbound_count, outbound_count, last_acked, detached_at_ms, max_resume_duration_ms, carbons_enabled, roster_interested, blocklist_interested, presence_available, presence_priority) VALUES ('v1014-session', 'alice', 'alice@example.com/web', 1, 1, 0, 1, 60000, 0, 0, 0, 1, 0)",
+        r#"INSERT INTO sm_unacked (stream_id, sequence, stanza_xml, original_receipt_at_ms) VALUES ('v1014-session', 1, '<message xmlns="jabber:client"/>', 1)"#,
+    ] {
+        conn.execute(sql, ()).await.expect("seed V1014 cutover row");
+    }
+}
+
+async fn assert_v1014_cutover_result(db: &Database, expected_epoch: i64) {
+    let conn = db.guard().await.expect("V1014 result connection");
+    let mut rows = conn
+        .query(
+            "SELECT \
+             (SELECT COUNT(*) FROM ingress_carbon_receipts) + \
+             (SELECT COUNT(*) FROM ingress_effect_receipts) + \
+             (SELECT COUNT(*) FROM ingress_effect_intents) + \
+             (SELECT COUNT(*) FROM ingress_deliveries) + \
+             (SELECT COUNT(*) FROM ingress_sm_refs) + \
+             (SELECT COUNT(*) FROM ingress_origin_aliases) + \
+             (SELECT COUNT(*) FROM muc_invite_claims) + \
+             (SELECT COUNT(*) FROM ingress_messages) + \
+             (SELECT COUNT(*) FROM ingress_sm_streams) + \
+             (SELECT COUNT(*) FROM sm_unacked) + \
+             (SELECT COUNT(*) FROM sm_sessions)",
+            (),
+        )
+        .await
+        .expect("count reset rows");
+    let reset_rows: i64 = rows
+        .next()
+        .await
+        .expect("read reset count")
+        .expect("reset count row")
+        .get(0)
+        .expect("decode reset count");
+    assert_eq!(reset_rows, 0, "every V1014 reset target must be empty");
+    drop(rows);
+
+    for (table, marker) in [
+        ("channels", "v1014-sentinel"),
+        ("pending_delivery", "store-owned-pending"),
+        ("groupchat_notification_recovery", "store-owned-recovery"),
+    ] {
+        let key = if table == "channels" { "id" } else { "marker" };
+        let mut rows = conn
+            .query(
+                &format!("SELECT COUNT(*) FROM {table} WHERE {key} = ?"),
+                crate::db_params![marker],
+            )
+            .await
+            .expect("query preserved row");
+        let preserved: i64 = rows
+            .next()
+            .await
+            .expect("read preserved count")
+            .expect("preserved count row")
+            .get(0)
+            .expect("decode preserved count");
+        assert_eq!(preserved, 1, "V1014 must preserve {table}");
+    }
+    let mut rows = conn
+        .query("SELECT epoch FROM ingress_protocol_epoch WHERE id = 1", ())
+        .await
+        .expect("query retained epoch");
+    let epoch: i64 = rows
+        .next()
+        .await
+        .expect("read epoch")
+        .expect("epoch row")
+        .get(0)
+        .expect("decode epoch");
+    assert_eq!(epoch, expected_epoch, "V1014 must not advance the epoch");
+
+    let table_exists = match db.driver() {
+        DatabaseDriver::Sqlite => {
+            "SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name = 'ingress_delivery_receipts'"
+        }
+        DatabaseDriver::Postgres => {
+            "SELECT COUNT(*) FROM information_schema.tables WHERE table_schema = current_schema() AND table_name = 'ingress_delivery_receipts'"
+        }
+    };
+    let mut rows = conn
+        .query(table_exists, ())
+        .await
+        .expect("query delivery receipt table");
+    let exists: i64 = rows
+        .next()
+        .await
+        .expect("read table count")
+        .expect("table count row")
+        .get(0)
+        .expect("decode table count");
+    assert_eq!(exists, 1, "V1014 must create ingress_delivery_receipts");
 }
 
 /// Store-owned tables exist only on upgrades, not on a fresh catalog install.
@@ -3720,7 +4022,7 @@ async fn migration_v1012_recreates_sql_sm_store(database_url: &str) {
             .run(&storage.database())
             .await
             .expect("cutover migration"),
-        vec![1012, 1013]
+        vec![1012, 1013, 1014]
     );
     drop(storage);
 

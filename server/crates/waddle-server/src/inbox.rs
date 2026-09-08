@@ -13,6 +13,7 @@ use waddle_xmpp::inbox::storage::{
     InboxStorageError,
 };
 use waddle_xmpp::inbox::{ConversationKind, InboxEntry};
+use waddle_xmpp::ingress::MessageKey;
 use waddle_xmpp::xep::CallThreadDuration;
 use waddle_xmpp_core::xep0359::StanzaId;
 
@@ -25,7 +26,7 @@ mod schema;
 use codec::{decode_row, encode_call_thread_columns, encode_kind, SELECT_COLS};
 pub use open::build_inbox_storage;
 
-const GROUPCHAT_NOTIFICATION_RECOVERY_SELECT_COLS: &str = "recipient_bare_jid, room_jid, thread_id, stanza_id_by, stanza_id, sender_jid, is_live_occupant, room_members_only, sender_can_broadcast_channel_mention, created_at_ms";
+const GROUPCHAT_NOTIFICATION_RECOVERY_SELECT_COLS: &str = "message_key, recipient_bare_jid, room_jid, thread_id, stanza_id_by, stanza_id, sender_jid, is_live_occupant, room_members_only, sender_can_broadcast_channel_mention, created_at_ms";
 
 #[derive(Clone)]
 pub struct DatabaseInboxStorage {
@@ -230,6 +231,7 @@ fn upsert_params(
 fn insert_groupchat_notification_recovery_sql() -> &'static str {
     r#"
     INSERT INTO groupchat_notification_recovery (
+        message_key,
         recipient_bare_jid,
         room_jid,
         thread_id,
@@ -241,8 +243,9 @@ fn insert_groupchat_notification_recovery_sql() -> &'static str {
         sender_can_broadcast_channel_mention,
         created_at_ms,
         completed_at_ms
-    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL)
+    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL)
     ON CONFLICT(recipient_bare_jid, room_jid, thread_id, stanza_id_by, stanza_id) DO UPDATE SET
+        message_key = excluded.message_key,
         sender_jid = excluded.sender_jid,
         is_live_occupant = excluded.is_live_occupant,
         room_members_only = excluded.room_members_only,
@@ -256,6 +259,7 @@ fn groupchat_notification_recovery_params(
     recovery: &GroupchatNotificationRecovery,
 ) -> Vec<crate::db::Value> {
     crate::db_params![
+        recovery.message_key.to_storage().to_string(),
         recovery.key.recipient.to_string(),
         recovery.key.room.to_string(),
         recovery.key.thread_id.clone().unwrap_or_default(),
@@ -360,37 +364,43 @@ pub(crate) async fn insert_groupchat_notification_recovery_in_transaction(
 fn decode_groupchat_notification_recovery(
     row: &crate::db::Row,
 ) -> Result<GroupchatNotificationRecovery, InboxStorageError> {
-    let recipient: String = row
+    let message_key: String = row
         .get(0)
         .map_err(|error| InboxStorageError::Other(error.to_string()))?;
-    let room: String = row
+    let recipient: String = row
         .get(1)
         .map_err(|error| InboxStorageError::Other(error.to_string()))?;
-    let thread_id: String = row
+    let room: String = row
         .get(2)
         .map_err(|error| InboxStorageError::Other(error.to_string()))?;
-    let stanza_id_by: String = row
+    let thread_id: String = row
         .get(3)
         .map_err(|error| InboxStorageError::Other(error.to_string()))?;
-    let stanza_id: String = row
+    let stanza_id_by: String = row
         .get(4)
         .map_err(|error| InboxStorageError::Other(error.to_string()))?;
-    let sender_jid: String = row
+    let stanza_id: String = row
         .get(5)
         .map_err(|error| InboxStorageError::Other(error.to_string()))?;
-    let is_live_occupant: i64 = row
+    let sender_jid: String = row
         .get(6)
         .map_err(|error| InboxStorageError::Other(error.to_string()))?;
-    let room_members_only: i64 = row
+    let is_live_occupant: i64 = row
         .get(7)
         .map_err(|error| InboxStorageError::Other(error.to_string()))?;
-    let sender_can_broadcast_channel_mention: i64 = row
+    let room_members_only: i64 = row
         .get(8)
         .map_err(|error| InboxStorageError::Other(error.to_string()))?;
-    let created_at_ms: i64 = row
+    let sender_can_broadcast_channel_mention: i64 = row
         .get(9)
         .map_err(|error| InboxStorageError::Other(error.to_string()))?;
+    let created_at_ms: i64 = row
+        .get(10)
+        .map_err(|error| InboxStorageError::Other(error.to_string()))?;
     Ok(GroupchatNotificationRecovery {
+        message_key: MessageKey::from_storage(message_key.parse().map_err(|error| {
+            InboxStorageError::Other(format!("invalid recovery message key: {error}"))
+        })?),
         key: GroupchatNotificationRecoveryKey {
             recipient: recipient.parse().map_err(|error| {
                 InboxStorageError::Other(format!("invalid recipient JID: {error}"))

@@ -131,11 +131,11 @@ struct GroupchatNotificationProjection<'a, 'deps> {
     sender_can_broadcast_channel_mention: bool,
     thread: &'a Option<GroupchatThreadProjection>,
     outcome: &'a GroupchatInboxProjectionOutcome,
-    notification_recovery: Option<&'a waddle_xmpp::inbox::storage::GroupchatNotificationRecovery>,
+    notification_recovery: Option<&'a super::effects::room::PlannedGroupchatNotificationRecovery>,
 }
 
 fn groupchat_notification_recovery_mutation(
-    recovery: &waddle_xmpp::inbox::storage::GroupchatNotificationRecovery,
+    recovery: &super::effects::room::PlannedGroupchatNotificationRecovery,
     action: waddle_xmpp::ingress::GroupchatNotificationRecoveryAction,
 ) -> waddle_xmpp::ingress::GroupchatNotificationRecoveryMutation {
     waddle_xmpp::ingress::GroupchatNotificationRecoveryMutation {
@@ -157,13 +157,13 @@ fn groupchat_notification_recovery_mutation(
 
 fn groupchat_notification_recovery_item(
     event: &ProjectGroupchatInboxEvent<'_, '_>,
-) -> Option<waddle_xmpp::inbox::storage::GroupchatNotificationRecovery> {
-    if !event.is_recipient || !event.is_durable_recipient {
+) -> Option<super::effects::room::PlannedGroupchatNotificationRecovery> {
+    if !event.deps.effects.is_planning() || !event.is_recipient || !event.is_durable_recipient {
         return None;
     }
     let archive_id = extract_room_stanza_id(&event.message, &event.room)?;
     let sender_jid = event.message.from.clone()?;
-    Some(waddle_xmpp::inbox::storage::GroupchatNotificationRecovery {
+    Some(super::effects::room::PlannedGroupchatNotificationRecovery {
         key: waddle_xmpp::inbox::storage::GroupchatNotificationRecoveryKey {
             recipient: event.owner.clone(),
             room: event.room.clone(),
@@ -351,7 +351,7 @@ async fn enqueue_groupchat_notification_candidate(
 /// recovery (`reconcile_groupchat_notification_candidates`).
 struct GroupchatNotificationCandidateSeed<'a> {
     deps: Option<&'a Deps<'a>>,
-    recovery: Option<&'a waddle_xmpp::inbox::storage::GroupchatNotificationRecovery>,
+    recovery: Option<&'a super::effects::room::PlannedGroupchatNotificationRecovery>,
     state: &'a WebSocketState,
     owner: &'a BareJid,
     room: &'a BareJid,
@@ -670,7 +670,7 @@ async fn insert_groupchat_notification_candidate(
 
 async fn mark_groupchat_notification_recovery_completed(
     deps: &Deps<'_>,
-    recovery: &waddle_xmpp::inbox::storage::GroupchatNotificationRecovery,
+    recovery: &super::effects::room::PlannedGroupchatNotificationRecovery,
 ) {
     if deps.effects.is_planning() {
         super::effects::room::external(
@@ -1157,7 +1157,7 @@ fn xmpp_uri_bare_jid(uri: &str) -> Option<BareJid> {
 
 pub(super) fn capture_recovery_completion(
     deps: &Deps<'_>,
-    recovery: &waddle_xmpp::inbox::storage::GroupchatNotificationRecovery,
+    recovery: &super::effects::room::PlannedGroupchatNotificationRecovery,
 ) {
     deps.capture_intent(IngressEffectIntent::GroupchatNotificationRecovery {
         mutation: groupchat_notification_recovery_mutation(

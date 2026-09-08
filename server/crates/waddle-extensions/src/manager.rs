@@ -48,6 +48,12 @@ pub struct MessageExtensionOutcome {
     pub effects: Vec<ExtensionEffect>,
 }
 
+/// Result of invoking one explicitly selected message observer.
+#[derive(Debug, Clone, Default)]
+pub struct ObserverOutcome {
+    pub effects: Vec<ExtensionEffect>,
+}
+
 pub struct LaunchInvocationRequest<'a> {
     pub plugin_name: &'a str,
     pub action_id: &'a str,
