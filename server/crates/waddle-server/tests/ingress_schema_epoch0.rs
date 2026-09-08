@@ -88,16 +88,16 @@ fn schema_url(database_url: &str, schema: &str) -> String {
 }
 
 #[tokio::test]
-async fn sqlite_v1012_ingress_schema_constraints() {
-    let db = Database::in_memory("v1012-schema")
+async fn sqlite_v1014_ingress_schema_constraints() {
+    let db = Database::in_memory("v1014-schema")
         .await
         .expect("SQLite database");
     MigrationRunner::single()
         .run(&db)
         .await
         .expect("migrate SQLite");
-    assert_v1012_constraints(&db).await;
-    assert_count(&db, "SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name IN ('ingress_protocol_epoch', 'ingress_messages', 'ingress_origin_aliases', 'ingress_sm_refs', 'ingress_deliveries', 'ingress_sm_streams', 'ingress_effect_intents', 'ingress_effect_receipts', 'ingress_carbon_receipts')", 9).await;
+    assert_v1014_constraints(&db).await;
+    assert_count(&db, "SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name IN ('ingress_protocol_epoch', 'ingress_messages', 'ingress_origin_aliases', 'ingress_sm_refs', 'ingress_deliveries', 'ingress_sm_streams', 'ingress_effect_intents', 'ingress_effect_receipts', 'ingress_carbon_receipts', 'ingress_delivery_receipts')", 10).await;
     assert_count(
         &db,
         "SELECT COUNT(*) FROM sqlite_master WHERE type = 'trigger' AND tbl_name LIKE 'ingress_%'",
@@ -106,14 +106,15 @@ async fn sqlite_v1012_ingress_schema_constraints() {
     .await;
     assert_count(&db, "SELECT COUNT(*) FROM pragma_foreign_key_list('ingress_effect_receipts') WHERE \"table\" = 'ingress_effect_intents' AND on_delete = 'CASCADE'", 3).await;
     assert_count(&db, "SELECT COUNT(*) FROM pragma_foreign_key_list('ingress_carbon_receipts') WHERE \"table\" = 'ingress_effect_intents' AND on_delete = 'CASCADE'", 3).await;
+    assert_count(&db, "SELECT COUNT(*) FROM pragma_foreign_key_list('ingress_delivery_receipts') WHERE \"table\" = 'ingress_effect_intents' AND on_delete = 'CASCADE'", 3).await;
 }
 
 #[tokio::test]
-async fn postgres_v1012_ingress_schema_catalog_and_constraints() {
-    let Some(fixture) = Fixture::open("v1012_catalog").await else {
+async fn postgres_v1014_ingress_schema_catalog_and_constraints() {
+    let Some(fixture) = Fixture::open("v1014_catalog").await else {
         return;
     };
-    assert_v1012_constraints(&fixture.db).await;
+    assert_v1014_constraints(&fixture.db).await;
     assert_count(&fixture.db, "SELECT COUNT(*) FROM information_schema.columns WHERE table_schema = current_schema() AND ((table_name = 'ingress_messages' AND column_name = 'envelope_version' AND data_type = 'smallint' AND is_nullable = 'YES') OR (table_name = 'ingress_messages' AND column_name = 'envelope' AND data_type = 'bytea' AND is_nullable = 'YES') OR (table_name = 'ingress_sm_streams' AND column_name = 'checkpoint_h' AND data_type = 'bigint' AND is_nullable = 'NO') OR (table_name = 'ingress_sm_refs' AND column_name = 'wire_h' AND data_type = 'bigint' AND is_nullable = 'NO') OR (table_name = 'ingress_sm_refs' AND column_name = 'wire_generation' AND data_type = 'bigint' AND is_nullable = 'NO') OR (table_name = 'ingress_sm_streams' AND column_name = 'wire_generation' AND data_type = 'bigint' AND is_nullable = 'NO'))", 6).await;
     assert_count(&fixture.db, "SELECT COUNT(*) FROM pg_constraint WHERE conrelid = 'ingress_sm_refs'::regclass AND contype = 'u' AND pg_get_constraintdef(oid) = 'UNIQUE (sm_ingress_id, wire_generation, wire_h)'", 1).await;
     assert_count(&fixture.db, "SELECT COUNT(*) FROM pg_constraint WHERE conrelid = 'ingress_effect_receipts'::regclass AND contype = 'f' AND confrelid = 'ingress_effect_intents'::regclass AND confdeltype = 'c' AND array_length(conkey, 1) = 3", 1).await;
@@ -123,6 +124,11 @@ async fn postgres_v1012_ingress_schema_catalog_and_constraints() {
     assert_count(&fixture.db, "SELECT COUNT(*) WHERE has_table_privilege('pg_monitor', 'ingress_effect_receipts', 'SELECT')", 1).await;
     assert_count(&fixture.db, "SELECT COUNT(*) FROM pg_constraint WHERE conrelid = 'ingress_carbon_receipts'::regclass AND contype = 'f' AND confrelid = 'ingress_effect_intents'::regclass AND confdeltype = 'c' AND array_length(conkey, 1) = 3", 1).await;
     assert_count(&fixture.db, "SELECT COUNT(*) FROM pg_constraint WHERE conrelid = 'ingress_carbon_receipts'::regclass AND contype = 'p' AND array_length(conkey, 1) = 4", 1).await;
+    assert_count(&fixture.db, "SELECT COUNT(*) FROM pg_constraint WHERE conrelid = 'ingress_delivery_receipts'::regclass AND contype = 'f' AND confrelid = 'ingress_effect_intents'::regclass AND confdeltype = 'c' AND array_length(conkey, 1) = 3", 1).await;
+    assert_count(&fixture.db, "SELECT COUNT(*) FROM pg_constraint WHERE conrelid = 'ingress_delivery_receipts'::regclass AND contype = 'p' AND array_length(conkey, 1) = 4", 1).await;
+    assert_count(&fixture.db, "SELECT COUNT(*) FROM pg_trigger WHERE tgrelid = 'ingress_delivery_receipts'::regclass AND NOT tgisinternal AND tgenabled = 'A' AND ((tgname = 'ingress_delivery_receipts_epoch_guard_dml' AND tgfoid = 'waddle_ingress_epoch_guard()'::regprocedure AND tgtype = 30) OR (tgname = 'ingress_delivery_receipts_epoch_guard_truncate' AND tgfoid = 'waddle_ingress_truncate_guard()'::regprocedure AND tgtype = 34))", 2).await;
+    assert_count(&fixture.db, "SELECT COUNT(*) FROM ingress_epoch_guard_manifest WHERE table_name = 'ingress_delivery_receipts'", 1).await;
+    assert_count(&fixture.db, "SELECT COUNT(*) WHERE has_table_privilege('pg_monitor', 'ingress_delivery_receipts', 'SELECT')", 1).await;
     fixture.close().await;
 }
 
@@ -139,7 +145,7 @@ async fn assert_count(db: &Database, sql: &str, expected: i64) {
     assert_eq!(count, expected, "{sql}");
 }
 
-async fn assert_v1012_constraints(db: &Database) {
+async fn assert_v1014_constraints(db: &Database) {
     let conn = db.guard().await.expect("database guard");
     let insert_message = match db.driver() {
         DatabaseDriver::Postgres => "INSERT INTO ingress_messages (message_key, digest_version, digest) VALUES ('00000000-0000-0000-0000-000000000011', 1, decode(repeat('00', 32), 'hex'))",
@@ -204,6 +210,22 @@ async fn assert_v1012_constraints(db: &Database) {
             .is_err(),
         "receipt primary key is unique"
     );
+    let delivery_receipt_sql = "INSERT INTO ingress_delivery_receipts (message_key, kind, semantic_identity_hash, resource) VALUES ('00000000-0000-0000-0000-000000000011', 0, ?, 'alice@example.com/web')";
+    conn.execute(
+        delivery_receipt_sql,
+        waddle_server::db_params![vec![0_u8; 32]],
+    )
+    .await
+    .expect("delivery progress receipt");
+    assert!(
+        conn.execute(
+            delivery_receipt_sql,
+            waddle_server::db_params![vec![0_u8; 32]],
+        )
+        .await
+        .is_err(),
+        "delivery progress primary key is unique"
+    );
     conn.execute("DELETE FROM ingress_sm_refs", ())
         .await
         .expect("remove references");
@@ -213,6 +235,7 @@ async fn assert_v1012_constraints(db: &Database) {
     drop(conn);
     assert_count(db, "SELECT COUNT(*) FROM ingress_effect_intents", 0).await;
     assert_count(db, "SELECT COUNT(*) FROM ingress_effect_receipts", 0).await;
+    assert_count(db, "SELECT COUNT(*) FROM ingress_delivery_receipts", 0).await;
     assert_count(
         db,
         "SELECT COUNT(*) FROM ingress_protocol_epoch WHERE id = 1 AND epoch = 0",

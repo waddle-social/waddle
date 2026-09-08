@@ -103,11 +103,15 @@ async fn newly_enabled_observer(fixture: IngressFixture) {
             room: room.clone(),
             requester: submission.sender.to_bare(),
             sender: submission.sender.clone(),
+            plugin: waddle_extensions::PluginId::new("message-hook-fixture")
+                .expect("fixture plugin"),
         });
     submission.plan.plan.push(
         PlannedEffect::new(Effect::External(ExternalEffect::Room(
             ExternalRoomEffect::ObserveRoomMessage {
                 room,
+                plugin: waddle_extensions::PluginId::new("message-hook-fixture")
+                    .expect("fixture plugin"),
                 requester: submission.sender.to_bare(),
                 sender: submission.sender.clone(),
                 message: Box::new(submission.plan.sanitized_message.clone()),
@@ -165,6 +169,7 @@ fn room_observer_first_owner_acceptance_is_not_historical_policy_drift() {
         room: room.clone(),
         requester: "romeo@example.com".parse().expect("requester"),
         sender: "romeo@example.com/phone".parse().expect("sender"),
+        plugin: waddle_extensions::PluginId::new("message-hook-fixture").expect("fixture plugin"),
     };
     let mut recorded = vec![super::RecordedEffect {
         ordinal: 0,
@@ -191,4 +196,21 @@ fn room_observer_first_owner_acceptance_is_not_historical_policy_drift() {
     let (verdict, omissions) = super::compare_effects(&recorded, &planned, true);
     assert!(matches!(verdict, super::ReconcileVerdict::Divergent { .. }));
     assert!(omissions.is_empty());
+}
+
+#[test]
+fn room_observer_plugins_have_distinct_semantic_hashes() {
+    let intent = |plugin: &str| IngressEffectIntent::RoomObserver {
+        room: "room@muc.example.com".parse().expect("room"),
+        requester: "romeo@example.com".parse().expect("requester"),
+        sender: "romeo@example.com/phone".parse().expect("sender"),
+        plugin: waddle_extensions::PluginId::new(plugin).expect("plugin"),
+    };
+    let first = intent("observer-one");
+    let second = intent("observer-two");
+    assert_ne!(first.semantic_key(), second.semantic_key());
+    assert_ne!(
+        super::semantic_identity_hash(&first),
+        super::semantic_identity_hash(&second)
+    );
 }

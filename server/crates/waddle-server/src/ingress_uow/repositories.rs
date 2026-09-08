@@ -20,6 +20,7 @@ use crate::{
         self, EffectReceiptKind, MessageEnvelope, MessageWriteOutcome, TerminalizeOutcome,
     },
     ingress_uow::{IngressUowError, IngressUowTransaction},
+    server::routes::interpret::effects::room::PlannedGroupchatNotificationRecovery,
 };
 
 /// Repository for MAM archive rows written inside the ingress transaction.
@@ -176,10 +177,19 @@ impl InboxRepository {
         user: &BareJid,
         entry: InboxEntry,
         increment_unread: bool,
-        recovery: GroupchatNotificationRecovery,
+        recovery: PlannedGroupchatNotificationRecovery,
     ) -> Result<InboxEntry, IngressUowError> {
         let (entry, _) =
             Self::apply_projection(transaction, message_key, user, entry, increment_unread).await?;
+        let recovery = GroupchatNotificationRecovery {
+            message_key,
+            key: recovery.key,
+            sender_jid: recovery.sender_jid,
+            is_live_occupant: recovery.is_live_occupant,
+            room_members_only: recovery.room_members_only,
+            sender_can_broadcast_channel_mention: recovery.sender_can_broadcast_channel_mention,
+            created_at_ms: recovery.created_at_ms,
+        };
         crate::inbox::insert_groupchat_notification_recovery_in_transaction(
             transaction.transaction_mut(),
             recovery,
@@ -963,8 +973,8 @@ fn compare_effects<'a>(
                         intent,
                         IngressEffectIntent::RelayCarbons { .. }
                             | IngressEffectIntent::Carbons { .. }
-                    ) || matches!(intent, IngressEffectIntent::RoomObserver { room, .. }
-                        if !room_authority_pending(recorded, room))
+                    ) || matches!(intent, IngressEffectIntent::RoomObserver { room, plugin, .. }
+                        if !room_observer_authority_pending(recorded, room, plugin))
                         || !inbox_omission_is_recorded_audience(recorded, intent, planned)))
             {
                 divergent.insert(intent.kind());
@@ -1007,6 +1017,23 @@ fn compare_effects<'a>(
         ReconcileVerdict::Consistent
     };
     (verdict, omissions)
+}
+
+fn room_observer_authority_pending(
+    recorded: &[RecordedEffect],
+    target_room: &BareJid,
+    target_plugin: &waddle_extensions::PluginId,
+) -> bool {
+    let mut recorded_plugins = recorded.iter().filter_map(|row| match &row.intent {
+        IngressEffectIntent::RoomObserver { room, plugin, .. } if room == target_room => {
+            Some(plugin)
+        }
+        _ => None,
+    });
+    room_authority_pending(recorded, target_room)
+        && recorded_plugins.next().is_none_or(|plugin| {
+            plugin == target_plugin && recorded_plugins.all(|other| other == plugin)
+        })
 }
 
 fn room_authority_pending(recorded: &[RecordedEffect], target_room: &BareJid) -> bool {

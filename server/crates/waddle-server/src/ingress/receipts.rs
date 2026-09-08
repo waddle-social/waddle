@@ -81,14 +81,21 @@ fn exact_mutation(effect: &ExternalEffect, intent: &IngressEffectIntent) -> bool
                 room,
                 requester,
                 sender,
+                plugin,
                 ..
             }),
             IngressEffectIntent::RoomObserver {
                 room: recorded_room,
                 requester: recorded_requester,
                 sender: recorded_sender,
+                plugin: recorded_plugin,
             },
-        ) => room == recorded_room && requester == recorded_requester && sender == recorded_sender,
+        ) => {
+            room == recorded_room
+                && requester == recorded_requester
+                && sender == recorded_sender
+                && plugin == recorded_plugin
+        }
         #[cfg(feature = "clustering")]
         (
             ExternalEffect::Room(ExternalRoomEffect::RelayMucProxy { room, .. }),
@@ -271,14 +278,15 @@ mod tests {
     }
     #[test]
     fn notification_recovery_receipt_requires_exact_completed_action() {
+        use crate::server::routes::interpret::effects::room::PlannedGroupchatNotificationRecovery;
         use waddle_xmpp::{
-            inbox::storage::{GroupchatNotificationRecovery, GroupchatNotificationRecoveryKey},
+            inbox::storage::GroupchatNotificationRecoveryKey,
             ingress::{GroupchatNotificationRecoveryAction, GroupchatNotificationRecoveryMutation},
         };
         let recipient: BareJid = "recipient@example.com".parse().expect("recipient");
         let room: BareJid = "room@example.com".parse().expect("room");
         let id = waddle_xmpp_core::xep0359::StanzaId::new("archive", room.clone().into());
-        let recovery = GroupchatNotificationRecovery {
+        let recovery = PlannedGroupchatNotificationRecovery {
             key: GroupchatNotificationRecoveryKey {
                 recipient: recipient.clone(),
                 room: room.clone(),

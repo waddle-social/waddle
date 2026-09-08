@@ -1,5 +1,7 @@
 use super::*;
-use crate::server::routes::interpret::effects::{PlannedEffect, RoomExecutionPath};
+use crate::server::routes::interpret::effects::{
+    room::PlannedGroupchatNotificationRecovery, PlannedEffect, RoomExecutionPath,
+};
 use waddle_xmpp::{
     inbox::{ConversationKind, InboxEntry},
     ingress::NotificationActivityMutation,
@@ -322,7 +324,7 @@ fn recorded_recovery_payload_respects_thread_and_execution_phase() {
     use waddle_xmpp_core::{mam::ThreadId, xep0359::StanzaId};
     let room: jid::BareJid = "room@example.test".parse().expect("room");
     let owner: jid::BareJid = "alice@example.test".parse().expect("owner");
-    let recovery = GroupchatNotificationRecovery {
+    let recovery = PlannedGroupchatNotificationRecovery {
         key: GroupchatNotificationRecoveryKey {
             recipient: owner.clone(),
             room: room.clone(),

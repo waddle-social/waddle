@@ -43,6 +43,7 @@ fn groupchat_notification_recovery(
     stanza_id: &str,
 ) -> GroupchatNotificationRecovery {
     GroupchatNotificationRecovery {
+        message_key: MessageKey::new(),
         key: GroupchatNotificationRecoveryKey {
             recipient,
             room: room.clone(),
@@ -714,6 +715,7 @@ async fn sqlx_inbox_storage_tracks_groupchat_notification_recovery() {
         "room@muc.example.com".parse().expect("stanza-id by"),
     );
     let recovery = GroupchatNotificationRecovery {
+        message_key: MessageKey::new(),
         key: GroupchatNotificationRecoveryKey {
             recipient: user.clone(),
             room: room.clone(),
@@ -727,6 +729,7 @@ async fn sqlx_inbox_storage_tracks_groupchat_notification_recovery() {
         created_at_ms: 42,
     };
     let second_recovery = GroupchatNotificationRecovery {
+        message_key: MessageKey::new(),
         key: GroupchatNotificationRecoveryKey {
             recipient: user.clone(),
             room: room.clone(),
@@ -908,11 +911,10 @@ async fn sqlx_inbox_postgres_handles_i32_overflow_last_updated() {
     assert_eq!(deleted, 1);
 }
 
-/// Regression for the reviewer feedback on PR #738: an existing
-/// `groupchat_notification_recovery` table created BEFORE the
-/// `sender_can_broadcast_channel_mention` column landed must be
-/// migrated forward — without the targeted ALTER, every recovery
-/// SELECT errors with "no such column". This test simulates that
+/// Existing `groupchat_notification_recovery` tables are migrated to the
+/// required canonical key shape. Legacy rows are discarded exactly when the
+/// key column is introduced because V1014 removed their canonical obligations.
+/// This test simulates that
 /// state by:
 ///
 ///   1. opening a fresh DB (CREATE TABLE includes the column),
@@ -921,7 +923,7 @@ async fn sqlx_inbox_postgres_handles_i32_overflow_last_updated() {
 ///   4. re-opening / re-initialising the storage,
 ///   5. asserting the column is present after init.
 #[tokio::test(flavor = "multi_thread")]
-async fn migration_adds_sender_can_broadcast_channel_mention_to_legacy_recovery_table() {
+async fn sqlite_migration_replaces_legacy_recoveries_with_required_message_keys() {
     let artifacts = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("target/test-artifacts");
     std::fs::create_dir_all(&artifacts).expect("artifacts dir");
     let path = artifacts.join(format!("inbox-migration-{}.db", uuid::Uuid::new_v4()));
@@ -958,6 +960,18 @@ async fn migration_adds_sender_can_broadcast_channel_mention_to_legacy_recovery_
             )
             .await
             .expect("create legacy recovery table");
+        storage
+            .execute(
+                "INSERT INTO groupchat_notification_recovery (\
+                    recipient_bare_jid, room_jid, thread_id, stanza_id_by, stanza_id, sender_jid, \
+                    is_live_occupant, room_members_only, created_at_ms, completed_at_ms\
+                 ) VALUES ('recipient@example.com', 'room@muc.example.com', '', \
+                    'room@muc.example.com', 'legacy-recovery', 'room@muc.example.com/alice', \
+                    1, 0, 41, NULL)",
+                (),
+            )
+            .await
+            .expect("seed recovery row without canonical message key");
     }
 
     // Step 4-5: re-open. The init path should detect the missing
@@ -968,26 +982,48 @@ async fn migration_adds_sender_can_broadcast_channel_mention_to_legacy_recovery_
     let storage = DatabaseInboxStorage::open(Some(&url))
         .await
         .expect("re-open storage triggers migration");
+    assert_eq!(
+        groupchat_notification_recovery_row_count(&storage).await,
+        0,
+        "rows without a canonical message key are deleted exactly at column introduction"
+    );
 
     let mut cols = storage
         .query("PRAGMA table_info(groupchat_notification_recovery)", ())
         .await
         .expect("PRAGMA table_info");
-    let mut has_column = false;
+    let mut has_broadcast_column = false;
+    let mut has_message_key_column = false;
+    let mut message_key_is_required = false;
     while let Some(row) = cols.next().await.expect("advance pragma row") {
         let name: String = row.get(1).expect("col name");
         if name == "sender_can_broadcast_channel_mention" {
-            has_column = true;
-            break;
+            has_broadcast_column = true;
+        }
+        if name == "message_key" {
+            has_message_key_column = true;
+            message_key_is_required = row.get::<i64>(3).expect("message_key not-null flag") != 0;
         }
     }
     assert!(
-        has_column,
+        has_broadcast_column,
         "migration must add `sender_can_broadcast_channel_mention` to \
          pre-existing groupchat_notification_recovery tables"
     );
+    assert!(
+        has_message_key_column,
+        "migration must add required `message_key` to legacy recovery tables"
+    );
+    assert!(message_key_is_required, "message_key must be NOT NULL");
+    assert_eq!(
+        groupchat_notification_recovery_row_count(&storage).await,
+        0,
+        "legacy rows without canonical keys must be deleted during the one-time transition"
+    );
 
+    let message_key = MessageKey::new();
     let recovery = waddle_xmpp::inbox::storage::GroupchatNotificationRecovery {
+        message_key,
         key: waddle_xmpp::inbox::storage::GroupchatNotificationRecoveryKey {
             recipient: jid("recipient@example.com"),
             room: jid("room@muc.example.com"),
@@ -1012,13 +1048,126 @@ async fn migration_adds_sender_can_broadcast_channel_mention_to_legacy_recovery_
         .await
         .expect("list after migration must succeed");
     assert_eq!(pending.len(), 1);
+    assert_eq!(pending[0].message_key, message_key);
     assert!(
         pending[0].sender_can_broadcast_channel_mention,
         "the persisted bool must round-trip through the migrated column"
     );
 
+    drop(storage);
+    let reopened = DatabaseInboxStorage::open(Some(&url))
+        .await
+        .expect("second reopen keeps keyed rows");
+    assert_eq!(
+        reopened
+            .list_pending_groupchat_notification_recoveries(16)
+            .await
+            .expect("list after idempotent migration"),
+        vec![recovery]
+    );
+
     // Cleanup
     std::fs::remove_file(&path).ok();
+}
+
+#[tokio::test]
+async fn postgres_migration_replaces_legacy_recoveries_with_required_message_keys() {
+    let Ok(database_url) = std::env::var("WADDLE_TEST_POSTGRES_URL") else {
+        eprintln!("skipping: WADDLE_TEST_POSTGRES_URL not set (recovery message-key migration)");
+        return;
+    };
+    let schema = format!(
+        "waddle_test_inbox_recovery_key_{}",
+        uuid::Uuid::new_v4().simple()
+    );
+    let admin = sqlx::PgPool::connect(&database_url)
+        .await
+        .expect("connect postgres admin pool");
+    sqlx::query(&format!("CREATE SCHEMA {schema}"))
+        .execute(&admin)
+        .await
+        .expect("create isolated postgres schema");
+    let scoped_url = postgres_url_with_search_path(&database_url, &schema);
+
+    sqlx::query(&format!(
+        "CREATE TABLE {schema}.groupchat_notification_recovery (\
+         recipient_bare_jid TEXT NOT NULL, room_jid TEXT NOT NULL, \
+         thread_id TEXT NOT NULL DEFAULT '', stanza_id_by TEXT NOT NULL, \
+         stanza_id TEXT NOT NULL, sender_jid TEXT NOT NULL, \
+         is_live_occupant INTEGER NOT NULL, room_members_only INTEGER NOT NULL, \
+         sender_can_broadcast_channel_mention INTEGER NOT NULL, \
+         created_at_ms BIGINT NOT NULL, completed_at_ms BIGINT, \
+         PRIMARY KEY (recipient_bare_jid, room_jid, thread_id, stanza_id_by, stanza_id))"
+    ))
+    .execute(&admin)
+    .await
+    .expect("create legacy postgres recovery table");
+    sqlx::query(&format!(
+        "INSERT INTO {schema}.groupchat_notification_recovery (\
+         recipient_bare_jid, room_jid, stanza_id_by, stanza_id, sender_jid, \
+         is_live_occupant, room_members_only, sender_can_broadcast_channel_mention, \
+         created_at_ms) VALUES ('legacy@example.com', 'room@muc.example.com', \
+         'room@muc.example.com', 'legacy', 'room@muc.example.com/alice', 1, 0, 1, 41)"
+    ))
+    .execute(&admin)
+    .await
+    .expect("insert legacy postgres recovery row");
+
+    let storage = DatabaseInboxStorage::open(Some(&scoped_url))
+        .await
+        .expect("migrate isolated postgres inbox schema");
+    assert_eq!(groupchat_notification_recovery_row_count(&storage).await, 0);
+    let nullable: String = sqlx::query_scalar(&format!(
+        "SELECT is_nullable FROM information_schema.columns \
+         WHERE table_schema = '{schema}' \
+           AND table_name = 'groupchat_notification_recovery' \
+           AND column_name = 'message_key'"
+    ))
+    .fetch_one(&admin)
+    .await
+    .expect("inspect postgres message_key nullability");
+    assert_eq!(nullable, "NO");
+
+    let recovery = groupchat_notification_recovery(
+        jid("keyed@example.com"),
+        jid("room@muc.example.com"),
+        "keyed",
+    );
+    storage
+        .insert_groupchat_notification_recovery(recovery.clone())
+        .await
+        .expect("insert keyed postgres recovery");
+    drop(storage);
+    let reopened = DatabaseInboxStorage::open(Some(&scoped_url))
+        .await
+        .expect("reopen migrated postgres inbox schema");
+    assert_eq!(
+        reopened
+            .list_pending_groupchat_notification_recoveries(16)
+            .await
+            .expect("keyed row survives idempotent postgres initialization"),
+        vec![recovery]
+    );
+    drop(reopened);
+
+    sqlx::query(&format!("DROP SCHEMA {schema} CASCADE"))
+        .execute(&admin)
+        .await
+        .expect("drop isolated postgres schema");
+}
+
+fn postgres_url_with_search_path(database_url: &str, schema: &str) -> String {
+    let mut url = url::Url::parse(database_url).expect("parse postgres URL");
+    let retained: Vec<(String, String)> = url
+        .query_pairs()
+        .filter(|(key, _)| key != "options")
+        .map(|(key, value)| (key.into_owned(), value.into_owned()))
+        .collect();
+    url.query_pairs_mut()
+        .clear()
+        .extend_pairs(retained.iter().map(|(key, value)| (key, value)))
+        .append_pair("options", &format!("-c search_path={schema}"));
+    url.to_string()
 }
 
 /// Issue #919 migration regression: an existing `inbox_entries` table

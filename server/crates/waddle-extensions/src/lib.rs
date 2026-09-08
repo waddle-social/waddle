@@ -17,7 +17,7 @@ pub use host_tools::{
     PubSubGetItemsRequest, PubSubGetItemsResponse, PubSubStoredItem, RoomMember, RosterAsk,
     RosterEntry, RosterSubscription, SendMessageRequest, SendMessageResponse, SpaceSummary,
 };
-pub use manager::{ExtensionManager, MessageExtensionOutcome};
+pub use manager::{ExtensionManager, MessageExtensionOutcome, ObserverOutcome};
 pub use types::{
     message_has_framework_envelope, ArtifactReference, CommandAction, CommandDescriptor,
     CommandInvocation, CommandNode, CommandScope, CommandSessionId, DataForm, DataFormField,

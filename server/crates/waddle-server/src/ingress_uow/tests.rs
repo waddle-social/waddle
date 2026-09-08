@@ -18,10 +18,7 @@ use waddle_xmpp::{
 };
 #[cfg(feature = "clustering")]
 use waddle_xmpp::{
-    inbox::{
-        storage::{GroupchatNotificationRecovery, GroupchatNotificationRecoveryKey},
-        ConversationKind, InboxEntry,
-    },
+    inbox::{storage::GroupchatNotificationRecoveryKey, ConversationKind, InboxEntry},
     mam::{ArchivedMessage, MamTxStoreOutcome},
 };
 #[cfg(feature = "clustering")]
@@ -1527,8 +1524,10 @@ fn archived_message(values: &FixtureValues) -> ArchivedMessage {
 }
 
 #[cfg(feature = "clustering")]
-fn groupchat_notification_recovery(values: &FixtureValues) -> GroupchatNotificationRecovery {
-    GroupchatNotificationRecovery {
+fn groupchat_notification_recovery(
+    values: &FixtureValues,
+) -> crate::server::routes::interpret::effects::room::PlannedGroupchatNotificationRecovery {
+    crate::server::routes::interpret::effects::room::PlannedGroupchatNotificationRecovery {
         key: GroupchatNotificationRecoveryKey {
             recipient: values.principal.bare_jid().clone(),
             room: values.archive_jid.clone(),
@@ -1826,6 +1825,14 @@ impl Fixture {
                 )
                 .await,
                 "delivery identity retains the canonical message key"
+            );
+            assert!(
+                self.row_exists(
+                    "SELECT 1 FROM groupchat_notification_recovery WHERE message_key = ?",
+                    crate::db_params![values.message_key.to_storage().to_string()],
+                )
+                .await,
+                "notification recovery retains the canonical ingress message key"
             );
             assert!(
                 self.row_exists(

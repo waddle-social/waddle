@@ -549,14 +549,14 @@ async fn room_observer_planning_enrichment_only_records_no_obligation() {
 }
 
 #[derive(Clone, Copy)]
-enum ObserverConfiguration {
+pub(crate) enum ObserverConfiguration {
     Disabled,
     Empty,
     EnrichmentOnly,
     Observer,
 }
 
-async fn room_observer_test_manager(
+pub(crate) async fn room_observer_test_manager(
     configuration: ObserverConfiguration,
 ) -> Arc<waddle_extensions::ExtensionManager> {
     use waddle_extensions::types::ExtensionCapability;
@@ -686,6 +686,7 @@ async fn assert_room_observer_planning(configuration: ObserverConfiguration, exp
     assert_eq!(planned.suppression, PlanSuppressionPolicy::Always);
     let Effect::External(ExternalEffect::Room(ExternalRoomEffect::ObserveRoomMessage {
         room,
+        plugin,
         message,
         requester,
         sender,
@@ -702,6 +703,7 @@ async fn assert_room_observer_planning(configuration: ObserverConfiguration, exp
             room: room.clone(),
             requester: requester.clone(),
             sender: sender.clone(),
+            plugin: plugin.clone(),
         }
     );
 }

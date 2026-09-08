@@ -1774,6 +1774,7 @@ async fn groupchat_notification_recovery_retries_committed_inbox_projection() {
         .inbox_storage
         .insert_groupchat_notification_recovery(
             waddle_xmpp::inbox::storage::GroupchatNotificationRecovery {
+                message_key: waddle_xmpp::ingress::MessageKey::new(),
                 key: waddle_xmpp::inbox::storage::GroupchatNotificationRecoveryKey {
                     recipient: recipient.clone(),
                     room: room_jid.clone(),

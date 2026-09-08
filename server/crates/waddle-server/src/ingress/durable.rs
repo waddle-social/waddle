@@ -389,7 +389,7 @@ fn corresponds(effect: &DurableEffect, intent: &IngressEffectIntent) -> bool {
 async fn recovery_completed(
     tx: &mut IngressUowTransaction<'_>,
     key: MessageKey,
-    recovery: &waddle_xmpp::inbox::storage::GroupchatNotificationRecovery,
+    recovery: &crate::server::routes::interpret::effects::room::PlannedGroupchatNotificationRecovery,
     recorded: &[IngressEffectIntent],
 ) -> Result<bool, IngressUowError> {
     for intent in recorded {

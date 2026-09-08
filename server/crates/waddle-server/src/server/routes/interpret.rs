@@ -975,7 +975,7 @@ async fn enrich_message_event(deps: &Deps<'_>, message: Message) -> Message {
 }
 
 #[cfg(test)]
-mod tests;
+pub(crate) mod tests;
 
 #[cfg(test)]
 mod retraction_ingress_tests;

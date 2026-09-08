@@ -11,6 +11,52 @@ fn bare(s: &str) -> BareJid {
     s.parse().expect("bare jid")
 }
 
+fn postgres_url_with_search_path(database_url: &str, schema: &str) -> String {
+    let mut url = url::Url::parse(database_url).expect("parse postgres URL");
+    url.query_pairs_mut()
+        .append_pair("options", &format!("-csearch_path={schema}"));
+    url.to_string()
+}
+
+async fn create_postgres_test_schema(database_url: &str, prefix: &str) -> (String, String) {
+    let schema = format!("{prefix}_{}", uuid::Uuid::new_v4().simple());
+    let db = crate::db::Database::from_config(
+        "pending_delivery_test_schema",
+        &crate::db::DatabaseConfig::new(
+            crate::db::DatabaseDriver::Postgres,
+            database_url.to_string(),
+        ),
+    )
+    .await
+    .expect("open postgres for test schema");
+    db.guard()
+        .await
+        .expect("postgres schema guard")
+        .execute(&format!("CREATE SCHEMA {schema}"), ())
+        .await
+        .expect("create postgres test schema");
+    let scoped_url = postgres_url_with_search_path(database_url, &schema);
+    (schema, scoped_url)
+}
+
+async fn drop_postgres_test_schema(database_url: &str, schema: &str) {
+    let db = crate::db::Database::from_config(
+        "pending_delivery_test_schema_cleanup",
+        &crate::db::DatabaseConfig::new(
+            crate::db::DatabaseDriver::Postgres,
+            database_url.to_string(),
+        ),
+    )
+    .await
+    .expect("open postgres for test schema cleanup");
+    db.guard()
+        .await
+        .expect("postgres cleanup guard")
+        .execute(&format!("DROP SCHEMA {schema} CASCADE"), ())
+        .await
+        .expect("drop postgres test schema");
+}
+
 /// A fresh, empty actor-authoritative registry for
 /// `sm_promotion::promote_session_unacked` (ADR-0017 Phase 3 Slice 9).
 fn test_user_registry() -> ActorRef<UserRegistryActor> {
@@ -257,6 +303,191 @@ async fn db_storage_startup_deletes_legacy_mam_query_frames() {
         .expect("cleanup marker row");
     let completed_at: i64 = marker_row.get(0).expect("cleanup marker timestamp");
     assert!(completed_at > i64::from(i32::MAX));
+}
+
+async fn assert_v1014_claim_reset_once(database_url: &str) {
+    let storage = DatabasePendingDeliveryStorage::open(Some(database_url), QuotaPolicy::Unlimited)
+        .await
+        .expect("open pending storage");
+    let recipient = bare("claim-reset@example.com");
+    let sm_row = transient_row("claim-reset@example.com", "claimed by deleted SM session");
+    let synthetic_row = transient_row(
+        "claim-reset@example.com",
+        "claimed by synthetic transient session",
+    );
+    let sm_row_id = sm_row.id.clone();
+    let transient_row_id = synthetic_row.id.clone();
+    storage.insert(sm_row).await.expect("insert SM-claimed row");
+    storage
+        .insert(synthetic_row)
+        .await
+        .expect("insert transient-claimed row");
+
+    let db = storage.database();
+    let conn = db.guard().await.expect("raw pending database guard");
+    conn.execute(
+        "UPDATE pending_delivery SET flushed_in_session = ?, outbound_sequence = ?, \
+                                     claimed_at_ms = ?, notification_outboxed_at_ms = ? \
+         WHERE row_id = ?",
+        crate::db_params![
+            "sm-session-discarded-by-v1014",
+            17_i64,
+            1_700_000_000_001_i64,
+            1_700_000_000_003_i64,
+            sm_row_id.as_str().to_string(),
+        ],
+    )
+    .await
+    .expect("stamp old SM claim");
+    conn.execute(
+        "UPDATE pending_delivery SET flushed_in_session = ?, outbound_sequence = ?, \
+                                     claimed_at_ms = ?, notification_outboxed_at_ms = ? \
+         WHERE row_id = ?",
+        crate::db_params![
+            "transient:discarded-stream",
+            23_i64,
+            1_700_000_000_002_i64,
+            1_700_000_000_004_i64,
+            transient_row_id.as_str().to_string(),
+        ],
+    )
+    .await
+    .expect("stamp old synthetic claim");
+    conn.execute(
+        "DELETE FROM pending_delivery_startup_migrations \
+         WHERE name = 'ingress_v1014_pending_claim_reset_v1'",
+        (),
+    )
+    .await
+    .expect("arm V1014 claim reset fixture");
+    drop(conn);
+
+    let reset_storage = Arc::new(
+        DatabasePendingDeliveryStorage::open(Some(database_url), QuotaPolicy::Unlimited)
+            .await
+            .expect("reopen storage for V1014 reset"),
+    );
+    let rows = reset_storage
+        .list(&recipient)
+        .await
+        .expect("list rows after reset");
+    assert_eq!(
+        rows.len(),
+        2,
+        "claim reset must preserve pending payload rows"
+    );
+    assert!(rows.iter().all(|row| row.flushed_in_session.is_none()));
+    assert!(rows.iter().all(|row| row.outbound_sequence.is_none()));
+
+    let conn = db.guard().await.expect("verify exact reset columns");
+    let mut reset_columns = conn
+        .query(
+            "SELECT claimed_at_ms, notification_outboxed_at_ms \
+             FROM pending_delivery WHERE recipient_jid = ? ORDER BY row_id",
+            crate::db_params![recipient.to_string()],
+        )
+        .await
+        .expect("query reset columns");
+    let mut preserved_notification_stamps = Vec::new();
+    while let Some(row) = reset_columns.next().await.expect("read reset row") {
+        assert_eq!(row.get::<Option<i64>>(0).expect("claimed_at_ms"), None);
+        preserved_notification_stamps.push(
+            row.get::<Option<i64>>(1)
+                .expect("notification_outboxed_at_ms")
+                .expect("unrelated notification stamp is preserved"),
+        );
+    }
+    preserved_notification_stamps.sort_unstable();
+    assert_eq!(
+        preserved_notification_stamps,
+        [1_700_000_000_003_i64, 1_700_000_000_004_i64],
+        "the one-time transition must update exactly the three claim columns"
+    );
+    drop(conn);
+
+    // Exercise the real first-reconnect flush path: both formerly claimed
+    // payloads must be claimable, pushed, and removed by the synthetic
+    // non-SM flush session.
+    let registry = ConnectionRegistry::new();
+    let resource = full("claim-reset@example.com/web");
+    let (tx, rx) = tokio::sync::mpsc::channel(4);
+    registry.register(resource.clone(), tx);
+    let storage_trait: Arc<dyn PendingDeliveryStorage> = reset_storage.clone();
+    let outcome = flush_for_resource(
+        &storage_trait,
+        &registry,
+        &recipient,
+        &resource,
+        FlushContext {
+            server_domain: "example.com",
+            sm_session: None,
+            blocking_storage: None,
+            owner: None,
+            archive_resolver: &NullArchiveResolver,
+        },
+    )
+    .await;
+    assert_eq!(outcome.claimed, 2);
+    assert_eq!(outcome.pushed, 2);
+    assert_eq!(rx.len(), 2);
+    assert_eq!(reset_storage.count(&recipient).await.expect("count"), 0);
+
+    // The durable marker makes the reset genuinely one-time. A new claim
+    // acquired after cutover must remain claimed across later startups.
+    reset_storage
+        .insert(transient_row(
+            "claim-reset@example.com",
+            "post-cutover claim",
+        ))
+        .await
+        .expect("insert post-cutover row");
+    let post_cutover_session = SmSessionId::new("post-cutover-session");
+    assert_eq!(
+        reset_storage
+            .claim_for_session(&recipient, &post_cutover_session)
+            .await
+            .expect("claim post-cutover row")
+            .len(),
+        1
+    );
+    let restarted =
+        DatabasePendingDeliveryStorage::open(Some(database_url), QuotaPolicy::Unlimited)
+            .await
+            .expect("restart after reset marker");
+    let rows = restarted
+        .list(&recipient)
+        .await
+        .expect("list after restart");
+    assert_eq!(rows.len(), 1);
+    assert_eq!(
+        rows[0].flushed_in_session.as_ref(),
+        Some(&post_cutover_session),
+        "completed marker must prevent a second claim reset"
+    );
+    restarted
+        .delete_row(&rows[0].id)
+        .await
+        .expect("cleanup post-cutover row");
+}
+
+#[tokio::test]
+async fn sqlite_v1014_claim_reset_is_one_time_and_rows_flush_on_first_reconnect() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let path = dir.path().join("pending-delivery-v1014.sqlite");
+    let database_url = format!("sqlite://{}", path.to_str().expect("UTF-8 sqlite path"));
+    assert_v1014_claim_reset_once(&database_url).await;
+}
+
+#[tokio::test]
+async fn postgres_v1014_claim_reset_is_one_time_and_rows_flush_on_first_reconnect() {
+    let Ok(base_url) = std::env::var("WADDLE_TEST_POSTGRES_URL") else {
+        eprintln!("skipping: WADDLE_TEST_POSTGRES_URL not set (V1014 pending claim reset)");
+        return;
+    };
+    let (schema, scoped_url) =
+        create_postgres_test_schema(&base_url, "pending_v1014_claim_reset").await;
+    assert_v1014_claim_reset_once(&scoped_url).await;
+    drop_postgres_test_schema(&base_url, &schema).await;
 }
 
 #[tokio::test]
@@ -906,6 +1137,195 @@ async fn db_storage_quota_returns_quota_exceeded_outcome() {
         InsertOutcome::QuotaExceeded
     );
     assert_eq!(storage.count(&recipient).await.unwrap(), 2);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn postgres_two_connections_serialize_the_final_quota_slot() {
+    let Ok(database_url) = std::env::var("WADDLE_TEST_POSTGRES_URL") else {
+        eprintln!(
+            "skipping: WADDLE_TEST_POSTGRES_URL not set \
+             (pending_delivery final-quota race)"
+        );
+        return;
+    };
+    let recipient_text = format!("quota-race-{}@example.com", uuid::Uuid::new_v4());
+    let recipient = bare(&recipient_text);
+    let storage_a = DatabasePendingDeliveryStorage::open(
+        Some(&database_url),
+        QuotaPolicy::CountCap { max_rows: 1 },
+    )
+    .await
+    .expect("open first postgres storage");
+    let storage_b = DatabasePendingDeliveryStorage::open(
+        Some(&database_url),
+        QuotaPolicy::CountCap { max_rows: 1 },
+    )
+    .await
+    .expect("open second postgres storage");
+
+    let barrier = std::sync::Arc::new(tokio::sync::Barrier::new(3));
+    let task_a = {
+        let barrier = barrier.clone();
+        let recipient_text = recipient_text.clone();
+        tokio::spawn(async move {
+            barrier.wait().await;
+            storage_a
+                .insert(transient_row(&recipient_text, "first contender"))
+                .await
+        })
+    };
+    let task_b = {
+        let barrier = barrier.clone();
+        let recipient_text = recipient_text.clone();
+        tokio::spawn(async move {
+            barrier.wait().await;
+            storage_b
+                .insert(transient_row(&recipient_text, "second contender"))
+                .await
+        })
+    };
+    barrier.wait().await;
+    let mut outcomes = vec![
+        task_a
+            .await
+            .expect("first task joins")
+            .expect("first insert"),
+        task_b
+            .await
+            .expect("second task joins")
+            .expect("second insert"),
+    ];
+    outcomes.sort_by_key(|outcome| match outcome {
+        InsertOutcome::Inserted => 0,
+        InsertOutcome::QuotaExceeded => 1,
+    });
+    assert_eq!(
+        outcomes,
+        vec![InsertOutcome::Inserted, InsertOutcome::QuotaExceeded]
+    );
+
+    let cleanup = DatabasePendingDeliveryStorage::open(Some(&database_url), QuotaPolicy::Unlimited)
+        .await
+        .expect("open cleanup storage");
+    let rows = cleanup.list(&recipient).await.expect("list race rows");
+    assert_eq!(rows.len(), 1);
+    assert_eq!(
+        cleanup
+            .delete_row(&rows[0].id)
+            .await
+            .expect("delete race winner"),
+        1
+    );
+}
+
+#[tokio::test]
+async fn postgres_v1014_startup_reset_preserves_and_releases_claimed_rows() {
+    use crate::db::{Database, DatabaseConfig, DatabaseDriver};
+
+    let Ok(database_url) = std::env::var("WADDLE_TEST_POSTGRES_URL") else {
+        eprintln!(
+            "skipping: WADDLE_TEST_POSTGRES_URL not set \
+             (pending_delivery V1014 claim reset)"
+        );
+        return;
+    };
+    let schema = format!(
+        "waddle_test_pending_v1014_{}",
+        uuid::Uuid::new_v4().simple()
+    );
+    let admin = sqlx::PgPool::connect(&database_url)
+        .await
+        .expect("connect postgres admin");
+    sqlx::query(&format!("CREATE SCHEMA {schema}"))
+        .execute(&admin)
+        .await
+        .expect("create isolated schema");
+    let mut url = url::Url::parse(&database_url).expect("parse postgres url");
+    let retained: Vec<(String, String)> = url
+        .query_pairs()
+        .filter(|(key, _)| key != "options")
+        .map(|(key, value)| (key.into_owned(), value.into_owned()))
+        .collect();
+    url.query_pairs_mut()
+        .clear()
+        .extend_pairs(retained.iter().map(|(key, value)| (key, value)))
+        .append_pair("options", &format!("-c search_path={schema}"));
+    let db = Database::from_config(
+        "pending-v1014-reset",
+        &DatabaseConfig::new(DatabaseDriver::Postgres, url.to_string()),
+    )
+    .await
+    .expect("open isolated database");
+    db.execute(
+        "CREATE TABLE pending_delivery (\
+            row_id TEXT PRIMARY KEY, recipient_jid TEXT NOT NULL, \
+            original_receipt_at BIGINT NOT NULL, payload_kind TEXT NOT NULL, \
+            archive_stanza_by TEXT, archive_stanza_id TEXT, transient_xml TEXT, \
+            flushed_in_session TEXT, outbound_sequence INTEGER, \
+            notification_outboxed_at_ms BIGINT, claimed_at_ms BIGINT\
+         )",
+    )
+    .await
+    .expect("create pre-startup pending table");
+    for (row_id, session) in [
+        ("claimed-sm", "sm-session"),
+        ("claimed-transient", "transient:flush"),
+    ] {
+        db.guard()
+            .await
+            .expect("seed connection")
+            .execute(
+                "INSERT INTO pending_delivery (\
+                    row_id, recipient_jid, original_receipt_at, payload_kind, transient_xml, \
+                    flushed_in_session, outbound_sequence, claimed_at_ms\
+                 ) VALUES (?, 'pending-v1014@example.com', 1, 'transient', \
+                    '<message xmlns=\"jabber:client\"/>', ?, 7, 9)",
+                crate::db_params![row_id, session],
+            )
+            .await
+            .expect("seed claimed row");
+    }
+
+    let storage = DatabasePendingDeliveryStorage::from_database(db.clone(), QuotaPolicy::Unlimited)
+        .await
+        .expect("startup initializes and resets claims");
+    let recipient = bare("pending-v1014@example.com");
+    let rows = storage.list(&recipient).await.expect("list preserved rows");
+    assert_eq!(rows.len(), 2);
+    assert!(rows
+        .iter()
+        .all(|row| row.flushed_in_session.is_none() && row.outbound_sequence.is_none()));
+    let claim_conn = db.guard().await.expect("claim reset connection");
+    let mut claim_rows = claim_conn
+        .query(
+            "SELECT COUNT(*) FROM pending_delivery \
+             WHERE recipient_jid = 'pending-v1014@example.com' AND claimed_at_ms IS NULL",
+            (),
+        )
+        .await
+        .expect("query cleared claim timestamps");
+    let cleared_claims: i64 = claim_rows
+        .next()
+        .await
+        .expect("advance claim count")
+        .expect("claim count row")
+        .get(0)
+        .expect("decode claim count");
+    assert_eq!(cleared_claims, 2);
+    drop(claim_rows);
+    drop(claim_conn);
+    let claimed = storage
+        .claim_for_session(&recipient, &SmSessionId::new("first-reconnect"))
+        .await
+        .expect("first reconnect claims reset rows");
+    assert_eq!(claimed.len(), 2);
+
+    drop(storage);
+    drop(db);
+    sqlx::query(&format!("DROP SCHEMA {schema} CASCADE"))
+        .execute(&admin)
+        .await
+        .expect("drop isolated schema");
 }
 
 #[tokio::test]
@@ -2311,6 +2731,70 @@ async fn db_storage_postgres_handles_i32_overflow_receipt_ms() {
     // other suites.
     let deleted = storage.delete_row(&row_id).await.expect("cleanup");
     assert_eq!(deleted, 1, "test row must be deleted by id");
+}
+
+/// Two independently-opened storage nodes must serialize the final quota slot
+/// in Postgres. The first transaction deliberately holds the recipient lock so
+/// the second node is proven to wait on the same database-owned lock rather
+/// than an in-process mutex.
+#[tokio::test]
+async fn postgres_two_connection_cap_one_race_accepts_exactly_one_insert() {
+    let Ok(base_url) = std::env::var("WADDLE_TEST_POSTGRES_URL") else {
+        eprintln!("skipping: WADDLE_TEST_POSTGRES_URL not set (pending quota race)");
+        return;
+    };
+    let (schema, scoped_url) = create_postgres_test_schema(&base_url, "pending_cap_one_race").await;
+    let quota = QuotaPolicy::CountCap { max_rows: 1 };
+    let storage_a = DatabasePendingDeliveryStorage::open(Some(&scoped_url), quota)
+        .await
+        .expect("open first pending node");
+    let storage_b = DatabasePendingDeliveryStorage::open(Some(&scoped_url), quota)
+        .await
+        .expect("open second pending node");
+    let recipient_text = format!("quota-race-{}@example.com", uuid::Uuid::new_v4());
+    let recipient = bare(&recipient_text);
+    let row_a = transient_row(&recipient_text, "node A");
+    let row_b = transient_row(&recipient_text, "node B");
+
+    let db_a = storage_a.database();
+    let mut tx_a = db_a.begin().await.expect("begin first insert transaction");
+    tx_a.execute(
+        "SELECT pg_advisory_xact_lock(hashtext(?))",
+        crate::db_params![recipient.to_string()],
+    )
+    .await
+    .expect("hold recipient advisory lock on first connection");
+
+    let mut node_b = tokio::spawn(async move { storage_b.insert(row_b).await });
+    assert!(
+        tokio::time::timeout(std::time::Duration::from_millis(150), &mut node_b)
+            .await
+            .is_err(),
+        "the second node must block on the database-owned recipient lock"
+    );
+
+    let outcome_a =
+        crate::pending_delivery::database::insert_in_transaction(&mut tx_a, &row_a, quota, None)
+            .await
+            .expect("first node inserts final quota slot");
+    assert_eq!(outcome_a, InsertOutcome::Inserted);
+    tx_a.commit().await.expect("commit first insert");
+
+    let outcome_b = node_b
+        .await
+        .expect("second insert task")
+        .expect("second insert outcome");
+    assert_eq!(outcome_b, InsertOutcome::QuotaExceeded);
+    assert_eq!(storage_a.count(&recipient).await.expect("count rows"), 1);
+    let rows = storage_a.list(&recipient).await.expect("list accepted row");
+    assert_eq!(rows.len(), 1);
+    storage_a
+        .delete_row(&rows[0].id)
+        .await
+        .expect("cleanup accepted row");
+    drop(storage_a);
+    drop(db_a);
+    drop_postgres_test_schema(&base_url, &schema).await;
 }
 
 // ── ADR-0017 Phase 3 Slice 5 FIX 3 (council-adjudicated): fenced Q6

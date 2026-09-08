@@ -686,29 +686,33 @@ pub(super) async fn dispatch_to_room(
     // The marker controls only this nested room batch. Consume it here rather
     // than folding it into the returned outcome, where it could leak into an
     // unrelated sibling event in the enclosing interpreter batch.
-    let has_observers = state
+    let observer_plugins = state
         .deps
         .protocol
         .extension_manager
-        .has_message_observers(&observer_message);
-    if retry_suppression.is_none() && has_observers && deps.effects.is_planning() {
-        deps.capture_intent(IngressEffectIntent::RoomObserver {
-            room: room_jid.clone(),
-            requester: sender_full.to_bare(),
-            sender: sender_full.clone(),
-        });
-        super::effects::room::external(
-            deps,
-            super::effects::room::ExternalRoomEffect::ObserveRoomMessage {
+        .message_observer_plugins(&observer_message);
+    if retry_suppression.is_none() && deps.effects.is_planning() {
+        for plugin in observer_plugins {
+            deps.capture_intent(IngressEffectIntent::RoomObserver {
                 room: room_jid.clone(),
-                message: Box::new(observer_message),
                 requester: sender_full.to_bare(),
                 sender: sender_full.clone(),
-                error_request: Box::new(incoming.clone()),
-            },
-            super::effects::PlanSuppressionPolicy::Always,
-        );
-    } else if retry_suppression.is_none() && has_observers {
+                plugin: plugin.clone(),
+            });
+            super::effects::room::external(
+                deps,
+                super::effects::room::ExternalRoomEffect::ObserveRoomMessage {
+                    room: room_jid.clone(),
+                    plugin,
+                    message: Box::new(observer_message.clone()),
+                    requester: sender_full.to_bare(),
+                    sender: sender_full.clone(),
+                    error_request: Box::new(incoming.clone()),
+                },
+                super::effects::PlanSuppressionPolicy::Always,
+            );
+        }
+    } else if retry_suppression.is_none() && !observer_plugins.is_empty() {
         let mut observer_message = observer_message;
         let observer_outcome = state
             .deps

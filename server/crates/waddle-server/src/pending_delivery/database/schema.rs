@@ -1,6 +1,7 @@
 use super::*;
 
 const LEGACY_MAM_CLEANUP_MARKER: &str = "legacy_mam_query_frames_v1";
+const V1014_CLAIM_RESET_MARKER: &str = "ingress_v1014_pending_claim_reset_v1";
 const LEGACY_MAM_CLEANUP_SELECT_BATCH: i64 = 128;
 const LEGACY_MAM_CLEANUP_DELETE_BATCH: usize = 128;
 
@@ -252,6 +253,7 @@ pub(super) async fn initialize(
         )
         .await?;
     ensure_startup_migration_marker_table(storage).await?;
+    reset_claims_for_ingress_v1014_once(storage).await?;
     if !startup_migration_marker_completed(storage, LEGACY_MAM_CLEANUP_MARKER).await? {
         let deleted_mam_frames = delete_legacy_mam_query_frames(storage).await?;
         mark_startup_migration_completed(storage, LEGACY_MAM_CLEANUP_MARKER).await?;
@@ -261,6 +263,93 @@ pub(super) async fn initialize(
                 "pending_delivery startup cleanup removed XEP-0313 MAM query frames"
             );
         }
+    }
+    Ok(())
+}
+
+/// Release pending rows claimed by SM sessions discarded by the V1014
+/// ingress cutover. `pending_delivery` owns its schema, so this transition
+/// lives here rather than in the global migration ledger.
+///
+/// The marker check, exact three-column release update, and marker insert are
+/// one transaction. Postgres serializes concurrent replicas with a
+/// transaction-scoped advisory lock; SQLite's `BEGIN IMMEDIATE` provides the
+/// equivalent single-writer exclusion. Re-checking the marker under that lock
+/// prevents a later replica from clearing a claim acquired after the first
+/// replica completed the cutover reset.
+async fn reset_claims_for_ingress_v1014_once(
+    storage: &DatabasePendingDeliveryStorage,
+) -> Result<(), PendingStorageError> {
+    let mut tx = storage
+        .db
+        .begin_immediate()
+        .await
+        .map_err(|error| PendingStorageError::Other(error.to_string()))?;
+    if matches!(tx.driver(), DatabaseDriver::Postgres) {
+        tx.execute(
+            "SELECT pg_advisory_xact_lock(hashtext(?))",
+            crate::db_params![V1014_CLAIM_RESET_MARKER],
+        )
+        .await
+        .map_err(|error| PendingStorageError::Other(error.to_string()))?;
+    }
+
+    let mut rows = tx
+        .query(
+            "SELECT 1 FROM pending_delivery_startup_migrations WHERE name = ? LIMIT 1",
+            crate::db_params![V1014_CLAIM_RESET_MARKER],
+        )
+        .await
+        .map_err(|error| PendingStorageError::Other(error.to_string()))?;
+    let already_completed = rows
+        .next()
+        .await
+        .map_err(|error| PendingStorageError::Other(error.to_string()))?
+        .is_some();
+    drop(rows);
+    if already_completed {
+        tx.commit()
+            .await
+            .map_err(|error| PendingStorageError::Other(error.to_string()))?;
+        return Ok(());
+    }
+
+    let released = tx
+        .execute(
+            "UPDATE pending_delivery SET flushed_in_session = NULL, \
+                                         outbound_sequence = NULL, \
+                                         claimed_at_ms = NULL",
+            (),
+        )
+        .await
+        .map_err(|error| PendingStorageError::Other(error.to_string()))?;
+    let marker_sql = match tx.driver() {
+        DatabaseDriver::Postgres => {
+            "INSERT INTO pending_delivery_startup_migrations (name, completed_at) \
+             VALUES (?, ?) ON CONFLICT (name) DO NOTHING"
+        }
+        DatabaseDriver::Sqlite => {
+            "INSERT OR IGNORE INTO pending_delivery_startup_migrations (name, completed_at) \
+             VALUES (?, ?)"
+        }
+    };
+    tx.execute(
+        marker_sql,
+        crate::db_params![
+            V1014_CLAIM_RESET_MARKER,
+            chrono::Utc::now().timestamp_millis()
+        ],
+    )
+    .await
+    .map_err(|error| PendingStorageError::Other(error.to_string()))?;
+    tx.commit()
+        .await
+        .map_err(|error| PendingStorageError::Other(error.to_string()))?;
+    if released > 0 {
+        info!(
+            released,
+            "pending_delivery startup migration released claims discarded by ingress V1014"
+        );
     }
     Ok(())
 }
@@ -541,5 +630,88 @@ mod slice5_dedup_index_tests {
             "a DIFFERENT recipient sharing the same (origin_stream_id, inbound_seq) pair \
                  must be allowed (fan-out property)",
         );
+    }
+}
+
+#[cfg(test)]
+mod ingress_v1014_claim_reset_tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn sqlite_reset_preserves_rows_and_clears_exact_claim_columns_once() {
+        let storage = DatabasePendingDeliveryStorage::open(None, QuotaPolicy::Unlimited)
+            .await
+            .expect("open storage");
+        storage
+            .execute(
+                "DELETE FROM pending_delivery_startup_migrations WHERE name = ?",
+                crate::db_params![V1014_CLAIM_RESET_MARKER],
+            )
+            .await
+            .expect("rewind marker for legacy fixture");
+        for (row_id, session) in [
+            ("claimed-sm", "sm-session"),
+            ("claimed-transient", "transient:flush"),
+        ] {
+            storage
+                .execute(
+                    "INSERT INTO pending_delivery (\
+                        row_id, recipient_jid, original_receipt_at, payload_kind, transient_xml, \
+                        flushed_in_session, outbound_sequence, claimed_at_ms\
+                     ) VALUES (?, 'alice@example.com', 1, 'transient', \
+                        '<message xmlns=\"jabber:client\"/>', ?, 7, 9)",
+                    crate::db_params![row_id, session],
+                )
+                .await
+                .expect("seed claimed pending row");
+        }
+
+        reset_claims_for_ingress_v1014_once(&storage)
+            .await
+            .expect("run one-time claim reset");
+        let mut rows = storage
+            .query(
+                "SELECT COUNT(*), \
+                        SUM(CASE WHEN flushed_in_session IS NULL THEN 1 ELSE 0 END), \
+                        SUM(CASE WHEN outbound_sequence IS NULL THEN 1 ELSE 0 END), \
+                        SUM(CASE WHEN claimed_at_ms IS NULL THEN 1 ELSE 0 END) \
+                 FROM pending_delivery WHERE row_id IN ('claimed-sm', 'claimed-transient')",
+                (),
+            )
+            .await
+            .expect("query reset rows");
+        let row = rows.next().await.expect("advance").expect("aggregate row");
+        for index in 0..4 {
+            let count: i64 = row.get(index).expect("decode count");
+            assert_eq!(count, 2);
+        }
+        drop(rows);
+
+        storage
+            .execute(
+                "UPDATE pending_delivery SET flushed_in_session = 'new-session', \
+                     outbound_sequence = 8, claimed_at_ms = 10 WHERE row_id = 'claimed-sm'",
+                (),
+            )
+            .await
+            .expect("claim after migration");
+        reset_claims_for_ingress_v1014_once(&storage)
+            .await
+            .expect("idempotent rerun");
+        let mut rows = storage
+            .query(
+                "SELECT flushed_in_session, outbound_sequence, claimed_at_ms \
+                 FROM pending_delivery WHERE row_id = 'claimed-sm'",
+                (),
+            )
+            .await
+            .expect("query post-marker claim");
+        let row = rows.next().await.expect("advance").expect("claimed row");
+        assert_eq!(
+            row.get::<Option<String>>(0).expect("session"),
+            Some("new-session".into())
+        );
+        assert_eq!(row.get::<Option<i64>>(1).expect("sequence"), Some(8));
+        assert_eq!(row.get::<Option<i64>>(2).expect("claimed at"), Some(10));
     }
 }
