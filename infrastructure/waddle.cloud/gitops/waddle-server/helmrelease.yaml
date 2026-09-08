@@ -32,13 +32,20 @@ spec:
     # it must never change across upgrades or rollbacks.
     deployment:
       uuid: b90424f8-22ca-40bb-a24e-551d171c7b84
-    # One-shot hard cutover for #1657: ledger V1012 resets ingress state
-    # and old binaries refuse the new ledger version. Recreate stops all
-    # old writers before the new image runs the migration (brief outage).
-    # Flip back to RollingUpdate in a follow-up PR after the deploy is
-    # verified, as #1605 did after #1596; this is not the steady state.
+    # Zero-downtime rollouts (ADR-0017 Phase 4). Safe under mixed
+    # versions because the ordered-relay envelope message id is
+    # versioned (deliver_ordered.vN, #1597/#1600): an old replica
+    # rejects a newer envelope pre-handler and the sender rolls back
+    # the sequence instead of poisoning the shared channel. Any
+    # envelope or reply-type change MUST bump the version (see
+    # server/CLAUDE.md) — that invariant is what keeps this strategy
+    # sound. The #1657 V1012 cutover (Helm v512, 2026-09-08) was the
+    # one-shot Recreate; this restores the steady state.
     updateStrategy:
-      type: Recreate
+      type: RollingUpdate
+      rollingUpdate:
+        maxSurge: 1
+        maxUnavailable: 0
     image:
       repository: ghcr.io/waddle-social/waddle
       tag: main
