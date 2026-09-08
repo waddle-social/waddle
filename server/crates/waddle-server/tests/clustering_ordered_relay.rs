@@ -26,6 +26,7 @@ fn channel_for_bare(bare: &str) -> OrderedRelayChannel {
     OrderedRelayChannel {
         origin: OrderedRelayOrigin::SmSession(SmSessionId::new("stream-1")),
         recipient: OrderedRelayRecipient::BareJid(jid::BareJid::from_str(bare).expect("bare jid")),
+        origin_epoch: origin_claim().epoch,
         target_epoch: ClaimEpoch(3),
     }
 }
@@ -49,6 +50,7 @@ fn room_channel() -> OrderedRelayChannel {
             room: room_jid(),
             lane: OrderedRelayRoomLane::MucStanza,
         },
+        origin_epoch: origin_claim().epoch,
         target_epoch: ClaimEpoch(11),
     }
 }
@@ -60,6 +62,7 @@ fn muji_room_channel() -> OrderedRelayChannel {
             room: room_jid(),
             lane: OrderedRelayRoomLane::MujiSignaling,
         },
+        origin_epoch: origin_claim().epoch,
         target_epoch: ClaimEpoch(11),
     }
 }
@@ -377,7 +380,7 @@ fn receiver_nacks_recent_duplicate_with_different_payload() {
 }
 
 #[test]
-fn receiver_replays_duplicate_ack_across_mutable_provenance_changes() {
+fn receiver_replays_duplicate_ack_across_asserted_node_changes() {
     let mut receiver =
         waddle_server::clustering::ordered_relay::OrderedRelayReceiverState::default();
     let envelope = RemoteStanzaEnvelope {
@@ -401,10 +404,6 @@ fn receiver_replays_duplicate_ack_across_mutable_provenance_changes() {
 
     let retry_after_move = RemoteStanzaEnvelope {
         asserted_origin_node: NodeId::new("new-node".to_string()),
-        origin_claim: OrderedRelayClaim {
-            epoch: ClaimEpoch(99),
-            ..origin_claim()
-        },
         ..envelope
     };
     assert!(matches!(
@@ -520,7 +519,7 @@ fn receiver_nacks_full_jid_payload_on_bare_channel() {
 }
 
 #[test]
-fn receiver_nacks_groupchat_on_user_message_payload() {
+fn receiver_nacks_bare_jid_groupchat_on_user_message_payload() {
     let mut receiver =
         waddle_server::clustering::ordered_relay::OrderedRelayReceiverState::default();
     let envelope = RemoteStanzaEnvelope {
@@ -652,6 +651,7 @@ fn receiver_accepts_entity_origin_when_claim_matches_channel_origin() {
             recipient: OrderedRelayRecipient::BareJid(
                 jid::BareJid::from_str("juliet@example.test").expect("bare jid"),
             ),
+            origin_epoch: user_actor_origin_claim().epoch,
             target_epoch: ClaimEpoch(3),
         },
         sequence: OrderedRelaySequence(1),
@@ -687,6 +687,7 @@ fn receiver_rejects_entity_origin_when_claim_differs_from_channel_origin() {
             recipient: OrderedRelayRecipient::BareJid(
                 jid::BareJid::from_str("juliet@example.test").expect("bare jid"),
             ),
+            origin_epoch: user_actor_origin_claim().epoch,
             target_epoch: ClaimEpoch(3),
         },
         sequence: OrderedRelaySequence(1),
@@ -1290,4 +1291,49 @@ fn receiver_enforces_room_lane_kind_binding() {
         ),
         "ordinary MUC payloads must be rejected on the Muji signaling lane"
     );
+}
+
+#[test]
+fn sender_allocates_independent_sequences_for_origin_epochs() {
+    let mut sender = OrderedRelaySenderState::default();
+    for (epoch, expected) in [(7, 1), (7, 2), (8, 1), (7, 3), (8, 2)] {
+        let mut channel = channel();
+        channel.origin_epoch = ClaimEpoch(epoch);
+        let mut claims = claims();
+        claims.origin.epoch = ClaimEpoch(epoch);
+        let envelope = sender
+            .next_envelope(
+                origin_node(),
+                channel,
+                inbound(1),
+                claims,
+                message_payload("epoch"),
+            )
+            .expect("allocate epoch channel");
+        assert_eq!(envelope.sequence, OrderedRelaySequence(expected));
+    }
+}
+
+#[test]
+fn receiver_nacks_origin_epoch_mismatched_with_channel() {
+    let mut sender = OrderedRelaySenderState::default();
+    let mut envelope = sender
+        .next_envelope(
+            origin_node(),
+            channel(),
+            inbound(1),
+            claims(),
+            message_payload("wrong-epoch"),
+        )
+        .expect("envelope");
+    envelope.origin_claim.epoch = ClaimEpoch(8);
+    let mut receiver =
+        waddle_server::clustering::ordered_relay::OrderedRelayReceiverState::default();
+    assert!(matches!(
+        receive(&mut receiver, envelope),
+        OrderedRelayReply::Nack(OrderedRelayNack {
+            reason: OrderedRelayNackReason::ParseFailure,
+            ..
+        })
+    ));
 }

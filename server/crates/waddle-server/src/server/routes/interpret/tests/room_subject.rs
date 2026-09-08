@@ -1138,3 +1138,7 @@ async fn xep_0045_subject_commit_outcome_unknown_reconciles_and_allows_broadcast
         )])
     );
 }
+
+#[cfg(feature = "clustering")]
+#[path = "room_relay_plan_tests.rs"]
+mod room_relay_plan_tests;

@@ -36,10 +36,10 @@ async fn test_migration_runner_global() {
     assert_eq!(auth_context_columns, 3);
 
     // Check version (global + shared waddle schema). `current_version` reads
-    // the ledger max, which the waddle namespace (V1012) still dominates
+    // the ledger max, which the waddle namespace (V1013) still dominates
     // after global V0012.
     let version = runner.current_version(&db).await.unwrap();
-    assert_eq!(version, Some(1012));
+    assert_eq!(version, Some(1013));
 }
 
 #[tokio::test]
@@ -154,7 +154,7 @@ async fn test_waddle_v1002_adds_pin_permission_to_existing_v1001_schema() {
     let applied = runner.run(&db).await.unwrap();
     assert_eq!(
         applied,
-        vec![1002, 1003, 1004, 1005, 1006, 1007, 1008, 1009, 1010, 1011, 1012]
+        vec![1002, 1003, 1004, 1005, 1006, 1007, 1008, 1009, 1010, 1011, 1012, 1013]
     );
 
     let conn = db.guard().await.unwrap();
@@ -174,7 +174,7 @@ async fn test_waddle_v1002_adds_pin_permission_to_existing_v1001_schema() {
     assert_eq!(public_room, 1);
 
     let version = runner.current_version(&db).await.unwrap();
-    assert_eq!(version, Some(1012));
+    assert_eq!(version, Some(1013));
 }
 
 #[tokio::test]
@@ -233,7 +233,7 @@ async fn test_global_v0004_adds_policy_digest_to_existing_v0003_schema() {
     drop(conn);
 
     // `MigrationRunner::global()` composes global + waddle migrations,
-    // so the runner also reports applying 1001 through 1012 (the waddle
+    // so the runner also reports applying 1001 through 1013 (the waddle
     // schema tables) on top of V0004. The test's invariant is V0004
     // specifically, asserted via the `pragma_table_info` probe below;
     // the version list is included in the assertion so a future PR
@@ -244,7 +244,7 @@ async fn test_global_v0004_adds_policy_digest_to_existing_v0003_schema() {
         applied,
         vec![
             4, 5, 6, 7, 8, 9, 10, 11, 12, 1001, 1002, 1003, 1004, 1005, 1006, 1007, 1008, 1009,
-            1010, 1011, 1012
+            1010, 1011, 1012, 1013
         ]
     );
 
@@ -308,7 +308,7 @@ async fn test_global_v0004_adds_policy_digest_to_existing_v0003_schema() {
     let version = runner.current_version(&db).await.unwrap();
     assert_eq!(
         version,
-        Some(1012),
+        Some(1013),
         "current version reflects the highest applied across global+waddle"
     );
 }
@@ -466,7 +466,7 @@ async fn sqlite_pre_ledger_history_is_adopted_once_before_pending_migrations() {
     let runner = MigrationRunner::waddle();
     assert_eq!(
         runner.run(&db).await.unwrap(),
-        vec![1002, 1003, 1004, 1005, 1006, 1007, 1008, 1009, 1010, 1011, 1012]
+        vec![1002, 1003, 1004, 1005, 1006, 1007, 1008, 1009, 1010, 1011, 1012, 1013]
     );
     let expected_checksum = migration_checksum(&first, DatabaseDriver::Sqlite);
     assert_eq!(
@@ -551,7 +551,7 @@ async fn sqlite_single_runner_backfills_checksums_when_legacy_ledger_has_no_pend
         .await
         .unwrap();
     let runner = MigrationRunner::single();
-    assert_eq!(runner.migrations.len(), 24);
+    assert_eq!(runner.migrations.len(), 25);
     runner.run(&db).await.unwrap();
 
     let conn = db.guard().await.unwrap();
@@ -561,7 +561,7 @@ async fn sqlite_single_runner_backfills_checksums_when_legacy_ledger_has_no_pend
     drop(conn);
 
     assert!(runner.run(&db).await.unwrap().is_empty());
-    assert_eq!(migration_ledger_row_count(&db).await, 24);
+    assert_eq!(migration_ledger_row_count(&db).await, 25);
     assert_all_migration_checksums(&db, DatabaseDriver::Sqlite).await;
     assert!(runner.run(&db).await.unwrap().is_empty());
 }
@@ -741,7 +741,7 @@ async fn v1010_rolls_forward_from_a_v1009_ledger() {
     drop(conn);
 
     let applied = MigrationRunner::single().run(&db).await.unwrap();
-    assert_eq!(applied, vec![1010, 1011, 1012]);
+    assert_eq!(applied, vec![1010, 1011, 1012, 1013]);
     assert_eq!(
         migration_ledger_checksum(&db, 1010).await.as_deref(),
         Some(migration_checksum(&migration_by_version(1010), DatabaseDriver::Sqlite).as_str())
@@ -910,7 +910,7 @@ async fn postgres_pre_ledger_history_is_adopted_once_before_pending_migrations()
     let runner = MigrationRunner::waddle();
     assert_eq!(
         runner.run(&db).await.expect("adopt and run migrations"),
-        vec![1002, 1003, 1004, 1005, 1006, 1007, 1008, 1009, 1010, 1011, 1012]
+        vec![1002, 1003, 1004, 1005, 1006, 1007, 1008, 1009, 1010, 1011, 1012, 1013]
     );
     let expected_checksum = migration_checksum(&first, DatabaseDriver::Postgres);
     assert_eq!(
@@ -1025,7 +1025,7 @@ async fn postgres_single_runner_backfills_checksums_when_legacy_ledger_has_no_pe
     let schema = unique_postgres_schema_name("ledger_pure_adoption");
     let (db, admin) = open_isolated_postgres_database(&database_url, &schema).await;
     let runner = MigrationRunner::single();
-    assert_eq!(runner.migrations.len(), 24);
+    assert_eq!(runner.migrations.len(), 25);
     runner.run(&db).await.expect("initial single migration run");
 
     let conn = db.guard().await.expect("postgres guard");
@@ -1039,7 +1039,7 @@ async fn postgres_single_runner_backfills_checksums_when_legacy_ledger_has_no_pe
         .await
         .expect("pure adoption rerun")
         .is_empty());
-    assert_eq!(migration_ledger_row_count(&db).await, 24);
+    assert_eq!(migration_ledger_row_count(&db).await, 25);
     assert_all_migration_checksums(&db, DatabaseDriver::Postgres).await;
     assert!(runner
         .run(&db)
@@ -1222,12 +1222,43 @@ fn ingress_monitoring_configmap_extracts_every_query() {
     }
 }
 
-const EXPECTED_MONITORING_QUERIES: [&str; 5] = [
+#[test]
+fn ingress_monitoring_kind_families_match_storage_codes() {
+    let yaml = fs::read_to_string(monitoring_configmap_path()).expect("read monitoring ConfigMap");
+    let queries = extract_monitoring_queries(&yaml).expect("extract monitoring queries");
+    let query = queries
+        .iter()
+        .find(|query| query.name == "waddle_ingress_nonterminal")
+        .expect("non-terminal monitoring query");
+    let arms: Vec<(i32, &str)> = query
+        .sql
+        .lines()
+        .filter_map(|line| line.trim().strip_prefix("WHEN "))
+        .map(|arm| {
+            let (code, name) = arm.split_once(" THEN ").expect("CASE arm shape");
+            (
+                code.parse().expect("integer storage code"),
+                name.strip_prefix('\'')
+                    .and_then(|name| name.strip_suffix('\''))
+                    .expect("quoted storage family"),
+            )
+        })
+        .collect();
+    assert_eq!(
+        arms,
+        waddle_xmpp::ingress::IngressEffectIntent::storage_kind_names(),
+        "monitoring CASE must cover exactly the stable storage-code families"
+    );
+}
+
+const EXPECTED_MONITORING_QUERIES: [&str; 7] = [
     "waddle_ingress_table",
     "waddle_ingress_gc",
     "waddle_ingress_messages",
     "waddle_ingress_cohort",
     "waddle_ingress_streams",
+    "waddle_ingress_nonterminal",
+    "waddle_ingress_nonterminal_age",
 ];
 
 fn monitoring_configmap_path() -> PathBuf {
@@ -1273,6 +1304,7 @@ async fn postgres_monitoring_queries_match_migrated_ingress_schema() {
         .run(&db)
         .await
         .expect("run migrations in isolated postgres schema");
+    assert_nonterminal_monitoring_index(&db).await;
 
     let query_pool = sqlx::PgPool::connect(db.database_url())
         .await
@@ -1295,7 +1327,7 @@ async fn postgres_monitoring_queries_match_migrated_ingress_schema() {
         .execute(&mut *monitor_conn)
         .await
         .expect("assume pg_monitor like the CNPG exporter");
-    for monitoring_query in queries {
+    for monitoring_query in &queries {
         // The production query pins `schemaname = 'public'`; the fixture
         // migrates into an isolated schema, so point it at that schema to
         // keep the table-name literals under test.
@@ -1319,7 +1351,7 @@ async fn postgres_monitoring_queries_match_migrated_ingress_schema() {
                     monitoring_query.name
                 )
             });
-        assert_declared_metric_columns(&monitoring_query, &rows);
+        assert_declared_metric_columns(monitoring_query, &rows);
 
         match monitoring_query.name.as_str() {
             "waddle_ingress_gc" | "waddle_ingress_streams" => assert_eq!(
@@ -1367,15 +1399,121 @@ async fn postgres_monitoring_queries_match_migrated_ingress_schema() {
                     "every monitored ingress table must exist in the migrated schema"
                 );
             }
+            "waddle_ingress_nonterminal" => {
+                assert_eq!(rows.len(), 1, "empty backlog must still emit the sentinel");
+                let kind: String = rows[0].try_get("kind").expect("sentinel kind");
+                let messages: i64 = rows[0].try_get("messages").expect("sentinel count");
+                assert_eq!((kind.as_str(), messages), ("none", 0));
+            }
+            "waddle_ingress_nonterminal_age" => {
+                assert_eq!(rows.len(), 1, "age query must always emit one row");
+                let age: f64 = sqlx::query_scalar(&format!(
+                    "SELECT oldest_seconds::double precision FROM ({}) AS age",
+                    sql.trim().trim_end_matches(';')
+                ))
+                .fetch_one(&mut *monitor_conn)
+                .await
+                .expect("decode empty non-terminal age");
+                assert_eq!(age, 0.0);
+            }
             "waddle_ingress_messages" => {}
             other => panic!("unexpected ingress monitoring query {other}"),
         }
     }
 
+    assert_populated_nonterminal_monitoring(&query_pool, &mut monitor_conn, &queries).await;
+
     drop(monitor_conn);
     query_pool.close().await;
     drop(db);
     drop_postgres_schema(&admin, &schema).await;
+}
+
+async fn assert_populated_nonterminal_monitoring(
+    pool: &sqlx::PgPool,
+    monitor: &mut sqlx::PgConnection,
+    queries: &[MonitoringQuery],
+) {
+    // Write as the application fixture owner, then read only as pg_monitor.
+    // Epoch zero permits these writes without a protocol-epoch guard token.
+    sqlx::raw_sql(
+        "INSERT INTO ingress_messages (message_key, digest_version, digest, created_at, terminal_at)
+         VALUES
+           ('00000000-0000-0000-0000-000000000001', 1, decode(repeat('01', 32), 'hex'), now() - interval '1 minute', NULL),
+           ('00000000-0000-0000-0000-000000000002', 1, decode(repeat('02', 32), 'hex'), now() - interval '2 hours', now()),
+           ('00000000-0000-0000-0000-000000000003', 1, decode(repeat('03', 32), 'hex'), now() - interval '1 hour', NULL),
+           ('00000000-0000-0000-0000-000000000004', 1, decode(repeat('04', 32), 'hex'), now() - interval '30 minutes', NULL);
+         INSERT INTO ingress_effect_intents
+           (message_key, effect_ordinal, kind, semantic_identity_hash, payload_version, payload)
+         SELECT message_key::uuid, ordinal, kind, decode(repeat(identity, 32), 'hex'), 1, '{}'::bytea
+         FROM (VALUES
+           ('00000000-0000-0000-0000-000000000001', 0, 2, '01'),
+           ('00000000-0000-0000-0000-000000000002', 0, 2, '01'),
+           ('00000000-0000-0000-0000-000000000003', 0, 2, '01'),
+           ('00000000-0000-0000-0000-000000000004', 0, 2, '01'),
+           ('00000000-0000-0000-0000-000000000004', 1, 2, '02'),
+           ('00000000-0000-0000-0000-000000000004', 2, 7, '03')
+         ) AS fixture(message_key, ordinal, kind, identity);
+         INSERT INTO ingress_effect_receipts (message_key, kind, semantic_identity_hash)
+         SELECT message_key, kind, semantic_identity_hash FROM ingress_effect_intents
+         WHERE message_key = '00000000-0000-0000-0000-000000000003';",
+    )
+    .execute(pool)
+    .await
+    .expect("insert non-terminal monitoring fixture");
+    let backlog = queries
+        .iter()
+        .find(|query| query.name == "waddle_ingress_nonterminal")
+        .expect("non-terminal query");
+    let rows = sqlx::query(&backlog.sql)
+        .fetch_all(&mut *monitor)
+        .await
+        .expect("query populated backlog as pg_monitor");
+    assert_declared_metric_columns(backlog, &rows);
+    let mut counts: Vec<(String, i64)> = rows
+        .iter()
+        .map(|row| {
+            (
+                row.try_get("kind").expect("pending kind family"),
+                row.try_get("messages")
+                    .expect("distinct canonical messages"),
+            )
+        })
+        .collect();
+    counts.sort();
+    assert_eq!(
+        counts,
+        vec![
+            ("none".to_string(), 0),
+            ("notification_activity_preview".to_string(), 1),
+            ("route_muc".to_string(), 1),
+            ("terminalization".to_string(), 1),
+        ]
+    );
+    let age = queries
+        .iter()
+        .find(|query| query.name == "waddle_ingress_nonterminal_age")
+        .expect("age query");
+    let ages: Vec<f64> = sqlx::query_scalar(&format!(
+        "SELECT oldest_seconds::double precision FROM ({}) AS age",
+        age.sql.trim().trim_end_matches(';')
+    ))
+    .fetch_all(&mut *monitor)
+    .await
+    .expect("query populated age as pg_monitor");
+    assert_eq!(ages.len(), 1);
+    assert!(
+        ages[0] >= 3600.0 && ages[0] < 3900.0,
+        "oldest age: {ages:?}"
+    );
+    let plan: Vec<String> = sqlx::query_scalar(&format!("EXPLAIN {}", backlog.sql))
+        .fetch_all(&mut *monitor)
+        .await
+        .expect("explain backlog as pg_monitor");
+    eprintln!(
+        "non-terminal monitoring fixture EXPLAIN:\n{}",
+        plan.join("\n")
+    );
 }
 
 fn assert_declared_metric_columns(query: &MonitoringQuery, rows: &[sqlx::postgres::PgRow]) {
@@ -1887,7 +2025,7 @@ async fn postgres_v0006_widens_existing_upload_slot_size_bytes() {
         applied,
         vec![
             6, 7, 8, 9, 10, 11, 12, 1001, 1002, 1003, 1004, 1005, 1006, 1007, 1008, 1009, 1010,
-            1011, 1012
+            1011, 1012, 1013
         ]
     );
     assert_postgres_column_type(&db, "upload_slots", "size_bytes", "bigint").await;
@@ -1964,7 +2102,7 @@ async fn sqlite_v0007_tracks_link_preview_media_refs() {
         applied,
         vec![
             7, 8, 9, 10, 11, 12, 1001, 1002, 1003, 1004, 1005, 1006, 1007, 1008, 1009, 1010, 1011,
-            1012
+            1012, 1013
         ]
     );
 
@@ -2474,7 +2612,7 @@ async fn postgres_v0007_tracks_link_preview_media_refs() {
         applied,
         vec![
             7, 8, 9, 10, 11, 12, 1001, 1002, 1003, 1004, 1005, 1006, 1007, 1008, 1009, 1010, 1011,
-            1012
+            1012, 1013
         ]
     );
 
@@ -2746,7 +2884,7 @@ async fn postgres_v1003_widens_existing_attachment_size_bytes() {
         .expect("run waddle migration");
     assert_eq!(
         applied,
-        vec![1003, 1004, 1005, 1006, 1007, 1008, 1009, 1010, 1011, 1012]
+        vec![1003, 1004, 1005, 1006, 1007, 1008, 1009, 1010, 1011, 1012, 1013]
     );
     assert_postgres_column_type(&db, "attachments", "size_bytes", "bigint").await;
 
@@ -3386,6 +3524,35 @@ fn postgres_url_with_search_path(database_url: &str, schema: &str) -> String {
     url.to_string()
 }
 
+async fn assert_nonterminal_monitoring_index(db: &Database) {
+    let (query, expected_suffix) = match db.driver() {
+        DatabaseDriver::Sqlite => (
+            "SELECT sql FROM sqlite_master WHERE type = 'index' AND name = 'ingress_messages_nonterminal_created_at_idx'",
+            "(created_at) WHERE terminal_at IS NULL",
+        ),
+        DatabaseDriver::Postgres => (
+            "SELECT indexdef FROM pg_indexes WHERE schemaname = current_schema() AND indexname = 'ingress_messages_nonterminal_created_at_idx'",
+            "(created_at) WHERE (terminal_at IS NULL)",
+        ),
+    };
+    let conn = db.guard().await.expect("index catalog connection");
+    let mut rows = conn
+        .query(query, ())
+        .await
+        .expect("query non-terminal index");
+    let definition: String = rows
+        .next()
+        .await
+        .expect("index catalog result")
+        .expect("non-terminal index exists")
+        .get(0)
+        .expect("index definition");
+    assert!(
+        definition.ends_with(expected_suffix),
+        "index definition: {definition}"
+    );
+}
+
 #[tokio::test]
 async fn sqlite_v1012_rolls_forward_from_v1011() {
     let db = Database::in_memory("v1012-roll-forward")
@@ -3411,9 +3578,10 @@ async fn sqlite_v1012_rolls_forward_from_v1011() {
         MigrationRunner::single()
             .run(&db)
             .await
-            .expect("apply V1012"),
-        vec![1012]
+            .expect("apply V1012 and V1013"),
+        vec![1012, 1013]
     );
+    assert_nonterminal_monitoring_index(&db).await;
     assert!(sqlite_table_exists(&db, "sm_sessions").await);
     assert!(sqlite_table_exists(&db, "sm_unacked").await);
     for table in [
@@ -3472,8 +3640,8 @@ async fn postgres_v1012_resets_epoch_zero_soak_rows() {
         MigrationRunner::single()
             .run(&db)
             .await
-            .expect("apply V1012"),
-        vec![1012]
+            .expect("apply V1012 and V1013"),
+        vec![1012, 1013]
     );
     assert!(postgres_table_exists(&db, "sm_sessions").await);
     assert!(postgres_table_exists(&db, "sm_unacked").await);
@@ -3552,7 +3720,7 @@ async fn migration_v1012_recreates_sql_sm_store(database_url: &str) {
             .run(&storage.database())
             .await
             .expect("cutover migration"),
-        vec![1012]
+        vec![1012, 1013]
     );
     drop(storage);
 

@@ -60,17 +60,10 @@ impl NotificationActivityStore {
         Ok(())
     }
 
-    /// Mark `(owner, conversation)` as no longer active. Used for the
-    /// XEP-0085 `<gone/>` signal: the user has ended participation in
-    /// the conversation, so any prior activity window must be
-    /// invalidated regardless of how recent it was. Bypasses the
-    /// monotonic clamp on `last_active_at_ms` — `<gone/>` is the only
-    /// path that legitimately regresses activity, because semantically
-    /// it tells us the recipient is *not* currently engaged. The T1
-    /// XEP-0513 `<active/>` filter then sees `now_ms - 0` which is
-    /// huge, so the `ActiveChannelMention` is suppressed with
-    /// `Xep0513ActiveMiss`. The audit trail preserves the chat-state
-    /// token as `gone` for diagnostics (Codex review on PR #731).
+    /// Mark the conversation inactive only when `<gone/>` is at least as recent
+    /// as its activity. Historical replays must preserve newer engagement.
+    /// Keep the `gone` token for diagnostics and advance the audit timestamp
+    /// monotonically even when clearing the active window.
     pub async fn record_chat_state_gone(
         &self,
         owner: &BareJid,
@@ -90,9 +83,21 @@ impl NotificationActivityStore {
                 updated_at_ms
             ) VALUES (?, ?, 0, ?, NULL, NULL, ?, ?)
             ON CONFLICT (owner_bare_jid, conversation_jid) DO UPDATE SET
-                last_active_at_ms = 0,
-                last_chat_state = excluded.last_chat_state,
-                updated_at_ms = excluded.updated_at_ms
+                last_active_at_ms = CASE
+                    WHEN excluded.updated_at_ms >= notification_activity.last_active_at_ms
+                    THEN 0
+                    ELSE notification_activity.last_active_at_ms
+                END,
+                last_chat_state = CASE
+                    WHEN excluded.updated_at_ms >= notification_activity.last_active_at_ms
+                    THEN excluded.last_chat_state
+                    ELSE notification_activity.last_chat_state
+                END,
+                updated_at_ms = CASE
+                    WHEN excluded.updated_at_ms >= notification_activity.updated_at_ms
+                    THEN excluded.updated_at_ms
+                    ELSE notification_activity.updated_at_ms
+                END
             "#,
             crate::db_params![
                 owner.to_string(),

@@ -286,12 +286,7 @@ pub(in super::super::super) async fn deliver_reserved_muc_groupchat(
             ),
         ),
     )
-    .with_ordered_relay_origin(Some(OrderedRelayRouteOrigin {
-        kind: OrderedRelayRouteOriginKind::Entity(sender_entity.clone()),
-        sender_entity: sender_entity.clone(),
-        inbound_sequence: 0,
-        handoff: None,
-    }));
+    .with_ordered_relay_origin(Some(OrderedRelayRouteOrigin::room(room_jid)));
     let authority = &state.deps.protocol.ingress;
     let decision = tokio::time::timeout(ORDERED_RECEIVER_DELIVERY_TIMEOUT, async {
         let claim = current_claim(services, &sender_entity)

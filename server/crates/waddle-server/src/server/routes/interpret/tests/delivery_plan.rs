@@ -108,10 +108,12 @@ async fn unavailable_iq_plans_frozen_error_reply() {
 }
 
 #[tokio::test]
-async fn relay_executor_reports_unavailable_without_local_recipient_fallback() {
+async fn relay_executor_reports_unavailable_without_any_recipient() {
     let registry = test_registry();
     let deps = Deps::registry_only(&registry);
     let target: jid::FullJid = "bob@example.com/phone".parse().expect("recipient");
+    // Full-JID declines now attempt the local peer path; with no registered recipient
+    // that fallback still reports Unavailable. Bare-JID relay behavior is unchanged.
     for effect in [
         ExternalDeliveryEffect::RelayFullJid {
             route_identity: None,

@@ -157,6 +157,7 @@ impl OrderedRelayDeliveryBridge {
                 room: room_jid.clone(),
                 lane: kind.room_lane(),
             },
+            origin_epoch: origin_snapshot.claim_epoch,
             target_epoch: target_snapshot.claim_epoch,
         };
         let retry_channel = channel.clone();
@@ -389,6 +390,7 @@ impl OrderedRelayDeliveryBridge {
                 room: room_jid.clone(),
                 lane: OrderedRelayMucProxyKind::JoinPresence.room_lane(),
             },
+            origin_epoch: origin_snapshot.claim_epoch,
             target_epoch: target_snapshot.claim_epoch,
         };
         let seed = RemoteDeliverySeed {

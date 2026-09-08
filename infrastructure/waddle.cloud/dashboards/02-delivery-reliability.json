@@ -364,6 +364,36 @@
     },
     {
       "type": "timeseries",
+      "title": "Non-terminal messages older than 10m by pending intent kind",
+      "description": "Distinct canonical messages per pending intent family; terminalization means all receipts are present. A message can appear in multiple families.",
+      "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+      "targets": [
+        {
+          "expr": "sum by (kind) (cnpg_waddle_ingress_nonterminal_messages{kind!=\"none\"}) or vector(0)",
+          "legendFormat": "{{kind}}",
+          "refId": "A"
+        }
+      ],
+      "fieldConfig": { "defaults": { "unit": "short" } },
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 65 }
+    },
+    {
+      "type": "timeseries",
+      "title": "Oldest non-terminal message age",
+      "description": "Oldest canonical message still non-terminal after ten minutes; zero when no backlog exists.",
+      "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+      "targets": [
+        {
+          "expr": "max(cnpg_waddle_ingress_nonterminal_age_oldest_seconds)",
+          "legendFormat": "oldest age",
+          "refId": "A"
+        }
+      ],
+      "fieldConfig": { "defaults": { "unit": "s" } },
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 65 }
+    },
+    {
+      "type": "timeseries",
       "title": "Postgres backends and max connections by instance",
       "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
       "targets": [
@@ -379,7 +409,7 @@
         }
       ],
       "fieldConfig": { "defaults": { "unit": "short" } },
-      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 65 }
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 73 }
     },
     {
       "type": "timeseries",
@@ -398,7 +428,7 @@
         }
       ],
       "fieldConfig": { "defaults": {} },
-      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 65 }
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 73 }
     },
     {
       "type": "timeseries",
@@ -417,7 +447,7 @@
         }
       ],
       "fieldConfig": { "defaults": { "unit": "bytes" } },
-      "gridPos": { "h": 8, "w": 24, "x": 0, "y": 73 }
+      "gridPos": { "h": 8, "w": 24, "x": 0, "y": 81 }
     }
   ],
   "refresh": "30s",

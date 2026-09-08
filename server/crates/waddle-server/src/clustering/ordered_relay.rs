@@ -74,6 +74,7 @@ pub enum OrderedRelayOrigin {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct OrderedRelayChannel {
     pub origin: OrderedRelayOrigin,
+    pub origin_epoch: ClaimEpoch,
     pub recipient: OrderedRelayRecipient,
     pub target_epoch: ClaimEpoch,
 }
@@ -81,6 +82,7 @@ pub struct OrderedRelayChannel {
 impl Hash for OrderedRelayChannel {
     fn hash<H: Hasher>(&self, state: &mut H) {
         self.origin.hash(state);
+        self.origin_epoch.0.hash(state);
         self.recipient.hash(state);
         self.target_epoch.0.hash(state);
     }
@@ -253,8 +255,12 @@ impl OrderedRelayPayload {
 
     fn matches_stanza_kind(&self) -> bool {
         match (self, self.stanza()) {
-            (OrderedRelayPayload::Message { .. }, waddle_xmpp::Stanza::Message(message)) => {
+            (
+                OrderedRelayPayload::Message { recipient, .. },
+                waddle_xmpp::Stanza::Message(message),
+            ) => {
                 message.type_ != xmpp_parsers::message::MessageType::Groupchat
+                    || (recipient.is_full() && message.to.as_ref() == Some(recipient))
             }
             (OrderedRelayPayload::Iq { .. }, waddle_xmpp::Stanza::Iq(_)) => true,
             (OrderedRelayPayload::Presence { .. }, waddle_xmpp::Stanza::Presence(_)) => true,
@@ -320,10 +326,28 @@ impl OrderedRelayPayload {
         let Some(from) = stanza_from(self.stanza()) else {
             return false;
         };
+        // A groupchat occupant copy is authored by the room (XEP-0045 §7.4), so
+        // only the room's own claim may vouch for it; user claims relay the
+        // remaining message, IQ and presence payloads.
+        let allowed = if self.is_groupchat_message() {
+            claim.entity.entity_type == EntityType::RoomActor
+        } else {
+            matches!(
+                claim.entity.entity_type,
+                EntityType::UserActor | EntityType::RoomActor
+            )
+        };
+        allowed && claim.entity.id == from.to_bare().to_string()
+    }
+
+    fn is_groupchat_message(&self) -> bool {
         matches!(
-            claim.entity.entity_type,
-            EntityType::UserActor | EntityType::RoomActor
-        ) && claim.entity.id == from.to_bare().to_string()
+            (self, self.stanza()),
+            (
+                OrderedRelayPayload::Message { .. },
+                waddle_xmpp::Stanza::Message(message)
+            ) if message.type_ == xmpp_parsers::message::MessageType::Groupchat
+        )
     }
 
     fn fingerprint(&self) -> OrderedRelayPayloadFingerprint {
@@ -1036,6 +1060,7 @@ fn envelope_is_consistent(envelope: &RemoteStanzaEnvelope) -> bool {
         && envelope.payload.matches_muc_proxy_origin()
         && origin_claim_matches_channel(&envelope.origin_claim, &envelope.channel.origin)
         && sender_claim_matches_channel(&envelope.sender_claim, &envelope.channel.origin)
+        && envelope.origin_claim.epoch == envelope.channel.origin_epoch
         && envelope.target_claim.epoch == envelope.channel.target_epoch
         && envelope
             .payload

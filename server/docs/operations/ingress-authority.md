@@ -43,7 +43,10 @@ latency is a seconds histogram; confirm `le`-labelled buckets are present.
 | `ingress.gc.runs{outcome}` | `ingress_gc_runs_total` | `IngressGcFailing` |
 | `ingress.gc.reclaimed_messages` | `ingress_gc_reclaimed_messages_total` | Reclamation progress |
 | `ingress.tx.duration` | `ingress_tx_duration_seconds_bucket` (also `_sum`, `_count`) | `IngressTxSlow` |
-| `ingress.effects.unresolved{kind}` | `ingress_effects_unresolved_total` | `IngressUnresolvedEffectsGrowing` |
+| `ingress.effects.unresolved{kind}` (local executions only) | `ingress_effects_unresolved_total` | `IngressUnresolvedEffectsGrowing` |
+| CNPG old non-terminal canonical messages by pending intent family | `cnpg_waddle_ingress_nonterminal_messages{kind}` | `IngressNonTerminalBacklog` |
+| CNPG oldest non-terminal message older than 10m (seconds; zero when empty) | `cnpg_waddle_ingress_nonterminal_age_oldest_seconds` | `IngressCnpgQueriesMissing` |
+| CNPG GC eligibility and oldest eligible age | `cnpg_waddle_ingress_gc_eligible_messages`, `cnpg_waddle_ingress_gc_oldest_eligible_age_seconds` | `IngressGcBacklog`, `IngressGcAge`, `IngressCnpgQueriesMissing` |
 
 `IngressInfraDecisions` is critical: a positive rate of storage, serialization
 exhaustion, timeout or ambiguous-commit decisions for 10m means messages are
@@ -61,10 +64,26 @@ persist for 6h; `IngressGcAge` warns above 9 days.
 `IngressSeriesMissing` warns when all decision series disappear, or a live
 `waddle-server` instance has none, for 15m. These counters are zero-registered
 at startup, so absence indicates missing telemetry even on idle pods.
-`IngressCnpgQueriesMissing` warns if either eligibility or age series is
-absent for 15m, so missing custom queries cannot masquerade as healthy GC.
+`IngressCnpgQueriesMissing` warns if GC eligibility, GC age,
+`cnpg_waddle_ingress_nonterminal_age_oldest_seconds`, or the backlog query's
+`cnpg_waddle_ingress_nonterminal_messages{kind="none"}` sentinel is absent for
+15m. The age query always returns one row (zero for no backlog) and the
+backlog query always emits the `none` sentinel row, so a missing or failing
+query cannot masquerade as healthy receipt completeness.
 `IngressUnresolvedEffectsGrowing` warns on a positive counter increase over
-1h, grouped by kind: this is observed unresolved work, not a current queue gauge.
+1h, grouped by kind. It sees only locally executed effects, not obligations
+that were recorded but never executed; it is not a current queue gauge. Use
+`IngressNonTerminalBacklog` for the canonical row-level view.
+
+`IngressNonTerminalBacklog` warns when any canonical row older than 10 minutes
+remains non-terminal, sustained for another 10m (roughly 20m after creation,
+plus scrape/evaluation delay). Its `kind` is the unreceipted intent family;
+`terminalization` means all receipts exist but terminalization itself is
+missing; `none` is the always-zero sentinel and never fires. A row counts once per pending family, even with several intents in
+that family, so summing families can count one row more than once. The 10m
+age threshold is a generous multiple of the 5s Phase C budget: investigate a
+receipt-completeness or terminalization regression (#1749). GC cannot reclaim
+these rows. Both CNPG queries run only on the primary.
 
 The dedicated ingress authority pool defaults to 4 connections per pod;
 `WADDLE_INGRESS_DB_POOL_SIZE` overrides it. Transactions and retries are
@@ -143,6 +162,8 @@ histogram_quantile(0.99, sum by (le) (rate(ingress_tx_duration_seconds_bucket[10
 sum by (outcome) (increase(ingress_gc_runs_total[1h]))
 max(cnpg_waddle_ingress_gc_eligible_messages)
 max(cnpg_waddle_ingress_gc_oldest_eligible_age_seconds)
+max by (kind) (cnpg_waddle_ingress_nonterminal_messages)
+max(cnpg_waddle_ingress_nonterminal_age_oldest_seconds)
 ```
 
 In `psql` connected to the application database with a read-only role, inspect
@@ -167,3 +188,243 @@ The mismatch query should return no rows for active retained streams.
 types, with u32 wrap), not the message ordinal: do not compare them numerically.
 Refs retain wire-position bindings until stream retirement; investigate any
 mismatch against the RFC before changing data.
+
+
+## Non-terminal backlog triage
+
+In `psql` on the primary, use a read-only role (the CNPG queries also run
+under `pg_monitor`) and a consistent snapshot. Empty `pending_pairs` denotes
+terminalization-only work; every old non-terminal row appears.
+
+```sql
+BEGIN TRANSACTION ISOLATION LEVEL REPEATABLE READ READ ONLY;
+WITH pending AS (
+  SELECT intent.message_key, intent.kind, intent.semantic_identity_hash,
+         CASE intent.kind
+           WHEN 0 THEN 'archive'
+           WHEN 1 THEN 'route_direct'
+           WHEN 2 THEN 'route_muc'
+           WHEN 3 THEN 'route_occupant_pm'
+           WHEN 4 THEN 'recipient_sm_append'
+           WHEN 5 THEN 'carbons'
+           WHEN 6 THEN 'inbox_project'
+           WHEN 7 THEN 'notification_activity_preview'
+           WHEN 8 THEN 'call_signal'
+           WHEN 9 THEN 'pin'
+           WHEN 10 THEN 'extension'
+           WHEN 11 THEN 'error_reply'
+           WHEN 12 THEN 'dispatch_to_room_remote'
+           WHEN 13 THEN 'room_subject_mutation'
+           WHEN 14 THEN 'retraction_tombstone'
+           WHEN 15 THEN 'dm_pin_mutation'
+           WHEN 16 THEN 'group_dm_membership_grant'
+           WHEN 17 THEN 'group_dm_invite_ledger'
+           WHEN 18 THEN 'link_preview_media_ref'
+           WHEN 19 THEN 'muc_invite_membership_grant'
+           WHEN 20 THEN 'muc_invite_ledger'
+           WHEN 21 THEN 'groupchat_notification_recovery'
+           WHEN 22 THEN 'pending_delivery'
+           WHEN 23 THEN 'tombstone_replay_deletion'
+           WHEN 24 THEN 'relay_carbons'
+           WHEN 25 THEN 'room_observer'
+           WHEN 26 THEN 'dm_call_thread_state'
+           ELSE 'kind_' || intent.kind::text
+         END AS kind_family
+  FROM ingress_effect_intents intent
+  WHERE NOT EXISTS (
+    SELECT 1 FROM ingress_effect_receipts receipt
+    WHERE receipt.message_key = intent.message_key
+      AND receipt.kind = intent.kind
+      AND receipt.semantic_identity_hash = intent.semantic_identity_hash
+  )
+)
+SELECT message.message_key, message.created_at,
+       coalesce(jsonb_agg(jsonb_build_object(
+         'kind', pending.kind,
+         'semantic_identity_hash', encode(pending.semantic_identity_hash, 'hex'),
+         'kind_family', pending.kind_family
+       ) ORDER BY pending.kind, pending.semantic_identity_hash)
+         FILTER (WHERE pending.kind IS NOT NULL), '[]'::jsonb) AS pending_pairs,
+       CASE WHEN count(pending.kind) = 0 THEN 'terminalization' END AS missing_step
+FROM ingress_messages message
+LEFT JOIN pending USING (message_key)
+WHERE message.terminal_at IS NULL
+  AND message.created_at <= now() - interval '10 minutes'
+GROUP BY message.message_key, message.created_at
+ORDER BY message.created_at, message.message_key;
+COMMIT;
+```
+
+## Repair for abandoned obligations (#1749)
+
+The pre-fix rows hold obligations that can never execute: the remote occupant
+copy was never sent, and #1658's recovery executor does not exist. Stale
+activity mutations must not be replayed. These repair receipts record
+**abandonment, not delivery**. Only archived content (message bodies in the
+room MAM archive, XEP-0313) is recoverable by affected occupants; bodyless chat
+states and markers were never archived. Running this repair is the operator's
+decision, after reviewing the affected messages and accepting that loss.
+
+The incident window starts at the #1657 cutover, `2026-09-08T11:02Z`, and ends
+only when **both replicas run the fixed image**. Record the actual rollout
+completion timestamp: during the mixed `deliver_ordered.v8`/`v9` rollout,
+an `UnsupportedEnvelope` NACK also leaves rows non-terminal. Do not use the
+first upgraded replica's start time as the end of the window.
+
+First run this read-only dry run, replacing the rollout timestamp placeholder.
+Keep its output as the reviewed manifest: every selected canonical key,
+including keys with no pending pairs, and the exact pending integer-kind and
+hex-hash pairs. The family labels reuse the monitoring query's mapping.
+Kind 2 also includes `RouteMucSystemBroadcast`, and kind 7 includes activity
+outside rooms. Never choose repair targets with a kind predicate; select an
+explicit reviewed `message_key` manifest instead.
+
+```sql
+BEGIN TRANSACTION ISOLATION LEVEL REPEATABLE READ READ ONLY;
+WITH pending AS (
+  SELECT intent.message_key, intent.kind, intent.semantic_identity_hash,
+         CASE intent.kind
+           WHEN 0 THEN 'archive'
+           WHEN 1 THEN 'route_direct'
+           WHEN 2 THEN 'route_muc'
+           WHEN 3 THEN 'route_occupant_pm'
+           WHEN 4 THEN 'recipient_sm_append'
+           WHEN 5 THEN 'carbons'
+           WHEN 6 THEN 'inbox_project'
+           WHEN 7 THEN 'notification_activity_preview'
+           WHEN 8 THEN 'call_signal'
+           WHEN 9 THEN 'pin'
+           WHEN 10 THEN 'extension'
+           WHEN 11 THEN 'error_reply'
+           WHEN 12 THEN 'dispatch_to_room_remote'
+           WHEN 13 THEN 'room_subject_mutation'
+           WHEN 14 THEN 'retraction_tombstone'
+           WHEN 15 THEN 'dm_pin_mutation'
+           WHEN 16 THEN 'group_dm_membership_grant'
+           WHEN 17 THEN 'group_dm_invite_ledger'
+           WHEN 18 THEN 'link_preview_media_ref'
+           WHEN 19 THEN 'muc_invite_membership_grant'
+           WHEN 20 THEN 'muc_invite_ledger'
+           WHEN 21 THEN 'groupchat_notification_recovery'
+           WHEN 22 THEN 'pending_delivery'
+           WHEN 23 THEN 'tombstone_replay_deletion'
+           WHEN 24 THEN 'relay_carbons'
+           WHEN 25 THEN 'room_observer'
+           WHEN 26 THEN 'dm_call_thread_state'
+           ELSE 'kind_' || intent.kind::text
+         END AS kind_family
+  FROM ingress_effect_intents intent
+  WHERE NOT EXISTS (
+    SELECT 1 FROM ingress_effect_receipts receipt
+    WHERE receipt.message_key = intent.message_key
+      AND receipt.kind = intent.kind
+      AND receipt.semantic_identity_hash = intent.semantic_identity_hash
+  )
+)
+SELECT message.message_key, message.created_at,
+       coalesce(jsonb_agg(jsonb_build_object(
+         'kind', pending.kind,
+         'semantic_identity_hash', encode(pending.semantic_identity_hash, 'hex'),
+         'kind_family', pending.kind_family
+       ) ORDER BY pending.kind, pending.semantic_identity_hash)
+         FILTER (WHERE pending.kind IS NOT NULL), '[]'::jsonb) AS pending_pairs,
+       CASE WHEN count(pending.kind) = 0 THEN 'terminalization' END AS missing_step
+FROM ingress_messages message
+LEFT JOIN pending USING (message_key)
+WHERE message.terminal_at IS NULL
+  AND message.created_at >= timestamptz '2026-09-08T11:02:00Z'
+  AND message.created_at <= timestamptz '<both-replicas-fixed-at>'
+GROUP BY message.message_key, message.created_at
+ORDER BY message.created_at, message.message_key;
+COMMIT;
+```
+
+Then connect `psql` to the primary with the **application role, never
+`pg_monitor`**. Replace all placeholders and expand the two `VALUES` lists
+from the reviewed output; if every selected key has an empty pending list,
+omit the `reviewed_pending` INSERT entirely. Preserve the `RETURNING` output
+and successful commit result with the dry-run output as the audit record.
+The epoch singleton is locked first, then canonical rows in key order, then
+child rows, following [ingress epoch guards](ingress-epoch-guards.md). The
+transaction-local xid proof is harmless at epoch 0 and required at later
+epochs. This does not activate or change the protocol epoch.
+
+The transaction aborts if a key disappeared, terminalized, falls outside the
+window, or its pending pairs differ in either direction. On any error,
+`ROLLBACK` and perform a fresh dry run and review; do not weaken the checks.
+The repeatable-read snapshot and canonical locks also prevent accepting a
+concurrent change silently.
+
+```sql
+\set ON_ERROR_STOP on
+BEGIN TRANSACTION ISOLATION LEVEL REPEATABLE READ READ WRITE;
+SELECT epoch FROM ingress_protocol_epoch WHERE id = 1 FOR SHARE;
+SET LOCAL waddle.protocol_epoch = '<current epoch>';
+SELECT set_config('waddle.protocol_epoch_xid', pg_current_xact_id()::text, true);
+
+CREATE TEMP TABLE reviewed_messages (
+  message_key uuid PRIMARY KEY
+) ON COMMIT DROP;
+CREATE TEMP TABLE reviewed_pending (
+  message_key uuid NOT NULL REFERENCES reviewed_messages (message_key),
+  kind integer NOT NULL,
+  semantic_identity_hash bytea NOT NULL CHECK (octet_length(semantic_identity_hash) = 32),
+  PRIMARY KEY (message_key, kind, semantic_identity_hash)
+) ON COMMIT DROP;
+INSERT INTO reviewed_messages (message_key) VALUES
+  ('<reviewed-message-key>'::uuid);
+INSERT INTO reviewed_pending (message_key, kind, semantic_identity_hash) VALUES
+  ('<reviewed-message-key>'::uuid, <reviewed-kind>, decode('<reviewed-hex-hash>', 'hex'));
+
+SELECT message.message_key
+FROM ingress_messages message
+JOIN reviewed_messages reviewed USING (message_key)
+ORDER BY message.message_key
+FOR UPDATE OF message;
+
+DO $$
+BEGIN
+  IF (SELECT epoch::text FROM ingress_protocol_epoch WHERE id = 1)
+       IS DISTINCT FROM current_setting('waddle.protocol_epoch') THEN
+    RAISE EXCEPTION 'epoch changed or singleton missing; abort repair';
+  END IF;
+  IF NOT EXISTS (SELECT 1 FROM reviewed_messages) OR EXISTS (
+    SELECT 1 FROM reviewed_messages reviewed
+    LEFT JOIN ingress_messages message USING (message_key)
+    WHERE message.message_key IS NULL OR message.terminal_at IS NOT NULL
+       OR message.created_at < timestamptz '2026-09-08T11:02:00Z'
+       OR message.created_at > timestamptz '<both-replicas-fixed-at>'
+  ) THEN
+    RAISE EXCEPTION 'manifest empty, missing, terminal, or outside incident window';
+  END IF;
+  IF EXISTS (
+    WITH actual_pending AS (
+      SELECT intent.message_key, intent.kind, intent.semantic_identity_hash
+      FROM ingress_effect_intents intent
+      JOIN reviewed_messages reviewed USING (message_key)
+      WHERE NOT EXISTS (
+        SELECT 1 FROM ingress_effect_receipts receipt
+        WHERE receipt.message_key = intent.message_key
+          AND receipt.kind = intent.kind
+          AND receipt.semantic_identity_hash = intent.semantic_identity_hash
+      )
+    )
+    (SELECT * FROM actual_pending EXCEPT SELECT * FROM reviewed_pending)
+    UNION ALL
+    (SELECT * FROM reviewed_pending EXCEPT SELECT * FROM actual_pending)
+  ) THEN
+    RAISE EXCEPTION 'pending pairs differ from reviewed manifest; abort repair';
+  END IF;
+END $$;
+
+INSERT INTO ingress_effect_receipts (message_key, kind, semantic_identity_hash)
+SELECT message_key, kind, semantic_identity_hash FROM reviewed_pending
+ON CONFLICT DO NOTHING
+RETURNING *;
+
+UPDATE ingress_messages SET terminal_at = now()
+WHERE message_key IN (SELECT message_key FROM reviewed_messages)
+  AND terminal_at IS NULL
+RETURNING message_key;
+COMMIT;
+```

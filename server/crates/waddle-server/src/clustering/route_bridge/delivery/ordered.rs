@@ -82,6 +82,7 @@ impl OrderedRelayDeliveryBridge {
             let channel = OrderedRelayChannel {
                 origin: channel_origin,
                 recipient: OrderedRelayRecipient::FullJid(target.clone()),
+                origin_epoch: origin_snapshot.claim_epoch,
                 target_epoch: target_snapshot.claim_epoch,
             };
             let origin_claim = OrderedRelayClaim {
@@ -237,6 +238,7 @@ impl OrderedRelayDeliveryBridge {
             let channel = OrderedRelayChannel {
                 origin: channel_origin,
                 recipient: OrderedRelayRecipient::BareJid(target.clone()),
+                origin_epoch: origin_snapshot.claim_epoch,
                 target_epoch: target_snapshot.claim_epoch,
             };
             let origin_claim = OrderedRelayClaim {

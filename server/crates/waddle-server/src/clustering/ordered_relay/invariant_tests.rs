@@ -11,6 +11,7 @@ fn channel_for_bare(bare: &str) -> OrderedRelayChannel {
     OrderedRelayChannel {
         origin: OrderedRelayOrigin::SmSession(SmSessionId::new("stream-1")),
         recipient: OrderedRelayRecipient::BareJid(jid::BareJid::from_str(bare).expect("bare jid")),
+        origin_epoch: origin_claim().epoch,
         target_epoch: ClaimEpoch(3),
     }
 }

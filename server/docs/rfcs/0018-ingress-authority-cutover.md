@@ -128,6 +128,13 @@ intent has a receipt, a follow-up transaction terminalizes the canonical row
 metered `ingress.effects.unresolved`). A Phase-C timeout never changes the
 disposition: `StanzaTimeout` maps to `Unhandled` only before commit.
 
+Full-JID room reflections to occupants owned by another node ride the ordered
+full-JID relay (`deliver_ordered.v9`), with the room's `RoomActor` claim as
+both origin and sender claim; XEP-0045 occupant-copy semantics are unchanged.
+`IngressNonTerminalBacklog` alerts on canonical rows older than 10 minutes
+that remain non-terminal (#1749/#1750), including missing receipts and
+receipt-complete rows awaiting terminalization.
+
 Remote carbon replies preserve completed targets even on typed `Incomplete`
 results. The origin durably records those full-JID targets in
 `ingress_carbon_receipts`, keyed by the recorded `RelayCarbons` intent and

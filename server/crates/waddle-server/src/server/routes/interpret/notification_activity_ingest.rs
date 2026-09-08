@@ -75,8 +75,10 @@ fn capture_notification_activity(
 /// 1. **XEP-0085 `<gone/>` (§"Definitions" + §"Use in Groupchat" item 3):**
 ///    `<gone/>` signals the user has ended their participation in the
 ///    conversation. We persist it as an *explicit inactivity* signal
-///    via `record_chat_state_gone`, which UNCONDITIONALLY zeroes
-///    `last_active_at_ms`. The XEP-0513 `<active/>` filter at T1 then
+///    via `record_chat_state_gone`, which zeroes `last_active_at_ms`
+///    unless a newer activity write already superseded it (a replayed
+///    historical `<gone/>` must not erase later engagement). The
+///    XEP-0513 `<active/>` filter at T1 then
 ///    sees `now - 0` which is huge → `> TTL` → suppressed with
 ///    `Xep0513ActiveMiss`. XEP-0085's "SHOULD ignore `<gone/>` in
 ///    groupchat" guidance applies to client UI state — the
@@ -376,8 +378,9 @@ mod tests {
     /// XEP-0085 §"Definitions" describes `<gone/>` as the user having
     /// ended participation in the conversation. The helper distinguishes
     /// `<gone/>` from other chat-states because it routes through
-    /// `record_chat_state_gone` (which zeroes `last_active_at_ms`) rather
-    /// than the monotonic `record_chat_state` path. Lock the typed
+    /// `record_chat_state_gone` (which zeroes `last_active_at_ms` when the
+    /// `<gone/>` is at least as recent as the stored activity) rather than
+    /// the `record_chat_state` path. Lock the typed
     /// predicate so a refactor cannot silently merge the two paths and
     /// re-introduce the XEP-0513 `<active/>` TTL inflation bug (Codex
     /// review on PR #731).

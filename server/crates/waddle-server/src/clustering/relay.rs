@@ -458,7 +458,9 @@ fn is_idempotent_join_presence_envelope(envelope: &RemoteStanzaEnvelope) -> bool
 // v6: ingress carbon fanout failure cutover; side-effect replies use v2.
 // v7: reply receipt backpressure.
 // v8: durable owner reply identities survive SM replay without the token.
-#[kameo::remote_message("waddle.clustering.relay.deliver_ordered.v8")]
+// v9: accept room groupchat copies on the ordered full-JID relay and include
+// the origin claim epoch in the channel identity.
+#[kameo::remote_message("waddle.clustering.relay.deliver_ordered.v9")]
 impl Message<RelayDeliverOrdered> for RelayActor {
     type Reply = kameo::reply::DelegatedReply<OrderedRelayReply>;
 

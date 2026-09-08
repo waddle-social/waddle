@@ -391,13 +391,13 @@ pub async fn execute_effects(
             break;
         };
         let effect = &decision.external[index];
-        // Remote fanout is replayable only until its owner supplied a receipt.
-        // A same-origin retry must not duplicate an already confirmed fanout.
+        // Confirmed fanout and state mutations must not execute again.
+        // Replaying historical activity could overwrite newer state.
         let already_receipted = matches!(
             effect,
             ExternalEffect::Delivery(ExternalDeliveryEffect::RelayCarbons { .. } | ExternalDeliveryEffect::Carbons { .. })
                 | ExternalEffect::Room(crate::server::routes::interpret::effects::room::ExternalRoomEffect::ObserveRoomMessage { .. })
-                | ExternalEffect::Direct(ExternalDirectEffect::DmCallThreadState { .. })
+                | ExternalEffect::Direct(ExternalDirectEffect::DmCallThreadState { .. } | ExternalDirectEffect::NotificationActivity { .. })
         ) && !decision.external_receipts[index].is_empty()
             && decision.external_receipts[index]
                 .iter()
@@ -1115,3 +1115,11 @@ mod detached_receipt_tests;
 #[cfg(test)]
 #[path = "execute_dm_call_tests.rs"]
 mod dm_call_tests;
+
+#[cfg(test)]
+#[path = "execute_activity_tests.rs"]
+mod activity_tests;
+
+#[cfg(all(test, feature = "clustering"))]
+#[path = "execute_groupchat_receipt_tests.rs"]
+mod groupchat_receipt_tests;

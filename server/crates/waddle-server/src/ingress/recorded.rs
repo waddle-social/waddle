@@ -283,16 +283,12 @@ pub(super) fn external_in_recorded_audience(plan: &IngressPlan, effect: &Externa
             (owner.clone(), room.clone())
         }
         ExternalEffect::Direct(ExternalDirectEffect::NotificationActivity { owner, mutation }) => {
-            let EffectAuthorityKey::Conversation { conversation, .. } =
-                (IngressEffectIntent::NotificationActivityPreview {
+            return plan
+                .intents
+                .contains(&IngressEffectIntent::NotificationActivityPreview {
                     owner: owner.clone(),
                     mutation: mutation.clone(),
-                })
-                .authority_key()
-            else {
-                return true;
-            };
-            (owner.clone(), conversation)
+                });
         }
         _ => return true,
     };

@@ -555,6 +555,7 @@ async fn connection_reply_receipt_after_transport_write_with_remote(
                     recipient: OrderedRelayRecipient::BareJid(
                         "room@example.com".parse().expect("room"),
                     ),
+                    origin_epoch: waddle_xmpp::ownership::ClaimEpoch(0),
                     target_epoch: waddle_xmpp::ownership::ClaimEpoch(0),
                 },
                 sequence: OrderedRelaySequence::FIRST,
