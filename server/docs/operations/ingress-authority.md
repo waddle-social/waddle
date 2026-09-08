@@ -42,6 +42,8 @@ latency is a seconds histogram; confirm `le`-labelled buckets are present.
 | `ingress.tx.retries` | `ingress_tx_retries_total` | Retry pressure context |
 | `ingress.gc.runs{outcome}` | `ingress_gc_runs_total` | `IngressGcFailing` |
 | `ingress.gc.reclaimed_messages` | `ingress_gc_reclaimed_messages_total` | Reclamation progress |
+| `ingress.maintenance.runs{phase,outcome}` | `ingress_maintenance_runs_total` | `IngressMaintenanceFailing` |
+| `ingress.maintenance.terminalized_messages` | `ingress_maintenance_terminalized_messages_total` | Terminalization progress |
 | `ingress.tx.duration` | `ingress_tx_duration_seconds_bucket` (also `_sum`, `_count`) | `IngressTxSlow` |
 | `ingress.effects.unresolved{kind}` (local executions only) | `ingress_effects_unresolved_total` | `IngressUnresolvedEffectsGrowing` |
 | CNPG old non-terminal canonical messages by pending intent family | `cnpg_waddle_ingress_nonterminal_messages{kind}` | `IngressNonTerminalBacklog` |
@@ -81,9 +83,11 @@ plus scrape/evaluation delay). Its `kind` is the unreceipted intent family;
 `terminalization` means all receipts exist but terminalization itself is
 missing; `none` is the always-zero sentinel and never fires. A row counts once per pending family, even with several intents in
 that family, so summing families can count one row more than once. The 10m
-age threshold is a generous multiple of the 5s Phase C budget: investigate a
-receipt-completeness or terminalization regression (#1749). GC cannot reclaim
-these rows. Both CNPG queries run only on the primary.
+age threshold is a generous multiple of the 5s Phase C budget: investigate
+missing receipts or failing maintenance. Check
+`ingress.maintenance.runs{outcome!="complete"}` (Prometheus:
+`ingress_maintenance_runs_total{outcome!="complete"}`) and the pending pairs
+below. GC cannot reclaim these rows. Both CNPG queries run only on the primary.
 
 The dedicated ingress authority pool defaults to 4 connections per pod;
 `WADDLE_INGRESS_DB_POOL_SIZE` overrides it. Transactions and retries are
@@ -91,6 +95,34 @@ bounded (the soak measured 23 ms p99 transaction time). The connection
 budget is approximately 77 at a 3-pod rollout peak against 100 PostgreSQL
 connections, below the 80% alert threshold; re-derive it before raising
 the pool override.
+
+## Periodic maintenance
+
+Each pod runs bounded maintenance at startup, after committed decisions, and
+on a jittered 30-second periodic tick, including when no traffic arrives.
+The tick resets after a run. A partial, failed or timed-out pass schedules a
+continuation with exponential backoff from 1 second to 30 seconds; a complete
+pass resets that backoff.
+
+The lineage attestation gate covers the entire pass. Terminalization first
+pages receipt-complete, non-terminal messages older than a 60-second grace
+period in `(created_at, message_key)` order. Each row is locked and its receipt
+completeness rechecked before terminalization. Contended or failed rows leave
+the pass partial while pagination continues to later rows. Continuations retain
+the keyset cursor so a contended prefix cannot starve later rows, then wrap to
+retry skipped rows. Retention GC follows. Each phase has a timeout inside a hard pass
+deadline. Maintenance shares the bounded ingress pool and holds at most one
+connection at a time.
+
+`ingress.maintenance.runs` labels phases as `pass`, `terminalization`, or
+`retention_gc`, with outcomes `complete`, `partial`, `failed`, or `timed_out`.
+The `pass` series includes attestation and hard-deadline failures.
+`IngressMaintenanceFailing` warns on failed or timed-out passes in the last
+hour. A partial pass can be ordinary bounded backlog progress or skipped
+contended rows; use repeated partial outcomes together with the backlog and
+`ingress.maintenance.terminalized_messages` to distinguish draining from
+stalled work. All maintenance series are zero-seeded at startup.
+Existing `ingress.gc.*` series retain their GC-specific meaning and outcomes.
 
 ## Retention and unresolved effects
 
@@ -152,14 +184,16 @@ kubectl --context teleport.waddle.social-production -n waddle logs deployment/wa
 kubectl --context teleport.waddle.social-production -n waddle get cluster postgresql -o yaml
 ```
 
-In Grafana Explore, verify decisions, unresolved kinds, histogram buckets and
-GC; absent metrics are not evidence of healthy zero activity:
+In Grafana Explore, verify decisions, unresolved kinds, histogram buckets,
+maintenance and GC; absent metrics are not evidence of healthy zero activity:
 
 ```promql
 sum by (class) (rate(ingress_decisions_total[10m]))
 sum by (kind) (increase(ingress_effects_unresolved_total[1h]))
 histogram_quantile(0.99, sum by (le) (rate(ingress_tx_duration_seconds_bucket[10m])))
 sum by (outcome) (increase(ingress_gc_runs_total[1h]))
+sum by (phase, outcome) (increase(ingress_maintenance_runs_total[1h]))
+sum(increase(ingress_maintenance_terminalized_messages_total[1h]))
 max(cnpg_waddle_ingress_gc_eligible_messages)
 max(cnpg_waddle_ingress_gc_oldest_eligible_age_seconds)
 max by (kind) (cnpg_waddle_ingress_nonterminal_messages)

@@ -1,6 +1,14 @@
-//! Bounded retention collection for terminal ingress authority records.
+//! Periodic ingress maintenance scheduling and bounded retention collection.
 
-use std::{future::Future, pin::Pin, sync::Arc, time::Duration};
+use std::{
+    future::Future,
+    pin::Pin,
+    sync::{
+        atomic::{AtomicBool, Ordering},
+        Arc,
+    },
+    time::Duration,
+};
 
 use chrono::Utc;
 use futures::FutureExt;
@@ -12,7 +20,12 @@ use crate::ingress_substrate::{
     gc_expired_aliases, AliasGcBudget, AliasGcError, AliasGcFailure, AliasGcOutcome,
     AliasGcProgress,
 };
-use crate::ingress_uow::{IngressUnitOfWork, IngressUowError};
+use crate::ingress_uow::IngressUnitOfWork;
+
+use super::maintenance::{
+    run_maintenance_pass, run_maintenance_pass_with_cursor, MaintenanceBudget, MaintenanceCursor,
+    MaintenanceOutcome,
+};
 
 const RETENTION_GC_BUDGET: Duration = Duration::from_secs(2);
 /// Last-resort envelope around one GC run, sized from the longest path the
@@ -33,6 +46,7 @@ const RETENTION_GC_SCAN_TIMEOUT: Duration = Duration::from_secs(1);
 /// backlog drains without an external trigger while leaving the dedicated
 /// pool connection free between passes.
 pub(crate) const RETENTION_GC_PARTIAL_RETRY_DELAY: Duration = Duration::from_secs(1);
+const MAINTENANCE_RETRY_MAX: Duration = Duration::from_secs(30);
 
 #[derive(Clone, Copy)]
 pub(crate) struct RetentionGcBudget {
@@ -57,33 +71,35 @@ impl RetentionGcBudget {
 /// slots.  Triggers arrive through a `Notify`: `notify_one` stores exactly
 /// one permit while a run is in flight, so a trigger that lands mid-run is
 /// never lost and a burst of triggers coalesces into one follow-up run.
-/// The task makes one pass at startup (reclaiming whatever an earlier
-/// process left behind) and a `partial` run continues on its own after
-/// `partial_retry_delay`, so a backlog converges without external triggers.
+/// The task makes one pass at startup and on a jittered periodic tick. Every
+/// incomplete pass continues with exponential backoff starting at
+/// `partial_retry_delay`, so repair converges without external triggers.
 #[derive(Clone)]
 pub(crate) struct RetentionGcCoordinator {
     pub(crate) trigger: Arc<Notify>,
     pub(crate) run: Arc<dyn Fn() -> RetentionGcRunFuture + Send + Sync>,
     pub(crate) partial_retry_delay: Duration,
+    pub(crate) periodic_interval: Duration,
 }
 
-type RetentionGcRunFuture = Pin<
-    Box<dyn Future<Output = waddle_xmpp::telemetry::attributes::IngressGcOutcome> + Send + 'static>,
->;
+type RetentionGcRunFuture = Pin<Box<dyn Future<Output = MaintenanceOutcome> + Send + 'static>>;
 
 pub(crate) async fn run_retention_gc_coordinator(
     coordinator: RetentionGcCoordinator,
     cancellation: CancellationToken,
     force_stop: CancellationToken,
 ) {
-    use waddle_xmpp::telemetry::attributes::IngressGcOutcome;
-
     let mut pending = true;
+    let mut retry_delay = coordinator.partial_retry_delay;
+    let mut tick = tokio::time::interval(coordinator.periodic_interval);
+    tick.reset();
     loop {
         if !pending {
             tokio::select! {
                 biased;
                 () = cancellation.cancelled() => return,
+                () = force_stop.cancelled() => return,
+                _ = tick.tick() => {},
                 () = coordinator.trigger.notified() => {}
             }
         }
@@ -99,18 +115,22 @@ pub(crate) async fn run_retention_gc_coordinator(
             () = force_stop.cancelled() => return,
             outcome = (coordinator.run)() => outcome,
         };
-        pending = outcome == IngressGcOutcome::Partial;
+        tick.reset();
+        pending = outcome != MaintenanceOutcome::Complete;
         if pending {
             tokio::select! {
                 biased;
                 () = cancellation.cancelled() => return,
                 () = force_stop.cancelled() => return,
-                () = tokio::time::sleep(coordinator.partial_retry_delay) => {}
+                () = tokio::time::sleep(retry_delay) => {}
             }
             // Commits during the pass or pause are covered by the pending
             // continuation. Consume their coalesced permit only after the
             // pause, so active traffic cannot bypass the pool's rest period.
             let _ = coordinator.trigger.notified().now_or_never();
+            retry_delay = retry_delay.saturating_mul(2).min(MAINTENANCE_RETRY_MAX);
+        } else {
+            retry_delay = coordinator.partial_retry_delay;
         }
     }
 }
@@ -155,52 +175,36 @@ fn record_retention_gc_result(
 
 impl RetentionGcCoordinator {
     pub(crate) fn new(database: Database, uow: IngressUnitOfWork) -> Self {
+        let cursor = MaintenanceCursor::default();
+        let startup = Arc::new(AtomicBool::new(true));
         Self {
             trigger: Arc::new(Notify::new()),
             run: Arc::new(move || {
                 let database = database.clone();
                 let uow = uow.clone();
+                let cursor = cursor.clone();
+                let startup = startup.clone();
                 Box::pin(async move {
-                    run_attested_retention_gc(&database, &uow, RetentionGcBudget::DEFAULT).await
+                    if startup.swap(false, Ordering::SeqCst) {
+                        run_maintenance_pass(&database, &uow, MaintenanceBudget::DEFAULT).await
+                    } else {
+                        run_maintenance_pass_with_cursor(
+                            &database,
+                            &uow,
+                            MaintenanceBudget::DEFAULT,
+                            &cursor,
+                        )
+                        .await
+                    }
                 })
             }),
             partial_retry_delay: RETENTION_GC_PARTIAL_RETRY_DELAY,
+            periodic_interval: Duration::from_millis(rand::random_range(27_000..=33_000)),
         }
     }
 
     pub(crate) fn trigger(&self) {
         self.trigger.notify_one();
-    }
-}
-
-/// Re-probe the same lineage and epoch policy used by admission before every
-/// pass, including the immediate startup pass. An authority may boot unattested,
-/// but its collector never reaches the bare database until this gate succeeds.
-async fn run_attested_retention_gc(
-    database: &Database,
-    uow: &IngressUnitOfWork,
-    budget: RetentionGcBudget,
-) -> waddle_xmpp::telemetry::attributes::IngressGcOutcome {
-    use waddle_xmpp::telemetry::attributes::IngressGcOutcome;
-    let probe = tokio::time::timeout(budget.hard_deadline, async {
-        uow.begin_with_timeouts(budget.lock_timeout, budget.statement_timeout)
-            .await?
-            .commit()
-            .await
-    })
-    .await;
-    match probe {
-        Ok(Ok(())) => run_retention_gc_with_budget(database, budget).await,
-        Ok(Err(error)) => {
-            let outcome = match error {
-                IngressUowError::Lineage(_) => IngressGcOutcome::Unattested,
-                IngressUowError::Timeout => IngressGcOutcome::TimedOut,
-                _ => IngressGcOutcome::Failed,
-            };
-            tracing::warn!(%error, "ingress retention GC attestation gate failed");
-            record_retention_gc_result(outcome, 0)
-        }
-        Err(_) => record_retention_gc_result(IngressGcOutcome::TimedOut, 0),
     }
 }
 
@@ -329,7 +333,7 @@ mod tests {
         )
         .await
         .expect("unattested authority boots");
-        assert_eq!((authority.gc.run)().await, IngressGcOutcome::Unattested);
+        assert_eq!((authority.gc.run)().await, MaintenanceOutcome::Failed);
         let connection = database.guard().await.expect("read");
         let mut rows = connection
             .query("SELECT COUNT(*) FROM ingress_messages", ())
@@ -352,8 +356,8 @@ mod tests {
         // The exact same retained row is eligible once the policy attests.
         let uow = IngressUnitOfWork::open(database.clone(), enrolled).expect("uow");
         assert_eq!(
-            run_attested_retention_gc(&database, &uow, RetentionGcBudget::DEFAULT).await,
-            IngressGcOutcome::Completed
+            run_maintenance_pass(&database, &uow, MaintenanceBudget::DEFAULT).await,
+            MaintenanceOutcome::Complete
         );
         let connection = database.guard().await.expect("read");
         let mut rows = connection
@@ -432,6 +436,7 @@ mod tests {
             trigger: Arc::new(Notify::new()),
             run: Arc::new(|| panic!("cancelled coordinator must not start a pass")),
             partial_retry_delay: RETENTION_GC_PARTIAL_RETRY_DELAY,
+            periodic_interval: Duration::from_secs(30),
         };
         run_retention_gc_coordinator(coordinator, cancellation, CancellationToken::new()).await;
     }
@@ -455,13 +460,14 @@ mod tests {
                     // A commit while the first pass is running leaves a
                     // stored permit that must not short-circuit the pause.
                     run_trigger.notify_one();
-                    IngressGcOutcome::Partial
+                    MaintenanceOutcome::Partial
                 } else {
-                    IngressGcOutcome::Completed
+                    MaintenanceOutcome::Complete
                 };
                 Box::pin(async move { outcome })
             }),
             partial_retry_delay: Duration::from_secs(1),
+            periodic_interval: Duration::from_secs(30),
         };
         (coordinator, receiver)
     }
@@ -512,5 +518,112 @@ mod tests {
             assert_eq!(started.elapsed(), Duration::ZERO);
             assert!(runs.try_recv().is_err(), "cancellation started a new pass");
         }
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn maintenance_coordinator_periodic_tick_runs_without_traffic() {
+        let (sender, mut runs) = tokio::sync::mpsc::unbounded_channel();
+        let coordinator = RetentionGcCoordinator {
+            trigger: Arc::new(Notify::new()),
+            run: Arc::new(move || {
+                sender.send(()).expect("observe maintenance pass");
+                Box::pin(async { MaintenanceOutcome::Complete })
+            }),
+            partial_retry_delay: Duration::from_secs(1),
+            periodic_interval: Duration::from_secs(30),
+        };
+        let cancellation = CancellationToken::new();
+        let task = tokio::spawn(run_retention_gc_coordinator(
+            coordinator,
+            cancellation.clone(),
+            CancellationToken::new(),
+        ));
+        runs.recv().await.expect("startup pass");
+        tokio::time::advance(Duration::from_secs(29)).await;
+        tokio::task::yield_now().await;
+        assert!(runs.try_recv().is_err());
+        tokio::time::advance(Duration::from_secs(1)).await;
+        runs.recv()
+            .await
+            .expect("periodic pass without notification");
+        cancellation.cancel();
+        task.await.expect("coordinator exits");
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn maintenance_coordinator_retries_every_failure_with_capped_backoff_and_reset() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+
+        let (sender, mut runs) = tokio::sync::mpsc::unbounded_channel();
+        let count = AtomicUsize::new(0);
+        let coordinator = RetentionGcCoordinator {
+            trigger: Arc::new(Notify::new()),
+            run: Arc::new(move || {
+                let run = count.fetch_add(1, Ordering::SeqCst);
+                sender.send(run).expect("observe maintenance pass");
+                Box::pin(async move {
+                    match run {
+                        0 => MaintenanceOutcome::Partial,
+                        1 => MaintenanceOutcome::Failed,
+                        7 | 9 => MaintenanceOutcome::Complete,
+                        _ => MaintenanceOutcome::TimedOut,
+                    }
+                })
+            }),
+            partial_retry_delay: Duration::from_secs(1),
+            periodic_interval: Duration::from_secs(300),
+        };
+        let trigger = coordinator.trigger.clone();
+        let cancellation = CancellationToken::new();
+        let task = tokio::spawn(run_retention_gc_coordinator(
+            coordinator,
+            cancellation.clone(),
+            CancellationToken::new(),
+        ));
+        assert_eq!(runs.recv().await, Some(0));
+        for (index, delay) in [1, 2, 4, 8, 16, 30, 30].into_iter().enumerate() {
+            tokio::time::advance(Duration::from_secs(delay) - Duration::from_millis(1)).await;
+            tokio::task::yield_now().await;
+            assert!(
+                runs.try_recv().is_err(),
+                "run {} bypassed backoff",
+                index + 1
+            );
+            tokio::time::advance(Duration::from_millis(1)).await;
+            assert_eq!(runs.recv().await, Some(index + 1));
+        }
+        trigger.notify_one();
+        assert_eq!(runs.recv().await, Some(8));
+        tokio::time::advance(Duration::from_secs(1)).await;
+        assert_eq!(runs.recv().await, Some(9), "complete resets retry delay");
+        cancellation.cancel();
+        task.await.expect("coordinator exits");
+    }
+
+    #[tokio::test]
+    async fn maintenance_coordinator_force_stop_cancels_in_flight_pass() {
+        let started = Arc::new(Notify::new());
+        let pass_started = started.clone();
+        let coordinator = RetentionGcCoordinator {
+            trigger: Arc::new(Notify::new()),
+            run: Arc::new(move || {
+                pass_started.notify_one();
+                Box::pin(std::future::pending())
+            }),
+            partial_retry_delay: Duration::from_secs(1),
+            periodic_interval: Duration::from_secs(30),
+        };
+        let force_stop = CancellationToken::new();
+        let task = tokio::spawn(run_retention_gc_coordinator(
+            coordinator,
+            CancellationToken::new(),
+            force_stop.clone(),
+        ));
+        started.notified().await;
+        force_stop.cancel();
+        tokio::time::timeout(Duration::from_millis(100), task)
+            .await
+            .expect("forced shutdown cancels the in-flight pass")
+            .expect("coordinator exits");
     }
 }

@@ -8,12 +8,16 @@ mod commit_room;
 mod commit_stream;
 pub mod decision;
 mod durable;
+pub(crate) use durable::receipt_key;
 pub mod execute;
+mod execute_uow;
 mod frame_receipt_retry;
 pub(crate) mod gc;
 pub mod identity;
+pub(crate) mod maintenance;
 mod receipts;
 mod recorded;
+pub use recorded::RouteProgress;
 mod rejection;
 pub mod restamp;
 pub mod submission;
@@ -574,6 +578,8 @@ fn non_advancing(class: IngressDecisionClass) -> IngressDecision {
         external_dependencies: Vec::new(),
         external: Vec::new(),
         external_receipts: Vec::new(),
+        arm_owned_receipts: Vec::new(),
+        route_progress: Vec::new(),
         receipts_pending: Vec::new(),
     }
 }

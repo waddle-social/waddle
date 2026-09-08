@@ -39,6 +39,9 @@ pub struct IngressDecision {
     pub external_dependencies: Vec<Vec<PlanEffectDependency>>,
     /// Receipt identities fulfilled by each external effect, in the same order.
     pub external_receipts: Vec<Vec<EffectReceiptKey>>,
+    /// Exact receipt union for effect indices handled by a transactional arm.
+    pub arm_owned_receipts: Vec<EffectReceiptKey>,
+    pub route_progress: Vec<super::recorded::RouteProgress>,
     pub receipts_pending: Vec<EffectReceiptKey>,
 }
 

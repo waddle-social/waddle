@@ -11,6 +11,8 @@ mod durable_more;
 mod error;
 mod repositories;
 mod retry;
+mod settlement;
+pub(crate) use settlement::settle_recorded;
 
 pub use error::IngressUowError;
 pub use repositories::{

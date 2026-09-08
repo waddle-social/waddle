@@ -96,3 +96,9 @@ mod retention;
 
 #[path = "ingress_cases/recipient_drift.rs"]
 mod recipient_drift;
+
+#[path = "ingress_cases/settlement.rs"]
+mod settlement;
+
+#[path = "ingress_cases/maintenance.rs"]
+mod maintenance;

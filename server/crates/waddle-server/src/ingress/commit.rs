@@ -473,6 +473,17 @@ async fn commit_attempt(
         }
     }
     let external_receipts = super::durable::external_receipts(&external, &intents)?;
+    let route_progress = Vec::new();
+    let mut arm_owned_receipts = Vec::new();
+    for (index, effect) in external.iter().enumerate() {
+        if super::execute_uow::owns(effect, &route_progress) {
+            for receipt in &external_receipts[index] {
+                if !arm_owned_receipts.contains(receipt) {
+                    arm_owned_receipts.push(receipt.clone());
+                }
+            }
+        }
+    }
     let decision = IngressDecision {
         class,
         message_key: Some(key),
@@ -487,6 +498,8 @@ async fn commit_attempt(
         external_dependencies,
         external,
         external_receipts,
+        arm_owned_receipts,
+        route_progress,
         receipts_pending: pending,
     };
     commit_transaction(tx).await?;

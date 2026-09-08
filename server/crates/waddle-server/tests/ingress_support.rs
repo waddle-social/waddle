@@ -42,6 +42,10 @@ impl IngressFixture {
     }
 
     pub async fn postgres(test_name: &str) -> Option<Self> {
+        Self::postgres_with_pool(test_name, 10).await
+    }
+
+    pub async fn postgres_with_pool(test_name: &str, pool_size: u32) -> Option<Self> {
         let Ok(database_url) = std::env::var("WADDLE_TEST_POSTGRES_URL") else {
             eprintln!("skipping {test_name}: WADDLE_TEST_POSTGRES_URL not set");
             return None;
@@ -67,7 +71,8 @@ impl IngressFixture {
             .clear()
             .extend_pairs(retained)
             .append_pair("options", &format!("-c search_path={schema}"));
-        let config = DatabaseConfig::new(DatabaseDriver::Postgres, url.to_string());
+        let mut config = DatabaseConfig::new(DatabaseDriver::Postgres, url.to_string());
+        config.pool_size = pool_size;
         let db = Database::from_config("ingress-test", &config)
             .await
             .expect("Postgres database");

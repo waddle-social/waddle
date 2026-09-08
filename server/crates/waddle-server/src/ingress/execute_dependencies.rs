@@ -65,7 +65,7 @@ pub(super) fn permits_dependents(effect: &ExternalEffect, outcome: &EffectOutcom
             EffectOutcome::Completed
         ) | (
             ExternalEffect::Room(crate::server::routes::interpret::effects::room::ExternalRoomEffect::ArchiveAfterPin { .. }),
-            EffectOutcome::Archive(Ok(_))
+            EffectOutcome::Archive(Ok(_)) | EffectOutcome::Settled(crate::server::routes::interpret::effects::SettledOutcome { completion: crate::server::routes::interpret::effects::SettledCompletion::Complete, .. })
         ) |
         (
             ExternalEffect::RoomMembershipMutation(_),

@@ -8,13 +8,15 @@ use waddle_xmpp::{
     registry::ConnectionRegistry,
 };
 
-async fn invite_delivered(fixture: IngressFixture) {
+async fn invite_delivered(fixture: IngressFixture, live: bool) {
     let state = crate::server::routes::websocket::tests::create_test_websocket_state().await;
     let registry = ConnectionRegistry::new();
     let recipient: jid::BareJid = "juliet@example.com".parse().expect("recipient");
     let resource = recipient.with_resource_str("phone").expect("resource");
     let (tx, mut rx) = tokio::sync::mpsc::channel(4);
-    registry.register(resource.clone(), tx);
+    if live {
+        registry.register(resource.clone(), tx);
+    }
     let mut submission = fixture.submission(Some("online-invite"), "invitation");
     let message = Box::new(submission.plan.sanitized_message.clone());
     let row_id = PendingRowId::fresh();
@@ -40,7 +42,7 @@ async fn invite_delivered(fixture: IngressFixture) {
             message: message.clone(),
             fallback: PendingRow {
                 id: row_id,
-                recipient,
+                recipient: recipient.clone(),
                 original_receipt_at: chrono::Utc::now(),
                 payload: PendingPayload::Transient(message),
                 flushed_in_session: None,
@@ -53,6 +55,10 @@ async fn invite_delivered(fixture: IngressFixture) {
         .await
         .expect("commit");
     assert_eq!(decision.external_receipts[0].len(), 2);
+    assert!(
+        decision.arm_owned_receipts.is_empty(),
+        "specialized invitation delivery keeps generic settlement"
+    );
     let mut deps = Deps::new(&registry, "example.com");
     deps.web_socket_state = Some(&state);
     let report = execute_effects(
@@ -65,9 +71,26 @@ async fn invite_delivered(fixture: IngressFixture) {
     )
     .await;
     assert_eq!(report.outcomes[0].1, ExternalOutcome::Done);
-    assert!(rx.try_recv().is_ok(), "live invitation delivered");
+    assert_eq!(rx.try_recv().is_ok(), live, "live invitation delivery");
+    assert_eq!(
+        state
+            .deps
+            .protocol
+            .pending_delivery_storage
+            .count(&recipient)
+            .await
+            .expect("queued invitations"),
+        u32::from(!live),
+        "an unavailable live resource uses the frozen pending fallback"
+    );
     assert!(report.receipt_failures.is_empty());
     assert_eq!(fixture.count("ingress_effect_receipts").await, 2);
+    assert_eq!(
+        fixture
+            .count("ingress_messages WHERE terminal_at IS NOT NULL")
+            .await,
+        1
+    );
     assert!(terminalize_if_complete(
         &fixture.uow,
         decision.message_key.expect("canonical message")
@@ -79,12 +102,24 @@ async fn invite_delivered(fixture: IngressFixture) {
 
 #[tokio::test]
 async fn sqlite_online_invite_receipts_live_route_and_fallback() {
-    invite_delivered(IngressFixture::sqlite().await).await;
+    invite_delivered(IngressFixture::sqlite().await, true).await;
 }
 #[tokio::test]
 async fn postgres_online_invite_receipts_live_route_and_fallback() {
     if let Some(fixture) = IngressFixture::postgres("online_invite_receipts").await {
-        invite_delivered(fixture).await;
+        invite_delivered(fixture, true).await;
+    }
+}
+
+#[tokio::test]
+async fn sqlite_invite_offline_fallback_terminalizes_generically() {
+    invite_delivered(IngressFixture::sqlite().await, false).await;
+}
+
+#[tokio::test]
+async fn postgres_invite_offline_fallback_terminalizes_generically() {
+    if let Some(fixture) = IngressFixture::postgres("offline_invite_receipts").await {
+        invite_delivered(fixture, false).await;
     }
 }
 

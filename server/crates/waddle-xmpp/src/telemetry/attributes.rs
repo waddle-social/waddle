@@ -708,6 +708,62 @@ impl MetricAttribute for IngressGcOutcome {
     }
 }
 
+/// `phase` — the bounded ingress maintenance work being measured.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum IngressMaintenancePhase {
+    Pass,
+    Terminalization,
+    RetentionGc,
+}
+
+impl IngressMaintenancePhase {
+    pub const ALL: [Self; 3] = [Self::Pass, Self::Terminalization, Self::RetentionGc];
+}
+
+impl sealed::Sealed for IngressMaintenancePhase {}
+impl MetricAttribute for IngressMaintenancePhase {
+    fn key(&self) -> &'static str {
+        "phase"
+    }
+
+    fn value(&self) -> &'static str {
+        match self {
+            Self::Pass => "pass",
+            Self::Terminalization => "terminalization",
+            Self::RetentionGc => "retention_gc",
+        }
+    }
+}
+
+/// `outcome` — how an ingress maintenance phase or whole pass ended.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum IngressMaintenanceOutcome {
+    Complete,
+    Partial,
+    Failed,
+    TimedOut,
+}
+
+impl IngressMaintenanceOutcome {
+    pub const ALL: [Self; 4] = [Self::Complete, Self::Partial, Self::Failed, Self::TimedOut];
+}
+
+impl sealed::Sealed for IngressMaintenanceOutcome {}
+impl MetricAttribute for IngressMaintenanceOutcome {
+    fn key(&self) -> &'static str {
+        "outcome"
+    }
+
+    fn value(&self) -> &'static str {
+        match self {
+            Self::Complete => "complete",
+            Self::Partial => "partial",
+            Self::Failed => "failed",
+            Self::TimedOut => "timed_out",
+        }
+    }
+}
+
 /// `condition` — the RFC 6120 §8.3.3 defined stanza-error conditions,
 /// reusing the crate's existing typed enum (its `as_str()` already
 /// yields the hyphenated wire names). Re-exported here so metric call

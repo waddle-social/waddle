@@ -54,6 +54,8 @@ fn decision(
         external,
         external_dependencies,
         external_receipts: vec![vec![]; count],
+        arm_owned_receipts: Vec::new(),
+        route_progress: Vec::new(),
         receipts_pending: vec![],
     }
 }

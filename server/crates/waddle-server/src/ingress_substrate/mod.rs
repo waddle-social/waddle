@@ -1,6 +1,8 @@
 //! Transactional ingress identity storage for PostgreSQL and SQLite.
 
 mod authority;
+mod maintenance;
+pub use maintenance::receipt_complete_nonterminal_keys;
 #[cfg(test)]
 mod authority_tests;
 pub use authority::{
@@ -83,6 +85,8 @@ pub enum IngressSubstrateError {
     Database { retry_class: DbRetryClass },
     #[error("ingress substrate returned a malformed stored message key")]
     InvalidStoredMessageKey,
+    #[error("ingress substrate returned a malformed stored timestamp")]
+    InvalidStoredTimestamp,
     #[error("ingress substrate returned a malformed semantic digest")]
     InvalidStoredDigest,
     #[error("ingress alias disappeared during concurrent resolution")]

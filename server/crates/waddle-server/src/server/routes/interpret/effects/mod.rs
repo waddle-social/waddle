@@ -7,7 +7,10 @@ mod immediate;
 mod outcome;
 pub mod room;
 mod room_immediate;
-pub use outcome::{AppliedDurableEffects, DurableOutcome, EffectOutcome, ProjectionRef};
+pub use outcome::{
+    AppliedDurableEffects, DurableOutcome, EffectOutcome, ProjectionRef, SettledCompletion,
+    SettledOutcome,
+};
 mod plan;
 mod planned;
 mod policy;

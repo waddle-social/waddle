@@ -16,6 +16,16 @@ use waddle_xmpp::ingress::{
     InboxProjectionMutation, IngressEffectIntent, RoomPinMutation,
 };
 
+/// Frozen fanout authority and the resources already durably completed.
+#[derive(Clone, Debug)]
+pub struct RouteProgress {
+    pub receipt: super::decision::EffectReceiptKey,
+    pub recipient: jid::BareJid,
+    pub fanout: Vec<jid::FullJid>,
+    pub route_identity: waddle_xmpp::ingress::EffectMessageIdentity,
+    pub completed: Vec<jid::FullJid>,
+}
+
 /// Reconciliation preserves recorded payloads when the policy or audience
 /// changes. Both application and receipt identity must use those same payloads.
 /// Recorded-only obligations stay pending unless the plan contains their work.

@@ -722,6 +722,9 @@ impl EffectReceiptRepository {
         kind: EffectReceiptKind,
         hash: &[u8; 32],
     ) -> Result<(), IngressUowError> {
+        #[cfg(test)]
+        let _ =
+            super::settlement::POOLED_RECEIPT_WRITES.try_with(|count| count.set(count.get() + 1));
         ingress_substrate::record_receipt_pooled(db, message_key, kind, hash)
             .await
             .map_err(Into::into)
