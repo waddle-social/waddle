@@ -29,6 +29,22 @@ pub struct OrderedRelayRouteOrigin {
     pub handoff: Option<super::handoff::OrderedRelayHandoffHandle>,
 }
 
+#[cfg(feature = "clustering")]
+impl OrderedRelayRouteOrigin {
+    pub(crate) fn room(room: &jid::BareJid) -> Self {
+        let entity = waddle_xmpp::ownership::Entity::new(
+            waddle_xmpp::ownership::EntityType::RoomActor,
+            room.to_string(),
+        );
+        Self {
+            kind: OrderedRelayRouteOriginKind::Entity(entity.clone()),
+            sender_entity: entity,
+            inbound_sequence: 0,
+            handoff: None,
+        }
+    }
+}
+
 /// Outcome of interpreting a batch of [`OutboundEvent`]s.
 ///
 /// The WebSocket transport uses `frames` to decide what to write back to

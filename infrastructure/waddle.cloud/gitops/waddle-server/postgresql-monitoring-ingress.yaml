@@ -172,3 +172,90 @@ data:
         - open_streams:
             usage: GAUGE
             description: Number of ingress stream records currently open.
+
+    waddle_ingress_nonterminal:
+      target_databases: ["waddle"]
+      query: |
+        -- The existing partial terminal_at index covers terminal rows only.
+        -- Filter canonical rows first; the uncorrelated receipt anti-join lets
+        -- PostgreSQL hash pending obligations instead of correlated subplans.
+        WITH old_nonterminal AS (
+          SELECT message_key
+          FROM ingress_messages
+          WHERE terminal_at IS NULL
+            AND created_at <= now() - interval '10 minutes'
+        ),
+        pending AS (
+          SELECT intent.message_key,
+            CASE intent.kind
+              WHEN 0 THEN 'archive'
+              WHEN 1 THEN 'route_direct'
+              WHEN 2 THEN 'route_muc'
+              WHEN 3 THEN 'route_occupant_pm'
+              WHEN 4 THEN 'recipient_sm_append'
+              WHEN 5 THEN 'carbons'
+              WHEN 6 THEN 'inbox_project'
+              WHEN 7 THEN 'notification_activity_preview'
+              WHEN 8 THEN 'call_signal'
+              WHEN 9 THEN 'pin'
+              WHEN 10 THEN 'extension'
+              WHEN 11 THEN 'error_reply'
+              WHEN 12 THEN 'dispatch_to_room_remote'
+              WHEN 13 THEN 'room_subject_mutation'
+              WHEN 14 THEN 'retraction_tombstone'
+              WHEN 15 THEN 'dm_pin_mutation'
+              WHEN 16 THEN 'group_dm_membership_grant'
+              WHEN 17 THEN 'group_dm_invite_ledger'
+              WHEN 18 THEN 'link_preview_media_ref'
+              WHEN 19 THEN 'muc_invite_membership_grant'
+              WHEN 20 THEN 'muc_invite_ledger'
+              WHEN 21 THEN 'groupchat_notification_recovery'
+              WHEN 22 THEN 'pending_delivery'
+              WHEN 23 THEN 'tombstone_replay_deletion'
+              WHEN 24 THEN 'relay_carbons'
+              WHEN 25 THEN 'room_observer'
+              WHEN 26 THEN 'dm_call_thread_state'
+              ELSE 'kind_' || intent.kind::text
+            END AS kind
+          FROM ingress_effect_intents intent
+          JOIN old_nonterminal message ON message.message_key = intent.message_key
+          LEFT JOIN ingress_effect_receipts receipt
+            ON receipt.message_key = intent.message_key
+            AND receipt.kind = intent.kind
+            AND receipt.semantic_identity_hash = intent.semantic_identity_hash
+          WHERE receipt.message_key IS NULL
+        ),
+        obligations AS (
+          SELECT message_key, kind FROM pending
+          UNION ALL
+          SELECT message.message_key, 'terminalization' AS kind
+          FROM old_nonterminal message
+          LEFT JOIN pending ON pending.message_key = message.message_key
+          WHERE pending.message_key IS NULL
+        )
+        SELECT kind, count(DISTINCT message_key) AS messages
+        FROM obligations
+        GROUP BY kind
+      primary: true
+      metrics:
+        - kind:
+            usage: LABEL
+            description: Pending intent kind family, or terminalization when all receipts are complete.
+        - messages:
+            usage: GAUGE
+            description: Distinct canonical messages non-terminal for at least ten minutes per pending kind family.
+
+    waddle_ingress_nonterminal_age:
+      target_databases: ["waddle"]
+      query: |
+        -- The terminal-only partial index cannot cover this predicate.
+        -- Always emit one row, including zero when no old non-terminal row exists.
+        SELECT coalesce(extract(epoch FROM now() - min(created_at)), 0) AS oldest_seconds
+        FROM ingress_messages
+        WHERE terminal_at IS NULL
+          AND created_at <= now() - interval '10 minutes'
+      primary: true
+      metrics:
+        - oldest_seconds:
+            usage: GAUGE
+            description: Age in seconds of the oldest canonical message non-terminal for at least ten minutes, or zero.

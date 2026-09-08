@@ -3183,6 +3183,42 @@ enum StoredEffectIntent {
     },
 }
 
+impl IngressEffectIntent {
+    /// Stable storage-code families used by ingress monitoring and operational SQL.
+    /// Shared codes intentionally name both variants rather than just one member.
+    pub fn storage_kind_names() -> &'static [(i32, &'static str)] {
+        &[
+            (0, "archive"),
+            (1, "route_direct"),
+            (2, "route_muc"),
+            (3, "route_occupant_pm"),
+            (4, "recipient_sm_append"),
+            (5, "carbons"),
+            (6, "inbox_project"),
+            (7, "notification_activity_preview"),
+            (8, "call_signal"),
+            (9, "pin"),
+            (10, "extension"),
+            (11, "error_reply"),
+            (12, "dispatch_to_room_remote"),
+            (13, "room_subject_mutation"),
+            (14, "retraction_tombstone"),
+            (15, "dm_pin_mutation"),
+            (16, "group_dm_membership_grant"),
+            (17, "group_dm_invite_ledger"),
+            (18, "link_preview_media_ref"),
+            (19, "muc_invite_membership_grant"),
+            (20, "muc_invite_ledger"),
+            (21, "groupchat_notification_recovery"),
+            (22, "pending_delivery"),
+            (23, "tombstone_replay_deletion"),
+            (24, "relay_carbons"),
+            (25, "room_observer"),
+            (26, "dm_call_thread_state"),
+        ]
+    }
+}
+
 impl StoredEffectIntent {
     fn kind(&self) -> i32 {
         match self {
@@ -4228,6 +4264,28 @@ mod tests {
         };
         assert_ne!(intent.semantic_key(), next.semantic_key());
         assert_ne!(intent.authority_key(), next.authority_key());
+    }
+
+    #[test]
+    fn every_sample_storage_kind_has_its_variant_family_name() {
+        for intent in samples() {
+            let encoded = intent.encode_v1().expect("encode sample intent");
+            let payload: serde_json::Value =
+                serde_json::from_slice(encoded.payload()).expect("decode sample payload");
+            let variant = payload["intent"]["type"]
+                .as_str()
+                .expect("snake_case stored variant name");
+            let family = match variant {
+                "archive_authoritative" | "system_message_archive" => "archive",
+                "route_muc_groupchat" | "route_muc_system_broadcast" => "route_muc",
+                other => other,
+            };
+            assert!(
+                IngressEffectIntent::storage_kind_names().contains(&(encoded.kind(), family)),
+                "missing storage kind {} family {family} for {variant}",
+                encoded.kind()
+            );
+        }
     }
 
     #[test]

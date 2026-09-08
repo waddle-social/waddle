@@ -167,12 +167,23 @@ async fn reserved_relay_unavailable_cannot_remove_a_replacement_generation() {
 }
 
 #[test]
-fn full_jid_bridge_rejects_groupchat_payloads() {
+fn full_jid_bridge_accepts_only_full_jid_groupchat_copies() {
     let target = target_full();
     let mut message = Message::new(Some(jid::Jid::from(target.clone())));
     message.type_ = xmpp_parsers::message::MessageType::Groupchat;
 
-    assert!(payload_for_recipient(jid::Jid::from(target), &Stanza::Message(message)).is_none());
+    let stanza = Stanza::Message(message);
+    assert!(matches!(
+        payload_for_recipient(jid::Jid::from(target.clone()), &stanza),
+        Some(OrderedRelayPayload::Message { recipient, .. }) if recipient == target
+    ));
+    let mut bare_message = Message::new(Some(jid::Jid::from(target.to_bare())));
+    bare_message.type_ = xmpp_parsers::message::MessageType::Groupchat;
+    assert!(payload_for_recipient(
+        jid::Jid::from(target.to_bare()),
+        &Stanza::Message(bare_message)
+    )
+    .is_none());
 }
 #[tokio::test]
 async fn unwired_bridge_reports_unreachable_without_advancing_effects() {

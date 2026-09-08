@@ -253,8 +253,12 @@ impl OrderedRelayPayload {
 
     fn matches_stanza_kind(&self) -> bool {
         match (self, self.stanza()) {
-            (OrderedRelayPayload::Message { .. }, waddle_xmpp::Stanza::Message(message)) => {
+            (
+                OrderedRelayPayload::Message { recipient, .. },
+                waddle_xmpp::Stanza::Message(message),
+            ) => {
                 message.type_ != xmpp_parsers::message::MessageType::Groupchat
+                    || (recipient.is_full() && message.to.as_ref() == Some(recipient))
             }
             (OrderedRelayPayload::Iq { .. }, waddle_xmpp::Stanza::Iq(_)) => true,
             (OrderedRelayPayload::Presence { .. }, waddle_xmpp::Stanza::Presence(_)) => true,

@@ -54,7 +54,8 @@ pub(in super::super) fn payload_for_recipient(
 ) -> Option<OrderedRelayPayload> {
     match stanza {
         Stanza::Message(message)
-            if message.type_ == xmpp_parsers::message::MessageType::Groupchat =>
+            if message.type_ == xmpp_parsers::message::MessageType::Groupchat
+                && recipient.is_bare() =>
         {
             None
         }

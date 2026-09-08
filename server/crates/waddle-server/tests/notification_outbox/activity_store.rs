@@ -116,12 +116,12 @@ async fn record_chat_state_does_not_regress_on_stale_write() {
 }
 
 /// XEP-0085 `<gone/>` is an explicit inactivity signal. The writer
-/// MUST zero `last_active_at_ms` regardless of how recent the prior
+/// MUST zero `last_active_at_ms` when newer than the prior
 /// activity was so the T1 XEP-0513 `<active/>` filter immediately
 /// stops treating the user as engaged in the conversation. The
 /// chat-state token is preserved as `gone` for diagnostics.
 #[tokio::test]
-async fn record_chat_state_gone_zeroes_last_active_unconditionally() {
+async fn record_chat_state_gone_zeroes_older_activity() {
     let store = store().await;
     let owner = bare("alice@example.com");
     let conversation = bare("room@muc.example.com");
@@ -136,9 +136,7 @@ async fn record_chat_state_gone_zeroes_last_active_unconditionally() {
         .expect("read seed")
         .expect("row");
     assert_eq!(seeded.last_active_at_ms, 5_000);
-    // <gone/> at t=6000 MUST zero last_active_at_ms even though
-    // the prior write is more recent than this would otherwise be
-    // allowed under the monotonic clamp.
+    // A later <gone/> at t=6000 invalidates the prior activity window.
     store
         .record_chat_state_gone(&owner, &conversation, 6_000)
         .await
@@ -150,7 +148,7 @@ async fn record_chat_state_gone_zeroes_last_active_unconditionally() {
         .expect("row");
     assert_eq!(
         after.last_active_at_ms, 0,
-        "<gone/> MUST unconditionally regress last_active_at_ms to 0",
+        "a newer <gone/> MUST clear last_active_at_ms to 0",
     );
     assert_eq!(
         after.last_chat_state,

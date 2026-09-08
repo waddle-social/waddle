@@ -16,7 +16,7 @@ use waddle_xmpp::ownership::{
 fn changed_muc_proxy_wire_shapes_have_new_remote_message_ids() {
     assert_eq!(
         <RelayActor as kameo::remote::RemoteMessage<RelayDeliverOrdered>>::REMOTE_ID,
-        "waddle.clustering.relay.deliver_ordered.v8"
+        "waddle.clustering.relay.deliver_ordered.v9"
     );
     assert_eq!(
         <RelayActor as kameo::remote::RemoteMessage<RelayRouteRemoteResourceStanza>>::REMOTE_ID,

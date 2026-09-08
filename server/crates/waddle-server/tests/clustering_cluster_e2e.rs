@@ -2359,6 +2359,322 @@ async fn muc_join_routes_to_foreign_room_owner() {
     drop(client_a);
 }
 
+/// #1749: both local-owner fan-out and relayed ingress must deliver the
+/// XEP-0045 §7.4 reflection and receipt every canonical obligation.
+#[tokio::test]
+async fn groupchat_fanout_reaches_foreign_node_occupant_and_terminalizes() {
+    let Ok(postgres_url) = std::env::var("WADDLE_TEST_POSTGRES_URL") else {
+        eprintln!("skipping groupchat fan-out regression: WADDLE_TEST_POSTGRES_URL not set");
+        return;
+    };
+    let _serial = cluster_e2e_serial_lock().lock().await;
+    let db = open_control_db(&postgres_url).await;
+    let pool = generate_pool();
+    reset_and_enroll(&db, &pool).await;
+    reset_node_lease_tables(&db).await;
+    let port_a = free_tcp_port();
+    let port_b = free_tcp_port();
+    let (server_a, _node_a, _peer_a) =
+        spawn_cluster_server(&postgres_url, &pool.pool_env, port_a, &[port_b]).await;
+    let (server_b, _node_b, _peer_b) =
+        spawn_cluster_server(&postgres_url, &pool.pool_env, port_b, &[port_a]).await;
+    wait_for_readiness(&server_a, true, Duration::from_secs(15)).await;
+    wait_for_readiness(&server_b, true, Duration::from_secs(15)).await;
+
+    // Use the database clock, preserving sub-millisecond precision. Never
+    // include old non-terminal rows left by another test in the shared DB.
+    let started_at: String = {
+        let conn = db.guard().await.expect("test start DB guard");
+        let mut rows = conn
+            .query("SELECT now()::text", ())
+            .await
+            .expect("DB clock");
+        rows.next()
+            .await
+            .expect("clock query")
+            .expect("clock row")
+            .get(0)
+            .expect("clock timestamp")
+    };
+    let room: jid::BareJid = format!("fanout-{}@muc.localhost", uuid::Uuid::new_v4())
+        .parse()
+        .expect("unique room JID");
+    let owner = room
+        .with_resource_str("owner-a")
+        .expect("owner occupant JID");
+    let joiner = room
+        .with_resource_str("joiner-b")
+        .expect("joiner occupant JID");
+    let mut client_a = WsXmppClient::connect_and_auth(
+        &server_a.ws_url(),
+        "localhost",
+        "admin",
+        server_b.fixed_account_password(),
+        &format!("fanout-a-{}", uuid::Uuid::new_v4()),
+    )
+    .await
+    .expect("client A authenticates on node A");
+    join_fanout_room(&mut client_a, &room, "owner-a").await;
+    let mut client_b = WsXmppClient::connect_and_auth(
+        &server_b.ws_url(),
+        "localhost",
+        CLUSTER_PEER_USERNAME,
+        CLUSTER_PEER_PASSWORD,
+        &format!("fanout-b-{}", uuid::Uuid::new_v4()),
+    )
+    .await
+    .expect("client B authenticates on node B");
+    join_fanout_room(&mut client_b, &room, "joiner-b").await;
+
+    let body_a = format!("local-owner-{}", uuid::Uuid::new_v4());
+    let body_b = format!("relayed-owner-{}", uuid::Uuid::new_v4());
+    // Retain socket failures until after the DB check so a failed reflection
+    // also reports which canonical obligations are stuck.
+    let mut failures = Vec::new();
+    client_a
+        .send(&String::from(&fanout_message(&room, "m1", Some(&body_a))))
+        .await
+        .expect("A sends local-owner groupchat");
+    for (client, label) in [
+        (&mut client_b, "B receives local-owner copy"),
+        (&mut client_a, "A receives local self-reflection"),
+    ] {
+        if let Err(error) = receive_fanout_copy(client, &owner, "m1", Some(&body_a)).await {
+            failures.push(format!("{label}: {error}"));
+        }
+    }
+    client_b
+        .send(&String::from(&fanout_message(&room, "m2", Some(&body_b))))
+        .await
+        .expect("B sends relayed groupchat");
+    for (client, label) in [
+        (&mut client_a, "A receives relayed copy"),
+        (&mut client_b, "B receives ACK self-reflection"),
+    ] {
+        if let Err(error) = receive_fanout_copy(client, &joiner, "m2", Some(&body_b)).await {
+            failures.push(format!("{label}: {error}"));
+        }
+    }
+    client_a
+        .send(&String::from(&fanout_message(&room, "chat-state", None)))
+        .await
+        .expect("A sends bodyless composing groupchat");
+    if let Err(error) = receive_fanout_copy(&mut client_b, &owner, "chat-state", None).await {
+        failures.push(format!("B receives bodyless composing: {error}"));
+    }
+    if let Err(error) = wait_for_fanout_receipts(&db, &started_at).await {
+        failures.push(error);
+    }
+    for (client, label) in [(&mut client_a, "A"), (&mut client_b, "B")] {
+        // Earlier receives reject stale IDs; this final bounded drain catches
+        // duplicates queued after the final expected reflection as well.
+        match client
+            .recv_matching_within(Duration::from_millis(500), |frame| {
+                frame.parse::<minidom::Element>().is_ok_and(|element| {
+                    element.is("message", waddle_xmpp::ns::JABBER_CLIENT)
+                        && matches!(element.attr("id"), Some("m1" | "m2"))
+                })
+            })
+            .await
+        {
+            Ok(frame) => failures.push(format!("{label} received duplicate reflection: {frame}")),
+            Err(error) if error.starts_with("Timeout waiting") => {}
+            Err(error) => failures.push(format!("{label} duplicate check failed: {error}")),
+        }
+    }
+    eprintln!("fanout socket/receipt failures: {failures:?}");
+
+    client_b.close().await.expect("client B closes");
+    let unavailable = client_a
+        .recv_matching_within(Duration::from_secs(10), |frame| {
+            frame.parse::<minidom::Element>().is_ok_and(|element| {
+                element.is("presence", waddle_xmpp::ns::JABBER_CLIENT)
+                    && element.attr("from") == Some(joiner.to_string().as_str())
+                    && element.attr("type") == Some("unavailable")
+            })
+        })
+        .await
+        .expect("A receives B's remote unavailable presence");
+    eprintln!("remote cleanup: {unavailable}");
+    client_a.close().await.expect("client A closes");
+    assert!(
+        failures.is_empty(),
+        "groupchat regression failures: {failures:#?}"
+    );
+}
+
+async fn join_fanout_room(client: &mut WsXmppClient, room: &jid::BareJid, nick: &str) {
+    client
+        .send(&String::from(&muc_join_presence(&room.to_string(), nick)))
+        .await
+        .expect("send MUC join");
+    let replies = tokio::time::timeout(
+        Duration::from_secs(15),
+        client.recv_until(|frame| frame.contains("<subject")),
+    )
+    .await
+    .expect("bounded MUC join")
+    .expect("MUC join replies");
+    let occupant = room
+        .with_resource_str(nick)
+        .expect("occupant JID")
+        .to_string();
+    assert!(
+        replies.iter().any(|frame| {
+            frame.parse::<minidom::Element>().is_ok_and(|element| {
+                element.is("presence", waddle_xmpp::ns::JABBER_CLIENT)
+                    && element.attr("from") == Some(occupant.as_str())
+                    && element.attr("type").is_none()
+                    && element
+                        .get_child("x", "http://jabber.org/protocol/muc#user")
+                        .is_some_and(|x| {
+                            x.children().any(|child| {
+                                child.is("status", "http://jabber.org/protocol/muc#user")
+                                    && child.attr("code") == Some("110")
+                            })
+                        })
+            })
+        }),
+        "{occupant} must receive self-presence 110: {replies:?}"
+    );
+}
+
+fn fanout_message(room: &jid::BareJid, id: &str, body: Option<&str>) -> minidom::Element {
+    use minidom::{rxml::xml_ncname, Element};
+    let payload = match body {
+        Some(body) => Element::builder("body", waddle_xmpp::ns::JABBER_CLIENT)
+            .append(body)
+            .build(),
+        None => Element::builder("composing", waddle_xmpp::xep::xep0085::NS_CHATSTATES).build(),
+    };
+    Element::builder("message", waddle_xmpp::ns::JABBER_CLIENT)
+        .attr(xml_ncname!("to").to_owned(), room.to_string())
+        .attr(xml_ncname!("type").to_owned(), "groupchat")
+        .attr(xml_ncname!("id").to_owned(), id)
+        .append(payload)
+        .build()
+}
+
+async fn receive_fanout_copy(
+    client: &mut WsXmppClient,
+    from: &jid::FullJid,
+    id: &str,
+    body: Option<&str>,
+) -> Result<(), String> {
+    let frame = client
+        .recv_matching_within(Duration::from_secs(10), |frame| {
+            frame.parse::<minidom::Element>().is_ok_and(|element| {
+                element.is("message", waddle_xmpp::ns::JABBER_CLIENT)
+                    && matches!(element.attr("id"), Some("m1" | "m2" | "chat-state"))
+            })
+        })
+        .await?;
+    eprintln!("reflection {id}: {frame}");
+    let element: minidom::Element = frame.parse().map_err(|error| format!("{error}"))?;
+    if element.attr("id") != Some(id)
+        || element.attr("type") != Some("groupchat")
+        || element.attr("from") != Some(from.to_string().as_str())
+    {
+        return Err(format!("expected groupchat from {from}: {frame}"));
+    }
+    if let Some(body) = body {
+        let room = from.to_bare().to_string();
+        let ids: Vec<_> = element
+            .children()
+            .filter(|child| {
+                child.is("stanza-id", "urn:xmpp:sid:0") && child.attr("by") == Some(room.as_str())
+            })
+            .collect();
+        if element
+            .get_child("body", waddle_xmpp::ns::JABBER_CLIENT)
+            .map(|b| b.text())
+            != Some(body.to_string())
+            || ids.len() != 1
+            || ids[0].attr("id").is_none_or(str::is_empty)
+        {
+            return Err(format!(
+                "expected body and one nonempty room stanza-id: {frame}"
+            ));
+        }
+    } else if element
+        .get_child("composing", waddle_xmpp::xep::xep0085::NS_CHATSTATES)
+        .is_none()
+        || element
+            .get_child("body", waddle_xmpp::ns::JABBER_CLIENT)
+            .is_some()
+    {
+        return Err(format!("expected bodyless composing reflection: {frame}"));
+    }
+    Ok(())
+}
+
+async fn wait_for_fanout_receipts(db: &Database, started_at: &str) -> Result<(), String> {
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(15);
+    let mut diagnostic = Vec::new();
+    loop {
+        let snapshot = async {
+            let conn = db.guard().await.expect("ingress snapshot guard");
+            let mut rows = conn
+                .query(
+                    "SELECT m.message_key::text, m.created_at::text, m.terminal_at IS NOT NULL,
+                    (SELECT count(*) FROM ingress_effect_intents i
+                     WHERE i.message_key = m.message_key AND i.kind = 2),
+                    (SELECT count(*) FROM ingress_effect_intents i
+                     WHERE i.message_key = m.message_key AND NOT EXISTS (
+                         SELECT 1 FROM ingress_effect_receipts r
+                         WHERE r.message_key = i.message_key AND r.kind = i.kind
+                           AND r.semantic_identity_hash = i.semantic_identity_hash)),
+                    (SELECT coalesce(string_agg(i.kind::text, ',' ORDER BY i.kind), '')
+                     FROM ingress_effect_intents i WHERE i.message_key = m.message_key
+                       AND NOT EXISTS (SELECT 1 FROM ingress_effect_receipts r
+                         WHERE r.message_key = i.message_key AND r.kind = i.kind
+                           AND r.semantic_identity_hash = i.semantic_identity_hash))
+                 FROM ingress_messages m WHERE m.created_at >= CAST(? AS timestamptz)
+                 ORDER BY m.created_at, m.message_key",
+                    waddle_server::db_params![started_at.to_string()],
+                )
+                .await
+                .expect("scoped canonical receipt snapshot");
+            let mut count = 0;
+            let mut route_rows = 0;
+            let mut complete = true;
+            let mut details = Vec::new();
+            while let Some(row) = rows.next().await.expect("canonical row") {
+                let key: String = row.get(0).expect("message key");
+                let created: String = row.get(1).expect("created_at");
+                let terminal: bool = row.get(2).expect("terminal flag");
+                let routes: i64 = row.get(3).expect("route intent count");
+                let missing: i64 = row.get(4).expect("missing receipt count");
+                let pending: String = row.get(5).expect("pending kinds");
+                count += 1;
+                route_rows += usize::from(routes > 0);
+                complete &= terminal && missing == 0;
+                details.push(format!("{key} created_at={created} terminal={terminal} route_intents={routes} missing={missing} pending kinds=[{pending}]"));
+            }
+            // All three sends, including the bodyless state, must have a
+            // canonical route row; zero rows is never success.
+            (complete && count >= 3 && route_rows >= 3, details)
+        };
+        let (complete, details) = match tokio::time::timeout_at(deadline, snapshot).await {
+            Ok(result) => result,
+            Err(_) => {
+                return Err(format!(
+                    "ingress query exceeded 15s; last rows: {diagnostic:#?}"
+                ))
+            }
+        };
+        diagnostic = details;
+        if complete {
+            eprintln!("terminal canonical rows since {started_at}: {diagnostic:#?}");
+            return Ok(());
+        }
+        if tokio::time::Instant::now() + Duration::from_millis(250) >= deadline {
+            return Err(format!("ingress did not terminalize with all receipts and three route rows within 15s (start={started_at}): {diagnostic:#?}"));
+        }
+        tokio::time::sleep(Duration::from_millis(250)).await;
+    }
+}
+
 /// #1445: a Muji (XEP-0272) `session-initiate` whose signaling lands on
 /// the replica that does NOT own the room actor must succeed — relayed
 /// to the claim owner, minted there, replies written back through the

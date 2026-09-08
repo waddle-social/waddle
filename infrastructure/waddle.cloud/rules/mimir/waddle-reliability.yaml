@@ -253,16 +253,25 @@ groups:
             team: waddle
           annotations:
             runbook: https://github.com/waddle-social/waddle/blob/main/server/docs/operations/ingress-authority.md
-            summary: "Unresolved ingress effects increased in the last hour. Issue #1658 adds the recovery executor; unresolved intents keep messages non-terminal and protected from GC."
+            summary: "Unresolved locally executed ingress effects increased in the last hour; effects executed on another node are not counted here. See IngressNonTerminalBacklog for the canonical row-level view. Issue #1658 adds the recovery executor; unresolved intents keep messages non-terminal and protected from GC."
+        - alert: IngressNonTerminalBacklog
+          expr: max by (kind) (cnpg_waddle_ingress_nonterminal_messages) > 0
+          for: 10m
+          labels:
+            severity: warning
+            team: waddle
+          annotations:
+            runbook: https://github.com/waddle-social/waddle/blob/main/server/docs/operations/ingress-authority.md
+            summary: "Canonical ingress rows have stayed non-terminal for more than 10 minutes; kind is the unreceipted intent kind family, or terminalization when only terminalization is missing. Phase C budgets are 5 s, so this is a receipt-completeness or terminalization regression (see #1749); GC cannot reclaim these rows."
         - alert: IngressCnpgQueriesMissing
-          expr: absent(cnpg_waddle_ingress_gc_eligible_messages) or absent(cnpg_waddle_ingress_gc_oldest_eligible_age_seconds)
+          expr: absent(cnpg_waddle_ingress_gc_eligible_messages) or absent(cnpg_waddle_ingress_gc_oldest_eligible_age_seconds) or absent(cnpg_waddle_ingress_nonterminal_age_oldest_seconds)
           for: 15m
           labels:
             severity: warning
             team: waddle
           annotations:
             runbook: https://github.com/waddle-social/waddle/blob/main/server/docs/operations/ingress-authority.md
-            summary: "Primary-only ingress custom-query series are absent; IngressGcBacklog or IngressGcAge cannot evaluate. Check the CNPG collector and monitoring query configuration."
+            summary: "Primary-only ingress custom-query series are absent, including the always-present non-terminal oldest-age query; IngressGcBacklog, IngressGcAge or non-terminal backlog coverage may be blind. Check the CNPG collector and monitoring query configuration."
     # Grafana Cloud Mimir caps each rule group at 20 rules.
     # Keep ingress and PostgreSQL capacity rules in separate groups.
     - name: waddle-postgres

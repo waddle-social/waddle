@@ -99,13 +99,9 @@ pub(crate) async fn execute(effect: ExternalDeliveryEffect, deps: &Deps<'_>) -> 
                 call_setup.clone(),
             )
             .await;
-            if outcome.is_none() {
-                routing::close_call_setup_from_outcome(
-                    call_setup,
-                    FullJidDeliveryOutcome::Unavailable,
-                );
-            }
-            EffectOutcome::Delivery(outcome.unwrap_or(FullJidDeliveryOutcome::Unavailable))
+            EffectOutcome::Delivery(
+                finish_full_jid_relay(outcome, &immediate, &target, &stanza, call_setup).await,
+            )
         }
         ExternalDeliveryEffect::RelayBareJid {
             origin,
@@ -188,3 +184,25 @@ fn detached_fanout_outcome(
     // The executor must not discharge its aggregate RouteDirect obligation.
     FullJidDeliveryOutcome::Dropped
 }
+
+/// A handled relay owns its ticket, even when delivery was dropped or uncertain.
+async fn finish_full_jid_relay(
+    outcome: Option<FullJidDeliveryOutcome>,
+    deps: &Deps<'_>,
+    target: &jid::FullJid,
+    stanza: &waddle_xmpp::Stanza,
+    call_setup: Option<waddle_xmpp::telemetry::call::PendingCallSetupRoute>,
+) -> FullJidDeliveryOutcome {
+    if let Some(outcome) = outcome {
+        return outcome;
+    }
+    let outcome =
+        route_to_connection::deliver_peer_to_full_with_registered_remote(deps, target, stanza)
+            .await;
+    routing::close_call_setup_from_outcome(call_setup, outcome);
+    outcome
+}
+
+#[cfg(test)]
+#[path = "delivery_immediate_tests.rs"]
+mod tests;

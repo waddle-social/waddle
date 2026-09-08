@@ -436,19 +436,8 @@ pub(crate) async fn route_room_presence_to_occupant(
     let deps = {
         let deps =
             crate::server::routes::websocket::interpret_loop::build_interpret_deps(state, None);
-        let entity = waddle_xmpp::ownership::Entity::new(
-            waddle_xmpp::ownership::EntityType::RoomActor,
-            room_jid.to_string(),
-        );
         deps.with_ordered_relay_origin(Some(
-            crate::server::routes::interpret::OrderedRelayRouteOrigin {
-                kind: crate::server::routes::interpret::OrderedRelayRouteOriginKind::Entity(
-                    entity.clone(),
-                ),
-                sender_entity: entity,
-                inbound_sequence: 0,
-                handoff: None,
-            },
+            crate::server::routes::interpret::OrderedRelayRouteOrigin::room(room_jid),
         ))
     };
     #[cfg(feature = "clustering")]

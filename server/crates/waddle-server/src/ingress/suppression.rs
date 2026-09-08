@@ -275,6 +275,95 @@ mod tests {
     }
 
     #[test]
+    fn room_activity_requires_its_exact_recorded_intent_without_inbox_projection() {
+        use crate::server::routes::interpret::effects::direct::ExternalDirectEffect;
+        use waddle_xmpp::ingress::{
+            EffectMessageIdentity, EntityGeneration, IngressEffectIntent,
+            NotificationActivityMutation,
+        };
+        let room: BareJid = "room@example.com".parse().expect("room");
+        let sender: jid::FullJid = "sender@example.com/device".parse().expect("sender");
+        let owner = sender.to_bare();
+        for mutation in [
+            NotificationActivityMutation::ChatState {
+                conversation: room.clone(),
+                state: waddle_xmpp::xep::xep0085::ChatState::Composing,
+                committed_at_ms: 1000,
+            },
+            NotificationActivityMutation::ReadMarker {
+                conversation: room.clone(),
+                committed_at_ms: 1000,
+            },
+        ] {
+            let mut message = Message::new(Some(room.clone().into()));
+            message.from = Some(sender.clone().into());
+            message.type_ = MessageType::Groupchat;
+            let mut plan = IngressPlan {
+                failure: None,
+                plan: vec![PlannedEffect::new(Effect::External(ExternalEffect::Direct(
+                    ExternalDirectEffect::NotificationActivity {
+                        owner: owner.clone(),
+                        mutation: mutation.clone(),
+                    },
+                )))
+                .with_suppression(PlanSuppressionPolicy::Always)],
+                intents: vec![IngressEffectIntent::RouteMucGroupchat {
+                    room: room.clone(),
+                    occupants: vec![sender.clone()],
+                    reflection: sender.clone(),
+                    room_generation: EntityGeneration::INITIAL,
+                    route_identity: EffectMessageIdentity::stanza(StanzaId::new(
+                        "room-copy",
+                        room.clone().into(),
+                    )),
+                }],
+                sanitized_message: message,
+                error_reply: None,
+                rejection: None,
+                room_execution: RoomExecutionPath::None,
+            };
+            for verdict in [ReconcileVerdict::FirstCommit, ReconcileVerdict::Consistent] {
+                assert!(external_effect_indices(&plan, &verdict, &[], &[]).is_empty());
+                plan.intents
+                    .push(IngressEffectIntent::NotificationActivityPreview {
+                        owner: owner.clone(),
+                        mutation: mutation.clone(),
+                    });
+                assert_eq!(external_effect_indices(&plan, &verdict, &[], &[]), vec![0]);
+                let IngressEffectIntent::NotificationActivityPreview {
+                    owner: recorded_owner,
+                    ..
+                } = plan.intents.last_mut().expect("activity intent")
+                else {
+                    panic!("activity intent");
+                };
+                *recorded_owner = "other@example.com".parse().expect("other owner");
+                assert!(external_effect_indices(&plan, &verdict, &[], &[]).is_empty());
+                plan.intents.pop();
+                let mut changed_mutation = mutation.clone();
+                match &mut changed_mutation {
+                    NotificationActivityMutation::ChatState {
+                        committed_at_ms, ..
+                    }
+                    | NotificationActivityMutation::ReadMarker {
+                        committed_at_ms, ..
+                    } => {
+                        *committed_at_ms += 1;
+                    }
+                    _ => panic!("tested activity mutation"),
+                }
+                plan.intents
+                    .push(IngressEffectIntent::NotificationActivityPreview {
+                        owner: owner.clone(),
+                        mutation: changed_mutation,
+                    });
+                assert!(external_effect_indices(&plan, &verdict, &[], &[]).is_empty());
+                plan.intents.pop();
+            }
+        }
+    }
+
+    #[test]
     fn filter_external_effects_policy_table() {
         let archive: BareJid = "room@example.com".parse().expect("archive");
         for (duplicate, sender_only, subject, tombstone, preserve_tombstone, expected) in [

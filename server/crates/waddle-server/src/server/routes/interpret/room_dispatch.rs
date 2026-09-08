@@ -621,8 +621,21 @@ pub(super) async fn dispatch_to_room(
     //    promotes to a headless recipient pass (depth bumped there).
     //    Bumping here would break that path for every offline
     //    occupant.
+    // Occupant copies originate from the room, so their ordered channel must
+    // carry the room claim rather than the sending user's stream claim.
+    #[cfg(feature = "clustering")]
+    let fanout_deps = if snapshot.claim_fence.is_some() {
+        deps.clone()
+            .with_ordered_relay_origin(Some(OrderedRelayRouteOrigin::room(&room_jid)))
+    } else {
+        deps.clone()
+    };
+    #[cfg(feature = "clustering")]
+    let fanout_deps = &fanout_deps;
+    #[cfg(not(feature = "clustering"))]
+    let fanout_deps = deps;
     let nested = Box::pin(
-        interpret_with_depth(dispatch_events, deps, recursion_depth).instrument(fanout_span),
+        interpret_with_depth(dispatch_events, fanout_deps, recursion_depth).instrument(fanout_span),
     )
     .await;
     waddle_xmpp::histogram_record!(

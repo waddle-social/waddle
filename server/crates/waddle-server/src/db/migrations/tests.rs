@@ -1222,12 +1222,43 @@ fn ingress_monitoring_configmap_extracts_every_query() {
     }
 }
 
-const EXPECTED_MONITORING_QUERIES: [&str; 5] = [
+#[test]
+fn ingress_monitoring_kind_families_match_storage_codes() {
+    let yaml = fs::read_to_string(monitoring_configmap_path()).expect("read monitoring ConfigMap");
+    let queries = extract_monitoring_queries(&yaml).expect("extract monitoring queries");
+    let query = queries
+        .iter()
+        .find(|query| query.name == "waddle_ingress_nonterminal")
+        .expect("non-terminal monitoring query");
+    let arms: Vec<(i32, &str)> = query
+        .sql
+        .lines()
+        .filter_map(|line| line.trim().strip_prefix("WHEN "))
+        .map(|arm| {
+            let (code, name) = arm.split_once(" THEN ").expect("CASE arm shape");
+            (
+                code.parse().expect("integer storage code"),
+                name.strip_prefix('\'')
+                    .and_then(|name| name.strip_suffix('\''))
+                    .expect("quoted storage family"),
+            )
+        })
+        .collect();
+    assert_eq!(
+        arms,
+        waddle_xmpp::ingress::IngressEffectIntent::storage_kind_names(),
+        "monitoring CASE must cover exactly the stable storage-code families"
+    );
+}
+
+const EXPECTED_MONITORING_QUERIES: [&str; 7] = [
     "waddle_ingress_table",
     "waddle_ingress_gc",
     "waddle_ingress_messages",
     "waddle_ingress_cohort",
     "waddle_ingress_streams",
+    "waddle_ingress_nonterminal",
+    "waddle_ingress_nonterminal_age",
 ];
 
 fn monitoring_configmap_path() -> PathBuf {
@@ -1295,7 +1326,7 @@ async fn postgres_monitoring_queries_match_migrated_ingress_schema() {
         .execute(&mut *monitor_conn)
         .await
         .expect("assume pg_monitor like the CNPG exporter");
-    for monitoring_query in queries {
+    for monitoring_query in &queries {
         // The production query pins `schemaname = 'public'`; the fixture
         // migrates into an isolated schema, so point it at that schema to
         // keep the table-name literals under test.
@@ -1319,7 +1350,7 @@ async fn postgres_monitoring_queries_match_migrated_ingress_schema() {
                     monitoring_query.name
                 )
             });
-        assert_declared_metric_columns(&monitoring_query, &rows);
+        assert_declared_metric_columns(monitoring_query, &rows);
 
         match monitoring_query.name.as_str() {
             "waddle_ingress_gc" | "waddle_ingress_streams" => assert_eq!(
@@ -1367,15 +1398,115 @@ async fn postgres_monitoring_queries_match_migrated_ingress_schema() {
                     "every monitored ingress table must exist in the migrated schema"
                 );
             }
+            "waddle_ingress_nonterminal" => assert!(rows.is_empty()),
+            "waddle_ingress_nonterminal_age" => {
+                assert_eq!(rows.len(), 1, "age query must always emit one row");
+                let age: f64 = sqlx::query_scalar(&format!(
+                    "SELECT oldest_seconds::double precision FROM ({}) AS age",
+                    sql.trim().trim_end_matches(';')
+                ))
+                .fetch_one(&mut *monitor_conn)
+                .await
+                .expect("decode empty non-terminal age");
+                assert_eq!(age, 0.0);
+            }
             "waddle_ingress_messages" => {}
             other => panic!("unexpected ingress monitoring query {other}"),
         }
     }
 
+    assert_populated_nonterminal_monitoring(&query_pool, &mut monitor_conn, &queries).await;
+
     drop(monitor_conn);
     query_pool.close().await;
     drop(db);
     drop_postgres_schema(&admin, &schema).await;
+}
+
+async fn assert_populated_nonterminal_monitoring(
+    pool: &sqlx::PgPool,
+    monitor: &mut sqlx::PgConnection,
+    queries: &[MonitoringQuery],
+) {
+    // Write as the application fixture owner, then read only as pg_monitor.
+    // Epoch zero permits these writes without a protocol-epoch guard token.
+    sqlx::raw_sql(
+        "INSERT INTO ingress_messages (message_key, digest_version, digest, created_at, terminal_at)
+         VALUES
+           ('00000000-0000-0000-0000-000000000001', 1, decode(repeat('01', 32), 'hex'), now() - interval '1 minute', NULL),
+           ('00000000-0000-0000-0000-000000000002', 1, decode(repeat('02', 32), 'hex'), now() - interval '2 hours', now()),
+           ('00000000-0000-0000-0000-000000000003', 1, decode(repeat('03', 32), 'hex'), now() - interval '1 hour', NULL),
+           ('00000000-0000-0000-0000-000000000004', 1, decode(repeat('04', 32), 'hex'), now() - interval '30 minutes', NULL);
+         INSERT INTO ingress_effect_intents
+           (message_key, effect_ordinal, kind, semantic_identity_hash, payload_version, payload)
+         SELECT message_key::uuid, ordinal, kind, decode(repeat(identity, 32), 'hex'), 1, '{}'::bytea
+         FROM (VALUES
+           ('00000000-0000-0000-0000-000000000001', 0, 2, '01'),
+           ('00000000-0000-0000-0000-000000000002', 0, 2, '01'),
+           ('00000000-0000-0000-0000-000000000003', 0, 2, '01'),
+           ('00000000-0000-0000-0000-000000000004', 0, 2, '01'),
+           ('00000000-0000-0000-0000-000000000004', 1, 2, '02'),
+           ('00000000-0000-0000-0000-000000000004', 2, 7, '03')
+         ) AS fixture(message_key, ordinal, kind, identity);
+         INSERT INTO ingress_effect_receipts (message_key, kind, semantic_identity_hash)
+         SELECT message_key, kind, semantic_identity_hash FROM ingress_effect_intents
+         WHERE message_key = '00000000-0000-0000-0000-000000000003';",
+    )
+    .execute(pool)
+    .await
+    .expect("insert non-terminal monitoring fixture");
+    let backlog = queries
+        .iter()
+        .find(|query| query.name == "waddle_ingress_nonterminal")
+        .expect("non-terminal query");
+    let rows = sqlx::query(&backlog.sql)
+        .fetch_all(&mut *monitor)
+        .await
+        .expect("query populated backlog as pg_monitor");
+    assert_declared_metric_columns(backlog, &rows);
+    let mut counts: Vec<(String, i64)> = rows
+        .iter()
+        .map(|row| {
+            (
+                row.try_get("kind").expect("pending kind family"),
+                row.try_get("messages")
+                    .expect("distinct canonical messages"),
+            )
+        })
+        .collect();
+    counts.sort();
+    assert_eq!(
+        counts,
+        vec![
+            ("notification_activity_preview".to_string(), 1),
+            ("route_muc".to_string(), 1),
+            ("terminalization".to_string(), 1),
+        ]
+    );
+    let age = queries
+        .iter()
+        .find(|query| query.name == "waddle_ingress_nonterminal_age")
+        .expect("age query");
+    let ages: Vec<f64> = sqlx::query_scalar(&format!(
+        "SELECT oldest_seconds::double precision FROM ({}) AS age",
+        age.sql.trim().trim_end_matches(';')
+    ))
+    .fetch_all(&mut *monitor)
+    .await
+    .expect("query populated age as pg_monitor");
+    assert_eq!(ages.len(), 1);
+    assert!(
+        ages[0] >= 3600.0 && ages[0] < 3900.0,
+        "oldest age: {ages:?}"
+    );
+    let plan: Vec<String> = sqlx::query_scalar(&format!("EXPLAIN {}", backlog.sql))
+        .fetch_all(&mut *monitor)
+        .await
+        .expect("explain backlog as pg_monitor");
+    eprintln!(
+        "non-terminal monitoring fixture EXPLAIN:\n{}",
+        plan.join("\n")
+    );
 }
 
 fn assert_declared_metric_columns(query: &MonitoringQuery, rows: &[sqlx::postgres::PgRow]) {

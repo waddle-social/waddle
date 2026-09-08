@@ -520,7 +520,7 @@ fn receiver_nacks_full_jid_payload_on_bare_channel() {
 }
 
 #[test]
-fn receiver_nacks_groupchat_on_user_message_payload() {
+fn receiver_nacks_bare_jid_groupchat_on_user_message_payload() {
     let mut receiver =
         waddle_server::clustering::ordered_relay::OrderedRelayReceiverState::default();
     let envelope = RemoteStanzaEnvelope {
@@ -545,6 +545,62 @@ fn receiver_nacks_groupchat_on_user_message_payload() {
             ..
         })
     ));
+}
+
+#[test]
+fn receiver_reserves_full_jid_groupchat_from_room_entity() {
+    for (to, accepted) in [
+        ("juliet@example.test/phone", true),
+        ("juliet@example.test/other", false),
+        ("juliet@example.test", false),
+    ] {
+        let mut receiver =
+            waddle_server::clustering::ordered_relay::OrderedRelayReceiverState::default();
+        let target: jid::FullJid = "juliet@example.test/phone".parse().expect("target");
+        let mut stanza = Message::new(Some(to.parse().expect("stanza to")));
+        stanza.from = Some("room@example.test/romeo".parse().expect("occupant"));
+        stanza.type_ = xmpp_parsers::message::MessageType::Groupchat;
+        let envelope = RemoteStanzaEnvelope {
+            asserted_origin_node: origin_node(),
+            channel: OrderedRelayChannel {
+                origin: OrderedRelayOrigin::Entity(room_claim().entity),
+                recipient: OrderedRelayRecipient::FullJid(target.clone()),
+                target_epoch: target_claim().epoch,
+            },
+            sequence: OrderedRelaySequence(1),
+            origin_inbound_sequence: inbound(0),
+            origin_claim: room_claim(),
+            sender_claim: room_claim(),
+            target_claim: target_claim(),
+            payload: OrderedRelayPayload::Message {
+                recipient: target.into(),
+                stanza: RemoteStanza(waddle_xmpp::Stanza::Message(stanza)),
+            },
+            origin_proof: None,
+        };
+        match receiver.reserve(envelope) {
+            OrderedRelayReservation::Reserved(reserved) => {
+                assert!(
+                    accepted,
+                    "mismatched groupchat destination must be rejected"
+                );
+                assert!(matches!(
+                    receiver.commit_reserved(*reserved),
+                    OrderedRelayReply::Ack(_)
+                ));
+            }
+            OrderedRelayReservation::Completed(reply) => {
+                assert!(!accepted, "full-JID room copy must reserve: {reply:?}");
+                assert!(matches!(
+                    reply,
+                    OrderedRelayReply::Nack(OrderedRelayNack {
+                        reason: OrderedRelayNackReason::ParseFailure,
+                        ..
+                    })
+                ));
+            }
+        }
+    }
 }
 
 #[test]
