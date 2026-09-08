@@ -26,6 +26,9 @@ mod dependencies;
 #[path = "execute_carbon_progress.rs"]
 mod carbon_progress;
 
+#[path = "execute_observers.rs"]
+mod observers;
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ExternalOutcome {
     Done,
@@ -388,6 +391,24 @@ pub async fn execute_effects(
             break;
         };
         let effect = &decision.external[index];
+        if ready && observers::is_observer(effect) {
+            observers::execute_ready(
+                observers::Batch {
+                    decision,
+                    planned: &planned,
+                    report: &mut report,
+                    completed: &mut completed,
+                    proven: &mut proven,
+                    recorded: &mut recorded,
+                },
+                db,
+                sink,
+                deps,
+                deadline,
+            )
+            .await;
+            continue;
+        }
         // Confirmed fanout and state mutations must not execute again.
         // Replaying historical activity could overwrite newer state.
         let already_receipted = matches!(
