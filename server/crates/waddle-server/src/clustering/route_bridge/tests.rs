@@ -220,6 +220,7 @@ fn envelope() -> RemoteStanzaEnvelope {
                 "stream-1",
             )),
             recipient: OrderedRelayRecipient::FullJid(target_full()),
+            origin_epoch: waddle_xmpp::ownership::ClaimEpoch(0),
             target_epoch: waddle_xmpp::ownership::ClaimEpoch(0),
         },
         sequence: OrderedRelaySequence::FIRST,

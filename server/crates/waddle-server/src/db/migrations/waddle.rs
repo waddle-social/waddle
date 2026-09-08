@@ -832,6 +832,16 @@ GRANT SELECT ON TABLE ingress_carbon_receipts TO pg_monitor;
 
 "#;
 
+/// Index the non-terminal monitoring time window.
+pub const V1013_INGRESS_NONTERMINAL_CREATED_AT: &str = r#"
+CREATE INDEX ingress_messages_nonterminal_created_at_idx ON ingress_messages (created_at) WHERE terminal_at IS NULL;
+"#;
+
+pub const V1013_INGRESS_NONTERMINAL_CREATED_AT_POSTGRES: &str = r#"
+-- Plain CREATE INDEX inside the migration transaction is acceptable for this table size.
+CREATE INDEX ingress_messages_nonterminal_created_at_idx ON ingress_messages (created_at) WHERE terminal_at IS NULL;
+"#;
+
 /// Get all waddle schema migrations in order.
 ///
 /// Versions are intentionally offset from global migrations so a single
@@ -909,6 +919,12 @@ pub fn all() -> Vec<Migration> {
             description: "Add dialect-aware ingress authority storage".to_string(),
             sql_sqlite: V1012_INGRESS_AUTHORITY_CUTOVER,
             sql_postgres: V1012_INGRESS_AUTHORITY_CUTOVER_POSTGRES,
+        },
+        Migration {
+            version: 1013,
+            description: "Index non-terminal ingress messages by creation time".to_string(),
+            sql_sqlite: V1013_INGRESS_NONTERMINAL_CREATED_AT,
+            sql_postgres: V1013_INGRESS_NONTERMINAL_CREATED_AT_POSTGRES,
         },
     ]
 }

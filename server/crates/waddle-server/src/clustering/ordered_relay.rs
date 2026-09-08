@@ -74,6 +74,7 @@ pub enum OrderedRelayOrigin {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct OrderedRelayChannel {
     pub origin: OrderedRelayOrigin,
+    pub origin_epoch: ClaimEpoch,
     pub recipient: OrderedRelayRecipient,
     pub target_epoch: ClaimEpoch,
 }
@@ -81,6 +82,7 @@ pub struct OrderedRelayChannel {
 impl Hash for OrderedRelayChannel {
     fn hash<H: Hasher>(&self, state: &mut H) {
         self.origin.hash(state);
+        self.origin_epoch.0.hash(state);
         self.recipient.hash(state);
         self.target_epoch.0.hash(state);
     }
@@ -1058,6 +1060,7 @@ fn envelope_is_consistent(envelope: &RemoteStanzaEnvelope) -> bool {
         && envelope.payload.matches_muc_proxy_origin()
         && origin_claim_matches_channel(&envelope.origin_claim, &envelope.channel.origin)
         && sender_claim_matches_channel(&envelope.sender_claim, &envelope.channel.origin)
+        && envelope.origin_claim.epoch == envelope.channel.origin_epoch
         && envelope.target_claim.epoch == envelope.channel.target_epoch
         && envelope
             .payload

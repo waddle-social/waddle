@@ -250,6 +250,7 @@ pub(super) fn timeout_envelope() -> RemoteStanzaEnvelope {
         channel: OrderedRelayChannel {
             origin: OrderedRelayOrigin::SmSession(origin_stream.clone()),
             recipient: OrderedRelayRecipient::FullJid(target.clone()),
+            origin_epoch: ClaimEpoch(0),
             target_epoch: ClaimEpoch(0),
         },
         sequence: OrderedRelaySequence::FIRST,

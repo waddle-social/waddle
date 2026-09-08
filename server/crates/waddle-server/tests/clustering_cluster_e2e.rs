@@ -500,10 +500,12 @@ fn thread_message(id: &str, body_size: usize) -> RemoteStanza {
 fn ordered_channel(
     id: &str,
     target: &jid::FullJid,
+    origin_epoch: ClaimEpoch,
     target_epoch: ClaimEpoch,
 ) -> OrderedRelayChannel {
     OrderedRelayChannel {
         origin: OrderedRelayOrigin::SmSession(waddle_xmpp::pending_delivery::SmSessionId::new(id)),
+        origin_epoch,
         recipient: OrderedRelayRecipient::FullJid(target.clone()),
         target_epoch,
     }
@@ -1003,6 +1005,7 @@ async fn cluster_exit_criteria_end_to_end() {
     let ordered_channel = ordered_channel(
         ordered_stream_id,
         &ordered_target_full,
+        origin_epoch,
         target_snapshot.claim_epoch,
     );
     let origin_claim = ordered_origin_claim(ordered_stream_id, origin_epoch);

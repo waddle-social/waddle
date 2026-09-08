@@ -265,6 +265,7 @@ impl OrderedRelayDeliveryBridge {
 
         let new_channel = OrderedRelayChannel {
             origin: prepared.envelope.channel.origin.clone(),
+            origin_epoch: prepared.envelope.channel.origin_epoch,
             recipient: prepared.envelope.channel.recipient.clone(),
             target_epoch: snapshot.claim_epoch,
         };

@@ -119,7 +119,7 @@ fn receiver_nacks_same_sequence_muc_proxy_with_different_generation() {
     ));
 }
 #[test]
-fn receiver_replays_duplicate_ack_across_mutable_provenance_changes() {
+fn receiver_replays_duplicate_ack_across_asserted_origin_node_changes() {
     let mut receiver = OrderedRelayReceiverState::default();
     let envelope = RemoteStanzaEnvelope {
         asserted_origin_node: NodeId::new("old-node".to_string()),
@@ -142,10 +142,6 @@ fn receiver_replays_duplicate_ack_across_mutable_provenance_changes() {
 
     let retry_after_move = RemoteStanzaEnvelope {
         asserted_origin_node: NodeId::new("new-node".to_string()),
-        origin_claim: OrderedRelayClaim {
-            epoch: ClaimEpoch(99),
-            ..origin_claim()
-        },
         ..envelope
     };
     assert!(matches!(

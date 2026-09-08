@@ -176,7 +176,7 @@ data:
     waddle_ingress_nonterminal:
       target_databases: ["waddle"]
       query: |
-        -- The existing partial terminal_at index covers terminal rows only.
+        -- The time predicate is served by ingress_messages_nonterminal_created_at_idx.
         -- Filter canonical rows first; the uncorrelated receipt anti-join lets
         -- PostgreSQL hash pending obligations instead of correlated subplans.
         WITH old_nonterminal AS (
@@ -253,7 +253,7 @@ data:
     waddle_ingress_nonterminal_age:
       target_databases: ["waddle"]
       query: |
-        -- The terminal-only partial index cannot cover this predicate.
+        -- The time predicate is served by ingress_messages_nonterminal_created_at_idx.
         -- Always emit one row, including zero when no old non-terminal row exists.
         SELECT coalesce(extract(epoch FROM now() - min(created_at)), 0) AS oldest_seconds
         FROM ingress_messages
