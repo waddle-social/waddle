@@ -4,7 +4,7 @@ use chrono::{DateTime, Utc};
 use jid::FullJid;
 use xmpp_parsers::presence::Show;
 
-use super::super::{sequence::sequence_gt, ShadowOrdinal};
+use super::super::sequence::sequence_gt;
 use super::DEFAULT_SESSION_TIMEOUT_SECS;
 
 /// One unacknowledged stanza retained on a detached SM session.
@@ -18,6 +18,8 @@ use super::DEFAULT_SESSION_TIMEOUT_SECS;
 /// XEP-0198 §5 line 364.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DetachedUnackedStanza {
+    /// Ingress obligations confirmed only after this ordered replay prefix is written.
+    pub ingress_receipts: Vec<crate::stream_management::SmIngressFrameReceipt>,
     /// XEP-0198 outbound sequence number assigned to this stanza.
     pub sequence: u32,
     /// Serialized stanza XML (re-parsed on demand by the promotion
@@ -46,8 +48,6 @@ pub struct DetachedSession {
     pub occupancy_session: waddle_xmpp_core::OccupancySessionGeneration,
     /// Server's inbound stanza count at detach time
     pub inbound_count: u32,
-    /// Durable non-wrapping shadow ordinal frontier at detach time.
-    pub shadow_ordinal: ShadowOrdinal,
     /// Server's outbound stanza count at detach time
     pub outbound_count: u32,
     /// Last acknowledged outbound stanza count
@@ -197,6 +197,7 @@ impl DetachedSession {
             self.mark_replay_gap_through(evicted.sequence);
         }
         self.unacked_stanzas.push(DetachedUnackedStanza {
+            ingress_receipts: Vec::new(),
             sequence: self.outbound_count,
             stanza_xml,
             original_receipt_at,
@@ -233,6 +234,7 @@ impl DetachedSession {
             self.outbound_count = sequence;
         }
         self.unacked_stanzas.push(DetachedUnackedStanza {
+            ingress_receipts: Vec::new(),
             sequence,
             stanza_xml,
             original_receipt_at,

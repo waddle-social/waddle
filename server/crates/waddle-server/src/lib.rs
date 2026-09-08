@@ -10,8 +10,9 @@ pub mod db;
 pub mod dnd_projection;
 pub mod dnd_reader;
 pub mod inbox;
-/// Non-blocking shadow executor for durable SM ingress frontiers.
-pub mod ingress_shadow;
+/// Transactional ingress authority and bounded post-commit execution.
+pub mod ingress;
+/// Durable ingress authority for message identity, effects, and SM frontiers.
 /// Dark Postgres-only ingress identity substrate (#1653), consumed by tests
 /// now and by #1654 repositories later.
 pub mod ingress_substrate;

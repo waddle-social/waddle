@@ -281,11 +281,10 @@ pub(super) async fn outcome_for_nack(
             NackChannelAction::Divert(diversion_reason_for_nack(nack)),
             false,
         ),
-        // #1597: sender-synthesized when the peer does not know the
-        // versioned ordered-relay message id. Provably uncommitted, so
-        // this one operation fails but the channel must not be
-        // poisoned: roll the sequence back and keep the channel.
-        OrderedRelayNackReason::UnsupportedEnvelope => (
+        // Neither an unsupported message id nor unavailable proof capacity can
+        // have committed owner effects. Roll back the sequence for a later retry.
+        OrderedRelayNackReason::UnsupportedEnvelope
+        | OrderedRelayNackReason::ReplyReceiptBackpressure => (
             Some(definite_no_effect_outcome(is_iq)),
             NackChannelAction::Rollback,
             false,
@@ -298,9 +297,8 @@ pub(super) enum NackChannelAction {
     Divert(OrderedRelayDiversionReason),
     Forget,
     Keep,
-    /// #1597: the envelope provably never reached the peer's handler
-    /// (versioned message id unknown there). Un-consume its sequence
-    /// and keep the channel — the opposite of a sticky diversion.
+    /// The peer has performed no effects (unsupported envelope or unavailable
+    /// reply-proof capacity). Un-consume its sequence and keep the channel.
     Rollback,
 }
 
@@ -342,7 +340,9 @@ pub(super) fn diversion_reason_for_nack(nack: &OrderedRelayNack) -> OrderedRelay
         OrderedRelayNackReason::Unreachable | OrderedRelayNackReason::TargetUnavailable => {
             OrderedRelayDiversionReason::Unreachable
         }
-        OrderedRelayNackReason::InFlight | OrderedRelayNackReason::Backpressure => {
+        OrderedRelayNackReason::InFlight
+        | OrderedRelayNackReason::Backpressure
+        | OrderedRelayNackReason::ReplyReceiptBackpressure => {
             OrderedRelayDiversionReason::Backpressure
         }
         OrderedRelayNackReason::MaybeCommitted => OrderedRelayDiversionReason::MaybeCommitted,

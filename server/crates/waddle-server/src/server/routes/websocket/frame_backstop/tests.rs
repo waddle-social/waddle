@@ -161,7 +161,6 @@ async fn already_revoked_admission_never_starts_dispatch_and_preserves_sm_hole()
     let mut completion = crate::server::routes::interpret::SmInboundCompletionTracker::default();
     let sequence = completion.reserve(&sm_state);
     crate::server::routes::websocket::frame::settle_inbound_dispatch(
-        &crate::ingress_shadow::IngressShadowHandle::disabled(),
         disposition,
         false,
         Some(sequence),
@@ -219,7 +218,6 @@ async fn revoked_after_committed_dispatch_suppresses_frames_but_settles_sm() {
     let mut completion = crate::server::routes::interpret::SmInboundCompletionTracker::default();
     let sequence = completion.reserve(&sm_state);
     crate::server::routes::websocket::frame::settle_inbound_dispatch(
-        &crate::ingress_shadow::IngressShadowHandle::disabled(),
         disposition,
         false,
         Some(sequence),
@@ -256,7 +254,6 @@ async fn iq_get_timeout_yields_conformant_resource_constraint() {
     let mut completion = crate::server::routes::interpret::SmInboundCompletionTracker::default();
     let sequence = completion.reserve(&sm_state);
     crate::server::routes::websocket::frame::settle_inbound_dispatch(
-        &crate::ingress_shadow::IngressShadowHandle::disabled(),
         disposition,
         false,
         Some(sequence),
@@ -429,4 +426,27 @@ async fn fast_dispatch_passes_through_untouched() {
         vec!["<iq id=\"disco-2\" type=\"result\"/>".to_string()]
     );
     assert_eq!(disposition, InboundDisposition::Handled);
+}
+
+#[tokio::test]
+async fn commit_backstop_preserves_decision_after_admission_revocation() {
+    let stanza = message_stanza();
+    let lifecycle = crate::clustering::NodeLifecycle::new();
+    let permit = lifecycle.admit().expect("serving permit");
+    let shutdown = tokio_util::sync::CancellationToken::new();
+    let result = run_commit_with_backstop_and_admission(
+        StanzaBackstop::capture(&stanza, None),
+        async {
+            lifecycle.begin_fenced_recovery();
+            crate::ingress::IngressDecisionClass::Accepted
+        },
+        &permit,
+        &shutdown,
+    )
+    .await;
+    assert!(result.authority_revoked_after_start);
+    assert_eq!(
+        result.result,
+        Ok(crate::ingress::IngressDecisionClass::Accepted)
+    );
 }

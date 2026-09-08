@@ -38,7 +38,6 @@ use crate::auth::AuthenticatedPrincipalRef;
 use crate::ownership::{ClaimEpoch, CurrentNodeIdentityGuard, Entity, NodeIdentity};
 use crate::pending_delivery::SmSessionId;
 use crate::postgres_identity::ClusterColocationIdentities;
-use crate::stream_management::ShadowOrdinal;
 use crate::Stanza;
 
 /// Immutable ownership context authorizing one clustered SM persistence write.
@@ -158,7 +157,6 @@ pub struct PersistedSession {
     pub jid: FullJid,
     pub occupancy_session: waddle_xmpp_core::OccupancySessionGeneration,
     pub inbound_count: u32,
-    pub shadow_ordinal: ShadowOrdinal,
     pub outbound_count: u32,
     pub last_acked: u32,
     pub replay_gap_through: Option<u32>,
@@ -192,6 +190,8 @@ pub struct PersistedSession {
 /// and parses back to typed on read.
 #[derive(Debug, Clone)]
 pub struct PersistedUnackedStanza {
+    /// Ingress obligations confirmed only after this ordered replay prefix is written.
+    pub ingress_receipts: Vec<crate::stream_management::SmIngressFrameReceipt>,
     /// XEP-0198 stream-id of the owning session.
     pub stream_id: SmSessionId,
     /// Server-side outbound sequence number; ordered ascending.

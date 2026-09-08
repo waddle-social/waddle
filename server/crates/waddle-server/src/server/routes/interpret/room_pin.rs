@@ -88,6 +88,7 @@ async fn apply_pin(deps: &Deps<'_>, room: BareJid, request: PinChangeRequest, re
         .ask(GetRoomSnapshot {
             sender_jid: synthetic_sender,
         })
+        .reply_timeout(std::time::Duration::from_secs(5))
         .await
     {
         Ok(snap) => snap,
@@ -97,6 +98,8 @@ async fn apply_pin(deps: &Deps<'_>, room: BareJid, request: PinChangeRequest, re
                 error = ?error,
                 "ApplyPinChange::Pin: GetRoomSnapshot failed; dropping"
             );
+            deps.effects
+                .fail_plan(effects::PlanFailure::RoomSnapshotUnavailable);
             return;
         }
     };
@@ -106,16 +109,23 @@ async fn apply_pin(deps: &Deps<'_>, room: BareJid, request: PinChangeRequest, re
     // placeholder preview keyed on the pinner — better than dropping
     // the pin silently. Most real pin requests target a recent
     // message that's still archived.
-    let preview = resolve_preview_from_mam(deps, &room, &target_stanza_id, &snapshot.occupants)
-        .await
-        .unwrap_or_else(|| {
-            warn!(
-                room = %room,
-                target = %target_stanza_id.id,
-                "ApplyPinChange::Pin: target not found in MAM; storing placeholder preview"
-            );
-            PinPreview::new(pinner_jid.clone(), None, "", pinned_at)
-        });
+    let preview =
+        match resolve_preview_from_mam(deps, &room, &target_stanza_id, &snapshot.occupants).await {
+            Err(_) => {
+                deps.effects
+                    .fail_plan(effects::PlanFailure::RichTargetLookup);
+                return;
+            }
+            Ok(Some(preview)) => preview,
+            Ok(None) => {
+                warn!(
+                    room = %room,
+                    target = %target_stanza_id.id,
+                    "ApplyPinChange::Pin: target not found in MAM; storing placeholder preview"
+                );
+                PinPreview::new(pinner_jid.clone(), None, "", pinned_at)
+            }
+        };
 
     let entry = PinnedEntry {
         target_stanza_id: target_stanza_id.clone(),
@@ -124,28 +134,40 @@ async fn apply_pin(deps: &Deps<'_>, room: BareJid, request: PinChangeRequest, re
         preview: preview.clone(),
     };
 
-    let applied = match room_actor
-        .ask(ApplyPin {
-            change: PinStateChange::Pin(entry.clone()),
-        })
-        .await
-    {
-        Err(error) => {
-            warn!(
-                room = %room,
-                error = ?error,
-                "ApplyPinChange::Pin: pin was not stored; not broadcasting"
-            );
-            false
+    let applied = if deps.effects.is_planning() {
+        plan_pin_mutation(
+            deps,
+            &room,
+            snapshot.claim_fence,
+            PinStateChange::Pin(entry.clone()),
+        );
+        true
+    } else {
+        match room_actor
+            .ask(ApplyPin {
+                change: PinStateChange::Pin(entry.clone()),
+            })
+            .await
+        {
+            Err(error) => {
+                warn!(
+                    room = %room,
+                    error = ?error,
+                    "ApplyPinChange::Pin: pin was not stored; not broadcasting"
+                );
+                false
+            }
+            Ok(()) => true,
         }
-        Ok(()) => true,
     };
     if !applied {
         return;
     }
     deps.capture_intent(IngressEffectIntent::Pin {
         room: room.clone(),
-        mutation: waddle_xmpp::ingress::RoomPinMutation::Pin { entry },
+        mutation: waddle_xmpp::ingress::RoomPinMutation::Pin {
+            entry: entry.clone(),
+        },
     });
 
     let system_message = build_pinned_system_message(
@@ -156,8 +178,23 @@ async fn apply_pin(deps: &Deps<'_>, room: BareJid, request: PinChangeRequest, re
         Some(&preview),
         None,
     );
+    let sink = effects::RoomPinSink {
+        inner: deps.effects,
+        dependency: effects::PlanEffectDependency::AfterRoomPin {
+            room: room.clone(),
+            change: PinStateChange::Pin(entry),
+        },
+    };
+    let scoped = Deps {
+        effects: &sink,
+        ..deps.clone()
+    };
     super::room_system_message::broadcast_room_system_message_event(
-        deps,
+        if deps.effects.is_planning() {
+            &scoped
+        } else {
+            deps
+        },
         room,
         Box::new(system_message),
         recursion_depth,
@@ -184,23 +221,47 @@ async fn apply_unpin(
         return;
     };
 
-    let applied = match room_actor
-        .ask(ApplyPin {
-            change: PinStateChange::Unpin {
+    let applied = if deps.effects.is_planning() {
+        let Ok(sender_jid) = room.with_resource_str("__pin_resolver__") else {
+            return;
+        };
+        let Ok(snapshot) = room_actor
+            .ask(GetRoomSnapshot { sender_jid })
+            .reply_timeout(std::time::Duration::from_secs(5))
+            .await
+        else {
+            deps.effects
+                .fail_plan(effects::PlanFailure::RoomSnapshotUnavailable);
+            return;
+        };
+        plan_pin_mutation(
+            deps,
+            &room,
+            snapshot.claim_fence,
+            PinStateChange::Unpin {
                 target_stanza_id: target_stanza_id.clone(),
             },
-        })
-        .await
-    {
-        Err(error) => {
-            warn!(
-                room = %room,
-                error = ?error,
-                "ApplyPinChange::Unpin: pin was not removed; not broadcasting"
-            );
-            false
+        );
+        true
+    } else {
+        match room_actor
+            .ask(ApplyPin {
+                change: PinStateChange::Unpin {
+                    target_stanza_id: target_stanza_id.clone(),
+                },
+            })
+            .await
+        {
+            Err(error) => {
+                warn!(
+                    room = %room,
+                    error = ?error,
+                    "ApplyPinChange::Unpin: pin was not removed; not broadcasting"
+                );
+                false
+            }
+            Ok(()) => true,
         }
-        Ok(()) => true,
     };
     if !applied {
         return;
@@ -219,8 +280,23 @@ async fn apply_unpin(
         &target_stanza_id,
         reason.as_deref(),
     );
+    let sink = effects::RoomPinSink {
+        inner: deps.effects,
+        dependency: effects::PlanEffectDependency::AfterRoomPin {
+            room: room.clone(),
+            change: PinStateChange::Unpin { target_stanza_id },
+        },
+    };
+    let scoped = Deps {
+        effects: &sink,
+        ..deps.clone()
+    };
     super::room_system_message::broadcast_room_system_message_event(
-        deps,
+        if deps.effects.is_planning() {
+            &scoped
+        } else {
+            deps
+        },
         room,
         Box::new(system_message),
         recursion_depth,
@@ -245,6 +321,7 @@ async fn lookup_room_actor(
         .ask(GetRoom {
             room_jid: room.clone(),
         })
+        .reply_timeout(std::time::Duration::from_secs(5))
         .await
     {
         Ok(Some(actor)) => Some(actor),
@@ -263,6 +340,8 @@ async fn lookup_room_actor(
                 error = ?error,
                 "room registry lookup failed; skipping"
             );
+            deps.effects
+                .fail_plan(effects::PlanFailure::RoomSnapshotUnavailable);
             None
         }
     }
@@ -289,14 +368,16 @@ async fn resolve_preview_from_mam(
     room: &BareJid,
     target_stanza_id: &StanzaId,
     occupants: &[waddle_xmpp::muc::room_actor::RoomChainOccupant],
-) -> Option<PinPreview> {
-    let mam_storage = deps.mam_storage?;
+) -> Result<Option<PinPreview>, waddle_xmpp::mam::MamStorageError> {
+    let Some(mam_storage) = deps.mam_storage else {
+        return Ok(None);
+    };
     let row = match mam_storage
         .get_message_by_stanza_id(room, &target_stanza_id.id)
         .await
     {
         Ok(Some(row)) => row,
-        Ok(None) => return None,
+        Ok(None) => return Ok(None),
         Err(error) => {
             warn!(
                 room = %room,
@@ -304,7 +385,7 @@ async fn resolve_preview_from_mam(
                 error = ?error,
                 "ApplyPinChange::Pin: MAM lookup failed"
             );
-            return None;
+            return Err(error);
         }
     };
     let nick = row.from.resource().map(|r| r.to_string());
@@ -323,12 +404,12 @@ async fn resolve_preview_from_mam(
     } else {
         body
     };
-    Some(PinPreview::new(
+    Ok(Some(PinPreview::new(
         author_bare,
         nick,
         &truncated,
         row.timestamp,
-    ))
+    )))
 }
 
 /// XEP-0424 retraction → pin auto-unpin cascade (#414, Q8 = a).
@@ -350,7 +431,11 @@ pub(super) async fn cascade_retraction_to_pin_list(
     let Some(room_actor) = lookup_room_actor(deps, &room, "PinRetractionCascade").await else {
         return;
     };
-    let entries = match room_actor.ask(GetPinList).await {
+    let entries = match room_actor
+        .ask(GetPinList)
+        .reply_timeout(std::time::Duration::from_secs(5))
+        .await
+    {
         Ok(entries) => entries,
         Err(error) => {
             warn!(
@@ -358,6 +443,8 @@ pub(super) async fn cascade_retraction_to_pin_list(
                 error = ?error,
                 "Pin retraction cascade: GetPinList ask failed"
             );
+            deps.effects
+                .fail_plan(effects::PlanFailure::RoomSnapshotUnavailable);
             return;
         }
     };
@@ -383,10 +470,29 @@ pub(super) async fn cascade_retraction_to_pin_list(
     .await;
 }
 
+fn plan_pin_mutation(
+    deps: &Deps<'_>,
+    room: &BareJid,
+    claim_fence: Option<waddle_xmpp::muc::RoomClaimFenceContext>,
+    change: PinStateChange,
+) {
+    super::effects::room::external(
+        deps,
+        super::effects::room::ExternalRoomEffect::RoomActorMutation {
+            room: room.clone(),
+            mutation: super::effects::room::RoomActorMutation::ApplyPin {
+                claim_fence,
+                change,
+            },
+        },
+        super::effects::PlanSuppressionPolicy::Always,
+    );
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::ingress_shadow::IngressEffectCapture;
+    use crate::ingress::IngressEffectCapture;
     use crate::server::routes::interpret::Deps;
     use crate::server::routes::websocket::handlers::presence::handle_muc_join;
     use crate::server::routes::websocket::tests::{
@@ -507,7 +613,7 @@ mod tests {
     #[tokio::test]
     async fn missing_room_actor_does_not_capture_pin_intent() {
         let registry = ConnectionRegistry::new();
-        let capture = IngressEffectCapture::new(None);
+        let capture = IngressEffectCapture::new();
         let mut deps = Deps::registry_only(&registry);
         deps.ingress_effect_capture = Some(capture.clone());
         let room: BareJid = "room@muc.example.com".parse().expect("room");
@@ -537,7 +643,7 @@ mod tests {
     #[tokio::test]
     async fn missing_room_actor_does_not_capture_unpin_intent() {
         let registry = ConnectionRegistry::new();
-        let capture = IngressEffectCapture::new(None);
+        let capture = IngressEffectCapture::new();
         let mut deps = Deps::registry_only(&registry);
         deps.ingress_effect_capture = Some(capture.clone());
         let room: BareJid = "room@muc.example.com".parse().expect("room");

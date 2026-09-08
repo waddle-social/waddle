@@ -24,9 +24,6 @@ pub enum MamArchiveKind {
 pub enum StoreOutcome {
     /// A new row was inserted under this archive id.
     Stored(String),
-    /// An existing live row matched the origin-id retry-dedupe; no row was
-    /// written. Carries the existing row's archive id.
-    Deduplicated(String),
     /// A tombstoned (XEP-0424 retracted) groupchat row matched the retry;
     /// no row was written and the caller must swallow the message entirely.
     TombstoneHit(String),

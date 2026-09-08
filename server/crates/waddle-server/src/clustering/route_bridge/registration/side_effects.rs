@@ -2,13 +2,36 @@ use super::super::*;
 
 /// Whether the remote owner supplied an authoritative XEP-0280 recipient
 /// snapshot. A timeout after send can be maybe-committed, but must never be
-/// represented as a known empty audience in ingress shadow capture.
+/// represented as a known empty audience in ingress intent capture.
 pub(crate) enum RemoteCarbonFanout {
     Applied {
         carbon_recipients: Vec<jid::FullJid>,
         recipient_sm_append_streams: Vec<waddle_xmpp::pending_delivery::SmSessionId>,
     },
+    Incomplete {
+        reason: crate::server::routes::interpret::carbons::CarbonFanoutFailure,
+        carbon_recipients: Vec<jid::FullJid>,
+        recipient_sm_append_streams: Vec<waddle_xmpp::pending_delivery::SmSessionId>,
+    },
     MaybeCommitted,
+}
+
+impl RemoteCarbonFanout {
+    pub(crate) fn from_reply(reply: RelayRemoteUserSideEffectReply) -> Option<Self> {
+        match reply.status {
+            RelayRemoteUserSideEffectStatus::Applied => Some(Self::Applied {
+                carbon_recipients: reply.carbon_recipients,
+                recipient_sm_append_streams: reply.recipient_sm_append_streams,
+            }),
+            RelayRemoteUserSideEffectStatus::Incomplete { reason } => Some(Self::Incomplete {
+                reason,
+                carbon_recipients: reply.carbon_recipients,
+                recipient_sm_append_streams: reply.recipient_sm_append_streams,
+            }),
+            RelayRemoteUserSideEffectStatus::StaleRegistration
+            | RelayRemoteUserSideEffectStatus::Unavailable => None,
+        }
+    }
 }
 
 impl OrderedRelayDeliveryBridge {
@@ -52,12 +75,6 @@ impl OrderedRelayDeliveryBridge {
             })
             .await
         {
-            Ok(reply) if reply.status == RelayRemoteUserSideEffectStatus::Applied => {
-                Some(RemoteCarbonFanout::Applied {
-                    carbon_recipients: reply.carbon_recipients,
-                    recipient_sm_append_streams: reply.recipient_sm_append_streams,
-                })
-            }
             Ok(RelayRemoteUserSideEffectReply {
                 status: RelayRemoteUserSideEffectStatus::StaleRegistration,
                 ..
@@ -66,7 +83,7 @@ impl OrderedRelayDeliveryBridge {
                     .await;
                 None
             }
-            Ok(_) => None,
+            Ok(reply) => RemoteCarbonFanout::from_reply(reply),
             Err(RelayAskError::Send {
                 effect: RelaySendEffect::MaybeCommitted,
                 message,
@@ -157,7 +174,9 @@ impl OrderedRelayDeliveryBridge {
                 false
             }
             Ok(RelayRemoteUserSideEffectReply {
-                status: RelayRemoteUserSideEffectStatus::Unavailable,
+                status:
+                    RelayRemoteUserSideEffectStatus::Unavailable
+                    | RelayRemoteUserSideEffectStatus::Incomplete { .. },
                 ..
             }) => false,
             Err(RelayAskError::Send {
@@ -289,11 +308,20 @@ impl OrderedRelayDeliveryBridge {
                             exclude,
                         )
                         .await;
-                    (
-                        RelayRemoteUserSideEffectStatus::Applied,
-                        outcome.carbon_recipients,
-                        outcome.recipient_sm_append_streams,
-                    )
+                    match outcome {
+                        Ok(outcome) => (
+                            RelayRemoteUserSideEffectStatus::Applied,
+                            outcome.carbon_recipients,
+                            outcome.recipient_sm_append_streams,
+                        ),
+                        Err(incomplete) => (
+                            RelayRemoteUserSideEffectStatus::Incomplete {
+                                reason: incomplete.reason,
+                            },
+                            incomplete.completed.carbon_recipients,
+                            incomplete.completed.recipient_sm_append_streams,
+                        ),
+                    }
                 }
                 _ => (
                     RelayRemoteUserSideEffectStatus::StaleRegistration,

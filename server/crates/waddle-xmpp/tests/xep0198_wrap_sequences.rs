@@ -22,7 +22,6 @@ fn detached_session(last_acked: u32, outbound_count: u32) -> DetachedSession {
         jid: "user@example.com/resource".parse().expect("valid full JID"),
         occupancy_session: waddle_xmpp_core::OccupancySessionGeneration::mint(),
         inbound_count: 0,
-        shadow_ordinal: waddle_xmpp::stream_management::ShadowOrdinal::ZERO,
         outbound_count,
         last_acked,
         replay_gap_through: None,
@@ -174,6 +173,7 @@ async fn persistence_hydration_and_followup_eviction_stay_in_wrap_order() {
         .iter()
         .rev()
         .map(|sequence| DetachedUnackedStanza {
+            ingress_receipts: Vec::new(),
             sequence: *sequence,
             stanza_xml: stanza_xml.clone(),
             original_receipt_at: Utc::now(),

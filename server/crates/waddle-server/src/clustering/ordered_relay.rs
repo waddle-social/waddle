@@ -230,6 +230,10 @@ pub enum OrderedRelayPayload {
         stanza: RemoteStanza,
     },
     MucProxy {
+        canonical: Option<crate::ingress::IngressCanonicalRef>,
+        principal: Option<waddle_xmpp::auth::AuthenticatedPrincipalRef>,
+        #[serde(with = "crate::ingress::identity::stanza_lang_serde")]
+        stanza_lang: Option<xmpp_parsers::message::Lang>,
         room_jid: jid::BareJid,
         kind: OrderedRelayMucProxyKind,
         origin: MucProxyOrigin,
@@ -341,11 +345,17 @@ impl OrderedRelayPayload {
                 }
             }
             OrderedRelayPayload::MucProxy {
+                canonical,
+                principal,
+                stanza_lang,
                 room_jid,
                 kind,
                 origin,
                 stanza,
             } => OrderedRelayPayloadFingerprint::MucProxy {
+                canonical: canonical.clone(),
+                principal: principal.clone(),
+                stanza_lang: stanza_lang.clone(),
                 room_jid: room_jid.clone(),
                 kind: *kind,
                 origin: *origin,
@@ -413,6 +423,8 @@ struct RemoteStanzaEnvelopeSigningView<'a> {
 /// and must never be serialized back to clients.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct OrderedRelayAck {
+    pub reply_receipt: Option<super::relay::RelayReplyReceiptToken>,
+    pub owner_receipts: Vec<waddle_xmpp::stream_management::SmIngressFrameReceipt>,
     pub channel: OrderedRelayChannel,
     pub sequence: OrderedRelaySequence,
     pub duplicate: bool,
@@ -452,6 +464,8 @@ pub enum OrderedRelayNackReason {
     /// mixed-version window degrades to per-operation failures rather
     /// than a poisoned channel.
     UnsupportedEnvelope,
+    /// Owner reply-proof capacity is full; no effects ran. Retry the same sequence.
+    ReplyReceiptBackpressure,
     Backpressure,
     MaybeCommitted,
     Diverted(OrderedRelayDiversion),
@@ -475,7 +489,8 @@ impl OrderedRelayNackReason {
             OrderedRelayNackReason::TargetUnavailable => "target_unavailable",
             OrderedRelayNackReason::ParseFailure => "parse_failure",
             OrderedRelayNackReason::UnsupportedEnvelope => "unsupported_envelope",
-            OrderedRelayNackReason::Backpressure => "backpressure",
+            OrderedRelayNackReason::Backpressure
+            | OrderedRelayNackReason::ReplyReceiptBackpressure => "backpressure",
             OrderedRelayNackReason::MaybeCommitted => "maybe_committed",
             OrderedRelayNackReason::Diverted(_) => "diverted",
         }
@@ -532,6 +547,8 @@ pub enum OrderedRelayDiversionReason {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct OrderedRelayRecentAck {
+    reply_receipt: Option<super::relay::RelayReplyReceiptToken>,
+    owner_receipts: Vec<waddle_xmpp::stream_management::SmIngressFrameReceipt>,
     sequence: OrderedRelaySequence,
     fingerprint: OrderedRelayEnvelopeFingerprint,
     client_replies: Vec<RemoteStanza>,
@@ -573,6 +590,9 @@ enum OrderedRelayPayloadFingerprint {
         stanza: minidom::Element,
     },
     MucProxy {
+        canonical: Option<crate::ingress::IngressCanonicalRef>,
+        principal: Option<waddle_xmpp::auth::AuthenticatedPrincipalRef>,
+        stanza_lang: Option<xmpp_parsers::message::Lang>,
         room_jid: jid::BareJid,
         kind: OrderedRelayMucProxyKind,
         origin: MucProxyOrigin,
@@ -781,6 +801,8 @@ impl OrderedRelayReceiverState {
                 if recently_acked.fingerprint == OrderedRelayEnvelopeFingerprint::from(&envelope) {
                     return OrderedRelayReservation::Completed(OrderedRelayReply::Ack(
                         OrderedRelayAck {
+                            reply_receipt: recently_acked.reply_receipt,
+                            owner_receipts: recently_acked.owner_receipts.clone(),
                             channel: envelope.channel,
                             sequence: envelope.sequence,
                             duplicate: true,
@@ -842,6 +864,16 @@ impl OrderedRelayReceiverState {
         reserved: OrderedRelayReservedEnvelope,
         client_replies: Vec<RemoteStanza>,
     ) -> OrderedRelayReply {
+        self.commit_reserved_with_reply_receipt(reserved, client_replies, None, Vec::new())
+    }
+
+    pub(crate) fn commit_reserved_with_reply_receipt(
+        &mut self,
+        reserved: OrderedRelayReservedEnvelope,
+        client_replies: Vec<RemoteStanza>,
+        reply_receipt: Option<super::relay::RelayReplyReceiptToken>,
+        owner_receipts: Vec<waddle_xmpp::stream_management::SmIngressFrameReceipt>,
+    ) -> OrderedRelayReply {
         let envelope = reserved.envelope;
         self.pending_by_channel.remove(&envelope.channel);
         if let Some(diversion) = self.diversions.get(&envelope.channel) {
@@ -884,8 +916,12 @@ impl OrderedRelayReceiverState {
             &envelope.channel,
             &envelope,
             &client_replies,
+            reply_receipt,
+            owner_receipts.clone(),
         );
         OrderedRelayReply::Ack(OrderedRelayAck {
+            reply_receipt,
+            owner_receipts,
             channel: envelope.channel,
             sequence: envelope.sequence,
             duplicate: false,
@@ -961,7 +997,9 @@ fn receiver_diversion_reason_for_nack(
         // abort path, treat it like any other parse-shaped failure.
         | OrderedRelayNackReason::UnsupportedEnvelope
         | OrderedRelayNackReason::Diverted(_) => OrderedRelayDiversionReason::OrderingGap,
-        OrderedRelayNackReason::InFlight | OrderedRelayNackReason::Backpressure => {
+        OrderedRelayNackReason::InFlight
+        | OrderedRelayNackReason::Backpressure
+        | OrderedRelayNackReason::ReplyReceiptBackpressure => {
             OrderedRelayDiversionReason::Backpressure
         }
         OrderedRelayNackReason::MaybeCommitted => OrderedRelayDiversionReason::MaybeCommitted,
@@ -977,9 +1015,13 @@ fn record_ack(
     channel: &OrderedRelayChannel,
     envelope: &RemoteStanzaEnvelope,
     client_replies: &[RemoteStanza],
+    reply_receipt: Option<super::relay::RelayReplyReceiptToken>,
+    owner_receipts: Vec<waddle_xmpp::stream_management::SmIngressFrameReceipt>,
 ) {
     let recent = recent_acked_by_channel.entry(channel.clone()).or_default();
     recent.push_back(OrderedRelayRecentAck {
+        reply_receipt,
+        owner_receipts,
         sequence: envelope.sequence,
         fingerprint: OrderedRelayEnvelopeFingerprint::from(envelope),
         client_replies: client_replies.to_vec(),

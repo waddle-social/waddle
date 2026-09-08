@@ -239,7 +239,6 @@ fn detached_session_for_terminal_entry(
         jid: source.jid.clone(),
         occupancy_session: source.occupancy_session,
         inbound_count: source.inbound_count,
-        shadow_ordinal: source.shadow_ordinal,
         outbound_count: source.outbound_count,
         last_acked: source.last_acked,
         replay_gap_through: source.replay_gap_through,

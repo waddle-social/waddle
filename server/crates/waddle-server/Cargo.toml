@@ -127,6 +127,7 @@ prescience = { version = "0.1.0", features = ["tls-rustls"] }
 image = { version = "0.25", default-features = false, features = ["png", "jpeg", "gif", "webp"] }
 
 [dev-dependencies]
+tokio = { workspace = true, features = ["test-util"] }
 # Shared WebSocket integration-test harness (TestServer + WsXmppClient).
 # A separate library crate so per-test-binary `dead_code` lints cannot
 # fire on helpers a given binary does not use.

@@ -45,6 +45,7 @@ mod broadcast;
 mod disco_trace;
 mod dispatch;
 mod frame_parsing;
+mod ingress_authority;
 mod iq;
 mod messages;
 mod misc;
@@ -193,16 +194,25 @@ async fn handle_muc_leave_with_occupancy_session(
 /// give that recipient an account first.
 pub(crate) async fn seed_local_account(state: &WebSocketState, localpart: &str) {
     use crate::db::actor::DbExecute;
+    let sql = match state.deps.app_state.db_pool.global().driver() {
+        crate::db::DatabaseDriver::Sqlite => {
+            "INSERT OR IGNORE INTO users \
+             (jid, username, xmpp_localpart, display_name, avatar_url, primary_email, created_at, updated_at) \
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?)"
+        }
+        crate::db::DatabaseDriver::Postgres => {
+            "INSERT INTO users \
+             (jid, username, xmpp_localpart, display_name, avatar_url, primary_email, created_at, updated_at) \
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?) ON CONFLICT DO NOTHING"
+        }
+    };
     state
         .deps
         .app_state
         .db_pool
         .global_actor()
         .ask(DbExecute {
-                sql: "INSERT OR IGNORE INTO users \
-                  (jid, username, xmpp_localpart, display_name, avatar_url, primary_email, created_at, updated_at) \
-                  VALUES (?, ?, ?, ?, ?, ?, ?, ?)"
-                .to_string(),
+            sql: sql.to_string(),
             params: vec![
                 format!("{localpart}@example.com").into(),
                 localpart.into(),
@@ -247,6 +257,22 @@ pub(crate) async fn create_test_websocket_state_with_db_pool(
         empty_extension_manager().await,
         TestStateOverrides {
             db_pool: Some(db_pool),
+            ..TestStateOverrides::default()
+        },
+    )
+    .await
+}
+
+/// Share projection storage with a caller-owned ingress transaction fixture.
+pub(crate) async fn create_test_websocket_state_with_db_pool_and_ingress(
+    db_pool: Arc<DatabasePool>,
+    ingress: Arc<crate::ingress::IngressAuthority>,
+) -> Arc<WebSocketState> {
+    create_test_websocket_state_with_extension_manager(
+        empty_extension_manager().await,
+        TestStateOverrides {
+            db_pool: Some(db_pool),
+            ingress: Some(ingress),
             ..TestStateOverrides::default()
         },
     )
@@ -329,16 +355,16 @@ pub(crate) async fn create_test_websocket_state_with_clustering(
     .await
 }
 
-#[cfg(all(test, feature = "clustering"))]
-pub(crate) async fn create_test_websocket_state_with_sm_registry_and_ingress_shadow(
+#[cfg(test)]
+pub(crate) async fn create_test_websocket_state_with_sm_registry_and_ingress(
     sm_session_registry: Arc<InMemorySmSessionRegistry>,
-    ingress_shadow: crate::ingress_shadow::IngressShadowHandle,
+    ingress: Arc<crate::ingress::IngressAuthority>,
 ) -> Arc<WebSocketState> {
     create_test_websocket_state_with_extension_manager(
         empty_extension_manager().await,
         TestStateOverrides {
             sm_session_registry: Some(sm_session_registry),
-            ingress_shadow: Some(ingress_shadow),
+            ingress: Some(ingress),
             ..TestStateOverrides::default()
         },
     )
@@ -885,7 +911,7 @@ struct TestStateOverrides {
     blocking_storage: Option<Arc<dyn waddle_xmpp::xep::xep0191::BlockingStorage>>,
     pending_delivery_storage:
         Option<Arc<dyn waddle_xmpp::pending_delivery::storage::PendingDeliveryStorage>>,
-    ingress_shadow: Option<crate::ingress_shadow::IngressShadowHandle>,
+    ingress: Option<Arc<crate::ingress::IngressAuthority>>,
     /// Wire `deps.protocol.room_registry` to the app-state registry, as
     /// production does, for tests that drive admin commands and janitors
     /// against the same rooms.
@@ -903,7 +929,7 @@ async fn create_test_websocket_state_with_extension_manager(
         sm_session_registry: sm_session_registry_override,
         blocking_storage: blocking_storage_override,
         pending_delivery_storage: pending_delivery_storage_override,
-        ingress_shadow: ingress_shadow_override,
+        ingress: ingress_override,
         share_app_room_registry,
     } = overrides;
     let db_pool = match db_pool_override {
@@ -914,6 +940,21 @@ async fn create_test_websocket_state_with_extension_manager(
                 .expect("db pool"),
         ),
     };
+
+    let global = db_pool.global();
+    let mam_storage: Arc<dyn MamStorage> = Arc::new(match global.sqlite_pool() {
+        Some(pool) => waddle_xmpp::mam::SqlxMamStorage::from_sqlite_pool(pool.clone())
+            .await
+            .expect("shared MAM schema"),
+        None => waddle_xmpp::mam::SqlxMamStorage::open(global.database_url())
+            .await
+            .expect("shared MAM schema"),
+    });
+    let test_inbox_storage: Arc<dyn waddle_xmpp::inbox::storage::InboxStorage> = Arc::new(
+        crate::inbox::DatabaseInboxStorage::from_database(db_pool.global().clone())
+            .await
+            .expect("shared inbox schema"),
+    );
 
     let runner = MigrationRunner::global();
     runner.run(db_pool.global()).await.expect("migrations");
@@ -946,7 +987,6 @@ async fn create_test_websocket_state_with_extension_manager(
     // JID delivery (#229 PR15) under unit-test fixtures.
     auth_state_inner.xmpp_domain = "example.com".to_string();
     let auth_state = Arc::new(auth_state_inner);
-    let mam_storage: Arc<dyn MamStorage> = Arc::new(InMemoryMamStorage::new());
 
     let mut dispatcher = StanzaDispatcher::new();
     waddle_xmpp::protocol::handlers::register_default_handlers(&mut dispatcher);
@@ -1034,9 +1074,6 @@ async fn create_test_websocket_state_with_extension_manager(
         Arc::clone(&room_effect_outbox),
         tokio::runtime::Handle::current(),
     );
-
-    let test_inbox_storage: Arc<dyn waddle_xmpp::inbox::storage::InboxStorage> =
-        Arc::new(waddle_xmpp::inbox::storage::InMemoryInboxStorage::new());
 
     Arc::new(WebSocketState {
             deps: WebSocketDeps {
@@ -1129,8 +1166,10 @@ async fn create_test_websocket_state_with_extension_manager(
                             waddle_xmpp::stream_management::persistence::InMemorySmPersistence::new(),
                         )))
                     }),
-                    ingress_shadow: ingress_shadow_override
-                        .unwrap_or_else(crate::ingress_shadow::IngressShadowHandle::disabled),
+                    ingress: match ingress_override {
+                        Some(ingress) => ingress,
+                        None => Arc::new(crate::ingress::IngressAuthority::for_test(app_state.db_pool.global().clone()).await),
+                    },
                     link_preview_resolves:
                         crate::server::routes::websocket::default_link_preview_resolve_permits(),
                     caps_resolver: Arc::new(
@@ -1193,6 +1232,15 @@ pub(crate) async fn store_resumable_detached_session(
     session: &Session,
     detached: waddle_xmpp::stream_management::DetachedSession,
 ) {
+    state
+        .deps
+        .protocol
+        .ingress
+        .enroll_stream(&waddle_xmpp::pending_delivery::SmSessionId::new(
+            detached.stream_id.clone(),
+        ))
+        .await
+        .expect("enroll resumable test stream");
     let principal = session
         .authenticated_principal_ref()
         .expect("test session carries an auth context");

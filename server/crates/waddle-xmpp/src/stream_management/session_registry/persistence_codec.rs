@@ -17,7 +17,6 @@ pub(super) fn detached_to_persisted(
         jid: session.jid.clone(),
         occupancy_session: session.occupancy_session,
         inbound_count: session.inbound_count,
-        shadow_ordinal: session.shadow_ordinal,
         outbound_count: session.outbound_count,
         last_acked: session.last_acked,
         replay_gap_through: session.replay_gap_through,
@@ -54,6 +53,7 @@ pub(super) fn parse_xml_to_persisted_unacked(
     sequence: u32,
     stanza_xml: &str,
     original_receipt_at: chrono::DateTime<chrono::Utc>,
+    ingress_receipts: Vec<super::super::SmIngressFrameReceipt>,
 ) -> Result<super::super::persistence::PersistedUnackedStanza, SmRegistryError> {
     let element: minidom::Element = stanza_xml.parse().map_err(|e: minidom::Error| {
         SmRegistryError::Internal(format!("parse unacked stanza for persistence: {e}"))
@@ -78,6 +78,7 @@ pub(super) fn parse_xml_to_persisted_unacked(
         }
     };
     Ok(super::super::persistence::PersistedUnackedStanza {
+        ingress_receipts,
         stream_id: crate::pending_delivery::SmSessionId::new(stream_id.to_string()),
         sequence,
         stanza: Box::new(stanza),
@@ -137,6 +138,7 @@ pub(super) fn persisted_to_detached(
             let xml = String::from_utf8(buf)
                 .map_err(|e| SmRegistryError::Internal(format!("serialize unacked stanza: {e}")))?;
             Ok(DetachedUnackedStanza {
+                ingress_receipts: row.ingress_receipts.clone(),
                 sequence: row.sequence,
                 stanza_xml: xml,
                 original_receipt_at: row.original_receipt_at,
@@ -156,7 +158,6 @@ pub(super) fn persisted_to_detached(
         jid: persisted.jid.clone(),
         occupancy_session: persisted.occupancy_session,
         inbound_count: persisted.inbound_count,
-        shadow_ordinal: persisted.shadow_ordinal,
         outbound_count: persisted.outbound_count,
         last_acked: persisted.last_acked,
         replay_gap_through: persisted.replay_gap_through,
@@ -197,7 +198,6 @@ mod tests {
             jid: "alice@example.com/web".parse().expect("full jid"),
             occupancy_session: waddle_xmpp_core::OccupancySessionGeneration::mint(),
             inbound_count: 0,
-            shadow_ordinal: crate::stream_management::ShadowOrdinal::from_storage(7),
             outbound_count,
             last_acked,
             replay_gap_through: None,
@@ -221,6 +221,7 @@ mod tests {
             .bodies
             .insert(Lang::new(), format!("seq-{sequence}"));
         PersistedUnackedStanza {
+            ingress_receipts: Vec::new(),
             stream_id: crate::pending_delivery::SmSessionId::new("codec-wrap".to_string()),
             sequence,
             stanza: Box::new(crate::Stanza::Message(message)),

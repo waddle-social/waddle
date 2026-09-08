@@ -5,7 +5,7 @@
 //! deduplication policy, not an XEP-defined archive identity rule.
 
 #[cfg(feature = "clustering")]
-mod ingress_shadow_support;
+mod ingress_authority_support;
 
 use waddle_server::{
     db::{Database, DatabaseConfig, DatabaseDriver, MigrationRunner},
@@ -18,7 +18,7 @@ use waddle_xmpp::ingress::{
 use waddle_xmpp_core::xep0359::OriginId;
 
 #[cfg(feature = "clustering")]
-use ingress_shadow_support::ShadowFixture;
+use ingress_authority_support::IngressFixture;
 
 #[tokio::test]
 async fn origin_ids_are_opaque_bounded_and_preserved() {
@@ -198,18 +198,13 @@ async fn same_digest_reuses_the_existing_alias_binding() {
 /// message digest diverges.
 #[cfg(feature = "clustering")]
 #[tokio::test]
-async fn shadow_pipeline_records_insert_existing_and_conflict_alias_outcomes() {
-    let Some(fixture) = ShadowFixture::open("xep0359_pipeline").await else {
+async fn authority_pipeline_records_insert_existing_and_conflict_alias_outcomes() {
+    let Some(fixture) = IngressFixture::open("xep0359_pipeline").await else {
         return;
     };
 
     fixture
-        .enqueue(fixture.submission_with_intents(
-            1,
-            Some("opaque-origin"),
-            "alias body",
-            Vec::new(),
-        ))
+        .commit(fixture.submission_with_intents(1, Some("opaque-origin"), "alias body", Vec::new()))
         .await;
     fixture.wait_for_frontier(1).await;
     let inserted_key = fixture
@@ -218,12 +213,7 @@ async fn shadow_pipeline_records_insert_existing_and_conflict_alias_outcomes() {
         .expect("inserted origin-id should bind ordinal one");
 
     fixture
-        .enqueue(fixture.submission_with_intents(
-            2,
-            Some("opaque-origin"),
-            "alias body",
-            Vec::new(),
-        ))
+        .commit(fixture.submission_with_intents(2, Some("opaque-origin"), "alias body", Vec::new()))
         .await;
     fixture.wait_for_frontier(2).await;
     let existing_key = fixture
@@ -232,7 +222,7 @@ async fn shadow_pipeline_records_insert_existing_and_conflict_alias_outcomes() {
         .expect("existing origin-id should bind ordinal two");
 
     fixture
-        .enqueue(fixture.submission_with_intents(
+        .commit(fixture.submission_with_intents(
             3,
             Some("opaque-origin"),
             "different alias body",
@@ -247,8 +237,8 @@ async fn shadow_pipeline_records_insert_existing_and_conflict_alias_outcomes() {
     );
     assert_eq!(
         count_table(&fixture, "ingress_messages").await,
-        1,
-        "alias conflict must not mint a second canonical message"
+        2,
+        "alias conflict must persist its own rejection row"
     );
     assert_eq!(
         count_table(&fixture, "ingress_origin_aliases").await,
@@ -257,19 +247,19 @@ async fn shadow_pipeline_records_insert_existing_and_conflict_alias_outcomes() {
     );
     assert_eq!(
         count_table(&fixture, "ingress_sm_refs").await,
-        2,
-        "conflicting retries must not bind an SM ref"
+        3,
+        "committed conflicts bind an SM ref"
     );
     assert!(
-        fixture.message_key_for_ordinal(3).await.is_none(),
-        "the conflicting retry must not claim handled ordinal three"
+        fixture.message_key_for_ordinal(3).await.is_some(),
+        "the committed conflict claims handled ordinal three"
     );
 
     fixture.close().await;
 }
 
 #[cfg(feature = "clustering")]
-async fn count_table(fixture: &ShadowFixture, table: &str) -> i64 {
+async fn count_table(fixture: &IngressFixture, table: &str) -> i64 {
     let conn = fixture.db.guard().await.expect("database connection");
     let mut rows = conn
         .query(&format!("SELECT COUNT(*) FROM {table}"), ())

@@ -153,6 +153,17 @@ impl OrderedRelayDeliveryBridge {
         let mut handle =
             RelayHandle::new(NodeId::new(owner.node_id.clone()), self.stop_token.clone())
                 .with_ask_timeouts(self.mailbox_timeout, self.reply_timeout);
+        #[cfg(test)]
+        {
+            let offered = envelope.clone();
+            let result = handle.deliver_ordered(envelope).await;
+            if matches!(&result, Err(RelayAskError::Cancelled)) {
+                let _ = crate::clustering::route_bridge::TEST_CANCELLED_ENVELOPES
+                    .try_with(|envelopes| envelopes.borrow_mut().push(offered));
+            }
+            result
+        }
+        #[cfg(not(test))]
         handle.deliver_ordered(envelope).await
     }
 
@@ -162,18 +173,21 @@ impl OrderedRelayDeliveryBridge {
         result: Result<OrderedRelayReply, RelayAskError>,
     ) -> Option<RemoteDeliveryOutcome> {
         match result {
-            Ok(OrderedRelayReply::Ack(ack)) => Some(RemoteDeliveryOutcome {
-                delivery: FullJidDeliveryOutcome::Delivered,
-                client_replies: ack
-                    .client_replies
-                    .into_iter()
-                    .map(|remote| remote.0)
-                    .collect(),
-                maybe_committed: false,
-                join_repair_allowed: false,
-                relay_target: Some(prepared.previous_owner.clone()),
-                target_claim: Some(prepared.envelope.target_claim.clone()),
-            }),
+            Ok(OrderedRelayReply::Ack(ack)) => {
+                let (client_replies, frame_completion) = ack.into_frame_delivery(
+                    NodeId::new(prepared.previous_owner.node_id.clone()),
+                    self.stop_token.clone(),
+                );
+                Some(RemoteDeliveryOutcome {
+                    frame_completion,
+                    delivery: FullJidDeliveryOutcome::Delivered,
+                    client_replies,
+                    maybe_committed: false,
+                    join_repair_allowed: false,
+                    relay_target: Some(prepared.previous_owner.clone()),
+                    target_claim: Some(prepared.envelope.target_claim.clone()),
+                })
+            }
             Ok(OrderedRelayReply::Nack(nack)) => {
                 let (outcome, channel_action, maybe_committed) = outcome_for_nack(
                     &prepared.services,

@@ -1,3 +1,6 @@
+#[path = "direct_archive_plan.rs"]
+mod plan;
+use super::effects::direct::{external, DurableDirectEffect, ExternalDirectEffect};
 use super::*;
 use waddle_xmpp::ingress::{IngressEffectIntent, RetractionTombstoneMutation};
 use waddle_xmpp::mam::StoreOutcome;
@@ -15,7 +18,7 @@ pub(super) async fn archive_direct(
     message: Box<Message>,
 ) -> Option<ArchiveIdRewrite> {
     let mut message = *message;
-    let Some(mam_storage) = deps.mam_storage else {
+    let Some(_) = deps.mam_storage else {
         debug!(
             archive_jid = %archive_jid,
             from = %from,
@@ -60,15 +63,32 @@ pub(super) async fn archive_direct(
         &message,
     );
     let requested_archive_id = archived.id.clone();
-    match mam_storage.store_message(&archive_jid, &archived).await {
+    let effect = DurableDirectEffect::ArchiveDirect {
+        archive: archive_jid.clone(),
+        message: Box::new(archived.clone()),
+        archive_expectation: waddle_xmpp::mam::ArchiveExpectation::Fresh,
+    };
+    let mut planned = effects::PlannedEffect::new(effects::Effect::Durable(
+        effects::DurableEffect::Direct(effect),
+    ));
+    for minted in waddle_xmpp::xep::extract_stanza_ids(&message) {
+        planned = planned.with_dependency(effects::PlanEffectDependency::AfterArchive {
+            archive: minted.by.to_bare(),
+            minted,
+        });
+    }
+    let effects::EffectOutcome::Archive(outcome) = deps.effects.execute(planned, deps).await else {
+        return None;
+    };
+    match outcome {
         Ok(outcome) => {
             let archive_id = match outcome {
-                StoreOutcome::Stored(id) | StoreOutcome::Deduplicated(id) => id,
+                StoreOutcome::Stored(id) => id,
                 StoreOutcome::TombstoneHit(id) => {
                     warn!(
                         archive_jid = %archive_jid,
                         archive_id = %id,
-                        "ArchiveDirect: unexpected groupchat tombstone outcome; treating as deduplicated"
+                        "ArchiveDirect: unexpected groupchat tombstone outcome; retaining its archive id"
                     );
                     id
                 }
@@ -78,9 +98,7 @@ pub(super) async fn archive_direct(
                 archive_id,
                 "ArchiveDirect: persisted"
             );
-            // Capture at the successful storage boundary. A retry-deduped
-            // write can resolve to an existing authoritative archive id,
-            // which is the only id that may be bound into the shadow intent.
+            // Capture the authoritative archive identity at the storage boundary.
             deps.capture_intent(IngressEffectIntent::ArchiveAuthoritative {
                 archive: archive_jid.clone(),
                 stanza_id: waddle_xmpp_core::xep0359::StanzaId::new(
@@ -88,6 +106,7 @@ pub(super) async fn archive_direct(
                     jid::Jid::from(archive_jid.clone()),
                 ),
                 by: archive_jid.clone(),
+                archived_at: archived.timestamp,
             });
             // Notification activity ingest (slice 2b): the sender's
             // own archive commit is the strongest "currently active"
@@ -156,6 +175,9 @@ fn prepare_dm_call_thread_archive_message(
     message: &Message,
 ) -> Option<crate::server::routes::websocket::ActiveCallThread> {
     let state = deps.web_socket_state?;
+    if deps.effects.is_planning() {
+        return plan::prepare(deps, archive_jid, from, to, message);
+    }
     if !waddle_xmpp::xep::HintCarrier::has_store(message) {
         return None;
     }
@@ -257,6 +279,11 @@ async fn maybe_project_dm_call_thread(
         return;
     };
     if !waddle_xmpp::xep::HintCarrier::has_store(message) {
+        return;
+    }
+    if deps.effects.is_planning() {
+        let archive_ref = StanzaId::new(archive_id, jid::Jid::from(archive_jid.clone()));
+        plan::project(deps, archive_jid, from, to, &archive_ref, message).await;
         return;
     }
     prune_dm_call_thread_state(state, chrono::Utc::now());
@@ -366,7 +393,7 @@ async fn maybe_project_dm_call_thread(
     .await;
 }
 
-fn prune_dm_call_thread_state(
+pub(super) fn prune_dm_call_thread_state(
     state: &crate::server::routes::websocket::WebSocketState,
     now: chrono::DateTime<chrono::Utc>,
 ) {
@@ -551,23 +578,39 @@ async fn update_direct_link_preview_refs(
     let global_db_actor = state.deps.app_state.db_pool.global_actor();
     let correction_target_message_id =
         if let Some(correction) = waddle_xmpp::xep::extract_correction_from_message(message) {
-            Some(
-                resolve_direct_correction_target_message_id(
-                    deps,
-                    archive_jid,
-                    sender,
-                    &correction.replaces_id,
-                )
-                .await
-                .unwrap_or_else(|| correction.replaces_id.clone()),
+            match resolve_direct_correction_target_message_id(
+                deps,
+                archive_jid,
+                sender,
+                &correction.replaces_id,
             )
+            .await
+            {
+                Ok(target) => {
+                    target.or_else(|| waddle_xmpp::mam::RichMessageId::new(correction.replaces_id))
+                }
+                Err(error) => {
+                    warn!(%archive_jid, %error, "correction preview target lookup failed");
+                    deps.effects
+                        .fail_plan(effects::PlanFailure::RichTargetLookup);
+                    return;
+                }
+            }
         } else {
             None
         };
     let message_id = correction_target_message_id
-        .as_deref()
+        .as_ref()
+        .map(waddle_xmpp::mam::RichMessageId::as_str)
         .or_else(|| message.id.as_ref().map(|id| id.0.as_str()));
     let Some(message_id) = message_id else { return };
+    if deps.effects.is_planning() {
+        if let Some(message_id) = waddle_xmpp::mam::RichMessageId::new(message_id.to_owned()) {
+            let archive_id = StanzaId::new(archive_id, jid::Jid::from(archive_jid.clone()));
+            super::preview_plan::update(deps, archive_jid, &message_id, &archive_id, message).await;
+        }
+        return;
+    }
     for intent in crate::server::routes::websocket::link_preview_refs::record_current_message_preview_refs_with_effects(
         global_db_actor,
         state.deps.auth_state.base_url.as_str(),
@@ -587,20 +630,24 @@ pub(super) async fn resolve_direct_correction_target_message_id(
     archive_jid: &BareJid,
     sender: &BareJid,
     replaces_id: &str,
-) -> Option<String> {
-    let mam_storage = deps.mam_storage?;
+) -> Result<Option<waddle_xmpp::mam::RichMessageId>, waddle_xmpp::mam::MamStorageError> {
+    let Some(mam_storage) = deps.mam_storage else {
+        return Ok(None);
+    };
     let origin_id = waddle_xmpp_core::xep0359::OriginId::new(replaces_id);
     let sender = jid::Jid::from(sender.clone());
-    mam_storage
+    let row = mam_storage
         .get_message_by_sender_and_origin_id(
             archive_jid,
             waddle_xmpp::mam::MamArchiveKind::Personal,
             &sender,
             &origin_id,
         )
-        .await
-        .ok()?
-        .and_then(|row| row.stanza_id.map(|stanza_id| stanza_id.id))
+        .await?;
+    Ok(row.and_then(|row| {
+        row.stanza_id
+            .and_then(|id| waddle_xmpp::mam::RichMessageId::new(id.id))
+    }))
 }
 
 async fn apply_direct_retraction_tombstone(
@@ -623,17 +670,10 @@ async fn apply_direct_retraction_tombstone(
     if let Some(waddle_xmpp::xep::xep0424::RetractionKind::Request(retraction)) =
         waddle_xmpp::xep::xep0424::extract_retraction_from_message(message)
     {
-        if let Some(mam_storage) = deps.mam_storage {
-            let target_stanza_id = apply_retraction_tombstone(
-                mam_storage,
-                deps.sm_session_registry,
-                deps.pending_delivery_storage,
-                archive_jid,
-                &retraction.retracts_id,
-                message,
-                deps.ingress_effect_capture.as_ref(),
-            )
-            .await;
+        if deps.mam_storage.is_some() {
+            let target_stanza_id =
+                apply_retraction_tombstone(deps, archive_jid, &retraction.retracts_id, message)
+                    .await;
             if let Some(target_stanza_id) = target_stanza_id {
                 if let Some(retraction_stanza_id) = retraction_stanza_id(message, archive_jid) {
                     deps.capture_intent(IngressEffectIntent::RetractionTombstone {
@@ -643,6 +683,14 @@ async fn apply_direct_retraction_tombstone(
                             retraction_stanza_id,
                         },
                     });
+                }
+                if deps.effects.is_planning() {
+                    if let Some(message_id) =
+                        waddle_xmpp::mam::RichMessageId::new(retraction.retracts_id.clone())
+                    {
+                        super::preview_plan::clear(deps, archive_jid, &message_id).await;
+                    }
+                    return;
                 }
                 if let Some(state) = deps.web_socket_state {
                     for intent in crate::server::routes::websocket::link_preview_refs::clear_current_message_preview_refs(
@@ -663,3 +711,7 @@ fn retraction_stanza_id(message: &Message, archive: &BareJid) -> Option<StanzaId
     let by = jid::Jid::from(archive.clone());
     extract_stanza_id_by(message, &by).map(|id| StanzaId::new(id, by))
 }
+
+#[cfg(test)]
+#[path = "direct_archive_correction_plan_tests.rs"]
+mod correction_plan_tests;

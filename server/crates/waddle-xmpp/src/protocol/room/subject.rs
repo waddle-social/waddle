@@ -76,10 +76,7 @@ impl RoomHandler for MucSubjectHandler {
         // <subject/> and a <body/> or a <subject/> and a <thread/> is a
         // legitimate message, but it SHALL NOT be interpreted as a
         // subject change" (#1265 item 8).
-        if message.subjects.is_empty()
-            || message.thread.is_some()
-            || message.bodies.values().any(|b| !b.trim().is_empty())
-        {
+        if !crate::muc::is_groupchat_subject_change_message(message) {
             return RoomHandlerOutcome::Continue(Vec::new());
         }
 
@@ -370,6 +367,33 @@ mod tests {
         let outcome = run(&mut msg, &room, &sender, "eve-nick", Role::Visitor, false);
         let RoomHandlerOutcome::Continue(events) = outcome else {
             panic!("subject+thread is not a subject change, got {outcome:?}");
+        };
+        assert!(extract_persist(&events).is_none());
+    }
+
+    /// The inbound parser moves `<thread parent='…'/>` out of the typed
+    /// field into `payloads`; the §8.1 thread exclusion must still hold.
+    #[test]
+    fn subject_with_parented_thread_payload_is_not_a_subject_change() {
+        let room = bare("team@muc.example.com");
+        let sender = full("eve@example.com/web");
+        let mut msg = subject_change(&room, &sender, "Threaded topic");
+        msg.thread = Some(xmpp_parsers::message::Thread {
+            id: "thread-2".to_string(),
+            parent: None,
+        });
+        waddle_xmpp_core::parser_utils::reattach_thread_parent(
+            &mut msg,
+            "thread-1".to_string(),
+            waddle_xmpp_core::CLIENT_STANZA_NS,
+        );
+        assert!(
+            msg.thread.is_none(),
+            "parser representation moves the thread into payloads"
+        );
+        let outcome = run(&mut msg, &room, &sender, "eve-nick", Role::Visitor, false);
+        let RoomHandlerOutcome::Continue(events) = outcome else {
+            panic!("subject+parented thread is not a subject change, got {outcome:?}");
         };
         assert!(extract_persist(&events).is_none());
     }

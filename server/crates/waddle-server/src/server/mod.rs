@@ -42,6 +42,10 @@ mod xmpp_user_storage_state;
 pub(crate) mod bootstrap_membership;
 pub(crate) mod managed_channel_policy;
 pub(crate) mod routes;
+
+pub use routes::interpret::effects;
+/// Interpreter-only ingress planning seam, consumed by the authority cutover.
+pub use routes::interpret::{build_plan_deps, plan_message_dispatch};
 pub mod xmpp_state;
 
 pub use config::{XmppAcmeConfig, XmppConfig};
@@ -49,7 +53,6 @@ pub use state::{resolve_server_owner_jids, AppState, AppStateDeps};
 
 use crate::config::ServerConfig;
 use crate::db::DatabasePool;
-use crate::inbox::DatabaseInboxStorage;
 use crate::permissions::PermissionActor;
 use crate::spaces_metadata::DatabaseSpacesMetadataStore;
 use acme::start_acme_runtime;
@@ -156,11 +159,12 @@ pub async fn start_with_config(
     // permission tuples) moved behind the startup lineage attestation gate
     // in `create_websocket_state` — it mutates application state and must
     // not run against a database this node cannot vouch for.
-    let inbox_database_storage = Arc::new(
-        DatabaseInboxStorage::open(xmpp_config.inbox_database_url.as_deref())
-            .await
-            .map_err(|error| anyhow::anyhow!("Failed to initialize inbox storage: {}", error))?,
-    );
+    // The inbox projection is written inside the ingress transaction, so its
+    // rows must live in the global database: SQLite shares the global pool
+    // outright; PostgreSQL must be pointed at the same database.
+    let inbox_database_storage =
+        http::create_ingress_inbox_storage(xmpp_config.inbox_database_url.as_deref(), &global_db)
+            .await?;
     let inbox_storage: Arc<dyn waddle_xmpp::inbox::storage::InboxStorage> =
         inbox_database_storage.clone();
     let spaces_metadata_database_store = Arc::new(

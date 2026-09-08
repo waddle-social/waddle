@@ -1,14 +1,17 @@
 use waddle_xmpp::{
     ingress::{IngressEffectIntent, MucInviteLedgerAction, MucInviteLedgerMutation},
     muc::room_registry_actor::GetRoom,
-    parser::stanza_to_string,
     protocol::handlers::errors::message_error_reply,
     Stanza,
 };
 use xmpp_parsers::message::{Message, MessageType};
 use xmpp_parsers::stanza_error::{DefinedCondition, ErrorType, StanzaError};
 
-use crate::ingress_shadow::{IngressEffectCapture, IngressShadowRoomFence};
+use crate::ingress::IngressEffectCapture;
+use crate::server::routes::interpret::{
+    effects::{Effect, ExternalEffect, PlanFailure, PlannedEffect},
+    Deps,
+};
 use crate::server::routes::websocket::WebSocketState;
 use tracing::warn;
 
@@ -16,22 +19,21 @@ pub(super) async fn handle_muc_direct_message(
     incoming: &Message,
     state: &WebSocketState,
     bound_jid: &jid::FullJid,
-    ingress_effect_capture: Option<&IngressEffectCapture>,
-) -> Option<Vec<String>> {
-    if let Some(frames) =
-        handle_muc_private_message(incoming, state, bound_jid, ingress_effect_capture).await
-    {
+    deps: &Deps<'_>,
+) -> Option<Vec<Stanza>> {
+    if let Some(frames) = handle_muc_private_message(incoming, state, bound_jid, deps).await {
         return Some(frames);
     }
-    handle_muc_mediated_decline(incoming, state, bound_jid, ingress_effect_capture).await
+    handle_muc_mediated_decline(incoming, state, bound_jid, deps).await
 }
 
 async fn handle_muc_private_message(
     incoming: &Message,
     state: &WebSocketState,
     bound_jid: &jid::FullJid,
-    ingress_effect_capture: Option<&IngressEffectCapture>,
-) -> Option<Vec<String>> {
+    deps: &Deps<'_>,
+) -> Option<Vec<Stanza>> {
+    let ingress_effect_capture = deps.ingress_effect_capture.as_ref();
     let target_occupant_jid = incoming.to.as_ref()?.clone().try_into_full().ok()?;
     let room_jid = target_occupant_jid.to_bare();
     if room_jid.domain().as_str() != state.deps.service_domains.muc {
@@ -41,7 +43,7 @@ async fn handle_muc_private_message(
         return Some(vec![message_error_frame(
             incoming,
             bound_jid,
-            ingress_effect_capture,
+            deps,
             ErrorType::Modify,
             DefinedCondition::BadRequest,
             "Groupchat messages must be addressed to the room bare JID.",
@@ -52,49 +54,59 @@ async fn handle_muc_private_message(
     }
     let target_nick = target_occupant_jid.resource().to_string();
 
-    let Some(room_actor) = state
+    let room_actor = match state
         .deps
         .protocol
         .room_registry
         .ask(GetRoom {
             room_jid: room_jid.clone(),
         })
+        .reply_timeout(std::time::Duration::from_secs(5))
         .await
-        .ok()
-        .flatten()
-    else {
-        return Some(vec![message_error_frame(
-            incoming,
-            bound_jid,
-            ingress_effect_capture,
-            ErrorType::Cancel,
-            DefinedCondition::ItemNotFound,
-            "Requested room not found.",
-        )]);
+    {
+        Ok(Some(actor)) => actor,
+        Ok(None) => {
+            return Some(vec![message_error_frame(
+                incoming,
+                bound_jid,
+                deps,
+                ErrorType::Cancel,
+                DefinedCondition::ItemNotFound,
+                "Requested room not found.",
+            )]);
+        }
+        Err(_) => {
+            deps.effects.fail_plan(PlanFailure::RoomSnapshotUnavailable);
+            return Some(Vec::new());
+        }
     };
     let Ok(snapshot) = room_actor
         .ask(waddle_xmpp::muc::room_actor::GetSnapshot)
+        .reply_timeout(std::time::Duration::from_secs(5))
         .await
     else {
-        return Some(vec![message_error_frame(
-            incoming,
-            bound_jid,
-            ingress_effect_capture,
-            ErrorType::Wait,
-            DefinedCondition::InternalServerError,
-            "Internal server error.",
-        )]);
+        deps.effects.fail_plan(PlanFailure::RoomSnapshotUnavailable);
+        return Some(Vec::new());
     };
-    if let (Some(capture), Some(claim_fence)) =
-        (ingress_effect_capture, snapshot.claim_fence.as_ref())
-    {
-        capture.record_room_fence(IngressShadowRoomFence::from_context(&room_jid, claim_fence));
+    if deps.effects.is_planning() {
+        use crate::server::routes::interpret::effects::{
+            room::RoomFenceRequirement, RoomExecutionPath,
+        };
+        deps.effects.set_room_execution(RoomExecutionPath::Local {
+            room: room_jid.clone(),
+            fence: snapshot
+                .claim_fence
+                .clone()
+                .map(RoomFenceRequirement::Guarded)
+                .unwrap_or(RoomFenceRequirement::Unfenced),
+            snapshot_generation: snapshot.admission_revision,
+        });
     }
     let Some(sender_occupant) = snapshot.room.find_occupant_by_real_jid(bound_jid) else {
         return Some(vec![message_error_frame(
             incoming,
             bound_jid,
-            ingress_effect_capture,
+            deps,
             ErrorType::Cancel,
             DefinedCondition::NotAcceptable,
             "Only room occupants may send private messages.",
@@ -110,7 +122,7 @@ async fn handle_muc_private_message(
         return Some(vec![message_error_frame(
             incoming,
             bound_jid,
-            ingress_effect_capture,
+            deps,
             ErrorType::Auth,
             DefinedCondition::Forbidden,
             "Private messages are not allowed for your role in this room.",
@@ -120,7 +132,7 @@ async fn handle_muc_private_message(
         return Some(vec![message_error_frame(
             incoming,
             bound_jid,
-            ingress_effect_capture,
+            deps,
             ErrorType::Cancel,
             DefinedCondition::ItemNotFound,
             "Requested occupant not found.",
@@ -135,7 +147,7 @@ async fn handle_muc_private_message(
             return Some(vec![message_error_frame(
                 incoming,
                 bound_jid,
-                ingress_effect_capture,
+                deps,
                 ErrorType::Wait,
                 DefinedCondition::InternalServerError,
                 "Internal server error.",
@@ -218,6 +230,9 @@ async fn handle_muc_private_message(
             });
         }
     }
+    // Bodyless PMs with carbon suppression emit no interpreter events, but
+    // their committed envelope still needs the canonical sender-side payload.
+    deps.effects.observe_message(&sent_form);
     // XEP-0280 eligibility (review P2 on PR #1277): honor §6.1
     // `<private/>` and XEP-0334 `<no-copy/>` suppression — the shared
     // `should_copy_message` rule the 1:1 CarbonsMessageHandler applies —
@@ -244,9 +259,7 @@ async fn handle_muc_private_message(
             exclude,
         });
     }
-    let deps = crate::server::routes::websocket::interpret_loop::build_interpret_deps(state, None)
-        .with_ingress_effect_capture(ingress_effect_capture.cloned());
-    let nested = crate::server::routes::interpret::interpret(events, &deps).await;
+    let nested = crate::server::routes::interpret::interpret(events, deps).await;
     if !nested.archive_id_rewrites.is_empty() {
         crate::server::routes::interpret::rewrite_message_archive_ids(
             &mut relayed,
@@ -267,7 +280,7 @@ async fn handle_muc_private_message(
         let mut routed = relayed.clone();
         routed.to = Some(jid::Jid::from(recipient.clone()));
         let stanza = Stanza::Message(routed);
-        let outcome = deliver_pm_to_session(state, &deps, recipient, &stanza).await;
+        let outcome = deliver_pm_to_session(deps, recipient, &stanza).await;
         let capture = pm_delivery_capture(outcome);
         if capture.any_session_handled {
             any_session_handled = true;
@@ -305,7 +318,7 @@ async fn handle_muc_private_message(
             return Some(vec![message_error_frame(
                 incoming,
                 bound_jid,
-                ingress_effect_capture,
+                deps,
                 ErrorType::Wait,
                 DefinedCondition::RecipientUnavailable,
                 "The occupant could not be reached; please retry.",
@@ -313,7 +326,11 @@ async fn handle_muc_private_message(
         }
     }
 
-    Some(nested.frames)
+    debug_assert!(
+        nested.frames.is_empty(),
+        "archive and carbon events return no frames"
+    );
+    Some(Vec::new())
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -354,39 +371,39 @@ fn pm_delivery_capture(
 /// detached-buffer fallback — the same reliability envelope 1:1 direct
 /// frames get.
 async fn deliver_pm_to_session(
-    state: &WebSocketState,
-    deps: &crate::server::routes::interpret::Deps<'_>,
+    deps: &Deps<'_>,
     target: &jid::FullJid,
     stanza: &Stanza,
 ) -> crate::server::routes::interpret::FullJidDeliveryOutcome {
-    #[cfg(feature = "clustering")]
-    if let Some(bridge) = state
-        .deps
-        .app_state
-        .clustering_claims
-        .ordered_relay_delivery_bridge
-        .as_ref()
-    {
-        if let Some(outcome) = bridge
-            .try_deliver_registered_remote_resource(
-                target,
-                stanza,
-                waddle_xmpp::registry::DeliveryKind::DirectFrame,
-            )
-            .await
-        {
-            return outcome;
-        }
+    use crate::server::routes::interpret::effects::{
+        delivery::{ExternalDeliveryEffect, PeerDeliveryKind},
+        EffectOutcome,
+    };
+    let mut effect = PlannedEffect::new(Effect::External(ExternalEffect::Delivery(
+        ExternalDeliveryEffect::RouteToPeer {
+            route_identity: None,
+            jid: target.clone(),
+            stanza: Box::new(stanza.clone()),
+            kind: PeerDeliveryKind::DirectFrame,
+            call_setup: None,
+        },
+    )));
+    if let Stanza::Message(message) = stanza {
+        effect.dependencies.extend(
+            waddle_xmpp::xep::extract_stanza_ids(message)
+                .into_iter()
+                .map(|minted| {
+                    crate::server::routes::interpret::effects::PlanEffectDependency::AfterArchive {
+                        archive: minted.by.to_bare(),
+                        minted,
+                    }
+                }),
+        );
     }
-    #[cfg(not(feature = "clustering"))]
-    let _ = state;
-    crate::server::routes::interpret::deliver_direct_to_full(
-        deps.user_registry,
-        deps.sm_session_registry,
-        target,
-        stanza,
-    )
-    .await
+    let EffectOutcome::Delivery(outcome) = deps.effects.execute(effect, deps).await else {
+        unreachable!("peer routing returns a delivery outcome");
+    };
+    outcome
 }
 
 /// XEP-0045 §7.8.2 mediated decline, hardened per #1264:
@@ -399,9 +416,8 @@ async fn deliver_pm_to_session(
 ///   selects WHICH invitation is declined, but the recipient is always
 ///   a ledger-recorded inviter — never an arbitrary client-supplied
 ///   target;
-/// - the row is claimed atomically BEFORE delivery (concurrent
-///   declines from two devices forward exactly one) and re-recorded if
-///   neither a live socket nor the durable queue accepted the decline;
+/// - the row is claimed atomically with its canonical identity BEFORE
+///   delivery; failures retain that winner for recorded delivery retries;
 /// - delivery is durable: an offline inviter gets a pending-delivery
 ///   row instead of a silent drop.
 ///
@@ -412,8 +428,9 @@ async fn handle_muc_mediated_decline(
     incoming: &Message,
     state: &WebSocketState,
     bound_jid: &jid::FullJid,
-    ingress_effect_capture: Option<&IngressEffectCapture>,
-) -> Option<Vec<String>> {
+    deps: &Deps<'_>,
+) -> Option<Vec<Stanza>> {
+    let ingress_effect_capture = deps.ingress_effect_capture.as_ref();
     if incoming.type_ != MessageType::Normal {
         return None;
     }
@@ -422,15 +439,6 @@ async fn handle_muc_mediated_decline(
         return None;
     }
     let inbound_decline = mediated_decline(incoming)?;
-    // Declines are authorized exclusively against the durable outstanding
-    // invite ledger, not a live room actor. The frame-level MUC classifier
-    // has no actor-bound fence to contribute here, so retaining its
-    // provisional lookup would make the shadow assert authority that the
-    // live decision never used.
-    if let Some(capture) = ingress_effect_capture {
-        capture.clear_room_scope();
-    }
-
     let decliner = bound_jid.to_bare();
     let db_actor = state.deps.app_state.db_pool.global_actor().clone();
     let outstanding = match crate::server::routes::websocket::muc_invites::list_invites(
@@ -448,14 +456,8 @@ async fn handle_muc_mediated_decline(
                 error = %error,
                 "Failed to look up outstanding invites for mediated decline"
             );
-            return Some(vec![message_error_frame(
-                incoming,
-                bound_jid,
-                ingress_effect_capture,
-                ErrorType::Wait,
-                DefinedCondition::InternalServerError,
-                "Internal server error.",
-            )]);
+            deps.effects.fail_plan(PlanFailure::InvitePrerequisiteRead);
+            return Some(Vec::new());
         }
     };
     if outstanding.is_empty() {
@@ -464,7 +466,7 @@ async fn handle_muc_mediated_decline(
         return Some(vec![message_error_frame(
             incoming,
             bound_jid,
-            ingress_effect_capture,
+            deps,
             ErrorType::Auth,
             DefinedCondition::Forbidden,
             "You have no outstanding invitation to this room.",
@@ -488,7 +490,7 @@ async fn handle_muc_mediated_decline(
             return Some(vec![message_error_frame(
                 incoming,
                 bound_jid,
-                ingress_effect_capture,
+                deps,
                 ErrorType::Modify,
                 DefinedCondition::BadRequest,
                 "Several invitations are outstanding; the decline must name its inviter.",
@@ -498,13 +500,23 @@ async fn handle_muc_mediated_decline(
 
     // Claim the row atomically FIRST: of N concurrent declines for the
     // same invitation, exactly one wins the delete and forwards.
-    match crate::server::routes::websocket::muc_invites::claim_invite(db_actor.clone(), &invite)
-        .await
-    {
-        Ok(true) => {}
-        // Another session already declined this invitation — silent
-        // success, no duplicate decline for the inviter.
-        Ok(false) => return Some(Vec::new()),
+    let claim = PlannedEffect::new(Effect::External(ExternalEffect::InviteLedger(
+        super::muc_invite::InviteLedgerMutation::Claim {
+            message_key: None,
+            invite: invite.clone(),
+        },
+    )));
+    let crate::server::routes::interpret::effects::EffectOutcome::InviteLedger(claimed) =
+        deps.effects.execute(claim, deps).await
+    else {
+        unreachable!("invite ledger effect returns its typed outcome");
+    };
+    match claimed {
+        Ok(super::muc_invite::InviteLedgerOutcome::Claimed(true)) => {}
+        Ok(super::muc_invite::InviteLedgerOutcome::Claimed(false)) => return Some(Vec::new()),
+        Ok(super::muc_invite::InviteLedgerOutcome::Recorded(_)) => {
+            unreachable!("claim effect returns claimed")
+        }
         Err(error) => {
             tracing::warn!(
                 room = %room_jid,
@@ -515,7 +527,7 @@ async fn handle_muc_mediated_decline(
             return Some(vec![message_error_frame(
                 incoming,
                 bound_jid,
-                ingress_effect_capture,
+                deps,
                 ErrorType::Wait,
                 DefinedCondition::InternalServerError,
                 "Internal server error.",
@@ -523,44 +535,40 @@ async fn handle_muc_mediated_decline(
         }
     }
 
-    let x = build_mediated_decline_payload(bound_jid, inbound_decline);
+    let x = build_mediated_decline_payload(&bound_jid.to_bare(), inbound_decline);
     let mut mediated = Message::new(Some(jid::Jid::from(invite.inviter.clone())));
     mediated.id = incoming.id.clone();
     mediated.from = Some(jid::Jid::from(room_jid.clone()));
     mediated.type_ = MessageType::Normal;
     mediated.payloads.push(x);
+    let delivery_sink = crate::server::routes::interpret::effects::ScopedInviteSink {
+        inner: deps.effects,
+        invite: invite.clone(),
+        failure: None,
+    };
+    let mut delivery_deps = deps.clone();
+    delivery_deps.effects = &delivery_sink;
     if let Err(error) = super::muc_invite::deliver_muc_user_message(
         state,
         &invite.inviter,
         mediated,
-        ingress_effect_capture,
+        &delivery_deps,
     )
     .await
     {
-        // Neither a live socket nor the durable queue took the decline
-        // — put the claimed row back so the decliner can retry, and
-        // say so instead of losing the decline silently.
+        // The canonical claim remains owned by this decline; its recorded
+        // delivery stays pending for a retry.
         tracing::warn!(
             room = %room_jid,
             decliner = %decliner,
             inviter = %invite.inviter,
             error = %error,
-            "Mediated decline could not be delivered or queued; restoring ledger row"
+            "Mediated decline could not be delivered or queued"
         );
-        if let Err(error) =
-            crate::server::routes::websocket::muc_invites::record_invite(db_actor, &invite).await
-        {
-            tracing::warn!(
-                room = %room_jid,
-                decliner = %decliner,
-                error = %error,
-                "Failed to restore claimed invite after undeliverable decline"
-            );
-        }
         return Some(vec![message_error_frame(
             incoming,
             bound_jid,
-            ingress_effect_capture,
+            deps,
             ErrorType::Wait,
             DefinedCondition::InternalServerError,
             "Internal server error.",
@@ -580,6 +588,107 @@ async fn handle_muc_mediated_decline(
     }
 
     Some(Vec::new())
+}
+
+/// Rebuild accepted decline obligations without consulting the consumed ledger.
+pub(crate) fn restore_recorded_muc_decline(
+    plan: &mut crate::ingress::IngressPlan,
+    recorded: &[IngressEffectIntent],
+    pending: &[IngressEffectIntent],
+    envelope: &crate::ingress_substrate::MessageEnvelope,
+) -> Result<bool, crate::ingress_uow::IngressUowError> {
+    use crate::server::routes::interpret::effects::{invite::MucUserRoute, PlanSuppressionPolicy};
+    use waddle_xmpp::{
+        ingress::PendingDeliveryMutation,
+        pending_delivery::{PendingPayload, PendingRow},
+    };
+    let Some(mutation) = recorded.iter().find_map(|intent| match intent {
+        IngressEffectIntent::MucInviteLedger { mutation }
+            if mutation.action == MucInviteLedgerAction::Claimed =>
+        {
+            Some(mutation)
+        }
+        _ => None,
+    }) else {
+        return Ok(false);
+    };
+    let incoming = envelope.message();
+    let decline = mediated_decline(incoming)
+        .ok_or(crate::ingress_uow::IngressUowError::EffectIntentMessageMissing)?;
+    let invite = crate::server::routes::websocket::muc_invites::OutstandingInvite {
+        room: mutation.room.clone(),
+        invitee: mutation.invitee.clone(),
+        inviter: mutation.inviter.clone(),
+    };
+    // The accepted decline owns the entire replay plan; live lookup may now
+    // select another invitation after the original invitation was consumed.
+    plan.plan.clear();
+    plan.sanitized_message = incoming.clone();
+    plan.plan.push(PlannedEffect::new(Effect::External(
+        ExternalEffect::InviteLedger(super::muc_invite::InviteLedgerMutation::Claim {
+            invite: invite.clone(),
+            message_key: None,
+        }),
+    )));
+    for intent in pending {
+        let IngressEffectIntent::RouteDirect {
+            recipient,
+            fanout,
+            route_identity,
+        } = intent
+        else {
+            continue;
+        };
+        if recipient != &invite.inviter {
+            continue;
+        }
+        let Some(row_id) = recorded.iter().find_map(|intent| match intent {
+            IngressEffectIntent::PendingDelivery {
+                mutation: PendingDeliveryMutation::Transient { recipient, row_id },
+            } if recipient == &invite.inviter => Some(row_id.clone()),
+            _ => None,
+        }) else {
+            return Err(crate::ingress_uow::IngressUowError::EffectIntentMessageMissing);
+        };
+        // A completed fallback is reconciled into the route receipt before this hook.
+        let mut message = Message::new(Some(invite.inviter.clone().into()));
+        message.id = incoming.id.clone();
+        message.from = Some(invite.room.clone().into());
+        message.type_ = MessageType::Normal;
+        message
+            .payloads
+            .push(build_mediated_decline_payload(&invite.invitee, decline));
+        let route = MucUserRoute {
+            route_identity: Some(route_identity.clone()),
+            recipient: recipient.clone(),
+            resources: fanout.clone(),
+            fallback: PendingRow {
+                id: row_id,
+                recipient: recipient.clone(),
+                original_receipt_at: chrono::Utc::now(),
+                payload: PendingPayload::Transient(Box::new(message.clone())),
+                flushed_in_session: None,
+                outbound_sequence: None,
+            },
+            message: Box::new(message),
+            failure: None,
+        };
+        let effect = if fanout.is_empty() {
+            ExternalEffect::QueueOfflineDelivery(route)
+        } else {
+            ExternalEffect::RouteToPeer(route)
+        };
+        let delivery = PlannedEffect::new(Effect::External(effect))
+            .with_suppression(PlanSuppressionPolicy::Always)
+            .with_dependency(
+                crate::server::routes::interpret::effects::PlanEffectDependency::AfterInviteLedger { invite: invite.clone() },
+            );
+        plan.plan.push(delivery);
+    }
+    plan.intents = recorded.to_vec();
+    plan.rejection = None;
+    plan.error_reply = None;
+    Ok(true)
 }
 
 fn capture_muc_private_routes(
@@ -610,13 +719,13 @@ fn mediated_decline(message: &Message) -> Option<&minidom::Element> {
 }
 
 fn build_mediated_decline_payload(
-    decliner: &jid::FullJid,
+    decliner: &jid::BareJid,
     inbound_decline: &minidom::Element,
 ) -> minidom::Element {
     let mut decline = minidom::Element::builder("decline", waddle_xmpp::muc::presence::NS_MUC_USER)
         .attr(
             minidom::rxml::xml_ncname!("from").to_owned(),
-            decliner.to_bare().to_string(),
+            decliner.to_string(),
         );
     if let Some(reason) =
         inbound_decline.get_child("reason", waddle_xmpp::muc::presence::NS_MUC_USER)
@@ -665,35 +774,31 @@ fn canonicalize_muc_private_payloads(
 fn message_error_frame(
     incoming: &Message,
     bound_jid: &jid::FullJid,
-    ingress_effect_capture: Option<&IngressEffectCapture>,
+    deps: &Deps<'_>,
     error_type: ErrorType,
     condition: DefinedCondition,
     text: &'static str,
-) -> String {
+) -> Stanza {
     let mut stamped = incoming.clone();
     stamped.from = Some(jid::Jid::from(bound_jid.clone()));
     let error = StanzaError::new(error_type, condition, "en", text);
-    let frozen_error = waddle_xmpp::ingress::FrozenStanzaError::from_xmpp(&error)
-        .expect("server-built stanza error should freeze");
-    let reply = message_error_reply(&stamped, error);
-    match stanza_to_string(reply) {
-        Ok(xml) => {
-            if let Some(capture) = ingress_effect_capture {
-                capture.record_intent(IngressEffectIntent::ErrorReply {
-                    recipient: bound_jid.clone(),
-                    error: frozen_error,
-                });
-            }
-            xml
-        }
-        Err(_) => String::new(),
+    if let Some(capture) = &deps.ingress_effect_capture {
+        capture.record_intent(IngressEffectIntent::ErrorReply {
+            recipient: bound_jid.clone(),
+            error: waddle_xmpp::ingress::FrozenStanzaError::from_xmpp(&error)
+                .expect("server-built stanza error should freeze"),
+        });
     }
+    let rejection = super::classify_rejection(&error);
+    let reply = Stanza::Message(message_error_reply(&stamped, error));
+    super::reject_message(deps, reply.clone(), rejection);
+    reply
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::ingress_shadow::IngressEffectCapture;
+    use crate::ingress::IngressEffectCapture;
     use crate::server::routes::websocket::tests::{
         create_test_websocket_state, register_test_connection,
     };
@@ -866,7 +971,7 @@ mod tests {
 
     #[test]
     fn capture_muc_private_routes_records_each_recipient_once() {
-        let capture = IngressEffectCapture::new(None);
+        let capture = IngressEffectCapture::new();
         let sender: jid::FullJid = "room@muc.example.com/alice".parse().expect("sender");
         let bob_phone: jid::FullJid = "bob@example.com/phone".parse().expect("bob phone");
         let bob_laptop: jid::FullJid = "bob@example.com/laptop".parse().expect("bob laptop");
@@ -921,7 +1026,7 @@ mod tests {
         let room: jid::BareJid = "pm@muc.example.com".parse().expect("room");
         let _room_actor = create_test_room(state.as_ref(), room.clone()).await;
         let sender: jid::FullJid = "mallory@example.com/web".parse().expect("sender");
-        let capture = IngressEffectCapture::new(None);
+        let capture = IngressEffectCapture::new();
         let mut incoming = Message::new(Some(
             "pm@muc.example.com/bob"
                 .parse::<jid::Jid>()
@@ -930,7 +1035,12 @@ mod tests {
         incoming.type_ = MessageType::Chat;
         incoming.from = Some(jid::Jid::from(sender.clone()));
 
-        let frames = handle_muc_direct_message(&incoming, state.as_ref(), &sender, Some(&capture))
+        let deps = crate::server::routes::websocket::interpret_loop::build_interpret_deps(
+            state.as_ref(),
+            None,
+        )
+        .with_ingress_effect_capture(Some(capture.clone()));
+        let frames = handle_muc_direct_message(&incoming, state.as_ref(), &sender, &deps)
             .await
             .expect("handled");
 
@@ -981,7 +1091,7 @@ mod tests {
         let _owner = register_test_connection(state.as_ref(), &recipient, recipient_tx).await;
         drop(recipient_rx);
 
-        let capture = IngressEffectCapture::new(None);
+        let capture = IngressEffectCapture::new();
         let mut incoming = Message::new(Some(
             format!("{room}/bob")
                 .parse::<jid::Jid>()
@@ -990,7 +1100,12 @@ mod tests {
         incoming.from = Some(jid::Jid::from(sender.clone()));
         incoming.type_ = MessageType::Chat;
 
-        let frames = handle_muc_direct_message(&incoming, state.as_ref(), &sender, Some(&capture))
+        let deps = crate::server::routes::websocket::interpret_loop::build_interpret_deps(
+            state.as_ref(),
+            None,
+        )
+        .with_ingress_effect_capture(Some(capture.clone()));
+        let frames = handle_muc_direct_message(&incoming, state.as_ref(), &sender, &deps)
             .await
             .expect("handled");
 
@@ -1004,4 +1119,219 @@ mod tests {
             "failed PM delivery must not record RouteOccupantPm"
         );
     }
+    #[tokio::test]
+    async fn plan_muc_private_message_archives_twice_without_delivering() {
+        use crate::server::routes::interpret::effects::{
+            delivery::ExternalDeliveryEffect, direct::DurableDirectEffect, DurableEffect, PlanSink,
+        };
+        let state = create_test_websocket_state().await;
+        let room: jid::BareJid = "room@muc.example.com".parse().expect("room");
+        let actor = create_test_room(state.as_ref(), room).await;
+        let sender: jid::FullJid = "alice@example.com/web".parse().expect("sender");
+        let recipient: jid::FullJid = "bob@example.com/web".parse().expect("recipient");
+        for (nick, jid) in [("alice", &sender), ("bob", &recipient)] {
+            actor
+                .ask(Join {
+                    nick: nick.to_owned(),
+                    real_jid: jid.clone(),
+                    role: Role::Participant,
+                    affiliation: Affiliation::Member,
+                })
+                .await
+                .expect("join");
+        }
+        let (tx, mut rx) = tokio::sync::mpsc::channel(8);
+        let _owner = register_test_connection(state.as_ref(), &recipient, tx).await;
+        // A carbon-enabled sibling makes the sender's carbon obligation
+        // non-empty; an empty audience plans no carbon effect at all.
+        let sibling: jid::FullJid = "alice@example.com/phone".parse().expect("sibling");
+        let (sibling_tx, _sibling_rx) = tokio::sync::mpsc::channel(8);
+        let _sibling = register_test_connection(state.as_ref(), &sibling, sibling_tx).await;
+        assert!(state
+            .deps
+            .protocol
+            .connection_registry
+            .set_carbons_enabled(&sibling, true));
+        let sink = PlanSink::new();
+        let base = crate::server::routes::websocket::interpret_loop::build_interpret_deps(
+            state.as_ref(),
+            None,
+        );
+        let deps = crate::server::routes::interpret::build_plan_deps(&base, &sink);
+        let frames = handle_muc_direct_message(&pm(), state.as_ref(), &sender, &deps)
+            .await
+            .expect("handled");
+        assert!(frames.is_empty());
+        assert!(rx.try_recv().is_err(), "planning must not deliver");
+        let effects = sink.snapshot();
+        for effect in &effects {
+            if let Effect::Durable(DurableEffect::Direct(DurableDirectEffect::ArchiveDirect {
+                message,
+                ..
+            })) = &effect.effect
+            {
+                assert!(
+                    deps.mam_storage
+                        .expect("MAM storage")
+                        .get_message(&message.id)
+                        .await
+                        .expect("archive read")
+                        .is_none(),
+                    "planning must not write archive rows"
+                );
+            }
+        }
+        assert_eq!(
+            effects
+                .iter()
+                .filter(|effect| matches!(
+                    effect.effect,
+                    Effect::Durable(DurableEffect::Direct(
+                        DurableDirectEffect::ArchiveDirect { .. }
+                    ))
+                ))
+                .count(),
+            2
+        );
+        let route = effects.iter().find(|effect| matches!(&effect.effect,
+            Effect::External(ExternalEffect::Delivery(ExternalDeliveryEffect::RouteToPeer { jid, .. })) if jid == &recipient))
+            .expect("recipient route is planned");
+        assert!(route.dependencies.iter().any(|dependency| matches!(dependency,
+            crate::server::routes::interpret::effects::PlanEffectDependency::AfterArchive { archive, .. }
+                if archive == &recipient.to_bare())),
+            "private-message delivery waits for its recipient archive");
+        assert!(effects.iter().any(|effect| matches!(&effect.effect,
+            Effect::External(ExternalEffect::Delivery(
+                ExternalDeliveryEffect::Carbons { recipient, .. }
+            )) if recipient == &sibling)));
+    }
+
+    #[tokio::test]
+    async fn plan_muc_decline_preserves_ledger_without_delivery() {
+        use crate::server::routes::interpret::effects::PlanSink;
+        use crate::server::routes::websocket::muc_invites::{
+            list_invites, record_invite_at, OutstandingInvite,
+        };
+        let state = create_test_websocket_state().await;
+        let decliner: jid::FullJid = "bob@example.com/web".parse().expect("decliner");
+        let inviter: jid::FullJid = "alice@example.com/web".parse().expect("inviter");
+        let invite = OutstandingInvite {
+            room: "room@muc.example.com".parse().expect("room"),
+            invitee: decliner.to_bare(),
+            inviter: inviter.to_bare(),
+        };
+        let actor = state.deps.app_state.db_pool.global_actor().clone();
+        record_invite_at(actor.clone(), &invite, chrono::Utc::now())
+            .await
+            .expect("seed invitation");
+        let (tx, mut rx) = tokio::sync::mpsc::channel(8);
+        let _owner = register_test_connection(state.as_ref(), &inviter, tx).await;
+        let mut message = Message::new(Some(invite.room.clone().into()));
+        message.type_ = MessageType::Normal;
+        message.payloads.push(
+            minidom::Element::builder("x", waddle_xmpp::muc::presence::NS_MUC_USER)
+                .append(
+                    minidom::Element::builder("decline", waddle_xmpp::muc::presence::NS_MUC_USER)
+                        .build(),
+                )
+                .build(),
+        );
+        let sink = PlanSink::new();
+        let base = crate::server::routes::websocket::interpret_loop::build_interpret_deps(
+            state.as_ref(),
+            None,
+        );
+        let deps = crate::server::routes::interpret::build_plan_deps(&base, &sink);
+        let frames = handle_muc_direct_message(&message, state.as_ref(), &decliner, &deps)
+            .await
+            .expect("handled");
+        assert!(frames.is_empty());
+        assert!(rx.try_recv().is_err(), "planning must not deliver decline");
+        assert_eq!(
+            list_invites(actor, &invite.room, &invite.invitee)
+                .await
+                .expect("read invites"),
+            vec![invite.clone()]
+        );
+        assert!(sink.snapshot().iter().any(|effect| matches!(&effect.effect,
+            Effect::External(ExternalEffect::InviteLedger(super::super::muc_invite::InviteLedgerMutation::Claim { invite: planned, .. })) if planned == &invite)));
+        assert!(sink.snapshot().iter().any(|effect| effect.dependencies.contains(
+            &crate::server::routes::interpret::effects::PlanEffectDependency::AfterInviteLedger { invite: invite.clone() }
+        )), "decline delivery must depend on successful ledger claim");
+    }
+    #[tokio::test]
+    async fn plan_bodyless_no_copy_pm_retains_canonical_envelope() {
+        let state = create_test_websocket_state().await;
+        let room: jid::BareJid = "room@muc.example.com".parse().expect("room");
+        let actor = create_test_room(state.as_ref(), room.clone()).await;
+        let sender: jid::FullJid = "alice@example.com/web".parse().expect("sender");
+        let recipient: jid::FullJid = "bob@example.com/web".parse().expect("recipient");
+        for (nick, jid) in [("alice", &sender), ("bob", &recipient)] {
+            actor
+                .ask(Join {
+                    nick: nick.to_owned(),
+                    real_jid: jid.clone(),
+                    role: Role::Participant,
+                    affiliation: Affiliation::Member,
+                })
+                .await
+                .expect("join");
+        }
+        let mut incoming = pm();
+        incoming.bodies.clear();
+        incoming.payloads.push(
+            minidom::Element::builder("no-copy", waddle_xmpp::xep::xep0334::NS_HINTS).build(),
+        );
+        incoming
+            .payloads
+            .push(minidom::Element::builder("query", waddle_xmpp::muc::NS_MUC_ADMIN).build());
+        incoming
+            .payloads
+            .push(waddle_xmpp::xep::xep0421::build_occupant_id_element(
+                &OccupantId::new("forged-id"),
+            ));
+        let target = incoming.to.clone();
+        let dispatcher = waddle_xmpp::protocol::StanzaDispatcher::new();
+        let mut machine = waddle_xmpp::protocol::XmppStateMachine::new("example.com", dispatcher);
+        machine.transition_to_ready(sender.clone(), false);
+        let deps = crate::server::routes::websocket::interpret_loop::build_interpret_deps(
+            state.as_ref(),
+            None,
+        );
+        let plan =
+            crate::server::routes::interpret::plan_message_dispatch(&mut machine, incoming, &deps)
+                .await;
+        assert!(plan.error_reply.is_none());
+        assert_eq!(plan.sanitized_message.from, Some(sender.clone().into()));
+        assert_eq!(plan.sanitized_message.to, target);
+        assert!(plan.sanitized_message.bodies.is_empty());
+        assert_eq!(
+            extract_occupant_id_from_message(&plan.sanitized_message),
+            Some(generate_occupant_id(
+                &sender.to_bare(),
+                &room,
+                &state.deps.occupant_id_secret
+            ))
+        );
+        let muc_payloads: Vec<_> = plan
+            .sanitized_message
+            .payloads
+            .iter()
+            .filter(|payload| waddle_xmpp::muc::is_muc_service_namespace(payload.ns().as_str()))
+            .collect();
+        assert_eq!(muc_payloads.len(), 1);
+        assert!(muc_payloads[0].is("x", waddle_xmpp::muc::presence::NS_MUC_USER));
+        assert_eq!(muc_payloads[0].children().count(), 0);
+        assert!(plan
+            .sanitized_message
+            .payloads
+            .iter()
+            .any(|payload| payload.is("no-copy", waddle_xmpp::xep::xep0334::NS_HINTS)));
+        assert!(!plan.plan.iter().any(|effect| matches!(effect.effect, Effect::Durable(_)
+            | Effect::External(ExternalEffect::Delivery(crate::server::routes::interpret::effects::delivery::ExternalDeliveryEffect::Carbons { .. })))));
+    }
 }
+
+#[cfg(test)]
+#[path = "muc_direct_plan_failure_tests.rs"]
+mod plan_failure_tests;

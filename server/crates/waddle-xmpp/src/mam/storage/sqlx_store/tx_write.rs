@@ -1,59 +1,128 @@
-use std::num::TryFromIntError;
-
+use super::write::{
+    find_origin_tombstone_postgres, find_origin_tombstone_sqlite,
+    insert_postgres_message_on_connection, insert_sqlite_message_on_connection, InsertConflict,
+    MessageInsert,
+};
+use chrono::{DateTime, Utc};
 use jid::BareJid;
-use sqlx::PgConnection;
+use sqlx::{PgConnection, SqliteConnection};
+use std::num::TryFromIntError;
 use thiserror::Error;
-use waddle_xmpp_core::mam::ArchivedMessage;
+use waddle_xmpp_core::mam::{ArchivedMessage, ArchivedRichMessage};
 use waddle_xmpp_core::xep0359::StanzaId;
 
-use crate::mam::storage::StoreOutcome;
-
-use super::write::{
-    find_existing_origin_id_match_postgres_on_connection, insert_postgres_message_on_connection,
-    origin_dedup_fingerprint, origin_dedup_sender_scope, PostgresInsertConflict,
-    PostgresMessageInsert,
-};
-
-/// Outcome of a MAM archive write performed within a caller-owned Postgres transaction.
+/// Canonical ingress authority's expectation for this archive projection.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub enum MamTxStoreOutcome {
-    /// A new archive row was inserted.
-    Inserted(StanzaId),
-    /// A live archive row already matched the retry's origin-id.
-    Existing(StanzaId),
-    /// A retracted archive row matched the retry's origin-id.
-    TombstoneHit(StanzaId),
+pub enum ArchiveExpectation {
+    Fresh,
+    Existing {
+        stanza_id: StanzaId,
+        archived_at: DateTime<Utc>,
+    },
 }
 
-/// Typed encoding failures raised before an archive row reaches Postgres.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum MamTxStoreOutcome {
+    Inserted(StanzaId),
+    Existing(StanzaId),
+    Repaired(StanzaId),
+    TombstoneHit(StanzaId),
+    /// Reserved for bounded archive retention; current MAM retention is unbounded.
+    Expired(StanzaId),
+}
+
 #[derive(Debug, Error)]
 pub enum MamTxEncodingError {
     #[error("failed to encode MAM rich payload")]
     RichPayload(#[source] serde_json::Error),
-    #[error("nickname generation does not fit the Postgres column")]
+    #[error("nickname generation does not fit the archive column")]
     NicknameGeneration(#[source] TryFromIntError),
 }
 
-/// Errors from a caller-owned Postgres MAM archive write.
 #[derive(Debug, Error)]
 pub enum MamTxStoreError {
     #[error("MAM archive database error: {0}")]
     Database(#[from] sqlx::Error),
     #[error("MAM archive encoding error: {0}")]
     Encoding(#[from] MamTxEncodingError),
-    #[error("MAM archive id conflicted without a matching origin-id row: {}", stanza_id.id)]
+    #[error("MAM archive id conflicts with canonical identity: {}", stanza_id.id)]
     Conflict { stanza_id: StanzaId },
 }
 
-/// Store an archived message on a caller-owned Postgres connection.
-///
-/// The caller owns transaction boundaries. This function never begins,
-/// commits, or rolls back a transaction.
+fn expected_message(
+    archive: &BareJid,
+    message: &ArchivedMessage,
+    expectation: &ArchiveExpectation,
+) -> Result<(ArchivedMessage, StanzaId), MamTxStoreError> {
+    let mut message = message.clone();
+    let id = match expectation {
+        ArchiveExpectation::Fresh => StanzaId::new(
+            if message.id.is_empty() {
+                uuid::Uuid::now_v7().to_string()
+            } else {
+                message.id.clone()
+            },
+            archive.clone().into(),
+        ),
+        ArchiveExpectation::Existing {
+            stanza_id,
+            archived_at,
+        } => {
+            if stanza_id.by != *archive {
+                return Err(MamTxStoreError::Conflict {
+                    stanza_id: stanza_id.clone(),
+                });
+            }
+            message.timestamp = *archived_at;
+            stanza_id.clone()
+        }
+    };
+    message.id = id.id.clone();
+    Ok((message, id))
+}
+
+/// Store using a caller-owned connection; transaction boundaries remain with the caller.
+/// MAM currently has unbounded retention, so absent recorded identities are repaired.
 pub async fn store_archived_message_on_connection(
     conn: &mut PgConnection,
-    archive_jid: &BareJid,
+    archive: &BareJid,
     message: &ArchivedMessage,
+    expectation: ArchiveExpectation,
 ) -> Result<MamTxStoreOutcome, MamTxStoreError> {
+    let (message, stanza_id) = expected_message(archive, message, &expectation)?;
+    let existing: Option<(String, Option<String>)> =
+        sqlx::query_as("SELECT room_jid, rich_payload FROM mam_messages WHERE id = $1")
+            .bind(&stanza_id.id)
+            .fetch_optional(&mut *conn)
+            .await?;
+    if let Some((recorded_archive, payload)) = existing {
+        if matches!(expectation, ArchiveExpectation::Fresh)
+            || recorded_archive != archive.to_string()
+        {
+            return Err(MamTxStoreError::Conflict { stanza_id });
+        }
+        let rich: Option<ArchivedRichMessage> = payload
+            .as_deref()
+            .map(serde_json::from_str)
+            .transpose()
+            .map_err(MamTxEncodingError::RichPayload)?;
+        return Ok(
+            if rich
+                .as_ref()
+                .is_some_and(ArchivedRichMessage::is_tombstoned)
+            {
+                MamTxStoreOutcome::TombstoneHit(stanza_id)
+            } else {
+                MamTxStoreOutcome::Existing(stanza_id)
+            },
+        );
+    }
+    if let Some(id) = find_origin_tombstone_postgres(conn, archive, &message).await? {
+        return Ok(MamTxStoreOutcome::TombstoneHit(StanzaId::new(
+            id,
+            archive.clone().into(),
+        )));
+    }
     let rich_payload = message
         .rich
         .as_ref()
@@ -65,105 +134,114 @@ pub async fn store_archived_message_on_connection(
         .map(i64::try_from)
         .transpose()
         .map_err(MamTxEncodingError::NicknameGeneration)?;
-    let origin_dedup_fingerprint = message
-        .origin_id
-        .as_ref()
-        .filter(|_| !super::super::origin_dedup::groupchat_subject_is_retry_dedup_exempt(message))
-        .map(|_| origin_dedup_fingerprint(message));
-    let origin_dedup_sender_scope = origin_dedup_sender_scope(message);
-    let origin_dedup_sender_scope_bind = origin_dedup_sender_scope.as_ref().map(BareJid::to_string);
-    let archive_id = if message.id.is_empty() {
-        uuid::Uuid::now_v7().to_string()
-    } else {
-        message.id.clone()
-    };
-
-    if let Some(outcome) = find_existing_origin_id_match_postgres_on_connection(
-        conn,
-        archive_jid,
-        message,
-        origin_dedup_fingerprint.as_deref(),
-    )
-    .await?
-    {
-        return Ok(tx_outcome(outcome, archive_jid));
-    }
-
     if insert_postgres_message_on_connection(
         conn,
-        PostgresMessageInsert {
-            archive_id: &archive_id,
-            archive_jid,
-            message,
+        MessageInsert {
+            archive_id: &message.id,
+            archive_jid: archive,
+            message: &message,
             rich_payload: rich_payload.as_deref(),
             nickname_generation,
-            origin_dedup_sender_scope: origin_dedup_sender_scope_bind.as_deref(),
-            origin_dedup_fingerprint: origin_dedup_fingerprint.as_deref(),
         },
-        PostgresInsertConflict::DoNothing,
+        InsertConflict::DoNothing,
     )
     .await?
-    .is_some()
+    .is_none()
     {
-        return Ok(MamTxStoreOutcome::Inserted(stanza_id(
-            archive_id,
-            archive_jid,
-        )));
+        return Err(MamTxStoreError::Conflict { stanza_id });
     }
-
-    if let Some(outcome) = find_existing_origin_id_match_postgres_on_connection(
-        conn,
-        archive_jid,
-        message,
-        origin_dedup_fingerprint.as_deref(),
-    )
-    .await?
-    {
-        return Ok(tx_outcome(outcome, archive_jid));
-    }
-
-    Err(MamTxStoreError::Conflict {
-        stanza_id: stanza_id(archive_id, archive_jid),
+    Ok(match expectation {
+        ArchiveExpectation::Fresh => MamTxStoreOutcome::Inserted(stanza_id),
+        ArchiveExpectation::Existing { .. } => MamTxStoreOutcome::Repaired(stanza_id),
     })
 }
 
-fn tx_outcome(outcome: StoreOutcome, archive_jid: &BareJid) -> MamTxStoreOutcome {
-    match outcome {
-        StoreOutcome::Stored(archive_id) | StoreOutcome::Deduplicated(archive_id) => {
-            MamTxStoreOutcome::Existing(stanza_id(archive_id, archive_jid))
+/// Store using a caller-owned connection; transaction boundaries remain with the caller.
+/// MAM currently has unbounded retention, so absent recorded identities are repaired.
+pub async fn store_archived_message_on_sqlite_connection(
+    conn: &mut SqliteConnection,
+    archive: &BareJid,
+    message: &ArchivedMessage,
+    expectation: ArchiveExpectation,
+) -> Result<MamTxStoreOutcome, MamTxStoreError> {
+    let (message, stanza_id) = expected_message(archive, message, &expectation)?;
+    let existing: Option<(String, Option<String>)> =
+        sqlx::query_as("SELECT room_jid, rich_payload FROM mam_messages WHERE id = $1")
+            .bind(&stanza_id.id)
+            .fetch_optional(&mut *conn)
+            .await?;
+    if let Some((recorded_archive, payload)) = existing {
+        if matches!(expectation, ArchiveExpectation::Fresh)
+            || recorded_archive != archive.to_string()
+        {
+            return Err(MamTxStoreError::Conflict { stanza_id });
         }
-        StoreOutcome::TombstoneHit(archive_id) => {
-            MamTxStoreOutcome::TombstoneHit(stanza_id(archive_id, archive_jid))
-        }
+        let rich: Option<ArchivedRichMessage> = payload
+            .as_deref()
+            .map(serde_json::from_str)
+            .transpose()
+            .map_err(MamTxEncodingError::RichPayload)?;
+        return Ok(
+            if rich
+                .as_ref()
+                .is_some_and(ArchivedRichMessage::is_tombstoned)
+            {
+                MamTxStoreOutcome::TombstoneHit(stanza_id)
+            } else {
+                MamTxStoreOutcome::Existing(stanza_id)
+            },
+        );
     }
-}
-
-fn stanza_id(archive_id: String, archive_jid: &BareJid) -> StanzaId {
-    StanzaId::new(archive_id, jid::Jid::from(archive_jid.clone()))
+    if let Some(id) = find_origin_tombstone_sqlite(conn, archive, &message).await? {
+        return Ok(MamTxStoreOutcome::TombstoneHit(StanzaId::new(
+            id,
+            archive.clone().into(),
+        )));
+    }
+    let rich_payload = message
+        .rich
+        .as_ref()
+        .map(serde_json::to_string)
+        .transpose()
+        .map_err(MamTxEncodingError::RichPayload)?;
+    let nickname_generation = message
+        .nickname_generation
+        .map(i64::try_from)
+        .transpose()
+        .map_err(MamTxEncodingError::NicknameGeneration)?;
+    if insert_sqlite_message_on_connection(
+        conn,
+        MessageInsert {
+            archive_id: &message.id,
+            archive_jid: archive,
+            message: &message,
+            rich_payload: rich_payload.as_deref(),
+            nickname_generation,
+        },
+        InsertConflict::DoNothing,
+    )
+    .await?
+    .is_none()
+    {
+        return Err(MamTxStoreError::Conflict { stanza_id });
+    }
+    Ok(match expectation {
+        ArchiveExpectation::Fresh => MamTxStoreOutcome::Inserted(stanza_id),
+        ArchiveExpectation::Existing { .. } => MamTxStoreOutcome::Repaired(stanza_id),
+    })
 }
 
 #[cfg(test)]
 mod tests {
-    use std::env;
-
-    use chrono::Utc;
-    use sqlx::postgres::PgPoolOptions;
-    use tokio::sync::oneshot;
+    use super::*;
+    use crate::mam::storage::{MamStorage, SqlxMamStorage};
+    use chrono::{Duration, Utc};
     use waddle_xmpp_core::mam::{
         ArchivedMessage, ArchivedMucSender, ArchivedRichMessage, ArchivedTombstone,
     };
     use waddle_xmpp_core::types::{Affiliation, Role};
-    use waddle_xmpp_core::xep0359::OriginId;
+    use waddle_xmpp_core::xep0359::{OriginId, StanzaId};
     use xmpp_parsers::message::MessageType;
-
-    use crate::mam::storage::{MamStorage, SqlxMamStorage};
-
-    use super::{store_archived_message_on_connection, MamTxStoreError, MamTxStoreOutcome};
-
-    fn postgres_url() -> Option<String> {
-        env::var("WADDLE_TEST_POSTGRES_URL").ok()
-    }
-
     fn fixture(archive: &jid::BareJid, id: &str, origin_id: Option<&str>) -> ArchivedMessage {
         ArchivedMessage {
             id: id.to_string(),
@@ -203,200 +281,261 @@ mod tests {
         format!("{prefix}-{}", uuid::Uuid::now_v7())
     }
 
-    async fn count_rows(pool: &sqlx::PgPool, archive: &jid::BareJid) -> i64 {
-        sqlx::query_scalar("SELECT COUNT(*) FROM mam_messages WHERE room_jid = $1")
-            .bind(archive.to_string())
-            .fetch_one(pool)
-            .await
-            .expect("count archive rows")
-    }
-
     #[tokio::test]
-    async fn postgres_tx_write_keeps_insert_commit_dedup_conflict_and_tombstone_semantics() {
-        let Some(url) = postgres_url() else {
+    async fn postgres_tx_write_preserves_canonical_identity_and_repairs_recorded_timestamp() {
+        let Ok(url) = std::env::var("WADDLE_TEST_POSTGRES_URL") else {
             eprintln!("skipping Postgres MAM tx-write test: WADDLE_TEST_POSTGRES_URL is unset");
             return;
         };
-        let storage = SqlxMamStorage::open(&url)
-            .await
-            .expect("initialize MAM schema");
-        let pool = PgPoolOptions::new()
-            .max_connections(5)
-            .connect(&url)
-            .await
-            .expect("connect Postgres test pool");
+        let storage = SqlxMamStorage::open(&url).await.expect("MAM schema");
+        let pool = storage.postgres_pool().expect("Postgres pool");
         let archive = unique_archive();
-        let rolled_back_id = unique_id("rolled-back");
-        let rolled_back_origin = unique_id("rolled-back-origin");
-        let inserted = fixture(&archive, &rolled_back_id, Some(&rolled_back_origin));
-
-        let mut rollback_tx = pool.begin().await.expect("begin rollback transaction");
-        let rollback_outcome =
-            store_archived_message_on_connection(&mut rollback_tx, &archive, &inserted)
-                .await
-                .expect("insert inside transaction");
+        let mut message = fixture(&archive, &unique_id("canonical"), Some("origin"));
+        let wire_id = unique_id("wire");
+        message.stanza_id = Some(StanzaId::new(wire_id.clone(), archive.clone().into()));
+        message.stanza_xml = None;
+        let mut tx = pool.begin().await.expect("begin");
         assert!(matches!(
-            rollback_outcome,
-            MamTxStoreOutcome::Inserted(ref stanza_id) if stanza_id.id == rolled_back_id
-        ));
-        rollback_tx
-            .rollback()
+            store_archived_message_on_connection(
+                &mut tx,
+                &archive,
+                &message,
+                ArchiveExpectation::Fresh
+            )
             .await
-            .expect("roll back archive insert");
-        assert_eq!(count_rows(&pool, &archive).await, 0);
-
-        let committed_id = unique_id("committed");
-        let committed_origin = unique_id("committed-origin");
-        let committed = fixture(&archive, &committed_id, Some(&committed_origin));
-        let mut commit_tx = pool.begin().await.expect("begin commit transaction");
-        assert!(matches!(
-            store_archived_message_on_connection(&mut commit_tx, &archive, &committed)
-                .await
-                .expect("insert before commit"),
+            .expect("insert"),
             MamTxStoreOutcome::Inserted(_)
         ));
-        commit_tx.commit().await.expect("commit archive insert");
-        assert_eq!(count_rows(&pool, &archive).await, 1);
-
-        let mut dedup_tx = pool.begin().await.expect("begin dedup transaction");
-        let retry_id = unique_id("retry");
-        let retry = fixture(&archive, &retry_id, Some(&committed_origin));
         assert!(matches!(
-            store_archived_message_on_connection(&mut dedup_tx, &archive, &retry)
-                .await
-                .expect("deduplicate retry"),
-            MamTxStoreOutcome::Existing(ref stanza_id) if stanza_id.id == committed_id
+            store_archived_message_on_connection(
+                &mut tx,
+                &archive,
+                &message,
+                ArchiveExpectation::Fresh
+            )
+            .await,
+            Err(MamTxStoreError::Conflict { .. })
         ));
-        dedup_tx.commit().await.expect("commit dedup transaction");
-
-        let conflict_id = unique_id("conflict");
-        let conflicting = fixture(&archive, &conflict_id, None);
-        let mut conflict_seed_tx = pool.begin().await.expect("begin conflict seed transaction");
-        store_archived_message_on_connection(&mut conflict_seed_tx, &archive, &conflicting)
-            .await
-            .expect("seed primary-key conflict");
-        conflict_seed_tx
-            .commit()
-            .await
-            .expect("commit conflict seed");
-        let mut conflict_tx = pool.begin().await.expect("begin conflict transaction");
-        let different_origin = unique_id("different-origin");
-        let conflict = fixture(&archive, &conflict_id, Some(&different_origin));
-        assert!(matches!(
-            store_archived_message_on_connection(&mut conflict_tx, &archive, &conflict).await,
-            Err(MamTxStoreError::Conflict { ref stanza_id }) if stanza_id.id == conflict_id
-        ));
-        conflict_tx
-            .rollback()
-            .await
-            .expect("roll back conflict transaction");
-
-        let tombstone = ArchivedTombstone {
-            retraction_id: None,
-            stamp: Utc::now(),
-            moderation: None,
-            sender_scope: None,
+        tx.rollback().await.expect("rollback");
+        let archived_at = Utc::now() - Duration::days(365);
+        let id = StanzaId::new(message.id.clone(), archive.clone().into());
+        let expected = ArchiveExpectation::Existing {
+            stanza_id: id.clone(),
+            archived_at,
         };
-        assert!(storage
-            .replace_with_tombstone(&committed_id, tombstone)
-            .await
-            .expect("replace committed row with tombstone"));
-        let mut tombstone_tx = pool
-            .begin()
-            .await
-            .expect("begin tombstone retry transaction");
-        let tombstone_retry_id = unique_id("tombstone-retry");
-        let tombstone_retry = fixture(&archive, &tombstone_retry_id, Some(&committed_origin));
-        assert!(matches!(
-            store_archived_message_on_connection(&mut tombstone_tx, &archive, &tombstone_retry)
+        let mut tx = pool.begin().await.expect("begin repair");
+        assert_eq!(
+            store_archived_message_on_connection(&mut tx, &archive, &message, expected.clone())
                 .await
-                .expect("recognize tombstone retry"),
-            MamTxStoreOutcome::TombstoneHit(ref stanza_id) if stanza_id.id == committed_id
-        ));
-        tombstone_tx
-            .commit()
+                .expect("repair"),
+            MamTxStoreOutcome::Repaired(id.clone())
+        );
+        assert_eq!(
+            store_archived_message_on_connection(&mut tx, &archive, &message, expected.clone())
+                .await
+                .expect("existing"),
+            MamTxStoreOutcome::Existing(id.clone())
+        );
+        let another = fixture(&archive, &unique_id("same-origin"), Some("origin"));
+        assert!(matches!(
+            store_archived_message_on_connection(
+                &mut tx,
+                &archive,
+                &another,
+                ArchiveExpectation::Fresh
+            )
             .await
-            .expect("commit tombstone retry transaction");
+            .expect("origin id does not deduplicate"),
+            MamTxStoreOutcome::Inserted(_)
+        ));
+        tx.commit().await.expect("commit repair");
+        let stored = storage
+            .get_message(&message.id)
+            .await
+            .expect("get")
+            .expect("row");
+        assert_eq!(
+            stored.timestamp.timestamp_millis(),
+            archived_at.timestamp_millis()
+        );
+        assert_eq!(stored.stanza_id, message.stanza_id);
+        assert_eq!(
+            waddle_xmpp_core::mam::archived_inner_message(&stored).attr("id"),
+            Some(wire_id.as_str())
+        );
+        storage
+            .replace_with_tombstone(
+                &message.id,
+                ArchivedTombstone {
+                    retraction_id: None,
+                    stamp: Utc::now(),
+                    moderation: None,
+                    sender_scope: None,
+                },
+            )
+            .await
+            .expect("tombstone");
+        let mut tx = pool.begin().await.expect("begin tombstone");
+        assert_eq!(
+            store_archived_message_on_connection(&mut tx, &archive, &message, expected)
+                .await
+                .expect("tombstone hit"),
+            MamTxStoreOutcome::TombstoneHit(id)
+        );
+        assert!(matches!(
+            store_archived_message_on_connection(
+                &mut tx,
+                &archive,
+                &message,
+                ArchiveExpectation::Fresh
+            )
+            .await,
+            Err(MamTxStoreError::Conflict { .. })
+        ));
+        let retry = fixture(&archive, &unique_id("retry"), Some("origin"));
+        assert!(matches!(
+            store_archived_message_on_connection(
+                &mut tx,
+                &archive,
+                &retry,
+                ArchiveExpectation::Fresh
+            )
+            .await
+            .expect("origin tombstone"),
+            MamTxStoreOutcome::TombstoneHit(_)
+        ));
+        tx.rollback().await.expect("rollback");
     }
 
     #[tokio::test]
-    async fn postgres_tx_write_dedup_race_leaves_one_row_and_no_poisoned_transaction() {
-        let Some(url) = postgres_url() else {
-            eprintln!(
-                "skipping Postgres MAM tx-write race test: WADDLE_TEST_POSTGRES_URL is unset"
-            );
-            return;
-        };
-        SqlxMamStorage::open(&url)
-            .await
-            .expect("initialize MAM schema");
-        let pool = PgPoolOptions::new()
-            .max_connections(6)
-            .connect(&url)
-            .await
-            .expect("connect Postgres test pool");
+    async fn sqlite_tx_write_preserves_canonical_identity_and_repairs_recorded_timestamp() {
+        let storage = SqlxMamStorage::open_in_memory().await.expect("MAM schema");
+        let pool = storage.sqlite_pool().expect("SQLite pool");
         let archive = unique_archive();
-        let race_first_id = unique_id("race-first");
-        let race_second_id = unique_id("race-second");
-        let race_origin = unique_id("race-origin");
-        let first = fixture(&archive, &race_first_id, Some(&race_origin));
-        let second = fixture(&archive, &race_second_id, Some(&race_origin));
-
-        let (first_opened_tx, first_opened_rx) = oneshot::channel();
-        let (second_opened_tx, second_opened_rx) = oneshot::channel();
-        let (start_first_tx, start_first_rx) = oneshot::channel();
-        let (first_inserted_tx, first_inserted_rx) = oneshot::channel();
-        let (start_second_tx, start_second_rx) = oneshot::channel();
-        let (commit_first_tx, commit_first_rx) = oneshot::channel();
-
-        let first_pool = pool.clone();
-        let first_archive = archive.clone();
-        let first_task = tokio::spawn(async move {
-            let mut tx = first_pool.begin().await.expect("begin first transaction");
-            first_opened_tx
-                .send(())
-                .expect("signal first transaction open");
-            start_first_rx.await.expect("start first transaction write");
-            let outcome = store_archived_message_on_connection(&mut tx, &first_archive, &first)
-                .await
-                .expect("first transaction insert");
-            first_inserted_tx.send(()).expect("signal first insert");
-            commit_first_rx.await.expect("commit first transaction");
-            tx.commit().await.expect("commit first transaction");
-            outcome
-        });
-        let second_pool = pool.clone();
-        let second_archive = archive.clone();
-        let second_task = tokio::spawn(async move {
-            let mut tx = second_pool.begin().await.expect("begin second transaction");
-            second_opened_tx
-                .send(())
-                .expect("signal second transaction open");
-            start_second_rx
-                .await
-                .expect("start second transaction write");
-            let outcome = store_archived_message_on_connection(&mut tx, &second_archive, &second)
-                .await
-                .expect("second transaction resolves dedup");
-            tx.commit().await.expect("commit second transaction");
-            outcome
-        });
-
-        first_opened_rx.await.expect("wait for first transaction");
-        second_opened_rx.await.expect("wait for second transaction");
-        start_first_tx.send(()).expect("start first write");
-        first_inserted_rx.await.expect("wait for first insert");
-        start_second_tx.send(()).expect("start second write");
-        commit_first_tx.send(()).expect("commit first write");
-
+        let mut message = fixture(&archive, &unique_id("canonical"), Some("origin"));
+        let wire_id = unique_id("wire");
+        message.stanza_id = Some(StanzaId::new(wire_id.clone(), archive.clone().into()));
+        message.stanza_xml = None;
+        let mut tx = pool.begin().await.expect("begin");
         assert!(matches!(
-            first_task.await.expect("first task completed"),
+            store_archived_message_on_sqlite_connection(
+                &mut tx,
+                &archive,
+                &message,
+                ArchiveExpectation::Fresh
+            )
+            .await
+            .expect("insert"),
             MamTxStoreOutcome::Inserted(_)
         ));
         assert!(matches!(
-            second_task.await.expect("second task completed"),
-            MamTxStoreOutcome::Existing(ref stanza_id) if stanza_id.id == race_first_id
+            store_archived_message_on_sqlite_connection(
+                &mut tx,
+                &archive,
+                &message,
+                ArchiveExpectation::Fresh
+            )
+            .await,
+            Err(MamTxStoreError::Conflict { .. })
         ));
-        assert_eq!(count_rows(&pool, &archive).await, 1);
+        tx.rollback().await.expect("rollback");
+        let archived_at = Utc::now() - Duration::days(365);
+        let id = StanzaId::new(message.id.clone(), archive.clone().into());
+        let expected = ArchiveExpectation::Existing {
+            stanza_id: id.clone(),
+            archived_at,
+        };
+        let mut tx = pool.begin().await.expect("begin repair");
+        assert_eq!(
+            store_archived_message_on_sqlite_connection(
+                &mut tx,
+                &archive,
+                &message,
+                expected.clone()
+            )
+            .await
+            .expect("repair"),
+            MamTxStoreOutcome::Repaired(id.clone())
+        );
+        assert_eq!(
+            store_archived_message_on_sqlite_connection(
+                &mut tx,
+                &archive,
+                &message,
+                expected.clone()
+            )
+            .await
+            .expect("existing"),
+            MamTxStoreOutcome::Existing(id.clone())
+        );
+        let another = fixture(&archive, &unique_id("same-origin"), Some("origin"));
+        assert!(matches!(
+            store_archived_message_on_sqlite_connection(
+                &mut tx,
+                &archive,
+                &another,
+                ArchiveExpectation::Fresh
+            )
+            .await
+            .expect("origin id does not deduplicate"),
+            MamTxStoreOutcome::Inserted(_)
+        ));
+        tx.commit().await.expect("commit repair");
+        let stored = storage
+            .get_message(&message.id)
+            .await
+            .expect("get")
+            .expect("row");
+        assert_eq!(
+            stored.timestamp.timestamp_millis(),
+            archived_at.timestamp_millis()
+        );
+        assert_eq!(stored.stanza_id, message.stanza_id);
+        assert_eq!(
+            waddle_xmpp_core::mam::archived_inner_message(&stored).attr("id"),
+            Some(wire_id.as_str())
+        );
+        storage
+            .replace_with_tombstone(
+                &message.id,
+                ArchivedTombstone {
+                    retraction_id: None,
+                    stamp: Utc::now(),
+                    moderation: None,
+                    sender_scope: None,
+                },
+            )
+            .await
+            .expect("tombstone");
+        let mut tx = pool.begin().await.expect("begin tombstone");
+        assert_eq!(
+            store_archived_message_on_sqlite_connection(&mut tx, &archive, &message, expected)
+                .await
+                .expect("tombstone hit"),
+            MamTxStoreOutcome::TombstoneHit(id)
+        );
+        assert!(matches!(
+            store_archived_message_on_sqlite_connection(
+                &mut tx,
+                &archive,
+                &message,
+                ArchiveExpectation::Fresh
+            )
+            .await,
+            Err(MamTxStoreError::Conflict { .. })
+        ));
+        let retry = fixture(&archive, &unique_id("retry"), Some("origin"));
+        assert!(matches!(
+            store_archived_message_on_sqlite_connection(
+                &mut tx,
+                &archive,
+                &retry,
+                ArchiveExpectation::Fresh
+            )
+            .await
+            .expect("origin tombstone"),
+            MamTxStoreOutcome::TombstoneHit(_)
+        ));
+        tx.rollback().await.expect("rollback");
     }
 }

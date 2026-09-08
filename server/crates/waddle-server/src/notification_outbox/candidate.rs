@@ -265,6 +265,13 @@ impl NotificationCandidate {
         &self.archive_stanza_id
     }
 
+    /// Rebind a planned candidate to the committed identity from the same authority.
+    pub(crate) fn restamp_archive_id(&mut self, recorded: &StanzaId) {
+        if self.archive_stanza_id.by == recorded.by {
+            self.archive_stanza_id = recorded.clone();
+        }
+    }
+
     pub fn class(&self) -> NotificationClass {
         self.class
     }

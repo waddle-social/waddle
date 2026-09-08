@@ -194,6 +194,63 @@ where
     .outcome
 }
 
+/// Settle each receipt carrier as soon as its ordered response prefix reaches the wire.
+pub(super) async fn write_ingress_response_batch_with_admission<S, SE, R, RE>(
+    sender: &mut S,
+    reader: &mut R,
+    state: &WebSocketState,
+    conn: &mut WsConnState,
+    responses: &mut super::frame::ResponseBatch,
+    policy: BatchSmPolicy,
+    authority: BatchAuthority<'_>,
+) -> BatchWriteReport
+where
+    S: Sink<Message, Error = SE> + Unpin,
+    SE: std::fmt::Display,
+    R: futures::Stream<Item = Result<Message, RE>> + Unpin,
+    RE: std::fmt::Display,
+{
+    let report = write_response_batch_report_with_admission(
+        sender,
+        reader,
+        state,
+        conn,
+        responses.frames.clone(),
+        policy,
+        authority,
+    )
+    .await;
+    if matches!(report.outcome, BatchWriteOutcome::Continue) {
+        for ingress_report in &mut responses.ingress_reports {
+            if let Err(error) = state
+                .deps
+                .protocol
+                .ingress
+                .complete_frame_obligations(ingress_report)
+                .await
+            {
+                warn!(%error, "Failed to receipt written ingress response frames");
+            }
+        }
+    }
+    report
+}
+
+/// Retain completion proofs carried through XEP-0198 recovery. Persistence
+/// retries run independently of this socket; success means the authority now
+/// owns the proofs, so the replay entry can be dropped.
+pub(super) async fn complete_replayed_ingress_receipts(
+    state: &WebSocketState,
+    receipts: &[waddle_xmpp::stream_management::SmIngressFrameReceipt],
+) -> bool {
+    state
+        .deps
+        .protocol
+        .ingress
+        .retry_frame_receipts(receipts)
+        .await
+}
+
 pub(super) async fn write_response_batch_report_with_admission<S, SE, R, RE, F>(
     sender: &mut S,
     reader: &mut R,
@@ -243,6 +300,7 @@ where
     let total_frames = frames.len();
     let mut accepted_frame_indices = Vec::new();
     let mut written_frame_count = 0usize;
+    complete_replayed_ingress_receipts(state, &[]).await;
     let mut frames = frames.into_iter().enumerate();
     if !batch_authoritative(authority) {
         accepted_frame_indices.extend(record_remaining_for_replay_indexed(conn, frames, policy));
@@ -338,6 +396,10 @@ where
             let (request_ack, accepted) =
                 record_live_sm_frame(conn, frame_xml.clone(), SmEvictionPath::Batch);
             if accepted {
+                // Only an entry inside the replay window can carry the
+                // obligation forward; a gapped queue cannot prove redelivery.
+                conn.sm_state
+                    .attach_ingress_receipts(frame.ingress_receipts().to_vec());
                 accepted_frame_indices.push(frame_index);
             }
             request_ack
@@ -359,6 +421,9 @@ where
                 written_frame_count,
             };
         }
+        // Only the final carrier bears the ordered prefix's obligations. Settle
+        // immediately after its write, before ACK cadence can drain or close.
+        let replayed_receipts = frame.ingress_receipts().to_vec();
         if let Err(outcome) = send_window_message(
             sender,
             Message::Text(frame.into_serialized_xml().into()),
@@ -395,6 +460,7 @@ where
             };
         }
         written_frame_count += 1;
+        complete_replayed_ingress_receipts(state, &replayed_receipts).await;
         if request_ack {
             if !batch_authoritative(authority) {
                 accepted_frame_indices
@@ -534,7 +600,7 @@ where
             return SendWindowOutcome::Recovered;
         }
         if let Err(outcome) =
-            service_paused_sm_requests_from_deferred(sender, conn, authority).await
+            service_paused_sm_requests_from_deferred(sender, state, conn, authority).await
         {
             return outcome;
         }
@@ -622,6 +688,16 @@ where
                     if !batch_authoritative(authority) {
                         return SendWindowOutcome::AuthorityRevoked;
                     }
+                    if super::stream_management::flush_ingress_checkpoint(
+                        state,
+                        &conn.sm_state,
+                        &mut conn.sm_inbound_completion,
+                    )
+                    .await
+                    .is_err()
+                    {
+                        return SendWindowOutcome::TransportClosed;
+                    }
                     if let Err(outcome) = send_window_message(
                         sender,
                         Message::Text(
@@ -674,6 +750,7 @@ where
 
 async fn service_paused_sm_requests_from_deferred<S, E>(
     sender: &mut S,
+    state: &WebSocketState,
     conn: &mut WsConnState,
     authority: Option<(
         &crate::clustering::NodeAdmissionPermit,
@@ -700,6 +777,13 @@ where
         if !batch_authoritative(authority) {
             return Err(SendWindowOutcome::AuthorityRevoked);
         }
+        super::stream_management::flush_ingress_checkpoint(
+            state,
+            &conn.sm_state,
+            &mut conn.sm_inbound_completion,
+        )
+        .await
+        .map_err(|_| SendWindowOutcome::TransportClosed)?;
         send_window_message(
             sender,
             Message::Text(
@@ -797,15 +881,24 @@ where
     let mut accepted_frame_indices = Vec::new();
     for (frame_index, frame) in frames {
         let frame: ResponseFrame = frame.into();
+        let ingress_receipts = frame.ingress_receipts().to_vec();
         let frame_xml = frame.into_serialized_xml();
         if should_record(conn, &frame_xml, policy) {
             let accepted = if conn.sm_recovery_required {
                 let before = conn.terminal_sm_recovery.queue_len();
                 conn.record_terminal_recovery_outbound(frame_xml);
-                conn.terminal_sm_recovery.queue_len() > before
+                let accepted = conn.terminal_sm_recovery.queue_len() > before;
+                if accepted {
+                    conn.terminal_sm_recovery
+                        .attach_ingress_receipts(ingress_receipts);
+                }
+                accepted
             } else {
                 let (_, accepted) =
                     record_live_sm_frame(conn, frame_xml, SmEvictionPath::ReplayTail);
+                if accepted {
+                    conn.sm_state.attach_ingress_receipts(ingress_receipts);
+                }
                 accepted
             };
             if accepted {
@@ -985,3 +1078,7 @@ fn is_client_sm_request(frame: &str) -> bool {
     SmStanza::is_client_nonza_candidate(frame)
         && matches!(SmStanza::parse(frame), Some(SmStanza::Request))
 }
+
+#[cfg(test)]
+#[path = "tests/ingress_replay_receipts.rs"]
+mod ingress_replay_receipts;

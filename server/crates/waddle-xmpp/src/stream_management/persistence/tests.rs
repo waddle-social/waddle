@@ -20,7 +20,6 @@ fn fixture_session(stream_id: &str) -> PersistedSession {
         jid: full("alice@example.com/web"),
         occupancy_session: waddle_xmpp_core::OccupancySessionGeneration::mint(),
         inbound_count: 0,
-        shadow_ordinal: crate::stream_management::ShadowOrdinal::ZERO,
         outbound_count: 0,
         last_acked: 0,
         replay_gap_through: Some(9),
@@ -49,6 +48,7 @@ fn fixture_unacked(stream_id: &str, sequence: u32) -> PersistedUnackedStanza {
         .bodies
         .insert(xmpp_parsers::message::Lang::new(), format!("m{sequence}"));
     PersistedUnackedStanza {
+        ingress_receipts: Vec::new(),
         stream_id: sid(stream_id),
         sequence,
         stanza: Box::new(Stanza::Message(message)),

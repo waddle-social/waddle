@@ -60,6 +60,7 @@
             fileset = lib.fileset.unions [
               ./server/Cargo.toml
               ./server/Cargo.lock
+              ./server/README.md
               ./server/capabilities.toml
               ./server/crates
               ./server/extensions
@@ -196,6 +197,7 @@
               ./server/Cargo.toml
               ./server/Cargo.lock
               ./server/.config/nextest.toml
+              ./server/README.md
               ./server/capabilities.toml
               ./server/crates
               ./server/extensions

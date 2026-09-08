@@ -65,7 +65,10 @@ pub use room_registry_handle::{
     RoomRegistry, ROOM_REGISTRY_MAILBOX_CAPACITY, ROOM_REGISTRY_MAILBOX_TIMEOUT,
     ROOM_REGISTRY_REPLY_TIMEOUT, ROOM_REGISTRY_SLOW_ASK_WARN,
 };
-pub use subject::{RoomSubjectTexts, SubjectState};
+pub use subject::{
+    is_groupchat_subject_change, is_groupchat_subject_change_message, RoomSubjectTexts,
+    SubjectState,
+};
 
 /// True when `ns` is a MUC *service* namespace whose payloads are
 /// authored by the room service, never by an occupant client:

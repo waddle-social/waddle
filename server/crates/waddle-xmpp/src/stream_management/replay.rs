@@ -37,6 +37,8 @@ use crate::xep::NS_DELAY;
 /// XEP-0198's no-loss guarantee outranks the stamp.
 #[derive(Debug, Clone)]
 pub struct ReplayStanza {
+    /// Ingress obligations confirmed only after this ordered replay prefix is written.
+    pub ingress_receipts: Vec<crate::stream_management::SmIngressFrameReceipt>,
     /// The wire XML captured when the stanza was first sent.
     pub stanza_xml: String,
     /// Server-side receipt time of the original stanza.
@@ -112,5 +114,27 @@ pub fn stamp_replay_delay(
             warn!(%error, "failed to serialize delay-stamped SM replay; replaying unstamped");
             stanza_xml.to_string()
         }
+    }
+}
+
+/// Durable ingress receipt identity attached to the last frame of an ordered batch.
+/// Earlier frames are either written before it or cumulatively acknowledged by SM.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct SmIngressFrameReceipt {
+    pub message_key: crate::ingress::MessageKey,
+    pub kind: SmIngressReceiptKind,
+    pub semantic_identity_hash: [u8; 32],
+}
+
+/// Stable ingress effect codec discriminator, transported without interpreting it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct SmIngressReceiptKind(i32);
+
+impl SmIngressReceiptKind {
+    pub const fn from_storage(value: i32) -> Self {
+        Self(value)
+    }
+    pub const fn to_storage(self) -> i32 {
+        self.0
     }
 }

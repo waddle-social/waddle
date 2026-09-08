@@ -7473,7 +7473,6 @@ async fn detached_invalidation_is_generation_safe_with_a_live_replacement() {
         jid: alice.clone(),
         occupancy_session: old_generation,
         inbound_count: 0,
-        shadow_ordinal: waddle_xmpp::stream_management::ShadowOrdinal::ZERO,
         outbound_count: 0,
         last_acked: 0,
         replay_gap_through: None,
@@ -7613,7 +7612,6 @@ async fn fresh_bind_invalidation_cleans_the_dead_sessions_room_occupancy() {
         jid: alice.clone(),
         occupancy_session: current_test_occupancy_session(state.as_ref(), &alice),
         inbound_count: 0,
-        shadow_ordinal: waddle_xmpp::stream_management::ShadowOrdinal::ZERO,
         outbound_count: 0,
         last_acked: 0,
         replay_gap_through: None,
@@ -7849,13 +7847,14 @@ async fn xep0045_destroy_notifies_every_occupant_session_and_wipes_durable_state
         .expect("grant owner");
 
     // Seed an outstanding invite: destroy must wipe the ledger.
-    crate::server::routes::websocket::muc_invites::record_invite(
+    crate::server::routes::websocket::muc_invites::record_invite_at(
         state.deps.app_state.db_pool.global_actor().clone(),
         &crate::server::routes::websocket::muc_invites::OutstandingInvite {
             room: room_jid.clone(),
             invitee: "hecate@example.com".parse().expect("invitee"),
             inviter: alice.to_bare(),
         },
+        chrono::Utc::now(),
     )
     .await
     .expect("seed invite ledger row");

@@ -1,5 +1,5 @@
 use super::*;
-use crate::ingress_shadow::IngressEffectCapture;
+use crate::ingress::IngressEffectCapture;
 use waddle_xmpp::stream_management::SmSessionRegistry;
 
 // -----------------------------------------------------------------
@@ -107,7 +107,7 @@ async fn xep_0280_capture_skips_closed_carbon_targets() {
     registry.register_with_carbons(alice_phone, phone_tx, true);
     drop(phone_rx);
 
-    let capture = IngressEffectCapture::new(None);
+    let capture = IngressEffectCapture::new();
     let deps = Deps::registry_only(&registry).with_ingress_effect_capture(Some(capture.clone()));
 
     let _ = interpret(
@@ -195,7 +195,6 @@ async fn xep_0280_send_carbons_queues_for_detached_xep_0198_resources() {
         jid: alice_phone.clone(),
         occupancy_session: waddle_xmpp_core::OccupancySessionGeneration::mint(),
         inbound_count: 0,
-        shadow_ordinal: waddle_xmpp::stream_management::ShadowOrdinal::ZERO,
         outbound_count: 0,
         last_acked: 0,
         replay_gap_through: None,
@@ -233,6 +232,8 @@ async fn xep_0280_send_carbons_queues_for_detached_xep_0198_resources() {
         ordered_relay_origin: None,
         sfu: None,
         ingress_effect_capture: None,
+        direct_route_identity: None,
+        effects: &crate::server::routes::interpret::effects::ImmediateSink,
     };
     let _outcome = interpret(
         vec![OutboundEvent::SendCarbons {
@@ -272,8 +273,9 @@ async fn detached_carbon_append_records_the_actual_sm_stream() {
     sm.store_session(detached)
         .await
         .expect("store detached session");
-    let capture = IngressEffectCapture::new(None);
+    let capture = IngressEffectCapture::new();
     let deps = Deps {
+        effects: &crate::server::routes::interpret::effects::ImmediateSink,
         connection_registry: &registry,
         user_registry: None,
         sm_session_registry: Some(&sm),
@@ -290,6 +292,7 @@ async fn detached_carbon_append_records_the_actual_sm_stream() {
         ordered_relay_origin: None,
         sfu: None,
         ingress_effect_capture: Some(capture.clone()),
+        direct_route_identity: None,
     };
 
     let _ = interpret(
@@ -331,8 +334,9 @@ async fn self_dm_and_sent_carbon_to_same_detached_stream_keep_distinct_append_id
         .await
         .expect("store detached session");
 
-    let capture = IngressEffectCapture::new(None);
+    let capture = IngressEffectCapture::new();
     let deps = Deps {
+        effects: &crate::server::routes::interpret::effects::ImmediateSink,
         connection_registry: &registry,
         user_registry: None,
         sm_session_registry: Some(&sm),
@@ -349,6 +353,7 @@ async fn self_dm_and_sent_carbon_to_same_detached_stream_keep_distinct_append_id
         ordered_relay_origin: None,
         sfu: None,
         ingress_effect_capture: Some(capture.clone()),
+        direct_route_identity: None,
     };
 
     let direct = chat_msg(
@@ -396,3 +401,42 @@ async fn self_dm_and_sent_carbon_to_same_detached_stream_keep_distinct_append_id
 }
 
 // -----------------------------------------------------------------
+
+#[tokio::test]
+async fn xep_0280_closed_middle_resource_preserves_other_carbon_deliveries() {
+    use crate::server::routes::interpret::carbons::{
+        send_carbons_to_registry_with_capture, CarbonFanoutFailure, CarbonRegistryDeps,
+    };
+    let registry = ConnectionRegistry::new();
+    let owner: jid::BareJid = "alice@example.com".parse().expect("owner");
+    let source = owner.with_resource_str("source").expect("source");
+    let first = owner.with_resource_str("a-first").expect("first");
+    let middle = owner.with_resource_str("b-middle").expect("middle");
+    let last = owner.with_resource_str("c-last").expect("last");
+    let (first_tx, mut first_rx) = tokio::sync::mpsc::channel(8);
+    let (middle_tx, middle_rx) = tokio::sync::mpsc::channel(8);
+    let (last_tx, mut last_rx) = tokio::sync::mpsc::channel(8);
+    registry.register_with_carbons(first.clone(), first_tx, true);
+    registry.register_with_carbons(middle, middle_tx, true);
+    registry.register_with_carbons(last.clone(), last_tx, true);
+    drop(middle_rx);
+    let message = chat_msg(source.clone().into(), jid("bob@example.com"), "hi");
+    let incomplete = send_carbons_to_registry_with_capture(
+        &registry,
+        CarbonRegistryDeps {
+            ingress_effect_capture: None,
+            sm_session_registry: None,
+            web_socket_state: None,
+        },
+        owner,
+        Box::new(message),
+        CarbonKind::Sent,
+        vec![source],
+    )
+    .await
+    .expect_err("closed resource leaves incomplete fanout");
+    assert_eq!(incomplete.reason, CarbonFanoutFailure::Delivery);
+    assert_eq!(incomplete.completed.carbon_recipients, vec![first, last]);
+    assert_eq!(drain_inbound(&mut first_rx).len(), 1);
+    assert_eq!(drain_inbound(&mut last_rx).len(), 1);
+}

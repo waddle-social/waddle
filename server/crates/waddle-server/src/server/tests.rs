@@ -492,58 +492,6 @@ fn push_service_durability_guard_rejects_sqlite_memory_urls() {
     ));
 }
 
-#[test]
-fn mam_storage_guard_rejects_missing_database_url() {
-    let error = http::ensure_mam_database_is_durable(None, false)
-        .expect_err("missing MAM database URL must fail-fast");
-    let message = format!("{error:?}");
-    assert!(
-        message.contains("WADDLE_XMPP_MAM_DATABASE_URL"),
-        "error should name the primary env var: {message}"
-    );
-    assert!(
-        message.contains("WADDLE_DATABASE_URL"),
-        "error should name the fallback env var: {message}"
-    );
-    assert!(
-        message.contains("WADDLE_XMPP_MAM_ALLOW_IN_MEMORY"),
-        "error should name the test-only escape hatch: {message}"
-    );
-}
-
-#[test]
-fn mam_storage_guard_rejects_in_memory_sqlite_urls() {
-    for database_url in [
-        "sqlite::memory:",
-        "sqlite::memory:?cache=shared",
-        "sqlite://?mode=memory",
-        ":memory:",
-    ] {
-        let error = http::ensure_mam_database_is_durable(Some(database_url), false)
-            .expect_err("in-memory MAM database URL must fail-fast");
-        let message = format!("{error:?}");
-        assert!(
-            message.contains("WADDLE_XMPP_MAM_DATABASE_URL"),
-            "error for {database_url} should name the env var: {message}"
-        );
-    }
-}
-
-#[test]
-fn mam_storage_guard_accepts_durable_urls_and_allow_flag() {
-    http::ensure_mam_database_is_durable(Some("sqlite:///var/lib/waddle/mam.db"), false)
-        .expect("durable sqlite URL must pass");
-    http::ensure_mam_database_is_durable(
-        Some("postgres://postgres:postgres@localhost/waddle"),
-        false,
-    )
-    .expect("postgres URL must pass");
-    http::ensure_mam_database_is_durable(None, true)
-        .expect("allow flag must permit missing URL for tests");
-    http::ensure_mam_database_is_durable(Some("sqlite::memory:"), true)
-        .expect("allow flag must permit in-memory URL for tests");
-}
-
 #[tokio::test]
 async fn test_health_endpoint() {
     let app = test_app().await;
@@ -1020,12 +968,10 @@ async fn test_app() -> Router {
 
 async fn test_app_for_state(state: Arc<AppState>) -> Router {
     let server_config = ServerConfig::test_homeserver();
-    let test_global_db = crate::db::Database::in_memory("test-mam-global")
-        .await
-        .expect("test global db");
-    let mam_storage = http::create_websocket_mam_storage(None, false, false, &test_global_db)
-        .await
-        .unwrap();
+    let mam_storage =
+        http::create_websocket_mam_storage(None, false, false, state.db_pool.global())
+            .await
+            .unwrap();
     let pubsub_database_storage = Arc::new(
         crate::pubsub::DatabasePubSubStorage::open(Some("sqlite::memory:"))
             .await

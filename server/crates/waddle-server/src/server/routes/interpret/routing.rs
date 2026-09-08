@@ -39,18 +39,13 @@ pub(super) async fn run_headless_recipient_pass(
         };
     let synthetic_full = recipient_bare.with_resource(&synthetic_resource);
 
-    // Fail-closed on blocklist load error (Copilot review on PR #275).
-    // Mirroring `load_blocklist_for_bind`'s fail-closed semantic and
-    // PR13's bind-time policy: a transient storage error must not
-    // disable XEP-0191 incoming-block enforcement, otherwise a blocked
-    // sender could be persisted into the offline recipient's MAM /
-    // inbox. We skip the recipient pass entirely; the outer arm has
-    // already logged the routing intent, and the sender's archive
-    // entry survives independently of the recipient pass.
+    // A missing policy snapshot cannot produce a complete recipient plan.
     let blocklist = match deps.blocking_storage {
         Some(storage) => match storage.list_blocked_jid_entries(recipient_bare).await {
             Ok(jids) => Blocklist::new(jids),
             Err(error) => {
+                deps.effects
+                    .fail_plan(super::effects::PlanFailure::RecipientBlocklistRead);
                 warn!(
                     bare_jid = %recipient_bare,
                     error = %error,
@@ -83,6 +78,7 @@ pub(super) async fn run_headless_recipient_pass(
     let mut remaining: Vec<OutboundEvent> = Vec::with_capacity(events.len());
     for event in events {
         match event {
+            OutboundEvent::SendStanza(_) if deps.effects.is_planning() => {}
             OutboundEvent::RouteToConnection { .. } => side_routes.push(event),
             other => remaining.push(other),
         }
@@ -226,6 +222,8 @@ pub(super) async fn run_fanout_recipient_pass(
         Some(storage) => match storage.list_blocked_jid_entries(recipient_bare).await {
             Ok(jids) => Blocklist::new(jids),
             Err(error) => {
+                deps.effects
+                    .fail_plan(super::effects::PlanFailure::RecipientBlocklistRead);
                 warn!(
                     bare_jid = %recipient_bare,
                     error = %error,
@@ -398,7 +396,7 @@ enum ActorSendFailure {
 ///   turn out not to land by the time delivery runs, and if every target
 ///   fails to land, the message must not be silently lost.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) enum FullJidDeliveryOutcome {
+pub enum FullJidDeliveryOutcome {
     /// Delivered onto a live resource's channel.
     Delivered,
     /// Routed to the detached XEP-0198 replay buffer.
@@ -541,7 +539,7 @@ fn classify_send_error<M, E>(error: &kameo::error::SendError<M, E>) -> ActorSend
 async fn deliver_one_via_actor(
     user_registry: &kameo::actor::ActorRef<waddle_xmpp::registry::UserRegistryActor>,
     sm_session_registry: Option<&Arc<InMemorySmSessionRegistry>>,
-    ingress_effect_capture: Option<&crate::ingress_shadow::IngressEffectCapture>,
+    ingress_effect_capture: Option<&crate::ingress::IngressEffectCapture>,
     target: &jid::FullJid,
     stanza: &Stanza,
     kind: ActorSendKind,
@@ -561,7 +559,7 @@ async fn deliver_one_via_actor(
 async fn deliver_one_via_actor_capturing_detached(
     user_registry: &kameo::actor::ActorRef<waddle_xmpp::registry::UserRegistryActor>,
     sm_session_registry: Option<&Arc<InMemorySmSessionRegistry>>,
-    ingress_effect_capture: Option<&crate::ingress_shadow::IngressEffectCapture>,
+    ingress_effect_capture: Option<&crate::ingress::IngressEffectCapture>,
     target: &jid::FullJid,
     stanza: &Stanza,
     kind: ActorSendKind,
@@ -754,7 +752,7 @@ pub(crate) async fn deliver_peer_to_full(
 pub(crate) async fn deliver_peer_to_full_capturing_detached(
     user_registry: Option<&kameo::actor::ActorRef<waddle_xmpp::registry::UserRegistryActor>>,
     sm_session_registry: Option<&Arc<InMemorySmSessionRegistry>>,
-    ingress_effect_capture: Option<&crate::ingress_shadow::IngressEffectCapture>,
+    ingress_effect_capture: Option<&crate::ingress::IngressEffectCapture>,
     target: &jid::FullJid,
     stanza: &Stanza,
 ) -> FullJidDeliveryOutcome {
@@ -943,7 +941,7 @@ pub(super) async fn deliver_peer_to_live_only(
 /// under its own lock, so we never infer a stale stream from the full JID.
 pub(super) async fn deliver_to_detached_with_capture(
     sm_session_registry: Option<&Arc<InMemorySmSessionRegistry>>,
-    ingress_effect_capture: Option<&crate::ingress_shadow::IngressEffectCapture>,
+    ingress_effect_capture: Option<&crate::ingress::IngressEffectCapture>,
     target: &jid::FullJid,
     stanza: &Stanza,
 ) -> DetachedDeliveryOutcome {
@@ -959,7 +957,7 @@ pub(super) async fn deliver_to_detached_with_capture(
 
 async fn deliver_to_detached_with_capture_details(
     sm_session_registry: Option<&Arc<InMemorySmSessionRegistry>>,
-    ingress_effect_capture: Option<&crate::ingress_shadow::IngressEffectCapture>,
+    ingress_effect_capture: Option<&crate::ingress::IngressEffectCapture>,
     target: &jid::FullJid,
     stanza: &Stanza,
 ) -> DetachedDeliveryCapture {
@@ -1089,7 +1087,6 @@ mod tests {
             jid: jid.clone(),
             occupancy_session: waddle_xmpp_core::OccupancySessionGeneration::mint(),
             inbound_count: 0,
-            shadow_ordinal: waddle_xmpp::stream_management::ShadowOrdinal::ZERO,
             outbound_count: 0,
             last_acked: 0,
             replay_gap_through: None,

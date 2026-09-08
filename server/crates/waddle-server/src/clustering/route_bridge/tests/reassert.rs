@@ -237,20 +237,12 @@ async fn reassert_media_grants_local_with_stale_lease_refuses_to_execute() {
         "an expired lease must never evict"
     );
 }
-/// #1594: the receiver-side claim reads are bounded. The executor
-/// runs in a delegated relay task that outlives the asker's
-/// webhook timeout, so a stalled claim store (pool exhaustion)
-/// must resolve to `Unavailable` within the read budget instead
-/// of accumulating one pending task per LiveKit retry.
-#[tokio::test]
-async fn reassert_media_grants_local_bounds_a_stalled_claim_store() {
-    use crate::server::routes::websocket::tests::{
-        create_test_websocket_state_with_sfu, RecordingSfu,
-    };
+pub(super) mod stalled_claim {
+    use super::*;
     use waddle_xmpp::ownership::{ClaimSnapshot, StalePredicate};
 
     /// `current_claim` never resolves; nothing else is reachable.
-    struct StalledClaimStore;
+    pub(in super::super) struct StalledClaimStore;
 
     #[async_trait::async_trait]
     impl waddle_xmpp::ownership::ClaimStore for StalledClaimStore {
@@ -325,6 +317,19 @@ async fn reassert_media_grants_local_bounds_a_stalled_claim_store() {
             unreachable!("stall test only calls current_claim")
         }
     }
+}
+
+/// #1594: the receiver-side claim reads are bounded. The executor
+/// runs in a delegated relay task that outlives the asker's
+/// webhook timeout, so a stalled claim store (pool exhaustion)
+/// must resolve to `Unavailable` within the read budget instead
+/// of accumulating one pending task per LiveKit retry.
+#[tokio::test]
+async fn reassert_media_grants_local_bounds_a_stalled_claim_store() {
+    use crate::server::routes::websocket::tests::{
+        create_test_websocket_state_with_sfu, RecordingSfu,
+    };
+    use stalled_claim::StalledClaimStore;
 
     let recorder = Arc::new(RecordingSfu::default());
     let state = create_test_websocket_state_with_sfu(recorder.clone()).await;

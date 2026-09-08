@@ -7,6 +7,7 @@ mod limits;
 pub mod v1;
 
 pub use input::{DigestContext, DigestInput, DigestInputError};
+pub use limits::MAX_TEXT_LEN;
 
 /// Version of the canonical semantic-digest algorithm.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]

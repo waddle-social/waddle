@@ -19,6 +19,28 @@ fn bare(s: &str) -> jid::BareJid {
     s.parse().expect("valid bare jid")
 }
 
+#[tokio::test]
+async fn detached_carbons_inventory_lock_failure_is_not_an_empty_audience() {
+    for claimed in [false, true] {
+        let registry = InMemorySmSessionRegistry::new();
+        let poisoned = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let _guard = if claimed {
+                registry.claimed_sessions.write().expect("claimed lock")
+            } else {
+                registry.sessions.write().expect("sessions lock")
+            };
+            panic!("simulate an inventory lock failure");
+        }));
+        assert!(poisoned.is_err());
+        assert!(matches!(
+            registry
+                .detached_carbon_resources_for_user(&bare("user@example.com"), &[])
+                .await,
+            Err(SmRegistryError::Internal(_))
+        ));
+    }
+}
+
 fn direct_target(wire_id: &str, author: &str, archive: &str) -> crate::tombstone::TombstoneTarget {
     crate::tombstone::TombstoneTarget::Direct {
         wire_id: wire_id.to_string(),
@@ -54,22 +76,24 @@ fn make_test_session_for_jid(stream_id: &str, jid: FullJid) -> DetachedSession {
         jid,
         occupancy_session: waddle_xmpp_core::OccupancySessionGeneration::mint(),
         inbound_count: 10,
-        shadow_ordinal: crate::stream_management::ShadowOrdinal::ZERO,
         outbound_count: 15,
         last_acked: 12,
         replay_gap_through: None,
         unacked_stanzas: vec![
             DetachedUnackedStanza {
+                ingress_receipts: Vec::new(),
                 sequence: 13,
                 stanza_xml: "<msg1/>".to_string(),
                 original_receipt_at: Utc::now(),
             },
             DetachedUnackedStanza {
+                ingress_receipts: Vec::new(),
                 sequence: 14,
                 stanza_xml: "<msg2/>".to_string(),
                 original_receipt_at: Utc::now(),
             },
             DetachedUnackedStanza {
+                ingress_receipts: Vec::new(),
                 sequence: 15,
                 stanza_xml: "<msg3/>".to_string(),
                 original_receipt_at: Utc::now(),
@@ -95,6 +119,7 @@ fn make_test_session_with_unacked(stream_id: &str, unacked: Vec<(u32, String)>) 
     s.unacked_stanzas = unacked
         .into_iter()
         .map(|(sequence, stanza_xml)| DetachedUnackedStanza {
+            ingress_receipts: Vec::new(),
             sequence,
             stanza_xml,
             original_receipt_at: now,
@@ -3374,17 +3399,18 @@ fn realistic_test_session_for_jid(stream_id: &str, jid: FullJid) -> DetachedSess
         jid,
         occupancy_session: waddle_xmpp_core::OccupancySessionGeneration::mint(),
         inbound_count: 4,
-        shadow_ordinal: crate::stream_management::ShadowOrdinal::ZERO,
         outbound_count: 7,
         last_acked: 5,
         replay_gap_through: None,
         unacked_stanzas: vec![
             DetachedUnackedStanza {
+                ingress_receipts: Vec::new(),
                 sequence: 6,
                 stanza_xml: realistic_message_stanza("first"),
                 original_receipt_at: Utc::now(),
             },
             DetachedUnackedStanza {
+                ingress_receipts: Vec::new(),
                 sequence: 7,
                 stanza_xml: realistic_message_stanza("second"),
                 original_receipt_at: Utc::now(),
@@ -4192,7 +4218,6 @@ async fn restore_hydrates_expired_sessions_for_promotion_and_preserves_rows() {
         jid: "alice@example.com/web".parse().unwrap(),
         occupancy_session: waddle_xmpp_core::OccupancySessionGeneration::mint(),
         inbound_count: 0,
-        shadow_ordinal: crate::stream_management::ShadowOrdinal::ZERO,
         outbound_count: 1,
         last_acked: 0,
         replay_gap_through: None,
@@ -4216,6 +4241,7 @@ async fn restore_hydrates_expired_sessions_for_promotion_and_preserves_rows() {
         .insert(xmpp_parsers::message::Lang::new(), "missed".to_string());
     storage
         .append_unacked(super::super::persistence::PersistedUnackedStanza {
+            ingress_receipts: Vec::new(),
             stream_id: crate::pending_delivery::SmSessionId::new("stream-expired"),
             sequence: 1,
             stanza: Box::new(Stanza::Message(queued)),
@@ -4635,6 +4661,7 @@ async fn cancelled_displacement_reconciles_the_pending_promotion_before_reinsert
     let mut old_session = realistic_test_session_for_jid(old_stream, jid.clone());
     old_session.unacked_stanzas = vec![
         DetachedUnackedStanza {
+            ingress_receipts: Vec::new(),
             sequence: 6,
             stanza_xml: realistic_dm_stanza_xml(
                 "alice@example.com/web",
@@ -4645,6 +4672,7 @@ async fn cancelled_displacement_reconciles_the_pending_promotion_before_reinsert
             original_receipt_at: Utc::now(),
         },
         DetachedUnackedStanza {
+            ingress_receipts: Vec::new(),
             sequence: 7,
             stanza_xml: realistic_dm_stanza_xml(
                 "alice@example.com/web",
@@ -5208,6 +5236,7 @@ async fn tombstone_scrub_reaches_durable_rows_of_off_map_streams() {
     let mut session = session;
     session.unacked_stanzas = vec![
         DetachedUnackedStanza {
+            ingress_receipts: Vec::new(),
             sequence: 6,
             stanza_xml: realistic_dm_stanza_xml(
                 "alice@example.com/web",
@@ -5218,6 +5247,7 @@ async fn tombstone_scrub_reaches_durable_rows_of_off_map_streams() {
             original_receipt_at: Utc::now(),
         },
         DetachedUnackedStanza {
+            ingress_receipts: Vec::new(),
             sequence: 7,
             stanza_xml: realistic_dm_stanza_xml(
                 "alice@example.com/web",
@@ -5636,6 +5666,7 @@ async fn reinsert_for_retry_drops_entries_whose_durable_rows_were_scrubbed() {
     );
     session.unacked_stanzas = vec![
         DetachedUnackedStanza {
+            ingress_receipts: Vec::new(),
             sequence: 6,
             stanza_xml: realistic_dm_stanza_xml(
                 "alice@example.com/web",
@@ -5646,6 +5677,7 @@ async fn reinsert_for_retry_drops_entries_whose_durable_rows_were_scrubbed() {
             original_receipt_at: Utc::now(),
         },
         DetachedUnackedStanza {
+            ingress_receipts: Vec::new(),
             sequence: 7,
             stanza_xml: realistic_dm_stanza_xml(
                 "alice@example.com/web",
@@ -5720,6 +5752,7 @@ async fn reinsert_for_retry_keeps_queue_when_session_was_never_persisted() {
         "user@example.com/resource".parse().unwrap(),
     );
     session.unacked_stanzas = vec![DetachedUnackedStanza {
+        ingress_receipts: Vec::new(),
         sequence: 3,
         stanza_xml: realistic_dm_stanza_xml(
             "alice@example.com/web",
@@ -6242,7 +6275,6 @@ async fn hydrate_reclaimed_skips_when_stream_id_already_present_in_memory() {
             jid: make_test_jid(),
             occupancy_session: waddle_xmpp_core::OccupancySessionGeneration::mint(),
             inbound_count: 111,
-            shadow_ordinal: crate::stream_management::ShadowOrdinal::ZERO,
             outbound_count: 111,
             last_acked: 0,
             replay_gap_through: None,
@@ -6318,7 +6350,6 @@ async fn hydrate_reclaimed_rejects_work_from_a_superseded_epoch() {
             jid: make_test_jid(),
             occupancy_session: waddle_xmpp_core::OccupancySessionGeneration::mint(),
             inbound_count: 0,
-            shadow_ordinal: crate::stream_management::ShadowOrdinal::ZERO,
             outbound_count: 0,
             last_acked: 0,
             replay_gap_through: None,
@@ -6543,7 +6574,6 @@ async fn hydrate_reclaimed_quarantines_corrupt_persistence_before_terminal_outco
             jid: make_test_jid(),
             occupancy_session: waddle_xmpp_core::OccupancySessionGeneration::mint(),
             inbound_count: 0,
-            shadow_ordinal: crate::stream_management::ShadowOrdinal::ZERO,
             outbound_count: 0,
             last_acked: 0,
             replay_gap_through: None,
@@ -6620,7 +6650,6 @@ async fn transient_reclaimed_hydration_is_retained_and_retried() {
             jid: make_test_jid(),
             occupancy_session: waddle_xmpp_core::OccupancySessionGeneration::mint(),
             inbound_count: 0,
-            shadow_ordinal: crate::stream_management::ShadowOrdinal::ZERO,
             outbound_count: 0,
             last_acked: 0,
             replay_gap_through: None,
@@ -6778,7 +6807,6 @@ async fn hydrate_reclaimed_serializes_against_a_concurrent_live_mutator_for_the_
             jid: jid.clone(),
             occupancy_session: waddle_xmpp_core::OccupancySessionGeneration::mint(),
             inbound_count: 0,
-            shadow_ordinal: crate::stream_management::ShadowOrdinal::ZERO,
             outbound_count: 0,
             last_acked: 0,
             replay_gap_through: None,
@@ -6958,7 +6986,6 @@ async fn any_resumable_session_probe_covers_durable_rows_and_fails_closed() {
         jid: jid.clone(),
         occupancy_session: waddle_xmpp_core::OccupancySessionGeneration::mint(),
         inbound_count: 0,
-        shadow_ordinal: crate::stream_management::ShadowOrdinal::ZERO,
         outbound_count: 0,
         last_acked: 0,
         replay_gap_through: None,

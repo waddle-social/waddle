@@ -38,11 +38,11 @@ impl OrderedRelayDeliveryBridge {
         origin_stanza: &Stanza,
         origin: &OrderedRelayRouteOrigin,
         call_setup: Option<waddle_xmpp::telemetry::call::PendingCallSetupRoute>,
-        deferred_capture: Option<crate::ingress_shadow::IngressEffectCapture>,
+        deferred_capture: Option<crate::ingress::IngressEffectCapture>,
     ) -> Option<CapturedRemoteDeliveryOutcome> {
         let outcome_log = route_outcome_log(&target);
         if let Some(handoff) = origin.handoff.clone() {
-            if handoff.mark_deferred() {
+            if defer_until_relay_completion(&handoff, origin_stanza) {
                 let bridge = Arc::clone(&self);
                 let origin_stanza = origin_stanza.clone();
                 tokio::spawn(async move {
@@ -218,7 +218,11 @@ impl OrderedRelayDeliveryBridge {
                                     refreshed.user_owner.as_str(),
                                 )),
                                 room_fence: None,
-                                outcome: remote_resource_muc_outcome(reply),
+                                outcome: remote_resource_muc_outcome(
+                                    reply,
+                                    refreshed.user_owner.clone(),
+                                    self.stop_token.clone(),
+                                ),
                             }),
                             Err(error) => {
                                 tracing::warn!(
@@ -256,7 +260,11 @@ impl OrderedRelayDeliveryBridge {
                     remote_origin.user_owner.as_str(),
                 )),
                 room_fence: None,
-                outcome: remote_resource_muc_outcome(reply),
+                outcome: remote_resource_muc_outcome(
+                    reply,
+                    remote_origin.user_owner.clone(),
+                    self.stop_token.clone(),
+                ),
             }),
             Err(error) => {
                 tracing::warn!(
@@ -275,7 +283,11 @@ impl OrderedRelayDeliveryBridge {
                                         refreshed.user_owner.as_str(),
                                     )),
                                     room_fence: None,
-                                    outcome: remote_resource_muc_outcome(reply),
+                                    outcome: remote_resource_muc_outcome(
+                                        reply,
+                                        refreshed.user_owner.clone(),
+                                        self.stop_token.clone(),
+                                    ),
                                 }),
                                 Err(error) => {
                                     tracing::warn!(
@@ -400,6 +412,9 @@ impl OrderedRelayDeliveryBridge {
     ) -> Option<MucProxyRouteAttempt> {
         let services = self.services.get().cloned()?;
         let RemoteResourceRouteTarget::MucProxy {
+            canonical,
+            principal,
+            stanza_lang,
             room_jid,
             kind,
             origin: muc_origin,
@@ -413,9 +428,19 @@ impl OrderedRelayDeliveryBridge {
             });
         };
         let origin = local_origin_for_remote_resource(remote_origin);
+        let admission = crate::ingress::identity::IngressRelayAdmission::from_parts(
+            canonical,
+            principal,
+            stanza_lang,
+        );
         match self
             .try_proxy_muc_remote_from_local_origin_decision(
-                &room_jid, &stanza.0, kind, muc_origin, &origin,
+                &room_jid,
+                &stanza.0,
+                kind,
+                muc_origin,
+                &origin,
+                admission.as_ref(),
             )
             .await
         {
@@ -423,17 +448,38 @@ impl OrderedRelayDeliveryBridge {
             MucProxyRouteDecision::LocalRoom
             | MucProxyRouteDecision::RoomUnclaimed
             | MucProxyRouteDecision::RoomClaimUnavailable
-            | MucProxyRouteDecision::OriginUnavailable => Some(MucProxyRouteAttempt {
-                relay_target: None,
-                room_fence: None,
-                outcome: muc_proxy_result_to_ordered_outcome(
+            | MucProxyRouteDecision::OriginUnavailable => {
+                let mut completion = None;
+                let outcome = muc_proxy_result_to_ordered_outcome(
                     kind,
                     Box::pin(deliver_reserved_muc_proxy(
-                        &services, &room_jid, kind, muc_origin, &stanza.0,
+                        &services,
+                        &room_jid,
+                        kind,
+                        muc_origin,
+                        &stanza.0,
+                        admission.as_ref(),
+                        &mut completion,
                     ))
                     .await,
-                ),
-            }),
+                );
+                let outcome = match (outcome, completion) {
+                    (OrderedRelayMucProxyOutcome::Delivered(frames), Some(completion)) => {
+                        OrderedRelayMucProxyOutcome::PendingFrames {
+                            frames,
+                            completion: crate::ingress::execute::RelayFrameReceiptCompletion::new(
+                                completion,
+                            ),
+                        }
+                    }
+                    (outcome, _) => outcome,
+                };
+                Some(MucProxyRouteAttempt {
+                    relay_target: None,
+                    room_fence: None,
+                    outcome,
+                })
+            }
         }
     }
 

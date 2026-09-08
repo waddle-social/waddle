@@ -599,7 +599,10 @@ fn remote_muc_join_decision(
         Some(crate::clustering::route_bridge::OrderedRelayMucProxyOutcome::Delivered(replies)) => {
             Some(RemoteMucJoinDecision::Delivered(replies))
         }
-        Some(crate::clustering::route_bridge::OrderedRelayMucProxyOutcome::MaybeCommitted)
+        Some(crate::clustering::route_bridge::OrderedRelayMucProxyOutcome::PendingFrames {
+            ..
+        })
+        | Some(crate::clustering::route_bridge::OrderedRelayMucProxyOutcome::MaybeCommitted)
         | Some(crate::clustering::route_bridge::OrderedRelayMucProxyOutcome::JoinMaybeCommitted) => {
             Some(RemoteMucJoinDecision::MaybeCommitted)
         }
@@ -617,7 +620,10 @@ fn remote_muc_leave_decision(
         Some(crate::clustering::route_bridge::OrderedRelayMucProxyOutcome::Delivered(replies)) => {
             RemoteMucLeaveDecision::Delivered(replies)
         }
-        Some(crate::clustering::route_bridge::OrderedRelayMucProxyOutcome::MaybeCommitted)
+        Some(crate::clustering::route_bridge::OrderedRelayMucProxyOutcome::PendingFrames {
+            ..
+        })
+        | Some(crate::clustering::route_bridge::OrderedRelayMucProxyOutcome::MaybeCommitted)
         | Some(crate::clustering::route_bridge::OrderedRelayMucProxyOutcome::JoinMaybeCommitted) => {
             RemoteMucLeaveDecision::MaybeCommitted
         }
@@ -1336,8 +1342,7 @@ async fn handle_muc_join_unlocked(state: &WebSocketState, request: MucJoinWork<'
                                             crate::clustering::ordered_relay::MucProxyOrigin::Connection(
                                                 occupancy_session,
                                             ),
-                                            origin,
-                                        )
+                                            origin, None)
                                         .await,
                                 ) {
                                     Some(RemoteMucJoinDecision::Delivered(replies)) => {
@@ -2008,8 +2013,7 @@ pub async fn handle_muc_leave(
                             crate::clustering::ordered_relay::MucProxyOrigin::Connection(
                                 occupancy_session,
                             ),
-                            origin,
-                        )
+                            origin, None)
                         .await,
                 ) {
                     RemoteMucLeaveDecision::Delivered(replies) => {

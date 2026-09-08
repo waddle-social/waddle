@@ -19,7 +19,10 @@ use schema::{
     ensure_postgres_schema, ensure_sqlite_parent_dir, infer_driver, is_in_memory_sqlite,
     MamDatabaseDriver,
 };
-pub use tx_write::{store_archived_message_on_connection, MamTxStoreError, MamTxStoreOutcome};
+pub use tx_write::{
+    store_archived_message_on_connection, store_archived_message_on_sqlite_connection,
+    ArchiveExpectation, MamTxStoreError, MamTxStoreOutcome,
+};
 
 #[derive(Clone)]
 pub(super) enum MamDatabaseBackend {
@@ -44,6 +47,17 @@ pub struct SqlxMamStorage {
 }
 
 impl SqlxMamStorage {
+    /// Initialize MAM on an existing SQLite pool so ingress transactions and
+    /// archive reads share the same physical database, including private tests.
+    pub async fn from_sqlite_pool(pool: SqlitePool) -> Result<Self, MamStorageError> {
+        let storage = Self {
+            backend: MamDatabaseBackend::Sqlite(pool),
+            fencing_enabled: false,
+        };
+        storage.initialize().await?;
+        Ok(storage)
+    }
+
     pub async fn open(database_url: &str) -> Result<Self, MamStorageError> {
         let driver = infer_driver(database_url)?;
         let backend = match driver {

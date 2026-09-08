@@ -55,8 +55,21 @@ pub fn digest(input: &DigestInput) -> SemanticDigest {
 pub(super) fn digest_fields(
     input: &super::input::DigestFields,
 ) -> Result<SemanticDigest, DigestInputError> {
+    digest_fields_in_domain(input, DOMAIN)
+}
+
+pub(super) fn digest_rejected_fields(
+    input: &super::input::DigestFields,
+) -> Result<SemanticDigest, DigestInputError> {
+    digest_fields_in_domain(input, b"waddle:rejected-semantic-digest:v1\0")
+}
+
+fn digest_fields_in_domain(
+    input: &super::input::DigestFields,
+    domain: &[u8],
+) -> Result<SemanticDigest, DigestInputError> {
     let mut writer = PreimageWriter::new();
-    writer.bytes(DOMAIN)?;
+    writer.bytes(domain)?;
     writer.byte(message_type(input.message_type.clone()))?;
     writer.option_str(input.stanza_lang.as_ref().map(|lang| lang.0.as_str()))?;
     match &input.target {

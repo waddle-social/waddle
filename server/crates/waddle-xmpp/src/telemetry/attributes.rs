@@ -489,77 +489,165 @@ impl MetricAttribute for PushRetryReason {
     }
 }
 
-/// `class` — the closed decision taxonomy for shadow-ingress submissions.
+/// `class` — the closed ingress authority decision vocabulary.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum IngressDecisionClass {
     Accepted,
-    ExistingSameDigest,
-    IntentDivergence,
-    RemoteRouteAmbiguous,
+    ExistingCommitted,
+    ExistingConsistent,
+    ExistingRepaired,
+    ExistingDivergent,
+    OwnerFirstAcceptance,
+    OwnerDuplicate,
     AliasConflict,
-    CaptureOverflow,
     SemanticMalformed,
     AuthorizationDenied,
+    PolicyDenied,
+    CaptureOverflow,
     PrincipalMissing,
     ClaimFenceMissing,
+    RoomGenerationStale,
     FrontierStale,
+    SmOrdinalConflict,
+    IntentContradiction,
     Storage,
     SerializationExhaustion,
+    Timeout,
+    AmbiguousCommit,
+    Lineage,
+    EpochUnsupported,
 }
-
 impl IngressDecisionClass {
-    pub const ALL: [Self; 13] = [
+    pub const ALL: [Self; 24] = [
         Self::Accepted,
-        Self::ExistingSameDigest,
-        Self::IntentDivergence,
-        Self::RemoteRouteAmbiguous,
+        Self::ExistingCommitted,
+        Self::ExistingConsistent,
+        Self::ExistingRepaired,
+        Self::ExistingDivergent,
+        Self::OwnerFirstAcceptance,
+        Self::OwnerDuplicate,
         Self::AliasConflict,
-        Self::CaptureOverflow,
         Self::SemanticMalformed,
         Self::AuthorizationDenied,
+        Self::PolicyDenied,
+        Self::CaptureOverflow,
         Self::PrincipalMissing,
         Self::ClaimFenceMissing,
+        Self::RoomGenerationStale,
         Self::FrontierStale,
+        Self::SmOrdinalConflict,
+        Self::IntentContradiction,
         Self::Storage,
         Self::SerializationExhaustion,
+        Self::Timeout,
+        Self::AmbiguousCommit,
+        Self::Lineage,
+        Self::EpochUnsupported,
     ];
+    /// Only committed Phase-B decisions authorize the handled count to advance.
+    pub const fn advances(&self) -> bool {
+        matches!(
+            self,
+            Self::Accepted
+                | Self::ExistingCommitted
+                | Self::ExistingConsistent
+                | Self::ExistingRepaired
+                | Self::ExistingDivergent
+                | Self::OwnerFirstAcceptance
+                | Self::OwnerDuplicate
+                | Self::AliasConflict
+                | Self::SemanticMalformed
+                | Self::AuthorizationDenied
+                | Self::PolicyDenied
+                | Self::CaptureOverflow
+        )
+    }
 }
-
 impl sealed::Sealed for IngressDecisionClass {}
 impl MetricAttribute for IngressDecisionClass {
     fn key(&self) -> &'static str {
         "class"
     }
-
     fn value(&self) -> &'static str {
         match self {
             Self::Accepted => "accepted",
-            Self::ExistingSameDigest => "existing_same_digest",
-            Self::IntentDivergence => "intent_divergence",
-            Self::RemoteRouteAmbiguous => "remote_route_ambiguous",
+            Self::ExistingCommitted => "existing_committed",
+            Self::ExistingConsistent => "existing_consistent",
+            Self::ExistingRepaired => "existing_repaired",
+            Self::ExistingDivergent => "existing_divergent",
+            Self::OwnerFirstAcceptance => "owner_first_acceptance",
+            Self::OwnerDuplicate => "owner_duplicate",
             Self::AliasConflict => "alias_conflict",
-            Self::CaptureOverflow => "capture_overflow",
             Self::SemanticMalformed => "semantic_malformed",
             Self::AuthorizationDenied => "authorization_denied",
+            Self::PolicyDenied => "policy_denied",
+            Self::CaptureOverflow => "capture_overflow",
             Self::PrincipalMissing => "principal_missing",
             Self::ClaimFenceMissing => "claim_fence_missing",
+            Self::RoomGenerationStale => "room_generation_stale",
             Self::FrontierStale => "frontier_stale",
+            Self::SmOrdinalConflict => "sm_ordinal_conflict",
+            Self::IntentContradiction => "intent_contradiction",
             Self::Storage => "storage",
             Self::SerializationExhaustion => "serialization_exhaustion",
+            Self::Timeout => "timeout",
+            Self::AmbiguousCommit => "ambiguous_commit",
+            Self::Lineage => "lineage",
+            Self::EpochUnsupported => "epoch_unsupported",
         }
     }
 }
 
-/// `outcome` — the closed alias-resolution result set for shadow ingress.
+/// `kind` — bounded post-commit effect categories requiring repair.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum IngressUnresolvedEffectKind {
+    Frame,
+    Direct,
+    Room,
+    Delivery,
+    Terminalization,
+}
+impl IngressUnresolvedEffectKind {
+    pub const ALL: [Self; 5] = [
+        Self::Frame,
+        Self::Direct,
+        Self::Room,
+        Self::Delivery,
+        Self::Terminalization,
+    ];
+}
+impl sealed::Sealed for IngressUnresolvedEffectKind {}
+impl MetricAttribute for IngressUnresolvedEffectKind {
+    fn key(&self) -> &'static str {
+        "kind"
+    }
+    fn value(&self) -> &'static str {
+        match self {
+            Self::Frame => "frame",
+            Self::Direct => "direct",
+            Self::Room => "room",
+            Self::Delivery => "delivery",
+            Self::Terminalization => "terminalization",
+        }
+    }
+}
+
+/// `outcome` — the closed alias-resolution result set for ingress authority.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum IngressAliasOutcome {
+    NoOrigin,
     Inserted,
     Existing,
     Conflict,
 }
 
 impl IngressAliasOutcome {
-    pub const ALL: [Self; 3] = [Self::Inserted, Self::Existing, Self::Conflict];
+    pub const ALL: [Self; 4] = [
+        Self::NoOrigin,
+        Self::Inserted,
+        Self::Existing,
+        Self::Conflict,
+    ];
 }
 
 impl sealed::Sealed for IngressAliasOutcome {}
@@ -570,6 +658,7 @@ impl MetricAttribute for IngressAliasOutcome {
 
     fn value(&self) -> &'static str {
         match self {
+            Self::NoOrigin => "no_origin",
             Self::Inserted => "inserted",
             Self::Existing => "existing",
             Self::Conflict => "conflict",
@@ -577,79 +666,11 @@ impl MetricAttribute for IngressAliasOutcome {
     }
 }
 
-/// `outcome` — whether a whole ingress transaction retried and recovered or
-/// exhausted its retry budget.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum IngressRetryOutcome {
-    Retried,
-    Exhausted,
-}
-
-impl IngressRetryOutcome {
-    pub const ALL: [Self; 2] = [Self::Retried, Self::Exhausted];
-}
-
-impl sealed::Sealed for IngressRetryOutcome {}
-impl MetricAttribute for IngressRetryOutcome {
-    fn key(&self) -> &'static str {
-        "outcome"
-    }
-
-    fn value(&self) -> &'static str {
-        match self {
-            Self::Retried => "retried",
-            Self::Exhausted => "exhausted",
-        }
-    }
-}
-
-/// `outcome` — whether a message stanza was eligible to park a shadow-ingress
-/// submission.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum IngressCandidateOutcome {
-    Parked,
-    Disabled,
-    NoStream,
-    NonResumable,
-    NoClaimFence,
-    NoPrincipal,
-    NoCapture,
-}
-
-impl IngressCandidateOutcome {
-    pub const ALL: [Self; 7] = [
-        Self::Parked,
-        Self::Disabled,
-        Self::NoStream,
-        Self::NonResumable,
-        Self::NoClaimFence,
-        Self::NoPrincipal,
-        Self::NoCapture,
-    ];
-}
-
-impl sealed::Sealed for IngressCandidateOutcome {}
-impl MetricAttribute for IngressCandidateOutcome {
-    fn key(&self) -> &'static str {
-        "outcome"
-    }
-
-    fn value(&self) -> &'static str {
-        match self {
-            Self::Parked => "parked",
-            Self::Disabled => "disabled",
-            Self::NoStream => "no_stream",
-            Self::NonResumable => "non_resumable",
-            Self::NoClaimFence => "no_claim_fence",
-            Self::NoPrincipal => "no_principal",
-            Self::NoCapture => "no_capture",
-        }
-    }
-}
-
-/// `outcome` — how a shadow-ingress retention GC run ended.
+/// `outcome` — how an ingress retention GC run ended.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum IngressGcOutcome {
+    /// The lineage policy did not attest, so collection was skipped.
+    Unattested,
     /// The run exhausted its cooperative budget after accounting for progress.
     Partial,
     /// The run processed all eligible work within its budgets.
@@ -661,7 +682,13 @@ pub enum IngressGcOutcome {
 }
 
 impl IngressGcOutcome {
-    pub const ALL: [Self; 4] = [Self::Completed, Self::Partial, Self::Failed, Self::TimedOut];
+    pub const ALL: [Self; 5] = [
+        Self::Completed,
+        Self::Partial,
+        Self::Failed,
+        Self::TimedOut,
+        Self::Unattested,
+    ];
 }
 
 impl sealed::Sealed for IngressGcOutcome {}
@@ -672,47 +699,11 @@ impl MetricAttribute for IngressGcOutcome {
 
     fn value(&self) -> &'static str {
         match self {
+            Self::Unattested => "unattested",
             Self::Partial => "partial",
             Self::Completed => "completed",
             Self::Failed => "failed",
             Self::TimedOut => "timed_out",
-        }
-    }
-}
-
-/// `reason` — why shadow ingress intentionally skipped or dropped work.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum IngressSkipReason {
-    Disabled,
-    QueueFull,
-    ParkingFull,
-    Closed,
-    Unenrolled,
-}
-
-impl IngressSkipReason {
-    pub const ALL: [Self; 5] = [
-        Self::Disabled,
-        Self::QueueFull,
-        Self::ParkingFull,
-        Self::Closed,
-        Self::Unenrolled,
-    ];
-}
-
-impl sealed::Sealed for IngressSkipReason {}
-impl MetricAttribute for IngressSkipReason {
-    fn key(&self) -> &'static str {
-        "reason"
-    }
-
-    fn value(&self) -> &'static str {
-        match self {
-            Self::Disabled => "disabled",
-            Self::QueueFull => "queue_full",
-            Self::ParkingFull => "parking_full",
-            Self::Closed => "closed",
-            Self::Unenrolled => "unenrolled",
         }
     }
 }

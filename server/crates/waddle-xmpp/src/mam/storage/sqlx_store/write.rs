@@ -1,25 +1,17 @@
-use jid::BareJid;
-use sha2::{Digest, Sha256};
-use sqlx::postgres::{PgConnection, PgRow};
-use sqlx::sqlite::SqliteRow;
-use sqlx::{Postgres, QueryBuilder, Sqlite, Transaction};
-use tracing::{debug, warn};
-use uuid::Uuid;
-use waddle_xmpp_core::mam::{ArchivedMessage, ArchivedRichMessage, ArchivedRichPayload};
-use xmpp_parsers::message::MessageType;
-
-use crate::mam::storage::origin_dedup::{
-    groupchat_subject_is_retry_dedup_exempt, origin_id_dedup_match, origin_id_tombstone_match,
-};
-use crate::mam::storage::{MamStorageError, StoreOutcome, TerminalTombstoneOutcome};
-use crate::muc::RoomClaimFenceContext;
-
 use super::decode::{
     decode_postgres_message_row, decode_rich_payload, decode_sqlite_message_row,
     encode_nickname_generation, encode_rich_payload,
 };
 use super::schema::SELECT_COLUMNS;
 use super::MamDatabaseBackend;
+use crate::mam::storage::tombstone::origin_id_tombstone_match;
+use crate::mam::storage::{MamStorageError, StoreOutcome, TerminalTombstoneOutcome};
+use crate::muc::RoomClaimFenceContext;
+use jid::BareJid;
+use sqlx::{PgConnection, Postgres, QueryBuilder, Sqlite, SqliteConnection, Transaction};
+use tracing::debug;
+use uuid::Uuid;
+use waddle_xmpp_core::mam::{ArchivedMessage, ArchivedRichMessage, ArchivedRichPayload};
 
 pub(super) async fn store_message(
     backend: &MamDatabaseBackend,
@@ -27,153 +19,40 @@ pub(super) async fn store_message(
     message: &ArchivedMessage,
 ) -> Result<StoreOutcome, MamStorageError> {
     let rich_payload = encode_rich_payload(message)?;
-    let origin_dedup_fingerprint = message
-        .origin_id
-        .as_ref()
-        .filter(|_| !groupchat_subject_is_retry_dedup_exempt(message))
-        .map(|_| origin_dedup_fingerprint(message));
-    let origin_dedup_sender_scope = origin_dedup_sender_scope(message);
-    // Typed-payloads boundary: the scope stays a `BareJid` until this
-    // SQL bind site.
-    let origin_dedup_sender_scope_bind = origin_dedup_sender_scope
-        .as_ref()
-        .map(jid::BareJid::to_string);
-
-    if let Some(outcome) = find_existing_origin_id_match(
-        backend,
-        archive_jid,
-        message,
-        origin_dedup_fingerprint.as_deref(),
-    )
-    .await?
-    {
-        return Ok(outcome);
-    }
-
+    let nickname_generation = encode_nickname_generation(message.nickname_generation)?;
     let archive_id = if message.id.is_empty() {
         Uuid::now_v7().to_string()
     } else {
         message.id.clone()
     };
-    // Typed-payloads boundary: convert the closed `MessageType`
-    // enum to its canonical wire literal exactly once, here at
-    // the SQL bind site.
-    let message_type = waddle_xmpp_core::mam::message_type_wire_str(&message.message_type);
-    let nickname_generation = encode_nickname_generation(message.nickname_generation)?;
-
-    let archive_jid_str = archive_jid.to_string();
-    let from_jid_str = message.from.to_string();
-    let to_jid_str = message.to.to_string();
-    let reply_to_id_bind = message.reply.as_ref().map(|r| r.id.as_str());
-    let reply_to_jid_owned: Option<String> = message
-        .reply
-        .as_ref()
-        .and_then(|r| r.to.as_ref())
-        .map(|jid| jid.to_string());
-
+    let insert = MessageInsert {
+        archive_id: &archive_id,
+        archive_jid,
+        message,
+        rich_payload: rich_payload.as_deref(),
+        nickname_generation,
+    };
     match backend {
-        MamDatabaseBackend::Sqlite(pool) => {
-            let mut query = QueryBuilder::<Sqlite>::new(
-                "INSERT INTO mam_messages (id, room_jid, timestamp, from_jid, to_jid, body, stanza_id, thread_id, reply_to_id, reply_to_jid, origin_id, message_type, stanza_xml, rich_payload, nickname_generation, parent_thread_id, origin_dedup_sender_scope, origin_dedup_fingerprint) ",
-            );
-            query.push_values(std::iter::once(()), |mut builder, _| {
-                builder
-                    .push_bind(&archive_id)
-                    .push_bind(archive_jid_str.as_str())
-                    .push_bind(message.timestamp.to_rfc3339())
-                    .push_bind(from_jid_str.as_str())
-                    .push_bind(to_jid_str.as_str())
-                    .push_bind(message.body.as_deref())
-                    .push_bind(message.stanza_id.as_ref().map(|s| s.id.as_str()))
-                    .push_bind(message.thread.as_ref().map(|t| t.id.as_str()))
-                    .push_bind(reply_to_id_bind)
-                    .push_bind(reply_to_jid_owned.as_deref())
-                    .push_bind(message.origin_id.as_ref().map(|o| o.id.as_str()))
-                    .push_bind(message_type)
-                    .push_bind(message.stanza_xml.as_deref())
-                    .push_bind(rich_payload.as_deref())
-                    .push_bind(nickname_generation)
-                    .push_bind(
-                        message
-                            .thread
-                            .as_ref()
-                            .and_then(|t| t.parent.as_ref())
-                            .map(|p| p.as_str()),
-                    )
-                    .push_bind(origin_dedup_sender_scope_bind.as_deref())
-                    .push_bind(origin_dedup_fingerprint.as_deref());
-            });
-            if let Err(error) = query.build().execute(pool).await {
-                if let Some(outcome) = find_existing_origin_id_match(
-                    backend,
-                    archive_jid,
-                    message,
-                    origin_dedup_fingerprint.as_deref(),
-                )
-                .await?
-                {
-                    return Ok(outcome);
-                }
-                return Err(error.into());
-            }
-        }
         MamDatabaseBackend::Postgres(pool) => {
-            // Release the checkout before the dedup fallback below queries
-            // the pool again: holding it across that re-query lets N
-            // concurrent conflicting writers each pin one of the pool's
-            // connections while waiting for another.
-            let inserted = {
-                let mut conn = pool.acquire().await?;
-                insert_postgres_message_on_connection(
-                    &mut conn,
-                    PostgresMessageInsert {
-                        archive_id: &archive_id,
-                        archive_jid,
-                        message,
-                        rich_payload: rich_payload.as_deref(),
-                        nickname_generation,
-                        origin_dedup_sender_scope: origin_dedup_sender_scope_bind.as_deref(),
-                        origin_dedup_fingerprint: origin_dedup_fingerprint.as_deref(),
-                    },
-                    PostgresInsertConflict::Error,
-                )
-                .await
-            };
-            if let Err(error) = inserted {
-                if let Some(outcome) = find_existing_origin_id_match(
-                    backend,
-                    archive_jid,
-                    message,
-                    origin_dedup_fingerprint.as_deref(),
-                )
-                .await?
-                {
-                    return Ok(outcome);
-                }
-                return Err(error.into());
+            let mut conn = pool.acquire().await?;
+            if let Some(id) =
+                find_origin_tombstone_postgres(&mut conn, archive_jid, message).await?
+            {
+                return Ok(StoreOutcome::TombstoneHit(id));
             }
+            insert_postgres_message_on_connection(&mut conn, insert, InsertConflict::Error).await?;
+        }
+        MamDatabaseBackend::Sqlite(pool) => {
+            let mut conn = pool.acquire().await?;
+            if let Some(id) = find_origin_tombstone_sqlite(&mut conn, archive_jid, message).await? {
+                return Ok(StoreOutcome::TombstoneHit(id));
+            }
+            insert_sqlite_message_on_connection(&mut conn, insert, InsertConflict::Error).await?;
         }
     }
-
-    debug!(archive_id = %archive_id, "Message stored in MAM archive");
     Ok(StoreOutcome::Stored(archive_id))
 }
 
-/// Fenced variant of [`store_message`] (ADR-0017 Phase 3 Slice 7 FIX 1,
-/// council-adjudicated): the `SELECT ... FOR SHARE` fencing check against
-/// `clustering_claims` runs INSIDE the same transaction as the archive
-/// insert, so a steal committing between `dispatch_to_room`'s own
-/// standalone pre-fan-out check and this write can never land a phantom
-/// archived row under a claim this node no longer holds.
-///
-/// Origin-id deduplication runs only after the claim check and inside the
-/// same transaction. An idempotent retry is still an ownership-sensitive
-/// archive operation: returning an existing row to a deposed actor would
-/// otherwise authorize its subsequent fan-out without proving the room
-/// claim. Postgres-only: fencing is never enabled for a SQLite backend
-/// (clustering is Postgres-only per ADR-0017 element 1 — see
-/// `SqlxMamStorage::with_cluster_fencing`), so the non-Postgres arm here is
-/// defensive only.
 pub(super) async fn store_message_fenced(
     backend: &MamDatabaseBackend,
     archive_jid: &BareJid,
@@ -183,102 +62,39 @@ pub(super) async fn store_message_fenced(
     let MamDatabaseBackend::Postgres(pool) = backend else {
         return store_message(backend, archive_jid, message).await;
     };
-
+    let mut tx = pool.begin().await?;
+    if !claim_fence_is_held(&mut tx, fence).await? {
+        tx.rollback().await?;
+        return Err(MamStorageError::NotOwner {
+            entity: fence.entity.clone(),
+        });
+    }
+    if let Some(id) = find_origin_tombstone_postgres(&mut tx, archive_jid, message).await? {
+        tx.commit().await?;
+        return Ok(StoreOutcome::TombstoneHit(id));
+    }
     let rich_payload = encode_rich_payload(message)?;
-    let origin_dedup_fingerprint = message
-        .origin_id
-        .as_ref()
-        .filter(|_| !groupchat_subject_is_retry_dedup_exempt(message))
-        .map(|_| origin_dedup_fingerprint(message));
-    let origin_dedup_sender_scope = origin_dedup_sender_scope(message);
-    // Typed-payloads boundary: the scope stays a `BareJid` until this
-    // SQL bind site.
-    let origin_dedup_sender_scope_bind = origin_dedup_sender_scope
-        .as_ref()
-        .map(jid::BareJid::to_string);
-
+    let nickname_generation = encode_nickname_generation(message.nickname_generation)?;
     let archive_id = if message.id.is_empty() {
         Uuid::now_v7().to_string()
     } else {
         message.id.clone()
     };
-    let nickname_generation = encode_nickname_generation(message.nickname_generation)?;
-
-    let mut tx = pool.begin().await?;
-
-    // Fencing check: the exact `SELECT ... FOR SHARE` shape
-    // `muc_durable::PostgresMucRoomStore::assert_fenced`/
-    // `sm_persistence_fenced::assert_fenced`/`pending_delivery`'s
-    // `insert_fenced` already establish — the first statement inside this
-    // transaction, on the SAME connection as the write it guards. A failed
-    // check rolls back BEFORE any write.
-    if !claim_fence_is_held(&mut tx, fence).await? {
-        // Roll back explicitly rather than relying on drop — the fencing
-        // failure is the expected, correctness-critical path here, not an
-        // error worth masking behind an implicit rollback-on-drop.
-        let _ = tx.rollback().await;
-        return Err(MamStorageError::NotOwner {
-            entity: fence.entity.clone(),
-        });
-    }
-    if let Some(outcome) = find_existing_origin_id_match_postgres_on_connection(
+    insert_postgres_message_on_connection(
         &mut tx,
-        archive_jid,
-        message,
-        origin_dedup_fingerprint.as_deref(),
-    )
-    .await?
-    {
-        tx.commit().await?;
-        return Ok(outcome);
-    }
-
-    if let Err(error) = insert_postgres_message_on_connection(
-        &mut tx,
-        PostgresMessageInsert {
+        MessageInsert {
             archive_id: &archive_id,
             archive_jid,
             message,
             rich_payload: rich_payload.as_deref(),
             nickname_generation,
-            origin_dedup_sender_scope: origin_dedup_sender_scope_bind.as_deref(),
-            origin_dedup_fingerprint: origin_dedup_fingerprint.as_deref(),
         },
-        PostgresInsertConflict::Error,
+        InsertConflict::Error,
     )
-    .await
-    {
-        let _ = tx.rollback().await;
-        // A concurrent origin-id insert can still win after our pre-check.
-        // Re-prove ownership in a fresh transaction before accepting its
-        // row as the idempotent result; never fall back to a pool-level
-        // dedup read that could bypass fencing after a claim transfer.
-        let mut dedup_tx = pool.begin().await?;
-        if !claim_fence_is_held(&mut dedup_tx, fence).await? {
-            let _ = dedup_tx.rollback().await;
-            return Err(MamStorageError::NotOwner {
-                entity: fence.entity.clone(),
-            });
-        }
-        let existing_outcome = find_existing_origin_id_match_postgres_on_connection(
-            &mut dedup_tx,
-            archive_jid,
-            message,
-            origin_dedup_fingerprint.as_deref(),
-        )
-        .await?;
-        dedup_tx.commit().await?;
-        if let Some(outcome) = existing_outcome {
-            return Ok(outcome);
-        }
-        return Err(error.into());
-    }
+    .await?;
     tx.commit().await?;
-
-    debug!(archive_id = %archive_id, "Message stored in MAM archive (fenced)");
     Ok(StoreOutcome::Stored(archive_id))
 }
-
 async fn claim_fence_is_held(
     tx: &mut Transaction<'_, Postgres>,
     fence: &RoomClaimFenceContext,
@@ -300,65 +116,23 @@ async fn claim_fence_is_held(
     .is_some())
 }
 
-pub(super) async fn find_existing_origin_id_match_postgres_on_connection(
-    conn: &mut PgConnection,
-    archive_jid: &BareJid,
-    message: &ArchivedMessage,
-    origin_dedup_fingerprint: Option<&str>,
-) -> Result<Option<StoreOutcome>, sqlx::Error> {
-    let Some(origin_id) = message.origin_id.as_ref() else {
-        return Ok(None);
-    };
-    let archive_jid_str = archive_jid.to_string();
-    let message_type = waddle_xmpp_core::mam::message_type_wire_str(&message.message_type);
-    let from_jid = message.from.to_string();
-    let groupchat_from =
-        matches!(message.message_type, MessageType::Groupchat).then_some(from_jid.as_str());
-    let mut builder = QueryBuilder::<Postgres>::new("SELECT ");
-    builder
-        .push(SELECT_COLUMNS)
-        .push(" FROM mam_messages WHERE room_jid = ");
-    push_origin_dedup_filter(
-        &mut builder,
-        archive_jid_str.as_str(),
-        origin_id.as_str(),
-        message_type,
-        groupchat_from,
-        origin_dedup_fingerprint,
-    );
-    let rows: Vec<PgRow> = builder.build().fetch_all(conn).await?;
-    let candidates = rows
-        .iter()
-        .filter_map(|row| match decode_postgres_message_row(row) {
-            Ok(candidate) => Some(candidate),
-            Err(error) => {
-                warn!(%error, "MAM origin-id dedup candidate is malformed; skipping");
-                None
-            }
-        })
-        .collect::<Vec<_>>();
-    Ok(matching_store_outcome(&candidates, message))
-}
-
-pub(super) enum PostgresInsertConflict {
+pub(super) enum InsertConflict {
     Error,
     DoNothing,
 }
 
-pub(super) struct PostgresMessageInsert<'a> {
+pub(super) struct MessageInsert<'a> {
     pub archive_id: &'a str,
     pub archive_jid: &'a BareJid,
     pub message: &'a ArchivedMessage,
     pub rich_payload: Option<&'a str>,
     pub nickname_generation: Option<i64>,
-    pub origin_dedup_sender_scope: Option<&'a str>,
-    pub origin_dedup_fingerprint: Option<&'a str>,
 }
 
 pub(super) async fn insert_postgres_message_on_connection(
     conn: &mut PgConnection,
-    insert: PostgresMessageInsert<'_>,
-    conflict: PostgresInsertConflict,
+    insert: MessageInsert<'_>,
+    conflict: InsertConflict,
 ) -> Result<Option<String>, sqlx::Error> {
     let archive_jid_str = insert.archive_jid.to_string();
     let from_jid_str = insert.message.from.to_string();
@@ -373,7 +147,7 @@ pub(super) async fn insert_postgres_message_on_connection(
     let message_type = waddle_xmpp_core::mam::message_type_wire_str(&insert.message.message_type);
 
     let mut query = QueryBuilder::<Postgres>::new(
-        "INSERT INTO mam_messages (id, room_jid, timestamp, from_jid, to_jid, body, stanza_id, thread_id, reply_to_id, reply_to_jid, origin_id, message_type, stanza_xml, rich_payload, nickname_generation, parent_thread_id, origin_dedup_sender_scope, origin_dedup_fingerprint) ",
+        "INSERT INTO mam_messages (id, room_jid, timestamp, from_jid, to_jid, body, stanza_id, thread_id, reply_to_id, reply_to_jid, origin_id, message_type, stanza_xml, rich_payload, nickname_generation, parent_thread_id) ",
     );
     query.push_values(std::iter::once(()), |mut builder, _| {
         builder
@@ -417,17 +191,15 @@ pub(super) async fn insert_postgres_message_on_connection(
                     .as_ref()
                     .and_then(|thread| thread.parent.as_ref())
                     .map(|parent| parent.as_str()),
-            )
-            .push_bind(insert.origin_dedup_sender_scope)
-            .push_bind(insert.origin_dedup_fingerprint);
+            );
     });
 
     match conflict {
-        PostgresInsertConflict::Error => {
+        InsertConflict::Error => {
             query.build().execute(conn).await?;
             Ok(Some(insert.archive_id.to_string()))
         }
-        PostgresInsertConflict::DoNothing => {
+        InsertConflict::DoNothing => {
             query.push(" ON CONFLICT DO NOTHING RETURNING id");
             query
                 .build_query_scalar::<String>()
@@ -437,220 +209,136 @@ pub(super) async fn insert_postgres_message_on_connection(
     }
 }
 
-async fn find_existing_origin_id_match(
-    backend: &MamDatabaseBackend,
-    archive_jid: &BareJid,
-    message: &ArchivedMessage,
-    origin_dedup_fingerprint: Option<&str>,
-) -> Result<Option<StoreOutcome>, MamStorageError> {
-    let Some(origin_id) = message.origin_id.as_ref() else {
-        return Ok(None);
-    };
-    let archive_jid_str = archive_jid.to_string();
-    let message_type = waddle_xmpp_core::mam::message_type_wire_str(&message.message_type);
-    let from_jid = message.from.to_string();
-    let groupchat_from =
-        matches!(message.message_type, MessageType::Groupchat).then_some(from_jid.as_str());
-
-    match backend {
-        MamDatabaseBackend::Sqlite(pool) => {
-            let mut builder = QueryBuilder::<Sqlite>::new("SELECT ");
-            builder
-                .push(SELECT_COLUMNS)
-                .push(" FROM mam_messages WHERE room_jid = ");
-            push_origin_dedup_filter(
-                &mut builder,
-                archive_jid_str.as_str(),
-                origin_id.as_str(),
-                message_type,
-                groupchat_from,
-                origin_dedup_fingerprint,
-            );
-            let rows: Vec<SqliteRow> = builder.build().fetch_all(pool).await?;
-            let candidates = rows
-                .iter()
-                .filter_map(|row| match decode_sqlite_message_row(row) {
-                    Ok(candidate) => Some(candidate),
-                    Err(error) => {
-                        warn!(%error, "MAM origin-id dedup candidate is malformed; skipping");
-                        None
-                    }
-                })
-                .collect::<Vec<_>>();
-            Ok(matching_store_outcome(&candidates, message))
-        }
-        MamDatabaseBackend::Postgres(pool) => {
-            let mut builder = QueryBuilder::<Postgres>::new("SELECT ");
-            builder
-                .push(SELECT_COLUMNS)
-                .push(" FROM mam_messages WHERE room_jid = ");
-            push_origin_dedup_filter(
-                &mut builder,
-                archive_jid_str.as_str(),
-                origin_id.as_str(),
-                message_type,
-                groupchat_from,
-                origin_dedup_fingerprint,
-            );
-            let rows: Vec<PgRow> = builder.build().fetch_all(pool).await?;
-            let candidates = rows
-                .iter()
-                .filter_map(|row| match decode_postgres_message_row(row) {
-                    Ok(candidate) => Some(candidate),
-                    Err(error) => {
-                        warn!(%error, "MAM origin-id dedup candidate is malformed; skipping");
-                        None
-                    }
-                })
-                .collect::<Vec<_>>();
-            Ok(matching_store_outcome(&candidates, message))
-        }
-    }
-}
-
-fn matching_store_outcome(
-    candidates: &[ArchivedMessage],
-    incoming: &ArchivedMessage,
-) -> Option<StoreOutcome> {
-    if let Some(existing) = candidates
-        .iter()
-        .find(|existing| origin_id_dedup_match(existing, incoming))
-    {
-        return Some(StoreOutcome::Deduplicated(existing.id.clone()));
-    }
-    candidates
-        .iter()
-        .find(|existing| origin_id_tombstone_match(existing, incoming))
-        .map(|existing| StoreOutcome::TombstoneHit(existing.id.clone()))
-}
-
-fn push_origin_dedup_filter<'args, DB>(
-    builder: &mut QueryBuilder<'args, DB>,
-    archive_jid: &'args str,
-    origin_id: &'args str,
-    message_type: &'args str,
-    groupchat_from: Option<&'args str>,
-    origin_dedup_fingerprint: Option<&'args str>,
-) where
-    DB: sqlx::Database,
-    &'args str: sqlx::Encode<'args, DB> + sqlx::Type<DB>,
-{
-    builder
-        .push_bind(archive_jid)
-        .push(" AND origin_id = ")
-        .push_bind(origin_id)
-        .push(" AND message_type = ")
-        .push_bind(message_type);
-    if let Some(from_jid) = groupchat_from {
-        builder.push(" AND from_jid = ").push_bind(from_jid);
-    }
-    if let Some(fingerprint) = origin_dedup_fingerprint {
-        builder
-            .push(" AND (origin_dedup_fingerprint = ")
-            .push_bind(fingerprint)
-            .push(" OR origin_dedup_fingerprint IS NULL)");
-    }
-    builder.push(" ORDER BY timestamp ASC, id ASC");
-}
-
-pub(super) fn origin_dedup_fingerprint(message: &ArchivedMessage) -> String {
-    let mut hasher = Sha256::new();
-    update_hash_part(
-        &mut hasher,
-        "message_type",
-        Some(waddle_xmpp_core::mam::message_type_wire_str(
-            &message.message_type,
-        )),
-    );
-    update_hash_part(&mut hasher, "body", message.body.as_deref());
-    update_hash_part(
-        &mut hasher,
-        "thread_id",
-        message.thread.as_ref().map(|thread| thread.id.as_str()),
-    );
-    update_hash_part(
-        &mut hasher,
-        "parent_thread_id",
-        message
-            .thread
-            .as_ref()
-            .and_then(|thread| thread.parent.as_ref())
-            .map(|parent| parent.as_str()),
-    );
-    update_hash_part(
-        &mut hasher,
-        "reply_to_id",
-        message.reply.as_ref().map(|reply| reply.id.as_str()),
-    );
-    let reply_to_jid = message
+pub(super) async fn insert_sqlite_message_on_connection(
+    conn: &mut SqliteConnection,
+    insert: MessageInsert<'_>,
+    conflict: InsertConflict,
+) -> Result<Option<String>, sqlx::Error> {
+    let archive_jid_str = insert.archive_jid.to_string();
+    let from_jid_str = insert.message.from.to_string();
+    let to_jid_str = insert.message.to.to_string();
+    let reply_to_id = insert.message.reply.as_ref().map(|reply| reply.id.as_str());
+    let reply_to_jid = insert
+        .message
         .reply
         .as_ref()
         .and_then(|reply| reply.to.as_ref())
-        .map(|jid| jid.to_string());
-    update_hash_part(&mut hasher, "reply_to_jid", reply_to_jid.as_deref());
-    // Hash the CONTENT-ONLY rich payload, not the full one bound to the
-    // `rich_payload` column: the server-derived MUC identity fields
-    // (`occupant_id`, `muc_sender`) carry per-session data
-    // (`muc_sender.jid` is a fresh random resource each reconnect), so
-    // including them would make every fresh-session origin-id retry
-    // fingerprint differently and defeat dedup. `content_only()` clears
-    // them, matching the in-memory `origin_id_dedup_match` check.
-    let dedup_rich = message
-        .rich
-        .as_ref()
-        .and_then(|rich| rich.dedup_content())
-        .as_ref()
-        .and_then(|rich| serde_json::to_string(rich).ok());
-    update_hash_part(&mut hasher, "rich_payload", dedup_rich.as_deref());
-    let digest = hasher.finalize();
-    let mut hex = String::with_capacity(digest.len() * 2);
-    for byte in digest {
-        use std::fmt::Write as _;
-        write!(&mut hex, "{byte:02x}").expect("writing to String never fails");
-    }
-    hex
-}
+        .map(jid::Jid::to_string);
+    let message_type = waddle_xmpp_core::mam::message_type_wire_str(&insert.message.message_type);
 
-pub(super) fn origin_dedup_sender_scope(message: &ArchivedMessage) -> Option<jid::BareJid> {
-    if !matches!(message.message_type, MessageType::Groupchat) || message.origin_id.is_none() {
-        return None;
-    }
-    let scope = message
-        .rich
-        .as_ref()
-        .and_then(|rich| rich.muc_sender.as_ref())
-        .map(|sender| sender.jid.to_bare());
-    if scope.is_none() {
-        // A groupchat row with an origin-id but no server-authored
-        // `muc_sender` sits outside BOTH retry-dedup layers (the Rust
-        // predicate fails open by design; the partial unique index
-        // requires a non-NULL scope). Today every archivable groupchat
-        // stanza carries a sender snapshot (the occupancy gate runs
-        // first), so this fires only if a future write path breaks
-        // that invariant — surface it instead of silently losing
-        // dedup coverage.
-        warn!(
-            from = %message.from,
-            "groupchat archive write carries an origin-id but no muc_sender; \
-             origin-id retry-dedup cannot protect this row"
-        );
-    }
-    scope
-}
+    let mut query = QueryBuilder::<Sqlite>::new(
+        "INSERT INTO mam_messages (id, room_jid, timestamp, from_jid, to_jid, body, stanza_id, thread_id, reply_to_id, reply_to_jid, origin_id, message_type, stanza_xml, rich_payload, nickname_generation, parent_thread_id) ",
+    );
+    query.push_values(std::iter::once(()), |mut builder, _| {
+        builder
+            .push_bind(insert.archive_id)
+            .push_bind(archive_jid_str.as_str())
+            .push_bind(insert.message.timestamp.to_rfc3339())
+            .push_bind(from_jid_str.as_str())
+            .push_bind(to_jid_str.as_str())
+            .push_bind(insert.message.body.as_deref())
+            .push_bind(
+                insert
+                    .message
+                    .stanza_id
+                    .as_ref()
+                    .map(|stanza_id| stanza_id.id.as_str()),
+            )
+            .push_bind(
+                insert
+                    .message
+                    .thread
+                    .as_ref()
+                    .map(|thread| thread.id.as_str()),
+            )
+            .push_bind(reply_to_id)
+            .push_bind(reply_to_jid.as_deref())
+            .push_bind(
+                insert
+                    .message
+                    .origin_id
+                    .as_ref()
+                    .map(|origin_id| origin_id.id.as_str()),
+            )
+            .push_bind(message_type)
+            .push_bind(insert.message.stanza_xml.as_deref())
+            .push_bind(insert.rich_payload)
+            .push_bind(insert.nickname_generation)
+            .push_bind(
+                insert
+                    .message
+                    .thread
+                    .as_ref()
+                    .and_then(|thread| thread.parent.as_ref())
+                    .map(|parent| parent.as_str()),
+            );
+    });
 
-fn update_hash_part(hasher: &mut Sha256, label: &str, value: Option<&str>) {
-    hasher.update(label.as_bytes());
-    hasher.update([0]);
-    match value {
-        Some(value) => {
-            hasher.update([1]);
-            hasher.update(value.len().to_le_bytes());
-            hasher.update(value.as_bytes());
+    match conflict {
+        InsertConflict::Error => {
+            query.build().execute(conn).await?;
+            Ok(Some(insert.archive_id.to_string()))
         }
-        None => hasher.update([0]),
+        InsertConflict::DoNothing => {
+            query.push(" ON CONFLICT DO NOTHING RETURNING id");
+            query
+                .build_query_scalar::<String>()
+                .fetch_optional(conn)
+                .await
+        }
     }
 }
 
+pub(super) async fn find_origin_tombstone_postgres(
+    conn: &mut PgConnection,
+    archive: &BareJid,
+    message: &ArchivedMessage,
+) -> Result<Option<String>, sqlx::Error> {
+    let Some(origin) = message.origin_id.as_ref() else {
+        return Ok(None);
+    };
+    let mut query = QueryBuilder::<Postgres>::new("SELECT ");
+    query
+        .push(SELECT_COLUMNS)
+        .push(" FROM mam_messages WHERE room_jid = ")
+        .push_bind(archive.to_string())
+        .push(" AND origin_id = ")
+        .push_bind(origin.as_str())
+        .push(" ORDER BY timestamp ASC, id ASC");
+    for row in query.build().fetch_all(conn).await? {
+        let candidate = decode_postgres_message_row(&row)
+            .map_err(|error| sqlx::Error::Decode(Box::new(error)))?;
+        if origin_id_tombstone_match(&candidate, message) {
+            return Ok(Some(candidate.id));
+        }
+    }
+    Ok(None)
+}
+pub(super) async fn find_origin_tombstone_sqlite(
+    conn: &mut SqliteConnection,
+    archive: &BareJid,
+    message: &ArchivedMessage,
+) -> Result<Option<String>, sqlx::Error> {
+    let Some(origin) = message.origin_id.as_ref() else {
+        return Ok(None);
+    };
+    let mut query = QueryBuilder::<Sqlite>::new("SELECT ");
+    query
+        .push(SELECT_COLUMNS)
+        .push(" FROM mam_messages WHERE room_jid = ")
+        .push_bind(archive.to_string())
+        .push(" AND origin_id = ")
+        .push_bind(origin.as_str())
+        .push(" ORDER BY timestamp ASC, id ASC");
+    for row in query.build().fetch_all(conn).await? {
+        let candidate = decode_sqlite_message_row(&row)
+            .map_err(|error| sqlx::Error::Decode(Box::new(error)))?;
+        if origin_id_tombstone_match(&candidate, message) {
+            return Ok(Some(candidate.id));
+        }
+    }
+    Ok(None)
+}
 pub(super) async fn replace_with_tombstone(
     backend: &MamDatabaseBackend,
     archive_id: &str,
@@ -664,7 +352,7 @@ pub(super) async fn replace_with_tombstone(
     let rows = match backend {
         MamDatabaseBackend::Sqlite(pool) => {
             let mut builder = QueryBuilder::<Sqlite>::new(
-                "UPDATE mam_messages SET body = NULL, stanza_xml = NULL, thread_id = NULL, parent_thread_id = NULL, reply_to_id = NULL, reply_to_jid = NULL, origin_dedup_sender_scope = NULL, origin_dedup_fingerprint = NULL, rich_payload = ",
+                "UPDATE mam_messages SET body = NULL, stanza_xml = NULL, thread_id = NULL, parent_thread_id = NULL, reply_to_id = NULL, reply_to_jid = NULL, rich_payload = ",
             );
             builder
                 .push_bind(encoded.as_str())
@@ -674,7 +362,7 @@ pub(super) async fn replace_with_tombstone(
         }
         MamDatabaseBackend::Postgres(pool) => {
             let mut builder = QueryBuilder::<Postgres>::new(
-                "UPDATE mam_messages SET body = NULL, stanza_xml = NULL, thread_id = NULL, parent_thread_id = NULL, reply_to_id = NULL, reply_to_jid = NULL, origin_dedup_sender_scope = NULL, origin_dedup_fingerprint = NULL, rich_payload = ",
+                "UPDATE mam_messages SET body = NULL, stanza_xml = NULL, thread_id = NULL, parent_thread_id = NULL, reply_to_id = NULL, reply_to_jid = NULL, rich_payload = ",
             );
             builder
                 .push_bind(encoded.as_str())
@@ -740,7 +428,7 @@ pub(super) async fn replace_with_terminal_tombstone(
         let rows = match backend {
             MamDatabaseBackend::Sqlite(pool) => {
                 let mut builder = QueryBuilder::<Sqlite>::new(
-                    "UPDATE mam_messages SET body = NULL, stanza_xml = NULL, thread_id = NULL, parent_thread_id = NULL, reply_to_id = NULL, reply_to_jid = NULL, origin_dedup_sender_scope = NULL, origin_dedup_fingerprint = NULL, rich_payload = ",
+                    "UPDATE mam_messages SET body = NULL, stanza_xml = NULL, thread_id = NULL, parent_thread_id = NULL, reply_to_id = NULL, reply_to_jid = NULL, rich_payload = ",
                 );
                 builder
                     .push_bind(encoded.as_str())
@@ -752,7 +440,7 @@ pub(super) async fn replace_with_terminal_tombstone(
             }
             MamDatabaseBackend::Postgres(pool) => {
                 let mut builder = QueryBuilder::<Postgres>::new(
-                    "UPDATE mam_messages SET body = NULL, stanza_xml = NULL, thread_id = NULL, parent_thread_id = NULL, reply_to_id = NULL, reply_to_jid = NULL, origin_dedup_sender_scope = NULL, origin_dedup_fingerprint = NULL, rich_payload = ",
+                    "UPDATE mam_messages SET body = NULL, stanza_xml = NULL, thread_id = NULL, parent_thread_id = NULL, reply_to_id = NULL, reply_to_jid = NULL, rich_payload = ",
                 );
                 builder
                     .push_bind(encoded.as_str())

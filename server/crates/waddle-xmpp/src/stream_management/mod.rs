@@ -26,16 +26,15 @@
 
 pub mod persistence;
 mod replay;
-pub(crate) mod sequence;
+pub mod sequence;
 mod session_registry;
-mod shadow_ordinal;
 mod stanzas;
 #[cfg(test)]
 mod stanzas_tests;
 mod state;
 mod unacked_queue;
 
-pub use replay::{stamp_replay_delay, ReplayStanza};
+pub use replay::{stamp_replay_delay, ReplayStanza, SmIngressFrameReceipt, SmIngressReceiptKind};
 pub use session_registry::{
     CrossNodeResumeOutcome, CrossNodeResumeStage, DetachedPresenceState, DetachedSession,
     DetachedUnackedStanza, InMemorySmSessionRegistry, PendingPromotionRetryRetention,
@@ -44,7 +43,6 @@ pub use session_registry::{
     SmRegistryError, SmSessionRegistry, StealTicket, TombstoneScrubbedSmEntries,
     TombstoneScrubbedSmEntry, DEFAULT_MAX_SESSIONS, TOMBSTONE_CLOCK_SKEW_SLACK,
 };
-pub use shadow_ordinal::ShadowOrdinal;
 pub use stanzas::{SmAck, SmEnable, SmEnabled, SmFailed, SmRequest, SmResume, SmResumed, SmStanza};
 pub use state::{DetachedSessionSnapshot, StreamManagementState};
 pub use unacked_queue::{UnackedPushResult, UnackedQueue, UnackedStanza};

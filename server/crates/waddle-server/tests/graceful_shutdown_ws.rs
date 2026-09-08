@@ -74,13 +74,12 @@ async fn sigterm_promotes_live_sm_session_unacked_queue_for_next_startup_deliver
     let global_db = format!("sqlite://{}?mode=rwc", scratch.join("global.db").display());
     let sm_db = format!("sqlite://{}?mode=rwc", scratch.join("sm.db").display());
     let pending_db = format!("sqlite://{}?mode=rwc", scratch.join("pending.db").display());
-    // MAM must be durable too: the promoted pending_delivery row
-    // references the archived stanza by (by, stanza-id), so redelivery
-    // after restart resolves the payload out of the archive.
-    let mam_db = format!("sqlite://{}?mode=rwc", scratch.join("mam.db").display());
+    // MAM and inbox inherit the durable global database: RFC 0018 §4
+    // requires their writes to share the ingress transaction. The promoted
+    // pending_delivery row resolves its archived stanza there after restart;
+    // SM and pending delivery retain their separate persistent stores.
     let extra_envs: Vec<(&str, &str)> = vec![
         ("WADDLE_XMPP_SM_DATABASE_URL", sm_db.as_str()),
-        ("WADDLE_XMPP_MAM_DATABASE_URL", mam_db.as_str()),
         (
             "WADDLE_XMPP_PENDING_DELIVERY_DATABASE_URL",
             pending_db.as_str(),

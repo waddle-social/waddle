@@ -3957,21 +3957,31 @@ pub(crate) async fn remove_group_dm_member_tuple(
     delete_group_dm_member_tuple(state, group_dm_id, member_jid).await
 }
 
+#[derive(Debug, thiserror::Error)]
+pub(crate) enum GroupDmInviteeValidationError {
+    #[error("group-DM invitee directory unavailable")]
+    DirectoryUnavailable,
+    #[error(transparent)]
+    Denied(#[from] XmppError),
+}
+
 pub(crate) async fn validate_group_dm_invitee(
     state: &AppState,
     inviter_jid: &BareJid,
     invitee_jid: &BareJid,
-) -> Result<(), XmppError> {
+) -> Result<(), GroupDmInviteeValidationError> {
     if invitee_jid.domain() != inviter_jid.domain() {
         return Err(XmppError::bad_request(Some(format!(
             "invitee must be local to {}",
             inviter_jid.domain()
-        ))));
+        )))
+        .into());
     }
     let Some(localpart) = invitee_jid.node().map(|node| node.to_string()) else {
         return Err(XmppError::bad_request(Some(
             "invitee must be a user JID with a localpart".to_string(),
-        )));
+        ))
+        .into());
     };
     let exists = local_account_exists(
         state.db_pool.global_actor(),
@@ -3979,11 +3989,12 @@ pub(crate) async fn validate_group_dm_invitee(
         invitee_jid.domain().as_str(),
     )
     .await
-    .map_err(|error| XmppError::internal(format!("user lookup failed: {error}")))?;
+    .map_err(|_| GroupDmInviteeValidationError::DirectoryUnavailable)?;
     if !exists {
         return Err(XmppError::item_not_found(Some(format!(
             "group-DM invitee does not exist: {invitee_jid}"
-        ))));
+        )))
+        .into());
     }
     Ok(())
 }

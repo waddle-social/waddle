@@ -2,6 +2,35 @@ use chrono::{DateTime, Utc};
 use jid::BareJid;
 use serde::{Deserialize, Serialize};
 
+/// XEP-0045 §8.1: a room subject change contains a subject and neither
+/// a body nor a thread. Callers supply the shape of their typed message.
+pub fn is_groupchat_subject_change(
+    message_type: &xmpp_parsers::message::MessageType,
+    has_subject: bool,
+    has_body: bool,
+    has_thread: bool,
+) -> bool {
+    *message_type == xmpp_parsers::message::MessageType::Groupchat
+        && has_subject
+        && !has_body
+        && !has_thread
+}
+
+/// [`is_groupchat_subject_change`] for a live [`Message`].
+///
+/// Whitespace-only bodies count as absent (hostile-client guard in the
+/// room subject handler), and the thread is read the payload-aware way:
+/// the inbound parser moves `<thread parent='…'/>` into `payloads`, so
+/// `message.thread` alone would miss parented threads.
+pub fn is_groupchat_subject_change_message(message: &xmpp_parsers::message::Message) -> bool {
+    is_groupchat_subject_change(
+        &message.type_,
+        !message.subjects.is_empty(),
+        message.bodies.values().any(|body| !body.trim().is_empty()),
+        waddle_xmpp_core::xep0201::thread_id_from_message(message).is_some(),
+    )
+}
+
 /// Typed multi-language subject-text map carried by [`SubjectState`]
 /// and the `OutboundEvent::PersistRoomSubject` / `RoomActor::SetSubject`
 /// payloads.

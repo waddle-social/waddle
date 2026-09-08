@@ -530,6 +530,308 @@ GRANT SELECT ON TABLE
 TO pg_monitor;
 "#;
 
+/// Authority-cutover ingress schema for the single-node SQLite backend.
+pub const V1012_INGRESS_AUTHORITY_CUTOVER: &str = r#"
+CREATE TABLE muc_invite_claims (
+    message_key TEXT NOT NULL,
+    room_jid TEXT NOT NULL,
+    invitee_jid TEXT NOT NULL,
+    inviter_jid TEXT NOT NULL,
+    claimed BIGINT NOT NULL CHECK (claimed IN (0, 1)),
+    FOREIGN KEY (message_key) REFERENCES ingress_messages(message_key) ON DELETE CASCADE,
+    PRIMARY KEY (message_key, room_jid, invitee_jid, inviter_jid)
+);
+
+-- Retained sessions cannot resume after ingress enrollment is reset. Recreate
+-- the complete SM schema inside the serialized migration: concurrent replica
+-- startup must never race PostgreSQL catalog inserts for these objects.
+DROP TABLE IF EXISTS sm_unacked;
+DROP TABLE IF EXISTS sm_sessions;
+CREATE TABLE sm_sessions (
+    stream_id TEXT PRIMARY KEY,
+    user_id TEXT NOT NULL,
+    full_jid TEXT NOT NULL,
+    occupancy_session TEXT,
+    inbound_count BIGINT NOT NULL,
+    outbound_count BIGINT NOT NULL,
+    last_acked BIGINT NOT NULL,
+    max_resume_secs BIGINT,
+    detached_at_ms BIGINT NOT NULL,
+    max_resume_duration_ms BIGINT NOT NULL,
+    carbons_enabled INTEGER NOT NULL,
+    roster_interested INTEGER NOT NULL,
+    blocklist_interested INTEGER NOT NULL DEFAULT 0,
+    presence_available INTEGER NOT NULL,
+    presence_show TEXT,
+    presence_status TEXT,
+    presence_priority INTEGER NOT NULL,
+    replay_gap_through BIGINT,
+    promotion_attempts INTEGER NOT NULL DEFAULT 0,
+    presence_payloads TEXT,
+    bare_jid TEXT,
+    auth_context_id TEXT,
+    auth_context_version BIGINT,
+    principal_auth_epoch BIGINT
+);
+CREATE TABLE sm_unacked (
+    stream_id TEXT NOT NULL,
+    sequence BIGINT NOT NULL,
+    stanza_xml TEXT NOT NULL,
+    original_receipt_at_ms BIGINT NOT NULL,
+    ingress_receipts BLOB,
+    origin_stream_id TEXT,
+    inbound_seq BIGINT,
+    pair_sequence BIGINT,
+    PRIMARY KEY (stream_id, sequence)
+);
+CREATE INDEX idx_sm_sessions_detached ON sm_sessions (detached_at_ms);
+CREATE UNIQUE INDEX idx_sm_unacked_dedup
+    ON sm_unacked (stream_id, origin_stream_id, inbound_seq)
+    WHERE origin_stream_id IS NOT NULL AND inbound_seq IS NOT NULL;
+
+CREATE TABLE ingress_protocol_epoch (
+    id INTEGER PRIMARY KEY CHECK (id = 1),
+    epoch BIGINT NOT NULL DEFAULT 0 CHECK (epoch BETWEEN 0 AND 4294967295),
+    activated_at TEXT NULL,
+    lineage_uuid TEXT NULL,
+    CHECK ((epoch = 0) = (activated_at IS NULL AND lineage_uuid IS NULL))
+);
+INSERT INTO ingress_protocol_epoch (id, epoch) VALUES (1, 0);
+
+CREATE TABLE ingress_messages (
+    message_key TEXT PRIMARY KEY NOT NULL,
+    envelope_version SMALLINT NULL CHECK (envelope_version IS NULL OR envelope_version = 1),
+    envelope BLOB NULL CHECK ((envelope IS NULL) = (envelope_version IS NULL)),
+    digest_version INTEGER NOT NULL CHECK (digest_version = 1),
+    digest BLOB NOT NULL CHECK (length(CAST(digest AS BLOB)) = 32),
+    created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
+    terminal_at TEXT NULL,
+    row_revision TEXT NOT NULL DEFAULT '0'
+        CHECK (row_revision <> '' AND row_revision NOT GLOB '*[^0-9]*'
+            AND (length(row_revision) < 20 OR (length(row_revision) = 20 AND row_revision <= '18446744073709551615'))
+            AND (row_revision = '0' OR substr(row_revision, 1, 1) <> '0'))
+);
+CREATE INDEX ingress_messages_terminal_at_idx
+    ON ingress_messages (terminal_at) WHERE terminal_at IS NOT NULL;
+
+CREATE TABLE ingress_origin_aliases (
+    alias_key_hash BLOB PRIMARY KEY NOT NULL CHECK (length(CAST(alias_key_hash AS BLOB)) = 32),
+    sender_bare_jid TEXT NOT NULL
+        CHECK (sender_bare_jid <> '' AND length(CAST(sender_bare_jid AS BLOB)) <= 3071),
+    target_kind INTEGER NOT NULL CHECK (target_kind IN (0, 1, 2)),
+    target_jid TEXT NOT NULL DEFAULT '' CHECK (length(CAST(target_jid AS BLOB)) <= 3071),
+    origin_id TEXT NOT NULL CHECK (origin_id <> '' AND length(CAST(origin_id AS BLOB)) <= 1024),
+    message_key TEXT NOT NULL REFERENCES ingress_messages (message_key),
+    created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
+    CHECK ((target_kind = 0) = (target_jid = ''))
+);
+CREATE INDEX ingress_origin_aliases_message_key_idx ON ingress_origin_aliases (message_key);
+
+CREATE TABLE ingress_sm_refs (
+    sm_ingress_id TEXT NOT NULL,
+    wire_h BIGINT NOT NULL CHECK (wire_h BETWEEN 0 AND 4294967295),
+    wire_generation BIGINT NOT NULL CHECK (wire_generation >= 0),
+    ingress_ordinal TEXT NOT NULL
+        CHECK (ingress_ordinal <> '' AND ingress_ordinal NOT GLOB '*[^0-9]*'
+            AND (length(ingress_ordinal) < 20 OR (length(ingress_ordinal) = 20 AND ingress_ordinal <= '18446744073709551615'))
+            AND (ingress_ordinal = '0' OR substr(ingress_ordinal, 1, 1) <> '0') AND ingress_ordinal <> '0'),
+    message_key TEXT NOT NULL REFERENCES ingress_messages (message_key),
+    created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
+    UNIQUE (sm_ingress_id, wire_generation, wire_h),
+    PRIMARY KEY (sm_ingress_id, ingress_ordinal)
+);
+CREATE INDEX ingress_sm_refs_message_key_idx ON ingress_sm_refs (message_key);
+
+CREATE TABLE ingress_deliveries (
+    delivery_key TEXT PRIMARY KEY NOT NULL,
+    message_key TEXT NOT NULL REFERENCES ingress_messages (message_key),
+    created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
+    row_revision TEXT NOT NULL DEFAULT '0'
+        CHECK (row_revision <> '' AND row_revision NOT GLOB '*[^0-9]*'
+            AND (length(row_revision) < 20 OR (length(row_revision) = 20 AND row_revision <= '18446744073709551615'))
+            AND (row_revision = '0' OR substr(row_revision, 1, 1) <> '0'))
+);
+CREATE INDEX ingress_deliveries_message_key_idx ON ingress_deliveries (message_key);
+
+CREATE TABLE ingress_sm_streams (
+    sm_ingress_id TEXT PRIMARY KEY NOT NULL,
+    stream_id TEXT NOT NULL UNIQUE CHECK (stream_id <> '' AND length(stream_id) <= 3071),
+    checkpoint_h BIGINT NOT NULL DEFAULT 0 CHECK (checkpoint_h BETWEEN 0 AND 4294967295),
+    wire_generation BIGINT NOT NULL DEFAULT 0 CHECK (wire_generation >= 0),
+    handled_ordinal TEXT NOT NULL DEFAULT '0'
+        CHECK (handled_ordinal <> '' AND handled_ordinal NOT GLOB '*[^0-9]*'
+            AND (length(handled_ordinal) < 20 OR (length(handled_ordinal) = 20 AND handled_ordinal <= '18446744073709551615'))
+            AND (handled_ordinal = '0' OR substr(handled_ordinal, 1, 1) <> '0')),
+    row_revision TEXT NOT NULL DEFAULT '0'
+        CHECK (row_revision <> '' AND row_revision NOT GLOB '*[^0-9]*'
+            AND (length(row_revision) < 20 OR (length(row_revision) = 20 AND row_revision <= '18446744073709551615'))
+            AND (row_revision = '0' OR substr(row_revision, 1, 1) <> '0')),
+    created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
+    updated_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))
+);
+
+CREATE TABLE ingress_effect_intents (
+    message_key TEXT NOT NULL REFERENCES ingress_messages (message_key) ON DELETE CASCADE,
+    effect_ordinal TEXT NOT NULL
+        CHECK (effect_ordinal <> '' AND effect_ordinal NOT GLOB '*[^0-9]*'
+            AND (length(effect_ordinal) < 20 OR (length(effect_ordinal) = 20 AND effect_ordinal <= '18446744073709551615'))
+            AND (effect_ordinal = '0' OR substr(effect_ordinal, 1, 1) <> '0')),
+    kind INTEGER NOT NULL CHECK (kind >= 0),
+    semantic_identity_hash BLOB NOT NULL CHECK (length(CAST(semantic_identity_hash AS BLOB)) = 32),
+    payload_version INTEGER NOT NULL CHECK (payload_version = 1),
+    payload BLOB NOT NULL CHECK (length(CAST(payload AS BLOB)) <= 65536),
+    created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
+    PRIMARY KEY (message_key, kind, semantic_identity_hash)
+);
+
+CREATE TABLE ingress_effect_receipts (
+    message_key TEXT NOT NULL,
+    kind INTEGER NOT NULL,
+    semantic_identity_hash BLOB NOT NULL CHECK (length(CAST(semantic_identity_hash AS BLOB)) = 32),
+    applied_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
+    PRIMARY KEY (message_key, kind, semantic_identity_hash),
+    FOREIGN KEY (message_key, kind, semantic_identity_hash)
+        REFERENCES ingress_effect_intents (message_key, kind, semantic_identity_hash) ON DELETE CASCADE
+);
+CREATE TABLE ingress_carbon_receipts (
+    message_key TEXT NOT NULL,
+    kind INTEGER NOT NULL,
+    semantic_identity_hash BLOB NOT NULL,
+    recipient TEXT NOT NULL,
+    PRIMARY KEY (message_key, kind, semantic_identity_hash, recipient),
+    FOREIGN KEY (message_key, kind, semantic_identity_hash)
+        REFERENCES ingress_effect_intents (message_key, kind, semantic_identity_hash) ON DELETE CASCADE
+);
+
+"#;
+
+/// Reset epoch-zero soak state and add the durable authority-cutover surface.
+pub const V1012_INGRESS_AUTHORITY_CUTOVER_POSTGRES: &str = r#"
+CREATE TABLE muc_invite_claims (
+    message_key UUID NOT NULL,
+    room_jid TEXT NOT NULL,
+    invitee_jid TEXT NOT NULL,
+    inviter_jid TEXT NOT NULL,
+    claimed BIGINT NOT NULL CHECK (claimed IN (0, 1)),
+    FOREIGN KEY (message_key) REFERENCES ingress_messages(message_key) ON DELETE CASCADE,
+    PRIMARY KEY (message_key, room_jid, invitee_jid, inviter_jid)
+);
+
+-- All pre-cutover soak rows belong to epoch zero. Row-wise deletes preserve
+-- the epoch guards and follow the documented child-before-parent lock order.
+DO $$ BEGIN
+    IF (SELECT epoch FROM ingress_protocol_epoch WHERE id = 1 FOR UPDATE) IS DISTINCT FROM 0 THEN
+        RAISE EXCEPTION 'waddle: V1012 requires ingress epoch zero';
+    END IF;
+END $$;
+DELETE FROM ingress_effect_intents;
+DELETE FROM ingress_deliveries;
+DELETE FROM ingress_sm_refs;
+DELETE FROM ingress_origin_aliases;
+DELETE FROM ingress_messages;
+DELETE FROM ingress_sm_streams;
+
+-- Retained sessions cannot resume after ingress enrollment is reset. Recreate
+-- the complete SM schema inside the serialized migration: concurrent replica
+-- startup must never race PostgreSQL catalog inserts for these objects.
+DROP TABLE IF EXISTS sm_unacked;
+DROP TABLE IF EXISTS sm_sessions;
+CREATE TABLE sm_sessions (
+    stream_id TEXT PRIMARY KEY,
+    user_id TEXT NOT NULL,
+    full_jid TEXT NOT NULL,
+    occupancy_session TEXT,
+    inbound_count BIGINT NOT NULL,
+    outbound_count BIGINT NOT NULL,
+    last_acked BIGINT NOT NULL,
+    max_resume_secs BIGINT,
+    detached_at_ms BIGINT NOT NULL,
+    max_resume_duration_ms BIGINT NOT NULL,
+    carbons_enabled INTEGER NOT NULL,
+    roster_interested INTEGER NOT NULL,
+    blocklist_interested INTEGER NOT NULL DEFAULT 0,
+    presence_available INTEGER NOT NULL,
+    presence_show TEXT,
+    presence_status TEXT,
+    presence_priority INTEGER NOT NULL,
+    replay_gap_through BIGINT,
+    promotion_attempts INTEGER NOT NULL DEFAULT 0,
+    presence_payloads TEXT,
+    bare_jid TEXT,
+    auth_context_id TEXT,
+    auth_context_version BIGINT,
+    principal_auth_epoch BIGINT
+);
+CREATE TABLE sm_unacked (
+    stream_id TEXT NOT NULL,
+    sequence BIGINT NOT NULL,
+    stanza_xml TEXT NOT NULL,
+    original_receipt_at_ms BIGINT NOT NULL,
+    ingress_receipts BYTEA,
+    origin_stream_id TEXT,
+    inbound_seq BIGINT,
+    pair_sequence BIGINT,
+    PRIMARY KEY (stream_id, sequence)
+);
+CREATE INDEX idx_sm_sessions_detached ON sm_sessions (detached_at_ms);
+CREATE UNIQUE INDEX idx_sm_unacked_dedup
+    ON sm_unacked (stream_id, origin_stream_id, inbound_seq)
+    WHERE origin_stream_id IS NOT NULL AND inbound_seq IS NOT NULL;
+
+ALTER TABLE ingress_messages
+    ADD COLUMN envelope_version SMALLINT NULL,
+    ADD COLUMN envelope BYTEA NULL,
+    ADD CHECK ((envelope IS NULL) = (envelope_version IS NULL)),
+    ADD CHECK (envelope_version IS NULL OR envelope_version = 1);
+ALTER TABLE ingress_sm_streams
+    ADD COLUMN checkpoint_h BIGINT NOT NULL DEFAULT 0
+        CHECK (checkpoint_h BETWEEN 0 AND 4294967295),
+    ADD COLUMN wire_generation BIGINT NOT NULL DEFAULT 0 CHECK (wire_generation >= 0);
+ALTER TABLE ingress_sm_refs
+    ADD COLUMN wire_h BIGINT NOT NULL CHECK (wire_h BETWEEN 0 AND 4294967295),
+    ADD COLUMN wire_generation BIGINT NOT NULL CHECK (wire_generation >= 0),
+    ADD UNIQUE (sm_ingress_id, wire_generation, wire_h);
+CREATE TABLE ingress_effect_receipts (
+    message_key UUID NOT NULL,
+    kind INTEGER NOT NULL,
+    semantic_identity_hash BYTEA NOT NULL CHECK (octet_length(semantic_identity_hash) = 32),
+    applied_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+    PRIMARY KEY (message_key, kind, semantic_identity_hash),
+    FOREIGN KEY (message_key, kind, semantic_identity_hash)
+        REFERENCES ingress_effect_intents (message_key, kind, semantic_identity_hash) ON DELETE CASCADE
+);
+CREATE TRIGGER ingress_effect_receipts_epoch_guard_dml
+BEFORE INSERT OR UPDATE OR DELETE ON ingress_effect_receipts
+FOR EACH STATEMENT EXECUTE FUNCTION waddle_ingress_epoch_guard();
+CREATE TRIGGER ingress_effect_receipts_epoch_guard_truncate
+BEFORE TRUNCATE ON ingress_effect_receipts
+FOR EACH STATEMENT EXECUTE FUNCTION waddle_ingress_truncate_guard();
+ALTER TABLE ingress_effect_receipts ENABLE ALWAYS TRIGGER ingress_effect_receipts_epoch_guard_dml;
+ALTER TABLE ingress_effect_receipts ENABLE ALWAYS TRIGGER ingress_effect_receipts_epoch_guard_truncate;
+INSERT INTO ingress_epoch_guard_manifest (table_name) VALUES ('ingress_effect_receipts');
+GRANT SELECT ON TABLE ingress_effect_receipts TO pg_monitor;
+CREATE TABLE ingress_carbon_receipts (
+    message_key UUID NOT NULL,
+    kind INTEGER NOT NULL,
+    semantic_identity_hash BYTEA NOT NULL,
+    recipient TEXT NOT NULL,
+    PRIMARY KEY (message_key, kind, semantic_identity_hash, recipient),
+    FOREIGN KEY (message_key, kind, semantic_identity_hash)
+        REFERENCES ingress_effect_intents (message_key, kind, semantic_identity_hash) ON DELETE CASCADE
+);
+CREATE TRIGGER ingress_carbon_receipts_epoch_guard_dml
+BEFORE INSERT OR UPDATE OR DELETE ON ingress_carbon_receipts
+FOR EACH STATEMENT EXECUTE FUNCTION waddle_ingress_epoch_guard();
+CREATE TRIGGER ingress_carbon_receipts_epoch_guard_truncate
+BEFORE TRUNCATE ON ingress_carbon_receipts
+FOR EACH STATEMENT EXECUTE FUNCTION waddle_ingress_truncate_guard();
+ALTER TABLE ingress_carbon_receipts ENABLE ALWAYS TRIGGER ingress_carbon_receipts_epoch_guard_dml;
+ALTER TABLE ingress_carbon_receipts ENABLE ALWAYS TRIGGER ingress_carbon_receipts_epoch_guard_truncate;
+INSERT INTO ingress_epoch_guard_manifest (table_name) VALUES ('ingress_carbon_receipts');
+GRANT SELECT ON TABLE ingress_carbon_receipts TO pg_monitor;
+
+"#;
+
 /// Get all waddle schema migrations in order.
 ///
 /// Versions are intentionally offset from global migrations so a single
@@ -601,6 +903,12 @@ pub fn all() -> Vec<Migration> {
             description: "Grant pg_monitor read access to the ingress tables".to_string(),
             sql_sqlite: V1011_INGRESS_MONITORING_GRANTS,
             sql_postgres: V1011_INGRESS_MONITORING_GRANTS_POSTGRES,
+        },
+        Migration {
+            version: 1012,
+            description: "Add dialect-aware ingress authority storage".to_string(),
+            sql_sqlite: V1012_INGRESS_AUTHORITY_CUTOVER,
+            sql_postgres: V1012_INGRESS_AUTHORITY_CUTOVER_POSTGRES,
         },
     ]
 }

@@ -1,5 +1,5 @@
 use super::*;
-use crate::ingress_shadow::IngressEffectCapture;
+use crate::ingress::IngressEffectCapture;
 
 // #229 PR12 — RouteToConnection delivers as PeerStanza
 // -----------------------------------------------------------------
@@ -54,7 +54,7 @@ async fn route_to_connection_full_jid_live_dm_records_route_direct_intent() {
     let (bob_tx, mut bob_rx) = tokio::sync::mpsc::channel(8);
     register_into_both_tiers(&registry, &user_registry, &bob, bob_tx).await;
 
-    let capture = IngressEffectCapture::new(None);
+    let capture = IngressEffectCapture::new();
     let deps = Deps::registry_with_user_registry(&registry, &user_registry)
         .with_ingress_effect_capture(Some(capture.clone()));
 
@@ -182,7 +182,7 @@ async fn route_to_connection_bare_jid_falls_back_to_connected_resources_without_
 
 #[tokio::test]
 async fn route_to_connection_capture_skips_blocked_bare_jid_delivery() {
-    use crate::ingress_shadow::IngressEffectCapture;
+    use crate::ingress::IngressEffectCapture;
     use waddle_xmpp::inbox::storage::InMemoryInboxStorage;
     use waddle_xmpp::mam::storage::InMemoryMamStorage;
     use waddle_xmpp::registry::UserRegistryActor;
@@ -204,7 +204,7 @@ async fn route_to_connection_capture_skips_blocked_bare_jid_delivery() {
     );
     let blocking: Arc<dyn BlockingStorage> = blocking_concrete;
     let dispatcher = pipelined_dispatcher();
-    let capture = IngressEffectCapture::new(None);
+    let capture = IngressEffectCapture::new();
     let deps = offline_pass_deps_with_user_registry(
         &registry,
         &user_registry,

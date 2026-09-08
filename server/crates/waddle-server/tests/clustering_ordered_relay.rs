@@ -430,6 +430,9 @@ fn receiver_duplicate_ack_replays_client_reply_stanzas() {
         sender_claim: sender_claim(),
         target_claim: room_claim(),
         payload: OrderedRelayPayload::MucProxy {
+            canonical: None,
+            principal: None,
+            stanza_lang: None,
             room_jid: room_jid(),
             kind: OrderedRelayMucProxyKind::JoinPresence,
             origin: connection_origin(),
@@ -894,6 +897,9 @@ fn diverted_room_lane_leaves_the_other_lane_flowing() {
             inbound(1),
             claims_for_target(room_claim()),
             OrderedRelayPayload::MucProxy {
+                canonical: None,
+                principal: None,
+                stanza_lang: None,
                 room_jid: room_jid(),
                 kind: OrderedRelayMucProxyKind::MujiJingleIq,
                 origin: connection_origin(),
@@ -909,6 +915,9 @@ fn diverted_room_lane_leaves_the_other_lane_flowing() {
             inbound(2),
             claims_for_target(room_claim()),
             OrderedRelayPayload::MucProxy {
+                canonical: None,
+                principal: None,
+                stanza_lang: None,
                 room_jid: room_jid(),
                 kind: OrderedRelayMucProxyKind::GroupchatMessage,
                 origin: MucProxyOrigin::Server,
@@ -930,6 +939,9 @@ fn diverted_room_lane_leaves_the_other_lane_flowing() {
             inbound(3),
             claims_for_target(room_claim()),
             OrderedRelayPayload::MucProxy {
+                canonical: None,
+                principal: None,
+                stanza_lang: None,
                 room_jid: room_jid(),
                 kind: OrderedRelayMucProxyKind::MujiJingleIq,
                 origin: connection_origin(),
@@ -953,6 +965,9 @@ fn muc_proxy_kind_validates_the_carried_stanza_kind() {
         sender_claim: sender_claim(),
         target_claim: room_claim(),
         payload: OrderedRelayPayload::MucProxy {
+            canonical: None,
+            principal: None,
+            stanza_lang: None,
             room_jid: room_jid(),
             kind: OrderedRelayMucProxyKind::JoinPresence,
             origin: connection_origin(),
@@ -979,6 +994,9 @@ fn muc_proxy_kind_validates_the_carried_stanza_kind() {
         sender_claim: sender_claim(),
         target_claim: room_claim(),
         payload: OrderedRelayPayload::MucProxy {
+            canonical: None,
+            principal: None,
+            stanza_lang: None,
             room_jid: room_jid(),
             kind: OrderedRelayMucProxyKind::GroupchatMessage,
             origin: MucProxyOrigin::Server,
@@ -1009,6 +1027,9 @@ fn muc_proxy_validation_rejects_malformed_xep0045_shapes() {
         sender_claim: sender_claim(),
         target_claim: room_claim(),
         payload: OrderedRelayPayload::MucProxy {
+            canonical: None,
+            principal: None,
+            stanza_lang: None,
             room_jid: room_jid(),
             kind: OrderedRelayMucProxyKind::JoinPresence,
             origin: connection_origin(),
@@ -1021,6 +1042,9 @@ fn muc_proxy_validation_rejects_malformed_xep0045_shapes() {
     };
     let bare_groupchat = RemoteStanzaEnvelope {
         payload: OrderedRelayPayload::MucProxy {
+            canonical: None,
+            principal: None,
+            stanza_lang: None,
             room_jid: room_jid(),
             kind: OrderedRelayMucProxyKind::GroupchatMessage,
             origin: MucProxyOrigin::Server,
@@ -1030,6 +1054,9 @@ fn muc_proxy_validation_rejects_malformed_xep0045_shapes() {
     };
     let full_groupchat = RemoteStanzaEnvelope {
         payload: OrderedRelayPayload::MucProxy {
+            canonical: None,
+            principal: None,
+            stanza_lang: None,
             room_jid: room_jid(),
             kind: OrderedRelayMucProxyKind::GroupchatMessage,
             origin: MucProxyOrigin::Server,
@@ -1073,6 +1100,9 @@ fn muc_proxy_room_iq_kinds_validate_bare_room_vs_occupant_addressing() {
         sender_claim: sender_claim(),
         target_claim: room_claim(),
         payload: OrderedRelayPayload::MucProxy {
+            canonical: None,
+            principal: None,
+            stanza_lang: None,
             room_jid: room_jid(),
             kind: OrderedRelayMucProxyKind::BareRoomIq,
             origin: MucProxyOrigin::Server,
@@ -1082,6 +1112,9 @@ fn muc_proxy_room_iq_kinds_validate_bare_room_vs_occupant_addressing() {
     };
     let full_jid_as_bare_room_iq = RemoteStanzaEnvelope {
         payload: OrderedRelayPayload::MucProxy {
+            canonical: None,
+            principal: None,
+            stanza_lang: None,
             room_jid: room_jid(),
             kind: OrderedRelayMucProxyKind::BareRoomIq,
             origin: MucProxyOrigin::Server,
@@ -1091,6 +1124,9 @@ fn muc_proxy_room_iq_kinds_validate_bare_room_vs_occupant_addressing() {
     };
     let occupant_iq = RemoteStanzaEnvelope {
         payload: OrderedRelayPayload::MucProxy {
+            canonical: None,
+            principal: None,
+            stanza_lang: None,
             room_jid: room_jid(),
             kind: OrderedRelayMucProxyKind::OccupantIq,
             origin: MucProxyOrigin::Server,
@@ -1100,6 +1136,9 @@ fn muc_proxy_room_iq_kinds_validate_bare_room_vs_occupant_addressing() {
     };
     let bare_jid_as_occupant_iq = RemoteStanzaEnvelope {
         payload: OrderedRelayPayload::MucProxy {
+            canonical: None,
+            principal: None,
+            stanza_lang: None,
             room_jid: room_jid(),
             kind: OrderedRelayMucProxyKind::OccupantIq,
             origin: MucProxyOrigin::Server,
@@ -1170,6 +1209,9 @@ fn muji_payload() -> OrderedRelayPayload {
         },
     )));
     OrderedRelayPayload::MucProxy {
+        canonical: None,
+        principal: None,
+        stanza_lang: None,
         room_jid: room_jid(),
         kind: OrderedRelayMucProxyKind::MujiJingleIq,
         origin: connection_origin(),
@@ -1202,6 +1244,9 @@ fn receiver_enforces_room_lane_kind_binding() {
     };
     let groupchat_on_muji_lane = RemoteStanzaEnvelope {
         payload: OrderedRelayPayload::MucProxy {
+            canonical: None,
+            principal: None,
+            stanza_lang: None,
             room_jid: room_jid(),
             kind: OrderedRelayMucProxyKind::GroupchatMessage,
             origin: MucProxyOrigin::Server,

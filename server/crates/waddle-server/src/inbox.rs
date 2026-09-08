@@ -63,6 +63,12 @@ pub enum InboxTxError {
     Decode(#[from] InboxDecodeError),
     #[error("RETURNING produced no row")]
     ReturningRowMissing,
+    #[error("inbox projection requires a canonical message row")]
+    ProjectionMessageMissing,
+    #[error("recorded inbox projection has no inbox row")]
+    ProjectionEntryMissing,
+    #[error("inbox projection has an invalid thread identifier")]
+    InvalidProjectionThread,
 }
 
 impl From<InboxTxError> for InboxStorageError {
@@ -78,6 +84,13 @@ impl From<InboxDecodeError> for InboxStorageError {
 }
 
 impl DatabaseInboxStorage {
+    /// Share the ingress database for transactional projections and their reads.
+    pub async fn from_database(db: Database) -> Result<Self, InboxStorageError> {
+        let storage = Self { db };
+        schema::initialize(&storage).await?;
+        Ok(storage)
+    }
+
     pub fn database(&self) -> Database {
         self.db.clone()
     }
@@ -89,8 +102,7 @@ impl DatabaseInboxStorage {
                 .await
                 .map_err(|error| InboxStorageError::Other(error.to_string()))?,
         };
-        let storage = Self { db };
-        schema::initialize(&storage).await?;
+        let storage = Self::from_database(db).await?;
         info!(driver = ?storage.db.driver(), "Inbox storage initialized");
         Ok(storage)
     }
@@ -148,10 +160,18 @@ fn upsert_sql() -> String {
             call_thread_kind, call_thread_media, call_ended_at, call_duration
         ) VALUES (?, ?, ?, ?, ?, ?, CASE WHEN ? != 0 THEN 1 ELSE 0 END, ?, ?, ?, ?, ?, ?, ?, ?)
         ON CONFLICT(user_jid, partner_jid, thread_id) DO UPDATE SET
-            kind = excluded.kind,
-            last_stanza_id = excluded.last_stanza_id,
-            last_updated = excluded.last_updated,
-            preview = excluded.preview,
+            kind = CASE
+                WHEN excluded.last_updated >= inbox_entries.last_updated
+                THEN excluded.kind ELSE inbox_entries.kind END,
+            last_stanza_id = CASE
+                WHEN excluded.last_updated >= inbox_entries.last_updated
+                THEN excluded.last_stanza_id ELSE inbox_entries.last_stanza_id END,
+            last_updated = CASE
+                WHEN excluded.last_updated >= inbox_entries.last_updated
+                THEN excluded.last_updated ELSE inbox_entries.last_updated END,
+            preview = CASE
+                WHEN excluded.last_updated >= inbox_entries.last_updated
+                THEN excluded.preview ELSE inbox_entries.preview END,
             unread = CASE
                 WHEN ? != 0 THEN inbox_entries.unread + 1
                 ELSE inbox_entries.unread
@@ -161,7 +181,10 @@ fn upsert_sql() -> String {
                 WHEN ? != 0 THEN inbox_entries.reply_count + 1
                 ELSE inbox_entries.reply_count
             END,
-            author = COALESCE(excluded.author, inbox_entries.author),
+            author = CASE
+                WHEN excluded.last_updated >= inbox_entries.last_updated
+                THEN COALESCE(excluded.author, inbox_entries.author)
+                ELSE inbox_entries.author END,
             call_thread_kind = COALESCE(excluded.call_thread_kind, inbox_entries.call_thread_kind),
             call_thread_media = COALESCE(excluded.call_thread_media, inbox_entries.call_thread_media),
             call_ended_at = COALESCE(excluded.call_ended_at, inbox_entries.call_ended_at),
@@ -266,6 +289,57 @@ pub(crate) async fn upsert_in_transaction(
         .await?
         .ok_or(InboxTxError::ReturningRowMissing)?;
 
+    Ok(decode_row(&row)?)
+}
+
+/// Mark a projection read and return its committed push payload.
+pub(crate) async fn mark_read_in_transaction(
+    tx: &mut crate::db::Transaction<'_>,
+    owner: &BareJid,
+    channel: &BareJid,
+    thread: Option<&waddle_xmpp_core::mam::ThreadId>,
+) -> Result<Option<InboxEntry>, InboxTxError> {
+    let mut rows = tx.query(
+        &format!("UPDATE inbox_entries SET unread = 0 WHERE user_jid = ? AND partner_jid = ? AND thread_id = ? RETURNING {SELECT_COLS}"),
+        crate::db_params![owner.to_string(), channel.to_string(), thread.map(waddle_xmpp_core::mam::ThreadId::as_str).unwrap_or("").to_owned()],
+    ).await?;
+    rows.next()
+        .await?
+        .map(|row| decode_row(&row).map_err(Into::into))
+        .transpose()
+}
+
+/// Read a projection by its typed identity without changing unread state.
+pub(crate) async fn find_in_transaction(
+    tx: &mut crate::db::Transaction<'_>,
+    owner: &BareJid,
+    channel: &BareJid,
+    thread: Option<&waddle_xmpp_core::mam::ThreadId>,
+) -> Result<Option<InboxEntry>, InboxTxError> {
+    let mut rows = tx.query(
+        &format!("SELECT {SELECT_COLS} FROM inbox_entries WHERE user_jid = ? AND partner_jid = ? AND thread_id = ?"),
+        crate::db_params![owner.to_string(), channel.to_string(), thread.map(waddle_xmpp_core::mam::ThreadId::as_str).unwrap_or("").to_owned()],
+    ).await?;
+    rows.next()
+        .await?
+        .map(|row| decode_row(&row).map_err(Into::into))
+        .transpose()
+}
+
+/// Read the current projection without replaying unread or reply increments.
+pub(crate) async fn get_in_transaction(
+    tx: &mut crate::db::Transaction<'_>,
+    user: &BareJid,
+    entry: &InboxEntry,
+) -> Result<InboxEntry, InboxTxError> {
+    let mut rows = tx.query(
+        &format!("SELECT {SELECT_COLS} FROM inbox_entries WHERE user_jid = ? AND partner_jid = ? AND thread_id = ?"),
+        crate::db_params![user.to_string(), entry.partner.to_string(), entry.thread_id.clone().unwrap_or_default()],
+    ).await?;
+    let row = rows
+        .next()
+        .await?
+        .ok_or(InboxTxError::ProjectionEntryMissing)?;
     Ok(decode_row(&row)?)
 }
 

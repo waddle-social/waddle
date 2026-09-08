@@ -27,7 +27,6 @@ fn detached_session(stream_id: &str, jid: &str) -> DetachedSession {
         jid: jid.parse().expect("valid full jid"),
         occupancy_session: waddle_xmpp_core::OccupancySessionGeneration::mint(),
         inbound_count: 7,
-        shadow_ordinal: waddle_xmpp::stream_management::ShadowOrdinal::ZERO,
         outbound_count: 11,
         last_acked: 10,
         replay_gap_through: None,
@@ -275,6 +274,7 @@ impl SmPersistenceStorage for MislabelingStore {
         for (_, unacked) in &mut groups {
             let to: FullJid = "mallory@example.test/phone".parse().expect("valid jid");
             unacked.push(PersistedUnackedStanza {
+                ingress_receipts: Vec::new(),
                 stream_id: SmSessionId::new("attacker-stream"),
                 sequence: 99,
                 stanza: Box::new(chat_stanza(&to, "leaked secret")),
@@ -318,6 +318,7 @@ async fn xep0198_restore_drops_unacked_rows_labeled_with_foreign_stream_id() {
     session
         .unacked_stanzas
         .push(waddle_xmpp::stream_management::DetachedUnackedStanza {
+            ingress_receipts: Vec::new(),
             sequence: 12,
             stanza_xml:
                 "<message xmlns='jabber:client' id='m12'><body>alice's own</body></message>"
@@ -562,6 +563,7 @@ async fn xep0198_release_claim_moves_expired_session_to_promotion() {
     let entity = Entity::new(EntityType::SmSession, stream_id);
     let mut session = expiring_detached_session(stream_id, jid.as_str());
     session.unacked_stanzas.push(DetachedUnackedStanza {
+        ingress_receipts: Vec::new(),
         sequence: 11,
         stanza_xml: queued_stanza_xml("queued", "queued"),
         original_receipt_at: chrono::Utc::now(),
@@ -673,6 +675,7 @@ async fn xep0198_expired_claim_promotion_rehydrates_durable_only_unacked_stanzas
     let second_receipt = chrono::Utc::now() - chrono::Duration::seconds(1);
     let mut session = expiring_detached_session(stream_id, jid.as_str());
     session.unacked_stanzas.push(DetachedUnackedStanza {
+        ingress_receipts: Vec::new(),
         sequence: 11,
         stanza_xml: queued_stanza_xml("queued-11", "first"),
         original_receipt_at: first_receipt,
@@ -689,6 +692,7 @@ async fn xep0198_expired_claim_promotion_rehydrates_durable_only_unacked_stanzas
 
     persistence
         .append_unacked(PersistedUnackedStanza {
+            ingress_receipts: Vec::new(),
             stream_id: SmSessionId::new(stream_id),
             sequence: 12,
             stanza: Box::new(chat_stanza(&jid, "durable only")),
@@ -744,6 +748,7 @@ async fn xep0198_deferred_release_moves_expired_session_to_promotion() {
     let entity = Entity::new(EntityType::SmSession, stream_id);
     let mut session = expiring_detached_session(stream_id, jid.as_str());
     session.unacked_stanzas.push(DetachedUnackedStanza {
+        ingress_receipts: Vec::new(),
         sequence: 11,
         stanza_xml: queued_stanza_xml("deferred", "queued"),
         original_receipt_at: chrono::Utc::now(),
@@ -879,6 +884,7 @@ async fn xep0198_expired_claim_handoff_recovers_after_restart_before_confirmatio
         .with_claim_store(claims, SharedNodeIdentity::new(owner.clone()));
     let mut session = expiring_detached_session(stream_id, jid.as_str());
     session.unacked_stanzas.push(DetachedUnackedStanza {
+        ingress_receipts: Vec::new(),
         sequence: 11,
         stanza_xml: queued_stanza_xml("restart", "queued"),
         original_receipt_at: chrono::Utc::now(),
@@ -1359,6 +1365,7 @@ async fn xep0198_unacked_original_receipt_at_round_trips_through_persistence() {
     // Use jabber:client namespace so the persistence layer's XML
     // round-trip can re-parse the stanza into a typed Stanza.
     session.unacked_stanzas.push(DetachedUnackedStanza {
+        ingress_receipts: Vec::new(),
         sequence: 12,
         stanza_xml: "<message xmlns='jabber:client' id='m12'><body>queued at T1</body></message>"
             .to_string(),
@@ -1611,6 +1618,7 @@ async fn xep0198_shutdown_drain_leases_expired_claimed_promotion_payload() {
     let stream_id = "stream-expiring-claim-shutdown";
     let mut session = expiring_detached_session(stream_id, jid.as_str());
     session.unacked_stanzas.push(DetachedUnackedStanza {
+        ingress_receipts: Vec::new(),
         sequence: 11,
         stanza_xml: queued_stanza_xml("queued", "queued"),
         original_receipt_at: chrono::Utc::now(),

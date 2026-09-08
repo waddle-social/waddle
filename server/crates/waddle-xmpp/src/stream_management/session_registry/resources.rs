@@ -43,6 +43,49 @@ impl DetachedPresenceState {
 }
 
 impl InMemorySmSessionRegistry {
+    /// Conservatively probe lifecycle ownership before retiring durable stream metadata.
+    /// Includes rows not hydrated after a failed startup read and foreign claims.
+    pub async fn has_retirement_protection(
+        &self,
+        stream_id: &SmSessionId,
+    ) -> Result<bool, SmRegistryError> {
+        let unavailable =
+            || SmRegistryError::StorageUnavailable(super::traits::StorageOutageCause::Backend);
+        let locally_owned = || {
+            self.locally_owned_claim_ids()
+                .ok_or_else(unavailable)
+                .map(|ids| ids.iter().any(|id| id == stream_id.as_str()))
+        };
+        if locally_owned()? {
+            return Ok(true);
+        }
+        let entity = crate::ownership::Entity::new(
+            crate::ownership::EntityType::SmSession,
+            stream_id.as_str().to_owned(),
+        );
+        if self
+            .claim_store
+            .current_claim(&entity)
+            .await
+            .map_err(|_| unavailable())?
+            .is_some()
+        {
+            return Ok(true);
+        }
+        if let Some(storage) = &self.persistence {
+            if storage
+                .get_session(stream_id)
+                .await
+                .map_err(|_| unavailable())?
+                .is_some()
+            {
+                return Ok(true);
+            }
+        }
+        // A fresh enrollment may have acquired ownership during either read.
+        locally_owned()
+    }
+
     fn stanza_to_replay_xml(stanza: &Stanza) -> String {
         let element = stanza.to_element();
         let mut buffer = Vec::new();

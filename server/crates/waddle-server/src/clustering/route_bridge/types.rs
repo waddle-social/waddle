@@ -251,6 +251,10 @@ pub enum RemoteResourceRouteTarget {
         stanza: RemoteStanza,
     },
     MucProxy {
+        canonical: Option<crate::ingress::IngressCanonicalRef>,
+        principal: Option<waddle_xmpp::auth::AuthenticatedPrincipalRef>,
+        #[serde(with = "crate::ingress::identity::stanza_lang_serde")]
+        stanza_lang: Option<xmpp_parsers::message::Lang>,
         room_jid: jid::BareJid,
         kind: OrderedRelayMucProxyKind,
         origin: MucProxyOrigin,
@@ -442,6 +446,7 @@ pub(super) struct PreparedRemoteDelivery {
 }
 
 pub(super) struct RemoteDeliveryOutcome {
+    pub(super) frame_completion: Option<crate::ingress::execute::RelayFrameReceiptCompletion>,
     pub(super) delivery: FullJidDeliveryOutcome,
     pub(super) client_replies: Vec<Stanza>,
     pub(super) maybe_committed: bool,

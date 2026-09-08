@@ -32,19 +32,13 @@ spec:
     # it must never change across upgrades or rollbacks.
     deployment:
       uuid: b90424f8-22ca-40bb-a24e-551d171c7b84
-    # Zero-downtime rollouts (ADR-0017 Phase 4). Safe under mixed
-    # versions because the ordered-relay envelope message id is
-    # versioned (deliver_ordered.vN, #1597/#1600): an old replica
-    # rejects a newer envelope pre-handler and the sender rolls back
-    # the sequence instead of poisoning the shared channel. Any
-    # envelope or reply-type change MUST bump the version (see
-    # server/CLAUDE.md) — that invariant is what keeps this strategy
-    # sound.
+    # One-shot hard cutover for #1657: ledger V1012 resets ingress state
+    # and old binaries refuse the new ledger version. Recreate stops all
+    # old writers before the new image runs the migration (brief outage).
+    # Flip back to RollingUpdate in a follow-up PR after the deploy is
+    # verified, as #1605 did after #1596; this is not the steady state.
     updateStrategy:
-      type: RollingUpdate
-      rollingUpdate:
-        maxSurge: 1
-        maxUnavailable: 0
+      type: Recreate
     image:
       repository: ghcr.io/waddle-social/waddle
       tag: main
@@ -65,16 +59,6 @@ spec:
         - randax
       s3Endpoint: "https://f90cc3950ab5b356ec869fe64c867ea7.r2.cloudflarestorage.com"
       s3Bucket: "waddle-social-files"
-      # Ingress-shadow soak (#1695): the #1656 shadow atomic ingress
-      # transaction runs on live traffic against the shadow tables only;
-      # the existing path keeps sole authority over delivery and wire `h`.
-      # Gates the #1657 authority cutover; removed with the shadow in
-      # #1657. Rollback = delete this key (pods roll via checksum/config).
-      # Rollback stops shadow writes AND the shadow's retention GC while
-      # leaving the shadow rows in place — see
-      # server/docs/operations/ingress-shadow-soak.md before flipping it.
-      extraEnv:
-        WADDLE_INGRESS_SHADOW_ENABLED: "true"
     database:
       driver: postgres
     spicedb:

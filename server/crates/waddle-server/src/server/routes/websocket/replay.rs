@@ -493,6 +493,7 @@ async fn record_drained_terminal_xml(
         };
     }
     let entry = waddle_xmpp::stream_management::DetachedUnackedStanza {
+        ingress_receipts: Vec::new(),
         sequence: terminal.session.outbound_count.wrapping_add(1),
         stanza_xml: xml,
         original_receipt_at,
@@ -611,7 +612,7 @@ pub(super) async fn load_terminal_recovery_blocklist(
 /// transport adapter must act on after the state machine + interpreter
 /// finished a dispatch, across all feedback rounds.
 #[derive(Debug, Default)]
-pub(super) struct DriveOutcome {
+pub(crate) struct DriveOutcome {
     /// Serialized wire frames to write, in order.
     pub(super) frames: Vec<String>,
     /// Set when any round emitted [`OutboundEvent::CloseTransport`].
@@ -633,7 +634,7 @@ pub(super) struct DriveOutcome {
 /// machine `sm` is borrowed mutably so feedback events can be re-fed
 /// via `sm.handle(...)` and produce the next-round `OutboundEvent`
 /// batch.
-pub(super) async fn drive_interpret_loop(
+pub(crate) async fn drive_interpret_loop(
     initial_events: Vec<OutboundEvent>,
     sm: &mut XmppStateMachine,
     deps: &crate::server::routes::interpret::Deps<'_>,

@@ -8,6 +8,51 @@ pub(super) async fn validate_groupchat_rich_targets(
     room_actor: &ActorRef<RoomActor>,
     sender_nickname_generation: Option<u64>,
 ) -> Result<(), Box<StanzaError>> {
+    match validate_groupchat_rich_targets_inner(
+        deps,
+        room,
+        message,
+        sender_room_nick_jid,
+        room_actor,
+        sender_nickname_generation,
+    )
+    .await
+    {
+        Ok(()) => Ok(()),
+        Err(RichTargetValidationError::Semantic(error)) => Err(error),
+        Err(error) => {
+            warn!(%error, "Rich-target validation infrastructure failed");
+            deps.effects
+                .fail_plan(effects::PlanFailure::RichTargetLookup);
+            Err(internal_server_error_for_lookup().into())
+        }
+    }
+}
+
+#[derive(Debug, thiserror::Error)]
+enum RichTargetValidationError {
+    #[error("rich-target request denied: {0:?}")]
+    Semantic(Box<StanzaError>),
+    #[error("rich-target archive lookup failed: {0}")]
+    Archive(#[from] waddle_xmpp::mam::MamStorageError),
+    #[error("rich-target occupancy lookup unavailable")]
+    RoomUnavailable,
+}
+
+impl From<StanzaError> for RichTargetValidationError {
+    fn from(error: StanzaError) -> Self {
+        Self::Semantic(Box::new(error))
+    }
+}
+
+async fn validate_groupchat_rich_targets_inner(
+    deps: &Deps<'_>,
+    room: &BareJid,
+    message: &Message,
+    sender_room_nick_jid: Option<&Jid>,
+    room_actor: &ActorRef<RoomActor>,
+    sender_nickname_generation: Option<u64>,
+) -> Result<(), RichTargetValidationError> {
     if message.from.is_none() {
         return Ok(());
     }
@@ -55,7 +100,7 @@ pub(super) async fn validate_groupchat_rich_targets(
         {
             Ok(Some(original)) => original,
             Ok(None) => return Err(item_not_found_error("Correction target not found.").into()),
-            Err(_) => return Err(internal_server_error_for_lookup().into()),
+            Err(error) => return Err(RichTargetValidationError::Archive(error)),
         };
         if !sender_matches_groupchat_from(sender_archive_view, &original.from) {
             return Err(forbidden_error("Only the original sender may correct a message.").into());
@@ -76,7 +121,7 @@ pub(super) async fn validate_groupchat_rich_targets(
             {
                 Ok(Some(original)) => original,
                 Ok(None) => return Err(item_not_found_error("Retraction target not found.").into()),
-                Err(_) => return Err(internal_server_error_for_lookup().into()),
+                Err(error) => return Err(RichTargetValidationError::Archive(error)),
             };
         if !sender_matches_groupchat_from(sender_archive_view, &original.from) {
             return Err(forbidden_error("Only the original sender may retract a message.").into());
@@ -130,12 +175,12 @@ pub(super) fn sender_matches_groupchat_from(sender: &Jid, original_from: &Jid) -
 /// per-nickname generation captured on the archive row at write time
 /// against the room actor's current generation for the sender's
 /// nickname.
-pub(super) async fn verify_groupchat_occupancy_generation(
+async fn verify_groupchat_occupancy_generation(
     sender: &Jid,
     original: &MamArchivedMessage,
     room_actor: &ActorRef<RoomActor>,
     sender_current_generation: Option<u64>,
-) -> Result<(), Box<StanzaError>> {
+) -> Result<(), RichTargetValidationError> {
     let Some(nick) = sender.resource().map(|r| r.to_string()) else {
         return Err(
             forbidden_error("Correction sender has no MUC nickname for occupancy check.").into(),
@@ -156,10 +201,11 @@ pub(super) async fn verify_groupchat_occupancy_generation(
         Some(value) => value,
         None => match room_actor
             .ask(GetNicknameGeneration { nick: nick.clone() })
+            .reply_timeout(std::time::Duration::from_secs(5))
             .await
         {
             Ok(value) => value,
-            Err(_) => return Err(internal_server_error_for_lookup().into()),
+            Err(_) => return Err(RichTargetValidationError::RoomUnavailable),
         },
     };
     if current_generation != archived_generation {

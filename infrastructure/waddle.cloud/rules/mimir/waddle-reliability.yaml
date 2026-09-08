@@ -159,163 +159,112 @@ groups:
           annotations:
             runbook: 'DeleteRoom returned 401 in production when the admin JWT omitted `roomCreate` (#1622); that outage measured 86-132 failures/day (3.6-5.5/h) against a healthy baseline of 0. Fires on the third failed call of one operation within a rolling 24h: for a bursty break that is the same instant a per-hour rule would fire, and for a sparse event-driven operation (RemoveParticipant, UpdateParticipant, DeleteRoom on a quiet day) it is the only shape that survives call gaps longer than an hour. One or two transient timeouts per day never page. The outer max_over_time over the last hour latches a hit so three failures spread across the window edges (t=0, 12h, 23h59m) stay active well past the notification policy group_wait instead of resolving after a single scrape. Break down by `op`, then read the matching admin-call errors in waddle-server logs. Failures are observed on the real SFU-driven operations only - there is no startup probe (removed after the #1714 review).'
             summary: A LiveKit admin operation failed three times within 24h - the SFU control plane is broken.
-    - name: waddle-ingress-shadow
+    - name: waddle-ingress
       rules:
-        - alert: IngressShadowNotEnabled
-          expr: min by (instance) (ingress_shadow_enabled) < 1
+        - alert: IngressInfraDecisions
+          expr: sum(rate(ingress_decisions_total{class=~"storage|serialization_exhaustion|timeout|ambiguous_commit"}[10m])) > 0
+          for: 10m
+          labels:
+            severity: critical
+            team: waddle
+          annotations:
+            runbook: https://github.com/waddle-social/waddle/blob/main/server/docs/operations/ingress-authority.md
+            summary: "Ingress infrastructure failures are refusing messages without advancing the handled count."
+        - alert: IngressFenceDecisions
+          expr: sum(rate(ingress_decisions_total{class=~"principal_missing|claim_fence_missing|room_generation_stale|frontier_stale|sm_ordinal_conflict"}[10m])) > 0
           for: 10m
           labels:
             severity: warning
             team: waddle
           annotations:
-            runbook: https://github.com/waddle-social/waddle/blob/main/server/docs/operations/ingress-shadow-soak.md ; https://github.com/waddle-social/waddle/issues/1695
-            lifecycle: "soak-temporary — removed with the shadow in #1657"
-            summary: A waddle-server replica has not reported ingress shadow enabled for 10m.
-        - alert: IngressShadowDisabledReplica
-          expr: max by (instance) (ingress_shadow_skips_total{reason="disabled"}) > 0
-          for: 10m
+            runbook: https://github.com/waddle-social/waddle/blob/main/server/docs/operations/ingress-authority.md
+            summary: "Sustained ingress fence failures are refusing messages without advancing the handled count."
+        - alert: IngressIdentityDecisions
+          expr: sum(increase(ingress_decisions_total{class=~"intent_contradiction|lineage|epoch_unsupported"}[1h])) > 0
+          labels:
+            severity: critical
+            team: waddle
+          annotations:
+            runbook: https://github.com/waddle-social/waddle/blob/main/server/docs/operations/ingress-authority.md
+            summary: "Ingress durable identity diverged or a wrong-lineage/unsupported-epoch binary refused a message."
+        - alert: IngressSeriesMissing
+          expr: absent(ingress_decisions_total) or (group by (instance) (target_info{job="waddle-server"}) unless group by (instance) (ingress_decisions_total))
+          for: 15m
           labels:
             severity: warning
             team: waddle
           annotations:
-            runbook: https://github.com/waddle-social/waddle/blob/main/server/docs/operations/ingress-shadow-soak.md ; https://github.com/waddle-social/waddle/issues/1695
-            lifecycle: "soak-temporary — removed with the shadow in #1657"
-            summary: A replica is dropping ingress shadow work because the feature is disabled.
-        - alert: IngressShadowClosedDrops
-          expr: sum(increase(ingress_shadow_skips_total{reason="closed"}[10m])) > 0
+            runbook: https://github.com/waddle-social/waddle/blob/main/server/docs/operations/ingress-authority.md
+            summary: "Zero-registered ingress decision series are absent; check OTLP export before treating silent ingress alerts as healthy."
+        - alert: IngressAliasConflicts
+          expr: sum(increase(ingress_alias_outcomes_total{outcome="conflict"}[1h])) > 0
           labels:
             severity: warning
             team: waddle
           annotations:
-            runbook: https://github.com/waddle-social/waddle/blob/main/server/docs/operations/ingress-shadow-soak.md ; https://github.com/waddle-social/waddle/issues/1695
-            lifecycle: "soak-temporary — removed with the shadow in #1657"
-            summary: Ingress shadow submissions were dropped because intake was closed.
-        - alert: IngressShadowSaturated
-          expr: sum(increase(ingress_shadow_skips_total{reason=~"queue_full|parking_full"}[15m])) > 0
+            runbook: https://github.com/waddle-social/waddle/blob/main/server/docs/operations/ingress-authority.md
+            summary: "Ingress alias enrollment hit a conflict in the last hour; inspect sender, target and origin-id reuse."
+        - alert: IngressRetryExhausted
+          expr: sum(increase(ingress_decisions_total{class="serialization_exhaustion"}[1h])) > 0
           labels:
             severity: warning
             team: waddle
           annotations:
-            runbook: https://github.com/waddle-social/waddle/blob/main/server/docs/operations/ingress-shadow-soak.md ; https://github.com/waddle-social/waddle/issues/1695
-            lifecycle: "soak-temporary — removed with the shadow in #1657"
-            summary: Ingress shadow intake saturated and started dropping work.
-        - alert: IngressShadowStalledSubmission
-          expr: max by (instance) (ingress_shadow_oldest_outstanding_submission_age_seconds) > 30
-          for: 5m
+            runbook: https://github.com/waddle-social/waddle/blob/main/server/docs/operations/ingress-authority.md
+            summary: "Ingress transaction retries exhausted in the last hour; messages were refused."
+        - alert: IngressGcFailing
+          expr: sum(increase(ingress_gc_runs_total{outcome=~"failed|timed_out|unattested"}[1h])) > 0
           labels:
             severity: warning
             team: waddle
           annotations:
-            runbook: https://github.com/waddle-social/waddle/blob/main/server/docs/operations/ingress-shadow-soak.md ; https://github.com/waddle-social/waddle/issues/1695
-            lifecycle: "soak-temporary — removed with the shadow in #1657"
-            summary: A replica has had an outstanding ingress shadow submission older than 30s for 5m.
-        - alert: IngressShadowAborted
-          expr: sum(increase(ingress_shadow_aborted_total[1h])) > 0
-          labels:
-            severity: warning
-            team: waddle
-          annotations:
-            runbook: "expected only during the declared churn restart; record the count on #1695. https://github.com/waddle-social/waddle/blob/main/server/docs/operations/ingress-shadow-soak.md ; https://github.com/waddle-social/waddle/issues/1695"
-            lifecycle: "soak-temporary — removed with the shadow in #1657"
-            summary: Ingress shadow submissions were aborted before completion in the last hour.
-        - alert: IngressShadowCandidateStarvation
-          expr: sum by (instance) (increase(ingress_shadow_candidates_total{outcome=~"no_claim_fence|no_principal|no_capture"}[30m])) > sum by (instance) (increase(ingress_shadow_candidates_total{outcome="parked"}[30m]))
-          for: 30m
-          labels:
-            severity: warning
-            team: waddle
-          annotations:
-            runbook: https://github.com/waddle-social/waddle/blob/main/server/docs/operations/ingress-shadow-soak.md ; https://github.com/waddle-social/waddle/issues/1695
-            lifecycle: "soak-temporary — removed with the shadow in #1657"
-            summary: Candidate gating exclusions are outpacing parked ingress shadow submissions on a replica.
-        - alert: IngressShadowAliasConflict
-          expr: sum(increase(ingress_shadow_alias_outcomes_total{outcome="conflict"}[1h])) > 0
-          labels:
-            severity: warning
-            team: waddle
-          annotations:
-            runbook: https://github.com/waddle-social/waddle/blob/main/server/docs/operations/ingress-shadow-soak.md ; https://github.com/waddle-social/waddle/issues/1695
-            lifecycle: "soak-temporary — removed with the shadow in #1657"
-            summary: Ingress shadow alias enrollment hit a conflict in the last hour.
-        - alert: IngressShadowRetryExhausted
-          expr: sum(increase(ingress_shadow_tx_retries_total{outcome="exhausted"}[1h])) > 0
-          labels:
-            severity: warning
-            team: waddle
-          annotations:
-            runbook: https://github.com/waddle-social/waddle/blob/main/server/docs/operations/ingress-shadow-soak.md ; https://github.com/waddle-social/waddle/issues/1695
-            lifecycle: "soak-temporary — removed with the shadow in #1657"
-            summary: Ingress shadow transaction retries exhausted in the last hour.
-        - alert: IngressShadowInfraDecisions
-          expr: sum(increase(ingress_shadow_decisions_total{class=~"storage|serialization_exhaustion|capture_overflow"}[1h])) > 0
-          labels:
-            severity: warning
-            team: waddle
-          annotations:
-            runbook: https://github.com/waddle-social/waddle/blob/main/server/docs/operations/ingress-shadow-soak.md ; https://github.com/waddle-social/waddle/issues/1695
-            lifecycle: "soak-temporary — removed with the shadow in #1657"
-            summary: Ingress shadow recorded infrastructure-related failure decisions in the last hour.
-        - alert: IngressShadowGcFailing
-          expr: sum(increase(ingress_shadow_gc_runs_total{outcome=~"failed|timed_out"}[1h])) > 0
-          labels:
-            severity: warning
-            team: waddle
-          annotations:
-            runbook: https://github.com/waddle-social/waddle/blob/main/server/docs/operations/ingress-shadow-soak.md ; https://github.com/waddle-social/waddle/issues/1695
-            lifecycle: "soak-temporary — removed with the shadow in #1657"
-            summary: Ingress shadow retention GC failed or timed out in the last hour.
-        - alert: IngressShadowGcBacklog
-          expr: (max(cnpg_waddle_ingress_gc_eligible_messages) > 0) and on() (sum(increase(ingress_shadow_admissions_total[6h])) > 0)
+            runbook: https://github.com/waddle-social/waddle/blob/main/server/docs/operations/ingress-authority.md
+            summary: "Ingress retention GC failed, timed out or ran unattested in the last hour."
+        - alert: IngressGcBacklog
+          expr: (max(cnpg_waddle_ingress_gc_eligible_messages) > 0) and on() (sum(increase(ingress_decisions_total[6h])) > 0)
           for: 6h
           labels:
             severity: warning
             team: waddle
           annotations:
-            runbook: https://github.com/waddle-social/waddle/blob/main/server/docs/operations/ingress-shadow-soak.md ; https://github.com/waddle-social/waddle/issues/1695
-            lifecycle: "soak-temporary — removed with the shadow in #1657"
-            summary: GC-eligible ingress shadow messages persisted for 6h while submissions (which trigger GC) kept flowing — retention GC is not draining.
-        - alert: IngressShadowGcAge
+            runbook: https://github.com/waddle-social/waddle/blob/main/server/docs/operations/ingress-authority.md
+            summary: "GC-eligible ingress messages persisted for 6h while committed decisions (which trigger GC) kept flowing; retention GC is not draining."
+        - alert: IngressGcAge
           expr: max(cnpg_waddle_ingress_gc_oldest_eligible_age_seconds) > 777600
           labels:
             severity: warning
             team: waddle
           annotations:
-            runbook: https://github.com/waddle-social/waddle/blob/main/server/docs/operations/ingress-shadow-soak.md ; https://github.com/waddle-social/waddle/issues/1695
-            lifecycle: "soak-temporary — removed with the shadow in #1657"
-            summary: The oldest GC-eligible ingress shadow message is older than 9 days.
-        - alert: IngressShadowTxSlow
-          expr: histogram_quantile(0.99, sum by (le) (rate(ingress_shadow_tx_duration_seconds_bucket[10m]))) > 2
+            runbook: https://github.com/waddle-social/waddle/blob/main/server/docs/operations/ingress-authority.md
+            summary: "The oldest GC-eligible ingress message is older than 9 days."
+        - alert: IngressTxSlow
+          expr: histogram_quantile(0.99, sum by (le) (rate(ingress_tx_duration_seconds_bucket[10m]))) > 2
           for: 30m
           labels:
             severity: warning
             team: waddle
           annotations:
-            runbook: https://github.com/waddle-social/waddle/blob/main/server/docs/operations/ingress-shadow-soak.md ; https://github.com/waddle-social/waddle/issues/1695
-            lifecycle: "soak-temporary — removed with the shadow in #1657"
-            summary: The ingress shadow transaction p99 exceeded 2 seconds for 30m.
-        - alert: IngressShadowSeriesMissing
-          expr: absent(ingress_shadow_admissions_total)
+            runbook: https://github.com/waddle-social/waddle/blob/main/server/docs/operations/ingress-authority.md
+            summary: "The ingress transaction p99 exceeded 2 seconds for 30m."
+        - alert: IngressUnresolvedEffectsGrowing
+          expr: sum by (kind) (increase(ingress_effects_unresolved_total[1h])) > 0
+          labels:
+            severity: warning
+            team: waddle
+          annotations:
+            runbook: https://github.com/waddle-social/waddle/blob/main/server/docs/operations/ingress-authority.md
+            summary: "Unresolved ingress effects increased in the last hour. Issue #1658 adds the recovery executor; unresolved intents keep messages non-terminal and protected from GC."
+        - alert: IngressCnpgQueriesMissing
+          expr: absent(cnpg_waddle_ingress_gc_eligible_messages) or absent(cnpg_waddle_ingress_gc_oldest_eligible_age_seconds)
           for: 15m
           labels:
             severity: warning
             team: waddle
           annotations:
-            runbook: https://github.com/waddle-social/waddle/blob/main/server/docs/operations/ingress-shadow-soak.md ; https://github.com/waddle-social/waddle/issues/1695
-            lifecycle: "soak-temporary — removed with the shadow in #1657"
-            summary: The ingress shadow metric families are absent — the OTLP export or the instruments broke; every IngressShadow* rule is silently not evaluating.
-        - alert: IngressShadowCnpgQueriesMissing
-          expr: absent(cnpg_waddle_ingress_gc_eligible_messages)
-          for: 15m
-          labels:
-            severity: warning
-            team: waddle
-          annotations:
-            runbook: https://github.com/waddle-social/waddle/blob/main/server/docs/operations/ingress-shadow-soak.md ; https://github.com/waddle-social/waddle/issues/1695
-            lifecycle: "soak-temporary — removed with the shadow in #1657"
-            summary: The primary-only ingress custom-query series are absent (exporter running but the postgresql-monitoring-ingress queries are not producing on the primary) — IngressShadowGcBacklog/GcAge are silently not evaluating.
-    # Grafana Cloud Mimir caps a rule group at 20 rules (rulesSync 400 on
-    # 2026-08-20 with 25); the soak-temporary IngressShadow* rules stay above,
-    # the permanent Postgres capacity gates live here.
+            runbook: https://github.com/waddle-social/waddle/blob/main/server/docs/operations/ingress-authority.md
+            summary: "Primary-only ingress custom-query series are absent; IngressGcBacklog or IngressGcAge cannot evaluate. Check the CNPG collector and monitoring query configuration."
+    # Grafana Cloud Mimir caps each rule group at 20 rules.
+    # Keep ingress and PostgreSQL capacity rules in separate groups.
     - name: waddle-postgres
       rules:
         - alert: PostgresCnpgSeriesMissing
@@ -325,7 +274,7 @@ groups:
             severity: warning
             team: waddle
           annotations:
-            runbook: https://github.com/waddle-social/waddle/blob/main/server/docs/operations/ingress-shadow-soak.md ; https://github.com/waddle-social/waddle/issues/1695
+            runbook: https://github.com/waddle-social/waddle/blob/main/server/docs/operations/ingress-authority.md ; https://github.com/waddle-social/waddle/issues/1695
             summary: Fewer than 2 CloudNativePG instances are being scraped (2 expected), or the core `cnpg_last_error` family is absent although the scrapes succeed — a standby or the primary stopped exporting, the Alloy cnpg scrape broke, or the exporter renamed/dropped its families; the backend/WAL/collector rules are evaluating against a partial cluster. The `or vector(0)` keeps this firing when every target vanishes.
         - alert: PostgresBackendsHigh
           expr: max by (instance) (sum by (instance) (cnpg_backends_total) / on (instance) group_left() cnpg_pg_settings_setting{name="max_connections"}) > 0.8
@@ -334,8 +283,8 @@ groups:
             severity: warning
             team: waddle
           annotations:
-            runbook: https://github.com/waddle-social/waddle/blob/main/server/docs/operations/ingress-shadow-soak.md ; https://github.com/waddle-social/waddle/issues/1695
-            summary: PostgreSQL backend utilization exceeded 80% of max_connections for 10m. Derivation (2026-08-20 preflight) - max_connections=100, 44 in use; the shadow adds 4 per pod, a 3-pod surge ≈77 peak, so 80% leaves headroom above the worst rollout case.
+            runbook: https://github.com/waddle-social/waddle/blob/main/server/docs/operations/ingress-authority.md ; https://github.com/waddle-social/waddle/issues/1695
+            summary: PostgreSQL backend utilization exceeded 80% of max_connections for 10m. Derivation (2026-08-20 preflight) - max_connections=100, 44 in use; the dedicated ingress authority pool is bounded at 4 connections per pod; including the existing pools on the surge pod, the 3-pod rollout peaks at approximately 77 connections, so 80% leaves headroom above the worst rollout case.
         - alert: PostgresWalVolumeHigh
           expr: max by (instance) (cnpg_collector_pg_wal{value="size"} / on (instance) group_left() cnpg_collector_pg_wal{value="volume_size"}) > 0.7
           for: 10m
@@ -343,7 +292,7 @@ groups:
             severity: warning
             team: waddle
           annotations:
-            runbook: https://github.com/waddle-social/waddle/blob/main/server/docs/operations/ingress-shadow-soak.md ; https://github.com/waddle-social/waddle/issues/1695
+            runbook: https://github.com/waddle-social/waddle/blob/main/server/docs/operations/ingress-authority.md ; https://github.com/waddle-social/waddle/issues/1695
             summary: PostgreSQL WAL volume utilization exceeded 70% for 10m. Derivation - 620 MB of 2 GiB (29%) measured 2026-08-20; 70% is the standard volume guard.
         - alert: PostgresWalRateHigh
           expr: max by (instance) (rate(cnpg_collector_wal_bytes[10m])) > 1048576
@@ -352,7 +301,7 @@ groups:
             severity: warning
             team: waddle
           annotations:
-            runbook: https://github.com/waddle-social/waddle/blob/main/server/docs/operations/ingress-shadow-soak.md ; https://github.com/waddle-social/waddle/issues/1695
+            runbook: https://github.com/waddle-social/waddle/blob/main/server/docs/operations/ingress-authority.md ; https://github.com/waddle-social/waddle/issues/1695
             summary: PostgreSQL WAL generation exceeded 1 MiB/s for 30m. Derivation - measured 5.6 KB/s live and ≈10 KB/s long-run average on 2026-08-20; 1 MiB/s is ≈100-180x that.
         - alert: PostgresCollectorError
           expr: max(cnpg_collector_last_collection_error) > 0
@@ -361,7 +310,7 @@ groups:
             severity: warning
             team: waddle
           annotations:
-            runbook: https://github.com/waddle-social/waddle/blob/main/server/docs/operations/ingress-shadow-soak.md ; https://github.com/waddle-social/waddle/issues/1695
+            runbook: https://github.com/waddle-social/waddle/blob/main/server/docs/operations/ingress-authority.md ; https://github.com/waddle-social/waddle/issues/1695
             summary: The CNPG metrics collector reported an error for 15m. Uses `cnpg_collector_last_collection_error`, which reflects the latest collection; observed 2026-08-21 that `cnpg_last_error` stays at 1 after user-query errors stop (sticky until the instance manager restarts), so it is only used as a presence guard.
         - alert: PostgresDataPvcHigh
           expr: max by (persistentvolumeclaim) (kubelet_volume_stats_used_bytes{namespace="waddle",persistentvolumeclaim=~"postgresql-[0-9]+"}) / on (persistentvolumeclaim) max by (persistentvolumeclaim) (kubelet_volume_stats_capacity_bytes{namespace="waddle",persistentvolumeclaim=~"postgresql-[0-9]+"}) > 0.7
@@ -370,7 +319,7 @@ groups:
             severity: warning
             team: waddle
           annotations:
-            runbook: https://github.com/waddle-social/waddle/blob/main/server/docs/operations/ingress-shadow-soak.md ; https://github.com/waddle-social/waddle/issues/1695
+            runbook: https://github.com/waddle-social/waddle/blob/main/server/docs/operations/ingress-authority.md ; https://github.com/waddle-social/waddle/issues/1695
             summary: A PostgreSQL data PVC exceeded 70% utilization for 10m. Derivation - 281 MB of 10.67 GB used on 2026-08-20; 70% is the standard volume guard.
         - alert: PostgresWalPvcHigh
           expr: max by (persistentvolumeclaim) (kubelet_volume_stats_used_bytes{namespace="waddle",persistentvolumeclaim=~"postgresql-[0-9]+-wal"}) / on (persistentvolumeclaim) max by (persistentvolumeclaim) (kubelet_volume_stats_capacity_bytes{namespace="waddle",persistentvolumeclaim=~"postgresql-[0-9]+-wal"}) > 0.7
@@ -379,7 +328,7 @@ groups:
             severity: warning
             team: waddle
           annotations:
-            runbook: https://github.com/waddle-social/waddle/blob/main/server/docs/operations/ingress-shadow-soak.md ; https://github.com/waddle-social/waddle/issues/1695
+            runbook: https://github.com/waddle-social/waddle/blob/main/server/docs/operations/ingress-authority.md ; https://github.com/waddle-social/waddle/issues/1695
             summary: A PostgreSQL WAL PVC exceeded 70% utilization for 10m. Derivation - 669 MB of 2.08 GB used on 2026-08-20; 70% is the standard volume guard.
         - alert: PostgresDataPvcSeriesMissing
           expr: (count(max by (persistentvolumeclaim) (kubelet_volume_stats_used_bytes{namespace="waddle",persistentvolumeclaim=~"postgresql-[0-9]+"}) / on (persistentvolumeclaim) max by (persistentvolumeclaim) (kubelet_volume_stats_capacity_bytes{namespace="waddle",persistentvolumeclaim=~"postgresql-[0-9]+"})) or vector(0)) < 2
@@ -388,7 +337,7 @@ groups:
             severity: warning
             team: waddle
           annotations:
-            runbook: https://github.com/waddle-social/waddle/blob/main/server/docs/operations/ingress-shadow-soak.md ; https://github.com/waddle-social/waddle/issues/1695
+            runbook: https://github.com/waddle-social/waddle/blob/main/server/docs/operations/ingress-authority.md ; https://github.com/waddle-social/waddle/issues/1695
             summary: Fewer than two PostgreSQL data PVC utilization series are available after the used/capacity join.
         - alert: PostgresWalPvcSeriesMissing
           expr: (count(max by (persistentvolumeclaim) (kubelet_volume_stats_used_bytes{namespace="waddle",persistentvolumeclaim=~"postgresql-[0-9]+-wal"}) / on (persistentvolumeclaim) max by (persistentvolumeclaim) (kubelet_volume_stats_capacity_bytes{namespace="waddle",persistentvolumeclaim=~"postgresql-[0-9]+-wal"})) or vector(0)) < 2
@@ -397,7 +346,7 @@ groups:
             severity: warning
             team: waddle
           annotations:
-            runbook: https://github.com/waddle-social/waddle/blob/main/server/docs/operations/ingress-shadow-soak.md ; https://github.com/waddle-social/waddle/issues/1695
+            runbook: https://github.com/waddle-social/waddle/blob/main/server/docs/operations/ingress-authority.md ; https://github.com/waddle-social/waddle/issues/1695
             summary: Fewer than two PostgreSQL WAL PVC utilization series are available after the used/capacity join.
     # ── Legacy-name aliases (#1330 contract phase) ──────────────────
     # Each record keeps a retired waddle_* text-family name answering

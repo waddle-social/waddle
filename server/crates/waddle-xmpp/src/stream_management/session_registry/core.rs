@@ -2000,6 +2000,7 @@ impl InMemorySmSessionRegistry {
                 entry.sequence,
                 &entry.stanza_xml,
                 entry.original_receipt_at,
+                entry.ingress_receipts.clone(),
             )?);
         }
         match principal {

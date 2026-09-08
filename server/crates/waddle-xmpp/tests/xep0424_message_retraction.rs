@@ -496,7 +496,8 @@ async fn xep0424_groupchat_retransmit_after_retraction_hits_tombstone() {
 async fn xep0424_tx_archive_retry_after_tombstone_returns_tombstone_hit() {
     use sqlx::postgres::PgPoolOptions;
     use waddle_xmpp::mam::{
-        store_archived_message_on_connection, MamStorage, MamTxStoreOutcome, SqlxMamStorage,
+        store_archived_message_on_connection, ArchiveExpectation, MamStorage, MamTxStoreOutcome,
+        SqlxMamStorage,
     };
     use waddle_xmpp_core::mam::{
         ArchivedMessage, ArchivedMucSender, ArchivedRichMessage, ArchivedTombstone,
@@ -539,9 +540,14 @@ async fn xep0424_tx_archive_retry_after_tombstone_returns_tombstone_hit() {
         )
     };
     let mut insert_tx = pool.begin().await.expect("begin insert transaction");
-    store_archived_message_on_connection(&mut insert_tx, &room, &message(original_id.clone()))
-        .await
-        .expect("store original");
+    store_archived_message_on_connection(
+        &mut insert_tx,
+        &room,
+        &message(original_id.clone()),
+        ArchiveExpectation::Fresh,
+    )
+    .await
+    .expect("store original");
     insert_tx.commit().await.expect("commit original");
     assert!(storage
         .replace_with_tombstone(
@@ -561,10 +567,78 @@ async fn xep0424_tx_archive_retry_after_tombstone_returns_tombstone_hit() {
             &mut retry_tx,
             &room,
             &message(format!("retract-retry-{}", uuid::Uuid::now_v7())),
+            ArchiveExpectation::Fresh,
         )
         .await
         .expect("retry against tombstone"),
         MamTxStoreOutcome::TombstoneHit(ref stanza_id) if stanza_id.id == original_id
     ));
     retry_tx.commit().await.expect("commit retry transaction");
+}
+
+#[tokio::test]
+async fn tombstone_replay_snapshot_precedes_pending_deletion_and_preserves_other_authors() {
+    use waddle_xmpp::{
+        pending_delivery::{
+            storage::{InMemoryPendingDeliveryStorage, PendingDeliveryStorage},
+            PendingPayload, PendingRow, PendingRowId,
+        },
+        tombstone::TombstoneTarget,
+    };
+    let storage =
+        InMemoryPendingDeliveryStorage::new(waddle_xmpp::pending_delivery::QuotaPolicy::Unlimited);
+    let recipient: jid::BareJid = "reader@example.com".parse().expect("reader");
+    let target = TombstoneTarget::Direct {
+        wire_id: "original".into(),
+        author: "author@example.com".parse().expect("author"),
+        archive: recipient.clone(),
+    };
+    let mut rows = Vec::new();
+    for author in ["author@example.com/phone", "other@example.com/phone"] {
+        let mut message = xmpp_parsers::message::Message::new(Some(recipient.clone().into()));
+        message.from = Some(author.parse().expect("sender"));
+        message.id = Some(xmpp_parsers::message::Id("original".into()));
+        let row = PendingRow {
+            id: PendingRowId::fresh(),
+            recipient: recipient.clone(),
+            original_receipt_at: chrono::Utc::now(),
+            payload: PendingPayload::Transient(Box::new(message)),
+            flushed_in_session: None,
+            outbound_sequence: None,
+        };
+        rows.push(row.id.clone());
+        storage.insert(row).await.expect("queued");
+    }
+    assert_eq!(
+        storage
+            .snapshot_for_tombstone(&target)
+            .await
+            .expect("snapshot"),
+        vec![rows[0].clone()]
+    );
+    assert_eq!(
+        storage
+            .count(&recipient)
+            .await
+            .expect("snapshot preserves queue"),
+        2
+    );
+    let scrub = storage
+        .scrub_for_tombstone_with_row_ids(&target)
+        .await
+        .expect("scrub");
+    assert_eq!(scrub.row_ids, vec![rows[0].clone()]);
+    assert_eq!(
+        storage
+            .list(&recipient)
+            .await
+            .expect("other author retained")[0]
+            .id,
+        rows[1]
+    );
+    assert!(storage
+        .snapshot_for_tombstone(&target)
+        .await
+        .expect("retry snapshot")
+        .is_empty());
 }

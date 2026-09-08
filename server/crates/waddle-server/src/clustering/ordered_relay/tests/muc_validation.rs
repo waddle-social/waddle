@@ -13,6 +13,9 @@ fn muc_proxy_kind_validates_the_carried_stanza_kind() {
         sender_claim: sender_claim(),
         target_claim: room_claim(),
         payload: OrderedRelayPayload::MucProxy {
+            canonical: None,
+            principal: None,
+            stanza_lang: None,
             room_jid: room_jid(),
             kind: OrderedRelayMucProxyKind::JoinPresence,
             origin: connection_origin(1),
@@ -39,6 +42,9 @@ fn muc_proxy_kind_validates_the_carried_stanza_kind() {
         sender_claim: sender_claim(),
         target_claim: room_claim(),
         payload: OrderedRelayPayload::MucProxy {
+            canonical: None,
+            principal: None,
+            stanza_lang: None,
             room_jid: room_jid(),
             kind: OrderedRelayMucProxyKind::GroupchatMessage,
             origin: MucProxyOrigin::Server,
@@ -92,6 +98,9 @@ fn room_lane_must_match_the_muc_proxy_kind() {
         sender_claim: sender_claim(),
         target_claim: room_claim(),
         payload: OrderedRelayPayload::MucProxy {
+            canonical: None,
+            principal: None,
+            stanza_lang: None,
             room_jid: room_jid(),
             kind: OrderedRelayMucProxyKind::GroupchatMessage,
             origin: MucProxyOrigin::Server,
@@ -261,6 +270,9 @@ fn muc_proxy_validation_rejects_malformed_xep0045_shapes() {
         sender_claim: sender_claim(),
         target_claim: room_claim(),
         payload: OrderedRelayPayload::MucProxy {
+            canonical: None,
+            principal: None,
+            stanza_lang: None,
             room_jid: room_jid(),
             kind: OrderedRelayMucProxyKind::JoinPresence,
             origin: connection_origin(1),
@@ -273,6 +285,9 @@ fn muc_proxy_validation_rejects_malformed_xep0045_shapes() {
     };
     let bare_groupchat = RemoteStanzaEnvelope {
         payload: OrderedRelayPayload::MucProxy {
+            canonical: None,
+            principal: None,
+            stanza_lang: None,
             room_jid: room_jid(),
             kind: OrderedRelayMucProxyKind::GroupchatMessage,
             origin: MucProxyOrigin::Server,
@@ -282,6 +297,9 @@ fn muc_proxy_validation_rejects_malformed_xep0045_shapes() {
     };
     let full_groupchat = RemoteStanzaEnvelope {
         payload: OrderedRelayPayload::MucProxy {
+            canonical: None,
+            principal: None,
+            stanza_lang: None,
             room_jid: room_jid(),
             kind: OrderedRelayMucProxyKind::GroupchatMessage,
             origin: MucProxyOrigin::Server,
@@ -324,6 +342,9 @@ fn muc_proxy_origin_must_match_kind_policy() {
         sender_claim: sender_claim(),
         target_claim: room_claim(),
         payload: OrderedRelayPayload::MucProxy {
+            canonical: None,
+            principal: None,
+            stanza_lang: None,
             room_jid: room_jid(),
             kind: OrderedRelayMucProxyKind::JoinPresence,
             origin: MucProxyOrigin::Server,
@@ -349,6 +370,9 @@ fn muc_proxy_origin_must_match_kind_policy() {
         sender_claim: sender_claim(),
         target_claim: room_claim(),
         payload: OrderedRelayPayload::MucProxy {
+            canonical: None,
+            principal: None,
+            stanza_lang: None,
             room_jid: room_jid(),
             kind: OrderedRelayMucProxyKind::GroupchatMessage,
             origin: connection_origin(2),
@@ -363,4 +387,51 @@ fn muc_proxy_origin_must_match_kind_policy() {
             ..
         })
     ));
+}
+
+#[test]
+fn muc_ingress_identity_survives_wire_encoding_and_binds_duplicate_fingerprint() {
+    use waddle_xmpp::auth::{
+        AuthContextId, AuthContextVersion, AuthenticatedPrincipalRef, PrincipalAuthEpoch,
+    };
+    let sender: jid::BareJid = "romeo@example.test".parse().expect("sender");
+    let canonical = crate::ingress::IngressCanonicalRef {
+        message_key: waddle_xmpp::ingress::MessageKey::new(),
+        sender_bare: sender.clone(),
+        origin_id: None,
+    };
+    let principal = AuthenticatedPrincipalRef::new(
+        sender,
+        AuthContextId::new(uuid::Uuid::new_v4()),
+        AuthContextVersion::INITIAL,
+        PrincipalAuthEpoch::INITIAL,
+    );
+    let payload = OrderedRelayPayload::MucProxy {
+        canonical: Some(canonical),
+        principal: Some(principal),
+        stanza_lang: Some(xmpp_parsers::message::Lang("en".to_owned())),
+        room_jid: room_jid(),
+        kind: OrderedRelayMucProxyKind::GroupchatMessage,
+        origin: MucProxyOrigin::Server,
+        stanza: groupchat_stanza_to("room@example.test"),
+    };
+    let encoded = serde_json::to_vec(&payload).expect("encode proxy");
+    let decoded: OrderedRelayPayload = serde_json::from_slice(&encoded).expect("decode proxy");
+    assert_eq!(payload.fingerprint(), decoded.fingerprint());
+    let mut changed_language = decoded.clone();
+    let OrderedRelayPayload::MucProxy { stanza_lang, .. } = &mut changed_language else {
+        panic!("language proxy");
+    };
+    *stanza_lang = Some(xmpp_parsers::message::Lang("fr".to_owned()));
+    assert_ne!(payload.fingerprint(), changed_language.fingerprint());
+    let mut changed = decoded;
+    let OrderedRelayPayload::MucProxy {
+        canonical: Some(canonical),
+        ..
+    } = &mut changed
+    else {
+        panic!("canonical proxy");
+    };
+    canonical.message_key = waddle_xmpp::ingress::MessageKey::new();
+    assert_ne!(payload.fingerprint(), changed.fingerprint());
 }

@@ -30,7 +30,7 @@ impl OrderedRelayDeliveryBridge {
         stanza: &'a Stanza,
         origin: &'a OrderedRelayRouteOrigin,
         call_setup: Option<waddle_xmpp::telemetry::call::PendingCallSetupRoute>,
-        deferred_capture: Option<crate::ingress_shadow::IngressEffectCapture>,
+        deferred_capture: Option<crate::ingress::IngressEffectCapture>,
     ) -> CapturedRemoteDeliveryFuture<'a> {
         Box::pin(async move {
             if let Some(remote_origin) = remote_resource_origin(origin) {
@@ -109,7 +109,7 @@ impl OrderedRelayDeliveryBridge {
             };
 
             if let Some(handoff) = origin.handoff.clone() {
-                if handoff.mark_deferred() {
+                if defer_until_relay_completion(&handoff, stanza) {
                     let bridge = Arc::clone(self);
                     let origin_stanza = stanza.clone();
                     let outcome_target = target.clone();
@@ -264,7 +264,7 @@ impl OrderedRelayDeliveryBridge {
             };
 
             if let Some(handoff) = origin.handoff.clone() {
-                if handoff.mark_deferred() {
+                if defer_until_relay_completion(&handoff, stanza) {
                     let bridge = Arc::clone(self);
                     let origin_stanza = stanza.clone();
                     tokio::spawn(async move {

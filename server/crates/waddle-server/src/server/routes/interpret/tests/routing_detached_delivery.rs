@@ -1,5 +1,5 @@
 use super::*;
-use crate::ingress_shadow::IngressEffectCapture;
+use crate::ingress::IngressEffectCapture;
 
 // ---------------------------------------------------------------------
 // XEP-0191 fail-closed: a blocklist load failure must never let the
@@ -166,7 +166,7 @@ async fn detached_dm_append_records_the_actual_sm_stream() {
     let inbox: Arc<dyn InboxStorage> = Arc::new(InMemoryInboxStorage::new());
     let blocking: Arc<dyn BlockingStorage> = Arc::new(InMemoryBlockingStorage::new());
     let dispatcher = pipelined_dispatcher();
-    let capture = IngressEffectCapture::new(None);
+    let capture = IngressEffectCapture::new();
     let deps = Deps {
         sm_session_registry: Some(&sm),
         ingress_effect_capture: Some(capture.clone()),
@@ -210,7 +210,7 @@ async fn detached_non_dm_append_records_the_actual_sm_stream() {
     sm.store_session(detached_dm_session("captured-presence-stream", &bob_phone))
         .await
         .expect("store detached session");
-    let capture = IngressEffectCapture::new(None);
+    let capture = IngressEffectCapture::new();
     let deps = Deps {
         sm_session_registry: Some(&sm),
         ingress_effect_capture: Some(capture.clone()),

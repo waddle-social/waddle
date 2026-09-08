@@ -8,7 +8,6 @@
 
 mod error;
 mod in_memory;
-mod origin_dedup;
 mod query_semantics;
 mod sqlx_store;
 mod tombstone;
@@ -20,6 +19,7 @@ mod tests;
 pub use error::MamStorageError;
 pub use in_memory::InMemoryMamStorage;
 pub use sqlx_store::{
-    store_archived_message_on_connection, MamTxStoreError, MamTxStoreOutcome, SqlxMamStorage,
+    store_archived_message_on_connection, store_archived_message_on_sqlite_connection,
+    ArchiveExpectation, MamTxStoreError, MamTxStoreOutcome, SqlxMamStorage,
 };
 pub use traits::{MamArchiveKind, MamStorage, StoreOutcome, TerminalTombstoneOutcome};

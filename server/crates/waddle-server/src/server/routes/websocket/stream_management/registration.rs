@@ -97,6 +97,18 @@ async fn complete_pending_resume_claim(
     owner: &Arc<std::sync::atomic::AtomicBool>,
     stream_id: String,
 ) -> SmFinalizationReport {
+    if super::flush_ingress_checkpoint(state, &conn.sm_state, &mut conn.sm_inbound_completion)
+        .await
+        .is_err()
+    {
+        close_registered_resume_attempt(state, conn, jid, owner).await;
+        return SmFinalizationReport {
+            finalization: SmRegistrationFinalization::ReplaceWithFailed(SmFailed::with_condition(
+                "internal-server-error",
+            )),
+            resume_outcome: Some(super::observe::SmResumeOutcome::Storage),
+        };
+    }
     let resume_h = conn.pending_resume_h.take();
     let completion = match resume_h {
         Some(h) => {
@@ -119,8 +131,12 @@ async fn complete_pending_resume_claim(
     let completion_reached_terminal_boundary = completion.is_ok();
     let mut resume_outcome = None;
     let finalization = match completion {
-        Ok(Some(SmClaimCompletion::Resumed(detached))) => match resume_h {
+        Ok(Some(SmClaimCompletion::Resumed(mut detached))) => match resume_h {
             Some(h) => {
+                detached.inbound_count = waddle_xmpp::stream_management::sequence::max_in_window(
+                    detached.inbound_count,
+                    conn.sm_state.get_inbound_count(),
+                );
                 conn.sm_state.restore_from_session(&detached);
                 // The resume `h` acknowledges the mod-2^32 window
                 // (detached.last_acked, h] — purge the pending_delivery
@@ -133,7 +149,7 @@ async fn complete_pending_resume_claim(
                 // re-released them as duplicates.
                 let acked_from_exclusive = detached.last_acked;
                 conn.sm_state.acknowledge(h);
-                if acked_from_exclusive != h {
+                {
                     let session_id =
                         waddle_xmpp::pending_delivery::SmSessionId::new(stream_id.clone());
                     if let Err(_error) = state
@@ -148,8 +164,7 @@ async fn complete_pending_resume_claim(
                             from = acked_from_exclusive,
                             h,
                             failure = "storage",
-                            "pending_delivery delete_acked_in_window failed on resume; \
-                             rows will be retried on next session via release_claim"
+                            "pending_delivery ACK deletion retained on resume; claim release must settle it"
                         );
                     }
                 }
@@ -323,6 +338,7 @@ async fn reset_registered_resume_attempt(
     let domain = state.deps.auth_state.xmpp_domain.clone();
     let keepalive = conn.keepalive_config;
     conn.init_prebind_state_machine(&domain, &state.deps.protocol.dispatcher, keepalive);
+    conn.sm_ingress_fence = None;
     conn.sm_state = StreamManagementState::new();
     conn.blocklist_interested = false;
     conn.suppress_sm_record_next_batch = false;

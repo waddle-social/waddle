@@ -11,12 +11,12 @@ use waddle_xmpp_core::xep0359::OriginId;
 
 use crate::xep::matches_fulltext;
 
-use super::origin_dedup::{origin_id_dedup_match, origin_id_tombstone_match};
 use super::query_semantics::{
     archive_order_after, archive_order_before, matches_thread_filter, message_matches_with_filter,
     missing_requested_id, uses_backward_pagination,
 };
 use super::tombstone::apply_tombstone;
+use super::tombstone::origin_id_tombstone_match;
 use super::{MamStorage, MamStorageError, StoreOutcome, TerminalTombstoneOutcome};
 
 #[derive(Clone, Default)]
@@ -43,11 +43,6 @@ impl MamStorage for InMemoryMamStorage {
     ) -> Result<StoreOutcome, MamStorageError> {
         let mut entries = self.entries.write().await;
         if message.origin_id.is_some() {
-            if let Some((_, existing)) = entries.iter().find(|(jid, existing)| {
-                jid == archive_jid && origin_id_dedup_match(existing, message)
-            }) {
-                return Ok(StoreOutcome::Deduplicated(existing.id.clone()));
-            }
             if let Some((_, existing)) = entries.iter().find(|(jid, existing)| {
                 jid == archive_jid && origin_id_tombstone_match(existing, message)
             }) {

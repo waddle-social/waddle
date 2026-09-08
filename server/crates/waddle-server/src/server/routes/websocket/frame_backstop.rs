@@ -265,7 +265,7 @@ pub(super) async fn run_with_backstop<F, T>(
 ) -> Result<T, StanzaTimeout>
 where
     F: Future<Output = T> + Send,
-    T: Default + Send,
+    T: Send,
 {
     run_with_backstop_impl(backstop, dispatch, None)
         .await
@@ -282,6 +282,27 @@ where
     F: Future<Output = T> + Send,
     T: Default + Send,
 {
+    let mut outcome = run_with_backstop_impl(backstop, dispatch, Some((permit, shutdown))).await;
+    if outcome.authority_revoked_after_start {
+        outcome.result = match outcome.result {
+            Ok(_) | Err(StanzaTimeout::HandledIq(_)) => Ok(T::default()),
+            Err(timeout) => Err(timeout),
+        };
+    }
+    outcome
+}
+
+/// Preserve the committed decision even when admission is revoked after dispatch.
+pub(super) async fn run_commit_with_backstop_and_admission<F, T>(
+    backstop: StanzaBackstop,
+    dispatch: F,
+    permit: &crate::clustering::NodeAdmissionPermit,
+    shutdown: &tokio_util::sync::CancellationToken,
+) -> AdmissionDispatchResult<T>
+where
+    F: Future<Output = T> + Send,
+    T: Send,
+{
     run_with_backstop_impl(backstop, dispatch, Some((permit, shutdown))).await
 }
 
@@ -295,7 +316,7 @@ async fn run_with_backstop_impl<F, T>(
 ) -> AdmissionDispatchResult<T>
 where
     F: Future<Output = T> + Send,
-    T: Default + Send,
+    T: Send,
 {
     // This check is the responsibility boundary. It happens immediately
     // before dispatch: a revoked generation never starts a new handler,
@@ -324,14 +345,6 @@ where
             Ok(responses)
         }
         Err(_elapsed) => Err(backstop.on_timeout()),
-    };
-    let result = if authority_revoked_after_start {
-        match result {
-            Ok(_) | Err(StanzaTimeout::HandledIq(_)) => Ok(T::default()),
-            Err(timeout) => Err(timeout),
-        }
-    } else {
-        result
     };
     AdmissionDispatchResult {
         result,

@@ -1,5 +1,5 @@
 use super::*;
-use crate::ingress_shadow::IngressEffectCapture;
+use crate::ingress::IngressEffectCapture;
 
 // ---------------------------------------------------------------------
 // #1246 — RFC 6121 §8.5.1: message to a nonexistent local account is
@@ -18,7 +18,7 @@ async fn route_bare_jid_message_to_nonexistent_local_user_bounces() {
     let inbox: Arc<dyn InboxStorage> = Arc::new(InMemoryInboxStorage::new());
     let blocking: Arc<dyn BlockingStorage> = Arc::new(InMemoryBlockingStorage::new());
     let dispatcher = pipelined_dispatcher();
-    let capture = IngressEffectCapture::new(None);
+    let capture = IngressEffectCapture::new();
     let deps = Deps {
         web_socket_state: Some(&state),
         ingress_effect_capture: Some(capture.clone()),

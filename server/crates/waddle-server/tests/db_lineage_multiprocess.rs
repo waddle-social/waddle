@@ -368,14 +368,14 @@ async fn split_deployment_rejected() {
     let deployment_one = uuid::Uuid::new_v4().to_string();
     let deployment_two = uuid::Uuid::new_v4().to_string();
 
-    // In single-node mode, separately enrolled durable stores are legitimate.
-    // The clustered colocation rule is covered by the PG-gated lineage registry
-    // unit test because the full cluster bootstrap is deliberately feature-gated.
+    // The XEP-0313 archive is committed by the ingress transaction, so MAM
+    // must live in the global database: with no MAM URL the server colocates
+    // it there and attests the one lineage.
     let enrolled = spawn_server(lineage_envs(
         &database_a,
         &deployment_one,
         Some("enroll"),
-        Some(&database_b),
+        None,
     ))
     .await;
     wait_for_attested(&enrolled).await;
@@ -386,16 +386,17 @@ async fn split_deployment_rejected() {
     // ledger), rather than coming up unready.
     spawn_expecting_startup_refusal(lineage_envs(&database_a, &deployment_two, None, None)).await;
 
-    let independently_provisioned = spawn_server(lineage_envs(
+    // A MAM archive on a different database boundary can no longer be
+    // written inside the ingress transaction; the split deployment is a
+    // startup refusal, not an unready node.
+    spawn_expecting_startup_refusal(lineage_envs(
         &database_a,
         &deployment_one,
         None,
         Some(&database_b),
     ))
     .await;
-    wait_for_attested(&independently_provisioned).await;
 
-    drop(independently_provisioned);
     drop(enrolled);
     fixture.cleanup().await;
 }

@@ -10,7 +10,7 @@ use tokio::sync::Mutex;
 use waddle_server::{
     config::LineageConfig,
     db::{lineage, Database, DatabaseConfig, DatabaseDriver, MigrationRunner},
-    ingress_uow::{MamArchiveRepository, PostgresIngressUnitOfWork},
+    ingress_uow::{IngressUnitOfWork, MamArchiveRepository},
 };
 use waddle_xmpp::mam::{
     ArchivedMessage, MamArchiveKind, MamQuery, MamStorage, MamStorageError, MamTxStoreOutcome,
@@ -714,12 +714,17 @@ async fn xep_0313_uow_mam_write_is_queryable_through_the_archive_read_path() {
             jid::Jid::from(archive.clone()),
         )
     };
-    let uow = PostgresIngressUnitOfWork::open(db.clone(), lineage_config)
+    let uow = IngressUnitOfWork::open(db.clone(), lineage_config)
         .expect("open PostgreSQL ingress unit of work");
     let mut transaction = uow.begin().await.expect("begin ingress unit of work");
-    match MamArchiveRepository::store(&mut transaction, &archive, &message)
-        .await
-        .expect("store MAM archive in ingress unit of work")
+    match MamArchiveRepository::store(
+        &mut transaction,
+        &archive,
+        &message,
+        waddle_xmpp::mam::ArchiveExpectation::Fresh,
+    )
+    .await
+    .expect("store MAM archive in ingress unit of work")
     {
         MamTxStoreOutcome::Inserted(stanza_id) => {
             assert_eq!(stanza_id.id, archive_id);

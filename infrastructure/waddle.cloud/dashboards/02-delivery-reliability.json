@@ -166,17 +166,17 @@
       "gridPos": { "h": 1, "w": 24, "x": 0, "y": 24 },
       "id": null,
       "panels": [],
-      "title": "Ingress shadow soak",
+      "title": "Ingress authority",
       "type": "row"
     },
     {
       "type": "timeseries",
-      "title": "Shadow candidates by outcome",
+      "title": "Decisions by class",
       "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
       "targets": [
         {
-          "expr": "sum by (outcome) (increase(ingress_shadow_candidates_total[5m])) or vector(0)",
-          "legendFormat": "{{outcome}}",
+          "expr": "sum by (class) (increase(ingress_decisions_total[5m])) or vector(0)",
+          "legendFormat": "{{class}}",
           "refId": "A"
         }
       ],
@@ -185,23 +185,13 @@
     },
     {
       "type": "timeseries",
-      "title": "Admissions, completions, and aborted by instance",
+      "title": "Alias outcomes",
       "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
       "targets": [
         {
-          "expr": "sum by (instance) (increase(ingress_shadow_admissions_total[5m])) or vector(0)",
-          "legendFormat": "admissions {{instance}}",
+          "expr": "sum by (outcome) (increase(ingress_alias_outcomes_total[5m])) or vector(0)",
+          "legendFormat": "{{outcome}}",
           "refId": "A"
-        },
-        {
-          "expr": "sum by (instance) (increase(ingress_shadow_completions_total[5m])) or vector(0)",
-          "legendFormat": "completions {{instance}}",
-          "refId": "B"
-        },
-        {
-          "expr": "sum by (instance) (increase(ingress_shadow_aborted_total[5m])) or vector(0)",
-          "legendFormat": "aborted {{instance}}",
-          "refId": "C"
         }
       ],
       "fieldConfig": { "defaults": { "unit": "short" } },
@@ -209,18 +199,13 @@
     },
     {
       "type": "timeseries",
-      "title": "Enabled and oldest outstanding age by instance",
+      "title": "Transaction retries",
       "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
       "targets": [
         {
-          "expr": "max by (instance) (ingress_shadow_enabled)",
-          "legendFormat": "enabled {{instance}}",
+          "expr": "sum(increase(ingress_tx_retries_total[5m])) or vector(0)",
+          "legendFormat": "retries",
           "refId": "A"
-        },
-        {
-          "expr": "max by (instance) (ingress_shadow_oldest_outstanding_submission_age_seconds)",
-          "legendFormat": "oldest age {{instance}}",
-          "refId": "B"
         }
       ],
       "fieldConfig": { "defaults": { "unit": "short" } },
@@ -228,78 +213,22 @@
     },
     {
       "type": "timeseries",
-      "title": "Decisions by class",
-      "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
-      "targets": [
-        {
-          "expr": "sum by (class) (increase(ingress_shadow_decisions_total[5m])) or vector(0)",
-          "legendFormat": "{{class}}",
-          "refId": "A"
-        }
-      ],
-      "fieldConfig": { "defaults": { "unit": "short" } },
-      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 33 }
-    },
-    {
-      "type": "timeseries",
-      "title": "Skips by reason",
-      "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
-      "targets": [
-        {
-          "expr": "sum by (reason) (increase(ingress_shadow_skips_total[5m])) or vector(0)",
-          "legendFormat": "{{reason}}",
-          "refId": "A"
-        }
-      ],
-      "fieldConfig": { "defaults": { "unit": "short" } },
-      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 41 }
-    },
-    {
-      "type": "timeseries",
-      "title": "Alias outcomes",
-      "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
-      "targets": [
-        {
-          "expr": "sum by (outcome) (increase(ingress_shadow_alias_outcomes_total[5m])) or vector(0)",
-          "legendFormat": "{{outcome}}",
-          "refId": "A"
-        }
-      ],
-      "fieldConfig": { "defaults": { "unit": "short" } },
-      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 41 }
-    },
-    {
-      "type": "timeseries",
-      "title": "Transaction retries",
-      "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
-      "targets": [
-        {
-          "expr": "sum by (outcome) (increase(ingress_shadow_tx_retries_total[5m])) or vector(0)",
-          "legendFormat": "{{outcome}}",
-          "refId": "A"
-        }
-      ],
-      "fieldConfig": { "defaults": { "unit": "short" } },
-      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 49 }
-    },
-    {
-      "type": "timeseries",
       "title": "Transaction duration p50 and p99",
       "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
       "targets": [
         {
-          "expr": "histogram_quantile(0.50, sum by (le) (rate(ingress_shadow_tx_duration_seconds_bucket[10m]))) or vector(0)",
+          "expr": "histogram_quantile(0.50, sum by (le) (rate(ingress_tx_duration_seconds_bucket[10m]))) or vector(0)",
           "legendFormat": "p50",
           "refId": "A"
         },
         {
-          "expr": "histogram_quantile(0.99, sum by (le) (rate(ingress_shadow_tx_duration_seconds_bucket[10m]))) or vector(0)",
+          "expr": "histogram_quantile(0.99, sum by (le) (rate(ingress_tx_duration_seconds_bucket[10m]))) or vector(0)",
           "legendFormat": "p99",
           "refId": "B"
         }
       ],
       "fieldConfig": { "defaults": { "unit": "s" } },
-      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 49 }
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 33 }
     },
     {
       "type": "timeseries",
@@ -307,18 +236,18 @@
       "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
       "targets": [
         {
-          "expr": "sum by (outcome) (increase(ingress_shadow_gc_runs_total[5m])) or vector(0)",
+          "expr": "sum by (outcome) (increase(ingress_gc_runs_total[5m])) or vector(0)",
           "legendFormat": "gc {{outcome}}",
           "refId": "A"
         },
         {
-          "expr": "sum(increase(ingress_shadow_gc_reclaimed_messages_total[5m])) or vector(0)",
+          "expr": "sum(increase(ingress_gc_reclaimed_messages_total[5m])) or vector(0)",
           "legendFormat": "reclaimed messages",
           "refId": "B"
         }
       ],
       "fieldConfig": { "defaults": { "unit": "short" } },
-      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 57 }
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 41 }
     },
     {
       "type": "timeseries",
@@ -342,7 +271,22 @@
         }
       ],
       "fieldConfig": { "defaults": { "unit": "short" } },
-      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 57 }
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 41 }
+    },
+    {
+      "type": "timeseries",
+      "title": "Unresolved effects by kind (1h increase)",
+      "description": "Recorded intents without completion receipts remain protected from GC. #1658 adds the recovery executor. This counter measures newly observed unresolved effects, not the current backlog.",
+      "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+      "targets": [
+        {
+          "expr": "sum by (kind) (increase(ingress_effects_unresolved_total[1h]))",
+          "legendFormat": "{{kind}}",
+          "refId": "A"
+        }
+      ],
+      "fieldConfig": { "defaults": { "unit": "short" } },
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 49 }
     },
     {
       "type": "timeseries",
@@ -367,7 +311,7 @@
           }
         }
       },
-      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 65 }
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 49 }
     },
     {
       "type": "timeseries",
@@ -391,11 +335,12 @@
           }
         }
       },
-      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 65 }
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 57 }
     },
     {
       "type": "timeseries",
       "title": "Ingress table bytes and tuples",
+      "description": "All ingress tables exported by CNPG, including ingress_effect_receipts; table labels are not filtered.",
       "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
       "targets": [
         {
@@ -415,7 +360,7 @@
         }
       ],
       "fieldConfig": { "defaults": {} },
-      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 73 }
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 57 }
     },
     {
       "type": "timeseries",
@@ -434,7 +379,7 @@
         }
       ],
       "fieldConfig": { "defaults": { "unit": "short" } },
-      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 73 }
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 65 }
     },
     {
       "type": "timeseries",
@@ -453,7 +398,7 @@
         }
       ],
       "fieldConfig": { "defaults": {} },
-      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 81 }
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 65 }
     },
     {
       "type": "timeseries",
@@ -472,7 +417,7 @@
         }
       ],
       "fieldConfig": { "defaults": { "unit": "bytes" } },
-      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 81 }
+      "gridPos": { "h": 8, "w": 24, "x": 0, "y": 73 }
     }
   ],
   "refresh": "30s",
