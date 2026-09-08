@@ -68,6 +68,8 @@ pub enum IngressUowError {
     EffectIntentOrdinalOverflow,
     #[error("stored ingress stream identity is malformed")]
     InvalidStoredSmIngressId,
+    #[error("stored carbon receipt recipient is malformed")]
+    InvalidStoredCarbonRecipient,
     #[error("stored ingress frontier is malformed")]
     InvalidStoredFrontier,
     #[error("ingress stream is missing")]

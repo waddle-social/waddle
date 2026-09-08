@@ -1,5 +1,8 @@
 //! Apply the payload-complete policy decisions retained by reconciliation.
 #[cfg(test)]
+#[path = "recorded/preview_replay_tests.rs"]
+mod preview_replay_tests;
+#[cfg(test)]
 mod tests;
 
 use crate::server::routes::interpret::effects::{
@@ -66,7 +69,64 @@ pub fn apply_recorded_intents(plan: &IngressPlan, recorded: &[IngressEffectInten
         }
     }
     result.intents.retain(|intent| recorded.contains(intent));
+    // Preview effects batch several independently reconciled mutations. Drop
+    // rejected work inside each batch, without shifting projection indices in
+    // the surrounding plan when the entire batch becomes empty.
+    for effect in &mut result.plan {
+        if let Effect::External(ExternalEffect::Direct(
+            ExternalDirectEffect::LinkPreviewRefs { mutations }
+            | ExternalDirectEffect::ClearLinkPreviewRefs { mutations },
+        )) = &mut effect.effect
+        {
+            mutations.retain(|mutation| {
+                result.intents.iter().any(|intent| {
+                    matches!(intent, IngressEffectIntent::LinkPreviewMediaRef { mutation: saved } if saved == mutation)
+                })
+            });
+        }
+    }
+    restore_dm_call_state(&mut result, recorded);
     result
+}
+
+/// Rebuild every frozen state transition, including offers absent from today's plan.
+fn restore_dm_call_state(plan: &mut IngressPlan, recorded: &[IngressEffectIntent]) {
+    let mut states = recorded
+        .iter()
+        .filter_map(|intent| match intent {
+            IngressEffectIntent::DmCallThreadState { sequence, state } => {
+                Some((*sequence, state, intent))
+            }
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    states.sort_by_key(|(sequence, _, _)| *sequence);
+    // Preserve plan indices used by projection references: replace matching
+    // effects in place and append only transitions missing from the retry plan.
+    for (_, state, intent) in states {
+        let existing = plan.plan.iter_mut().find(|planned| matches!(&planned.effect,
+            Effect::External(ExternalEffect::Direct(ExternalDirectEffect::DmCallThreadState { receipt: Some(receipt), .. }))
+                if receipt.authority_key() == intent.authority_key()));
+        let effect = Effect::External(ExternalEffect::Direct(
+            ExternalDirectEffect::DmCallThreadState {
+                state: state.clone(),
+                receipt: Some(Box::new(intent.clone())),
+            },
+        ));
+        if let Some(existing) = existing {
+            existing.effect = effect;
+        } else {
+            plan.plan.push(
+                crate::server::routes::interpret::effects::PlannedEffect::new(effect)
+                    .with_suppression(
+                        crate::server::routes::interpret::effects::PlanSuppressionPolicy::Always,
+                    ),
+            );
+        }
+        if !plan.intents.contains(intent) {
+            plan.intents.push(intent.clone());
+        }
+    }
 }
 
 /// Restore observer payloads from the canonical envelope before receipt matching.
@@ -184,6 +244,20 @@ fn recorded_match<'a>(
 /// projection, even when its usual duplicate policy allows idempotent replay.
 pub(super) fn external_in_recorded_audience(plan: &IngressPlan, effect: &ExternalEffect) -> bool {
     use waddle_xmpp::ingress::EffectAuthorityKey;
+    if let ExternalEffect::Direct(ExternalDirectEffect::DmCallThreadState { receipt, .. }) = effect
+    {
+        return receipt
+            .as_deref()
+            .is_some_and(|intent| plan.intents.contains(intent));
+    }
+
+    if let ExternalEffect::Direct(
+        ExternalDirectEffect::LinkPreviewRefs { mutations }
+        | ExternalDirectEffect::ClearLinkPreviewRefs { mutations },
+    ) = effect
+    {
+        return !mutations.is_empty();
+    }
     if let ExternalEffect::Delivery(
         crate::server::routes::interpret::effects::delivery::ExternalDeliveryEffect::Carbons {
             owner,
@@ -231,6 +305,75 @@ pub(super) fn external_in_recorded_audience(plan: &IngressPlan, effect: &Externa
         matches!(intent.authority_key(),
         EffectAuthorityKey::Inbox { owner: recorded_owner, partner, .. }
             if recorded_owner == owner && partner == room)
+    })
+}
+
+/// Capture identity a delivery effect discharges, when it carries one.
+pub(super) fn external_route_identity(
+    effect: &ExternalEffect,
+) -> Option<&waddle_xmpp::ingress::EffectMessageIdentity> {
+    use crate::server::routes::interpret::effects::delivery::ExternalDeliveryEffect;
+    match effect {
+        ExternalEffect::RouteToPeer(route) | ExternalEffect::QueueOfflineDelivery(route) => {
+            route.route_identity.as_ref()
+        }
+        ExternalEffect::Delivery(
+            ExternalDeliveryEffect::RouteToPeer { route_identity, .. }
+            | ExternalDeliveryEffect::QueueDetached { route_identity, .. }
+            | ExternalDeliveryEffect::RelayFullJid { route_identity, .. },
+        ) => route_identity.as_ref(),
+        _ => None,
+    }
+}
+
+/// Resources this delivery effect targets.
+fn external_route_targets(effect: &ExternalEffect) -> Vec<jid::FullJid> {
+    use crate::server::routes::interpret::effects::delivery::ExternalDeliveryEffect;
+    match effect {
+        ExternalEffect::RouteToPeer(route) | ExternalEffect::QueueOfflineDelivery(route) => {
+            route.resources.clone()
+        }
+        ExternalEffect::Delivery(ExternalDeliveryEffect::RouteToPeer { jid, .. }) => {
+            vec![jid.clone()]
+        }
+        ExternalEffect::Delivery(ExternalDeliveryEffect::QueueDetached { resources, .. }) => {
+            resources.clone()
+        }
+        ExternalEffect::Delivery(ExternalDeliveryEffect::RelayFullJid { target, .. }) => {
+            vec![target.clone()]
+        }
+        _ => Vec::new(),
+    }
+}
+
+/// Whether one of these recorded obligations carries both this delivery's
+/// capture identity and its exact audience. A reconnect must not repair a
+/// fan-out the committed obligation never covered.
+pub(super) fn recorded_route_obligation(
+    intents: &[IngressEffectIntent],
+    effect: &ExternalEffect,
+) -> bool {
+    let Some(identity) = external_route_identity(effect) else {
+        return false;
+    };
+    let targets = external_route_targets(effect);
+    intents.iter().any(|intent| match intent {
+        IngressEffectIntent::RouteDirect {
+            fanout,
+            route_identity,
+            ..
+        } => route_identity == identity && targets.iter().all(|target| fanout.contains(target)),
+        IngressEffectIntent::RouteMucGroupchat {
+            occupants,
+            route_identity,
+            ..
+        }
+        | IngressEffectIntent::RouteMucSystemBroadcast {
+            occupants,
+            route_identity,
+            ..
+        } => route_identity == identity && targets.iter().all(|target| occupants.contains(target)),
+        _ => false,
     })
 }
 

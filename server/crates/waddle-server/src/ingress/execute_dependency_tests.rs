@@ -284,7 +284,7 @@ fn invite_receipts_require_the_exact_captured_route_and_actual_delivery_proof() 
             })),
             &mapped[0]
         ),
-        vec![route_key, pending_key.clone()]
+        vec![route_key.clone(), pending_key.clone()]
     );
     assert_eq!(
         proven_receipts(
@@ -292,6 +292,18 @@ fn invite_receipts_require_the_exact_captured_route_and_actual_delivery_proof() 
             &EffectOutcome::MucUserDelivery(Ok(MucUserDeliveryProof::Queued { row_id })),
             &mapped[0]
         ),
-        vec![pending_key]
+        vec![route_key, pending_key],
+        "the confirmed fallback discharges its mutually exclusive live route"
+    );
+    assert!(
+        proven_receipts(
+            &effect,
+            &EffectOutcome::MucUserDelivery(Ok(MucUserDeliveryProof::Queued {
+                row_id: PendingRowId::fresh(),
+            })),
+            &mapped[0],
+        )
+        .is_empty(),
+        "an unrelated queued row proves neither invitation alternative"
     );
 }

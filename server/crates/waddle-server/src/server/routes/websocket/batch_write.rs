@@ -194,7 +194,7 @@ where
     .outcome
 }
 
-/// Keep ingress receipts pending until the complete response batch reaches the wire.
+/// Settle each receipt carrier as soon as its ordered response prefix reaches the wire.
 pub(super) async fn write_ingress_response_batch_with_admission<S, SE, R, RE>(
     sender: &mut S,
     reader: &mut R,
@@ -234,6 +234,28 @@ where
         }
     }
     report
+}
+
+/// Receipt the ingress obligations a replayed frame carried through XEP-0198
+/// recovery. The original writer's report was dropped with its connection, so
+/// the retained replay entry is the only remaining proof carrier.
+pub(super) async fn complete_replayed_ingress_receipts(
+    state: &WebSocketState,
+    receipts: &[waddle_xmpp::stream_management::SmIngressFrameReceipt],
+) -> bool {
+    for mut report in crate::ingress::ExecutionReport::replay_frame_completions(receipts) {
+        if let Err(error) = state
+            .deps
+            .protocol
+            .ingress
+            .complete_frame_obligations(&mut report)
+            .await
+        {
+            warn!(%error, "Failed to receipt written ingress response frames");
+            return false;
+        }
+    }
+    true
 }
 
 pub(super) async fn write_response_batch_report_with_admission<S, SE, R, RE, F>(
@@ -380,6 +402,10 @@ where
             let (request_ack, accepted) =
                 record_live_sm_frame(conn, frame_xml.clone(), SmEvictionPath::Batch);
             if accepted {
+                // Only an entry inside the replay window can carry the
+                // obligation forward; a gapped queue cannot prove redelivery.
+                conn.sm_state
+                    .attach_ingress_receipts(frame.ingress_receipts().to_vec());
                 accepted_frame_indices.push(frame_index);
             }
             request_ack
@@ -401,6 +427,9 @@ where
                 written_frame_count,
             };
         }
+        // Only the final carrier bears the ordered prefix's obligations. Settle
+        // immediately after its write, before ACK cadence can drain or close.
+        let replayed_receipts = frame.ingress_receipts().to_vec();
         if let Err(outcome) = send_window_message(
             sender,
             Message::Text(frame.into_serialized_xml().into()),
@@ -437,6 +466,7 @@ where
             };
         }
         written_frame_count += 1;
+        complete_replayed_ingress_receipts(state, &replayed_receipts).await;
         if request_ack {
             if !batch_authoritative(authority) {
                 accepted_frame_indices
@@ -857,15 +887,24 @@ where
     let mut accepted_frame_indices = Vec::new();
     for (frame_index, frame) in frames {
         let frame: ResponseFrame = frame.into();
+        let ingress_receipts = frame.ingress_receipts().to_vec();
         let frame_xml = frame.into_serialized_xml();
         if should_record(conn, &frame_xml, policy) {
             let accepted = if conn.sm_recovery_required {
                 let before = conn.terminal_sm_recovery.queue_len();
                 conn.record_terminal_recovery_outbound(frame_xml);
-                conn.terminal_sm_recovery.queue_len() > before
+                let accepted = conn.terminal_sm_recovery.queue_len() > before;
+                if accepted {
+                    conn.terminal_sm_recovery
+                        .attach_ingress_receipts(ingress_receipts);
+                }
+                accepted
             } else {
                 let (_, accepted) =
                     record_live_sm_frame(conn, frame_xml, SmEvictionPath::ReplayTail);
+                if accepted {
+                    conn.sm_state.attach_ingress_receipts(ingress_receipts);
+                }
                 accepted
             };
             if accepted {
@@ -1045,3 +1084,7 @@ fn is_client_sm_request(frame: &str) -> bool {
     SmStanza::is_client_nonza_candidate(frame)
         && matches!(SmStanza::parse(frame), Some(SmStanza::Request))
 }
+
+#[cfg(test)]
+#[path = "tests/ingress_replay_receipts.rs"]
+mod ingress_replay_receipts;

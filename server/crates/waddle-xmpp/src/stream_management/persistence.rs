@@ -190,6 +190,8 @@ pub struct PersistedSession {
 /// and parses back to typed on read.
 #[derive(Debug, Clone)]
 pub struct PersistedUnackedStanza {
+    /// Ingress obligations confirmed only after this ordered replay prefix is written.
+    pub ingress_receipts: Vec<crate::stream_management::SmIngressFrameReceipt>,
     /// XEP-0198 stream-id of the owning session.
     pub stream_id: SmSessionId,
     /// Server-side outbound sequence number; ordered ascending.

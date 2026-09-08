@@ -459,19 +459,7 @@ async fn route_dm_to_full_jid(
     // the shared recipient pass targeted at exactly this resource and
     // queue its processed output for XEP-0198 replay.
     let is_detached = match deps.sm_session_registry {
-        Some(sm) => sm
-            .detached_resources_for_user(&bare)
-            .await
-            .unwrap_or_else(|error| {
-                warn!(
-                    jid = %full,
-                    message_id = stanza_message_id(stanza.as_ref()),
-                    %error,
-                    "RouteToConnection: failed to enumerate detached \
-                     resources for full-JID DM delivery"
-                );
-                Vec::new()
-            })
+        Some(sm) => plan::detached_inventory(deps, sm.detached_resources_for_user(&bare).await)
             .contains(&full),
         None => false,
     };
@@ -619,19 +607,7 @@ async fn route_to_bare_jid(
         // so a recipient mid-resume didn't lose
         // messages; we preserve that here.
         let detached_targets: Vec<jid::FullJid> = match deps.sm_session_registry {
-            Some(sm) => sm
-                .detached_resources_for_user(&bare)
-                .await
-                .unwrap_or_else(|error| {
-                    warn!(
-                        bare_jid = %bare,
-                        message_id = stanza_message_id(stanza.as_ref()),
-                        %error,
-                        "RouteToConnection: failed to enumerate \
-                         detached resources for bare-JID delivery"
-                    );
-                    Vec::new()
-                }),
+            Some(sm) => plan::detached_inventory(deps, sm.detached_resources_for_user(&bare).await),
             None => Vec::new(),
         };
         // RFC 6121 §8.5.2.1.1 prefers presence-available resources for
@@ -1493,3 +1469,7 @@ fn stanza_message_id(stanza: &Stanza) -> &str {
         Stanza::Iq(_) | Stanza::Presence(_) => "",
     }
 }
+
+#[cfg(test)]
+#[path = "routing_plan_failure_tests.rs"]
+mod routing_plan_failure_tests;

@@ -236,6 +236,10 @@ pub(crate) fn decode_unacked(
     let stanza = parse_stanza(element)?;
 
     Ok(PersistedUnackedStanza {
+        ingress_receipts: decode_ingress_receipts(
+            row.get(4)
+                .map_err(|error| SmPersistenceError::Other(error.to_string()))?,
+        )?,
         stream_id: SmSessionId::new(stream_id),
         sequence: sequence.max(0) as u32,
         stanza: Box::new(stanza),
@@ -272,6 +276,10 @@ pub(super) fn decode_unacked_join_row(
     let sequence =
         u32::try_from(sequence_i64).map_err(|e| SmPersistenceError::Other(e.to_string()))?;
     Ok(PersistedUnackedStanza {
+        ingress_receipts: decode_ingress_receipts(
+            row.get(22)
+                .map_err(|error| SmPersistenceError::Other(error.to_string()))?,
+        )?,
         stream_id: SmSessionId::new(stream_id),
         sequence,
         stanza: Box::new(stanza),
@@ -393,6 +401,50 @@ fn parse_stanza(element: xmpp_parsers::minidom::Element) -> Result<Stanza, SmPer
             "unknown stanza element '{other}'"
         ))),
     }
+}
+
+/// Encode SM receipt metadata at the durable storage boundary.
+pub(crate) fn encode_ingress_receipts(
+    receipts: &[waddle_xmpp::stream_management::SmIngressFrameReceipt],
+) -> Vec<u8> {
+    let mut encoded = Vec::with_capacity(receipts.len() * 52);
+    for receipt in receipts {
+        encoded.extend_from_slice(receipt.message_key.to_storage().as_bytes());
+        encoded.extend_from_slice(&receipt.kind.to_storage().to_be_bytes());
+        encoded.extend_from_slice(&receipt.semantic_identity_hash);
+    }
+    encoded
+}
+
+fn decode_ingress_receipts(
+    encoded: Option<Vec<u8>>,
+) -> Result<Vec<waddle_xmpp::stream_management::SmIngressFrameReceipt>, SmPersistenceError> {
+    use waddle_xmpp::stream_management::{SmIngressFrameReceipt, SmIngressReceiptKind};
+    let encoded = encoded.unwrap_or_default();
+    const ENTRY: usize = 52;
+    if !encoded.len().is_multiple_of(ENTRY) {
+        return Err(SmPersistenceError::Other(
+            "invalid ingress frame receipt length".into(),
+        ));
+    }
+    encoded
+        .as_chunks::<ENTRY>()
+        .0
+        .iter()
+        .map(|entry| {
+            let message_key = uuid::Uuid::from_slice(&entry[..16])
+                .map_err(|error| SmPersistenceError::Other(error.to_string()))?;
+            let mut kind = [0; 4];
+            kind.copy_from_slice(&entry[16..20]);
+            let mut semantic_identity_hash = [0; 32];
+            semantic_identity_hash.copy_from_slice(&entry[20..]);
+            Ok(SmIngressFrameReceipt {
+                message_key: waddle_xmpp::ingress::MessageKey::from_storage(message_key),
+                kind: SmIngressReceiptKind::from_storage(i32::from_be_bytes(kind)),
+                semantic_identity_hash,
+            })
+        })
+        .collect()
 }
 
 #[cfg(test)]

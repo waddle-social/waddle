@@ -121,6 +121,14 @@ pub enum PlanFailure {
     RetractionTargetRead,
     #[error("tombstone replay snapshot could not be read")]
     TombstoneReplaySnapshotRead,
+    #[error("invite prerequisite could not be read")]
+    InvitePrerequisiteRead,
+    #[error("DM pin target could not be read")]
+    DmPinTargetLookup,
+    #[error("recipient blocklist could not be read")]
+    RecipientBlocklistRead,
+    #[error("detached session inventory could not be read")]
+    DetachedInventoryRead,
 }
 
 #[derive(Clone, Debug)]

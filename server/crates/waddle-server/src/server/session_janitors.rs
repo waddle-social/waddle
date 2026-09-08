@@ -12213,6 +12213,7 @@ mod graceful_shutdown_drain_tests {
             "romeo@example.com/phone".parse().expect("full jid"),
         );
         session.unacked_stanzas.push(DetachedUnackedStanza {
+            ingress_receipts: Vec::new(),
             sequence: 11,
             stanza_xml: message_xml(&message),
             original_receipt_at: chrono::Utc::now(),
@@ -12277,6 +12278,7 @@ mod graceful_shutdown_drain_tests {
             "romeo@example.com/phone".parse().expect("full jid"),
         );
         session.unacked_stanzas.push(DetachedUnackedStanza {
+            ingress_receipts: Vec::new(),
             sequence: 11,
             stanza_xml: message_xml(&message),
             original_receipt_at: chrono::Utc::now(),

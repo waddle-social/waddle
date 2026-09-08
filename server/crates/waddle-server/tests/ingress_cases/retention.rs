@@ -115,7 +115,9 @@ async fn stale_terminal_pending_intent(fixture: IngressFixture) {
     let mut intents = submission.plan.intents.clone();
     intents.push(omitted_intent());
     let mut tx = fixture.uow.begin().await.expect("insert pending intent");
-    EffectIntentRepository::reconcile(&mut tx, key, &intents)
+    // Not a replay: this bypass writes the pending intent directly, so it is
+    // reconciled as the row's own first-commit authority.
+    EffectIntentRepository::reconcile(&mut tx, key, &intents, false)
         .await
         .expect("insert omitted intent");
     tx.commit().await.expect("commit stale terminal state");

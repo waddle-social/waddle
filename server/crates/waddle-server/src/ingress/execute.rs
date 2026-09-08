@@ -26,6 +26,9 @@ mod archive;
 #[path = "execute_dependencies.rs"]
 mod dependencies;
 
+#[path = "execute_carbon_progress.rs"]
+mod carbon_progress;
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ExternalOutcome {
     Done,
@@ -53,6 +56,7 @@ pub enum ExecutionPersistenceFailure {
 #[cfg(feature = "clustering")]
 #[derive(Clone)]
 pub struct RelayFrameReceiptCompletion {
+    receipts: Vec<waddle_xmpp::stream_management::SmIngressFrameReceipt>,
     inner: std::sync::Arc<tokio::sync::Mutex<RelayFrameReceiptTarget>>,
 }
 
@@ -79,6 +83,7 @@ impl std::fmt::Debug for RelayFrameReceiptCompletion {
 impl RelayFrameReceiptCompletion {
     pub(crate) fn new(completion: crate::clustering::route_bridge::RelayFrameCompletion) -> Self {
         Self {
+            receipts: completion.report.frame_receipts(),
             inner: std::sync::Arc::new(tokio::sync::Mutex::new(RelayFrameReceiptTarget::Local(
                 completion,
             ))),
@@ -88,15 +93,23 @@ impl RelayFrameReceiptCompletion {
     pub(crate) fn remote(
         owner: crate::clustering::NodeId,
         token: crate::clustering::relay::RelayReplyReceiptToken,
+        receipts: Vec<waddle_xmpp::stream_management::SmIngressFrameReceipt>,
         stop_token: tokio_util::sync::CancellationToken,
     ) -> Self {
         Self {
+            receipts,
             inner: std::sync::Arc::new(tokio::sync::Mutex::new(RelayFrameReceiptTarget::Remote {
                 owner,
                 token,
                 stop_token,
             })),
         }
+    }
+
+    pub(crate) fn frame_receipts(
+        &self,
+    ) -> Vec<waddle_xmpp::stream_management::SmIngressFrameReceipt> {
+        self.receipts.clone()
     }
 
     pub async fn complete(&self) -> Result<bool, ExecutionPersistenceFailure> {
@@ -157,6 +170,68 @@ impl Drop for ExecutionReport {
 }
 
 impl ExecutionReport {
+    /// The durable receipt identities this batch's frames discharge. The
+    /// websocket writer carries them with the XEP-0198 replay entry so a
+    /// transport failure can still receipt them once the retained frames are
+    /// written on resume.
+    pub(crate) fn frame_receipts(
+        &self,
+    ) -> Vec<waddle_xmpp::stream_management::SmIngressFrameReceipt> {
+        use waddle_xmpp::stream_management::{SmIngressFrameReceipt, SmIngressReceiptKind};
+        // Owner receipts precede origin dispatch receipts. Canonical identities
+        // are cluster-global; resume uses the same authority confirmation path
+        // even after the original owner's process and reply token have expired.
+        let mut receipts = Vec::new();
+        #[cfg(feature = "clustering")]
+        for completion in &self.relay_frame_completions {
+            receipts.extend(completion.frame_receipts());
+        }
+        if let Some(message_key) = self.message_key {
+            receipts.extend(self.frame_completion_receipts.iter().map(|key| {
+                SmIngressFrameReceipt {
+                    message_key,
+                    kind: SmIngressReceiptKind::from_storage(key.kind.to_storage()),
+                    semantic_identity_hash: key.semantic_identity_hash,
+                }
+            }));
+        }
+        receipts
+    }
+
+    /// Rebuild receipt-only completions, one per canonical message, after a
+    /// retained replay prefix reached the wire. These carry no obligations and
+    /// re-execute nothing: they only record receipts and terminalize.
+    pub(crate) fn replay_frame_completions(
+        receipts: &[waddle_xmpp::stream_management::SmIngressFrameReceipt],
+    ) -> Vec<Self> {
+        let mut reports: Vec<Self> = Vec::new();
+        for receipt in receipts {
+            let key = EffectReceiptKey {
+                kind: crate::ingress_substrate::EffectReceiptKind::from_storage(
+                    receipt.kind.to_storage(),
+                ),
+                semantic_identity_hash: receipt.semantic_identity_hash,
+            };
+            match reports
+                .iter_mut()
+                .find(|report| report.message_key == Some(receipt.message_key))
+            {
+                Some(report) => report.frame_completion_receipts.push(key),
+                None => reports.push(Self {
+                    outcomes: Vec::new(),
+                    frame_obligations: Vec::new(),
+                    #[cfg(feature = "clustering")]
+                    relay_frame_completions: Vec::new(),
+                    message_key: Some(receipt.message_key),
+                    frame_completion_receipts: vec![key],
+                    receipt_failures: Vec::new(),
+                    terminalization_failure: None,
+                }),
+            }
+        }
+        reports
+    }
+
     #[cfg(feature = "clustering")]
     pub(crate) fn retain_relay_frame_completion(
         &mut self,
@@ -225,6 +300,39 @@ impl ExecutionReport {
     }
 }
 
+/// A later confirmed snapshot of the same call subsumes every earlier transition.
+/// Receipt repair must not reinstall an intermediate anchor/projection snapshot.
+fn call_state_superseded(decision: &IngressDecision, effect: &ExternalEffect) -> bool {
+    use waddle_xmpp::ingress::IngressEffectIntent;
+
+    let ExternalEffect::Direct(ExternalDirectEffect::DmCallThreadState {
+        state,
+        receipt: Some(receipt),
+    }) = effect
+    else {
+        return false;
+    };
+    let IngressEffectIntent::DmCallThreadState { sequence, .. } = receipt.as_ref() else {
+        return false;
+    };
+    decision.external.iter().enumerate().any(|(index, later)| {
+        let ExternalEffect::Direct(ExternalDirectEffect::DmCallThreadState {
+            state: later_state,
+            receipt: Some(later_receipt),
+        }) = later
+        else {
+            return false;
+        };
+        matches!(later_receipt.as_ref(),
+            IngressEffectIntent::DmCallThreadState { sequence: later_sequence, .. }
+                if later_state.key == state.key && later_sequence > sequence)
+            && !decision.external_receipts[index].is_empty()
+            && decision.external_receipts[index]
+                .iter()
+                .all(|key| !decision.receipts_pending.contains(key))
+    })
+}
+
 pub async fn execute_effects(
     uow: &IngressUnitOfWork,
     db: &Database,
@@ -242,6 +350,7 @@ pub async fn execute_effects(
     let mut recorded = Vec::new();
     let mut proven = vec![Vec::new(); decision.external.len()];
     let mut completed = vec![None; decision.external.len()];
+    let mut discharged_invite_deliveries = vec![false; decision.external.len()];
     let mut planned = decision
         .external
         .iter()
@@ -288,11 +397,18 @@ pub async fn execute_effects(
             effect,
             ExternalEffect::Delivery(ExternalDeliveryEffect::RelayCarbons { .. } | ExternalDeliveryEffect::Carbons { .. })
                 | ExternalEffect::Room(crate::server::routes::interpret::effects::room::ExternalRoomEffect::ObserveRoomMessage { .. })
+                | ExternalEffect::Direct(ExternalDirectEffect::DmCallThreadState { .. })
         ) && !decision.external_receipts[index].is_empty()
             && decision.external_receipts[index]
                 .iter()
                 .all(|key| !decision.receipts_pending.contains(key));
-        let outcome = if already_receipted {
+        let outcome = if discharged_invite_deliveries[index] {
+            // The ledger confirmed this invitation was already outstanding.
+            // Its mutually exclusive live and offline obligations are no-ops.
+            completed[index] = Some(false);
+            proven[index] = decision.external_receipts[index].clone();
+            ExternalOutcome::Done
+        } else if already_receipted || call_state_superseded(decision, effect) {
             completed[index] = Some(true);
             proven[index] = decision.external_receipts[index].clone();
             ExternalOutcome::Done
@@ -306,14 +422,48 @@ pub async fn execute_effects(
                     if let ExternalEffect::Room(room_effect @ crate::server::routes::interpret::effects::room::ExternalRoomEffect::ArchiveAfterPin { .. }) = effect {
                         archive::execute(uow, room_effect).await
                     } else {
-                        sink.execute_with_applied(planned[index].clone(), deps, &decision.applied_durable).await
+                        let mut execution = planned[index].clone();
+                        if let Some(message) = decision.message_key {
+                            match carbon_progress::prepare(uow, message, effect).await {
+                                Ok(prepared) => execution.effect = Effect::External(prepared),
+                                Err(error) => {
+                                    tracing::warn!(%error, "remote carbon progress unavailable; leaving obligation pending");
+                                    return EffectOutcome::Unavailable;
+                                }
+                            }
+                        }
+                        let result = sink.execute_with_applied(execution, deps, &decision.applied_durable).await;
+                        if let Some(message) = decision.message_key {
+                            if let Err(error) = carbon_progress::persist(uow, message, effect, &result).await {
+                                tracing::warn!(%error, "remote carbon progress persistence failed; leaving obligation pending");
+                                return EffectOutcome::Unavailable;
+                            }
+                        }
+                        result
                     }
                 },
             )
             .await
             {
                 Ok(result) => {
-                    completed[index] = Some(dependencies::permits_dependents(effect, &result));
+                    let ledger_noop = invite_ledger_noop(&result);
+                    // A recorded authority can have written the ledger row and
+                    // then lost its connection before the invitation was sent.
+                    // The row proves only itself, so a replay of that authority
+                    // must still run its pending delivery instead of
+                    // discharging it as an outstanding duplicate.
+                    let recorded_ledger_repair = ledger_noop
+                        && decision.alias == super::decision::AliasOutcomeClass::Existing;
+                    if ledger_noop && !recorded_ledger_repair {
+                        for (dependent_index, dependent) in planned.iter().enumerate() {
+                            discharged_invite_deliveries[dependent_index] |=
+                                is_invite_delivery_dependent(effect, dependent);
+                        }
+                    }
+                    completed[index] = Some(
+                        recorded_ledger_repair
+                            || dependencies::permits_dependents(effect, &result),
+                    );
                     proven[index] =
                         proven_receipts(effect, &result, &decision.external_receipts[index]);
                     if let (
@@ -550,7 +700,7 @@ fn proven_receipts(
         });
     }
     let route_completed = match proof {
-        MucUserDeliveryProof::Queued { .. } => route.resources.is_empty(),
+        MucUserDeliveryProof::Queued { row_id } => row_id == &route.fallback.id,
         MucUserDeliveryProof::Delivered { resources } => route
             .resources
             .iter()
@@ -647,10 +797,11 @@ fn classify_outcome(
                 handlers::message::muc_invite::InviteLedgerOutcome, muc_invites::RecordOutcome,
             };
             match outcome {
-                InviteLedgerOutcome::Recorded(RecordOutcome::New { .. })
+                InviteLedgerOutcome::Recorded(
+                    RecordOutcome::New { .. } | RecordOutcome::AlreadyOutstanding,
+                )
                 | InviteLedgerOutcome::Claimed(true) => ExternalOutcome::Done,
-                InviteLedgerOutcome::Recorded(RecordOutcome::AlreadyOutstanding)
-                | InviteLedgerOutcome::Claimed(false) => ExternalOutcome::Uncertain,
+                InviteLedgerOutcome::Claimed(false) => ExternalOutcome::Uncertain,
             }
         }
         EffectOutcome::PlannedInbox(_)
@@ -670,23 +821,44 @@ fn classify_outcome(
             ExternalOutcome::Failed
         }
         EffectOutcome::Archive(Err(_)) | EffectOutcome::Inbox(Err(_)) => ExternalOutcome::Failed,
-        EffectOutcome::Delivery(outcome) => match outcome {
-            FullJidDeliveryOutcome::Delivered | FullJidDeliveryOutcome::QueuedDetached => {
-                if matches!(effect, ExternalEffect::Delivery(ExternalDeliveryEffect::QueueDetached { resources, .. }) if resources.len() > 1)
-                {
-                    // The existing sink reports success if any resource was queued;
-                    // it does not prove the whole multi-resource obligation.
-                    ExternalOutcome::Uncertain
-                } else {
+        EffectOutcome::Delivery(outcome) | EffectOutcome::CarbonFanout { outcome, .. } => {
+            match outcome {
+                FullJidDeliveryOutcome::Delivered | FullJidDeliveryOutcome::QueuedDetached => {
                     ExternalOutcome::Done
                 }
+                FullJidDeliveryOutcome::Unavailable => ExternalOutcome::Failed,
+                FullJidDeliveryOutcome::Dropped => ExternalOutcome::Uncertain,
+                #[cfg(feature = "clustering")]
+                FullJidDeliveryOutcome::MaybeCommitted => ExternalOutcome::Uncertain,
             }
-            FullJidDeliveryOutcome::Unavailable => ExternalOutcome::Failed,
-            FullJidDeliveryOutcome::Dropped => ExternalOutcome::Uncertain,
-            #[cfg(feature = "clustering")]
-            FullJidDeliveryOutcome::MaybeCommitted => ExternalOutcome::Uncertain,
-        },
+        }
     }
+}
+
+fn invite_ledger_noop(outcome: &EffectOutcome) -> bool {
+    use crate::server::routes::websocket::{
+        handlers::message::muc_invite::InviteLedgerOutcome, muc_invites::RecordOutcome,
+    };
+    matches!(
+        outcome,
+        EffectOutcome::InviteLedger(Ok(InviteLedgerOutcome::Recorded(
+            RecordOutcome::AlreadyOutstanding
+        )))
+    )
+}
+
+fn is_invite_delivery_dependent(ledger: &ExternalEffect, planned: &PlannedEffect) -> bool {
+    matches!(ledger, ExternalEffect::InviteLedger(_))
+        && matches!(
+            &planned.effect,
+            Effect::External(ExternalEffect::RouteToPeer(_) | ExternalEffect::QueueOfflineDelivery(_))
+        )
+        && planned.dependencies.iter().any(|dependency| {
+            matches!(
+                dependency,
+                crate::server::routes::interpret::effects::PlanEffectDependency::AfterInviteLedger { .. }
+            ) && dependencies::produces(ledger, dependency)
+        })
 }
 
 fn has_confirmed_completion(effect: &ExternalEffect) -> bool {
@@ -853,7 +1025,7 @@ mod tests {
         assert_eq!(frames.len(), 1);
     }
     #[test]
-    fn partial_detached_success_is_not_a_complete_receipt() {
+    fn detached_batch_completion_preserves_incomplete_outcomes() {
         let effect = ExternalEffect::Delivery(ExternalDeliveryEffect::QueueDetached {
             route_identity: None,
             call_setup: None,
@@ -868,6 +1040,14 @@ mod tests {
             classify_outcome(
                 &effect,
                 EffectOutcome::Delivery(FullJidDeliveryOutcome::QueuedDetached),
+                &mut Vec::new()
+            ),
+            ExternalOutcome::Done
+        );
+        assert_eq!(
+            classify_outcome(
+                &effect,
+                EffectOutcome::Delivery(FullJidDeliveryOutcome::Dropped),
                 &mut Vec::new()
             ),
             ExternalOutcome::Uncertain
@@ -920,3 +1100,15 @@ mod local_carbons_tests;
 #[cfg(test)]
 #[path = "execute_frame_completion_tests.rs"]
 mod frame_completion_tests;
+
+#[cfg(test)]
+#[path = "execute_invite_noop_tests.rs"]
+mod invite_noop_tests;
+
+#[cfg(test)]
+#[path = "execute_detached_receipt_tests.rs"]
+mod detached_receipt_tests;
+
+#[cfg(test)]
+#[path = "execute_dm_call_tests.rs"]
+mod dm_call_tests;

@@ -399,6 +399,7 @@ async fn epoch_one_uow_write_succeeds_and_raw_write_is_rejected() {
                     increment_unread: true,
                 },
             }],
+            false
         )
         .await
         .expect("UoW can record guarded effect intents"),
@@ -1041,7 +1042,7 @@ async fn every_effect_intent_kind_round_trips_through_postgres_storage() {
         .await
         .expect("record effect parent message");
     assert_eq!(
-        EffectIntentRepository::reconcile(&mut transaction, message_key, &intents)
+        EffectIntentRepository::reconcile(&mut transaction, message_key, &intents, false)
             .await
             .expect("persist every codec kind"),
         ReconcileVerdict::FirstCommit
@@ -1143,7 +1144,8 @@ async fn assert_intent_reconciliation(
         EffectIntentRepository::reconcile_on_transaction(
             transaction,
             key,
-            &[original.clone(), original.clone()]
+            &[original.clone(), original.clone()],
+            false
         )
         .await
         .expect("first"),
@@ -1153,7 +1155,8 @@ async fn assert_intent_reconciliation(
         EffectIntentRepository::reconcile_on_transaction(
             transaction,
             key,
-            std::slice::from_ref(&original)
+            std::slice::from_ref(&original),
+            true
         )
         .await
         .expect("consistent"),
@@ -1163,7 +1166,8 @@ async fn assert_intent_reconciliation(
         EffectIntentRepository::reconcile_on_transaction(
             transaction,
             key,
-            &[route.clone(), original.clone()]
+            &[route.clone(), original.clone()],
+            true
         )
         .await
         .expect("repair"),
@@ -1179,7 +1183,8 @@ async fn assert_intent_reconciliation(
         EffectIntentRepository::reconcile_on_transaction(
             transaction,
             key,
-            &[reverse, original.clone()]
+            &[reverse, original.clone()],
+            true
         )
         .await
         .expect("canonical recipient order"),
@@ -1200,7 +1205,8 @@ async fn assert_intent_reconciliation(
         EffectIntentRepository::reconcile_on_transaction(
             transaction,
             key,
-            &[new_route.clone(), changed.clone(), route.clone()]
+            &[new_route.clone(), changed.clone(), route.clone()],
+            true
         )
         .await
         .expect("contradiction"),
@@ -1241,7 +1247,8 @@ async fn assert_intent_reconciliation(
         EffectIntentRepository::reconcile_on_transaction(
             transaction,
             key,
-            &[original.clone(), drift, new_route.clone()]
+            &[original.clone(), drift, new_route.clone()],
+            true
         )
         .await
         .expect("recorded audience wins while omissions repair"),
@@ -1253,16 +1260,22 @@ async fn assert_intent_reconciliation(
         EffectIntentRepository::reconcile_on_transaction(
             transaction,
             key,
-            &[original.clone(), route.clone(), new_route]
+            &[original.clone(), route.clone(), new_route],
+            true
         )
         .await
         .expect("omission was repaired"),
         ReconcileVerdict::Consistent
     );
     assert_eq!(
-        EffectIntentRepository::reconcile_on_transaction(transaction, key, &[original, route])
-            .await
-            .expect("recorded-only audience"),
+        EffectIntentRepository::reconcile_on_transaction(
+            transaction,
+            key,
+            &[original, route],
+            true
+        )
+        .await
+        .expect("recorded-only audience"),
         ReconcileVerdict::Divergent {
             kinds: vec![IngressEffectKind::RouteDirect]
         }
@@ -1279,7 +1292,8 @@ async fn assert_intent_reconciliation(
     }
     assert_eq!(ordinals, ["0", "1", "2"]);
     assert!(matches!(
-        EffectIntentRepository::reconcile_on_transaction(transaction, MessageKey::new(), &[]).await,
+        EffectIntentRepository::reconcile_on_transaction(transaction, MessageKey::new(), &[], true)
+            .await,
         Err(IngressUowError::EffectIntentMessageMissing)
     ));
 }
@@ -1413,6 +1427,9 @@ async fn principal_assertion_observes_concurrent_session_revocation_after_lock_r
 
 #[cfg(feature = "clustering")]
 async fn write_spanning_rows(transaction: &mut IngressUowTransaction<'_>, values: &FixtureValues) {
+    SmIngressStreamRepository::mint_reserved(transaction, &values.stream_id, values.sm_ingress_id)
+        .await
+        .expect("enroll reference stream");
     store_mam_message(transaction, values).await;
     // The alias miss path mints the canonical message row itself; recording
     // `values.message_key` separately first would collide on the primary key.

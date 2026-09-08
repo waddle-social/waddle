@@ -47,6 +47,11 @@ pub(crate) enum ResponseFrame {
     Element(Element),
     /// Typed transport-only stream error emitted by the websocket adapter.
     StreamError(StreamErrorFrame),
+    /// Replay keeps the durable ingress obligation with the retained frame.
+    Replay {
+        frame: Box<ResponseFrame>,
+        ingress_receipts: Vec<waddle_xmpp::stream_management::SmIngressFrameReceipt>,
+    },
 }
 
 impl ResponseFrame {
@@ -55,6 +60,7 @@ impl ResponseFrame {
             Self::Stanza(stanza) => stanza_to_xml(&stanza),
             Self::Element(element) => element_to_xml(element),
             Self::StreamError(error) => error.into_serialized_xml(),
+            Self::Replay { frame, .. } => frame.into_serialized_xml(),
         }
     }
 
@@ -65,6 +71,42 @@ impl ResponseFrame {
                 element.name() == "close" && element.ns() == "urn:ietf:params:xml:ns:xmpp-framing"
             }
             Self::StreamError(_) => false,
+            Self::Replay { frame, .. } => frame.is_websocket_stream_close(),
+        }
+    }
+
+    pub(crate) fn with_ingress_receipts(
+        self,
+        ingress_receipts: Vec<waddle_xmpp::stream_management::SmIngressFrameReceipt>,
+    ) -> Self {
+        if ingress_receipts.is_empty() {
+            self
+        } else {
+            Self::Replay {
+                frame: Box::new(self),
+                ingress_receipts,
+            }
+        }
+    }
+
+    /// The stanza this frame carries, through any replay obligation wrapper.
+    #[cfg(all(test, feature = "clustering"))]
+    pub(crate) fn stanza(&self) -> Option<&Stanza> {
+        match self {
+            Self::Stanza(stanza) => Some(stanza),
+            Self::Replay { frame, .. } => frame.stanza(),
+            Self::Element(_) | Self::StreamError(_) => None,
+        }
+    }
+
+    pub(crate) fn ingress_receipts(
+        &self,
+    ) -> &[waddle_xmpp::stream_management::SmIngressFrameReceipt] {
+        match self {
+            Self::Replay {
+                ingress_receipts, ..
+            } => ingress_receipts,
+            _ => &[],
         }
     }
 
@@ -883,6 +925,11 @@ mod tests {
     }
 }
 
+enum DigestRejection {
+    Malformed,
+    Resource,
+}
+
 struct MessageIngressDispatch {
     message: xmpp_parsers::message::Message,
     stanza_lang: Option<xmpp_parsers::message::Lang>,
@@ -982,24 +1029,32 @@ async fn dispatch_authoritative_message(
             ),
             stanza_lang,
         };
-        let (digest_input, malformed) =
+        let (digest_input, rejection) =
             match crate::ingress::submission::digest_input(&message, &digest_context) {
-                Ok(input) => (input, false),
+                Ok(input) => (input, None),
                 Err(
                     waddle_xmpp::ingress::DigestInputError::DuplicateOriginId
                     | waddle_xmpp::ingress::DigestInputError::MalformedOriginId
                     | waddle_xmpp::ingress::DigestInputError::DuplicateThread
                     | waddle_xmpp::ingress::DigestInputError::DuplicateReply
                     | waddle_xmpp::ingress::DigestInputError::ReplyMalformed,
-                ) => (
-                    waddle_xmpp::ingress::DigestInput::from_rejected_parsed(
-                        &message,
-                        &digest_context,
-                    )
-                    .map_err(|_| IngressDecisionClass::Storage)?,
-                    true,
+                ) => match waddle_xmpp::ingress::DigestInput::from_rejected_parsed(
+                    &message,
+                    &digest_context,
+                ) {
+                    Ok(input) => (input, Some(DigestRejection::Malformed)),
+                    Err(_) => (
+                        resource_rejection_digest(&message, &digest_context)?,
+                        Some(DigestRejection::Resource),
+                    ),
+                },
+                Err(waddle_xmpp::ingress::DigestInputError::ForgedServerStanzaId { .. }) => {
+                    return Err(IngressDecisionClass::Storage);
+                }
+                Err(_) => (
+                    resource_rejection_digest(&message, &digest_context)?,
+                    Some(DigestRejection::Resource),
                 ),
-                Err(_) => return Err(IngressDecisionClass::Storage),
             };
         let sender = conn
             .phase
@@ -1010,10 +1065,15 @@ async fn dispatch_authoritative_message(
             .state_machine
             .as_mut()
             .ok_or(IngressDecisionClass::Storage)?;
-        let plan = if malformed {
-            crate::server::routes::interpret::reject_malformed_message(message, &sender)
-        } else {
-            crate::server::routes::interpret::plan_message_dispatch(machine, message, &deps).await
+        let plan = match rejection {
+            Some(DigestRejection::Resource) => reject_resource_message(message, &sender),
+            Some(DigestRejection::Malformed) => {
+                crate::server::routes::interpret::reject_malformed_message(message, &sender)
+            }
+            None => {
+                crate::server::routes::interpret::plan_message_dispatch(machine, message, &deps)
+                    .await
+            }
         };
         let submission = IngressSubmission {
             sender,
@@ -1044,7 +1104,10 @@ async fn dispatch_authoritative_message(
         failure => {
             let class = match failure {
                 Ok(Ok(decision)) => decision.class,
-                Ok(Err(class)) => class,
+                Ok(Err(class)) => {
+                    waddle_xmpp::telemetry::reliability::increment_ingress_decision(class);
+                    class
+                }
                 Err(error) => {
                     let class = match error {
                         StanzaTimeout::AdmissionRevoked => IngressDecisionClass::ClaimFenceMissing,
@@ -1129,6 +1192,14 @@ pub(super) async fn execute_committed_message(
                     .iter()
                     .flat_map(|obligation| obligation.frames.iter().cloned()),
             );
+            // The ordered batch discharges its receipts once its last frame is
+            // written. Carry that obligation on the frame itself so a transport
+            // failure retains it with the XEP-0198 replay entry.
+            if let Some(frame) = batch.frames.pop() {
+                batch
+                    .frames
+                    .push(frame.with_ingress_receipts(report.frame_receipts()));
+            }
             batch.ingress_reports.push(report);
             batch
         }
@@ -1153,3 +1224,89 @@ fn ingress_failure_stream_error(class: crate::ingress::IngressDecisionClass) -> 
     }
     .into()
 }
+
+/// Limit failures cannot pass through the bounded semantic digest again. Hash
+/// the complete offered XML at the frame boundary into a bounded rejection-only
+/// surrogate; keep the original typed stanza in the committed envelope.
+fn resource_rejection_digest(
+    message: &xmpp_parsers::message::Message,
+    context: &waddle_xmpp::ingress::DigestContext,
+) -> Result<waddle_xmpp::ingress::DigestInput, crate::ingress::IngressDecisionClass> {
+    use sha2::Digest;
+    struct DigestWriter(sha2::Sha256);
+    impl std::io::Write for DigestWriter {
+        fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+            self.0.update(bytes);
+            Ok(bytes.len())
+        }
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+    let mut writer = DigestWriter(sha2::Sha256::new());
+    writer.0.update(b"waddle:resource-rejected-frame:v1\0");
+    let lang = context
+        .stanza_lang
+        .as_ref()
+        .map_or("", |lang| lang.0.as_str());
+    writer.0.update([u8::from(context.stanza_lang.is_some())]);
+    writer.0.update((lang.len() as u64).to_be_bytes());
+    writer.0.update(lang.as_bytes());
+    Element::from(message.clone())
+        .write_to(&mut writer)
+        .map_err(|_| crate::ingress::IngressDecisionClass::Storage)?;
+    let mut surrogate = xmpp_parsers::message::Message::new(None);
+    surrogate
+        .bodies
+        .insert(Default::default(), hex::encode(writer.0.finalize()));
+    let context = waddle_xmpp::ingress::DigestContext {
+        target: context.target.clone(),
+        server_authorities: vec![],
+        stanza_lang: None,
+    };
+    waddle_xmpp::ingress::DigestInput::from_rejected_parsed(&surrogate, &context)
+        .map_err(|_| crate::ingress::IngressDecisionClass::Storage)
+}
+
+fn reject_resource_message(
+    message: xmpp_parsers::message::Message,
+    sender: &jid::FullJid,
+) -> crate::server::routes::interpret::effects::IngressPlan {
+    use crate::server::routes::interpret::effects::{
+        Effect, ExternalEffect, PlanRejection, PlannedEffect, PolicyDeniedReason,
+    };
+    let mut plan = crate::server::routes::interpret::reject_malformed_message(message, sender);
+    // RFC 6120 §8.3.1: retain silent handling for an offered error stanza.
+    if plan.error_reply.is_none() {
+        return plan;
+    }
+    let error = xmpp_parsers::stanza_error::StanzaError::new(
+        xmpp_parsers::stanza_error::ErrorType::Wait,
+        xmpp_parsers::stanza_error::DefinedCondition::ResourceConstraint,
+        "en",
+        "The message exceeds the ingress resource limit.",
+    );
+    let reply = Stanza::Message(
+        waddle_xmpp::protocol::handlers::errors::message_error_reply(
+            &plan.sanitized_message,
+            error.clone(),
+        ),
+    );
+    plan.rejection = Some(PlanRejection::PolicyDenied(
+        PolicyDeniedReason::CaptureOverflow,
+    ));
+    plan.plan = vec![PlannedEffect::new(Effect::External(ExternalEffect::Frame(
+        Box::new(reply.clone()),
+    )))];
+    plan.intents = vec![waddle_xmpp::ingress::IngressEffectIntent::ErrorReply {
+        recipient: sender.clone(),
+        error: waddle_xmpp::ingress::FrozenStanzaError::from_xmpp(&error)
+            .expect("typed standard error"),
+    }];
+    plan.error_reply = Some(reply);
+    plan
+}
+
+#[cfg(test)]
+#[path = "tests/ingress_frame_limits.rs"]
+mod ingress_frame_limits;

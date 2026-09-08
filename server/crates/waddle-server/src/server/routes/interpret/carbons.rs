@@ -140,7 +140,7 @@ pub(super) async fn relay_carbons_only(
     message: &Message,
     kind: CarbonKind,
     exclude: &[FullJid],
-) -> Option<FullJidDeliveryOutcome> {
+) -> Option<super::effects::EffectOutcome> {
     #[cfg(feature = "clustering")]
     if let Some(state) = deps.web_socket_state {
         if let Some(bridge) = state
@@ -178,39 +178,51 @@ pub(crate) fn remote_carbon_delivery(
     owner: &BareJid,
     exclude: &[FullJid],
     kind: CarbonKind,
-) -> FullJidDeliveryOutcome {
-    match outcome {
+) -> super::effects::EffectOutcome {
+    let (outcome, carbon_recipients, recipient_sm_append_streams) = match outcome {
         crate::clustering::route_bridge::RemoteCarbonFanout::Applied {
             carbon_recipients,
             recipient_sm_append_streams,
+        } => (
+            FullJidDeliveryOutcome::Delivered,
+            carbon_recipients,
+            recipient_sm_append_streams,
+        ),
+        crate::clustering::route_bridge::RemoteCarbonFanout::Incomplete {
+            reason,
+            carbon_recipients,
+            recipient_sm_append_streams,
         } => {
-            if let Some(capture) = deps.ingress_effect_capture.as_ref() {
-                for stream in recipient_sm_append_streams {
-                    capture.record_recipient_sm_append(stream);
-                }
-            }
-            if let (Some(capture), Some(excluded_source)) = (
-                deps.ingress_effect_capture.as_ref(),
-                exclude
-                    .iter()
-                    .find(|source| &source.to_bare() == owner)
-                    .cloned(),
-            ) {
+            warn!(%owner, %reason, "remote carbon fanout incomplete");
+            (
+                FullJidDeliveryOutcome::Unavailable,
+                carbon_recipients,
+                recipient_sm_append_streams,
+            )
+        }
+        crate::clustering::route_bridge::RemoteCarbonFanout::MaybeCommitted => (
+            FullJidDeliveryOutcome::MaybeCommitted,
+            Vec::new(),
+            Vec::new(),
+        ),
+    };
+    if let Some(capture) = deps.ingress_effect_capture.as_ref() {
+        for stream in recipient_sm_append_streams {
+            capture.record_recipient_sm_append(stream);
+        }
+        if let Some(excluded_source) = exclude.iter().find(|source| &source.to_bare() == owner) {
+            if !carbon_recipients.is_empty() {
                 capture.record_intent(IngressEffectIntent::Carbons {
-                    carbon_recipients,
-                    excluded_source,
+                    carbon_recipients: carbon_recipients.clone(),
+                    excluded_source: excluded_source.clone(),
                     kind,
                 });
             }
-            FullJidDeliveryOutcome::Delivered
         }
-        crate::clustering::route_bridge::RemoteCarbonFanout::Incomplete { reason } => {
-            warn!(%owner, %reason, "remote carbon fanout incomplete");
-            FullJidDeliveryOutcome::Unavailable
-        }
-        crate::clustering::route_bridge::RemoteCarbonFanout::MaybeCommitted => {
-            FullJidDeliveryOutcome::MaybeCommitted
-        }
+    }
+    super::effects::EffectOutcome::CarbonFanout {
+        outcome,
+        recipients: carbon_recipients,
     }
 }
 

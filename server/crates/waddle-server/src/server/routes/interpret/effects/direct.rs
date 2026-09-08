@@ -57,6 +57,7 @@ pub enum ExternalDirectEffect {
     /// Frozen post-commit call state; subsequent archive passes read this overlay.
     DmCallThreadState {
         state: Box<PlannedDmCallState>,
+        receipt: Option<Box<waddle_xmpp::ingress::IngressEffectIntent>>,
     },
     ScrubReplayForTombstone {
         target: TombstoneTarget,
@@ -98,7 +99,7 @@ pub(crate) fn planned_durable(effect: DurableDirectEffect) -> super::PlannedEffe
 
 pub(crate) fn external(deps: &super::super::Deps<'_>, effect: ExternalDirectEffect) {
     let dependency = match &effect {
-        ExternalDirectEffect::DmCallThreadState { state } => state
+        ExternalDirectEffect::DmCallThreadState { state, .. } => state
             .active
             .as_ref()
             .and_then(|active| active.anchor.as_ref())
@@ -142,22 +143,7 @@ pub(crate) fn external(deps: &super::super::Deps<'_>, effect: ExternalDirectEffe
     deps.effects.record(planned);
 }
 
-#[derive(Debug, Clone)]
-pub struct PlannedDmCallState {
-    pub key: crate::server::routes::websocket::DmCallThreadKey,
-    pub pending: Option<crate::server::routes::websocket::PendingDmCallOffer>,
-    pub active: Option<PlannedActiveDmCall>,
-    pub projected: std::collections::HashSet<BareJid>,
-}
-
-#[derive(Debug, Clone)]
-pub struct PlannedActiveDmCall {
-    pub anchor: Option<StanzaId>,
-    pub initiator: BareJid,
-    pub media: waddle_xmpp::xep::CallThreadMedia,
-    pub started: chrono::DateTime<chrono::Utc>,
-    pub thread: ThreadId,
-}
+pub use waddle_xmpp::ingress::{PlannedActiveDmCall, PlannedDmCallState};
 
 #[cfg(test)]
 mod tests {

@@ -427,7 +427,9 @@ async fn semantic_malformed(fixture: IngressFixture) {
     assert_error(&wire[0], DefinedCondition::BadRequest);
     assert_canonical(&fixture, &decision, &submission.plan.sanitized_message).await;
     assert_eq!(fixture.count("ingress_messages").await, 1);
-    assert_eq!(fixture.count("ingress_origin_aliases").await, 0);
+    // XEP-0359 §5: the committed denial owns the offered origin id, so a
+    // retransmission resolves to it instead of re-deciding under new policy.
+    assert_eq!(fixture.count("ingress_origin_aliases").await, 1);
     assert_eq!(fixture.count("mam_messages").await, 0);
     fixture.close().await;
 }

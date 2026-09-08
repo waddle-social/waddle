@@ -48,7 +48,7 @@ async fn ordered_delivery_timeout_aborts_reserved_effect_before_commit() {
         Arc::clone(&receiver),
         Arc::clone(&bridge),
         reservation,
-        &mut None,
+        Arc::new(Mutex::new(PendingReplyReceipts::default())),
     )
     .await;
     assert!(

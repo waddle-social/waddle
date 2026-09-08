@@ -1016,10 +1016,101 @@ pub enum ArchiveRole {
     SystemMessage { sequence: u32 },
 }
 
+/// Frozen call-thread state shared by planning, replay, and the socket overlay.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PlannedDmCallState {
+    pub key: DmCallThreadKey,
+    pub pending: Option<PendingDmCallOffer>,
+    pub active: Option<PlannedActiveDmCall>,
+    pub projected: std::collections::HashSet<BareJid>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct DmCallThreadKey {
+    pub low_peer: BareJid,
+    pub high_peer: BareJid,
+    pub sid: xmpp_parsers::jingle::SessionId,
+}
+
+impl DmCallThreadKey {
+    pub fn new(a: BareJid, b: BareJid, sid: xmpp_parsers::jingle::SessionId) -> Self {
+        let (low_peer, high_peer) = if a.as_str() <= b.as_str() {
+            (a, b)
+        } else {
+            (b, a)
+        };
+        Self {
+            low_peer,
+            high_peer,
+            sid,
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PendingDmCallOffer {
+    pub media: CallThreadMedia,
+    pub initiator: BareJid,
+    pub started: chrono::DateTime<chrono::Utc>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PlannedActiveDmCall {
+    pub anchor: Option<StanzaId>,
+    pub initiator: BareJid,
+    pub media: CallThreadMedia,
+    pub started: chrono::DateTime<chrono::Utc>,
+    pub thread: ThreadId,
+}
+
+#[derive(Serialize, Deserialize)]
+struct StoredDmCallState {
+    low_peer: BareJid,
+    high_peer: BareJid,
+    sid: String,
+    pending: Option<PendingDmCallOffer>,
+    active: Option<PlannedActiveDmCall>,
+    projected: Vec<BareJid>,
+}
+
+impl From<PlannedDmCallState> for StoredDmCallState {
+    fn from(state: PlannedDmCallState) -> Self {
+        let mut projected = state.projected.into_iter().collect::<Vec<_>>();
+        projected.sort();
+        Self {
+            low_peer: state.key.low_peer,
+            high_peer: state.key.high_peer,
+            sid: state.key.sid.0,
+            pending: state.pending,
+            active: state.active,
+            projected,
+        }
+    }
+}
+
+impl From<StoredDmCallState> for PlannedDmCallState {
+    fn from(state: StoredDmCallState) -> Self {
+        Self {
+            key: DmCallThreadKey::new(
+                state.low_peer,
+                state.high_peer,
+                xmpp_parsers::jingle::SessionId(state.sid),
+            ),
+            pending: state.pending,
+            active: state.active,
+            projected: state.projected.into_iter().collect(),
+        }
+    }
+}
+
 /// A frozen effect decision; it carries no executable callback or mutable
 /// lookup and can therefore be durably replayed without re-deriving policy.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum IngressEffectIntent {
+    DmCallThreadState {
+        sequence: u64,
+        state: Box<PlannedDmCallState>,
+    },
     ArchiveAuthoritative {
         archive: BareJid,
         stanza_id: StanzaId,
@@ -1146,6 +1237,7 @@ pub enum IngressEffectIntent {
 /// Closed classification of an ingress effect, independent of its storage tag.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub enum IngressEffectKind {
+    DmCallThreadState,
     ArchiveAuthoritative,
     RouteDirect,
     RouteMucGroupchat,
@@ -1178,6 +1270,7 @@ pub enum IngressEffectKind {
 /// deliberately excluded so reconciliation can preserve the recorded decision.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum EffectAuthorityKey {
+    DmCallThreadState(DmCallThreadKey, u64),
     Archive {
         role: ArchiveRole,
         by: BareJid,
@@ -1248,6 +1341,7 @@ pub enum EffectAuthorityKey {
 /// Closed semantic identity used to deduplicate a stanza's frozen effects.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum IngressEffectKey {
+    DmCallThreadState(DmCallThreadKey, u64),
     ArchiveAuthoritative(BareJid, String),
     RouteDirect(BareJid, String),
     RouteMucGroupchat(BareJid, String),
@@ -1279,6 +1373,10 @@ pub enum IngressEffectKey {
 impl IngressEffectKey {
     pub fn storage_identity(&self) -> String {
         match self {
+            Self::DmCallThreadState(key, sequence) => format!(
+                "{}|{}|{}|{sequence}",
+                key.low_peer, key.high_peer, key.sid.0
+            ),
             Self::ArchiveAuthoritative(archive, stanza_identity) => {
                 format!("{}|{}", archive, stanza_identity)
             }
@@ -1340,6 +1438,7 @@ impl IngressEffectKey {
 
     fn ordering_key(&self) -> (u8, String) {
         let class = match self {
+            Self::DmCallThreadState(..) => 26,
             Self::ArchiveAuthoritative(..) => 0,
             Self::RouteDirect(..) => 1,
             Self::RouteMucGroupchat(..) => 2,
@@ -1424,6 +1523,24 @@ impl IngressEffectIntent {
             ),
         };
         vec![
+            Self::DmCallThreadState {
+                sequence: 0,
+                state: Box::new(PlannedDmCallState {
+                    key: DmCallThreadKey::new(
+                        bare("juliet@example.test"),
+                        bare("romeo@example.test"),
+                        xmpp_parsers::jingle::SessionId("call-1".into()),
+                    ),
+                    pending: Some(PendingDmCallOffer {
+                        media: CallThreadMedia::audio_only(),
+                        initiator: bare("romeo@example.test"),
+                        started: chrono::DateTime::from_timestamp(1_753_617_600, 0)
+                            .expect("timestamp"),
+                    }),
+                    active: None,
+                    projected: Default::default(),
+                }),
+            },
             Self::ArchiveAuthoritative {
                 archive: bare("archive@example.test"),
                 stanza_id: stanza(),
@@ -1648,6 +1765,7 @@ impl IngressEffectIntent {
 
     pub fn kind(&self) -> IngressEffectKind {
         match self {
+            Self::DmCallThreadState { .. } => IngressEffectKind::DmCallThreadState,
             Self::ArchiveAuthoritative { .. } | Self::SystemMessageArchive { .. } => {
                 IngressEffectKind::ArchiveAuthoritative
             }
@@ -1688,6 +1806,9 @@ impl IngressEffectIntent {
     pub fn authority_key(&self) -> EffectAuthorityKey {
         let kind = self.kind();
         match self {
+            Self::DmCallThreadState { state, sequence } => {
+                EffectAuthorityKey::DmCallThreadState(state.key.clone(), *sequence)
+            }
             Self::ArchiveAuthoritative { archive, by, .. } => EffectAuthorityKey::Archive {
                 role: ArchiveRole::Sender,
                 by: by.clone(),
@@ -1851,6 +1972,9 @@ impl IngressEffectIntent {
 
     pub fn semantic_key(&self) -> IngressEffectKey {
         match self {
+            Self::DmCallThreadState { state, sequence } => {
+                IngressEffectKey::DmCallThreadState(state.key.clone(), *sequence)
+            }
             Self::ArchiveAuthoritative {
                 archive, stanza_id, ..
             }
@@ -2930,6 +3054,10 @@ impl From<StoredTombstoneReplaySmEntry> for TombstoneReplaySmEntry {
 #[derive(Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 enum StoredEffectIntent {
+    DmCallThreadState {
+        sequence: u64,
+        state: Box<StoredDmCallState>,
+    },
     ArchiveAuthoritative {
         archive: BareJid,
         stanza_id: StanzaId,
@@ -3058,6 +3186,7 @@ enum StoredEffectIntent {
 impl StoredEffectIntent {
     fn kind(&self) -> i32 {
         match self {
+            Self::DmCallThreadState { .. } => 26,
             Self::ArchiveAuthoritative { .. } | Self::SystemMessageArchive { .. } => 0,
             Self::RouteDirect { .. } => 1,
             Self::RouteMucGroupchat { .. } | Self::RouteMucSystemBroadcast { .. } => 2,
@@ -3089,6 +3218,10 @@ impl StoredEffectIntent {
 
     fn from_domain(intent: IngressEffectIntent) -> Self {
         match intent {
+            IngressEffectIntent::DmCallThreadState { state, sequence } => Self::DmCallThreadState {
+                sequence,
+                state: Box::new((*state).into()),
+            },
             IngressEffectIntent::ArchiveAuthoritative {
                 archive,
                 stanza_id,
@@ -3298,6 +3431,10 @@ impl StoredEffectIntent {
 
     fn into_domain(self) -> Result<IngressEffectIntent, EffectIntentCodecError> {
         Ok(match self {
+            Self::DmCallThreadState { state, sequence } => IngressEffectIntent::DmCallThreadState {
+                sequence,
+                state: Box::new((*state).into()),
+            },
             Self::ArchiveAuthoritative {
                 archive,
                 stanza_id,
@@ -4069,6 +4206,28 @@ mod tests {
             IngressEffectIntent::decode_v1(25, &payload),
             Err(EffectIntentCodecError::PayloadTooLarge)
         );
+    }
+
+    #[test]
+    fn dm_call_thread_state_codec_golden_and_transition_identity() {
+        let payload = br#"{"version":1,"intent":{"type":"dm_call_thread_state","sequence":0,"state":{"low_peer":"alice@example.test","high_peer":"bob@example.test","sid":"call-1","pending":{"media":{"audio":true,"video":false},"initiator":"alice@example.test","started":"2025-07-27T12:00:00Z"},"active":null,"projected":[]}}}"#;
+        let intent = IngressEffectIntent::decode_v1(26, payload).expect("frozen offer");
+        assert_eq!(intent.kind(), IngressEffectKind::DmCallThreadState);
+        intent
+            .with_encoded_v1(|kind, encoded| {
+                assert_eq!(kind, 26);
+                assert_eq!(encoded, payload);
+            })
+            .expect("encode");
+        let IngressEffectIntent::DmCallThreadState { state, .. } = &intent else {
+            panic!("call state")
+        };
+        let next = IngressEffectIntent::DmCallThreadState {
+            sequence: 1,
+            state: state.clone(),
+        };
+        assert_ne!(intent.semantic_key(), next.semantic_key());
+        assert_ne!(intent.authority_key(), next.authority_key());
     }
 
     #[test]

@@ -459,6 +459,98 @@ async fn unsupported_envelope_nack_rolls_back_and_keeps_the_channel() {
     );
 }
 #[tokio::test]
+async fn reply_receipt_backpressure_rolls_back_and_retry_remains_deliverable() {
+    let bridge = OrderedRelayDeliveryBridge::new(
+        CancellationToken::new(),
+        &ClusteringMessagingConfig::default(),
+    );
+    let mut channel = envelope().channel;
+    channel.target_epoch = ClaimEpoch(1);
+    let allocated = bridge
+        .sender_state
+        .lock()
+        .await
+        .next_envelope(
+            NodeId::new(origin_identity().node_id),
+            channel.clone(),
+            OriginInboundSequence(1),
+            envelope_claims(1),
+            message_payload(),
+        )
+        .expect("fresh channel allocates");
+    assert_eq!(allocated.sequence, OrderedRelaySequence::FIRST);
+
+    let mut receiver = crate::clustering::ordered_relay::OrderedRelayReceiverState::default();
+    let first_reservation = receiver.reserve(allocated.clone());
+    let crate::clustering::ordered_relay::OrderedRelayReservation::Reserved(reserved) =
+        first_reservation
+    else {
+        panic!("initial envelope must be consistent: {first_reservation:?}")
+    };
+    let backpressure = receiver.abort_reserved_without_diversion(
+        *reserved,
+        OrderedRelayNackReason::ReplyReceiptBackpressure,
+    );
+    let outcome = OrderedRelayDeliveryBridge::finish_prepared_delivery_result(
+        Arc::clone(&bridge),
+        PreparedRemoteDelivery {
+            services: Arc::new(
+                services_with_claims(
+                    origin_identity(),
+                    receiver_identity(),
+                    receiver_identity(),
+                    test_peer_id(),
+                )
+                .await,
+            ),
+            target_entity: target_entity(),
+            previous_owner: receiver_identity(),
+            channel: channel.clone(),
+            envelope: allocated.clone(),
+            target: jid::Jid::from(target_full()),
+            stanza: Stanza::Message(Message::new(Some(jid::Jid::from(target_full())))),
+            is_iq: false,
+        },
+        Ok(backpressure),
+    )
+    .await
+    .expect("reply capacity exhaustion is an attempted delivery outcome");
+
+    assert_eq!(outcome.delivery, FullJidDeliveryOutcome::Dropped);
+    assert!(
+        !outcome.maybe_committed,
+        "reply capacity exhaustion proves no owner effects ran"
+    );
+
+    let retry = bridge
+        .sender_state
+        .lock()
+        .await
+        .next_envelope(
+            NodeId::new(origin_identity().node_id),
+            channel,
+            OriginInboundSequence(1),
+            envelope_claims(1),
+            message_payload(),
+        )
+        .expect("the channel must stay undiverted");
+    assert_eq!(
+        retry.sequence,
+        OrderedRelaySequence::FIRST,
+        "the unconsumed sequence must be rolled back and reused"
+    );
+    let retry_reservation = receiver.reserve(retry);
+    let crate::clustering::ordered_relay::OrderedRelayReservation::Reserved(reserved) =
+        retry_reservation
+    else {
+        panic!("the same envelope is still acceptable after backpressure: {retry_reservation:?}")
+    };
+    assert!(matches!(
+        receiver.commit_reserved(*reserved),
+        OrderedRelayReply::Ack(_)
+    ));
+}
+#[tokio::test]
 async fn same_owner_target_not_owner_nack_diverts_rejected_channel() {
     let services = services_with_claims(
         origin_identity(),

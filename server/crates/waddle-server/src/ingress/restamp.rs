@@ -246,7 +246,10 @@ impl Replacements {
                     self.id(&mut mutation.current_archive_stanza_id);
                 }
             }
-            ExternalDirectEffect::DmCallThreadState { state } => {
+            ExternalDirectEffect::DmCallThreadState { state, receipt } => {
+                if let Some(receipt) = receipt {
+                    self.intent(receipt);
+                }
                 if let Some(id) = state
                     .active
                     .as_mut()

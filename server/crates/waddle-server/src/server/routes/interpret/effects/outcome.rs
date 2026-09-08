@@ -35,6 +35,11 @@ pub enum EffectOutcome {
     Inbox(Result<InboxEntry, InboxStorageError>),
     PlannedInbox(ProjectionRef),
     Delivery(super::super::routing::FullJidDeliveryOutcome),
+    /// A relay may confirm individual targets before the whole fanout finishes.
+    CarbonFanout {
+        outcome: super::super::routing::FullJidDeliveryOutcome,
+        recipients: Vec<jid::FullJid>,
+    },
     Unavailable,
 }
 

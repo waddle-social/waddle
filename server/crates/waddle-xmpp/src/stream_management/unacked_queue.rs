@@ -14,6 +14,8 @@ use super::sequence::{sequence_gt, sequence_lte};
 /// An unacknowledged stanza waiting for client acknowledgment.
 #[derive(Debug, Clone)]
 pub struct UnackedStanza {
+    /// Ingress obligations confirmed only after this ordered replay prefix is written.
+    pub ingress_receipts: Vec<crate::stream_management::SmIngressFrameReceipt>,
     /// The sequence number of this stanza (outbound count when sent)
     pub sequence: u32,
     /// The XML content of the stanza
@@ -65,6 +67,7 @@ impl UnackedStanza {
             sequence,
             stanza_xml,
             sent_at: Instant::now(),
+            ingress_receipts: Vec::new(),
             original_receipt_at,
         }
     }
@@ -168,6 +171,7 @@ impl UnackedQueue {
             .iter()
             .filter(|s| sequence_gt(s.sequence, h))
             .map(|s| super::ReplayStanza {
+                ingress_receipts: s.ingress_receipts.clone(),
                 stanza_xml: s.stanza_xml.clone(),
                 original_receipt_at: s.original_receipt_at,
             })
@@ -182,6 +186,7 @@ impl UnackedQueue {
         self.stanzas
             .iter()
             .map(|s| super::session_registry::DetachedUnackedStanza {
+                ingress_receipts: s.ingress_receipts.clone(),
                 sequence: s.sequence,
                 stanza_xml: s.stanza_xml.clone(),
                 original_receipt_at: s.original_receipt_at,
@@ -195,12 +200,20 @@ impl UnackedQueue {
         self.stanzas.clear();
         for entry in stanzas {
             if self.stanzas.len() < self.max_size {
-                self.stanzas.push_back(UnackedStanza::with_receipt_at(
+                let mut stanza = UnackedStanza::with_receipt_at(
                     entry.sequence,
                     entry.stanza_xml.clone(),
                     entry.original_receipt_at,
-                ));
+                );
+                stanza.ingress_receipts = entry.ingress_receipts.clone();
+                self.stanzas.push_back(stanza);
             }
+        }
+    }
+
+    pub(super) fn attach_ingress_receipts(&mut self, receipts: Vec<super::SmIngressFrameReceipt>) {
+        if let Some(last) = self.stanzas.back_mut() {
+            last.ingress_receipts.extend(receipts);
         }
     }
 
@@ -326,16 +339,19 @@ mod tests {
         let now = Utc::now();
         let stanzas = vec![
             DetachedUnackedStanza {
+                ingress_receipts: Vec::new(),
                 sequence: 5,
                 stanza_xml: "<msg5/>".to_string(),
                 original_receipt_at: now,
             },
             DetachedUnackedStanza {
+                ingress_receipts: Vec::new(),
                 sequence: 6,
                 stanza_xml: "<msg6/>".to_string(),
                 original_receipt_at: now,
             },
             DetachedUnackedStanza {
+                ingress_receipts: Vec::new(),
                 sequence: 7,
                 stanza_xml: "<msg7/>".to_string(),
                 original_receipt_at: now,
@@ -373,5 +389,41 @@ mod tests {
 
         queue.clear();
         assert!(queue.is_empty());
+    }
+}
+
+#[cfg(test)]
+mod ingress_receipt_tests {
+    use super::*;
+    use crate::stream_management::{SmIngressFrameReceipt, SmIngressReceiptKind};
+
+    #[test]
+    fn ingress_frame_receipts_survive_detach_restore_and_acknowledged_prefix() {
+        let receipt = SmIngressFrameReceipt {
+            message_key: crate::ingress::MessageKey::new(),
+            kind: SmIngressReceiptKind::from_storage(1),
+            semantic_identity_hash: [17; 32],
+        };
+        let mut original = UnackedQueue::new(4);
+        let stanza = minidom::Element::builder("message", crate::ns::JABBER_CLIENT).build();
+        let wire = crate::parser::element_to_string(&stanza).expect("serialize stanza");
+        assert!(matches!(
+            original.push(1, wire.clone()),
+            UnackedPushResult::Accepted
+        ));
+        assert!(matches!(
+            original.push(2, wire),
+            UnackedPushResult::Accepted
+        ));
+        original.attach_ingress_receipts(vec![receipt.clone()]);
+        let detached = original.get_all_unacked();
+        assert!(detached[0].ingress_receipts.is_empty());
+        assert_eq!(detached[1].ingress_receipts, vec![receipt.clone()]);
+        let mut restored = UnackedQueue::new(4);
+        restored.restore(&detached);
+        restored.acknowledge(1);
+        let replay = restored.get_unacked_after(1);
+        assert_eq!(replay.len(), 1);
+        assert_eq!(replay[0].ingress_receipts, vec![receipt]);
     }
 }

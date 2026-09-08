@@ -107,7 +107,8 @@ impl OrderedRelayNackMetricReason {
             OrderedRelayNackReason::TargetUnavailable => Self::TargetUnavailable,
             OrderedRelayNackReason::ParseFailure => Self::ParseFailure,
             OrderedRelayNackReason::UnsupportedEnvelope => Self::UnsupportedEnvelope,
-            OrderedRelayNackReason::Backpressure => Self::Backpressure,
+            OrderedRelayNackReason::Backpressure
+            | OrderedRelayNackReason::ReplyReceiptBackpressure => Self::Backpressure,
             OrderedRelayNackReason::MaybeCommitted => Self::MaybeCommitted,
             OrderedRelayNackReason::Diverted(_) => Self::Diverted,
         }

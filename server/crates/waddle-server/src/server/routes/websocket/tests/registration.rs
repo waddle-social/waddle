@@ -345,11 +345,13 @@ async fn register_bound_connection_after_frame_completes_pending_resume_claim() 
             replay_gap_through: None,
             unacked_stanzas: vec![
                 DetachedUnackedStanza {
+                    ingress_receipts: Vec::new(),
                     sequence: 9,
                     stanza_xml: "<message xmlns='jabber:client' id='m9'/>".to_string(),
                     original_receipt_at: chrono::Utc::now(),
                 },
                 DetachedUnackedStanza {
+                    ingress_receipts: Vec::new(),
                     sequence: 10,
                     stanza_xml: "<message xmlns='jabber:client' id='m10'/>".to_string(),
                     original_receipt_at: chrono::Utc::now(),

@@ -9,7 +9,7 @@ use xmpp_parsers::stanza_error::{DefinedCondition, ErrorType, StanzaError};
 
 use crate::ingress::IngressEffectCapture;
 use crate::server::routes::interpret::{
-    effects::{Effect, ExternalEffect, PlannedEffect},
+    effects::{Effect, ExternalEffect, PlanFailure, PlannedEffect},
     Deps,
 };
 use crate::server::routes::websocket::WebSocketState;
@@ -54,7 +54,7 @@ async fn handle_muc_private_message(
     }
     let target_nick = target_occupant_jid.resource().to_string();
 
-    let Some(room_actor) = state
+    let room_actor = match state
         .deps
         .protocol
         .room_registry
@@ -63,31 +63,30 @@ async fn handle_muc_private_message(
         })
         .reply_timeout(std::time::Duration::from_secs(5))
         .await
-        .ok()
-        .flatten()
-    else {
-        return Some(vec![message_error_frame(
-            incoming,
-            bound_jid,
-            deps,
-            ErrorType::Cancel,
-            DefinedCondition::ItemNotFound,
-            "Requested room not found.",
-        )]);
+    {
+        Ok(Some(actor)) => actor,
+        Ok(None) => {
+            return Some(vec![message_error_frame(
+                incoming,
+                bound_jid,
+                deps,
+                ErrorType::Cancel,
+                DefinedCondition::ItemNotFound,
+                "Requested room not found.",
+            )]);
+        }
+        Err(_) => {
+            deps.effects.fail_plan(PlanFailure::RoomSnapshotUnavailable);
+            return Some(Vec::new());
+        }
     };
     let Ok(snapshot) = room_actor
         .ask(waddle_xmpp::muc::room_actor::GetSnapshot)
         .reply_timeout(std::time::Duration::from_secs(5))
         .await
     else {
-        return Some(vec![message_error_frame(
-            incoming,
-            bound_jid,
-            deps,
-            ErrorType::Wait,
-            DefinedCondition::InternalServerError,
-            "Internal server error.",
-        )]);
+        deps.effects.fail_plan(PlanFailure::RoomSnapshotUnavailable);
+        return Some(Vec::new());
     };
     if deps.effects.is_planning() {
         use crate::server::routes::interpret::effects::{
@@ -458,14 +457,8 @@ async fn handle_muc_mediated_decline(
                 error = %error,
                 "Failed to look up outstanding invites for mediated decline"
             );
-            return Some(vec![message_error_frame(
-                incoming,
-                bound_jid,
-                deps,
-                ErrorType::Wait,
-                DefinedCondition::InternalServerError,
-                "Internal server error.",
-            )]);
+            deps.effects.fail_plan(PlanFailure::InvitePrerequisiteRead);
+            return Some(Vec::new());
         }
     };
     if outstanding.is_empty() {
@@ -1241,3 +1234,7 @@ mod tests {
             | Effect::External(ExternalEffect::Delivery(crate::server::routes::interpret::effects::delivery::ExternalDeliveryEffect::Carbons { .. })))));
     }
 }
+
+#[cfg(test)]
+#[path = "muc_direct_plan_failure_tests.rs"]
+mod plan_failure_tests;

@@ -69,6 +69,8 @@ pub enum IngressRetirementOutcome {
     StreamMissing,
 }
 
+const RETIREMENT_BATCH_SIZE: u32 = 256;
+
 /// Boot-owned handle. Shutdown blocks new work and joins admitted operations and GC.
 pub struct IngressAuthority {
     database: Database,
@@ -84,6 +86,8 @@ pub struct IngressAuthority {
     /// Test-only: fires when a commit is about to wait for its stream lock.
     #[cfg(test)]
     stream_wait_observer: StdMutex<Option<Arc<tokio::sync::Notify>>>,
+    #[cfg(test)]
+    retirement_batch_gate: StdMutex<Option<Arc<tokio::sync::Notify>>>,
 }
 
 impl IngressAuthority {
@@ -161,6 +165,8 @@ impl IngressAuthority {
             streams: StdMutex::new(HashMap::new()),
             #[cfg(test)]
             stream_wait_observer: StdMutex::new(None),
+            #[cfg(test)]
+            retirement_batch_gate: StdMutex::new(None),
             retirement_cursor: Mutex::new(None),
         })
     }
@@ -187,6 +193,8 @@ impl IngressAuthority {
             streams: StdMutex::new(HashMap::new()),
             #[cfg(test)]
             stream_wait_observer: StdMutex::new(None),
+            #[cfg(test)]
+            retirement_batch_gate: StdMutex::new(None),
             retirement_cursor: Mutex::new(None),
         }
     }
@@ -325,35 +333,71 @@ impl IngressAuthority {
             return Err(IngressUowError::AuthorityStopped);
         }
         let _stream_guard = self.stream_activity(stream_id).write_owned().await;
-        let mut transaction = self
-            .uow
-            .begin_with_timeouts(Duration::from_millis(100), Duration::from_millis(250))
-            .await?;
-        #[cfg(feature = "clustering")]
-        if self.database.driver() == DatabaseDriver::Postgres
-            && !SmIngressStreamRepository::fence_claim_absence_for_retirement(
+        loop {
+            let mut transaction = self
+                .uow
+                .begin_with_timeouts(Duration::from_millis(100), Duration::from_millis(250))
+                .await?;
+            #[cfg(feature = "clustering")]
+            if self.database.driver() == DatabaseDriver::Postgres
+                && !SmIngressStreamRepository::fence_claim_absence_for_retirement(
+                    &mut transaction,
+                    stream_id,
+                )
+                .await?
+            {
+                transaction.commit().await?;
+                return Ok(IngressRetirementOutcome::DeferredClaim);
+            }
+            let Some(id) =
+                SmIngressStreamRepository::lookup_unclaimed(&mut transaction, stream_id).await?
+            else {
+                transaction.commit().await?;
+                return Ok(IngressRetirementOutcome::StreamMissing);
+            };
+            let refs = SmIngressRepository::refs_for_stream_batch(
                 &mut transaction,
-                stream_id,
+                id,
+                RETIREMENT_BATCH_SIZE,
             )
-            .await?
-        {
+            .await?;
+            // The stream is locked, so a short page contains all remaining refs.
+            let finished = refs.len() < RETIREMENT_BATCH_SIZE as usize;
+            let mut keys: Vec<_> = refs.iter().map(|(_, key)| *key).collect();
+            // Different streams can reference the same canonical keys in
+            // opposite ordinal order. Lock each bounded page in UUID order.
+            keys.sort_unstable_by_key(waddle_xmpp::ingress::MessageKey::to_storage);
+            keys.dedup();
+            for key in keys {
+                execute::terminalize_if_complete_in_transaction(&mut transaction, key).await?;
+            }
+            for (ordinal, _) in refs {
+                SmIngressRepository::delete_stream_ref(&mut transaction, id, ordinal).await?;
+            }
+            if finished {
+                SmIngressStreamRepository::delete_unclaimed(&mut transaction, stream_id).await?;
+            }
             transaction.commit().await?;
-            return Ok(IngressRetirementOutcome::DeferredClaim);
+            self.gc.trigger();
+            if finished {
+                return Ok(IngressRetirementOutcome::Deleted);
+            }
+            #[cfg(test)]
+            self.wait_after_retirement_batch().await;
         }
-        let Some(id) =
-            SmIngressStreamRepository::lookup_unclaimed(&mut transaction, stream_id).await?
-        else {
-            transaction.commit().await?;
-            return Ok(IngressRetirementOutcome::StreamMissing);
-        };
-        for key in SmIngressRepository::message_keys_for_stream(&mut transaction, id).await? {
-            execute::terminalize_if_complete_in_transaction(&mut transaction, key).await?;
+    }
+
+    #[cfg(test)]
+    async fn wait_after_retirement_batch(&self) {
+        let gate = self
+            .retirement_batch_gate
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone();
+        if let Some(gate) = gate {
+            gate.notify_one();
+            std::future::pending::<()>().await;
         }
-        SmIngressRepository::delete_for_stream(&mut transaction, id).await?;
-        SmIngressStreamRepository::delete_unclaimed(&mut transaction, stream_id).await?;
-        transaction.commit().await?;
-        self.gc.trigger();
-        Ok(IngressRetirementOutcome::Deleted)
     }
 
     pub async fn commit(&self, submission: &IngressSubmission) -> IngressDecision {
@@ -591,9 +635,14 @@ mod lifecycle_tests {
         )
         .await
         .expect("record canonical message");
-        EffectIntentRepository::reconcile(&mut transaction, key, std::slice::from_ref(&intent))
-            .await
-            .expect("record pending intent");
+        EffectIntentRepository::reconcile(
+            &mut transaction,
+            key,
+            std::slice::from_ref(&intent),
+            false,
+        )
+        .await
+        .expect("record pending intent");
         if receipt_complete {
             let receipt = super::durable::receipt_key(&intent).expect("receipt identity");
             EffectReceiptRepository::record_receipt(
@@ -716,12 +765,14 @@ mod lifecycle_tests {
         assert_retired_message(authority, pending, false).await;
         assert_retired_message(authority, complete, true).await;
         let mut transaction = authority.uow.begin().await.expect("read retired refs");
-        assert!(
-            SmIngressRepository::message_keys_for_stream(&mut transaction, id)
-                .await
-                .expect("retired refs")
-                .is_empty()
-        );
+        assert!(SmIngressRepository::refs_for_stream_batch(
+            &mut transaction,
+            id,
+            RETIREMENT_BATCH_SIZE
+        )
+        .await
+        .expect("retired refs")
+        .is_empty());
         transaction.commit().await.expect("close retired refs read");
         assert_eq!(
             authority
@@ -737,6 +788,137 @@ mod lifecycle_tests {
                 .expect("retire absent"),
             IngressRetirementOutcome::StreamMissing
         );
+    }
+
+    async fn retirement_preserves_committed_batches(authority: &IngressAuthority) {
+        let stream = SmSessionId::new("batched-retirement");
+        let id = authority.enroll_stream(&stream).await.expect("enroll");
+        let mut keys = Vec::new();
+        for position in 1..=RETIREMENT_BATCH_SIZE * 2 + 3 {
+            keys.push(seed_retirement_message(authority, id, position, true).await);
+        }
+        // A same-origin retry can bind another position to the same canonical
+        // key. Its reference must survive until its own bounded page is retired.
+        let position = RETIREMENT_BATCH_SIZE * 2 + 4;
+        let mut transaction = authority
+            .uow
+            .begin()
+            .await
+            .expect("duplicate ref transaction");
+        SmIngressRepository::insert_sm_ref(
+            &mut transaction,
+            id,
+            waddle_xmpp::ingress::IngressOrdinal::from_storage(u64::from(position))
+                .expect("duplicate ordinal"),
+            WireHandledCount::from_storage(position),
+            keys[0],
+        )
+        .await
+        .expect("duplicate canonical ref");
+        transaction.commit().await.expect("commit duplicate ref");
+        let mut transaction = authority.uow.begin().await.expect("inspect first page");
+        let first_page =
+            SmIngressRepository::refs_for_stream_batch(&mut transaction, id, RETIREMENT_BATCH_SIZE)
+                .await
+                .expect("first page");
+        assert!(first_page.iter().any(|(_, key)| *key == keys[0]));
+        assert!(first_page
+            .iter()
+            .all(|(ordinal, _)| ordinal.to_storage() != u64::from(position)));
+        transaction.commit().await.expect("close first page read");
+        // Pause after the first transaction committed so the deadline cancels
+        // the actual multi-batch operation at a deterministic boundary.
+        let gate = Arc::new(tokio::sync::Notify::new());
+        *authority
+            .retirement_batch_gate
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(gate.clone());
+        {
+            let retirement = authority.forget_stream(&stream);
+            tokio::pin!(retirement);
+            tokio::select! {
+                outcome = &mut retirement => panic!("retirement passed the batch gate: {outcome:?}"),
+                () = gate.notified() => {},
+            }
+            assert!(tokio::time::timeout(Duration::from_millis(1), retirement)
+                .await
+                .is_err());
+        }
+        *authority
+            .retirement_batch_gate
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = None;
+        assert_eq!(
+            authority
+                .lookup_stream(&stream)
+                .await
+                .expect("retained stream"),
+            Some(id)
+        );
+        let mut transaction = authority.uow.begin().await.expect("inspect progress");
+        let remaining = SmIngressRepository::refs_for_stream_batch(
+            &mut transaction,
+            id,
+            RETIREMENT_BATCH_SIZE * 3,
+        )
+        .await
+        .expect("remaining refs");
+        assert_eq!(remaining.len(), RETIREMENT_BATCH_SIZE as usize + 4);
+        assert!(
+            remaining.iter().any(
+                |(ordinal, key)| ordinal.to_storage() == u64::from(position) && *key == keys[0]
+            ),
+            "duplicate reference outside the selected page must survive"
+        );
+        assert!(remaining.iter().all(|entry| !first_page.contains(entry)));
+        transaction.commit().await.expect("close progress read");
+        for key in &keys {
+            assert_retired_message(
+                authority,
+                *key,
+                first_page
+                    .iter()
+                    .any(|(_, selected_key)| selected_key == key),
+            )
+            .await;
+        }
+        assert_eq!(
+            authority
+                .forget_stream(&stream)
+                .await
+                .expect("resume retirement"),
+            IngressRetirementOutcome::Deleted
+        );
+        assert_eq!(
+            authority
+                .lookup_stream(&stream)
+                .await
+                .expect("deleted stream"),
+            None
+        );
+        let mut transaction = authority.uow.begin().await.expect("inspect final refs");
+        assert!(SmIngressRepository::refs_for_stream_batch(
+            &mut transaction,
+            id,
+            RETIREMENT_BATCH_SIZE,
+        )
+        .await
+        .expect("final refs")
+        .is_empty());
+        transaction.commit().await.expect("close final read");
+        for key in keys {
+            assert_retired_message(authority, key, true).await;
+        }
+    }
+
+    #[tokio::test]
+    async fn sqlite_retirement_preserves_committed_batches_after_cancellation() {
+        let authority = authority().await;
+        crate::db::MigrationRunner::global()
+            .run(&authority.database)
+            .await
+            .expect("migrate ingress");
+        retirement_preserves_committed_batches(&authority).await;
     }
 
     #[tokio::test]
@@ -792,8 +974,17 @@ mod lifecycle_tests {
 
     #[tokio::test]
     async fn postgres_enrollment_checkpoint_and_retirement() {
+        postgres_retirement_test(false).await;
+    }
+
+    #[tokio::test]
+    async fn postgres_retirement_preserves_committed_batches_after_cancellation() {
+        postgres_retirement_test(true).await;
+    }
+
+    async fn postgres_retirement_test(batches: bool) {
         let Ok(database_url) = std::env::var("WADDLE_TEST_POSTGRES_URL") else {
-            eprintln!("skipping postgres_enrollment_checkpoint_and_retirement: WADDLE_TEST_POSTGRES_URL not set");
+            eprintln!("skipping postgres retirement test: WADDLE_TEST_POSTGRES_URL not set");
             return;
         };
         let admin = sqlx::PgPool::connect(&database_url)
@@ -834,7 +1025,11 @@ mod lifecycle_tests {
         {
             authority.uow = IngressUnitOfWork::open(db, lineage).expect("unit of work");
         }
-        enrollment_checkpoint_and_retirement_round_trip(&authority).await;
+        if batches {
+            retirement_preserves_committed_batches(&authority).await;
+        } else {
+            enrollment_checkpoint_and_retirement_round_trip(&authority).await;
+        }
         drop(authority);
         sqlx::query(&format!("DROP SCHEMA {schema} CASCADE"))
             .execute(&admin)

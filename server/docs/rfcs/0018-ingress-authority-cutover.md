@@ -24,6 +24,60 @@ destination connection's own recipient archive/inbox pipeline (#1658);
 (#1659/#1660); (v) non-resumable streams have no durable
 connection-generation fence (follow-up issue).
 
+### Recovery follow-ups from combined review
+
+These five gaps are inherited from the pre-review implementation and remain
+outside this cutover slice. The issue titles below are follow-ups to file under
+#1658, not newly filed issue references.
+
+**Partial detached progress.** Detached delivery receipts remain aggregate:
+successful resource appends are not recorded independently when another
+destination fails. Complete batches terminalize, but an incomplete batch
+remains pending, and alias replay suppresses its non-sender detached delivery
+and live subsets of its aggregate obligation to avoid repeating completed
+resources. Automatic delivery to remaining resources is deferred to #1658;
+file **“Persist per-resource detached ingress progress and replay only
+unfinished destinations”**, including SQLite/Postgres partial-success,
+restart, and replay tests.
+
+**Per-plugin observer receipts.** Room observers retain one room-level intent
+and receipt, without a typed plugin identity or independently persisted
+observer outcomes. If an observer pass partially succeeds and fails before
+aggregate completion, recovery cannot distinguish completed plugins from
+unfinished ones; a retry may repeat completed observer work. Independent
+observer recovery is deferred to #1658; file **“Capture typed observer
+identities and persist per-plugin ingress completion receipts”**, covering
+mixed success, failure, restart, and retry on both databases.
+
+**Terminalization maintenance.** Phase C attempts terminalization after
+receipt completion, but a failed terminalization transaction has no persistent
+maintenance sweep. A receipt-complete canonical row can remain non-terminal
+across restart and remain protected from retention until another execution
+path retries terminalization. This lifecycle limitation is deferred to #1658;
+file **“Sweep receipt-complete non-terminal ingress rows at startup and during
+bounded maintenance”**, testing injected terminalization failure, restart
+recovery, and eventual retention eligibility on SQLite and Postgres.
+
+**Ordinary pending-row reconstruction.** Alias replay does not generally
+reconstruct ordinary offline pending deliveries from their recorded row
+identity and canonical envelope; fresh planning allocates a new pending-row
+identifier. Specialized invitation reconstruction does not provide that
+general recovery executor, and ordinary duplicate suppression remains
+necessary to avoid inventing another row. Recovery of these durable unresolved
+obligations is deferred to #1658; file **“Reconstruct ordinary pending
+deliveries from recorded ingress identity and payload”**, with both-backend
+tests proving replay preserves the recorded row ID without duplicate delivery.
+
+**Atomic recovery completion and receipts.** Groupchat notification recovery
+marks its recovery row completed separately from recording the corresponding
+ingress receipt, and the existing background recovery sweep does not settle
+ingress receipts. A crash or receipt-write failure between those operations
+can leave a completed recovery item with an unresolved canonical obligation.
+Atomic settlement is deferred to #1658; file **“Atomically complete notification
+recovery and its correlated ingress receipts”**, adding a typed unit-of-work
+repository operation and SQLite/Postgres fault-injection tests for rollback
+and restart.
+
 ## 2. Three phases per inbound message
 
 **Phase A — plan** (no locks, bounded, read-only). The whole message handler
@@ -74,12 +128,14 @@ intent has a receipt, a follow-up transaction terminalizes the canonical row
 metered `ingress.effects.unresolved`). A Phase-C timeout never changes the
 disposition: `StanzaTimeout` maps to `Unhandled` only before commit.
 
-Remote carbon obligations receive a receipt only on the owner's complete
-`Applied` reply. Detached inventory or append errors return typed
-`Incomplete { reason }`; the origin records a failed external effect and leaves
-its intent unresolved. The reply change uses remote message ids
-`waddle.clustering.relay.remote_user_side_effect.v2` and
-`waddle.clustering.relay.deliver_ordered.v6`.
+Remote carbon replies preserve completed targets even on typed `Incomplete`
+results. The origin durably records those full-JID targets in
+`ingress_carbon_receipts`, keyed by the recorded `RelayCarbons` intent and
+recipient. Same-origin retries add confirmed targets to the existing typed
+exclusion request, so only unfinished targets receive a carbon. The whole
+`RelayCarbons` intent receives its normal effect receipt only on the owner's
+complete `Applied` reply; incomplete replies leave that intent unresolved.
+
 
 
 ## 3. Identity
@@ -105,7 +161,8 @@ No in-memory ordinal mirror; `sm_sessions.shadow_ordinal` is dropped.
   the contiguous handled count that becomes exposable once this message is
   handled — `seq` when no lower sequence is pending, otherwise the current
   contiguous count (a pending IQ hole is never acknowledged).
-- `ingress_sm_refs.wire_h` + `UNIQUE (sm_ingress_id, wire_h)`: the binding
+- `ingress_sm_refs.(wire_generation, wire_h)` +
+  `UNIQUE (sm_ingress_id, wire_generation, wire_h)`: the binding
   from the message's reserved wire position to its canonical row and ordinal.
   Phase B looks the position up first: bound → `ExistingCommitted` (crash after
   commit, ambiguous commit, or the hole case) → no new row/ordinal, reconcile
@@ -119,8 +176,12 @@ No in-memory ordinal mirror; `sm_sessions.shadow_ordinal` is dropped.
   the stream row before exposing the count. Otherwise a crash after that ACK
   would resume below a count the client already discarded and fresh stanzas
   would collide with retained bindings.
-- Wire wrap colliding with a retained binding fails the unique insert →
-  `Storage` (non-advancing); refs are deleted at stream retirement.
+- `ingress_sm_streams.wire_generation` increments when the checkpoint moves
+  forward across an XEP-0198 counter wrap. A reserved position resolves to the
+  checkpoint generation or its adjacent generation using `max_in_window`, so a
+  pending IQ hole can hold the checkpoint before a wrapped message, and an
+  exact pre-wrap replay still selects its original binding. Reusing `h` in a
+  later generation creates a fresh binding; refs survive until stream retirement.
 
 ### 3.3 Durable payload
 `ingress_messages.envelope` = the post-transform typed message for the
@@ -200,11 +261,16 @@ Clustering stays a cargo feature (fences compile only with it).
 tables)
 - `ingress_messages`: `envelope_version SMALLINT NULL`, `envelope BYTEA NULL`,
   `CHECK ((envelope IS NULL) = (envelope_version IS NULL))`.
-- `ingress_sm_streams`: `checkpoint_h BIGINT NOT NULL DEFAULT 0`.
-- `ingress_sm_refs`: `wire_h BIGINT NOT NULL`, `UNIQUE (sm_ingress_id, wire_h)`.
+- `ingress_sm_streams`: `checkpoint_h BIGINT NOT NULL DEFAULT 0`,
+  `wire_generation BIGINT NOT NULL DEFAULT 0`.
+- `ingress_sm_refs`: `wire_h BIGINT NOT NULL`, `wire_generation BIGINT NOT NULL`,
+  `UNIQUE (sm_ingress_id, wire_generation, wire_h)`.
 - `ingress_effect_receipts (message_key, kind, semantic_identity_hash,
   applied_at)` with PK = FK → `ingress_effect_intents` `ON DELETE CASCADE`;
   epoch guard triggers, manifest row and `pg_monitor` grant.
+- `ingress_carbon_receipts (message_key, kind, semantic_identity_hash, recipient)`
+  with a composite primary key and FK to `ingress_effect_intents`
+  `ON DELETE CASCADE`; epoch guards, manifest row and `pg_monitor` grant.
 - Epoch-0 reset of the soak rows in the runbook lock order (DELETE).
 - SQLite arm: real DDL for every ingress table.
 - `ensure_schema`: `sm_sessions` drops `shadow_ordinal`; `mam_messages` drops

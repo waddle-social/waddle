@@ -356,50 +356,59 @@ impl SmIngressRepository {
         .await
     }
 
-    pub async fn message_keys_for_stream(
+    /// Read an indexed, bounded reference page, retaining the exact ordinals
+    /// so retirement cannot delete references outside this page.
+    pub async fn refs_for_stream_batch(
         transaction: &mut IngressUowTransaction<'_>,
         sm_ingress_id: SmIngressId,
-    ) -> Result<Vec<MessageKey>, IngressUowError> {
-        const POSTGRES: &str =
-            "SELECT DISTINCT message_key::text FROM ingress_sm_refs WHERE sm_ingress_id = ?::uuid";
-        const SQLITE: &str =
-            "SELECT DISTINCT message_key FROM ingress_sm_refs WHERE sm_ingress_id = ?";
+        limit: u32,
+    ) -> Result<Vec<(IngressOrdinal, MessageKey)>, IngressUowError> {
+        const POSTGRES: &str = "SELECT ingress_ordinal::text, message_key::text FROM ingress_sm_refs WHERE sm_ingress_id = ?::uuid ORDER BY ingress_ordinal LIMIT ?";
+        const SQLITE: &str = "SELECT ingress_ordinal, message_key FROM ingress_sm_refs WHERE sm_ingress_id = ? ORDER BY ingress_ordinal LIMIT ?";
         let sql = dialect_sql(transaction, POSTGRES, SQLITE);
         let mut rows = transaction
             .transaction_mut()
             .query(
                 sql,
-                crate::db_params![sm_ingress_id.to_storage().to_string()],
+                crate::db_params![sm_ingress_id.to_storage().to_string(), i64::from(limit)],
             )
             .await?;
-        let mut keys = Vec::new();
+        let mut refs = Vec::new();
         while let Some(row) = rows.next().await? {
-            let key: String = row.get(0)?;
-            keys.push(
-                key.parse::<Uuid>()
-                    .map(MessageKey::from_storage)
-                    .map_err(|_| {
-                        IngressUowError::Substrate(
-                            ingress_substrate::IngressSubstrateError::InvalidStoredMessageKey,
-                        )
-                    })?,
-            );
+            let ordinal: String = row.get(0)?;
+            let ordinal = ordinal
+                .parse::<u64>()
+                .ok()
+                .and_then(|value| IngressOrdinal::from_storage(value).ok())
+                .ok_or(ingress_substrate::IngressSubstrateError::InvalidStoredStream)?;
+            let key: String = row.get(1)?;
+            let key = key
+                .parse::<Uuid>()
+                .map(MessageKey::from_storage)
+                .map_err(|_| ingress_substrate::IngressSubstrateError::InvalidStoredMessageKey)?;
+            refs.push((ordinal, key));
         }
-        Ok(keys)
+        Ok(refs)
     }
 
-    pub async fn delete_for_stream(
+    pub async fn delete_stream_ref(
         transaction: &mut IngressUowTransaction<'_>,
         sm_ingress_id: SmIngressId,
+        ordinal: IngressOrdinal,
     ) -> Result<u64, IngressUowError> {
-        const POSTGRES: &str = "DELETE FROM ingress_sm_refs WHERE sm_ingress_id = ?::uuid";
-        const SQLITE: &str = "DELETE FROM ingress_sm_refs WHERE sm_ingress_id = ?";
+        const POSTGRES: &str =
+            "DELETE FROM ingress_sm_refs WHERE sm_ingress_id = ?::uuid AND ingress_ordinal = ?::numeric";
+        const SQLITE: &str =
+            "DELETE FROM ingress_sm_refs WHERE sm_ingress_id = ? AND ingress_ordinal = ?";
         let sql = dialect_sql(transaction, POSTGRES, SQLITE);
         transaction
             .transaction_mut()
             .execute(
                 sql,
-                crate::db_params![sm_ingress_id.to_storage().to_string()],
+                crate::db_params![
+                    sm_ingress_id.to_storage().to_string(),
+                    ordinal.to_storage().to_string()
+                ],
             )
             .await
             .map_err(Into::into)
@@ -419,7 +428,11 @@ impl SmIngressStreamRepository {
         stream_id: &SmSessionId,
         id: SmIngressId,
     ) -> Result<(), IngressUowError> {
-        let sql = dialect_sql(transaction, "INSERT INTO ingress_sm_streams (sm_ingress_id, stream_id) VALUES (?::uuid, ?) ON CONFLICT (stream_id) DO NOTHING", "INSERT INTO ingress_sm_streams (sm_ingress_id, stream_id) VALUES (?, ?) ON CONFLICT (stream_id) DO NOTHING");
+        let sql = dialect_sql(
+            transaction,
+            "INSERT INTO ingress_sm_streams (sm_ingress_id, stream_id) VALUES (?::uuid, ?) ON CONFLICT (stream_id) DO NOTHING",
+            "INSERT INTO ingress_sm_streams (sm_ingress_id, stream_id) VALUES (?, ?) ON CONFLICT (stream_id) DO NOTHING",
+        );
         transaction
             .transaction_mut()
             .execute(
@@ -657,7 +670,11 @@ impl EffectReceiptRepository {
         kind: EffectReceiptKind,
         hash: &[u8; 32],
     ) -> Result<bool, IngressUowError> {
-        let sql = dialect_sql(transaction, "SELECT 1 FROM ingress_effect_receipts WHERE message_key = ?::uuid AND kind = ? AND semantic_identity_hash = ?", "SELECT 1 FROM ingress_effect_receipts WHERE message_key = ? AND kind = ? AND semantic_identity_hash = ?");
+        let sql = dialect_sql(
+            transaction,
+            "SELECT 1 FROM ingress_effect_receipts WHERE message_key = ?::uuid AND kind = ? AND semantic_identity_hash = ?",
+            "SELECT 1 FROM ingress_effect_receipts WHERE message_key = ? AND kind = ? AND semantic_identity_hash = ?",
+        );
         let mut rows = transaction
             .transaction_mut()
             .query(
@@ -769,14 +786,22 @@ impl EffectIntentRepository {
         transaction: &mut IngressUowTransaction<'_>,
         message_key: MessageKey,
         planned: &[IngressEffectIntent],
+        existing_authority: bool,
     ) -> Result<ReconcileVerdict, IngressUowError> {
-        Self::reconcile_on_transaction(transaction.transaction_mut(), message_key, planned).await
+        Self::reconcile_on_transaction(
+            transaction.transaction_mut(),
+            message_key,
+            planned,
+            existing_authority,
+        )
+        .await
     }
 
     pub(super) async fn reconcile_on_transaction(
         transaction: &mut crate::db::Transaction<'_>,
         message_key: MessageKey,
         planned: &[IngressEffectIntent],
+        existing_authority: bool,
     ) -> Result<ReconcileVerdict, IngressUowError> {
         let postgres = transaction.postgres_connection().is_some();
         let mut message = transaction
@@ -796,7 +821,7 @@ impl EffectIntentRepository {
 
         let planned = canonical_effects(planned)?;
         let recorded = load_effects(transaction, message_key, postgres).await?;
-        let (verdict, omissions) = compare_effects(&recorded, &planned);
+        let (verdict, omissions) = compare_effects(&recorded, &planned, existing_authority);
         if matches!(verdict, ReconcileVerdict::Contradiction { .. }) {
             return Ok(verdict);
         }
@@ -884,6 +909,7 @@ async fn load_effects(
 fn compare_effects<'a>(
     recorded: &[RecordedEffect],
     planned: &'a [IngressEffectIntent],
+    existing_authority: bool,
 ) -> (ReconcileVerdict, Vec<&'a IngressEffectIntent>) {
     let mut omissions = Vec::new();
     let mut divergent = std::collections::BTreeSet::new();
@@ -928,13 +954,18 @@ fn compare_effects<'a>(
                     );
                 }
             }
-            // A reconnect must not invent a new carbon audience after commit.
-            // Only obligations in the original local or remote fanout retry.
-            if !recorded.is_empty()
-                && (matches!(
-                    intent,
-                    IngressEffectIntent::RelayCarbons { .. } | IngressEffectIntent::Carbons { .. }
-                ) || !inbox_omission_is_recorded_audience(recorded, intent, planned))
+            // Replays cannot invent obligations for an empty acceptance or
+            // add observers and carbon audiences from current policy. A remote
+            // room owner may still establish its authority on first acceptance.
+            if (existing_authority && recorded.is_empty())
+                || (!recorded.is_empty()
+                    && (matches!(
+                        intent,
+                        IngressEffectIntent::RelayCarbons { .. }
+                            | IngressEffectIntent::Carbons { .. }
+                    ) || matches!(intent, IngressEffectIntent::RoomObserver { room, .. }
+                        if !room_authority_pending(recorded, room))
+                        || !inbox_omission_is_recorded_audience(recorded, intent, planned)))
             {
                 divergent.insert(intent.kind());
             } else {
@@ -959,7 +990,7 @@ fn compare_effects<'a>(
             divergent.insert(row.intent.kind());
         }
     }
-    let verdict = if recorded.is_empty() {
+    let verdict = if recorded.is_empty() && !existing_authority {
         ReconcileVerdict::FirstCommit
     } else if !divergent.is_empty() {
         ReconcileVerdict::Divergent {
@@ -976,6 +1007,16 @@ fn compare_effects<'a>(
         ReconcileVerdict::Consistent
     };
     (verdict, omissions)
+}
+
+fn room_authority_pending(recorded: &[RecordedEffect], target_room: &BareJid) -> bool {
+    recorded.iter().any(|row| {
+        matches!(&row.intent,
+        IngressEffectIntent::DispatchToRoomRemote { room, .. } if room == target_room)
+    }) && !recorded.iter().any(|row| {
+        matches!(&row.intent,
+            IngressEffectIntent::ArchiveAuthoritative { archive, .. } if archive == target_room)
+    })
 }
 
 /// A later room snapshot cannot turn a newly joined member into an original
@@ -1016,13 +1057,7 @@ fn inbox_omission_is_recorded_audience(
     };
     // A relayed owner is accepting the room authority for the first time, not
     // replanning an already committed room audience.
-    if recorded.iter().any(|row| {
-        matches!(&row.intent,
-        IngressEffectIntent::DispatchToRoomRemote { room, .. } if room == &partner)
-    }) && !recorded.iter().any(|row| {
-        matches!(&row.intent,
-            IngressEffectIntent::ArchiveAuthoritative { archive, .. } if archive == &partner)
-    }) {
+    if room_authority_pending(recorded, &partner) {
         return true;
     }
     let has_inbox_authority = recorded.iter().any(|row| {
@@ -1338,3 +1373,7 @@ impl ClaimRepository {
         })
     }
 }
+
+#[cfg(test)]
+#[path = "reconciliation_authority_tests.rs"]
+mod reconciliation_authority_tests;

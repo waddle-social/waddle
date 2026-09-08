@@ -541,11 +541,13 @@ async fn connection_reply_receipt_after_transport_write_with_remote(
                 OrderedRelayAck, OrderedRelayChannel, OrderedRelayOrigin, OrderedRelayRecipient,
                 OrderedRelaySequence,
             };
+            let owner_receipts = completion.frame_receipts();
             let token = pending_remote_receipts
                 .register(completion)
                 .expect("owner token");
             let ack = OrderedRelayAck {
                 reply_receipt: Some(token),
+                owner_receipts,
                 channel: OrderedRelayChannel {
                     origin: OrderedRelayOrigin::SmSession(
                         waddle_xmpp::pending_delivery::SmSessionId::new("remote-origin"),
@@ -562,10 +564,8 @@ async fn connection_reply_receipt_after_transport_write_with_remote(
                     .frames
                     .iter()
                     .map(|frame| {
-                        let super::super::frame::ResponseFrame::Stanza(stanza) = frame else {
-                            panic!("owner reply must be a stanza");
-                        };
-                        crate::clustering::codec::RemoteStanza((**stanza).clone())
+                        let stanza = frame.stanza().expect("owner reply must be a stanza");
+                        crate::clustering::codec::RemoteStanza(stanza.clone())
                     })
                     .collect(),
             };
@@ -583,6 +583,15 @@ async fn connection_reply_receipt_after_transport_write_with_remote(
         };
         let mut origin_report = crate::ingress::ExecutionReport::default();
         origin_report.retain_relay_frame_completion(completion);
+        if remote_owner {
+            // This fixture replaced execute_committed_message's prepared frames
+            // with decoded relay stanzas. Restore the production last-frame
+            // carrier using the reconstructed origin report.
+            let last = responses.frames.pop().expect("relay reply frame");
+            responses
+                .frames
+                .push(last.with_ingress_receipts(origin_report.frame_receipts()));
+        }
         responses.ingress_reports.push(origin_report);
     }
     assert_eq!(frame_receipt_state(&state).await, (0, 0));
@@ -651,6 +660,43 @@ async fn connection_reply_receipt_after_transport_write_with_remote(
         u64::from(transport_lost),
         "only a failed frame completion increments unresolved effects, exactly once"
     );
+    if transport_lost && nested_owner && resumable {
+        // The original owner report and remote token registry are gone. Only
+        // identities retained on the SM carrier can authorize completion.
+        let frames = conn
+            .sm_state
+            .get_stanzas_to_resend(0)
+            .into_iter()
+            .map(|entry| {
+                super::super::frame::ResponseFrame::from_serialized_xml(entry.stanza_xml)
+                    .with_ingress_receipts(entry.ingress_receipts)
+            });
+        let mut replay = super::super::frame::ResponseBatch::from_frames(frames);
+        assert_eq!(replay.frames.len(), 1);
+        assert_eq!(replay.frames[0].ingress_receipts().len(), 1);
+        let mut resumed_sink = Box::pin(futures::sink::unfold((), |(), _: Message| async {
+            Ok::<(), std::io::Error>(())
+        }));
+        let replayed = write_ingress_response_batch_with_admission(
+            &mut resumed_sink,
+            &mut reader,
+            &state,
+            &mut conn,
+            &mut replay,
+            BatchSmPolicy::ReplaySuppressed,
+            BatchAuthority {
+                permit: &permit,
+                shutdown: &shutdown,
+            },
+        )
+        .await;
+        assert!(matches!(replayed.outcome, BatchWriteOutcome::Continue));
+        assert_eq!(
+            frame_receipt_state(&state).await,
+            (1, 1),
+            "resume settles and terminalizes the owner row without its token"
+        );
+    }
 }
 
 #[tokio::test]
@@ -882,7 +928,7 @@ mod fence;
 
 #[cfg(feature = "clustering")]
 #[tokio::test]
-async fn ingress_remote_owner_ack_transport_loss_preserves_pending_receipts() {
+async fn ingress_remote_owner_ack_resume_settles_receipts_after_token_loss() {
     connection_reply_receipt_after_transport_write_with_remote(
         create_test_websocket_state().await,
         true,
@@ -895,7 +941,7 @@ async fn ingress_remote_owner_ack_transport_loss_preserves_pending_receipts() {
 
 #[cfg(feature = "clustering")]
 #[tokio::test]
-async fn ingress_remote_owner_ack_transport_loss_preserves_pending_receipts_postgres() {
+async fn ingress_remote_owner_ack_resume_settles_receipts_after_token_loss_postgres() {
     postgres_connection_reply_receipt_with_remote(true, true, true).await;
 }
 

@@ -16,11 +16,11 @@ use waddle_xmpp::ownership::{
 fn changed_muc_proxy_wire_shapes_have_new_remote_message_ids() {
     assert_eq!(
         <RelayActor as kameo::remote::RemoteMessage<RelayDeliverOrdered>>::REMOTE_ID,
-        "waddle.clustering.relay.deliver_ordered.v6"
+        "waddle.clustering.relay.deliver_ordered.v8"
     );
     assert_eq!(
         <RelayActor as kameo::remote::RemoteMessage<RelayRouteRemoteResourceStanza>>::REMOTE_ID,
-        "waddle.clustering.relay.remote_resource_route.v4"
+        "waddle.clustering.relay.remote_resource_route.v5"
     );
 }
 
@@ -227,7 +227,7 @@ impl crate::clustering::allowlist::AllowlistStore for NoopAllowlist {
     }
 }
 
-fn timeout_envelope() -> RemoteStanzaEnvelope {
+pub(super) fn timeout_envelope() -> RemoteStanzaEnvelope {
     use waddle_xmpp::pending_delivery::SmSessionId;
     use xmpp_parsers::message::{Lang, Message};
 

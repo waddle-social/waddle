@@ -120,6 +120,30 @@ pub(super) fn bounce_nonexistent(deps: &Deps<'_>, stanza: &Stanza) -> Vec<Stanza
             }
         }
         for reply in bounce_for_nonexistent_account(stanza, None) {
+            if let Stanza::Message(message) = &reply {
+                if let Some(error) = message
+                    .payloads
+                    .iter()
+                    .rev()
+                    .find_map(|payload| StanzaError::try_from(payload.clone()).ok())
+                    .and_then(|error| {
+                        waddle_xmpp::ingress::FrozenStanzaError::from_xmpp(&error).ok()
+                    })
+                {
+                    deps.effects
+                        .set_rejection(super::super::effects::PlanRejection::PolicyDenied(
+                            super::super::effects::PolicyDeniedReason::StanzaError(error.clone()),
+                        ));
+                    if let Some(recipient) =
+                        message.to.as_ref().and_then(|jid| jid.try_as_full().ok())
+                    {
+                        deps.capture_intent(IngressEffectIntent::ErrorReply {
+                            recipient: recipient.clone(),
+                            error,
+                        });
+                    }
+                }
+            }
             record(
                 deps,
                 ExternalDeliveryEffect::UndeliverableBounce {
@@ -173,10 +197,10 @@ pub(super) async fn deliver_full(
         return FullJidDeliveryOutcome::Delivered;
     }
     let detached = match deps.sm_session_registry {
-        Some(sm) => sm
-            .detached_resources_for_user(&target.to_bare())
-            .await
-            .unwrap_or_default(),
+        Some(sm) => detached_inventory(
+            deps,
+            sm.detached_resources_for_user(&target.to_bare()).await,
+        ),
         None => Vec::new(),
     };
     if detached.contains(target) {
@@ -208,4 +232,17 @@ pub(super) fn bounce_unavailable(deps: &Deps<'_>, stanza: &Stanza) -> Option<Sta
     } else {
         bounce_undeliverable_iq(stanza, deps.sfu)
     }
+}
+
+/// Preserve the infrastructure error before callers inspect the recipient set.
+pub(super) fn detached_inventory(
+    deps: &Deps<'_>,
+    result: Result<Vec<FullJid>, waddle_xmpp::stream_management::SmRegistryError>,
+) -> Vec<FullJid> {
+    result.unwrap_or_else(|error| {
+        deps.effects
+            .fail_plan(super::super::effects::PlanFailure::DetachedInventoryRead);
+        warn!(%error, "detached delivery inventory unavailable");
+        Vec::new()
+    })
 }

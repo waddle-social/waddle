@@ -18,6 +18,8 @@ use super::DEFAULT_SESSION_TIMEOUT_SECS;
 /// XEP-0198 §5 line 364.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DetachedUnackedStanza {
+    /// Ingress obligations confirmed only after this ordered replay prefix is written.
+    pub ingress_receipts: Vec<crate::stream_management::SmIngressFrameReceipt>,
     /// XEP-0198 outbound sequence number assigned to this stanza.
     pub sequence: u32,
     /// Serialized stanza XML (re-parsed on demand by the promotion
@@ -195,6 +197,7 @@ impl DetachedSession {
             self.mark_replay_gap_through(evicted.sequence);
         }
         self.unacked_stanzas.push(DetachedUnackedStanza {
+            ingress_receipts: Vec::new(),
             sequence: self.outbound_count,
             stanza_xml,
             original_receipt_at,
@@ -231,6 +234,7 @@ impl DetachedSession {
             self.outbound_count = sequence;
         }
         self.unacked_stanzas.push(DetachedUnackedStanza {
+            ingress_receipts: Vec::new(),
             sequence,
             stanza_xml,
             original_receipt_at,

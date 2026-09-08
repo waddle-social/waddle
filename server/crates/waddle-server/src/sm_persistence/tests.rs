@@ -64,6 +64,7 @@ fn fixture_unacked(stream_id: &str, sequence: u32) -> PersistedUnackedStanza {
         .bodies
         .insert(xmpp_parsers::message::Lang::new(), format!("m{sequence}"));
     PersistedUnackedStanza {
+        ingress_receipts: Vec::new(),
         stream_id: SmSessionId::new(stream_id),
         sequence,
         stanza: Box::new(Stanza::Message(message)),
@@ -1312,3 +1313,6 @@ async fn postgres_schema_has_no_shadow_ordinal() {
         .expect("column count");
     assert_eq!(count, 0);
 }
+
+#[path = "ingress_receipt_tests.rs"]
+mod ingress_receipt_tests;

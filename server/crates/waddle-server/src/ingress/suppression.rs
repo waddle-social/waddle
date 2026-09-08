@@ -14,8 +14,9 @@ pub fn filter_external_effects(
     plan: &IngressPlan,
     verdict: &ReconcileVerdict,
     archive_outcomes: &[(PlanEffectDependency, MamTxStoreOutcome)],
+    unreceipted: &[waddle_xmpp::ingress::IngressEffectIntent],
 ) -> Vec<ExternalEffect> {
-    external_effect_indices(plan, verdict, archive_outcomes)
+    external_effect_indices(plan, verdict, archive_outcomes, unreceipted)
         .into_iter()
         .filter_map(|index| match &plan.plan[index].effect {
             Effect::External(effect) => Some(effect.clone()),
@@ -28,6 +29,7 @@ pub(crate) fn external_effect_indices(
     plan: &IngressPlan,
     verdict: &ReconcileVerdict,
     archive_outcomes: &[(PlanEffectDependency, MamTxStoreOutcome)],
+    unreceipted: &[waddle_xmpp::ingress::IngressEffectIntent],
 ) -> Vec<usize> {
     let duplicate = !matches!(verdict, ReconcileVerdict::FirstCommit);
     plan.plan
@@ -44,9 +46,17 @@ pub(crate) fn external_effect_indices(
                 return None;
             }
             if duplicate
+                && unresolved_aggregate_delivery(effect, unreceipted)
+                && !sender_delivery(effect, plan.sanitized_message.from.as_ref())
+                && !subject_rebroadcast(effect)
+            {
+                return None;
+            }
+            if duplicate
                 && duplicate_policy(planned) == PlanSuppressionPolicy::SenderOnly
                 && !sender_delivery(effect, plan.sanitized_message.from.as_ref())
                 && !subject_rebroadcast(effect)
+                && !unreceipted_repair(effect, unreceipted)
             {
                 return None;
             }
@@ -78,6 +88,35 @@ fn relay_carbons_recorded(plan: &IngressPlan, effect: &ExternalEffect) -> bool {
             kind: recorded_kind,
         } if owner == recorded_owner && exclude == recorded_exclude && kind == recorded_kind)
     })
+}
+
+/// Repair recorded routes whose completion can be correlated individually.
+/// Detached batches have only an aggregate receipt, so replay cannot distinguish
+/// resources already appended before a partial failure (#1658), even if a
+/// resumed resource changes the retry's effect into a live peer delivery.
+fn unreceipted_repair(
+    effect: &ExternalEffect,
+    unreceipted: &[waddle_xmpp::ingress::IngressEffectIntent],
+) -> bool {
+    !matches!(
+        effect,
+        ExternalEffect::Delivery(ExternalDeliveryEffect::QueueDetached { .. })
+    ) && super::recorded::recorded_route_obligation(unreceipted, effect)
+}
+
+/// Ordinary direct fanout has no per-resource progress proof. A resumed
+/// resource must not bypass that limit merely by becoming an Always live route.
+fn unresolved_aggregate_delivery(
+    effect: &ExternalEffect,
+    unreceipted: &[waddle_xmpp::ingress::IngressEffectIntent],
+) -> bool {
+    matches!(effect, ExternalEffect::Delivery(_))
+        && unreceipted.iter().any(|intent| {
+            matches!(intent,
+                waddle_xmpp::ingress::IngressEffectIntent::RouteDirect { fanout, route_identity, .. }
+                    if fanout.len() > 1
+                        && super::recorded::external_route_identity(effect) == Some(route_identity))
+        })
 }
 
 fn duplicate_policy(planned: &PlannedEffect) -> PlanSuppressionPolicy {
@@ -224,12 +263,12 @@ mod tests {
                 room_execution: RoomExecutionPath::None,
             };
             assert_eq!(
-                external_effect_indices(&plan, &ReconcileVerdict::FirstCommit, &[]),
+                external_effect_indices(&plan, &ReconcileVerdict::FirstCommit, &[], &[]),
                 vec![0, 1]
             );
             let expected = if has_thread { vec![0] } else { vec![0, 1] };
             assert_eq!(
-                external_effect_indices(&plan, &ReconcileVerdict::Consistent, &[]),
+                external_effect_indices(&plan, &ReconcileVerdict::Consistent, &[], &[]),
                 expected
             );
         }
@@ -289,7 +328,7 @@ mod tests {
                 vec![]
             };
             assert_eq!(
-                filter_external_effects(&plan, &verdict, &outcomes).len(),
+                filter_external_effects(&plan, &verdict, &outcomes, &[]).len(),
                 expected
             );
         }
@@ -342,6 +381,7 @@ mod tests {
                             recipient.clone().into(),
                         )),
                     )],
+                    &[],
                 )
                 .len(),
                 expected,
@@ -376,11 +416,11 @@ mod tests {
             room_execution: RoomExecutionPath::None,
         };
         assert_eq!(
-            external_effect_indices(&plan, &ReconcileVerdict::FirstCommit, &[]),
+            external_effect_indices(&plan, &ReconcileVerdict::FirstCommit, &[], &[]),
             vec![0, 1]
         );
         assert_eq!(
-            external_effect_indices(&plan, &ReconcileVerdict::Consistent, &[]),
+            external_effect_indices(&plan, &ReconcileVerdict::Consistent, &[], &[]),
             vec![0]
         );
     }

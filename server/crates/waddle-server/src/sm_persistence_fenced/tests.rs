@@ -81,6 +81,7 @@ fn fixture_unacked(stream_id: &str, sequence: u32) -> PersistedUnackedStanza {
         .bodies
         .insert(xmpp_parsers::message::Lang::new(), format!("m{sequence}"));
     PersistedUnackedStanza {
+        ingress_receipts: Vec::new(),
         stream_id: SmSessionId::new(stream_id),
         sequence,
         stanza: Box::new(waddle_xmpp::Stanza::Message(message)),

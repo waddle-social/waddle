@@ -134,13 +134,14 @@ async fn store_session_atomic_inner(
         let xml = serialize_stanza(&stanza.stanza)?;
         let receipt_ms = stanza.original_receipt_at.timestamp_millis();
         tx.execute(
-            "INSERT INTO sm_unacked (stream_id, sequence, stanza_xml, original_receipt_at_ms) \
-             VALUES (?, ?, ?, ?)",
+            "INSERT INTO sm_unacked (stream_id, sequence, stanza_xml, original_receipt_at_ms, ingress_receipts) \
+             VALUES (?, ?, ?, ?, ?)",
             crate::db_params![
                 stanza.stream_id.as_str().to_string(),
                 i64::from(stanza.sequence),
                 xml,
                 receipt_ms,
+                crate::sm_persistence::codec::encode_ingress_receipts(&stanza.ingress_receipts),
             ],
         )
         .await

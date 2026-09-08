@@ -6,7 +6,8 @@ use uuid::Uuid;
 use waddle_xmpp_core::mam::ThreadId;
 
 /// Canonical per-message identity resolved by the alias substrate.
-#[derive(Clone, Copy, PartialEq, Eq, Hash)]
+#[derive(Clone, Copy, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
+#[serde(transparent)]
 pub struct MessageKey(Uuid);
 
 impl MessageKey {

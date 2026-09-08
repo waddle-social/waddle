@@ -30,6 +30,15 @@ impl Replacements {
 
     pub(super) fn intent(&self, intent: &mut IngressEffectIntent) {
         match intent {
+            IngressEffectIntent::DmCallThreadState { state, .. } => {
+                if let Some(id) = state
+                    .active
+                    .as_mut()
+                    .and_then(|active| active.anchor.as_mut())
+                {
+                    self.id(id);
+                }
+            }
             IngressEffectIntent::ArchiveAuthoritative { stanza_id, .. }
             | IngressEffectIntent::SystemMessageArchive { stanza_id, .. }
             | IngressEffectIntent::CallSignal { stanza_id, .. }

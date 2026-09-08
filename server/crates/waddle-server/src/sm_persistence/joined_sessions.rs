@@ -11,7 +11,7 @@ pub(super) async fn list_all_sessions_with_unacked(
                     s.carbons_enabled, s.roster_interested, s.blocklist_interested, s.presence_available, \
                     s.presence_show, s.presence_status, s.presence_priority, \
                     s.replay_gap_through, s.presence_payloads, \
-                    u.sequence, u.stanza_xml, u.original_receipt_at_ms \
+                    u.sequence, u.stanza_xml, u.original_receipt_at_ms, u.ingress_receipts \
              FROM sm_sessions s \
              LEFT JOIN sm_unacked u ON s.stream_id = u.stream_id \
              ORDER BY s.stream_id ASC, u.sequence ASC",

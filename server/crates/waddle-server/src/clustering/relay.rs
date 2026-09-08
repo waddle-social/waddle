@@ -351,22 +351,47 @@ async fn finish_ordered_reservation(
     receiver: Arc<Mutex<OrderedRelayReceiverState>>,
     delivery_bridge: Arc<OrderedRelayDeliveryBridge>,
     reservation: OrderedRelayReservation,
-    completion: &mut Option<super::route_bridge::RelayFrameCompletion>,
+    receipts: Arc<Mutex<PendingReplyReceipts>>,
 ) -> OrderedRelayReply {
     match reservation {
         OrderedRelayReservation::Reserved(reserved) => {
+            // Reserve proof storage before any owner effects can commit. A dropped
+            // delivery task releases its reservation automatically.
+            let Some(permit) = receipts.lock().await.reserve() else {
+                return receiver.lock().await.abort_reserved_without_diversion(
+                    *reserved,
+                    OrderedRelayNackReason::ReplyReceiptBackpressure,
+                );
+            };
+            let mut completion = None;
             let envelope = reserved.envelope().clone();
             let delivery_timeout = delivery_bridge.reserved_delivery_effect_timeout();
             match tokio::time::timeout(
                 delivery_timeout,
-                delivery_bridge.deliver_reserved(&envelope, completion),
+                delivery_bridge.deliver_reserved(&envelope, &mut completion),
             )
             .await
             {
-                Ok(Ok(client_replies)) => receiver
-                    .lock()
-                    .await
-                    .commit_reserved_with_replies(*reserved, client_replies),
+                Ok(Ok(client_replies)) => {
+                    let owner_receipts = completion
+                        .as_ref()
+                        .map(|completion| completion.report.frame_receipts())
+                        .unwrap_or_default();
+                    let token = if let Some(completion) = completion {
+                        Some(receipts.lock().await.register_reserved(
+                            permit,
+                            crate::ingress::execute::RelayFrameReceiptCompletion::new(completion),
+                        ))
+                    } else {
+                        None
+                    };
+                    receiver.lock().await.commit_reserved_with_reply_receipt(
+                        *reserved,
+                        client_replies,
+                        token,
+                        owner_receipts,
+                    )
+                }
                 Ok(Err(reason)) => receiver.lock().await.abort_reserved(*reserved, reason),
                 Err(_) => {
                     tracing::warn!(
@@ -388,6 +413,18 @@ async fn finish_ordered_reservation(
                     }
                 }
             }
+        }
+        OrderedRelayReservation::Completed(OrderedRelayReply::Ack(ack)) => {
+            if let Some(token) = ack.reply_receipt {
+                if !receipts.lock().await.contains(token) {
+                    return OrderedRelayReply::Nack(OrderedRelayNack {
+                        channel: ack.channel,
+                        sequence: ack.sequence,
+                        reason: OrderedRelayNackReason::MaybeCommitted,
+                    });
+                }
+            }
+            OrderedRelayReply::Ack(ack)
         }
         OrderedRelayReservation::Completed(reply) => reply,
     }
@@ -419,7 +456,9 @@ fn is_idempotent_join_presence_envelope(envelope: &RemoteStanzaEnvelope) -> bool
 // v4: committed ingress canonical identity and principal on MUC proxy (#1657).
 // v5: origin receipt-confirmation token on ACK replies (#1657).
 // v6: ingress carbon fanout failure cutover; side-effect replies use v2.
-#[kameo::remote_message("waddle.clustering.relay.deliver_ordered.v6")]
+// v7: reply receipt backpressure.
+// v8: durable owner reply identities survive SM replay without the token.
+#[kameo::remote_message("waddle.clustering.relay.deliver_ordered.v8")]
 impl Message<RelayDeliverOrdered> for RelayActor {
     type Reply = kameo::reply::DelegatedReply<OrderedRelayReply>;
 
@@ -442,15 +481,8 @@ impl Message<RelayDeliverOrdered> for RelayActor {
         let reservation = receiver.lock().await.reserve(msg.envelope);
         let receipts = Arc::clone(&self.pending_reply_receipts);
         spawn_in_dispatch_span(ctx, span, async move {
-            let mut completion = None;
-            let mut reply =
-                finish_ordered_reservation(receiver, delivery_bridge, reservation, &mut completion)
-                    .await;
-            if let (OrderedRelayReply::Ack(ack), Some(completion)) = (&mut reply, completion) {
-                ack.reply_receipt = receipts.lock().await.register(
-                    crate::ingress::execute::RelayFrameReceiptCompletion::new(completion),
-                );
-            }
+            let reply =
+                finish_ordered_reservation(receiver, delivery_bridge, reservation, receipts).await;
             record_ordered_relay_reply(&reply);
             reply
         })
@@ -670,6 +702,7 @@ pub struct RelayRouteRemoteResourceStanza {
 #[derive(Debug, Clone, Serialize, Deserialize, Reply)]
 pub struct RelayRouteRemoteResourceStanzaReply {
     pub reply_receipt: Option<RelayReplyReceiptToken>,
+    pub owner_receipts: Vec<waddle_xmpp::stream_management::SmIngressFrameReceipt>,
     pub outcome: RemoteResourceRouteOutcome,
     pub replies: Vec<RemoteStanza>,
     #[serde(default)]
@@ -680,7 +713,8 @@ pub struct RelayRouteRemoteResourceStanzaReply {
 // that target's wire shape changes. v2 adds the typed MUC proxy origin (#1703).
 // v3 adds canonical ingress identity and principal for room-owner admission (#1657).
 // v4 adds origin receipt confirmation for reply frames (#1657).
-#[kameo::remote_message("waddle.clustering.relay.remote_resource_route.v4")]
+// v5 adds durable owner reply identities for SM replay (#1657).
+#[kameo::remote_message("waddle.clustering.relay.remote_resource_route.v5")]
 impl Message<RelayRouteRemoteResourceStanza> for RelayActor {
     type Reply = kameo::reply::DelegatedReply<RelayRouteRemoteResourceStanzaReply>;
 
@@ -694,13 +728,24 @@ impl Message<RelayRouteRemoteResourceStanza> for RelayActor {
         let bridge = Arc::clone(&self.ordered_delivery_bridge);
         let receipts = Arc::clone(&self.pending_reply_receipts);
         spawn_in_dispatch_span(ctx, span, async move {
+            let Some(permit) = receipts.lock().await.reserve() else {
+                return RelayRouteRemoteResourceStanzaReply {
+                    reply_receipt: None,
+                    owner_receipts: Vec::new(),
+                    outcome: RemoteResourceRouteOutcome::Unavailable,
+                    replies: Vec::new(),
+                    recipient_sm_append_streams: Vec::new(),
+                };
+            };
             let mut completion = None;
             let mut reply = bridge
                 .route_remote_resource_stanza_on_owner(msg, &mut completion)
                 .await;
             if reply.outcome == RemoteResourceRouteOutcome::Delivered {
                 if let Some(completion) = completion {
-                    reply.reply_receipt = receipts.lock().await.register(completion);
+                    reply.owner_receipts = completion.frame_receipts();
+                    reply.reply_receipt =
+                        Some(receipts.lock().await.register_reserved(permit, completion));
                 }
             }
             reply

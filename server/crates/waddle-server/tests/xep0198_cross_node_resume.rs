@@ -209,11 +209,13 @@ fn detached_session(stream_id: &str, jid: &FullJid) -> DetachedSession {
         replay_gap_through: None,
         unacked_stanzas: vec![
             DetachedUnackedStanza {
+                ingress_receipts: Vec::new(),
                 sequence: 6,
                 stanza_xml: "<message xmlns='jabber:client'><body>six</body></message>".to_string(),
                 original_receipt_at: chrono::Utc::now(),
             },
             DetachedUnackedStanza {
+                ingress_receipts: Vec::new(),
                 sequence: 7,
                 stanza_xml: "<message xmlns='jabber:client'><body>seven</body></message>"
                     .to_string(),

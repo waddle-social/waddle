@@ -91,10 +91,11 @@ async fn direct_correction_preview_ref_target_resolves_to_wire_message_id() {
         &sender,
         "wire-msg-id",
     )
-    .await;
+    .await
+    .expect("target lookup");
 
     assert_eq!(
-        target.as_deref(),
+        target.as_ref().map(waddle_xmpp::mam::RichMessageId::as_str),
         Some("wire-msg-id"),
         "link preview refs are keyed by original direct message wire ids, not canonical MAM ids"
     );
@@ -125,10 +126,11 @@ async fn direct_correction_preview_ref_target_resolves_to_wire_message_id() {
         &sender,
         "client-origin-id",
     )
-    .await;
+    .await
+    .expect("target lookup");
 
     assert_eq!(
-        target.as_deref(),
+        target.as_ref().map(waddle_xmpp::mam::RichMessageId::as_str),
         Some("origin-wire-msg-id"),
         "origin-id corrections must still clear refs by the original direct wire message id"
     );

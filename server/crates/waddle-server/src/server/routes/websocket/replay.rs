@@ -493,6 +493,7 @@ async fn record_drained_terminal_xml(
         };
     }
     let entry = waddle_xmpp::stream_management::DetachedUnackedStanza {
+        ingress_receipts: Vec::new(),
         sequence: terminal.session.outbound_count.wrapping_add(1),
         stanza_xml: xml,
         original_receipt_at,

@@ -227,13 +227,14 @@ pub(super) fn observe_message(deps: &Deps<'_>, event: &super::OutboundEvent, dep
         return;
     };
     if message.type_ == MessageType::Error && message.to == original.from {
+        super::capture_serialized_error_reply(deps, &Stanza::Message(message.clone()));
         let mut sanitized = message.clone();
         sanitized.to = original.to;
         sanitized.from = original.from;
         sanitized.type_ = original.type_;
-        sanitized
-            .payloads
-            .retain(|payload| payload.name() != "error");
+        sanitized.payloads.retain(|payload| {
+            xmpp_parsers::stanza_error::StanzaError::try_from(payload.clone()).is_err()
+        });
         deps.effects.observe_message(&sanitized);
     } else if message.to == original.to && message.from == original.from {
         if let Some(sender) = message.from.as_ref().and_then(|jid| jid.try_as_full().ok()) {
@@ -339,6 +340,10 @@ mod tests {
         );
         let plan = plan_message_dispatch(&mut machine(), message, &deps).await;
         assert!(plan.error_reply.is_some());
+        assert!(plan.intents.iter().any(|intent| matches!(
+            intent,
+            waddle_xmpp::ingress::IngressEffectIntent::ErrorReply { .. }
+        )));
         assert!(!plan
             .sanitized_message
             .payloads
@@ -391,3 +396,7 @@ mod rich_target_plan_tests;
 #[cfg(all(test, feature = "clustering"))]
 #[path = "ownership_plan_tests.rs"]
 pub(crate) mod ownership_plan_tests;
+
+#[cfg(test)]
+#[path = "message_plan_envelope_tests.rs"]
+mod envelope_tests;

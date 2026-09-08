@@ -142,7 +142,7 @@ pub(super) async fn execute_external(
                 EffectOutcome::Unavailable
             }
         }
-        ExternalDirectEffect::DmCallThreadState { state } => {
+        ExternalDirectEffect::DmCallThreadState { state, receipt } => {
             let Some(socket) = deps.web_socket_state else {
                 return EffectOutcome::Unavailable;
             };
@@ -186,7 +186,7 @@ pub(super) async fn execute_external(
                     protocol.dm_call_thread_projections.remove(&key);
                 }
             }
-            EffectOutcome::Completed
+            EffectOutcome::ConfirmedIntents(receipt.into_iter().map(|intent| *intent).collect())
         }
         ExternalDirectEffect::NotificationActivity { owner, mutation } => {
             notification_activity(deps, &owner, mutation).await

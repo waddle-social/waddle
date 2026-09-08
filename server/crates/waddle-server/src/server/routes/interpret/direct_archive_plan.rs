@@ -6,7 +6,7 @@ use crate::server::routes::websocket::{ActiveCallThread, DmCallThreadKey, Pendin
 fn snapshot(deps: &Deps<'_>, key: DmCallThreadKey) -> Option<PlannedDmCallState> {
     for effect in deps.effects.snapshot().into_iter().rev() {
         if let super::effects::Effect::External(super::effects::ExternalEffect::Direct(
-            ExternalDirectEffect::DmCallThreadState { state },
+            ExternalDirectEffect::DmCallThreadState { state, .. },
         )) = effect.effect
         {
             if state.key == key {
@@ -75,10 +75,29 @@ fn snapshot(deps: &Deps<'_>, key: DmCallThreadKey) -> Option<PlannedDmCallState>
 }
 
 fn record(deps: &Deps<'_>, state: PlannedDmCallState) {
+    let sequence = deps
+        .effects
+        .snapshot()
+        .iter()
+        .filter(|effect| {
+            matches!(
+                effect.effect,
+                super::effects::Effect::External(super::effects::ExternalEffect::Direct(
+                    ExternalDirectEffect::DmCallThreadState { .. }
+                ))
+            )
+        })
+        .count() as u64;
+    let receipt = waddle_xmpp::ingress::IngressEffectIntent::DmCallThreadState {
+        sequence,
+        state: Box::new(state.clone()),
+    };
+    deps.capture_intent(receipt.clone());
     external(
         deps,
         ExternalDirectEffect::DmCallThreadState {
             state: Box::new(state),
+            receipt: Some(Box::new(receipt)),
         },
     );
 }
@@ -219,6 +238,62 @@ mod tests {
     };
 
     #[tokio::test]
+    async fn stored_jmi_propose_captures_frozen_call_state_before_execution() {
+        let socket = crate::server::routes::websocket::tests::create_test_websocket_state().await;
+        let protocol = &socket.deps.protocol;
+        let sink = PlanSink::new();
+        let capture = crate::ingress::IngressEffectCapture::new();
+        let mut deps = Deps::test_with_storage(
+            &protocol.connection_registry,
+            &protocol.mam_storage,
+            &protocol.inbox_storage,
+        );
+        deps.web_socket_state = Some(&socket);
+        deps.effects = &sink;
+        deps.ingress_effect_capture = Some(capture.clone());
+        let alice: BareJid = "alice@example.com".parse().expect("alice");
+        let bob: BareJid = "bob@example.com".parse().expect("bob");
+        let mut message = Message::new(Some(bob.clone().into()));
+        message.type_ = xmpp_parsers::message::MessageType::Chat;
+        waddle_xmpp::xep::xep0334::add_hint(&mut message, waddle_xmpp::xep::xep0334::Hint::Store);
+        message.payloads.push(
+            Element::builder("propose", waddle_xmpp::xep::xep0353::NS_JINGLE_MESSAGE)
+                .attr(minidom::rxml::xml_ncname!("id").to_owned(), "call-offer")
+                .append(
+                    Element::builder("description", waddle_xmpp::xep::xep0167::NS_JINGLE_RTP)
+                        .attr(minidom::rxml::xml_ncname!("media").to_owned(), "audio")
+                        .build(),
+                )
+                .build(),
+        );
+        project(
+            &deps,
+            &alice,
+            &alice,
+            &bob,
+            &StanzaId::new("stored", alice.clone().into()),
+            &message,
+        )
+        .await;
+        let intents = capture.snapshot().intents;
+        let [waddle_xmpp::ingress::IngressEffectIntent::DmCallThreadState { sequence: 0, state }] =
+            intents.as_slice()
+        else {
+            panic!("frozen offer intent")
+        };
+        assert_eq!(
+            state.pending.as_ref().expect("pending offer").initiator,
+            alice
+        );
+        assert!(
+            protocol.pending_dm_call_offers.is_empty(),
+            "Phase A did not mutate call state"
+        );
+        assert!(matches!(&sink.snapshot()[0].effect,
+            Effect::External(super::super::effects::ExternalEffect::Direct(ExternalDirectEffect::DmCallThreadState { receipt: Some(receipt), .. })) if receipt.as_ref() == &intents[0]));
+    }
+
+    #[tokio::test]
     async fn finish_overlay_projects_each_peer_once_across_both_archives() {
         let registry = ConnectionRegistry::new();
         let mam: Arc<dyn MamStorage> = Arc::new(InMemoryMamStorage::new());
@@ -310,7 +385,7 @@ mod tests {
         for effect in sink.take().0 {
             assert!(matches!(
                 ImmediateSink.execute(effect, deps).await,
-                EffectOutcome::Completed
+                EffectOutcome::ConfirmedIntents(_)
             ));
         }
     }

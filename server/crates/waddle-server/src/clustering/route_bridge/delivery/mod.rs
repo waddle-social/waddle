@@ -41,6 +41,7 @@ pub(super) fn remote_resource_route_reply(
 ) -> RelayRouteRemoteResourceStanzaReply {
     RelayRouteRemoteResourceStanzaReply {
         reply_receipt: None,
+        owner_receipts: Vec::new(),
         outcome,
         replies: Vec::new(),
         recipient_sm_append_streams: Vec::new(),
@@ -59,7 +60,10 @@ pub(super) fn remote_resource_muc_outcome(
                 Some(token) => OrderedRelayMucProxyOutcome::PendingFrames {
                     frames,
                     completion: crate::ingress::execute::RelayFrameReceiptCompletion::remote(
-                        owner, token, stop_token,
+                        owner,
+                        token,
+                        reply.owner_receipts,
+                        stop_token,
                     ),
                 },
                 None => OrderedRelayMucProxyOutcome::Delivered(frames),

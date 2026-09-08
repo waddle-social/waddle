@@ -14,7 +14,7 @@ use xmpp_parsers::stanza_error::{DefinedCondition, ErrorType, StanzaError};
 use crate::auth::Session;
 use crate::db::ValueExt;
 use crate::server::routes::interpret::effects::{
-    Effect, EffectOutcome, ExternalEffect, PlannedEffect,
+    Effect, EffectOutcome, ExternalEffect, PlanFailure, PlannedEffect,
 };
 use crate::server::routes::websocket::WebSocketState;
 
@@ -72,15 +72,11 @@ pub(super) async fn handle_group_dm_mediated_invite(
         .reply_timeout(std::time::Duration::from_secs(5))
         .await
     else {
-        return Some(vec![error_reply(
-            incoming,
-            bound_jid,
-            deps,
-            GroupDmInviteError::InternalServerError,
-            "Internal server error.",
-        )]);
+        deps.effects.fail_plan(PlanFailure::RoomSnapshotUnavailable);
+        return Some(vec![]);
     };
     if context.affiliation < waddle_xmpp::Affiliation::Member {
+        retain_group_dm_replay_actor(incoming, bound_jid, &room_jid, &invitee, &room_actor, deps);
         return Some(vec![error_reply(
             incoming,
             bound_jid,
@@ -103,16 +99,12 @@ pub(super) async fn handle_group_dm_mediated_invite(
                 error = %error,
                 "Suppressing group-DM invite because blocklist lookup failed"
             );
-            return Some(vec![error_reply(
-                incoming,
-                bound_jid,
-                deps,
-                GroupDmInviteError::InternalServerError,
-                "Internal server error.",
-            )]);
+            deps.effects.fail_plan(PlanFailure::InvitePrerequisiteRead);
+            return Some(vec![]);
         }
     };
     if invitee_blocklist.contains_jid(&jid::Jid::from(bound_jid.clone())) {
+        retain_group_dm_replay_actor(incoming, bound_jid, &room_jid, &invitee, &room_actor, deps);
         return Some(vec![]);
     }
 
@@ -132,6 +124,7 @@ pub(super) async fn handle_group_dm_mediated_invite(
     )
     .await
     {
+        retain_group_dm_replay_actor(incoming, bound_jid, &room_jid, &invitee, &room_actor, deps);
         return Some(vec![xmpp_error_reply(incoming, bound_jid, deps, error)]);
     }
     let Ok(invitee_context) = room_actor
@@ -144,15 +137,11 @@ pub(super) async fn handle_group_dm_mediated_invite(
         .reply_timeout(std::time::Duration::from_secs(5))
         .await
     else {
-        return Some(vec![error_reply(
-            incoming,
-            bound_jid,
-            deps,
-            GroupDmInviteError::InternalServerError,
-            "Internal server error.",
-        )]);
+        deps.effects.fail_plan(PlanFailure::RoomSnapshotUnavailable);
+        return Some(vec![]);
     };
-    if invitee_context.affiliation >= waddle_xmpp::Affiliation::Member {
+    let already_member = invitee_context.affiliation >= waddle_xmpp::Affiliation::Member;
+    if already_member && !deps.effects.is_planning() {
         return Some(vec![error_reply(
             incoming,
             bound_jid,
@@ -231,6 +220,7 @@ pub(super) async fn handle_group_dm_mediated_invite(
             invite: ledger.clone(),
         }
     });
+    let recorded_at = chrono::Utc::now();
     // #1264: record the outstanding invite so a later XEP-0045 §7.8.2
     // `<decline/>` from this invitee verifies against the ledger and
     // routes to this inviter.
@@ -240,7 +230,7 @@ pub(super) async fn handle_group_dm_mediated_invite(
             PlannedEffect::new(Effect::External(ExternalEffect::InviteLedger(
                 super::muc_invite::InviteLedgerMutation::Record {
                     invite: ledger.clone(),
-                    recorded_at: chrono::Utc::now(),
+                    recorded_at,
                     failure: grant_failure.clone().map(Box::new),
                 },
             ))).with_dependency(crate::server::routes::interpret::effects::PlanEffectDependency::AfterRoomMembership {
@@ -337,9 +327,240 @@ pub(super) async fn handle_group_dm_mediated_invite(
     deps.capture_intent(IngressEffectIntent::GroupDmMembershipGrant {
         grant: grant.clone(),
     });
+    deps.capture_intent(IngressEffectIntent::MucInviteLedger {
+        mutation: waddle_xmpp::ingress::MucInviteLedgerMutation {
+            room: grant.room.clone(),
+            invitee: grant.invitee.clone(),
+            inviter: grant.inviter.clone(),
+            action: waddle_xmpp::ingress::MucInviteLedgerAction::Recorded,
+            recorded_at: Some(recorded_at),
+        },
+    });
     deps.capture_intent(IngressEffectIntent::GroupDmInviteLedger { grant });
 
+    if already_member {
+        return Some(vec![error_reply(
+            incoming,
+            bound_jid,
+            deps,
+            GroupDmInviteError::Conflict,
+            "Invitee is already a group-DM member.",
+        )]);
+    }
+
     Some(vec![])
+}
+
+// Retain the actor handle before a current semantic rejection. Phase B drops
+// this provisional effect for a fresh denial; accepted replay replaces its
+// grant from recorded authority before execution.
+fn retain_group_dm_replay_actor(
+    incoming: &xmpp_parsers::message::Message,
+    sender: &jid::FullJid,
+    room: &jid::BareJid,
+    invitee: &jid::BareJid,
+    actor: &kameo::actor::ActorRef<waddle_xmpp::muc::room_actor::RoomActor>,
+    deps: &crate::server::routes::interpret::Deps<'_>,
+) {
+    if !deps.effects.is_planning() {
+        return;
+    }
+    deps.effects.record(PlannedEffect::new(Effect::External(
+        ExternalEffect::RoomMembershipMutation(
+            crate::server::routes::interpret::effects::early::RoomMembershipMutation::GroupDm(
+                Box::new(GroupDmMembershipMutation {
+                    grant: GroupDmMembershipGrant {
+                        room: room.clone(),
+                        invitee: invitee.clone(),
+                        inviter: sender.to_bare(),
+                        history_visibility: GroupDmHistoryVisibility::FromJoin {
+                            visible_after: chrono::Utc::now(),
+                        },
+                    },
+                    incoming: incoming.clone(),
+                    sender: sender.clone(),
+                    actor: actor.clone(),
+                }),
+            ),
+        ),
+    )));
+}
+
+/// Restore pending accepted invitation work after membership has already applied.
+/// The offered plan contributes only its current room actor; payloads and route
+/// identities come from the committed envelope and recorded obligations.
+/// Returns whether recorded invitation work was rebuilt into `plan`.
+pub(crate) fn restore_recorded_group_dm_invite(
+    plan: &mut crate::server::routes::interpret::effects::IngressPlan,
+    offered: &crate::server::routes::interpret::effects::IngressPlan,
+    recorded: &[IngressEffectIntent],
+    pending: &[IngressEffectIntent],
+    envelope: &crate::ingress_substrate::MessageEnvelope,
+) -> Result<bool, crate::ingress_uow::IngressUowError> {
+    use crate::server::routes::interpret::effects::{
+        early::RoomMembershipMutation, invite::MucUserRoute, PlanEffectDependency,
+        PlanSuppressionPolicy,
+    };
+    use waddle_xmpp::ingress::PendingDeliveryMutation;
+    use waddle_xmpp::pending_delivery::{PendingPayload, PendingRow};
+    let Some(grant) = recorded.iter().find_map(|intent| match intent {
+        IngressEffectIntent::GroupDmMembershipGrant { grant } => Some(grant),
+        _ => None,
+    }) else {
+        return Ok(false);
+    };
+    let Some(template) = offered.plan.iter().find_map(|effect| match &effect.effect {
+        Effect::External(ExternalEffect::RoomMembershipMutation(
+            RoomMembershipMutation::GroupDm(mutation),
+        )) if mutation.grant.room == grant.room && mutation.grant.invitee == grant.invitee => {
+            Some(mutation)
+        }
+        _ => None,
+    }) else {
+        return Ok(false);
+    };
+    // Current policy can still produce a complete plan with a different audience,
+    // history boundary, or route identity. Replace its invitation work even then:
+    // only the actor handle is allowed to come from today's plan.
+    plan.plan.retain(|effect| match &effect.effect {
+        Effect::External(ExternalEffect::RoomMembershipMutation(
+            RoomMembershipMutation::GroupDm(mutation),
+        )) => mutation.grant.room != grant.room || mutation.grant.invitee != grant.invitee,
+        Effect::External(ExternalEffect::InviteLedger(
+            super::muc_invite::InviteLedgerMutation::Record { invite, .. }
+            | super::muc_invite::InviteLedgerMutation::Claim { invite },
+        )) => invite.room != grant.room || invite.invitee != grant.invitee,
+        Effect::External(
+            ExternalEffect::RouteToPeer(route) | ExternalEffect::QueueOfflineDelivery(route),
+        ) => route.recipient != grant.invitee,
+        _ => true,
+    });
+    let incoming = envelope.message().clone();
+    let (_, inbound_invite) = super::muc_invite::mediated_invitee(&incoming)
+        .ok_or(crate::ingress_uow::IngressUowError::EffectIntentMessageMissing)?;
+    let mut mutation = (**template).clone();
+    mutation.grant = grant.clone();
+    mutation.incoming = incoming.clone();
+    let invite = crate::server::routes::websocket::muc_invites::OutstandingInvite {
+        room: grant.room.clone(),
+        invitee: grant.invitee.clone(),
+        inviter: grant.inviter.clone(),
+    };
+    plan.plan.push(PlannedEffect::new(Effect::External(
+        ExternalEffect::RoomMembershipMutation(RoomMembershipMutation::GroupDm(Box::new(mutation))),
+    )));
+    let ledger_intent = recorded.iter().find(|intent| {
+        matches!(intent,
+        IngressEffectIntent::MucInviteLedger { mutation }
+            if mutation.room == grant.room && mutation.invitee == grant.invitee
+                && mutation.inviter == grant.inviter
+                && mutation.action == waddle_xmpp::ingress::MucInviteLedgerAction::Recorded)
+    });
+    let recorded_at = ledger_intent
+        .and_then(|intent| match intent {
+            IngressEffectIntent::MucInviteLedger { mutation } => mutation.recorded_at,
+            _ => None,
+        })
+        .ok_or(crate::ingress_uow::IngressUowError::EffectIntentMessageMissing)?;
+    let ledger_pending = pending.iter().any(|intent| {
+        matches!(intent,
+        IngressEffectIntent::GroupDmInviteLedger { grant: saved } if saved == grant)
+            || Some(intent) == ledger_intent
+    });
+    if ledger_pending {
+        plan.plan.push(
+            PlannedEffect::new(Effect::External(ExternalEffect::InviteLedger(
+                super::muc_invite::InviteLedgerMutation::Record {
+                    invite: invite.clone(),
+                    recorded_at,
+                    failure: None,
+                },
+            )))
+            .with_dependency(PlanEffectDependency::AfterRoomMembership {
+                room: grant.room.clone(),
+                member: grant.invitee.clone(),
+            }),
+        );
+    }
+    let route = recorded.iter().find_map(|intent| match intent {
+        IngressEffectIntent::RouteDirect {
+            recipient,
+            fanout,
+            route_identity,
+        } if recipient == &grant.invitee
+            && pending.contains(intent)
+            && recorded
+                .iter()
+                .filter(|other| {
+                    matches!(other,
+                IngressEffectIntent::PendingDelivery {
+                    mutation: PendingDeliveryMutation::Transient { recipient, .. }
+                } if recipient == &grant.invitee)
+                })
+                .all(|other| pending.contains(other)) =>
+        {
+            Some((fanout, route_identity))
+        }
+        _ => None,
+    });
+    if let Some((resources, route_identity)) = route {
+        let row_id = recorded
+            .iter()
+            .find_map(|intent| match intent {
+                IngressEffectIntent::PendingDelivery {
+                    mutation: PendingDeliveryMutation::Transient { recipient, row_id },
+                } if recipient == &grant.invitee => Some(row_id.clone()),
+                _ => None,
+            })
+            .ok_or(crate::ingress_uow::IngressUowError::EffectIntentMessageMissing)?;
+        let access = match grant.history_visibility {
+            GroupDmHistoryVisibility::Full => {
+                waddle_xmpp::xep::xep_waddle_group_dm::GroupDmHistoryAccess::Full
+            }
+            GroupDmHistoryVisibility::FromJoin { .. } => {
+                waddle_xmpp::xep::xep_waddle_group_dm::GroupDmHistoryAccess::FromJoin
+            }
+        };
+        let mut message = incoming;
+        message.from = Some(grant.room.clone().into());
+        message.to = Some(grant.invitee.clone().into());
+        message.payloads = vec![build_server_mediated_invite_payload(
+            &grant.inviter,
+            &grant.invitee,
+            &inbound_invite,
+            access,
+        )];
+        let route = MucUserRoute {
+            route_identity: Some(route_identity.clone()),
+            recipient: grant.invitee.clone(),
+            resources: resources.clone(),
+            fallback: PendingRow {
+                id: row_id,
+                recipient: grant.invitee.clone(),
+                original_receipt_at: recorded_at,
+                payload: PendingPayload::Transient(Box::new(message.clone())),
+                flushed_in_session: None,
+                outbound_sequence: None,
+            },
+            message: Box::new(message),
+            failure: None,
+        };
+        let effect = if resources.is_empty() {
+            ExternalEffect::QueueOfflineDelivery(route)
+        } else {
+            ExternalEffect::RouteToPeer(route)
+        };
+        let mut planned = PlannedEffect::new(Effect::External(effect))
+            .with_suppression(PlanSuppressionPolicy::Always);
+        if ledger_pending {
+            planned = planned.with_dependency(PlanEffectDependency::AfterInviteLedger { invite });
+        }
+        plan.plan.push(planned);
+    }
+    plan.intents = recorded.to_vec();
+    plan.rejection = None;
+    plan.error_reply = None;
+    Ok(true)
 }
 
 #[derive(Clone, Debug)]
@@ -683,7 +904,7 @@ mod tests {
     use waddle_xmpp::stream_management::InMemorySmSessionRegistry;
     use waddle_xmpp::xep::xep0191::{BlockingStorage, BlockingStorageError};
 
-    fn group_dm_invite_message(
+    pub(super) fn group_dm_invite_message(
         room_jid: &jid::BareJid,
         sender: &jid::FullJid,
         invitee: &str,
@@ -704,7 +925,7 @@ mod tests {
         message
     }
 
-    async fn create_group_dm_room(
+    pub(super) async fn create_group_dm_room(
         state: &WebSocketState,
         room_jid: &jid::BareJid,
         channel_id: &str,
@@ -1208,7 +1429,7 @@ mod tests {
             .is_none());
     }
 
-    async fn invite_plan_with_blocking(
+    pub(super) async fn invite_plan_with_blocking(
         blocking: Arc<dyn BlockingStorage>,
         group_dm: bool,
     ) -> crate::server::routes::interpret::effects::IngressPlan {
@@ -1278,7 +1499,11 @@ mod tests {
         );
         crate::server::routes::interpret::plan_message_dispatch(
             &mut machine,
-            group_dm_invite_message(&room, &sender, "bob@example.com"),
+            {
+                let mut message = group_dm_invite_message(&room, &sender, "bob@example.com");
+                waddle_xmpp_core::xep0359::add_origin_id(&mut message, "invite-prerequisite-retry");
+                message
+            },
             &deps,
         )
         .await
@@ -1300,12 +1525,20 @@ mod tests {
             );
             assert!(plan.error_reply.is_none());
             assert!(plan.intents.is_empty());
-            assert!(plan.plan.is_empty());
+            if group_dm {
+                assert_eq!(plan.plan.len(), 1, "only replay actor metadata retained");
+                assert!(matches!(
+                    &plan.plan[0].effect,
+                    Effect::External(ExternalEffect::RoomMembershipMutation(_))
+                ));
+            } else {
+                assert!(plan.plan.is_empty());
+            }
         }
     }
 
     #[tokio::test]
-    async fn blocklist_lookup_failure_plans_a_complete_generic_error_for_group_dm_and_muc() {
+    async fn blocklist_lookup_failure_is_a_sticky_plan_failure_for_group_dm_and_muc() {
         struct FailingBlocking;
         #[derive(Debug, thiserror::Error)]
         #[error("synthetic blocking lookup failure")]
@@ -1327,33 +1560,11 @@ mod tests {
         }
         for group_dm in [false, true] {
             let plan = invite_plan_with_blocking(Arc::new(FailingBlocking), group_dm).await;
-            assert!(matches!(
-                plan.rejection,
-                Some(crate::server::routes::interpret::effects::PlanRejection::PolicyDenied(_))
-            ));
-            let Some(waddle_xmpp::Stanza::Message(reply)) = plan.error_reply else {
-                panic!("standard error reply")
-            };
-            assert_eq!(
-                reply.to,
-                Some("alice@example.com/web".parse().expect("sender"))
-            );
-            let payload = reply
-                .payloads
-                .iter()
-                .find(|payload| payload.name() == "error")
-                .expect("error payload");
-            let error = StanzaError::try_from(payload.clone()).expect("typed error");
-            assert_eq!(
-                error.defined_condition,
-                DefinedCondition::InternalServerError
-            );
-            assert_eq!(plan.intents.len(), 1);
-            assert!(matches!(
-                plan.intents[0],
-                IngressEffectIntent::ErrorReply { .. }
-            ));
-            assert_eq!(plan.plan.len(), 1);
+            assert_eq!(plan.failure, Some(PlanFailure::InvitePrerequisiteRead));
+            assert!(plan.rejection.is_none());
+            assert!(plan.error_reply.is_none());
+            assert!(plan.intents.is_empty());
+            assert!(plan.plan.is_empty());
         }
     }
 }
@@ -1530,3 +1741,7 @@ fn stanza_error_from_waddle_parts(
         },
     }
 }
+
+#[cfg(test)]
+#[path = "invite_plan_failure_tests.rs"]
+mod plan_failure_tests;

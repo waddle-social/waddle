@@ -145,7 +145,34 @@ async fn commit_attempt(
     let (key, alias) = if let Some((key, _)) = stream.as_ref().and_then(|stream| stream.bound) {
         (key, AliasOutcomeClass::Existing)
     } else if rejection.is_some() {
-        (MessageKey::new(), AliasOutcomeClass::NoOrigin)
+        // A committed denial owns its origin id like any acceptance: the alias
+        // is what lets a retransmission on a new wire position find the
+        // recorded authority instead of re-deciding under today's policy.
+        match submission.digest_input.origin() {
+            Some(origin) => match CanonicalMessageRepository::resolve_and_record_alias(
+                &mut tx,
+                submission.principal.bare_jid(),
+                &submission.target,
+                origin,
+                &digest,
+                MessageKey::new,
+            )
+            .await?
+            {
+                AliasResolution::Aliased(AliasOutcome::Existing(key)) => {
+                    (key, AliasOutcomeClass::Existing)
+                }
+                AliasResolution::Aliased(AliasOutcome::Inserted(key)) => {
+                    (key, AliasOutcomeClass::Inserted)
+                }
+                AliasResolution::NoOrigin(key) => (key, AliasOutcomeClass::NoOrigin),
+                AliasResolution::Aliased(AliasOutcome::Conflict(_)) => {
+                    rejection = Some(IngressDecisionClass::AliasConflict);
+                    (MessageKey::new(), AliasOutcomeClass::Conflict)
+                }
+            },
+            None => (MessageKey::new(), AliasOutcomeClass::NoOrigin),
+        }
     } else if let IngressStreamIdentity::Relayed { canonical, .. } = &submission.identity {
         (canonical.message_key, AliasOutcomeClass::Existing)
     } else if let Some(origin) = submission.digest_input.origin() {
@@ -198,11 +225,14 @@ async fn commit_attempt(
     // A policy change cannot replace an already committed acceptance with a
     // rejection. Preserve its recorded obligations; any work absent from this
     // new plan stays pending for recovery rather than inventing a new denial.
-    let replay_acceptance = bound && !super::rejection::is_recorded_rejection(&recorded);
+    let replay_acceptance =
+        alias == AliasOutcomeClass::Existing && !super::rejection::is_recorded_rejection(&recorded);
     let discard_new_denial = replay_acceptance && rejection.take().is_some();
     let recorded_ids = archive_ids(&recorded);
     let owner_first = matches!(&submission.identity, IngressStreamIdentity::Relayed { room, .. } if !recorded.iter().any(|intent| matches!(intent, IngressEffectIntent::ArchiveAuthoritative { by, .. } if by == room)));
-    let mut plan = if stream.as_ref().is_some_and(|stream| stream.bound.is_some())
+    // A recorded denial is authority: any retransmission that resolves to it
+    // re-emits the committed reply, whatever today's policy would decide.
+    let mut plan = if alias == AliasOutcomeClass::Existing
         && super::rejection::is_recorded_rejection(&recorded)
     {
         let recorded_envelope = CanonicalMessageRepository::load_envelope(&mut tx, key)
@@ -222,8 +252,37 @@ async fn commit_attempt(
     } else {
         super::restamp::restamp_plan(&submission.plan, &recorded_ids)
     };
+    // Recorded obligations still missing their receipts. These are the only
+    // ones a replay may repair; everything else is provably complete.
+    let mut unreceipted = Vec::new();
+    for intent in &recorded {
+        let receipt = super::durable::receipt_key(intent)?;
+        if !crate::ingress_uow::EffectReceiptRepository::contains(
+            &mut tx,
+            key,
+            receipt.kind,
+            &receipt.semantic_identity_hash,
+        )
+        .await?
+        {
+            unreceipted.push(intent.clone());
+        }
+    }
+    reconcile_invitation_delivery_receipts(&mut tx, key, &recorded, &mut unreceipted).await?;
+    // Recorded work this commit rebuilt from the canonical envelope. Such a
+    // repair is not a duplicate fan-out: today's plan could not produce it.
+    let mut reconstructed = false;
     if alias == AliasOutcomeClass::Existing {
         retain_live_recipient_plan(submission, &recorded, &mut plan);
+        let recorded_envelope = CanonicalMessageRepository::load_envelope(&mut tx, key)
+            .await?
+            .ok_or(IngressUowError::EffectIntentMessageMissing)?;
+        reconstructed = crate::server::routes::websocket::handlers::message::dm_pin::restore_recorded_dm_pin_effects(
+            &mut plan, &recorded, &recorded_envelope,
+        )?;
+        reconstructed |= crate::server::routes::websocket::handlers::message::group_dm_invite::restore_recorded_group_dm_invite(
+            &mut plan, &submission.plan, &recorded, &unreceipted, &recorded_envelope,
+        )?;
     }
     // Each generated message retains its own timestamp and assigning authority.
     for intent in &mut plan.intents {
@@ -263,7 +322,13 @@ async fn commit_attempt(
     {
         return Err(IngressUowError::EffectIntentMessageMissing);
     }
-    let verdict = EffectIntentRepository::reconcile(&mut tx, key, &plan.intents).await?;
+    let verdict = EffectIntentRepository::reconcile(
+        &mut tx,
+        key,
+        &plan.intents,
+        alias == AliasOutcomeClass::Existing,
+    )
+    .await?;
     if matches!(verdict, ReconcileVerdict::Contradiction { .. }) {
         return Err(IngressUowError::EffectIntentConflict);
     }
@@ -274,6 +339,22 @@ async fn commit_attempt(
         CanonicalMessageRepository::clear_terminal(&mut tx, key).await?;
     }
     let mut plan = super::recorded::apply_recorded_intents(&plan, &intents);
+    // An accepted canonical row with no recorded obligations authorizes nothing.
+    // Current policy may plan work for it again (a block that has since been
+    // lifted, a newly enabled extension); replaying it would invent obligations
+    // the original acceptance never committed (RFC 0018 §3).
+    if alias == AliasOutcomeClass::Existing && intents.is_empty() && !owner_first {
+        // Only the sender-visible reply the committed envelope already owns may
+        // still be written; it carries no obligation and mutates no host state.
+        plan.plan.retain(|planned| {
+            matches!(
+                &planned.effect,
+                crate::server::routes::interpret::effects::Effect::External(
+                    crate::server::routes::interpret::effects::ExternalEffect::Frame(_)
+                )
+            )
+        });
+    }
     if let Some(observer_envelope) = super::recorded::room_observer_envelope(&plan) {
         CanonicalMessageRepository::record_room_observer_envelope(&mut tx, key, &observer_envelope)
             .await?;
@@ -292,6 +373,17 @@ async fn commit_attempt(
             .ok_or(IngressUowError::EffectIntentMessageMissing)?;
         super::recorded::restore_subject_rejection_replies(&mut plan, &recorded_envelope)?;
     }
+    // Actor handles retained during planning are replay context, not authority.
+    // Only a recorded grant permits the reconstructed membership mutation.
+    plan.plan.retain(|planned| {
+        use crate::server::routes::interpret::effects::{early::RoomMembershipMutation, Effect, ExternalEffect};
+        match &planned.effect {
+            Effect::External(ExternalEffect::RoomMembershipMutation(RoomMembershipMutation::GroupDm(mutation))) =>
+                plan.intents.iter().any(|intent| matches!(intent,
+                    IngressEffectIntent::GroupDmMembershipGrant { grant } if grant == &mutation.grant)),
+            _ => true,
+        }
+    });
     let applied =
         super::durable::apply_durable(&mut tx, key, &plan, &recorded, &room_proof).await?;
     let ordinal = stream.as_ref().map(|stream| stream.ordinal);
@@ -312,8 +404,17 @@ async fn commit_attempt(
     } else {
         &verdict
     };
-    let external =
-        super::suppression::filter_external_effects(&plan, filter_verdict, &applied.archives);
+    let repairable = if reconstructed {
+        unreceipted.as_slice()
+    } else {
+        &[][..]
+    };
+    let external = super::suppression::filter_external_effects(
+        &plan,
+        filter_verdict,
+        &applied.archives,
+        repairable,
+    );
     #[cfg(feature = "clustering")]
     let external = {
         use crate::server::routes::interpret::effects::room::ExternalRoomEffect;
@@ -337,11 +438,15 @@ async fn commit_attempt(
         }
         external
     };
-    let external_dependencies =
-        super::suppression::external_effect_indices(&plan, filter_verdict, &applied.archives)
-            .into_iter()
-            .map(|index| plan.plan[index].dependencies.clone())
-            .collect();
+    let external_dependencies = super::suppression::external_effect_indices(
+        &plan,
+        filter_verdict,
+        &applied.archives,
+        repairable,
+    )
+    .into_iter()
+    .map(|index| plan.plan[index].dependencies.clone())
+    .collect();
     let mut pending = Vec::new();
     for intent in &intents {
         let receipt = super::durable::receipt_key(intent)?;
@@ -571,3 +676,53 @@ pub(crate) mod commit_hooks;
 #[cfg(test)]
 #[path = "commit_tests.rs"]
 mod tests;
+
+#[cfg(test)]
+#[path = "alias_denial_replay_tests.rs"]
+mod alias_denial_replay_tests;
+
+/// Live invitation delivery and its offline fallback are mutually exclusive.
+/// Repair a partially persisted pair before rebuilding any delivery effects.
+async fn reconcile_invitation_delivery_receipts(
+    tx: &mut crate::ingress_uow::IngressUowTransaction<'_>,
+    key: waddle_xmpp::ingress::MessageKey,
+    recorded: &[IngressEffectIntent],
+    pending: &mut Vec<IngressEffectIntent>,
+) -> Result<(), IngressUowError> {
+    use waddle_xmpp::ingress::PendingDeliveryMutation;
+    for grant in recorded.iter().filter_map(|intent| match intent {
+        IngressEffectIntent::GroupDmMembershipGrant { grant } => Some(grant),
+        _ => None,
+    }) {
+        let route = recorded.iter().find(|intent| {
+            matches!(intent,
+            IngressEffectIntent::RouteDirect { recipient, .. } if recipient == &grant.invitee)
+        });
+        let fallback = recorded.iter().find(|intent| {
+            matches!(intent,
+            IngressEffectIntent::PendingDelivery {
+                mutation: PendingDeliveryMutation::Transient { recipient, .. }
+            } if recipient == &grant.invitee)
+        });
+        let (Some(route), Some(fallback)) = (route, fallback) else {
+            continue;
+        };
+        if pending.contains(route) && pending.contains(fallback) {
+            continue;
+        }
+        for intent in [route, fallback] {
+            if pending.contains(intent) {
+                let receipt = super::durable::receipt_key(intent)?;
+                crate::ingress_uow::EffectReceiptRepository::record_receipt(
+                    tx,
+                    key,
+                    receipt.kind,
+                    &receipt.semantic_identity_hash,
+                )
+                .await?;
+                pending.retain(|candidate| candidate != intent);
+            }
+        }
+    }
+    Ok(())
+}

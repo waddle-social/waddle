@@ -27,6 +27,10 @@ pub(super) async fn initialize(storage: &DatabaseSmPersistence) -> Result<(), Sm
     // for `timestamp_millis()` after Jan 2038); BIGINT is i64.
     // SQLite INTEGER is dynamically sized so the same DDL works.
     let bigint = crate::db::i64_sql_type(storage.db.driver());
+    let receipts_type = match storage.db.driver() {
+        DatabaseDriver::Postgres => "BYTEA",
+        DatabaseDriver::Sqlite => "BLOB",
+    };
     storage
         .execute(
             &format!(
@@ -71,6 +75,7 @@ pub(super) async fn initialize(storage: &DatabaseSmPersistence) -> Result<(), Sm
                 sequence {bigint} NOT NULL,
                 stanza_xml TEXT NOT NULL,
                 original_receipt_at_ms {bigint} NOT NULL,
+                ingress_receipts {receipts_type},
                 PRIMARY KEY (stream_id, sequence)
             )
             "#

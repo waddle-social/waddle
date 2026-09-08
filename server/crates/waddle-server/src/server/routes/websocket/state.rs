@@ -14,27 +14,7 @@ pub struct ActiveCallThread {
     pub thread_id: String,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
-pub struct DmCallThreadKey {
-    pub low_peer: BareJid,
-    pub high_peer: BareJid,
-    pub sid: xmpp_parsers::jingle::SessionId,
-}
-
-impl DmCallThreadKey {
-    pub fn new(a: BareJid, b: BareJid, sid: xmpp_parsers::jingle::SessionId) -> Self {
-        let (low_peer, high_peer) = if a.as_str() <= b.as_str() {
-            (a, b)
-        } else {
-            (b, a)
-        };
-        Self {
-            low_peer,
-            high_peer,
-            sid,
-        }
-    }
-}
+pub use waddle_xmpp::ingress::{DmCallThreadKey, PendingDmCallOffer};
 
 const MAX_RESOLVER_AFFILIATION_SYNC_WORKERS: usize = 128;
 const MAX_RECENT_RESOLVER_AFFILIATION_SYNC_COMPLETIONS: usize = 128;
@@ -818,13 +798,6 @@ mod resolver_affiliation_sync_scheduler_tests {
             "capacity rejection must increment the exported counter"
         );
     }
-}
-
-#[derive(Debug, Clone)]
-pub struct PendingDmCallOffer {
-    pub media: waddle_xmpp::xep::CallThreadMedia,
-    pub initiator: BareJid,
-    pub started: chrono::DateTime<chrono::Utc>,
 }
 
 #[derive(Debug, Default)]

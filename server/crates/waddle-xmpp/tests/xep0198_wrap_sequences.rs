@@ -173,6 +173,7 @@ async fn persistence_hydration_and_followup_eviction_stay_in_wrap_order() {
         .iter()
         .rev()
         .map(|sequence| DetachedUnackedStanza {
+            ingress_receipts: Vec::new(),
             sequence: *sequence,
             stanza_xml: stanza_xml.clone(),
             original_receipt_at: Utc::now(),

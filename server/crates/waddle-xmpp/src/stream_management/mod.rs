@@ -34,7 +34,7 @@ mod stanzas_tests;
 mod state;
 mod unacked_queue;
 
-pub use replay::{stamp_replay_delay, ReplayStanza};
+pub use replay::{stamp_replay_delay, ReplayStanza, SmIngressFrameReceipt, SmIngressReceiptKind};
 pub use session_registry::{
     CrossNodeResumeOutcome, CrossNodeResumeStage, DetachedPresenceState, DetachedSession,
     DetachedUnackedStanza, InMemorySmSessionRegistry, PendingPromotionRetryRetention,

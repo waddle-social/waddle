@@ -15,7 +15,7 @@ pub(super) fn route_receipts(
 ) -> Option<Vec<usize>> {
     let direct = external.iter().enumerate().filter_map(|(index, effect)| {
         match effect {
-            ExternalEffect::Direct(crate::server::routes::interpret::effects::direct::ExternalDirectEffect::PushInboxUpdate { receipt: Some(recorded), .. }) if recorded.as_ref() == intent => Some(index),
+            ExternalEffect::Direct(crate::server::routes::interpret::effects::direct::ExternalDirectEffect::PushInboxUpdate { receipt: Some(recorded), .. } | crate::server::routes::interpret::effects::direct::ExternalDirectEffect::DmCallThreadState { receipt: Some(recorded), .. }) if recorded.as_ref() == intent => Some(index),
             ExternalEffect::Delivery(ExternalDeliveryEffect::QueueOfflineDelivery { row, prepared_notification, .. }) if offline_intents(row, prepared_notification).contains(intent) => Some(index),
             effect if groupchat_notification_receipt(effect, intent) => Some(index),
             _ => None,

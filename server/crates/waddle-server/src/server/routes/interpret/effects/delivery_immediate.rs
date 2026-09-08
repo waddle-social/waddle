@@ -61,23 +61,26 @@ pub(crate) async fn execute(effect: ExternalDeliveryEffect, deps: &Deps<'_>) -> 
             call_setup,
             ..
         } => {
-            let (queued, unqueued) = route_to_connection::queue_processed_for_detached(
-                &immediate,
-                resources,
-                &std::collections::HashSet::new(),
-                &stanza,
-            )
-            .await;
-            let retried =
-                route_to_connection::retry_unqueued_detached_as_live(&immediate, unqueued, &stanza)
-                    .await;
-            let outcome = if !queued.is_empty() {
-                FullJidDeliveryOutcome::QueuedDetached
-            } else if !retried.is_empty() {
-                FullJidDeliveryOutcome::Delivered
-            } else {
-                FullJidDeliveryOutcome::Unavailable
-            };
+            let mut destinations = Vec::with_capacity(resources.len());
+            for resource in resources {
+                let (queued, _) = route_to_connection::queue_processed_for_detached(
+                    &immediate,
+                    vec![resource.clone()],
+                    &std::collections::HashSet::new(),
+                    &stanza,
+                )
+                .await;
+                let outcome = if queued.contains(&resource) {
+                    FullJidDeliveryOutcome::QueuedDetached
+                } else {
+                    route_to_connection::deliver_direct_to_full_with_registered_remote(
+                        &immediate, &resource, &stanza,
+                    )
+                    .await
+                };
+                destinations.push((resource, outcome));
+            }
+            let outcome = detached_fanout_outcome(&destinations);
             routing::close_call_setup_from_outcome(call_setup, outcome);
             EffectOutcome::Delivery(outcome)
         }
@@ -126,13 +129,9 @@ pub(crate) async fn execute(effect: ExternalDeliveryEffect, deps: &Deps<'_>) -> 
             kind,
         } => {
             immediate.ordered_relay_origin = origin;
-            EffectOutcome::Delivery(
-                super::super::carbons::relay_carbons_only(
-                    &immediate, &owner, &message, kind, &exclude,
-                )
+            super::super::carbons::relay_carbons_only(&immediate, &owner, &message, kind, &exclude)
                 .await
-                .unwrap_or(FullJidDeliveryOutcome::Unavailable),
-            )
+                .unwrap_or(EffectOutcome::Unavailable)
         }
         ExternalDeliveryEffect::Carbons {
             owner,
@@ -161,4 +160,31 @@ pub(crate) async fn execute(effect: ExternalDeliveryEffect, deps: &Deps<'_>) -> 
             EffectOutcome::ConfirmedIntents(confirmed)
         }
     }
+}
+
+/// A detached batch proves completion only when every frozen resource accepted it.
+fn detached_fanout_outcome(
+    destinations: &[(jid::FullJid, FullJidDeliveryOutcome)],
+) -> FullJidDeliveryOutcome {
+    if destinations.is_empty() {
+        return FullJidDeliveryOutcome::Unavailable;
+    }
+    if destinations.iter().all(|(_, outcome)| {
+        matches!(
+            outcome,
+            FullJidDeliveryOutcome::Delivered | FullJidDeliveryOutcome::QueuedDetached
+        )
+    }) {
+        return if destinations
+            .iter()
+            .any(|(_, outcome)| *outcome == FullJidDeliveryOutcome::QueuedDetached)
+        {
+            FullJidDeliveryOutcome::QueuedDetached
+        } else {
+            FullJidDeliveryOutcome::Delivered
+        };
+    }
+    // A failed member leaves the batch incomplete even when other members landed.
+    // The executor must not discharge its aggregate RouteDirect obligation.
+    FullJidDeliveryOutcome::Dropped
 }

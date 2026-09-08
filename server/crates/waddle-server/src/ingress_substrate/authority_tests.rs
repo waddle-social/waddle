@@ -83,7 +83,7 @@ fn typed_envelope(body: &str) -> MessageEnvelope {
     MessageEnvelope::new(message)
 }
 
-async fn insert_stream(tx: &mut Transaction<'_>, id: SmIngressId) {
+pub(super) async fn insert_stream(tx: &mut Transaction<'_>, id: SmIngressId) {
     const POSTGRES: &str =
         "INSERT INTO ingress_sm_streams (sm_ingress_id, stream_id) VALUES (?::uuid, ?)";
     const SQLITE: &str = "INSERT INTO ingress_sm_streams (sm_ingress_id, stream_id) VALUES (?, ?)";
@@ -237,7 +237,7 @@ async fn wire_binding_unique(driver: DatabaseDriver) {
     };
     let key = MessageKey::new();
     let id = SmIngressId::new();
-    let h = WireHandledCount::from_storage(u32::MAX);
+    let h = WireHandledCount::from_storage(1);
     let mut tx = fixture.db.begin_immediate().await.expect("begin");
     insert_stream(&mut tx, id).await;
     record_message(&mut tx, key, &digest(), None)
@@ -637,11 +637,9 @@ async fn checkpoint_flush_never_regresses(driver: DatabaseDriver) {
     let id = SmIngressId::new();
     let mut tx = fixture.db.begin_immediate().await.expect("begin");
     insert_stream(&mut tx, id).await;
-    advance_frontier(
-        &mut tx,
-        id,
-        IngressOrdinal::FIRST,
-        WireHandledCount::from_storage(u32::MAX - 1),
+    tx.execute(
+        "UPDATE ingress_sm_streams SET checkpoint_h = 4294967294",
+        (),
     )
     .await
     .expect("seed near wrap");

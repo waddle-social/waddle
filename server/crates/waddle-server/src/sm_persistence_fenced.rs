@@ -404,6 +404,7 @@ impl PostgresFencedSmPersistence {
         // landed, and `CREATE TABLE IF NOT EXISTS` is a no-op against an
         // existing table.
         for column_def in [
+            "ingress_receipts BYTEA",
             "origin_stream_id TEXT",
             "inbound_seq BIGINT",
             "pair_sequence BIGINT",
@@ -862,13 +863,14 @@ impl SmPersistenceStorage for PostgresFencedSmPersistence {
             .map_err(|e| SmPersistenceError::Other(e.to_string()))?;
         let _identity_guard = self.assert_fenced(&mut tx, &stream_id, &fence).await?;
         tx.execute(
-            "INSERT INTO sm_unacked (stream_id, sequence, stanza_xml, original_receipt_at_ms) \
-             VALUES (?, ?, ?, ?)",
+            "INSERT INTO sm_unacked (stream_id, sequence, stanza_xml, original_receipt_at_ms, ingress_receipts) \
+             VALUES (?, ?, ?, ?, ?)",
             crate::db_params![
                 stream_id.as_str().to_string(),
                 i64::from(stanza.sequence),
                 xml,
                 receipt_ms,
+                crate::sm_persistence::codec::encode_ingress_receipts(&stanza.ingress_receipts),
             ],
         )
         .await
@@ -942,7 +944,7 @@ impl SmPersistenceStorage for PostgresFencedSmPersistence {
         // resumption is allowed to proceed.
         let mut rows = self
             .guard_query(
-                "SELECT stream_id, sequence, stanza_xml, original_receipt_at_ms \
+                "SELECT stream_id, sequence, stanza_xml, original_receipt_at_ms, ingress_receipts \
                  FROM sm_unacked WHERE stream_id = ? \
                  ORDER BY sequence ASC",
                 crate::db_params![stream_id.as_str().to_string()],
@@ -1172,13 +1174,14 @@ impl SmPersistenceStorage for PostgresFencedSmPersistence {
             let xml = serialize_stanza(&stanza.stanza)?;
             let receipt_ms = stanza.original_receipt_at.timestamp_millis();
             tx.execute(
-                "INSERT INTO sm_unacked (stream_id, sequence, stanza_xml, original_receipt_at_ms) \
-                 VALUES (?, ?, ?, ?)",
+                "INSERT INTO sm_unacked (stream_id, sequence, stanza_xml, original_receipt_at_ms, ingress_receipts) \
+                 VALUES (?, ?, ?, ?, ?)",
                 crate::db_params![
                     stream_id.as_str().to_string(),
                     i64::from(stanza.sequence),
                     xml,
                     receipt_ms,
+                crate::sm_persistence::codec::encode_ingress_receipts(&stanza.ingress_receipts),
                 ],
             )
             .await
@@ -1281,13 +1284,14 @@ impl SmPersistenceStorage for PostgresFencedSmPersistence {
         .map_err(|e| SmPersistenceError::Other(e.to_string()))?;
         for stanza in &unacked {
             tx.execute(
-                "INSERT INTO sm_unacked (stream_id, sequence, stanza_xml, original_receipt_at_ms) \
-                 VALUES (?, ?, ?, ?)",
+                "INSERT INTO sm_unacked (stream_id, sequence, stanza_xml, original_receipt_at_ms, ingress_receipts) \
+                 VALUES (?, ?, ?, ?, ?)",
                 crate::db_params![
                     stream_id.as_str().to_string(),
                     i64::from(stanza.sequence),
                     serialize_stanza(&stanza.stanza)?,
                     stanza.original_receipt_at.timestamp_millis(),
+                    crate::sm_persistence::codec::encode_ingress_receipts(&stanza.ingress_receipts),
                 ],
             )
             .await

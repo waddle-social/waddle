@@ -197,3 +197,107 @@ async fn ambiguous_pending_wire_position_postgres() {
         replay_pending_position(fixture).await;
     }
 }
+
+async fn wrapped_wire_position_is_fresh(fixture: IngressFixture) {
+    let mut first_submission = rejection(&fixture, 1, 1).await;
+    // Use plain messages to isolate receive identity from rejection replay.
+    first_submission.plan.rejection = None;
+    first_submission.plan.error_reply = None;
+    first_submission.plan.intents.clear();
+    let first = commit_submission(&fixture.uow, &first_submission, 5)
+        .await
+        .expect("first generation commit");
+    let exact = commit_submission(&fixture.uow, &first_submission, 5)
+        .await
+        .expect("exact replay before wrap");
+    assert_eq!(exact.class, IngressDecisionClass::ExistingCommitted);
+    assert_eq!(exact.message_key, first.message_key);
+
+    // Simulate intervening handled traffic without materializing 2^32 stanzas.
+    let mut tx = fixture.db.begin_immediate().await.expect("seed checkpoint");
+    tx.execute(
+        "UPDATE ingress_sm_streams SET checkpoint_h = 4294967294",
+        (),
+    )
+    .await
+    .expect("checkpoint before wrap");
+    tx.commit().await.expect("seed checkpoint commit");
+    let mut before_wrap = fixture.submission(None, "last pre-wrap message");
+    before_wrap.identity = first_submission.identity.clone();
+    if let IngressStreamIdentity::Resumable {
+        reserved_wire_position,
+        checkpoint_h,
+        ..
+    } = &mut before_wrap.identity
+    {
+        *reserved_wire_position = WireHandledCount::new(u32::MAX);
+        *checkpoint_h = WireHandledCount::new(u32::MAX);
+    }
+    let last = commit_submission(&fixture.uow, &before_wrap, 5)
+        .await
+        .expect("last pre-wrap commit");
+    // An IQ hole holds the checkpoint behind the wrap while the new message
+    // reserves a reused h. Its generation must already be the next one.
+    let mut wrapped = fixture.submission(None, "different body at reused h");
+    wrapped.identity = first_submission.identity.clone();
+    if let IngressStreamIdentity::Resumable { checkpoint_h, .. } = &mut wrapped.identity {
+        *checkpoint_h = WireHandledCount::new(u32::MAX);
+    }
+    let fresh = commit_submission(&fixture.uow, &wrapped, 5)
+        .await
+        .expect("wrapped position accepts different content");
+    assert_eq!(fresh.class, IngressDecisionClass::Accepted);
+    assert_ne!(fresh.message_key, first.message_key);
+    let retry = commit_submission(&fixture.uow, &wrapped, 5)
+        .await
+        .expect("retry while checkpoint remains before wrap");
+    assert_eq!(retry.class, IngressDecisionClass::ExistingCommitted);
+    assert_eq!(retry.message_key, fresh.message_key);
+
+    let IngressStreamIdentity::Resumable { sm_ingress_id, .. } = wrapped.identity else {
+        panic!("resumable identity");
+    };
+    let mut tx = fixture.uow.begin().await.expect("hole completion");
+    SmIngressStreamRepository::flush_checkpoint(&mut tx, sm_ingress_id, WireHandledCount::new(1))
+        .await
+        .expect("checkpoint observes wrap");
+    tx.commit().await.expect("checkpoint wrap commit");
+    assert_eq!(
+        fixture
+            .count("ingress_sm_streams WHERE wire_generation = 1 AND checkpoint_h = 1")
+            .await,
+        1
+    );
+    assert_eq!(fixture.count("ingress_sm_refs WHERE wire_h = 1").await, 2);
+    let mut post_wrap_retry = fixture.submission(None, "different body at reused h");
+    post_wrap_retry.identity = first_submission.identity.clone();
+    let retry = commit_submission(&fixture.uow, &post_wrap_retry, 5)
+        .await
+        .expect("new generation remains replayable after wrap");
+    assert_eq!(retry.class, IngressDecisionClass::ExistingCommitted);
+    assert_eq!(retry.message_key, fresh.message_key);
+    let prior = commit_submission(&fixture.uow, &before_wrap, 5)
+        .await
+        .expect("previous generation replay after checkpoint wrap");
+    assert_eq!(prior.class, IngressDecisionClass::ExistingCommitted);
+    assert_eq!(prior.message_key, last.message_key);
+    assert_eq!(
+        fixture
+            .count("ingress_sm_streams WHERE wire_generation = 1 AND checkpoint_h = 1")
+            .await,
+        1
+    );
+    fixture.close().await;
+}
+
+#[tokio::test]
+async fn xep0198_wrapped_wire_position_is_fresh_sqlite() {
+    wrapped_wire_position_is_fresh(IngressFixture::sqlite().await).await;
+}
+
+#[tokio::test]
+async fn xep0198_wrapped_wire_position_is_fresh_postgres() {
+    if let Some(fixture) = IngressFixture::postgres("wrapped_wire_position").await {
+        wrapped_wire_position_is_fresh(fixture).await;
+    }
+}

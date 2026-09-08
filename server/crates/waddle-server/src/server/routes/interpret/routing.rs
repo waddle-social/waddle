@@ -39,18 +39,13 @@ pub(super) async fn run_headless_recipient_pass(
         };
     let synthetic_full = recipient_bare.with_resource(&synthetic_resource);
 
-    // Fail-closed on blocklist load error (Copilot review on PR #275).
-    // Mirroring `load_blocklist_for_bind`'s fail-closed semantic and
-    // PR13's bind-time policy: a transient storage error must not
-    // disable XEP-0191 incoming-block enforcement, otherwise a blocked
-    // sender could be persisted into the offline recipient's MAM /
-    // inbox. We skip the recipient pass entirely; the outer arm has
-    // already logged the routing intent, and the sender's archive
-    // entry survives independently of the recipient pass.
+    // A missing policy snapshot cannot produce a complete recipient plan.
     let blocklist = match deps.blocking_storage {
         Some(storage) => match storage.list_blocked_jid_entries(recipient_bare).await {
             Ok(jids) => Blocklist::new(jids),
             Err(error) => {
+                deps.effects
+                    .fail_plan(super::effects::PlanFailure::RecipientBlocklistRead);
                 warn!(
                     bare_jid = %recipient_bare,
                     error = %error,
@@ -227,6 +222,8 @@ pub(super) async fn run_fanout_recipient_pass(
         Some(storage) => match storage.list_blocked_jid_entries(recipient_bare).await {
             Ok(jids) => Blocklist::new(jids),
             Err(error) => {
+                deps.effects
+                    .fail_plan(super::effects::PlanFailure::RecipientBlocklistRead);
                 warn!(
                     bare_jid = %recipient_bare,
                     error = %error,

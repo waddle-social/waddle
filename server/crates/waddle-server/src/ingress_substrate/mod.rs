@@ -51,7 +51,7 @@ pub fn supported_protocol_epoch() -> ProtocolEpoch {
 /// Keep this list in lock-step with the migration manifest: tests query the
 /// live catalog to ensure a newly-added ingress table cannot accidentally be
 /// left outside the activation boundary.
-pub const EPOCH_GUARDED_TABLES: [&str; 7] = [
+pub const EPOCH_GUARDED_TABLES: [&str; 8] = [
     "ingress_messages",
     "ingress_origin_aliases",
     "ingress_sm_refs",
@@ -59,6 +59,7 @@ pub const EPOCH_GUARDED_TABLES: [&str; 7] = [
     "ingress_sm_streams",
     "ingress_effect_intents",
     "ingress_effect_receipts",
+    "ingress_carbon_receipts",
 ];
 
 /// Fail-closed errors for the dark ingress substrate.
@@ -427,6 +428,7 @@ pub async fn insert_sm_ref(
     if !lock_message_for_child(tx, message_key).await? {
         return Ok(MessageWriteOutcome::MessageVanished);
     }
+    let generation = authority::wire_generation(tx, sm_ingress_id, wire_h).await?;
     let inserted = tx
         .execute(
             dialect_sql(tx.driver(), INSERT_SM_REF_POSTGRES, INSERT_SM_REF_SQLITE),
@@ -434,6 +436,7 @@ pub async fn insert_sm_ref(
                 sm_ingress_id.to_storage().to_string(),
                 ordinal.to_storage().to_string(),
                 i64::from(wire_h.to_storage()),
+                generation,
                 message_key.to_storage().to_string(),
             ],
         )
@@ -1136,13 +1139,13 @@ const DELETE_CANDIDATE_POSTGRES: &str =
     r#"DELETE FROM ingress_messages WHERE message_key = ?::uuid"#;
 const DELETE_CANDIDATE_SQLITE: &str = r#"DELETE FROM ingress_messages WHERE message_key = ?"#;
 const INSERT_SM_REF_POSTGRES: &str = r#"
-            INSERT INTO ingress_sm_refs (sm_ingress_id, ingress_ordinal, wire_h, message_key)
-            VALUES (?::uuid, ?::numeric, ?, ?::uuid)
+            INSERT INTO ingress_sm_refs (sm_ingress_id, ingress_ordinal, wire_h, wire_generation, message_key)
+            VALUES (?::uuid, ?::numeric, ?, ?, ?::uuid)
             ON CONFLICT (sm_ingress_id, ingress_ordinal) DO NOTHING
             "#;
 const INSERT_SM_REF_SQLITE: &str = r#"
-            INSERT INTO ingress_sm_refs (sm_ingress_id, ingress_ordinal, wire_h, message_key)
-            VALUES (?, ?, ?, ?)
+            INSERT INTO ingress_sm_refs (sm_ingress_id, ingress_ordinal, wire_h, wire_generation, message_key)
+            VALUES (?, ?, ?, ?, ?)
             ON CONFLICT (sm_ingress_id, ingress_ordinal) DO NOTHING
             "#;
 const READ_SM_REF_POSTGRES: &str = r#"
@@ -2159,12 +2162,14 @@ mod tests {
 
         let terminal_at = timestamp(5);
         let mut tx = fixture.store.begin().await.expect("begin child writes");
+        let sm_id = SmIngressId::new();
+        authority_tests::insert_stream(&mut tx, sm_id).await;
         assert_eq!(
             fixture
                 .store
                 .insert_sm_ref(
                     &mut tx,
-                    SmIngressId::new(),
+                    sm_id,
                     IngressOrdinal::FIRST,
                     WireHandledCount::from_storage(1),
                     key
@@ -2221,6 +2226,7 @@ mod tests {
         let key = fixture.record_message().await;
         let sm_id = SmIngressId::new();
         let mut tx = fixture.store.begin().await.expect("begin first ref");
+        authority_tests::insert_stream(&mut tx, sm_id).await;
         assert_eq!(
             fixture
                 .store
@@ -2883,12 +2889,14 @@ mod tests {
         fixture.terminalize(key, terminal_at).await;
 
         let mut tx = fixture.store.begin().await.expect("begin child insert");
+        let sm_id = SmIngressId::new();
+        authority_tests::insert_stream(&mut tx, sm_id).await;
         assert_eq!(
             fixture
                 .store
                 .insert_sm_ref(
                     &mut tx,
-                    SmIngressId::new(),
+                    sm_id,
                     IngressOrdinal::FIRST,
                     WireHandledCount::from_storage(1),
                     key

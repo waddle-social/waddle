@@ -234,7 +234,8 @@ async fn committed_rejection_wire_replay(fixture: IngressFixture) {
     }));
 
     assert_eq!(fixture.count("ingress_messages").await, 1);
-    assert_eq!(fixture.count("ingress_origin_aliases").await, 0);
+    // A committed denial owns its origin id like any acceptance.
+    assert_eq!(fixture.count("ingress_origin_aliases").await, 1);
     assert_eq!(fixture.count("ingress_sm_refs").await, 1);
     assert_eq!(fixture.count("ingress_effect_intents").await, 1);
     assert_eq!(fixture.count("ingress_effect_receipts").await, 0);

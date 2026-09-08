@@ -210,17 +210,63 @@ pub async fn load_envelope(
     }
 }
 
+/// Resolve a reserved wire count within the checkpoint's unambiguous SM window.
+/// Pending messages may already belong to the next wrap while an earlier IQ
+/// keeps the checkpoint behind; replays can likewise belong to the prior wrap.
+pub(super) async fn wire_generation(
+    tx: &mut Transaction<'_>,
+    id: SmIngressId,
+    h: WireHandledCount,
+) -> Result<i64, IngressSubstrateError> {
+    const POSTGRES: &str = "SELECT checkpoint_h, wire_generation FROM ingress_sm_streams WHERE sm_ingress_id = ?::uuid FOR UPDATE";
+    const SQLITE: &str =
+        "SELECT checkpoint_h, wire_generation FROM ingress_sm_streams WHERE sm_ingress_id = ?";
+    let mut rows = tx
+        .query(
+            dialect_sql(tx.driver(), POSTGRES, SQLITE),
+            crate::db_params![id.to_storage().to_string()],
+        )
+        .await
+        .map_err(discard_database_error)?;
+    let row = rows
+        .next()
+        .await
+        .map_err(discard_database_error)?
+        .ok_or(IngressSubstrateError::StreamMissing)?;
+    let checkpoint: i64 = row.get(0).map_err(discard_database_error)?;
+    let generation: i64 = row.get(1).map_err(discard_database_error)?;
+    let checkpoint =
+        u32::try_from(checkpoint).map_err(|_| IngressSubstrateError::InvalidStoredStream)?;
+    let h = h.to_storage();
+    let latest = waddle_xmpp::stream_management::sequence::max_in_window(checkpoint, h);
+    let generation = if h < checkpoint && latest == h {
+        generation.checked_add(1)
+    } else if h > checkpoint && latest == checkpoint {
+        generation.checked_sub(1)
+    } else {
+        Some(generation)
+    };
+    generation
+        .filter(|value| *value >= 0)
+        .ok_or(IngressSubstrateError::InvalidStoredStream)
+}
+
 pub async fn lookup_wire_binding(
     tx: &mut Transaction<'_>,
     id: SmIngressId,
     h: WireHandledCount,
 ) -> Result<Option<(MessageKey, IngressOrdinal)>, IngressSubstrateError> {
-    const POSTGRES: &str = "SELECT message_key::text, ingress_ordinal::text FROM ingress_sm_refs WHERE sm_ingress_id = ?::uuid AND wire_h = ?";
-    const SQLITE: &str = "SELECT message_key, ingress_ordinal FROM ingress_sm_refs WHERE sm_ingress_id = ? AND wire_h = ?";
+    const POSTGRES: &str = "SELECT message_key::text, ingress_ordinal::text FROM ingress_sm_refs WHERE sm_ingress_id = ?::uuid AND wire_generation = ? AND wire_h = ?";
+    const SQLITE: &str = "SELECT message_key, ingress_ordinal FROM ingress_sm_refs WHERE sm_ingress_id = ? AND wire_generation = ? AND wire_h = ?";
+    let generation = wire_generation(tx, id, h).await?;
     let mut rows = tx
         .query(
             dialect_sql(tx.driver(), POSTGRES, SQLITE),
-            crate::db_params![id.to_storage().to_string(), i64::from(h.to_storage())],
+            crate::db_params![
+                id.to_storage().to_string(),
+                generation,
+                i64::from(h.to_storage())
+            ],
         )
         .await
         .map_err(discard_database_error)?;
@@ -276,14 +322,13 @@ pub async fn advance_frontier(
     if stored != offered - 1 {
         return Ok(FrontierOutcome::Stale { stored });
     }
-    const WRITE_POSTGRES: &str = "UPDATE ingress_sm_streams SET handled_ordinal = ?::numeric, checkpoint_h = ?, row_revision = row_revision + 1, updated_at = now() WHERE sm_ingress_id = ?::uuid AND handled_ordinal = ?::numeric";
-    const WRITE_SQLITE: &str = "UPDATE ingress_sm_streams SET handled_ordinal = ?, checkpoint_h = ?, row_revision = row_revision + 1, updated_at = CURRENT_TIMESTAMP WHERE sm_ingress_id = ? AND handled_ordinal = ?";
+    const WRITE_POSTGRES: &str = "UPDATE ingress_sm_streams SET handled_ordinal = ?::numeric, row_revision = row_revision + 1, updated_at = now() WHERE sm_ingress_id = ?::uuid AND handled_ordinal = ?::numeric";
+    const WRITE_SQLITE: &str = "UPDATE ingress_sm_streams SET handled_ordinal = ?, row_revision = row_revision + 1, updated_at = CURRENT_TIMESTAMP WHERE sm_ingress_id = ? AND handled_ordinal = ?";
     let changed = tx
         .execute(
             dialect_sql(tx.driver(), WRITE_POSTGRES, WRITE_SQLITE),
             crate::db_params![
                 offered.to_string(),
-                i64::from(checkpoint_h.to_storage()),
                 id.to_storage().to_string(),
                 stored.to_string()
             ],
@@ -291,6 +336,7 @@ pub async fn advance_frontier(
         .await
         .map_err(discard_database_error)?;
     Ok(if changed == 1 {
+        flush_checkpoint(tx, id, checkpoint_h).await?;
         FrontierOutcome::Advanced
     } else {
         FrontierOutcome::Stale { stored }
@@ -328,11 +374,15 @@ pub async fn flush_checkpoint(
         return Ok(());
     }
     const POSTGRES: &str =
-        "UPDATE ingress_sm_streams SET checkpoint_h = ? WHERE sm_ingress_id = ?::uuid";
-    const SQLITE: &str = "UPDATE ingress_sm_streams SET checkpoint_h = ? WHERE sm_ingress_id = ?";
+        "UPDATE ingress_sm_streams SET checkpoint_h = ?, wire_generation = wire_generation + ? WHERE sm_ingress_id = ?::uuid";
+    const SQLITE: &str = "UPDATE ingress_sm_streams SET checkpoint_h = ?, wire_generation = wire_generation + ? WHERE sm_ingress_id = ?";
     tx.execute(
         dialect_sql(tx.driver(), POSTGRES, SQLITE),
-        crate::db_params![i64::from(offered), id.to_storage().to_string()],
+        crate::db_params![
+            i64::from(offered),
+            i64::from(offered < stored),
+            id.to_storage().to_string()
+        ],
     )
     .await
     .map_err(discard_database_error)?;

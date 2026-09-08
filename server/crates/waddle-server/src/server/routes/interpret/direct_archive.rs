@@ -578,21 +578,30 @@ async fn update_direct_link_preview_refs(
     let global_db_actor = state.deps.app_state.db_pool.global_actor();
     let correction_target_message_id =
         if let Some(correction) = waddle_xmpp::xep::extract_correction_from_message(message) {
-            Some(
-                resolve_direct_correction_target_message_id(
-                    deps,
-                    archive_jid,
-                    sender,
-                    &correction.replaces_id,
-                )
-                .await
-                .unwrap_or_else(|| correction.replaces_id.clone()),
+            match resolve_direct_correction_target_message_id(
+                deps,
+                archive_jid,
+                sender,
+                &correction.replaces_id,
             )
+            .await
+            {
+                Ok(target) => {
+                    target.or_else(|| waddle_xmpp::mam::RichMessageId::new(correction.replaces_id))
+                }
+                Err(error) => {
+                    warn!(%archive_jid, %error, "correction preview target lookup failed");
+                    deps.effects
+                        .fail_plan(effects::PlanFailure::RichTargetLookup);
+                    return;
+                }
+            }
         } else {
             None
         };
     let message_id = correction_target_message_id
-        .as_deref()
+        .as_ref()
+        .map(waddle_xmpp::mam::RichMessageId::as_str)
         .or_else(|| message.id.as_ref().map(|id| id.0.as_str()));
     let Some(message_id) = message_id else { return };
     if deps.effects.is_planning() {
@@ -621,20 +630,24 @@ pub(super) async fn resolve_direct_correction_target_message_id(
     archive_jid: &BareJid,
     sender: &BareJid,
     replaces_id: &str,
-) -> Option<String> {
-    let mam_storage = deps.mam_storage?;
+) -> Result<Option<waddle_xmpp::mam::RichMessageId>, waddle_xmpp::mam::MamStorageError> {
+    let Some(mam_storage) = deps.mam_storage else {
+        return Ok(None);
+    };
     let origin_id = waddle_xmpp_core::xep0359::OriginId::new(replaces_id);
     let sender = jid::Jid::from(sender.clone());
-    mam_storage
+    let row = mam_storage
         .get_message_by_sender_and_origin_id(
             archive_jid,
             waddle_xmpp::mam::MamArchiveKind::Personal,
             &sender,
             &origin_id,
         )
-        .await
-        .ok()?
-        .and_then(|row| row.stanza_id.map(|stanza_id| stanza_id.id))
+        .await?;
+    Ok(row.and_then(|row| {
+        row.stanza_id
+            .and_then(|id| waddle_xmpp::mam::RichMessageId::new(id.id))
+    }))
 }
 
 async fn apply_direct_retraction_tombstone(
@@ -698,3 +711,7 @@ fn retraction_stanza_id(message: &Message, archive: &BareJid) -> Option<StanzaId
     let by = jid::Jid::from(archive.clone());
     extract_stanza_id_by(message, &by).map(|id| StanzaId::new(id, by))
 }
+
+#[cfg(test)]
+#[path = "direct_archive_correction_plan_tests.rs"]
+mod correction_plan_tests;

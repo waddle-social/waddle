@@ -3414,8 +3414,8 @@ async fn sqlite_v1012_rolls_forward_from_v1011() {
             .expect("apply V1012"),
         vec![1012]
     );
-    assert!(!sqlite_table_exists(&db, "sm_sessions").await);
-    assert!(!sqlite_table_exists(&db, "sm_unacked").await);
+    assert!(sqlite_table_exists(&db, "sm_sessions").await);
+    assert!(sqlite_table_exists(&db, "sm_unacked").await);
     for table in [
         "ingress_protocol_epoch",
         "ingress_messages",
@@ -3425,6 +3425,7 @@ async fn sqlite_v1012_rolls_forward_from_v1011() {
         "ingress_sm_streams",
         "ingress_effect_intents",
         "ingress_effect_receipts",
+        "ingress_carbon_receipts",
     ] {
         assert!(
             sqlite_table_exists(&db, table).await,
@@ -3474,8 +3475,8 @@ async fn postgres_v1012_resets_epoch_zero_soak_rows() {
             .expect("apply V1012"),
         vec![1012]
     );
-    assert!(!postgres_table_exists(&db, "sm_sessions").await);
-    assert!(!postgres_table_exists(&db, "sm_unacked").await);
+    assert!(postgres_table_exists(&db, "sm_sessions").await);
+    assert!(postgres_table_exists(&db, "sm_unacked").await);
     let conn = db.guard().await.expect("Postgres guard");
     let mut rows = conn.query("SELECT (SELECT COUNT(*) FROM ingress_messages) + (SELECT COUNT(*) FROM ingress_origin_aliases) + (SELECT COUNT(*) FROM ingress_sm_refs) + (SELECT COUNT(*) FROM ingress_deliveries) + (SELECT COUNT(*) FROM ingress_sm_streams) + (SELECT COUNT(*) FROM ingress_effect_intents) + (SELECT COUNT(*) FROM ingress_effect_receipts)", ()).await.expect("count remaining soak rows");
     let count: i64 = rows
@@ -3696,9 +3697,96 @@ fn cutover_sm_unacked(
 ) -> waddle_xmpp::stream_management::persistence::PersistedUnackedStanza {
     let message = xmpp_parsers::message::Message::new(None::<jid::Jid>);
     waddle_xmpp::stream_management::persistence::PersistedUnackedStanza {
+        ingress_receipts: Vec::new(),
         stream_id: waddle_xmpp::pending_delivery::SmSessionId::new(stream),
         sequence,
         stanza: Box::new(waddle_xmpp::Stanza::Message(message)),
         original_receipt_at: chrono::Utc::now(),
     }
+}
+
+async fn v1012_concurrent_sm_initializers(database_url: &str) {
+    let driver = if database_url.starts_with("postgres") {
+        DatabaseDriver::Postgres
+    } else {
+        DatabaseDriver::Sqlite
+    };
+    let db = Database::from_config(
+        "concurrent-sm-cutover",
+        &DatabaseConfig::new(driver, database_url.to_owned()),
+    )
+    .await
+    .expect("cutover database");
+    MigrationRunner::single().run(&db).await.expect("cutover");
+    // Before either replica starts, every table, column and index that its
+    // initializer creates must already exist under the migration runner lock.
+    let conn = db.guard().await.expect("schema inspection");
+    conn.query("SELECT occupancy_session, blocklist_interested, replay_gap_through, promotion_attempts, presence_payloads, bare_jid, auth_context_id, auth_context_version, principal_auth_epoch FROM sm_sessions", ())
+        .await.expect("complete session schema before startup");
+    conn.query("SELECT original_receipt_at_ms, ingress_receipts, origin_stream_id, inbound_seq, pair_sequence FROM sm_unacked", ())
+        .await.expect("complete replay schema before startup");
+    let index_sql = match driver {
+        DatabaseDriver::Postgres => "SELECT COUNT(*) FROM pg_indexes WHERE schemaname = current_schema() AND indexname IN ('idx_sm_sessions_detached', 'idx_sm_unacked_dedup')",
+        DatabaseDriver::Sqlite => "SELECT COUNT(*) FROM sqlite_master WHERE type = 'index' AND name IN ('idx_sm_sessions_detached', 'idx_sm_unacked_dedup')",
+    };
+    let mut rows = conn.query(index_sql, ()).await.expect("SM indexes");
+    let count: i64 = rows
+        .next()
+        .await
+        .expect("index count result")
+        .expect("index count row")
+        .get(0)
+        .expect("index count");
+    assert_eq!(count, 2, "indexes must exist before concurrent startup");
+    drop(rows);
+    drop(conn);
+    drop(db);
+    let (first, second) = tokio::join!(
+        DatabaseSmPersistence::open(Some(database_url)),
+        DatabaseSmPersistence::open(Some(database_url)),
+    );
+    let first = first.expect("first replica initializes");
+    let second = second.expect("second replica initializes");
+    let session = cutover_sm_session("concurrent-cutover");
+    first
+        .store_session_atomic_with_principal(
+            &cutover_sm_principal(),
+            session.clone(),
+            vec![cutover_sm_unacked(session.stream_id.as_str(), 11)],
+        )
+        .await
+        .expect("first replica stores resumable stream");
+    assert!(second
+        .get_session(&session.stream_id)
+        .await
+        .expect("second replica reads session")
+        .is_some());
+    assert_eq!(
+        second
+            .list_unacked(&session.stream_id)
+            .await
+            .expect("second replica reads replay queue")
+            .len(),
+        1
+    );
+}
+
+#[tokio::test]
+async fn sqlite_v1012_concurrent_sm_initializers_use_migrated_schema() {
+    let directory = tempfile::tempdir().expect("SM schema directory");
+    let path = directory.path().join("concurrent-sm.db");
+    v1012_concurrent_sm_initializers(path.to_str().expect("SQLite path")).await;
+}
+
+#[tokio::test]
+async fn postgres_v1012_concurrent_sm_initializers_use_migrated_schema() {
+    let Ok(database_url) = std::env::var("WADDLE_TEST_POSTGRES_URL") else {
+        eprintln!("skipping: WADDLE_TEST_POSTGRES_URL not set (concurrent SM startup)");
+        return;
+    };
+    let schema = unique_postgres_schema_name("concurrent_sm_cutover");
+    let (db, admin) = open_isolated_postgres_database(&database_url, &schema).await;
+    drop(db);
+    v1012_concurrent_sm_initializers(&postgres_url_with_search_path(&database_url, &schema)).await;
+    drop_postgres_schema(&admin, &schema).await;
 }

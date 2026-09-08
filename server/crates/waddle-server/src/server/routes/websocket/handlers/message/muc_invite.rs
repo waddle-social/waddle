@@ -42,7 +42,9 @@ use crate::server::routes::websocket::muc_invites::{
 use crate::server::routes::websocket::WebSocketState;
 
 use crate::server::routes::interpret::{
-    effects::{Effect, EffectOutcome, ExternalEffect, MembershipOutcome, PlannedEffect},
+    effects::{
+        Effect, EffectOutcome, ExternalEffect, MembershipOutcome, PlanFailure, PlannedEffect,
+    },
     Deps,
 };
 
@@ -266,14 +268,8 @@ pub(super) async fn handle_muc_mediated_invite(
         .reply_timeout(std::time::Duration::from_secs(5))
         .await
     else {
-        return Some(vec![error_frame(
-            incoming,
-            bound_jid,
-            deps,
-            ErrorType::Wait,
-            DefinedCondition::InternalServerError,
-            "Internal server error.",
-        )]);
+        deps.effects.fail_plan(PlanFailure::RoomSnapshotUnavailable);
+        return Some(vec![]);
     };
     // XEP-0045 §7.8: a mediated invitation is an occupant action ("a
     // room in which one is an occupant").
@@ -351,14 +347,8 @@ pub(super) async fn handle_muc_mediated_invite(
                 error = %error,
                 "Failed to look up mediated-invite invitee"
             );
-            return Some(vec![error_frame(
-                incoming,
-                bound_jid,
-                deps,
-                ErrorType::Wait,
-                DefinedCondition::InternalServerError,
-                "Internal server error.",
-            )]);
+            deps.effects.fail_plan(PlanFailure::InvitePrerequisiteRead);
+            return Some(vec![]);
         }
     }
 
@@ -379,14 +369,8 @@ pub(super) async fn handle_muc_mediated_invite(
                 error = %error,
                 "Suppressing mediated invite because blocklist lookup failed"
             );
-            return Some(vec![error_frame(
-                incoming,
-                bound_jid,
-                deps,
-                ErrorType::Wait,
-                DefinedCondition::InternalServerError,
-                "Internal server error.",
-            )]);
+            deps.effects.fail_plan(PlanFailure::InvitePrerequisiteRead);
+            return Some(vec![]);
         }
     };
     if invitee_blocklist.contains_jid(&jid::Jid::from(bound_jid.clone())) {

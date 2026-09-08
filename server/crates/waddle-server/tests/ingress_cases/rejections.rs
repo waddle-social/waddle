@@ -28,7 +28,10 @@ async fn semantic_rejections(fixture: IngressFixture) {
             IngressDecisionClass::CaptureOverflow,
         ),
     ] {
-        let mut submission = fixture.submission(Some("rejected-origin"), "offered body");
+        // Each denial owns its own origin id: a committed rejection binds the
+        // alias, so reusing one id would resolve to the recorded denial.
+        let origin = format!("rejected-origin-{index}");
+        let mut submission = fixture.submission(Some(&origin), "offered body");
         // Rejected plans carry no local room writes to revalidate; semantic
         // denials still commit when planning observed a local room snapshot.
         submission.plan.room_execution = waddle_server::ingress::RoomExecutionPath::Local {
@@ -70,7 +73,7 @@ async fn semantic_rejections(fixture: IngressFixture) {
         assert!(decision.class.advances());
         assert_eq!(decision.external.len(), 1);
         assert_eq!(fixture.count("ingress_messages").await, index + 1);
-        assert_eq!(fixture.count("ingress_origin_aliases").await, 0);
+        assert_eq!(fixture.count("ingress_origin_aliases").await, index + 1);
         assert_eq!(fixture.count("ingress_effect_intents").await, index + 1);
         assert_eq!(fixture.count("ingress_effect_receipts").await, 0);
         assert_eq!(fixture.count("ingress_sm_refs").await, 0);

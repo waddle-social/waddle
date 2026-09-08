@@ -146,6 +146,7 @@ impl OrderedRelayDeliveryBridge {
                 };
                 RelayRouteRemoteResourceStanzaReply {
                     reply_receipt: None,
+                    owner_receipts: Vec::new(),
                     outcome: outcome.outcome.into(),
                     replies: Vec::new(),
                     recipient_sm_append_streams: outcome.recipient_sm_append_streams,
@@ -231,6 +232,7 @@ impl OrderedRelayDeliveryBridge {
                         *completion = Some(pending);
                         RelayRouteRemoteResourceStanzaReply {
                             reply_receipt: None,
+                            owner_receipts: Vec::new(),
                             outcome: RemoteResourceRouteOutcome::Delivered,
                             replies: frames.into_iter().map(RemoteStanza).collect(),
                             recipient_sm_append_streams: Vec::new(),
@@ -239,6 +241,7 @@ impl OrderedRelayDeliveryBridge {
                     OrderedRelayMucProxyOutcome::Delivered(replies) => {
                         RelayRouteRemoteResourceStanzaReply {
                             reply_receipt: None,
+                            owner_receipts: Vec::new(),
                             outcome: RemoteResourceRouteOutcome::Delivered,
                             replies: replies.into_iter().map(RemoteStanza).collect(),
                             recipient_sm_append_streams: Vec::new(),

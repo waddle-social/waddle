@@ -53,7 +53,16 @@ pub(super) async fn mark_inbox_read_from_displayed(
         );
         return;
     };
-    let thread_id = resolve_thread_id(deps, &room, &displayed_message_id).await;
+    let thread_id = match resolve_thread_id(deps, &room, &displayed_message_id).await {
+        Ok(thread_id) => thread_id,
+        Err(error) => {
+            warn!(%owner, %room, displayed_id = %displayed_message_id, %error,
+                "MarkInboxReadFromDisplayed: MAM lookup failed");
+            deps.effects
+                .fail_plan(super::effects::PlanFailure::RichTargetLookup);
+            return;
+        }
+    };
 
     apply_mark_read(deps, inbox_storage.as_ref(), &owner, &room, None).await;
     if let Some(ref thread_id) = thread_id {
@@ -62,20 +71,22 @@ pub(super) async fn mark_inbox_read_from_displayed(
 }
 
 /// Look up the displayed message's `<thread/>` id from MAM. Returns
-/// `None` when the message was not found, has no thread, or MAM is not
-/// wired (unit-test fixtures). The mark-read still applies to the
-/// channel-level row in all cases.
+/// `Ok(None)` when the message was not found, has no thread, or MAM is not
+/// wired (unit-test fixtures). Those cases still mark the channel row read;
+/// lookup errors leave both rows untouched and refuse the plan.
 async fn resolve_thread_id(
     deps: &Deps<'_>,
     room: &BareJid,
     displayed_message_id: &str,
-) -> Option<ThreadId> {
-    let mam_storage = deps.mam_storage?;
+) -> Result<Option<ThreadId>, waddle_xmpp::mam::storage::MamStorageError> {
+    let Some(mam_storage) = deps.mam_storage else {
+        return Ok(None);
+    };
     match mam_storage
         .get_message_by_message_id(room, displayed_message_id)
         .await
     {
-        Ok(Some(archived)) => archived.thread.map(|thread| thread.id),
+        Ok(Some(archived)) => Ok(archived.thread.map(|thread| thread.id)),
         Ok(None) => {
             debug!(
                 %room,
@@ -83,18 +94,9 @@ async fn resolve_thread_id(
                 "MarkInboxReadFromDisplayed: target message not in MAM; \
                  marking only the channel row read"
             );
-            None
+            Ok(None)
         }
-        Err(error) => {
-            warn!(
-                %room,
-                displayed_id = %displayed_message_id,
-                %error,
-                "MarkInboxReadFromDisplayed: MAM lookup failed; \
-                 falling back to channel-row mark-read"
-            );
-            None
-        }
+        Err(error) => Err(error),
     }
 }
 
@@ -487,3 +489,7 @@ mod tests {
         snapshot_read_failure_prevents_ingress_commit(fixture).await;
     }
 }
+
+#[cfg(test)]
+#[path = "displayed_marker_plan_tests.rs"]
+mod plan_tests;

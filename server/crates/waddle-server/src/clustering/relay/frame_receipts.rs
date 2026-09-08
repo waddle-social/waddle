@@ -11,43 +11,110 @@ const REPLY_RECEIPT_TTL: Duration = Duration::from_secs(30);
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct RelayReplyReceiptToken(uuid::Uuid);
 
-#[derive(Default)]
 pub(crate) struct PendingReplyReceipts {
+    capacity: Arc<tokio::sync::Semaphore>,
     entries: HashMap<RelayReplyReceiptToken, PendingReplyReceipt>,
 }
 
+impl Default for PendingReplyReceipts {
+    fn default() -> Self {
+        Self {
+            capacity: Arc::new(tokio::sync::Semaphore::new(MAX_PENDING_REPLY_RECEIPTS)),
+            entries: HashMap::new(),
+        }
+    }
+}
+
 struct PendingReplyReceipt {
+    permit: Option<tokio::sync::OwnedSemaphorePermit>,
     expires_at: tokio::time::Instant,
-    completion: RelayFrameReceiptCompletion,
+    completion: ReplyReceiptCompletion,
+}
+
+#[derive(Clone)]
+enum ReplyReceiptCompletion {
+    Pending(RelayFrameReceiptCompletion),
+    Confirmed,
 }
 
 impl PendingReplyReceipts {
+    pub(crate) fn reserve(&mut self) -> Option<tokio::sync::OwnedSemaphorePermit> {
+        let now = tokio::time::Instant::now();
+        self.entries.retain(|_, pending| pending.expires_at > now);
+        Arc::clone(&self.capacity).try_acquire_owned().ok()
+    }
+
+    #[cfg(test)]
     pub(crate) fn register(
         &mut self,
         completion: RelayFrameReceiptCompletion,
     ) -> Option<RelayReplyReceiptToken> {
-        let now = tokio::time::Instant::now();
-        self.entries.retain(|_, pending| pending.expires_at > now);
-        if self.entries.len() >= MAX_PENDING_REPLY_RECEIPTS {
-            // Dropping the report preserves its durable unresolved obligations.
-            return None;
-        }
+        let permit = self.reserve()?;
+        Some(self.register_reserved(permit, completion))
+    }
+
+    pub(crate) fn register_reserved(
+        &mut self,
+        permit: tokio::sync::OwnedSemaphorePermit,
+        completion: RelayFrameReceiptCompletion,
+    ) -> RelayReplyReceiptToken {
         let token = RelayReplyReceiptToken(uuid::Uuid::new_v4());
         self.entries.insert(
             token,
             PendingReplyReceipt {
-                expires_at: now + REPLY_RECEIPT_TTL,
-                completion,
+                permit: Some(permit),
+                expires_at: tokio::time::Instant::now() + REPLY_RECEIPT_TTL,
+                completion: ReplyReceiptCompletion::Pending(completion),
             },
         );
-        Some(token)
+        token
     }
 
-    fn take(&mut self, token: RelayReplyReceiptToken) -> Option<RelayFrameReceiptCompletion> {
+    pub(crate) fn contains(&mut self, token: RelayReplyReceiptToken) -> bool {
+        self.get(token).is_some()
+    }
+
+    #[cfg(test)]
+    fn pending_count(&self) -> usize {
         self.entries
-            .remove(&token)
-            .filter(|pending| pending.expires_at > tokio::time::Instant::now())
-            .map(|pending| pending.completion)
+            .values()
+            .filter(|entry| matches!(entry.completion, ReplyReceiptCompletion::Pending(_)))
+            .count()
+    }
+
+    fn get(&mut self, token: RelayReplyReceiptToken) -> Option<ReplyReceiptCompletion> {
+        self.entries
+            .retain(|_, pending| pending.expires_at > tokio::time::Instant::now());
+        self.entries
+            .get(&token)
+            .map(|pending| pending.completion.clone())
+    }
+}
+
+async fn confirm(receipts: &Mutex<PendingReplyReceipts>, token: RelayReplyReceiptToken) -> bool {
+    // Clone the shared, idempotent completion before awaiting storage. A failed
+    // or cancelled confirmation must not consume the only proof of the write.
+    let Some(completion) = receipts.lock().await.get(token) else {
+        return false;
+    };
+    let ReplyReceiptCompletion::Pending(completion) = completion else {
+        return true;
+    };
+    match completion.complete().await {
+        Ok(_) => {
+            if let Some(entry) = receipts.lock().await.entries.get_mut(&token) {
+                // Release the heavy report and pending capacity, while retaining
+                // the small proof through its original TTL for lost confirmations.
+                // Completed token count follows throughput during this bounded TTL.
+                entry.completion = ReplyReceiptCompletion::Confirmed;
+                entry.permit = None;
+            }
+            true
+        }
+        Err(error) => {
+            tracing::warn!(%error, "relay reply receipt persistence remains pending");
+            false
+        }
     }
 }
 
@@ -69,19 +136,7 @@ impl Message<RelayConfirmReplyReceipt> for RelayActor {
         spawn_in_dispatch_span(
             ctx,
             tracing::info_span!("clustering.relay.reply_receipt"),
-            async move {
-                let completion = receipts.lock().await.take(msg.token);
-                let Some(completion) = completion else {
-                    return false;
-                };
-                match completion.complete().await {
-                    Ok(_) => true,
-                    Err(error) => {
-                        tracing::warn!(%error, "relay reply receipt persistence remains pending");
-                        false
-                    }
-                }
-            },
+            async move { confirm(&receipts, msg.token).await },
         )
     }
 }
@@ -119,9 +174,9 @@ impl OrderedRelayAck {
         Vec<waddle_xmpp::Stanza>,
         Option<RelayFrameReceiptCompletion>,
     ) {
-        let completion = self
-            .reply_receipt
-            .map(|token| RelayFrameReceiptCompletion::remote(owner, token, stop_token));
+        let completion = self.reply_receipt.map(|token| {
+            RelayFrameReceiptCompletion::remote(owner, token, self.owner_receipts, stop_token)
+        });
         let frames = self
             .client_replies
             .into_iter()
@@ -146,20 +201,128 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn ingress_relay_reply_requires_exact_received_token_and_consumes_it_once() {
+    async fn ingress_relay_full_reply_table_backpressures_before_owner_effects() {
+        let receipts = Arc::new(Mutex::new(PendingReplyReceipts::default()));
+        let completion = completion().await;
+        let mut tokens = Vec::new();
+        for _ in 0..MAX_PENDING_REPLY_RECEIPTS {
+            tokens.push(
+                receipts
+                    .lock()
+                    .await
+                    .register(completion.clone())
+                    .expect("capacity"),
+            );
+        }
+        let receiver = Arc::new(Mutex::new(OrderedRelayReceiverState::default()));
+        let envelope = super::super::tests::timeout_envelope();
+        // An unwired owner bridge returns Unreachable if execution is entered.
+        // Backpressure must be decided first, without entering that delivery path.
+        let bridge = OrderedRelayDeliveryBridge::new(
+            CancellationToken::new(),
+            &crate::config::ClusteringMessagingConfig::default(),
+        );
+        let reservation = receiver.lock().await.reserve(envelope.clone());
+        let reply = finish_ordered_reservation(
+            Arc::clone(&receiver),
+            Arc::clone(&bridge),
+            reservation,
+            Arc::clone(&receipts),
+        )
+        .await;
+        assert!(matches!(
+            reply,
+            OrderedRelayReply::Nack(OrderedRelayNack {
+                reason: OrderedRelayNackReason::ReplyReceiptBackpressure,
+                ..
+            })
+        ));
+        assert_eq!(
+            receipts.lock().await.pending_count(),
+            MAX_PENDING_REPLY_RECEIPTS
+        );
+        assert!(confirm(&receipts, tokens[0]).await);
+        let retry = receiver.lock().await.reserve(envelope);
+        assert!(
+            matches!(retry, OrderedRelayReservation::Reserved(_)),
+            "backpressure does not consume or divert the sequence"
+        );
+        let reply =
+            finish_ordered_reservation(receiver, bridge, retry, Arc::clone(&receipts)).await;
+        assert!(
+            matches!(
+                reply,
+                OrderedRelayReply::Nack(OrderedRelayNack {
+                    reason: OrderedRelayNackReason::Unreachable,
+                    ..
+                })
+            ),
+            "released capacity permits entry to owner delivery"
+        );
+        assert!(
+            receipts.lock().await.reserve().is_some(),
+            "failed owner delivery releases its permit"
+        );
+    }
+
+    #[tokio::test]
+    async fn ingress_relay_expired_cached_proof_never_acknowledges_without_receipt() {
+        let receipts = Arc::new(Mutex::new(PendingReplyReceipts::default()));
+        let token = receipts
+            .lock()
+            .await
+            .register(completion().await)
+            .expect("token");
+        let receiver = Arc::new(Mutex::new(OrderedRelayReceiverState::default()));
+        let envelope = super::super::tests::timeout_envelope();
+        let OrderedRelayReservation::Reserved(reserved) =
+            receiver.lock().await.reserve(envelope.clone())
+        else {
+            panic!("first reservation")
+        };
+        receiver.lock().await.commit_reserved_with_reply_receipt(
+            *reserved,
+            Vec::new(),
+            Some(token),
+            Vec::new(),
+        );
+        receipts
+            .lock()
+            .await
+            .entries
+            .get_mut(&token)
+            .expect("pending token")
+            .expires_at = tokio::time::Instant::now();
+        let retry = receiver.lock().await.reserve(envelope);
+        let bridge = OrderedRelayDeliveryBridge::new(
+            CancellationToken::new(),
+            &crate::config::ClusteringMessagingConfig::default(),
+        );
+        let reply = finish_ordered_reservation(receiver, bridge, retry, receipts).await;
+        assert!(matches!(
+            reply,
+            OrderedRelayReply::Nack(OrderedRelayNack {
+                reason: OrderedRelayNackReason::MaybeCommitted,
+                ..
+            })
+        ));
+    }
+
+    #[tokio::test]
+    async fn ingress_relay_reply_requires_exact_received_token_and_retains_retry_proof() {
         let mut pending = PendingReplyReceipts::default();
         let token = pending.register(completion().await).expect("registered");
         assert!(pending
-            .take(RelayReplyReceiptToken(uuid::Uuid::new_v4()))
+            .get(RelayReplyReceiptToken(uuid::Uuid::new_v4()))
             .is_none());
         assert_eq!(pending.entries.len(), 1, "unreceived replies stay pending");
         assert!(
-            pending.take(token).is_some(),
+            pending.get(token).is_some(),
             "the transport completion confirms receipt"
         );
         assert!(
-            pending.take(token).is_none(),
-            "confirmation is consumed once"
+            pending.get(token).is_some(),
+            "confirmation remains retryable until expiry"
         );
     }
 
@@ -168,8 +331,48 @@ mod tests {
         let mut pending = PendingReplyReceipts::default();
         let token = pending.register(completion().await).expect("registered");
         pending.entries.get_mut(&token).expect("pending").expires_at = tokio::time::Instant::now();
-        assert!(pending.take(token).is_none());
+        assert!(pending.get(token).is_none());
         assert!(pending.entries.is_empty());
+    }
+
+    #[tokio::test]
+    async fn ingress_relay_confirmed_tokens_release_pending_capacity_and_expire() {
+        let pending = Mutex::new(PendingReplyReceipts::default());
+        let completion = completion().await;
+        let mut tokens = Vec::new();
+        for _ in 0..MAX_PENDING_REPLY_RECEIPTS {
+            tokens.push(
+                pending
+                    .lock()
+                    .await
+                    .register(completion.clone())
+                    .expect("capacity"),
+            );
+        }
+        assert!(pending.lock().await.register(completion.clone()).is_none());
+        for token in &tokens {
+            assert!(confirm(&pending, *token).await);
+            assert!(confirm(&pending, *token).await, "lost confirmation retries");
+        }
+        let mut entries = pending.lock().await;
+        assert_eq!(entries.pending_count(), 0);
+        assert!(
+            entries.register(completion).is_some(),
+            "confirmed proofs do not consume pending capacity"
+        );
+        for token in &tokens {
+            entries
+                .entries
+                .get_mut(token)
+                .expect("confirmed proof")
+                .expires_at = tokio::time::Instant::now();
+        }
+        assert!(entries.get(tokens[0]).is_none());
+        assert_eq!(
+            entries.entries.len(),
+            1,
+            "expired confirmed proofs are pruned"
+        );
     }
 
     #[tokio::test]
@@ -183,3 +386,7 @@ mod tests {
         assert_eq!(pending.entries.len(), MAX_PENDING_REPLY_RECEIPTS);
     }
 }
+
+#[cfg(test)]
+#[path = "frame_receipts_tests.rs"]
+mod persistence_tests;

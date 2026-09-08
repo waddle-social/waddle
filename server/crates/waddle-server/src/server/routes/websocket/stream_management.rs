@@ -451,6 +451,18 @@ pub(super) async fn handle_sm_stanza(
     }
 }
 
+pub(super) async fn complete_acknowledged_ingress_receipts(
+    state: &WebSocketState,
+    sm_state: &StreamManagementState,
+    h: u32,
+) -> bool {
+    super::batch_write::complete_replayed_ingress_receipts(
+        state,
+        &sm_state.ingress_receipts_through(h),
+    )
+    .await
+}
+
 /// Apply a client `<a h='N'/>` ack: advance the SM counters, drop the
 /// acked prefix of the unacked queue, and range-delete every
 /// `pending_delivery` row this XEP-0198 session claimed whose
@@ -494,6 +506,15 @@ pub(super) async fn apply_sm_ack(
     phase: &mut ConnectionPhase,
     h: u32,
 ) -> Vec<ResponseFrame> {
+    if !sm_state.ack_regresses_last_acked(h)
+        && !sm_state.ack_exceeds_outbound(h)
+        && !complete_acknowledged_ingress_receipts(state, sm_state, h).await
+    {
+        // Do not advance the acknowledgement floor until its receipt proof is
+        // durable. Keeping the stream resumable preserves carriers if the peer
+        // disconnects; a later ACK or resume retries this completion.
+        return vec![];
+    }
     let observation = apply_sm_ack_observation(sm_state, h);
     observe_sm_ack(observation);
 
@@ -1158,7 +1179,17 @@ async fn handle_sm_resume_terminal(
         );
     }
 
-    // Commit the staged snapshot only after the durable recheck succeeds.
+    // Receipt settlement can fail or be cancelled. Keep the live connection
+    // untouched until the detached prefix's completion proof is durable.
+    let mut staged_sm_state = StreamManagementState::new();
+    staged_sm_state.restore_from_session(&detached);
+    if !complete_acknowledged_ingress_receipts(state, &staged_sm_state, resume.h).await {
+        claim_guard.release().await;
+        return SmResumeTerminal::failed(
+            waddle_xmpp::pending_delivery::SmSessionId::new(resume.previd),
+            SmResumeOutcome::Storage,
+        );
+    }
     *sm_ingress_fence = state
         .deps
         .protocol
@@ -1227,6 +1258,7 @@ async fn handle_sm_resume_terminal(
                 server_domain,
                 entry.original_receipt_at,
             ))
+            .with_ingress_receipts(entry.ingress_receipts)
         })
         .collect();
     SmResumeTerminal::resumed(

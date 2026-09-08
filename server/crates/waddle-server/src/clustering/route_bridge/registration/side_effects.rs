@@ -10,6 +10,8 @@ pub(crate) enum RemoteCarbonFanout {
     },
     Incomplete {
         reason: crate::server::routes::interpret::carbons::CarbonFanoutFailure,
+        carbon_recipients: Vec<jid::FullJid>,
+        recipient_sm_append_streams: Vec<waddle_xmpp::pending_delivery::SmSessionId>,
     },
     MaybeCommitted,
 }
@@ -21,9 +23,11 @@ impl RemoteCarbonFanout {
                 carbon_recipients: reply.carbon_recipients,
                 recipient_sm_append_streams: reply.recipient_sm_append_streams,
             }),
-            RelayRemoteUserSideEffectStatus::Incomplete { reason } => {
-                Some(Self::Incomplete { reason })
-            }
+            RelayRemoteUserSideEffectStatus::Incomplete { reason } => Some(Self::Incomplete {
+                reason,
+                carbon_recipients: reply.carbon_recipients,
+                recipient_sm_append_streams: reply.recipient_sm_append_streams,
+            }),
             RelayRemoteUserSideEffectStatus::StaleRegistration
             | RelayRemoteUserSideEffectStatus::Unavailable => None,
         }

@@ -274,6 +274,11 @@ impl StreamManagementState {
         self.ack_request_cadence()
     }
 
+    /// Attach receipt obligations to the most recently recorded replay entry.
+    pub fn attach_ingress_receipts(&mut self, receipts: Vec<super::SmIngressFrameReceipt>) {
+        self.unacked_queue.attach_ingress_receipts(receipts);
+    }
+
     /// Cadence: once `ack_threshold` stanzas have flowed since the
     /// last `<r/>` (or the stream was enabled / resumed), tell the
     /// caller to follow this stanza with an `<r/>`. The wasm
@@ -381,6 +386,17 @@ impl StreamManagementState {
     /// Get the number of unacknowledged outbound stanzas.
     pub fn unacked_count(&self) -> u32 {
         self.outbound_count.wrapping_sub(self.last_acked)
+    }
+
+    /// Receipt obligations covered by a validated cumulative acknowledgement.
+    /// Callers must complete these before removing their replay carriers.
+    pub fn ingress_receipts_through(&self, h: u32) -> Vec<super::SmIngressFrameReceipt> {
+        self.unacked_queue
+            .get_all_unacked()
+            .into_iter()
+            .filter(|entry| !sequence_gt(entry.sequence, h))
+            .flat_map(|entry| entry.ingress_receipts)
+            .collect()
     }
 
     /// Get stanzas that need to be resent after resumption.
