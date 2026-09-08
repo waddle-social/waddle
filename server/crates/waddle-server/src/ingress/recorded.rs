@@ -346,6 +346,25 @@ fn external_route_targets(effect: &ExternalEffect) -> Vec<jid::FullJid> {
     }
 }
 
+fn external_route_recipient(effect: &ExternalEffect) -> Option<jid::BareJid> {
+    use crate::server::routes::interpret::effects::delivery::ExternalDeliveryEffect;
+    match effect {
+        ExternalEffect::RouteToPeer(route) | ExternalEffect::QueueOfflineDelivery(route) => {
+            Some(route.recipient.clone())
+        }
+        ExternalEffect::Delivery(ExternalDeliveryEffect::RouteToPeer { jid, .. }) => {
+            Some(jid.to_bare())
+        }
+        ExternalEffect::Delivery(ExternalDeliveryEffect::QueueDetached { bare, .. }) => {
+            Some(bare.clone())
+        }
+        ExternalEffect::Delivery(ExternalDeliveryEffect::RelayFullJid { target, .. }) => {
+            Some(target.to_bare())
+        }
+        _ => None,
+    }
+}
+
 /// Whether one of these recorded obligations carries both this delivery's
 /// capture identity and its exact audience. A reconnect must not repair a
 /// fan-out the committed obligation never covered.
@@ -357,12 +376,17 @@ pub(super) fn recorded_route_obligation(
         return false;
     };
     let targets = external_route_targets(effect);
+    let recipient = external_route_recipient(effect);
     intents.iter().any(|intent| match intent {
         IngressEffectIntent::RouteDirect {
             fanout,
             route_identity,
-            ..
-        } => route_identity == identity && targets.iter().all(|target| fanout.contains(target)),
+            recipient: recorded_recipient,
+        } => {
+            recipient.as_ref() == Some(recorded_recipient)
+                && route_identity == identity
+                && targets.iter().all(|target| fanout.contains(target))
+        }
         IngressEffectIntent::RouteMucGroupchat {
             occupants,
             route_identity,

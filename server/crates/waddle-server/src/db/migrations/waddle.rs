@@ -532,6 +532,16 @@ TO pg_monitor;
 
 /// Authority-cutover ingress schema for the single-node SQLite backend.
 pub const V1012_INGRESS_AUTHORITY_CUTOVER: &str = r#"
+CREATE TABLE muc_invite_claims (
+    message_key TEXT NOT NULL,
+    room_jid TEXT NOT NULL,
+    invitee_jid TEXT NOT NULL,
+    inviter_jid TEXT NOT NULL,
+    claimed BIGINT NOT NULL CHECK (claimed IN (0, 1)),
+    FOREIGN KEY (message_key) REFERENCES ingress_messages(message_key) ON DELETE CASCADE,
+    PRIMARY KEY (message_key, room_jid, invitee_jid, inviter_jid)
+);
+
 -- Retained sessions cannot resume after ingress enrollment is reset. Recreate
 -- the complete SM schema inside the serialized migration: concurrent replica
 -- startup must never race PostgreSQL catalog inserts for these objects.
@@ -697,6 +707,16 @@ CREATE TABLE ingress_carbon_receipts (
 
 /// Reset epoch-zero soak state and add the durable authority-cutover surface.
 pub const V1012_INGRESS_AUTHORITY_CUTOVER_POSTGRES: &str = r#"
+CREATE TABLE muc_invite_claims (
+    message_key UUID NOT NULL,
+    room_jid TEXT NOT NULL,
+    invitee_jid TEXT NOT NULL,
+    inviter_jid TEXT NOT NULL,
+    claimed BIGINT NOT NULL CHECK (claimed IN (0, 1)),
+    FOREIGN KEY (message_key) REFERENCES ingress_messages(message_key) ON DELETE CASCADE,
+    PRIMARY KEY (message_key, room_jid, invitee_jid, inviter_jid)
+);
+
 -- All pre-cutover soak rows belong to epoch zero. Row-wise deletes preserve
 -- the epoch guards and follow the documented child-before-parent lock order.
 DO $$ BEGIN

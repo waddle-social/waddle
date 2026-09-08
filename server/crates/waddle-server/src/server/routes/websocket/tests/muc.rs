@@ -7847,13 +7847,14 @@ async fn xep0045_destroy_notifies_every_occupant_session_and_wipes_durable_state
         .expect("grant owner");
 
     // Seed an outstanding invite: destroy must wipe the ledger.
-    crate::server::routes::websocket::muc_invites::record_invite(
+    crate::server::routes::websocket::muc_invites::record_invite_at(
         state.deps.app_state.db_pool.global_actor().clone(),
         &crate::server::routes::websocket::muc_invites::OutstandingInvite {
             room: room_jid.clone(),
             invitee: "hecate@example.com".parse().expect("invitee"),
             inviter: alice.to_bare(),
         },
+        chrono::Utc::now(),
     )
     .await
     .expect("seed invite ledger row");

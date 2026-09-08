@@ -83,6 +83,12 @@ pub(super) async fn initialize(storage: &DatabaseSmPersistence) -> Result<(), Sm
             (),
         )
         .await?;
+    add_column_if_missing(
+        storage,
+        "sm_unacked",
+        &format!("ingress_receipts {receipts_type}"),
+    )
+    .await?;
     add_column_if_missing(storage, "sm_sessions", "occupancy_session TEXT").await?;
     drop_shadow_ordinal(storage).await?;
     add_column_if_missing(

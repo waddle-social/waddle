@@ -1,5 +1,6 @@
 use super::*;
 
+mod ack_windows;
 mod schema;
 
 use super::codec::{decode_row, serialize_message, PAYLOAD_KIND_ARCHIVED, PAYLOAD_KIND_TRANSIENT};
@@ -91,6 +92,7 @@ pub struct DatabasePendingDeliveryStorage {
     /// portable, unfenced `insert` path — correct for every
     /// non-clustered/non-co-located deployment.
     fencing: Option<PendingDeliveryFencing>,
+    ack_windows: std::sync::Arc<ack_windows::SessionAckWindows>,
 }
 
 /// Clustering context [`DatabasePendingDeliveryStorage::insert_fenced`]
@@ -180,11 +182,19 @@ impl DatabasePendingDeliveryStorage {
                 .await
                 .map_err(|e| PendingStorageError::Other(e.to_string()))?,
         };
+        Self::from_database(db, quota).await
+    }
+
+    pub(crate) async fn from_database(
+        db: Database,
+        quota: QuotaPolicy,
+    ) -> Result<Self, PendingStorageError> {
         let storage = Self {
             db,
             quota,
             recipient_locks: std::sync::Arc::new(RecipientLockMap::new()),
             fencing: None,
+            ack_windows: Default::default(),
         };
         schema::initialize(&storage).await?;
         info!(
@@ -825,6 +835,9 @@ impl PendingDeliveryStorage for DatabasePendingDeliveryStorage {
     }
 
     async fn release_claim(&self, session: &SmSessionId) -> Result<u64, PendingStorageError> {
+        let state = self.ack_windows.for_session(session);
+        let _guard = state.operation.lock().await;
+        self.settle_ack_windows(session, &state).await?;
         // Clear `outbound_sequence` alongside `flushed_in_session` so a
         // stale sequence from the dead session can't survive a re-claim
         // and trick a later session's SM ack into deleting an unack'd
@@ -840,14 +853,29 @@ impl PendingDeliveryStorage for DatabasePendingDeliveryStorage {
     }
 
     async fn release_row(&self, id: &PendingRowId) -> Result<u64, PendingStorageError> {
-        self.execute(
-            "UPDATE pending_delivery SET flushed_in_session = NULL, \
-                                          outbound_sequence = NULL, \
-                                          claimed_at_ms = NULL \
-             WHERE row_id = ?",
-            crate::db_params![id.as_str().to_string()],
-        )
-        .await
+        let mut rows = self
+            .query(
+                "SELECT flushed_in_session FROM pending_delivery WHERE row_id = ?",
+                crate::db_params![id.as_str().to_string()],
+            )
+            .await?;
+        let Some(row) = rows
+            .next()
+            .await
+            .map_err(|error| PendingStorageError::Other(error.to_string()))?
+        else {
+            return Ok(0);
+        };
+        let session: Option<String> = row
+            .get(0)
+            .map_err(|error| PendingStorageError::Other(error.to_string()))?;
+        match session {
+            Some(session) => self.release_row_if_session(id, &SmSessionId::new(session)).await,
+            None => self.execute(
+                "UPDATE pending_delivery SET outbound_sequence = NULL, claimed_at_ms = NULL WHERE row_id = ? AND flushed_in_session IS NULL",
+                crate::db_params![id.as_str().to_string()],
+            ).await,
+        }
     }
 
     async fn release_row_if_session(
@@ -855,6 +883,9 @@ impl PendingDeliveryStorage for DatabasePendingDeliveryStorage {
         id: &PendingRowId,
         expected_session: &SmSessionId,
     ) -> Result<u64, PendingStorageError> {
+        let state = self.ack_windows.for_session(expected_session);
+        let _guard = state.operation.lock().await;
+        self.settle_ack_windows(expected_session, &state).await?;
         // Conditional release for the claim-expiry janitor. The
         // (row_id, session) snapshot returned by list_orphaned_claims can
         // be stale if a fresh bind re-claims the row before release.
@@ -883,6 +914,11 @@ impl PendingDeliveryStorage for DatabasePendingDeliveryStorage {
             );
         }
 
+        let state = self.ack_windows.for_session(session);
+        let _guard = state.operation.lock().await;
+        if let Err(error) = self.settle_ack_windows(session, &state).await {
+            return waddle_xmpp::pending_delivery::storage::ReleaseRowsForOutboundSequencesOutcome::failed(error);
+        }
         let sequence_placeholders = std::iter::repeat_n("?", sequences.len())
             .collect::<Vec<_>>()
             .join(", ");
@@ -1075,32 +1111,10 @@ impl PendingDeliveryStorage for DatabasePendingDeliveryStorage {
         from_exclusive: u32,
         to_inclusive: u32,
     ) -> Result<u64, PendingStorageError> {
-        // SQL mirror of `waddle_xmpp::pending_delivery::sequence_in_ack_window`
-        // (mod-2^32 interval `(from, to]`): plain `> from AND <= to` when
-        // the window doesn't wrap, `> from OR <= to` when it spans the
-        // u32 wrap. `outbound_sequence IS NOT NULL` keeps claimed-but-
-        // unpushed rows untouched in both branches.
-        let sql = if from_exclusive <= to_inclusive {
-            "DELETE FROM pending_delivery \
-             WHERE flushed_in_session = ? \
-               AND outbound_sequence IS NOT NULL \
-               AND outbound_sequence > ? \
-               AND outbound_sequence <= ?"
-        } else {
-            "DELETE FROM pending_delivery \
-             WHERE flushed_in_session = ? \
-               AND outbound_sequence IS NOT NULL \
-               AND (outbound_sequence > ? OR outbound_sequence <= ?)"
-        };
-        self.execute(
-            sql,
-            crate::db_params![
-                session.as_str().to_string(),
-                i64::from(from_exclusive),
-                i64::from(to_inclusive)
-            ],
-        )
-        .await
+        let state = self.ack_windows.for_session(session);
+        state.retain(from_exclusive, to_inclusive)?;
+        let _guard = state.operation.lock().await;
+        self.settle_ack_windows(session, &state).await
     }
 
     async fn list_orphaned_claims(
@@ -1368,6 +1382,6 @@ impl PendingDeliveryStorage for DatabasePendingDeliveryStorage {
     }
 
     fn sweep_internal_bookkeeping(&self) -> usize {
-        sweep_recipient_locks(&self.recipient_locks)
+        sweep_recipient_locks(&self.recipient_locks) + self.ack_windows.sweep()
     }
 }

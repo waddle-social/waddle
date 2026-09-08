@@ -1012,3 +1012,134 @@ async fn subject_snapshot_failure_nonadvancing_retry_postgres() {
         secondary_room_snapshot_failure(fixture, true, false).await;
     }
 }
+
+async fn room_pin_preview_lookup_failure(fixture: IngressFixture) {
+    let registry = ConnectionRegistry::new();
+    let rooms = RoomRegistryActor::spawn(RoomRegistryActor::new(
+        "muc.example.com".into(),
+        OccupantIdSecret::new(vec![b'p'; 32]).expect("secret"),
+    ));
+    let room: BareJid = "preview@muc.example.com".parse().expect("room");
+    let actor = rooms
+        .ask(CreateRoom {
+            room_jid: room.clone(),
+            waddle_id: "test".into(),
+            channel_id: "preview".into(),
+            config: Default::default(),
+        })
+        .await
+        .expect("room");
+    let mam: std::sync::Arc<dyn MamStorage> = std::sync::Arc::new(
+        SqlxMamStorage::open(fixture.db.database_url())
+            .await
+            .expect("MAM"),
+    );
+    let target_id = StanzaId::new("preview-target", room.clone().into());
+    let mut target = waddle_xmpp::mam::ArchivedMessage::for_test(
+        room.with_resource_str("author").expect("nick").into(),
+        room.clone().into(),
+    );
+    target.id = target_id.id.clone();
+    target.stanza_id = Some(target_id.clone());
+    target.body = Some("actual preview".into());
+    mam.store_message(&room, &target)
+        .await
+        .expect("archive target");
+    let mut deps = Deps::registry_only(&registry);
+    deps.room_registry = Some(&rooms);
+    deps.mam_storage = Some(&mam);
+    let mut submission = fixture.submission(Some("pin-preview-retry"), "pin");
+    let stream_id = waddle_xmpp::pending_delivery::SmSessionId::new("pin-preview-stream");
+    let mut tx = fixture.uow.begin().await.expect("stream transaction");
+    let sm_ingress_id = crate::ingress_uow::SmIngressStreamRepository::mint(&mut tx, &stream_id)
+        .await
+        .expect("stream");
+    tx.commit().await.expect("stream commit");
+    submission.identity = IngressStreamIdentity::Resumable {
+        stream_id,
+        sm_ingress_id,
+        #[cfg(feature = "clustering")]
+        owner: waddle_xmpp::ownership::NodeIdentity::local(),
+        #[cfg(feature = "clustering")]
+        claim_epoch: waddle_xmpp::ownership::ClaimEpoch(1),
+        reserved_wire_position: waddle_xmpp::ingress::WireHandledCount::new(1),
+        checkpoint_h: waddle_xmpp::ingress::WireHandledCount::new(1),
+    };
+    let events = || {
+        vec![OutboundEvent::ApplyPinChange {
+            room: room.clone(),
+            request: PinChangeRequest::Pin {
+                target_stanza_id: target_id.clone(),
+                pinner_jid: "romeo@example.com".parse().expect("pinner"),
+                pinner_nick: "romeo".into(),
+                pinned_at: chrono::Utc::now(),
+            },
+        }]
+    };
+    fixture
+        .execute(
+            "ALTER TABLE mam_messages RENAME TO unavailable_mam_messages",
+            (),
+        )
+        .await;
+    plan_events(&mut submission, &deps, events()).await;
+    assert_eq!(
+        submission.plan.failure,
+        Some(effects::PlanFailure::RichTargetLookup)
+    );
+    assert!(submission.plan.plan.is_empty());
+    let failure = commit_submission(&fixture.uow, &submission, 1)
+        .await
+        .expect_err("lookup outage refuses pin");
+    assert_eq!(failure.class(), IngressDecisionClass::Storage);
+    for table in [
+        "ingress_messages",
+        "ingress_origin_aliases",
+        "ingress_effect_intents",
+        "ingress_sm_refs",
+    ] {
+        assert_eq!(fixture.count(table).await, 0);
+    }
+    assert_eq!(
+        fixture
+            .count("ingress_sm_streams WHERE checkpoint_h = 0 AND handled_ordinal = 0")
+            .await,
+        1
+    );
+    fixture
+        .execute(
+            "ALTER TABLE unavailable_mam_messages RENAME TO mam_messages",
+            (),
+        )
+        .await;
+    plan_events(&mut submission, &deps, events()).await;
+    assert_eq!(submission.plan.failure, None);
+    assert!(submission
+        .plan
+        .intents
+        .iter()
+        .any(|intent| matches!(intent, IngressEffectIntent::Pin { mutation: waddle_xmpp::ingress::RoomPinMutation::Pin { entry }, .. } if entry.preview.text == "actual preview")));
+    commit_submission(&fixture.uow, &submission, 3)
+        .await
+        .expect("healthy preview retry");
+    assert_eq!(
+        fixture
+            .count("ingress_sm_streams WHERE checkpoint_h = 1 AND handled_ordinal = 1")
+            .await,
+        1
+    );
+    actor.kill();
+    rooms.kill();
+    drop(mam);
+    fixture.close().await;
+}
+#[tokio::test]
+async fn sqlite_room_pin_preview_lookup_failure_retry() {
+    room_pin_preview_lookup_failure(IngressFixture::sqlite().await).await;
+}
+#[tokio::test]
+async fn postgres_room_pin_preview_lookup_failure_retry() {
+    if let Some(fixture) = IngressFixture::postgres("pin_preview_failure").await {
+        room_pin_preview_lookup_failure(fixture).await;
+    }
+}

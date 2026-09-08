@@ -39,7 +39,7 @@ async fn outstanding_invite_discharges_delivery(fixture: IngressFixture) {
     };
     let ledger = state.deps.app_state.db_pool.global_actor().clone();
     assert!(matches!(
-        muc_invites::record_invite(ledger.clone(), &invite)
+        muc_invites::record_invite_at(ledger.clone(), &invite, chrono::Utc::now())
             .await
             .expect("first invitation"),
         RecordOutcome::New { .. }
@@ -149,7 +149,7 @@ async fn outstanding_invite_discharges_delivery(fixture: IngressFixture) {
         .await
         .expect("terminalize no-op"));
     assert!(matches!(
-        muc_invites::record_invite(ledger, &invite)
+        muc_invites::record_invite_at(ledger, &invite, chrono::Utc::now())
             .await
             .expect("retained original invitation"),
         RecordOutcome::AlreadyOutstanding
@@ -178,6 +178,7 @@ fn invite_noop_discharge_excludes_non_delivery_effects() {
         inviter: "romeo@example.com".parse().expect("inviter"),
     };
     let ledger = ExternalEffect::InviteLedger(InviteLedgerMutation::Claim {
+        message_key: None,
         invite: invite.clone(),
     });
     let mut frame = PlannedEffect::new(Effect::External(ExternalEffect::Frame(Box::new(

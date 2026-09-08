@@ -98,8 +98,8 @@ docker tag ghcr.io/waddle-social/waddle:nix waddle-server:local
 docker run --rm \
   -p 3000:3000 \
   -e WADDLE_DATABASE_URL=sqlite:///var/lib/waddle/waddle.db \
-  -e WADDLE_XMPP_MAM_DATABASE_URL=sqlite:///var/lib/waddle/mam.db \
-  -e WADDLE_XMPP_INBOX_DATABASE_URL=sqlite:///var/lib/waddle/inbox.db \
+  -e WADDLE_XMPP_MAM_DATABASE_URL=sqlite:///var/lib/waddle/waddle.db \
+  -e WADDLE_XMPP_INBOX_DATABASE_URL=sqlite:///var/lib/waddle/waddle.db \
   -e WADDLE_SESSION_KEY="$(openssl rand -base64 48)" \
   -e WADDLE_OCCUPANT_ID_SECRET="$(openssl rand -base64 48)" \
   -e WADDLE_DEPLOYMENT_UUID="$(uuidgen | tr 'A-Z' 'a-z')" \

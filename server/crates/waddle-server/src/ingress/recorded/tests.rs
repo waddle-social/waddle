@@ -642,3 +642,32 @@ fn recorded_subject_bounce_reconstructs_exact_frame_without_transient_reply() {
         ]]
     );
 }
+
+#[test]
+fn recorded_decline_empty_fanout_requires_recipient_equality() {
+    use crate::server::routes::interpret::effects::delivery::ExternalDeliveryEffect;
+    let recorded: jid::BareJid = "a@example.com".parse().expect("A");
+    let other: jid::BareJid = "b@example.com".parse().expect("B");
+    let identity = waddle_xmpp::ingress::EffectMessageIdentity::capture_ordinal(1);
+    let intent = IngressEffectIntent::RouteDirect {
+        recipient: recorded.clone(),
+        fanout: Vec::new(),
+        route_identity: identity.clone(),
+    };
+    let effect = |bare: jid::BareJid| {
+        ExternalEffect::Delivery(ExternalDeliveryEffect::QueueDetached {
+            route_identity: Some(identity.clone()),
+            call_setup: None,
+            bare,
+            resources: Vec::new(),
+            stanza: Box::new(waddle_xmpp::Stanza::Message(
+                xmpp_parsers::message::Message::new(None),
+            )),
+        })
+    };
+    assert!(!recorded_route_obligation(
+        std::slice::from_ref(&intent),
+        &effect(other)
+    ));
+    assert!(recorded_route_obligation(&[intent], &effect(recorded)));
+}

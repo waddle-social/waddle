@@ -37,7 +37,7 @@ use xmpp_parsers::stanza_error::{DefinedCondition, ErrorType, StanzaError};
 
 use crate::auth::Session;
 use crate::server::routes::websocket::muc_invites::{
-    claim_invite, record_invite_at, OutstandingInvite, RecordOutcome,
+    claim_invite_for_message, record_invite_at, OutstandingInvite, RecordOutcome,
 };
 use crate::server::routes::websocket::WebSocketState;
 
@@ -58,6 +58,8 @@ pub enum InviteLedgerMutation {
     },
     Claim {
         invite: OutstandingInvite,
+        /// Bound to the canonical identity after ingress commits.
+        message_key: Option<waddle_xmpp::ingress::MessageKey>,
     },
 }
 #[derive(Clone, Debug)]
@@ -93,9 +95,17 @@ pub(crate) async fn execute_invite_ledger(
             }
             result.map(InviteLedgerOutcome::Recorded)
         }
-        InviteLedgerMutation::Claim { invite } => claim_invite(actor, &invite)
-            .await
-            .map(InviteLedgerOutcome::Claimed),
+        InviteLedgerMutation::Claim {
+            invite,
+            message_key,
+        } => {
+            let Some(message_key) = message_key else {
+                return EffectOutcome::Unavailable;
+            };
+            claim_invite_for_message(actor, &invite, message_key)
+                .await
+                .map(InviteLedgerOutcome::Claimed)
+        }
     }
     .map_err(|error| {
         warn!(%error, "Invitation ledger mutation failed");
@@ -242,7 +252,7 @@ pub(super) async fn handle_muc_mediated_invite(
         )]);
     }
 
-    let Some(room_actor) = state
+    let room_actor = match state
         .deps
         .protocol
         .room_registry
@@ -251,17 +261,22 @@ pub(super) async fn handle_muc_mediated_invite(
         })
         .reply_timeout(std::time::Duration::from_secs(5))
         .await
-        .ok()
-        .flatten()
-    else {
-        return Some(vec![error_frame(
-            incoming,
-            bound_jid,
-            deps,
-            ErrorType::Cancel,
-            DefinedCondition::ItemNotFound,
-            "Requested room not found.",
-        )]);
+    {
+        Ok(Some(actor)) => actor,
+        Err(_) => {
+            deps.effects.fail_plan(PlanFailure::RoomSnapshotUnavailable);
+            return Some(vec![]);
+        }
+        Ok(None) => {
+            return Some(vec![error_frame(
+                incoming,
+                bound_jid,
+                deps,
+                ErrorType::Cancel,
+                DefinedCondition::ItemNotFound,
+                "Requested room not found.",
+            )]);
+        }
     };
     let Ok(snapshot) = room_actor
         .ask(GetSnapshot)

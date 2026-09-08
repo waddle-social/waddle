@@ -36,6 +36,8 @@ pub enum InviteStorageError {
     ActorUnavailable,
     #[error("invitation ledger database operation failed: {0}")]
     Database(#[from] DatabaseError),
+    #[error("canonical invitation claim identity is missing")]
+    CanonicalMissing,
     #[error("stored invitation has an invalid inviter JID: {0}")]
     InvalidInviter(#[from] jid::Error),
 }
@@ -65,7 +67,7 @@ pub struct OutstandingInvite {
     pub inviter: BareJid,
 }
 
-/// Outcome of [`record_invite`]: whether this `(room, invitee,
+/// Outcome of [`record_invite_at`]: whether this `(room, invitee,
 /// inviter)` invitation is new or was already outstanding. Callers use
 /// `AlreadyOutstanding` as the anti-spam dedup signal — an identical
 /// re-invite is answered with silent success instead of another
@@ -76,22 +78,6 @@ pub enum RecordOutcome {
         created_at: chrono::DateTime<chrono::Utc>,
     },
     AlreadyOutstanding,
-}
-
-/// Record the outstanding invite for `(room, invitee, inviter)`.
-/// An identical unexpired invitation reports `AlreadyOutstanding`
-/// (and keeps its original timestamp); an expired one is refreshed
-/// and reported as `New`.
-///
-/// The dedup decision is a SINGLE conditional-upsert statement whose
-/// affected-row count is the answer, so two concurrent identical
-/// invites racing through the serialized [`DbActor`] resolve to
-/// exactly one `New` — there is no check-then-insert window.
-pub(crate) async fn record_invite(
-    actor: ActorRef<DbActor>,
-    invite: &OutstandingInvite,
-) -> Result<RecordOutcome, InviteStorageError> {
-    record_invite_at(actor, invite, chrono::Utc::now()).await
 }
 
 /// Record using the timestamp frozen by ingress planning.
@@ -195,6 +181,67 @@ pub(crate) async fn claim_invite(
         .await
         .map_err(actor_error)?;
     Ok(affected > 0)
+}
+
+/// Consume an invitation and retain its winning canonical identity atomically.
+/// A retry is authorized only by its own journal entry, never by mere absence.
+pub(crate) async fn claim_invite_for_message(
+    actor: ActorRef<DbActor>,
+    invite: &OutstandingInvite,
+    message_key: waddle_xmpp::ingress::MessageKey,
+) -> Result<bool, InviteStorageError> {
+    let database = actor
+        .ask(crate::db::actor::GetDatabase)
+        .await
+        .map_err(|_| InviteStorageError::ActorUnavailable)?;
+    let mut transaction = database.begin_immediate().await?;
+    let lock = match database.driver() {
+        crate::db::DatabaseDriver::Postgres => "SELECT message_key FROM ingress_messages WHERE message_key = CAST(? AS UUID) FOR UPDATE",
+        crate::db::DatabaseDriver::Sqlite => "SELECT message_key FROM ingress_messages WHERE message_key = ?",
+    };
+    if transaction
+        .query(
+            lock,
+            vec![crate::db::Value::from(message_key.to_storage().to_string())],
+        )
+        .await?
+        .next()
+        .await?
+        .is_none()
+    {
+        return Err(InviteStorageError::CanonicalMissing);
+    }
+    let identity = || -> Vec<crate::db::Value> {
+        vec![
+            message_key.to_storage().to_string().into(),
+            invite.room.to_string().into(),
+            invite.invitee.to_string().into(),
+            invite.inviter.to_string().into(),
+        ]
+    };
+    let select = match database.driver() {
+        crate::db::DatabaseDriver::Postgres => "SELECT claimed FROM muc_invite_claims WHERE message_key = CAST(? AS UUID) AND room_jid = ? AND invitee_jid = ? AND inviter_jid = ?",
+        crate::db::DatabaseDriver::Sqlite => "SELECT claimed FROM muc_invite_claims WHERE message_key = ? AND room_jid = ? AND invitee_jid = ? AND inviter_jid = ?",
+    };
+    if let Some(row) = transaction.query(select, identity()).await?.next().await? {
+        let claimed = row.get::<i64>(0)? != 0;
+        transaction.commit().await?;
+        return Ok(claimed);
+    }
+    let affected = transaction.execute(
+        "DELETE FROM muc_pending_invites WHERE room_jid = ? AND invitee_jid = ? AND inviter_jid = ? AND created_at > ?",
+        vec![invite.room.to_string().into(), invite.invitee.to_string().into(), invite.inviter.to_string().into(), expiry_cutoff().into()],
+    ).await?;
+    let claimed = affected > 0;
+    let insert = match database.driver() {
+        crate::db::DatabaseDriver::Postgres => "INSERT INTO muc_invite_claims (message_key, room_jid, invitee_jid, inviter_jid, claimed) VALUES (CAST(? AS UUID), ?, ?, ?, ?)",
+        crate::db::DatabaseDriver::Sqlite => "INSERT INTO muc_invite_claims (message_key, room_jid, invitee_jid, inviter_jid, claimed) VALUES (?, ?, ?, ?, ?)",
+    };
+    let mut params = identity();
+    params.push(claimed.into());
+    transaction.execute(insert, params).await?;
+    transaction.commit().await?;
+    Ok(claimed)
 }
 
 /// Wipe every outstanding invite for `room` — the room-destroy path

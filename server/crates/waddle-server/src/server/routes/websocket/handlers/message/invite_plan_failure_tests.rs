@@ -77,17 +77,48 @@ async fn refused(fixture: &IngressFixture, submission: &IngressSubmission, expec
     }
     checkpoint(fixture, submission, 0).await;
 }
-async fn recovered(fixture: &IngressFixture, submission: &IngressSubmission) {
+async fn recovered(
+    fixture: &IngressFixture,
+    submission: &IngressSubmission,
+) -> crate::ingress::IngressDecision {
     assert_eq!(submission.plan.failure, None);
-    assert_eq!(
-        commit_submission(&fixture.uow, submission, 3)
-            .await
-            .expect("healthy retry")
-            .class,
-        IngressDecisionClass::Accepted
-    );
+    let decision = commit_submission(&fixture.uow, submission, 3)
+        .await
+        .expect("healthy retry");
+    assert_eq!(decision.class, IngressDecisionClass::Accepted);
     assert_eq!(fixture.count("ingress_origin_aliases").await, 1);
     checkpoint(fixture, submission, 1).await;
+    decision
+}
+async fn deliver_recovered(
+    fixture: &IngressFixture,
+    submission: &IngressSubmission,
+    state: &WebSocketState,
+) {
+    let decision = recovered(fixture, submission).await;
+    let deps = crate::server::routes::websocket::interpret_loop::build_interpret_deps(state, None);
+    let report = crate::ingress::execute::execute_effects(
+        &fixture.uow,
+        &fixture.db,
+        &decision,
+        &crate::server::routes::interpret::effects::ImmediateSink,
+        &deps,
+        std::time::Duration::from_secs(5),
+    )
+    .await;
+    assert!(report.receipt_failures.is_empty(), "{report:?}");
+    let recipient = "juliet@example.com".parse().expect("recipient");
+    assert_eq!(
+        state
+            .deps
+            .protocol
+            .pending_delivery_storage
+            .list(&recipient)
+            .await
+            .expect("delivered invitation")
+            .len(),
+        1
+    );
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -241,16 +272,16 @@ async fn invite_room(
     (message, actor)
 }
 
-async fn directory_failure(fixture: IngressFixture) {
+async fn directory_failure(fixture: IngressFixture, group_dm: bool) {
     let state = shared_state(&fixture).await;
-    let (message, actor) = invite_room(&state, false).await;
+    let (message, actor) = invite_room(&state, group_dm).await;
     fixture
         .execute(
             "ALTER TABLE native_users RENAME TO temporarily_unavailable_native_users",
             (),
         )
         .await;
-    let mut submission = submission(&fixture, invite_plan(&state, &message, false).await).await;
+    let mut submission = submission(&fixture, invite_plan(&state, &message, group_dm).await).await;
     refused(&fixture, &submission, PlanFailure::InvitePrerequisiteRead).await;
     fixture
         .execute(
@@ -258,20 +289,20 @@ async fn directory_failure(fixture: IngressFixture) {
             (),
         )
         .await;
-    submission.plan = invite_plan(&state, &message, false).await;
-    recovered(&fixture, &submission).await;
+    submission.plan = invite_plan(&state, &message, group_dm).await;
+    deliver_recovered(&fixture, &submission, &state).await;
     actor.kill();
     drop(state);
     fixture.close().await;
 }
 #[tokio::test]
 async fn ingress_muc_invite_directory_failure_retry_sqlite() {
-    directory_failure(IngressFixture::sqlite().await).await;
+    directory_failure(IngressFixture::sqlite().await, false).await;
 }
 #[tokio::test]
 async fn ingress_muc_invite_directory_failure_retry_postgres() {
     if let Some(fixture) = IngressFixture::postgres("muc_invite_directory").await {
-        directory_failure(fixture).await;
+        directory_failure(fixture, false).await;
     }
 }
 
@@ -766,5 +797,95 @@ async fn ingress_group_dm_invite_full_history_timestamp_replay_sqlite() {
 async fn ingress_group_dm_invite_full_history_timestamp_replay_postgres() {
     if let Some(fixture) = IngressFixture::postgres("invite_full_timestamp").await {
         full_history_timestamp_replay(fixture).await;
+    }
+}
+
+#[tokio::test]
+async fn ingress_group_dm_invite_directory_failure_retry_sqlite() {
+    directory_failure(IngressFixture::sqlite().await, true).await;
+}
+#[tokio::test]
+async fn ingress_group_dm_invite_directory_failure_retry_postgres() {
+    if let Some(fixture) = IngressFixture::postgres("group_invite_directory").await {
+        directory_failure(fixture, true).await;
+    }
+}
+async fn registry_failure(fixture: IngressFixture, group_dm: bool) {
+    let state = shared_state(&fixture).await;
+    let (message, actor) = invite_room(&state, group_dm).await;
+    state.deps.protocol.room_registry.kill();
+    state.deps.protocol.room_registry.wait_for_shutdown().await;
+    let mut submission = submission(&fixture, invite_plan(&state, &message, group_dm).await).await;
+    refused(&fixture, &submission, PlanFailure::RoomSnapshotUnavailable).await;
+    let healthy = crate::server::routes::websocket::tests::create_test_websocket_state().await;
+    let (message, healthy_actor) = invite_room(&healthy, group_dm).await;
+    submission.plan = invite_plan(&healthy, &message, group_dm).await;
+    deliver_recovered(&fixture, &submission, &healthy).await;
+    actor.kill();
+    healthy_actor.kill();
+    drop(state);
+    fixture.close().await;
+}
+#[tokio::test]
+async fn ingress_muc_invite_registry_failure_retry_sqlite() {
+    registry_failure(IngressFixture::sqlite().await, false).await;
+}
+#[tokio::test]
+async fn ingress_group_dm_invite_registry_failure_retry_sqlite() {
+    registry_failure(IngressFixture::sqlite().await, true).await;
+}
+#[tokio::test]
+async fn ingress_muc_invite_registry_failure_retry_postgres() {
+    if let Some(fixture) = IngressFixture::postgres("muc_registry_failure").await {
+        registry_failure(fixture, false).await;
+    }
+}
+#[tokio::test]
+async fn ingress_group_dm_invite_registry_failure_retry_postgres() {
+    if let Some(fixture) = IngressFixture::postgres("group_registry_failure").await {
+        registry_failure(fixture, true).await;
+    }
+}
+
+async fn invite_directory_semantic_denial(fixture: IngressFixture, group_dm: bool) {
+    let state = shared_state(&fixture).await;
+    let (message, actor) = invite_room(&state, group_dm).await;
+    let sender = "romeo@example.com/phone".parse().expect("sender");
+    let mut message = super::tests::group_dm_invite_message(
+        &message.to.expect("room").to_bare(),
+        &sender,
+        "missing@example.com",
+    );
+    waddle_xmpp_core::xep0359::add_origin_id(&mut message, "invite-prerequisite-retry");
+    let submission = submission(&fixture, invite_plan(&state, &message, group_dm).await).await;
+    assert_eq!(submission.plan.failure, None);
+    assert!(submission.plan.rejection.is_some());
+    let decision = commit_submission(&fixture.uow, &submission, 3)
+        .await
+        .expect("semantic denial commits");
+    assert!(decision.class.advances());
+    checkpoint(&fixture, &submission, 1).await;
+    actor.kill();
+    drop(state);
+    fixture.close().await;
+}
+#[tokio::test]
+async fn ingress_muc_invite_missing_account_denial_sqlite() {
+    invite_directory_semantic_denial(IngressFixture::sqlite().await, false).await;
+}
+#[tokio::test]
+async fn ingress_group_dm_invite_missing_account_denial_sqlite() {
+    invite_directory_semantic_denial(IngressFixture::sqlite().await, true).await;
+}
+#[tokio::test]
+async fn ingress_muc_invite_missing_account_denial_postgres() {
+    if let Some(fixture) = IngressFixture::postgres("muc_missing_account").await {
+        invite_directory_semantic_denial(fixture, false).await;
+    }
+}
+#[tokio::test]
+async fn ingress_group_dm_invite_missing_account_denial_postgres() {
+    if let Some(fixture) = IngressFixture::postgres("group_missing_account").await {
+        invite_directory_semantic_denial(fixture, true).await;
     }
 }

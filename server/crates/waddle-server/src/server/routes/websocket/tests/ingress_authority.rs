@@ -691,11 +691,13 @@ async fn connection_reply_receipt_after_transport_write_with_remote(
         )
         .await;
         assert!(matches!(replayed.outcome, BatchWriteOutcome::Continue));
-        assert_eq!(
-            frame_receipt_state(&state).await,
-            (1, 1),
-            "resume settles and terminalizes the owner row without its token"
-        );
+        tokio::time::timeout(std::time::Duration::from_secs(10), async {
+            while frame_receipt_state(&state).await != (1, 1) {
+                tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .expect("retained replay proof settles and terminalizes the owner without its token");
     }
 }
 

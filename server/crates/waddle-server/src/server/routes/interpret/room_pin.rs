@@ -109,16 +109,23 @@ async fn apply_pin(deps: &Deps<'_>, room: BareJid, request: PinChangeRequest, re
     // placeholder preview keyed on the pinner — better than dropping
     // the pin silently. Most real pin requests target a recent
     // message that's still archived.
-    let preview = resolve_preview_from_mam(deps, &room, &target_stanza_id, &snapshot.occupants)
-        .await
-        .unwrap_or_else(|| {
-            warn!(
-                room = %room,
-                target = %target_stanza_id.id,
-                "ApplyPinChange::Pin: target not found in MAM; storing placeholder preview"
-            );
-            PinPreview::new(pinner_jid.clone(), None, "", pinned_at)
-        });
+    let preview =
+        match resolve_preview_from_mam(deps, &room, &target_stanza_id, &snapshot.occupants).await {
+            Err(_) => {
+                deps.effects
+                    .fail_plan(effects::PlanFailure::RichTargetLookup);
+                return;
+            }
+            Ok(Some(preview)) => preview,
+            Ok(None) => {
+                warn!(
+                    room = %room,
+                    target = %target_stanza_id.id,
+                    "ApplyPinChange::Pin: target not found in MAM; storing placeholder preview"
+                );
+                PinPreview::new(pinner_jid.clone(), None, "", pinned_at)
+            }
+        };
 
     let entry = PinnedEntry {
         target_stanza_id: target_stanza_id.clone(),
@@ -361,14 +368,16 @@ async fn resolve_preview_from_mam(
     room: &BareJid,
     target_stanza_id: &StanzaId,
     occupants: &[waddle_xmpp::muc::room_actor::RoomChainOccupant],
-) -> Option<PinPreview> {
-    let mam_storage = deps.mam_storage?;
+) -> Result<Option<PinPreview>, waddle_xmpp::mam::MamStorageError> {
+    let Some(mam_storage) = deps.mam_storage else {
+        return Ok(None);
+    };
     let row = match mam_storage
         .get_message_by_stanza_id(room, &target_stanza_id.id)
         .await
     {
         Ok(Some(row)) => row,
-        Ok(None) => return None,
+        Ok(None) => return Ok(None),
         Err(error) => {
             warn!(
                 room = %room,
@@ -376,7 +385,7 @@ async fn resolve_preview_from_mam(
                 error = ?error,
                 "ApplyPinChange::Pin: MAM lookup failed"
             );
-            return None;
+            return Err(error);
         }
     };
     let nick = row.from.resource().map(|r| r.to_string());
@@ -395,12 +404,12 @@ async fn resolve_preview_from_mam(
     } else {
         body
     };
-    Some(PinPreview::new(
+    Ok(Some(PinPreview::new(
         author_bare,
         nick,
         &truncated,
         row.timestamp,
-    ))
+    )))
 }
 
 /// XEP-0424 retraction → pin auto-unpin cascade (#414, Q8 = a).

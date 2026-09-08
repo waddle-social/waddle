@@ -236,26 +236,19 @@ where
     report
 }
 
-/// Receipt the ingress obligations a replayed frame carried through XEP-0198
-/// recovery. The original writer's report was dropped with its connection, so
-/// the retained replay entry is the only remaining proof carrier.
+/// Retain completion proofs carried through XEP-0198 recovery. Persistence
+/// retries run independently of this socket; success means the authority now
+/// owns the proofs, so the replay entry can be dropped.
 pub(super) async fn complete_replayed_ingress_receipts(
     state: &WebSocketState,
     receipts: &[waddle_xmpp::stream_management::SmIngressFrameReceipt],
 ) -> bool {
-    for mut report in crate::ingress::ExecutionReport::replay_frame_completions(receipts) {
-        if let Err(error) = state
-            .deps
-            .protocol
-            .ingress
-            .complete_frame_obligations(&mut report)
-            .await
-        {
-            warn!(%error, "Failed to receipt written ingress response frames");
-            return false;
-        }
-    }
-    true
+    state
+        .deps
+        .protocol
+        .ingress
+        .retry_frame_receipts(receipts)
+        .await
 }
 
 pub(super) async fn write_response_batch_report_with_admission<S, SE, R, RE, F>(
@@ -307,6 +300,7 @@ where
     let total_frames = frames.len();
     let mut accepted_frame_indices = Vec::new();
     let mut written_frame_count = 0usize;
+    complete_replayed_ingress_receipts(state, &[]).await;
     let mut frames = frames.into_iter().enumerate();
     if !batch_authoritative(authority) {
         accepted_frame_indices.extend(record_remaining_for_replay_indexed(conn, frames, policy));

@@ -45,7 +45,7 @@ pub(super) async fn handle_group_dm_mediated_invite(
     if channel.channel_type != waddle_xmpp::admin::CHANNEL_TYPE_GROUP_DM {
         return None;
     }
-    let Some(room_actor) = state
+    let room_actor = match state
         .deps
         .protocol
         .room_registry
@@ -54,16 +54,21 @@ pub(super) async fn handle_group_dm_mediated_invite(
         })
         .reply_timeout(std::time::Duration::from_secs(5))
         .await
-        .ok()
-        .flatten()
-    else {
-        return Some(vec![error_reply(
-            incoming,
-            bound_jid,
-            deps,
-            GroupDmInviteError::ItemNotFound,
-            "Requested room not found.",
-        )]);
+    {
+        Ok(Some(actor)) => actor,
+        Err(_) => {
+            deps.effects.fail_plan(PlanFailure::RoomSnapshotUnavailable);
+            return Some(vec![]);
+        }
+        Ok(None) => {
+            return Some(vec![error_reply(
+                incoming,
+                bound_jid,
+                deps,
+                GroupDmInviteError::ItemNotFound,
+                "Requested room not found.",
+            )]);
+        }
     };
     let Ok(context) = room_actor
         .ask(GetAdminContext {
@@ -124,6 +129,13 @@ pub(super) async fn handle_group_dm_mediated_invite(
     )
     .await
     {
+        let error = match error {
+            crate::admin::channels::GroupDmInviteeValidationError::DirectoryUnavailable => {
+                deps.effects.fail_plan(PlanFailure::InvitePrerequisiteRead);
+                return Some(vec![]);
+            }
+            crate::admin::channels::GroupDmInviteeValidationError::Denied(error) => error,
+        };
         retain_group_dm_replay_actor(incoming, bound_jid, &room_jid, &invitee, &room_actor, deps);
         return Some(vec![xmpp_error_reply(incoming, bound_jid, deps, error)]);
     }
@@ -428,7 +440,7 @@ pub(crate) fn restore_recorded_group_dm_invite(
         )) => mutation.grant.room != grant.room || mutation.grant.invitee != grant.invitee,
         Effect::External(ExternalEffect::InviteLedger(
             super::muc_invite::InviteLedgerMutation::Record { invite, .. }
-            | super::muc_invite::InviteLedgerMutation::Claim { invite },
+            | super::muc_invite::InviteLedgerMutation::Claim { invite, .. },
         )) => invite.room != grant.room || invite.invitee != grant.invitee,
         Effect::External(
             ExternalEffect::RouteToPeer(route) | ExternalEffect::QueueOfflineDelivery(route),

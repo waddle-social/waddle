@@ -506,14 +506,10 @@ pub(super) async fn apply_sm_ack(
     phase: &mut ConnectionPhase,
     h: u32,
 ) -> Vec<ResponseFrame> {
-    if !sm_state.ack_regresses_last_acked(h)
-        && !sm_state.ack_exceeds_outbound(h)
-        && !complete_acknowledged_ingress_receipts(state, sm_state, h).await
-    {
-        // Do not advance the acknowledgement floor until its receipt proof is
-        // durable. Keeping the stream resumable preserves carriers if the peer
-        // disconnects; a later ACK or resume retries this completion.
-        return vec![];
+    if !sm_state.ack_regresses_last_acked(h) && !sm_state.ack_exceeds_outbound(h) {
+        // Move proofs to the authority's retry queue before releasing replay
+        // carriers. Receipt storage must not veto a valid XEP-0198 ACK.
+        complete_acknowledged_ingress_receipts(state, sm_state, h).await;
     }
     let observation = apply_sm_ack_observation(sm_state, h);
     observe_sm_ack(observation);
@@ -549,41 +545,52 @@ pub(super) async fn apply_sm_ack(
                 ResponseFrame::from(websocket_stream_close_element()),
             ]
         }
-        SmAckObservation::Duplicate { .. } => vec![],
+        SmAckObservation::Duplicate { .. } => {
+            settle_pending_ack_window(state, sm_state, h, h).await;
+            vec![]
+        }
         SmAckObservation::Advanced {
             acked_from_exclusive,
             ..
         } => {
-            if let Some(stream_id) = sm_state.stream_id.clone() {
-                let session_id = waddle_xmpp::pending_delivery::SmSessionId::new(stream_id);
-                match state
-                    .deps
-                    .protocol
-                    .pending_delivery_storage
-                    .delete_acked_in_window(&session_id, acked_from_exclusive, h)
-                    .await
-                {
-                    Ok(removed) if removed > 0 => {
-                        debug!(
-                            session = %session_id,
-                            h,
-                            removed,
-                            "pending_delivery rows cleared by SM ack"
-                        );
-                    }
-                    Ok(_) => {}
-                    Err(_) => {
-                        warn!(
-                            session = %session_id,
-                            h,
-                            failure = "storage",
-                            "pending_delivery delete_acked_in_window failed; rows \
-                             will be retried on next session via release_claim"
-                        );
-                    }
-                }
-            }
+            settle_pending_ack_window(state, sm_state, acked_from_exclusive, h).await;
             vec![]
+        }
+    }
+}
+
+async fn settle_pending_ack_window(
+    state: &WebSocketState,
+    sm_state: &StreamManagementState,
+    acked_from_exclusive: u32,
+    h: u32,
+) {
+    if let Some(stream_id) = sm_state.stream_id.clone() {
+        let session_id = waddle_xmpp::pending_delivery::SmSessionId::new(stream_id);
+        match state
+            .deps
+            .protocol
+            .pending_delivery_storage
+            .delete_acked_in_window(&session_id, acked_from_exclusive, h)
+            .await
+        {
+            Ok(removed) if removed > 0 => {
+                debug!(
+                    session = %session_id,
+                    h,
+                    removed,
+                    "pending_delivery rows cleared by SM ack"
+                );
+            }
+            Ok(_) => {}
+            Err(_) => {
+                warn!(
+                    session = %session_id,
+                    h,
+                    failure = "storage",
+                    "pending_delivery ACK deletion retained; claim release must settle it"
+                );
+            }
         }
     }
 }

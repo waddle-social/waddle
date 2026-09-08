@@ -416,9 +416,8 @@ async fn deliver_pm_to_session(
 ///   selects WHICH invitation is declined, but the recipient is always
 ///   a ledger-recorded inviter — never an arbitrary client-supplied
 ///   target;
-/// - the row is claimed atomically BEFORE delivery (concurrent
-///   declines from two devices forward exactly one) and re-recorded if
-///   neither a live socket nor the durable queue accepted the decline;
+/// - the row is claimed atomically with its canonical identity BEFORE
+///   delivery; failures retain that winner for recorded delivery retries;
 /// - delivery is durable: an offline inviter gets a pending-delivery
 ///   row instead of a silent drop.
 ///
@@ -503,6 +502,7 @@ async fn handle_muc_mediated_decline(
     // same invitation, exactly one wins the delete and forwards.
     let claim = PlannedEffect::new(Effect::External(ExternalEffect::InviteLedger(
         super::muc_invite::InviteLedgerMutation::Claim {
+            message_key: None,
             invite: invite.clone(),
         },
     )));
@@ -535,7 +535,7 @@ async fn handle_muc_mediated_decline(
         }
     }
 
-    let x = build_mediated_decline_payload(bound_jid, inbound_decline);
+    let x = build_mediated_decline_payload(&bound_jid.to_bare(), inbound_decline);
     let mut mediated = Message::new(Some(jid::Jid::from(invite.inviter.clone())));
     mediated.id = incoming.id.clone();
     mediated.from = Some(jid::Jid::from(room_jid.clone()));
@@ -544,11 +544,7 @@ async fn handle_muc_mediated_decline(
     let delivery_sink = crate::server::routes::interpret::effects::ScopedInviteSink {
         inner: deps.effects,
         invite: invite.clone(),
-        failure: Some(
-            crate::server::routes::interpret::effects::invite::InviteDeliveryFailure::RestoreLedger(
-                invite.clone(),
-            ),
-        ),
+        failure: None,
     };
     let mut delivery_deps = deps.clone();
     delivery_deps.effects = &delivery_sink;
@@ -560,8 +556,8 @@ async fn handle_muc_mediated_decline(
     )
     .await
     {
-        // The executed delivery effect restored the claimed ledger row;
-        // tell the decliner that the delivery failed so they can retry.
+        // The canonical claim remains owned by this decline; its recorded
+        // delivery stays pending for a retry.
         tracing::warn!(
             room = %room_jid,
             decliner = %decliner,
@@ -594,6 +590,107 @@ async fn handle_muc_mediated_decline(
     Some(Vec::new())
 }
 
+/// Rebuild accepted decline obligations without consulting the consumed ledger.
+pub(crate) fn restore_recorded_muc_decline(
+    plan: &mut crate::ingress::IngressPlan,
+    recorded: &[IngressEffectIntent],
+    pending: &[IngressEffectIntent],
+    envelope: &crate::ingress_substrate::MessageEnvelope,
+) -> Result<bool, crate::ingress_uow::IngressUowError> {
+    use crate::server::routes::interpret::effects::{invite::MucUserRoute, PlanSuppressionPolicy};
+    use waddle_xmpp::{
+        ingress::PendingDeliveryMutation,
+        pending_delivery::{PendingPayload, PendingRow},
+    };
+    let Some(mutation) = recorded.iter().find_map(|intent| match intent {
+        IngressEffectIntent::MucInviteLedger { mutation }
+            if mutation.action == MucInviteLedgerAction::Claimed =>
+        {
+            Some(mutation)
+        }
+        _ => None,
+    }) else {
+        return Ok(false);
+    };
+    let incoming = envelope.message();
+    let decline = mediated_decline(incoming)
+        .ok_or(crate::ingress_uow::IngressUowError::EffectIntentMessageMissing)?;
+    let invite = crate::server::routes::websocket::muc_invites::OutstandingInvite {
+        room: mutation.room.clone(),
+        invitee: mutation.invitee.clone(),
+        inviter: mutation.inviter.clone(),
+    };
+    // The accepted decline owns the entire replay plan; live lookup may now
+    // select another invitation after the original invitation was consumed.
+    plan.plan.clear();
+    plan.sanitized_message = incoming.clone();
+    plan.plan.push(PlannedEffect::new(Effect::External(
+        ExternalEffect::InviteLedger(super::muc_invite::InviteLedgerMutation::Claim {
+            invite: invite.clone(),
+            message_key: None,
+        }),
+    )));
+    for intent in pending {
+        let IngressEffectIntent::RouteDirect {
+            recipient,
+            fanout,
+            route_identity,
+        } = intent
+        else {
+            continue;
+        };
+        if recipient != &invite.inviter {
+            continue;
+        }
+        let Some(row_id) = recorded.iter().find_map(|intent| match intent {
+            IngressEffectIntent::PendingDelivery {
+                mutation: PendingDeliveryMutation::Transient { recipient, row_id },
+            } if recipient == &invite.inviter => Some(row_id.clone()),
+            _ => None,
+        }) else {
+            return Err(crate::ingress_uow::IngressUowError::EffectIntentMessageMissing);
+        };
+        // A completed fallback is reconciled into the route receipt before this hook.
+        let mut message = Message::new(Some(invite.inviter.clone().into()));
+        message.id = incoming.id.clone();
+        message.from = Some(invite.room.clone().into());
+        message.type_ = MessageType::Normal;
+        message
+            .payloads
+            .push(build_mediated_decline_payload(&invite.invitee, decline));
+        let route = MucUserRoute {
+            route_identity: Some(route_identity.clone()),
+            recipient: recipient.clone(),
+            resources: fanout.clone(),
+            fallback: PendingRow {
+                id: row_id,
+                recipient: recipient.clone(),
+                original_receipt_at: chrono::Utc::now(),
+                payload: PendingPayload::Transient(Box::new(message.clone())),
+                flushed_in_session: None,
+                outbound_sequence: None,
+            },
+            message: Box::new(message),
+            failure: None,
+        };
+        let effect = if fanout.is_empty() {
+            ExternalEffect::QueueOfflineDelivery(route)
+        } else {
+            ExternalEffect::RouteToPeer(route)
+        };
+        let delivery = PlannedEffect::new(Effect::External(effect))
+            .with_suppression(PlanSuppressionPolicy::Always)
+            .with_dependency(
+                crate::server::routes::interpret::effects::PlanEffectDependency::AfterInviteLedger { invite: invite.clone() },
+            );
+        plan.plan.push(delivery);
+    }
+    plan.intents = recorded.to_vec();
+    plan.rejection = None;
+    plan.error_reply = None;
+    Ok(true)
+}
+
 fn capture_muc_private_routes(
     ingress_effect_capture: Option<&IngressEffectCapture>,
     sender: &jid::FullJid,
@@ -622,13 +719,13 @@ fn mediated_decline(message: &Message) -> Option<&minidom::Element> {
 }
 
 fn build_mediated_decline_payload(
-    decliner: &jid::FullJid,
+    decliner: &jid::BareJid,
     inbound_decline: &minidom::Element,
 ) -> minidom::Element {
     let mut decline = minidom::Element::builder("decline", waddle_xmpp::muc::presence::NS_MUC_USER)
         .attr(
             minidom::rxml::xml_ncname!("from").to_owned(),
-            decliner.to_bare().to_string(),
+            decliner.to_string(),
         );
     if let Some(reason) =
         inbound_decline.get_child("reason", waddle_xmpp::muc::presence::NS_MUC_USER)
@@ -1113,7 +1210,7 @@ mod tests {
     async fn plan_muc_decline_preserves_ledger_without_delivery() {
         use crate::server::routes::interpret::effects::PlanSink;
         use crate::server::routes::websocket::muc_invites::{
-            list_invites, record_invite, OutstandingInvite,
+            list_invites, record_invite_at, OutstandingInvite,
         };
         let state = create_test_websocket_state().await;
         let decliner: jid::FullJid = "bob@example.com/web".parse().expect("decliner");
@@ -1124,7 +1221,7 @@ mod tests {
             inviter: inviter.to_bare(),
         };
         let actor = state.deps.app_state.db_pool.global_actor().clone();
-        record_invite(actor.clone(), &invite)
+        record_invite_at(actor.clone(), &invite, chrono::Utc::now())
             .await
             .expect("seed invitation");
         let (tx, mut rx) = tokio::sync::mpsc::channel(8);
@@ -1157,7 +1254,7 @@ mod tests {
             vec![invite.clone()]
         );
         assert!(sink.snapshot().iter().any(|effect| matches!(&effect.effect,
-            Effect::External(ExternalEffect::InviteLedger(super::super::muc_invite::InviteLedgerMutation::Claim { invite: planned })) if planned == &invite)));
+            Effect::External(ExternalEffect::InviteLedger(super::super::muc_invite::InviteLedgerMutation::Claim { invite: planned, .. })) if planned == &invite)));
         assert!(sink.snapshot().iter().any(|effect| effect.dependencies.contains(
             &crate::server::routes::interpret::effects::PlanEffectDependency::AfterInviteLedger { invite: invite.clone() }
         )), "decline delivery must depend on successful ledger claim");

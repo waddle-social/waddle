@@ -4342,13 +4342,14 @@ async fn muc_mediated_decline_is_forwarded_from_room_to_inviter() {
 
     // #1264: a decline only forwards when the outstanding-invite ledger
     // says alice actually invited hecate to this room.
-    crate::server::routes::websocket::muc_invites::record_invite(
+    crate::server::routes::websocket::muc_invites::record_invite_at(
         state.deps.app_state.db_pool.global_actor().clone(),
         &crate::server::routes::websocket::muc_invites::OutstandingInvite {
             room: room_jid.clone(),
             invitee: decliner_jid.to_bare(),
             inviter: alice_jid.to_bare(),
         },
+        chrono::Utc::now(),
     )
     .await
     .expect("seed outstanding invite");
@@ -4372,7 +4373,7 @@ async fn muc_mediated_decline_is_forwarded_from_room_to_inviter() {
     message.id = Some(xmpp_parsers::message::Id("decline-1".to_string()));
     message.type_ = XmppMessageType::Normal;
     message.payloads.push(decline_payload);
-    let responses = handle_message_for_test(state.as_ref(), &decliner_jid, None, message).await;
+    let responses = handle_decline_through_ingress(state.as_ref(), &decliner_jid, message).await;
     assert!(
         responses.is_empty(),
         "mediated decline routes asynchronously"
@@ -4450,13 +4451,14 @@ async fn muc_mediated_decline_routes_to_ledger_inviter_not_client_supplied_targe
     .await;
     while alice_rx.try_recv().is_ok() {}
 
-    crate::server::routes::websocket::muc_invites::record_invite(
+    crate::server::routes::websocket::muc_invites::record_invite_at(
         state.deps.app_state.db_pool.global_actor().clone(),
         &crate::server::routes::websocket::muc_invites::OutstandingInvite {
             room: room_jid.clone(),
             invitee: decliner_jid.to_bare(),
             inviter: alice_jid.to_bare(),
         },
+        chrono::Utc::now(),
     )
     .await
     .expect("seed outstanding invite");
@@ -4477,7 +4479,7 @@ async fn muc_mediated_decline_routes_to_ledger_inviter_not_client_supplied_targe
     message.type_ = XmppMessageType::Normal;
     message.payloads.push(decline_payload);
 
-    let responses = handle_message_for_test(state.as_ref(), &decliner_jid, None, message).await;
+    let responses = handle_decline_through_ingress(state.as_ref(), &decliner_jid, message).await;
     assert!(
         responses.is_empty(),
         "mediated decline routes asynchronously"
@@ -4576,13 +4578,14 @@ async fn muc_mediated_decline_to_offline_inviter_is_queued_durably() {
     let inviter: BareJid = "alice@example.com".parse().expect("inviter jid");
     let decliner_jid: FullJid = "hecate@example.com/broom".parse().expect("decliner jid");
 
-    crate::server::routes::websocket::muc_invites::record_invite(
+    crate::server::routes::websocket::muc_invites::record_invite_at(
         state.deps.app_state.db_pool.global_actor().clone(),
         &crate::server::routes::websocket::muc_invites::OutstandingInvite {
             room: room_jid.clone(),
             invitee: decliner_jid.to_bare(),
             inviter: inviter.clone(),
         },
+        chrono::Utc::now(),
     )
     .await
     .expect("seed outstanding invite");
@@ -4602,7 +4605,7 @@ async fn muc_mediated_decline_to_offline_inviter_is_queued_durably() {
     message.type_ = XmppMessageType::Normal;
     message.payloads.push(decline_payload);
 
-    let responses = handle_message_for_test(state.as_ref(), &decliner_jid, None, message).await;
+    let responses = handle_decline_through_ingress(state.as_ref(), &decliner_jid, message).await;
     assert!(
         responses.is_empty(),
         "queued decline is a silent success for the decliner: {responses:?}"
@@ -5950,13 +5953,14 @@ async fn muc_mediated_decline_selects_inviter_by_to_among_multiple() {
     register_test_connection(state.as_ref(), &alice_full, alice_tx).await;
 
     for inviter in [&alice, &bob] {
-        crate::server::routes::websocket::muc_invites::record_invite(
+        crate::server::routes::websocket::muc_invites::record_invite_at(
             state.deps.app_state.db_pool.global_actor().clone(),
             &crate::server::routes::websocket::muc_invites::OutstandingInvite {
                 room: room_jid.clone(),
                 invitee: decliner_jid.to_bare(),
                 inviter: inviter.clone(),
             },
+            chrono::Utc::now(),
         )
         .await
         .expect("seed invite");
@@ -5976,7 +5980,7 @@ async fn muc_mediated_decline_selects_inviter_by_to_among_multiple() {
     message.id = Some(xmpp_parsers::message::Id("decline-multi-1".to_string()));
     message.type_ = XmppMessageType::Normal;
     message.payloads.push(decline_payload);
-    let responses = handle_message_for_test(state.as_ref(), &decliner_jid, None, message).await;
+    let responses = handle_decline_through_ingress(state.as_ref(), &decliner_jid, message).await;
     assert!(responses.is_empty(), "decline routes: {responses:?}");
 
     let outbound = alice_rx.try_recv().expect("alice receives her decline");
@@ -6010,13 +6014,14 @@ async fn muc_mediated_decline_ambiguous_target_is_bad_request() {
     let decliner_jid: FullJid = "hecate@example.com/broom".parse().expect("decliner jid");
 
     for inviter in ["alice@example.com", "bob@example.com"] {
-        crate::server::routes::websocket::muc_invites::record_invite(
+        crate::server::routes::websocket::muc_invites::record_invite_at(
             state.deps.app_state.db_pool.global_actor().clone(),
             &crate::server::routes::websocket::muc_invites::OutstandingInvite {
                 room: room_jid.clone(),
                 invitee: decliner_jid.to_bare(),
                 inviter: inviter.parse().expect("inviter"),
             },
+            chrono::Utc::now(),
         )
         .await
         .expect("seed invite");
@@ -6051,4 +6056,49 @@ async fn muc_mediated_decline_ambiguous_target_is_bad_request() {
     .await
     .expect("ledger lookup");
     assert_eq!(remaining.len(), 2, "nothing consumed on ambiguity");
+}
+
+/// Exercise decline claims through their canonical commit boundary.
+async fn handle_decline_through_ingress(
+    state: &WebSocketState,
+    sender: &FullJid,
+    message: xmpp_parsers::message::Message,
+) -> Vec<String> {
+    let mut conn = super::super::state::WsConnState::new();
+    conn.phase = ConnectionPhase::ready(sender.clone(), false);
+    conn.authenticated_session =
+        Some(create_test_session(state, sender.node().expect("sender node").as_str()).await);
+    conn.ensure_state_machine(
+        "example.com",
+        &state.deps.protocol.dispatcher,
+        sender.clone(),
+        false,
+        Default::default(),
+    );
+    let stream = waddle_xmpp::pending_delivery::SmSessionId::new(uuid::Uuid::new_v4().to_string());
+    drop(
+        state
+            .deps
+            .protocol
+            .sm_session_registry
+            .ensure_session_claim(stream.as_str())
+            .await
+            .expect("stream claim"),
+    );
+    state
+        .deps
+        .protocol
+        .ingress
+        .enroll_stream(&stream)
+        .await
+        .expect("enroll stream");
+    conn.sm_ingress_fence = state
+        .deps
+        .protocol
+        .sm_session_registry
+        .current_sm_claim_fence(stream.as_str());
+    conn.sm_state
+        .enable(stream.as_str().to_owned(), true, Some(300));
+    let frame = stanza_to_xml(&Stanza::Message(message));
+    super::super::frame::handle_xmpp_frame(&frame, "example.com", state, &mut conn).await
 }

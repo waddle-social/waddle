@@ -246,7 +246,7 @@ fn message(stanza: &Stanza) -> Option<&Message> {
 fn full_delivery<'a>(effect: &'a ExternalEffect, recipient: &FullJid) -> Option<&'a Message> {
     match effect {
         ExternalEffect::RouteToPeer(route) | ExternalEffect::QueueOfflineDelivery(route)
-            if route.resources.contains(recipient) =>
+            if route.recipient == recipient.to_bare() && route.resources.contains(recipient) =>
         {
             Some(&route.message)
         }
@@ -263,10 +263,11 @@ fn full_delivery<'a>(effect: &'a ExternalEffect, recipient: &FullJid) -> Option<
             },
         ) if jid == recipient => message(stanza),
         ExternalEffect::Delivery(ExternalDeliveryEffect::QueueDetached {
+            bare,
             resources,
             stanza,
             ..
-        }) if resources.contains(recipient) => message(stanza),
+        }) if *bare == recipient.to_bare() && resources.contains(recipient) => message(stanza),
         _ => None,
     }
 }
@@ -336,7 +337,7 @@ fn early_mutation_receipts(
             (ExternalEffect::InviteLedger(mutation), IngressEffectIntent::MucInviteLedger { mutation: recorded }) => {
                 let (invite, action, recorded_at) = match mutation {
                     InviteLedgerMutation::Record { invite, recorded_at, .. } => (invite, MucInviteLedgerAction::Recorded, Some(*recorded_at)),
-                    InviteLedgerMutation::Claim { invite } => (invite, MucInviteLedgerAction::Claimed, None),
+                    InviteLedgerMutation::Claim { invite, .. } => (invite, MucInviteLedgerAction::Claimed, None),
                 };
                 invite.room == recorded.room && invite.invitee == recorded.invitee && invite.inviter == recorded.inviter && action == recorded.action && recorded_at == recorded.recorded_at
             }

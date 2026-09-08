@@ -258,7 +258,7 @@ async fn actor_failure(fixture: IngressFixture, snapshot: bool) {
 
 async fn ledger_failure(fixture: IngressFixture) {
     use crate::server::routes::websocket::muc_invites::{
-        list_invites, record_invite, OutstandingInvite,
+        list_invites, record_invite_at, OutstandingInvite,
     };
     let state = state(&fixture).await;
     let mut submission = submission(&fixture, true).await;
@@ -268,7 +268,7 @@ async fn ledger_failure(fixture: IngressFixture) {
         inviter: "juliet@example.com".parse().expect("inviter"),
     };
     let actor = state.deps.app_state.db_pool.global_actor().clone();
-    record_invite(actor.clone(), &invite)
+    record_invite_at(actor.clone(), &invite, chrono::Utc::now())
         .await
         .expect("seed invite");
     fixture
@@ -405,5 +405,449 @@ async fn ingress_muc_direct_missing_room_commits_denial_sqlite() {
 async fn ingress_muc_direct_missing_room_commits_denial_postgres() {
     if let Some(fixture) = IngressFixture::postgres("muc_direct_missing").await {
         missing_room(fixture).await;
+    }
+}
+
+async fn decline_claim_crash_replay(fixture: IngressFixture, receipt: bool, two_inviters: bool) {
+    use crate::server::routes::interpret::effects::{EffectOutcome, ExternalEffect, ImmediateSink};
+    use crate::server::routes::websocket::handlers::message::muc_invite::{
+        execute_invite_ledger, InviteLedgerOutcome,
+    };
+    use crate::server::routes::websocket::muc_invites::{record_invite_at, OutstandingInvite};
+    let state = state(&fixture).await;
+    let mut submission = submission(&fixture, true).await;
+    let invite = OutstandingInvite {
+        room: "direct-failure@muc.example.com".parse().expect("room"),
+        invitee: submission.sender.to_bare(),
+        inviter: "juliet@example.com".parse().expect("inviter"),
+    };
+    record_invite_at(
+        state.deps.app_state.db_pool.global_actor().clone(),
+        &invite,
+        chrono::Utc::now(),
+    )
+    .await
+    .expect("seed invite");
+    let other = OutstandingInvite {
+        inviter: "other@example.com".parse().expect("other"),
+        ..invite.clone()
+    };
+    if two_inviters {
+        record_invite_at(
+            state.deps.app_state.db_pool.global_actor().clone(),
+            &other,
+            chrono::Utc::now(),
+        )
+        .await
+        .expect("second invite");
+        submission
+            .plan
+            .sanitized_message
+            .payloads
+            .retain(|payload| !payload.is("x", waddle_xmpp::muc::presence::NS_MUC_USER));
+        submission.plan.sanitized_message.payloads.push(
+            minidom::Element::builder("x", waddle_xmpp::muc::presence::NS_MUC_USER)
+                .append(
+                    minidom::Element::builder("decline", waddle_xmpp::muc::presence::NS_MUC_USER)
+                        .attr(
+                            minidom::rxml::xml_ncname!("to").to_owned(),
+                            invite.inviter.to_string(),
+                        )
+                        .build(),
+                )
+                .build(),
+        );
+        submission.digest_input = DigestInput::from_parsed(
+            &submission.plan.sanitized_message,
+            &DigestContext {
+                target: submission.target.clone(),
+                server_authorities: vec![],
+                stanza_lang: None,
+            },
+        )
+        .expect("digest");
+    }
+    let resource = invite.inviter.with_resource_str("phone").expect("resource");
+    let (tx, mut rx) = tokio::sync::mpsc::channel(8);
+    crate::server::routes::websocket::tests::register_test_connection(&state, &resource, tx).await;
+    plan(&mut submission, &state).await;
+    let accepted = commit_submission(&fixture.uow, &submission, 3)
+        .await
+        .expect("accept decline");
+    let (index, claim) = accepted
+        .external
+        .iter()
+        .enumerate()
+        .find_map(|(index, effect)| match effect {
+            ExternalEffect::InviteLedger(claim) => Some((index, claim.clone())),
+            _ => None,
+        })
+        .expect("claim effect");
+    let deps = crate::server::routes::websocket::interpret_loop::build_interpret_deps(&state, None);
+    assert!(matches!(
+        execute_invite_ledger(claim, &deps).await,
+        EffectOutcome::InviteLedger(Ok(InviteLedgerOutcome::Claimed(true)))
+    ));
+    if receipt {
+        for proof in &accepted.external_receipts[index] {
+            crate::ingress_uow::EffectReceiptRepository::record_receipt_pooled(
+                &fixture.db,
+                accepted.message_key.expect("key"),
+                proof.kind,
+                &proof.semantic_identity_hash,
+            )
+            .await
+            .expect("claim receipt");
+        }
+    }
+    assert!(rx.try_recv().is_err());
+    plan(&mut submission, &state).await;
+    if !two_inviters {
+        assert!(
+            submission.plan.rejection.is_some(),
+            "empty ledger denies fresh decline"
+        );
+    }
+    let replay = commit_submission(&fixture.uow, &submission, 3)
+        .await
+        .expect("recorded decline replay");
+    assert_eq!(replay.message_key, accepted.message_key);
+    let report = crate::ingress::execute::execute_effects(
+        &fixture.uow,
+        &fixture.db,
+        &replay,
+        &ImmediateSink,
+        &deps,
+        std::time::Duration::from_secs(5),
+    )
+    .await;
+    assert!(report.receipt_failures.is_empty(), "{report:?}");
+    let delivered = rx.try_recv().expect("inviter receives decline");
+    assert!(
+        matches!(delivered.stanza, waddle_xmpp::Stanza::Message(message) if message.from == Some(invite.room.into()) && message.to == Some(invite.inviter.into()))
+    );
+    assert!(rx.try_recv().is_err());
+    assert!(crate::ingress::execute::terminalize_if_complete(
+        &fixture.uow,
+        replay.message_key.expect("key")
+    )
+    .await
+    .expect("terminalize"));
+    assert_eq!(
+        fixture.count("ingress_effect_receipts").await,
+        fixture.count("ingress_effect_intents").await
+    );
+    if two_inviters {
+        assert_eq!(
+            crate::server::routes::websocket::muc_invites::list_invites(
+                state.deps.app_state.db_pool.global_actor().clone(),
+                &other.room,
+                &other.invitee
+            )
+            .await
+            .expect("remaining invitation"),
+            vec![other]
+        );
+        assert_eq!(
+            state
+                .deps
+                .protocol
+                .pending_delivery_storage
+                .count(&"other@example.com".parse().expect("recipient"))
+                .await
+                .expect("pending rows"),
+            0
+        );
+    }
+    drop(state);
+    fixture.close().await;
+}
+#[tokio::test]
+async fn ingress_muc_decline_claim_crash_replay_sqlite() {
+    decline_claim_crash_replay(IngressFixture::sqlite().await, true, false).await;
+}
+#[tokio::test]
+async fn ingress_muc_decline_claim_crash_replay_postgres() {
+    if let Some(fixture) = IngressFixture::postgres("decline_claim_replay").await {
+        decline_claim_crash_replay(fixture, true, false).await;
+    }
+}
+#[tokio::test]
+async fn ingress_muc_decline_unreceipted_claim_crash_replay_sqlite() {
+    decline_claim_crash_replay(IngressFixture::sqlite().await, false, false).await;
+}
+#[tokio::test]
+async fn ingress_muc_decline_unreceipted_claim_crash_replay_postgres() {
+    if let Some(fixture) = IngressFixture::postgres("decline_claim_no_receipt").await {
+        decline_claim_crash_replay(fixture, false, false).await;
+    }
+}
+
+#[tokio::test]
+async fn ingress_muc_decline_two_inviters_replay_sqlite() {
+    decline_claim_crash_replay(IngressFixture::sqlite().await, false, true).await;
+}
+#[tokio::test]
+async fn ingress_muc_decline_two_inviters_replay_postgres() {
+    if let Some(fixture) = IngressFixture::postgres("decline_two_inviters").await {
+        decline_claim_crash_replay(fixture, false, true).await;
+    }
+}
+
+async fn losing_decline_replay(fixture: IngressFixture) {
+    use crate::server::routes::interpret::effects::{EffectOutcome, ExternalEffect, ImmediateSink};
+    use crate::server::routes::websocket::handlers::message::muc_invite::{
+        execute_invite_ledger, InviteLedgerOutcome,
+    };
+    use crate::server::routes::websocket::muc_invites::{record_invite_at, OutstandingInvite};
+    let state = state(&fixture).await;
+    let mut winner = submission(&fixture, true).await;
+    let mut loser = winner.clone();
+    loser
+        .plan
+        .sanitized_message
+        .payloads
+        .retain(|payload| !waddle_xmpp_core::xep0359::is_origin_id_element(payload));
+    waddle_xmpp_core::xep0359::add_origin_id(&mut loser.plan.sanitized_message, "losing-decline");
+    loser.digest_input = DigestInput::from_parsed(
+        &loser.plan.sanitized_message,
+        &DigestContext {
+            target: loser.target.clone(),
+            server_authorities: vec![],
+            stanza_lang: None,
+        },
+    )
+    .expect("loser digest");
+    loser.identity = fixture.submission(Some("losing-decline"), "").identity;
+    let invite = OutstandingInvite {
+        room: "direct-failure@muc.example.com".parse().expect("room"),
+        invitee: winner.sender.to_bare(),
+        inviter: "juliet@example.com".parse().expect("inviter"),
+    };
+    let actor = state.deps.app_state.db_pool.global_actor().clone();
+    record_invite_at(actor.clone(), &invite, chrono::Utc::now())
+        .await
+        .expect("seed invite");
+    let resource = invite.inviter.with_resource_str("phone").expect("resource");
+    let (tx, mut rx) = tokio::sync::mpsc::channel(8);
+    crate::server::routes::websocket::tests::register_test_connection(&state, &resource, tx).await;
+    plan(&mut winner, &state).await;
+    plan(&mut loser, &state).await;
+    let winner = commit_submission(&fixture.uow, &winner, 3)
+        .await
+        .expect("winner commit");
+    let accepted_loser = commit_submission(&fixture.uow, &loser, 3)
+        .await
+        .expect("loser commit");
+    assert_ne!(winner.message_key, accepted_loser.message_key);
+    let deps = crate::server::routes::websocket::interpret_loop::build_interpret_deps(&state, None);
+    for (decision, expected) in [(&winner, true), (&accepted_loser, false)] {
+        let claim = decision
+            .external
+            .iter()
+            .find_map(|effect| match effect {
+                ExternalEffect::InviteLedger(claim) => Some(claim.clone()),
+                _ => None,
+            })
+            .expect("claim");
+        assert!(
+            matches!(execute_invite_ledger(claim, &deps).await, EffectOutcome::InviteLedger(Ok(InviteLedgerOutcome::Claimed(actual))) if actual == expected)
+        );
+    }
+    // A new invitation must not allow this canonical loser to become a winner.
+    record_invite_at(actor.clone(), &invite, chrono::Utc::now())
+        .await
+        .expect("renew invitation");
+    plan(&mut loser, &state).await;
+    let replay = commit_submission(&fixture.uow, &loser, 3)
+        .await
+        .expect("loser replay");
+    let report = crate::ingress::execute::execute_effects(
+        &fixture.uow,
+        &fixture.db,
+        &replay,
+        &ImmediateSink,
+        &deps,
+        std::time::Duration::from_secs(5),
+    )
+    .await;
+    assert!(report.receipt_failures.is_empty(), "{report:?}");
+    assert!(rx.try_recv().is_err(), "loser must never deliver");
+    assert_eq!(
+        state
+            .deps
+            .protocol
+            .pending_delivery_storage
+            .count(&invite.inviter)
+            .await
+            .expect("pending rows"),
+        0
+    );
+    assert_eq!(
+        crate::server::routes::websocket::muc_invites::list_invites(
+            actor,
+            &invite.room,
+            &invite.invitee
+        )
+        .await
+        .expect("renewed invite"),
+        vec![invite]
+    );
+    assert!(crate::ingress::execute::terminalize_if_complete(
+        &fixture.uow,
+        replay.message_key.expect("key")
+    )
+    .await
+    .expect("terminalize loser"));
+    drop(state);
+    fixture.close().await;
+}
+#[tokio::test]
+async fn ingress_muc_decline_losing_claim_replay_sqlite() {
+    losing_decline_replay(IngressFixture::sqlite().await).await;
+}
+#[tokio::test]
+async fn ingress_muc_decline_losing_claim_replay_postgres() {
+    if let Some(fixture) = IngressFixture::postgres("decline_losing_claim").await {
+        losing_decline_replay(fixture).await;
+    }
+}
+
+async fn decline_delivery_failure_retains_winner(fixture: IngressFixture) {
+    use crate::server::routes::interpret::effects::ImmediateSink;
+    use crate::server::routes::websocket::muc_invites::{
+        list_invites, record_invite_at, OutstandingInvite,
+    };
+    use waddle_xmpp::pending_delivery::QuotaPolicy;
+    let mut state = state(&fixture).await;
+    let recovered_storage = state.deps.protocol.pending_delivery_storage.clone();
+    Arc::get_mut(&mut state)
+        .expect("exclusive state")
+        .deps
+        .protocol
+        .pending_delivery_storage = Arc::new(
+        crate::pending_delivery::DatabasePendingDeliveryStorage::from_database(
+            fixture.db.clone(),
+            QuotaPolicy::CountCap { max_rows: 0 },
+        )
+        .await
+        .expect("quota storage"),
+    );
+    let mut winner = submission(&fixture, true).await;
+    let mut other = winner.clone();
+    other
+        .plan
+        .sanitized_message
+        .payloads
+        .retain(|payload| !waddle_xmpp_core::xep0359::is_origin_id_element(payload));
+    waddle_xmpp_core::xep0359::add_origin_id(
+        &mut other.plan.sanitized_message,
+        "after-failed-decline",
+    );
+    other.digest_input = DigestInput::from_parsed(
+        &other.plan.sanitized_message,
+        &DigestContext {
+            target: other.target.clone(),
+            server_authorities: vec![],
+            stanza_lang: None,
+        },
+    )
+    .expect("other digest");
+    other.identity = fixture
+        .submission(Some("after-failed-decline"), "")
+        .identity;
+    let invite = OutstandingInvite {
+        room: "direct-failure@muc.example.com".parse().expect("room"),
+        invitee: winner.sender.to_bare(),
+        inviter: "juliet@example.com".parse().expect("inviter"),
+    };
+    let actor = state.deps.app_state.db_pool.global_actor().clone();
+    record_invite_at(actor.clone(), &invite, chrono::Utc::now())
+        .await
+        .expect("invitation");
+    plan(&mut winner, &state).await;
+    let accepted = commit_submission(&fixture.uow, &winner, 3)
+        .await
+        .expect("winner commit");
+    {
+        let deps =
+            crate::server::routes::websocket::interpret_loop::build_interpret_deps(&state, None);
+        let report = crate::ingress::execute::execute_effects(
+            &fixture.uow,
+            &fixture.db,
+            &accepted,
+            &ImmediateSink,
+            &deps,
+            std::time::Duration::from_secs(5),
+        )
+        .await;
+        assert!(report
+            .outcomes
+            .iter()
+            .any(|(_, outcome)| *outcome == crate::ingress::execute::ExternalOutcome::Failed));
+    }
+    assert!(
+        list_invites(actor, &invite.room, &invite.invitee)
+            .await
+            .expect("ledger")
+            .is_empty(),
+        "delivery failure must not reopen the claimed invitation"
+    );
+    plan(&mut other, &state).await;
+    assert!(
+        other.plan.rejection.is_some(),
+        "second origin has no invitation"
+    );
+    let denied = commit_submission(&fixture.uow, &other, 3)
+        .await
+        .expect("committed denial");
+    assert_ne!(denied.message_key, accepted.message_key);
+    Arc::get_mut(&mut state)
+        .expect("exclusive state")
+        .deps
+        .protocol
+        .pending_delivery_storage = recovered_storage;
+    plan(&mut winner, &state).await;
+    let replay = commit_submission(&fixture.uow, &winner, 3)
+        .await
+        .expect("winner replay");
+    let deps = crate::server::routes::websocket::interpret_loop::build_interpret_deps(&state, None);
+    let report = crate::ingress::execute::execute_effects(
+        &fixture.uow,
+        &fixture.db,
+        &replay,
+        &ImmediateSink,
+        &deps,
+        std::time::Duration::from_secs(5),
+    )
+    .await;
+    assert!(report.receipt_failures.is_empty(), "{report:?}");
+    assert_eq!(
+        state
+            .deps
+            .protocol
+            .pending_delivery_storage
+            .count(&invite.inviter)
+            .await
+            .expect("pending decline"),
+        1
+    );
+    assert!(crate::ingress::execute::terminalize_if_complete(
+        &fixture.uow,
+        replay.message_key.expect("key")
+    )
+    .await
+    .expect("terminalize winner"));
+    drop(state);
+    fixture.close().await;
+}
+#[tokio::test]
+async fn ingress_muc_decline_delivery_failure_retains_winner_sqlite() {
+    decline_delivery_failure_retains_winner(IngressFixture::sqlite().await).await;
+}
+#[tokio::test]
+async fn ingress_muc_decline_delivery_failure_retains_winner_postgres() {
+    if let Some(fixture) = IngressFixture::postgres("decline_delivery_failure_winner").await {
+        decline_delivery_failure_retains_winner(fixture).await;
     }
 }

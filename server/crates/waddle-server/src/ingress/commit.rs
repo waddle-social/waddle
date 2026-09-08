@@ -283,6 +283,9 @@ async fn commit_attempt(
         reconstructed |= crate::server::routes::websocket::handlers::message::group_dm_invite::restore_recorded_group_dm_invite(
             &mut plan, &submission.plan, &recorded, &unreceipted, &recorded_envelope,
         )?;
+        reconstructed |= crate::server::routes::websocket::handlers::message::muc_direct::restore_recorded_muc_decline(
+            &mut plan, &recorded, &unreceipted, &recorded_envelope,
+        )?;
     }
     // Each generated message retains its own timestamp and assigning authority.
     for intent in &mut plan.intents {
@@ -459,6 +462,14 @@ async fn commit_attempt(
         .await?
         {
             pending.push(receipt);
+        }
+    }
+    let mut external = external;
+    for effect in &mut external {
+        if let crate::server::routes::interpret::effects::ExternalEffect::InviteLedger(
+            crate::server::routes::websocket::handlers::message::muc_invite::InviteLedgerMutation::Claim { message_key, .. }
+        ) = effect {
+            *message_key = Some(key);
         }
     }
     let external_receipts = super::durable::external_receipts(&external, &intents)?;
@@ -690,19 +701,24 @@ async fn reconcile_invitation_delivery_receipts(
     pending: &mut Vec<IngressEffectIntent>,
 ) -> Result<(), IngressUowError> {
     use waddle_xmpp::ingress::PendingDeliveryMutation;
-    for grant in recorded.iter().filter_map(|intent| match intent {
-        IngressEffectIntent::GroupDmMembershipGrant { grant } => Some(grant),
+    for recipient in recorded.iter().filter_map(|intent| match intent {
+        IngressEffectIntent::GroupDmMembershipGrant { grant } => Some(&grant.invitee),
+        IngressEffectIntent::MucInviteLedger { mutation }
+            if mutation.action == waddle_xmpp::ingress::MucInviteLedgerAction::Claimed =>
+        {
+            Some(&mutation.inviter)
+        }
         _ => None,
     }) {
         let route = recorded.iter().find(|intent| {
             matches!(intent,
-            IngressEffectIntent::RouteDirect { recipient, .. } if recipient == &grant.invitee)
+            IngressEffectIntent::RouteDirect { recipient: target, .. } if target == recipient)
         });
         let fallback = recorded.iter().find(|intent| {
             matches!(intent,
             IngressEffectIntent::PendingDelivery {
-                mutation: PendingDeliveryMutation::Transient { recipient, .. }
-            } if recipient == &grant.invitee)
+                mutation: PendingDeliveryMutation::Transient { recipient: target, .. }
+            } if target == recipient)
         });
         let (Some(route), Some(fallback)) = (route, fallback) else {
             continue;

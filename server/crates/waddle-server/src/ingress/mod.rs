@@ -9,6 +9,7 @@ mod commit_stream;
 pub mod decision;
 mod durable;
 pub mod execute;
+mod frame_receipt_retry;
 pub(crate) mod gc;
 pub mod identity;
 mod receipts;
@@ -83,6 +84,7 @@ pub struct IngressAuthority {
     admission: RwLock<bool>,
     streams: StdMutex<HashMap<SmSessionId, Weak<RwLock<()>>>>,
     retirement_cursor: Mutex<Option<SmSessionId>>,
+    frame_receipt_retries: StdMutex<frame_receipt_retry::FrameReceiptRetries>,
     /// Test-only: fires when a commit is about to wait for its stream lock.
     #[cfg(test)]
     stream_wait_observer: StdMutex<Option<Arc<tokio::sync::Notify>>>,
@@ -168,6 +170,9 @@ impl IngressAuthority {
             #[cfg(test)]
             retirement_batch_gate: StdMutex::new(None),
             retirement_cursor: Mutex::new(None),
+            frame_receipt_retries: StdMutex::new(
+                frame_receipt_retry::FrameReceiptRetries::default(),
+            ),
         })
     }
 
@@ -196,6 +201,9 @@ impl IngressAuthority {
             #[cfg(test)]
             retirement_batch_gate: StdMutex::new(None),
             retirement_cursor: Mutex::new(None),
+            frame_receipt_retries: StdMutex::new(
+                frame_receipt_retry::FrameReceiptRetries::default(),
+            ),
         }
     }
 
@@ -517,6 +525,17 @@ impl IngressAuthority {
     pub async fn drain_and_join(&self, budget: Duration) -> bool {
         self.cancellation.cancel();
         let drained = tokio::time::timeout(budget, async {
+            let receipt_task = self
+                .frame_receipt_retries
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .task
+                .take();
+            if let Some(task) = receipt_task {
+                if task.await.is_err() {
+                    return false;
+                }
+            }
             *self.admission.write().await = false;
             let mut task = self.gc_task.lock().await;
             if let Some(handle) = task.as_mut() {

@@ -13,7 +13,6 @@ use xmpp_parsers::message::Message;
 
 #[derive(Clone, Debug)]
 pub enum InviteDeliveryFailure {
-    RestoreLedger(OutstandingInvite),
     RemoveLedger(OutstandingInvite),
     RollbackMucMembership(Box<MucMembershipMutation>),
     RollbackMuc {
@@ -113,16 +112,6 @@ pub(crate) async fn compensate(failure: InviteDeliveryFailure, deps: &Deps<'_>) 
         return;
     };
     match failure {
-        InviteDeliveryFailure::RestoreLedger(invite) => {
-            if let Err(error) = muc_invites::record_invite(
-                state.deps.app_state.db_pool.global_actor().clone(),
-                &invite,
-            )
-            .await
-            {
-                tracing::warn!(%error, "Failed to restore invitation after delivery failure");
-            }
-        }
         InviteDeliveryFailure::RemoveLedger(invite) => {
             if let Err(error) = muc_invites::claim_invite(
                 state.deps.app_state.db_pool.global_actor().clone(),

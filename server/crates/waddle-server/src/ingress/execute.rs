@@ -403,7 +403,7 @@ pub async fn execute_effects(
                 .iter()
                 .all(|key| !decision.receipts_pending.contains(key));
         let outcome = if discharged_invite_deliveries[index] {
-            // The ledger confirmed this invitation was already outstanding.
+            // The ledger confirmed an outstanding invitation or a losing claim.
             // Its mutually exclusive live and offline obligations are no-ops.
             completed[index] = Some(false);
             proven[index] = decision.external_receipts[index].clone();
@@ -452,7 +452,11 @@ pub async fn execute_effects(
                     // The row proves only itself, so a replay of that authority
                     // must still run its pending delivery instead of
                     // discharging it as an outstanding duplicate.
-                    let recorded_ledger_repair = ledger_noop
+                    let recorded_ledger_repair = matches!(&result, EffectOutcome::InviteLedger(Ok(
+                        crate::server::routes::websocket::handlers::message::muc_invite::InviteLedgerOutcome::Recorded(
+                            crate::server::routes::websocket::muc_invites::RecordOutcome::AlreadyOutstanding
+                        )
+                    )))
                         && decision.alias == super::decision::AliasOutcomeClass::Existing;
                     if ledger_noop && !recorded_ledger_repair {
                         for (dependent_index, dependent) in planned.iter().enumerate() {
@@ -800,8 +804,7 @@ fn classify_outcome(
                 InviteLedgerOutcome::Recorded(
                     RecordOutcome::New { .. } | RecordOutcome::AlreadyOutstanding,
                 )
-                | InviteLedgerOutcome::Claimed(true) => ExternalOutcome::Done,
-                InviteLedgerOutcome::Claimed(false) => ExternalOutcome::Uncertain,
+                | InviteLedgerOutcome::Claimed(_) => ExternalOutcome::Done,
             }
         }
         EffectOutcome::PlannedInbox(_)
@@ -843,7 +846,7 @@ fn invite_ledger_noop(outcome: &EffectOutcome) -> bool {
         outcome,
         EffectOutcome::InviteLedger(Ok(InviteLedgerOutcome::Recorded(
             RecordOutcome::AlreadyOutstanding
-        )))
+        ) | InviteLedgerOutcome::Claimed(false)))
     )
 }
 

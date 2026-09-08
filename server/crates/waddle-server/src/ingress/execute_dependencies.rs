@@ -35,7 +35,7 @@ pub(super) fn produces(effect: &ExternalEffect, dependency: &PlanEffectDependenc
             PlanEffectDependency::AfterInviteLedger { invite },
         ) => {
             let (InviteLedgerMutation::Record { invite: actual, .. }
-            | InviteLedgerMutation::Claim { invite: actual }) = mutation;
+            | InviteLedgerMutation::Claim { invite: actual, .. }) = mutation;
             actual == invite
         }
         (
@@ -120,6 +120,7 @@ mod tests {
             inviter: "inviter@example.com".parse().expect("inviter"),
         };
         let effect = ExternalEffect::InviteLedger(InviteLedgerMutation::Claim {
+            message_key: None,
             invite: invite.clone(),
         });
         let dependency = PlanEffectDependency::AfterInviteLedger { invite };

@@ -149,7 +149,7 @@ async fn complete_pending_resume_claim(
                 // re-released them as duplicates.
                 let acked_from_exclusive = detached.last_acked;
                 conn.sm_state.acknowledge(h);
-                if acked_from_exclusive != h {
+                {
                     let session_id =
                         waddle_xmpp::pending_delivery::SmSessionId::new(stream_id.clone());
                     if let Err(_error) = state
@@ -164,8 +164,7 @@ async fn complete_pending_resume_claim(
                             from = acked_from_exclusive,
                             h,
                             failure = "storage",
-                            "pending_delivery delete_acked_in_window failed on resume; \
-                             rows will be retried on next session via release_claim"
+                            "pending_delivery ACK deletion retained on resume; claim release must settle it"
                         );
                     }
                 }

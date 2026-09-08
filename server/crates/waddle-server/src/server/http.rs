@@ -1744,6 +1744,41 @@ mod admin_failure_observer_tests {
 mod ingress_colocation_tests {
     use super::*;
 
+    #[tokio::test]
+    async fn readme_sqlite_launch_passes_ingress_colocation() {
+        let readme = include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/../../README.md"));
+        let directory = tempfile::tempdir().expect("temporary deployment volume");
+        let configured = |name: &str| {
+            let prefix = format!("-e {name}=");
+            let value = readme
+                .lines()
+                .find_map(|line| line.trim().strip_prefix(&prefix))
+                .expect("documented environment variable")
+                .split_whitespace()
+                .next()
+                .expect("URL");
+            value.replace("/var/lib/waddle", directory.path().to_str().expect("path"))
+        };
+        let global_url = configured("WADDLE_DATABASE_URL");
+        let global = crate::db::Database::from_config(
+            "readme",
+            &crate::db::DatabaseConfig::new(crate::db::DatabaseDriver::Sqlite, &global_url),
+        )
+        .await
+        .expect("global");
+        create_websocket_mam_storage(
+            Some(configured("WADDLE_XMPP_MAM_DATABASE_URL")),
+            false,
+            false,
+            &global,
+        )
+        .await
+        .expect("documented MAM boots");
+        create_ingress_inbox_storage(Some(&configured("WADDLE_XMPP_INBOX_DATABASE_URL")), &global)
+            .await
+            .expect("documented inbox boots");
+    }
+
     const LEGACY_MAM_OBJECTS: &[&str] = &[
         "ALTER TABLE mam_messages ADD COLUMN origin_dedup_sender_scope TEXT",
         "ALTER TABLE mam_messages ADD COLUMN origin_dedup_fingerprint TEXT",

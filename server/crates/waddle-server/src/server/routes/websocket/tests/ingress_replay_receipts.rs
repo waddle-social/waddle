@@ -87,6 +87,16 @@ async fn receipt_state(state: &WebSocketState) -> (i64, i64) {
     )
 }
 
+async fn wait_for_receipts(state: &WebSocketState) {
+    tokio::time::timeout(std::time::Duration::from_secs(10), async {
+        while receipt_state(state).await != (1, 1) {
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("retained receipt proofs must settle after storage recovery");
+}
+
 async fn replayed_frame_receipt_case(state: Arc<WebSocketState>) {
     let mut conn = connection(&state).await;
     let lifecycle = crate::clustering::NodeLifecycle::new();
@@ -166,11 +176,7 @@ async fn replayed_frame_receipt_case(state: Arc<WebSocketState>) {
     )
     .await;
     assert!(matches!(outcome, BatchWriteOutcome::Continue));
-    assert_eq!(
-        receipt_state(&state).await,
-        (1, 1),
-        "the replayed frame receipts its obligation and terminalizes the row"
-    );
+    wait_for_receipts(&state).await;
 }
 
 async fn postgres_state() -> Option<(Arc<WebSocketState>, sqlx::PgPool, String)> {
@@ -317,8 +323,8 @@ async fn receipt_boundary_case(state: Arc<WebSocketState>, boundary: ReceiptBoun
             )
             .await;
             assert!(frames.is_empty());
-            assert_eq!(conn.sm_state.last_acked, 0);
-            assert_eq!(conn.sm_state.queue_len(), 1);
+            assert_eq!(conn.sm_state.last_acked, 1);
+            assert_eq!(conn.sm_state.queue_len(), 0);
             assert!(!matches!(conn.phase, ConnectionPhase::Closing { .. }));
             let db = state
                 .deps
@@ -335,13 +341,12 @@ async fn receipt_boundary_case(state: Arc<WebSocketState>, boundary: ReceiptBoun
             .await
             .expect("restore receipt storage");
             drop(db);
-            super::super::stream_management::apply_sm_ack(
-                &state,
-                &mut conn.sm_state,
-                &mut conn.phase,
-                1,
-            )
-            .await;
+            // A fresh connection has no replay carrier or repeated ACK. A write
+            // tick on the shared authority still settles the retained proof.
+            conn.sm_state = Default::default();
+            assert!(
+                super::super::batch_write::complete_replayed_ingress_receipts(&state, &[]).await
+            );
             assert_eq!(conn.sm_state.queue_len(), 0);
         }
         ReceiptBoundary::ResumeStorageFailure => {
@@ -362,7 +367,7 @@ async fn receipt_boundary_case(state: Arc<WebSocketState>, boundary: ReceiptBoun
             assert_eq!(conn.sm_state.queue_len(), 0);
         }
     }
-    assert_eq!(receipt_state(&state).await, (1, 1));
+    wait_for_receipts(&state).await;
 }
 
 #[tokio::test]
@@ -412,7 +417,7 @@ async fn ingress_resume_h_completes_carrier_before_removal_postgres() {
 }
 
 #[tokio::test]
-async fn ingress_ack_receipt_failure_retains_carrier_sqlite() {
+async fn ingress_ack_receipt_failure_advances_and_retries_sqlite() {
     receipt_boundary_case(
         create_test_websocket_state().await,
         ReceiptBoundary::AckPersistenceFailure,
@@ -421,7 +426,7 @@ async fn ingress_ack_receipt_failure_retains_carrier_sqlite() {
 }
 
 #[tokio::test]
-async fn ingress_ack_receipt_failure_retains_carrier_postgres() {
+async fn ingress_ack_receipt_failure_advances_and_retries_postgres() {
     postgres_receipt_boundary(ReceiptBoundary::AckPersistenceFailure).await;
 }
 
@@ -475,19 +480,14 @@ async fn resume_storage_failure(state: &WebSocketState, conn: &mut WsConnState) 
     drop(db);
     let response =
         super::super::frame::handle_xmpp_frame(&xml, "example.com", state, &mut resumed).await;
-    let failed: minidom::Element = response[0].parse().expect("failed XML");
-    assert_eq!(failed.name(), "failed");
-    assert!(failed
-        .get_child("internal-server-error", xmpp_parsers::ns::XMPP_STANZAS)
-        .is_some());
-    assert!(!resumed.sm_state.enabled);
+    let success: minidom::Element = response[0].parse().expect("resumed XML");
+    assert_eq!(
+        success.name(),
+        "resumed",
+        "retained proofs authorize resume despite receipt outage"
+    );
+    assert!(resumed.sm_state.enabled);
     assert_eq!(resumed.sm_state.queue_len(), 0);
-    assert!(resumed.sm_ingress_fence.is_none());
-    assert!(resumed.pending_resume_claim.is_none());
-    assert!(matches!(
-        resumed.phase,
-        ConnectionPhase::Authenticated { .. }
-    ));
     let db = state
         .deps
         .app_state
@@ -503,20 +503,11 @@ async fn resume_storage_failure(state: &WebSocketState, conn: &mut WsConnState) 
     .await
     .expect("restore receipts");
     drop(db);
-    let response =
-        super::super::frame::handle_xmpp_frame(&xml, "example.com", state, &mut resumed).await;
-    let success: minidom::Element = response[0].parse().expect("resumed XML");
-    assert_eq!(
-        success.name(),
-        "resumed",
-        "released claim remains retryable"
-    );
-    assert!(resumed.sm_state.enabled);
-    assert_eq!(resumed.sm_state.queue_len(), 0);
+    wait_for_receipts(state).await;
 }
 
 #[tokio::test]
-async fn ingress_resume_receipt_failure_preserves_staged_state_sqlite() {
+async fn ingress_resume_receipt_failure_retains_proof_sqlite() {
     receipt_boundary_case(
         create_test_websocket_state().await,
         ReceiptBoundary::ResumeStorageFailure,
@@ -525,6 +516,217 @@ async fn ingress_resume_receipt_failure_preserves_staged_state_sqlite() {
 }
 
 #[tokio::test]
-async fn ingress_resume_receipt_failure_preserves_staged_state_postgres() {
+async fn ingress_resume_receipt_failure_retains_proof_postgres() {
     postgres_receipt_boundary(ReceiptBoundary::ResumeStorageFailure).await;
+}
+
+async fn ack_deletion_failure_case(mut state: Arc<WebSocketState>) {
+    use waddle_xmpp::pending_delivery::storage::PendingDeliveryStorage;
+    use waddle_xmpp::pending_delivery::{PendingPayload, PendingRow, PendingRowId, QuotaPolicy};
+    let pending = Arc::new(
+        crate::pending_delivery::DatabasePendingDeliveryStorage::from_database(
+            state.deps.app_state.db_pool.global().clone(),
+            QuotaPolicy::Unlimited,
+        )
+        .await
+        .expect("shared pending store"),
+    );
+    Arc::get_mut(&mut state)
+        .expect("unshared test state")
+        .deps
+        .protocol
+        .pending_delivery_storage = pending.clone();
+    let mut conn = connection(&state).await;
+    let lifecycle = crate::clustering::NodeLifecycle::new();
+    let permit = lifecycle.admit().expect("permit");
+    let shutdown = tokio_util::sync::CancellationToken::new();
+    let mut responses = super::super::frame::handle_xmpp_frame_with_admission(
+        &offered_message(),
+        "example.com",
+        &state,
+        &mut conn,
+        &permit,
+        &shutdown,
+    )
+    .await;
+    let mut broken = Box::pin(futures::sink::unfold((), |(), _: Message| async {
+        Err(std::io::Error::from(std::io::ErrorKind::BrokenPipe))
+    }));
+    let mut reader = futures::stream::pending::<Result<Message, std::io::Error>>();
+    let report = write_ingress_response_batch_with_admission(
+        &mut broken,
+        &mut reader,
+        &state,
+        &mut conn,
+        &mut responses,
+        BatchSmPolicy::Record,
+        BatchAuthority {
+            permit: &permit,
+            shutdown: &shutdown,
+        },
+    )
+    .await;
+    assert!(matches!(report.outcome, BatchWriteOutcome::TransportClosed));
+    let stanza = Stanza::Message(xmpp_parsers::message::Message::new(None));
+    for _ in 0..2 {
+        let _ = conn.sm_state.record_outbound(
+            super::super::transport_xml::stanza_to_xml(&stanza),
+            waddle_xmpp::telemetry::attributes::SmEvictionPath::Batch,
+        );
+    }
+    let recipient: jid::BareJid = "alice@example.com".parse().expect("recipient");
+    let old_session = SmSessionId::new(conn.sm_state.stream_id.clone().expect("stream"));
+    let mut row_ids = Vec::new();
+    for _ in 0..4 {
+        let id = PendingRowId::fresh();
+        pending
+            .insert(PendingRow {
+                id: id.clone(),
+                recipient: recipient.clone(),
+                original_receipt_at: chrono::Utc::now(),
+                payload: PendingPayload::Transient(Box::new(xmpp_parsers::message::Message::new(
+                    None,
+                ))),
+                flushed_in_session: None,
+                outbound_sequence: None,
+            })
+            .await
+            .expect("pending row");
+        row_ids.push(id);
+    }
+    pending
+        .claim_for_session(&recipient, &old_session)
+        .await
+        .expect("claim rows");
+    for (index, id) in row_ids.iter().take(3).enumerate() {
+        pending
+            .record_pushed_at(id, u32::try_from(index + 1).expect("sequence"))
+            .await
+            .expect("stamp row");
+    }
+    let db = pending.database();
+    let guard = db.guard().await.expect("database");
+    guard
+        .execute(
+            "ALTER TABLE ingress_effect_receipts RENAME TO held_receipts",
+            (),
+        )
+        .await
+        .expect("receipt outage");
+    guard
+        .execute(
+            "ALTER TABLE pending_delivery RENAME TO held_pending_delivery",
+            (),
+        )
+        .await
+        .expect("pending outage");
+    drop(guard);
+    for h in [2, 2] {
+        assert!(super::super::stream_management::apply_sm_ack(
+            &state,
+            &mut conn.sm_state,
+            &mut conn.phase,
+            h
+        )
+        .await
+        .is_empty());
+        assert_eq!(conn.sm_state.last_acked, 2);
+        assert_eq!(conn.sm_state.queue_len(), 1);
+    }
+    // Persistent receipt failure must not serialize an unrelated socket's ACK
+    // or output behind the authority retry worker's database attempts.
+    let mut unrelated = connection(&state).await;
+    tokio::time::timeout(std::time::Duration::from_millis(500), async {
+        assert!(super::super::stream_management::apply_sm_ack(
+            &state,
+            &mut unrelated.sm_state,
+            &mut unrelated.phase,
+            0
+        )
+        .await
+        .is_empty());
+        let mut socket = Box::pin(futures::sink::unfold((), |(), _: Message| async {
+            Ok::<(), std::io::Error>(())
+        }));
+        let outcome = write_response_batch_with_admission(
+            &mut socket,
+            &mut reader,
+            &state,
+            &mut unrelated,
+            vec![ResponseFrame::from(
+                super::super::transport_xml::websocket_stream_close_element(),
+            )],
+            BatchSmPolicy::Record,
+            BatchAuthority {
+                permit: &permit,
+                shutdown: &shutdown,
+            },
+        )
+        .await;
+        assert!(matches!(outcome, BatchWriteOutcome::Continue));
+    })
+    .await
+    .expect("unrelated ACK and batch must not await receipt persistence");
+    drop(conn);
+    // Fresh-session cleanup uses the shared store after the old connection and
+    // its ACK floor have gone. It must retain ownership throughout the outage.
+    assert!(pending.release_claim(&old_session).await.is_err());
+    let guard = db.guard().await.expect("database");
+    guard
+        .execute(
+            "ALTER TABLE held_pending_delivery RENAME TO pending_delivery",
+            (),
+        )
+        .await
+        .expect("recover pending store");
+    guard
+        .execute(
+            "ALTER TABLE held_receipts RENAME TO ingress_effect_receipts",
+            (),
+        )
+        .await
+        .expect("recover receipts");
+    drop(guard);
+    assert_eq!(
+        pending
+            .release_claim(&old_session)
+            .await
+            .expect("fresh-session cleanup"),
+        2
+    );
+    let remaining = pending
+        .list(&recipient)
+        .await
+        .expect("remaining pending rows");
+    assert_eq!(remaining.len(), 2);
+    assert!(remaining.iter().all(|row| row_ids[2..].contains(&row.id)
+        && row.flushed_in_session.is_none()
+        && row.outbound_sequence.is_none()));
+    assert_eq!(
+        pending
+            .claim_for_session(&recipient, &SmSessionId::new("fresh-session"))
+            .await
+            .expect("fresh delivery")
+            .len(),
+        2
+    );
+    wait_for_receipts(&state).await;
+}
+
+#[tokio::test]
+async fn ingress_ack_deletion_failure_gates_fresh_cleanup_sqlite() {
+    ack_deletion_failure_case(create_test_websocket_state().await).await;
+}
+
+#[tokio::test]
+async fn ingress_ack_deletion_failure_gates_fresh_cleanup_postgres() {
+    let Some((state, admin, schema)) = postgres_state().await else {
+        return;
+    };
+    ack_deletion_failure_case(state).await;
+    sqlx::query(&format!("DROP SCHEMA {schema} CASCADE"))
+        .execute(&admin)
+        .await
+        .expect("drop schema");
+    admin.close().await;
 }
