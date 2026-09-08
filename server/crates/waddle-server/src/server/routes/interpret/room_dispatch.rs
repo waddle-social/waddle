@@ -712,31 +712,6 @@ pub(super) async fn dispatch_to_room(
                 super::effects::PlanSuppressionPolicy::Always,
             );
         }
-    } else if retry_suppression.is_none() && !observer_plugins.is_empty() {
-        let mut observer_message = observer_message;
-        let observer_outcome = state
-            .deps
-            .protocol
-            .extension_manager
-            .process_message_observers_for_waddle_with_requester(
-                &mut observer_message,
-                waddle_id_for_room_jid(&room_jid),
-                Some(sender_full.to_bare()),
-            )
-            .await;
-        for effect in observer_outcome.effects {
-            if let ExtensionEffect::HostWarning(message) = effect {
-                warn!(warning = %message.as_str(), "extension message observer emitted host warning");
-                push_sender_error_reply(
-                    deps,
-                    &mut outcome,
-                    &incoming,
-                    &room_jid,
-                    &sender_full,
-                    service_unavailable_error(message.as_str()),
-                );
-            }
-        }
     }
 
     outcome

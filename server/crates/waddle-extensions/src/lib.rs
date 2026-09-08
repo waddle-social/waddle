@@ -32,3 +32,6 @@ pub use types::{
     ReplyTarget, RoomJid, RouteId, StanzaId, ThreadId, Timestamp, UiActionId, Url, WaddleId,
     XmlAttribute, XmlElement, XmlNode, FRAMEWORK_NAMESPACE, INVOKE_COMMAND_NODE,
 };
+
+#[cfg(any(test, feature = "test-support"))]
+pub mod observer_test_support;

@@ -4,6 +4,9 @@ use crate::server::routes::interpret::effects::{room::ExternalRoomEffect, PlanSu
 use waddle_xmpp::{ingress::IngressEffectIntent, registry::ConnectionRegistry};
 use xmpp_parsers::message::Message;
 
+#[path = "execute_observer_fairness_tests.rs"]
+mod fairness;
+
 fn observer_plugin() -> waddle_extensions::PluginId {
     waddle_extensions::PluginId::new("message-hook-fixture").expect("fixture plugin")
 }
@@ -317,3 +320,6 @@ async fn postgres_room_observer_maximum_body_commits_and_replays_envelope() {
         observer_maximum_body_envelope(fixture).await;
     }
 }
+
+#[path = "execute_observer_membership_tests.rs"]
+mod membership;

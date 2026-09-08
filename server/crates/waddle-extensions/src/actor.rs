@@ -16,6 +16,8 @@ use xmpp_parsers::jid::FullJid;
 /// An extension loaded into wasmtime and ready to handle typed framework events.
 pub struct WasmExtensionActor {
     manifest: ExtensionManifest,
+    #[cfg(any(test, feature = "test-support"))]
+    observer_test: Option<Arc<crate::observer_test_support::ObserverTestPlugin>>,
     extension: Arc<LoadedExtension>,
     config: String,
     host_tools: Arc<dyn ExtensionHostTools>,
@@ -41,6 +43,8 @@ impl WasmExtensionActor {
         let manifest = extension.call_init(config).await?;
         Ok(Self {
             manifest,
+            #[cfg(any(test, feature = "test-support"))]
+            observer_test: None,
             extension: Arc::new(extension),
             config: config.to_string(),
             host_tools: Arc::new(DenyingExtensionHostTools),
@@ -48,6 +52,16 @@ impl WasmExtensionActor {
             allowed_http_origins: Vec::new(),
             provider_room_grants: Vec::new(),
         })
+    }
+
+    #[cfg(any(test, feature = "test-support"))]
+    pub(crate) fn with_observer_test(
+        mut self,
+        plugin: Arc<crate::observer_test_support::ObserverTestPlugin>,
+    ) -> Self {
+        self.manifest.id = plugin.id.clone();
+        self.observer_test = Some(plugin);
+        self
     }
 
     pub fn with_host_tools(mut self, host_tools: Arc<dyn ExtensionHostTools>) -> Self {
@@ -75,6 +89,15 @@ impl WasmExtensionActor {
     }
 
     pub fn has_grant(&self, capability: ExtensionCapability) -> bool {
+        #[cfg(any(test, feature = "test-support"))]
+        if capability == ExtensionCapability::MessageObserve
+            && self
+                .observer_test
+                .as_ref()
+                .is_some_and(|plugin| plugin.is_revoked())
+        {
+            return false;
+        }
         self.grants.contains(&capability)
     }
 
@@ -102,6 +125,12 @@ impl WasmExtensionActor {
         waddle_id: WaddleId,
         requester: Option<xmpp_parsers::jid::BareJid>,
     ) -> Vec<ExtensionEffect> {
+        #[cfg(any(test, feature = "test-support"))]
+        if let (Some(plugin), ExtensionEvent::MessageHook(hook)) = (&self.observer_test, &event) {
+            if let Some(effects) = plugin.invoke(hook.clone()).await {
+                return effects;
+            }
+        }
         let context = InvocationContext {
             waddle_id,
             plugin_id: self.manifest.id.clone(),

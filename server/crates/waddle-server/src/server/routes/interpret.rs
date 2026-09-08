@@ -84,9 +84,8 @@ use std::str::FromStr;
 use std::sync::Arc;
 use tracing::{debug, error, info, info_span, warn, Instrument};
 use waddle_extensions::{
-    message_has_framework_envelope, DisplayText, ExtensionEffect, ExtensionEnvelope,
-    ExtensionManager, MessageMarkupKind, MessageMarkupSpan, ReplyTarget, RoomJid, StanzaId,
-    ThreadId, WaddleId,
+    message_has_framework_envelope, DisplayText, ExtensionEnvelope, ExtensionManager,
+    MessageMarkupKind, MessageMarkupSpan, ReplyTarget, RoomJid, StanzaId, ThreadId, WaddleId,
 };
 use waddle_xmpp::carbons::{build_received_carbon, build_sent_carbon};
 use waddle_xmpp::inbox::runtime::{direct_message_entry, groupchat_entry, groupchat_thread_entry};
