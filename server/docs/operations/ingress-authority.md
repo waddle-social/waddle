@@ -64,10 +64,12 @@ persist for 6h; `IngressGcAge` warns above 9 days.
 `IngressSeriesMissing` warns when all decision series disappear, or a live
 `waddle-server` instance has none, for 15m. These counters are zero-registered
 at startup, so absence indicates missing telemetry even on idle pods.
-`IngressCnpgQueriesMissing` warns if GC eligibility, GC age, or
-`cnpg_waddle_ingress_nonterminal_age_oldest_seconds` is absent for 15m. The
-non-terminal age query always returns one row, including zero for no backlog,
-so a missing query cannot masquerade as healthy receipt completeness.
+`IngressCnpgQueriesMissing` warns if GC eligibility, GC age,
+`cnpg_waddle_ingress_nonterminal_age_oldest_seconds`, or the backlog query's
+`cnpg_waddle_ingress_nonterminal_messages{kind="none"}` sentinel is absent for
+15m. The age query always returns one row (zero for no backlog) and the
+backlog query always emits the `none` sentinel row, so a missing or failing
+query cannot masquerade as healthy receipt completeness.
 `IngressUnresolvedEffectsGrowing` warns on a positive counter increase over
 1h, grouped by kind. It sees only locally executed effects, not obligations
 that were recorded but never executed; it is not a current queue gauge. Use
@@ -77,7 +79,7 @@ that were recorded but never executed; it is not a current queue gauge. Use
 remains non-terminal, sustained for another 10m (roughly 20m after creation,
 plus scrape/evaluation delay). Its `kind` is the unreceipted intent family;
 `terminalization` means all receipts exist but terminalization itself is
-missing. A row counts once per pending family, even with several intents in
+missing; `none` is the always-zero sentinel and never fires. A row counts once per pending family, even with several intents in
 that family, so summing families can count one row more than once. The 10m
 age threshold is a generous multiple of the 5s Phase C budget: investigate a
 receipt-completeness or terminalization regression (#1749). GC cannot reclaim

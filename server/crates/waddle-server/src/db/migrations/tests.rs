@@ -1398,7 +1398,12 @@ async fn postgres_monitoring_queries_match_migrated_ingress_schema() {
                     "every monitored ingress table must exist in the migrated schema"
                 );
             }
-            "waddle_ingress_nonterminal" => assert!(rows.is_empty()),
+            "waddle_ingress_nonterminal" => {
+                assert_eq!(rows.len(), 1, "empty backlog must still emit the sentinel");
+                let kind: String = rows[0].try_get("kind").expect("sentinel kind");
+                let messages: i64 = rows[0].try_get("messages").expect("sentinel count");
+                assert_eq!((kind.as_str(), messages), ("none", 0));
+            }
             "waddle_ingress_nonterminal_age" => {
                 assert_eq!(rows.len(), 1, "age query must always emit one row");
                 let age: f64 = sqlx::query_scalar(&format!(
@@ -1478,6 +1483,7 @@ async fn assert_populated_nonterminal_monitoring(
     assert_eq!(
         counts,
         vec![
+            ("none".to_string(), 0),
             ("notification_activity_preview".to_string(), 1),
             ("route_muc".to_string(), 1),
             ("terminalization".to_string(), 1),

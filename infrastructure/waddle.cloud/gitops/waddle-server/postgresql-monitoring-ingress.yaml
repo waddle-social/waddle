@@ -236,11 +236,16 @@ data:
         SELECT kind, count(DISTINCT message_key) AS messages
         FROM obligations
         GROUP BY kind
+        UNION ALL
+        -- Always-present sentinel: an empty backlog emits no family rows, so
+        -- `absent(cnpg_waddle_ingress_nonterminal_messages{kind="none"})`
+        -- proves this query stopped running rather than that nothing is stuck.
+        SELECT 'none' AS kind, 0 AS messages
       primary: true
       metrics:
         - kind:
             usage: LABEL
-            description: Pending intent kind family, or terminalization when all receipts are complete.
+            description: Pending intent kind family, terminalization when all receipts are complete, or the always-present none sentinel.
         - messages:
             usage: GAUGE
             description: Distinct canonical messages non-terminal for at least ten minutes per pending kind family.

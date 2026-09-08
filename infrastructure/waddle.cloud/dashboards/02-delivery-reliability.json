@@ -369,7 +369,7 @@
       "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
       "targets": [
         {
-          "expr": "sum by (kind) (cnpg_waddle_ingress_nonterminal_messages) or vector(0)",
+          "expr": "sum by (kind) (cnpg_waddle_ingress_nonterminal_messages{kind!=\"none\"}) or vector(0)",
           "legendFormat": "{{kind}}",
           "refId": "A"
         }
