@@ -324,10 +324,28 @@ impl OrderedRelayPayload {
         let Some(from) = stanza_from(self.stanza()) else {
             return false;
         };
+        // A groupchat occupant copy is authored by the room (XEP-0045 §7.4), so
+        // only the room's own claim may vouch for it; user claims relay the
+        // remaining message, IQ and presence payloads.
+        let allowed = if self.is_groupchat_message() {
+            claim.entity.entity_type == EntityType::RoomActor
+        } else {
+            matches!(
+                claim.entity.entity_type,
+                EntityType::UserActor | EntityType::RoomActor
+            )
+        };
+        allowed && claim.entity.id == from.to_bare().to_string()
+    }
+
+    fn is_groupchat_message(&self) -> bool {
         matches!(
-            claim.entity.entity_type,
-            EntityType::UserActor | EntityType::RoomActor
-        ) && claim.entity.id == from.to_bare().to_string()
+            (self, self.stanza()),
+            (
+                OrderedRelayPayload::Message { .. },
+                waddle_xmpp::Stanza::Message(message)
+            ) if message.type_ == xmpp_parsers::message::MessageType::Groupchat
+        )
     }
 
     fn fingerprint(&self) -> OrderedRelayPayloadFingerprint {

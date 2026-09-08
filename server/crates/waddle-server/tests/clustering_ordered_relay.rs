@@ -604,6 +604,43 @@ fn receiver_reserves_full_jid_groupchat_from_room_entity() {
 }
 
 #[test]
+fn receiver_nacks_groupchat_vouched_by_a_user_claim() {
+    // XEP-0045 §7.4: an occupant copy is authored by the room, so only the
+    // room's claim may vouch for it even when the user claim matches `from`.
+    let mut receiver =
+        waddle_server::clustering::ordered_relay::OrderedRelayReceiverState::default();
+    let target: jid::FullJid = "juliet@example.test/phone".parse().expect("target");
+    let mut stanza = Message::new(Some(target.clone().into()));
+    stanza.from = Some("romeo@example.test/phone".parse().expect("user sender"));
+    stanza.type_ = xmpp_parsers::message::MessageType::Groupchat;
+    let envelope = RemoteStanzaEnvelope {
+        asserted_origin_node: origin_node(),
+        channel: OrderedRelayChannel {
+            origin: OrderedRelayOrigin::Entity(user_actor_origin_claim().entity),
+            recipient: OrderedRelayRecipient::FullJid(target.clone()),
+            target_epoch: target_claim().epoch,
+        },
+        sequence: OrderedRelaySequence(1),
+        origin_inbound_sequence: inbound(0),
+        origin_claim: user_actor_origin_claim(),
+        sender_claim: sender_claim(),
+        target_claim: target_claim(),
+        payload: OrderedRelayPayload::Message {
+            recipient: target.into(),
+            stanza: RemoteStanza(waddle_xmpp::Stanza::Message(stanza)),
+        },
+        origin_proof: None,
+    };
+    assert!(matches!(
+        receive(&mut receiver, envelope),
+        OrderedRelayReply::Nack(OrderedRelayNack {
+            reason: OrderedRelayNackReason::ParseFailure,
+            ..
+        })
+    ));
+}
+
+#[test]
 fn receiver_reservation_does_not_advance_expected_until_commit() {
     let mut receiver =
         waddle_server::clustering::ordered_relay::OrderedRelayReceiverState::default();
