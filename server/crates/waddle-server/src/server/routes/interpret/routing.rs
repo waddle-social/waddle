@@ -536,6 +536,7 @@ async fn deliver_one_via_actor(
     target: &jid::FullJid,
     stanza: &Stanza,
     kind: ActorSendKind,
+    ingress_append_context: Option<&SmIngressAppendContext>,
 ) -> FullJidDeliveryOutcome {
     let message_id = stanza_message_id(stanza);
     // FUTURE CLEANUP (ADR-0017; Greptile review on PR #1177, tracked in #1195):
@@ -559,14 +560,20 @@ async fn deliver_one_via_actor(
         // No live actor for this bare JID — no delivery was attempted, so the
         // detached replay buffer is a safe (non-duplicating) fallback.
         Ok(None) => {
-            return deliver_to_detached(sm_session_registry, target, stanza)
-                .await
-                .into();
+            return deliver_to_detached(
+                sm_session_registry,
+                target,
+                stanza,
+                ingress_append_context,
+            )
+            .await
+            .into();
         }
         Err(error) => {
             warn!(jid = %target, message_id, %error, "actor delivery: GetUser failed; routing to detached");
             return detached_after_routing_failure(
-                deliver_to_detached(sm_session_registry, target, stanza).await,
+                deliver_to_detached(sm_session_registry, target, stanza, ingress_append_context)
+                    .await,
             );
         }
     };
@@ -641,7 +648,7 @@ async fn deliver_one_via_actor(
         }
         Ok(waddle_xmpp::registry::BroadcastOutcome::NotConnected)
         | Ok(waddle_xmpp::registry::BroadcastOutcome::DroppedClosed) => {
-            deliver_to_detached(sm_session_registry, target, stanza)
+            deliver_to_detached(sm_session_registry, target, stanza, ingress_append_context)
                 .await
                 .into()
         }
@@ -655,7 +662,8 @@ async fn deliver_one_via_actor(
                 "actor delivery: TrySend ask failed before enqueue; routing to detached"
             );
             detached_after_routing_failure(
-                deliver_to_detached(sm_session_registry, target, stanza).await,
+                deliver_to_detached(sm_session_registry, target, stanza, ingress_append_context)
+                    .await,
             )
         }
         // May have been enqueued — kameo does not cancel the enqueued handler,
@@ -690,6 +698,7 @@ pub(crate) async fn deliver_peer_to_full(
     sm_session_registry: Option<&Arc<InMemorySmSessionRegistry>>,
     target: &jid::FullJid,
     stanza: &Stanza,
+    ingress_append_context: Option<&SmIngressAppendContext>,
 ) -> FullJidDeliveryOutcome {
     match user_registry {
         Some(user_registry) => {
@@ -699,10 +708,11 @@ pub(crate) async fn deliver_peer_to_full(
                 target,
                 stanza,
                 ActorSendKind::Peer,
+                ingress_append_context,
             )
             .await
         }
-        None => deliver_to_detached(sm_session_registry, target, stanza)
+        None => deliver_to_detached(sm_session_registry, target, stanza, ingress_append_context)
             .await
             .into(),
     }
@@ -720,6 +730,7 @@ pub(crate) async fn deliver_direct_to_full(
     sm_session_registry: Option<&Arc<InMemorySmSessionRegistry>>,
     target: &jid::FullJid,
     stanza: &Stanza,
+    ingress_append_context: Option<&SmIngressAppendContext>,
 ) -> FullJidDeliveryOutcome {
     match user_registry {
         Some(user_registry) => {
@@ -729,10 +740,11 @@ pub(crate) async fn deliver_direct_to_full(
                 target,
                 stanza,
                 ActorSendKind::Direct,
+                ingress_append_context,
             )
             .await
         }
-        None => deliver_to_detached(sm_session_registry, target, stanza)
+        None => deliver_to_detached(sm_session_registry, target, stanza, ingress_append_context)
             .await
             .into(),
     }
@@ -838,21 +850,43 @@ pub(super) async fn deliver_peer_to_live_only(
     }
 }
 
+/// Preserve ordinary replay appends while deduplicating recorded direct obligations.
+pub(super) async fn append_detached(
+    sm: &InMemorySmSessionRegistry,
+    context: Option<&SmIngressAppendContext>,
+    target: &jid::FullJid,
+    stanza: &Stanza,
+) -> Result<bool, waddle_xmpp::stream_management::SmRegistryError> {
+    match context {
+        Some(context) => sm
+            .record_keyed_stanza_for_detached_bound_resource(
+                target,
+                stanza,
+                chrono::Utc::now(),
+                context.for_resource(target),
+            )
+            .await
+            .map(|outcome| outcome.is_allocated()),
+        None => {
+            sm.record_stanza_for_detached_bound_resource(target, stanza, chrono::Utc::now())
+                .await
+        }
+    }
+}
+
 /// Queue a fallback replay stanza in the detached resource's SM session.
 pub(super) async fn deliver_to_detached(
     sm_session_registry: Option<&Arc<InMemorySmSessionRegistry>>,
     target: &jid::FullJid,
     stanza: &Stanza,
+    ingress_append_context: Option<&SmIngressAppendContext>,
 ) -> DetachedDeliveryOutcome {
     let message_id = stanza_message_id(stanza);
     let Some(sm) = sm_session_registry else {
         debug!(jid = %target, message_id, "RouteToConnection: target offline, dropping");
         return DetachedDeliveryOutcome::Unavailable;
     };
-    match sm
-        .record_stanza_for_detached_bound_resource(target, stanza, chrono::Utc::now())
-        .await
-    {
+    match append_detached(sm, ingress_append_context, target, stanza).await {
         Ok(true) => {
             debug!(jid = %target, message_id, "RouteToConnection: recipient detached, queued for XEP-0198 replay");
             DetachedDeliveryOutcome::Queued
@@ -1012,6 +1046,7 @@ mod tests {
             &target,
             &sample_message(&target),
             ActorSendKind::Peer,
+            None,
         )
         .await;
 
@@ -1038,6 +1073,7 @@ mod tests {
             &target,
             &sample_message(&target),
             ActorSendKind::Peer,
+            None,
         )
         .await;
 
@@ -1052,6 +1088,7 @@ mod tests {
             &target,
             &sample_message(&target),
             ActorSendKind::Peer,
+            None,
         )
         .await;
 
@@ -1083,6 +1120,7 @@ mod tests {
             &missing,
             &sample_message(&missing),
             ActorSendKind::Peer,
+            None,
         )
         .await;
 
@@ -1111,6 +1149,7 @@ mod tests {
             &target,
             &sample_message(&target),
             ActorSendKind::Peer,
+            None,
         )
         .await;
 
@@ -1187,6 +1226,7 @@ mod tests {
             &target,
             &sample_message(&target),
             ActorSendKind::Peer,
+            None,
         )
         .await;
 

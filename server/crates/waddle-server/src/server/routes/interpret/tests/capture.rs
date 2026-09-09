@@ -527,6 +527,7 @@ async fn immediate_offline_delivery_queues_without_capturing_ingress_intents() {
         sfu: None,
         ingress_effect_capture: Some(capture.clone()),
         direct_route_identity: None,
+        ingress_append_context: None,
     };
     let recipient: jid::BareJid = "bob@example.com".parse().expect("recipient");
     let archive_jid: jid::BareJid = "bob@example.com".parse().expect("archive");
@@ -589,6 +590,7 @@ async fn transient_offline_delivery_records_pending_delivery_intent() {
         sfu: None,
         ingress_effect_capture: Some(capture.clone()),
         direct_route_identity: None,
+        ingress_append_context: None,
     };
     let recipient: jid::BareJid = "bob@example.com".parse().expect("recipient");
     let transient = chat_msg(

@@ -123,6 +123,7 @@ pub(in super::super) async fn deliver_local_full_jid_after_target_refresh(
         Some(&services.sm_session_registry),
         target,
         stanza,
+        None,
     )
     .await
 }

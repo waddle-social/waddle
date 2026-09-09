@@ -261,7 +261,7 @@ async fn concurrent_snapshots(fixture: IngressFixture) {
     let connections = ConnectionRegistry::new();
     let sm = registry(&fixture).await;
     attach(&sm, &a).await;
-    let mut submission = fixture.submission(Some("detached-concurrent"), "at least once");
+    let mut submission = fixture.submission(Some("detached-concurrent"), "one durable append");
     route(&mut submission, &[a.clone(), b.clone()], 1);
     let first = commit_submission(&fixture.uow, &submission, 5)
         .await
@@ -285,8 +285,8 @@ async fn concurrent_snapshots(fixture: IngressFixture) {
     assert_eq!(queued(&sm, &a).await.unacked_stanzas.len(), 1);
     assert_eq!(
         queued(&sm, &b).await.unacked_stanzas.len(),
-        2,
-        "both frozen decisions may append B before either observes the other's progress"
+        1,
+        "the durable ledger allows only one append for B across frozen decisions"
     );
     assert_eq!(fixture.count("ingress_delivery_receipts").await, 2);
     assert_eq!(fixture.count("ingress_effect_receipts").await, 1);

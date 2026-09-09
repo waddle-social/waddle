@@ -108,6 +108,29 @@ pub enum TimerCommand {
     Cancel(TimerId),
 }
 
+/// Recorded direct-route obligation identity, completed with a resource at append time.
+#[derive(Clone, Debug)]
+pub struct SmIngressAppendContext {
+    pub message_key: waddle_xmpp::ingress::MessageKey,
+    pub receipt: crate::ingress::EffectReceiptKey,
+}
+
+impl SmIngressAppendContext {
+    pub(super) fn for_resource(
+        &self,
+        resource: &jid::FullJid,
+    ) -> waddle_xmpp::stream_management::SmIngressAppendKey {
+        waddle_xmpp::stream_management::SmIngressAppendKey {
+            message_key: self.message_key,
+            kind: waddle_xmpp::stream_management::SmIngressReceiptKind::from_storage(
+                self.receipt.kind.to_storage(),
+            ),
+            semantic_identity_hash: self.receipt.semantic_identity_hash,
+            resource: resource.clone(),
+        }
+    }
+}
+
 /// Typed dependency context for the interpreter.
 ///
 /// Grows as later migration steps add storage/actor handles
@@ -116,6 +139,8 @@ pub enum TimerCommand {
 /// churn small.
 #[derive(Clone)]
 pub struct Deps<'a> {
+    /// Owned receipt context scoped to one recorded direct-route resource attempt.
+    pub ingress_append_context: Option<SmIngressAppendContext>,
     /// Identity scoped to the current direct-routing invocation.
     pub direct_route_identity: Option<waddle_xmpp::ingress::EffectMessageIdentity>,
     pub effects: &'a dyn super::effects::EffectSink,
@@ -254,6 +279,7 @@ impl<'a> Deps<'a> {
             sfu: None,
             ingress_effect_capture: None,
             direct_route_identity: None,
+            ingress_append_context: None,
         }
     }
 
@@ -293,6 +319,7 @@ impl<'a> Deps<'a> {
             sfu: None,
             ingress_effect_capture: None,
             direct_route_identity: None,
+            ingress_append_context: None,
         }
     }
 
@@ -324,6 +351,7 @@ impl<'a> Deps<'a> {
             sfu: None,
             ingress_effect_capture: None,
             direct_route_identity: None,
+            ingress_append_context: None,
         }
     }
 
@@ -353,6 +381,7 @@ impl<'a> Deps<'a> {
             sfu: None,
             ingress_effect_capture: None,
             direct_route_identity: None,
+            ingress_append_context: None,
         }
     }
 }

@@ -14,7 +14,7 @@ use crate::{
             delivery::{ExternalDeliveryEffect, PeerDeliveryKind},
             EffectOutcome, ImmediateSink, SettledCompletion, SettledOutcome,
         },
-        queue_processed_for_detached, Deps, FullJidDeliveryOutcome,
+        queue_processed_for_detached, Deps, FullJidDeliveryOutcome, SmIngressAppendContext,
     },
 };
 
@@ -81,7 +81,14 @@ pub(super) async fn execute(
         {
             std::future::pending::<()>().await;
         }
-        let outcome = append_resource(&immediate, effect, resource).await;
+        // The recorded receipt, rather than today's stanza or audience, owns
+        // this resource's append. Each resource gets an independent context.
+        let mut resource_deps = immediate.clone();
+        resource_deps.ingress_append_context = Some(SmIngressAppendContext {
+            message_key: key,
+            receipt: progress.receipt.clone(),
+        });
+        let outcome = append_resource(&resource_deps, effect, resource).await;
         destinations.push((resource.clone(), outcome));
         #[cfg(feature = "clustering")]
         if outcome == FullJidDeliveryOutcome::MaybeCommitted {

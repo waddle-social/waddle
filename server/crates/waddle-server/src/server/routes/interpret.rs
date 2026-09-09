@@ -233,7 +233,8 @@ pub(crate) struct NotificationRecoverySweepOutcome {
 #[cfg(feature = "clustering")]
 pub use deps::OrderedRelayRouteOriginKind;
 pub use deps::{
-    Deps, GroupchatRetrySuppression, InterpretOutcome, OrderedRelayRouteOrigin, TimerCommand,
+    Deps, GroupchatRetrySuppression, InterpretOutcome, OrderedRelayRouteOrigin,
+    SmIngressAppendContext, TimerCommand,
 };
 pub(crate) use groupchat_archive::push_inbox_update;
 pub(crate) use notification_activity_ingest::{

@@ -233,6 +233,7 @@ async fn xep_0280_send_carbons_queues_for_detached_xep_0198_resources() {
         sfu: None,
         ingress_effect_capture: None,
         direct_route_identity: None,
+        ingress_append_context: None,
         effects: &crate::server::routes::interpret::effects::ImmediateSink,
     };
     let _outcome = interpret(
@@ -293,6 +294,7 @@ async fn detached_carbon_delivery_still_queues_with_ingress_capture() {
         sfu: None,
         ingress_effect_capture: Some(capture.clone()),
         direct_route_identity: None,
+        ingress_append_context: None,
     };
 
     let _ = interpret(
@@ -353,6 +355,7 @@ async fn self_dm_and_sent_carbon_to_same_detached_stream_both_queue() {
         sfu: None,
         ingress_effect_capture: Some(capture.clone()),
         direct_route_identity: None,
+        ingress_append_context: None,
     };
 
     let direct = chat_msg(
