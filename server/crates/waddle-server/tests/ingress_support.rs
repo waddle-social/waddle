@@ -16,7 +16,6 @@ pub struct IngressFixture {
     pub db: Database,
     pub uow: IngressUnitOfWork,
     pub principal: AuthenticatedPrincipalRef,
-    #[cfg(feature = "clustering")]
     lineage: LineageConfig,
     postgres: Option<(sqlx::PgPool, String)>,
     sqlite_directory: Option<tempfile::TempDir>,
@@ -42,6 +41,10 @@ impl IngressFixture {
     }
 
     pub async fn postgres(test_name: &str) -> Option<Self> {
+        Self::postgres_with_pool(test_name, 10).await
+    }
+
+    pub async fn postgres_with_pool(test_name: &str, pool_size: u32) -> Option<Self> {
         let Ok(database_url) = std::env::var("WADDLE_TEST_POSTGRES_URL") else {
             eprintln!("skipping {test_name}: WADDLE_TEST_POSTGRES_URL not set");
             return None;
@@ -67,7 +70,8 @@ impl IngressFixture {
             .clear()
             .extend_pairs(retained)
             .append_pair("options", &format!("-c search_path={schema}"));
-        let config = DatabaseConfig::new(DatabaseDriver::Postgres, url.to_string());
+        let mut config = DatabaseConfig::new(DatabaseDriver::Postgres, url.to_string());
+        config.pool_size = pool_size;
         let db = Database::from_config("ingress-test", &config)
             .await
             .expect("Postgres database");
@@ -106,7 +110,6 @@ impl IngressFixture {
             principal,
             postgres,
             sqlite_directory: None,
-            #[cfg(feature = "clustering")]
             lineage,
         };
         fixture.execute("INSERT INTO users (jid, username, xmpp_localpart, created_at, updated_at) VALUES (?, ?, ?, ?, ?)", waddle_server::db_params![fixture.principal.bare_jid().to_string(), "romeo".to_string(), "romeo".to_string(), chrono::Utc::now().to_rfc3339(), chrono::Utc::now().to_rfc3339()]).await;
@@ -217,6 +220,18 @@ impl IngressFixture {
             owner,
             epoch,
         )
+    }
+
+    pub async fn authority(&self) -> waddle_server::ingress::IngressAuthority {
+        waddle_server::ingress::IngressAuthority::new(
+            Default::default(),
+            self.db.clone(),
+            self.lineage.clone(),
+            #[cfg(feature = "clustering")]
+            None,
+        )
+        .await
+        .expect("restarted authority")
     }
 
     pub async fn close(self) {

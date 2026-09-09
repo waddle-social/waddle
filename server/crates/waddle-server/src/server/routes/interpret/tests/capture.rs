@@ -411,19 +411,13 @@ async fn groupchat_inbox_boundary_records_notification_intent_after_candidate_ac
         IngressEffectIntent::NotificationActivityPreview { owner: intent_owner, .. }
             if *intent_owner == owner
     )));
-    assert!(snapshot.intents.iter().any(|intent| matches!(
+    // Recovery rows carry the canonical message key and are materialized only
+    // inside the ingress transaction (#1743). Immediate execution therefore
+    // records no recovery obligation; the planning-mode regressions in
+    // groupchat_recovery_tests.rs cover the Recorded/Completed pair.
+    assert!(!snapshot.intents.iter().any(|intent| matches!(
         intent,
-        IngressEffectIntent::GroupchatNotificationRecovery { mutation }
-            if mutation.recipient == owner
-                && mutation.action
-                    == waddle_xmpp::ingress::GroupchatNotificationRecoveryAction::Recorded
-    )));
-    assert!(snapshot.intents.iter().any(|intent| matches!(
-        intent,
-        IngressEffectIntent::GroupchatNotificationRecovery { mutation }
-            if mutation.recipient == owner
-                && mutation.action
-                    == waddle_xmpp::ingress::GroupchatNotificationRecoveryAction::Completed
+        IngressEffectIntent::GroupchatNotificationRecovery { .. }
     )));
 }
 
@@ -508,7 +502,7 @@ async fn groupchat_inbox_boundary_skips_notification_intent_when_t0_policy_suppr
 }
 
 #[tokio::test]
-async fn offline_delivery_boundary_only_confirms_written_steps() {
+async fn immediate_offline_delivery_queues_without_capturing_ingress_intents() {
     let registry = ConnectionRegistry::new();
     let pending: Arc<dyn PendingDeliveryStorage> = Arc::new(InMemoryPendingDeliveryStorage::new(
         waddle_xmpp::pending_delivery::QuotaPolicy::default_policy(),
@@ -554,21 +548,18 @@ async fn offline_delivery_boundary_only_confirms_written_steps() {
     )
     .await;
 
-    let snapshot = capture_snapshot(&capture);
-    assert!(!snapshot.intents.iter().any(|intent| matches!(
-        intent,
-        IngressEffectIntent::NotificationActivityPreview { owner, .. }
-            if *owner == recipient
-    )));
-    assert!(snapshot.intents.iter().any(|intent| matches!(
-        intent,
-        IngressEffectIntent::PendingDelivery {
-            mutation: waddle_xmpp::ingress::PendingDeliveryMutation::Archived {
-                recipient: intent_recipient,
-                ..
-            }
-        } if *intent_recipient == recipient
-    )));
+    assert!(capture_snapshot(&capture).intents.is_empty());
+    let rows = pending.list(&recipient).await.expect("pending rows");
+    assert_eq!(rows.len(), 1);
+    assert_eq!(rows[0].recipient, recipient);
+    let waddle_xmpp::pending_delivery::PendingPayload::Archived(archive_id) = &rows[0].payload
+    else {
+        panic!("immediate delivery must retain its archived payload");
+    };
+    assert_eq!(
+        archive_id,
+        &XepStanzaId::new("offline-archive-1", recipient.into())
+    );
 }
 
 #[tokio::test]
@@ -578,8 +569,9 @@ async fn transient_offline_delivery_records_pending_delivery_intent() {
         waddle_xmpp::pending_delivery::QuotaPolicy::default_policy(),
     ));
     let capture = IngressEffectCapture::new();
+    let sink = crate::server::routes::interpret::effects::PlanSink::new();
     let deps = Deps {
-        effects: &crate::server::routes::interpret::effects::ImmediateSink,
+        effects: &sink,
         connection_registry: &registry,
         user_registry: None,
         sm_session_registry: None,

@@ -17,66 +17,35 @@ shadow scaffolding (#1656/#1695) is deleted; there is one ingress path.
 Stated limitations (strict non-regressions against `main`, owned by later
 roadmap slices): (i) lost post-commit effects are durable (envelope,
 intents, receipts) but not executed by a recovery executor (#1658);
-(ii) non-idempotent fan-out to non-senders is suppressed on a repaired
-duplicate, as today (#1658); (iii) live full-JID delivery keeps the
+(ii) non-idempotent fan-out to non-senders remains suppressed on a repaired
+duplicate except for unfinished recorded direct resources tracked below; (iii) live full-JID delivery keeps the
 destination connection's own recipient archive/inbox pipeline (#1658);
 (iv) subject/pin/membership supersession keeps `main`'s semantics
 (#1659/#1660); (v) non-resumable streams have no durable
-connection-generation fence (follow-up issue).
+connection-generation fence (follow-up issue); (vi) extension-host dispatch runs outside ingress: offline rows and candidates are written immediately without receipts, and groupchat notification recovery rows are not created; a typed Extension ingress identity is the follow-up.
 
 ### Recovery follow-ups from combined review
 
-These five gaps are inherited from the pre-review implementation and remain
-outside this cutover slice. The issue titles below are follow-ups to file under
-#1658, not newly filed issue references.
+Five gaps were inherited from the pre-review implementation and filed under
+#1658. All five are resolved in PR #1752: per-resource detached delivery
+progress (#1739, §3.3a), per-plugin observer obligations (#1740, §3.3b),
+atomic notification recovery settlement (#1743, §3.3c), ordinary pending-row
+reconstruction (#1742, §3.3d) and periodic terminalization maintenance
+(#1741, §3.6a).
 
-**Partial detached progress.** Detached delivery receipts remain aggregate:
-successful resource appends are not recorded independently when another
-destination fails. Complete batches terminalize, but an incomplete batch
-remains pending, and alias replay suppresses its non-sender detached delivery
-and live subsets of its aggregate obligation to avoid repeating completed
-resources. Automatic delivery to remaining resources is deferred to #1658;
-file **“Persist per-resource detached ingress progress and replay only
-unfinished destinations”**, including SQLite/Postgres partial-success,
-restart, and replay tests.
+### Settlement contract (#1752)
 
-**Per-plugin observer receipts.** Room observers retain one room-level intent
-and receipt, without a typed plugin identity or independently persisted
-observer outcomes. If an observer pass partially succeeds and fails before
-aggregate completion, recovery cannot distinguish completed plugins from
-unfinished ones; a retry may repeat completed observer work. Independent
-observer recovery is deferred to #1658; file **“Capture typed observer
-identities and persist per-plugin ingress completion receipts”**, covering
-mixed success, failure, restart, and retry on both databases.
-
-**Terminalization maintenance.** Phase C attempts terminalization after
-receipt completion, but a failed terminalization transaction has no persistent
-maintenance sweep. A receipt-complete canonical row can remain non-terminal
-across restart and remain protected from retention until another execution
-path retries terminalization. This lifecycle limitation is deferred to #1658;
-file **“Sweep receipt-complete non-terminal ingress rows at startup and during
-bounded maintenance”**, testing injected terminalization failure, restart
-recovery, and eventual retention eligibility on SQLite and Postgres.
-
-**Ordinary pending-row reconstruction.** Alias replay does not generally
-reconstruct ordinary offline pending deliveries from their recorded row
-identity and canonical envelope; fresh planning allocates a new pending-row
-identifier. Specialized invitation reconstruction does not provide that
-general recovery executor, and ordinary duplicate suppression remains
-necessary to avoid inventing another row. Recovery of these durable unresolved
-obligations is deferred to #1658; file **“Reconstruct ordinary pending
-deliveries from recorded ingress identity and payload”**, with both-backend
-tests proving replay preserves the recorded row ID without duplicate delivery.
-
-**Atomic recovery completion and receipts.** Groupchat notification recovery
-marks its recovery row completed separately from recording the corresponding
-ingress receipt, and the existing background recovery sweep does not settle
-ingress receipts. A crash or receipt-write failure between those operations
-can leave a completed recovery item with an unresolved canonical obligation.
-Atomic settlement is deferred to #1658; file **“Atomically complete notification
-recovery and its correlated ingress receipts”**, adding a typed unit-of-work
-repository operation and SQLite/Postgres fault-injection tests for rollback
-and restart.
+An effect whose completion evidence is a row in the global database (delivery
+progress, notification candidate, recovery completion) commits that evidence
+and the receipts of the recorded intents it discharges in ONE ingress
+transaction: attested epoch → canonical row `FOR UPDATE` → effect tables →
+`settle_recorded` → commit. No actor, registry, extension or socket call runs
+while that transaction is open. Such effects are executed by unit-of-work arms
+(`execute_uow`) selected by exact effect variant; the generic executor never
+writes a receipt owned by an arm (`arm_owned_receipts`). Evidence discharges a
+recorded intent only by exact identity, with two typed coalescences: a
+`Duplicate` candidate insertion discharges the recorded `Inserted` obligation,
+and a `Completed` recovery discharges a recorded `DeferredPolicy` obligation.
 
 ## 2. Three phases per inbound message
 
@@ -198,6 +167,82 @@ rows. Per-recipient copies and error replies are reconstructed by a pure
 function over `(envelope, intent)` tested without actors, extensions or
 policy lookups.
 
+### 3.3a Per-resource detached delivery progress (#1739)
+
+A recorded direct route freezes its capture identity and resource fanout.
+`ingress_delivery_receipts` records each successful resource under the canonical
+message key and complete effect receipt key. Duplicate planning intersects
+available targets with that frozen fanout and removes completed resources,
+including when a formerly detached resource is now live. Every replay uses the
+canonical envelope to rebuild its recipient payload. Unavailable recorded
+resources remain unresolved; newly available resources outside the recorded
+fanout are never added.
+
+Each resource append runs before its progress transaction. That transaction
+attests the epoch, locks the canonical message, records resource progress, and
+settles the aggregate route only when all recorded resources are covered.
+The progress and aggregate receipt commit atomically. No registry or socket
+operation runs while this transaction is open.
+
+Delivery is **at least once per resource under concurrent duplicate replay**:
+two decisions can snapshot the same unfinished resource and both append it.
+There are no execution claims in this slice. A crash after an append but before
+its progress commit can repeat the one in-flight resource on retry; previously
+committed resource progress is retained across restart. An append followed by
+a failed progress transaction has the same retry window. MUC groupchat
+occupant fanout is outside this mechanism. `QueueDetached` effects without
+a matching recorded direct route retain generic execution and receipt
+ownership; the variant is shared by MUC occupant delivery.
+
+### 3.3b Per-plugin observer obligations (#1740)
+
+Room observer work is one typed intent and one external effect per eligible
+plugin: `RoomObserver { room, requester, sender, plugin: PluginId }` (codec tag
+27; the semantic key includes the plugin). Eligibility is frozen at planning
+from the extension manager's exact predicates (valid hook body, declared
+`MessageObserve` capability, grant). Ready observer effects execute
+concurrently under the shared Phase C deadline and are receipted independently,
+so a slow plugin cannot starve a fast plugin's receipt. On replay the recorded
+plugin set is authoritative: unrecorded plugins never run historical messages,
+recorded plugins missing from the fresh plan are rebuilt from the canonical
+envelope, and a plugin that is missing or revoked at execution stays
+unresolved. Host-warning replies keep their non-proving semantics.
+
+### 3.3c Atomic notification recovery settlement (#1743)
+
+`groupchat_notification_recovery` rows carry the canonical `message_key` and
+are inserted only inside the ingress transaction. Phase C executes the
+`NotificationCandidate` effect through a unit-of-work arm: candidate insertion,
+recovery completion and the receipts for the recorded
+`NotificationActivityPreview` and `GroupchatNotificationRecovery` intents commit
+together. A T0 push-policy error records a typed `DeferredPolicy` obligation
+instead of nothing. The background sweep is obligations-driven: it reads
+recorded intents under the canonical lock, rebuilds candidates purely from the
+canonical envelope (no MAM read, no T0 re-evaluation for recorded `Inserted`
+work), evaluates policy only for `DeferredPolicy` rows and only outside the
+lock, then re-validates and settles. Completed-but-unreceipted orphans settle
+the recovery obligation alone; pruning skips rows whose canonical message is
+still non-terminal; a recovery row whose canonical message is gone is deleted.
+
+### 3.3d Ordinary pending-row reconstruction (#1742)
+
+When T0 push-policy preparation returns `RetryLater`, ingress records only the pending-delivery obligation, leaves `notification_outboxed_at_ms` unset on execution and replay, and defers notification preparation to the existing XEP-0357 janitor.
+
+`QueueOfflineDelivery` executes through a unit-of-work arm: under the canonical
+lock the arm skips insertion when the recorded `PendingDelivery` receipt exists,
+otherwise checks for the recorded row id before the quota-predicated insert
+(Postgres recipient advisory lock), inserts the frozen notification candidate
+and marks `notification_outboxed_at_ms` in the same transaction, and settles
+exactly the recorded pending and notification obligations. Quota exhaustion is
+a typed outcome; the XEP-0160 `<service-unavailable/>` bounce is sent after the
+transaction closes. On replay, ordinary pending obligations (never invitation-
+owned rows) are rebuilt purely from the canonical envelope, the recorded row id,
+the canonical acceptance time and the recorded notification intents: a fresh
+offline effect for the same recipient is replaced, a fresh live route for an
+originally offline recipient is refused (recorded audience wins), and when the
+row is already receipted only the unfinished notification work runs. T0 push
+policy is never re-evaluated for recorded `Inserted` candidates.
+
 ### 3.4 Alias-only dedupe, MAM identity, reconciliation
 - Deleted: `origin_dedup.rs`, the `origin_dedup_*` columns and both partial
   unique indexes, `StoreOutcome::Deduplicated`, pool and transaction dedupe
@@ -225,7 +270,8 @@ policy lookups.
   re-applies idempotent fenced effects through the existing guarded handler
   code (membership grants never demote; subject re-apply **and rebroadcast**
   to all occupants per XEP-0045 §8.1), sends the sender's reflection/reply,
-  and suppresses non-idempotent fan-out to non-senders.
+  and suppresses non-idempotent fan-out to non-senders except for unfinished
+  recorded direct resources with per-resource progress.
 - Owner side of a relayed groupchat runs the same pipeline with the
   `Relayed` identity; the proxy envelope carries `IngressCanonicalRef
   { message_key, sender_bare, origin_id }` (relay ask/reply version bumped).
@@ -257,6 +303,20 @@ Alias resolution and sm-ref/delivery insertion lock the canonical row
 `terminalize_message` takes an unconditional `FOR UPDATE`; GC keeps
 `FOR UPDATE SKIP LOCKED`. Retention: eight days from `terminal_at`.
 
+### 3.6a Periodic bounded maintenance (#1741)
+
+The retention coordinator runs a maintenance pass at startup, after committed
+decisions and on a jittered 30 s tick, continuing with capped exponential
+backoff after any `Partial`, `Failed` or `TimedOut` pass. A pass attests the
+epoch, then terminalizes receipt-complete non-terminal rows older than a 60 s
+grace through a keyset cursor over `(created_at, message_key)` (each row is
+locked and its receipt completeness re-checked; contended rows are skipped and
+retried on the continuation), then runs retention GC. Each phase is bounded
+inside a hard pass deadline; maintenance shares the ingress pool and holds at
+most one connection at a time. Metrics: `ingress.maintenance.runs{phase,
+outcome}` and `ingress.maintenance.terminalized_messages`; alert
+`IngressMaintenanceFailing`.
+
 ## 4. Backends
 The unit of work is dialect-aware through `Database`: SQLite uses
 `BEGIN IMMEDIATE`, no lock clauses, no epoch GUC proof, `IngressFencing::
@@ -287,6 +347,22 @@ tables)
 Recreate hard cutover rides in this PR (prod HelmRelease `updateStrategy:
 Recreate`, precedent #1596 → flipped back by #1605); all old writers stop
 before V1012 runs; old binaries refuse the unknown ledger version.
+
+**V1014 cutover (#1752).** The recovery follow-ups ride a second one-shot
+Recreate. V1014 installs an epoch-safe transaction-local proof (valid at live
+epoch 0 and 1; no epoch-zero requirement), then resets ingress and SM state in
+child-before-parent order: effect receipts, carbon receipts, effect intents,
+deliveries, SM refs, origin aliases, invite claims, canonical messages, SM
+streams, retained SM sessions and their unacked outbound frames. Consequences:
+in-flight ingress obligations at cutover are abandoned (observer runs,
+notification candidates, not-yet-inserted pending rows); retained sessions
+cannot resume and their unacked outbound frames are discarded; queued
+`pending_delivery` rows and archives are unaffected, and pending rows claimed by
+a discarded session are released once by the store-owned startup step
+(`reset_claims_for_ingress_v1014_once`) so they deliver on the first reconnect.
+`groupchat_notification_recovery` rows without a canonical `message_key` are
+deleted once by the inbox schema step. Roll-forward only: no pre-V1014 binary
+can start after the ledger advances.
 
 ## 7. Scaffolding removal
 `ingress_shadow` → `ingress`; worker, queue, parking map, candidate ladder,

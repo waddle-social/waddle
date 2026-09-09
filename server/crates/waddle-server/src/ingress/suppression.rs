@@ -15,11 +15,26 @@ pub fn filter_external_effects(
     verdict: &ReconcileVerdict,
     archive_outcomes: &[(PlanEffectDependency, MamTxStoreOutcome)],
     unreceipted: &[waddle_xmpp::ingress::IngressEffectIntent],
+    route_progress: &[super::recorded::RouteProgress],
 ) -> Vec<ExternalEffect> {
-    external_effect_indices(plan, verdict, archive_outcomes, unreceipted)
+    external_effect_indices(plan, verdict, archive_outcomes, unreceipted, route_progress)
         .into_iter()
         .filter_map(|index| match &plan.plan[index].effect {
-            Effect::External(effect) => Some(effect.clone()),
+            Effect::External(effect) => {
+                let mut effect = effect.clone();
+                if let RouteProgressFilter::Keep { remaining } =
+                    route_progress_filter(&effect, route_progress)
+                {
+                    if let ExternalEffect::Delivery(ExternalDeliveryEffect::QueueDetached {
+                        resources,
+                        ..
+                    }) = &mut effect
+                    {
+                        *resources = remaining;
+                    }
+                }
+                Some(effect)
+            }
             _ => None,
         })
         .collect()
@@ -30,6 +45,7 @@ pub(crate) fn external_effect_indices(
     verdict: &ReconcileVerdict,
     archive_outcomes: &[(PlanEffectDependency, MamTxStoreOutcome)],
     unreceipted: &[waddle_xmpp::ingress::IngressEffectIntent],
+    route_progress: &[super::recorded::RouteProgress],
 ) -> Vec<usize> {
     let duplicate = !matches!(verdict, ReconcileVerdict::FirstCommit);
     plan.plan
@@ -39,23 +55,23 @@ pub(crate) fn external_effect_indices(
             let Effect::External(effect) = &planned.effect else {
                 return None;
             };
-            if !super::recorded::external_in_recorded_audience(plan, effect) {
+            if !super::recorded::external_in_recorded_audience(plan, effect)
+                || !super::restore_offline::in_recorded_offline_audience(plan, effect)
+            {
                 return None;
             }
             if duplicate && !relay_carbons_recorded(plan, effect) {
                 return None;
             }
-            if duplicate
-                && unresolved_aggregate_delivery(effect, unreceipted)
-                && !sender_delivery(effect, plan.sanitized_message.from.as_ref())
-                && !subject_rebroadcast(effect)
-            {
+            let progress = route_progress_filter(effect, route_progress);
+            if matches!(progress, RouteProgressFilter::Drop) {
                 return None;
             }
             if duplicate
                 && duplicate_policy(planned) == PlanSuppressionPolicy::SenderOnly
                 && !sender_delivery(effect, plan.sanitized_message.from.as_ref())
                 && !subject_rebroadcast(effect)
+                && !matches!(progress, RouteProgressFilter::Keep { .. })
                 && !unreceipted_repair(effect, unreceipted)
             {
                 return None;
@@ -90,33 +106,44 @@ fn relay_carbons_recorded(plan: &IngressPlan, effect: &ExternalEffect) -> bool {
     })
 }
 
-/// Repair recorded routes whose completion can be correlated individually.
-/// Detached batches have only an aggregate receipt, so replay cannot distinguish
-/// resources already appended before a partial failure (#1658), even if a
-/// resumed resource changes the retry's effect into a live peer delivery.
+/// The same eligibility decision drives both cloned effects and dependency
+/// indices, so trimming cannot detach an effect from its planned prerequisites.
+enum RouteProgressFilter {
+    Untracked,
+    Keep { remaining: Vec<jid::FullJid> },
+    Drop,
+}
+
+fn route_progress_filter(
+    effect: &ExternalEffect,
+    progress: &[super::recorded::RouteProgress],
+) -> RouteProgressFilter {
+    if !matches!(
+        effect,
+        ExternalEffect::Delivery(
+            ExternalDeliveryEffect::QueueDetached { .. }
+                | ExternalDeliveryEffect::RouteToPeer { .. }
+        )
+    ) {
+        return RouteProgressFilter::Untracked;
+    }
+    let Some(progress) = progress.iter().find(|progress| progress.matches(effect)) else {
+        return RouteProgressFilter::Untracked;
+    };
+    let remaining = progress.remaining(effect);
+    if remaining.is_empty() {
+        RouteProgressFilter::Drop
+    } else {
+        RouteProgressFilter::Keep { remaining }
+    }
+}
+
 fn unreceipted_repair(
     effect: &ExternalEffect,
     unreceipted: &[waddle_xmpp::ingress::IngressEffectIntent],
 ) -> bool {
-    !matches!(
-        effect,
-        ExternalEffect::Delivery(ExternalDeliveryEffect::QueueDetached { .. })
-    ) && super::recorded::recorded_route_obligation(unreceipted, effect)
-}
-
-/// Ordinary direct fanout has no per-resource progress proof. A resumed
-/// resource must not bypass that limit merely by becoming an Always live route.
-fn unresolved_aggregate_delivery(
-    effect: &ExternalEffect,
-    unreceipted: &[waddle_xmpp::ingress::IngressEffectIntent],
-) -> bool {
-    matches!(effect, ExternalEffect::Delivery(_))
-        && unreceipted.iter().any(|intent| {
-            matches!(intent,
-                waddle_xmpp::ingress::IngressEffectIntent::RouteDirect { fanout, route_identity, .. }
-                    if fanout.len() > 1
-                        && super::recorded::external_route_identity(effect) == Some(route_identity))
-        })
+    super::restore_offline::pending_obligation(effect, unreceipted)
+        || super::recorded::recorded_route_obligation(unreceipted, effect)
 }
 
 fn duplicate_policy(planned: &PlannedEffect) -> PlanSuppressionPolicy {
@@ -263,12 +290,12 @@ mod tests {
                 room_execution: RoomExecutionPath::None,
             };
             assert_eq!(
-                external_effect_indices(&plan, &ReconcileVerdict::FirstCommit, &[], &[]),
+                external_effect_indices(&plan, &ReconcileVerdict::FirstCommit, &[], &[], &[]),
                 vec![0, 1]
             );
             let expected = if has_thread { vec![0] } else { vec![0, 1] };
             assert_eq!(
-                external_effect_indices(&plan, &ReconcileVerdict::Consistent, &[], &[]),
+                external_effect_indices(&plan, &ReconcileVerdict::Consistent, &[], &[], &[]),
                 expected
             );
         }
@@ -323,13 +350,16 @@ mod tests {
                 room_execution: RoomExecutionPath::None,
             };
             for verdict in [ReconcileVerdict::FirstCommit, ReconcileVerdict::Consistent] {
-                assert!(external_effect_indices(&plan, &verdict, &[], &[]).is_empty());
+                assert!(external_effect_indices(&plan, &verdict, &[], &[], &[]).is_empty());
                 plan.intents
                     .push(IngressEffectIntent::NotificationActivityPreview {
                         owner: owner.clone(),
                         mutation: mutation.clone(),
                     });
-                assert_eq!(external_effect_indices(&plan, &verdict, &[], &[]), vec![0]);
+                assert_eq!(
+                    external_effect_indices(&plan, &verdict, &[], &[], &[]),
+                    vec![0]
+                );
                 let IngressEffectIntent::NotificationActivityPreview {
                     owner: recorded_owner,
                     ..
@@ -338,7 +368,7 @@ mod tests {
                     panic!("activity intent");
                 };
                 *recorded_owner = "other@example.com".parse().expect("other owner");
-                assert!(external_effect_indices(&plan, &verdict, &[], &[]).is_empty());
+                assert!(external_effect_indices(&plan, &verdict, &[], &[], &[]).is_empty());
                 plan.intents.pop();
                 let mut changed_mutation = mutation.clone();
                 match &mut changed_mutation {
@@ -357,7 +387,7 @@ mod tests {
                         owner: owner.clone(),
                         mutation: changed_mutation,
                     });
-                assert!(external_effect_indices(&plan, &verdict, &[], &[]).is_empty());
+                assert!(external_effect_indices(&plan, &verdict, &[], &[], &[]).is_empty());
                 plan.intents.pop();
             }
         }
@@ -417,7 +447,7 @@ mod tests {
                 vec![]
             };
             assert_eq!(
-                filter_external_effects(&plan, &verdict, &outcomes, &[]).len(),
+                filter_external_effects(&plan, &verdict, &outcomes, &[], &[]).len(),
                 expected
             );
         }
@@ -471,6 +501,7 @@ mod tests {
                         )),
                     )],
                     &[],
+                    &[],
                 )
                 .len(),
                 expected,
@@ -505,12 +536,86 @@ mod tests {
             room_execution: RoomExecutionPath::None,
         };
         assert_eq!(
-            external_effect_indices(&plan, &ReconcileVerdict::FirstCommit, &[], &[]),
+            external_effect_indices(&plan, &ReconcileVerdict::FirstCommit, &[], &[], &[]),
             vec![0, 1]
         );
         assert_eq!(
-            external_effect_indices(&plan, &ReconcileVerdict::Consistent, &[], &[]),
+            external_effect_indices(&plan, &ReconcileVerdict::Consistent, &[], &[], &[]),
             vec![0]
+        );
+    }
+}
+
+#[cfg(test)]
+mod progress_tests {
+    use super::*;
+    use crate::ingress::recorded::RouteProgress;
+    use crate::server::routes::interpret::effects::RoomExecutionPath;
+    use waddle_xmpp::ingress::{EffectMessageIdentity, IngressEffectIntent};
+
+    #[test]
+    fn ordinary_duplicate_trims_completed_and_unrecorded_targets_without_shifting_dependencies() {
+        let a: jid::FullJid = "juliet@example.com/a".parse().expect("a");
+        let b: jid::FullJid = "juliet@example.com/b".parse().expect("b");
+        let c: jid::FullJid = "juliet@example.com/c".parse().expect("c");
+        let identity = EffectMessageIdentity::capture_ordinal(1);
+        let intent = IngressEffectIntent::RouteDirect {
+            recipient: a.to_bare(),
+            fanout: vec![a.clone(), b.clone()],
+            route_identity: identity.clone(),
+        };
+        let progress = RouteProgress {
+            receipt: crate::ingress::durable::receipt_key(&intent).expect("receipt"),
+            recipient: a.to_bare(),
+            fanout: vec![a.clone(), b.clone()],
+            route_identity: identity.clone(),
+            completed: vec![a.clone()],
+        };
+        let message = Message::new(Some(a.to_bare().into()));
+        let mut plan = IngressPlan {
+            failure: None,
+            plan: vec![
+                PlannedEffect::new(Effect::External(ExternalEffect::Delivery(
+                    ExternalDeliveryEffect::QueueDetached {
+                        route_identity: Some(identity),
+                        call_setup: None,
+                        bare: a.to_bare(),
+                        resources: vec![a.clone(), b.clone(), c],
+                        stanza: Box::new(Stanza::Message(message.clone())),
+                    },
+                )))
+                .with_suppression(PlanSuppressionPolicy::SenderOnly),
+            ],
+            intents: vec![intent],
+            sanitized_message: message,
+            error_reply: None,
+            rejection: None,
+            room_execution: RoomExecutionPath::None,
+        };
+        let saved = [progress];
+        let effects =
+            filter_external_effects(&plan, &ReconcileVerdict::Consistent, &[], &[], &saved);
+        assert!(
+            matches!(&effects[..], [ExternalEffect::Delivery(ExternalDeliveryEffect::QueueDetached { resources, .. })] if resources == &[b])
+        );
+        assert_eq!(
+            external_effect_indices(&plan, &ReconcileVerdict::Consistent, &[], &[], &saved),
+            vec![0]
+        );
+        if let Effect::External(ExternalEffect::Delivery(ExternalDeliveryEffect::QueueDetached {
+            resources,
+            ..
+        })) = &mut plan.plan[0].effect
+        {
+            *resources = vec![a];
+        }
+        assert!(
+            filter_external_effects(&plan, &ReconcileVerdict::Consistent, &[], &[], &saved)
+                .is_empty()
+        );
+        assert!(
+            external_effect_indices(&plan, &ReconcileVerdict::Consistent, &[], &[], &saved)
+                .is_empty()
         );
     }
 }

@@ -51,9 +51,14 @@ async fn duplicate_reflection(fixture: IngressFixture) {
         let frames = wire_messages(&fixture, &first).await;
         assert_eq!(frames.len(), 2);
         let retry = archive_plan(&fixture, room, "discard-retry-id");
-        let duplicate = commit_submission(&fixture.uow, &retry, 5)
-            .await
-            .expect("retry");
+        // Reopening the authority must preserve the assigned XEP-0359 identity.
+        let restarted = fixture.authority().await;
+        let duplicate = restarted.commit(&retry).await;
+        assert!(
+            restarted
+                .drain_and_join(std::time::Duration::from_secs(5))
+                .await
+        );
         assert_eq!(duplicate.class, IngressDecisionClass::ExistingConsistent);
         assert_eq!(duplicate.message_key, first.message_key);
         assert_eq!(duplicate.archive_ids, first.archive_ids);
@@ -533,5 +538,20 @@ async fn alias_remote_owner_sqlite() {
 async fn alias_remote_owner_postgres() {
     if let Some(fixture) = IngressFixture::postgres("alias_remote_owner").await {
         remote_owner(fixture).await;
+    }
+}
+
+#[path = "ingress_cases/detached_progress_support.rs"]
+pub mod detached_progress_support;
+
+#[tokio::test]
+async fn xep0359_detached_progress_recorded_archive_ids_sqlite() {
+    detached_progress_support::cross_archive_retry(IngressFixture::sqlite().await).await;
+}
+
+#[tokio::test]
+async fn xep0359_detached_progress_recorded_archive_ids_postgres() {
+    if let Some(fixture) = IngressFixture::postgres("xep0359_dp_archives").await {
+        detached_progress_support::cross_archive_retry(fixture).await;
     }
 }

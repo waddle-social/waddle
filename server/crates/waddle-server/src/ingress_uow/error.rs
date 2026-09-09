@@ -70,6 +70,10 @@ pub enum IngressUowError {
     InvalidStoredSmIngressId,
     #[error("stored carbon receipt recipient is malformed")]
     InvalidStoredCarbonRecipient,
+    #[error("stored delivery progress resource is malformed")]
+    InvalidStoredDeliveryResource,
+    #[error("stored canonical message timestamp is malformed")]
+    InvalidStoredMessageTimestamp,
     #[error("stored ingress frontier is malformed")]
     InvalidStoredFrontier,
     #[error("ingress stream is missing")]

@@ -389,14 +389,16 @@ fn corresponds(effect: &DurableEffect, intent: &IngressEffectIntent) -> bool {
 async fn recovery_completed(
     tx: &mut IngressUowTransaction<'_>,
     key: MessageKey,
-    recovery: &waddle_xmpp::inbox::storage::GroupchatNotificationRecovery,
+    recovery: &crate::server::routes::interpret::effects::room::PlannedGroupchatNotificationRecovery,
     recorded: &[IngressEffectIntent],
 ) -> Result<bool, IngressUowError> {
     for intent in recorded {
         if let IngressEffectIntent::GroupchatNotificationRecovery { mutation } = intent {
-            if mutation.action
-                == waddle_xmpp::ingress::GroupchatNotificationRecoveryAction::Completed
-                && mutation.recipient == recovery.key.recipient
+            if matches!(
+                mutation.action,
+                waddle_xmpp::ingress::GroupchatNotificationRecoveryAction::Completed
+                    | waddle_xmpp::ingress::GroupchatNotificationRecoveryAction::DeferredPolicy
+            ) && mutation.recipient == recovery.key.recipient
                 && mutation.room == recovery.key.room
                 && mutation.archive_stanza_id == recovery.key.archive_stanza_id
                 && mutation.thread_id.as_ref().map(|id| id.as_str())

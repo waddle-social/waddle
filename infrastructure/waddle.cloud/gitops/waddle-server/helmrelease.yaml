@@ -39,13 +39,13 @@ spec:
     # the sequence instead of poisoning the shared channel. Any
     # envelope or reply-type change MUST bump the version (see
     # server/CLAUDE.md) — that invariant is what keeps this strategy
-    # sound. The #1657 V1012 cutover (Helm v512, 2026-09-08) was the
-    # one-shot Recreate; this restores the steady state.
+    # sound. One-shot Recreate for the #1739-#1743 V1014 cutover (PR #1752):
+    # V1014 resets ingress + SM state and retires the aggregate observer
+    # intent shape, so every old writer must stop before the new binary runs
+    # the ledger. Flip back to RollingUpdate (maxSurge 1, maxUnavailable 0)
+    # in a follow-up PR once the rollout completes (precedent #1605/#1748).
     updateStrategy:
-      type: RollingUpdate
-      rollingUpdate:
-        maxSurge: 1
-        maxUnavailable: 0
+      type: Recreate
     image:
       repository: ghcr.io/waddle-social/waddle
       tag: main

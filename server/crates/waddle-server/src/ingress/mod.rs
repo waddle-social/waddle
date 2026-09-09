@@ -8,14 +8,21 @@ mod commit_room;
 mod commit_stream;
 pub mod decision;
 mod durable;
+pub(crate) use durable::receipt_key;
 pub mod execute;
+mod execute_uow;
 mod frame_receipt_retry;
 pub(crate) mod gc;
 pub mod identity;
+pub(crate) mod maintenance;
 mod receipts;
+mod recovery;
+pub use recovery::{RecoveryPolicyDecision, RecoveryPreparation, RecoverySweepOutcome};
 mod recorded;
+pub use recorded::RouteProgress;
 mod rejection;
 pub mod restamp;
+mod restore_offline;
 pub mod submission;
 pub mod suppression;
 
@@ -574,6 +581,8 @@ fn non_advancing(class: IngressDecisionClass) -> IngressDecision {
         external_dependencies: Vec::new(),
         external: Vec::new(),
         external_receipts: Vec::new(),
+        arm_owned_receipts: Vec::new(),
+        route_progress: Vec::new(),
         receipts_pending: Vec::new(),
     }
 }
@@ -1127,3 +1136,12 @@ pub(crate) mod test_support {
 
 #[cfg(test)]
 mod subject_receipt_tests;
+
+#[cfg(test)]
+pub(crate) mod recovery_tests;
+
+#[cfg(test)]
+mod offline_settlement_tests;
+
+#[cfg(test)]
+mod offline_hardening_tests;

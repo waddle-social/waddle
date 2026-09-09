@@ -286,6 +286,19 @@ async fn commit_attempt(
         reconstructed |= crate::server::routes::websocket::handlers::message::muc_direct::restore_recorded_muc_decline(
             &mut plan, &recorded, &unreceipted, &recorded_envelope,
         )?;
+        if recorded
+            .iter()
+            .any(|intent| matches!(intent, IngressEffectIntent::PendingDelivery { .. }))
+        {
+            let created_at = CanonicalMessageRepository::created_at(&mut tx, key).await?;
+            reconstructed |= super::restore_offline::restore_recorded_offline_deliveries(
+                &mut plan,
+                &recorded,
+                &unreceipted,
+                &recorded_envelope,
+                created_at,
+            );
+        }
     }
     // Each generated message retains its own timestamp and assigning authority.
     for intent in &mut plan.intents {
@@ -361,10 +374,15 @@ async fn commit_attempt(
     if let Some(observer_envelope) = super::recorded::room_observer_envelope(&plan) {
         CanonicalMessageRepository::record_room_observer_envelope(&mut tx, key, &observer_envelope)
             .await?;
+    }
+    if intents
+        .iter()
+        .any(|intent| matches!(intent, IngressEffectIntent::RoomObserver { .. }))
+    {
         let recorded_envelope = CanonicalMessageRepository::load_envelope(&mut tx, key)
             .await?
             .ok_or(IngressUowError::EffectIntentMessageMissing)?;
-        super::recorded::restore_room_observer_envelope(&mut plan, &recorded_envelope)?;
+        super::recorded::restore_room_observer_envelope(&mut plan, &intents, &recorded_envelope)?;
     }
     if plan
         .intents
@@ -407,16 +425,59 @@ async fn commit_attempt(
     } else {
         &verdict
     };
-    let repairable = if reconstructed {
-        unreceipted.as_slice()
-    } else {
-        &[][..]
-    };
+    let repairable: Vec<_> = unreceipted.iter().filter(|intent| {
+        reconstructed || matches!(intent,
+            IngressEffectIntent::PendingDelivery { .. }
+            | IngressEffectIntent::NotificationActivityPreview {
+                mutation: waddle_xmpp::ingress::NotificationActivityMutation::NotificationCandidate { .. }
+                    | waddle_xmpp::ingress::NotificationActivityMutation::OfflineDelivery { .. }, ..
+            })
+    }).cloned().collect();
+    let mut route_progress = Vec::new();
+    for intent in &intents {
+        let IngressEffectIntent::RouteDirect {
+            recipient,
+            fanout,
+            route_identity,
+        } = intent
+        else {
+            continue;
+        };
+        let receipt = super::durable::receipt_key(intent)?;
+        if !crate::ingress_uow::EffectReceiptRepository::contains(
+            &mut tx,
+            key,
+            receipt.kind,
+            &receipt.semantic_identity_hash,
+        )
+        .await?
+        {
+            let completed =
+                crate::ingress_uow::DeliveryProgressRepository::load(&mut tx, key, &receipt)
+                    .await?;
+            route_progress.push(super::recorded::RouteProgress {
+                receipt,
+                recipient: recipient.clone(),
+                fanout: fanout.clone(),
+                route_identity: route_identity.clone(),
+                completed,
+            });
+        }
+    }
+    if alias == AliasOutcomeClass::Existing
+        || !matches!(filter_verdict, ReconcileVerdict::FirstCommit)
+    {
+        let envelope = CanonicalMessageRepository::load_envelope(&mut tx, key)
+            .await?
+            .ok_or(IngressUowError::EffectIntentMessageMissing)?;
+        super::recorded::restore_delivery_payloads(&mut plan, &envelope);
+    }
     let external = super::suppression::filter_external_effects(
         &plan,
         filter_verdict,
         &applied.archives,
-        repairable,
+        &repairable,
+        &route_progress,
     );
     #[cfg(feature = "clustering")]
     let external = {
@@ -445,7 +506,8 @@ async fn commit_attempt(
         &plan,
         filter_verdict,
         &applied.archives,
-        repairable,
+        &repairable,
+        &route_progress,
     )
     .into_iter()
     .map(|index| plan.plan[index].dependencies.clone())
@@ -472,7 +534,32 @@ async fn commit_attempt(
             *message_key = Some(key);
         }
     }
-    let external_receipts = super::durable::external_receipts(&external, &intents)?;
+    let mut external_receipts = super::durable::external_receipts(&external, &intents)?;
+    // A progress-aware arm can own a strict subset of the frozen fanout.
+    // Generic receipt mapping deliberately requires full coverage; add only
+    // the exact route receipt whose aggregate this arm settles transactionally.
+    for (index, effect) in external.iter().enumerate() {
+        if super::execute_uow::owns(effect, &route_progress) {
+            for progress in route_progress
+                .iter()
+                .filter(|progress| progress.matches(effect))
+            {
+                if !external_receipts[index].contains(&progress.receipt) {
+                    external_receipts[index].push(progress.receipt.clone());
+                }
+            }
+        }
+    }
+    let mut arm_owned_receipts = Vec::new();
+    for (index, effect) in external.iter().enumerate() {
+        if super::execute_uow::owns(effect, &route_progress) {
+            for receipt in &external_receipts[index] {
+                if !arm_owned_receipts.contains(receipt) {
+                    arm_owned_receipts.push(receipt.clone());
+                }
+            }
+        }
+    }
     let decision = IngressDecision {
         class,
         message_key: Some(key),
@@ -487,6 +574,8 @@ async fn commit_attempt(
         external_dependencies,
         external,
         external_receipts,
+        arm_owned_receipts,
+        route_progress,
         receipts_pending: pending,
     };
     commit_transaction(tx).await?;

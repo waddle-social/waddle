@@ -820,7 +820,7 @@ pub(super) struct GroupchatInboxProjectionInputs<'a> {
     pub is_recipient: bool,
     pub thread: &'a Option<GroupchatThreadProjection>,
     pub dispatch_timestamp: i64,
-    pub notification_recovery: Option<waddle_xmpp::inbox::storage::GroupchatNotificationRecovery>,
+    pub notification_recovery: Option<super::effects::room::PlannedGroupchatNotificationRecovery>,
 }
 
 /// Apply the `(owner, room, message)` projection against the inbox

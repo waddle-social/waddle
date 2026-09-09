@@ -1,4 +1,4 @@
-//! The Phase C receipt confirms a batch only after every detached destination succeeds.
+//! Phase C records each successful resource before settling the frozen batch.
 use super::*;
 use crate::ingress::{commit::commit_submission, test_support::IngressFixture};
 use std::sync::Arc;
@@ -107,6 +107,11 @@ async fn detached_receipts(fixture: IngressFixture, missing_second: bool, live_s
         .expect("receipt lookup"),
         !missing_second
     );
+    let progress = crate::ingress_uow::DeliveryProgressRepository::load(&mut tx, key, &receipt)
+        .await
+        .expect("resource progress");
+    assert!(progress.contains(&first));
+    assert_eq!(progress.contains(&second), !missing_second);
     tx.commit().await.expect("read receipt");
     assert_eq!(
         terminalize_if_complete(&fixture.uow, key)
@@ -152,7 +157,7 @@ async fn detached_receipts(fixture: IngressFixture, missing_second: bool, live_s
             !terminalize_if_complete(&fixture.uow, key)
                 .await
                 .expect("partial batch remains pending"),
-            "unfinished resources remain a stated recovery limitation"
+            "missing resources remain unresolved until a retry can reach them"
         );
         let resumed = sm
             .take_session(&first.to_string())

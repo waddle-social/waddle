@@ -143,6 +143,10 @@ struct AlwaysFailingPending;
 
 #[async_trait::async_trait]
 impl PendingDeliveryStorage for AlwaysFailingPending {
+    fn quota_policy(&self) -> waddle_xmpp::pending_delivery::QuotaPolicy {
+        waddle_xmpp::pending_delivery::QuotaPolicy::Unlimited
+    }
+
     async fn insert(
         &self,
         _row: waddle_xmpp::pending_delivery::PendingRow,
@@ -2085,6 +2089,10 @@ struct RetractDuringInsertPending {
 
 #[async_trait::async_trait]
 impl PendingDeliveryStorage for RetractDuringInsertPending {
+    fn quota_policy(&self) -> waddle_xmpp::pending_delivery::QuotaPolicy {
+        self.inner.quota_policy()
+    }
+
     async fn insert(
         &self,
         row: waddle_xmpp::pending_delivery::PendingRow,
@@ -2307,6 +2315,10 @@ impl FlakyPending {
 
 #[async_trait::async_trait]
 impl PendingDeliveryStorage for FlakyPending {
+    fn quota_policy(&self) -> waddle_xmpp::pending_delivery::QuotaPolicy {
+        self.inner.quota_policy()
+    }
+
     async fn insert(
         &self,
         row: waddle_xmpp::pending_delivery::PendingRow,

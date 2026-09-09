@@ -1,5 +1,8 @@
 use super::*;
 
+#[path = "messages_offline.rs"]
+mod messages_offline;
+
 async fn current_admission_revision(
     room_actor: &kameo::actor::ActorRef<waddle_xmpp::muc::room_actor::RoomActor>,
 ) -> u64 {
@@ -617,7 +620,21 @@ async fn register_first_party_push_for_test(
 #[tokio::test]
 async fn queue_offline_delivery_publishes_first_party_xep0357_notification_without_touching_external_registrations(
 ) {
-    let state = create_test_websocket_state().await;
+    queue_offline_delivery_publishes_first_party_xep0357_notification_without_touching_external_registrations_scenario(messages_offline::sqlite_state().await).await;
+}
+
+#[tokio::test]
+async fn queue_offline_delivery_publishes_first_party_xep0357_notification_without_touching_external_registrations_postgres(
+) {
+    if let Some((fixture, state)) = messages_offline::postgres_state("offline_notification").await {
+        queue_offline_delivery_publishes_first_party_xep0357_notification_without_touching_external_registrations_scenario(state).await;
+        fixture.close().await;
+    }
+}
+
+async fn queue_offline_delivery_publishes_first_party_xep0357_notification_without_touching_external_registrations_scenario(
+    state: Arc<WebSocketState>,
+) {
     let recipient: BareJid = "bob@example.com".parse().expect("recipient");
     let node = state
         .deps
@@ -702,15 +719,14 @@ async fn queue_offline_delivery_publishes_first_party_xep0357_notification_witho
     );
     store_committed_dm_archive_for_notification(&state, &recipient, &archive_stanza_id, &message)
         .await;
-    let deps = build_interpret_deps(state.as_ref(), None);
-    crate::server::routes::interpret::interpret(
+    messages_offline::commit_offline_events(
+        state.as_ref(),
         vec![waddle_xmpp::protocol::OutboundEvent::QueueOfflineDelivery {
             recipient: recipient.clone(),
             payload: waddle_xmpp::pending_delivery::PendingPayload::Archived(archive_stanza_id),
             original_receipt_at: chrono::Utc::now(),
             original_message: Box::new(message),
         }],
-        &deps,
     )
     .await;
     let sender_bare: BareJid = "alice@example.com".parse().expect("sender bare jid");
@@ -871,7 +887,26 @@ async fn queue_offline_delivery_publishes_first_party_xep0357_notification_witho
 
 #[tokio::test]
 async fn queue_offline_delivery_persists_candidate_before_xep0357_registration_exists() {
-    let state = create_test_websocket_state().await;
+    queue_offline_delivery_persists_candidate_before_xep0357_registration_exists_scenario(
+        messages_offline::sqlite_state().await,
+    )
+    .await;
+}
+
+#[tokio::test]
+async fn queue_offline_delivery_persists_candidate_before_xep0357_registration_exists_postgres() {
+    if let Some((fixture, state)) = messages_offline::postgres_state("offline_notification").await {
+        queue_offline_delivery_persists_candidate_before_xep0357_registration_exists_scenario(
+            state,
+        )
+        .await;
+        fixture.close().await;
+    }
+}
+
+async fn queue_offline_delivery_persists_candidate_before_xep0357_registration_exists_scenario(
+    state: Arc<WebSocketState>,
+) {
     let recipient: BareJid = "bob@example.com".parse().expect("recipient");
     let sender: BareJid = "alice@example.com".parse().expect("sender");
     let node = state
@@ -914,15 +949,14 @@ async fn queue_offline_delivery_persists_candidate_before_xep0357_registration_e
     );
     store_committed_dm_archive_for_notification(&state, &recipient, &archive_stanza_id, &message)
         .await;
-    let deps = build_interpret_deps(state.as_ref(), None);
-    crate::server::routes::interpret::interpret(
+    messages_offline::commit_offline_events(
+        state.as_ref(),
         vec![waddle_xmpp::protocol::OutboundEvent::QueueOfflineDelivery {
             recipient: recipient.clone(),
             payload: waddle_xmpp::pending_delivery::PendingPayload::Archived(archive_stanza_id),
             original_receipt_at: chrono::Utc::now(),
             original_message: Box::new(message),
         }],
-        &deps,
     )
     .await;
 
@@ -958,8 +992,25 @@ async fn queue_offline_delivery_persists_candidate_before_xep0357_registration_e
 }
 
 #[tokio::test]
-async fn queue_offline_delivery_skips_xep0357_when_committed_mam_row_is_missing() {
-    let state = create_test_websocket_state().await;
+async fn queue_offline_delivery_preserves_frozen_candidate_when_mam_row_is_missing() {
+    queue_offline_delivery_preserves_frozen_candidate_when_mam_row_is_missing_scenario(
+        messages_offline::sqlite_state().await,
+    )
+    .await;
+}
+
+#[tokio::test]
+async fn queue_offline_delivery_preserves_frozen_candidate_when_mam_row_is_missing_postgres() {
+    if let Some((fixture, state)) = messages_offline::postgres_state("offline_notification").await {
+        queue_offline_delivery_preserves_frozen_candidate_when_mam_row_is_missing_scenario(state)
+            .await;
+        fixture.close().await;
+    }
+}
+
+async fn queue_offline_delivery_preserves_frozen_candidate_when_mam_row_is_missing_scenario(
+    state: Arc<WebSocketState>,
+) {
     let recipient: BareJid = "bob@example.com".parse().expect("recipient");
     let node = state
         .deps
@@ -1004,18 +1055,27 @@ async fn queue_offline_delivery_skips_xep0357_when_committed_mam_row_is_missing(
         "archive-offline-no-mam",
         jid::Jid::from(recipient.clone()),
     );
-    let deps = build_interpret_deps(state.as_ref(), None);
-    crate::server::routes::interpret::interpret(
+    messages_offline::commit_offline_events(
+        state.as_ref(),
         vec![waddle_xmpp::protocol::OutboundEvent::QueueOfflineDelivery {
             recipient: recipient.clone(),
             payload: waddle_xmpp::pending_delivery::PendingPayload::Archived(archive_stanza_id),
             original_receipt_at: chrono::Utc::now(),
             original_message: Box::new(message),
         }],
-        &deps,
     )
     .await;
 
+    assert_eq!(
+        state
+            .deps
+            .protocol
+            .notification_outbox
+            .count_all_candidates()
+            .await
+            .expect("candidate count"),
+        1
+    );
     let outbox_jobs = state
         .deps
         .protocol
@@ -1033,7 +1093,7 @@ async fn queue_offline_delivery_skips_xep0357_when_committed_mam_row_is_missing(
         .expect("unoutboxed archived rows");
     assert!(
         unoutboxed.is_empty(),
-        "missing committed MAM row is a completed no-push notification decision"
+        "frozen notification candidate and marker settle without reading MAM"
     );
 }
 
@@ -1048,7 +1108,21 @@ async fn drive_xep0492_direct_chat_push_gate(
     is_mention: bool,
     message_id: &str,
 ) -> usize {
-    let state = create_test_websocket_state().await;
+    drive_xep0492_direct_chat_push_gate_with_state(
+        messages_offline::sqlite_state().await,
+        level,
+        is_mention,
+        message_id,
+    )
+    .await
+}
+
+async fn drive_xep0492_direct_chat_push_gate_with_state(
+    state: Arc<WebSocketState>,
+    level: waddle_xmpp::xep::NotificationLevel,
+    is_mention: bool,
+    message_id: &str,
+) -> usize {
     let recipient: BareJid = "bob@example.com".parse().expect("recipient");
     let sender: BareJid = "alice@example.com".parse().expect("sender");
     let node = state
@@ -1118,21 +1192,20 @@ async fn drive_xep0492_direct_chat_push_gate(
         message.payloads.push(mention);
     }
 
-    let deps = build_interpret_deps(state.as_ref(), None);
     let archive_stanza_id = waddle_xmpp_core::xep0359::StanzaId::new(
         format!("archive-{message_id}"),
         jid::Jid::from(recipient.clone()),
     );
     store_committed_dm_archive_for_notification(&state, &recipient, &archive_stanza_id, &message)
         .await;
-    crate::server::routes::interpret::interpret(
+    messages_offline::commit_offline_events(
+        state.as_ref(),
         vec![waddle_xmpp::protocol::OutboundEvent::QueueOfflineDelivery {
             recipient: recipient.clone(),
             payload: waddle_xmpp::pending_delivery::PendingPayload::Archived(archive_stanza_id),
             original_receipt_at: chrono::Utc::now(),
             original_message: Box::new(message),
         }],
-        &deps,
     )
     .await;
 
@@ -1232,7 +1305,21 @@ async fn drive_xep0492_direct_chat_emission_shape(
     is_mention: bool,
     message_id: &str,
 ) -> (i64, usize) {
-    let state = create_test_websocket_state().await;
+    drive_xep0492_direct_chat_emission_shape_with_state(
+        messages_offline::sqlite_state().await,
+        level,
+        is_mention,
+        message_id,
+    )
+    .await
+}
+
+async fn drive_xep0492_direct_chat_emission_shape_with_state(
+    state: Arc<WebSocketState>,
+    level: waddle_xmpp::xep::NotificationLevel,
+    is_mention: bool,
+    message_id: &str,
+) -> (i64, usize) {
     let recipient: BareJid = "bob@example.com".parse().expect("recipient");
     let sender: BareJid = "alice@example.com".parse().expect("sender");
     let node = state
@@ -1298,21 +1385,20 @@ async fn drive_xep0492_direct_chat_emission_shape(
         message.payloads.push(mention);
     }
 
-    let deps = build_interpret_deps(state.as_ref(), None);
     let archive_stanza_id = waddle_xmpp_core::xep0359::StanzaId::new(
         format!("archive-{message_id}"),
         jid::Jid::from(recipient.clone()),
     );
     store_committed_dm_archive_for_notification(&state, &recipient, &archive_stanza_id, &message)
         .await;
-    crate::server::routes::interpret::interpret(
+    messages_offline::commit_offline_events(
+        state.as_ref(),
         vec![waddle_xmpp::protocol::OutboundEvent::QueueOfflineDelivery {
             recipient: recipient.clone(),
             payload: waddle_xmpp::pending_delivery::PendingPayload::Archived(archive_stanza_id),
             original_receipt_at: chrono::Utc::now(),
             original_message: Box::new(message),
         }],
-        &deps,
     )
     .await;
 
@@ -1717,18 +1803,15 @@ async fn groupchat_xep0492_never_suppresses_personal_mentions_and_plain_messages
 }
 
 #[tokio::test]
-async fn groupchat_notification_recovery_retries_committed_inbox_projection() {
+async fn groupchat_notification_recovery_discards_missing_canonical_authority() {
     let state = create_test_websocket_state().await;
     let recipient: BareJid = "charlie-recover@example.com".parse().expect("recipient");
     register_first_party_push_for_test(state.as_ref(), &recipient, "charlie-recover-web").await;
     let room_jid: BareJid = "groupchat-recovery@muc.example.com"
         .parse()
         .expect("room jid");
-    // The T1 push evaluator now defers candidates when the room
-    // actor is not live (no durable T1 projection of MUC config in
-    // slice 1), so the recovery test must spin up the room actor
-    // before draining — otherwise the candidate row is deferred
-    // with policy_error_count = 1 instead of becoming a push job.
+    // A live room, an archived mention, and an enabled push subscription
+    // cannot authorize notification recovery after canonical authority is gone.
     let _room_actor = get_or_create_room_actor(
         state.as_ref(),
         &room_jid,
@@ -1768,12 +1851,14 @@ async fn groupchat_notification_recovery_retries_committed_inbox_projection() {
     store_committed_dm_archive_for_notification(&state, &room_jid, &archive_stanza_id, &message)
         .await;
 
+    let missing_message_key = waddle_xmpp::ingress::MessageKey::new();
     state
         .deps
         .protocol
         .inbox_storage
         .insert_groupchat_notification_recovery(
             waddle_xmpp::inbox::storage::GroupchatNotificationRecovery {
+                message_key: missing_message_key,
                 key: waddle_xmpp::inbox::storage::GroupchatNotificationRecoveryKey {
                     recipient: recipient.clone(),
                     room: room_jid.clone(),
@@ -1797,7 +1882,7 @@ async fn groupchat_notification_recovery_retries_committed_inbox_projection() {
         )
         .await,
         1,
-        "recovery should complete the durable item after enqueueing the candidate"
+        "the sweep removes the recovery whose canonical authority no longer exists"
     );
     assert!(
         state
@@ -1808,11 +1893,11 @@ async fn groupchat_notification_recovery_retries_committed_inbox_projection() {
             .await
             .expect("list recovery")
             .is_empty(),
-        "completed groupchat recovery items must not be retried"
+        "deleted recovery items must not be retried"
     );
     assert_eq!(
         drain_notification_candidates_for_test(state.as_ref()).await,
-        1
+        0
     );
     let jobs = state
         .deps
@@ -1821,12 +1906,41 @@ async fn groupchat_notification_recovery_retries_committed_inbox_projection() {
         .pending_outbox_jobs()
         .await
         .expect("notification outbox jobs");
-    assert_eq!(jobs.len(), 1);
-    assert_eq!(jobs[0].recipient_bare_jid(), &recipient);
-    assert_eq!(jobs[0].conversation_jid(), &room_jid);
+    assert!(
+        jobs.is_empty(),
+        "canonical-gone recovery must not enqueue push jobs"
+    );
     assert_eq!(
-        jobs[0].class(),
-        crate::notification_outbox::NotificationClass::PersonalMention
+        state
+            .deps
+            .protocol
+            .notification_outbox
+            .count_all_candidates()
+            .await
+            .expect("candidate count"),
+        0,
+        "MAM presence is not authority to reconstruct a candidate"
+    );
+    let connection = state
+        .deps
+        .app_state
+        .db_pool
+        .global()
+        .guard()
+        .await
+        .expect("global database");
+    let mut rows = connection
+        .query(
+            "SELECT COUNT(*) FROM groupchat_notification_recovery WHERE message_key = ?",
+            crate::db_params![missing_message_key.to_storage().to_string()],
+        )
+        .await
+        .expect("recovery deletion query");
+    let row = rows.next().await.expect("count row").expect("count exists");
+    assert_eq!(
+        row.get::<i64>(0).expect("recovery count"),
+        0,
+        "delete the orphan rather than marking it completed"
     );
 }
 
@@ -2357,7 +2471,24 @@ async fn groupchat_active_channel_mention_preserves_notify_all_for_non_live_alwa
 
 #[tokio::test]
 async fn queue_offline_delivery_suppresses_xep0357_when_xep0492_direct_chat_is_never() {
-    let state = create_test_websocket_state().await;
+    queue_offline_delivery_suppresses_xep0357_when_xep0492_direct_chat_is_never_scenario(
+        messages_offline::sqlite_state().await,
+    )
+    .await;
+}
+
+#[tokio::test]
+async fn queue_offline_delivery_suppresses_xep0357_when_xep0492_direct_chat_is_never_postgres() {
+    if let Some((fixture, state)) = messages_offline::postgres_state("offline_notification").await {
+        queue_offline_delivery_suppresses_xep0357_when_xep0492_direct_chat_is_never_scenario(state)
+            .await;
+        fixture.close().await;
+    }
+}
+
+async fn queue_offline_delivery_suppresses_xep0357_when_xep0492_direct_chat_is_never_scenario(
+    state: Arc<WebSocketState>,
+) {
     let recipient: BareJid = "bob@example.com".parse().expect("recipient");
     let sender: BareJid = "alice@example.com".parse().expect("sender");
     let node = state
@@ -2424,15 +2555,14 @@ async fn queue_offline_delivery_suppresses_xep0357_when_xep0492_direct_chat_is_n
     );
     store_committed_dm_archive_for_notification(&state, &recipient, &archive_stanza_id, &message)
         .await;
-    let deps = build_interpret_deps(state.as_ref(), None);
-    crate::server::routes::interpret::interpret(
+    messages_offline::commit_offline_events(
+        state.as_ref(),
         vec![waddle_xmpp::protocol::OutboundEvent::QueueOfflineDelivery {
             recipient: recipient.clone(),
             payload: waddle_xmpp::pending_delivery::PendingPayload::Archived(archive_stanza_id),
             original_receipt_at: chrono::Utc::now(),
             original_message: Box::new(message),
         }],
-        &deps,
     )
     .await;
 
@@ -2484,7 +2614,23 @@ async fn queue_offline_delivery_suppresses_xep0357_when_xep0492_direct_chat_is_n
 /// suite).
 #[tokio::test]
 async fn xep0357_suppression_preserves_mam_inbox_pending_delivery_and_audit() {
-    let state = create_test_websocket_state().await;
+    xep0357_suppression_preserves_mam_inbox_pending_delivery_and_audit_scenario(
+        messages_offline::sqlite_state().await,
+    )
+    .await;
+}
+
+#[tokio::test]
+async fn xep0357_suppression_preserves_mam_inbox_pending_delivery_and_audit_postgres() {
+    if let Some((fixture, state)) = messages_offline::postgres_state("offline_notification").await {
+        xep0357_suppression_preserves_mam_inbox_pending_delivery_and_audit_scenario(state).await;
+        fixture.close().await;
+    }
+}
+
+async fn xep0357_suppression_preserves_mam_inbox_pending_delivery_and_audit_scenario(
+    state: Arc<WebSocketState>,
+) {
     let recipient: BareJid = "bob@example.com".parse().expect("recipient");
     let sender: BareJid = "alice@example.com".parse().expect("sender");
     register_first_party_push_for_test(state.as_ref(), &recipient, "web-1").await;
@@ -2538,6 +2684,16 @@ async fn xep0357_suppression_preserves_mam_inbox_pending_delivery_and_audit() {
         "archive-storage-preserve-1",
     )
     .await;
+    // Preserve an earlier queued delivery. The database correctly rejects two
+    // pending rows for the same recipient/archive identity.
+    let prior_archive = waddle_xmpp_core::xep0359::StanzaId::new(
+        "archive-storage-preserve-prior",
+        recipient.clone().into(),
+    );
+    let mut prior_message = message.clone();
+    prior_message.id = Some(xmpp_parsers::message::Id("storage-preserve-prior".into()));
+    store_committed_dm_archive_for_notification(&state, &recipient, &prior_archive, &prior_message)
+        .await;
     state
         .deps
         .protocol
@@ -2546,9 +2702,7 @@ async fn xep0357_suppression_preserves_mam_inbox_pending_delivery_and_audit() {
             id: waddle_xmpp::pending_delivery::PendingRowId::fresh(),
             recipient: recipient.clone(),
             original_receipt_at: chrono::Utc::now(),
-            payload: waddle_xmpp::pending_delivery::PendingPayload::Archived(
-                archive_stanza_id.clone(),
-            ),
+            payload: waddle_xmpp::pending_delivery::PendingPayload::Archived(prior_archive),
             flushed_in_session: None,
             outbound_sequence: None,
         })
@@ -2594,8 +2748,8 @@ async fn xep0357_suppression_preserves_mam_inbox_pending_delivery_and_audit() {
 
     // Drive the T0 emission path through the interpret loop just like
     // the live DM handler does.
-    let deps = build_interpret_deps(state.as_ref(), None);
-    crate::server::routes::interpret::interpret(
+    messages_offline::commit_offline_events(
+        state.as_ref(),
         vec![waddle_xmpp::protocol::OutboundEvent::QueueOfflineDelivery {
             recipient: recipient.clone(),
             payload: waddle_xmpp::pending_delivery::PendingPayload::Archived(
@@ -2604,7 +2758,6 @@ async fn xep0357_suppression_preserves_mam_inbox_pending_delivery_and_audit() {
             original_receipt_at: chrono::Utc::now(),
             original_message: Box::new(message),
         }],
-        &deps,
     )
     .await;
 
@@ -2685,7 +2838,24 @@ async fn xep0357_suppression_preserves_mam_inbox_pending_delivery_and_audit() {
 
 #[tokio::test]
 async fn queue_offline_delivery_suppresses_xep0357_for_transient_no_permanent_store_payloads() {
-    let state = create_test_websocket_state().await;
+    queue_offline_delivery_suppresses_xep0357_for_transient_no_permanent_store_payloads_scenario(
+        messages_offline::sqlite_state().await,
+    )
+    .await;
+}
+
+#[tokio::test]
+async fn queue_offline_delivery_suppresses_xep0357_for_transient_no_permanent_store_payloads_postgres(
+) {
+    if let Some((fixture, state)) = messages_offline::postgres_state("offline_notification").await {
+        queue_offline_delivery_suppresses_xep0357_for_transient_no_permanent_store_payloads_scenario(state).await;
+        fixture.close().await;
+    }
+}
+
+async fn queue_offline_delivery_suppresses_xep0357_for_transient_no_permanent_store_payloads_scenario(
+    state: Arc<WebSocketState>,
+) {
     let recipient: BareJid = "bob@example.com".parse().expect("recipient");
     let node = state
         .deps
@@ -2728,8 +2898,8 @@ async fn queue_offline_delivery_suppresses_xep0357_for_transient_no_permanent_st
         xmpp_parsers::message::Lang::new(),
         "do not push transient".to_string(),
     );
-    let deps = build_interpret_deps(state.as_ref(), None);
-    crate::server::routes::interpret::interpret(
+    messages_offline::commit_offline_events(
+        state.as_ref(),
         vec![waddle_xmpp::protocol::OutboundEvent::QueueOfflineDelivery {
             recipient: recipient.clone(),
             payload: waddle_xmpp::pending_delivery::PendingPayload::Transient(Box::new(
@@ -2738,7 +2908,6 @@ async fn queue_offline_delivery_suppresses_xep0357_for_transient_no_permanent_st
             original_receipt_at: chrono::Utc::now(),
             original_message: Box::new(message),
         }],
-        &deps,
     )
     .await;
 
@@ -6101,4 +6270,41 @@ async fn handle_decline_through_ingress(
         .enable(stream.as_str().to_owned(), true, Some(300));
     let frame = stanza_to_xml(&Stanza::Message(message));
     super::super::frame::handle_xmpp_frame(&frame, "example.com", state, &mut conn).await
+}
+
+#[tokio::test]
+async fn queue_offline_delivery_xep0492_matrix_postgres() {
+    use waddle_xmpp::xep::NotificationLevel::{Always, Never, OnMention};
+    for (level, mention, expected) in [
+        (Always, false, 1),
+        (Always, true, 1),
+        (OnMention, false, 0),
+        (OnMention, true, 1),
+        (Never, false, 0),
+        (Never, true, 0),
+    ] {
+        let Some((fixture, state)) = messages_offline::postgres_state("offline_gate").await else {
+            return;
+        };
+        assert_eq!(
+            drive_xep0492_direct_chat_push_gate_with_state(state, level, mention, "postgres-gate")
+                .await,
+            expected
+        );
+        fixture.close().await;
+        let Some((fixture, state)) = messages_offline::postgres_state("offline_emission").await
+        else {
+            return;
+        };
+        let (candidates, jobs) = drive_xep0492_direct_chat_emission_shape_with_state(
+            state,
+            level,
+            mention,
+            "postgres-emission",
+        )
+        .await;
+        assert_eq!(candidates, expected as i64);
+        assert_eq!(jobs, expected);
+        fixture.close().await;
+    }
 }

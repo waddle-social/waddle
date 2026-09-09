@@ -130,7 +130,7 @@ async fn recipient_plan_drift(fixture: IngressFixture, missing_sender: bool) {
                 route_identity: Some(route_identity),
                 call_setup: None,
                 bare: recipient.clone(),
-                resources: vec![full],
+                resources: vec![full.clone()],
                 stanza: Box::new(waddle_xmpp::Stanza::Message(
                     submission.plan.sanitized_message.clone(),
                 )),
@@ -163,10 +163,33 @@ async fn recipient_plan_drift(fixture: IngressFixture, missing_sender: bool) {
             IngressDecisionClass::ExistingConsistent | IngressDecisionClass::ExistingDivergent
         ));
         assert_eq!(duplicate.message_key, first.message_key);
-        assert!(
-            duplicate.external.is_empty(),
-            "no recipient replay delivery"
+        // #1739: the recorded live route was never receipted, so the replay
+        // retries exactly the unfinished recorded resource with the canonical
+        // payload instead of suppressing it as a stated limitation.
+        assert_eq!(
+            duplicate.external.len(),
+            1,
+            "one unfinished recorded resource"
         );
+        let ExternalEffect::Delivery(ExternalDeliveryEffect::QueueDetached {
+            resources,
+            stanza,
+            ..
+        }) = &duplicate.external[0]
+        else {
+            panic!("detached retry for the unfinished recorded resource");
+        };
+        assert_eq!(resources.as_slice(), std::slice::from_ref(&full));
+        let waddle_xmpp::Stanza::Message(copy) = stanza.as_ref() else {
+            panic!("message copy");
+        };
+        assert_eq!(
+            copy.bodies.values().next().map(String::as_str),
+            Some("hello"),
+            "canonical payload"
+        );
+        assert_eq!(duplicate.route_progress.len(), 1);
+        assert!(duplicate.route_progress[0].completed.is_empty());
         assert!(!duplicate
             .archive_ids
             .iter()

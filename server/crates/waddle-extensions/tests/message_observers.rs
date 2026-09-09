@@ -36,7 +36,10 @@ async fn message_observers_granted_observer_is_eligible() {
     let manager = ExtensionManager::from_config(config(ExtensionCapability::MessageObserve))
         .await
         .expect("observer fixture loads");
-    assert!(manager.has_message_observers(&message()));
+    assert_eq!(
+        manager.message_observer_plugins(&message()),
+        vec!["message-hook-fixture".parse_plugin_id()]
+    );
 }
 
 #[tokio::test]
@@ -56,7 +59,7 @@ async fn message_observers_enrichment_only_is_ineligible() {
     let manager = ExtensionManager::from_config(config(ExtensionCapability::MessageEnrich))
         .await
         .expect("enrichment fixture loads");
-    assert!(!manager.has_message_observers(&message()));
+    assert!(manager.message_observer_plugins(&message()).is_empty());
 }
 
 #[tokio::test]
@@ -64,7 +67,7 @@ async fn message_observers_empty_manager_is_ineligible() {
     let manager = ExtensionManager::from_config(ExtensionConfig::default())
         .await
         .expect("empty manager loads");
-    assert!(!manager.has_message_observers(&message()));
+    assert!(manager.message_observer_plugins(&message()).is_empty());
 }
 
 #[tokio::test]
@@ -74,7 +77,7 @@ async fn message_observers_disabled_manager_is_ineligible() {
     let manager = ExtensionManager::from_config(config)
         .await
         .expect("disabled manager loads");
-    assert!(!manager.has_message_observers(&message()));
+    assert!(manager.message_observer_plugins(&message()).is_empty());
 }
 
 #[tokio::test]
@@ -82,10 +85,12 @@ async fn message_observers_bodyless_and_whitespace_messages_are_ineligible() {
     let manager = ExtensionManager::from_config(config(ExtensionCapability::MessageObserve))
         .await
         .expect("observer fixture loads");
-    assert!(!manager.has_message_observers(&Message::new(None)));
+    assert!(manager
+        .message_observer_plugins(&Message::new(None))
+        .is_empty());
     let mut message = message();
     message.bodies.insert(Lang(String::new()), " \t\n".into());
-    assert!(!manager.has_message_observers(&message));
+    assert!(manager.message_observer_plugins(&message).is_empty());
 }
 
 #[tokio::test]
@@ -95,5 +100,41 @@ async fn message_observers_non_default_language_is_eligible() {
         .expect("observer fixture loads");
     let mut message = Message::new(None);
     message.bodies.insert(Lang("nb".into()), "hei".into());
-    assert!(manager.has_message_observers(&message));
+    assert_eq!(manager.message_observer_plugins(&message).len(), 1);
+}
+
+trait PluginFixture {
+    fn parse_plugin_id(self) -> waddle_extensions::PluginId;
+}
+
+impl PluginFixture for &str {
+    fn parse_plugin_id(self) -> waddle_extensions::PluginId {
+        waddle_extensions::PluginId::new(self).expect("fixture plugin")
+    }
+}
+
+#[tokio::test]
+async fn message_observer_invokes_only_the_selected_eligible_plugin() {
+    let manager = ExtensionManager::from_config(config(ExtensionCapability::MessageObserve))
+        .await
+        .expect("observer fixture loads");
+    let plugin = "message-hook-fixture".parse_plugin_id();
+    assert!(manager
+        .process_message_observer(
+            &plugin,
+            &message(),
+            waddle_extensions::WaddleId::new("local").expect("waddle"),
+            None,
+        )
+        .await
+        .is_some());
+    assert!(manager
+        .process_message_observer(
+            &"missing-plugin".parse_plugin_id(),
+            &message(),
+            waddle_extensions::WaddleId::new("local").expect("waddle"),
+            None,
+        )
+        .await
+        .is_none());
 }

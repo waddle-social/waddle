@@ -1,5 +1,8 @@
 //! Apply the payload-complete policy decisions retained by reconciliation.
 #[cfg(test)]
+#[path = "recorded/delivery_replay_tests.rs"]
+mod delivery_replay_tests;
+#[cfg(test)]
 #[path = "recorded/preview_replay_tests.rs"]
 mod preview_replay_tests;
 #[cfg(test)]
@@ -7,14 +10,112 @@ mod tests;
 
 use crate::server::routes::interpret::effects::{
     direct::{DurableDirectEffect, ExternalDirectEffect},
-    room::{DurableRoomEffect, ExternalRoomEffect, RoomActorMutation},
-    DurableEffect, Effect, ExternalEffect, IngressPlan,
+    room::{
+        DurableRoomEffect, ExternalRoomEffect, PlannedGroupchatNotificationRecovery,
+        RoomActorMutation,
+    },
+    DurableEffect, Effect, ExternalEffect, IngressPlan, PlanEffectDependency,
 };
-use waddle_xmpp::inbox::storage::GroupchatNotificationRecovery;
 use waddle_xmpp::ingress::{
     GroupchatNotificationRecoveryAction, GroupchatNotificationRecoveryMutation,
     InboxProjectionMutation, IngressEffectIntent, RoomPinMutation,
 };
+
+/// Frozen fanout authority and the resources already durably completed.
+#[derive(Clone, Debug)]
+pub struct RouteProgress {
+    pub receipt: super::decision::EffectReceiptKey,
+    pub recipient: jid::BareJid,
+    pub fanout: Vec<jid::FullJid>,
+    pub route_identity: waddle_xmpp::ingress::EffectMessageIdentity,
+    pub completed: Vec<jid::FullJid>,
+}
+
+impl RouteProgress {
+    pub(super) fn matches(&self, effect: &ExternalEffect) -> bool {
+        external_route_recipient(effect).as_ref() == Some(&self.recipient)
+            && external_route_identity(effect) == Some(&self.route_identity)
+    }
+
+    pub(super) fn remaining(&self, effect: &ExternalEffect) -> Vec<jid::FullJid> {
+        external_route_targets(effect)
+            .into_iter()
+            .filter(|target| self.fanout.contains(target) && !self.completed.contains(target))
+            .collect()
+    }
+}
+
+/// Restore direct delivery copies from canonical content and recorded archive
+/// authority. Synthetic pin, invitation and room copies have their own restorers.
+pub fn restore_delivery_payloads(
+    plan: &mut IngressPlan,
+    envelope: &crate::ingress_substrate::MessageEnvelope,
+) {
+    use crate::server::routes::interpret::effects::delivery::ExternalDeliveryEffect;
+    for planned in &mut plan.plan {
+        if planned
+            .dependencies
+            .iter()
+            .any(|dependency| matches!(dependency, PlanEffectDependency::AfterDmPinMutation { .. }))
+        {
+            continue;
+        }
+        let Effect::External(effect) = &mut planned.effect else {
+            continue;
+        };
+        let Some(recipient) = external_route_recipient(effect) else {
+            continue;
+        };
+        if !plan.intents.iter().any(|intent| {
+            matches!(intent,
+            IngressEffectIntent::RouteDirect { recipient: saved, route_identity, .. }
+                if saved == &recipient && external_route_identity(effect) == Some(route_identity))
+        }) {
+            continue;
+        }
+        if let ExternalEffect::Delivery(
+            ExternalDeliveryEffect::QueueDetached { stanza, .. }
+            | ExternalDeliveryEffect::RouteToPeer { stanza, .. },
+        ) = effect
+        {
+            if matches!(stanza.as_ref(), waddle_xmpp::Stanza::Message(_)) {
+                **stanza = waddle_xmpp::Stanza::Message(delivery_message(
+                    envelope,
+                    &recipient,
+                    &plan.intents,
+                ));
+            }
+        }
+    }
+}
+
+fn delivery_message(
+    envelope: &crate::ingress_substrate::MessageEnvelope,
+    recipient: &jid::BareJid,
+    intents: &[IngressEffectIntent],
+) -> xmpp_parsers::message::Message {
+    let mut message = envelope.message().clone();
+    // A bare-target message remains bare even when today's route is live;
+    // full-target messages retain the canonical requested resource.
+    if message
+        .to
+        .as_ref()
+        .is_none_or(|target| target.to_bare() != *recipient)
+    {
+        message.to = Some(recipient.clone().into());
+    }
+    for intent in intents {
+        if let IngressEffectIntent::ArchiveAuthoritative {
+            archive, stanza_id, ..
+        } = intent
+        {
+            if archive == recipient {
+                waddle_xmpp_core::xep0359::add_stanza_id(&mut message, stanza_id);
+            }
+        }
+    }
+    message
+}
 
 /// Reconciliation preserves recorded payloads when the policy or audience
 /// changes. Both application and receipt identity must use those same payloads.
@@ -132,6 +233,7 @@ fn restore_dm_call_state(plan: &mut IngressPlan, recorded: &[IngressEffectIntent
 /// Restore observer payloads from the canonical envelope before receipt matching.
 pub fn restore_room_observer_envelope(
     plan: &mut IngressPlan,
+    recorded: &[IngressEffectIntent],
     envelope: &crate::ingress_substrate::MessageEnvelope,
 ) -> Result<(), crate::ingress_uow::IngressUowError> {
     for effect in &mut plan.plan {
@@ -145,6 +247,57 @@ pub fn restore_room_observer_envelope(
             **error_request = envelope
                 .room_observer_request()
                 .ok_or(crate::ingress_uow::IngressUowError::EffectIntentMessageMissing)?;
+        }
+    }
+    let error_request = envelope
+        .room_observer_request()
+        .ok_or(crate::ingress_uow::IngressUowError::EffectIntentMessageMissing)?;
+    for intent in recorded {
+        let IngressEffectIntent::RoomObserver {
+            room,
+            requester,
+            sender,
+            plugin,
+        } = intent
+        else {
+            continue;
+        };
+        let exists = plan.plan.iter().any(|planned| {
+            matches!(
+                &planned.effect,
+                Effect::External(ExternalEffect::Room(
+                    ExternalRoomEffect::ObserveRoomMessage {
+                        plugin: planned_plugin,
+                        ..
+                    }
+                )) if planned_plugin == plugin
+            )
+        });
+        if !exists {
+            let message = envelope.message().clone();
+            let dependencies =
+                crate::server::routes::interpret::effects::room::message_dependencies(
+                    room, &message,
+                );
+            let mut planned =
+                crate::server::routes::interpret::effects::PlannedEffect::new(Effect::External(
+                    ExternalEffect::Room(ExternalRoomEffect::ObserveRoomMessage {
+                        room: room.clone(),
+                        plugin: plugin.clone(),
+                        message: Box::new(message),
+                        requester: requester.clone(),
+                        sender: sender.clone(),
+                        error_request: Box::new(error_request.clone()),
+                    }),
+                ))
+                .with_suppression(
+                    crate::server::routes::interpret::effects::PlanSuppressionPolicy::Always,
+                );
+            planned.dependencies = dependencies;
+            plan.plan.push(planned);
+        }
+        if !plan.intents.contains(intent) {
+            plan.intents.push(intent.clone());
         }
     }
     Ok(())
@@ -275,8 +428,19 @@ pub(super) fn external_in_recorded_audience(plan: &IngressPlan, effect: &Externa
                     && exclude.iter().find(|source| &source.to_bare() == owner) == Some(excluded_source) && kind == recorded_kind)
         });
     }
-    if let ExternalEffect::Room(ExternalRoomEffect::ObserveRoomMessage { room, .. }) = effect {
-        return plan.intents.iter().any(|intent| matches!(intent, IngressEffectIntent::RoomObserver { room: recorded_room, .. } if room == recorded_room));
+    if let ExternalEffect::Room(ExternalRoomEffect::ObserveRoomMessage { room, plugin, .. }) =
+        effect
+    {
+        return plan.intents.iter().any(|intent| {
+            matches!(
+                intent,
+                IngressEffectIntent::RoomObserver {
+                    room: recorded_room,
+                    plugin: recorded_plugin,
+                    ..
+                } if room == recorded_room && plugin == recorded_plugin
+            )
+        });
     }
     let (owner, room) = match effect {
         ExternalEffect::Room(ExternalRoomEffect::NotificationCandidate { owner, room, .. }) => {
@@ -443,6 +607,12 @@ fn same_mutation_shape(recorded: &IngressEffectIntent, planned: &IngressEffectIn
             IngressEffectIntent::LinkPreviewMediaRef { mutation: saved },
             IngressEffectIntent::LinkPreviewMediaRef { mutation: offered },
         ) => saved.state == offered.state,
+        (
+            IngressEffectIntent::RoomObserver { plugin: saved, .. },
+            IngressEffectIntent::RoomObserver {
+                plugin: offered, ..
+            },
+        ) => saved == offered,
         _ => true,
     }
 }
@@ -589,11 +759,12 @@ fn apply_external(
     use crate::server::routes::websocket::handlers::message::muc_invite::InviteLedgerMutation;
     match (effect, original, recorded) {
         (
-            ExternalEffect::Room(ExternalRoomEffect::ObserveRoomMessage { room, requester, sender, .. }),
-            IngressEffectIntent::RoomObserver { room: original_room, .. },
-            IngressEffectIntent::RoomObserver { room: saved_room, requester: saved_requester, sender: saved_sender },
-        ) if room == original_room => {
+            ExternalEffect::Room(ExternalRoomEffect::ObserveRoomMessage { room, plugin, requester, sender, .. }),
+            IngressEffectIntent::RoomObserver { room: original_room, plugin: original_plugin, .. },
+            IngressEffectIntent::RoomObserver { room: saved_room, plugin: saved_plugin, requester: saved_requester, sender: saved_sender },
+        ) if room == original_room && plugin == original_plugin => {
             *room = saved_room.clone();
+            *plugin = saved_plugin.clone();
             *requester = saved_requester.clone();
             *sender = saved_sender.clone();
         }
@@ -724,7 +895,7 @@ fn apply_external(
 }
 
 fn recovery_matches(
-    recovery: &GroupchatNotificationRecovery,
+    recovery: &PlannedGroupchatNotificationRecovery,
     mutation: &GroupchatNotificationRecoveryMutation,
 ) -> bool {
     recovery.key.recipient == mutation.recipient
@@ -734,7 +905,7 @@ fn recovery_matches(
 }
 
 fn apply_recovery(
-    recovery: &mut GroupchatNotificationRecovery,
+    recovery: &mut PlannedGroupchatNotificationRecovery,
     saved: &GroupchatNotificationRecoveryMutation,
 ) {
     recovery.sender_jid = saved.sender.clone();

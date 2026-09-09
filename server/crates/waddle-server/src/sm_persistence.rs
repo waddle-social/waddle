@@ -132,6 +132,10 @@ impl DatabaseSmPersistence {
                 .await
                 .map_err(|e| SmPersistenceError::Other(e.to_string()))?,
         };
+        Self::from_database(db).await
+    }
+
+    async fn from_database(db: Database) -> Result<Self, SmPersistenceError> {
         let storage = Self {
             db,
             stream_locks: Arc::new(StreamLockMap::new()),
@@ -568,51 +572,22 @@ impl SmPersistenceStorage for DatabaseSmPersistence {
 /// to portable persistence would make the claim reaper query a different
 /// (or nonexistent) `sm_sessions` table and violate ownership fencing.
 ///
-/// `global_db` is the same [`Database`] handle `clustering::start_if_enabled`
-/// itself received (`db_pool.global()`) — FIX 4: the fenced impl is
-/// constructed by cloning *this* handle, never by opening a second,
-/// independently-resolved pool from `database_url`. Before that clone even
-/// happens, the candidate storage pool's live PostgreSQL identity is compared
-/// against `global_db`; a mismatch while clustering is enabled fails startup
-/// outright with [`SmPersistenceError::ClusterColocationMismatch`] rather than
-/// silently fencing `sm_sessions`/`sm_unacked` writes against a
-/// `clustering_claims` table that may not even exist in whatever database
-/// `database_url` actually points at.
-pub struct OpenedSmPersistence {
-    pub storage: Arc<dyn SmPersistenceStorage>,
-    pub database: Option<Database>,
-    pub aliases_global: bool,
-}
-
+/// `global_db` is the ingress database. The startup factory validates any
+/// configured SM URL before calling this constructor; both portable and fenced
+/// persistence share this handle so migration resets cover all retained sessions.
 pub async fn open_for_cluster_mode_with_lineage(
-    database_url: Option<&str>,
     clustering_enabled: bool,
     claim_pair: Option<(
         std::sync::Arc<dyn waddle_xmpp::ownership::ClaimStore>,
         waddle_xmpp::ownership::SharedNodeIdentity,
     )>,
     global_db: &Database,
-) -> Result<OpenedSmPersistence, SmPersistenceError> {
+) -> Result<Arc<dyn SmPersistenceStorage>, SmPersistenceError> {
     #[cfg(feature = "clustering")]
     {
         if clustering_enabled {
-            let resolved_sm_url = database_url
-                .filter(|url| url.starts_with("postgres://") || url.starts_with("postgresql://"))
-                .ok_or(SmPersistenceError::ClusterRequiresPostgres)?;
-            let storage = DatabaseSmPersistence::open(Some(resolved_sm_url)).await?;
-            let sm_identity = crate::db::lineage::live_postgres_identity(&storage.database())
-                .await
-                .map_err(|error| SmPersistenceError::Other(error.to_string()))?;
-            let global_identity = crate::db::lineage::live_postgres_identity(global_db)
-                .await
-                .map_err(|error| SmPersistenceError::Other(error.to_string()))?;
-            if sm_identity != global_identity {
-                return Err(SmPersistenceError::ClusterColocationMismatch {
-                    identities: Box::new(waddle_xmpp::ClusterColocationIdentities {
-                        store: (&sm_identity).into(),
-                        global: (&global_identity).into(),
-                    }),
-                });
+            if global_db.driver() != DatabaseDriver::Postgres {
+                return Err(SmPersistenceError::ClusterRequiresPostgres);
             }
             let (claim_store, node_identity) =
                 claim_pair.ok_or(SmPersistenceError::ClusterClaimHandlesUnavailable)?;
@@ -622,26 +597,18 @@ pub async fn open_for_cluster_mode_with_lineage(
                 node_identity,
             )
             .await?;
-            return Ok(OpenedSmPersistence {
-                storage: Arc::new(fenced),
-                database: None,
-                aliases_global: true,
-            });
+            return Ok(Arc::new(fenced));
         }
     }
     #[cfg(not(feature = "clustering"))]
     {
-        let _ = (claim_pair, global_db);
+        let _ = claim_pair;
         if clustering_enabled {
             return Err(SmPersistenceError::ClusterClaimHandlesUnavailable);
         }
     }
-    let storage = DatabaseSmPersistence::open(database_url).await?;
-    Ok(OpenedSmPersistence {
-        database: Some(storage.database()),
-        storage: Arc::new(storage),
-        aliases_global: false,
-    })
+    let storage = DatabaseSmPersistence::from_database(global_db.clone()).await?;
+    Ok(Arc::new(storage))
 }
 
 #[cfg(test)]

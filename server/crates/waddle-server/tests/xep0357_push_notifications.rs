@@ -200,3 +200,58 @@ async fn sign_and_verify_round_trip_under_loaded_key() {
     let _ = jsonwebtoken::decode::<serde_json::Value>(jwt.as_str(), &decoding_key, &validation)
         .expect("JWT verifies under loaded public key");
 }
+
+/// A lost Phase C rebuild keeps canonical push preview and processing hints.
+#[test]
+fn recovery_envelope_preserves_push_body_and_hints() {
+    use waddle_server::notification_outbox::{
+        candidate_from_envelope, GroupchatCandidateIdentity, NotificationThreadId,
+    };
+    use waddle_xmpp::xep::{xep0334, xep0421::OccupantIdSecret};
+
+    let owner = "juliet@example.com".parse().expect("owner");
+    let room: jid::BareJid = "room@conference.example.com".parse().expect("room");
+    let sender = room.with_resource_str("romeo").expect("occupant").into();
+    let archive = waddle_xmpp_core::xep0359::StanzaId::new("frozen", room.clone().into());
+    let secret = OccupantIdSecret::new(vec![7; 32]).expect("secret");
+    let mut envelope = xmpp_parsers::message::Message::new(None);
+    envelope.bodies.insert(
+        xmpp_parsers::message::Lang::new(),
+        "canonical preview".to_owned(),
+    );
+    envelope.bodies.insert(
+        xmpp_parsers::message::Lang::from("fr"),
+        "autre aperçu".to_owned(),
+    );
+    let rebuild = |message: &xmpp_parsers::message::Message| {
+        candidate_from_envelope(
+            message,
+            GroupchatCandidateIdentity {
+                owner: &owner,
+                room: &room,
+                sender: &sender,
+                thread_id: NotificationThreadId::root(),
+                archive_stanza_id: &archive,
+                is_live_occupant: false,
+                sender_can_broadcast_channel_mention: false,
+            },
+            &secret,
+        )
+        .expect("rebuild candidate")
+    };
+    assert_eq!(
+        rebuild(&envelope).last_message_body(),
+        Some("canonical preview")
+    );
+    for hint in [xep0334::Hint::NoStore, xep0334::Hint::NoPermanentStore] {
+        envelope.payloads.push(
+            xmpp_parsers::minidom::Element::builder(hint.element_name(), xep0334::NS_HINTS).build(),
+        );
+    }
+    let candidate = rebuild(&envelope);
+    assert_eq!(candidate.last_message_body(), None);
+    assert!(candidate.no_store());
+    assert!(candidate.no_permanent_store());
+    assert!(!candidate.reaction());
+    assert_eq!(candidate.archive_stanza_id(), &archive);
+}

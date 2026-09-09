@@ -1083,7 +1083,7 @@ pub(super) fn deliver_full_jid_via_ordered_relay<'a>(
     })
 }
 
-pub(super) async fn deliver_peer_to_full_with_registered_remote(
+pub(crate) async fn deliver_peer_to_full_with_registered_remote(
     deps: &Deps<'_>,
     target: &jid::FullJid,
     stanza: &Stanza,
@@ -1121,7 +1121,7 @@ pub(super) async fn deliver_peer_to_full_with_registered_remote(
     .await
 }
 
-pub(super) async fn deliver_direct_to_full_with_registered_remote(
+pub(crate) async fn deliver_direct_to_full_with_registered_remote(
     deps: &Deps<'_>,
     target: &jid::FullJid,
     stanza: &Stanza,
@@ -1364,7 +1364,7 @@ fn jingle_action(payload: &minidom::Element) -> Option<xmpp_parsers::jingle::Act
 /// cause of `Ok(false)` is the resource resuming mid-route, in which
 /// case a direct send reaches it (the persistence already happened, so
 /// the retry is delivery-only and cannot duplicate rows).
-pub(super) async fn queue_processed_for_detached(
+pub(crate) async fn queue_processed_for_detached(
     deps: &Deps<'_>,
     detached_targets: Vec<jid::FullJid>,
     live_set: &std::collections::HashSet<jid::FullJid>,

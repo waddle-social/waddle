@@ -5,12 +5,20 @@
 //! projections. Dropping an uncommitted [`IngressUowTransaction`] rolls it
 //! back through [`crate::db::Transaction`].
 
+mod delivery_progress;
+pub(crate) use delivery_progress::DeliveryProgressRepository;
 mod carbon_receipts;
 pub(crate) use carbon_receipts::CarbonReceiptRepository;
 mod durable_more;
 mod error;
+mod pending_receipts;
+mod recovery_receipts;
+pub(crate) use pending_receipts::PendingReceiptRepository;
 mod repositories;
 mod retry;
+pub(crate) use recovery_receipts::{RecoveryCompletion, RecoveryReceiptRepository};
+mod settlement;
+pub(crate) use settlement::settle_recorded;
 
 pub use error::IngressUowError;
 pub use repositories::{

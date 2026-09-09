@@ -1,16 +1,93 @@
 use super::*;
 
 impl ExtensionManager {
-    /// Whether this message can invoke at least one granted observer hook.
-    /// Keep the body and capability checks aligned with observer execution.
-    pub fn has_message_observers(&self, message: &Message) -> bool {
-        message_hook_body(message).is_some()
-            && self.actors.iter().any(|actor| {
+    /// Plugins whose observer hook is eligible for this exact message.
+    ///
+    /// Membership is frozen into ingress obligations by callers. Keep these
+    /// predicates exactly aligned with [`Self::process_message_observer`].
+    pub fn message_observer_plugins(&self, message: &Message) -> Vec<PluginId> {
+        if message_hook_body(message).is_none() {
+            return Vec::new();
+        }
+        self.actors
+            .iter()
+            .filter(|actor| {
                 actor
                     .manifest()
                     .declares_capability(ExtensionCapability::MessageObserve)
                     && actor.has_grant(ExtensionCapability::MessageObserve)
             })
+            .map(|actor| actor.manifest().id)
+            .collect()
+    }
+
+    /// Invoke exactly one observer selected during ingress planning.
+    ///
+    /// `None` means the plugin is no longer installed, granted, declared, or
+    /// eligible for the frozen message and therefore cannot prove completion.
+    pub async fn process_message_observer(
+        &self,
+        plugin: &PluginId,
+        msg: &Message,
+        waddle_id: WaddleId,
+        requester: Option<BareJid>,
+    ) -> Option<ObserverOutcome> {
+        let body_text = message_hook_body(msg)?;
+        let actor = self.actors.iter().find(|actor| {
+            let manifest = actor.manifest();
+            manifest.id == *plugin
+                && manifest.declares_capability(ExtensionCapability::MessageObserve)
+                && actor.has_grant(ExtensionCapability::MessageObserve)
+        })?;
+        let links = detect_links(body_text.as_str())
+            .into_iter()
+            .filter_map(|link| LinkTarget::try_from(link).ok())
+            .collect();
+        let room = msg
+            .to
+            .as_ref()
+            .or(msg.from.as_ref())
+            .and_then(|jid| RoomJid::new(jid.to_bare().to_string()).ok());
+        let source_stanza_id = room
+            .as_ref()
+            .and_then(|room| room_stanza_id_from_payloads(msg, room.as_str()))
+            .or_else(|| {
+                msg.id
+                    .as_ref()
+                    .and_then(|id| StanzaId::new(id.0.clone()).ok())
+            });
+        let sender = msg
+            .from
+            .as_ref()
+            .and_then(|jid| FullJidValue::new(jid.to_string()).ok());
+        let event = ExtensionEvent::MessageHook(MessageHook {
+            context: MessageContext {
+                waddle_id: waddle_id.clone(),
+                stanza_id: source_stanza_id,
+                room: room.clone(),
+                sender,
+                thread_id: thread_id_from_message(msg),
+                reply_to: reply_target_from_payloads(&msg.payloads),
+            },
+            body: body_text,
+            links,
+        });
+        let manifest = actor.manifest();
+        let effects = bounded_message_hook(
+            plugin,
+            HookTimeout::Observer,
+            EXTENSION_OBSERVE_TIMEOUT,
+            actor.handle_event_for_waddle_with_requester(event, waddle_id, requester),
+        )
+        .await;
+        let effects = self
+            .sign_effects(effects)
+            .into_iter()
+            .filter(|effect| message_hook_effect_launches_match_room(effect, room.as_ref()))
+            .filter(|effect| effect.validate_for_manifest(&manifest))
+            .filter(|effect| matches!(effect, ExtensionEffect::HostWarning(_)))
+            .collect();
+        Some(ObserverOutcome { effects })
     }
 
     pub async fn enrich_message(&self, msg: &mut Message) -> usize {
@@ -63,21 +140,6 @@ impl ExtensionManager {
         .await
     }
 
-    pub async fn process_message_observers_for_waddle_with_requester(
-        &self,
-        msg: &mut Message,
-        waddle_id: WaddleId,
-        requester: Option<BareJid>,
-    ) -> MessageExtensionOutcome {
-        self.process_message_for_waddle_with_requester_and_mode(
-            msg,
-            waddle_id,
-            requester,
-            MessageHookMode::ObserveOnly,
-        )
-        .await
-    }
-
     async fn process_message_for_waddle_with_requester_and_mode(
         &self,
         msg: &mut Message,
@@ -85,7 +147,7 @@ impl ExtensionManager {
         requester: Option<BareJid>,
         mode: MessageHookMode,
     ) -> MessageExtensionOutcome {
-        if mode != MessageHookMode::ObserveOnly && message_has_framework_envelope(msg) {
+        if message_has_framework_envelope(msg) {
             return MessageExtensionOutcome::default();
         }
 
@@ -149,7 +211,6 @@ impl ExtensionManager {
                     MessageHookMode::EnrichOnly => {
                         declares_enrich && grants_enrich && !(declares_observe && grants_observe)
                     }
-                    MessageHookMode::ObserveOnly => declares_observe && grants_observe,
                 };
                 if !selected {
                     return None;
@@ -170,7 +231,7 @@ impl ExtensionManager {
                     };
                     let effects = bounded_message_hook(
                         &manifest.id,
-                        mode,
+                        HookTimeout::FailOpen,
                         timeout_duration,
                         actor.handle_event_for_waddle_with_requester(event, waddle_id, requester),
                     )
@@ -238,10 +299,15 @@ fn message_hook_body(message: &Message) -> Option<DisplayText> {
         .and_then(|body| DisplayText::new(body.clone()).ok())
 }
 
+enum HookTimeout {
+    Observer,
+    FailOpen,
+}
+
 /// Preserve observer failures for the caller's durable receipt decision.
 async fn bounded_message_hook(
     plugin: &PluginId,
-    mode: MessageHookMode,
+    policy: HookTimeout,
     timeout_duration: Duration,
     invocation: impl std::future::Future<Output = Vec<ExtensionEffect>>,
 ) -> Vec<ExtensionEffect> {
@@ -253,7 +319,7 @@ async fn bounded_message_hook(
                 timeout_secs = timeout_duration.as_secs(),
                 "extension message hook timed out; continuing fail-open"
             );
-            if mode == MessageHookMode::ObserveOnly {
+            if matches!(policy, HookTimeout::Observer) {
                 vec![ExtensionEffect::HostWarning(
                     DisplayText::new("Extension message observer timed out")
                         .expect("static observer timeout warning"),
@@ -273,7 +339,7 @@ mod observer_tests {
     async fn observer_invocation_success_returns_confirmed_effects() {
         let effects = bounded_message_hook(
             &PluginId::new("observer-test").expect("plugin"),
-            MessageHookMode::ObserveOnly,
+            HookTimeout::Observer,
             Duration::from_secs(1),
             std::future::ready(vec![ExtensionEffect::Noop]),
         )
@@ -286,7 +352,7 @@ mod observer_tests {
         let warning = DisplayText::new("observer host mutation failed").expect("warning");
         let effects = bounded_message_hook(
             &PluginId::new("observer-test").expect("plugin"),
-            MessageHookMode::ObserveOnly,
+            HookTimeout::Observer,
             Duration::from_secs(1),
             std::future::ready(vec![ExtensionEffect::HostWarning(warning.clone())]),
         )
@@ -300,7 +366,7 @@ mod observer_tests {
     async fn observer_invocation_timeout_remains_unconfirmed() {
         let effects = bounded_message_hook(
             &PluginId::new("observer-test").expect("plugin"),
-            MessageHookMode::ObserveOnly,
+            HookTimeout::Observer,
             Duration::ZERO,
             std::future::pending(),
         )
@@ -315,7 +381,7 @@ mod observer_tests {
     async fn enrichment_invocation_timeout_still_fails_open() {
         let effects = bounded_message_hook(
             &PluginId::new("enrichment-test").expect("plugin"),
-            MessageHookMode::EnrichOnly,
+            HookTimeout::FailOpen,
             Duration::ZERO,
             std::future::pending(),
         )

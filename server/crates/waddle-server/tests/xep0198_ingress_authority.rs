@@ -301,3 +301,20 @@ async fn xep0198_wrapped_wire_position_is_fresh_postgres() {
         wrapped_wire_position_is_fresh(fixture).await;
     }
 }
+
+#[path = "ingress_cases/detached_progress_support.rs"]
+pub mod detached_progress_support;
+
+/// XEP-0198 §5: a committed detached append survives restart without being
+/// appended again when another resource's aggregate obligation is retried.
+#[tokio::test]
+async fn xep0198_detached_progress_restart_sqlite() {
+    detached_progress_support::restart_and_retry(IngressFixture::sqlite().await).await;
+}
+
+#[tokio::test]
+async fn xep0198_detached_progress_restart_postgres() {
+    if let Some(fixture) = IngressFixture::postgres("xep0198_dp_restart").await {
+        detached_progress_support::restart_and_retry(fixture).await;
+    }
+}

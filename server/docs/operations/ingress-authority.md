@@ -42,6 +42,8 @@ latency is a seconds histogram; confirm `le`-labelled buckets are present.
 | `ingress.tx.retries` | `ingress_tx_retries_total` | Retry pressure context |
 | `ingress.gc.runs{outcome}` | `ingress_gc_runs_total` | `IngressGcFailing` |
 | `ingress.gc.reclaimed_messages` | `ingress_gc_reclaimed_messages_total` | Reclamation progress |
+| `ingress.maintenance.runs{phase,outcome}` | `ingress_maintenance_runs_total` | `IngressMaintenanceFailing` |
+| `ingress.maintenance.terminalized_messages` | `ingress_maintenance_terminalized_messages_total` | Terminalization progress |
 | `ingress.tx.duration` | `ingress_tx_duration_seconds_bucket` (also `_sum`, `_count`) | `IngressTxSlow` |
 | `ingress.effects.unresolved{kind}` (local executions only) | `ingress_effects_unresolved_total` | `IngressUnresolvedEffectsGrowing` |
 | CNPG old non-terminal canonical messages by pending intent family | `cnpg_waddle_ingress_nonterminal_messages{kind}` | `IngressNonTerminalBacklog` |
@@ -81,9 +83,11 @@ plus scrape/evaluation delay). Its `kind` is the unreceipted intent family;
 `terminalization` means all receipts exist but terminalization itself is
 missing; `none` is the always-zero sentinel and never fires. A row counts once per pending family, even with several intents in
 that family, so summing families can count one row more than once. The 10m
-age threshold is a generous multiple of the 5s Phase C budget: investigate a
-receipt-completeness or terminalization regression (#1749). GC cannot reclaim
-these rows. Both CNPG queries run only on the primary.
+age threshold is a generous multiple of the 5s Phase C budget: investigate
+missing receipts or failing maintenance. Check
+`ingress.maintenance.runs{outcome!="complete"}` (Prometheus:
+`ingress_maintenance_runs_total{outcome!="complete"}`) and the pending pairs
+below. GC cannot reclaim these rows. Both CNPG queries run only on the primary.
 
 The dedicated ingress authority pool defaults to 4 connections per pod;
 `WADDLE_INGRESS_DB_POOL_SIZE` overrides it. Transactions and retries are
@@ -91,6 +95,34 @@ bounded (the soak measured 23 ms p99 transaction time). The connection
 budget is approximately 77 at a 3-pod rollout peak against 100 PostgreSQL
 connections, below the 80% alert threshold; re-derive it before raising
 the pool override.
+
+## Periodic maintenance
+
+Each pod runs bounded maintenance at startup, after committed decisions, and
+on a jittered 30-second periodic tick, including when no traffic arrives.
+The tick resets after a run. A partial, failed or timed-out pass schedules a
+continuation with exponential backoff from 1 second to 30 seconds; a complete
+pass resets that backoff.
+
+The lineage attestation gate covers the entire pass. Terminalization first
+pages receipt-complete, non-terminal messages older than a 60-second grace
+period in `(created_at, message_key)` order. Each row is locked and its receipt
+completeness rechecked before terminalization. Contended or failed rows leave
+the pass partial while pagination continues to later rows. Continuations retain
+the keyset cursor so a contended prefix cannot starve later rows, then wrap to
+retry skipped rows. Retention GC follows. Each phase has a timeout inside a hard pass
+deadline. Maintenance shares the bounded ingress pool and holds at most one
+connection at a time.
+
+`ingress.maintenance.runs` labels phases as `pass`, `terminalization`, or
+`retention_gc`, with outcomes `complete`, `partial`, `failed`, or `timed_out`.
+The `pass` series includes attestation and hard-deadline failures.
+`IngressMaintenanceFailing` warns on failed or timed-out passes in the last
+hour. A partial pass can be ordinary bounded backlog progress or skipped
+contended rows; use repeated partial outcomes together with the backlog and
+`ingress.maintenance.terminalized_messages` to distinguish draining from
+stalled work. All maintenance series are zero-seeded at startup.
+Existing `ingress.gc.*` series retain their GC-specific meaning and outcomes.
 
 ## Retention and unresolved effects
 
@@ -139,6 +171,23 @@ follow-up PR restoring `RollingUpdate` (`maxSurge: 1`, `maxUnavailable: 0`).
 This follows #1596 (`1cad23a2`) and its verified flip-back #1605 (`5dbe771c`);
 Recreate is not the steady-state rollout strategy.
 
+### V1014 cutover (#1739–#1743, PR #1752)
+
+The recovery follow-ups ride a second one-shot Recreate. Expect and do not
+treat as incidents: (1) every retained XEP-0198 session fails to resume and its
+unacked outbound frames are discarded (clients reconnect and catch up via MAM);
+(2) ingress obligations that were in flight at cutover are abandoned — observer
+plugin runs, XEP-0357 notification candidates and pending rows that had not yet
+been inserted — because V1014 deletes all canonical rows, intents, receipts,
+aliases and SM refs; (3) queued `pending_delivery` rows and archives are kept,
+and rows claimed by a discarded session are released once at startup
+(`pending_delivery_startup_migrations` marker `ingress_v1014_pending_claim_reset_v1`)
+so they flush on the first reconnect; (4) `groupchat_notification_recovery`
+rows without a canonical `message_key` are deleted once when the inbox schema
+adds the column. `IngressNonTerminalBacklog` starts from an empty table after
+the cutover; any post-cutover row is new work. Roll-forward only: a pre-V1014
+image refuses the ledger.
+
 ## Read-only verification
 
 Use the production context explicitly. Inspect rollout strategy, actual
@@ -152,14 +201,16 @@ kubectl --context teleport.waddle.social-production -n waddle logs deployment/wa
 kubectl --context teleport.waddle.social-production -n waddle get cluster postgresql -o yaml
 ```
 
-In Grafana Explore, verify decisions, unresolved kinds, histogram buckets and
-GC; absent metrics are not evidence of healthy zero activity:
+In Grafana Explore, verify decisions, unresolved kinds, histogram buckets,
+maintenance and GC; absent metrics are not evidence of healthy zero activity:
 
 ```promql
 sum by (class) (rate(ingress_decisions_total[10m]))
 sum by (kind) (increase(ingress_effects_unresolved_total[1h]))
 histogram_quantile(0.99, sum by (le) (rate(ingress_tx_duration_seconds_bucket[10m])))
 sum by (outcome) (increase(ingress_gc_runs_total[1h]))
+sum by (phase, outcome) (increase(ingress_maintenance_runs_total[1h]))
+sum(increase(ingress_maintenance_terminalized_messages_total[1h]))
 max(cnpg_waddle_ingress_gc_eligible_messages)
 max(cnpg_waddle_ingress_gc_oldest_eligible_age_seconds)
 max by (kind) (cnpg_waddle_ingress_nonterminal_messages)
@@ -428,3 +479,46 @@ WHERE message_key IN (SELECT message_key FROM reviewed_messages)
 RETURNING message_key;
 COMMIT;
 ```
+
+
+## Detached delivery progress
+
+For direct detached fanout, `ingress_delivery_receipts` tracks completed full
+JIDs by canonical message and complete effect receipt identity. An aggregate
+route receipt exists only after every recorded resource has completed. A
+partial fanout therefore remains non-terminal even if today's registry offers
+only a subset of its unfinished resources. Ordinary duplicate ingress retries
+only unfinished recorded targets and restores the canonical message payload;
+a resource that has reconnected can receive the retry live.
+
+Concurrent duplicate decisions may both append the same resource: this path
+provides at-least-once per-resource delivery, with no execution claim. The
+append precedes its progress transaction, so a crash or transaction failure
+between them can repeat the one in-flight resource. Earlier committed progress
+survives restart and is excluded from later decisions. Progress writes and the
+final aggregate receipt share one epoch-attested transaction under the
+canonical message lock. Lock contention leaves the obligation retryable.
+
+When investigating a pending direct route, compare its recorded fanout with
+its resource progress rows using the full effect receipt key. A missing
+resource is outstanding delivery work, not evidence that the aggregate can be
+settled. Do not synthesize a receipt from today's smaller registry audience.
+MUC groupchat occupant fanout does not use these progress rows.
+
+### Pending delivery and SM database placement
+
+`WADDLE_XMPP_PENDING_DELIVERY_DATABASE_URL` and `WADDLE_XMPP_SM_DATABASE_URL`
+must be colocated with the global
+ingress database on every backend, including deployments without clustering.
+SQLite requires the same URL as `WADDLE_DATABASE_URL`; PostgreSQL requires the
+same live database/schema identity. Startup rejects a separate store before
+initializing its schema or hydrating retained SM sessions. Leaving either
+override unset shares the global database
+pool. In-memory pending and SM storage are available only when the global database itself
+is in memory; it does not survive restart.
+
+SM session and replay tables must participate in the same V1014 reset as ingress
+and pending claims. A separate retained-session store would leave replay copies
+bound to claims that the reset released, allowing expiry promotion to enqueue
+the same pending delivery again. Split SM stores are therefore rejected even
+when clustering is disabled.

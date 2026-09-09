@@ -96,3 +96,23 @@ mod retention;
 
 #[path = "ingress_cases/recipient_drift.rs"]
 mod recipient_drift;
+
+#[path = "ingress_cases/settlement.rs"]
+mod settlement;
+
+#[path = "ingress_cases/maintenance.rs"]
+mod maintenance;
+
+#[path = "ingress_cases/detached_progress.rs"]
+mod detached_progress;
+#[path = "ingress_cases/detached_progress_support.rs"]
+pub mod detached_progress_support;
+
+#[path = "ingress_cases/detached_contention.rs"]
+mod detached_contention;
+
+#[path = "ingress_cases/recovery_receipts.rs"]
+mod recovery_receipts;
+
+#[path = "ingress_cases/pending_reconstruction.rs"]
+mod pending_reconstruction;

@@ -25,6 +25,8 @@ pub enum EffectOutcome {
     InboxPush(Vec<jid::FullJid>),
     /// Independently completed storage steps; absent obligations stay pending.
     ConfirmedIntents(Vec<waddle_xmpp::ingress::IngressEffectIntent>),
+    /// The arm already committed these receipts with its durable work.
+    Settled(SettledOutcome),
     Frames(Vec<Stanza>),
     #[cfg(feature = "clustering")]
     RelayFrames {
@@ -40,7 +42,24 @@ pub enum EffectOutcome {
         outcome: super::super::routing::FullJidDeliveryOutcome,
         recipients: Vec<jid::FullJid>,
     },
+    /// Ordinary offline queue admission failed; the sender bounce was attempted.
+    OfflineDeliveryQuotaExceeded,
     Unavailable,
+}
+
+#[derive(Debug)]
+pub struct SettledOutcome {
+    pub persisted: Vec<waddle_xmpp::ingress::IngressEffectIntent>,
+    pub completion: SettledCompletion,
+    /// Delivery diagnostics only; these values never prove receipts.
+    pub detached: Option<Vec<(jid::FullJid, super::super::routing::FullJidDeliveryOutcome)>>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum SettledCompletion {
+    Complete,
+    Incomplete,
+    Uncertain,
 }
 
 impl super::PlannedEffect {

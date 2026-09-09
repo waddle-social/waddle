@@ -72,20 +72,9 @@ async fn sigterm_promotes_live_sm_session_unacked_queue_for_next_startup_deliver
     let scratch_dir = tempfile::tempdir().expect("create scratch dir");
     let scratch = scratch_dir.path();
     let global_db = format!("sqlite://{}?mode=rwc", scratch.join("global.db").display());
-    let sm_db = format!("sqlite://{}?mode=rwc", scratch.join("sm.db").display());
-    let pending_db = format!("sqlite://{}?mode=rwc", scratch.join("pending.db").display());
-    // MAM and inbox inherit the durable global database: RFC 0018 §4
-    // requires their writes to share the ingress transaction. The promoted
-    // pending_delivery row resolves its archived stanza there after restart;
-    // SM and pending delivery retain their separate persistent stores.
-    let extra_envs: Vec<(&str, &str)> = vec![
-        ("WADDLE_XMPP_SM_DATABASE_URL", sm_db.as_str()),
-        (
-            "WADDLE_XMPP_PENDING_DELIVERY_DATABASE_URL",
-            pending_db.as_str(),
-        ),
-        ("WADDLE_DRAIN_TIMEOUT_SECS", "5"),
-    ];
+    // Ingress, MAM, inbox, SM, and pending rows share the durable global
+    // database, including the promoted delivery across this restart.
+    let extra_envs = [("WADDLE_DRAIN_TIMEOUT_SECS", "5")];
 
     // Phase 1: admin holds a live resumable SM session with one
     // unacked inbound DM when SIGTERM lands.

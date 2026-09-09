@@ -12,7 +12,7 @@ use crate::{
     server::routes::interpret::{
         effects::{
             delivery::ExternalDeliveryEffect, direct::ExternalDirectEffect, Effect, EffectOutcome,
-            ExternalEffect, ImmediateSink, PlannedEffect,
+            ExternalEffect, ImmediateSink, PlannedEffect, SettledCompletion,
         },
         Deps, FullJidDeliveryOutcome,
     },
@@ -20,14 +20,14 @@ use crate::{
 
 use super::decision::{EffectReceiptKey, IngressDecision};
 
-#[path = "execute_archive.rs"]
-mod archive;
-
 #[path = "execute_dependencies.rs"]
 mod dependencies;
 
 #[path = "execute_carbon_progress.rs"]
 mod carbon_progress;
+
+#[path = "execute_observers.rs"]
+mod observers;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ExternalOutcome {
@@ -391,6 +391,24 @@ pub async fn execute_effects(
             break;
         };
         let effect = &decision.external[index];
+        if ready && observers::is_observer(effect) {
+            observers::execute_ready(
+                observers::Batch {
+                    decision,
+                    planned: &planned,
+                    report: &mut report,
+                    completed: &mut completed,
+                    proven: &mut proven,
+                    recorded: &mut recorded,
+                },
+                db,
+                sink,
+                deps,
+                deadline,
+            )
+            .await;
+            continue;
+        }
         // Confirmed fanout and state mutations must not execute again.
         // Replaying historical activity could overwrite newer state.
         let already_receipted = matches!(
@@ -402,6 +420,7 @@ pub async fn execute_effects(
             && decision.external_receipts[index]
                 .iter()
                 .all(|key| !decision.receipts_pending.contains(key));
+        let mut settled_complete = false;
         let outcome = if discharged_invite_deliveries[index] {
             // The ledger confirmed an outstanding invitation or a losing claim.
             // Its mutually exclusive live and offline obligations are no-ops.
@@ -419,8 +438,8 @@ pub async fn execute_effects(
             match tokio::time::timeout_at(
                 deadline,
                 async {
-                    if let ExternalEffect::Room(room_effect @ crate::server::routes::interpret::effects::room::ExternalRoomEffect::ArchiveAfterPin { .. }) = effect {
-                        archive::execute(uow, room_effect).await
+                    if let Some(result) = super::execute_uow::execute_with_uow(uow, db, decision, index, effect, deps, deadline).await {
+                        result
                     } else {
                         let mut execution = planned[index].clone();
                         if let Some(message) = decision.message_key {
@@ -446,6 +465,15 @@ pub async fn execute_effects(
             .await
             {
                 Ok(result) => {
+                    // Completion attests that this effect's work committed, even
+                    // when another effect still owns unfinished aggregate work.
+                    // This affects diagnostics only; persisted values remain
+                    // the sole receipt proof.
+                    settled_complete = matches!(
+                        &result,
+                        EffectOutcome::Settled(settled)
+                            if settled.completion == SettledCompletion::Complete
+                    );
                     let ledger_noop = invite_ledger_noop(&result);
                     // A recorded authority can have written the ledger row and
                     // then lost its connection before the invitation was sent.
@@ -470,6 +498,15 @@ pub async fn execute_effects(
                     );
                     proven[index] =
                         proven_receipts(effect, &result, &decision.external_receipts[index]);
+                    // These receipts committed with the arm's work, including
+                    // any partial progress in an incomplete/uncertain outcome.
+                    if matches!(&result, EffectOutcome::Settled(_)) {
+                        for key in &proven[index] {
+                            if !recorded.contains(key) {
+                                recorded.push(key.clone());
+                            }
+                        }
+                    }
                     if let (
                         ExternalEffect::RoomMembershipMutation(mutation),
                         EffectOutcome::Membership(outcome),
@@ -523,9 +560,10 @@ pub async fn execute_effects(
             meter_unresolved(effect);
             continue;
         }
-        if decision.external_receipts[index]
-            .iter()
-            .any(|key| !proven[index].contains(key))
+        if !settled_complete
+            && decision.external_receipts[index]
+                .iter()
+                .any(|key| !proven[index].contains(key))
         {
             meter_unresolved(effect);
         }
@@ -581,6 +619,8 @@ pub async fn execute_effects(
         return report;
     }
     if let Some(key) = decision.message_key {
+        #[cfg(test)]
+        test_hooks::before_terminalization(key).await;
         // Tokio's timeout polls its future before checking the deadline. With
         // no budget, do not start a transaction that must immediately cancel.
         if budget.is_zero() {
@@ -612,6 +652,7 @@ fn completed_receipts(
         return Vec::new();
     };
     keys.iter()
+        .filter(|key| !decision.arm_owned_receipts.contains(key))
         .filter(|key| {
             decision
                 .external_receipts
@@ -662,7 +703,12 @@ fn proven_receipts(
             .cloned()
             .collect();
     }
-    if let EffectOutcome::ConfirmedIntents(intents) = outcome {
+    if let EffectOutcome::ConfirmedIntents(intents)
+    | EffectOutcome::Settled(crate::server::routes::interpret::effects::SettledOutcome {
+        persisted: intents,
+        ..
+    }) = outcome
+    {
         let proven = intents
             .iter()
             .filter_map(|intent| super::durable::receipt_key(intent).ok())
@@ -757,6 +803,18 @@ fn classify_outcome(
     frames: &mut Vec<Stanza>,
 ) -> ExternalOutcome {
     match outcome {
+        EffectOutcome::Settled(settled) => {
+            if let Some(detached) = settled.detached {
+                for (resource, outcome) in detached {
+                    tracing::debug!(%resource, ?outcome, "transactional detached delivery completed");
+                }
+            }
+            match settled.completion {
+                SettledCompletion::Complete => ExternalOutcome::Done,
+                SettledCompletion::Incomplete => ExternalOutcome::Failed,
+                SettledCompletion::Uncertain => ExternalOutcome::Uncertain,
+            }
+        }
         #[cfg(feature = "clustering")]
         EffectOutcome::RelayFrames { .. } => ExternalOutcome::Failed,
         EffectOutcome::Frames(mut produced) => {
@@ -823,7 +881,9 @@ fn classify_outcome(
             }
             ExternalOutcome::Failed
         }
-        EffectOutcome::Archive(Err(_)) | EffectOutcome::Inbox(Err(_)) => ExternalOutcome::Failed,
+        EffectOutcome::Archive(Err(_))
+        | EffectOutcome::Inbox(Err(_))
+        | EffectOutcome::OfflineDeliveryQuotaExceeded => ExternalOutcome::Failed,
         EffectOutcome::Delivery(outcome) | EffectOutcome::CarbonFanout { outcome, .. } => {
             match outcome {
                 FullJidDeliveryOutcome::Delivered | FullJidDeliveryOutcome::QueuedDetached => {
@@ -898,12 +958,30 @@ pub async fn terminalize_if_complete(
     uow: &IngressUnitOfWork,
     message_key: MessageKey,
 ) -> Result<bool, IngressUowError> {
+    Ok(matches!(
+        terminalize_if_complete_outcome(uow, message_key).await?,
+        Some(
+            crate::ingress_substrate::TerminalizeOutcome::Terminalized
+                | crate::ingress_substrate::TerminalizeOutcome::AlreadyTerminal
+        )
+    ))
+}
+
+pub(crate) async fn terminalize_if_complete_outcome(
+    uow: &IngressUnitOfWork,
+    message_key: MessageKey,
+) -> Result<Option<crate::ingress_substrate::TerminalizeOutcome>, IngressUowError> {
+    #[cfg(test)]
+    if test_hooks::take_terminalization_timeout(message_key) {
+        return Err(IngressUowError::Timeout);
+    }
     let mut transaction = uow
         .begin_with_timeouts(Duration::from_millis(100), Duration::from_millis(250))
         .await?;
-    let complete = terminalize_if_complete_in_transaction(&mut transaction, message_key).await?;
+    let outcome =
+        terminalize_if_complete_outcome_in_transaction(&mut transaction, message_key).await?;
     transaction.commit().await?;
-    Ok(complete)
+    Ok(outcome)
 }
 
 /// Share the receipt proof with stream retirement without opening a nested transaction.
@@ -911,27 +989,47 @@ pub(super) async fn terminalize_if_complete_in_transaction(
     transaction: &mut IngressUowTransaction<'_>,
     message_key: MessageKey,
 ) -> Result<bool, IngressUowError> {
+    Ok(matches!(
+        terminalize_if_complete_outcome_in_transaction(transaction, message_key).await?,
+        Some(
+            crate::ingress_substrate::TerminalizeOutcome::Terminalized
+                | crate::ingress_substrate::TerminalizeOutcome::AlreadyTerminal
+        )
+    ))
+}
+
+async fn terminalize_if_complete_outcome_in_transaction(
+    transaction: &mut IngressUowTransaction<'_>,
+    message_key: MessageKey,
+) -> Result<Option<crate::ingress_substrate::TerminalizeOutcome>, IngressUowError> {
     if !CanonicalMessageRepository::lock(transaction, message_key).await? {
-        return Ok(false);
+        return Ok(Some(
+            crate::ingress_substrate::TerminalizeOutcome::MessageVanished,
+        ));
     }
     if !EffectReceiptRepository::receipts_complete(transaction, message_key).await? {
         waddle_xmpp::telemetry::reliability::increment_ingress_effect_unresolved(
             waddle_xmpp::telemetry::attributes::IngressUnresolvedEffectKind::Terminalization,
         );
-        return Ok(false);
+        return Ok(None);
     }
     let outcome =
         CanonicalMessageRepository::terminalize(transaction, message_key, chrono::Utc::now())
             .await?;
-    Ok(!matches!(
-        outcome,
-        crate::ingress_substrate::TerminalizeOutcome::MessageVanished
-    ))
+    Ok(Some(outcome))
 }
 
 #[cfg(test)]
 #[path = "execute_dependency_tests.rs"]
 mod dependency_tests;
+
+#[cfg(test)]
+#[path = "execute_test_hooks.rs"]
+pub(crate) mod test_hooks;
+
+#[cfg(test)]
+#[path = "execute_settlement_tests.rs"]
+mod settlement_tests;
 
 #[cfg(test)]
 mod tests {
@@ -1000,6 +1098,8 @@ mod tests {
             external_dependencies: vec![vec![], vec![]],
             external: vec![frame(), frame()],
             external_receipts: vec![vec![key.clone()], vec![key.clone()]],
+            arm_owned_receipts: Vec::new(),
+            route_progress: Vec::new(),
             receipts_pending: vec![key.clone()],
         };
         let mut outcomes = vec![(frame(), ExternalOutcome::Done)];
@@ -1123,3 +1223,7 @@ mod activity_tests;
 #[cfg(all(test, feature = "clustering"))]
 #[path = "execute_groupchat_receipt_tests.rs"]
 mod groupchat_receipt_tests;
+
+#[cfg(test)]
+#[path = "execute_detached_fault_tests.rs"]
+mod detached_fault_tests;

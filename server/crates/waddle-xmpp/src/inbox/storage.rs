@@ -13,6 +13,7 @@ use jid::{BareJid, Jid};
 use waddle_xmpp_core::xep0359::StanzaId;
 
 use super::{InboxEntry, InboxKey, InboxView};
+use crate::ingress::MessageKey;
 use crate::xep::CallThreadDuration;
 
 /// Durable key for one groupchat notification recovery item.
@@ -27,6 +28,9 @@ pub struct GroupchatNotificationRecoveryKey {
 /// Durable retry item created alongside a committed groupchat inbox row.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct GroupchatNotificationRecovery {
+    /// Canonical ingress message whose recorded recovery obligation this row
+    /// discharges.
+    pub message_key: MessageKey,
     pub key: GroupchatNotificationRecoveryKey,
     pub sender_jid: Jid,
     pub is_live_occupant: bool,
@@ -122,6 +126,15 @@ pub trait InboxStorage: Send + Sync {
     /// List a bounded global page of uncompleted groupchat notification
     /// recovery items.
     async fn list_pending_groupchat_notification_recoveries(
+        &self,
+        limit: usize,
+    ) -> Result<Vec<GroupchatNotificationRecovery>, InboxStorageError> {
+        let _ = limit;
+        Ok(Vec::new())
+    }
+
+    /// List completed rows whose canonical recovery obligation is still unreceipted.
+    async fn list_completed_unreceipted_groupchat_notification_recoveries(
         &self,
         limit: usize,
     ) -> Result<Vec<GroupchatNotificationRecovery>, InboxStorageError> {
@@ -585,6 +598,7 @@ mod tests {
         let user = jid("me@example.com");
         let room = jid("room@muc.example.com");
         let recovery = GroupchatNotificationRecovery {
+            message_key: MessageKey::new(),
             key: GroupchatNotificationRecoveryKey {
                 recipient: user,
                 room,

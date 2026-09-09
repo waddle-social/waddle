@@ -1,6 +1,8 @@
 //! Transactional ingress identity storage for PostgreSQL and SQLite.
 
 mod authority;
+mod maintenance;
+pub use maintenance::receipt_complete_nonterminal_keys;
 #[cfg(test)]
 mod authority_tests;
 pub use authority::{
@@ -51,7 +53,7 @@ pub fn supported_protocol_epoch() -> ProtocolEpoch {
 /// Keep this list in lock-step with the migration manifest: tests query the
 /// live catalog to ensure a newly-added ingress table cannot accidentally be
 /// left outside the activation boundary.
-pub const EPOCH_GUARDED_TABLES: [&str; 8] = [
+pub const EPOCH_GUARDED_TABLES: [&str; 9] = [
     "ingress_messages",
     "ingress_origin_aliases",
     "ingress_sm_refs",
@@ -60,6 +62,7 @@ pub const EPOCH_GUARDED_TABLES: [&str; 8] = [
     "ingress_effect_intents",
     "ingress_effect_receipts",
     "ingress_carbon_receipts",
+    "ingress_delivery_receipts",
 ];
 
 /// Fail-closed errors for the dark ingress substrate.
@@ -83,6 +86,8 @@ pub enum IngressSubstrateError {
     Database { retry_class: DbRetryClass },
     #[error("ingress substrate returned a malformed stored message key")]
     InvalidStoredMessageKey,
+    #[error("ingress substrate returned a malformed stored timestamp")]
+    InvalidStoredTimestamp,
     #[error("ingress substrate returned a malformed semantic digest")]
     InvalidStoredDigest,
     #[error("ingress alias disappeared during concurrent resolution")]

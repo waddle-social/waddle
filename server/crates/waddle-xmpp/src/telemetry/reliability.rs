@@ -10,9 +10,9 @@
 //! scrape during the dual-emit release.
 
 use super::attributes::{
-    IngressAliasOutcome, IngressDecisionClass, IngressGcOutcome, IngressUnresolvedEffectKind,
-    Janitor, PushRetryReason, PushSuppressReason, SmAckOutcome, SmEvictionPath, SmResumeOutcome,
-    SweepOutcome,
+    IngressAliasOutcome, IngressDecisionClass, IngressGcOutcome, IngressMaintenanceOutcome,
+    IngressMaintenancePhase, IngressUnresolvedEffectKind, Janitor, PushRetryReason,
+    PushSuppressReason, SmAckOutcome, SmEvictionPath, SmResumeOutcome, SweepOutcome,
 };
 
 /// One table entry: a private `mod <helper> { fn add(count) }` holding
@@ -269,6 +269,12 @@ pub fn register_reliability_counters() {
     for outcome in IngressGcOutcome::ALL {
         add_ingress_gc_runs(0, outcome);
     }
+    for phase in IngressMaintenancePhase::ALL {
+        for outcome in IngressMaintenanceOutcome::ALL {
+            add_ingress_maintenance_runs(0, phase, outcome);
+        }
+    }
+    add_ingress_maintenance_terminalized_messages(0);
     for class in IngressDecisionClass::ALL {
         add_ingress_decision(0, class);
     }
@@ -485,6 +491,37 @@ pub fn add_ingress_gc_reclaimed_messages(count: u64) {
     record_ingress_gc_reclaimed_messages(count);
 }
 
+fn add_ingress_maintenance_runs(
+    count: u64,
+    phase: IngressMaintenancePhase,
+    outcome: IngressMaintenanceOutcome,
+) {
+    crate::counter_add!(
+        "ingress.maintenance.runs",
+        "{run}",
+        "Ingress maintenance runs by phase and outcome.",
+        count,
+        phase,
+        outcome,
+    );
+}
+
+pub fn increment_ingress_maintenance_run(
+    phase: IngressMaintenancePhase,
+    outcome: IngressMaintenanceOutcome,
+) {
+    add_ingress_maintenance_runs(1, phase, outcome);
+}
+
+pub fn add_ingress_maintenance_terminalized_messages(count: u64) {
+    crate::counter_add!(
+        "ingress.maintenance.terminalized_messages",
+        "{message}",
+        "Ingress messages terminalized by bounded maintenance.",
+        count,
+    );
+}
+
 // The legacy unknown-reason catch-all family is gone with the text
 // renderer: the sealed `PushSuppressReason` enum makes an unmapped
 // reason a compile error, so it was structurally unreachable and
@@ -577,6 +614,58 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn ingress_maintenance_helpers_emit_with_typed_labels() {
+        let guard = setup().await;
+        register_reliability_counters();
+        increment_ingress_maintenance_run(
+            IngressMaintenancePhase::Terminalization,
+            IngressMaintenanceOutcome::Partial,
+        );
+        add_ingress_maintenance_terminalized_messages(3);
+        assert_eq!(
+            guard.counter_sum(
+                "ingress.maintenance.runs",
+                &[("phase", "terminalization"), ("outcome", "partial")]
+            ),
+            Some(1)
+        );
+        assert_eq!(
+            guard.counter_sum("ingress.maintenance.terminalized_messages", &[]),
+            Some(3)
+        );
+    }
+
+    #[tokio::test]
+    async fn ingress_maintenance_failure_rule_matches_exported_labels() {
+        let guard = setup().await;
+        let rules_path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../../infrastructure/waddle.cloud/rules/mimir/waddle-reliability.yaml");
+        let rules = std::fs::read_to_string(&rules_path)
+            .unwrap_or_else(|error| panic!("read {}: {error}", rules_path.display()));
+        let expression = rules
+            .lines()
+            .skip_while(|line| !line.contains("alert: IngressMaintenanceFailing"))
+            .nth(1)
+            .expect("IngressMaintenanceFailing expression");
+        assert!(expression.contains(
+            "ingress_maintenance_runs_total{phase=\"pass\",outcome=~\"failed|timed_out\"}"
+        ));
+        for outcome in [
+            IngressMaintenanceOutcome::Failed,
+            IngressMaintenanceOutcome::TimedOut,
+        ] {
+            increment_ingress_maintenance_run(IngressMaintenancePhase::Pass, outcome);
+            assert_eq!(
+                guard.counter_sum(
+                    "ingress.maintenance.runs",
+                    &[("phase", "pass"), ("outcome", outcome.value())]
+                ),
+                Some(1)
+            );
+        }
+    }
+
+    #[tokio::test]
     async fn ingress_gc_failure_rule_matches_exported_outcome_label() {
         let guard = setup().await;
         let rules_path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
@@ -606,6 +695,23 @@ mod tests {
                 Some(0)
             );
         }
+    }
+
+    #[test]
+    fn ingress_gc_backlog_rule_covers_idle_maintenance() {
+        let rules_path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../../infrastructure/waddle.cloud/rules/mimir/waddle-reliability.yaml");
+        let rules = std::fs::read_to_string(&rules_path)
+            .unwrap_or_else(|error| panic!("read {}: {error}", rules_path.display()));
+        let expression = rules
+            .lines()
+            .skip_while(|line| !line.contains("alert: IngressGcBacklog"))
+            .nth(1)
+            .expect("IngressGcBacklog expression");
+        assert_eq!(
+            expression.trim(),
+            "expr: max(cnpg_waddle_ingress_gc_eligible_messages) > 0"
+        );
     }
 
     #[test]
@@ -717,6 +823,8 @@ mod tests {
         "ingress.tx.retries",
         "ingress.gc.runs",
         "ingress.gc.reclaimed_messages",
+        "ingress.maintenance.runs",
+        "ingress.maintenance.terminalized_messages",
         "ingress.effects.unresolved",
     ];
 
@@ -806,6 +914,20 @@ mod tests {
                 "ingress GC outcome {} not registered",
                 outcome.value()
             );
+        }
+        for phase in IngressMaintenancePhase::ALL {
+            for outcome in IngressMaintenanceOutcome::ALL {
+                assert_eq!(
+                    guard.counter_sum(
+                        "ingress.maintenance.runs",
+                        &[("phase", phase.value()), ("outcome", outcome.value())]
+                    ),
+                    Some(0),
+                    "ingress maintenance phase {} outcome {} not registered",
+                    phase.value(),
+                    outcome.value()
+                );
+            }
         }
         for reason in PushRetryReason::ALL {
             assert_eq!(

@@ -39,12 +39,17 @@ const XEP_0359_STANZA_ID_NS: &str = "urn:xmpp:sid:0";
 enum MessageHookMode {
     All,
     EnrichOnly,
-    ObserveOnly,
 }
 
 #[derive(Debug, Clone, Default)]
 pub struct MessageExtensionOutcome {
     pub enrichments_added: usize,
+    pub effects: Vec<ExtensionEffect>,
+}
+
+/// Result of invoking one explicitly selected message observer.
+#[derive(Debug, Clone, Default)]
+pub struct ObserverOutcome {
     pub effects: Vec<ExtensionEffect>,
 }
 
@@ -122,6 +127,8 @@ mod manifest;
 mod message_context;
 mod message_helpers;
 mod message_processing;
+#[cfg(any(test, feature = "test-support"))]
+mod observer_test_support;
 mod signing;
 
 use launch_signing::*;

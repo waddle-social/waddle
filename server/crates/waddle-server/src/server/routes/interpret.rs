@@ -84,9 +84,8 @@ use std::str::FromStr;
 use std::sync::Arc;
 use tracing::{debug, error, info, info_span, warn, Instrument};
 use waddle_extensions::{
-    message_has_framework_envelope, DisplayText, ExtensionEffect, ExtensionEnvelope,
-    ExtensionManager, MessageMarkupKind, MessageMarkupSpan, ReplyTarget, RoomJid, StanzaId,
-    ThreadId, WaddleId,
+    message_has_framework_envelope, DisplayText, ExtensionEnvelope, ExtensionManager,
+    MessageMarkupKind, MessageMarkupSpan, ReplyTarget, RoomJid, StanzaId, ThreadId, WaddleId,
 };
 use waddle_xmpp::carbons::{build_received_carbon, build_sent_carbon};
 use waddle_xmpp::inbox::runtime::{direct_message_entry, groupchat_entry, groupchat_thread_entry};
@@ -162,7 +161,7 @@ mod groupchat_inbox;
 mod groupchat_validation;
 mod handoff;
 mod notification_activity_ingest;
-mod offline_delivery;
+pub(crate) mod offline_delivery;
 mod room_dispatch;
 mod room_pin;
 mod room_subject;
@@ -212,7 +211,9 @@ use room_subject::{
     persist_room_subject_event, PersistRoomSubjectEventOutcome, PersistRoomSubjectRequest,
 };
 pub(crate) use route_to_connection::{
-    bounce_undeliverable_iq, route_to_connection, undeliverable_iq_reply,
+    bounce_undeliverable_iq, deliver_direct_to_full_with_registered_remote,
+    deliver_peer_to_full_with_registered_remote, queue_processed_for_detached, route_to_connection,
+    undeliverable_iq_reply,
 };
 #[cfg(feature = "clustering")]
 pub(crate) use routing::deliver_peer_to_full;
@@ -975,7 +976,7 @@ async fn enrich_message_event(deps: &Deps<'_>, message: Message) -> Message {
 }
 
 #[cfg(test)]
-mod tests;
+pub(crate) mod tests;
 
 #[cfg(test)]
 mod retraction_ingress_tests;

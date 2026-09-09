@@ -5,45 +5,15 @@ mod schema;
 
 use super::codec::{decode_row, serialize_message, PAYLOAD_KIND_ARCHIVED, PAYLOAD_KIND_TRANSIENT};
 
-use waddle_xmpp::ownership::{ClaimError, ClaimStore, Entity, EntityType, SharedNodeIdentity};
+use waddle_xmpp::ownership::{
+    ClaimError, ClaimStore, CurrentNodeIdentityGuard, Entity, EntityType, SharedNodeIdentity,
+};
 use waddle_xmpp::stream_management::persistence::SmClaimFence;
 
 // ---------------------------------------------------------------------------
 // Database-backed PendingDeliveryStorage (issue #209, slice (b) production
 // backend).
 // ---------------------------------------------------------------------------
-
-/// Per-recipient mutex map serializing inserts so the
-/// `INSERT … SELECT … WHERE COUNT < cap` quota check is strict on
-/// Postgres too. SQLite serializes writers globally so this is
-/// belt-and-suspenders for SQLite, but on Postgres with the default
-/// READ-COMMITTED isolation level two concurrent inserts can both
-/// observe the same `COUNT(*)` snapshot and exceed `max_rows`. The
-/// app-level lock per recipient bare-JID closes that race
-/// portably across drivers.
-///
-/// Lock granularity is per recipient — concurrent inserts for
-/// *different* recipients don't contend.
-type RecipientLockMap = dashmap::DashMap<BareJid, std::sync::Arc<tokio::sync::Mutex<()>>>;
-
-/// Sweep [`RecipientLockMap`] entries that no caller is currently
-/// holding. Called periodically from the claim-expiry janitor so the
-/// per-recipient insert-lock map does not grow forever with every
-/// distinct recipient seen by the process.
-pub fn sweep_recipient_locks(
-    locks: &dashmap::DashMap<BareJid, std::sync::Arc<tokio::sync::Mutex<()>>>,
-) -> usize {
-    let mut removed = 0;
-    locks.retain(|_, lock| {
-        if std::sync::Arc::strong_count(lock) > 1 {
-            true
-        } else {
-            removed += 1;
-            false
-        }
-    });
-    removed
-}
 
 /// libSQL/Postgres-backed [`PendingDeliveryStorage`] implementation.
 ///
@@ -75,12 +45,6 @@ pub fn sweep_recipient_locks(
 pub struct DatabasePendingDeliveryStorage {
     db: Database,
     quota: QuotaPolicy,
-    /// Per-recipient insert serialization to make
-    /// `INSERT … SELECT … WHERE COUNT < cap` strict on Postgres
-    /// (READ-COMMITTED snapshots can't see uncommitted concurrent
-    /// inserts, so two writers can both pass the cap check). SQLite
-    /// already serializes writers; this is portable defense.
-    recipient_locks: std::sync::Arc<RecipientLockMap>,
     /// ADR-0017 Phase 3 Slice 5 FIX 3 (council-adjudicated): present only
     /// when clustering is enabled AND this storage's `db` is co-located
     /// with the clustering global database (checked once, before
@@ -115,6 +79,35 @@ struct PreparedInsertRow {
     by: Option<String>,
     sid: Option<String>,
     xml: Option<String>,
+}
+
+/// Optional clustered-SM ownership assertion for one pending insert.
+///
+/// The identity guard is acquired by `insert_fenced` and retained by that
+/// caller through transaction commit. Passing it into the shared helper lets
+/// the helper keep the required SQL order: exact claim assertion first,
+/// recipient advisory lock second, pending row insert last.
+pub(crate) struct PendingInsertFence<'a> {
+    entity: &'a Entity,
+    claim_fence: &'a SmClaimFence,
+    node_identity: &'a SharedNodeIdentity,
+    identity_guard: &'a CurrentNodeIdentityGuard,
+}
+
+impl<'a> PendingInsertFence<'a> {
+    fn new(
+        entity: &'a Entity,
+        claim_fence: &'a SmClaimFence,
+        node_identity: &'a SharedNodeIdentity,
+        identity_guard: &'a CurrentNodeIdentityGuard,
+    ) -> Self {
+        Self {
+            entity,
+            claim_fence,
+            node_identity,
+            identity_guard,
+        }
+    }
 }
 
 /// Map a [`ClaimError`] to the [`PendingStorageError`] `insert_fenced`'s
@@ -192,7 +185,6 @@ impl DatabasePendingDeliveryStorage {
         let storage = Self {
             db,
             quota,
-            recipient_locks: std::sync::Arc::new(RecipientLockMap::new()),
             fencing: None,
             ack_windows: Default::default(),
         };
@@ -300,87 +292,139 @@ impl DatabasePendingDeliveryStorage {
     }
 }
 
+/// Insert one pending row inside the caller's transaction.
+///
+/// Postgres takes a transaction-scoped advisory lock keyed by the recipient
+/// before evaluating the count-cap predicate. This serializes the last quota
+/// slot across processes and across every insert path that uses this helper.
+/// SQLite needs no corresponding advisory primitive because its single writer
+/// already serializes the statement. When `fence` is present, its exact SM
+/// claim is asserted before either the advisory lock or the write.
+pub(crate) async fn insert_in_transaction(
+    tx: &mut crate::db::Transaction<'_>,
+    row: &PendingRow,
+    quota: QuotaPolicy,
+    fence: Option<PendingInsertFence<'_>>,
+) -> Result<InsertOutcome, PendingStorageError> {
+    if let Some(fence) = fence {
+        let owner = fence.claim_fence.owner();
+        if !fence.node_identity.owns_guard(fence.identity_guard)
+            || fence.identity_guard.identity() != owner
+        {
+            return Err(PendingStorageError::NotOwner {
+                entity: fence.entity.clone(),
+            });
+        }
+        let entity_key = format!(
+            "{}:{}",
+            fence.entity.entity_type.as_db_str(),
+            fence.entity.id
+        );
+        let mut rows = tx
+            .query(
+                "SELECT 1 FROM clustering_claims WHERE entity = ? AND node_id = ? AND node_epoch = ? AND claim_epoch = ? FOR SHARE",
+                crate::db_params![
+                    entity_key,
+                    owner.node_id.clone(),
+                    owner.node_epoch.clone(),
+                    fence.claim_fence.epoch().0,
+                ],
+            )
+            .await
+            .map_err(|error| PendingStorageError::Other(error.to_string()))?;
+        let held = rows
+            .next()
+            .await
+            .map_err(|error| PendingStorageError::Other(error.to_string()))?
+            .is_some();
+        if !held {
+            return Err(PendingStorageError::NotOwner {
+                entity: fence.entity.clone(),
+            });
+        }
+    }
+
+    let recipient = row.recipient.to_string();
+    if matches!(tx.driver(), DatabaseDriver::Postgres) {
+        tx.execute(
+            "SELECT pg_advisory_xact_lock(hashtext(?))",
+            crate::db_params![recipient.clone()],
+        )
+        .await
+        .map_err(|error| PendingStorageError::Other(error.to_string()))?;
+    }
+
+    let PreparedInsertRow {
+        row_id,
+        receipt_ms,
+        kind,
+        by,
+        sid,
+        xml,
+    } = DatabasePendingDeliveryStorage::prepare_insert_row(row)?;
+    let affected = match quota {
+        QuotaPolicy::Unlimited => {
+            tx.execute(
+                "INSERT INTO pending_delivery (\
+                    row_id, recipient_jid, original_receipt_at, payload_kind, \
+                    archive_stanza_by, archive_stanza_id, transient_xml, \
+                    flushed_in_session, outbound_sequence \
+                 ) VALUES (?, ?, ?, ?, ?, ?, ?, NULL, NULL)",
+                crate::db_params![row_id, recipient, receipt_ms, kind, by, sid, xml],
+            )
+            .await
+        }
+        QuotaPolicy::CountCap { max_rows } => {
+            tx.execute(
+                "INSERT INTO pending_delivery (\
+                    row_id, recipient_jid, original_receipt_at, payload_kind, \
+                    archive_stanza_by, archive_stanza_id, transient_xml, \
+                    flushed_in_session, outbound_sequence \
+                 ) \
+                 SELECT ?, ?, ?, ?, ?, ?, ?, NULL, NULL \
+                 WHERE (SELECT COUNT(*) FROM pending_delivery WHERE recipient_jid = ?) < ?",
+                crate::db_params![
+                    row_id,
+                    recipient.clone(),
+                    receipt_ms,
+                    kind,
+                    by,
+                    sid,
+                    xml,
+                    recipient,
+                    i64::from(max_rows),
+                ],
+            )
+            .await
+        }
+    }
+    .map_err(|error| PendingStorageError::Other(error.to_string()))?;
+
+    Ok(if affected == 0 {
+        InsertOutcome::QuotaExceeded
+    } else {
+        InsertOutcome::Inserted
+    })
+}
+
 #[async_trait]
 impl PendingDeliveryStorage for DatabasePendingDeliveryStorage {
+    fn quota_policy(&self) -> waddle_xmpp::pending_delivery::QuotaPolicy {
+        self.quota
+    }
+
     #[instrument(skip(self, row), fields(recipient = %row.recipient), err)]
     async fn insert(&self, row: PendingRow) -> Result<InsertOutcome, PendingStorageError> {
-        // Per-recipient lock to serialize concurrent inserts for the
-        // same recipient. This makes the `INSERT … SELECT … WHERE
-        // COUNT < cap` quota check strict on Postgres (where
-        // READ-COMMITTED snapshots can otherwise let two concurrent
-        // inserts both pass the cap and exceed `max_rows`). SQLite
-        // serializes writers globally, so for SQLite this is
-        // belt-and-suspenders.
-        let recipient_lock = self
-            .recipient_locks
-            .entry(row.recipient.clone())
-            .or_insert_with(|| std::sync::Arc::new(tokio::sync::Mutex::new(())))
-            .clone();
-        let _guard = recipient_lock.lock().await;
-
-        let PreparedInsertRow {
-            row_id,
-            receipt_ms,
-            kind,
-            by,
-            sid,
-            xml,
-        } = Self::prepare_insert_row(&row)?;
-        // Atomic-with-quota INSERT: the WHERE clause runs in the same
-        // SQL statement as the insert. Combined with the per-recipient
-        // lock above this gives strict cap enforcement portably across
-        // SQLite (single-writer) and Postgres (READ-COMMITTED).
-        // Affected row count differentiates accepted (1) from
-        // quota-rejected (0).
-        let affected = match self.quota {
-            QuotaPolicy::Unlimited => {
-                self.execute(
-                    "INSERT INTO pending_delivery (\
-                        row_id, recipient_jid, original_receipt_at, payload_kind, \
-                        archive_stanza_by, archive_stanza_id, transient_xml, \
-                        flushed_in_session, outbound_sequence \
-                     ) VALUES (?, ?, ?, ?, ?, ?, ?, NULL, NULL)",
-                    crate::db_params![
-                        row_id,
-                        row.recipient.to_string(),
-                        receipt_ms,
-                        kind,
-                        by,
-                        sid,
-                        xml,
-                    ],
-                )
-                .await?
-            }
-            QuotaPolicy::CountCap { max_rows } => {
-                self.execute(
-                    "INSERT INTO pending_delivery (\
-                        row_id, recipient_jid, original_receipt_at, payload_kind, \
-                        archive_stanza_by, archive_stanza_id, transient_xml, \
-                        flushed_in_session, outbound_sequence \
-                     ) \
-                     SELECT ?, ?, ?, ?, ?, ?, ?, NULL, NULL \
-                     WHERE (SELECT COUNT(*) FROM pending_delivery WHERE recipient_jid = ?) < ?",
-                    crate::db_params![
-                        row_id,
-                        row.recipient.to_string(),
-                        receipt_ms,
-                        kind,
-                        by,
-                        sid,
-                        xml,
-                        row.recipient.to_string(),
-                        i64::from(max_rows),
-                    ],
-                )
-                .await?
-            }
-        };
-        if affected == 0 {
-            Ok(InsertOutcome::QuotaExceeded)
-        } else {
-            Ok(InsertOutcome::Inserted)
-        }
+        let mut tx = self
+            .db
+            .begin_immediate()
+            .await
+            .map_err(|error| PendingStorageError::Other(error.to_string()))?;
+        let outcome = insert_in_transaction(&mut tx, &row, self.quota, None).await?;
+        tx.commit()
+            .await
+            .map_err(|error| PendingStorageError::Other(error.to_string()))?;
+        Ok(outcome)
     }
 
     #[instrument(
@@ -401,13 +445,6 @@ impl PendingDeliveryStorage for DatabasePendingDeliveryStorage {
             return self.insert(row).await;
         };
 
-        let recipient_lock = self
-            .recipient_locks
-            .entry(row.recipient.clone())
-            .or_insert_with(|| std::sync::Arc::new(tokio::sync::Mutex::new(())))
-            .clone();
-        let _guard = recipient_lock.lock().await;
-
         let entity = Entity::new(EntityType::SmSession, origin_stream_id.to_string());
         let identity = fencing.node_identity.current();
         // `ensure_claimed`, not a bare `acquire`: the caller (Q6 promotion)
@@ -423,48 +460,12 @@ impl PendingDeliveryStorage for DatabasePendingDeliveryStorage {
             .await
             .map_err(|error| claim_error_to_pending_storage_error(error, entity.clone()))?;
         let claim_fence = SmClaimFence::new(identity, epoch);
-        let PreparedInsertRow {
-            row_id,
-            receipt_ms,
-            kind,
-            by,
-            sid,
-            xml,
-        } = Self::prepare_insert_row(&row)?;
-
         let mut tx = self
             .db
             .begin()
             .await
             .map_err(|e| PendingStorageError::Other(e.to_string()))?;
 
-        // Fencing check: identical shape to
-        // `sm_persistence_fenced::PostgresFencedSmPersistence::assert_fenced`
-        // — the first statement inside this transaction, on the SAME
-        // connection as the write it guards. A failed check aborts BEFORE
-        // any write: `tx` is dropped here (rolling back) rather than
-        // committed.
-        let entity_key = format!("{}:{}", EntityType::SmSession.as_db_str(), origin_stream_id);
-        let mut fence_rows = tx
-            .query(
-                "SELECT 1 FROM clustering_claims WHERE entity = ? AND node_id = ? AND node_epoch = ? AND claim_epoch = ? FOR SHARE",
-                crate::db_params![
-                    entity_key,
-                    claim_fence.owner().node_id.clone(),
-                    claim_fence.owner().node_epoch.clone(),
-                    claim_fence.epoch().0,
-                ],
-            )
-            .await
-            .map_err(|e| PendingStorageError::Other(e.to_string()))?;
-        let held = fence_rows
-            .next()
-            .await
-            .map_err(|e| PendingStorageError::Other(e.to_string()))?
-            .is_some();
-        if !held || fencing.node_identity.current() != *claim_fence.owner() {
-            return Err(PendingStorageError::NotOwner { entity });
-        }
         let Some(identity_guard) = fencing
             .node_identity
             .guard_if_current(claim_fence.owner())
@@ -473,64 +474,20 @@ impl PendingDeliveryStorage for DatabasePendingDeliveryStorage {
             return Err(PendingStorageError::NotOwner { entity });
         };
 
-        // Same two INSERT shapes as `insert`, issued on `tx` instead of a
-        // pooled single-statement guard, so the fencing check and the
-        // write commit or roll back together.
-        let affected = match self.quota {
-            QuotaPolicy::Unlimited => tx
-                .execute(
-                    "INSERT INTO pending_delivery (\
-                        row_id, recipient_jid, original_receipt_at, payload_kind, \
-                        archive_stanza_by, archive_stanza_id, transient_xml, \
-                        flushed_in_session, outbound_sequence \
-                     ) VALUES (?, ?, ?, ?, ?, ?, ?, NULL, NULL)",
-                    crate::db_params![
-                        row_id,
-                        row.recipient.to_string(),
-                        receipt_ms,
-                        kind,
-                        by,
-                        sid,
-                        xml,
-                    ],
-                )
-                .await
-                .map_err(|e| PendingStorageError::Other(e.to_string()))?,
-            QuotaPolicy::CountCap { max_rows } => tx
-                .execute(
-                    "INSERT INTO pending_delivery (\
-                        row_id, recipient_jid, original_receipt_at, payload_kind, \
-                        archive_stanza_by, archive_stanza_id, transient_xml, \
-                        flushed_in_session, outbound_sequence \
-                     ) \
-                     SELECT ?, ?, ?, ?, ?, ?, ?, NULL, NULL \
-                     WHERE (SELECT COUNT(*) FROM pending_delivery WHERE recipient_jid = ?) < ?",
-                    crate::db_params![
-                        row_id,
-                        row.recipient.to_string(),
-                        receipt_ms,
-                        kind,
-                        by,
-                        sid,
-                        xml,
-                        row.recipient.to_string(),
-                        i64::from(max_rows),
-                    ],
-                )
-                .await
-                .map_err(|e| PendingStorageError::Other(e.to_string()))?,
-        };
+        let fence = PendingInsertFence::new(
+            &entity,
+            &claim_fence,
+            &fencing.node_identity,
+            &identity_guard,
+        );
+        let outcome = insert_in_transaction(&mut tx, &row, self.quota, Some(fence)).await?;
 
         tx.commit()
             .await
             .map_err(|e| PendingStorageError::Other(e.to_string()))?;
         drop(identity_guard);
 
-        if affected == 0 {
-            Ok(InsertOutcome::QuotaExceeded)
-        } else {
-            Ok(InsertOutcome::Inserted)
-        }
+        Ok(outcome)
     }
 
     async fn list(&self, recipient: &BareJid) -> Result<Vec<PendingRow>, PendingStorageError> {
@@ -1382,6 +1339,33 @@ impl PendingDeliveryStorage for DatabasePendingDeliveryStorage {
     }
 
     fn sweep_internal_bookkeeping(&self) -> usize {
-        sweep_recipient_locks(&self.recipient_locks) + self.ack_windows.sweep()
+        self.ack_windows.sweep()
     }
+}
+
+/// Test for an existing pending row before applying a quota-predicated insert.
+pub(crate) async fn contains_in_transaction(
+    tx: &mut crate::db::Transaction<'_>,
+    id: &PendingRowId,
+) -> Result<bool, PendingStorageError> {
+    let mut rows = tx
+        .query(
+            "SELECT 1 FROM pending_delivery WHERE row_id = ?",
+            crate::db_params![id.as_str().to_string()],
+        )
+        .await
+        .map_err(|error| PendingStorageError::Other(error.to_string()))?;
+    Ok(rows
+        .next()
+        .await
+        .map_err(|error| PendingStorageError::Other(error.to_string()))?
+        .is_some())
+}
+
+/// Mark the archived notification obligation in the same transaction as its receipt.
+pub(crate) async fn mark_notification_outboxed_in_transaction(
+    tx: &mut crate::db::Transaction<'_>,
+    id: &PendingRowId,
+) -> Result<u64, PendingStorageError> {
+    tx.execute("UPDATE pending_delivery SET notification_outboxed_at_ms = ? WHERE row_id = ? AND notification_outboxed_at_ms IS NULL", crate::db_params![crate::time::now_ms(), id.as_str().to_string()]).await.map_err(|error| PendingStorageError::Other(error.to_string()))
 }

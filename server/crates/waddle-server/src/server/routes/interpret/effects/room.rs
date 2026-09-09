@@ -3,12 +3,25 @@
 pub use super::super::{OrderedRelayRouteOrigin, OrderedRelayRouteOriginKind};
 use jid::BareJid;
 use waddle_xmpp::{
-    inbox::{storage::GroupchatNotificationRecovery, InboxEntry},
+    inbox::{storage::GroupchatNotificationRecoveryKey, InboxEntry},
     mam::{ArchiveExpectation, ArchivedMessage},
     muc::{pin::PinStateChange, RoomClaimFenceContext, SubjectState},
 };
 use waddle_xmpp_core::xep0359::StanzaId;
 use xmpp_parsers::message::Message;
+
+/// Recovery data captured before ingress alias resolution assigns the
+/// canonical message key. It must be materialized as a
+/// `GroupchatNotificationRecovery` only inside the ingress transaction.
+#[derive(Debug, Clone)]
+pub struct PlannedGroupchatNotificationRecovery {
+    pub key: GroupchatNotificationRecoveryKey,
+    pub sender_jid: jid::Jid,
+    pub is_live_occupant: bool,
+    pub room_members_only: bool,
+    pub sender_can_broadcast_channel_mention: bool,
+    pub created_at_ms: i64,
+}
 
 #[derive(Debug, Clone)]
 pub enum RoomFenceRequirement {
@@ -29,7 +42,7 @@ pub enum DurableRoomEffect {
         owner: BareJid,
         entry: Box<InboxEntry>,
         is_recipient: bool,
-        recovery: Option<GroupchatNotificationRecovery>,
+        recovery: Option<PlannedGroupchatNotificationRecovery>,
     },
 }
 
@@ -58,6 +71,7 @@ pub enum ExternalRoomEffect {
     /// Observer hooks may invoke host mutations, so unlike enrichment they run only after commit.
     ObserveRoomMessage {
         room: BareJid,
+        plugin: waddle_extensions::PluginId,
         message: Box<Message>,
         requester: BareJid,
         sender: jid::FullJid,
@@ -73,7 +87,7 @@ pub enum ExternalRoomEffect {
         archive_stanza_id: waddle_xmpp_core::xep0359::StanzaId,
         /// None completes recovery for a candidate suppressed by the planning-time gate.
         candidate: Option<Box<crate::notification_outbox::NotificationCandidate>>,
-        recovery: Option<GroupchatNotificationRecovery>,
+        recovery: Option<PlannedGroupchatNotificationRecovery>,
     },
     #[cfg(feature = "clustering")]
     RelayMucProxy {
@@ -144,7 +158,10 @@ fn after_archive(room: &BareJid, id: &str) -> super::PlanEffectDependency {
     }
 }
 
-fn message_dependencies(room: &BareJid, message: &Message) -> Vec<super::PlanEffectDependency> {
+pub(crate) fn message_dependencies(
+    room: &BareJid,
+    message: &Message,
+) -> Vec<super::PlanEffectDependency> {
     super::super::groupchat_archive::extract_room_stanza_id(message, room)
         .map(|id| after_archive(room, &id))
         .into_iter()

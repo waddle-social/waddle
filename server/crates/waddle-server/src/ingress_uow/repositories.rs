@@ -20,6 +20,7 @@ use crate::{
         self, EffectReceiptKind, MessageEnvelope, MessageWriteOutcome, TerminalizeOutcome,
     },
     ingress_uow::{IngressUowError, IngressUowTransaction},
+    server::routes::interpret::effects::room::PlannedGroupchatNotificationRecovery,
 };
 
 /// Repository for MAM archive rows written inside the ingress transaction.
@@ -176,10 +177,19 @@ impl InboxRepository {
         user: &BareJid,
         entry: InboxEntry,
         increment_unread: bool,
-        recovery: GroupchatNotificationRecovery,
+        recovery: PlannedGroupchatNotificationRecovery,
     ) -> Result<InboxEntry, IngressUowError> {
         let (entry, _) =
             Self::apply_projection(transaction, message_key, user, entry, increment_unread).await?;
+        let recovery = GroupchatNotificationRecovery {
+            message_key,
+            key: recovery.key,
+            sender_jid: recovery.sender_jid,
+            is_live_occupant: recovery.is_live_occupant,
+            room_members_only: recovery.room_members_only,
+            sender_can_broadcast_channel_mention: recovery.sender_can_broadcast_channel_mention,
+            created_at_ms: recovery.created_at_ms,
+        };
         crate::inbox::insert_groupchat_notification_recovery_in_transaction(
             transaction.transaction_mut(),
             recovery,
@@ -247,6 +257,30 @@ impl CanonicalMessageRepository {
         ingress_substrate::load_envelope(transaction.transaction_mut(), message_key)
             .await
             .map_err(Into::into)
+    }
+
+    /// Read the original acceptance time while holding the canonical lock.
+    pub async fn created_at(
+        transaction: &mut IngressUowTransaction<'_>,
+        message_key: MessageKey,
+    ) -> Result<DateTime<Utc>, IngressUowError> {
+        let sql = dialect_sql(
+            transaction,
+            "SELECT to_char(created_at AT TIME ZONE 'UTC', 'YYYY-MM-DD\"T\"HH24:MI:SS.US\"Z\"') FROM ingress_messages WHERE message_key = ?::uuid",
+            "SELECT created_at FROM ingress_messages WHERE message_key = ?",
+        );
+        let mut rows = transaction
+            .transaction_mut()
+            .query(sql, crate::db_params![message_key.to_storage().to_string()])
+            .await?;
+        let row = rows
+            .next()
+            .await?
+            .ok_or(IngressUowError::EffectIntentMessageMissing)?;
+        let timestamp: String = row.get(0)?;
+        DateTime::parse_from_rfc3339(&timestamp)
+            .map(|timestamp| timestamp.with_timezone(&Utc))
+            .map_err(|_| IngressUowError::InvalidStoredMessageTimestamp)
     }
 
     pub async fn resolve_and_record_alias(
@@ -722,6 +756,9 @@ impl EffectReceiptRepository {
         kind: EffectReceiptKind,
         hash: &[u8; 32],
     ) -> Result<(), IngressUowError> {
+        #[cfg(test)]
+        let _ =
+            super::settlement::POOLED_RECEIPT_WRITES.try_with(|count| count.set(count.get() + 1));
         ingress_substrate::record_receipt_pooled(db, message_key, kind, hash)
             .await
             .map_err(Into::into)
@@ -959,12 +996,14 @@ fn compare_effects<'a>(
             // room owner may still establish its authority on first acceptance.
             if (existing_authority && recorded.is_empty())
                 || (!recorded.is_empty()
-                    && (matches!(
-                        intent,
-                        IngressEffectIntent::RelayCarbons { .. }
-                            | IngressEffectIntent::Carbons { .. }
-                    ) || matches!(intent, IngressEffectIntent::RoomObserver { room, .. }
-                        if !room_authority_pending(recorded, room))
+                    && (notification_candidate_has_recorded_recovery(recorded, intent)
+                        || matches!(
+                            intent,
+                            IngressEffectIntent::RelayCarbons { .. }
+                                | IngressEffectIntent::Carbons { .. }
+                        )
+                        || matches!(intent, IngressEffectIntent::RoomObserver { room, plugin, .. }
+                        if !room_observer_authority_pending(recorded, room, plugin))
                         || !inbox_omission_is_recorded_audience(recorded, intent, planned)))
             {
                 divergent.insert(intent.kind());
@@ -1007,6 +1046,49 @@ fn compare_effects<'a>(
         ReconcileVerdict::Consistent
     };
     (verdict, omissions)
+}
+
+fn notification_candidate_has_recorded_recovery(
+    recorded: &[RecordedEffect],
+    planned: &IngressEffectIntent,
+) -> bool {
+    let IngressEffectIntent::NotificationActivityPreview {
+        owner,
+        mutation:
+            waddle_xmpp::ingress::NotificationActivityMutation::NotificationCandidate {
+                conversation,
+                archive_stanza_id,
+                ..
+            },
+    } = planned
+    else {
+        return false;
+    };
+    // Recovery owns this frozen decision, including a deferred decision later
+    // settled by the sweep. Fresh policy cannot add a candidate obligation.
+    recorded.iter().any(|row| {
+        matches!(&row.intent, IngressEffectIntent::GroupchatNotificationRecovery { mutation }
+            if &mutation.recipient == owner
+                && &mutation.room == conversation
+                && &mutation.archive_stanza_id == archive_stanza_id)
+    })
+}
+
+fn room_observer_authority_pending(
+    recorded: &[RecordedEffect],
+    target_room: &BareJid,
+    target_plugin: &waddle_extensions::PluginId,
+) -> bool {
+    let mut recorded_plugins = recorded.iter().filter_map(|row| match &row.intent {
+        IngressEffectIntent::RoomObserver { room, plugin, .. } if room == target_room => {
+            Some(plugin)
+        }
+        _ => None,
+    });
+    room_authority_pending(recorded, target_room)
+        && recorded_plugins.next().is_none_or(|plugin| {
+            plugin == target_plugin && recorded_plugins.all(|other| other == plugin)
+        })
 }
 
 fn room_authority_pending(recorded: &[RecordedEffect], target_room: &BareJid) -> bool {

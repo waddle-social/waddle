@@ -842,6 +842,77 @@ pub const V1013_INGRESS_NONTERMINAL_CREATED_AT_POSTGRES: &str = r#"
 CREATE INDEX ingress_messages_nonterminal_created_at_idx ON ingress_messages (created_at) WHERE terminal_at IS NULL;
 "#;
 
+/// Reset pre-upgrade ingress obligations and add per-resource delivery progress.
+///
+/// Store-owned recovery tables are intentionally outside this ledger migration.
+pub const V1014_INGRESS_RECOVERY_FOLLOWUPS: &str = r#"
+-- Delete children before parents so the reset remains valid with foreign keys enabled.
+DELETE FROM ingress_carbon_receipts;
+DELETE FROM ingress_effect_receipts;
+DELETE FROM ingress_effect_intents;
+DELETE FROM ingress_deliveries;
+DELETE FROM ingress_sm_refs;
+DELETE FROM ingress_origin_aliases;
+DELETE FROM muc_invite_claims;
+DELETE FROM ingress_messages;
+DELETE FROM ingress_sm_streams;
+
+-- Retained SM sessions cannot resume without their deleted ingress checkpoint.
+DELETE FROM sm_unacked;
+DELETE FROM sm_sessions;
+
+CREATE TABLE ingress_delivery_receipts (
+    message_key TEXT NOT NULL,
+    kind INTEGER NOT NULL,
+    semantic_identity_hash BLOB NOT NULL,
+    resource TEXT NOT NULL,
+    PRIMARY KEY (message_key, kind, semantic_identity_hash, resource),
+    FOREIGN KEY (message_key, kind, semantic_identity_hash)
+        REFERENCES ingress_effect_intents (message_key, kind, semantic_identity_hash) ON DELETE CASCADE
+);
+"#;
+
+pub const V1014_INGRESS_RECOVERY_FOLLOWUPS_POSTGRES: &str = r#"
+-- Lock the live epoch first and install proof for this migration transaction.
+-- Unlike V1012, this reset is valid both before and after epoch-one activation.
+SELECT set_config('waddle.protocol_epoch', (SELECT epoch FROM ingress_protocol_epoch WHERE id = 1 FOR UPDATE)::text, true), set_config('waddle.protocol_epoch_xid', pg_current_xact_id()::text, true);
+
+-- Delete children before parents so the reset remains valid with foreign keys enabled.
+DELETE FROM ingress_carbon_receipts;
+DELETE FROM ingress_effect_receipts;
+DELETE FROM ingress_effect_intents;
+DELETE FROM ingress_deliveries;
+DELETE FROM ingress_sm_refs;
+DELETE FROM ingress_origin_aliases;
+DELETE FROM muc_invite_claims;
+DELETE FROM ingress_messages;
+DELETE FROM ingress_sm_streams;
+
+-- Retained SM sessions cannot resume without their deleted ingress checkpoint.
+DELETE FROM sm_unacked;
+DELETE FROM sm_sessions;
+
+CREATE TABLE ingress_delivery_receipts (
+    message_key UUID NOT NULL,
+    kind INTEGER NOT NULL,
+    semantic_identity_hash BYTEA NOT NULL,
+    resource TEXT NOT NULL,
+    PRIMARY KEY (message_key, kind, semantic_identity_hash, resource),
+    FOREIGN KEY (message_key, kind, semantic_identity_hash)
+        REFERENCES ingress_effect_intents (message_key, kind, semantic_identity_hash) ON DELETE CASCADE
+);
+CREATE TRIGGER ingress_delivery_receipts_epoch_guard_dml
+BEFORE INSERT OR UPDATE OR DELETE ON ingress_delivery_receipts
+FOR EACH STATEMENT EXECUTE FUNCTION waddle_ingress_epoch_guard();
+CREATE TRIGGER ingress_delivery_receipts_epoch_guard_truncate
+BEFORE TRUNCATE ON ingress_delivery_receipts
+FOR EACH STATEMENT EXECUTE FUNCTION waddle_ingress_truncate_guard();
+ALTER TABLE ingress_delivery_receipts ENABLE ALWAYS TRIGGER ingress_delivery_receipts_epoch_guard_dml;
+ALTER TABLE ingress_delivery_receipts ENABLE ALWAYS TRIGGER ingress_delivery_receipts_epoch_guard_truncate;
+INSERT INTO ingress_epoch_guard_manifest (table_name) VALUES ('ingress_delivery_receipts');
+GRANT SELECT ON TABLE ingress_delivery_receipts TO pg_monitor;
+"#;
+
 /// Get all waddle schema migrations in order.
 ///
 /// Versions are intentionally offset from global migrations so a single
@@ -925,6 +996,12 @@ pub fn all() -> Vec<Migration> {
             description: "Index non-terminal ingress messages by creation time".to_string(),
             sql_sqlite: V1013_INGRESS_NONTERMINAL_CREATED_AT,
             sql_postgres: V1013_INGRESS_NONTERMINAL_CREATED_AT_POSTGRES,
+        },
+        Migration {
+            version: 1014,
+            description: "Reset ingress state and add per-resource delivery receipts".to_string(),
+            sql_sqlite: V1014_INGRESS_RECOVERY_FOLLOWUPS,
+            sql_postgres: V1014_INGRESS_RECOVERY_FOLLOWUPS_POSTGRES,
         },
     ]
 }

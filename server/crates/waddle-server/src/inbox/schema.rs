@@ -99,6 +99,7 @@ pub(super) async fn initialize(storage: &DatabaseInboxStorage) -> Result<(), Inb
             &format!(
                 r#"
             CREATE TABLE IF NOT EXISTS groupchat_notification_recovery (
+                message_key TEXT NOT NULL,
                 recipient_bare_jid TEXT NOT NULL,
                 room_jid TEXT NOT NULL,
                 thread_id TEXT NOT NULL DEFAULT '',
@@ -127,6 +128,7 @@ pub(super) async fn initialize(storage: &DatabaseInboxStorage) -> Result<(), Inb
         )
         .await?;
     migrate_recovery_channel_broadcast_column(storage).await?;
+    migrate_recovery_message_key_column(storage).await?;
     storage.execute(
         "CREATE INDEX IF NOT EXISTS idx_groupchat_notification_recovery_pending \
          ON groupchat_notification_recovery (created_at_ms, recipient_bare_jid, room_jid, thread_id, stanza_id) \
@@ -141,6 +143,70 @@ pub(super) async fn initialize(storage: &DatabaseInboxStorage) -> Result<(), Inb
         (),
     )
     .await?;
+    Ok(())
+}
+
+/// Adds the canonical ingress message key to recovery rows. Legacy rows are
+/// deliberately discarded before the required column is added: V1014 removes
+/// their canonical ingress obligations, so retaining rows that cannot point to
+/// a canonical message would create an unreceiptable retry path.
+async fn migrate_recovery_message_key_column(
+    storage: &DatabaseInboxStorage,
+) -> Result<(), InboxStorageError> {
+    const COLUMN: &str = "message_key";
+    let mut tx = storage
+        .db
+        .begin_immediate()
+        .await
+        .map_err(|error| InboxStorageError::Other(error.to_string()))?;
+    if matches!(tx.driver(), DatabaseDriver::Postgres) {
+        tx.execute(
+            "SELECT pg_advisory_xact_lock(hashtext(?))",
+            crate::db_params!["groupchat_notification_recovery.message_key"],
+        )
+        .await
+        .map_err(|error| InboxStorageError::Other(error.to_string()))?;
+    }
+    let probe = match tx.driver() {
+        DatabaseDriver::Sqlite => {
+            "SELECT 1 FROM pragma_table_info('groupchat_notification_recovery') WHERE name = ?"
+        }
+        DatabaseDriver::Postgres => {
+            "SELECT 1 FROM information_schema.columns \
+             WHERE table_schema = current_schema() \
+               AND table_name = 'groupchat_notification_recovery' \
+               AND column_name = ?"
+        }
+    };
+    let mut rows = tx
+        .query(probe, crate::db_params![COLUMN])
+        .await
+        .map_err(|error| InboxStorageError::Other(error.to_string()))?;
+    let column_present = rows
+        .next()
+        .await
+        .map_err(|error| InboxStorageError::Other(error.to_string()))?
+        .is_some();
+    drop(rows);
+    if !column_present {
+        info!(
+            column = COLUMN,
+            "Discarding legacy groupchat notification recoveries before adding canonical message keys"
+        );
+        tx.execute("DELETE FROM groupchat_notification_recovery", ())
+            .await
+            .map_err(|error| InboxStorageError::Other(error.to_string()))?;
+        tx.execute(
+            "ALTER TABLE groupchat_notification_recovery \
+             ADD COLUMN message_key TEXT NOT NULL",
+            (),
+        )
+        .await
+        .map_err(|error| InboxStorageError::Other(error.to_string()))?;
+    }
+    tx.commit()
+        .await
+        .map_err(|error| InboxStorageError::Other(error.to_string()))?;
     Ok(())
 }
 
