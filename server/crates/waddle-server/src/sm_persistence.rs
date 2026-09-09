@@ -17,7 +17,8 @@ use tracing::{debug, info, instrument};
 use waddle_xmpp::auth::AuthenticatedPrincipalRef;
 use waddle_xmpp::pending_delivery::SmSessionId;
 use waddle_xmpp::stream_management::persistence::{
-    PersistedSession, PersistedUnackedStanza, SmPersistenceError, SmPersistenceStorage,
+    KeyedSnapshotOutcome, PersistedIngressAppend, PersistedSession, PersistedUnackedStanza,
+    SmPersistenceError, SmPersistenceStorage,
 };
 use waddle_xmpp::Stanza;
 use xmpp_parsers::presence::Show;
@@ -33,6 +34,7 @@ mod atomic_store;
 /// `sm_sessions`/`sm_unacked` schema, instead of forking a second copy
 /// that could silently drift from this one.
 pub(crate) mod codec;
+pub(crate) mod ingress_append;
 mod joined_sessions;
 mod schema;
 
@@ -538,6 +540,22 @@ impl SmPersistenceStorage for DatabaseSmPersistence {
         unacked: Vec<PersistedUnackedStanza>,
     ) -> Result<(), SmPersistenceError> {
         atomic_store::store_session_atomic(self, session, unacked).await
+    }
+
+    async fn store_session_atomic_with_ingress_append(
+        &self,
+        session: PersistedSession,
+        unacked: Vec<PersistedUnackedStanza>,
+        append: PersistedIngressAppend,
+    ) -> Result<KeyedSnapshotOutcome, SmPersistenceError> {
+        atomic_store::store_session_atomic_with_ingress_append(self, session, unacked, append).await
+    }
+
+    async fn get_ingress_append(
+        &self,
+        key: &waddle_xmpp::stream_management::SmIngressAppendKey,
+    ) -> Result<Option<PersistedIngressAppend>, SmPersistenceError> {
+        ingress_append::get(&self.db, key).await
     }
 
     async fn store_session_atomic_with_principal(

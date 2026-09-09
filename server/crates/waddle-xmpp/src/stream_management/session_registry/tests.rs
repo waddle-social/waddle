@@ -4440,6 +4440,30 @@ impl super::super::persistence::SmPersistenceStorage for GatedSnapshotPersistenc
     > {
         self.inner.get_session_principal(stream_id).await
     }
+
+    async fn store_session_atomic_with_ingress_append(
+        &self,
+        session: super::super::persistence::PersistedSession,
+        unacked: Vec<super::super::persistence::PersistedUnackedStanza>,
+        append: super::super::persistence::PersistedIngressAppend,
+    ) -> Result<
+        super::super::persistence::KeyedSnapshotOutcome,
+        super::super::persistence::SmPersistenceError,
+    > {
+        self.inner
+            .store_session_atomic_with_ingress_append(session, unacked, append)
+            .await
+    }
+
+    async fn get_ingress_append(
+        &self,
+        key: &crate::stream_management::SmIngressAppendKey,
+    ) -> Result<
+        Option<super::super::persistence::PersistedIngressAppend>,
+        super::super::persistence::SmPersistenceError,
+    > {
+        self.inner.get_ingress_append(key).await
+    }
 }
 
 async fn assert_ambiguous_claim_survives_displacement(
@@ -5919,6 +5943,30 @@ impl super::super::persistence::SmPersistenceStorage for FailingSnapshotPersiste
     > {
         self.inner.get_session_principal(stream_id).await
     }
+
+    async fn store_session_atomic_with_ingress_append(
+        &self,
+        session: super::super::persistence::PersistedSession,
+        unacked: Vec<super::super::persistence::PersistedUnackedStanza>,
+        append: super::super::persistence::PersistedIngressAppend,
+    ) -> Result<
+        super::super::persistence::KeyedSnapshotOutcome,
+        super::super::persistence::SmPersistenceError,
+    > {
+        self.inner
+            .store_session_atomic_with_ingress_append(session, unacked, append)
+            .await
+    }
+
+    async fn get_ingress_append(
+        &self,
+        key: &crate::stream_management::SmIngressAppendKey,
+    ) -> Result<
+        Option<super::super::persistence::PersistedIngressAppend>,
+        super::super::persistence::SmPersistenceError,
+    > {
+        self.inner.get_ingress_append(key).await
+    }
 }
 
 async fn assert_cross_shard_displacement_preserves_claim(snapshot_fails: bool) {
@@ -6554,6 +6602,30 @@ impl super::super::persistence::SmPersistenceStorage for GatedGetSessionPersiste
         super::super::persistence::SmPersistenceError,
     > {
         self.inner.get_session_principal(stream_id).await
+    }
+
+    async fn store_session_atomic_with_ingress_append(
+        &self,
+        session: super::super::persistence::PersistedSession,
+        unacked: Vec<super::super::persistence::PersistedUnackedStanza>,
+        append: super::super::persistence::PersistedIngressAppend,
+    ) -> Result<
+        super::super::persistence::KeyedSnapshotOutcome,
+        super::super::persistence::SmPersistenceError,
+    > {
+        self.inner
+            .store_session_atomic_with_ingress_append(session, unacked, append)
+            .await
+    }
+
+    async fn get_ingress_append(
+        &self,
+        key: &crate::stream_management::SmIngressAppendKey,
+    ) -> Result<
+        Option<super::super::persistence::PersistedIngressAppend>,
+        super::super::persistence::SmPersistenceError,
+    > {
+        self.inner.get_ingress_append(key).await
     }
 }
 

@@ -205,6 +205,30 @@ pub struct PersistedUnackedStanza {
     pub original_receipt_at: chrono::DateTime<chrono::Utc>,
 }
 
+/// Durable proof that one ingress obligation allocated a queue entry.
+///
+/// Keyed by the obligation rather than the stream: see
+/// [`crate::stream_management::SmIngressAppendKey`] for why a stream-scoped key would let a
+/// rebind or a resume authorize a second allocation. `accepting_stream` is therefore
+/// recorded evidence, not part of the identity, and may name a stream that has since been
+/// displaced or resumed.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PersistedIngressAppend {
+    pub key: crate::stream_management::SmIngressAppendKey,
+    pub accepting_stream: SmSessionId,
+    pub appended_at: chrono::DateTime<chrono::Utc>,
+}
+
+/// Result of a snapshot write that also claims an ingress obligation.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum KeyedSnapshotOutcome {
+    /// The snapshot and the ledger proof committed together.
+    Committed,
+    /// The obligation was already allocated, so nothing committed: neither the queue nor
+    /// the session counters moved. Carries the stream that won the allocation.
+    ObligationAlreadyAllocated { accepting_stream: SmSessionId },
+}
+
 /// Persistent storage contract for XEP-0198 SM session state.
 ///
 /// Operations are async to allow libSQL / Postgres backends; the
@@ -394,6 +418,39 @@ pub trait SmPersistenceStorage: Send + Sync {
         stream_id: &SmSessionId,
     ) -> Result<Option<AuthenticatedPrincipalRef>, SmPersistenceError>;
 
+    /// Atomically persist a detached snapshot, its complete unacked queue, and the ledger
+    /// proof for the ingress obligation that allocated the queue's newest entry.
+    ///
+    /// The ledger insert is the exactly-once gate, and it is the *database constraint* that
+    /// decides: a pre-check cannot serialize two callers, so both may arrive here believing
+    /// the obligation is unallocated. On a uniqueness conflict an implementation MUST abort
+    /// the entire write — leaving the prior queue, counters, replay-gap markers, original
+    /// timestamps and resume expiry untouched — and report
+    /// [`KeyedSnapshotOutcome::ObligationAlreadyAllocated`] with the winning stream. It must
+    /// never catch the conflict and commit anyway, and must never report a conflict for any
+    /// other constraint or backend failure: those are errors.
+    ///
+    /// There is deliberately no default implementation. The non-transactional
+    /// delete-then-upsert-then-append fallback used by [`Self::store_session_atomic`] cannot
+    /// provide this gate, and a backend that silently succeeded without the ledger write
+    /// would reintroduce duplicate allocation. Backends fail closed by failing to compile.
+    async fn store_session_atomic_with_ingress_append(
+        &self,
+        session: PersistedSession,
+        unacked: Vec<PersistedUnackedStanza>,
+        append: PersistedIngressAppend,
+    ) -> Result<KeyedSnapshotOutcome, SmPersistenceError>;
+
+    /// Look up durable proof for one ingress obligation, across every stream.
+    ///
+    /// Consulted before any session work, which is what makes resume and rebind safe: proof
+    /// outlives the detached snapshot a resume deletes, and is found even when the resource
+    /// is now bound to a different stream or has no detached session at all.
+    async fn get_ingress_append(
+        &self,
+        key: &crate::stream_management::SmIngressAppendKey,
+    ) -> Result<Option<PersistedIngressAppend>, SmPersistenceError>;
+
     /// Atomically increment the persistent promotion-failure counter
     /// for `stream_id` and return the new value. Used by the SM-
     /// expiry janitor (issue #209 finding #14) to break runaway retry
@@ -452,6 +509,10 @@ struct InMemoryState {
     unacked: std::collections::HashMap<SmSessionId, Vec<PersistedUnackedStanza>>,
     // Non-secret authorization reference paired with the detached snapshot.
     principals: std::collections::HashMap<SmSessionId, AuthenticatedPrincipalRef>,
+    // Ingress append ledger, keyed by obligation and NOT by stream, so it survives the
+    // snapshot deletion a resume performs and is shared across rebinds. A flat list keeps
+    // the obligation key free of a `Hash` bound; only tests use this backend.
+    ingress_appends: Vec<PersistedIngressAppend>,
 }
 
 impl InMemorySmPersistence {
@@ -633,6 +694,49 @@ impl SmPersistenceStorage for InMemorySmPersistence {
             .lock()
             .map_err(|error| SmPersistenceError::Other(error.to_string()))?;
         Ok(guard.principals.get(stream_id).cloned())
+    }
+
+    async fn store_session_atomic_with_ingress_append(
+        &self,
+        session: PersistedSession,
+        unacked: Vec<PersistedUnackedStanza>,
+        append: PersistedIngressAppend,
+    ) -> Result<KeyedSnapshotOutcome, SmPersistenceError> {
+        let stream_id = session.stream_id.clone();
+        let mut guard = self
+            .inner
+            .lock()
+            .map_err(|error| SmPersistenceError::Other(error.to_string()))?;
+        // The map insert stands in for the unique constraint: the obligation is claimed
+        // here or not at all, and a loser mutates neither queue nor session.
+        if let Some(existing) = guard
+            .ingress_appends
+            .iter()
+            .find(|existing| existing.key == append.key)
+        {
+            return Ok(KeyedSnapshotOutcome::ObligationAlreadyAllocated {
+                accepting_stream: existing.accepting_stream.clone(),
+            });
+        }
+        guard.ingress_appends.push(append);
+        guard.sessions.insert(stream_id.clone(), session);
+        guard.unacked.insert(stream_id, unacked);
+        Ok(KeyedSnapshotOutcome::Committed)
+    }
+
+    async fn get_ingress_append(
+        &self,
+        key: &crate::stream_management::SmIngressAppendKey,
+    ) -> Result<Option<PersistedIngressAppend>, SmPersistenceError> {
+        let guard = self
+            .inner
+            .lock()
+            .map_err(|error| SmPersistenceError::Other(error.to_string()))?;
+        Ok(guard
+            .ingress_appends
+            .iter()
+            .find(|existing| &existing.key == key)
+            .cloned())
     }
 }
 

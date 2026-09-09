@@ -584,6 +584,15 @@ CREATE TABLE sm_unacked (
     pair_sequence BIGINT,
     PRIMARY KEY (stream_id, sequence)
 );
+CREATE TABLE sm_ingress_appends (
+    message_key TEXT NOT NULL,
+    receipt_kind INTEGER NOT NULL,
+    semantic_identity_hash BLOB NOT NULL,
+    resource TEXT NOT NULL,
+    accepting_stream_id TEXT NOT NULL,
+    appended_at_ms BIGINT NOT NULL,
+    PRIMARY KEY (message_key, receipt_kind, semantic_identity_hash, resource)
+);
 CREATE INDEX idx_sm_sessions_detached ON sm_sessions (detached_at_ms);
 CREATE UNIQUE INDEX idx_sm_unacked_dedup
     ON sm_unacked (stream_id, origin_stream_id, inbound_seq)
@@ -772,6 +781,15 @@ CREATE TABLE sm_unacked (
     inbound_seq BIGINT,
     pair_sequence BIGINT,
     PRIMARY KEY (stream_id, sequence)
+);
+CREATE TABLE sm_ingress_appends (
+    message_key TEXT NOT NULL,
+    receipt_kind INTEGER NOT NULL,
+    semantic_identity_hash BYTEA NOT NULL,
+    resource TEXT NOT NULL,
+    accepting_stream_id TEXT NOT NULL,
+    appended_at_ms BIGINT NOT NULL,
+    PRIMARY KEY (message_key, receipt_kind, semantic_identity_hash, resource)
 );
 CREATE INDEX idx_sm_sessions_detached ON sm_sessions (detached_at_ms);
 CREATE UNIQUE INDEX idx_sm_unacked_dedup
