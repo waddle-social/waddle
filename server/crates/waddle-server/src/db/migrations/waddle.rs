@@ -545,6 +545,7 @@ CREATE TABLE muc_invite_claims (
 -- Retained sessions cannot resume after ingress enrollment is reset. Recreate
 -- the complete SM schema inside the serialized migration: concurrent replica
 -- startup must never race PostgreSQL catalog inserts for these objects.
+DROP TABLE IF EXISTS sm_ingress_appends;
 DROP TABLE IF EXISTS sm_unacked;
 DROP TABLE IF EXISTS sm_sessions;
 CREATE TABLE sm_sessions (
@@ -743,6 +744,7 @@ DELETE FROM ingress_sm_streams;
 -- Retained sessions cannot resume after ingress enrollment is reset. Recreate
 -- the complete SM schema inside the serialized migration: concurrent replica
 -- startup must never race PostgreSQL catalog inserts for these objects.
+DROP TABLE IF EXISTS sm_ingress_appends;
 DROP TABLE IF EXISTS sm_unacked;
 DROP TABLE IF EXISTS sm_sessions;
 CREATE TABLE sm_sessions (
