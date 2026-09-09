@@ -171,6 +171,23 @@ follow-up PR restoring `RollingUpdate` (`maxSurge: 1`, `maxUnavailable: 0`).
 This follows #1596 (`1cad23a2`) and its verified flip-back #1605 (`5dbe771c`);
 Recreate is not the steady-state rollout strategy.
 
+### V1014 cutover (#1739–#1743, PR #1752)
+
+The recovery follow-ups ride a second one-shot Recreate. Expect and do not
+treat as incidents: (1) every retained XEP-0198 session fails to resume and its
+unacked outbound frames are discarded (clients reconnect and catch up via MAM);
+(2) ingress obligations that were in flight at cutover are abandoned — observer
+plugin runs, XEP-0357 notification candidates and pending rows that had not yet
+been inserted — because V1014 deletes all canonical rows, intents, receipts,
+aliases and SM refs; (3) queued `pending_delivery` rows and archives are kept,
+and rows claimed by a discarded session are released once at startup
+(`pending_delivery_startup_migrations` marker `ingress_v1014_pending_claim_reset_v1`)
+so they flush on the first reconnect; (4) `groupchat_notification_recovery`
+rows without a canonical `message_key` are deleted once when the inbox schema
+adds the column. `IngressNonTerminalBacklog` starts from an empty table after
+the cutover; any post-cutover row is new work. Roll-forward only: a pre-V1014
+image refuses the ledger.
+
 ## Read-only verification
 
 Use the production context explicitly. Inspect rollout strategy, actual

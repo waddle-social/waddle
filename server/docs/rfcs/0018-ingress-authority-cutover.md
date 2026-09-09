@@ -346,6 +346,22 @@ Recreate hard cutover rides in this PR (prod HelmRelease `updateStrategy:
 Recreate`, precedent #1596 → flipped back by #1605); all old writers stop
 before V1012 runs; old binaries refuse the unknown ledger version.
 
+**V1014 cutover (#1752).** The recovery follow-ups ride a second one-shot
+Recreate. V1014 installs an epoch-safe transaction-local proof (valid at live
+epoch 0 and 1; no epoch-zero requirement), then resets ingress and SM state in
+child-before-parent order: effect receipts, carbon receipts, effect intents,
+deliveries, SM refs, origin aliases, invite claims, canonical messages, SM
+streams, retained SM sessions and their unacked outbound frames. Consequences:
+in-flight ingress obligations at cutover are abandoned (observer runs,
+notification candidates, not-yet-inserted pending rows); retained sessions
+cannot resume and their unacked outbound frames are discarded; queued
+`pending_delivery` rows and archives are unaffected, and pending rows claimed by
+a discarded session are released once by the store-owned startup step
+(`reset_claims_for_ingress_v1014_once`) so they deliver on the first reconnect.
+`groupchat_notification_recovery` rows without a canonical `message_key` are
+deleted once by the inbox schema step. Roll-forward only: no pre-V1014 binary
+can start after the ledger advances.
+
 ## 7. Scaffolding removal
 `ingress_shadow` → `ingress`; worker, queue, parking map, candidate ladder,
 decision markers, `IngressShadowConfig`/`WADDLE_INGRESS_SHADOW_*`
