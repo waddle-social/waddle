@@ -192,7 +192,6 @@ data:
               WHEN 1 THEN 'route_direct'
               WHEN 2 THEN 'route_muc'
               WHEN 3 THEN 'route_occupant_pm'
-              WHEN 4 THEN 'recipient_sm_append'
               WHEN 5 THEN 'carbons'
               WHEN 6 THEN 'inbox_project'
               WHEN 7 THEN 'notification_activity_preview'

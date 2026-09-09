@@ -1,14 +1,11 @@
 //! Bounded, deduplicated typed obligations collected during Phase A.
 use std::collections::BTreeSet;
 use std::sync::{Arc, Mutex};
-use waddle_xmpp::ingress::{
-    EffectMessageIdentity, IngressEffectIntent, IngressEffectKey, RecipientSmAppendIdentity,
-};
-use waddle_xmpp::pending_delivery::SmSessionId;
+use waddle_xmpp::ingress::{EffectMessageIdentity, IngressEffectIntent, IngressEffectKey};
 // Fixed obligations cover archives, room mutation/observer/recovery and error replies.
 const BASE_CAPTURE_ENTRIES: usize = 128;
 // Each recipient can require an inbox projection, its notification, delivery,
-// SM append, push candidate, and additional notification/recovery obligations.
+// push candidate, and additional notification/recovery obligations.
 const CAPTURE_ENTRIES_PER_RECIPIENT: usize = 8;
 #[cfg(test)]
 tokio::task_local! {
@@ -33,7 +30,6 @@ pub struct IngressEffectCapture {
 struct CaptureState {
     intents: Vec<IngressEffectIntent>,
     intent_keys: BTreeSet<IngressEffectKey>,
-    next_append_identity: u64,
     next_route_identity: u64,
     overflowed: bool,
     limit: usize,
@@ -45,7 +41,6 @@ impl IngressEffectCapture {
             inner: Arc::new(Mutex::new(CaptureState {
                 intents: Vec::new(),
                 intent_keys: BTreeSet::new(),
-                next_append_identity: 0,
                 next_route_identity: 0,
                 overflowed: false,
                 limit: BASE_CAPTURE_ENTRIES,
@@ -77,24 +72,6 @@ impl IngressEffectCapture {
             let key = intent.semantic_key();
             if state.intent_keys.insert(key) {
                 state.intents.push(intent.clone());
-            }
-        });
-    }
-
-    pub fn record_recipient_sm_append(&self, stream: SmSessionId) {
-        self.with_state(|state| {
-            let append_identity = RecipientSmAppendIdentity::new(state.next_append_identity);
-            state.next_append_identity = state
-                .next_append_identity
-                .checked_add(1)
-                .expect("capture append identity should not overflow in tests or production");
-            let intent = IngressEffectIntent::RecipientSmAppend {
-                stream,
-                append_identity,
-            };
-            let key = intent.semantic_key();
-            if state.intent_keys.insert(key) {
-                state.intents.push(intent);
             }
         });
     }
@@ -153,6 +130,14 @@ impl IngressEffectCapture {
 mod tests {
     use super::*;
 
+    fn record_unique_route(capture: &IngressEffectCapture) {
+        capture.record_intent(IngressEffectIntent::RouteDirect {
+            recipient: "bob@example.com".parse().expect("recipient"),
+            fanout: Vec::new(),
+            route_identity: capture.next_route_identity(),
+        });
+    }
+
     #[test]
     fn deduplicates_typed_intents() {
         let capture = IngressEffectCapture::new();
@@ -171,9 +156,9 @@ mod tests {
     fn overflow_discards_incomplete_obligations_and_stays_overflowed() {
         let capture = IngressEffectCapture::new();
         for _ in 0..=BASE_CAPTURE_ENTRIES {
-            capture.record_recipient_sm_append(SmSessionId::new("recipient"));
+            record_unique_route(&capture);
         }
-        capture.record_recipient_sm_append(SmSessionId::new("later"));
+        record_unique_route(&capture);
         assert!(capture.snapshot().overflowed);
         assert!(capture.snapshot().intents.is_empty());
     }
@@ -186,32 +171,12 @@ mod tests {
             let capture = IngressEffectCapture::new();
             capture.reserve_room_capacity(configured, occupants, members);
             for _ in 0..BASE_CAPTURE_ENTRIES + audience * CAPTURE_ENTRIES_PER_RECIPIENT {
-                capture.record_recipient_sm_append(SmSessionId::new("recipient"));
+                record_unique_route(&capture);
             }
             assert!(!capture.snapshot().overflowed);
-            capture.record_recipient_sm_append(SmSessionId::new("over-bound"));
+            record_unique_route(&capture);
             assert!(capture.snapshot().overflowed);
             assert!(capture.snapshot().intents.is_empty());
         }
-    }
-
-    #[test]
-    fn append_identity_is_global_across_recipient_streams() {
-        let capture = IngressEffectCapture::new();
-        for stream in ["first", "first", "second"] {
-            capture.record_recipient_sm_append(SmSessionId::new(stream));
-        }
-        let ordinals: Vec<_> = capture
-            .snapshot()
-            .intents
-            .into_iter()
-            .map(|intent| match intent {
-                IngressEffectIntent::RecipientSmAppend {
-                    append_identity, ..
-                } => append_identity.as_u64(),
-                _ => panic!("expected append intent"),
-            })
-            .collect();
-        assert_eq!(ordinals, [0, 1, 2]);
     }
 }

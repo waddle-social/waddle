@@ -74,7 +74,6 @@ impl Replacements {
             // These intents carry historical targets or no archive identity.
             IngressEffectIntent::RouteOccupantPm { .. }
             | IngressEffectIntent::DispatchToRoomRemote { .. }
-            | IngressEffectIntent::RecipientSmAppend { .. }
             | IngressEffectIntent::Carbons { .. }
             | IngressEffectIntent::RelayCarbons { .. }
             | IngressEffectIntent::PendingDelivery {

@@ -232,12 +232,6 @@ impl<'a> Deps<'a> {
         }
     }
 
-    pub fn capture_recipient_sm_append(&self, stream: waddle_xmpp::pending_delivery::SmSessionId) {
-        if let Some(capture) = self.ingress_effect_capture.as_ref() {
-            capture.record_recipient_sm_append(stream);
-        }
-    }
-
     /// Build an immediate execution context with optional capabilities disabled.
     /// Callers attach the storage and actor handles required by their effects.
     pub fn new(connection_registry: &'a ConnectionRegistry, local_domain: &'a str) -> Self {
