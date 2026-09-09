@@ -1,5 +1,8 @@
 //! Apply the payload-complete policy decisions retained by reconciliation.
 #[cfg(test)]
+#[path = "recorded/delivery_replay_tests.rs"]
+mod delivery_replay_tests;
+#[cfg(test)]
 #[path = "recorded/preview_replay_tests.rs"]
 mod preview_replay_tests;
 #[cfg(test)]
@@ -26,6 +29,85 @@ pub struct RouteProgress {
     pub fanout: Vec<jid::FullJid>,
     pub route_identity: waddle_xmpp::ingress::EffectMessageIdentity,
     pub completed: Vec<jid::FullJid>,
+}
+
+impl RouteProgress {
+    pub(super) fn matches(&self, effect: &ExternalEffect) -> bool {
+        external_route_recipient(effect).as_ref() == Some(&self.recipient)
+            && external_route_identity(effect) == Some(&self.route_identity)
+    }
+
+    pub(super) fn remaining(&self, effect: &ExternalEffect) -> Vec<jid::FullJid> {
+        external_route_targets(effect)
+            .into_iter()
+            .filter(|target| self.fanout.contains(target) && !self.completed.contains(target))
+            .collect()
+    }
+}
+
+/// Restore direct delivery copies from canonical content and recorded archive
+/// authority. Synthetic invitation and room copies have their own restorers.
+pub fn restore_delivery_payloads(
+    plan: &mut IngressPlan,
+    envelope: &crate::ingress_substrate::MessageEnvelope,
+) {
+    use crate::server::routes::interpret::effects::delivery::ExternalDeliveryEffect;
+    for planned in &mut plan.plan {
+        let Effect::External(effect) = &mut planned.effect else {
+            continue;
+        };
+        let Some(recipient) = external_route_recipient(effect) else {
+            continue;
+        };
+        if !plan.intents.iter().any(|intent| {
+            matches!(intent,
+            IngressEffectIntent::RouteDirect { recipient: saved, route_identity, .. }
+                if saved == &recipient && external_route_identity(effect) == Some(route_identity))
+        }) {
+            continue;
+        }
+        if let ExternalEffect::Delivery(
+            ExternalDeliveryEffect::QueueDetached { stanza, .. }
+            | ExternalDeliveryEffect::RouteToPeer { stanza, .. },
+        ) = effect
+        {
+            if matches!(stanza.as_ref(), waddle_xmpp::Stanza::Message(_)) {
+                **stanza = waddle_xmpp::Stanza::Message(delivery_message(
+                    envelope,
+                    &recipient,
+                    &plan.intents,
+                ));
+            }
+        }
+    }
+}
+
+fn delivery_message(
+    envelope: &crate::ingress_substrate::MessageEnvelope,
+    recipient: &jid::BareJid,
+    intents: &[IngressEffectIntent],
+) -> xmpp_parsers::message::Message {
+    let mut message = envelope.message().clone();
+    // A bare-target message remains bare even when today's route is live;
+    // full-target messages retain the canonical requested resource.
+    if message
+        .to
+        .as_ref()
+        .is_none_or(|target| target.to_bare() != *recipient)
+    {
+        message.to = Some(recipient.clone().into());
+    }
+    for intent in intents {
+        if let IngressEffectIntent::ArchiveAuthoritative {
+            archive, stanza_id, ..
+        } = intent
+        {
+            if archive == recipient {
+                waddle_xmpp_core::xep0359::add_stanza_id(&mut message, stanza_id);
+            }
+        }
+    }
+    message
 }
 
 /// Reconciliation preserves recorded payloads when the policy or audience

@@ -16,16 +16,36 @@ use super::{decision::IngressDecision, recorded::RouteProgress};
 #[path = "execute_archive.rs"]
 mod archive;
 
-pub(super) fn owns(effect: &ExternalEffect, _route_progress: &[RouteProgress]) -> bool {
-    matches!(
-        effect,
-        ExternalEffect::Room(ExternalRoomEffect::ArchiveAfterPin { .. })
-    )
+#[path = "execute_detached.rs"]
+mod detached;
+#[cfg(test)]
+pub(crate) use detached::{FAIL_DELIVERY_PROGRESS_TX, STALL_DELIVERY_RESOURCE};
+
+pub(super) fn owns(effect: &ExternalEffect, route_progress: &[RouteProgress]) -> bool {
+    match effect {
+        ExternalEffect::Room(ExternalRoomEffect::ArchiveAfterPin { .. }) => true,
+        ExternalEffect::Delivery(ExternalDeliveryEffect::QueueDetached {
+            bare,
+            route_identity,
+            ..
+        }) => route_progress.iter().any(|progress| {
+            &progress.recipient == bare && Some(&progress.route_identity) == route_identity.as_ref()
+        }),
+        ExternalEffect::Delivery(ExternalDeliveryEffect::RouteToPeer {
+            jid,
+            route_identity,
+            ..
+        }) => route_progress.iter().any(|progress| {
+            progress.fanout.len() > 1
+                && progress.recipient == jid.to_bare()
+                && Some(&progress.route_identity) == route_identity.as_ref()
+        }),
+        _ => false,
+    }
 }
 
-/// Later lanes add QueueDetached, RouteToPeer with recorded progress,
-/// QueueOfflineDelivery, and NotificationCandidate. Until then they remain
-/// generic effects; specialized invitation routes always remain generic.
+/// QueueOfflineDelivery and NotificationCandidate remain generic until their
+/// settlement lanes land; specialized invitation routes always remain generic.
 /// The caller wraps this entire future in its existing timeout_at(deadline).
 pub(super) async fn execute_with_uow(
     uow: &IngressUnitOfWork,
@@ -33,7 +53,7 @@ pub(super) async fn execute_with_uow(
     decision: &IngressDecision,
     index: usize,
     effect: &ExternalEffect,
-    _deps: &Deps<'_>,
+    deps: &Deps<'_>,
     _deadline: tokio::time::Instant,
 ) -> Option<EffectOutcome> {
     match effect {
@@ -41,11 +61,11 @@ pub(super) async fn execute_with_uow(
             Some(archive::execute(uow, decision, index, room).await)
         }
         ExternalEffect::Delivery(
-            ExternalDeliveryEffect::QueueDetached { .. }
-            | ExternalDeliveryEffect::RouteToPeer { .. }
-            | ExternalDeliveryEffect::QueueOfflineDelivery { .. },
-        )
-        | ExternalEffect::Room(ExternalRoomEffect::NotificationCandidate { .. }) => None,
+            delivery @ (ExternalDeliveryEffect::QueueDetached { .. }
+            | ExternalDeliveryEffect::RouteToPeer { .. }),
+        ) if owns(effect, &decision.route_progress) => {
+            Some(detached::execute(uow, decision, index, delivery, deps).await)
+        }
         _ => None,
     }
 }

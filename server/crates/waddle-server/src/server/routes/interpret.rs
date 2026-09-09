@@ -211,7 +211,9 @@ use room_subject::{
     persist_room_subject_event, PersistRoomSubjectEventOutcome, PersistRoomSubjectRequest,
 };
 pub(crate) use route_to_connection::{
-    bounce_undeliverable_iq, route_to_connection, undeliverable_iq_reply,
+    bounce_undeliverable_iq, deliver_direct_to_full_with_registered_remote,
+    deliver_peer_to_full_with_registered_remote, queue_processed_for_detached, route_to_connection,
+    undeliverable_iq_reply,
 };
 #[cfg(feature = "clustering")]
 pub(crate) use routing::deliver_peer_to_full;

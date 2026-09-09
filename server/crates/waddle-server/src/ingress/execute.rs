@@ -1210,3 +1210,7 @@ mod activity_tests;
 #[cfg(all(test, feature = "clustering"))]
 #[path = "execute_groupchat_receipt_tests.rs"]
 mod groupchat_receipt_tests;
+
+#[cfg(test)]
+#[path = "execute_detached_fault_tests.rs"]
+mod detached_fault_tests;

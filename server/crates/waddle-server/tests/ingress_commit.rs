@@ -102,3 +102,11 @@ mod settlement;
 
 #[path = "ingress_cases/maintenance.rs"]
 mod maintenance;
+
+#[path = "ingress_cases/detached_progress.rs"]
+mod detached_progress;
+#[path = "ingress_cases/detached_progress_support.rs"]
+pub mod detached_progress_support;
+
+#[path = "ingress_cases/detached_contention.rs"]
+mod detached_contention;

@@ -17,8 +17,8 @@ shadow scaffolding (#1656/#1695) is deleted; there is one ingress path.
 Stated limitations (strict non-regressions against `main`, owned by later
 roadmap slices): (i) lost post-commit effects are durable (envelope,
 intents, receipts) but not executed by a recovery executor (#1658);
-(ii) non-idempotent fan-out to non-senders is suppressed on a repaired
-duplicate, as today (#1658); (iii) live full-JID delivery keeps the
+(ii) non-idempotent fan-out to non-senders remains suppressed on a repaired
+duplicate except for unfinished recorded direct resources tracked below; (iii) live full-JID delivery keeps the
 destination connection's own recipient archive/inbox pipeline (#1658);
 (iv) subject/pin/membership supersession keeps `main`'s semantics
 (#1659/#1660); (v) non-resumable streams have no durable
@@ -26,19 +26,9 @@ connection-generation fence (follow-up issue).
 
 ### Recovery follow-ups from combined review
 
-These five gaps are inherited from the pre-review implementation and remain
+These four gaps are inherited from the pre-review implementation and remain
 outside this cutover slice. The issue titles below are follow-ups to file under
 #1658, not newly filed issue references.
-
-**Partial detached progress.** Detached delivery receipts remain aggregate:
-successful resource appends are not recorded independently when another
-destination fails. Complete batches terminalize, but an incomplete batch
-remains pending, and alias replay suppresses its non-sender detached delivery
-and live subsets of its aggregate obligation to avoid repeating completed
-resources. Automatic delivery to remaining resources is deferred to #1658;
-file **“Persist per-resource detached ingress progress and replay only
-unfinished destinations”**, including SQLite/Postgres partial-success,
-restart, and replay tests.
 
 **Per-plugin observer receipts.** Room observers retain one room-level intent
 and receipt, without a typed plugin identity or independently persisted
@@ -198,6 +188,33 @@ rows. Per-recipient copies and error replies are reconstructed by a pure
 function over `(envelope, intent)` tested without actors, extensions or
 policy lookups.
 
+### Per-resource detached delivery progress (#1739)
+
+A recorded direct route freezes its capture identity and resource fanout.
+`ingress_delivery_receipts` records each successful resource under the canonical
+message key and complete effect receipt key. Duplicate planning intersects
+available targets with that frozen fanout and removes completed resources,
+including when a formerly detached resource is now live. Every replay uses the
+canonical envelope to rebuild its recipient payload. Unavailable recorded
+resources remain unresolved; newly available resources outside the recorded
+fanout are never added.
+
+Each resource append runs before its progress transaction. That transaction
+attests the epoch, locks the canonical message, records resource progress, and
+settles the aggregate route only when all recorded resources are covered.
+The progress and aggregate receipt commit atomically. No registry or socket
+operation runs while this transaction is open.
+
+Delivery is **at least once per resource under concurrent duplicate replay**:
+two decisions can snapshot the same unfinished resource and both append it.
+There are no execution claims in this slice. A crash after an append but before
+its progress commit can repeat the one in-flight resource on retry; previously
+committed resource progress is retained across restart. An append followed by
+a failed progress transaction has the same retry window. MUC groupchat
+occupant fanout is outside this mechanism. `QueueDetached` effects without
+a matching recorded direct route retain generic execution and receipt
+ownership; the variant is shared by MUC occupant delivery.
+
 ### 3.4 Alias-only dedupe, MAM identity, reconciliation
 - Deleted: `origin_dedup.rs`, the `origin_dedup_*` columns and both partial
   unique indexes, `StoreOutcome::Deduplicated`, pool and transaction dedupe
@@ -225,7 +242,8 @@ policy lookups.
   re-applies idempotent fenced effects through the existing guarded handler
   code (membership grants never demote; subject re-apply **and rebroadcast**
   to all occupants per XEP-0045 §8.1), sends the sender's reflection/reply,
-  and suppresses non-idempotent fan-out to non-senders.
+  and suppresses non-idempotent fan-out to non-senders except for unfinished
+  recorded direct resources with per-resource progress.
 - Owner side of a relayed groupchat runs the same pipeline with the
   `Relayed` identity; the proxy envelope carries `IngressCanonicalRef
   { message_key, sender_bare, origin_id }` (relay ask/reply version bumped).
