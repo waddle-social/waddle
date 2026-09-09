@@ -139,6 +139,56 @@ async fn assert_receipted(fixture: &IngressFixture, decision: &crate::ingress::I
         .expect("terminalize"));
 }
 
+fn assert_pin_notification(
+    outbound: waddle_xmpp::registry::OutboundStanza,
+    recipient: &jid::BareJid,
+    recorded: &[IngressEffectIntent],
+    request: &xmpp_parsers::message::Message,
+    target: &StanzaId,
+    action: DmPinAction,
+    cascade: bool,
+) {
+    let Stanza::Message(message) = outbound.stanza else {
+        panic!("pin notification must be a message");
+    };
+    let event = message
+        .payloads
+        .iter()
+        .find(|payload| {
+            payload.name() == "pin-event" && payload.ns() == waddle_xmpp::xep::NS_WADDLE_PIN_V0
+        })
+        .expect("recipient receives the synthetic pin event, not the canonical request");
+    assert_eq!(event.attr("action"), Some(action.as_attr()));
+    assert_eq!(event.attr("target"), Some(target.id.as_str()));
+    assert_eq!(event.attr("reason"), cascade.then_some("retracted"));
+    let identity = recorded
+        .iter()
+        .find_map(|intent| match intent {
+            IngressEffectIntent::RouteDirect {
+                recipient: saved,
+                route_identity: EffectMessageIdentity::StanzaId(stanza_id),
+                ..
+            } if saved == recipient => Some(stanza_id),
+            _ => None,
+        })
+        .expect("recorded pin notification identity");
+    assert_eq!(
+        waddle_xmpp_core::xep0359::extract_stanza_ids(&message),
+        vec![identity.clone()],
+        "notification retains its recorded identity on replay"
+    );
+    assert_ne!(
+        message.bodies, request.bodies,
+        "request body is not delivered"
+    );
+    for payload in &request.payloads {
+        assert!(
+            !message.payloads.contains(payload),
+            "canonical request payload must not replace or leak into the pin event"
+        );
+    }
+}
+
 async fn dm_pin_receipts(fixture: IngressFixture, replay: bool, cascade: bool) {
     let state = state_for(&fixture).await;
     let mut submission = fixture.submission(Some("pin-receipt"), "pin request");
@@ -282,8 +332,35 @@ async fn dm_pin_receipts(fixture: IngressFixture, replay: bool, cascade: bool) {
     )
     .await;
     assert!(report.receipt_failures.is_empty());
-    assert!(sender_rx.try_recv().is_ok(), "sender notification");
-    assert!(peer_rx.try_recv().is_ok(), "peer notification");
+    for (recipient, outbound) in [
+        (
+            submission.sender.to_bare(),
+            sender_rx.try_recv().expect("sender notification"),
+        ),
+        (
+            peer.to_bare(),
+            peer_rx.try_recv().expect("peer notification"),
+        ),
+    ] {
+        assert_pin_notification(
+            outbound,
+            &recipient,
+            &recorded,
+            &submission.plan.sanitized_message,
+            &target,
+            if replay {
+                DmPinAction::Unpinned
+            } else {
+                DmPinAction::Pinned
+            },
+            cascade,
+        );
+    }
+    assert!(
+        sender_rx.try_recv().is_err(),
+        "only one sender notification"
+    );
+    assert!(peer_rx.try_recv().is_err(), "only one peer notification");
     assert_eq!(
         state.deps.protocol.dm_pin_store.contains(&pair, &target),
         !replay,

@@ -214,9 +214,8 @@ impl TestServer {
         }
         command
             .env("WADDLE_XMPP_PUSH_SERVICE_ALLOW_IN_MEMORY", "true")
-            // MAM, inbox, and pending delivery are colocated with the global database (the server
+            // MAM, inbox, SM, and pending delivery share the global database (the server
             // falls back to WADDLE_DATABASE_URL when these are unset).
-            .env("WADDLE_XMPP_SM_DATABASE_URL", "sqlite::memory:")
             .env("WADDLE_XMPP_PUBSUB_DATABASE_URL", "sqlite::memory:")
             .env("WADDLE_UPLOAD_DIR", &upload_dir)
             .env("WADDLE_GIT_SHA", TEST_GIT_SHA)

@@ -996,11 +996,13 @@ fn compare_effects<'a>(
             // room owner may still establish its authority on first acceptance.
             if (existing_authority && recorded.is_empty())
                 || (!recorded.is_empty()
-                    && (matches!(
-                        intent,
-                        IngressEffectIntent::RelayCarbons { .. }
-                            | IngressEffectIntent::Carbons { .. }
-                    ) || matches!(intent, IngressEffectIntent::RoomObserver { room, plugin, .. }
+                    && (notification_candidate_has_recorded_recovery(recorded, intent)
+                        || matches!(
+                            intent,
+                            IngressEffectIntent::RelayCarbons { .. }
+                                | IngressEffectIntent::Carbons { .. }
+                        )
+                        || matches!(intent, IngressEffectIntent::RoomObserver { room, plugin, .. }
                         if !room_observer_authority_pending(recorded, room, plugin))
                         || !inbox_omission_is_recorded_audience(recorded, intent, planned)))
             {
@@ -1044,6 +1046,32 @@ fn compare_effects<'a>(
         ReconcileVerdict::Consistent
     };
     (verdict, omissions)
+}
+
+fn notification_candidate_has_recorded_recovery(
+    recorded: &[RecordedEffect],
+    planned: &IngressEffectIntent,
+) -> bool {
+    let IngressEffectIntent::NotificationActivityPreview {
+        owner,
+        mutation:
+            waddle_xmpp::ingress::NotificationActivityMutation::NotificationCandidate {
+                conversation,
+                archive_stanza_id,
+                ..
+            },
+    } = planned
+    else {
+        return false;
+    };
+    // Recovery owns this frozen decision, including a deferred decision later
+    // settled by the sweep. Fresh policy cannot add a candidate obligation.
+    recorded.iter().any(|row| {
+        matches!(&row.intent, IngressEffectIntent::GroupchatNotificationRecovery { mutation }
+            if &mutation.recipient == owner
+                && &mutation.room == conversation
+                && &mutation.archive_stanza_id == archive_stanza_id)
+    })
 }
 
 fn room_observer_authority_pending(

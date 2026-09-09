@@ -55,6 +55,8 @@ package(waddle-server) & (
     | test(pubsub::)
     | test(session_janitors::)
     | test(sm_persistence)
+    | test(pending_colocation_tests::)
+    | test(sm_colocation_tests::)
     | test(stream_management::)
     | test(muc_direct::plan_failure_tests::) | test(group_dm_invite::plan_failure_tests::) | test(dm_pin::authority_tests::)
     | test(routing_plan_failure_tests::) | test(direct_archive::correction_plan_tests::) | test(message_plan::envelope_tests::)

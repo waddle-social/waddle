@@ -505,12 +505,20 @@ resource is outstanding delivery work, not evidence that the aggregate can be
 settled. Do not synthesize a receipt from today's smaller registry audience.
 MUC groupchat occupant fanout does not use these progress rows.
 
-### Pending delivery database placement
+### Pending delivery and SM database placement
 
-`WADDLE_XMPP_PENDING_DELIVERY_DATABASE_URL` must be colocated with the global
+`WADDLE_XMPP_PENDING_DELIVERY_DATABASE_URL` and `WADDLE_XMPP_SM_DATABASE_URL`
+must be colocated with the global
 ingress database on every backend, including deployments without clustering.
 SQLite requires the same URL as `WADDLE_DATABASE_URL`; PostgreSQL requires the
 same live database/schema identity. Startup rejects a separate store before
-initializing its schema. Leaving the override unset shares the global database
-pool. In-memory pending storage is available only when the global database itself
+initializing its schema or hydrating retained SM sessions. Leaving either
+override unset shares the global database
+pool. In-memory pending and SM storage are available only when the global database itself
 is in memory; it does not survive restart.
+
+SM session and replay tables must participate in the same V1014 reset as ingress
+and pending claims. A separate retained-session store would leave replay copies
+bound to claims that the reset released, allowing expiry promotion to enqueue
+the same pending delivery again. Split SM stores are therefore rejected even
+when clustering is disabled.

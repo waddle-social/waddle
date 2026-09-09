@@ -176,13 +176,13 @@ pub(crate) async fn start_http_server(deps: HttpServerDeps) -> Result<()> {
 
 #[derive(Debug, thiserror::Error)]
 enum IngressColocationError {
-    #[error("Projection storage and ingress must use the same database backend")]
+    #[error("Storage and ingress must use the same database backend")]
     Backend,
-    #[error("projection storage and ingress must share the same PostgreSQL database/schema: {identities:?}")]
+    #[error("storage and ingress must share the same PostgreSQL database/schema: {identities:?}")]
     PostgresIdentity {
         identities: Box<waddle_xmpp::ClusterColocationIdentities>,
     },
-    #[error("Projection storage and ingress must share one durable SQLite database")]
+    #[error("Storage and ingress must share one durable SQLite database")]
     SqliteDatabase,
 }
 
@@ -1505,39 +1505,17 @@ async fn create_sm_session_registry(
              these env vars for durable session resumption (issue #209)."
         );
     }
-    // ADR-0017 Phase 3 Slice 4: cluster mode selects the Postgres-fenced
-    // `SmPersistenceStorage`; every other deployment shape (clustering
-    // disabled, non-Postgres, or a build without the `clustering` feature)
-    // keeps today's portable, single-node implementation. All of that
-    // branching — including FIX 4's co-location check against `global_db`,
-    // the same handle `clustering::start_if_enabled` itself received —
-    // lives inside `open_for_cluster_mode` itself.
-    let opened = crate::sm_persistence::open_for_cluster_mode_with_lineage(
+    let sm_persistence = create_ingress_sm_storage(
         sm_database_url.as_deref(),
         server_config.clustering.enabled,
         clustering.claim_pair(),
         global_db,
     )
     .await?;
-    if opened.aliases_global {
-        state.register_lineage_alias(
-            crate::db::lineage::DurableStore::Sm,
-            crate::db::lineage::DurableStore::Global,
-        );
-    } else if let Some(database) = opened.database.clone() {
-        if database.is_in_memory_sqlite() {
-            state.register_lineage_ephemeral(crate::db::lineage::DurableStore::Sm);
-        } else {
-            crate::server::bootstrap_store_lineage(
-                state,
-                crate::db::lineage::DurableStore::Sm,
-                database.clone(),
-            )
-            .await?;
-            state.register_lineage_database(crate::db::lineage::DurableStore::Sm, database);
-        }
-    }
-    let sm_persistence = opened.storage;
+    state.register_lineage_alias(
+        crate::db::lineage::DurableStore::Sm,
+        crate::db::lineage::DurableStore::Global,
+    );
     let mut sm_session_registry =
         waddle_xmpp::stream_management::InMemorySmSessionRegistry::with_capacity(
             sm_max_sessions_from_env(),
@@ -1595,12 +1573,11 @@ async fn create_sm_session_registry(
     Ok(sm_session_registry)
 }
 
-/// Pending rows and ingress receipts must be written in the same database.
-/// Validate configured locations before initializing any store-owned schema.
-async fn create_ingress_pending_storage(
+/// Reject split stores before initializing schemas or hydrating retained sessions.
+async fn ensure_ingress_storage_colocation(
     database_url: Option<&str>,
     global: &crate::db::Database,
-) -> Result<crate::pending_delivery::DatabasePendingDeliveryStorage> {
+) -> Result<()> {
     match global.driver() {
         crate::db::DatabaseDriver::Sqlite => {
             if database_url.is_some_and(|url| url != global.database_url()) {
@@ -1624,6 +1601,34 @@ async fn create_ingress_pending_storage(
             }
         }
     }
+    Ok(())
+}
+
+async fn create_ingress_sm_storage(
+    database_url: Option<&str>,
+    clustering_enabled: bool,
+    claim_pair: Option<(
+        Arc<dyn waddle_xmpp::ownership::ClaimStore>,
+        waddle_xmpp::ownership::SharedNodeIdentity,
+    )>,
+    global: &crate::db::Database,
+) -> Result<Arc<dyn waddle_xmpp::stream_management::persistence::SmPersistenceStorage>> {
+    ensure_ingress_storage_colocation(database_url, global).await?;
+    Ok(crate::sm_persistence::open_for_cluster_mode_with_lineage(
+        clustering_enabled,
+        claim_pair,
+        global,
+    )
+    .await?)
+}
+
+/// Pending rows and ingress receipts must be written in the same database.
+/// Validate configured locations before initializing any store-owned schema.
+async fn create_ingress_pending_storage(
+    database_url: Option<&str>,
+    global: &crate::db::Database,
+) -> Result<crate::pending_delivery::DatabasePendingDeliveryStorage> {
+    ensure_ingress_storage_colocation(database_url, global).await?;
     // Sharing the pool also preserves private in-memory SQLite identity.
     Ok(
         crate::pending_delivery::DatabasePendingDeliveryStorage::from_database(
@@ -2123,3 +2128,7 @@ mod ingress_colocation_tests {
 #[cfg(test)]
 #[path = "pending_colocation_tests.rs"]
 mod pending_colocation_tests;
+
+#[cfg(test)]
+#[path = "sm_colocation_tests.rs"]
+mod sm_colocation_tests;

@@ -258,7 +258,6 @@ async fn spawn_expecting_startup_refusal(envs: Vec<(String, String)>) {
             .env("WADDLE_XMPP_MAM_ALLOW_IN_MEMORY", "true")
             .env("WADDLE_XMPP_MAM_DATABASE_URL", "sqlite::memory:")
             .env("WADDLE_XMPP_INBOX_DATABASE_URL", "sqlite::memory:")
-            .env("WADDLE_XMPP_SM_DATABASE_URL", "sqlite::memory:")
             .env(
                 "WADDLE_XMPP_PENDING_DELIVERY_DATABASE_URL",
                 "sqlite::memory:",

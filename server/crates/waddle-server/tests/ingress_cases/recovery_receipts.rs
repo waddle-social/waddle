@@ -139,10 +139,8 @@ fn recovery_plan(fixture: &IngressFixture) -> IngressSubmission {
                 recovery: Some(recovery.clone()),
             },
         ))));
-    submission
-        .plan
-        .plan
-        .push(PlannedEffect::new(Effect::External(ExternalEffect::Room(
+    submission.plan.plan.push(
+        PlannedEffect::new(Effect::External(ExternalEffect::Room(
             ExternalRoomEffect::NotificationCandidate {
                 owner,
                 room,
@@ -150,7 +148,9 @@ fn recovery_plan(fixture: &IngressFixture) -> IngressSubmission {
                 candidate: Some(Box::new(candidate)),
                 recovery: Some(recovery),
             },
-        ))));
+        )))
+        .with_suppression(waddle_server::ingress::PlanSuppressionPolicy::SenderOnly),
+    );
     submission
 }
 
@@ -528,9 +528,10 @@ async fn deferred(fixture: IngressFixture, deliver: bool) {
             }
         }
     }
-    commit_submission(&fixture.uow, &submission, 5)
+    let decision = commit_submission(&fixture.uow, &submission, 5)
         .await
         .expect("deferred commit");
+    execute_without_candidate(&fixture, &decision).await;
     let recovery = inbox
         .list_pending_groupchat_notification_recoveries(10)
         .await
@@ -605,8 +606,62 @@ async fn deferred(fixture: IngressFixture, deliver: bool) {
         .await
         .expect("no reset after replay")
         .is_empty());
+    let recorded_intents = fixture.count("ingress_effect_intents").await;
+    let healthy_duplicate = commit_submission(&fixture.uow, &recovery_plan(&fixture), 5)
+        .await
+        .expect("fresh duplicate with healthy policy");
+    assert_eq!(
+        healthy_duplicate.class,
+        waddle_server::ingress::IngressDecisionClass::ExistingDivergent
+    );
+    assert_eq!(healthy_duplicate.message_key, decision.message_key);
+    assert_eq!(
+        fixture.count("ingress_effect_intents").await,
+        recorded_intents,
+        "healthy policy cannot invent a candidate obligation after recovery settled"
+    );
+    assert_eq!(
+        fixture
+            .count("ingress_messages WHERE terminal_at IS NOT NULL")
+            .await,
+        1,
+        "duplicate commit must not reopen the terminal message"
+    );
+    execute_without_candidate(&fixture, &healthy_duplicate).await;
+    assert_eq!(
+        store
+            .count_all_candidates()
+            .await
+            .expect("candidates after duplicate"),
+        i64::from(deliver),
+        "fresh policy cannot produce a second candidate or override suppression"
+    );
+    assert_eq!(fixture.count("ingress_effect_receipts").await, 3);
+    assert_eq!(
+        fixture
+            .count("ingress_messages WHERE terminal_at IS NOT NULL")
+            .await,
+        1
+    );
     assert!(authority.drain_and_join(Duration::from_secs(5)).await);
     fixture.close().await;
+}
+
+async fn execute_without_candidate(fixture: &IngressFixture, decision: &IngressDecision) {
+    let registry = ConnectionRegistry::new();
+    let deps = Deps::new(&registry, "example.com");
+    let report = execute_effects(
+        &fixture.uow,
+        &fixture.db,
+        decision,
+        &ImmediateSink,
+        &deps,
+        Duration::from_secs(5),
+    )
+    .await;
+    assert!(report.outcomes.is_empty(), "no fresh candidate may execute");
+    assert!(report.receipt_failures.is_empty());
+    assert!(report.terminalization_failure.is_none());
 }
 
 async fn concurrent_execute_sweep(fixture: IngressFixture) {

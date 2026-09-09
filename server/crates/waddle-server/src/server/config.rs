@@ -75,14 +75,12 @@ pub struct XmppConfig {
     /// every backend, even without clustering. When unset, shares the global
     /// database pool; memory storage is used only when that pool is in memory.
     pub pending_delivery_database_url: ResolvedXmppDatabaseUrl,
-    /// XEP-0198 stream-management persistence database URL —
-    /// prefers dedicated XMPP DSN, otherwise the main runtime DSN.
-    /// Resolution order:
-    /// `WADDLE_XMPP_SM_DATABASE_URL` → `WADDLE_DATABASE_URL`. When
-    /// unset the storage falls back to in-memory SQLite — suitable
-    /// for tests; production deployments MUST set one of these env
-    /// vars so detached sessions survive restart per issue #209
-    /// slice (d) Q8 = B.
+    /// XEP-0198 stream-management persistence database URL.
+    /// `WADDLE_XMPP_SM_DATABASE_URL` overrides `WADDLE_DATABASE_URL` only
+    /// when colocated: SQLite requires the same URL; PostgreSQL requires the
+    /// same live database/schema identity. Startup rejects split stores before
+    /// hydration on every backend, even without clustering. Persistence shares
+    /// the global database pool, including private in-memory databases in tests.
     pub sm_database_url: ResolvedXmppDatabaseUrl,
     /// PubSub/PEP database URL (prefers dedicated XMPP DSN, otherwise the main runtime DSN)
     pub pubsub_database_url: ResolvedXmppDatabaseUrl,

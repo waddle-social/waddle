@@ -14,7 +14,7 @@ use crate::server::routes::interpret::effects::{
         DurableRoomEffect, ExternalRoomEffect, PlannedGroupchatNotificationRecovery,
         RoomActorMutation,
     },
-    DurableEffect, Effect, ExternalEffect, IngressPlan,
+    DurableEffect, Effect, ExternalEffect, IngressPlan, PlanEffectDependency,
 };
 use waddle_xmpp::ingress::{
     GroupchatNotificationRecoveryAction, GroupchatNotificationRecoveryMutation,
@@ -46,13 +46,20 @@ impl RouteProgress {
 }
 
 /// Restore direct delivery copies from canonical content and recorded archive
-/// authority. Synthetic invitation and room copies have their own restorers.
+/// authority. Synthetic pin, invitation and room copies have their own restorers.
 pub fn restore_delivery_payloads(
     plan: &mut IngressPlan,
     envelope: &crate::ingress_substrate::MessageEnvelope,
 ) {
     use crate::server::routes::interpret::effects::delivery::ExternalDeliveryEffect;
     for planned in &mut plan.plan {
+        if planned
+            .dependencies
+            .iter()
+            .any(|dependency| matches!(dependency, PlanEffectDependency::AfterDmPinMutation { .. }))
+        {
+            continue;
+        }
         let Effect::External(effect) = &mut planned.effect else {
             continue;
         };
