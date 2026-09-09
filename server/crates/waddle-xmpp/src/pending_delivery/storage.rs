@@ -101,6 +101,9 @@ impl ReleaseRowsForOutboundSequencesOutcome {
 /// order on replay.
 #[async_trait]
 pub trait PendingDeliveryStorage: Send + Sync {
+    /// The recipient quota used by ordinary and transactional pending inserts.
+    fn quota_policy(&self) -> QuotaPolicy;
+
     /// Insert a new pending row. Returns
     /// [`InsertOutcome::QuotaExceeded`] when the configured
     /// [`QuotaPolicy`] would be violated; the caller is then
@@ -640,6 +643,10 @@ impl Default for InMemoryPendingDeliveryStorage {
 
 #[async_trait]
 impl PendingDeliveryStorage for InMemoryPendingDeliveryStorage {
+    fn quota_policy(&self) -> QuotaPolicy {
+        self.quota
+    }
+
     async fn insert(&self, mut row: PendingRow) -> Result<InsertOutcome, PendingStorageError> {
         let mut guard = self
             .inner

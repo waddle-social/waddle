@@ -261,3 +261,40 @@ mod ingress_digest_boundary {
         );
     }
 }
+
+/// Reconstructing the same accepted row and retrying its flush cannot move
+/// the delay timestamp to the replay or reconnect time.
+#[test]
+fn xep0203_reconstructed_row_reflush_keeps_canonical_receipt_timestamp() {
+    let canonical_time = Utc
+        .with_ymd_and_hms(2026, 5, 1, 12, 0, 0)
+        .single()
+        .expect("canonical timestamp");
+    let row = transient_row("juliet@example.com", "canonical payload", canonical_time);
+    let first = build_replay_stanza(
+        MaterializedPayload::from_transient(&row).expect("transient"),
+        "example.com",
+        row.original_receipt_at,
+        ReplayReason::OfflineStorage,
+    );
+    let retried = build_replay_stanza(
+        MaterializedPayload::Transient(Box::new(first)),
+        "example.com",
+        canonical_time + chrono::Duration::days(1),
+        ReplayReason::OfflineStorage,
+    );
+    let delays = retried
+        .payloads
+        .iter()
+        .filter(|payload| payload.is("delay", NS_DELAY))
+        .collect::<Vec<_>>();
+    assert_eq!(delays.len(), 1);
+    assert_eq!(delays[0].attr("from"), Some("example.com"));
+    let stamp = chrono::DateTime::parse_from_rfc3339(delays[0].attr("stamp").expect("stamp"))
+        .expect("XEP-0082 timestamp");
+    assert_eq!(stamp.with_timezone(&Utc), canonical_time);
+    assert_eq!(
+        retried.bodies.get(""),
+        Some(&"canonical payload".to_owned())
+    );
+}

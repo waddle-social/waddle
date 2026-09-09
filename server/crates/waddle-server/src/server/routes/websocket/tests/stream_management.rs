@@ -67,6 +67,10 @@ impl FailFirstPendingStorage {
 
 #[async_trait::async_trait]
 impl waddle_xmpp::pending_delivery::storage::PendingDeliveryStorage for FailFirstPendingStorage {
+    fn quota_policy(&self) -> waddle_xmpp::pending_delivery::QuotaPolicy {
+        self.inner.quota_policy()
+    }
+
     async fn insert(
         &self,
         row: waddle_xmpp::pending_delivery::PendingRow,
@@ -380,6 +384,10 @@ struct RetractOnMessageIdInsertPendingStorage {
 impl waddle_xmpp::pending_delivery::storage::PendingDeliveryStorage
     for RetractOnMessageIdInsertPendingStorage
 {
+    fn quota_policy(&self) -> waddle_xmpp::pending_delivery::QuotaPolicy {
+        self.inner.quota_policy()
+    }
+
     async fn insert(
         &self,
         row: waddle_xmpp::pending_delivery::PendingRow,
@@ -545,6 +553,10 @@ fn direct_tombstone_target(
 impl waddle_xmpp::pending_delivery::storage::PendingDeliveryStorage
     for GatedFirstInsertPendingStorage
 {
+    fn quota_policy(&self) -> waddle_xmpp::pending_delivery::QuotaPolicy {
+        self.inner.quota_policy()
+    }
+
     async fn insert(
         &self,
         row: waddle_xmpp::pending_delivery::PendingRow,
@@ -2425,6 +2437,10 @@ impl FailFirstReleaseRowsPendingStorage {
 impl waddle_xmpp::pending_delivery::storage::PendingDeliveryStorage
     for FailFirstReleaseRowsPendingStorage
 {
+    fn quota_policy(&self) -> waddle_xmpp::pending_delivery::QuotaPolicy {
+        self.inner.quota_policy()
+    }
+
     async fn insert(
         &self,
         row: waddle_xmpp::pending_delivery::PendingRow,
@@ -2603,6 +2619,10 @@ impl FailFirstClaimBatchPendingStorage {
 impl waddle_xmpp::pending_delivery::storage::PendingDeliveryStorage
     for FailFirstClaimBatchPendingStorage
 {
+    fn quota_policy(&self) -> waddle_xmpp::pending_delivery::QuotaPolicy {
+        self.inner.quota_policy()
+    }
+
     async fn insert(
         &self,
         row: waddle_xmpp::pending_delivery::PendingRow,
@@ -2893,6 +2913,10 @@ impl FailOnceListAndReleasePendingStorage {
 impl waddle_xmpp::pending_delivery::storage::PendingDeliveryStorage
     for FailOnceListAndReleasePendingStorage
 {
+    fn quota_policy(&self) -> waddle_xmpp::pending_delivery::QuotaPolicy {
+        self.inner.quota_policy()
+    }
+
     async fn insert(
         &self,
         row: waddle_xmpp::pending_delivery::PendingRow,
@@ -3397,6 +3421,10 @@ struct FailInsertsForMessageIdPendingStorage {
 impl waddle_xmpp::pending_delivery::storage::PendingDeliveryStorage
     for FailInsertsForMessageIdPendingStorage
 {
+    fn quota_policy(&self) -> waddle_xmpp::pending_delivery::QuotaPolicy {
+        self.inner.quota_policy()
+    }
+
     async fn insert(
         &self,
         row: waddle_xmpp::pending_delivery::PendingRow,
@@ -3900,6 +3928,10 @@ struct FailCountedInsertsForMessageIdPendingStorage {
 impl waddle_xmpp::pending_delivery::storage::PendingDeliveryStorage
     for FailCountedInsertsForMessageIdPendingStorage
 {
+    fn quota_policy(&self) -> waddle_xmpp::pending_delivery::QuotaPolicy {
+        self.inner.quota_policy()
+    }
+
     async fn insert(
         &self,
         row: waddle_xmpp::pending_delivery::PendingRow,

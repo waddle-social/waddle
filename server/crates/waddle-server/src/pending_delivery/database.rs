@@ -409,6 +409,10 @@ pub(crate) async fn insert_in_transaction(
 
 #[async_trait]
 impl PendingDeliveryStorage for DatabasePendingDeliveryStorage {
+    fn quota_policy(&self) -> waddle_xmpp::pending_delivery::QuotaPolicy {
+        self.quota
+    }
+
     #[instrument(skip(self, row), fields(recipient = %row.recipient), err)]
     async fn insert(&self, row: PendingRow) -> Result<InsertOutcome, PendingStorageError> {
         let mut tx = self
@@ -1337,4 +1341,31 @@ impl PendingDeliveryStorage for DatabasePendingDeliveryStorage {
     fn sweep_internal_bookkeeping(&self) -> usize {
         self.ack_windows.sweep()
     }
+}
+
+/// Test for an existing pending row before applying a quota-predicated insert.
+pub(crate) async fn contains_in_transaction(
+    tx: &mut crate::db::Transaction<'_>,
+    id: &PendingRowId,
+) -> Result<bool, PendingStorageError> {
+    let mut rows = tx
+        .query(
+            "SELECT 1 FROM pending_delivery WHERE row_id = ?",
+            crate::db_params![id.as_str().to_string()],
+        )
+        .await
+        .map_err(|error| PendingStorageError::Other(error.to_string()))?;
+    Ok(rows
+        .next()
+        .await
+        .map_err(|error| PendingStorageError::Other(error.to_string()))?
+        .is_some())
+}
+
+/// Mark the archived notification obligation in the same transaction as its receipt.
+pub(crate) async fn mark_notification_outboxed_in_transaction(
+    tx: &mut crate::db::Transaction<'_>,
+    id: &PendingRowId,
+) -> Result<u64, PendingStorageError> {
+    tx.execute("UPDATE pending_delivery SET notification_outboxed_at_ms = ? WHERE row_id = ? AND notification_outboxed_at_ms IS NULL", crate::db_params![crate::time::now_ms(), id.as_str().to_string()]).await.map_err(|error| PendingStorageError::Other(error.to_string()))
 }

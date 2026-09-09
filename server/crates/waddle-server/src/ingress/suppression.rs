@@ -55,7 +55,9 @@ pub(crate) fn external_effect_indices(
             let Effect::External(effect) = &planned.effect else {
                 return None;
             };
-            if !super::recorded::external_in_recorded_audience(plan, effect) {
+            if !super::recorded::external_in_recorded_audience(plan, effect)
+                || !super::restore_offline::in_recorded_offline_audience(plan, effect)
+            {
                 return None;
             }
             if duplicate && !relay_carbons_recorded(plan, effect) {
@@ -140,7 +142,8 @@ fn unreceipted_repair(
     effect: &ExternalEffect,
     unreceipted: &[waddle_xmpp::ingress::IngressEffectIntent],
 ) -> bool {
-    super::recorded::recorded_route_obligation(unreceipted, effect)
+    super::restore_offline::pending_obligation(effect, unreceipted)
+        || super::recorded::recorded_route_obligation(unreceipted, effect)
 }
 
 fn duplicate_policy(planned: &PlannedEffect) -> PlanSuppressionPolicy {

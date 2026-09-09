@@ -2315,6 +2315,10 @@ async fn flush_blocked_row_releases_claim_when_delete_fails() {
     }
     #[async_trait]
     impl PendingDeliveryStorage for DeleteRowFails {
+        fn quota_policy(&self) -> waddle_xmpp::pending_delivery::QuotaPolicy {
+            self.inner.quota_policy()
+        }
+
         async fn insert(&self, row: PendingRow) -> Result<InsertOutcome, PendingStorageError> {
             self.inner.insert(row).await
         }

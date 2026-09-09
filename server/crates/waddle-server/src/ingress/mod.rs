@@ -22,6 +22,7 @@ mod recorded;
 pub use recorded::RouteProgress;
 mod rejection;
 pub mod restamp;
+mod restore_offline;
 pub mod submission;
 pub mod suppression;
 
@@ -1138,3 +1139,6 @@ mod subject_receipt_tests;
 
 #[cfg(test)]
 pub(crate) mod recovery_tests;
+
+#[cfg(test)]
+mod offline_settlement_tests;

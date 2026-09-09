@@ -311,3 +311,6 @@ async fn remote_carbons_planning_captures_owner_obligation_before_relay() {
         crate::server::routes::interpret::effects::PlanSuppressionPolicy::Always
     );
 }
+
+#[path = "pending_exclusion_tests.rs"]
+mod pending_exclusion;

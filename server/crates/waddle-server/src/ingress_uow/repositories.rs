@@ -259,6 +259,30 @@ impl CanonicalMessageRepository {
             .map_err(Into::into)
     }
 
+    /// Read the original acceptance time while holding the canonical lock.
+    pub async fn created_at(
+        transaction: &mut IngressUowTransaction<'_>,
+        message_key: MessageKey,
+    ) -> Result<DateTime<Utc>, IngressUowError> {
+        let sql = dialect_sql(
+            transaction,
+            "SELECT to_char(created_at AT TIME ZONE 'UTC', 'YYYY-MM-DD\"T\"HH24:MI:SS.US\"Z\"') FROM ingress_messages WHERE message_key = ?::uuid",
+            "SELECT created_at FROM ingress_messages WHERE message_key = ?",
+        );
+        let mut rows = transaction
+            .transaction_mut()
+            .query(sql, crate::db_params![message_key.to_storage().to_string()])
+            .await?;
+        let row = rows
+            .next()
+            .await?
+            .ok_or(IngressUowError::EffectIntentMessageMissing)?;
+        let timestamp: String = row.get(0)?;
+        DateTime::parse_from_rfc3339(&timestamp)
+            .map(|timestamp| timestamp.with_timezone(&Utc))
+            .map_err(|_| IngressUowError::InvalidStoredMessageTimestamp)
+    }
+
     pub async fn resolve_and_record_alias(
         transaction: &mut IngressUowTransaction<'_>,
         sender: &BareJid,

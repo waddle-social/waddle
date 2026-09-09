@@ -113,3 +113,6 @@ mod detached_contention;
 
 #[path = "ingress_cases/recovery_receipts.rs"]
 mod recovery_receipts;
+
+#[path = "ingress_cases/pending_reconstruction.rs"]
+mod pending_reconstruction;
