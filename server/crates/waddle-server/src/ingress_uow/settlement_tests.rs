@@ -264,3 +264,61 @@ async fn postgres_settled_archive_avoids_pooled_receipt_transactions() {
         settled_archive_avoids_pooled_receipt_transactions(fixture).await;
     }
 }
+
+#[test]
+fn deferred_policy_requires_completed_evidence_with_identical_frozen_fields() {
+    use waddle_xmpp::ingress::{
+        GroupchatNotificationRecoveryAction as Action, GroupchatNotificationRecoveryMutation,
+    };
+    let mutation = GroupchatNotificationRecoveryMutation {
+        recipient: "juliet@example.com".parse().expect("recipient"),
+        room: "room@muc.example.com".parse().expect("room"),
+        thread_id: None,
+        archive_stanza_id: StanzaId::new(
+            "archive",
+            "room@muc.example.com".parse().expect("archive"),
+        ),
+        sender: "romeo@example.com/phone".parse().expect("sender"),
+        is_live_occupant: false,
+        room_members_only: true,
+        sender_can_broadcast_channel_mention: false,
+        created_at_ms: 123,
+        action: Action::DeferredPolicy,
+    };
+    let recorded = IngressEffectIntent::GroupchatNotificationRecovery {
+        mutation: mutation.clone(),
+    };
+    let mut completed = mutation;
+    completed.action = Action::Completed;
+    let evidence = IngressEffectIntent::GroupchatNotificationRecovery {
+        mutation: completed.clone(),
+    };
+    assert!(discharges(&recorded, &evidence));
+    assert!(!discharges(&evidence, &recorded));
+    assert_ne!(
+        crate::ingress::receipt_key(&recorded).expect("deferred receipt identity"),
+        crate::ingress::receipt_key(&evidence).expect("completion receipt identity")
+    );
+    for changed in 0..10 {
+        let mut mismatch = completed.clone();
+        match changed {
+            0 => mismatch.recipient = "other@example.com".parse().expect("recipient"),
+            1 => mismatch.room = "other@muc.example.com".parse().expect("room"),
+            2 => {
+                mismatch.thread_id =
+                    Some(waddle_xmpp_core::mam::ThreadId::new("thread").expect("thread"))
+            }
+            3 => mismatch.archive_stanza_id.id = "other".into(),
+            4 => mismatch.sender = "other@example.com/phone".parse().expect("sender"),
+            5 => mismatch.is_live_occupant = true,
+            6 => mismatch.room_members_only = false,
+            7 => mismatch.sender_can_broadcast_channel_mention = true,
+            8 => mismatch.created_at_ms += 1,
+            _ => mismatch.action = Action::Recorded,
+        }
+        assert!(!discharges(
+            &recorded,
+            &IngressEffectIntent::GroupchatNotificationRecovery { mutation: mismatch }
+        ));
+    }
+}

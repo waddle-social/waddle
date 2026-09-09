@@ -411,19 +411,13 @@ async fn groupchat_inbox_boundary_records_notification_intent_after_candidate_ac
         IngressEffectIntent::NotificationActivityPreview { owner: intent_owner, .. }
             if *intent_owner == owner
     )));
-    assert!(snapshot.intents.iter().any(|intent| matches!(
+    // Recovery rows carry the canonical message key and are materialized only
+    // inside the ingress transaction (#1743). Immediate execution therefore
+    // records no recovery obligation; the planning-mode regressions in
+    // groupchat_recovery_tests.rs cover the Recorded/Completed pair.
+    assert!(!snapshot.intents.iter().any(|intent| matches!(
         intent,
-        IngressEffectIntent::GroupchatNotificationRecovery { mutation }
-            if mutation.recipient == owner
-                && mutation.action
-                    == waddle_xmpp::ingress::GroupchatNotificationRecoveryAction::Recorded
-    )));
-    assert!(snapshot.intents.iter().any(|intent| matches!(
-        intent,
-        IngressEffectIntent::GroupchatNotificationRecovery { mutation }
-            if mutation.recipient == owner
-                && mutation.action
-                    == waddle_xmpp::ingress::GroupchatNotificationRecoveryAction::Completed
+        IngressEffectIntent::GroupchatNotificationRecovery { .. }
     )));
 }
 

@@ -503,3 +503,40 @@ fn restamp_subject_rejection_reply_uses_committed_archive_identity() {
         );
     }
 }
+
+#[test]
+fn restamp_deferred_policy_preserves_frozen_fields_and_changes_receipt_identity() {
+    use waddle_xmpp::ingress::{
+        GroupchatNotificationRecoveryAction, GroupchatNotificationRecoveryMutation,
+    };
+    let (mut plan, owner, minted, recorded) = fixture();
+    let mutation = GroupchatNotificationRecoveryMutation {
+        recipient: jid("bob@example.test"),
+        room: jid("room@example.test"),
+        thread_id: None,
+        archive_stanza_id: minted,
+        sender: owner.clone().into(),
+        is_live_occupant: false,
+        room_members_only: true,
+        sender_can_broadcast_channel_mention: false,
+        created_at_ms: 123,
+        action: GroupchatNotificationRecoveryAction::DeferredPolicy,
+    };
+    let provisional = IngressEffectIntent::GroupchatNotificationRecovery {
+        mutation: mutation.clone(),
+    };
+    plan.intents.push(provisional.clone());
+    let stamped = restamp_plan(&plan, &[(owner, ArchiveRole::Sender, recorded.clone())]);
+    let expected = IngressEffectIntent::GroupchatNotificationRecovery {
+        mutation: GroupchatNotificationRecoveryMutation {
+            archive_stanza_id: recorded,
+            ..mutation
+        },
+    };
+    assert_eq!(stamped.intents[1], expected);
+    assert_eq!(plan.intents[1], provisional);
+    assert_ne!(
+        crate::ingress::receipt_key(&provisional).expect("provisional key"),
+        crate::ingress::receipt_key(&expected).expect("committed key")
+    );
+}

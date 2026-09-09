@@ -582,6 +582,60 @@ impl InboxStorage for DatabaseInboxStorage {
         Ok(recoveries)
     }
 
+    async fn list_completed_unreceipted_groupchat_notification_recoveries(
+        &self,
+        limit: usize,
+    ) -> Result<Vec<GroupchatNotificationRecovery>, InboxStorageError> {
+        if limit == 0 {
+            return Ok(Vec::new());
+        }
+        // Match the version-one typed recovery payload before limiting the page.
+        // Codec tag 21 is GroupchatNotificationRecovery (effect_intent.rs).
+        let mutation = match self.db.driver() {
+            crate::db::DatabaseDriver::Postgres => {
+                "convert_from(i.payload, 'UTF8')::jsonb -> 'intent' -> 'mutation'"
+            }
+            crate::db::DatabaseDriver::Sqlite => {
+                "json_extract(CAST(i.payload AS TEXT), '$.intent.mutation')"
+            }
+        };
+        let field = |name: &str| match self.db.driver() {
+            crate::db::DatabaseDriver::Postgres => format!("({mutation}) ->> '{name}'"),
+            crate::db::DatabaseDriver::Sqlite => format!("json_extract({mutation}, '$.{name}')"),
+        };
+        let archive = |name: &str| match self.db.driver() {
+            crate::db::DatabaseDriver::Postgres => {
+                format!("({mutation}) -> 'archive_stanza_id' ->> '{name}'")
+            }
+            crate::db::DatabaseDriver::Sqlite => {
+                format!("json_extract({mutation}, '$.archive_stanza_id.{name}')")
+            }
+        };
+        let sql = format!(
+            "SELECT {GROUPCHAT_NOTIFICATION_RECOVERY_SELECT_COLS} FROM groupchat_notification_recovery g \
+             WHERE completed_at_ms IS NOT NULL AND EXISTS ( \
+                 SELECT 1 FROM ingress_effect_intents i \
+                 LEFT JOIN ingress_effect_receipts r ON r.message_key = i.message_key AND r.kind = i.kind AND r.semantic_identity_hash = i.semantic_identity_hash \
+                 WHERE CAST(i.message_key AS TEXT) = g.message_key AND r.message_key IS NULL AND i.kind = 21 AND i.payload_version = 1 \
+                 AND {recipient} = g.recipient_bare_jid AND {room} = g.room_jid \
+                 AND COALESCE({thread}, '') = g.thread_id AND {archive_by} = g.stanza_id_by AND {archive_id} = g.stanza_id \
+                 AND CAST({action} AS INTEGER) IN (1, 2) \
+             ) ORDER BY completed_at_ms, recipient_bare_jid, room_jid, thread_id, stanza_id_by, stanza_id LIMIT ?",
+             recipient = field("recipient"), room = field("room"), thread = field("thread_id"),
+             archive_by = archive("by"), archive_id = archive("id"), action = field("action"),
+        );
+        let mut rows = self.query(&sql, crate::db_params![limit]).await?;
+        let mut recoveries = Vec::new();
+        while let Some(row) = rows
+            .next()
+            .await
+            .map_err(|error| InboxStorageError::Other(error.to_string()))?
+        {
+            recoveries.push(decode_groupchat_notification_recovery(&row)?);
+        }
+        Ok(recoveries)
+    }
+
     async fn mark_groupchat_notification_recovery_completed(
         &self,
         key: &GroupchatNotificationRecoveryKey,
@@ -622,6 +676,7 @@ impl InboxStorage for DatabaseInboxStorage {
                  FROM groupchat_notification_recovery \
                  WHERE completed_at_ms IS NOT NULL \
                    AND completed_at_ms < ? \
+                   AND NOT EXISTS (SELECT 1 FROM ingress_messages m WHERE CAST(m.message_key AS TEXT) = groupchat_notification_recovery.message_key AND m.terminal_at IS NULL) \
                  ORDER BY completed_at_ms ASC, recipient_bare_jid ASC, room_jid ASC, thread_id ASC, stanza_id_by ASC, stanza_id ASC \
                  LIMIT ? \
              )",

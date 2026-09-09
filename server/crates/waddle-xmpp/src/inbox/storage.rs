@@ -133,6 +133,15 @@ pub trait InboxStorage: Send + Sync {
         Ok(Vec::new())
     }
 
+    /// List completed rows whose canonical recovery obligation is still unreceipted.
+    async fn list_completed_unreceipted_groupchat_notification_recoveries(
+        &self,
+        limit: usize,
+    ) -> Result<Vec<GroupchatNotificationRecovery>, InboxStorageError> {
+        let _ = limit;
+        Ok(Vec::new())
+    }
+
     /// Mark a groupchat notification recovery item as complete.
     async fn mark_groupchat_notification_recovery_completed(
         &self,

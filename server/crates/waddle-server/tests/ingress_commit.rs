@@ -110,3 +110,6 @@ pub mod detached_progress_support;
 
 #[path = "ingress_cases/detached_contention.rs"]
 mod detached_contention;
+
+#[path = "ingress_cases/recovery_receipts.rs"]
+mod recovery_receipts;

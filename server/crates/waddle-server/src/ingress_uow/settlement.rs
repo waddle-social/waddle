@@ -1,6 +1,7 @@
 //! Match durable evidence to the exact obligations retained by ingress.
 use waddle_xmpp::ingress::{
-    IngressEffectIntent, MessageKey, NotificationActivityMutation, NotificationCandidateOutcome,
+    GroupchatNotificationRecoveryAction, IngressEffectIntent, MessageKey,
+    NotificationActivityMutation, NotificationCandidateOutcome,
 };
 
 use super::{
@@ -42,10 +43,23 @@ pub(crate) async fn settle_recorded(
 }
 
 /// A duplicate candidate proves the same durable candidate as its insertion.
-/// No other difference in a recorded payload is evidence of completion.
+/// Completed recovery also discharges a deferred policy decision with identical frozen fields.
 fn discharges(recorded: &IngressEffectIntent, evidence: &IngressEffectIntent) -> bool {
     if recorded == evidence {
         return true;
+    }
+    if let (
+        IngressEffectIntent::GroupchatNotificationRecovery { mutation: recorded },
+        IngressEffectIntent::GroupchatNotificationRecovery { mutation: evidence },
+    ) = (recorded, evidence)
+    {
+        if recorded.action == GroupchatNotificationRecoveryAction::DeferredPolicy
+            && evidence.action == GroupchatNotificationRecoveryAction::Completed
+        {
+            let mut completed = recorded.clone();
+            completed.action = GroupchatNotificationRecoveryAction::Completed;
+            return completed == *evidence;
+        }
     }
     matches!(
         (recorded, evidence),
