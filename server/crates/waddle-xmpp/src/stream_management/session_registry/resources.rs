@@ -312,6 +312,99 @@ impl InMemorySmSessionRegistry {
         Ok(recorded.then(|| SmSessionId::new(stream_id)))
     }
 
+    /// Allocate one ingress obligation exactly once, even after resume or rebind.
+    /// The ledger is consulted before looking at any detached session.
+    pub async fn record_keyed_stanza_for_detached_bound_resource(
+        &self,
+        jid: &FullJid,
+        stanza: &Stanza,
+        original_receipt_at: DateTime<Utc>,
+        key: crate::stream_management::SmIngressAppendKey,
+    ) -> Result<crate::stream_management::SmKeyedAppendOutcome, SmRegistryError> {
+        use crate::stream_management::{
+            persistence::{KeyedSnapshotOutcome, PersistedIngressAppend},
+            SmKeyedAppendOutcome,
+        };
+        let storage = self
+            .persistence
+            .as_ref()
+            .ok_or(SmRegistryError::StorageUnavailable(
+                super::traits::StorageOutageCause::Backend,
+            ))?;
+        // Proof belongs to the obligation, not the currently bound stream.
+        if let Some(proof) = storage
+            .get_ingress_append(&key)
+            .await
+            .map_err(|error| SmRegistryError::Internal(error.to_string()))?
+        {
+            return Ok(SmKeyedAppendOutcome::AlreadyAppended {
+                accepting_stream: proof.accepting_stream,
+            });
+        }
+        if key.resource != *jid {
+            return Err(SmRegistryError::Internal(
+                "Ingress append resource does not match target JID".to_owned(),
+            ));
+        }
+        let Some(stream_id) =
+            self.find_session_id_matching(|session| !session.is_expired() && session.jid == *jid)?
+        else {
+            return Ok(SmKeyedAppendOutcome::NoSession);
+        };
+        let accepting_stream = SmSessionId::new(stream_id);
+        let shard = self.stream_lock(accepting_stream.as_str())?;
+        let _guard = shard.lock().await;
+        self.reconcile_stale_session_locked(&accepting_stream)
+            .await?;
+        let Some(mut updated) = self.detached_snapshot_matching(&accepting_stream, |session| {
+            !session.is_expired() && session.jid == *jid
+        })?
+        else {
+            return Ok(SmKeyedAppendOutcome::NoSession);
+        };
+        updated.record_detached_outbound(Self::stanza_to_replay_xml(stanza), original_receipt_at);
+        let persisted = super::persistence_codec::detached_to_persisted(&updated)?;
+        let rows = updated
+            .unacked_stanzas
+            .iter()
+            .map(|entry| {
+                super::persistence_codec::parse_xml_to_persisted_unacked(
+                    accepting_stream.as_str(),
+                    entry.sequence,
+                    &entry.stanza_xml,
+                    entry.original_receipt_at,
+                    entry.ingress_receipts.clone(),
+                )
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+        self.mark_snapshot_stale(&accepting_stream)?;
+        let outcome = storage
+            .store_session_atomic_with_ingress_append(
+                persisted,
+                rows,
+                PersistedIngressAppend {
+                    key,
+                    accepting_stream: accepting_stream.clone(),
+                    appended_at: Utc::now(),
+                },
+            )
+            .await
+            .map_err(|error| SmRegistryError::Internal(error.to_string()))?;
+        match outcome {
+            KeyedSnapshotOutcome::Committed => {
+                // Publication may report displacement, but the transaction still
+                // allocated the entry. Promotion reconciles the captured queue.
+                self.publish_detached_snapshot(&accepting_stream, updated)?;
+                Ok(SmKeyedAppendOutcome::Appended { accepting_stream })
+            }
+            KeyedSnapshotOutcome::ObligationAlreadyAllocated { accepting_stream } => {
+                // Discard the clone, including evictions and counters. Keep the
+                // stale mark: the winning writer may have updated durable state.
+                Ok(SmKeyedAppendOutcome::AlreadyAppended { accepting_stream })
+            }
+        }
+    }
+
     /// Record a stanza directly against a detached stream id, regardless of
     /// roster-interest or presence-availability flags.
     pub async fn record_outbound_for_detached_stream(

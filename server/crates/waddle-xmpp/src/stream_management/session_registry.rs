@@ -11,6 +11,7 @@ mod claims;
 mod core;
 mod cross_node_resume;
 mod persistence_codec;
+mod reconciliation;
 mod resources;
 mod session;
 mod tombstones;

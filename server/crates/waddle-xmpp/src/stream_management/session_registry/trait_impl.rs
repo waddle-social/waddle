@@ -235,7 +235,7 @@ impl InMemorySmSessionRegistry {
                 return Err(error);
             }
         };
-        let displaced_guard = DisplacedPromotionGuard::new(self, displaced);
+        let mut displaced_guard = DisplacedPromotionGuard::new(self, displaced);
         // Durable rows for displaced sessions are deliberately NOT
         // deleted here. They follow the drain_expired/confirm_drained
         // persist-until-confirmed contract: the caller promotes each
@@ -290,6 +290,15 @@ impl InMemorySmSessionRegistry {
             .await;
 
         debug!(stream_id = %stream_id, count = count, "Stored detached SM session");
+        // A displaced stream can still be committing its append while this
+        // replacement holds a different shard. Release ours before acquiring
+        // theirs: different stream identifiers may share the same shard.
+        drop(_stream_guard);
+        for displaced in &mut displaced_guard.sessions {
+            let displaced_lock = self.stream_lock(&displaced.stream_id)?;
+            let _displaced_guard = displaced_lock.lock().await;
+            self.reconcile_promotion_session_locked(displaced).await?;
+        }
         Ok(displaced_guard.transfer())
     }
 }
@@ -309,6 +318,8 @@ impl SmSessionRegistry for InMemorySmSessionRegistry {
     ) -> Result<Option<DetachedSession>, SmRegistryError> {
         let stream_lock = self.stream_lock(stream_id)?;
         let _stream_guard = stream_lock.lock().await;
+        self.reconcile_stale_session_locked(&SmSessionId::new(stream_id))
+            .await?;
         // Persist-first ordering (same rationale as complete_claim):
         // peek to see if the session exists, durably erase, then
         // remove from in-memory. Failure to durably erase aborts
@@ -373,6 +384,10 @@ impl SmSessionRegistry for InMemorySmSessionRegistry {
         &self,
         stream_id: &str,
     ) -> Result<Option<DetachedSession>, SmRegistryError> {
+        let stream_lock = self.stream_lock(stream_id)?;
+        let _stream_guard = stream_lock.lock().await;
+        self.reconcile_stale_session_locked(&SmSessionId::new(stream_id))
+            .await?;
         let sessions = self
             .sessions
             .read()
@@ -407,6 +422,8 @@ impl SmSessionRegistry for InMemorySmSessionRegistry {
         for stream_id in &expired_ids {
             let stream_lock = self.stream_lock(stream_id)?;
             let _stream_guard = stream_lock.lock().await;
+            self.reconcile_stale_session_locked(&SmSessionId::new(stream_id))
+                .await?;
             let removed_session = {
                 let mut sessions = self
                     .sessions
@@ -574,6 +591,8 @@ impl SmSessionRegistry for InMemorySmSessionRegistry {
         for (stream_id, sequences) in matched {
             let stream_lock = self.stream_lock(&stream_id)?;
             let _stream_guard = stream_lock.lock().await;
+            self.reconcile_stale_session_locked(&SmSessionId::new(&stream_id))
+                .await?;
             if let Some(storage) = &self.persistence {
                 if let Err(error) = storage
                     .delete_unacked(
@@ -710,6 +729,8 @@ impl SmSessionRegistry for InMemorySmSessionRegistry {
                 // currently in a map: it may have entered after phase 1.
                 let stream_lock = self.stream_lock(&stream_id)?;
                 let _stream_guard = stream_lock.lock().await;
+                self.reconcile_stale_session_locked(&persisted.stream_id)
+                    .await?;
                 let sequences: Vec<u32> = unacked
                     .iter()
                     .filter(|entry| {
