@@ -2645,3 +2645,168 @@ async fn capacity_churn_loses_no_messages_across_restart_style_read() {
         .with_persistence(Arc::clone(&sm_storage) as Arc<dyn SmPersistenceStorage>);
     assert_eq!(restarted.restore_from_persistence().await.unwrap(), 2);
 }
+
+/// #1756: a keyed ingress append that commits durably while a captured queue is
+/// already in flight for promotion must not be erased by that promotion's
+/// confirmation.
+///
+/// Before the append ledger existed this was invisible: the at-least-once retry
+/// simply appended the stanza again, so losing it here cost nothing observable.
+/// Once durable proof suppresses that retry, `confirm_drained` deleting the whole
+/// session would drop the message permanently. Confirmation must therefore compare
+/// durable state against the queue it actually handed out and refuse to retire a
+/// session holding an entry promotion never saw.
+///
+/// This drives the production promotion path (`promote_session_unacked` then
+/// `confirm_drained`), not a stand-in: the registry-level regression can only show
+/// that durable rows still exist, which is not the same claim.
+#[tokio::test]
+async fn keyed_append_committed_during_promotion_blocks_confirmation() {
+    use waddle_xmpp::pending_delivery::SmSessionId;
+    use waddle_xmpp::stream_management::persistence::{
+        InMemorySmPersistence, KeyedSnapshotOutcome, PersistedIngressAppend, PersistedSession,
+        PersistedUnackedStanza, SmPersistenceStorage,
+    };
+    use waddle_xmpp::stream_management::{
+        InMemorySmSessionRegistry, SmIngressAppendKey, SmIngressReceiptKind,
+    };
+
+    const STREAM: &str = "stream-keyed-promotion";
+    let recipient = full("alice@example.com/laptop");
+    let sm_storage = Arc::new(InMemorySmPersistence::new());
+    let now = Utc::now();
+
+    let session = PersistedSession {
+        stream_id: SmSessionId::new(STREAM),
+        user_id: "alice".to_string(),
+        jid: recipient.clone(),
+        occupancy_session: fixed_occupancy_session(),
+        inbound_count: 0,
+        outbound_count: 1,
+        last_acked: 0,
+        replay_gap_through: None,
+        max_resume_time: Some(60),
+        detached_at: now - chrono::Duration::seconds(600),
+        max_resume_duration: std::time::Duration::from_secs(60),
+        carbons_enabled: false,
+        roster_interested: false,
+        blocklist_interested: false,
+        presence_available: false,
+        presence_show: None,
+        presence_status: None,
+        presence_priority: 0,
+        presence_payloads: Vec::new(),
+    };
+    let queued = |body: &str| {
+        let mut message = xmpp_parsers::message::Message::new(Some(
+            "alice@example.com".parse::<jid::Jid>().expect("bare jid"),
+        ));
+        message.from = Some("bob@elsewhere/x".parse::<jid::Jid>().expect("sender"));
+        message.type_ = xmpp_parsers::message::MessageType::Chat;
+        message
+            .bodies
+            .insert(xmpp_parsers::message::Lang::new(), body.to_string());
+        Stanza::Message(message)
+    };
+    let first = PersistedUnackedStanza {
+        ingress_receipts: Vec::new(),
+        stream_id: SmSessionId::new(STREAM),
+        sequence: 1,
+        stanza: Box::new(queued("captured before promotion")),
+        original_receipt_at: now - chrono::Duration::seconds(610),
+    };
+    sm_storage
+        .store_session_atomic(session.clone(), vec![first.clone()])
+        .await
+        .expect("seed durable session");
+
+    let sm_registry = InMemorySmSessionRegistry::new()
+        .with_persistence(Arc::clone(&sm_storage) as Arc<dyn SmPersistenceStorage>);
+    assert_eq!(
+        sm_registry
+            .restore_from_persistence()
+            .await
+            .expect("restore"),
+        1
+    );
+
+    // The janitor captures the queue as it stands: one stanza.
+    let drained = sm_registry.drain_expired().await.expect("drain expired");
+    assert_eq!(drained.len(), 1);
+    assert_eq!(drained[0].unacked_stanzas.len(), 1);
+
+    // A concurrent keyed ingress append now commits Q+K durably. This is exactly
+    // the committed-but-displaced case: durable storage holds two entries while
+    // the captured promotion copy still holds one.
+    let mut appended_session = session.clone();
+    appended_session.outbound_count = 2;
+    let second = PersistedUnackedStanza {
+        ingress_receipts: Vec::new(),
+        stream_id: SmSessionId::new(STREAM),
+        sequence: 2,
+        stanza: Box::new(queued("appended during promotion")),
+        original_receipt_at: now,
+    };
+    let outcome = sm_storage
+        .store_session_atomic_with_ingress_append(
+            appended_session,
+            vec![first, second],
+            PersistedIngressAppend {
+                key: SmIngressAppendKey {
+                    message_key: waddle_xmpp::ingress::MessageKey::new(),
+                    kind: SmIngressReceiptKind::from_storage(1),
+                    semantic_identity_hash: [42; 32],
+                    resource: recipient.clone(),
+                },
+                accepting_stream: SmSessionId::new(STREAM),
+                appended_at: now,
+            },
+        )
+        .await
+        .expect("concurrent keyed append commits");
+    assert_eq!(outcome, KeyedSnapshotOutcome::Committed);
+
+    // Promotion drains only what it captured.
+    let pending: Arc<dyn PendingDeliveryStorage> =
+        Arc::new(InMemoryPendingDeliveryStorage::unlimited());
+    let registry = ConnectionRegistry::new();
+    let user_registry = test_user_registry();
+    let summary = promote_session_unacked(
+        &drained[0],
+        &registry,
+        &user_registry,
+        &pending,
+        &Blocklist::empty(),
+        "example.com",
+        &[],
+    )
+    .await;
+    assert_eq!(summary.queued, 1, "only the captured stanza is promoted");
+    assert!(!summary.has_storage_failure());
+
+    // Confirmation must refuse: durable state holds a sequence promotion never saw.
+    assert!(
+        !sm_registry.confirm_drained(STREAM).await,
+        "confirmation must not retire a session holding an unseen durable append"
+    );
+    assert!(
+        sm_storage
+            .get_session(&SmSessionId::new(STREAM))
+            .await
+            .expect("durable lookup")
+            .is_some(),
+        "the durable session survives so the unseen append can still be delivered"
+    );
+    let surviving = sm_storage
+        .list_unacked(&SmSessionId::new(STREAM))
+        .await
+        .expect("durable queue");
+    assert_eq!(
+        surviving
+            .iter()
+            .map(|entry| entry.sequence)
+            .collect::<Vec<_>>(),
+        vec![1, 2],
+        "the committed append is still queued for the promotion retry"
+    );
+}
