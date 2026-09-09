@@ -6,12 +6,10 @@ use super::super::*;
 pub(crate) enum RemoteCarbonFanout {
     Applied {
         carbon_recipients: Vec<jid::FullJid>,
-        recipient_sm_append_streams: Vec<waddle_xmpp::pending_delivery::SmSessionId>,
     },
     Incomplete {
         reason: crate::server::routes::interpret::carbons::CarbonFanoutFailure,
         carbon_recipients: Vec<jid::FullJid>,
-        recipient_sm_append_streams: Vec<waddle_xmpp::pending_delivery::SmSessionId>,
     },
     MaybeCommitted,
 }
@@ -21,12 +19,10 @@ impl RemoteCarbonFanout {
         match reply.status {
             RelayRemoteUserSideEffectStatus::Applied => Some(Self::Applied {
                 carbon_recipients: reply.carbon_recipients,
-                recipient_sm_append_streams: reply.recipient_sm_append_streams,
             }),
             RelayRemoteUserSideEffectStatus::Incomplete { reason } => Some(Self::Incomplete {
                 reason,
                 carbon_recipients: reply.carbon_recipients,
-                recipient_sm_append_streams: reply.recipient_sm_append_streams,
             }),
             RelayRemoteUserSideEffectStatus::StaleRegistration
             | RelayRemoteUserSideEffectStatus::Unavailable => None,
@@ -210,7 +206,6 @@ impl OrderedRelayDeliveryBridge {
             return RelayRemoteUserSideEffectReply {
                 status: RelayRemoteUserSideEffectStatus::Unavailable,
                 carbon_recipients: Vec::new(),
-                recipient_sm_append_streams: Vec::new(),
             };
         };
         let registration = self
@@ -227,7 +222,6 @@ impl OrderedRelayDeliveryBridge {
             return RelayRemoteUserSideEffectReply {
                 status: RelayRemoteUserSideEffectStatus::StaleRegistration,
                 carbon_recipients: Vec::new(),
-                recipient_sm_append_streams: Vec::new(),
             };
         };
         let actor = match services
@@ -244,7 +238,6 @@ impl OrderedRelayDeliveryBridge {
                 return RelayRemoteUserSideEffectReply {
                     status: RelayRemoteUserSideEffectStatus::StaleRegistration,
                     carbon_recipients: Vec::new(),
-                    recipient_sm_append_streams: Vec::new(),
                 };
             }
             Err(error) => {
@@ -256,7 +249,6 @@ impl OrderedRelayDeliveryBridge {
                 return RelayRemoteUserSideEffectReply {
                     status: RelayRemoteUserSideEffectStatus::Unavailable,
                     carbon_recipients: Vec::new(),
-                    recipient_sm_append_streams: Vec::new(),
                 };
             }
         };
@@ -281,11 +273,10 @@ impl OrderedRelayDeliveryBridge {
                     }
                 },
                 carbon_recipients: Vec::new(),
-                recipient_sm_append_streams: Vec::new(),
             };
         }
 
-        let (status, carbon_recipients, recipient_sm_append_streams) = match msg.effect {
+        let (status, carbon_recipients) = match msg.effect {
             RemoteUserSideEffect::Carbons {
                 owner,
                 message,
@@ -312,20 +303,17 @@ impl OrderedRelayDeliveryBridge {
                         Ok(outcome) => (
                             RelayRemoteUserSideEffectStatus::Applied,
                             outcome.carbon_recipients,
-                            outcome.recipient_sm_append_streams,
                         ),
                         Err(incomplete) => (
                             RelayRemoteUserSideEffectStatus::Incomplete {
                                 reason: incomplete.reason,
                             },
                             incomplete.completed.carbon_recipients,
-                            incomplete.completed.recipient_sm_append_streams,
                         ),
                     }
                 }
                 _ => (
                     RelayRemoteUserSideEffectStatus::StaleRegistration,
-                    Vec::new(),
                     Vec::new(),
                 ),
             },
@@ -339,7 +327,6 @@ impl OrderedRelayDeliveryBridge {
                     return RelayRemoteUserSideEffectReply {
                         status: RelayRemoteUserSideEffectStatus::Unavailable,
                         carbon_recipients: Vec::new(),
-                        recipient_sm_append_streams: Vec::new(),
                     };
                 };
                 crate::server::routes::websocket::handlers::iq::roster::push::send_roster_push_to_sibling_resources(
@@ -350,11 +337,7 @@ impl OrderedRelayDeliveryBridge {
                     &version,
                 )
                 .await;
-                (
-                    RelayRemoteUserSideEffectStatus::Applied,
-                    Vec::new(),
-                    Vec::new(),
-                )
+                (RelayRemoteUserSideEffectStatus::Applied, Vec::new())
             }
             RemoteUserSideEffect::BlocklistPush {
                 user_bare,
@@ -365,24 +348,18 @@ impl OrderedRelayDeliveryBridge {
                     return RelayRemoteUserSideEffectReply {
                         status: RelayRemoteUserSideEffectStatus::Unavailable,
                         carbon_recipients: Vec::new(),
-                        recipient_sm_append_streams: Vec::new(),
                     };
                 };
                 crate::server::routes::websocket::handlers::iq::blocking::send_blocking_pushes(
                     &state, &user_bare, blocked, &jids,
                 )
                 .await;
-                (
-                    RelayRemoteUserSideEffectStatus::Applied,
-                    Vec::new(),
-                    Vec::new(),
-                )
+                (RelayRemoteUserSideEffectStatus::Applied, Vec::new())
             }
         };
         RelayRemoteUserSideEffectReply {
             status,
             carbon_recipients,
-            recipient_sm_append_streams,
         }
     }
 }

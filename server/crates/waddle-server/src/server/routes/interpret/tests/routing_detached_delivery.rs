@@ -150,7 +150,7 @@ async fn route_bare_jid_dm_to_detached_only_recipient_runs_recipient_pipeline() 
 }
 
 #[tokio::test]
-async fn detached_dm_append_records_the_actual_sm_stream() {
+async fn detached_dm_append_preserves_delivery_and_route_capture() {
     use waddle_xmpp::inbox::storage::InMemoryInboxStorage;
     use waddle_xmpp::mam::storage::InMemoryMamStorage;
     use waddle_xmpp::stream_management::SmSessionRegistry;
@@ -187,13 +187,12 @@ async fn detached_dm_append_records_the_actual_sm_stream() {
     )
     .await;
 
-    assert!(capture.snapshot().intents.iter().any(|intent| {
-        matches!(
-            intent,
-            IngressEffectIntent::RecipientSmAppend { stream, .. }
-                if stream.as_str() == "captured-dm-stream"
-        )
-    }));
+    let session = sm
+        .peek_session("captured-dm-stream")
+        .await
+        .expect("load session")
+        .expect("detached session");
+    assert_eq!(session.unacked_stanzas.len(), 1);
     assert!(
         capture.snapshot().intents.iter().any(|intent| matches!(intent, IngressEffectIntent::RouteDirect { recipient, fanout, .. } if *recipient == "bob@example.com".parse::<jid::BareJid>().expect("bare") && *fanout == vec!["bob@example.com/phone".parse::<jid::FullJid>().expect("full")])),
         "detached full-JID DM must also record the accepted direct-route target"
@@ -201,7 +200,7 @@ async fn detached_dm_append_records_the_actual_sm_stream() {
 }
 
 #[tokio::test]
-async fn detached_non_dm_append_records_the_actual_sm_stream() {
+async fn detached_non_dm_append_preserves_delivery() {
     use waddle_xmpp::stream_management::SmSessionRegistry;
 
     let registry = ConnectionRegistry::new();
@@ -230,11 +229,12 @@ async fn detached_non_dm_append_records_the_actual_sm_stream() {
     )
     .await;
 
-    assert!(capture.snapshot().intents.iter().any(|intent| matches!(
-        intent,
-        IngressEffectIntent::RecipientSmAppend { stream, .. }
-            if stream.as_str() == "captured-presence-stream"
-    )));
+    let session = sm
+        .peek_session("captured-presence-stream")
+        .await
+        .expect("load session")
+        .expect("detached session");
+    assert_eq!(session.unacked_stanzas.len(), 1);
 }
 
 #[tokio::test]

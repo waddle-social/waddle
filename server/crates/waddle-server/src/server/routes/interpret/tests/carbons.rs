@@ -261,7 +261,7 @@ async fn xep_0280_send_carbons_queues_for_detached_xep_0198_resources() {
 }
 
 #[tokio::test]
-async fn detached_carbon_append_records_the_actual_sm_stream() {
+async fn detached_carbon_delivery_still_queues_with_ingress_capture() {
     let registry = ConnectionRegistry::new();
     let alice_web: jid::FullJid = "alice@example.com/web".parse().expect("jid");
     let alice_phone: jid::FullJid = "alice@example.com/phone".parse().expect("jid");
@@ -310,17 +310,16 @@ async fn detached_carbon_append_records_the_actual_sm_stream() {
     )
     .await;
 
-    assert!(capture.snapshot().intents.iter().any(|intent| {
-        matches!(
-            intent,
-            IngressEffectIntent::RecipientSmAppend { stream, .. }
-                if stream.as_str() == "captured-carbon-stream"
-        )
-    }));
+    let session = sm
+        .peek_session("captured-carbon-stream")
+        .await
+        .expect("peek")
+        .expect("session present");
+    assert_eq!(session.unacked_stanzas.len(), 1);
 }
 
 #[tokio::test]
-async fn self_dm_and_sent_carbon_to_same_detached_stream_keep_distinct_append_identities() {
+async fn self_dm_and_sent_carbon_to_same_detached_stream_both_queue() {
     let registry = ConnectionRegistry::new();
     let alice_web: jid::FullJid = "alice@example.com/web".parse().expect("jid");
     let alice_phone: jid::FullJid = "alice@example.com/phone".parse().expect("jid");
@@ -379,24 +378,15 @@ async fn self_dm_and_sent_carbon_to_same_detached_stream_keep_distinct_append_id
     )
     .await;
 
-    let append_identities: Vec<u64> = capture
-        .snapshot()
-        .intents
-        .into_iter()
-        .filter_map(|intent| match intent {
-            IngressEffectIntent::RecipientSmAppend {
-                stream,
-                append_identity,
-            } if stream.as_str() == "shared-self-dm-stream" => Some(append_identity.as_u64()),
-            _ => None,
-        })
-        .collect();
-
+    let session = sm
+        .peek_session("shared-self-dm-stream")
+        .await
+        .expect("peek")
+        .expect("session present");
     assert_eq!(
-        append_identities,
-        vec![0, 1],
-        "direct detached replay append and sent-carbon append to the same \
-         stream must not dedupe"
+        session.unacked_stanzas.len(),
+        2,
+        "direct delivery and its sent carbon must both remain queued"
     );
 }
 

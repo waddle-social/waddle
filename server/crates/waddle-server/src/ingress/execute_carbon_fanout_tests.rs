@@ -208,7 +208,6 @@ async fn remote_carbons_partial_retry(fixture: IngressFixture) {
             reason: outcome.reason,
         },
         carbon_recipients: outcome.completed.carbon_recipients,
-        recipient_sm_append_streams: outcome.completed.recipient_sm_append_streams,
     };
     let deps = Deps::new(&registry, "example.com");
     let partial = remote_carbon_delivery(
@@ -276,7 +275,6 @@ async fn remote_carbons_partial_retry(fixture: IngressFixture) {
         RemoteCarbonFanout::from_reply(RelayRemoteUserSideEffectReply {
             status: RelayRemoteUserSideEffectStatus::Applied,
             carbon_recipients: outcome.carbon_recipients,
-            recipient_sm_append_streams: outcome.recipient_sm_append_streams,
         })
         .expect("reply"),
         &deps,

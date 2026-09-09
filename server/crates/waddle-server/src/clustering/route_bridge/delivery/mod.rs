@@ -44,7 +44,6 @@ pub(super) fn remote_resource_route_reply(
         owner_receipts: Vec::new(),
         outcome,
         replies: Vec::new(),
-        recipient_sm_append_streams: Vec::new(),
     }
 }
 

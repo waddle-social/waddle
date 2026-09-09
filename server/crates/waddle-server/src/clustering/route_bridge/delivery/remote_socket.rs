@@ -116,9 +116,7 @@ impl OrderedRelayDeliveryBridge {
         match msg.target {
             RemoteResourceRouteTarget::FullJid { target, stanza } => {
                 let outcome = if let Some(remote) = self
-                    .try_deliver_full_jid_remote_with_capture(
-                        &target, &stanza.0, &origin, None, None,
-                    )
+                    .try_deliver_full_jid_remote(&target, &stanza.0, &origin, None)
                     .await
                 {
                     remote
@@ -130,26 +128,15 @@ impl OrderedRelayDeliveryBridge {
                     )
                     .await
                 {
-                    CapturedRemoteDeliveryOutcome::from_outcome(registered)
+                    registered
                 } else {
-                    let local = deliver_local_full_jid_after_target_refresh_with_capture(
-                        &services, &target, &stanza.0,
-                    )
-                    .await;
-                    CapturedRemoteDeliveryOutcome {
-                        outcome: local.outcome,
-                        recipient_sm_append_streams: local
-                            .recipient_sm_append_stream
-                            .into_iter()
-                            .collect(),
-                    }
+                    deliver_local_full_jid_after_target_refresh(&services, &target, &stanza.0).await
                 };
                 RelayRouteRemoteResourceStanzaReply {
                     reply_receipt: None,
                     owner_receipts: Vec::new(),
-                    outcome: outcome.outcome.into(),
+                    outcome: outcome.into(),
                     replies: Vec::new(),
-                    recipient_sm_append_streams: outcome.recipient_sm_append_streams,
                 }
             }
             RemoteResourceRouteTarget::BareJid { target, stanza } => {
@@ -235,7 +222,6 @@ impl OrderedRelayDeliveryBridge {
                             owner_receipts: Vec::new(),
                             outcome: RemoteResourceRouteOutcome::Delivered,
                             replies: frames.into_iter().map(RemoteStanza).collect(),
-                            recipient_sm_append_streams: Vec::new(),
                         }
                     }
                     OrderedRelayMucProxyOutcome::Delivered(replies) => {
@@ -244,7 +230,6 @@ impl OrderedRelayDeliveryBridge {
                             owner_receipts: Vec::new(),
                             outcome: RemoteResourceRouteOutcome::Delivered,
                             replies: replies.into_iter().map(RemoteStanza).collect(),
-                            recipient_sm_append_streams: Vec::new(),
                         }
                     }
                     OrderedRelayMucProxyOutcome::Unavailable => {
