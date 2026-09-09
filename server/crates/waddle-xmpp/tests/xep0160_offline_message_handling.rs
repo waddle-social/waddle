@@ -904,3 +904,47 @@ fn xep0160_flush_and_mam_emit_same_stanza_id_for_same_message() {
 // stanza-id matching — see `xep0359_archived_flush_preserves_stanza_id_for_dedupe`
 // in `tests/xep0359_stanza_id.rs` which pins the wire-shape
 // invariant the client dedups against.
+
+/// A canonical transient row recovered after a missed ingress execution must
+/// preserve the sender's origin identity and payload on every later flush.
+#[test]
+fn xep0160_reconstructed_transient_preserves_canonical_origin_and_payload() {
+    let mut canonical = dm(
+        "romeo@example.com/phone",
+        "juliet@example.com",
+        MessageType::Chat,
+        Some("accepted before restart"),
+    );
+    waddle_xmpp_core::xep0359::add_origin_id(&mut canonical, "canonical-offline-origin");
+    let stamp = Utc
+        .with_ymd_and_hms(2026, 5, 1, 12, 0, 0)
+        .single()
+        .expect("canonical timestamp");
+    let row = PendingRow {
+        id: PendingRowId::fresh(),
+        recipient: bare("juliet@example.com"),
+        original_receipt_at: stamp,
+        payload: PendingPayload::Transient(Box::new(canonical.clone())),
+        flushed_in_session: None,
+        outbound_sequence: None,
+    };
+    let replay = build_replay_stanza(
+        MaterializedPayload::from_transient(&row).expect("transient"),
+        "example.com",
+        row.original_receipt_at,
+        ReplayReason::OfflineStorage,
+    );
+    assert_eq!(replay.from, canonical.from);
+    assert_eq!(replay.to, canonical.to);
+    assert_eq!(replay.bodies, canonical.bodies);
+    for payload in &canonical.payloads {
+        assert!(replay.payloads.contains(payload));
+    }
+    assert!(
+        !replay
+            .payloads
+            .iter()
+            .any(|payload| payload.is("stanza-id", NS_SID)),
+        "transient recovery must not invent an archive identity"
+    );
+}

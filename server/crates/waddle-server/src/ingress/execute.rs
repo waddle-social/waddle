@@ -420,6 +420,7 @@ pub async fn execute_effects(
             && decision.external_receipts[index]
                 .iter()
                 .all(|key| !decision.receipts_pending.contains(key));
+        let mut settled_complete = false;
         let outcome = if discharged_invite_deliveries[index] {
             // The ledger confirmed an outstanding invitation or a losing claim.
             // Its mutually exclusive live and offline obligations are no-ops.
@@ -464,6 +465,15 @@ pub async fn execute_effects(
             .await
             {
                 Ok(result) => {
+                    // Completion attests that every assigned receipt already exists
+                    // in the arm's transaction, including receipts written by a
+                    // concurrent execution of this stale decision. This affects
+                    // diagnostics only; persisted values remain the sole proof.
+                    settled_complete = matches!(
+                        &result,
+                        EffectOutcome::Settled(settled)
+                            if settled.completion == SettledCompletion::Complete
+                    );
                     let ledger_noop = invite_ledger_noop(&result);
                     // A recorded authority can have written the ledger row and
                     // then lost its connection before the invitation was sent.
@@ -550,9 +560,10 @@ pub async fn execute_effects(
             meter_unresolved(effect);
             continue;
         }
-        if decision.external_receipts[index]
-            .iter()
-            .any(|key| !proven[index].contains(key))
+        if !settled_complete
+            && decision.external_receipts[index]
+                .iter()
+                .any(|key| !proven[index].contains(key))
         {
             meter_unresolved(effect);
         }
@@ -870,7 +881,9 @@ fn classify_outcome(
             }
             ExternalOutcome::Failed
         }
-        EffectOutcome::Archive(Err(_)) | EffectOutcome::Inbox(Err(_)) => ExternalOutcome::Failed,
+        EffectOutcome::Archive(Err(_))
+        | EffectOutcome::Inbox(Err(_))
+        | EffectOutcome::OfflineDeliveryQuotaExceeded => ExternalOutcome::Failed,
         EffectOutcome::Delivery(outcome) | EffectOutcome::CarbonFanout { outcome, .. } => {
             match outcome {
                 FullJidDeliveryOutcome::Delivered | FullJidDeliveryOutcome::QueuedDetached => {

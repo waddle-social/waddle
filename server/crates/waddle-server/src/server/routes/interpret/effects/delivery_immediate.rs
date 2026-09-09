@@ -123,20 +123,8 @@ pub(crate) async fn execute(effect: ExternalDeliveryEffect, deps: &Deps<'_>) -> 
             )
             .await,
         ),
-        ExternalDeliveryEffect::QueueOfflineDelivery {
-            prepared_notification,
-            row,
-            original_message,
-        } => {
-            let confirmed = super::super::offline_delivery::apply_offline_delivery_row(
-                &immediate,
-                row,
-                original_message,
-                Some(prepared_notification),
-            )
-            .await;
-            EffectOutcome::ConfirmedIntents(confirmed)
-        }
+        // Ordinary offline writes and receipts belong to the ingress transaction arm.
+        ExternalDeliveryEffect::QueueOfflineDelivery { .. } => EffectOutcome::Unavailable,
     }
 }
 

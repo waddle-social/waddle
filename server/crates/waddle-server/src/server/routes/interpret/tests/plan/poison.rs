@@ -212,6 +212,10 @@ use waddle_xmpp::pending_delivery::{
 pub(super) struct PoisonPending(pub InMemoryPendingDeliveryStorage);
 #[async_trait::async_trait]
 impl PendingDeliveryStorage for PoisonPending {
+    fn quota_policy(&self) -> waddle_xmpp::pending_delivery::QuotaPolicy {
+        self.0.quota_policy()
+    }
+
     async fn insert(&self, _row: PendingRow) -> Result<InsertOutcome, PendingStorageError> {
         panic!("planning wrote PendingDeliveryStorage::insert")
     }

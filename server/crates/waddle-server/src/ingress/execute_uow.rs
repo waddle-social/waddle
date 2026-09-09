@@ -13,6 +13,11 @@ use crate::{
 
 use super::{decision::IngressDecision, recorded::RouteProgress};
 
+#[path = "execute_offline.rs"]
+mod offline;
+#[cfg(test)]
+pub(crate) use offline::fail_before_offline_settlement;
+
 #[path = "execute_archive.rs"]
 mod archive;
 #[path = "execute_recovery.rs"]
@@ -27,6 +32,7 @@ pub(crate) use detached::{FAIL_DELIVERY_PROGRESS_TX, STALL_DELIVERY_RESOURCE};
 
 pub(super) fn owns(effect: &ExternalEffect, route_progress: &[RouteProgress]) -> bool {
     match effect {
+        ExternalEffect::Delivery(ExternalDeliveryEffect::QueueOfflineDelivery { .. }) => true,
         ExternalEffect::Room(
             ExternalRoomEffect::ArchiveAfterPin { .. }
             | ExternalRoomEffect::NotificationCandidate { .. },
@@ -51,8 +57,7 @@ pub(super) fn owns(effect: &ExternalEffect, route_progress: &[RouteProgress]) ->
     }
 }
 
-/// QueueOfflineDelivery remains generic until its settlement lane lands;
-/// specialized invitation routes always remain generic.
+/// Specialized invitation routes always remain generic.
 /// The caller wraps this entire future in its existing timeout_at(deadline).
 pub(super) async fn execute_with_uow(
     uow: &IngressUnitOfWork,
@@ -64,6 +69,9 @@ pub(super) async fn execute_with_uow(
     _deadline: tokio::time::Instant,
 ) -> Option<EffectOutcome> {
     match effect {
+        ExternalEffect::Delivery(
+            delivery @ ExternalDeliveryEffect::QueueOfflineDelivery { .. },
+        ) => Some(offline::execute(uow, decision, index, delivery, deps).await),
         ExternalEffect::Room(room @ ExternalRoomEffect::ArchiveAfterPin { .. }) => {
             Some(archive::execute(uow, decision, index, room).await)
         }

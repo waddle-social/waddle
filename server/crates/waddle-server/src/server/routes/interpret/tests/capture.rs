@@ -502,7 +502,7 @@ async fn groupchat_inbox_boundary_skips_notification_intent_when_t0_policy_suppr
 }
 
 #[tokio::test]
-async fn offline_delivery_boundary_only_confirms_written_steps() {
+async fn immediate_offline_delivery_cannot_write_or_prove_receipts() {
     let registry = ConnectionRegistry::new();
     let pending: Arc<dyn PendingDeliveryStorage> = Arc::new(InMemoryPendingDeliveryStorage::new(
         waddle_xmpp::pending_delivery::QuotaPolicy::default_policy(),
@@ -548,21 +548,12 @@ async fn offline_delivery_boundary_only_confirms_written_steps() {
     )
     .await;
 
-    let snapshot = capture_snapshot(&capture);
-    assert!(!snapshot.intents.iter().any(|intent| matches!(
-        intent,
-        IngressEffectIntent::NotificationActivityPreview { owner, .. }
-            if *owner == recipient
-    )));
-    assert!(snapshot.intents.iter().any(|intent| matches!(
-        intent,
-        IngressEffectIntent::PendingDelivery {
-            mutation: waddle_xmpp::ingress::PendingDeliveryMutation::Archived {
-                recipient: intent_recipient,
-                ..
-            }
-        } if *intent_recipient == recipient
-    )));
+    assert!(capture_snapshot(&capture).intents.is_empty());
+    assert!(pending
+        .list(&recipient)
+        .await
+        .expect("pending rows")
+        .is_empty());
 }
 
 #[tokio::test]
@@ -572,8 +563,9 @@ async fn transient_offline_delivery_records_pending_delivery_intent() {
         waddle_xmpp::pending_delivery::QuotaPolicy::default_policy(),
     ));
     let capture = IngressEffectCapture::new();
+    let sink = crate::server::routes::interpret::effects::PlanSink::new();
     let deps = Deps {
-        effects: &crate::server::routes::interpret::effects::ImmediateSink,
+        effects: &sink,
         connection_registry: &registry,
         user_registry: None,
         sm_session_registry: None,

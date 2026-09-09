@@ -286,6 +286,19 @@ async fn commit_attempt(
         reconstructed |= crate::server::routes::websocket::handlers::message::muc_direct::restore_recorded_muc_decline(
             &mut plan, &recorded, &unreceipted, &recorded_envelope,
         )?;
+        if recorded
+            .iter()
+            .any(|intent| matches!(intent, IngressEffectIntent::PendingDelivery { .. }))
+        {
+            let created_at = CanonicalMessageRepository::created_at(&mut tx, key).await?;
+            reconstructed |= super::restore_offline::restore_recorded_offline_deliveries(
+                &mut plan,
+                &recorded,
+                &unreceipted,
+                &recorded_envelope,
+                created_at,
+            );
+        }
     }
     // Each generated message retains its own timestamp and assigning authority.
     for intent in &mut plan.intents {
@@ -412,11 +425,14 @@ async fn commit_attempt(
     } else {
         &verdict
     };
-    let repairable = if reconstructed {
-        unreceipted.as_slice()
-    } else {
-        &[][..]
-    };
+    let repairable: Vec<_> = unreceipted.iter().filter(|intent| {
+        reconstructed || matches!(intent,
+            IngressEffectIntent::PendingDelivery { .. }
+            | IngressEffectIntent::NotificationActivityPreview {
+                mutation: waddle_xmpp::ingress::NotificationActivityMutation::NotificationCandidate { .. }
+                    | waddle_xmpp::ingress::NotificationActivityMutation::OfflineDelivery { .. }, ..
+            })
+    }).cloned().collect();
     let mut route_progress = Vec::new();
     for intent in &intents {
         let IngressEffectIntent::RouteDirect {
@@ -460,7 +476,7 @@ async fn commit_attempt(
         &plan,
         filter_verdict,
         &applied.archives,
-        repairable,
+        &repairable,
         &route_progress,
     );
     #[cfg(feature = "clustering")]
@@ -490,7 +506,7 @@ async fn commit_attempt(
         &plan,
         filter_verdict,
         &applied.archives,
-        repairable,
+        &repairable,
         &route_progress,
     )
     .into_iter()

@@ -192,7 +192,7 @@ async fn inbox_push_receipt(fixture: IngressFixture) {
     fixture.close().await;
 }
 
-async fn offline_receipts(fixture: IngressFixture, fail_notification: bool) {
+async fn offline_receipts(fixture: IngressFixture, detach_post_commit_state: bool) {
     use waddle_xmpp::pending_delivery::{
         storage::PendingDeliveryStorage, PendingPayload, QuotaPolicy,
     };
@@ -252,7 +252,7 @@ async fn offline_receipts(fixture: IngressFixture, fail_notification: bool) {
         .expect("commit offline intents");
     assert_eq!(decision.external_receipts[0].len(), 3);
     deps.effects = &ImmediateSink;
-    if fail_notification {
+    if detach_post_commit_state {
         deps.web_socket_state = None;
     }
     let report = execute_effects(
@@ -269,27 +269,21 @@ async fn offline_receipts(fixture: IngressFixture, fail_notification: bool) {
         pending.list(&recipient).await.expect("queued rows").len(),
         1
     );
-    assert_eq!(
-        fixture.count("ingress_effect_receipts").await,
-        if fail_notification { 1 } else { 3 }
-    );
+    assert_eq!(fixture.count("ingress_effect_receipts").await, 3);
     assert_eq!(
         fixture
             .count("ingress_messages WHERE terminal_at IS NOT NULL")
             .await,
-        if fail_notification { 0 } else { 1 }
+        1
     );
-    assert_eq!(
-        fixture.count("notification_candidates").await,
-        if fail_notification { 0 } else { 1 }
-    );
+    assert_eq!(fixture.count("notification_candidates").await, 1);
     assert_eq!(
         pending
             .list_unoutboxed_archived(10)
             .await
             .expect("outbox marker")
             .len(),
-        usize::from(fail_notification)
+        0
     );
     fixture.close().await;
 }
@@ -315,11 +309,11 @@ async fn postgres_offline_delivery_receipts_each_written_step() {
     }
 }
 #[tokio::test]
-async fn sqlite_offline_delivery_partial_proof_leaves_notification_pending() {
+async fn sqlite_offline_delivery_frozen_candidate_survives_missing_post_commit_state() {
     offline_receipts(IngressFixture::sqlite().await, true).await;
 }
 #[tokio::test]
-async fn postgres_offline_delivery_partial_proof_leaves_notification_pending() {
+async fn postgres_offline_delivery_frozen_candidate_survives_missing_post_commit_state() {
     if let Some(fixture) = IngressFixture::postgres("offline_partial_receipts").await {
         offline_receipts(fixture, true).await;
     }

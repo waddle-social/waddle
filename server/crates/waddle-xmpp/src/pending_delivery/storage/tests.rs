@@ -474,6 +474,10 @@ impl FailNthReleaseRowIfSessionStorage {
 
 #[async_trait::async_trait]
 impl PendingDeliveryStorage for FailNthReleaseRowIfSessionStorage {
+    fn quota_policy(&self) -> QuotaPolicy {
+        self.inner.quota_policy()
+    }
+
     async fn insert(&self, row: PendingRow) -> Result<InsertOutcome, PendingStorageError> {
         self.inner.insert(row).await
     }

@@ -161,7 +161,7 @@ mod groupchat_inbox;
 mod groupchat_validation;
 mod handoff;
 mod notification_activity_ingest;
-mod offline_delivery;
+pub(crate) mod offline_delivery;
 mod room_dispatch;
 mod room_pin;
 mod room_subject;
