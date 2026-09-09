@@ -27,20 +27,11 @@ connection-generation fence (follow-up issue).
 ### Recovery follow-ups from combined review
 
 Five gaps were inherited from the pre-review implementation and filed under
-#1658. Four are resolved in PR #1752: per-resource detached delivery progress
-(#1739, §3.3a), per-plugin observer obligations (#1740, §3.3b), periodic
-terminalization maintenance (#1741, §3.6a) and atomic notification recovery
-settlement (#1743, §3.3c). One remains:
-
-**Ordinary pending-row reconstruction.** Alias replay does not generally
-reconstruct ordinary offline pending deliveries from their recorded row
-identity and canonical envelope; fresh planning allocates a new pending-row
-identifier. Specialized invitation reconstruction does not provide that
-general recovery executor, and ordinary duplicate suppression remains
-necessary to avoid inventing another row. Recovery of these durable unresolved
-obligations is tracked as #1742 (“Reconstruct ordinary pending deliveries from
-recorded ingress identity and payload”), with both-backend tests proving
-replay preserves the recorded row ID without duplicate delivery.
+#1658. All five are resolved in PR #1752: per-resource detached delivery
+progress (#1739, §3.3a), per-plugin observer obligations (#1740, §3.3b),
+atomic notification recovery settlement (#1743, §3.3c), ordinary pending-row
+reconstruction (#1742, §3.3d) and periodic terminalization maintenance
+(#1741, §3.6a).
 
 ### Settlement contract (#1752)
 
@@ -232,6 +223,23 @@ work), evaluates policy only for `DeferredPolicy` rows and only outside the
 lock, then re-validates and settles. Completed-but-unreceipted orphans settle
 the recovery obligation alone; pruning skips rows whose canonical message is
 still non-terminal; a recovery row whose canonical message is gone is deleted.
+
+### 3.3d Ordinary pending-row reconstruction (#1742)
+
+`QueueOfflineDelivery` executes through a unit-of-work arm: under the canonical
+lock the arm skips insertion when the recorded `PendingDelivery` receipt exists,
+otherwise checks for the recorded row id before the quota-predicated insert
+(Postgres recipient advisory lock), inserts the frozen notification candidate
+and marks `notification_outboxed_at_ms` in the same transaction, and settles
+exactly the recorded pending and notification obligations. Quota exhaustion is
+a typed outcome; the XEP-0160 `<service-unavailable/>` bounce is sent after the
+transaction closes. On replay, ordinary pending obligations (never invitation-
+owned rows) are rebuilt purely from the canonical envelope, the recorded row id,
+the canonical acceptance time and the recorded notification intents: a fresh
+offline effect for the same recipient is replaced, a fresh live route for an
+originally offline recipient is refused (recorded audience wins), and when the
+row is already receipted only the unfinished notification work runs. T0 push
+policy is never re-evaluated for recorded `Inserted` candidates.
 
 ### 3.4 Alias-only dedupe, MAM identity, reconciliation
 - Deleted: `origin_dedup.rs`, the `origin_dedup_*` columns and both partial
