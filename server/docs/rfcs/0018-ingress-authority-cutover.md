@@ -26,27 +26,11 @@ connection-generation fence (follow-up issue).
 
 ### Recovery follow-ups from combined review
 
-These four gaps are inherited from the pre-review implementation and remain
-outside this cutover slice. The issue titles below are follow-ups to file under
-#1658, not newly filed issue references.
-
-**Per-plugin observer receipts.** Room observers retain one room-level intent
-and receipt, without a typed plugin identity or independently persisted
-observer outcomes. If an observer pass partially succeeds and fails before
-aggregate completion, recovery cannot distinguish completed plugins from
-unfinished ones; a retry may repeat completed observer work. Independent
-observer recovery is deferred to #1658; file **“Capture typed observer
-identities and persist per-plugin ingress completion receipts”**, covering
-mixed success, failure, restart, and retry on both databases.
-
-**Terminalization maintenance.** Phase C attempts terminalization after
-receipt completion, but a failed terminalization transaction has no persistent
-maintenance sweep. A receipt-complete canonical row can remain non-terminal
-across restart and remain protected from retention until another execution
-path retries terminalization. This lifecycle limitation is deferred to #1658;
-file **“Sweep receipt-complete non-terminal ingress rows at startup and during
-bounded maintenance”**, testing injected terminalization failure, restart
-recovery, and eventual retention eligibility on SQLite and Postgres.
+Five gaps were inherited from the pre-review implementation and filed under
+#1658. Four are resolved in PR #1752: per-resource detached delivery progress
+(#1739, §3.3a), per-plugin observer obligations (#1740, §3.3b), periodic
+terminalization maintenance (#1741, §3.6a) and atomic notification recovery
+settlement (#1743, §3.3c). One remains:
 
 **Ordinary pending-row reconstruction.** Alias replay does not generally
 reconstruct ordinary offline pending deliveries from their recorded row
@@ -54,19 +38,23 @@ identity and canonical envelope; fresh planning allocates a new pending-row
 identifier. Specialized invitation reconstruction does not provide that
 general recovery executor, and ordinary duplicate suppression remains
 necessary to avoid inventing another row. Recovery of these durable unresolved
-obligations is deferred to #1658; file **“Reconstruct ordinary pending
-deliveries from recorded ingress identity and payload”**, with both-backend
-tests proving replay preserves the recorded row ID without duplicate delivery.
+obligations is tracked as #1742 (“Reconstruct ordinary pending deliveries from
+recorded ingress identity and payload”), with both-backend tests proving
+replay preserves the recorded row ID without duplicate delivery.
 
-**Atomic recovery completion and receipts.** Groupchat notification recovery
-marks its recovery row completed separately from recording the corresponding
-ingress receipt, and the existing background recovery sweep does not settle
-ingress receipts. A crash or receipt-write failure between those operations
-can leave a completed recovery item with an unresolved canonical obligation.
-Atomic settlement is deferred to #1658; file **“Atomically complete notification
-recovery and its correlated ingress receipts”**, adding a typed unit-of-work
-repository operation and SQLite/Postgres fault-injection tests for rollback
-and restart.
+### Settlement contract (#1752)
+
+An effect whose completion evidence is a row in the global database (delivery
+progress, notification candidate, recovery completion) commits that evidence
+and the receipts of the recorded intents it discharges in ONE ingress
+transaction: attested epoch → canonical row `FOR UPDATE` → effect tables →
+`settle_recorded` → commit. No actor, registry, extension or socket call runs
+while that transaction is open. Such effects are executed by unit-of-work arms
+(`execute_uow`) selected by exact effect variant; the generic executor never
+writes a receipt owned by an arm (`arm_owned_receipts`). Evidence discharges a
+recorded intent only by exact identity, with two typed coalescences: a
+`Duplicate` candidate insertion discharges the recorded `Inserted` obligation,
+and a `Completed` recovery discharges a recorded `DeferredPolicy` obligation.
 
 ## 2. Three phases per inbound message
 
@@ -188,7 +176,7 @@ rows. Per-recipient copies and error replies are reconstructed by a pure
 function over `(envelope, intent)` tested without actors, extensions or
 policy lookups.
 
-### Per-resource detached delivery progress (#1739)
+### 3.3a Per-resource detached delivery progress (#1739)
 
 A recorded direct route freezes its capture identity and resource fanout.
 `ingress_delivery_receipts` records each successful resource under the canonical
@@ -214,6 +202,36 @@ a failed progress transaction has the same retry window. MUC groupchat
 occupant fanout is outside this mechanism. `QueueDetached` effects without
 a matching recorded direct route retain generic execution and receipt
 ownership; the variant is shared by MUC occupant delivery.
+
+### 3.3b Per-plugin observer obligations (#1740)
+
+Room observer work is one typed intent and one external effect per eligible
+plugin: `RoomObserver { room, requester, sender, plugin: PluginId }` (codec tag
+27; the semantic key includes the plugin). Eligibility is frozen at planning
+from the extension manager's exact predicates (valid hook body, declared
+`MessageObserve` capability, grant). Ready observer effects execute
+concurrently under the shared Phase C deadline and are receipted independently,
+so a slow plugin cannot starve a fast plugin's receipt. On replay the recorded
+plugin set is authoritative: unrecorded plugins never run historical messages,
+recorded plugins missing from the fresh plan are rebuilt from the canonical
+envelope, and a plugin that is missing or revoked at execution stays
+unresolved. Host-warning replies keep their non-proving semantics.
+
+### 3.3c Atomic notification recovery settlement (#1743)
+
+`groupchat_notification_recovery` rows carry the canonical `message_key` and
+are inserted only inside the ingress transaction. Phase C executes the
+`NotificationCandidate` effect through a unit-of-work arm: candidate insertion,
+recovery completion and the receipts for the recorded
+`NotificationActivityPreview` and `GroupchatNotificationRecovery` intents commit
+together. A T0 push-policy error records a typed `DeferredPolicy` obligation
+instead of nothing. The background sweep is obligations-driven: it reads
+recorded intents under the canonical lock, rebuilds candidates purely from the
+canonical envelope (no MAM read, no T0 re-evaluation for recorded `Inserted`
+work), evaluates policy only for `DeferredPolicy` rows and only outside the
+lock, then re-validates and settles. Completed-but-unreceipted orphans settle
+the recovery obligation alone; pruning skips rows whose canonical message is
+still non-terminal; a recovery row whose canonical message is gone is deleted.
 
 ### 3.4 Alias-only dedupe, MAM identity, reconciliation
 - Deleted: `origin_dedup.rs`, the `origin_dedup_*` columns and both partial
@@ -274,6 +292,20 @@ Alias resolution and sm-ref/delivery insertion lock the canonical row
 `FOR UPDATE` (no share→update upgrades on the write path);
 `terminalize_message` takes an unconditional `FOR UPDATE`; GC keeps
 `FOR UPDATE SKIP LOCKED`. Retention: eight days from `terminal_at`.
+
+### 3.6a Periodic bounded maintenance (#1741)
+
+The retention coordinator runs a maintenance pass at startup, after committed
+decisions and on a jittered 30 s tick, continuing with capped exponential
+backoff after any `Partial`, `Failed` or `TimedOut` pass. A pass attests the
+epoch, then terminalizes receipt-complete non-terminal rows older than a 60 s
+grace through a keyset cursor over `(created_at, message_key)` (each row is
+locked and its receipt completeness re-checked; contended rows are skipped and
+retried on the continuation), then runs retention GC. Each phase is bounded
+inside a hard pass deadline; maintenance shares the ingress pool and holds at
+most one connection at a time. Metrics: `ingress.maintenance.runs{phase,
+outcome}` and `ingress.maintenance.terminalized_messages`; alert
+`IngressMaintenanceFailing`.
 
 ## 4. Backends
 The unit of work is dialect-aware through `Database`: SQLite uses
