@@ -278,6 +278,7 @@ impl ExtensionHostAdapter {
             sfu: self.state.deps.protocol.sfu.as_deref(),
             ingress_effect_capture: None,
             direct_route_identity: None,
+            ingress_append_context: None,
         }
     }
 

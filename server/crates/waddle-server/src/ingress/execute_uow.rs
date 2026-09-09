@@ -49,8 +49,7 @@ pub(super) fn owns(effect: &ExternalEffect, route_progress: &[RouteProgress]) ->
             route_identity,
             ..
         }) => route_progress.iter().any(|progress| {
-            progress.fanout.len() > 1
-                && progress.recipient == jid.to_bare()
+            progress.recipient == jid.to_bare()
                 && Some(&progress.route_identity) == route_identity.as_ref()
         }),
         _ => false,

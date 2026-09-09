@@ -859,13 +859,13 @@ async fn route_to_bare_jid(
                         continue;
                     }
                     let stanza_typed = (*stanza).clone();
-                    match sm
-                        .record_stanza_for_detached_bound_resource(
-                            &full,
-                            &stanza_typed,
-                            chrono::Utc::now(),
-                        )
-                        .await
+                    match routing::append_detached(
+                        sm,
+                        deps.ingress_append_context.as_ref(),
+                        &full,
+                        &stanza_typed,
+                    )
+                    .await
                     {
                         Ok(true) => {
                             any_landed = true;
@@ -1087,7 +1087,14 @@ pub(crate) async fn deliver_peer_to_full_with_registered_remote(
     {
         return outcome;
     }
-    deliver_peer_to_full(deps.user_registry, deps.sm_session_registry, target, stanza).await
+    deliver_peer_to_full(
+        deps.user_registry,
+        deps.sm_session_registry,
+        target,
+        stanza,
+        deps.ingress_append_context.as_ref(),
+    )
+    .await
 }
 
 pub(crate) async fn deliver_direct_to_full_with_registered_remote(
@@ -1118,7 +1125,14 @@ pub(crate) async fn deliver_direct_to_full_with_registered_remote(
     {
         return outcome;
     }
-    deliver_direct_to_full(deps.user_registry, deps.sm_session_registry, target, stanza).await
+    deliver_direct_to_full(
+        deps.user_registry,
+        deps.sm_session_registry,
+        target,
+        stanza,
+        deps.ingress_append_context.as_ref(),
+    )
+    .await
 }
 
 async fn deliver_registered_remote_resource(
@@ -1356,8 +1370,7 @@ pub(crate) async fn queue_processed_for_detached(
         if live_set.contains(&full) {
             continue;
         }
-        match sm
-            .record_stanza_for_detached_bound_resource(&full, stanza, chrono::Utc::now())
+        match routing::append_detached(sm, deps.ingress_append_context.as_ref(), &full, stanza)
             .await
         {
             Ok(true) => {

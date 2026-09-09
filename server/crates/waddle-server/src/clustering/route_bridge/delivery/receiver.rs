@@ -32,6 +32,7 @@ impl OrderedRelayDeliveryBridge {
             Some(&services.sm_session_registry),
             target,
             stanza,
+            None,
         )
         .await
         {
@@ -225,6 +226,7 @@ pub(in super::super) async fn deliver_direct_or_registered_remote_resource(
         Some(&services.sm_session_registry),
         target,
         stanza,
+        None,
     )
     .await
 }

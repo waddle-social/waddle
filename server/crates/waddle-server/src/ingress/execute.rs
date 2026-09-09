@@ -14,7 +14,7 @@ use crate::{
             delivery::ExternalDeliveryEffect, direct::ExternalDirectEffect, Effect, EffectOutcome,
             ExternalEffect, ImmediateSink, PlannedEffect, SettledCompletion,
         },
-        Deps, FullJidDeliveryOutcome,
+        Deps, FullJidDeliveryOutcome, SmIngressAppendContext,
     },
 };
 
@@ -451,7 +451,26 @@ pub async fn execute_effects(
                                 }
                             }
                         }
-                        let result = sink.execute_with_applied(execution, deps, &decision.applied_durable).await;
+                        // A remote plan may become local before execution. Carry
+                        // only its exact recorded direct receipt into that fallback;
+                        // unrelated effects (including MUC) get no append context.
+                        let mut effect_deps = deps.clone();
+                        effect_deps.ingress_append_context = None;
+                        if let ExternalEffect::Delivery(ExternalDeliveryEffect::RelayFullJid { target, .. }) = effect {
+                            if let Some(message_key) = decision.message_key {
+                                if let Some(progress) = decision.route_progress.iter().find(|progress| {
+                                    progress.matches(effect)
+                                        && progress.fanout.contains(target)
+                                        && decision.external_receipts[index].contains(&progress.receipt)
+                                }) {
+                                    effect_deps.ingress_append_context = Some(SmIngressAppendContext {
+                                        message_key,
+                                        receipt: progress.receipt.clone(),
+                                    });
+                                }
+                            }
+                        }
+                        let result = sink.execute_with_applied(execution, &effect_deps, &decision.applied_durable).await;
                         if let Some(message) = decision.message_key {
                             if let Err(error) = carbon_progress::persist(uow, message, effect, &result).await {
                                 tracing::warn!(%error, "remote carbon progress persistence failed; leaving obligation pending");
@@ -1227,3 +1246,7 @@ mod groupchat_receipt_tests;
 #[cfg(test)]
 #[path = "execute_detached_fault_tests.rs"]
 mod detached_fault_tests;
+
+#[cfg(test)]
+#[path = "execute_relay_detached_tests.rs"]
+mod relay_detached_tests;
