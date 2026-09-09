@@ -226,6 +226,8 @@ still non-terminal; a recovery row whose canonical message is gone is deleted.
 
 ### 3.3d Ordinary pending-row reconstruction (#1742)
 
+When T0 push-policy preparation returns `RetryLater`, ingress records only the pending-delivery obligation, leaves `notification_outboxed_at_ms` unset on execution and replay, and defers notification preparation to the existing XEP-0357 janitor.
+
 `QueueOfflineDelivery` executes through a unit-of-work arm: under the canonical
 lock the arm skips insertion when the recorded `PendingDelivery` receipt exists,
 otherwise checks for the recorded row id before the quota-predicated insert

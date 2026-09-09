@@ -137,9 +137,9 @@ async fn store(
     let mut evidence = if already_receipted {
         Vec::new()
     } else {
-        vec![pending]
+        vec![pending.clone()]
     };
-    notification_evidence(&mut tx, row, prepared, &mut evidence).await?;
+    notification_evidence(&mut tx, decision, index, row, prepared, &mut evidence).await?;
     #[cfg(test)]
     if FAIL_BEFORE_SETTLEMENT
         .lock()
@@ -149,6 +149,9 @@ async fn store(
         return Err(IngressUowError::Timeout.into());
     }
     let persisted = settle_recorded(&mut tx, key, &evidence).await?;
+    if !already_receipted && !persisted.contains(&pending) {
+        return Err(IngressUowError::EffectIntentConflict.into());
+    }
     let mut complete = true;
     for receipt in &decision.external_receipts[index] {
         if !EffectReceiptRepository::contains(
@@ -192,6 +195,8 @@ fn pending_intent(row: &PendingRow) -> IngressEffectIntent {
 
 async fn notification_evidence(
     tx: &mut IngressUowTransaction<'_>,
+    decision: &IngressDecision,
+    index: usize,
     row: &PendingRow,
     prepared: &PreparedOfflineNotification,
     evidence: &mut Vec<IngressEffectIntent>,
@@ -226,13 +231,16 @@ async fn notification_evidence(
         PreparedOfflineNotification::Suppressed => {}
         PreparedOfflineNotification::RetryLater => return Ok(()),
     }
-    PendingReceiptRepository::mark_notification_outboxed(tx, &row.id).await?;
-    evidence.push(IngressEffectIntent::NotificationActivityPreview {
+    let marker = IngressEffectIntent::NotificationActivityPreview {
         owner: row.recipient.clone(),
         mutation: NotificationActivityMutation::OfflineDelivery {
             conversation: row.recipient.clone(),
             archive_stanza_id: archive_stanza_id.clone(),
         },
-    });
+    };
+    if decision.external_receipts[index].contains(&crate::ingress::receipt_key(&marker)?) {
+        PendingReceiptRepository::mark_notification_outboxed(tx, &row.id).await?;
+        evidence.push(marker);
+    }
     Ok(())
 }

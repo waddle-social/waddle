@@ -248,7 +248,7 @@ fn transient_replacement_restores_identity_payload_time_and_dependencies() {
     );
     assert!(matches!(
         prepared_notification,
-        PreparedOfflineNotification::Suppressed
+        PreparedOfflineNotification::RetryLater
     ));
 }
 

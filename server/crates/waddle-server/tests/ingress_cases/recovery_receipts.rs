@@ -438,26 +438,48 @@ async fn completed_orphan(fixture: IngressFixture) {
         authority
             .settle_notification_recovery(&recovery, RecoveryPolicyDecision::AlreadyCompleted)
             .await
-            .expect("orphan receipt"),
-        RecoverySweepOutcome::Completed
+            .expect("incomplete orphan stays pending"),
+        RecoverySweepOutcome::Pending
     );
     assert_eq!(
         fixture.count("notification_candidates").await,
         0,
-        "AlreadyCompleted only proves recovery"
+        "AlreadyCompleted cannot prove the outstanding candidate"
     );
-    assert_eq!(fixture.count("ingress_effect_receipts").await, 3);
+    assert_eq!(fixture.count("ingress_effect_receipts").await, 2);
     assert_eq!(
         fixture
             .count("ingress_messages WHERE terminal_at IS NOT NULL")
             .await,
         0
     );
-    assert!(inbox
-        .list_completed_unreceipted_groupchat_notification_recoveries(10)
-        .await
-        .expect("no orphan")
-        .is_empty());
+    let ExternalEffect::Room(ExternalRoomEffect::NotificationCandidate {
+        candidate: Some(candidate),
+        ..
+    }) = &decision.external[0]
+    else {
+        panic!("candidate effect")
+    };
+    assert_eq!(
+        authority
+            .settle_notification_recovery(
+                &recovery,
+                RecoveryPolicyDecision::Deliver(candidate.clone()),
+            )
+            .await
+            .expect("completed marker does not prove candidate insertion"),
+        RecoverySweepOutcome::Pending
+    );
+    assert_eq!(fixture.count("ingress_effect_receipts").await, 2);
+    assert_eq!(fixture.count("notification_candidates").await, 0);
+    assert_eq!(
+        inbox
+            .list_completed_unreceipted_groupchat_notification_recoveries(10)
+            .await
+            .expect("orphan remains discoverable")
+            .len(),
+        1
+    );
     assert_eq!(
         inbox
             .prune_completed_groupchat_notification_recoveries(i64::MAX, 10)

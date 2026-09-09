@@ -88,7 +88,12 @@ pub(super) async fn apply_offline_delivery_row(
         deps.capture_intent(IngressEffectIntent::PendingDelivery {
             mutation: pending_delivery_mutation,
         });
-        if let Some(archive_stanza_id) = notification_archive_stanza_id {
+        if let Some(archive_stanza_id) = notification_archive_stanza_id.filter(|_| {
+            !matches!(
+                prepared_notification,
+                PreparedOfflineNotification::RetryLater
+            )
+        }) {
             deps.capture_intent(IngressEffectIntent::NotificationActivityPreview {
                 owner: recipient.clone(),
                 mutation: waddle_xmpp::ingress::NotificationActivityMutation::OfflineDelivery {

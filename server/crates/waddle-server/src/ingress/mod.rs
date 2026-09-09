@@ -1142,3 +1142,6 @@ pub(crate) mod recovery_tests;
 
 #[cfg(test)]
 mod offline_settlement_tests;
+
+#[cfg(test)]
+mod offline_hardening_tests;

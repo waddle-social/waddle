@@ -98,21 +98,35 @@ pub(super) fn restore_recorded_offline_deliveries(
                 None
             }
         }) {
-            Some(archive_stanza_id) => {
-                let Some(sender) = envelope.message().from.as_ref() else {
-                    continue;
-                };
-                let Ok(candidate) = crate::notification_outbox::direct_candidate_from_envelope(
-                    envelope.message(),
-                    recipient,
-                    sender,
-                    archive_stanza_id,
-                ) else {
-                    continue;
-                };
-                PreparedOfflineNotification::Prepared(Box::new(candidate))
+            Some(archive_stanza_id) => envelope
+                .message()
+                .from
+                .as_ref()
+                .and_then(|sender| {
+                    crate::notification_outbox::direct_candidate_from_envelope(
+                        envelope.message(),
+                        recipient,
+                        sender,
+                        archive_stanza_id,
+                    )
+                    .ok()
+                })
+                .map(|candidate| PreparedOfflineNotification::Prepared(Box::new(candidate)))
+                .unwrap_or(PreparedOfflineNotification::RetryLater),
+            None if recorded.iter().any(|intent| {
+                correlated_notification(intent, mutation)
+                    && matches!(
+                        intent,
+                        IngressEffectIntent::NotificationActivityPreview {
+                            mutation: NotificationActivityMutation::OfflineDelivery { .. },
+                            ..
+                        }
+                    )
+            }) =>
+            {
+                PreparedOfflineNotification::Suppressed
             }
-            None => PreparedOfflineNotification::Suppressed,
+            None => PreparedOfflineNotification::RetryLater,
         };
         let row = PendingRow {
             id: row_id.clone(),

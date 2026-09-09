@@ -321,3 +321,115 @@ async fn detached_progress_cross_archive_retry_postgres() {
         cross_archive_retry(fixture).await;
     }
 }
+
+async fn live_effects_complete_independently(fixture: IngressFixture) {
+    use kameo::actor::Spawn;
+    use waddle_server::ingress::{
+        execute::{execute_effects, ExternalOutcome},
+        Deps, ImmediateSink,
+    };
+    use waddle_xmpp::registry::{RegisterUserResource, UserRegistryActor};
+
+    let metrics = waddle_xmpp::telemetry::test_support::acquire().await;
+    let [a, b, _] = resources();
+    let connections = ConnectionRegistry::new();
+    let users = UserRegistryActor::spawn(UserRegistryActor::new());
+    let mut receivers = Vec::new();
+    for jid in [&a, &b] {
+        let (sender, receiver) = tokio::sync::mpsc::channel(4);
+        connections.register_with_carbons(jid.clone(), sender, false);
+        users
+            .ask(RegisterUserResource {
+                entry: connections.get_entry(jid).expect("live resource entry"),
+                jid: jid.clone(),
+            })
+            .await
+            .expect("register live resource");
+        receivers.push(receiver);
+    }
+    let mut submission = fixture.submission(Some("detached-live-effects"), "two live devices");
+    let identity = EffectMessageIdentity::capture_ordinal(1);
+    submission.plan.intents = vec![IngressEffectIntent::RouteDirect {
+        recipient: a.to_bare(),
+        fanout: vec![a.clone(), b.clone()],
+        route_identity: identity.clone(),
+    }];
+    // The bare-JID recipient pass emits one DirectFrame effect per live
+    // resource, all associated with the same frozen RouteDirect obligation.
+    submission.plan.plan = [a, b]
+        .into_iter()
+        .map(|jid| {
+            PlannedEffect::new(Effect::External(ExternalEffect::Delivery(
+                ExternalDeliveryEffect::RouteToPeer {
+                    route_identity: Some(identity.clone()),
+                    jid,
+                    stanza: Box::new(Stanza::Message(submission.plan.sanitized_message.clone())),
+                    kind: PeerDeliveryKind::DirectFrame,
+                    call_setup: None,
+                },
+            )))
+        })
+        .collect();
+    let decision = commit_submission(&fixture.uow, &submission, 5)
+        .await
+        .expect("first commit with two live resources");
+    assert_eq!(decision.class, IngressDecisionClass::Accepted);
+    assert_eq!(decision.external.len(), 2);
+    assert_eq!(decision.arm_owned_receipts.len(), 1);
+    assert_eq!(decision.external_receipts[0], decision.external_receipts[1]);
+    let mut deps = Deps::new(&connections, "example.com");
+    deps.user_registry = Some(&users);
+    let baseline = metrics
+        .counter_sum("ingress.effects.unresolved", &[("kind", "delivery")])
+        .unwrap_or(0);
+    let report = execute_effects(
+        &fixture.uow,
+        &fixture.db,
+        &decision,
+        &ImmediateSink,
+        &deps,
+        std::time::Duration::from_secs(5),
+    )
+    .await;
+    assert_eq!(report.outcomes.len(), 2);
+    for (_, outcome) in &report.outcomes {
+        assert_eq!(*outcome, ExternalOutcome::Done, "{report:?}");
+    }
+    assert!(report.receipt_failures.is_empty(), "{report:?}");
+    assert!(report.terminalization_failure.is_none(), "{report:?}");
+    for receiver in &mut receivers {
+        assert!(receiver.try_recv().is_ok(), "resource received its message");
+        assert!(
+            receiver.try_recv().is_err(),
+            "resource received exactly once"
+        );
+    }
+    assert_eq!(fixture.count("ingress_delivery_receipts").await, 2);
+    assert_eq!(fixture.count("ingress_effect_receipts").await, 1);
+    assert_eq!(
+        fixture
+            .count("ingress_messages WHERE terminal_at IS NOT NULL")
+            .await,
+        1
+    );
+    assert_eq!(
+        metrics
+            .counter_sum("ingress.effects.unresolved", &[("kind", "delivery")])
+            .unwrap_or(0),
+        baseline,
+        "successful resource effects must not meter unresolved delivery"
+    );
+    fixture.close().await;
+}
+
+#[tokio::test]
+async fn detached_progress_live_effects_complete_independently_sqlite() {
+    live_effects_complete_independently(IngressFixture::sqlite().await).await;
+}
+
+#[tokio::test]
+async fn detached_progress_live_effects_complete_independently_postgres() {
+    if let Some(fixture) = IngressFixture::postgres("dp_live_effects").await {
+        live_effects_complete_independently(fixture).await;
+    }
+}

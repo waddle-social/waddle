@@ -465,10 +465,10 @@ pub async fn execute_effects(
             .await
             {
                 Ok(result) => {
-                    // Completion attests that every assigned receipt already exists
-                    // in the arm's transaction, including receipts written by a
-                    // concurrent execution of this stale decision. This affects
-                    // diagnostics only; persisted values remain the sole proof.
+                    // Completion attests that this effect's work committed, even
+                    // when another effect still owns unfinished aggregate work.
+                    // This affects diagnostics only; persisted values remain
+                    // the sole receipt proof.
                     settled_complete = matches!(
                         &result,
                         EffectOutcome::Settled(settled)

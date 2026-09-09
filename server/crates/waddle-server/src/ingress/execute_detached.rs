@@ -103,8 +103,9 @@ pub(super) async fn execute(
             }
         }
     }
+    // Each effect completes its own resources; another effect may still own
+    // the remaining fanout. Only `persisted` proves the aggregate receipt.
     if completion != SettledCompletion::Uncertain
-        && !persisted.is_empty()
         && !destinations.is_empty()
         && destinations.iter().all(|(_, outcome)| accepted(*outcome))
     {

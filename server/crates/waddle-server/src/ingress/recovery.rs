@@ -125,6 +125,9 @@ impl IngressAuthority {
             RecoveryReceiptRepository::is_completed(&mut tx, recovery.message_key, &recovery.key)
                 .await?;
         let candidate_required = intents.iter().any(is_candidate);
+        if completed && candidate_required {
+            return Ok(RecoverySweepOutcome::Pending);
+        }
         let deferred = intents.iter().any(|intent| matches!(intent, IngressEffectIntent::GroupchatNotificationRecovery { mutation } if mutation.action == GroupchatNotificationRecoveryAction::DeferredPolicy));
         let mut evidence = Vec::new();
         if !completed && (candidate_required || deferred) {
