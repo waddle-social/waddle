@@ -7,8 +7,19 @@ impl NotificationOutboxStore {
         &self,
         candidate: &NotificationCandidate,
     ) -> Result<NotificationCandidateInsertOutcome, NotificationOutboxError> {
+        let mut tx = self.db.begin().await?;
+        let outcome = Self::insert_candidate_in_transaction(&mut tx, candidate).await?;
+        tx.commit().await?;
+        Ok(outcome)
+    }
+
+    /// Use the caller's transaction so candidate and ingress receipts commit together.
+    pub(crate) async fn insert_candidate_in_transaction(
+        tx: &mut crate::db::Transaction<'_>,
+        candidate: &NotificationCandidate,
+    ) -> Result<NotificationCandidateInsertOutcome, DatabaseError> {
         let now_ms = crate::time::now_ms();
-        let inserted = self
+        let inserted = tx
             .execute(
                 r#"
                 INSERT INTO notification_candidates (

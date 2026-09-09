@@ -16,6 +16,8 @@ pub(crate) mod gc;
 pub mod identity;
 pub(crate) mod maintenance;
 mod receipts;
+mod recovery;
+pub use recovery::{RecoveryPolicyDecision, RecoveryPreparation, RecoverySweepOutcome};
 mod recorded;
 pub use recorded::RouteProgress;
 mod rejection;
@@ -1133,3 +1135,6 @@ pub(crate) mod test_support {
 
 #[cfg(test)]
 mod subject_receipt_tests;
+
+#[cfg(test)]
+pub(crate) mod recovery_tests;

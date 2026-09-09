@@ -102,3 +102,6 @@ mod settlement;
 
 #[path = "ingress_cases/maintenance.rs"]
 mod maintenance;
+
+#[path = "ingress_cases/recovery_receipts.rs"]
+mod recovery_receipts;

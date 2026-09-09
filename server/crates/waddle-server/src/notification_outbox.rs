@@ -18,6 +18,9 @@ use crate::notification_activity::{
     NotificationActivity, NotificationActivityError, NotificationActivityReader,
 };
 mod candidate;
+mod envelope;
+pub(crate) mod groupchat_class;
+pub use envelope::{candidate_from_envelope, GroupchatCandidateIdentity};
 mod codec;
 mod deps;
 mod drain;

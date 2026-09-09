@@ -3,7 +3,6 @@ use super::super::Deps;
 use super::room::{DurableRoomEffect, ExternalRoomEffect, RoomActorMutation, RoomFenceRequirement};
 use super::EffectOutcome;
 use waddle_xmpp::{
-    ingress::IngressEffectIntent,
     muc::room_actor::{ApplyPin, GetRoomSnapshot, SetSubject},
     muc::room_registry_actor::GetRoom,
     Stanza,
@@ -72,61 +71,7 @@ pub(super) async fn execute_external(effect: ExternalRoomEffect, deps: &Deps<'_>
             )
             .await
         }
-        ExternalRoomEffect::NotificationCandidate {
-            owner,
-            room,
-            archive_stanza_id,
-            candidate,
-            recovery,
-        } => {
-            let Some(state) = deps.web_socket_state else {
-                return EffectOutcome::Unavailable;
-            };
-            if let Some(candidate) = candidate {
-                let outcome = match state
-                    .deps
-                    .protocol
-                    .notification_outbox
-                    .insert_candidate(&candidate)
-                    .await
-                {
-                    Ok(
-                        crate::notification_outbox::NotificationCandidateInsertOutcome::Inserted,
-                    ) => waddle_xmpp::ingress::NotificationCandidateOutcome::Inserted,
-                    Ok(
-                        crate::notification_outbox::NotificationCandidateInsertOutcome::Duplicate,
-                    ) => waddle_xmpp::ingress::NotificationCandidateOutcome::Duplicate,
-                    Err(_) => return EffectOutcome::Unavailable,
-                };
-                deps.capture_intent(IngressEffectIntent::NotificationActivityPreview {
-                    owner,
-                    mutation:
-                        waddle_xmpp::ingress::NotificationActivityMutation::NotificationCandidate {
-                            conversation: room,
-                            archive_stanza_id,
-                            outcome,
-                        },
-                });
-            }
-            if let Some(recovery) = recovery {
-                let Some(storage) = deps.inbox_storage else {
-                    return EffectOutcome::Unavailable;
-                };
-                match storage
-                    .mark_groupchat_notification_recovery_completed(&recovery.key)
-                    .await
-                {
-                    Ok(marked) if marked > 0 => {
-                        super::super::groupchat_inbox::capture_recovery_completion(deps, &recovery)
-                    }
-                    // Zero conflates an already completed item with a missing
-                    // item or a storage implementation's no-op default. It is
-                    // not evidence for an ingress completion receipt.
-                    Ok(_) | Err(_) => return EffectOutcome::Unavailable,
-                }
-            }
-            EffectOutcome::Completed
-        }
+        ExternalRoomEffect::NotificationCandidate { .. } => EffectOutcome::Unavailable,
         #[cfg(feature = "clustering")]
         ExternalRoomEffect::RelayMucProxy {
             admission,

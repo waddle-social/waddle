@@ -9,8 +9,10 @@ mod carbon_receipts;
 pub(crate) use carbon_receipts::CarbonReceiptRepository;
 mod durable_more;
 mod error;
+mod recovery_receipts;
 mod repositories;
 mod retry;
+pub(crate) use recovery_receipts::{RecoveryCompletion, RecoveryReceiptRepository};
 mod settlement;
 pub(crate) use settlement::settle_recorded;
 

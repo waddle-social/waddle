@@ -496,3 +496,51 @@ async fn mentions_permissions_iq_service_jid_target_returns_bad_request_with_que
 
     let _ = client.close().await;
 }
+
+/// Recovery must retain the recipient-specific occupant mention and No Ping semantics.
+#[test]
+fn recovery_envelope_preserves_occupant_mention_and_noping() {
+    use waddle_server::notification_outbox::{
+        candidate_from_envelope, GroupchatCandidateIdentity, NotificationClass,
+        NotificationThreadId,
+    };
+    use waddle_xmpp::xep::{
+        build_mention_element, generate_occupant_id, xep0421::OccupantIdSecret, ExplicitMention,
+    };
+
+    let owner = "juliet@example.com".parse().expect("owner");
+    let room: jid::BareJid = "room@conference.example.com".parse().expect("room");
+    let sender = room.with_resource_str("romeo").expect("occupant").into();
+    let archive = waddle_xmpp_core::xep0359::StanzaId::new("frozen", room.clone().into());
+    let secret = OccupantIdSecret::new(vec![7; 32]).expect("secret");
+    let occupant = generate_occupant_id(&owner, &room, &secret);
+    for noping in [false, true] {
+        let mut mention = ExplicitMention::occupant_id(occupant.as_str());
+        mention.noping = noping;
+        let mut envelope = xmpp_parsers::message::Message::new(None);
+        envelope.payloads.push(build_mention_element(&mention));
+        let candidate = candidate_from_envelope(
+            &envelope,
+            GroupchatCandidateIdentity {
+                owner: &owner,
+                room: &room,
+                sender: &sender,
+                thread_id: NotificationThreadId::root(),
+                archive_stanza_id: &archive,
+                is_live_occupant: false,
+                sender_can_broadcast_channel_mention: false,
+            },
+            &secret,
+        )
+        .expect("rebuild candidate");
+        assert_eq!(candidate.noping(), noping);
+        assert_eq!(
+            candidate.class(),
+            if noping {
+                NotificationClass::NotifyAll
+            } else {
+                NotificationClass::PersonalMention
+            }
+        );
+    }
+}

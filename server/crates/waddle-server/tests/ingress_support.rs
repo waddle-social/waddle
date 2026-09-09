@@ -16,7 +16,6 @@ pub struct IngressFixture {
     pub db: Database,
     pub uow: IngressUnitOfWork,
     pub principal: AuthenticatedPrincipalRef,
-    #[cfg(feature = "clustering")]
     lineage: LineageConfig,
     postgres: Option<(sqlx::PgPool, String)>,
     sqlite_directory: Option<tempfile::TempDir>,
@@ -111,7 +110,6 @@ impl IngressFixture {
             principal,
             postgres,
             sqlite_directory: None,
-            #[cfg(feature = "clustering")]
             lineage,
         };
         fixture.execute("INSERT INTO users (jid, username, xmpp_localpart, created_at, updated_at) VALUES (?, ?, ?, ?, ?)", waddle_server::db_params![fixture.principal.bare_jid().to_string(), "romeo".to_string(), "romeo".to_string(), chrono::Utc::now().to_rfc3339(), chrono::Utc::now().to_rfc3339()]).await;
@@ -222,6 +220,18 @@ impl IngressFixture {
             owner,
             epoch,
         )
+    }
+
+    pub async fn authority(&self) -> waddle_server::ingress::IngressAuthority {
+        waddle_server::ingress::IngressAuthority::new(
+            Default::default(),
+            self.db.clone(),
+            self.lineage.clone(),
+            #[cfg(feature = "clustering")]
+            None,
+        )
+        .await
+        .expect("restarted authority")
     }
 
     pub async fn close(self) {

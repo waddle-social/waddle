@@ -376,6 +376,7 @@ impl InboxProjectionMutation {
 pub enum GroupchatNotificationRecoveryAction {
     Recorded,
     Completed,
+    DeferredPolicy,
 }
 
 impl GroupchatNotificationRecoveryAction {
@@ -383,6 +384,7 @@ impl GroupchatNotificationRecoveryAction {
         match self {
             Self::Recorded => "recorded",
             Self::Completed => "completed",
+            Self::DeferredPolicy => "deferred_policy",
         }
     }
 }
@@ -3713,6 +3715,7 @@ fn groupchat_notification_recovery_action_tag(action: GroupchatNotificationRecov
     match action {
         GroupchatNotificationRecoveryAction::Recorded => 0,
         GroupchatNotificationRecoveryAction::Completed => 1,
+        GroupchatNotificationRecoveryAction::DeferredPolicy => 2,
     }
 }
 
@@ -3722,6 +3725,7 @@ fn groupchat_notification_recovery_action_from_tag(
     Ok(match tag {
         0 => GroupchatNotificationRecoveryAction::Recorded,
         1 => GroupchatNotificationRecoveryAction::Completed,
+        2 => GroupchatNotificationRecoveryAction::DeferredPolicy,
         _ => return Err(EffectIntentCodecError::MalformedPayload),
     })
 }
@@ -4715,6 +4719,25 @@ mod tests {
                 }
             },
         };
+        let recovery_deferred = IngressEffectIntent::GroupchatNotificationRecovery {
+            mutation: GroupchatNotificationRecoveryMutation {
+                action: GroupchatNotificationRecoveryAction::DeferredPolicy,
+                ..match &recovery_recorded {
+                    IngressEffectIntent::GroupchatNotificationRecovery { mutation } => {
+                        mutation.clone()
+                    }
+                    _ => unreachable!("fixture shape"),
+                }
+            },
+        };
+        assert_ne!(
+            recovery_deferred.semantic_key(),
+            recovery_recorded.semantic_key()
+        );
+        assert_ne!(
+            recovery_deferred.semantic_key(),
+            recovery_completed.semantic_key()
+        );
         let pending_archived = IngressEffectIntent::PendingDelivery {
             mutation: PendingDeliveryMutation::Archived {
                 recipient: bare("romeo@example.test"),
@@ -4766,6 +4789,7 @@ mod tests {
         for intent in [
             recovery_recorded,
             recovery_completed,
+            recovery_deferred,
             pending_archived,
             pending_transient,
             tombstone_one,

@@ -703,9 +703,10 @@ async fn sqlx_inbox_storage_thread_entries() {
     assert_eq!(storage.total_unread(&user).await.expect("unread"), 1);
 }
 
-#[tokio::test]
-async fn sqlx_inbox_storage_tracks_groupchat_notification_recovery() {
-    let storage = DatabaseInboxStorage::open(Some("sqlite::memory:"))
+async fn tracks_groupchat_notification_recovery(
+    fixture: crate::ingress::test_support::IngressFixture,
+) {
+    let storage = DatabaseInboxStorage::from_database(fixture.db.clone())
         .await
         .expect("storage");
     let user = jid("me@example.com");
@@ -813,6 +814,24 @@ async fn sqlx_inbox_storage_tracks_groupchat_notification_recovery() {
         1
     );
     assert_eq!(groupchat_notification_recovery_row_count(&storage).await, 0);
+    fixture.close().await;
+}
+
+#[tokio::test]
+async fn sqlx_inbox_storage_tracks_groupchat_notification_recovery() {
+    tracks_groupchat_notification_recovery(
+        crate::ingress::test_support::IngressFixture::sqlite().await,
+    )
+    .await;
+}
+
+#[tokio::test]
+async fn postgres_inbox_storage_tracks_groupchat_notification_recovery() {
+    if let Some(fixture) =
+        crate::ingress::test_support::IngressFixture::postgres("inbox_recovery").await
+    {
+        tracks_groupchat_notification_recovery(fixture).await;
+    }
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -1345,4 +1364,51 @@ async fn inbox_upsert_a_b_retry_a_preserves_latest_postgres() {
             .expect("postgres inbox"),
     )
     .await;
+}
+
+/// The orphan-selection SQL in `list_completed_unreceipted_groupchat_notification_recoveries`
+/// filters `ingress_effect_intents.kind = 21` and JSON `action IN (1, 2)`. Pin those storage
+/// codes to the codec so a renumbering fails here instead of silently emptying the sweep.
+#[test]
+fn orphan_recovery_sql_pins_recovery_codec_tags() {
+    use waddle_xmpp::ingress::{
+        GroupchatNotificationRecoveryAction, GroupchatNotificationRecoveryMutation,
+        IngressEffectIntent,
+    };
+    assert!(IngressEffectIntent::storage_kind_names()
+        .contains(&(21, "groupchat_notification_recovery")));
+    let room: jid::BareJid = "room@conference.example.com".parse().expect("room");
+    for (action, tag) in [
+        (GroupchatNotificationRecoveryAction::Completed, 1),
+        (GroupchatNotificationRecoveryAction::DeferredPolicy, 2),
+    ] {
+        let intent = IngressEffectIntent::GroupchatNotificationRecovery {
+            mutation: GroupchatNotificationRecoveryMutation {
+                recipient: "bob@example.com".parse().expect("recipient"),
+                room: room.clone(),
+                thread_id: None,
+                archive_stanza_id: waddle_xmpp_core::xep0359::StanzaId::new(
+                    "archive-id",
+                    room.clone().into(),
+                ),
+                sender: "room@conference.example.com/alice".parse().expect("sender"),
+                is_live_occupant: true,
+                room_members_only: true,
+                sender_can_broadcast_channel_mention: false,
+                created_at_ms: 1,
+                action,
+            },
+        };
+        intent
+            .with_encoded_v1(|kind, payload| {
+                assert_eq!(kind, 21);
+                let payload: serde_json::Value =
+                    serde_json::from_slice(payload).expect("json payload");
+                assert_eq!(
+                    payload["intent"]["mutation"]["action"],
+                    serde_json::json!(tag)
+                );
+            })
+            .expect("codec");
+    }
 }

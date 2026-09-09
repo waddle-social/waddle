@@ -1717,18 +1717,15 @@ async fn groupchat_xep0492_never_suppresses_personal_mentions_and_plain_messages
 }
 
 #[tokio::test]
-async fn groupchat_notification_recovery_retries_committed_inbox_projection() {
+async fn groupchat_notification_recovery_discards_missing_canonical_authority() {
     let state = create_test_websocket_state().await;
     let recipient: BareJid = "charlie-recover@example.com".parse().expect("recipient");
     register_first_party_push_for_test(state.as_ref(), &recipient, "charlie-recover-web").await;
     let room_jid: BareJid = "groupchat-recovery@muc.example.com"
         .parse()
         .expect("room jid");
-    // The T1 push evaluator now defers candidates when the room
-    // actor is not live (no durable T1 projection of MUC config in
-    // slice 1), so the recovery test must spin up the room actor
-    // before draining — otherwise the candidate row is deferred
-    // with policy_error_count = 1 instead of becoming a push job.
+    // A live room, an archived mention, and an enabled push subscription
+    // cannot authorize notification recovery after canonical authority is gone.
     let _room_actor = get_or_create_room_actor(
         state.as_ref(),
         &room_jid,
@@ -1768,13 +1765,14 @@ async fn groupchat_notification_recovery_retries_committed_inbox_projection() {
     store_committed_dm_archive_for_notification(&state, &room_jid, &archive_stanza_id, &message)
         .await;
 
+    let missing_message_key = waddle_xmpp::ingress::MessageKey::new();
     state
         .deps
         .protocol
         .inbox_storage
         .insert_groupchat_notification_recovery(
             waddle_xmpp::inbox::storage::GroupchatNotificationRecovery {
-                message_key: waddle_xmpp::ingress::MessageKey::new(),
+                message_key: missing_message_key,
                 key: waddle_xmpp::inbox::storage::GroupchatNotificationRecoveryKey {
                     recipient: recipient.clone(),
                     room: room_jid.clone(),
@@ -1798,7 +1796,7 @@ async fn groupchat_notification_recovery_retries_committed_inbox_projection() {
         )
         .await,
         1,
-        "recovery should complete the durable item after enqueueing the candidate"
+        "the sweep removes the recovery whose canonical authority no longer exists"
     );
     assert!(
         state
@@ -1809,11 +1807,11 @@ async fn groupchat_notification_recovery_retries_committed_inbox_projection() {
             .await
             .expect("list recovery")
             .is_empty(),
-        "completed groupchat recovery items must not be retried"
+        "deleted recovery items must not be retried"
     );
     assert_eq!(
         drain_notification_candidates_for_test(state.as_ref()).await,
-        1
+        0
     );
     let jobs = state
         .deps
@@ -1822,12 +1820,41 @@ async fn groupchat_notification_recovery_retries_committed_inbox_projection() {
         .pending_outbox_jobs()
         .await
         .expect("notification outbox jobs");
-    assert_eq!(jobs.len(), 1);
-    assert_eq!(jobs[0].recipient_bare_jid(), &recipient);
-    assert_eq!(jobs[0].conversation_jid(), &room_jid);
+    assert!(
+        jobs.is_empty(),
+        "canonical-gone recovery must not enqueue push jobs"
+    );
     assert_eq!(
-        jobs[0].class(),
-        crate::notification_outbox::NotificationClass::PersonalMention
+        state
+            .deps
+            .protocol
+            .notification_outbox
+            .count_all_candidates()
+            .await
+            .expect("candidate count"),
+        0,
+        "MAM presence is not authority to reconstruct a candidate"
+    );
+    let connection = state
+        .deps
+        .app_state
+        .db_pool
+        .global()
+        .guard()
+        .await
+        .expect("global database");
+    let mut rows = connection
+        .query(
+            "SELECT COUNT(*) FROM groupchat_notification_recovery WHERE message_key = ?",
+            crate::db_params![missing_message_key.to_storage().to_string()],
+        )
+        .await
+        .expect("recovery deletion query");
+    let row = rows.next().await.expect("count row").expect("count exists");
+    assert_eq!(
+        row.get::<i64>(0).expect("recovery count"),
+        0,
+        "delete the orphan rather than marking it completed"
     );
 }
 
