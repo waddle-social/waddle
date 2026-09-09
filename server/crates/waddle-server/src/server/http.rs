@@ -1595,6 +1595,45 @@ async fn create_sm_session_registry(
     Ok(sm_session_registry)
 }
 
+/// Pending rows and ingress receipts must be written in the same database.
+/// Validate configured locations before initializing any store-owned schema.
+async fn create_ingress_pending_storage(
+    database_url: Option<&str>,
+    global: &crate::db::Database,
+) -> Result<crate::pending_delivery::DatabasePendingDeliveryStorage> {
+    match global.driver() {
+        crate::db::DatabaseDriver::Sqlite => {
+            if database_url.is_some_and(|url| url != global.database_url()) {
+                return Err(IngressColocationError::SqliteDatabase.into());
+            }
+        }
+        crate::db::DatabaseDriver::Postgres => {
+            if let Some(database_url) = database_url {
+                if !database_url.starts_with("postgres://")
+                    && !database_url.starts_with("postgresql://")
+                {
+                    return Err(IngressColocationError::Backend.into());
+                }
+                let probe = sqlx::postgres::PgPoolOptions::new()
+                    .max_connections(1)
+                    .connect(database_url)
+                    .await?;
+                let identity = crate::db::lineage::live_postgres_identity_via_pg_pool(&probe).await;
+                probe.close().await;
+                ensure_postgres_ingress_colocation(&identity?, global).await?;
+            }
+        }
+    }
+    // Sharing the pool also preserves private in-memory SQLite identity.
+    Ok(
+        crate::pending_delivery::DatabasePendingDeliveryStorage::from_database(
+            global.clone(),
+            waddle_xmpp::pending_delivery::QuotaPolicy::default_policy(),
+        )
+        .await?,
+    )
+}
+
 async fn create_pending_delivery_storage(
     xmpp_config: &XmppConfig,
     server_config: &ServerConfig,
@@ -1603,30 +1642,34 @@ async fn create_pending_delivery_storage(
     state: &Arc<AppState>,
 ) -> Result<Arc<dyn waddle_xmpp::pending_delivery::storage::PendingDeliveryStorage>> {
     let pending_delivery_url = xmpp_config.pending_delivery_database_url.clone();
-    if pending_delivery_url.is_ephemeral_fallback() {
+    if pending_delivery_url.is_ephemeral_fallback() && global_db.is_in_memory_sqlite() {
         warn!(
             "Neither WADDLE_XMPP_PENDING_DELIVERY_DATABASE_URL nor \
              WADDLE_DATABASE_URL is set; falling back to in-memory SQLite. \
              Offline DMs queued via XEP-0160 will NOT survive restart. \
-             Set one of these env vars to a SQLite path or Postgres URL \
+             Set WADDLE_DATABASE_URL to a SQLite path or Postgres URL \
              for durable offline delivery (issue #209)."
         );
     }
-    // ADR-0017 Phase 3 Slice 5 FIX 3: cluster mode attaches claim-fenced
-    // Q6-promotion inserts; every other deployment shape (clustering
-    // disabled, non-Postgres, or a build without the `clustering` feature)
-    // keeps today's portable, unfenced path. All of that branching —
-    // including the co-location check against `global_db` — lives inside
-    // `open_for_cluster_mode` itself, mirroring `create_sm_session_registry`'s
-    // identical `sm_persistence::open_for_cluster_mode` call above.
-    let storage = crate::pending_delivery::open_for_cluster_mode(
-        pending_delivery_url.as_deref(),
-        waddle_xmpp::pending_delivery::QuotaPolicy::default_policy(),
-        server_config.clustering.enabled,
-        clustering.claim_pair(),
-        global_db,
-    )
-    .await?;
+    let storage =
+        create_ingress_pending_storage(pending_delivery_url.as_deref(), global_db).await?;
+    #[cfg(feature = "clustering")]
+    let storage = if server_config.clustering.enabled
+        && global_db.driver() == crate::db::DatabaseDriver::Postgres
+    {
+        if let Some((claim_store, node_identity)) = clustering.claim_pair() {
+            storage.with_cluster_fencing(claim_store, node_identity)
+        } else {
+            warn!(
+                "clustered pending delivery has no claim handles; using unfenced promotion inserts"
+            );
+            storage
+        }
+    } else {
+        storage
+    };
+    #[cfg(not(feature = "clustering"))]
+    let _ = (server_config, clustering);
     let database = storage.database();
     if database.is_in_memory_sqlite() {
         state.register_lineage_ephemeral(crate::db::lineage::DurableStore::PendingDelivery);
@@ -2076,3 +2119,7 @@ mod ingress_colocation_tests {
         assert!(ensure_mam_ingress_colocation(&mam, &global).await.is_err());
     }
 }
+
+#[cfg(test)]
+#[path = "pending_colocation_tests.rs"]
+mod pending_colocation_tests;

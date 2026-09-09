@@ -123,8 +123,21 @@ pub(crate) async fn execute(effect: ExternalDeliveryEffect, deps: &Deps<'_>) -> 
             )
             .await,
         ),
-        // Ordinary offline writes and receipts belong to the ingress transaction arm.
-        ExternalDeliveryEffect::QueueOfflineDelivery { .. } => EffectOutcome::Unavailable,
+        // Ingress decisions are intercepted by execute_uow; extension-host
+        // callers have no canonical ingress row and use immediate storage.
+        ExternalDeliveryEffect::QueueOfflineDelivery {
+            row,
+            prepared_notification,
+            original_message,
+        } => {
+            super::super::offline_delivery::execute_immediate(
+                &immediate,
+                row,
+                prepared_notification,
+                &original_message,
+            )
+            .await
+        }
     }
 }
 

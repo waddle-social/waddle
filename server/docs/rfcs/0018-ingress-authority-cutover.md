@@ -22,7 +22,7 @@ duplicate except for unfinished recorded direct resources tracked below; (iii) l
 destination connection's own recipient archive/inbox pipeline (#1658);
 (iv) subject/pin/membership supersession keeps `main`'s semantics
 (#1659/#1660); (v) non-resumable streams have no durable
-connection-generation fence (follow-up issue).
+connection-generation fence (follow-up issue); (vi) extension-host dispatch runs outside ingress: offline rows and candidates are written immediately without receipts, and groupchat notification recovery rows are not created; a typed Extension ingress identity is the follow-up.
 
 ### Recovery follow-ups from combined review
 

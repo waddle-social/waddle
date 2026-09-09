@@ -502,7 +502,7 @@ async fn groupchat_inbox_boundary_skips_notification_intent_when_t0_policy_suppr
 }
 
 #[tokio::test]
-async fn immediate_offline_delivery_cannot_write_or_prove_receipts() {
+async fn immediate_offline_delivery_queues_without_capturing_ingress_intents() {
     let registry = ConnectionRegistry::new();
     let pending: Arc<dyn PendingDeliveryStorage> = Arc::new(InMemoryPendingDeliveryStorage::new(
         waddle_xmpp::pending_delivery::QuotaPolicy::default_policy(),
@@ -549,11 +549,17 @@ async fn immediate_offline_delivery_cannot_write_or_prove_receipts() {
     .await;
 
     assert!(capture_snapshot(&capture).intents.is_empty());
-    assert!(pending
-        .list(&recipient)
-        .await
-        .expect("pending rows")
-        .is_empty());
+    let rows = pending.list(&recipient).await.expect("pending rows");
+    assert_eq!(rows.len(), 1);
+    assert_eq!(rows[0].recipient, recipient);
+    let waddle_xmpp::pending_delivery::PendingPayload::Archived(archive_id) = &rows[0].payload
+    else {
+        panic!("immediate delivery must retain its archived payload");
+    };
+    assert_eq!(
+        archive_id,
+        &XepStanzaId::new("offline-archive-1", recipient.into())
+    );
 }
 
 #[tokio::test]

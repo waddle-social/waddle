@@ -80,3 +80,6 @@ async fn handled_full_jid_relay_failure_never_falls_back() {
         );
     }
 }
+
+#[path = "delivery_immediate_offline_tests.rs"]
+mod offline;

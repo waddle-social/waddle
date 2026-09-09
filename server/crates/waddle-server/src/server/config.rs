@@ -68,14 +68,12 @@ pub struct XmppConfig {
     /// `WADDLE_DATABASE_URL`. When unset, the store falls back to
     /// in-memory SQLite — suitable for tests only.
     pub channel_space_links_database_url: ResolvedXmppDatabaseUrl,
-    /// XEP-0160 offline-message (`pending_delivery`) database URL —
-    /// prefers dedicated XMPP DSN, otherwise the main runtime DSN.
-    /// Resolution order (matches `resolve_xmpp_database_url`):
-    /// `WADDLE_XMPP_PENDING_DELIVERY_DATABASE_URL` →
-    /// `WADDLE_DATABASE_URL`. When neither is set the storage falls
-    /// back to in-memory SQLite — suitable only for tests; production
-    /// deployments MUST set one of these env vars so queued offline
-    /// DMs survive restart per issue #209.
+    /// XEP-0160 offline-message (`pending_delivery`) database URL.
+    /// `WADDLE_XMPP_PENDING_DELIVERY_DATABASE_URL` overrides `WADDLE_DATABASE_URL`
+    /// only when colocated: SQLite requires the same URL; PostgreSQL requires
+    /// the same live database/schema identity. Startup rejects split stores on
+    /// every backend, even without clustering. When unset, shares the global
+    /// database pool; memory storage is used only when that pool is in memory.
     pub pending_delivery_database_url: ResolvedXmppDatabaseUrl,
     /// XEP-0198 stream-management persistence database URL —
     /// prefers dedicated XMPP DSN, otherwise the main runtime DSN.

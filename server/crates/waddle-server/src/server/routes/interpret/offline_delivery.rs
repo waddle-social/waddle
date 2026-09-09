@@ -1,3 +1,7 @@
+#[path = "offline_delivery_immediate.rs"]
+mod immediate;
+pub(super) use immediate::execute_immediate;
+
 use super::effects::delivery::PreparedOfflineNotification;
 use super::*;
 
@@ -110,6 +114,15 @@ pub(super) async fn apply_offline_delivery_row(
                 original_message,
             },
         );
+    } else {
+        let prepared_notification = prepare_offline_notification(
+            deps,
+            &recipient,
+            notification_archive_stanza_id.as_ref(),
+            &original_message,
+        )
+        .await;
+        execute_immediate(deps, row, prepared_notification, &original_message).await;
     }
 }
 
