@@ -24,6 +24,7 @@
 //! - `SmSessionRegistry` - Server-wide registry for detached resumable sessions
 //! - `UnackedQueue` - Queue of unacknowledged outbound stanzas
 
+pub mod ingress_append;
 pub mod persistence;
 mod replay;
 pub mod sequence;
@@ -34,6 +35,7 @@ mod stanzas_tests;
 mod state;
 mod unacked_queue;
 
+pub use ingress_append::{SmIngressAppendKey, SmKeyedAppendOutcome};
 pub use replay::{stamp_replay_delay, ReplayStanza, SmIngressFrameReceipt, SmIngressReceiptKind};
 pub use session_registry::{
     CrossNodeResumeOutcome, CrossNodeResumeStage, DetachedPresenceState, DetachedSession,
