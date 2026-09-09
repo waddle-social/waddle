@@ -1,3 +1,4 @@
+use crate::pending_delivery::SmSessionId;
 use jid::FullJid;
 use tracing::debug;
 
@@ -373,6 +374,8 @@ impl InMemorySmSessionRegistry {
         for stream_id in &stream_ids {
             let stream_lock = self.stream_lock(stream_id)?;
             let _stream_guard = stream_lock.lock().await;
+            self.reconcile_stale_session_locked(&SmSessionId::new(stream_id))
+                .await?;
             let removed = {
                 let mut sessions = self
                     .sessions
@@ -389,7 +392,10 @@ impl InMemorySmSessionRegistry {
                 removed
             };
             if let Some(session) = removed {
-                drained.push(session);
+                let mut retry = PendingPromotionRetryLease::new(self, session);
+                self.reconcile_promotion_session_locked(retry.session_mut())
+                    .await?;
+                drained.push(retry.finish());
             }
         }
         Ok(drained.finish())
@@ -976,6 +982,10 @@ impl InMemorySmSessionRegistry {
             promotions.remove(stream_id);
             retries.remove(stream_id);
         }
+        // Ownership retirement ends snapshot reconciliation too. Drop the
+        // inventory guards first; publication acquires inventory before stale
+        // bookkeeping, and reconciliation never holds either across an await.
+        self.forget_snapshot_reconciliation(&SmSessionId::new(stream_id));
         // A reservation/acquisition/lookup represents an ownership CAS that
         // may still be in flight outside this shard. Preserve that ambiguous,
         // capacity-counted responsibility until its read-only reconciliation
@@ -1251,6 +1261,17 @@ impl InMemorySmSessionRegistry {
             }
         };
         let _stream_guard = stream_lock.lock().await;
+        match self
+            .confirm_promotion_snapshot_locked(&SmSessionId::new(stream_id))
+            .await
+        {
+            Ok(true) => {}
+            Ok(false) => return false,
+            Err(error) => {
+                debug!(stream_id, %error, "promotion reconciliation failed; preserving durable session");
+                return false;
+            }
+        }
         match self.persist_delete_session(stream_id).await {
             Ok(()) => {
                 // ADR-0017 Phase 3 Slice 5: the durable row is gone, so the
@@ -1356,7 +1377,8 @@ impl InMemorySmSessionRegistry {
                 continue;
             };
             let mut retry = PendingPromotionRetryLease::new(self, session);
-            self.reconcile_retry_payload(retry.session_mut()).await;
+            self.reconcile_promotion_session_locked(retry.session_mut())
+                .await?;
             let still_pending = self
                 .pending_promotions
                 .read()
@@ -1388,6 +1410,8 @@ impl InMemorySmSessionRegistry {
         for stream_id in &expired_ids {
             let stream_lock = self.stream_lock(stream_id)?;
             let _stream_guard = stream_lock.lock().await;
+            self.reconcile_stale_session_locked(&SmSessionId::new(stream_id))
+                .await?;
             let removed = {
                 let mut sessions = self
                     .sessions
@@ -1407,7 +1431,10 @@ impl InMemorySmSessionRegistry {
                 removed
             };
             if let Some(session) = removed {
-                drained.push(session);
+                let mut retry = PendingPromotionRetryLease::new(self, session);
+                self.reconcile_promotion_session_locked(retry.session_mut())
+                    .await?;
+                drained.push(retry.finish());
             }
         }
         if !drained.sessions.is_empty() {
@@ -1720,6 +1747,8 @@ impl InMemorySmSessionRegistry {
         let stream_lock = self.stream_lock(stream_id)?;
         let _stream_guard = stream_lock.lock().await;
 
+        self.reconcile_stale_session_locked(&SmSessionId::new(stream_id))
+            .await?;
         // Peek (not remove): is there a live, unexpired session to claim at
         // all? A session that doesn't exist, or is already expired, is not
         // something the pre-Slice-1 semantics would ever have queried a
@@ -1946,6 +1975,8 @@ impl InMemorySmSessionRegistry {
     }
 
     async fn release_claim_locked(&self, stream_id: &str) -> Result<(), SmRegistryError> {
+        self.reconcile_stale_session_locked(&SmSessionId::new(stream_id))
+            .await?;
         match self.transition_claimed_resume_release(stream_id)? {
             ClaimedReleaseTransition::Restored | ClaimedReleaseTransition::PromotionOwned => {}
             ClaimedReleaseTransition::Missing => {
@@ -2226,6 +2257,8 @@ impl InMemorySmSessionRegistry {
         client_h: Option<u32>,
         authority: Option<&crate::ownership::CurrentNodeIdentityGuard>,
     ) -> Result<Option<SmClaimCompletion>, SmRegistryError> {
+        self.reconcile_stale_session_locked(&SmSessionId::new(stream_id))
+            .await?;
         // Persist-first ordering: durably erase the session BEFORE
         // we hand it back to the resuming connection. If the durable
         // delete fails, abort the resume — the in-memory entry stays
@@ -2369,6 +2402,8 @@ impl InMemorySmSessionRegistry {
     ) -> Result<Option<DetachedSession>, SmRegistryError> {
         let stream_lock = self.stream_lock(stream_id)?;
         let _stream_guard = stream_lock.lock().await;
+        self.reconcile_stale_session_locked(&SmSessionId::new(stream_id))
+            .await?;
         let claimed = self
             .claimed_sessions
             .read()
@@ -2392,7 +2427,14 @@ impl InMemorySmSessionRegistry {
             }
             removed
         };
-        Ok(removed)
+        if let Some(session) = removed {
+            let mut retry = PendingPromotionRetryLease::new(self, session);
+            self.reconcile_promotion_session_locked(retry.session_mut())
+                .await?;
+            Ok(Some(retry.finish()))
+        } else {
+            Ok(None)
+        }
     }
 
     /// Invalidate detached sessions for a FullJID after a fresh bind has
@@ -2431,10 +2473,12 @@ impl InMemorySmSessionRegistry {
             }
             ids
         };
-        let mut removed = Vec::new();
+        let mut removed = DrainedSessionBatch::new(self, matching_ids.len());
         for stream_id in &matching_ids {
             let stream_lock = self.stream_lock(stream_id)?;
             let _stream_guard = stream_lock.lock().await;
+            self.reconcile_stale_session_locked(&SmSessionId::new(stream_id))
+                .await?;
             let (removed_detached, removed_claimed) = {
                 let mut sessions = self
                     .sessions
@@ -2464,13 +2508,13 @@ impl InMemorySmSessionRegistry {
             // every returned session through `promote_displaced_sessions`,
             // which releases via `confirm_drained` after the durable delete
             // — or re-inserts for janitor retry with the claim still held.
-            if let Some(session) = removed_detached {
-                removed.push(session);
-            }
-            if let Some(session) = removed_claimed {
-                removed.push(session);
+            for session in removed_detached.into_iter().chain(removed_claimed) {
+                let mut retry = PendingPromotionRetryLease::new(self, session);
+                self.reconcile_promotion_session_locked(retry.session_mut())
+                    .await?;
+                removed.push(retry.finish());
             }
         }
-        Ok(removed)
+        Ok(removed.finish())
     }
 }
