@@ -462,3 +462,28 @@ WHERE message_key IN (SELECT message_key FROM reviewed_messages)
 RETURNING message_key;
 COMMIT;
 ```
+
+
+## Detached delivery progress
+
+For direct detached fanout, `ingress_delivery_receipts` tracks completed full
+JIDs by canonical message and complete effect receipt identity. An aggregate
+route receipt exists only after every recorded resource has completed. A
+partial fanout therefore remains non-terminal even if today's registry offers
+only a subset of its unfinished resources. Ordinary duplicate ingress retries
+only unfinished recorded targets and restores the canonical message payload;
+a resource that has reconnected can receive the retry live.
+
+Concurrent duplicate decisions may both append the same resource: this path
+provides at-least-once per-resource delivery, with no execution claim. The
+append precedes its progress transaction, so a crash or transaction failure
+between them can repeat the one in-flight resource. Earlier committed progress
+survives restart and is excluded from later decisions. Progress writes and the
+final aggregate receipt share one epoch-attested transaction under the
+canonical message lock. Lock contention leaves the obligation retryable.
+
+When investigating a pending direct route, compare its recorded fanout with
+its resource progress rows using the full effect receipt key. A missing
+resource is outstanding delivery work, not evidence that the aggregate can be
+settled. Do not synthesize a receipt from today's smaller registry audience.
+MUC groupchat occupant fanout does not use these progress rows.

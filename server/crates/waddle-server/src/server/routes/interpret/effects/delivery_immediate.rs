@@ -61,26 +61,8 @@ pub(crate) async fn execute(effect: ExternalDeliveryEffect, deps: &Deps<'_>) -> 
             call_setup,
             ..
         } => {
-            let mut destinations = Vec::with_capacity(resources.len());
-            for resource in resources {
-                let (queued, _) = route_to_connection::queue_processed_for_detached(
-                    &immediate,
-                    vec![resource.clone()],
-                    &std::collections::HashSet::new(),
-                    &stanza,
-                )
-                .await;
-                let outcome = if queued.contains(&resource) {
-                    FullJidDeliveryOutcome::QueuedDetached
-                } else {
-                    route_to_connection::deliver_direct_to_full_with_registered_remote(
-                        &immediate, &resource, &stanza,
-                    )
-                    .await
-                };
-                destinations.push((resource, outcome));
-            }
-            let outcome = detached_fanout_outcome(&destinations);
+            let outcome =
+                queue_detached_without_direct_progress(&immediate, resources, &stanza).await;
             routing::close_call_setup_from_outcome(call_setup, outcome);
             EffectOutcome::Delivery(outcome)
         }
@@ -158,31 +140,47 @@ pub(crate) async fn execute(effect: ExternalDeliveryEffect, deps: &Deps<'_>) -> 
     }
 }
 
-/// A detached batch proves completion only when every frozen resource accepted it.
-fn detached_fanout_outcome(
-    destinations: &[(jid::FullJid, FullJidDeliveryOutcome)],
+/// Non-direct obligations (notably MUC occupant delivery) retain their generic
+/// completion path. Direct obligations are intercepted by the ingress arm.
+async fn queue_detached_without_direct_progress(
+    deps: &Deps<'_>,
+    resources: Vec<jid::FullJid>,
+    stanza: &waddle_xmpp::Stanza,
 ) -> FullJidDeliveryOutcome {
-    if destinations.is_empty() {
-        return FullJidDeliveryOutcome::Unavailable;
+    let mut outcomes = Vec::with_capacity(resources.len());
+    for resource in resources {
+        let (queued, _) = route_to_connection::queue_processed_for_detached(
+            deps,
+            vec![resource.clone()],
+            &std::collections::HashSet::new(),
+            stanza,
+        )
+        .await;
+        outcomes.push(if queued.contains(&resource) {
+            FullJidDeliveryOutcome::QueuedDetached
+        } else {
+            route_to_connection::deliver_direct_to_full_with_registered_remote(
+                deps, &resource, stanza,
+            )
+            .await
+        });
     }
-    if destinations.iter().all(|(_, outcome)| {
+    if outcomes.is_empty() {
+        FullJidDeliveryOutcome::Unavailable
+    } else if outcomes.iter().all(|outcome| {
         matches!(
             outcome,
             FullJidDeliveryOutcome::Delivered | FullJidDeliveryOutcome::QueuedDetached
         )
     }) {
-        return if destinations
-            .iter()
-            .any(|(_, outcome)| *outcome == FullJidDeliveryOutcome::QueuedDetached)
-        {
+        if outcomes.contains(&FullJidDeliveryOutcome::QueuedDetached) {
             FullJidDeliveryOutcome::QueuedDetached
         } else {
             FullJidDeliveryOutcome::Delivered
-        };
+        }
+    } else {
+        FullJidDeliveryOutcome::Dropped
     }
-    // A failed member leaves the batch incomplete even when other members landed.
-    // The executor must not discharge its aggregate RouteDirect obligation.
-    FullJidDeliveryOutcome::Dropped
 }
 
 /// A handled relay owns its ticket, even when delivery was dropped or uncertain.

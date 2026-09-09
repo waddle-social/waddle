@@ -417,11 +417,51 @@ async fn commit_attempt(
     } else {
         &[][..]
     };
+    let mut route_progress = Vec::new();
+    for intent in &intents {
+        let IngressEffectIntent::RouteDirect {
+            recipient,
+            fanout,
+            route_identity,
+        } = intent
+        else {
+            continue;
+        };
+        let receipt = super::durable::receipt_key(intent)?;
+        if !crate::ingress_uow::EffectReceiptRepository::contains(
+            &mut tx,
+            key,
+            receipt.kind,
+            &receipt.semantic_identity_hash,
+        )
+        .await?
+        {
+            let completed =
+                crate::ingress_uow::DeliveryProgressRepository::load(&mut tx, key, &receipt)
+                    .await?;
+            route_progress.push(super::recorded::RouteProgress {
+                receipt,
+                recipient: recipient.clone(),
+                fanout: fanout.clone(),
+                route_identity: route_identity.clone(),
+                completed,
+            });
+        }
+    }
+    if alias == AliasOutcomeClass::Existing
+        || !matches!(filter_verdict, ReconcileVerdict::FirstCommit)
+    {
+        let envelope = CanonicalMessageRepository::load_envelope(&mut tx, key)
+            .await?
+            .ok_or(IngressUowError::EffectIntentMessageMissing)?;
+        super::recorded::restore_delivery_payloads(&mut plan, &envelope);
+    }
     let external = super::suppression::filter_external_effects(
         &plan,
         filter_verdict,
         &applied.archives,
         repairable,
+        &route_progress,
     );
     #[cfg(feature = "clustering")]
     let external = {
@@ -451,6 +491,7 @@ async fn commit_attempt(
         filter_verdict,
         &applied.archives,
         repairable,
+        &route_progress,
     )
     .into_iter()
     .map(|index| plan.plan[index].dependencies.clone())
@@ -477,8 +518,22 @@ async fn commit_attempt(
             *message_key = Some(key);
         }
     }
-    let external_receipts = super::durable::external_receipts(&external, &intents)?;
-    let route_progress = Vec::new();
+    let mut external_receipts = super::durable::external_receipts(&external, &intents)?;
+    // A progress-aware arm can own a strict subset of the frozen fanout.
+    // Generic receipt mapping deliberately requires full coverage; add only
+    // the exact route receipt whose aggregate this arm settles transactionally.
+    for (index, effect) in external.iter().enumerate() {
+        if super::execute_uow::owns(effect, &route_progress) {
+            for progress in route_progress
+                .iter()
+                .filter(|progress| progress.matches(effect))
+            {
+                if !external_receipts[index].contains(&progress.receipt) {
+                    external_receipts[index].push(progress.receipt.clone());
+                }
+            }
+        }
+    }
     let mut arm_owned_receipts = Vec::new();
     for (index, effect) in external.iter().enumerate() {
         if super::execute_uow::owns(effect, &route_progress) {

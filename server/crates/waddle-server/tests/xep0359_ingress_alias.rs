@@ -535,3 +535,18 @@ async fn alias_remote_owner_postgres() {
         remote_owner(fixture).await;
     }
 }
+
+#[path = "ingress_cases/detached_progress_support.rs"]
+pub mod detached_progress_support;
+
+#[tokio::test]
+async fn xep0359_detached_progress_recorded_archive_ids_sqlite() {
+    detached_progress_support::cross_archive_retry(IngressFixture::sqlite().await).await;
+}
+
+#[tokio::test]
+async fn xep0359_detached_progress_recorded_archive_ids_postgres() {
+    if let Some(fixture) = IngressFixture::postgres("xep0359_dp_archives").await {
+        detached_progress_support::cross_archive_retry(fixture).await;
+    }
+}
