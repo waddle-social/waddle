@@ -570,14 +570,20 @@ impl SmPersistenceStorage for InMemorySmPersistence {
         // Retire proofs the session's replay gap covers before that gap is lost
         // with the session row: they stand for evicted, never-delivered payloads,
         // and a retry must be able to allocate a replacement (#1756).
-        if let Some(gap) = guard
-            .sessions
-            .get(stream_id)
-            .and_then(|session| session.replay_gap_through)
-        {
+        //
+        // Acknowledged sequences are kept: they left the queue because they were
+        // delivered, so their proof must go on suppressing retries even once a
+        // later overflow advances the gap past them.
+        if let Some((gap, last_acked)) = guard.sessions.get(stream_id).and_then(|session| {
+            session
+                .replay_gap_through
+                .map(|gap| (gap, session.last_acked))
+        }) {
+            use crate::stream_management::sequence::{sequence_gt, sequence_lte};
             guard.ingress_appends.retain(|append| {
                 &append.accepting_stream != stream_id
-                    || !crate::stream_management::sequence::sequence_lte(append.sequence, gap)
+                    || !(sequence_lte(append.sequence, gap)
+                        && sequence_gt(append.sequence, last_acked))
             });
         }
         guard.sessions.remove(stream_id);

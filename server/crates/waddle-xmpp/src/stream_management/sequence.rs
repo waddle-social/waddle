@@ -8,7 +8,11 @@
 
 /// Returns whether `a` is strictly after `b` in the unambiguous half of the
 /// XEP-0198 wrapping sequence space.
-pub(crate) fn sequence_gt(a: u32, b: u32) -> bool {
+///
+/// Public alongside [`sequence_lte`] because the SM storage layer compares an
+/// ingress append proof's sequence against both the replay gap and the
+/// acknowledgement frontier before retiring it.
+pub fn sequence_gt(a: u32, b: u32) -> bool {
     if a == b {
         return false;
     }

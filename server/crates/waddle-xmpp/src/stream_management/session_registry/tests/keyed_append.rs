@@ -1039,6 +1039,68 @@ async fn deleting_a_session_retires_only_gap_covered_proofs() {
     );
 }
 
+/// #1756: retirement must respect the acknowledgement frontier too.
+///
+/// The retry-time check already excludes acknowledged allocations, but the
+/// delete-time helper decided on the replay gap alone. A stanza can be
+/// acknowledged — leaving the queue because it was delivered — and a later
+/// overflow can then advance the gap past its sequence. Retiring that proof
+/// would let the next retry deliver an already acknowledged stanza again.
+#[tokio::test]
+async fn retirement_keeps_proof_for_acknowledged_sequences() {
+    let stream = SmSessionId::new("keyed-delete-acked");
+    let storage = Arc::new(InMemorySmPersistence::new());
+    let registry = Arc::new(InMemorySmSessionRegistry::new().with_persistence(storage.clone()));
+    registry
+        .store_session(realistic_test_session(stream.as_str()))
+        .await
+        .expect("seed session");
+    let jid = make_test_jid();
+    let key = obligation(&jid);
+    registry
+        .record_keyed_stanza_for_detached_bound_resource(&jid, &stanza(), Utc::now(), key.clone())
+        .await
+        .expect("allocation");
+    let allocated = storage
+        .get_ingress_append(&key)
+        .await
+        .expect("ledger read")
+        .expect("proof recorded");
+
+    // Acknowledged, then a later overflow advances the gap past it.
+    let mut durable = storage
+        .get_session(&stream)
+        .await
+        .expect("durable read")
+        .expect("durable session");
+    durable.last_acked = allocated.sequence;
+    durable.replay_gap_through = Some(allocated.sequence.wrapping_add(2));
+    let queue: Vec<_> = storage
+        .list_unacked(&stream)
+        .await
+        .expect("queue read")
+        .into_iter()
+        .filter(|entry| entry.sequence != allocated.sequence)
+        .collect();
+    storage
+        .store_session_atomic(durable, queue)
+        .await
+        .expect("apply ack and later gap");
+    storage
+        .delete_session(&stream)
+        .await
+        .expect("session delete");
+
+    assert!(
+        storage
+            .get_ingress_append(&key)
+            .await
+            .expect("ledger read")
+            .is_some(),
+        "an acknowledged allocation keeps its proof through retirement"
+    );
+}
+
 /// #1756: an acknowledged allocation must never be treated as evicted.
 ///
 /// Progress can fail after an append; the client then resumes and acknowledges

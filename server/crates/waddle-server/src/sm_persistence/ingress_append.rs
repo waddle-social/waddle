@@ -146,16 +146,23 @@ fn storage_error(error: DatabaseError) -> SmPersistenceError {
     SmPersistenceError::Other(error.to_string())
 }
 
-/// Proofs whose payload the session's replay gap covers, i.e. entries the
-/// bounded queue evicted rather than delivered.
-fn gap_covered(
+/// Proofs whose payload the session lost: covered by the replay gap, and never
+/// acknowledged.
+///
+/// The acknowledgement frontier has to participate. A stanza can be
+/// acknowledged, leaving the queue because it was delivered, and a later
+/// overflow on the re-detached stream can then advance the gap past its
+/// sequence. Retiring that proof would let the next retry deliver an already
+/// acknowledged stanza a second time.
+fn lost_by_session(
     rows: &[(PersistedIngressAppendRow, u32)],
     gap: u32,
+    last_acked: u32,
 ) -> Vec<&(PersistedIngressAppendRow, u32)> {
+    use waddle_xmpp::stream_management::sequence::{sequence_gt, sequence_lte};
+
     rows.iter()
-        .filter(|(_, sequence)| {
-            waddle_xmpp::stream_management::sequence::sequence_lte(*sequence, gap)
-        })
+        .filter(|(_, sequence)| sequence_lte(*sequence, gap) && sequence_gt(*sequence, last_acked))
         .collect()
 }
 
@@ -177,22 +184,29 @@ pub(crate) struct PersistedIngressAppendRow {
 ///
 /// Promotion never delivers a gap-covered entry either: it hands out only the
 /// retained queue, which by construction sits strictly above the gap.
+///
+/// Acknowledged allocations are excluded: they left the queue because they were
+/// delivered, so their proof must keep suppressing retries even once a later
+/// overflow advances the gap past them.
 pub(crate) async fn void_gap_covered(
     tx: &mut Transaction<'_>,
     stream_id: &SmSessionId,
 ) -> Result<(), DatabaseError> {
     let mut rows = tx
         .query(
-            "SELECT replay_gap_through FROM sm_sessions WHERE stream_id = ?",
+            "SELECT replay_gap_through, last_acked FROM sm_sessions WHERE stream_id = ?",
             crate::db_params![stream_id.as_str().to_string()],
         )
         .await?;
-    let gap = match rows.next().await? {
-        Some(row) => row.get::<Option<i64>>(0)?,
+    let (gap, last_acked) = match rows.next().await? {
+        Some(row) => (row.get::<Option<i64>>(0)?, row.get::<i64>(1)?),
         None => return Ok(()),
     };
     drop(rows);
     let Some(gap) = gap.and_then(|gap| u32::try_from(gap).ok()) else {
+        return Ok(());
+    };
+    let Ok(last_acked) = u32::try_from(last_acked) else {
         return Ok(());
     };
     let mut rows = tx
@@ -221,7 +235,7 @@ pub(crate) async fn void_gap_covered(
     drop(rows);
     // Wrap-aware in Rust rather than SQL: the comparison is modulo 2^32 and no
     // portable dialect expression states that clearly.
-    for (row, sequence) in gap_covered(&proofs, gap) {
+    for (row, sequence) in lost_by_session(&proofs, gap, last_acked) {
         // Retire only the exact allocation that was read. A retry can supersede
         // this proof onto a newer stream between the select and this delete; a
         // primary-key-only predicate would then delete the replacement, and the
