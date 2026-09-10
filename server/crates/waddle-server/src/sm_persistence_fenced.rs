@@ -779,6 +779,11 @@ impl SmPersistenceStorage for PostgresFencedSmPersistence {
 
         // Two statements rather than ON DELETE CASCADE, matching the
         // portable impl's observable lifecycle exactly.
+        // Retire proofs for allocations this session lost, while its replay gap
+        // still exists to identify them (#1756).
+        crate::sm_persistence::ingress_append::void_gap_covered(&mut tx, stream_id)
+            .await
+            .map_err(|e| SmPersistenceError::Other(e.to_string()))?;
         tx.execute(
             "DELETE FROM sm_unacked WHERE stream_id = ?",
             crate::db_params![stream_id.as_str().to_string()],
@@ -812,6 +817,11 @@ impl SmPersistenceStorage for PostgresFencedSmPersistence {
             .map_err(|e| SmPersistenceError::Other(e.to_string()))?;
         self.assert_fenced_with_authority(&mut tx, stream_id, &fence, authority)
             .await?;
+        // Retire proofs for allocations this session lost, while its replay gap
+        // still exists to identify them (#1756).
+        crate::sm_persistence::ingress_append::void_gap_covered(&mut tx, stream_id)
+            .await
+            .map_err(|e| SmPersistenceError::Other(e.to_string()))?;
         tx.execute(
             "DELETE FROM sm_unacked WHERE stream_id = ?",
             crate::db_params![stream_id.as_str().to_string()],
@@ -844,6 +854,11 @@ impl SmPersistenceStorage for PostgresFencedSmPersistence {
         let _identity_guard = self
             .assert_fenced(&mut tx, stream_id, expected_fence)
             .await?;
+        // Retire proofs for allocations this session lost, while its replay gap
+        // still exists to identify them (#1756).
+        crate::sm_persistence::ingress_append::void_gap_covered(&mut tx, stream_id)
+            .await
+            .map_err(|e| SmPersistenceError::Other(e.to_string()))?;
         tx.execute(
             "DELETE FROM sm_unacked WHERE stream_id = ?",
             crate::db_params![stream_id.as_str().to_string()],

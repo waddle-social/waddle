@@ -145,3 +145,95 @@ pub(crate) fn decode(
 fn storage_error(error: DatabaseError) -> SmPersistenceError {
     SmPersistenceError::Other(error.to_string())
 }
+
+/// Proofs whose payload the session's replay gap covers, i.e. entries the
+/// bounded queue evicted rather than delivered.
+fn gap_covered(
+    rows: &[(PersistedIngressAppendRow, u32)],
+    gap: u32,
+) -> Vec<&PersistedIngressAppendRow> {
+    rows.iter()
+        .filter(|(_, sequence)| {
+            waddle_xmpp::stream_management::sequence::sequence_lte(*sequence, gap)
+        })
+        .map(|(row, _)| row)
+        .collect()
+}
+
+/// The primary key of one ledger row, as stored.
+pub(crate) struct PersistedIngressAppendRow {
+    message_key: String,
+    receipt_kind: i64,
+    semantic_identity_hash: Vec<u8>,
+    resource: String,
+}
+
+/// Retire proofs for allocations this session lost before its row is deleted.
+///
+/// Deleting the durable session destroys `replay_gap_through`, which is the only
+/// evidence distinguishing an evicted allocation from a delivered one. A later
+/// retry would then read "no durable session" as a discharged obligation and
+/// commit resource progress for a stanza nothing ever delivered. Retiring the
+/// gap-covered proofs first lets that retry allocate a replacement instead.
+///
+/// Promotion never delivers a gap-covered entry either: it hands out only the
+/// retained queue, which by construction sits strictly above the gap.
+pub(crate) async fn void_gap_covered(
+    tx: &mut Transaction<'_>,
+    stream_id: &SmSessionId,
+) -> Result<(), DatabaseError> {
+    let mut rows = tx
+        .query(
+            "SELECT replay_gap_through FROM sm_sessions WHERE stream_id = ?",
+            crate::db_params![stream_id.as_str().to_string()],
+        )
+        .await?;
+    let gap = match rows.next().await? {
+        Some(row) => row.get::<Option<i64>>(0)?,
+        None => return Ok(()),
+    };
+    drop(rows);
+    let Some(gap) = gap.and_then(|gap| u32::try_from(gap).ok()) else {
+        return Ok(());
+    };
+    let mut rows = tx
+        .query(
+            "SELECT message_key, receipt_kind, semantic_identity_hash, resource, sequence \
+             FROM sm_ingress_appends WHERE accepting_stream_id = ?",
+            crate::db_params![stream_id.as_str().to_string()],
+        )
+        .await?;
+    let mut proofs = Vec::new();
+    while let Some(row) = rows.next().await? {
+        let sequence = row.get::<i64>(4)?;
+        let Ok(sequence) = u32::try_from(sequence) else {
+            continue;
+        };
+        proofs.push((
+            PersistedIngressAppendRow {
+                message_key: row.get::<String>(0)?,
+                receipt_kind: row.get::<i64>(1)?,
+                semantic_identity_hash: row.get::<Vec<u8>>(2)?,
+                resource: row.get::<String>(3)?,
+            },
+            sequence,
+        ));
+    }
+    drop(rows);
+    // Wrap-aware in Rust rather than SQL: the comparison is modulo 2^32 and no
+    // portable dialect expression states that clearly.
+    for row in gap_covered(&proofs, gap) {
+        tx.execute(
+            "DELETE FROM sm_ingress_appends \
+             WHERE message_key = ? AND receipt_kind = ? AND semantic_identity_hash = ? AND resource = ?",
+            crate::db_params![
+                row.message_key.clone(),
+                row.receipt_kind,
+                row.semantic_identity_hash.clone(),
+                row.resource.clone(),
+            ],
+        )
+        .await?;
+    }
+    Ok(())
+}

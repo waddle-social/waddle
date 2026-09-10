@@ -963,3 +963,78 @@ async fn void_allocation_reads_durable_state_not_memory() {
         }
     }
 }
+
+/// #1756 review round 3: deleting a session must retire the proofs its replay
+/// gap covers.
+///
+/// The gap is the only evidence separating an evicted allocation from a
+/// delivered one. If the session is deleted — by expiry promotion, displacement
+/// or resume — while an evicted allocation's proof survives, a later retry reads
+/// "no durable session" as a discharged obligation and commits resource progress
+/// for a stanza that was never promoted or replayed.
+///
+/// A *retained* allocation's proof must survive the same deletion: that one was
+/// handed to promotion or replayed on resume, so it really was discharged.
+#[tokio::test]
+async fn deleting_a_session_retires_only_gap_covered_proofs() {
+    let stream = SmSessionId::new("keyed-delete-voids");
+    let storage = Arc::new(InMemorySmPersistence::new());
+    let registry = Arc::new(InMemorySmSessionRegistry::new().with_persistence(storage.clone()));
+    registry
+        .store_session(realistic_test_session(stream.as_str()))
+        .await
+        .unwrap();
+    let jid = make_test_jid();
+    let evicted_key = obligation(&jid);
+    let mut retained_key = obligation(&jid);
+    retained_key.semantic_identity_hash = [77; 32];
+
+    for key in [evicted_key.clone(), retained_key.clone()] {
+        registry
+            .record_keyed_stanza_for_detached_bound_resource(&jid, &stanza(), Utc::now(), key)
+            .await
+            .unwrap();
+    }
+    let evicted = storage
+        .get_ingress_append(&evicted_key)
+        .await
+        .unwrap()
+        .unwrap();
+    let retained = storage
+        .get_ingress_append(&retained_key)
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(retained.sequence != evicted.sequence);
+
+    // Evict the first allocation durably, then delete the session the way
+    // expiry promotion or resume does.
+    let mut durable = storage.get_session(&stream).await.unwrap().unwrap();
+    durable.replay_gap_through = Some(evicted.sequence);
+    let queue: Vec<_> = storage
+        .list_unacked(&stream)
+        .await
+        .unwrap()
+        .into_iter()
+        .filter(|entry| entry.sequence != evicted.sequence)
+        .collect();
+    storage.store_session_atomic(durable, queue).await.unwrap();
+    storage.delete_session(&stream).await.unwrap();
+
+    assert!(
+        storage
+            .get_ingress_append(&evicted_key)
+            .await
+            .unwrap()
+            .is_none(),
+        "the evicted allocation's proof is retired so a retry can allocate again"
+    );
+    assert!(
+        storage
+            .get_ingress_append(&retained_key)
+            .await
+            .unwrap()
+            .is_some(),
+        "a delivered allocation's proof must still suppress its retry"
+    );
+}

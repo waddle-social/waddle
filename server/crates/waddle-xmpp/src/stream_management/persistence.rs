@@ -567,6 +567,19 @@ impl SmPersistenceStorage for InMemorySmPersistence {
             .inner
             .lock()
             .map_err(|e| SmPersistenceError::Other(e.to_string()))?;
+        // Retire proofs the session's replay gap covers before that gap is lost
+        // with the session row: they stand for evicted, never-delivered payloads,
+        // and a retry must be able to allocate a replacement (#1756).
+        if let Some(gap) = guard
+            .sessions
+            .get(stream_id)
+            .and_then(|session| session.replay_gap_through)
+        {
+            guard.ingress_appends.retain(|append| {
+                &append.accepting_stream != stream_id
+                    || !crate::stream_management::sequence::sequence_lte(append.sequence, gap)
+            });
+        }
         guard.sessions.remove(stream_id);
         guard.unacked.remove(stream_id);
         guard.principals.remove(stream_id);

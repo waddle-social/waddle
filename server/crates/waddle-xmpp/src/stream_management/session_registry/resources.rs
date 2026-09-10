@@ -348,13 +348,12 @@ impl InMemorySmSessionRegistry {
         else {
             return Ok(None);
         };
-        let unacked = storage
-            .list_unacked(&proof.accepting_stream)
-            .await
-            .map_err(|error| SmRegistryError::Internal(error.to_string()))?;
-        if unacked.iter().any(|entry| entry.sequence == proof.sequence) {
-            return Ok(None);
-        }
+        // One row decides it. Reading the queue separately would tear: a
+        // concurrent eviction committing between the two reads pairs the old gap
+        // with the new queue. The queue read is also redundant — eviction always
+        // drops the OLDEST entry and marks the gap through its sequence, so every
+        // retained sequence is strictly above the gap. Gap-covered therefore
+        // already implies not retained.
         let evicted = session
             .replay_gap_through
             .is_some_and(|gap| !sequence_gt(proof.sequence, gap));
