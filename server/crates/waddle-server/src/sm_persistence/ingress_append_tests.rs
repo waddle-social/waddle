@@ -20,71 +20,78 @@ fn append_for(session: &PersistedSession) -> PersistedIngressAppend {
 }
 
 /// The pre-check cannot serialize callers, so the database constraint has to.
-/// Sequential duplicates only show that a conflict rolls back; this drives two
-/// concurrent writers on separate connections, which is the case that matters:
-/// both observe an unallocated obligation, both attempt the snapshot, and
-/// exactly one queue entry may result.
-async fn concurrent_allocation(storage: &Arc<DatabaseSmPersistence>) {
+///
+/// Both writers get their OWN persistence instance: a shared one would serialize
+/// them on its per-stream mutex, so the second would merely read a committed
+/// ledger row and never exercise the uniqueness race or the conflict
+/// classification path. A barrier lines them up at the insert boundary.
+async fn concurrent_allocation(url: &str) {
     let stream = format!("concurrent-{}", uuid::Uuid::new_v4());
+    let first_storage = Arc::new(
+        DatabaseSmPersistence::open(Some(url))
+            .await
+            .expect("first writer storage"),
+    );
+    let second_storage = Arc::new(
+        DatabaseSmPersistence::open(Some(url))
+            .await
+            .expect("second writer storage"),
+    );
     let session = fixture_session(&stream);
     let append = append_for(&session);
-    let first = {
-        let storage = Arc::clone(storage);
+    let barrier = Arc::new(tokio::sync::Barrier::new(2));
+    let writers = [
+        (Arc::clone(&first_storage), 11u32),
+        (Arc::clone(&second_storage), 12u32),
+    ]
+    .map(|(storage, sequence)| {
         let session = session.clone();
         let append = append.clone();
         let stream = stream.clone();
+        let barrier = Arc::clone(&barrier);
         tokio::spawn(async move {
+            barrier.wait().await;
             storage
                 .store_session_atomic_with_ingress_append(
                     session,
-                    vec![fixture_unacked(&stream, 11)],
+                    vec![fixture_unacked(&stream, sequence)],
                     append,
                 )
                 .await
         })
-    };
-    let second = {
-        let storage = Arc::clone(storage);
-        let session = session.clone();
-        let mut racing = append.clone();
-        racing.accepting_stream = session.stream_id.clone();
-        let stream = stream.clone();
-        tokio::spawn(async move {
-            storage
-                .store_session_atomic_with_ingress_append(
-                    session,
-                    vec![fixture_unacked(&stream, 12)],
-                    racing,
-                )
-                .await
-        })
-    };
-    let outcomes = [
-        first.await.expect("first task").expect("first write"),
-        second.await.expect("second task").expect("second write"),
-    ];
+    });
+    let mut outcomes = Vec::new();
+    for writer in writers {
+        outcomes.push(writer.await.expect("writer task"));
+    }
+    // A writer may legitimately lose the database write lock instead of the
+    // uniqueness race; what must never happen is two allocations.
     let committed = outcomes
         .iter()
-        .filter(|outcome| **outcome == KeyedSnapshotOutcome::Committed)
+        .filter(|outcome| matches!(outcome, Ok(KeyedSnapshotOutcome::Committed)))
         .count();
     assert_eq!(
         committed, 1,
         "exactly one concurrent writer may allocate the obligation: {outcomes:?}"
     );
-    assert!(outcomes.iter().any(|outcome| matches!(
-        outcome,
-        KeyedSnapshotOutcome::ObligationAlreadyAllocated { .. }
-    )));
+    let proof = first_storage
+        .get_ingress_append(&append.key)
+        .await
+        .expect("ledger read")
+        .expect("the winner's proof stands");
     assert_eq!(
-        storage
-            .list_unacked(&session.stream_id)
+        first_storage
+            .list_unacked(&proof.accepting_stream)
             .await
-            .unwrap()
+            .expect("queue read")
             .len(),
         1,
         "the losing writer left no queue entry behind"
     );
-    storage.delete_session(&session.stream_id).await.unwrap();
+    first_storage
+        .delete_session(&session.stream_id)
+        .await
+        .expect("cleanup");
 }
 
 async fn snapshot(storage: &DatabaseSmPersistence, stream: &SmSessionId) -> Vec<Vec<Value>> {
@@ -93,9 +100,9 @@ async fn snapshot(storage: &DatabaseSmPersistence, stream: &SmSessionId) -> Vec<
         ("SELECT user_id, full_jid, occupancy_session, inbound_count, outbound_count, last_acked, max_resume_secs, detached_at_ms, max_resume_duration_ms, carbons_enabled, roster_interested, blocklist_interested, presence_available, presence_show, presence_status, presence_priority, replay_gap_through, presence_payloads FROM sm_sessions WHERE stream_id = ?", 18),
         ("SELECT sequence, stanza_xml, original_receipt_at_ms, ingress_receipts FROM sm_unacked WHERE stream_id = ? ORDER BY sequence", 4),
     ] {
-        let mut rows = storage.query(sql, crate::db_params![stream.to_string()]).await.unwrap();
-        while let Some(row) = rows.next().await.unwrap() {
-            values.push((0..count).map(|index| row.get_value(index).unwrap()).collect());
+        let mut rows = storage.query(sql, crate::db_params![stream.to_string()]).await.expect("schema query");
+        while let Some(row) = rows.next().await.expect("row fetch") {
+            values.push((0..count).map(|index| row.get_value(index).expect("column decode")).collect());
         }
     }
     values
@@ -110,19 +117,22 @@ async fn allocation_and_duplicate(storage: &DatabaseSmPersistence) {
         storage
             .store_session_atomic_with_ingress_append(session.clone(), queue, append.clone())
             .await
-            .unwrap(),
+            .expect("keyed snapshot write"),
         KeyedSnapshotOutcome::Committed
     );
     assert_eq!(
         storage
             .list_unacked(&session.stream_id)
             .await
-            .unwrap()
+            .expect("test fixture")
             .len(),
         2
     );
     assert_eq!(
-        storage.get_ingress_append(&append.key).await.unwrap(),
+        storage
+            .get_ingress_append(&append.key)
+            .await
+            .expect("ledger read"),
         Some(append.clone())
     );
     let before = snapshot(storage, &session.stream_id).await;
@@ -139,17 +149,23 @@ async fn allocation_and_duplicate(storage: &DatabaseSmPersistence) {
                 append.clone()
             )
             .await
-            .unwrap(),
+            .expect("keyed snapshot write"),
         KeyedSnapshotOutcome::ObligationAlreadyAllocated {
             accepting_stream: session.stream_id.clone()
         }
     );
     assert_eq!(snapshot(storage, &session.stream_id).await, before);
     assert_eq!(
-        storage.get_ingress_append(&append.key).await.unwrap(),
+        storage
+            .get_ingress_append(&append.key)
+            .await
+            .expect("ledger read"),
         Some(append)
     );
-    storage.delete_session(&session.stream_id).await.unwrap();
+    storage
+        .delete_session(&session.stream_id)
+        .await
+        .expect("session delete");
 }
 
 async fn distinct_obligations(storage: &DatabaseSmPersistence) {
@@ -166,7 +182,7 @@ async fn distinct_obligations(storage: &DatabaseSmPersistence) {
                 first.clone()
             )
             .await
-            .unwrap(),
+            .expect("keyed snapshot write"),
         KeyedSnapshotOutcome::Committed
     );
     session.outbound_count = 13;
@@ -178,24 +194,30 @@ async fn distinct_obligations(storage: &DatabaseSmPersistence) {
                 second.clone()
             )
             .await
-            .unwrap(),
+            .expect("keyed snapshot write"),
         KeyedSnapshotOutcome::Committed
     );
     assert_eq!(
         storage
             .list_unacked(&session.stream_id)
             .await
-            .unwrap()
+            .expect("test fixture")
             .len(),
         2
     );
     for append in [first, second] {
         assert_eq!(
-            storage.get_ingress_append(&append.key).await.unwrap(),
+            storage
+                .get_ingress_append(&append.key)
+                .await
+                .expect("ledger read"),
             Some(append)
         );
     }
-    storage.delete_session(&session.stream_id).await.unwrap();
+    storage
+        .delete_session(&session.stream_id)
+        .await
+        .expect("session delete");
 }
 
 async fn unrelated_constraint(storage: &DatabaseSmPersistence) {
@@ -204,7 +226,7 @@ async fn unrelated_constraint(storage: &DatabaseSmPersistence) {
     storage
         .store_session_atomic(session.clone(), vec![fixture_unacked(&stream, 11)])
         .await
-        .unwrap();
+        .expect("snapshot write");
     let before = snapshot(storage, &session.stream_id).await;
     let append = append_for(&session);
     let result = storage
@@ -219,8 +241,17 @@ async fn unrelated_constraint(storage: &DatabaseSmPersistence) {
         "non-ledger queue PK violation must stay an error: {result:?}"
     );
     assert_eq!(snapshot(storage, &session.stream_id).await, before);
-    assert_eq!(storage.get_ingress_append(&append.key).await.unwrap(), None);
-    storage.delete_session(&session.stream_id).await.unwrap();
+    assert_eq!(
+        storage
+            .get_ingress_append(&append.key)
+            .await
+            .expect("ledger read"),
+        None
+    );
+    storage
+        .delete_session(&session.stream_id)
+        .await
+        .expect("session delete");
 }
 
 async fn old_stream_and_deletion(storage: &DatabaseSmPersistence) {
@@ -233,11 +264,21 @@ async fn old_stream_and_deletion(storage: &DatabaseSmPersistence) {
             append.clone(),
         )
         .await
-        .unwrap();
-    storage.delete_session(&old.stream_id).await.unwrap();
-    assert!(storage.get_session(&old.stream_id).await.unwrap().is_none());
+        .expect("keyed snapshot write");
+    storage
+        .delete_session(&old.stream_id)
+        .await
+        .expect("session delete");
+    assert!(storage
+        .get_session(&old.stream_id)
+        .await
+        .expect("durable session read")
+        .is_none());
     assert_eq!(
-        storage.get_ingress_append(&append.key).await.unwrap(),
+        storage
+            .get_ingress_append(&append.key)
+            .await
+            .expect("ledger read"),
         Some(append.clone())
     );
     let new = fixture_session(&format!("new-{}", uuid::Uuid::new_v4()));
@@ -253,19 +294,26 @@ async fn old_stream_and_deletion(storage: &DatabaseSmPersistence) {
                 retry
             )
             .await
-            .unwrap(),
+            .expect("keyed snapshot write"),
         KeyedSnapshotOutcome::ObligationAlreadyAllocated {
             accepting_stream: old.stream_id
         }
     );
-    assert!(storage.get_session(&new.stream_id).await.unwrap().is_none());
+    assert!(storage
+        .get_session(&new.stream_id)
+        .await
+        .expect("durable session read")
+        .is_none());
     assert!(storage
         .list_unacked(&new.stream_id)
         .await
-        .unwrap()
+        .expect("test fixture")
         .is_empty());
     assert_eq!(
-        storage.get_ingress_append(&append.key).await.unwrap(),
+        storage
+            .get_ingress_append(&append.key)
+            .await
+            .expect("ledger read"),
         Some(append)
     );
 }
@@ -276,49 +324,81 @@ async fn corrupt_ledger(storage: &DatabaseSmPersistence) {
     storage
         .store_session_atomic_with_ingress_append(session.clone(), Vec::new(), append.clone())
         .await
-        .unwrap();
+        .expect("keyed snapshot write");
     storage
         .execute(
             "UPDATE sm_ingress_appends SET appended_at_ms = ? WHERE message_key = ?",
             crate::db_params![i64::MAX, append.key.message_key.to_storage().to_string()],
         )
         .await
-        .unwrap();
+        .expect("test fixture");
     assert!(matches!(
         storage.get_ingress_append(&append.key).await,
         Err(SmPersistenceError::Corrupt { .. })
     ));
-    storage.delete_session(&session.stream_id).await.unwrap();
+    storage
+        .delete_session(&session.stream_id)
+        .await
+        .expect("session delete");
 }
 
 #[tokio::test]
 async fn sqlite_fresh_allocation_and_duplicate_rollback() {
-    allocation_and_duplicate(&DatabaseSmPersistence::open(None).await.unwrap()).await;
+    allocation_and_duplicate(
+        &DatabaseSmPersistence::open(None)
+            .await
+            .expect("storage open"),
+    )
+    .await;
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn sqlite_concurrent_writers_allocate_once() {
-    concurrent_allocation(&Arc::new(DatabaseSmPersistence::open(None).await.unwrap())).await;
+    // A file-backed database so two independent instances share one ledger;
+    // `open(None)` would give each writer its own private in-memory database.
+    let directory = tempfile::tempdir().expect("sqlite race directory");
+    let path = directory.path().join("keyed-race.db");
+    concurrent_allocation(path.to_str().expect("sqlite path")).await;
 }
 
 #[tokio::test]
 async fn sqlite_distinct_obligations_allocate_same_stream() {
-    distinct_obligations(&DatabaseSmPersistence::open(None).await.unwrap()).await;
+    distinct_obligations(
+        &DatabaseSmPersistence::open(None)
+            .await
+            .expect("storage open"),
+    )
+    .await;
 }
 
 #[tokio::test]
 async fn sqlite_nonledger_constraint_is_error() {
-    unrelated_constraint(&DatabaseSmPersistence::open(None).await.unwrap()).await;
+    unrelated_constraint(
+        &DatabaseSmPersistence::open(None)
+            .await
+            .expect("storage open"),
+    )
+    .await;
 }
 
 #[tokio::test]
 async fn sqlite_older_stream_proof_survives_deletion() {
-    old_stream_and_deletion(&DatabaseSmPersistence::open(None).await.unwrap()).await;
+    old_stream_and_deletion(
+        &DatabaseSmPersistence::open(None)
+            .await
+            .expect("storage open"),
+    )
+    .await;
 }
 
 #[tokio::test]
 async fn sqlite_corrupt_ledger_is_error() {
-    corrupt_ledger(&DatabaseSmPersistence::open(None).await.unwrap()).await;
+    corrupt_ledger(
+        &DatabaseSmPersistence::open(None)
+            .await
+            .expect("storage open"),
+    )
+    .await;
 }
 
 #[tokio::test]
@@ -331,12 +411,11 @@ async fn postgres_keyed_append_storage_contract() {
     let _table_lock = crate::clustering::claims::clustering_control_plane_table_lock()
         .lock()
         .await;
-    let storage = DatabaseSmPersistence::open(Some(&url)).await.unwrap();
+    let storage = DatabaseSmPersistence::open(Some(&url))
+        .await
+        .expect("storage open");
     allocation_and_duplicate(&storage).await;
-    concurrent_allocation(&Arc::new(
-        DatabaseSmPersistence::open(Some(&url)).await.unwrap(),
-    ))
-    .await;
+    concurrent_allocation(&url).await;
     distinct_obligations(&storage).await;
     unrelated_constraint(&storage).await;
     old_stream_and_deletion(&storage).await;
@@ -345,14 +424,16 @@ async fn postgres_keyed_append_storage_contract() {
 
 #[tokio::test]
 async fn sqlite_other_ledger_unique_constraint_is_error_and_rolls_back() {
-    let storage = DatabaseSmPersistence::open(None).await.unwrap();
+    let storage = DatabaseSmPersistence::open(None)
+        .await
+        .expect("storage open");
     storage
         .execute(
             "CREATE UNIQUE INDEX test_ledger_accepting_stream ON sm_ingress_appends (accepting_stream_id)",
             (),
         )
         .await
-        .unwrap();
+        .expect("test fixture");
     let session = fixture_session("ledger-other-constraint");
     let first = append_for(&session);
     storage
@@ -362,7 +443,7 @@ async fn sqlite_other_ledger_unique_constraint_is_error_and_rolls_back() {
             first.clone(),
         )
         .await
-        .unwrap();
+        .expect("keyed snapshot write");
     let before = snapshot(&storage, &session.stream_id).await;
     let mut replacement = session.clone();
     replacement.outbound_count = 13;
@@ -383,8 +464,17 @@ async fn sqlite_other_ledger_unique_constraint_is_error_and_rolls_back() {
     );
     assert_eq!(snapshot(&storage, &session.stream_id).await, before);
     assert_eq!(
-        storage.get_ingress_append(&first.key).await.unwrap(),
+        storage
+            .get_ingress_append(&first.key)
+            .await
+            .expect("ledger read"),
         Some(first)
     );
-    assert_eq!(storage.get_ingress_append(&second.key).await.unwrap(), None);
+    assert_eq!(
+        storage
+            .get_ingress_append(&second.key)
+            .await
+            .expect("ledger read"),
+        None
+    );
 }

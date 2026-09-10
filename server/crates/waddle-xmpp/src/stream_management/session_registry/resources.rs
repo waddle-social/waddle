@@ -354,6 +354,15 @@ impl InMemorySmSessionRegistry {
         // drops the OLDEST entry and marks the gap through its sequence, so every
         // retained sequence is strictly above the gap. Gap-covered therefore
         // already implies not retained.
+        //
+        // Acknowledged allocations are excluded first. Progress can fail after an
+        // append, the client can then resume and acknowledge the stanza, and a
+        // later overflow on the re-detached stream can advance the gap past that
+        // sequence. Gap coverage alone would misread it as lost and append a
+        // duplicate of a stanza the client has already acknowledged.
+        if !sequence_gt(proof.sequence, session.last_acked) {
+            return Ok(None);
+        }
         let evicted = session
             .replay_gap_through
             .is_some_and(|gap| !sequence_gt(proof.sequence, gap));

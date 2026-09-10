@@ -944,6 +944,19 @@ CREATE TABLE IF NOT EXISTS sm_ingress_appends (
 );
 "#;
 
+/// Retirement filters the ledger by accepting stream when a session is deleted,
+/// and the primary key starts with `message_key`, so that lookup would scan the
+/// whole ledger (#1756).
+pub const V1016_SM_INGRESS_APPENDS_STREAM_INDEX: &str = r#"
+CREATE INDEX IF NOT EXISTS idx_sm_ingress_appends_stream
+    ON sm_ingress_appends (accepting_stream_id);
+"#;
+
+pub const V1016_SM_INGRESS_APPENDS_STREAM_INDEX_POSTGRES: &str = r#"
+CREATE INDEX IF NOT EXISTS idx_sm_ingress_appends_stream
+    ON sm_ingress_appends (accepting_stream_id);
+"#;
+
 /// Get all waddle schema migrations in order.
 ///
 /// Versions are intentionally offset from global migrations so a single
@@ -1039,6 +1052,12 @@ pub fn all() -> Vec<Migration> {
             description: "Add the ingress SM append ledger".to_string(),
             sql_sqlite: V1015_SM_INGRESS_APPENDS,
             sql_postgres: V1015_SM_INGRESS_APPENDS_POSTGRES,
+        },
+        Migration {
+            version: 1016,
+            description: "Index the ingress SM append ledger by accepting stream".to_string(),
+            sql_sqlite: V1016_SM_INGRESS_APPENDS_STREAM_INDEX,
+            sql_postgres: V1016_SM_INGRESS_APPENDS_STREAM_INDEX_POSTGRES,
         },
     ]
 }

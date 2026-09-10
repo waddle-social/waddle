@@ -151,12 +151,11 @@ fn storage_error(error: DatabaseError) -> SmPersistenceError {
 fn gap_covered(
     rows: &[(PersistedIngressAppendRow, u32)],
     gap: u32,
-) -> Vec<&PersistedIngressAppendRow> {
+) -> Vec<&(PersistedIngressAppendRow, u32)> {
     rows.iter()
         .filter(|(_, sequence)| {
             waddle_xmpp::stream_management::sequence::sequence_lte(*sequence, gap)
         })
-        .map(|(row, _)| row)
         .collect()
 }
 
@@ -222,15 +221,22 @@ pub(crate) async fn void_gap_covered(
     drop(rows);
     // Wrap-aware in Rust rather than SQL: the comparison is modulo 2^32 and no
     // portable dialect expression states that clearly.
-    for row in gap_covered(&proofs, gap) {
+    for (row, sequence) in gap_covered(&proofs, gap) {
+        // Retire only the exact allocation that was read. A retry can supersede
+        // this proof onto a newer stream between the select and this delete; a
+        // primary-key-only predicate would then delete the replacement, and the
+        // next retry would see no proof and append a duplicate.
         tx.execute(
             "DELETE FROM sm_ingress_appends \
-             WHERE message_key = ? AND receipt_kind = ? AND semantic_identity_hash = ? AND resource = ?",
+             WHERE message_key = ? AND receipt_kind = ? AND semantic_identity_hash = ? AND resource = ? \
+             AND accepting_stream_id = ? AND sequence = ?",
             crate::db_params![
                 row.message_key.clone(),
                 row.receipt_kind,
                 row.semantic_identity_hash.clone(),
                 row.resource.clone(),
+                stream_id.as_str().to_string(),
+                i64::from(*sequence),
             ],
         )
         .await?;

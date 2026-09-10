@@ -405,6 +405,13 @@ impl PostgresFencedSmPersistence {
         .await
         .map_err(|error| SmPersistenceError::Other(error.to_string()))?;
         conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_sm_ingress_appends_stream \
+             ON sm_ingress_appends (accepting_stream_id)",
+            (),
+        )
+        .await
+        .map_err(|error| SmPersistenceError::Other(error.to_string()))?;
+        conn.execute(
             "CREATE INDEX IF NOT EXISTS idx_sm_sessions_detached ON sm_sessions (detached_at_ms)",
             (),
         )

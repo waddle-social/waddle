@@ -1038,3 +1038,65 @@ async fn deleting_a_session_retires_only_gap_covered_proofs() {
         "a delivered allocation's proof must still suppress its retry"
     );
 }
+
+/// #1756: an acknowledged allocation must never be treated as evicted.
+///
+/// Progress can fail after an append; the client then resumes and acknowledges
+/// the stanza, which removes its queue entry while the ledger row stands. If
+/// that stream detaches again and a later overflow advances the replay gap past
+/// the old sequence, gap coverage alone would misread the acknowledged
+/// allocation as lost and append a duplicate of a delivered stanza.
+#[tokio::test]
+async fn acknowledged_allocation_is_never_voided_by_a_later_gap() {
+    let stream = SmSessionId::new("keyed-acked-gap");
+    let storage = Arc::new(InMemorySmPersistence::new());
+    let registry = Arc::new(InMemorySmSessionRegistry::new().with_persistence(storage.clone()));
+    registry
+        .store_session(realistic_test_session(stream.as_str()))
+        .await
+        .expect("seed session");
+    let jid = make_test_jid();
+    let key = obligation(&jid);
+    registry
+        .record_keyed_stanza_for_detached_bound_resource(&jid, &stanza(), Utc::now(), key.clone())
+        .await
+        .expect("first allocation");
+    let allocated = storage
+        .get_ingress_append(&key)
+        .await
+        .expect("ledger read")
+        .expect("proof recorded");
+
+    // The client acknowledged through this sequence, so its entry left the queue
+    // because it was delivered. A later overflow then advances the gap past it.
+    let mut durable = storage
+        .get_session(&stream)
+        .await
+        .expect("durable read")
+        .expect("durable session");
+    durable.last_acked = allocated.sequence;
+    durable.replay_gap_through = Some(allocated.sequence.wrapping_add(3));
+    let queue: Vec<_> = storage
+        .list_unacked(&stream)
+        .await
+        .expect("queue read")
+        .into_iter()
+        .filter(|entry| entry.sequence != allocated.sequence)
+        .collect();
+    storage
+        .store_session_atomic(durable, queue)
+        .await
+        .expect("apply ack and later gap");
+
+    let outcome = registry
+        .record_keyed_stanza_for_detached_bound_resource(&jid, &stanza(), Utc::now(), key)
+        .await
+        .expect("retry");
+    assert!(
+        matches!(
+            outcome,
+            crate::stream_management::SmKeyedAppendOutcome::AlreadyAppended { .. }
+        ),
+        "an acknowledged allocation stays discharged: {outcome:?}"
+    );
+}

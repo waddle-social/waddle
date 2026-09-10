@@ -100,6 +100,13 @@ pub(super) async fn initialize(storage: &DatabaseSmPersistence) -> Result<(), Sm
             (),
         )
         .await?;
+    storage
+        .execute(
+            "CREATE INDEX IF NOT EXISTS idx_sm_ingress_appends_stream \
+             ON sm_ingress_appends (accepting_stream_id)",
+            (),
+        )
+        .await?;
     add_column_if_missing(
         storage,
         "sm_unacked",
