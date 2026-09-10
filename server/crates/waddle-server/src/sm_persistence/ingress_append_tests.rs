@@ -12,6 +12,8 @@ fn append_for(session: &PersistedSession) -> PersistedIngressAppend {
             resource: session.jid.clone(),
         },
         accepting_stream: session.stream_id.clone(),
+        sequence: 12,
+        supersedes: None,
         appended_at: fixed_time(),
     }
 }

@@ -396,6 +396,7 @@ impl PostgresFencedSmPersistence {
                 semantic_identity_hash BYTEA NOT NULL,
                 resource TEXT NOT NULL,
                 accepting_stream_id TEXT NOT NULL,
+                sequence BIGINT NOT NULL,
                 appended_at_ms BIGINT NOT NULL,
                 PRIMARY KEY (message_key, receipt_kind, semantic_identity_hash, resource)
             )",

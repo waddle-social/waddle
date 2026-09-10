@@ -45,7 +45,8 @@ fn assert_snapshot_unchanged(before: &DetachedSession, after: &DetachedSession) 
 #[tokio::test]
 async fn keyed_append_older_proof_precedes_missing_session_lookup() {
     let storage = Arc::new(InMemorySmPersistence::new());
-    let registry = InMemorySmSessionRegistry::new().with_persistence(storage.clone());
+    let registry =
+        std::sync::Arc::new(InMemorySmSessionRegistry::new().with_persistence(storage.clone()));
     let jid = make_test_jid();
     let key = obligation(&jid);
     registry
@@ -87,7 +88,8 @@ async fn keyed_append_older_proof_precedes_missing_session_lookup() {
 #[tokio::test]
 async fn keyed_append_resume_ack_redetach_retry_does_not_allocate_again() {
     let storage = Arc::new(InMemorySmPersistence::new());
-    let registry = InMemorySmSessionRegistry::new().with_persistence(storage.clone());
+    let registry =
+        std::sync::Arc::new(InMemorySmSessionRegistry::new().with_persistence(storage.clone()));
     let jid = make_test_jid();
     let key = obligation(&jid);
     registry
@@ -133,7 +135,7 @@ async fn keyed_append_resume_ack_redetach_retry_does_not_allocate_again() {
 #[tokio::test]
 async fn keyed_append_rebind_retry_returns_old_stream_without_changing_replacement() {
     let storage = Arc::new(InMemorySmPersistence::new());
-    let registry = InMemorySmSessionRegistry::new().with_persistence(storage);
+    let registry = std::sync::Arc::new(InMemorySmSessionRegistry::new().with_persistence(storage));
     let jid = make_test_jid();
     let key = obligation(&jid);
     registry
@@ -165,7 +167,7 @@ async fn keyed_append_rebind_retry_returns_old_stream_without_changing_replaceme
 #[tokio::test]
 async fn keyed_append_distinct_obligations_preserve_sequence_and_original_timestamp() {
     let storage = Arc::new(InMemorySmPersistence::new());
-    let registry = InMemorySmSessionRegistry::new().with_persistence(storage);
+    let registry = std::sync::Arc::new(InMemorySmSessionRegistry::new().with_persistence(storage));
     let jid = make_test_jid();
     let first = obligation(&jid);
     let second = SmIngressAppendKey {
@@ -199,8 +201,9 @@ async fn keyed_append_distinct_obligations_preserve_sequence_and_original_timest
 
 #[tokio::test]
 async fn keyed_append_no_session_for_missing_or_expired_resource() {
-    let registry =
-        InMemorySmSessionRegistry::new().with_persistence(Arc::new(InMemorySmPersistence::new()));
+    let registry = std::sync::Arc::new(
+        InMemorySmSessionRegistry::new().with_persistence(Arc::new(InMemorySmPersistence::new())),
+    );
     let jid = make_test_jid();
     assert_eq!(
         registry
@@ -285,7 +288,9 @@ async fn keyed_append_losing_transaction_preserves_every_snapshot_field_and_expi
                 PersistedIngressAppend {
                     key,
                     accepting_stream: SmSessionId::new("earlier-winner"),
-                    appended_at: Utc::now()
+                    sequence: 41,
+                    appended_at: Utc::now(),
+                    supersedes: None
                 },
             )
             .await
@@ -320,8 +325,9 @@ async fn keyed_append_losing_transaction_preserves_every_snapshot_field_and_expi
 
 #[tokio::test]
 async fn keyed_append_wraps_outbound_sequence_without_reordering() {
-    let registry =
-        InMemorySmSessionRegistry::new().with_persistence(Arc::new(InMemorySmPersistence::new()));
+    let registry = std::sync::Arc::new(
+        InMemorySmSessionRegistry::new().with_persistence(Arc::new(InMemorySmPersistence::new())),
+    );
     let jid = make_test_jid();
     let mut session = realistic_test_session("keyed-wrap");
     session.outbound_count = u32::MAX;
@@ -381,10 +387,32 @@ async fn cancel_after_keyed_commit(
     tokio::time::timeout(Duration::from_secs(5), storage.reached.notified())
         .await
         .expect("append commits before cancellation");
-    assert_eq!(snapshot(&registry, stream.as_str()).outbound_count, 7);
+    let unpublished = snapshot(&registry, stream.as_str());
+    assert_eq!(unpublished.outbound_count, 7);
     assert_eq!(storage.inner.list_unacked(stream).await.unwrap().len(), 3);
     append.abort();
     assert!(append.await.unwrap_err().is_cancelled());
+    // The persist deliberately outlives caller cancellation and owns the stream
+    // shard until it resolves, so release its gate and let it settle; otherwise
+    // the consumers under test would simply block on that shard.
+    storage.proceed.notify_one();
+    tokio::time::timeout(Duration::from_secs(5), async {
+        while snapshot(&registry, stream.as_str()).outbound_count != 8 {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("the cancelled persist settles and publishes");
+    // Now reproduce what a crash between commit and publication actually leaves:
+    // storage ahead of memory. The consumers must reconcile from storage rather
+    // than trust the in-memory queue, which is the property these tests exist for.
+    {
+        let mut sessions = registry.sessions.write().unwrap();
+        *sessions
+            .get_mut(stream.as_str())
+            .expect("session still registered") = unpublished;
+    }
+    registry.mark_snapshot_stale(stream).unwrap();
     storage.armed.store(false, Ordering::SeqCst);
     (registry, storage, key, receipt)
 }
@@ -578,7 +606,8 @@ async fn keyed_append_committed_while_displaced_is_promoted_before_confirm_drain
 async fn keyed_append_promotion_confirmation_preserves_rows_on_reconciliation_failure() {
     let stream = SmSessionId::new("keyed-confirm-read-failure");
     let storage = Arc::new(GatedGetSessionPersistence::new(stream.as_str()));
-    let registry = InMemorySmSessionRegistry::new().with_persistence(storage.clone());
+    let registry =
+        std::sync::Arc::new(InMemorySmSessionRegistry::new().with_persistence(storage.clone()));
     let mut expired = realistic_test_session(stream.as_str());
     expired.max_resume_time = Some(0);
     registry.store_session(expired).await.unwrap();
@@ -596,7 +625,8 @@ async fn keyed_append_confirmation_retries_unseen_durable_entry_before_deletion(
     use crate::stream_management::persistence::PersistedUnackedStanza;
     let stream = SmSessionId::new("keyed-confirm-new-entry");
     let storage = Arc::new(InMemorySmPersistence::new());
-    let registry = InMemorySmSessionRegistry::new().with_persistence(storage.clone());
+    let registry =
+        std::sync::Arc::new(InMemorySmSessionRegistry::new().with_persistence(storage.clone()));
     let mut expired = realistic_test_session(stream.as_str());
     expired.max_resume_time = Some(0);
     registry.store_session(expired).await.unwrap();
@@ -623,7 +653,9 @@ async fn keyed_append_confirmation_retries_unseen_durable_entry_before_deletion(
             PersistedIngressAppend {
                 key: obligation(&make_test_jid()),
                 accepting_stream: stream.clone(),
+                sequence: 9,
                 appended_at: Utc::now(),
+                supersedes: None,
             },
         )
         .await
@@ -638,4 +670,197 @@ async fn keyed_append_confirmation_retries_unseen_durable_entry_before_deletion(
     assert!(registry.confirm_drained(stream.as_str()).await);
     assert!(storage.get_session(&stream).await.unwrap().is_none());
     assert_pending_keyed_entry(&pending, receipt).await;
+}
+
+/// #1756: cancelling the caller while its keyed write is still in flight must not
+/// release the stream shard.
+///
+/// The SQLite driver runs an already-submitted COMMIT on its own worker thread and
+/// deliberately ignores the drop-triggered rollback once it succeeds
+/// (`sqlx-sqlite` worker, `Command::Commit`). If the shard were released at
+/// cancellation, the next writer could read pre-commit state and then overwrite the
+/// committed entry with a full snapshot replacement — while the ledger proof for it
+/// survived. That is unrecoverable loss, because the proof suppresses every retry.
+///
+/// The persist therefore owns the shard guard, so a second obligation for the same
+/// resource cannot even begin until the first write has resolved.
+#[tokio::test]
+async fn cancelled_inflight_keyed_write_keeps_the_shard_until_it_resolves() {
+    let stream = SmSessionId::new("keyed-inflight-cancel");
+    let storage = Arc::new(GatedSnapshotPersistence::new(stream.as_str()));
+    let registry = Arc::new(InMemorySmSessionRegistry::new().with_persistence(storage.clone()));
+    registry
+        .store_session(realistic_test_session(stream.as_str()))
+        .await
+        .unwrap();
+    let jid = make_test_jid();
+    let first_key = obligation(&jid);
+    let mut second_key = obligation(&jid);
+    second_key.semantic_identity_hash = [99; 32];
+    let seeded = storage.inner.list_unacked(&stream).await.unwrap().len();
+
+    // Gate the first write BEFORE it commits, so cancellation lands mid-flight.
+    storage.armed.store(true, Ordering::SeqCst);
+    let first = tokio::spawn({
+        let registry = registry.clone();
+        let jid = jid.clone();
+        let key = first_key.clone();
+        async move {
+            registry
+                .record_keyed_stanza_for_detached_bound_resource(&jid, &stanza(), Utc::now(), key)
+                .await
+        }
+    });
+    tokio::time::timeout(Duration::from_secs(5), storage.reached.notified())
+        .await
+        .expect("first write reaches the pre-commit gate");
+    first.abort();
+    assert!(first.await.unwrap_err().is_cancelled());
+
+    // A second, DISTINCT obligation for the same resource must block: the
+    // cancelled write still owns the shard because its commit is unresolved.
+    storage.armed.store(false, Ordering::SeqCst);
+    let second = tokio::spawn({
+        let registry = registry.clone();
+        let jid = jid.clone();
+        let key = second_key.clone();
+        async move {
+            registry
+                .record_keyed_stanza_for_detached_bound_resource(&jid, &stanza(), Utc::now(), key)
+                .await
+        }
+    });
+    assert!(
+        tokio::time::timeout(Duration::from_millis(300), async {
+            while !second.is_finished() {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .is_err(),
+        "the second obligation must not proceed while the cancelled write is unresolved"
+    );
+
+    // Releasing the gate resolves the first write; the second then sees it.
+    storage.proceed.notify_one();
+    let second = tokio::time::timeout(Duration::from_secs(5), second)
+        .await
+        .expect("second obligation completes once the shard is free")
+        .expect("second append task")
+        .expect("second append succeeds");
+    assert!(matches!(
+        second,
+        crate::stream_management::SmKeyedAppendOutcome::Appended { .. }
+    ));
+
+    // Neither allocation was lost: both proofs exist and both stanzas are queued.
+    for key in [&first_key, &second_key] {
+        assert!(
+            storage.get_ingress_append(key).await.unwrap().is_some(),
+            "ledger proof survives for every allocated obligation"
+        );
+    }
+    let durable = storage.inner.list_unacked(&stream).await.unwrap();
+    assert_eq!(
+        durable.len(),
+        seeded + 2,
+        "both keyed appends remain queued alongside the seeded entries"
+    );
+    // A retry of the first obligation must find its proof AND its queue entry.
+    assert!(matches!(
+        registry
+            .record_keyed_stanza_for_detached_bound_resource(&jid, &stanza(), Utc::now(), first_key)
+            .await
+            .unwrap(),
+        crate::stream_management::SmKeyedAppendOutcome::AlreadyAppended { .. }
+    ));
+    assert_eq!(
+        storage.inner.list_unacked(&stream).await.unwrap().len(),
+        seeded + 2,
+        "the suppressed retry neither appends nor loses the committed entry"
+    );
+}
+
+/// #1756: proof for a payload the bounded queue has since evicted must not
+/// suppress the retry.
+///
+/// The hazard: a keyed append commits, its route-progress transaction fails, and
+/// later appends push the stanza out of the queue. Eviction records a replay gap
+/// through that sequence, so the payload is provably gone — yet the ledger row
+/// still says allocated. Returning `AlreadyAppended` there would let the caller
+/// commit progress and a receipt, terminalizing a message neither resume nor
+/// promotion can ever deliver.
+///
+/// An acknowledged entry is deliberately treated differently: it also leaves the
+/// queue, but it left because it was delivered, so its proof still stands.
+#[tokio::test]
+async fn proof_for_an_evicted_payload_allows_a_replacement_allocation() {
+    let stream = SmSessionId::new("keyed-evicted");
+    let storage = Arc::new(InMemorySmPersistence::new());
+    let registry = Arc::new(InMemorySmSessionRegistry::new().with_persistence(storage.clone()));
+    registry
+        .store_session(realistic_test_session(stream.as_str()))
+        .await
+        .unwrap();
+    let jid = make_test_jid();
+    let key = obligation(&jid);
+
+    let first = registry
+        .record_keyed_stanza_for_detached_bound_resource(&jid, &stanza(), Utc::now(), key.clone())
+        .await
+        .unwrap();
+    let crate::stream_management::SmKeyedAppendOutcome::Appended { .. } = first else {
+        panic!("first append allocates: {first:?}");
+    };
+    let allocated = storage
+        .get_ingress_append(&key)
+        .await
+        .unwrap()
+        .expect("proof recorded");
+
+    // While the obligation is still unsettled, evict its payload the way queue
+    // overflow does: drop the entry and record the replay gap through it.
+    {
+        let mut sessions = registry.sessions.write().unwrap();
+        let session = sessions.get_mut(stream.as_str()).unwrap();
+        session
+            .unacked_stanzas
+            .retain(|entry| entry.sequence != allocated.sequence);
+        session.replay_gap_through = Some(allocated.sequence);
+    }
+
+    // The retry must allocate again rather than report the lost payload as queued.
+    let replacement = registry
+        .record_keyed_stanza_for_detached_bound_resource(&jid, &stanza(), Utc::now(), key.clone())
+        .await
+        .unwrap();
+    let crate::stream_management::SmKeyedAppendOutcome::Appended { .. } = replacement else {
+        panic!("an evicted allocation is replaced, not suppressed: {replacement:?}");
+    };
+    let proof = storage
+        .get_ingress_append(&key)
+        .await
+        .unwrap()
+        .expect("replacement proof");
+    assert_ne!(
+        proof.sequence, allocated.sequence,
+        "the ledger now points at the entry that actually exists"
+    );
+    assert!(
+        snapshot(&registry, stream.as_str())
+            .unacked_stanzas
+            .iter()
+            .any(|entry| entry.sequence == proof.sequence),
+        "the replacement payload is queued"
+    );
+
+    // A retained allocation is still suppressed: only eviction voids proof.
+    let again = registry
+        .record_keyed_stanza_for_detached_bound_resource(&jid, &stanza(), Utc::now(), key)
+        .await
+        .unwrap();
+    assert!(matches!(
+        again,
+        crate::stream_management::SmKeyedAppendOutcome::AlreadyAppended { .. }
+    ));
 }

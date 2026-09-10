@@ -852,7 +852,7 @@ pub(super) async fn deliver_peer_to_live_only(
 
 /// Preserve ordinary replay appends while deduplicating recorded direct obligations.
 pub(super) async fn append_detached(
-    sm: &InMemorySmSessionRegistry,
+    sm: &Arc<InMemorySmSessionRegistry>,
     context: Option<&SmIngressAppendContext>,
     target: &jid::FullJid,
     stanza: &Stanza,

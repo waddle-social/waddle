@@ -116,25 +116,45 @@ impl PostgresFencedSmPersistence {
         }
 
         if let Some(append) = append {
-            if let Err(error) =
-                crate::sm_persistence::ingress_append::insert(&mut tx, &append).await
-            {
-                let ledger_conflict =
-                    crate::sm_persistence::ingress_append::is_ledger_conflict(&error);
-                tx.rollback()
-                    .await
-                    .map_err(|error| SmPersistenceError::Other(error.to_string()))?;
-                if !ledger_conflict {
-                    return Err(SmPersistenceError::Other(error.to_string()));
-                }
-                let winner = self.get_ingress_append(&append.key).await?.ok_or_else(|| {
-                    SmPersistenceError::Other(
-                        "conflicting ingress append proof disappeared after rollback".into(),
-                    )
-                })?;
-                return Ok(KeyedSnapshotOutcome::ObligationAlreadyAllocated {
+            let standing = |winner: PersistedIngressAppend| {
+                Ok(KeyedSnapshotOutcome::ObligationAlreadyAllocated {
                     accepting_stream: winner.accepting_stream,
-                });
+                })
+            };
+            match crate::sm_persistence::ingress_append::insert(&mut tx, &append).await {
+                Ok(true) => {}
+                Ok(false) => {
+                    // A replacement whose prior row was already superseded: the
+                    // standing allocation wins and nothing here commits.
+                    tx.rollback()
+                        .await
+                        .map_err(|error| SmPersistenceError::Other(error.to_string()))?;
+                    return standing(self.get_ingress_append(&append.key).await?.ok_or_else(
+                        || {
+                            SmPersistenceError::Other(
+                                "superseded ingress append vanished after rollback".into(),
+                            )
+                        },
+                    )?);
+                }
+                Err(error) => {
+                    let ledger_conflict =
+                        crate::sm_persistence::ingress_append::is_ledger_conflict(&error);
+                    tx.rollback()
+                        .await
+                        .map_err(|error| SmPersistenceError::Other(error.to_string()))?;
+                    if !ledger_conflict {
+                        return Err(SmPersistenceError::Other(error.to_string()));
+                    }
+                    return standing(self.get_ingress_append(&append.key).await?.ok_or_else(
+                        || {
+                            SmPersistenceError::Other(
+                                "conflicting ingress append proof disappeared after rollback"
+                                    .into(),
+                            )
+                        },
+                    )?);
+                }
             }
         }
 

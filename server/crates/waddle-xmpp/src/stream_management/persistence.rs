@@ -216,7 +216,26 @@ pub struct PersistedUnackedStanza {
 pub struct PersistedIngressAppend {
     pub key: crate::stream_management::SmIngressAppendKey,
     pub accepting_stream: SmSessionId,
+    /// Outbound sequence the allocation occupies, so a reader can tell whether the
+    /// payload is still deliverable: an acknowledged entry simply leaves the queue,
+    /// but an evicted one is covered by the session's replay gap.
+    pub sequence: u32,
     pub appended_at: chrono::DateTime<chrono::Utc>,
+    /// The exact prior allocation this write replaces, when the previous payload was
+    /// evicted from the bounded queue and can no longer be delivered.
+    ///
+    /// `None` is a first allocation: any conflict means the obligation is already
+    /// allocated. `Some` supersedes only that exact row, so a racing writer that
+    /// already replaced it wins and this write reports the obligation as allocated
+    /// rather than issuing a second one.
+    pub supersedes: Option<PriorIngressAllocation>,
+}
+
+/// The prior allocation a replacement is allowed to overwrite.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PriorIngressAllocation {
+    pub accepting_stream: SmSessionId,
+    pub sequence: u32,
 }
 
 /// Result of a snapshot write that also claims an ingress obligation.
@@ -709,16 +728,26 @@ impl SmPersistenceStorage for InMemorySmPersistence {
             .map_err(|error| SmPersistenceError::Other(error.to_string()))?;
         // The map insert stands in for the unique constraint: the obligation is claimed
         // here or not at all, and a loser mutates neither queue nor session.
-        if let Some(existing) = guard
+        if let Some(index) = guard
             .ingress_appends
             .iter()
-            .find(|existing| existing.key == append.key)
+            .position(|existing| existing.key == append.key)
         {
-            return Ok(KeyedSnapshotOutcome::ObligationAlreadyAllocated {
-                accepting_stream: existing.accepting_stream.clone(),
+            let existing = &guard.ingress_appends[index];
+            let superseded = append.supersedes.as_ref().is_some_and(|prior| {
+                prior.accepting_stream == existing.accepting_stream
+                    && prior.sequence == existing.sequence
             });
+            if !superseded {
+                return Ok(KeyedSnapshotOutcome::ObligationAlreadyAllocated {
+                    accepting_stream: existing.accepting_stream.clone(),
+                });
+            }
+            guard.ingress_appends[index] = append;
+        } else {
+            // No row to supersede: this is a first allocation either way.
+            guard.ingress_appends.push(append);
         }
-        guard.ingress_appends.push(append);
         guard.sessions.insert(stream_id.clone(), session);
         guard.unacked.insert(stream_id, unacked);
         Ok(KeyedSnapshotOutcome::Committed)

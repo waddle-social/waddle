@@ -36,10 +36,10 @@ async fn test_migration_runner_global() {
     assert_eq!(auth_context_columns, 3);
 
     // Check version (global + shared waddle schema). `current_version` reads
-    // the ledger max, which the waddle namespace (V1014) still dominates
+    // the ledger max, which the waddle namespace (V1015) still dominates
     // after global V0012.
     let version = runner.current_version(&db).await.unwrap();
-    assert_eq!(version, Some(1014));
+    assert_eq!(version, Some(1015));
 }
 
 #[tokio::test]
@@ -154,7 +154,7 @@ async fn test_waddle_v1002_adds_pin_permission_to_existing_v1001_schema() {
     let applied = runner.run(&db).await.unwrap();
     assert_eq!(
         applied,
-        vec![1002, 1003, 1004, 1005, 1006, 1007, 1008, 1009, 1010, 1011, 1012, 1013, 1014]
+        vec![1002, 1003, 1004, 1005, 1006, 1007, 1008, 1009, 1010, 1011, 1012, 1013, 1014, 1015]
     );
 
     let conn = db.guard().await.unwrap();
@@ -174,7 +174,7 @@ async fn test_waddle_v1002_adds_pin_permission_to_existing_v1001_schema() {
     assert_eq!(public_room, 1);
 
     let version = runner.current_version(&db).await.unwrap();
-    assert_eq!(version, Some(1014));
+    assert_eq!(version, Some(1015));
 }
 
 #[tokio::test]
@@ -233,7 +233,7 @@ async fn test_global_v0004_adds_policy_digest_to_existing_v0003_schema() {
     drop(conn);
 
     // `MigrationRunner::global()` composes global + waddle migrations,
-    // so the runner also reports applying 1001 through 1014 (the waddle
+    // so the runner also reports applying 1001 through 1015 (the waddle
     // schema tables) on top of V0004. The test's invariant is V0004
     // specifically, asserted via the `pragma_table_info` probe below;
     // the version list is included in the assertion so a future PR
@@ -244,7 +244,7 @@ async fn test_global_v0004_adds_policy_digest_to_existing_v0003_schema() {
         applied,
         vec![
             4, 5, 6, 7, 8, 9, 10, 11, 12, 1001, 1002, 1003, 1004, 1005, 1006, 1007, 1008, 1009,
-            1010, 1011, 1012, 1013, 1014
+            1010, 1011, 1012, 1013, 1014, 1015
         ]
     );
 
@@ -308,7 +308,7 @@ async fn test_global_v0004_adds_policy_digest_to_existing_v0003_schema() {
     let version = runner.current_version(&db).await.unwrap();
     assert_eq!(
         version,
-        Some(1014),
+        Some(1015),
         "current version reflects the highest applied across global+waddle"
     );
 }
@@ -466,7 +466,7 @@ async fn sqlite_pre_ledger_history_is_adopted_once_before_pending_migrations() {
     let runner = MigrationRunner::waddle();
     assert_eq!(
         runner.run(&db).await.unwrap(),
-        vec![1002, 1003, 1004, 1005, 1006, 1007, 1008, 1009, 1010, 1011, 1012, 1013, 1014]
+        vec![1002, 1003, 1004, 1005, 1006, 1007, 1008, 1009, 1010, 1011, 1012, 1013, 1014, 1015]
     );
     let expected_checksum = migration_checksum(&first, DatabaseDriver::Sqlite);
     assert_eq!(
@@ -551,7 +551,7 @@ async fn sqlite_single_runner_backfills_checksums_when_legacy_ledger_has_no_pend
         .await
         .unwrap();
     let runner = MigrationRunner::single();
-    assert_eq!(runner.migrations.len(), 26);
+    assert_eq!(runner.migrations.len(), 27);
     runner.run(&db).await.unwrap();
 
     let conn = db.guard().await.unwrap();
@@ -561,7 +561,7 @@ async fn sqlite_single_runner_backfills_checksums_when_legacy_ledger_has_no_pend
     drop(conn);
 
     assert!(runner.run(&db).await.unwrap().is_empty());
-    assert_eq!(migration_ledger_row_count(&db).await, 26);
+    assert_eq!(migration_ledger_row_count(&db).await, 27);
     assert_all_migration_checksums(&db, DatabaseDriver::Sqlite).await;
     assert!(runner.run(&db).await.unwrap().is_empty());
 }
@@ -741,7 +741,7 @@ async fn v1010_rolls_forward_from_a_v1009_ledger() {
     drop(conn);
 
     let applied = MigrationRunner::single().run(&db).await.unwrap();
-    assert_eq!(applied, vec![1010, 1011, 1012, 1013, 1014]);
+    assert_eq!(applied, vec![1010, 1011, 1012, 1013, 1014, 1015]);
     assert_eq!(
         migration_ledger_checksum(&db, 1010).await.as_deref(),
         Some(migration_checksum(&migration_by_version(1010), DatabaseDriver::Sqlite).as_str())
@@ -910,7 +910,7 @@ async fn postgres_pre_ledger_history_is_adopted_once_before_pending_migrations()
     let runner = MigrationRunner::waddle();
     assert_eq!(
         runner.run(&db).await.expect("adopt and run migrations"),
-        vec![1002, 1003, 1004, 1005, 1006, 1007, 1008, 1009, 1010, 1011, 1012, 1013, 1014]
+        vec![1002, 1003, 1004, 1005, 1006, 1007, 1008, 1009, 1010, 1011, 1012, 1013, 1014, 1015]
     );
     let expected_checksum = migration_checksum(&first, DatabaseDriver::Postgres);
     assert_eq!(
@@ -1025,7 +1025,7 @@ async fn postgres_single_runner_backfills_checksums_when_legacy_ledger_has_no_pe
     let schema = unique_postgres_schema_name("ledger_pure_adoption");
     let (db, admin) = open_isolated_postgres_database(&database_url, &schema).await;
     let runner = MigrationRunner::single();
-    assert_eq!(runner.migrations.len(), 26);
+    assert_eq!(runner.migrations.len(), 27);
     runner.run(&db).await.expect("initial single migration run");
 
     let conn = db.guard().await.expect("postgres guard");
@@ -1039,7 +1039,7 @@ async fn postgres_single_runner_backfills_checksums_when_legacy_ledger_has_no_pe
         .await
         .expect("pure adoption rerun")
         .is_empty());
-    assert_eq!(migration_ledger_row_count(&db).await, 26);
+    assert_eq!(migration_ledger_row_count(&db).await, 27);
     assert_all_migration_checksums(&db, DatabaseDriver::Postgres).await;
     assert!(runner
         .run(&db)
@@ -2170,7 +2170,7 @@ async fn sqlite_v0007_tracks_link_preview_media_refs() {
         applied,
         vec![
             7, 8, 9, 10, 11, 12, 1001, 1002, 1003, 1004, 1005, 1006, 1007, 1008, 1009, 1010, 1011,
-            1012, 1013, 1014
+            1012, 1013, 1014, 1015
         ]
     );
 
@@ -2680,7 +2680,7 @@ async fn postgres_v0007_tracks_link_preview_media_refs() {
         applied,
         vec![
             7, 8, 9, 10, 11, 12, 1001, 1002, 1003, 1004, 1005, 1006, 1007, 1008, 1009, 1010, 1011,
-            1012, 1013, 1014
+            1012, 1013, 1014, 1015
         ]
     );
 
@@ -2952,7 +2952,7 @@ async fn postgres_v1003_widens_existing_attachment_size_bytes() {
         .expect("run waddle migration");
     assert_eq!(
         applied,
-        vec![1003, 1004, 1005, 1006, 1007, 1008, 1009, 1010, 1011, 1012, 1013, 1014]
+        vec![1003, 1004, 1005, 1006, 1007, 1008, 1009, 1010, 1011, 1012, 1013, 1014, 1015]
     );
     assert_postgres_column_type(&db, "attachments", "size_bytes", "bigint").await;
 
@@ -3647,7 +3647,7 @@ async fn sqlite_v1012_rolls_forward_from_v1011() {
             .run(&db)
             .await
             .expect("apply V1012 through V1014"),
-        vec![1012, 1013, 1014]
+        vec![1012, 1013, 1014, 1015]
     );
     assert_nonterminal_monitoring_index(&db).await;
     assert!(sqlite_table_exists(&db, "sm_sessions").await);
@@ -3710,7 +3710,7 @@ async fn postgres_v1012_resets_epoch_zero_soak_rows() {
             .run(&db)
             .await
             .expect("apply V1012 through V1014"),
-        vec![1012, 1013, 1014]
+        vec![1012, 1013, 1014, 1015]
     );
     assert!(postgres_table_exists(&db, "sm_sessions").await);
     assert!(postgres_table_exists(&db, "sm_unacked").await);
@@ -3743,7 +3743,7 @@ async fn sqlite_v1014_resets_only_ledger_owned_ingress_and_sm_state() {
             .run(&db)
             .await
             .expect("apply V1014"),
-        vec![1014]
+        vec![1014, 1015]
     );
 
     assert_v1014_cutover_result(&db, 0).await;
@@ -3775,7 +3775,7 @@ async fn postgres_v1014_resets_at_epoch_zero_and_epoch_one_with_trigger_proof() 
                 .run(&db)
                 .await
                 .expect("apply V1014 at live epoch"),
-            vec![1014]
+            vec![1014, 1015]
         );
         assert_v1014_cutover_result(&db, epoch).await;
 
@@ -4022,7 +4022,7 @@ async fn migration_v1012_recreates_sql_sm_store(database_url: &str) {
             .run(&storage.database())
             .await
             .expect("cutover migration"),
-        vec![1012, 1013, 1014]
+        vec![1012, 1013, 1014, 1015]
     );
     drop(storage);
 

@@ -163,24 +163,44 @@ async fn store_session_atomic_inner(
     }
 
     if let Some(append) = append {
-        if let Err(error) = ingress_append::insert(&mut tx, &append).await {
-            let conflict = ingress_append::is_ledger_conflict(&error);
-            tx.rollback()
-                .await
-                .map_err(|error| SmPersistenceError::Other(error.to_string()))?;
-            if conflict {
+        match ingress_append::insert(&mut tx, &append).await {
+            Ok(true) => {}
+            Ok(false) => {
+                // A replacement whose prior row was already superseded: the
+                // standing allocation wins and nothing here commits.
+                tx.rollback()
+                    .await
+                    .map_err(|error| SmPersistenceError::Other(error.to_string()))?;
                 let winner = ingress_append::get(&storage.db, &append.key)
                     .await?
                     .ok_or_else(|| {
                         SmPersistenceError::Other(
-                            "ingress append conflict winner missing after rollback".into(),
+                            "superseded ingress append vanished after rollback".into(),
                         )
                     })?;
                 return Ok(KeyedSnapshotOutcome::ObligationAlreadyAllocated {
                     accepting_stream: winner.accepting_stream,
                 });
             }
-            return Err(SmPersistenceError::Other(error.to_string()));
+            Err(error) => {
+                let conflict = ingress_append::is_ledger_conflict(&error);
+                tx.rollback()
+                    .await
+                    .map_err(|error| SmPersistenceError::Other(error.to_string()))?;
+                if conflict {
+                    let winner = ingress_append::get(&storage.db, &append.key)
+                        .await?
+                        .ok_or_else(|| {
+                            SmPersistenceError::Other(
+                                "ingress append conflict winner missing after rollback".into(),
+                            )
+                        })?;
+                    return Ok(KeyedSnapshotOutcome::ObligationAlreadyAllocated {
+                        accepting_stream: winner.accepting_stream,
+                    });
+                }
+                return Err(SmPersistenceError::Other(error.to_string()));
+            }
         }
     }
 

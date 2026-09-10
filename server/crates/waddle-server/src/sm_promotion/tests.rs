@@ -2759,6 +2759,8 @@ async fn keyed_append_committed_during_promotion_blocks_confirmation() {
                     resource: recipient.clone(),
                 },
                 accepting_stream: SmSessionId::new(STREAM),
+                sequence: 2,
+                supersedes: None,
                 appended_at: now,
             },
         )

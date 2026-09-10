@@ -13,6 +13,8 @@ fn append(stream: &SmSessionId) -> PersistedIngressAppend {
             resource: full("alice@example.com/web"),
         },
         accepting_stream: stream.clone(),
+        sequence: 12,
+        supersedes: None,
         appended_at: stale_caller_supplied_time(),
     }
 }

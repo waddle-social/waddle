@@ -7,25 +7,57 @@ use waddle_xmpp::stream_management::SmIngressAppendKey;
 
 use crate::db::{Database, DatabaseError, Row, Transaction};
 
+/// Write the allocation. `Ok(false)` means a replacement found no matching prior
+/// row, so another writer already superseded it and this obligation stays theirs.
 pub(crate) async fn insert(
     tx: &mut Transaction<'_>,
     append: &PersistedIngressAppend,
-) -> Result<(), DatabaseError> {
-    tx.execute(
-        "INSERT INTO sm_ingress_appends \
-         (message_key, receipt_kind, semantic_identity_hash, resource, accepting_stream_id, appended_at_ms) \
-         VALUES (?, ?, ?, ?, ?, ?)",
-        crate::db_params![
-            append.key.message_key.to_storage().to_string(),
-            i64::from(append.key.kind.to_storage()),
-            append.key.semantic_identity_hash.to_vec(),
-            append.key.resource.to_string(),
-            append.accepting_stream.as_str().to_string(),
-            append.appended_at.timestamp_millis(),
-        ],
-    )
-    .await?;
-    Ok(())
+) -> Result<bool, DatabaseError> {
+    let Some(prior) = append.supersedes.as_ref() else {
+        tx.execute(
+            "INSERT INTO sm_ingress_appends \
+             (message_key, receipt_kind, semantic_identity_hash, resource, accepting_stream_id, sequence, appended_at_ms) \
+             VALUES (?, ?, ?, ?, ?, ?, ?)",
+            crate::db_params![
+                append.key.message_key.to_storage().to_string(),
+                i64::from(append.key.kind.to_storage()),
+                append.key.semantic_identity_hash.to_vec(),
+                append.key.resource.to_string(),
+                append.accepting_stream.as_str().to_string(),
+                i64::from(append.sequence),
+                append.appended_at.timestamp_millis(),
+            ],
+        )
+        .await?;
+        return Ok(true);
+    };
+    // Replace exactly the evicted allocation. The guarded `DO UPDATE` keeps the
+    // database the arbiter: a racing writer that already replaced the row leaves
+    // the predicate false, so no second allocation is issued.
+    let affected = tx
+        .execute(
+            "INSERT INTO sm_ingress_appends \
+             (message_key, receipt_kind, semantic_identity_hash, resource, accepting_stream_id, sequence, appended_at_ms) \
+             VALUES (?, ?, ?, ?, ?, ?, ?) \
+             ON CONFLICT (message_key, receipt_kind, semantic_identity_hash, resource) DO UPDATE SET \
+             accepting_stream_id = excluded.accepting_stream_id, \
+             sequence = excluded.sequence, \
+             appended_at_ms = excluded.appended_at_ms \
+             WHERE sm_ingress_appends.accepting_stream_id = ? AND sm_ingress_appends.sequence = ?",
+            crate::db_params![
+                append.key.message_key.to_storage().to_string(),
+                i64::from(append.key.kind.to_storage()),
+                append.key.semantic_identity_hash.to_vec(),
+                append.key.resource.to_string(),
+                append.accepting_stream.as_str().to_string(),
+                i64::from(append.sequence),
+                append.appended_at.timestamp_millis(),
+                prior.accepting_stream.as_str().to_string(),
+                i64::from(prior.sequence),
+            ],
+        )
+        .await?;
+    Ok(affected > 0)
 }
 
 /// Match the ledger's primary key, never an unrelated uniqueness/check failure.
@@ -62,7 +94,7 @@ pub(crate) async fn get(
     let conn = db.guard().await.map_err(storage_error)?;
     let mut rows = conn
         .query(
-            "SELECT accepting_stream_id, appended_at_ms FROM sm_ingress_appends \
+            "SELECT accepting_stream_id, sequence, appended_at_ms FROM sm_ingress_appends \
              WHERE message_key = ? AND receipt_kind = ? AND semantic_identity_hash = ? AND resource = ?",
             crate::db_params![
                 key.message_key.to_storage().to_string(),
@@ -86,7 +118,13 @@ pub(crate) fn decode(
 ) -> Result<PersistedIngressAppend, SmPersistenceError> {
     let accepting_stream = SmSessionId::try_from_wire(row.get::<String>(0).map_err(storage_error)?)
         .map_err(|error| SmPersistenceError::Other(error.to_string()))?;
-    let millis = row.get::<i64>(1).map_err(storage_error)?;
+    let sequence = u32::try_from(row.get::<i64>(1).map_err(storage_error)?).map_err(|_| {
+        SmPersistenceError::Corrupt {
+            stream_id: accepting_stream.clone(),
+            detail: "ingress append sequence outside u32".into(),
+        }
+    })?;
+    let millis = row.get::<i64>(2).map_err(storage_error)?;
     let appended_at = DateTime::<Utc>::from_timestamp_millis(millis).ok_or_else(|| {
         SmPersistenceError::Corrupt {
             stream_id: accepting_stream.clone(),
@@ -96,7 +134,11 @@ pub(crate) fn decode(
     Ok(PersistedIngressAppend {
         key: key.clone(),
         accepting_stream,
+        sequence,
         appended_at,
+        // Storage never reports a pending supersede: the row read back is whatever
+        // allocation currently stands.
+        supersedes: None,
     })
 }
 

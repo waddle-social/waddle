@@ -92,6 +92,7 @@ pub(super) async fn initialize(storage: &DatabaseSmPersistence) -> Result<(), Sm
                     semantic_identity_hash {receipts_type} NOT NULL,
                     resource TEXT NOT NULL,
                     accepting_stream_id TEXT NOT NULL,
+                    sequence {bigint} NOT NULL,
                     appended_at_ms {bigint} NOT NULL,
                     PRIMARY KEY (message_key, receipt_kind, semantic_identity_hash, resource)
                 )"
