@@ -2093,7 +2093,7 @@ async fn postgres_v0006_widens_existing_upload_slot_size_bytes() {
         applied,
         vec![
             6, 7, 8, 9, 10, 11, 12, 1001, 1002, 1003, 1004, 1005, 1006, 1007, 1008, 1009, 1010,
-            1011, 1012, 1013, 1014
+            1011, 1012, 1013, 1014, 1015
         ]
     );
     assert_postgres_column_type(&db, "upload_slots", "size_bytes", "bigint").await;
@@ -4195,6 +4195,10 @@ async fn v1012_concurrent_sm_initializers(database_url: &str) {
         .await.expect("complete session schema before startup");
     conn.query("SELECT original_receipt_at_ms, ingress_receipts, origin_stream_id, inbound_seq, pair_sequence FROM sm_unacked", ())
         .await.expect("complete replay schema before startup");
+    // The append ledger is created by the migration AND by each replica's own
+    // initializer, so it must already exist under the runner lock too (#1756).
+    conn.query("SELECT message_key, receipt_kind, semantic_identity_hash, resource, accepting_stream_id, sequence, appended_at_ms FROM sm_ingress_appends", ())
+        .await.expect("complete append ledger schema before startup");
     let index_sql = match driver {
         DatabaseDriver::Postgres => "SELECT COUNT(*) FROM pg_indexes WHERE schemaname = current_schema() AND indexname IN ('idx_sm_sessions_detached', 'idx_sm_unacked_dedup')",
         DatabaseDriver::Sqlite => "SELECT COUNT(*) FROM sqlite_master WHERE type = 'index' AND name IN ('idx_sm_sessions_detached', 'idx_sm_unacked_dedup')",
