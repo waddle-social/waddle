@@ -819,7 +819,22 @@ async fn proof_for_an_evicted_payload_allows_a_replacement_allocation() {
         .expect("proof recorded");
 
     // While the obligation is still unsettled, evict its payload the way queue
-    // overflow does: drop the entry and record the replay gap through it.
+    // overflow does: drop the entry and record the replay gap through it. The
+    // eviction is applied to DURABLE state, which is what the void decision
+    // reads — memory can lie about deliverability in both directions.
+    let mut durable = storage.get_session(&stream).await.unwrap().unwrap();
+    durable.replay_gap_through = Some(allocated.sequence);
+    let retained: Vec<_> = storage
+        .list_unacked(&stream)
+        .await
+        .unwrap()
+        .into_iter()
+        .filter(|entry| entry.sequence != allocated.sequence)
+        .collect();
+    storage
+        .store_session_atomic(durable, retained)
+        .await
+        .unwrap();
     {
         let mut sessions = registry.sessions.write().unwrap();
         let session = sessions.get_mut(stream.as_str()).unwrap();
@@ -863,4 +878,88 @@ async fn proof_for_an_evicted_payload_allows_a_replacement_allocation() {
         again,
         crate::stream_management::SmKeyedAppendOutcome::AlreadyAppended { .. }
     ));
+}
+
+/// #1756 review round 2: the void decision must come from durable state.
+///
+/// Two ways in-memory state lies about whether an allocation is still
+/// deliverable, both of which would have let a lost stanza be reported as queued:
+///
+/// 1. another append evicted the sequence, committed, and was cancelled before
+///    publishing — memory still shows the entry while storage records the gap;
+/// 2. a same-JID replacement moved the old stream off both maps into promotion
+///    ownership while its durable row still exists — a missing map entry is not
+///    evidence that delivery completed.
+#[tokio::test]
+async fn void_allocation_reads_durable_state_not_memory() {
+    for off_map in [false, true] {
+        let stream = SmSessionId::new(if off_map {
+            "keyed-void-offmap"
+        } else {
+            "keyed-void-stale"
+        });
+        let storage = Arc::new(InMemorySmPersistence::new());
+        let registry = Arc::new(InMemorySmSessionRegistry::new().with_persistence(storage.clone()));
+        registry
+            .store_session(realistic_test_session(stream.as_str()))
+            .await
+            .unwrap();
+        let jid = make_test_jid();
+        let key = obligation(&jid);
+        registry
+            .record_keyed_stanza_for_detached_bound_resource(
+                &jid,
+                &stanza(),
+                Utc::now(),
+                key.clone(),
+            )
+            .await
+            .unwrap();
+        let allocated = storage.get_ingress_append(&key).await.unwrap().unwrap();
+
+        // Evict the payload in DURABLE state only, leaving memory untouched.
+        let mut durable = storage.get_session(&stream).await.unwrap().unwrap();
+        durable.replay_gap_through = Some(allocated.sequence);
+        let retained: Vec<_> = storage
+            .list_unacked(&stream)
+            .await
+            .unwrap()
+            .into_iter()
+            .filter(|entry| entry.sequence != allocated.sequence)
+            .collect();
+        storage
+            .store_session_atomic(durable, retained)
+            .await
+            .unwrap();
+        // Memory still shows the entry the durable gap has lost.
+        assert!(snapshot(&registry, stream.as_str())
+            .unacked_stanzas
+            .iter()
+            .any(|entry| entry.sequence == allocated.sequence));
+        if off_map {
+            // Model promotion ownership: off both maps, durable row still present.
+            registry.sessions.write().unwrap().remove(stream.as_str());
+        }
+
+        let outcome = registry
+            .record_keyed_stanza_for_detached_bound_resource(&jid, &stanza(), Utc::now(), key)
+            .await
+            .unwrap();
+        if off_map {
+            // Nothing local can accept the replacement, so the obligation stays
+            // unresolved for its recorded route rather than being reported queued.
+            assert!(
+                !outcome.is_allocated(),
+                "an evicted payload on a promotion-owned stream is not discharged: {outcome:?}"
+            );
+        } else {
+            assert!(
+                matches!(
+                    outcome,
+                    crate::stream_management::SmKeyedAppendOutcome::Appended { .. }
+                ),
+                "durable eviction voids the proof despite stale memory: {outcome:?}"
+            );
+        }
+    }
 }

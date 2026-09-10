@@ -321,8 +321,15 @@ impl InMemorySmSessionRegistry {
     /// records a replay gap through its sequence, which is exactly the durable
     /// marker that the payload is gone. Proof covered by that gap is void, because
     /// neither resume nor promotion can produce the stanza any more.
-    fn void_allocation(
+    ///
+    /// Decided entirely from durable state, never from the in-memory map. Memory
+    /// can still show the entry after another append evicted it, committed, and
+    /// was cancelled before publishing; and a same-JID replacement moves the old
+    /// stream off both maps into promotion ownership while its durable row still
+    /// exists, so a missing map entry is not evidence that delivery completed.
+    async fn void_allocation(
         &self,
+        storage: &Arc<dyn crate::stream_management::persistence::SmPersistenceStorage>,
         proof: &crate::stream_management::persistence::PersistedIngressAppend,
     ) -> Result<
         Option<crate::stream_management::persistence::PriorIngressAllocation>,
@@ -331,17 +338,21 @@ impl InMemorySmSessionRegistry {
         use crate::stream_management::persistence::PriorIngressAllocation;
         use crate::stream_management::sequence::sequence_gt;
 
-        // No session left: promotion or expiry already disposed of the queue, so
-        // the obligation was discharged rather than lost.
-        let Some(session) = self.detached_snapshot_matching(&proof.accepting_stream, |_| true)?
+        // No durable session left: promotion drained the queue and confirmation
+        // retired the row, which only happens once the handed-out queue covered
+        // durable state, so the obligation was discharged rather than lost.
+        let Some(session) = storage
+            .get_session(&proof.accepting_stream)
+            .await
+            .map_err(|error| SmRegistryError::Internal(error.to_string()))?
         else {
             return Ok(None);
         };
-        if session
-            .unacked_stanzas
-            .iter()
-            .any(|entry| entry.sequence == proof.sequence)
-        {
+        let unacked = storage
+            .list_unacked(&proof.accepting_stream)
+            .await
+            .map_err(|error| SmRegistryError::Internal(error.to_string()))?;
+        if unacked.iter().any(|entry| entry.sequence == proof.sequence) {
             return Ok(None);
         }
         let evicted = session
@@ -352,6 +363,7 @@ impl InMemorySmSessionRegistry {
             sequence: proof.sequence,
         }))
     }
+
     /// Allocate one ingress obligation exactly once, even after resume or rebind.
     /// The ledger is consulted before looking at any detached session.
     ///
@@ -388,7 +400,7 @@ impl InMemorySmSessionRegistry {
             .await
             .map_err(|error| SmRegistryError::Internal(error.to_string()))?
         {
-            match self.void_allocation(&proof)? {
+            match self.void_allocation(storage, &proof).await? {
                 // The allocated payload is still deliverable, or the session it
                 // belonged to was already promoted or expired away.
                 None => {
