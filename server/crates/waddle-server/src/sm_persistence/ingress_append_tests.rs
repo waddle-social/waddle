@@ -1,5 +1,6 @@
 use super::*;
 use crate::db::Value;
+use std::sync::Arc;
 use waddle_xmpp::ingress::MessageKey;
 use waddle_xmpp::stream_management::{SmIngressAppendKey, SmIngressReceiptKind};
 
@@ -16,6 +17,74 @@ fn append_for(session: &PersistedSession) -> PersistedIngressAppend {
         supersedes: None,
         appended_at: fixed_time(),
     }
+}
+
+/// The pre-check cannot serialize callers, so the database constraint has to.
+/// Sequential duplicates only show that a conflict rolls back; this drives two
+/// concurrent writers on separate connections, which is the case that matters:
+/// both observe an unallocated obligation, both attempt the snapshot, and
+/// exactly one queue entry may result.
+async fn concurrent_allocation(storage: &Arc<DatabaseSmPersistence>) {
+    let stream = format!("concurrent-{}", uuid::Uuid::new_v4());
+    let session = fixture_session(&stream);
+    let append = append_for(&session);
+    let first = {
+        let storage = Arc::clone(storage);
+        let session = session.clone();
+        let append = append.clone();
+        let stream = stream.clone();
+        tokio::spawn(async move {
+            storage
+                .store_session_atomic_with_ingress_append(
+                    session,
+                    vec![fixture_unacked(&stream, 11)],
+                    append,
+                )
+                .await
+        })
+    };
+    let second = {
+        let storage = Arc::clone(storage);
+        let session = session.clone();
+        let mut racing = append.clone();
+        racing.accepting_stream = session.stream_id.clone();
+        let stream = stream.clone();
+        tokio::spawn(async move {
+            storage
+                .store_session_atomic_with_ingress_append(
+                    session,
+                    vec![fixture_unacked(&stream, 12)],
+                    racing,
+                )
+                .await
+        })
+    };
+    let outcomes = [
+        first.await.expect("first task").expect("first write"),
+        second.await.expect("second task").expect("second write"),
+    ];
+    let committed = outcomes
+        .iter()
+        .filter(|outcome| **outcome == KeyedSnapshotOutcome::Committed)
+        .count();
+    assert_eq!(
+        committed, 1,
+        "exactly one concurrent writer may allocate the obligation: {outcomes:?}"
+    );
+    assert!(outcomes.iter().any(|outcome| matches!(
+        outcome,
+        KeyedSnapshotOutcome::ObligationAlreadyAllocated { .. }
+    )));
+    assert_eq!(
+        storage
+            .list_unacked(&session.stream_id)
+            .await
+            .unwrap()
+            .len(),
+        1,
+        "the losing writer left no queue entry behind"
+    );
+    storage.delete_session(&session.stream_id).await.unwrap();
 }
 
 async fn snapshot(storage: &DatabaseSmPersistence, stream: &SmSessionId) -> Vec<Vec<Value>> {
@@ -227,6 +296,11 @@ async fn sqlite_fresh_allocation_and_duplicate_rollback() {
     allocation_and_duplicate(&DatabaseSmPersistence::open(None).await.unwrap()).await;
 }
 
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn sqlite_concurrent_writers_allocate_once() {
+    concurrent_allocation(&Arc::new(DatabaseSmPersistence::open(None).await.unwrap())).await;
+}
+
 #[tokio::test]
 async fn sqlite_distinct_obligations_allocate_same_stream() {
     distinct_obligations(&DatabaseSmPersistence::open(None).await.unwrap()).await;
@@ -259,6 +333,10 @@ async fn postgres_keyed_append_storage_contract() {
         .await;
     let storage = DatabaseSmPersistence::open(Some(&url)).await.unwrap();
     allocation_and_duplicate(&storage).await;
+    concurrent_allocation(&Arc::new(
+        DatabaseSmPersistence::open(Some(&url)).await.unwrap(),
+    ))
+    .await;
     distinct_obligations(&storage).await;
     unrelated_constraint(&storage).await;
     old_stream_and_deletion(&storage).await;
