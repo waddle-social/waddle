@@ -35,9 +35,9 @@ else
   echo "✅ rustup already installed: $(rustup --version)"
 fi
 
-# Add Apple targets
-echo "🎯 Adding Rust Apple targets..."
-rustup target add aarch64-apple-darwin aarch64-apple-ios aarch64-apple-ios-sim
+# Install the toolchain pinned in server/rust-toolchain.toml and add Apple targets
+echo "🎯 Installing pinned Rust toolchain and Apple targets..."
+(cd "$REPO_ROOT/server" && rustup toolchain install && rustup target add aarch64-apple-darwin aarch64-apple-ios aarch64-apple-ios-sim)
 
 # Build the xcframework from repository root
 echo "🔨 Building WaddleXmppClientFFI.xcframework..."

@@ -93,7 +93,7 @@ jobs:
       with:
         fetch-depth: 2
     - name: Install Determinate Nix
-      uses: DeterminateSystems/determinate-nix-action@d96678350ffd6a456235832eb11e1c491589b7bb
+      uses: DeterminateSystems/determinate-nix-action@021c8a1bd3570eb21f5c20a054812b0c4d9ca614
       with:
         extra-conf: accept-flake-config = true
     - name: Setup Hestia Nix Cache
@@ -151,7 +151,7 @@ jobs:
       with:
         fetch-depth: 2
     - name: Install Determinate Nix
-      uses: DeterminateSystems/determinate-nix-action@d96678350ffd6a456235832eb11e1c491589b7bb
+      uses: DeterminateSystems/determinate-nix-action@021c8a1bd3570eb21f5c20a054812b0c4d9ca614
       with:
         extra-conf: accept-flake-config = true
     - name: Setup Hestia Nix Cache
@@ -197,7 +197,7 @@ jobs:
       with:
         fetch-depth: 2
     - name: Install Determinate Nix
-      uses: DeterminateSystems/determinate-nix-action@d96678350ffd6a456235832eb11e1c491589b7bb
+      uses: DeterminateSystems/determinate-nix-action@021c8a1bd3570eb21f5c20a054812b0c4d9ca614
       with:
         extra-conf: accept-flake-config = true
     - name: Setup Hestia Nix Cache
@@ -243,7 +243,7 @@ jobs:
       with:
         fetch-depth: 2
     - name: Install Determinate Nix
-      uses: DeterminateSystems/determinate-nix-action@d96678350ffd6a456235832eb11e1c491589b7bb
+      uses: DeterminateSystems/determinate-nix-action@021c8a1bd3570eb21f5c20a054812b0c4d9ca614
       with:
         extra-conf: accept-flake-config = true
     - name: Setup Hestia Nix Cache
@@ -289,7 +289,7 @@ jobs:
       with:
         fetch-depth: 2
     - name: Install Determinate Nix
-      uses: DeterminateSystems/determinate-nix-action@d96678350ffd6a456235832eb11e1c491589b7bb
+      uses: DeterminateSystems/determinate-nix-action@021c8a1bd3570eb21f5c20a054812b0c4d9ca614
       with:
         extra-conf: accept-flake-config = true
     - name: Setup Hestia Nix Cache
@@ -335,7 +335,7 @@ jobs:
       with:
         fetch-depth: 2
     - name: Install Determinate Nix
-      uses: DeterminateSystems/determinate-nix-action@d96678350ffd6a456235832eb11e1c491589b7bb
+      uses: DeterminateSystems/determinate-nix-action@021c8a1bd3570eb21f5c20a054812b0c4d9ca614
       with:
         extra-conf: accept-flake-config = true
     - name: Setup Hestia Nix Cache
@@ -381,7 +381,7 @@ jobs:
       with:
         fetch-depth: 2
     - name: Install Determinate Nix
-      uses: DeterminateSystems/determinate-nix-action@d96678350ffd6a456235832eb11e1c491589b7bb
+      uses: DeterminateSystems/determinate-nix-action@021c8a1bd3570eb21f5c20a054812b0c4d9ca614
       with:
         extra-conf: accept-flake-config = true
     - name: Setup Hestia Nix Cache
@@ -434,7 +434,7 @@ jobs:
       with:
         fetch-depth: 2
     - name: Install Determinate Nix
-      uses: DeterminateSystems/determinate-nix-action@d96678350ffd6a456235832eb11e1c491589b7bb
+      uses: DeterminateSystems/determinate-nix-action@021c8a1bd3570eb21f5c20a054812b0c4d9ca614
       with:
         extra-conf: accept-flake-config = true
     - name: Setup Hestia Nix Cache
@@ -492,7 +492,7 @@ jobs:
       with:
         fetch-depth: 2
     - name: Install Determinate Nix
-      uses: DeterminateSystems/determinate-nix-action@d96678350ffd6a456235832eb11e1c491589b7bb
+      uses: DeterminateSystems/determinate-nix-action@021c8a1bd3570eb21f5c20a054812b0c4d9ca614
       with:
         extra-conf: accept-flake-config = true
     - name: Setup Hestia Nix Cache
@@ -538,7 +538,7 @@ jobs:
       with:
         fetch-depth: 2
     - name: Install Determinate Nix
-      uses: DeterminateSystems/determinate-nix-action@d96678350ffd6a456235832eb11e1c491589b7bb
+      uses: DeterminateSystems/determinate-nix-action@021c8a1bd3570eb21f5c20a054812b0c4d9ca614
       with:
         extra-conf: accept-flake-config = true
     - name: Setup Hestia Nix Cache

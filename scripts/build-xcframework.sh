@@ -28,6 +28,8 @@ if [[ "${1:-}" == "--debug" ]]; then
 fi
 
 echo "==> Building Rust targets (profile: $PROFILE)"
+# Run cargo from the server workspace so rustup honours server/rust-toolchain.toml.
+cd "$SERVER"
 cargo build -p waddle-xmpp-client-ffi $CARGO_FLAG \
   --locked \
   --target aarch64-apple-darwin \
