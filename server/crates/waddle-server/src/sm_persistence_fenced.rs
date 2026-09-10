@@ -22,10 +22,9 @@
 //! implements `waddle_xmpp::stream_management::persistence::
 //! SmPersistenceStorage` for [`PostgresFencedSmPersistence`], a completely
 //! independent type from `crate::sm_persistence::DatabaseSmPersistence`.
-//! No schema changes: this impl reads/writes the exact same
-//! `sm_sessions`/`sm_unacked` tables as the portable impl (byte-identical
-//! for SQLite, which never runs this type at all — this module is
-//! Postgres-only and gated behind the `clustering` Cargo feature).
+//! This impl shares the portable impl's `sm_sessions`, `sm_unacked`, and
+//! stream-independent `sm_ingress_appends` tables. This module is
+//! Postgres-only and gated behind the `clustering` Cargo feature.
 //!
 //! # Fencing design (per-method)
 //!
@@ -136,8 +135,8 @@ use waddle_xmpp::ownership::{
 };
 use waddle_xmpp::pending_delivery::SmSessionId;
 use waddle_xmpp::stream_management::persistence::{
-    PersistedSession, PersistedUnackedStanza, SmClaimFence, SmPersistenceError,
-    SmPersistenceStorage,
+    KeyedSnapshotOutcome, PersistedIngressAppend, PersistedSession, PersistedUnackedStanza,
+    SmClaimFence, SmPersistenceError, SmPersistenceStorage,
 };
 
 use crate::db::{Database, DatabaseDriver, Transaction};
@@ -145,6 +144,8 @@ use crate::sm_persistence::codec::{
     decode_session, decode_session_principal, decode_unacked, encode_session_principal,
     serialize_presence_payloads, serialize_stanza, show_wire_str,
 };
+
+mod atomic_store;
 
 const STALE_CLAIM_RELEASE_TIMEOUT: Duration = Duration::from_secs(5);
 
@@ -388,6 +389,28 @@ impl PostgresFencedSmPersistence {
         )
         .await
         .map_err(|e| SmPersistenceError::Other(e.to_string()))?;
+        conn.execute(
+            "CREATE TABLE IF NOT EXISTS sm_ingress_appends (
+                message_key TEXT NOT NULL,
+                receipt_kind INTEGER NOT NULL,
+                semantic_identity_hash BYTEA NOT NULL,
+                resource TEXT NOT NULL,
+                accepting_stream_id TEXT NOT NULL,
+                sequence BIGINT NOT NULL,
+                appended_at_ms BIGINT NOT NULL,
+                PRIMARY KEY (message_key, receipt_kind, semantic_identity_hash, resource)
+            )",
+            (),
+        )
+        .await
+        .map_err(|error| SmPersistenceError::Other(error.to_string()))?;
+        conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_sm_ingress_appends_stream \
+             ON sm_ingress_appends (accepting_stream_id)",
+            (),
+        )
+        .await
+        .map_err(|error| SmPersistenceError::Other(error.to_string()))?;
         conn.execute(
             "CREATE INDEX IF NOT EXISTS idx_sm_sessions_detached ON sm_sessions (detached_at_ms)",
             (),
@@ -763,6 +786,11 @@ impl SmPersistenceStorage for PostgresFencedSmPersistence {
 
         // Two statements rather than ON DELETE CASCADE, matching the
         // portable impl's observable lifecycle exactly.
+        // Retire proofs for allocations this session lost, while its replay gap
+        // still exists to identify them (#1756).
+        crate::sm_persistence::ingress_append::void_gap_covered(&mut tx, stream_id)
+            .await
+            .map_err(|e| SmPersistenceError::Other(e.to_string()))?;
         tx.execute(
             "DELETE FROM sm_unacked WHERE stream_id = ?",
             crate::db_params![stream_id.as_str().to_string()],
@@ -796,6 +824,11 @@ impl SmPersistenceStorage for PostgresFencedSmPersistence {
             .map_err(|e| SmPersistenceError::Other(e.to_string()))?;
         self.assert_fenced_with_authority(&mut tx, stream_id, &fence, authority)
             .await?;
+        // Retire proofs for allocations this session lost, while its replay gap
+        // still exists to identify them (#1756).
+        crate::sm_persistence::ingress_append::void_gap_covered(&mut tx, stream_id)
+            .await
+            .map_err(|e| SmPersistenceError::Other(e.to_string()))?;
         tx.execute(
             "DELETE FROM sm_unacked WHERE stream_id = ?",
             crate::db_params![stream_id.as_str().to_string()],
@@ -828,6 +861,11 @@ impl SmPersistenceStorage for PostgresFencedSmPersistence {
         let _identity_guard = self
             .assert_fenced(&mut tx, stream_id, expected_fence)
             .await?;
+        // Retire proofs for allocations this session lost, while its replay gap
+        // still exists to identify them (#1756).
+        crate::sm_persistence::ingress_append::void_gap_covered(&mut tx, stream_id)
+            .await
+            .map_err(|e| SmPersistenceError::Other(e.to_string()))?;
         tx.execute(
             "DELETE FROM sm_unacked WHERE stream_id = ?",
             crate::db_params![stream_id.as_str().to_string()],
@@ -1082,116 +1120,25 @@ impl SmPersistenceStorage for PostgresFencedSmPersistence {
         session: PersistedSession,
         unacked: Vec<PersistedUnackedStanza>,
     ) -> Result<(), SmPersistenceError> {
-        let stream_id = session.stream_id.clone();
-        let fence = self.claim_fence_for(&stream_id).await?;
-        let max_resume_duration_ms = i64::try_from(session.max_resume_duration.as_millis())
-            .map_err(|_| SmPersistenceError::Other("max_resume_duration overflows i64".into()))?;
-        let presence_show_str = session.presence_show.as_ref().map(show_wire_str);
-        let presence_payloads_xml = serialize_presence_payloads(&session.presence_payloads)?;
-
-        let mut tx = self
-            .db
-            .begin()
+        self.store_snapshot(session, unacked, None)
             .await
-            .map_err(|e| SmPersistenceError::Other(e.to_string()))?;
-        let _identity_guard = self.assert_fenced(&mut tx, &stream_id, &fence).await?;
+            .map(|_| ())
+    }
 
-        // Drop any pre-existing unacked rows first (see the portable
-        // impl's identical comment on this statement's ordering
-        // rationale), then upsert the session row (divergence (a):
-        // Postgres `now()`, not `session.detached_at`), then append every
-        // supplied unacked stanza.
-        tx.execute(
-            "DELETE FROM sm_unacked WHERE stream_id = ?",
-            crate::db_params![stream_id.as_str().to_string()],
-        )
-        .await
-        .map_err(|e| SmPersistenceError::Other(e.to_string()))?;
+    async fn store_session_atomic_with_ingress_append(
+        &self,
+        session: PersistedSession,
+        unacked: Vec<PersistedUnackedStanza>,
+        append: PersistedIngressAppend,
+    ) -> Result<KeyedSnapshotOutcome, SmPersistenceError> {
+        self.store_snapshot(session, unacked, Some(append)).await
+    }
 
-        tx.execute(
-            r#"
-            INSERT INTO sm_sessions (
-                stream_id, user_id, full_jid, occupancy_session, inbound_count, outbound_count,
-                last_acked, max_resume_secs, detached_at_ms, max_resume_duration_ms,
-                carbons_enabled, roster_interested, blocklist_interested, presence_available,
-                presence_show, presence_status, presence_priority, replay_gap_through,
-                presence_payloads, bare_jid, auth_context_id, auth_context_version,
-                principal_auth_epoch
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, (EXTRACT(EPOCH FROM now()) * 1000)::bigint, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-            ON CONFLICT (stream_id) DO UPDATE SET
-                user_id = excluded.user_id,
-                full_jid = excluded.full_jid,
-                occupancy_session = excluded.occupancy_session,
-                inbound_count = excluded.inbound_count,
-                outbound_count = excluded.outbound_count,
-                last_acked = excluded.last_acked,
-                max_resume_secs = excluded.max_resume_secs,
-                detached_at_ms = excluded.detached_at_ms,
-                max_resume_duration_ms = excluded.max_resume_duration_ms,
-                carbons_enabled = excluded.carbons_enabled,
-                roster_interested = excluded.roster_interested,
-                blocklist_interested = excluded.blocklist_interested,
-                presence_available = excluded.presence_available,
-                presence_show = excluded.presence_show,
-                presence_status = excluded.presence_status,
-                presence_priority = excluded.presence_priority,
-                replay_gap_through = excluded.replay_gap_through,
-                presence_payloads = excluded.presence_payloads,
-                bare_jid = COALESCE(excluded.bare_jid, sm_sessions.bare_jid),
-                auth_context_id = COALESCE(excluded.auth_context_id, sm_sessions.auth_context_id),
-                auth_context_version = COALESCE(excluded.auth_context_version, sm_sessions.auth_context_version),
-                principal_auth_epoch = COALESCE(excluded.principal_auth_epoch, sm_sessions.principal_auth_epoch)
-            "#,
-            crate::db_params![
-                stream_id.as_str().to_string(),
-                session.user_id.clone(),
-                session.jid.to_string(),
-                Some(session.occupancy_session.to_string()),
-                i64::from(session.inbound_count),
-                i64::from(session.outbound_count),
-                i64::from(session.last_acked),
-                session.max_resume_time.map(i64::from),
-                max_resume_duration_ms,
-                i64::from(session.carbons_enabled),
-                i64::from(session.roster_interested),
-                i64::from(session.blocklist_interested),
-                i64::from(session.presence_available),
-                presence_show_str.map(str::to_string),
-                session.presence_status.clone(),
-                i64::from(session.presence_priority),
-                session.replay_gap_through.map(i64::from),
-                presence_payloads_xml,
-                None::<String>,
-                None::<String>,
-                None::<i64>,
-                None::<i64>,
-            ],
-        )
-        .await
-        .map_err(|e| SmPersistenceError::Other(e.to_string()))?;
-
-        for stanza in &unacked {
-            let xml = serialize_stanza(&stanza.stanza)?;
-            let receipt_ms = stanza.original_receipt_at.timestamp_millis();
-            tx.execute(
-                "INSERT INTO sm_unacked (stream_id, sequence, stanza_xml, original_receipt_at_ms, ingress_receipts) \
-                 VALUES (?, ?, ?, ?, ?)",
-                crate::db_params![
-                    stream_id.as_str().to_string(),
-                    i64::from(stanza.sequence),
-                    xml,
-                    receipt_ms,
-                crate::sm_persistence::codec::encode_ingress_receipts(&stanza.ingress_receipts),
-                ],
-            )
-            .await
-            .map_err(|e| SmPersistenceError::Other(e.to_string()))?;
-        }
-
-        tx.commit()
-            .await
-            .map_err(|e| SmPersistenceError::Other(e.to_string()))?;
-        Ok(())
+    async fn get_ingress_append(
+        &self,
+        key: &waddle_xmpp::stream_management::SmIngressAppendKey,
+    ) -> Result<Option<PersistedIngressAppend>, SmPersistenceError> {
+        crate::sm_persistence::ingress_append::get(&self.db, key).await
     }
 
     async fn store_session_atomic_with_principal(

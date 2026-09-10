@@ -757,6 +757,21 @@ async fn gc_candidate_batch(
             )
             .await
             .map_err(|error| gc_database_failure(deleted_messages, error))?;
+        // Only a reclaimed canonical row proves the obligation is unretryable.
+        // A message retained by live SM refs keeps its proofs, so a still
+        // possible retry cannot be granted a second durable allocation.
+        if deleted > 0 {
+            tx.execute(
+                dialect_sql(
+                    tx.driver(),
+                    GC_DELETE_INGRESS_APPENDS_POSTGRES,
+                    GC_DELETE_INGRESS_APPENDS_SQLITE,
+                ),
+                crate::db_params![message_key.to_storage().to_string()],
+            )
+            .await
+            .map_err(|error| gc_database_failure(deleted_messages, error))?;
+        }
         tx.commit()
             .await
             .map_err(|error| gc_database_failure(deleted_messages, error))?;
@@ -1190,6 +1205,14 @@ const DELETE_ALIASES_POSTGRES: &str =
 const DELETE_ALIASES_SQLITE: &str = r#"DELETE FROM ingress_origin_aliases WHERE message_key = ?"#;
 const GC_DELETE_DELIVERIES_POSTGRES: &str =
     r#"DELETE FROM ingress_deliveries WHERE message_key = ?::uuid"#;
+// Append proofs outlive the SM session deliberately, so nothing else deletes
+// them: the obligation, not the stream, owns their lifetime (#1756). Once the
+// canonical row is reclaimed the obligation can never be retried again, which
+// is exactly when the proof stops being load-bearing.
+const GC_DELETE_INGRESS_APPENDS_POSTGRES: &str =
+    r#"DELETE FROM sm_ingress_appends WHERE message_key = ?"#;
+const GC_DELETE_INGRESS_APPENDS_SQLITE: &str =
+    r#"DELETE FROM sm_ingress_appends WHERE message_key = ?"#;
 const GC_DELETE_DELIVERIES_SQLITE: &str = r#"DELETE FROM ingress_deliveries WHERE message_key = ?"#;
 const GC_DELETE_MESSAGE_POSTGRES: &str = r#"
                 DELETE FROM ingress_messages m

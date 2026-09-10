@@ -18,27 +18,12 @@ impl OrderedRelayDeliveryBridge {
         call_setup: Option<waddle_xmpp::telemetry::call::PendingCallSetupRoute>,
     ) -> RemoteDeliveryFuture<'a> {
         Box::pin(async move {
-            self.try_deliver_full_jid_remote_with_capture(target, stanza, origin, call_setup, None)
-                .await
-                .map(|outcome| outcome.outcome)
-        })
-    }
-
-    pub(crate) fn try_deliver_full_jid_remote_with_capture<'a>(
-        self: &'a Arc<Self>,
-        target: &'a jid::FullJid,
-        stanza: &'a Stanza,
-        origin: &'a OrderedRelayRouteOrigin,
-        call_setup: Option<waddle_xmpp::telemetry::call::PendingCallSetupRoute>,
-        deferred_capture: Option<crate::ingress::IngressEffectCapture>,
-    ) -> CapturedRemoteDeliveryFuture<'a> {
-        Box::pin(async move {
             if let Some(remote_origin) = remote_resource_origin(origin) {
                 // Ticket ownership passes down: `route_remote_resource_origin`
                 // has its own deferred-handoff branch and closes the
                 // ticket from the REAL outcome (#1488).
                 return Arc::clone(self)
-                    .route_remote_resource_origin_with_capture(
+                    .route_remote_resource_origin(
                         remote_origin,
                         RemoteResourceRouteTarget::FullJid {
                             target: target.clone(),
@@ -47,7 +32,6 @@ impl OrderedRelayDeliveryBridge {
                         stanza,
                         origin,
                         call_setup,
-                        deferred_capture,
                     )
                     .await;
             }
@@ -164,9 +148,7 @@ impl OrderedRelayDeliveryBridge {
                             sfu_for_bounce.as_deref(),
                         ));
                     });
-                    return Some(CapturedRemoteDeliveryOutcome::from_outcome(
-                        FullJidDeliveryOutcome::MaybeCommitted,
-                    ));
+                    return Some(FullJidDeliveryOutcome::MaybeCommitted);
                 }
             }
 
@@ -179,7 +161,7 @@ impl OrderedRelayDeliveryBridge {
                 "ordered-relay full-JID delivery outcome"
             );
             crate::server::routes::interpret::close_call_setup_from_outcome(call_setup, outcome);
-            Some(CapturedRemoteDeliveryOutcome::from_outcome(outcome))
+            Some(outcome)
         })
     }
 

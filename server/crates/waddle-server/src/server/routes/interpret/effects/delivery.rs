@@ -11,8 +11,6 @@ pub enum PeerDeliveryKind {
 }
 
 /// Delivery obligations are executed after the ingress transaction commits.
-/// Relay and detached obligations capture their recipient SM append identities
-/// after execution, when the actual receiving stream is known.
 #[derive(Debug, Clone)]
 pub enum ExternalDeliveryEffect {
     UndeliverableBounce {

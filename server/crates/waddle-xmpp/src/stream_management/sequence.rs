@@ -28,7 +28,11 @@ pub fn max_in_window(a: u32, b: u32) -> u32 {
 
 /// Returns whether `a` is at or behind `b` in the XEP-0198 wrapping sequence
 /// space.
-pub(crate) fn sequence_lte(a: u32, b: u32) -> bool {
+///
+/// Public because the SM storage layer needs it to decide which ingress append
+/// proofs a session's replay gap covers before that session's row — and with it
+/// the gap itself — is deleted.
+pub fn sequence_lte(a: u32, b: u32) -> bool {
     !sequence_gt(a, b)
 }
 

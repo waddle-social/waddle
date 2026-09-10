@@ -25,11 +25,6 @@ pub enum CarbonFanoutFailure {
 #[derive(Debug)]
 pub(crate) struct CarbonRegistryFanoutOutcome {
     pub(crate) carbon_recipients: Vec<FullJid>,
-    // Re-exported to the origin node through the clustering relay reply; the
-    // local capture already recorded each stream, so non-clustering builds
-    // construct but never re-read this field.
-    #[cfg_attr(not(feature = "clustering"), allow(dead_code))]
-    pub(crate) recipient_sm_append_streams: Vec<waddle_xmpp::pending_delivery::SmSessionId>,
 }
 
 /// Partial proof survives a failed destination so healthy resources are not lost.
@@ -179,37 +174,22 @@ pub(crate) fn remote_carbon_delivery(
     exclude: &[FullJid],
     kind: CarbonKind,
 ) -> super::effects::EffectOutcome {
-    let (outcome, carbon_recipients, recipient_sm_append_streams) = match outcome {
-        crate::clustering::route_bridge::RemoteCarbonFanout::Applied {
-            carbon_recipients,
-            recipient_sm_append_streams,
-        } => (
-            FullJidDeliveryOutcome::Delivered,
-            carbon_recipients,
-            recipient_sm_append_streams,
-        ),
+    let (outcome, carbon_recipients) = match outcome {
+        crate::clustering::route_bridge::RemoteCarbonFanout::Applied { carbon_recipients } => {
+            (FullJidDeliveryOutcome::Delivered, carbon_recipients)
+        }
         crate::clustering::route_bridge::RemoteCarbonFanout::Incomplete {
             reason,
             carbon_recipients,
-            recipient_sm_append_streams,
         } => {
             warn!(%owner, %reason, "remote carbon fanout incomplete");
-            (
-                FullJidDeliveryOutcome::Unavailable,
-                carbon_recipients,
-                recipient_sm_append_streams,
-            )
+            (FullJidDeliveryOutcome::Unavailable, carbon_recipients)
         }
-        crate::clustering::route_bridge::RemoteCarbonFanout::MaybeCommitted => (
-            FullJidDeliveryOutcome::MaybeCommitted,
-            Vec::new(),
-            Vec::new(),
-        ),
+        crate::clustering::route_bridge::RemoteCarbonFanout::MaybeCommitted => {
+            (FullJidDeliveryOutcome::MaybeCommitted, Vec::new())
+        }
     };
     if let Some(capture) = deps.ingress_effect_capture.as_ref() {
-        for stream in recipient_sm_append_streams {
-            capture.record_recipient_sm_append(stream);
-        }
         if let Some(excluded_source) = exclude.iter().find(|source| &source.to_bare() == owner) {
             if !carbon_recipients.is_empty() {
                 capture.record_intent(IngressEffectIntent::Carbons {
@@ -309,11 +289,9 @@ pub(crate) async fn send_carbons_to_registry_with_capture(
         );
         return Ok(CarbonRegistryFanoutOutcome {
             carbon_recipients: Vec::new(),
-            recipient_sm_append_streams: Vec::new(),
         });
     }
     let mut carbon_recipients = Vec::new();
-    let mut recipient_sm_append_streams = Vec::new();
     for target in live_targets {
         let envelope = match build_carbon_envelope(kind, &message, &owner_str, &target) {
             Ok(env) => env,
@@ -412,18 +390,10 @@ pub(crate) async fn send_carbons_to_registry_with_capture(
             };
             let stanza = Stanza::Message(envelope);
             match sm
-                .record_stanza_for_detached_bound_resource_with_stream(
-                    &target,
-                    &stanza,
-                    chrono::Utc::now(),
-                )
+                .record_stanza_for_detached_bound_resource(&target, &stanza, chrono::Utc::now())
                 .await
             {
-                Ok(Some(stream)) => {
-                    if let Some(capture) = deps.ingress_effect_capture {
-                        capture.record_recipient_sm_append(stream.clone());
-                    }
-                    recipient_sm_append_streams.push(stream);
+                Ok(true) => {
                     carbon_recipients.push(target.clone());
                     debug!(
                         target = %target,
@@ -431,7 +401,7 @@ pub(crate) async fn send_carbons_to_registry_with_capture(
                         "SendCarbons: queued for detached XEP-0198 resume"
                     );
                 }
-                Ok(None) => {
+                Ok(false) => {
                     debug!(
                         target = %target,
                         kind = ?kind,
@@ -468,10 +438,7 @@ pub(crate) async fn send_carbons_to_registry_with_capture(
             });
         }
     }
-    let completed = CarbonRegistryFanoutOutcome {
-        carbon_recipients,
-        recipient_sm_append_streams,
-    };
+    let completed = CarbonRegistryFanoutOutcome { carbon_recipients };
     match failure {
         Some(reason) => Err(CarbonFanoutIncomplete { reason, completed }),
         None => Ok(completed),
@@ -516,17 +483,10 @@ pub(super) async fn send_carbon_to_resource(
         {
             return FullJidDeliveryOutcome::Unavailable;
         }
-        if let Ok(Some(stream)) = sm
-            .record_stanza_for_detached_bound_resource_with_stream(
-                recipient,
-                &stanza,
-                chrono::Utc::now(),
-            )
+        if let Ok(true) = sm
+            .record_stanza_for_detached_bound_resource(recipient, &stanza, chrono::Utc::now())
             .await
         {
-            if let Some(capture) = deps.ingress_effect_capture.as_ref() {
-                capture.record_recipient_sm_append(stream);
-            }
             return FullJidDeliveryOutcome::QueuedDetached;
         }
     }

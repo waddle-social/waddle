@@ -17,7 +17,8 @@ use tracing::{debug, info, instrument};
 use waddle_xmpp::auth::AuthenticatedPrincipalRef;
 use waddle_xmpp::pending_delivery::SmSessionId;
 use waddle_xmpp::stream_management::persistence::{
-    PersistedSession, PersistedUnackedStanza, SmPersistenceError, SmPersistenceStorage,
+    KeyedSnapshotOutcome, PersistedIngressAppend, PersistedSession, PersistedUnackedStanza,
+    SmPersistenceError, SmPersistenceStorage,
 };
 use waddle_xmpp::Stanza;
 use xmpp_parsers::presence::Show;
@@ -33,6 +34,7 @@ mod atomic_store;
 /// `sm_sessions`/`sm_unacked` schema, instead of forking a second copy
 /// that could silently drift from this one.
 pub(crate) mod codec;
+pub(crate) mod ingress_append;
 mod joined_sessions;
 mod schema;
 
@@ -357,18 +359,39 @@ impl SmPersistenceStorage for DatabaseSmPersistence {
     async fn delete_session(&self, stream_id: &SmSessionId) -> Result<(), SmPersistenceError> {
         let lock = self.lock_for(stream_id);
         let _guard = lock.lock().await;
+        // One transaction so the gap-covered proof retirement below cannot be
+        // separated from the session delete that destroys its evidence.
+        //
+        // `begin_immediate` because this transaction reads before it writes. A
+        // deferred SQLite transaction would take a read snapshot first, and two
+        // concurrent session deletions on different streams — whose per-stream
+        // locks do not serialize pooled connections — would then both hold read
+        // snapshots, so one reader-to-writer upgrade fails immediately with
+        // SQLITE_BUSY. `busy_timeout` cannot resolve that upgrade cycle, so the
+        // write lock is taken up front instead.
+        let mut tx = self
+            .db
+            .begin_immediate()
+            .await
+            .map_err(|error| SmPersistenceError::Other(error.to_string()))?;
+        // Retire proofs for allocations this session lost, while its replay gap
+        // still exists to identify them (#1756).
+        crate::sm_persistence::ingress_append::void_gap_covered(&mut tx, stream_id)
+            .await
+            .map_err(|error| SmPersistenceError::Other(error.to_string()))?;
         // Two statements rather than ON DELETE CASCADE so the trait's
         // observable lifecycle matches the in-memory fake.
-        self.execute(
+        for sql in [
             "DELETE FROM sm_unacked WHERE stream_id = ?",
-            crate::db_params![stream_id.as_str().to_string()],
-        )
-        .await?;
-        self.execute(
             "DELETE FROM sm_sessions WHERE stream_id = ?",
-            crate::db_params![stream_id.as_str().to_string()],
-        )
-        .await?;
+        ] {
+            tx.execute(sql, crate::db_params![stream_id.as_str().to_string()])
+                .await
+                .map_err(|error| SmPersistenceError::Other(error.to_string()))?;
+        }
+        tx.commit()
+            .await
+            .map_err(|error| SmPersistenceError::Other(error.to_string()))?;
         drop(_guard);
         drop(lock);
         self.drop_stream_lock(stream_id);
@@ -538,6 +561,22 @@ impl SmPersistenceStorage for DatabaseSmPersistence {
         unacked: Vec<PersistedUnackedStanza>,
     ) -> Result<(), SmPersistenceError> {
         atomic_store::store_session_atomic(self, session, unacked).await
+    }
+
+    async fn store_session_atomic_with_ingress_append(
+        &self,
+        session: PersistedSession,
+        unacked: Vec<PersistedUnackedStanza>,
+        append: PersistedIngressAppend,
+    ) -> Result<KeyedSnapshotOutcome, SmPersistenceError> {
+        atomic_store::store_session_atomic_with_ingress_append(self, session, unacked, append).await
+    }
+
+    async fn get_ingress_append(
+        &self,
+        key: &waddle_xmpp::stream_management::SmIngressAppendKey,
+    ) -> Result<Option<PersistedIngressAppend>, SmPersistenceError> {
+        ingress_append::get(&self.db, key).await
     }
 
     async fn store_session_atomic_with_principal(

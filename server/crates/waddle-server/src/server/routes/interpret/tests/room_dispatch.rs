@@ -137,6 +137,7 @@ async fn dispatch_to_room_fanout_span_and_latency_cover_recipient_enqueues() {
         sfu: None,
         ingress_effect_capture: Some(capture.clone()),
         direct_route_identity: None,
+        ingress_append_context: None,
     };
     let mut message = Message::new(Some(jid::Jid::from(room_jid.clone())));
     message.from = Some(jid::Jid::from(alice));
@@ -265,6 +266,7 @@ fn successful_room_error_reply_records_error_intent() {
         sfu: None,
         ingress_effect_capture: Some(capture.clone()),
         direct_route_identity: None,
+        ingress_append_context: None,
     };
     let room: jid::BareJid = "room@muc.example.com".parse().expect("room");
     let sender: jid::FullJid = "alice@example.com/web".parse().expect("sender");

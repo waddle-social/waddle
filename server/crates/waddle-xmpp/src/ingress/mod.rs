@@ -29,9 +29,9 @@ pub use effect_intent::{
     LinkPreviewMediaRefMutation, LinkPreviewMediaRefState, MucInviteLedgerAction,
     MucInviteLedgerMutation, MucInviteMembershipGrant, NotificationActivityMutation,
     NotificationCandidateOutcome, PendingDeliveryMutation, PendingDmCallOffer, PlannedActiveDmCall,
-    PlannedDmCallState, RecipientSmAppendIdentity, RelayNodeEpoch, RelayNodeId,
-    RelayTargetIdentity, RetractionTombstoneMutation, RoomPinMutation, TombstoneReplaySmEntry,
-    TombstoneReplayTarget, MAX_EFFECT_INTENT_PAYLOAD_BYTES,
+    PlannedDmCallState, RelayNodeEpoch, RelayNodeId, RelayTargetIdentity,
+    RetractionTombstoneMutation, RoomPinMutation, TombstoneReplaySmEntry, TombstoneReplayTarget,
+    MAX_EFFECT_INTENT_PAYLOAD_BYTES,
 };
 pub use epoch::ProtocolEpoch;
 pub use error::IngressTypeError;

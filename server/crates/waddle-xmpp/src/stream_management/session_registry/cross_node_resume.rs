@@ -1394,6 +1394,30 @@ mod tests {
         ) -> Result<Option<crate::auth::AuthenticatedPrincipalRef>, SmPersistenceError> {
             self.inner.get_session_principal(stream_id).await
         }
+
+        async fn store_session_atomic_with_ingress_append(
+            &self,
+            session: crate::stream_management::persistence::PersistedSession,
+            unacked: Vec<crate::stream_management::persistence::PersistedUnackedStanza>,
+            append: crate::stream_management::persistence::PersistedIngressAppend,
+        ) -> Result<
+            crate::stream_management::persistence::KeyedSnapshotOutcome,
+            crate::stream_management::persistence::SmPersistenceError,
+        > {
+            self.inner
+                .store_session_atomic_with_ingress_append(session, unacked, append)
+                .await
+        }
+
+        async fn get_ingress_append(
+            &self,
+            key: &crate::stream_management::SmIngressAppendKey,
+        ) -> Result<
+            Option<crate::stream_management::persistence::PersistedIngressAppend>,
+            crate::stream_management::persistence::SmPersistenceError,
+        > {
+            self.inner.get_ingress_append(key).await
+        }
     }
 
     fn make_persisted_session(stream_id: &str, jid: &jid::FullJid) -> PersistedSession {

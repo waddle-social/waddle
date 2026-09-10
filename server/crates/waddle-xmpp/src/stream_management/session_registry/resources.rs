@@ -1,3 +1,5 @@
+use std::sync::Arc;
+
 use chrono::{DateTime, Utc};
 use jid::{BareJid, FullJid};
 use xmpp_parsers::presence::Show;
@@ -310,6 +312,196 @@ impl InMemorySmSessionRegistry {
             )
             .await?;
         Ok(recorded.then(|| SmSessionId::new(stream_id)))
+    }
+
+    /// Whether existing proof stands for a payload that can no longer be delivered.
+    ///
+    /// An acknowledged entry simply leaves the queue, so its absence is not loss.
+    /// An *evicted* one is different: the bounded queue drops the oldest entry and
+    /// records a replay gap through its sequence, which is exactly the durable
+    /// marker that the payload is gone. Proof covered by that gap is void, because
+    /// neither resume nor promotion can produce the stanza any more.
+    ///
+    /// Decided entirely from durable state, never from the in-memory map. Memory
+    /// can still show the entry after another append evicted it, committed, and
+    /// was cancelled before publishing; and a same-JID replacement moves the old
+    /// stream off both maps into promotion ownership while its durable row still
+    /// exists, so a missing map entry is not evidence that delivery completed.
+    async fn void_allocation(
+        &self,
+        storage: &Arc<dyn crate::stream_management::persistence::SmPersistenceStorage>,
+        proof: &crate::stream_management::persistence::PersistedIngressAppend,
+    ) -> Result<
+        Option<crate::stream_management::persistence::PriorIngressAllocation>,
+        SmRegistryError,
+    > {
+        use crate::stream_management::persistence::PriorIngressAllocation;
+        use crate::stream_management::sequence::sequence_gt;
+
+        // No durable session left: promotion drained the queue and confirmation
+        // retired the row, which only happens once the handed-out queue covered
+        // durable state, so the obligation was discharged rather than lost.
+        let Some(session) = storage
+            .get_session(&proof.accepting_stream)
+            .await
+            .map_err(|error| SmRegistryError::Internal(error.to_string()))?
+        else {
+            return Ok(None);
+        };
+        // One row decides it. Reading the queue separately would tear: a
+        // concurrent eviction committing between the two reads pairs the old gap
+        // with the new queue. The queue read is also redundant — eviction always
+        // drops the OLDEST entry and marks the gap through its sequence, so every
+        // retained sequence is strictly above the gap. Gap-covered therefore
+        // already implies not retained.
+        //
+        // Acknowledged allocations are excluded first. Progress can fail after an
+        // append, the client can then resume and acknowledge the stanza, and a
+        // later overflow on the re-detached stream can advance the gap past that
+        // sequence. Gap coverage alone would misread it as lost and append a
+        // duplicate of a stanza the client has already acknowledged.
+        if !sequence_gt(proof.sequence, session.last_acked) {
+            return Ok(None);
+        }
+        let evicted = session
+            .replay_gap_through
+            .is_some_and(|gap| !sequence_gt(proof.sequence, gap));
+        Ok(evicted.then(|| PriorIngressAllocation {
+            accepting_stream: proof.accepting_stream.clone(),
+            sequence: proof.sequence,
+        }))
+    }
+
+    /// Allocate one ingress obligation exactly once, even after resume or rebind.
+    /// The ledger is consulted before looking at any detached session.
+    ///
+    /// Takes `Arc<Self>` because the durable write must outlive caller
+    /// cancellation. Post-commit execution runs under a deadline that can drop
+    /// this future mid-`COMMIT`, and the SQLite driver completes an already
+    /// submitted commit on its own worker thread regardless. Releasing the
+    /// stream shard at that moment would let the next writer read pre-commit
+    /// state and overwrite the committed entry while its ledger proof survived,
+    /// which is unrecoverable message loss: the proof suppresses every retry.
+    /// The persist therefore runs in a task that owns the shard guard, so the
+    /// lock is released only once the write has actually resolved.
+    pub async fn record_keyed_stanza_for_detached_bound_resource(
+        self: &Arc<Self>,
+        jid: &FullJid,
+        stanza: &Stanza,
+        original_receipt_at: DateTime<Utc>,
+        key: crate::stream_management::SmIngressAppendKey,
+    ) -> Result<crate::stream_management::SmKeyedAppendOutcome, SmRegistryError> {
+        use crate::stream_management::{
+            persistence::{KeyedSnapshotOutcome, PersistedIngressAppend},
+            SmKeyedAppendOutcome,
+        };
+        let storage = self
+            .persistence
+            .as_ref()
+            .ok_or(SmRegistryError::StorageUnavailable(
+                super::traits::StorageOutageCause::Backend,
+            ))?;
+        // Proof belongs to the obligation, not the currently bound stream.
+        let mut supersedes = None;
+        if let Some(proof) = storage
+            .get_ingress_append(&key)
+            .await
+            .map_err(|error| SmRegistryError::Internal(error.to_string()))?
+        {
+            match self.void_allocation(storage, &proof).await? {
+                // The allocated payload is still deliverable, or the session it
+                // belonged to was already promoted or expired away.
+                None => {
+                    return Ok(SmKeyedAppendOutcome::AlreadyAppended {
+                        accepting_stream: proof.accepting_stream,
+                    })
+                }
+                // The payload was evicted from the bounded queue, so the proof
+                // stands for a stanza nothing can deliver any more. Suppressing
+                // the retry against it would terminalize a lost message, so this
+                // allocation is replaced — gated on that exact row, so a racing
+                // writer that already replaced it still wins.
+                Some(prior) => supersedes = Some(prior),
+            }
+        }
+        if key.resource != *jid {
+            return Err(SmRegistryError::Internal(
+                "Ingress append resource does not match target JID".to_owned(),
+            ));
+        }
+        let Some(stream_id) =
+            self.find_session_id_matching(|session| !session.is_expired() && session.jid == *jid)?
+        else {
+            return Ok(SmKeyedAppendOutcome::NoSession);
+        };
+        let accepting_stream = SmSessionId::new(stream_id);
+        let shard = self.stream_lock(accepting_stream.as_str())?;
+        let guard = shard.lock_owned().await;
+        self.reconcile_stale_session_locked(&accepting_stream)
+            .await?;
+        let Some(mut updated) = self.detached_snapshot_matching(&accepting_stream, |session| {
+            !session.is_expired() && session.jid == *jid
+        })?
+        else {
+            return Ok(SmKeyedAppendOutcome::NoSession);
+        };
+        updated.record_detached_outbound(Self::stanza_to_replay_xml(stanza), original_receipt_at);
+        let persisted = super::persistence_codec::detached_to_persisted(&updated)?;
+        let rows = updated
+            .unacked_stanzas
+            .iter()
+            .map(|entry| {
+                super::persistence_codec::parse_xml_to_persisted_unacked(
+                    accepting_stream.as_str(),
+                    entry.sequence,
+                    &entry.stanza_xml,
+                    entry.original_receipt_at,
+                    entry.ingress_receipts.clone(),
+                )
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+        self.mark_snapshot_stale(&accepting_stream)?;
+        let registry = Arc::clone(self);
+        let storage = Arc::clone(storage);
+        let sequence = updated
+            .unacked_stanzas
+            .last()
+            .map(|entry| entry.sequence)
+            .ok_or_else(|| {
+                SmRegistryError::Internal("keyed append produced no queue entry".to_owned())
+            })?;
+        let append = PersistedIngressAppend {
+            key,
+            accepting_stream: accepting_stream.clone(),
+            sequence,
+            appended_at: Utc::now(),
+            supersedes,
+        };
+        // `guard` moves into the task: the shard stays locked until the write
+        // resolves, even if this future is dropped first.
+        let settle = tokio::spawn(async move {
+            let _guard = guard;
+            let outcome = storage
+                .store_session_atomic_with_ingress_append(persisted, rows, append)
+                .await
+                .map_err(|error| SmRegistryError::Internal(error.to_string()))?;
+            match outcome {
+                KeyedSnapshotOutcome::Committed => {
+                    // Publication may report displacement, but the transaction still
+                    // allocated the entry. Promotion reconciles the captured queue.
+                    registry.publish_detached_snapshot(&accepting_stream, updated)?;
+                    Ok(SmKeyedAppendOutcome::Appended { accepting_stream })
+                }
+                KeyedSnapshotOutcome::ObligationAlreadyAllocated { accepting_stream } => {
+                    // Discard the clone, including evictions and counters. Keep the
+                    // stale mark: the winning writer may have updated durable state.
+                    Ok(SmKeyedAppendOutcome::AlreadyAppended { accepting_stream })
+                }
+            }
+        });
+        settle
+            .await
+            .map_err(|error| SmRegistryError::Internal(error.to_string()))?
     }
 
     /// Record a stanza directly against a detached stream id, regardless of

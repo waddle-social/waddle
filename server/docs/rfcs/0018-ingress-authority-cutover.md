@@ -18,8 +18,11 @@ Stated limitations (strict non-regressions against `main`, owned by later
 roadmap slices): (i) lost post-commit effects are durable (envelope,
 intents, receipts) but not executed by a recovery executor (#1658);
 (ii) non-idempotent fan-out to non-senders remains suppressed on a repaired
-duplicate except for unfinished recorded direct resources tracked below; (iii) live full-JID delivery keeps the
-destination connection's own recipient archive/inbox pipeline (#1658);
+duplicate except for unfinished recorded direct resources tracked below;
+per-resource detached delivery now guarantees one durable queue allocation per
+(recorded obligation, resource), with no retry-induced duplicate (§3.3a), rather
+than at-least-once queue allocation; (iii) live full-JID delivery keeps the
+destination connection's own recipient archive/inbox pipeline (#1658, now tracked as #1759);
 (iv) subject/pin/membership supersession keeps `main`'s semantics
 (#1659/#1660); (v) non-resumable streams have no durable
 connection-generation fence (follow-up issue); (vi) extension-host dispatch runs outside ingress: offline rows and candidates are written immediately without receipts, and groupchat notification recovery rows are not created; a typed Extension ingress identity is the follow-up.
@@ -98,7 +101,7 @@ metered `ingress.effects.unresolved`). A Phase-C timeout never changes the
 disposition: `StanzaTimeout` maps to `Unhandled` only before commit.
 
 Full-JID room reflections to occupants owned by another node ride the ordered
-full-JID relay (`deliver_ordered.v9`), with the room's `RoomActor` claim as
+full-JID relay (`deliver_ordered.v10`), with the room's `RoomActor` claim as
 both origin and sender claim; XEP-0045 occupant-copy semantics are unchanged.
 `IngressNonTerminalBacklog` alerts on canonical rows older than 10 minutes
 that remain non-terminal (#1749/#1750), including missing receipts and
@@ -184,15 +187,29 @@ settles the aggregate route only when all recorded resources are covered.
 The progress and aggregate receipt commit atomically. No registry or socket
 operation runs while this transaction is open.
 
-Delivery is **at least once per resource under concurrent duplicate replay**:
-two decisions can snapshot the same unfinished resource and both append it.
-There are no execution claims in this slice. A crash after an append but before
-its progress commit can repeat the one in-flight resource on retry; previously
-committed resource progress is retained across restart. An append followed by
-a failed progress transaction has the same retry window. MUC groupchat
-occupant fanout is outside this mechanism. `QueueDetached` effects without
-a matching recorded direct route retain generic execution and receipt
-ownership; the variant is shared by MUC occupant delivery.
+**ONE DURABLE QUEUE ALLOCATION PER (recorded obligation, resource), WITH NO
+RETRY-INDUCED DUPLICATE** is guaranteed by a stream-independent ledger keyed by
+`(message_key, receipt_kind, semantic_identity_hash, resource)`. Its database
+constraint is the gate, and the ledger entry is written in the same transaction
+as the SM snapshot. Concurrent replay and retries after an append but before
+resource-progress settlement therefore cannot allocate another durable queue
+entry for the same recorded obligation and resource.
+
+The remaining limits are explicit:
+
+- XEP-0198 itself still permits client-observed duplicates after an uncertain
+  acknowledgement: an unacknowledged stanza may already have been received,
+  so retransmission can duplicate it (see
+  [`xeps/xep-0198.xml`](../../../xeps/xep-0198.xml), §4 Acks, duplicate warning
+  near line 367).
+- When no unexpired session exists, the append does not happen at all and the
+  obligation stays unresolved for its recorded route to retry or degrade.
+- The `RegistryFrame` live-transport branch is not durable queue delivery and
+  is out of scope.
+
+MUC groupchat occupant fanout is outside this mechanism. `QueueDetached`
+effects without a matching recorded direct route retain generic execution and
+receipt ownership; the variant is shared by MUC occupant delivery.
 
 ### 3.3b Per-plugin observer obligations (#1740)
 

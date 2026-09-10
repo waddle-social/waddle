@@ -11,11 +11,12 @@ use jid::{BareJid, FullJid, Jid};
 use waddle_xmpp::auth::AuthenticatedPrincipalRef;
 use waddle_xmpp::pending_delivery::SmSessionId;
 use waddle_xmpp::stream_management::persistence::{
-    InMemorySmPersistence, PersistedSession, PersistedUnackedStanza, SmPersistenceError,
-    SmPersistenceStorage,
+    InMemorySmPersistence, KeyedSnapshotOutcome, PersistedIngressAppend, PersistedSession,
+    PersistedUnackedStanza, SmPersistenceError, SmPersistenceStorage,
 };
 use waddle_xmpp::stream_management::{
-    DetachedSession, InMemorySmSessionRegistry, SmClaimCompletion, SmSessionRegistry,
+    DetachedSession, InMemorySmSessionRegistry, SmClaimCompletion, SmIngressAppendKey,
+    SmSessionRegistry,
 };
 use waddle_xmpp::Stanza;
 use xmpp_parsers::message::Message;
@@ -197,6 +198,24 @@ impl SmPersistenceStorage for BlockingFirstAtomicStore {
     ) -> Result<Option<AuthenticatedPrincipalRef>, SmPersistenceError> {
         self.inner.get_session_principal(stream_id).await
     }
+
+    async fn store_session_atomic_with_ingress_append(
+        &self,
+        session: PersistedSession,
+        unacked: Vec<PersistedUnackedStanza>,
+        append: PersistedIngressAppend,
+    ) -> Result<KeyedSnapshotOutcome, SmPersistenceError> {
+        self.inner
+            .store_session_atomic_with_ingress_append(session, unacked, append)
+            .await
+    }
+
+    async fn get_ingress_append(
+        &self,
+        key: &SmIngressAppendKey,
+    ) -> Result<Option<PersistedIngressAppend>, SmPersistenceError> {
+        self.inner.get_ingress_append(key).await
+    }
 }
 
 /// Storage double that mislabels rows: its
@@ -300,6 +319,24 @@ impl SmPersistenceStorage for MislabelingStore {
         stream_id: &SmSessionId,
     ) -> Result<Option<AuthenticatedPrincipalRef>, SmPersistenceError> {
         self.inner.get_session_principal(stream_id).await
+    }
+
+    async fn store_session_atomic_with_ingress_append(
+        &self,
+        session: PersistedSession,
+        unacked: Vec<PersistedUnackedStanza>,
+        append: PersistedIngressAppend,
+    ) -> Result<KeyedSnapshotOutcome, SmPersistenceError> {
+        self.inner
+            .store_session_atomic_with_ingress_append(session, unacked, append)
+            .await
+    }
+
+    async fn get_ingress_append(
+        &self,
+        key: &SmIngressAppendKey,
+    ) -> Result<Option<PersistedIngressAppend>, SmPersistenceError> {
+        self.inner.get_ingress_append(key).await
     }
 }
 

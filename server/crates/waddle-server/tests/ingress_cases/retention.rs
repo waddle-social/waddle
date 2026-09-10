@@ -158,3 +158,56 @@ async fn ingress_gc_stale_terminal_pending_intent_postgres() {
         stale_terminal_pending_intent(fixture).await;
     }
 }
+
+/// #1756: append proofs are reclaimed with their canonical row, and only then.
+///
+/// Nothing else deletes them on purpose — the obligation owns their lifetime, not
+/// the SM session, because a resume deletes the detached snapshot while the stream
+/// continues. That makes retention GC the only place they can be retired, and it
+/// must not retire proof while the obligation could still be retried: a missing
+/// proof would authorize a second durable allocation.
+async fn append_proofs_retire_with_their_message(fixture: IngressFixture) {
+    let submission = archive_plan(&fixture, Some("append-proof-gc"), "retained", "archive");
+    let decision = commit_submission(&fixture.uow, &submission, 5)
+        .await
+        .expect("initial commit");
+    let key = decision.message_key.expect("canonical key");
+    let proof_sql = "INSERT INTO sm_ingress_appends \
+         (message_key, receipt_kind, semantic_identity_hash, resource, accepting_stream_id, sequence, appended_at_ms) \
+         VALUES (?, 1, ?, 'juliet@example.com/phone', 'stream-gc', 7, 0)";
+    fixture
+        .execute(
+            proof_sql,
+            waddle_server::db_params![key.to_storage().to_string(), vec![9u8; 32]],
+        )
+        .await;
+    assert_eq!(fixture.count("sm_ingress_appends").await, 1);
+
+    // Still inside the retention window: the obligation remains retryable, so the
+    // proof must survive even though the GC pass runs.
+    assert_eq!(collect(&fixture, Utc::now()).await, 0);
+    assert_eq!(fixture.count("sm_ingress_appends").await, 1);
+
+    // Terminal and past retention: the canonical row goes, and its proofs with it.
+    terminalize_expired(&fixture, key).await;
+    assert_eq!(collect(&fixture, Utc::now() + Duration::days(9)).await, 1);
+    assert_eq!(fixture.count("ingress_messages").await, 0);
+    assert_eq!(
+        fixture.count("sm_ingress_appends").await,
+        0,
+        "a reclaimed obligation can never be retried, so its proof is retired with it"
+    );
+    fixture.close().await;
+}
+
+#[tokio::test]
+async fn ingress_append_proofs_retire_with_their_message_sqlite() {
+    append_proofs_retire_with_their_message(IngressFixture::sqlite().await).await;
+}
+
+#[tokio::test]
+async fn ingress_append_proofs_retire_with_their_message_postgres() {
+    if let Some(fixture) = IngressFixture::postgres("append_proof_gc").await {
+        append_proofs_retire_with_their_message(fixture).await;
+    }
+}

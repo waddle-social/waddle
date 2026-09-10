@@ -1413,3 +1413,5 @@ async fn restore_from_persistence_hydrates_only_unclaimed_or_self_claimed_rows()
         "node B's own restart must self-reacquire its own pre-restart claim on stream-b"
     );
 }
+
+mod ingress_append;

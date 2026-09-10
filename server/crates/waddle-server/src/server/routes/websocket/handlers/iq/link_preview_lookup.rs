@@ -449,6 +449,7 @@ async fn deliver_deferred_lookup_reply(
             Some(sm_session_registry),
             requester,
             &stanza,
+            None,
         )
         .await
         {

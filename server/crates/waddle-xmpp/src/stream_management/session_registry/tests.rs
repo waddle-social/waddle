@@ -1,3 +1,5 @@
+mod keyed_append;
+
 use super::core::PendingClaimAcquisitionDisposition;
 use super::*;
 use std::time::{Duration, Instant};
@@ -4301,6 +4303,7 @@ async fn restore_hydrates_expired_sessions_for_promotion_and_preserves_rows() {
 struct GatedSnapshotPersistence {
     inner: super::super::persistence::InMemorySmPersistence,
     gate_stream: String,
+    commit_then_gate: std::sync::atomic::AtomicBool,
     armed: std::sync::atomic::AtomicBool,
     fail_after_gate: std::sync::atomic::AtomicBool,
     reached: tokio::sync::Notify,
@@ -4312,6 +4315,7 @@ impl GatedSnapshotPersistence {
         Self {
             inner: super::super::persistence::InMemorySmPersistence::new(),
             gate_stream: gate_stream.to_string(),
+            commit_then_gate: std::sync::atomic::AtomicBool::new(false),
             armed: std::sync::atomic::AtomicBool::new(false),
             fail_after_gate: std::sync::atomic::AtomicBool::new(false),
             reached: tokio::sync::Notify::new(),
@@ -4439,6 +4443,53 @@ impl super::super::persistence::SmPersistenceStorage for GatedSnapshotPersistenc
         super::super::persistence::SmPersistenceError,
     > {
         self.inner.get_session_principal(stream_id).await
+    }
+
+    async fn store_session_atomic_with_ingress_append(
+        &self,
+        session: super::super::persistence::PersistedSession,
+        unacked: Vec<super::super::persistence::PersistedUnackedStanza>,
+        append: super::super::persistence::PersistedIngressAppend,
+    ) -> Result<
+        super::super::persistence::KeyedSnapshotOutcome,
+        super::super::persistence::SmPersistenceError,
+    > {
+        let gated = session.stream_id.as_str() == self.gate_stream
+            && self.armed.load(std::sync::atomic::Ordering::SeqCst);
+        let gate_after_commit = self
+            .commit_then_gate
+            .load(std::sync::atomic::Ordering::SeqCst);
+        if gated && !gate_after_commit {
+            self.reached.notify_one();
+            self.proceed.notified().await;
+        }
+        if self
+            .fail_after_gate
+            .load(std::sync::atomic::Ordering::SeqCst)
+        {
+            return Err(super::super::persistence::SmPersistenceError::Other(
+                "injected failure after keyed snapshot gate".to_string(),
+            ));
+        }
+        let outcome = self
+            .inner
+            .store_session_atomic_with_ingress_append(session, unacked, append)
+            .await;
+        if gated && gate_after_commit {
+            self.reached.notify_one();
+            self.proceed.notified().await;
+        }
+        outcome
+    }
+
+    async fn get_ingress_append(
+        &self,
+        key: &crate::stream_management::SmIngressAppendKey,
+    ) -> Result<
+        Option<super::super::persistence::PersistedIngressAppend>,
+        super::super::persistence::SmPersistenceError,
+    > {
+        self.inner.get_ingress_append(key).await
     }
 }
 
@@ -5194,15 +5245,30 @@ async fn detached_append_losing_race_to_displacement_preserves_durable_rows() {
     // Same client fresh-binds under a new stream id: store_session
     // displaces the victim from the in-memory maps (jid collision)
     // while the append is parked mid-write.
-    let displaced = registry
-        .store_session(realistic_test_session_for_jid(&displacing_id, victim_jid))
-        .await
-        .unwrap();
-    assert_eq!(displaced.len(), 1, "victim must be displaced");
+    let replacing_registry = registry.clone();
+    let replacement = tokio::spawn(async move {
+        replacing_registry
+            .store_session(realistic_test_session_for_jid(&displacing_id, victim_jid))
+            .await
+    });
+    tokio::time::timeout(Duration::from_secs(5), async {
+        while registry
+            .sessions
+            .read()
+            .unwrap()
+            .contains_key("stream-race-victim")
+        {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("replacement must displace before reconciling the append");
 
     // Let the append finish; it must observe the loss of ownership...
     storage.proceed.notify_one();
     let updated = append.await.unwrap().unwrap();
+    let displaced = replacement.await.unwrap().unwrap();
+    assert_eq!(displaced.len(), 1, "victim must be displaced");
     assert!(!updated, "append must report the session as gone");
 
     // ...WITHOUT durably deleting rows it no longer owns. Deletion is
@@ -5919,6 +5985,30 @@ impl super::super::persistence::SmPersistenceStorage for FailingSnapshotPersiste
     > {
         self.inner.get_session_principal(stream_id).await
     }
+
+    async fn store_session_atomic_with_ingress_append(
+        &self,
+        session: super::super::persistence::PersistedSession,
+        unacked: Vec<super::super::persistence::PersistedUnackedStanza>,
+        append: super::super::persistence::PersistedIngressAppend,
+    ) -> Result<
+        super::super::persistence::KeyedSnapshotOutcome,
+        super::super::persistence::SmPersistenceError,
+    > {
+        self.inner
+            .store_session_atomic_with_ingress_append(session, unacked, append)
+            .await
+    }
+
+    async fn get_ingress_append(
+        &self,
+        key: &crate::stream_management::SmIngressAppendKey,
+    ) -> Result<
+        Option<super::super::persistence::PersistedIngressAppend>,
+        super::super::persistence::SmPersistenceError,
+    > {
+        self.inner.get_ingress_append(key).await
+    }
 }
 
 async fn assert_cross_shard_displacement_preserves_claim(snapshot_fails: bool) {
@@ -5974,9 +6064,28 @@ async fn assert_cross_shard_displacement_preserves_claim(snapshot_fails: bool) {
     storage
         .fail_snapshots
         .store(snapshot_fails, std::sync::atomic::Ordering::SeqCst);
-    let replacement = registry
-        .store_session(realistic_test_session_for_jid(&new_stream, jid))
-        .await;
+    let replacement_registry = registry.clone();
+    let replacement = tokio::spawn(async move {
+        replacement_registry
+            .store_session(realistic_test_session_for_jid(&new_stream, jid))
+            .await
+    });
+    tokio::time::timeout(Duration::from_secs(1), async {
+        while registry
+            .sessions
+            .read()
+            .expect("sessions")
+            .contains_key(old_stream)
+        {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("replacement captures the old session");
+    // The replacement must wait for the old shard before returning its
+    // reconciled promotion payload. Release the gated claim first.
+    proceed.notify_one();
+    let replacement = replacement.await.expect("replacement task");
     if snapshot_fails {
         assert!(replacement.is_err(), "replacement snapshot must fail");
     } else {
@@ -5988,7 +6097,6 @@ async fn assert_cross_shard_displacement_preserves_claim(snapshot_fails: bool) {
     storage
         .fail_snapshots
         .store(false, std::sync::atomic::Ordering::SeqCst);
-    proceed.notify_one();
 
     let outcome = claiming.await.expect("claim task").expect("claim result");
     assert!(matches!(
@@ -6554,6 +6662,30 @@ impl super::super::persistence::SmPersistenceStorage for GatedGetSessionPersiste
         super::super::persistence::SmPersistenceError,
     > {
         self.inner.get_session_principal(stream_id).await
+    }
+
+    async fn store_session_atomic_with_ingress_append(
+        &self,
+        session: super::super::persistence::PersistedSession,
+        unacked: Vec<super::super::persistence::PersistedUnackedStanza>,
+        append: super::super::persistence::PersistedIngressAppend,
+    ) -> Result<
+        super::super::persistence::KeyedSnapshotOutcome,
+        super::super::persistence::SmPersistenceError,
+    > {
+        self.inner
+            .store_session_atomic_with_ingress_append(session, unacked, append)
+            .await
+    }
+
+    async fn get_ingress_append(
+        &self,
+        key: &crate::stream_management::SmIngressAppendKey,
+    ) -> Result<
+        Option<super::super::persistence::PersistedIngressAppend>,
+        super::super::persistence::SmPersistenceError,
+    > {
+        self.inner.get_ingress_append(key).await
     }
 }
 

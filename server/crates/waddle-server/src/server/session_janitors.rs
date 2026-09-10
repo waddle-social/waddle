@@ -4427,6 +4427,30 @@ impl waddle_xmpp::stream_management::persistence::SmPersistenceStorage
     > {
         self.inner.list_all_sessions().await
     }
+
+    async fn store_session_atomic_with_ingress_append(
+        &self,
+        session: waddle_xmpp::stream_management::persistence::PersistedSession,
+        unacked: Vec<waddle_xmpp::stream_management::persistence::PersistedUnackedStanza>,
+        append: waddle_xmpp::stream_management::persistence::PersistedIngressAppend,
+    ) -> Result<
+        waddle_xmpp::stream_management::persistence::KeyedSnapshotOutcome,
+        waddle_xmpp::stream_management::persistence::SmPersistenceError,
+    > {
+        self.inner
+            .store_session_atomic_with_ingress_append(session, unacked, append)
+            .await
+    }
+
+    async fn get_ingress_append(
+        &self,
+        key: &waddle_xmpp::stream_management::SmIngressAppendKey,
+    ) -> Result<
+        Option<waddle_xmpp::stream_management::persistence::PersistedIngressAppend>,
+        waddle_xmpp::stream_management::persistence::SmPersistenceError,
+    > {
+        self.inner.get_ingress_append(key).await
+    }
 }
 
 #[cfg(all(test, feature = "clustering"))]

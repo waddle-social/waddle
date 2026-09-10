@@ -913,6 +913,50 @@ INSERT INTO ingress_epoch_guard_manifest (table_name) VALUES ('ingress_delivery_
 GRANT SELECT ON TABLE ingress_delivery_receipts TO pg_monitor;
 "#;
 
+/// Stream-independent ledger proving one durable queue allocation per recorded
+/// ingress obligation and resource (#1756).
+///
+/// `IF NOT EXISTS` because the SM store's own runtime initializer creates the same
+/// table when it opens; either may run first depending on startup order.
+pub const V1015_SM_INGRESS_APPENDS: &str = r#"
+CREATE TABLE IF NOT EXISTS sm_ingress_appends (
+    message_key TEXT NOT NULL,
+    receipt_kind INTEGER NOT NULL,
+    semantic_identity_hash BLOB NOT NULL,
+    resource TEXT NOT NULL,
+    accepting_stream_id TEXT NOT NULL,
+    sequence BIGINT NOT NULL,
+    appended_at_ms BIGINT NOT NULL,
+    PRIMARY KEY (message_key, receipt_kind, semantic_identity_hash, resource)
+);
+"#;
+
+pub const V1015_SM_INGRESS_APPENDS_POSTGRES: &str = r#"
+CREATE TABLE IF NOT EXISTS sm_ingress_appends (
+    message_key TEXT NOT NULL,
+    receipt_kind INTEGER NOT NULL,
+    semantic_identity_hash BYTEA NOT NULL,
+    resource TEXT NOT NULL,
+    accepting_stream_id TEXT NOT NULL,
+    sequence BIGINT NOT NULL,
+    appended_at_ms BIGINT NOT NULL,
+    PRIMARY KEY (message_key, receipt_kind, semantic_identity_hash, resource)
+);
+"#;
+
+/// Retirement filters the ledger by accepting stream when a session is deleted,
+/// and the primary key starts with `message_key`, so that lookup would scan the
+/// whole ledger (#1756).
+pub const V1016_SM_INGRESS_APPENDS_STREAM_INDEX: &str = r#"
+CREATE INDEX IF NOT EXISTS idx_sm_ingress_appends_stream
+    ON sm_ingress_appends (accepting_stream_id);
+"#;
+
+pub const V1016_SM_INGRESS_APPENDS_STREAM_INDEX_POSTGRES: &str = r#"
+CREATE INDEX IF NOT EXISTS idx_sm_ingress_appends_stream
+    ON sm_ingress_appends (accepting_stream_id);
+"#;
+
 /// Get all waddle schema migrations in order.
 ///
 /// Versions are intentionally offset from global migrations so a single
@@ -1002,6 +1046,18 @@ pub fn all() -> Vec<Migration> {
             description: "Reset ingress state and add per-resource delivery receipts".to_string(),
             sql_sqlite: V1014_INGRESS_RECOVERY_FOLLOWUPS,
             sql_postgres: V1014_INGRESS_RECOVERY_FOLLOWUPS_POSTGRES,
+        },
+        Migration {
+            version: 1015,
+            description: "Add the ingress SM append ledger".to_string(),
+            sql_sqlite: V1015_SM_INGRESS_APPENDS,
+            sql_postgres: V1015_SM_INGRESS_APPENDS_POSTGRES,
+        },
+        Migration {
+            version: 1016,
+            description: "Index the ingress SM append ledger by accepting stream".to_string(),
+            sql_sqlite: V1016_SM_INGRESS_APPENDS_STREAM_INDEX,
+            sql_postgres: V1016_SM_INGRESS_APPENDS_STREAM_INDEX_POSTGRES,
         },
     ]
 }

@@ -116,19 +116,6 @@ fn is_definitive_route_capture_outcome(outcome: FullJidDeliveryOutcome) -> bool 
     )
 }
 
-#[cfg(feature = "clustering")]
-fn capture_remote_recipient_sm_appends(
-    deps: &Deps<'_>,
-    streams: Vec<waddle_xmpp::pending_delivery::SmSessionId>,
-) {
-    let Some(capture) = deps.ingress_effect_capture.as_ref() else {
-        return;
-    };
-    for stream in streams {
-        capture.record_recipient_sm_append(stream);
-    }
-}
-
 pub(crate) async fn route_to_connection(
     deps: &Deps<'_>,
     jid: Jid,
@@ -872,17 +859,16 @@ async fn route_to_bare_jid(
                         continue;
                     }
                     let stanza_typed = (*stanza).clone();
-                    match sm
-                        .record_stanza_for_detached_bound_resource_with_stream(
-                            &full,
-                            &stanza_typed,
-                            chrono::Utc::now(),
-                        )
-                        .await
+                    match routing::append_detached(
+                        sm,
+                        deps.ingress_append_context.as_ref(),
+                        &full,
+                        &stanza_typed,
+                    )
+                    .await
                     {
-                        Ok(Some(stream)) => {
+                        Ok(true) => {
                             any_landed = true;
-                            deps.capture_recipient_sm_append(stream);
                             if !is_dm_message {
                                 captured_fanout.push(full.clone());
                             }
@@ -893,7 +879,7 @@ async fn route_to_bare_jid(
                                  for detached XEP-0198 replay"
                             );
                         }
-                        Ok(None) => {
+                        Ok(false) => {
                             debug!(
                                 jid = %full,
                                 message_id = stanza_message_id(stanza.as_ref()),
@@ -1062,18 +1048,8 @@ pub(super) fn deliver_full_jid_via_ordered_relay<'a>(
                 .ordered_relay_delivery_bridge
                 .as_ref()?;
             bridge
-                .try_deliver_full_jid_remote_with_capture(
-                    target,
-                    stanza,
-                    origin,
-                    call_setup,
-                    deps.ingress_effect_capture.clone(),
-                )
+                .try_deliver_full_jid_remote(target, stanza, origin, call_setup)
                 .await
-                .map(|outcome| {
-                    capture_remote_recipient_sm_appends(deps, outcome.recipient_sm_append_streams);
-                    outcome.outcome
-                })
         }
         #[cfg(not(feature = "clustering"))]
         {
@@ -1111,12 +1087,12 @@ pub(crate) async fn deliver_peer_to_full_with_registered_remote(
     {
         return outcome;
     }
-    deliver_peer_to_full_capturing_detached(
+    deliver_peer_to_full(
         deps.user_registry,
         deps.sm_session_registry,
-        deps.ingress_effect_capture.as_ref(),
         target,
         stanza,
+        deps.ingress_append_context.as_ref(),
     )
     .await
 }
@@ -1149,7 +1125,14 @@ pub(crate) async fn deliver_direct_to_full_with_registered_remote(
     {
         return outcome;
     }
-    deliver_direct_to_full(deps.user_registry, deps.sm_session_registry, target, stanza).await
+    deliver_direct_to_full(
+        deps.user_registry,
+        deps.sm_session_registry,
+        target,
+        stanza,
+        deps.ingress_append_context.as_ref(),
+    )
+    .await
 }
 
 async fn deliver_registered_remote_resource(
@@ -1387,18 +1370,10 @@ pub(crate) async fn queue_processed_for_detached(
         if live_set.contains(&full) {
             continue;
         }
-        match sm
-            .record_stanza_for_detached_bound_resource_with_stream(
-                &full,
-                stanza,
-                chrono::Utc::now(),
-            )
+        match routing::append_detached(sm, deps.ingress_append_context.as_ref(), &full, stanza)
             .await
         {
-            Ok(Some(stream)) => {
-                if let Some(capture) = deps.ingress_effect_capture.as_ref() {
-                    capture.record_recipient_sm_append(stream);
-                }
+            Ok(true) => {
                 let queued_full = full.clone();
                 queued.push(queued_full);
                 debug!(
@@ -1408,7 +1383,7 @@ pub(crate) async fn queue_processed_for_detached(
                      XEP-0198 replay"
                 );
             }
-            Ok(None) => {
+            Ok(false) => {
                 debug!(
                     jid = %full,
                     message_id = stanza_message_id(stanza),

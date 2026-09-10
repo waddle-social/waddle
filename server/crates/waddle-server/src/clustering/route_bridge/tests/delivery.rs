@@ -12,7 +12,6 @@ use waddle_xmpp::muc::{
     RoomRevision,
 };
 use waddle_xmpp::ownership::ClaimEpoch;
-use waddle_xmpp::pending_delivery::SmSessionId;
 use waddle_xmpp::stream_management::InMemorySmSessionRegistry;
 use waddle_xmpp::stream_management::{DetachedSession, SmSessionRegistry};
 use xmpp_parsers::message::Message;
@@ -1045,7 +1044,7 @@ async fn stale_registered_remote_resource_cleans_mirror_and_allows_local_fallbac
 }
 
 #[tokio::test]
-async fn remote_full_jid_route_reply_returns_detached_stream_identity() {
+async fn remote_full_jid_route_queues_detached_delivery() {
     let services = Arc::new(
         services_with_claims(
             origin_identity(),
@@ -1141,10 +1140,14 @@ async fn remote_full_jid_route_reply_returns_detached_stream_identity() {
         .await;
 
     assert_eq!(reply.outcome, RemoteResourceRouteOutcome::QueuedDetached);
-    assert_eq!(
-        reply.recipient_sm_append_streams,
-        vec![SmSessionId::new("remote-direct-detached-stream")],
-    );
+    let detached = services
+        .sm_session_registry
+        .peek_session("remote-direct-detached-stream")
+        .await
+        .expect("peek detached session")
+        .expect("detached session remains");
+    assert_eq!(detached.unacked_stanzas.len(), 1);
+    assert_eq!(detached.outbound_count, 1);
 }
 
 pub(crate) async fn remote_carbon_owner_reply(
@@ -1252,10 +1255,11 @@ pub(crate) async fn remote_carbon_owner_reply(
 }
 
 #[tokio::test]
-async fn remote_carbons_reply_returns_detached_stream_identity() {
+async fn remote_carbons_reply_queues_detached_delivery() {
+    let sm = Arc::new(InMemorySmSessionRegistry::new());
     let reply = remote_carbon_owner_reply(
         "alice@example.com/web".parse().expect("source"),
-        Arc::new(InMemorySmSessionRegistry::new()),
+        Arc::clone(&sm),
         async {},
     )
     .await;
@@ -1266,10 +1270,13 @@ async fn remote_carbons_reply_returns_detached_stream_identity() {
             .parse::<jid::FullJid>()
             .expect("target")]
     );
-    assert_eq!(
-        reply.recipient_sm_append_streams,
-        vec![SmSessionId::new("remote-carbon-detached-stream")]
-    );
+    let detached = sm
+        .peek_session("remote-carbon-detached-stream")
+        .await
+        .expect("peek detached session")
+        .expect("detached session remains");
+    assert_eq!(detached.unacked_stanzas.len(), 1);
+    assert_eq!(detached.outbound_count, 1);
 }
 
 #[tokio::test]

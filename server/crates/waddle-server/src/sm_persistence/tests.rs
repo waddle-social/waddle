@@ -1316,3 +1316,6 @@ async fn postgres_schema_has_no_shadow_ordinal() {
 
 #[path = "ingress_receipt_tests.rs"]
 mod ingress_receipt_tests;
+
+#[path = "ingress_append_tests.rs"]
+mod ingress_append_tests;

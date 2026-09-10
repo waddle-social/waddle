@@ -122,6 +122,10 @@ pub(super) const CLAIM_CALL_UNDER_SHARD_LOCK_TIMEOUT: Duration = Duration::from_
 pub struct InMemorySmSessionRegistry {
     pub(super) sessions: RwLock<HashMap<String, DetachedSession>>,
     pub(super) claimed_sessions: RwLock<HashMap<String, DetachedSession>>,
+    pub(super) stale_snapshots: RwLock<HashSet<crate::pending_delivery::SmSessionId>>,
+    pub(super) promotion_snapshots: RwLock<
+        HashMap<crate::pending_delivery::SmSessionId, super::reconciliation::PromotionSnapshot>,
+    >,
     pub(super) stream_locks: Vec<Arc<tokio::sync::Mutex<()>>>,
     pub(super) max_sessions: usize,
     /// Recently applied XEP-0424/0425 tombstones, kept for the
@@ -851,6 +855,8 @@ impl InMemorySmSessionRegistry {
         Self {
             sessions: RwLock::new(HashMap::new()),
             claimed_sessions: RwLock::new(HashMap::new()),
+            stale_snapshots: RwLock::new(HashSet::new()),
+            promotion_snapshots: RwLock::new(HashMap::new()),
             stream_locks: new_stream_locks(),
             max_sessions: DEFAULT_MAX_SESSIONS,
             recent_tombstones: RwLock::new(Vec::new()),
@@ -877,6 +883,8 @@ impl InMemorySmSessionRegistry {
         Self {
             sessions: RwLock::new(HashMap::with_capacity(max_sessions.min(10000))),
             claimed_sessions: RwLock::new(HashMap::new()),
+            stale_snapshots: RwLock::new(HashSet::new()),
+            promotion_snapshots: RwLock::new(HashMap::new()),
             stream_locks: new_stream_locks(),
             max_sessions,
             recent_tombstones: RwLock::new(Vec::new()),
@@ -1964,7 +1972,9 @@ impl InMemorySmSessionRegistry {
                 stream_id.to_string(),
             ))
             .await
-            .map_err(|e| SmRegistryError::Internal(e.to_string()))
+            .map_err(|e| SmRegistryError::Internal(e.to_string()))?;
+        self.forget_snapshot_reconciliation(&crate::pending_delivery::SmSessionId::new(stream_id));
+        Ok(())
     }
 
     pub(super) async fn persist_delete_session_with_authority(
@@ -1981,7 +1991,9 @@ impl InMemorySmSessionRegistry {
                 authority,
             )
             .await
-            .map_err(|e| SmRegistryError::Internal(e.to_string()))
+            .map_err(|e| SmRegistryError::Internal(e.to_string()))?;
+        self.forget_snapshot_reconciliation(&crate::pending_delivery::SmSessionId::new(stream_id));
+        Ok(())
     }
 
     pub(super) async fn persist_detached_session_snapshot(
@@ -2107,28 +2119,9 @@ impl InMemorySmSessionRegistry {
         let stream_lock = self.stream_lock(stream_id)?;
         let _stream_guard = stream_lock.lock().await;
 
-        let current = {
-            let sessions = self
-                .sessions
-                .read()
-                .map_err(|_| SmRegistryError::Internal("Lock poisoned".to_string()))?;
-            sessions
-                .get(stream_id)
-                .filter(|session| predicate(session))
-                .cloned()
-        };
-        let current = if current.is_some() {
-            current
-        } else {
-            let claimed = self
-                .claimed_sessions
-                .read()
-                .map_err(|_| SmRegistryError::Internal("Lock poisoned".to_string()))?;
-            claimed
-                .get(stream_id)
-                .filter(|session| predicate(session))
-                .cloned()
-        };
+        let session_id = crate::pending_delivery::SmSessionId::new(stream_id);
+        self.reconcile_stale_session_locked(&session_id).await?;
+        let current = self.detached_snapshot_matching(&session_id, predicate)?;
 
         let Some(mut updated) = current else {
             return Ok(false);
@@ -2145,56 +2138,10 @@ impl InMemorySmSessionRegistry {
         // The stream lock serializes this full-snapshot write with other appends
         // and with claim completion/deletion so an older clone cannot overwrite
         // a newer replay window.
+        self.mark_snapshot_stale(&session_id)?;
         self.persist_detached_session_snapshot(&updated, None)
             .await?;
-
-        let updated = {
-            let mut sessions = self
-                .sessions
-                .write()
-                .map_err(|_| SmRegistryError::Internal("Lock poisoned".to_string()))?;
-            if sessions.contains_key(stream_id) {
-                sessions.insert(stream_id.to_string(), updated);
-                return Ok(true);
-            }
-            updated
-        };
-
-        let found_claimed = {
-            let mut claimed = self
-                .claimed_sessions
-                .write()
-                .map_err(|_| SmRegistryError::Internal("Lock poisoned".to_string()))?;
-            if claimed.contains_key(stream_id) {
-                claimed.insert(stream_id.to_string(), updated);
-                true
-            } else {
-                false
-            }
-        };
-        if found_claimed {
-            return Ok(true);
-        }
-
-        // The session vanished from both maps between the stream-lock
-        // read and this recheck. The only remover that does NOT take
-        // this stream's lock is displacement by `store_session` (jid
-        // collision / max_sessions eviction, which holds only the NEW
-        // stream's shard lock) — and displaced sessions follow the
-        // persist-until-confirmed contract (traits.rs): their durable
-        // rows must survive until the promote → confirm_drained chain
-        // erases them. The previous fail-closed `persist_delete_session`
-        // here (PR #486, guarding against hypothetical lock-free
-        // removers resurrecting an already-consumed stream) deleted a
-        // displaced session's rows mid-promotion, losing the queue on a
-        // crash. Every consuming path (take_session, complete_claim,
-        // confirm_drained) takes
-        // this stream lock, so the consumed-stream-resurrection concern
-        // cannot arise here; deletion stays owned by
-        // confirm_drained / the janitor. Worst case is an orphan
-        // snapshot row that restore_from_persistence rehydrates and the
-        // janitor later promotes — at-least-once, never data loss.
-        Ok(false)
+        self.publish_detached_snapshot(&session_id, updated)
     }
 }
 

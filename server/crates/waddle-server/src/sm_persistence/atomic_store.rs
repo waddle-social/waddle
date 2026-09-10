@@ -6,7 +6,9 @@ pub(super) async fn store_session_atomic(
     session: PersistedSession,
     unacked: Vec<PersistedUnackedStanza>,
 ) -> Result<(), SmPersistenceError> {
-    store_session_atomic_inner(storage, None, session, unacked).await
+    store_session_atomic_inner(storage, None, session, unacked, None)
+        .await
+        .map(|_| ())
 }
 
 pub(super) async fn store_session_atomic_with_principal(
@@ -15,7 +17,18 @@ pub(super) async fn store_session_atomic_with_principal(
     session: PersistedSession,
     unacked: Vec<PersistedUnackedStanza>,
 ) -> Result<(), SmPersistenceError> {
-    store_session_atomic_inner(storage, Some(principal), session, unacked).await
+    store_session_atomic_inner(storage, Some(principal), session, unacked, None)
+        .await
+        .map(|_| ())
+}
+
+pub(super) async fn store_session_atomic_with_ingress_append(
+    storage: &DatabaseSmPersistence,
+    session: PersistedSession,
+    unacked: Vec<PersistedUnackedStanza>,
+    append: PersistedIngressAppend,
+) -> Result<KeyedSnapshotOutcome, SmPersistenceError> {
+    store_session_atomic_inner(storage, None, session, unacked, Some(append)).await
 }
 
 async fn store_session_atomic_inner(
@@ -23,7 +36,8 @@ async fn store_session_atomic_inner(
     principal: Option<&waddle_xmpp::auth::AuthenticatedPrincipalRef>,
     session: PersistedSession,
     unacked: Vec<PersistedUnackedStanza>,
-) -> Result<(), SmPersistenceError> {
+    append: Option<PersistedIngressAppend>,
+) -> Result<KeyedSnapshotOutcome, SmPersistenceError> {
     let lock = storage.lock_for(&session.stream_id);
     let _guard = lock.lock().await;
 
@@ -148,8 +162,50 @@ async fn store_session_atomic_inner(
         .map_err(|e| SmPersistenceError::Other(e.to_string()))?;
     }
 
+    if let Some(append) = append {
+        match ingress_append::insert(&mut tx, &append).await {
+            Ok(true) => {}
+            Ok(false) => {
+                // A replacement whose prior row was already superseded: the
+                // standing allocation wins and nothing here commits.
+                tx.rollback()
+                    .await
+                    .map_err(|error| SmPersistenceError::Other(error.to_string()))?;
+                let winner = ingress_append::get(&storage.db, &append.key)
+                    .await?
+                    .ok_or_else(|| {
+                        SmPersistenceError::Other(
+                            "superseded ingress append vanished after rollback".into(),
+                        )
+                    })?;
+                return Ok(KeyedSnapshotOutcome::ObligationAlreadyAllocated {
+                    accepting_stream: winner.accepting_stream,
+                });
+            }
+            Err(error) => {
+                let conflict = ingress_append::is_ledger_conflict(&error);
+                tx.rollback()
+                    .await
+                    .map_err(|error| SmPersistenceError::Other(error.to_string()))?;
+                if conflict {
+                    let winner = ingress_append::get(&storage.db, &append.key)
+                        .await?
+                        .ok_or_else(|| {
+                            SmPersistenceError::Other(
+                                "ingress append conflict winner missing after rollback".into(),
+                            )
+                        })?;
+                    return Ok(KeyedSnapshotOutcome::ObligationAlreadyAllocated {
+                        accepting_stream: winner.accepting_stream,
+                    });
+                }
+                return Err(SmPersistenceError::Other(error.to_string()));
+            }
+        }
+    }
+
     tx.commit()
         .await
         .map_err(|e| SmPersistenceError::Other(e.to_string()))?;
-    Ok(())
+    Ok(KeyedSnapshotOutcome::Committed)
 }

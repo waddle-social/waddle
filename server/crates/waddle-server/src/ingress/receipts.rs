@@ -190,8 +190,8 @@ fn exact_mutation(effect: &ExternalEffect, intent: &IngressEffectIntent) -> bool
                     == recovery.sender_can_broadcast_channel_mention
                 && mutation.created_at_ms == recovery.created_at_ms
         }
-        // Recipient SM append identity and runtime-generated mutation results
-        // are not exposed by ImmediateSink. Keep those intents unresolved until
+        // Runtime-generated mutation results are not exposed by ImmediateSink.
+        // Keep those intents unresolved until
         // the sink can provide their exact completion proof.
         _ => false,
     }

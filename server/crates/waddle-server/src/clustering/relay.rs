@@ -460,7 +460,9 @@ fn is_idempotent_join_presence_envelope(envelope: &RemoteStanzaEnvelope) -> bool
 // v8: durable owner reply identities survive SM replay without the token.
 // v9: accept room groupchat copies on the ordered full-JID relay and include
 // the origin claim epoch in the channel identity.
-#[kameo::remote_message("waddle.clustering.relay.deliver_ordered.v9")]
+// v10: remove capture-only detached stream identities from side-effect and
+// remote-resource replies; companion endpoint versions are v3 and v6 (#1756).
+#[kameo::remote_message("waddle.clustering.relay.deliver_ordered.v10")]
 impl Message<RelayDeliverOrdered> for RelayActor {
     type Reply = kameo::reply::DelegatedReply<OrderedRelayReply>;
 
@@ -666,11 +668,9 @@ pub struct RelayRemoteUserSideEffectReply {
     /// capture after the remote owner performs its authoritative enumeration.
     #[serde(default)]
     pub carbon_recipients: Vec<jid::FullJid>,
-    #[serde(default)]
-    pub recipient_sm_append_streams: Vec<waddle_xmpp::pending_delivery::SmSessionId>,
 }
 
-#[kameo::remote_message("waddle.clustering.relay.remote_user_side_effect.v2")]
+#[kameo::remote_message("waddle.clustering.relay.remote_user_side_effect.v3")]
 impl Message<RelayRemoteUserSideEffect> for RelayActor {
     type Reply = kameo::reply::DelegatedReply<RelayRemoteUserSideEffectReply>;
 
@@ -707,8 +707,6 @@ pub struct RelayRouteRemoteResourceStanzaReply {
     pub owner_receipts: Vec<waddle_xmpp::stream_management::SmIngressFrameReceipt>,
     pub outcome: RemoteResourceRouteOutcome,
     pub replies: Vec<RemoteStanza>,
-    #[serde(default)]
-    pub recipient_sm_append_streams: Vec<waddle_xmpp::pending_delivery::SmSessionId>,
 }
 
 // This message serializes `RemoteResourceRouteTarget`; bump the suffix whenever
@@ -716,7 +714,8 @@ pub struct RelayRouteRemoteResourceStanzaReply {
 // v3 adds canonical ingress identity and principal for room-owner admission (#1657).
 // v4 adds origin receipt confirmation for reply frames (#1657).
 // v5 adds durable owner reply identities for SM replay (#1657).
-#[kameo::remote_message("waddle.clustering.relay.remote_resource_route.v5")]
+// v6 removes capture-only detached stream identities from the reply (#1756).
+#[kameo::remote_message("waddle.clustering.relay.remote_resource_route.v6")]
 impl Message<RelayRouteRemoteResourceStanza> for RelayActor {
     type Reply = kameo::reply::DelegatedReply<RelayRouteRemoteResourceStanzaReply>;
 
@@ -736,7 +735,6 @@ impl Message<RelayRouteRemoteResourceStanza> for RelayActor {
                     owner_receipts: Vec::new(),
                     outcome: RemoteResourceRouteOutcome::Unavailable,
                     replies: Vec::new(),
-                    recipient_sm_append_streams: Vec::new(),
                 };
             };
             let mut completion = None;

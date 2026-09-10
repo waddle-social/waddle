@@ -600,6 +600,15 @@ impl<'a> Transaction<'a> {
         Ok(())
     }
 
+    /// Complete rollback before a caller reads state using another connection.
+    pub async fn rollback(self) -> Result<(), DatabaseError> {
+        match self.inner {
+            TransactionInner::Sqlite(tx) => tx.rollback().await?,
+            TransactionInner::Postgres(tx) => tx.rollback().await?,
+        }
+        Ok(())
+    }
+
     /// Commit the transaction. Drops without commit roll back automatically.
     pub async fn commit(self) -> Result<(), DatabaseError> {
         match self.inner {
