@@ -39,13 +39,18 @@ spec:
     # the sequence instead of poisoning the shared channel. Any
     # envelope or reply-type change MUST bump the version (see
     # server/CLAUDE.md) — that invariant is what keeps this strategy
-    # sound. The #1739-#1743 V1014 cutover (PR #1752) was the second one-shot
-    # Recreate (after the #1657 V1012 cutover); this restores the steady state.
+    # sound. One-shot Recreate for the #1756 V1015/V1016 cutover (PR #1758):
+    # the append ledger is only an exactly-once gate if every writer consults
+    # it. A main-version replica keeps using the unkeyed append path
+    # (interpret/routing.rs), so during a rolling window an old owner could
+    # append with no ledger row, and a concurrent replay — or a later
+    # new-version retry — could then allocate the same obligation again, which
+    # is exactly the duplicate this migration exists to prevent. Every old
+    # append writer must stop before the new binary runs. Flip back to
+    # RollingUpdate (maxSurge 1, maxUnavailable 0) in a follow-up PR once the
+    # rollout completes (precedent #1605/#1748/#1754).
     updateStrategy:
-      type: RollingUpdate
-      rollingUpdate:
-        maxSurge: 1
-        maxUnavailable: 0
+      type: Recreate
     image:
       repository: ghcr.io/waddle-social/waddle
       tag: main

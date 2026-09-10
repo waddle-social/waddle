@@ -361,9 +361,17 @@ impl SmPersistenceStorage for DatabaseSmPersistence {
         let _guard = lock.lock().await;
         // One transaction so the gap-covered proof retirement below cannot be
         // separated from the session delete that destroys its evidence.
+        //
+        // `begin_immediate` because this transaction reads before it writes. A
+        // deferred SQLite transaction would take a read snapshot first, and two
+        // concurrent session deletions on different streams — whose per-stream
+        // locks do not serialize pooled connections — would then both hold read
+        // snapshots, so one reader-to-writer upgrade fails immediately with
+        // SQLITE_BUSY. `busy_timeout` cannot resolve that upgrade cycle, so the
+        // write lock is taken up front instead.
         let mut tx = self
             .db
-            .begin()
+            .begin_immediate()
             .await
             .map_err(|error| SmPersistenceError::Other(error.to_string()))?;
         // Retire proofs for allocations this session lost, while its replay gap
