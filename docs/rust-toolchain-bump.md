@@ -62,9 +62,17 @@ Android targets). Every build path reads that file:
    standard post-deploy check (pods healthy, alerts quiet, ingress and relay
    metrics flowing).
 
-A nixpkgs bump can also move other dev-shell tools. Run the full PR pipeline
-and treat a newly failing non-Rust gate as a tool regression to investigate;
-`flake.nix` holds cue at 0.16.1 for exactly that reason (cue-lang/cue#4421).
+A nixpkgs bump can also move other dev-shell tools, and those moves are the
+likeliest source of fallout. Run the full PR pipeline and treat a newly
+failing non-Rust gate as a tool regression to investigate rather than a flake.
+Two such pins already exist for that reason:
+
+- `flake.nix` holds `cue` at 0.16.1 because 0.17.1 does not terminate on the
+  `server/` CUE package (#1763). Remove that override only after measuring
+  `cd server && time cue vet .` on the candidate version, never because an
+  upstream issue looks closed.
+- `flake.nix` asks for `postgresql_17` explicitly so the major the server
+  tests run against cannot move with the nixpkgs default.
 
 Related pins that are not Rust but live next to it: the Determinate Nix
 installer action revision in `ci/contributors/nix.cue` and the cuenv version

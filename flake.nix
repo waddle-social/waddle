@@ -445,10 +445,15 @@
         let
           pkgs = mkPkgs system;
           rustToolchain = pkgs.rust-bin.fromRustupToolchainFile ./server/rust-toolchain.toml;
-          # cue 0.17.x regresses the evaluator (cue-lang/cue#4421): `cue vet .`
-          # in server/ takes ~4s on 0.16.1 and is OOM-killed on 0.17.1, which
-          # breaks the renderDeployment gate. Hold cue at 0.16.1 until an
-          # upstream release fixes it, independent of the nixpkgs snapshot.
+          # cue 0.17.1 does not terminate evaluating server/: `cue vet .`
+          # takes ~4s on 0.16.1 and ran >11min/OOM on 0.17.1, which killed the
+          # renderDeployment gate and would hang the main-only
+          # publishContainerImage task. The two known v0.17 hang issues
+          # (cue-lang/cue#4421, #4422) are fixed in 0.17.1, so this is a
+          # distinct unreported regression: see #1763. Do not drop this hold
+          # because an upstream issue looks closed -- measure `cue vet .`
+          # in server/ on the candidate version first. Covers the CLI only;
+          # the cuengine crate is pinned separately in server/Cargo.lock.
           cue = pkgs.cue.overrideAttrs (finalAttrs: _prev: {
             version = "0.16.1";
             src = pkgs.fetchFromGitHub {
