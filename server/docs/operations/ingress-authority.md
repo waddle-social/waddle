@@ -190,7 +190,7 @@ image refuses the ledger.
 
 ### V1015/V1016 cutover (#1756, PR #1758)
 
-Keyed recipient SM append receipts ride a third one-shot `Recreate`. Unlike
+Keyed recipient SM append receipts rode a further one-shot `Recreate`. Unlike
 V1012 and V1014 the migrations themselves are **purely additive**: V1015 creates
 `sm_ingress_appends`, V1016 indexes it by `accepting_stream_id`, and nothing is
 reset. Retained XEP-0198 sessions survive, no canonical rows, intents, receipts,
