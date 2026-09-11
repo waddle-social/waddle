@@ -82,8 +82,31 @@ Two such pins already exist for that reason:
 - `flake.nix` asks for `postgresql_17` explicitly so the major the server
   tests run against cannot move with the nixpkgs default.
 
-Related pins that are not Rust but live next to it: the Determinate Nix
-installer action revision in `ci/contributors/nix.cue`, and the cuenv version
-in `cue.mod/module.cue` (the `cuenv_version` in the workflows is generated
-from it, not edited). Regenerate workflows with `cuenv sync ci` after
-changing either.
+## Related pins
+
+The Determinate Nix installer action revision lives in
+`ci/contributors/nix.cue`. Change it there and regenerate the workflows with
+`cuenv sync ci`.
+
+The cuenv version is less obvious, and worth knowing before you regenerate
+anything. There are two separate values:
+
+- `cue.mod/module.cue` pins the cuenv **CUE schema** dependency.
+- `cuenv_version` in the generated workflows is the cuenv **binary** CI
+  installs. It is not read from `module.cue`. `cuenv sync ci` stamps in the
+  version of the cuenv binary that runs it, because no project sets
+  `config.ci.cuenv.version` and cuenv then falls back to its own
+  `CARGO_PKG_VERSION`.
+
+They agree at 0.55.0 today only because both were set together. Two
+consequences:
+
+- Bumping `module.cue` alone does not move the CI pin, even after
+  `cuenv sync ci`.
+- Running `cuenv sync ci` with a newer cuenv installed locally rewrites
+  `cuenv_version` across every generated workflow with no `module.cue`
+  change, so check `git diff .github/workflows` before committing a
+  regeneration.
+
+Move the two together deliberately, or set `config.ci.cuenv.version`
+explicitly so the CI pin lives in the repo instead of on whoever regenerates.
