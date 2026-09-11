@@ -188,6 +188,73 @@ adds the column. `IngressNonTerminalBacklog` starts from an empty table after
 the cutover; any post-cutover row is new work. Roll-forward only: a pre-V1014
 image refuses the ledger.
 
+### V1015/V1016 cutover (#1756, PR #1758)
+
+Keyed recipient SM append receipts ride a third one-shot `Recreate`. Unlike
+V1012 and V1014 the migrations themselves are **purely additive**: V1015 creates
+`sm_ingress_appends`, V1016 indexes it by `accepting_stream_id`, and nothing is
+reset. Retained XEP-0198 sessions survive, no canonical rows, intents, receipts,
+aliases or SM refs are deleted, and no in-flight obligation is abandoned. Both
+statements are `CREATE ... IF NOT EXISTS` because the SM store's runtime
+initializer creates the same table when it opens, so either may run first.
+
+`Recreate` was required for the **writers**, not the schema. The ledger is an
+exactly-once gate only if every writer consults it. A replica still running the
+previous build keeps the unkeyed append path, so during a rolling window an old
+owner could append with no ledger row while a concurrent replay allocated the
+same `(obligation, resource)` a second time — the duplicate the migration exists
+to prevent. Stopping every old writer before the first keyed writer starts is
+the only way to make the gate total from its first use.
+
+Rollback is fail-closed rather than silently unkeyed. The migration ledger guard
+makes a binary whose catalog lacks a version recorded in `_migrations` refuse to
+start (`pre_v1010_catalog_refuses_a_v1010_ledger_until_roll_forward`,
+`server/crates/waddle-server/src/db/migrations/tests.rs`), so no pre-#1758 image
+can come up against this database at all. The guard fires at startup only, which
+is exactly why `Recreate` was needed at cutover and not at the flip-back (#1765):
+it does nothing about an old pod that is already running.
+
+#1758 also bumped three wire versions — `remote_user_side_effect.v3`,
+`remote_resource_route.v6` and `deliver_ordered.v10`. Because the cutover rode
+its own `Recreate`, and because the flip-back rolled two builds of identical
+server code, the first genuine mixed-version window for `deliver_ordered.v10`
+is the next deploy that changes server source.
+
+**Ledger lifetime.** The obligation owns the proof, not the stream. A successful
+resume deletes the detached snapshot while the logical stream continues, so
+session-scoped evidence would vanish while the obligation was still retryable.
+Only two paths remove a row: retirement of gap-covered proofs when a session is
+deleted, and ingress retention GC once the canonical row is reclaimed, at which
+point the obligation can never be retried again.
+
+**If the append ledger looks wrong.** Proof that outlives its payload suppresses
+the retry that would have recovered the stanza, so the failure mode is silent
+loss rather than a duplicate. List candidates in a read-only snapshot:
+
+```sql
+BEGIN TRANSACTION ISOLATION LEVEL REPEATABLE READ READ ONLY;
+SELECT a.message_key, a.resource, a.accepting_stream_id, a.sequence,
+       (s.stream_id IS NOT NULL) AS session_present,
+       s.last_acked, s.replay_gap_through
+FROM sm_ingress_appends a
+LEFT JOIN sm_sessions s ON s.stream_id = a.accepting_stream_id
+LEFT JOIN sm_unacked u
+       ON u.stream_id = a.accepting_stream_id AND u.sequence = a.sequence
+WHERE u.stream_id IS NULL
+ORDER BY a.appended_at_ms
+LIMIT 50;
+COMMIT;
+```
+
+This is a candidate list, not a verdict. A sequence that was acknowledged or is
+covered by the replay gap legitimately has no `sm_unacked` row, and the sequence
+comparison is modulo 2^32 while SQL is not wrap-aware — the server deliberately
+performs that comparison in Rust. Treat a candidate as real only when the stream
+has no `sm_sessions` row at all and the canonical message is still non-terminal.
+That shape is the open invariant tracked by #1760 (durable append proof must not
+outlive the payload it stands for); record the row and the obligation rather
+than deleting ledger entries by hand. Do not perform ledger surgery.
+
 ## Read-only verification
 
 Use the production context explicitly. Inspect rollout strategy, actual
@@ -489,13 +556,18 @@ only a subset of its unfinished resources. Ordinary duplicate ingress retries
 only unfinished recorded targets and restores the canonical message payload;
 a resource that has reconnected can receive the retry live.
 
-Concurrent duplicate decisions may both append the same resource: this path
-provides at-least-once per-resource delivery, with no execution claim. The
-append precedes its progress transaction, so a crash or transaction failure
-between them can repeat the one in-flight resource. Earlier committed progress
-survives restart and is excluded from later decisions. Progress writes and the
-final aggregate receipt share one epoch-attested transaction under the
-canonical message lock. Lock contention leaves the obligation retryable.
+Since #1756 this path allocates exactly one durable queue entry per (recorded
+obligation, resource), with no retry-induced duplicate. The stream-independent
+`sm_ingress_appends` ledger is consulted before any session work and its primary
+key is the gate, so neither a concurrent duplicate decision nor a crash between
+the append and its progress commit allocates a second entry. Two limits remain
+explicit: XEP-0198 still permits a client-observed duplicate after an uncertain
+acknowledgement, and when no unexpired session exists the append does not happen
+at all and the obligation stays unresolved for its recorded route to retry or
+degrade. Earlier committed progress survives restart and is excluded from later
+decisions. Progress writes and the final aggregate receipt share one
+epoch-attested transaction under the canonical message lock. Lock contention
+leaves the obligation retryable.
 
 When investigating a pending direct route, compare its recorded fanout with
 its resource progress rows using the full effect receipt key. A missing
