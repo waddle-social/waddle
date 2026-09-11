@@ -255,7 +255,11 @@
           };
           serverPostgresTestArgs = serverTestArgs // {
             nativeBuildInputs = serverTestArgs.nativeBuildInputs ++ [
-              pkgs.postgresql
+              # Pin the major explicitly rather than tracking the nixpkgs
+              # default (which moved 17 -> 18 in the 2026-09 snapshot), so a
+              # nixpkgs bump cannot silently change the database the tests
+              # run against. Prod runs the CloudNativePG operator default.
+              pkgs.postgresql_17
             ];
             preCheck = ''
               export PGDATA="$TMPDIR/postgres-data"
