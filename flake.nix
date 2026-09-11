@@ -441,6 +441,20 @@
         let
           pkgs = mkPkgs system;
           rustToolchain = pkgs.rust-bin.fromRustupToolchainFile ./server/rust-toolchain.toml;
+          # cue 0.17.x regresses the evaluator (cue-lang/cue#4421): `cue vet .`
+          # in server/ takes ~4s on 0.16.1 and is OOM-killed on 0.17.1, which
+          # breaks the renderDeployment gate. Hold cue at 0.16.1 until an
+          # upstream release fixes it, independent of the nixpkgs snapshot.
+          cue = pkgs.cue.overrideAttrs (finalAttrs: _prev: {
+            version = "0.16.1";
+            src = pkgs.fetchFromGitHub {
+              owner = "cue-lang";
+              repo = "cue";
+              tag = "v${finalAttrs.version}";
+              hash = "sha256-mTj3XMWByNrKjm+/MOQGLyUKIv4JJ8i6Oaphbzls84U=";
+            };
+            vendorHash = "sha256-HXRrVPjPc10Q1MVr1d9vZBWgSVqNZ5J0UgvP/hTPfcg=";
+          });
         in
         {
           default = pkgs.mkShell {
@@ -450,7 +464,7 @@
               pkgs.nodejs_22
               pkgs.python3
               pkgs.go
-              pkgs.cue
+              cue
               pkgs.kubectl
               pkgs.kubernetes-helm
               pkgs.just

@@ -59,6 +59,10 @@ Android targets). Every build path reads that file:
    standard post-deploy check (pods healthy, alerts quiet, ingress and relay
    metrics flowing).
 
+A nixpkgs bump can also move other dev-shell tools. Run the full PR pipeline
+and treat a newly failing non-Rust gate as a tool regression to investigate;
+`flake.nix` holds cue at 0.16.1 for exactly that reason (cue-lang/cue#4421).
+
 Related pins that are not Rust but live next to it: the Determinate Nix
 installer action revision in `ci/contributors/nix.cue` and the cuenv version
 in the generated workflows. Regenerate workflows with `cuenv sync ci` after
