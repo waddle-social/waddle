@@ -105,8 +105,12 @@ consequences:
   `cuenv sync ci`.
 - Running `cuenv sync ci` with a newer cuenv installed locally rewrites
   `cuenv_version` across every generated workflow with no `module.cue`
-  change, so check `git diff .github/workflows` before committing a
-  regeneration.
+  change. The `cuenv sync -A` in step 3 does the same, because it runs the
+  CI provider too, so the "only `digest` lines" expectation there holds only
+  when your local cuenv matches the pin. Check
+  `git diff .github/workflows` before committing a regeneration.
 
-Move the two together deliberately, or set `config.ci.cuenv.version`
-explicitly so the CI pin lives in the repo instead of on whoever regenerates.
+Move the two together deliberately, or set `config.ci.cuenv.version` to a
+concrete version so the CI pin lives in the repo instead of on whoever
+regenerates. That field is read per project, so it has to be set in each
+project's `env.cue` rather than once at the root.

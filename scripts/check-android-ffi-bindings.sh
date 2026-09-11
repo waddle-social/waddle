@@ -19,10 +19,11 @@ esac
 TMP_DIR="$(mktemp -d)"
 trap 'rm -rf "$TMP_DIR"' EXIT
 
-cargo build \
-  --manifest-path "$SERVER_ROOT/Cargo.toml" \
+# Run from the server workspace so a rustup-only invocation honours
+# server/rust-toolchain.toml, matching the cargo run below.
+(cd "$SERVER_ROOT" && cargo build \
   --locked \
-  -p waddle-xmpp-client-ffi
+  -p waddle-xmpp-client-ffi)
 
 (cd "$SERVER_ROOT" && cargo run -p waddle-xmpp-client-ffi \
   --locked \
