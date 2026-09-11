@@ -36,9 +36,12 @@ Android targets). Every build path reads that file:
    cuenv sync -A
    ```
 
-   The lock writer is nondeterministic and sometimes drops a `[runtimes.*]`
-   entry. Never hand-edit `cuenv.lock`; rerun the command until the diff only
-   touches `digest` lines.
+   cuenv 0.55.0 skips any project whose CUE evaluation exceeds its hard
+   10-second timeout and then writes the lock without that project's
+   `[runtimes.*]` entry (#1480; `chat` is the usual victim). Never hand-edit
+   `cuenv.lock`; rerun the command until the diff only touches `digest`
+   lines. The same drop can hit `checkRootSyncDrift` in CI, where a rerun
+   is the fix.
 
 4. Run the existing enforcement locally and fix every new lint properly. The
    `-D warnings` policy in the Clippy hard rule does not change for a bump,
