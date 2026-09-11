@@ -23,7 +23,10 @@ Android targets). Every build path reads that file:
    nix flake update
    ```
 
-   If nix is not installed locally, run the same command in a container:
+   If nix is not installed locally, run the same command in a container from
+   the repository root. The container runs as root, so on Linux hosts
+   `chown` the lock back afterwards (Docker Desktop on macOS remaps it for
+   you):
 
    ```sh
    docker run --rm -v "$PWD:/src" -w /src nixos/nix:latest \
@@ -58,7 +61,12 @@ Android targets). Every build path reads that file:
    cold run is the known memory-pressure flake; capture the log before
    rerunning so a real failure is not mistaken for it.
 
-6. After merge the server auto-deploys with a normal RollingUpdate. Do the
+6. After merge the server auto-deploys. Check
+   `infrastructure/waddle.cloud/gitops/waddle-server/helmrelease.yaml` before
+   merging: a bump inherits whatever `updateStrategy` that file currently
+   carries, and a migration cutover may have left it on `Recreate`, which
+   drops every connection instead of rolling. Wait for the flip-back to
+   `RollingUpdate` unless a hard cutover is acceptable. Either way, do the
    standard post-deploy check (pods healthy, alerts quiet, ingress and relay
    metrics flowing).
 
@@ -75,6 +83,7 @@ Two such pins already exist for that reason:
   tests run against cannot move with the nixpkgs default.
 
 Related pins that are not Rust but live next to it: the Determinate Nix
-installer action revision in `ci/contributors/nix.cue` and the cuenv version
-in the generated workflows. Regenerate workflows with `cuenv sync ci` after
+installer action revision in `ci/contributors/nix.cue`, and the cuenv version
+in `cue.mod/module.cue` (the `cuenv_version` in the workflows is generated
+from it, not edited). Regenerate workflows with `cuenv sync ci` after
 changing either.
