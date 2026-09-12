@@ -39,14 +39,14 @@ spec:
     # the sequence instead of poisoning the shared channel. Any
     # envelope or reply-type change MUST bump the version (see
     # server/CLAUDE.md) — that invariant is what keeps this strategy
-    # sound. The #1756 V1015/V1016 cutover (PR #1758) was the third one-shot
-    # Recreate (after the #1657 V1012 and #1739-#1743 V1014 cutovers); this
-    # restores the steady state.
+    # sound. One-shot Recreate for the #1770 archive_seq cutover (PR #1771):
+    # old writers omit archive_seq, so their inserts fail once the new binary
+    # sets NOT NULL. Every old archive writer must stop before the new binary
+    # backfills and seeds the per-archive counters. Flip back to
+    # RollingUpdate (maxSurge 1, maxUnavailable 0) in a follow-up PR once the
+    # rollout and verification complete (precedent #1758/#1765).
     updateStrategy:
-      type: RollingUpdate
-      rollingUpdate:
-        maxSurge: 1
-        maxUnavailable: 0
+      type: Recreate
     image:
       repository: ghcr.io/waddle-social/waddle
       tag: main

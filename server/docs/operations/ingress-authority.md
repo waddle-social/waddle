@@ -394,6 +394,61 @@ can simply be in flight, so re-run before acting.
 Record the row and its full obligation identity. Do not delete ledger entries by
 hand. No ledger surgery.
 
+### archive_seq cutover (#1770 stage 1, PR #1771)
+
+Per-archive commit ordinals require a further one-shot `Recreate`. Every old
+writer must stop before the new binary backfills the archive: old inserts omit
+`archive_seq` and fail once the new binary makes that column `NOT NULL`.
+A rolling window cannot safely mix these writers. Expect a brief full outage
+and client reconnects; the drain and unresolved-obligation caveats above still
+apply.
+
+At startup, the MAM store's `ensure_schema` adds the column, ranks legacy rows
+within each archive by `(timestamp, id)`, seeds `mam_archive_sequences` from
+per-archive maxima without lowering existing counters, and enforces `NOT NULL`
+and `UNIQUE (room_jid, archive_seq)`. Backfill ranks every row of any archive
+that still contains a NULL ordinal, so restarting an interrupted backfill is
+safe with no old writers. PostgreSQL sets `NOT NULL`; SQLite rebuilds the
+legacy table with that constraint. This is store-owned schema, not a new
+ingress migration-ledger version.
+
+After every replica runs the new digest and is ready, verify the backfill in
+one read-only PostgreSQL snapshot:
+
+```sql
+BEGIN TRANSACTION ISOLATION LEVEL REPEATABLE READ READ ONLY;
+SELECT COUNT(*) FROM mam_messages WHERE archive_seq IS NULL;
+
+SELECT m.room_jid, MAX(m.archive_seq) AS max_archive_seq, s.next_seq
+FROM mam_messages m
+LEFT JOIN mam_archive_sequences s ON s.archive_jid = m.room_jid
+GROUP BY m.room_jid, s.next_seq
+HAVING s.next_seq IS NULL OR s.next_seq < MAX(m.archive_seq);
+
+SELECT room_jid, archive_seq, COUNT(*)
+FROM mam_messages
+GROUP BY room_jid, archive_seq
+HAVING COUNT(*) > 1;
+COMMIT;
+```
+
+The NULL count must be **0**; the counter and duplicate queries must return
+**no rows**. Every retained archive needs a counter at least its maximum
+ordinal. A counter above that maximum is valid after deletion; never lower it.
+
+**Rollback is not supported.** A pre-cutover binary can still read the table
+because it ignores the extra column, but its inserts fail on `NOT NULL`.
+Flipping back to an old image does not restore service; reverting the schema
+to enable such a rollback is not a supported procedure. Roll forward with an
+ordinal-aware binary. Do not treat this store-owned change as a ledger startup
+refusal.
+
+Once the rollout and verification complete, open a follow-up PR restoring
+`RollingUpdate` (`maxSurge: 1`, `maxUnavailable: 0`), following #1758 → #1765.
+That flip-back restores the deployment strategy, not the pre-cutover binary
+or schema. Archive ordinals do not yet enforce concurrent live dispatch order;
+RFC 0018 §3.7 records stage 2 and #1770 remains open.
+
 ## Read-only verification
 
 Use the production context explicitly. Inspect rollout strategy, actual
