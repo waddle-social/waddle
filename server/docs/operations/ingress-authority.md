@@ -193,10 +193,30 @@ image refuses the ledger.
 Keyed recipient SM append receipts rode a further one-shot `Recreate`. Unlike
 V1012 and V1014 the migrations themselves are **purely additive**: V1015 creates
 `sm_ingress_appends`, V1016 indexes it by `accepting_stream_id`, and nothing is
-reset. Retained XEP-0198 sessions survive, no canonical rows, intents, receipts,
-aliases or SM refs are deleted, and no in-flight obligation is abandoned. Both
-statements are `CREATE ... IF NOT EXISTS` because the SM store's runtime
-initializer creates the same table when it opens, so either may run first.
+reset: the migration transaction deletes no canonical row, intent, receipt,
+alias, SM ref or obligation row. Both statements are `CREATE ... IF NOT EXISTS`
+because the SM store's runtime initializer creates the same table when it opens,
+so either may run first.
+
+**Additive DDL is not a harmless cutover, and the two must not be conflated.**
+The `Recreate` around it still stops every replica, and the outgoing binary's
+SIGTERM path drains: it promotes each live connection's unacked queue and calls
+`confirm_drained`, which deletes the durable session row on success
+(`server/session_janitors.rs`). So normally drained XEP-0198 sessions are
+**retired, not preserved** — those clients reconnect fresh and catch up through
+MAM rather than resuming. Only sessions whose drain fails or times out keep a
+durable row to resume from. A failed post-cutover resume is the expected outcome
+here, not an incident.
+
+Likewise, V1015/V1016 delete no obligation rows — but that is not the same as no
+obligation being abandoned. If SIGTERM reaches a replica during post-commit
+Phase C, the canonical row and its intents stay durable while execution stops
+without writing a receipt, and nothing re-drives it: there is no recovery
+executor (RFC 0018 stated limitation (i), tracked as #1755), and periodic
+maintenance only terminalizes work whose receipts are already complete. Absent a
+same-origin retry that obligation stays unresolved indefinitely. Inspect
+unresolved effects after this cutover rather than assuming the additive
+migration left none.
 
 `Recreate` was required for the **writers**, not the schema. The ledger is an
 exactly-once gate only if every writer consults it. A replica still running the
@@ -249,8 +269,14 @@ point the obligation can never be retried again.
 the retry that would have recovered the stanza, so the failure mode is silent
 loss rather than a duplicate. List candidates in a read-only snapshot:
 
-Every incident predicate is applied **before** `LIMIT`, so legitimate
-acknowledged or gap-covered proofs cannot fill the result set and hide a real one:
+Every incident predicate is applied **before** `LIMIT` so the cheapest healthy
+shapes are excluded early. That is not sufficient on its own: several healthy
+terminal-session outcomes described below satisfy every predicate, so with enough
+of them an oldest-first page returns the same benign rows forever and never
+reaches a newer real loss. The query is therefore keyset-paginated — carry
+`(appended_at_ms, message_key, receipt_kind, semantic_identity_hash, resource)`
+from the last row of each page into the next, and keep paging until a page is
+short:
 
 ```sql
 BEGIN TRANSACTION ISOLATION LEVEL REPEATABLE READ READ ONLY;
@@ -280,7 +306,13 @@ WHERE u.stream_id IS NULL   -- the payload is gone
   AND s.stream_id IS NULL   -- and so is the whole session, not merely acked or gapped
   AND d.message_key IS NULL -- this resource was never receipted as delivered
   AND e.message_key IS NULL -- nor was its effect settled generically
-ORDER BY a.appended_at_ms
+  -- keyset cursor: omit on the first page, then carry the last row forward
+  AND (a.appended_at_ms, a.message_key, a.receipt_kind,
+       a.semantic_identity_hash, a.resource)
+      > (:last_appended_at_ms, :last_message_key, :last_receipt_kind,
+         :last_semantic_identity_hash, :last_resource)
+ORDER BY a.appended_at_ms, a.message_key, a.receipt_kind,
+         a.semantic_identity_hash, a.resource
 LIMIT 50;
 COMMIT;
 ```
@@ -301,22 +333,47 @@ while the ingress tables use `uuid`.
 
 Rows that survive every predicate are **candidates, and the query cannot promote
 them to a verdict.** A deleted session is not proof of loss: the proof is meant
-to outlive its session, and two healthy outcomes delete the session and its
-`sm_unacked` rows while the proof legitimately stands —
+to outlive its session, and several healthy outcomes delete the session and its
+`sm_unacked` rows while the proof legitimately stands. The two easiest to reach
+are —
 
 - the retained frame was **acknowledged during resume**, which is delivery; and
 - the payload was **promoted to `pending_delivery`** on expiry, which is a
   durable handoff, not a destruction.
 
-Neither leaves a delivery or effect receipt, so both satisfy the query. Worse,
+— and the full promotion outcome set below adds more. None leaves a delivery or
+effect receipt, so all of them satisfy the query. Worse,
 `pending_delivery` rows carry no reference back to the obligation that produced
 them, so a promoted payload **cannot currently be correlated to its ledger row at
 all** — that missing link is itself part of what #1760 has to fix.
 
 So before treating a candidate as the #1760 shape (durable append proof must not
-outlive the payload it stands for), rule out both: look for a `pending_delivery`
-row to the same recipient around `appended_at`, and check whether the stream
-resumed and acknowledged before it was deleted.
+outlive the payload it stands for), rule out every healthy way its session can
+have ended: a `pending_delivery` row to the same recipient around `appended_at`
+(the `Queued` outcome), a live redelivery or any other handled promotion outcome
+for that stream, and acknowledgement during resume.
+
+**A deleted session has eight terminal outcomes, not two, and six of them are
+healthy.** Promotion classifies every unacked stanza
+(`sm_promotion/types.rs::PromotedOutcome`): `Redelivered` to an alternate
+resource, `Queued` into `pending_delivery`, `Bounced` per XEP-0160 §3,
+`Dropped`, `NotPromotable`, `Unparseable`, `Scrubbed` by a racing
+XEP-0424/0425 tombstone, and `StorageFailure`. Only `StorageFailure` blocks
+`confirm_drained`; every other outcome counts as handled and the durable session
+row is deleted. So a healthy `Redelivered` or `Scrubbed` stanza leaves a
+non-gap-covered proof with **no** `pending_delivery` row and **no** receipt for
+the original obligation — passing the query and both checks above. Correlate the
+promotion outcome for that stream, not just `pending_delivery`.
+
+**And the acknowledgement check above often cannot be performed at all.**
+`last_acked` is a column on `sm_sessions`, so deleting the session deletes the
+acknowledgement frontier along with `sm_unacked`. Accepted `<a/>` handling
+advances live stream state and aggregate counters rather than a per-sequence
+durable record. For a candidate whose session is already gone there is therefore
+usually no retained database evidence that a given `a.sequence` was
+acknowledged: treat that question as **historically indeterminate** rather than
+resolving it against the row's absence, which is the same mistake in a different
+direction.
 
 **The query also has a hard blind spot in the other direction: it finds the loss
 only before anything retries it.** Once a retry runs against a stale proof, the
