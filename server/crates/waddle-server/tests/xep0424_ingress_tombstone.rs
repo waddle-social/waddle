@@ -50,6 +50,7 @@ fn archive_plan(fixture: &IngressFixture, id: &str) -> IngressSubmission {
             stanza_id: stamp,
             by: room.clone(),
             archived_at: message.timestamp,
+            ordinal: None,
         });
     submission
         .plan

@@ -1,4 +1,5 @@
 //! Durable ingress authority: immutable planning, atomic commit, bounded execution.
+mod archive_authority;
 mod capture;
 #[cfg(test)]
 pub(crate) use capture::TEST_CAPTURE_LIMIT;

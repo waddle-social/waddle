@@ -116,10 +116,9 @@ impl super::PlannedEffect {
             })) => EffectOutcome::Archive(Ok(StoreOutcome::Stored {
                 stanza_id: message.id.clone(),
                 // Planning assumes success; this ordinal is not authoritative storage state.
-                ordinal: message.ordinal.unwrap_or_else(|| {
-                    waddle_xmpp::mam::ArchiveOrdinal::from_storage(1)
-                        .expect("positive planning placeholder")
-                }),
+                ordinal: message
+                    .ordinal
+                    .unwrap_or(waddle_xmpp::mam::ArchiveOrdinal::FIRST),
             })),
             Effect::Durable(DurableEffect::Direct(DurableDirectEffect::ProjectInbox {
                 ..

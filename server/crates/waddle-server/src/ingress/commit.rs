@@ -85,7 +85,11 @@ pub fn classify_failure(error: &IngressUowError) -> IngressDecisionClass {
         ) => IngressDecisionClass::RoomGenerationStale,
         IngressUowError::IngressFrontierStale => IngressDecisionClass::FrontierStale,
         IngressUowError::AmbiguousCommit => IngressDecisionClass::AmbiguousCommit,
-        IngressUowError::EffectIntentConflict => IngressDecisionClass::IntentContradiction,
+        IngressUowError::EffectIntentConflict
+        | IngressUowError::ArchiveOrdinalConflict { .. }
+        | IngressUowError::MamStore(waddle_xmpp::mam::MamTxStoreError::OrdinalConflict {
+            ..
+        }) => IngressDecisionClass::IntentContradiction,
         IngressUowError::Substrate(IngressSubstrateError::SmOrdinalConflict) => {
             IngressDecisionClass::SmOrdinalConflict
         }
@@ -300,27 +304,7 @@ async fn commit_attempt(
             );
         }
     }
-    // Each generated message retains its own timestamp and assigning authority.
-    for intent in &mut plan.intents {
-        let authority = intent.authority_key();
-        if let IngressEffectIntent::ArchiveAuthoritative { archived_at, .. }
-        | IngressEffectIntent::SystemMessageArchive { archived_at, .. } = intent
-        {
-            if let Some(
-                IngressEffectIntent::ArchiveAuthoritative {
-                    archived_at: stored,
-                    ..
-                }
-                | IngressEffectIntent::SystemMessageArchive {
-                    archived_at: stored,
-                    ..
-                },
-            ) = recorded.iter().find(|row| row.authority_key() == authority)
-            {
-                *archived_at = *stored;
-            }
-        }
-    }
+    super::archive_authority::restore(&mut plan.intents, &recorded)?;
     // Archive-free plans (for example invitations) have no archive authority to
     // recover. A remote room origin still needs its recorded dispatch obligation
     // until the owner has supplied the canonical archive identity.

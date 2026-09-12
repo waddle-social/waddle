@@ -10,10 +10,7 @@ use crate::{
         Deps,
     },
 };
-use waddle_xmpp::{
-    mam::{ArchiveExpectation, ArchivedMessage},
-    registry::ConnectionRegistry,
-};
+use waddle_xmpp::{mam::ArchivedMessage, registry::ConnectionRegistry};
 use waddle_xmpp_core::xep0359::StanzaId;
 
 fn candidate(
@@ -183,6 +180,7 @@ async fn settled_archive_avoids_pooled_receipt_transactions(fixture: IngressFixt
     archive.stanza_id = Some(StanzaId::new(&archive.id, room.clone().into()));
     let mut submission = fixture.submission(None, "system archive settlement");
     submission.plan.intents = vec![IngressEffectIntent::SystemMessageArchive {
+        ordinal: None,
         sequence: 0,
         archive: room.clone(),
         stanza_id: archive.stanza_id.clone().expect("stanza id"),
@@ -194,7 +192,6 @@ async fn settled_archive_avoids_pooled_receipt_transactions(fixture: IngressFixt
             room,
             message: Box::new(archive),
             fence: RoomFenceRequirement::Unfenced,
-            archive_expectation: ArchiveExpectation::Fresh,
         },
     )))];
     let decision = commit_submission(&fixture.uow, &submission, 1)

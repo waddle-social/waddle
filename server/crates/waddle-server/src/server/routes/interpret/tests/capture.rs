@@ -773,8 +773,12 @@ async fn direct_archive_capture_uses_the_new_authoritative_id_for_an_origin_retr
                 archive,
                 stanza_id,
                 archived_at,
+                ordinal,
                 ..
-            } if archive == &owner => Some((stanza_id, archived_at)),
+            } if archive == &owner => {
+                assert_eq!(*ordinal, None, "planning ordinals are not authoritative");
+                Some((stanza_id, archived_at))
+            }
             _ => None,
         })
         .expect("captured archive identity");

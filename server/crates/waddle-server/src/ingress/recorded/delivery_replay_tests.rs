@@ -9,6 +9,7 @@ fn delivery_copy_restores_canonical_content_address_and_recipient_stamp() {
     let sender: jid::BareJid = "romeo@example.com".parse().expect("sender");
     let saved = StanzaId::new("recipient-saved", recipient.clone().into());
     let intent = IngressEffectIntent::ArchiveAuthoritative {
+        ordinal: None,
         archive: recipient.clone(),
         by: recipient.clone(),
         stanza_id: saved.clone(),

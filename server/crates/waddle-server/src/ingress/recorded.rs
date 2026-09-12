@@ -712,11 +712,15 @@ fn apply_durable(
         }
         (
             DurableEffect::Direct(DurableDirectEffect::ArchiveDirect {
-                archive, message, ..
+                archive,
+                message,
+                archive_expectation,
+                ..
             })
             | DurableEffect::Room(DurableRoomEffect::ArchiveGroupchat {
                 room: archive,
                 message,
+                archive_expectation,
                 ..
             }),
             IngressEffectIntent::ArchiveAuthoritative {
@@ -729,10 +733,23 @@ fn apply_durable(
                 stanza_id,
                 ..
             },
-            IngressEffectIntent::ArchiveAuthoritative { archived_at, .. }
-            | IngressEffectIntent::SystemMessageArchive { archived_at, .. },
+            IngressEffectIntent::ArchiveAuthoritative {
+                archived_at,
+                ordinal,
+                ..
+            }
+            | IngressEffectIntent::SystemMessageArchive {
+                archived_at,
+                ordinal,
+                ..
+            },
         ) if archive == old_archive && message.id == stanza_id.id => {
-            message.timestamp = *archived_at
+            message.timestamp = *archived_at;
+            *archive_expectation = waddle_xmpp::mam::ArchiveExpectation::Existing {
+                stanza_id: stanza_id.clone(),
+                archived_at: *archived_at,
+                ordinal: *ordinal,
+            };
         }
         (
             DurableEffect::Room(DurableRoomEffect::ProjectGroupchatInbox {
@@ -780,24 +797,19 @@ fn apply_external(
         }
 
         (
-            ExternalEffect::Room(ExternalRoomEffect::ArchiveAfterPin {
-                room,
-                message,
-                archive_expectation,
-                ..
-            }),
+            ExternalEffect::Room(ExternalRoomEffect::ArchiveAfterPin { room, message, .. }),
             IngressEffectIntent::SystemMessageArchive {
                 archive, stanza_id, ..
+            } | IngressEffectIntent::ArchiveAuthoritative {
+                archive, stanza_id, ..
             },
-            IngressEffectIntent::SystemMessageArchive { archived_at, .. },
+            IngressEffectIntent::SystemMessageArchive { archived_at, .. }
+            | IngressEffectIntent::ArchiveAuthoritative { archived_at, .. },
         ) if room == archive && message.id == stanza_id.id => {
+            // The Phase C archive transaction derives its expectation (including
+            // the recorded ordinal) from recorded authority; only the receive
+            // time travels on the effect.
             message.timestamp = *archived_at;
-            *archive_expectation = waddle_xmpp::mam::ArchiveExpectation::Existing {
-                // #1770 stage-1: ordinal recorded by the ingress slice
-                ordinal: None,
-                stanza_id: stanza_id.clone(),
-                archived_at: *archived_at,
-            };
         }
         (
             ExternalEffect::InviteLedger(InviteLedgerMutation::Record {

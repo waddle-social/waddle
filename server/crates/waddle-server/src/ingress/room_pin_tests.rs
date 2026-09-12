@@ -313,6 +313,8 @@ async fn room_pin_seam(mut fixture: IngressFixture, retract: bool, fail_pin: boo
             fixture.count("mam_messages").await,
             if retract { 3 } else { 2 }
         );
+        assert_generated_archive_ordinal(&fixture, decision.message_key.expect("message key"))
+            .await;
         assert_eq!(
             actor.ask(GetPinList).await.expect("pins").len(),
             usize::from(!retract && !unpin)
@@ -395,6 +397,53 @@ async fn room_pin_seam(mut fixture: IngressFixture, retract: bool, fail_pin: boo
     users.kill();
     drop(mam);
     fixture.close().await;
+}
+
+async fn assert_generated_archive_ordinal(
+    fixture: &IngressFixture,
+    key: waddle_xmpp::ingress::MessageKey,
+) {
+    let mut tx = fixture
+        .uow
+        .begin()
+        .await
+        .expect("read generated archive authority");
+    let intents = crate::ingress_uow::EffectIntentRepository::load(&mut tx, key)
+        .await
+        .expect("recorded effects");
+    tx.commit().await.expect("close authority read");
+    let conn = fixture.db.guard().await.expect("archive connection");
+    let mut generated = 0;
+    for intent in intents {
+        if let IngressEffectIntent::SystemMessageArchive {
+            stanza_id, ordinal, ..
+        } = intent
+        {
+            generated += 1;
+            let mut rows = conn
+                .query(
+                    "SELECT archive_seq FROM mam_messages WHERE id = ?",
+                    crate::db_params![stanza_id.id],
+                )
+                .await
+                .expect("generated archive sequence");
+            let sequence: i64 = rows
+                .next()
+                .await
+                .expect("row")
+                .expect("generated archive row")
+                .get(0)
+                .expect("sequence");
+            assert_eq!(
+                ordinal,
+                Some(
+                    waddle_xmpp::mam::ArchiveOrdinal::from_storage(sequence)
+                        .expect("positive archive sequence")
+                )
+            );
+        }
+    }
+    assert_eq!(generated, 1);
 }
 
 #[tokio::test]

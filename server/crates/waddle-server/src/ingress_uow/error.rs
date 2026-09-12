@@ -62,6 +62,11 @@ pub enum IngressUowError {
     EffectIntentCodec(#[from] EffectIntentCodecError),
     #[error("ingress effect-intent conflicts with an existing immutable row")]
     EffectIntentConflict,
+    #[error("recorded archive ordinal {recorded:?} conflicts with {stored:?}")]
+    ArchiveOrdinalConflict {
+        recorded: waddle_xmpp::mam::ArchiveOrdinal,
+        stored: waddle_xmpp::mam::ArchiveOrdinal,
+    },
     #[error("ingress effect-intent message row is missing")]
     EffectIntentMessageMissing,
     #[error("ingress effect-intent ordinal cannot be represented")]

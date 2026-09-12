@@ -107,6 +107,7 @@ pub(super) async fn archive_direct(
                 ),
                 by: archive_jid.clone(),
                 archived_at: archived.timestamp,
+                ordinal: None,
             });
             // Notification activity ingest (slice 2b): the sender's
             // own archive commit is the strongest "currently active"

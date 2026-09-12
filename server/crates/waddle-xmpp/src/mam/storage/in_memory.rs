@@ -62,7 +62,7 @@ impl MamStorage for InMemoryMamStorage {
         let mut counters = self.counters.write().await;
         let ordinal = match counters.get(archive_jid) {
             Some(previous) => previous.next().ok_or(MamStorageError::OrdinalExhausted)?,
-            None => ArchiveOrdinal::from_storage(1)?,
+            None => ArchiveOrdinal::FIRST,
         };
         counters.insert(archive_jid.clone(), ordinal);
         stored.ordinal = Some(ordinal);

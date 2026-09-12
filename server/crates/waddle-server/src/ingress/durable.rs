@@ -14,7 +14,7 @@ use crate::{
 use sha2::{Digest, Sha256};
 use waddle_xmpp::{
     ingress::{IngressEffectIntent, MessageKey},
-    mam::{ArchiveExpectation, MamTxStoreOutcome},
+    mam::MamTxStoreOutcome,
 };
 pub(super) struct AppliedDurable {
     pub archives: Vec<(PlanEffectDependency, MamTxStoreOutcome)>,
@@ -90,31 +90,8 @@ pub(super) async fn apply_durable(
                 message,
                 ..
             }) => {
-                let expectation = recorded
-                    .iter()
-                    .find_map(|intent| match intent {
-                        IngressEffectIntent::ArchiveAuthoritative {
-                            archive: stored,
-                            stanza_id,
-                            archived_at,
-                            ..
-                        }
-                        | IngressEffectIntent::SystemMessageArchive {
-                            archive: stored,
-                            stanza_id,
-                            archived_at,
-                            ..
-                        } if stored == archive && stanza_id.id == message.id => {
-                            Some(ArchiveExpectation::Existing {
-                                // #1770 stage-1: ordinal recorded by the ingress slice
-                                ordinal: None,
-                                stanza_id: stanza_id.clone(),
-                                archived_at: *archived_at,
-                            })
-                        }
-                        _ => None,
-                    })
-                    .unwrap_or(ArchiveExpectation::Fresh);
+                let expectation =
+                    super::archive_authority::expectation(key, recorded, archive, message);
                 #[cfg(feature = "clustering")]
                 let outcome = if matches!(effect, DurableEffect::Room(_))
                     && matches!(
@@ -139,6 +116,15 @@ pub(super) async fn apply_durable(
                     let _ = room_proof;
                     MamArchiveRepository::store(tx, archive, message, expectation).await?
                 };
+                super::archive_authority::finalize(
+                    tx,
+                    key,
+                    &plan.intents,
+                    archive,
+                    message,
+                    &outcome,
+                )
+                .await?;
                 applied.archives.push((
                     PlanEffectDependency::AfterArchive {
                         archive: archive.clone(),

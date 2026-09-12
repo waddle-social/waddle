@@ -1010,7 +1010,10 @@ fn compare_effects<'a>(
             } else {
                 omissions.push(intent);
             }
-        } else if !matches.iter().any(|row| row.intent == *intent) {
+        } else if !matches
+            .iter()
+            .any(|row| super::archive_ordinal::archive_intent_matches(&row.intent, intent))
+        {
             if intent.kind() == IngressEffectKind::ArchiveAuthoritative {
                 return (
                     ReconcileVerdict::Contradiction {
@@ -1025,7 +1028,10 @@ fn compare_effects<'a>(
         }
     }
     for row in recorded {
-        if !planned.contains(&row.intent) {
+        if !planned
+            .iter()
+            .any(|intent| super::archive_ordinal::archive_intent_matches(&row.intent, intent))
+        {
             divergent.insert(row.intent.kind());
         }
     }

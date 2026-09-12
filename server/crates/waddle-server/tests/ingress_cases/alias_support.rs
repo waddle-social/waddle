@@ -54,6 +54,7 @@ pub(super) fn archive_plan(fixture: &IngressFixture, room: bool, id: &str) -> In
             by: archive.clone(),
             stanza_id: stamp,
             archived_at: archived.timestamp,
+            ordinal: None,
         });
     let effect = if room {
         DurableEffect::Room(DurableRoomEffect::ArchiveGroupchat {

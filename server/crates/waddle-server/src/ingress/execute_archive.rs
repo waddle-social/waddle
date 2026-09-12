@@ -36,7 +36,7 @@ async fn store(
         room,
         message,
         fence,
-        archive_expectation,
+        ..
     } = effect
     else {
         return Err(IngressUowError::EffectIntentMessageMissing);
@@ -53,6 +53,9 @@ async fn store(
     if !CanonicalMessageRepository::lock(&mut tx, key).await? {
         return Err(IngressUowError::EffectIntentMessageMissing);
     }
+    let recorded = EffectIntentRepository::load(&mut tx, key).await?;
+    let archive_expectation =
+        crate::ingress::archive_authority::expectation(key, &recorded, room, message);
     #[cfg(feature = "clustering")]
     let outcome = match fence {
         crate::server::routes::interpret::effects::room::RoomFenceRequirement::Guarded(context) => {
@@ -106,6 +109,8 @@ async fn store(
             detached: None,
         });
     }
+    crate::ingress::archive_authority::finalize(&mut tx, key, &recorded, room, message, &outcome)
+        .await?;
     let mut evidence = Vec::new();
     for intent in EffectIntentRepository::load(&mut tx, key).await? {
         if decision.external_receipts[index].contains(&crate::ingress::receipt_key(&intent)?) {

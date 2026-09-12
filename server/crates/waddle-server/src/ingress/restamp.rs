@@ -270,14 +270,8 @@ impl Replacements {
 
     fn room(&self, effect: &mut ExternalRoomEffect) {
         match effect {
-            ExternalRoomEffect::ArchiveAfterPin {
-                room,
-                message,
-                archive_expectation,
-                ..
-            } => {
+            ExternalRoomEffect::ArchiveAfterPin { room, message, .. } => {
                 self.archive(room, message);
-                self.expectation(archive_expectation);
             }
             ExternalRoomEffect::ObserveRoomMessage {
                 message,

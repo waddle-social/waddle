@@ -13,13 +13,13 @@ use waddle_server::{
         DurableEffect, IngressDecisionClass, IngressSubmission, PlannedEffect,
     },
     ingress_substrate::{gc_expired_aliases, AliasGcBudget, AliasGcProgress, ALIAS_RETENTION},
-    ingress_uow::{MamArchiveRepository, ReconcileVerdict},
+    ingress_uow::{EffectIntentRepository, MamArchiveRepository, ReconcileVerdict},
 };
 use waddle_xmpp::{
     ingress::IngressEffectIntent,
     mam::{
-        build_result_messages, ArchiveExpectation, ArchivedMessage, ArchivedTombstone,
-        MamArchiveKind, MamQuery, MamStorage, SqlxMamStorage, MAM_NS,
+        build_result_messages, ArchiveExpectation, ArchiveOrdinal, ArchivedMessage,
+        ArchivedTombstone, MamArchiveKind, MamQuery, MamStorage, SqlxMamStorage, MAM_NS,
     },
 };
 use waddle_xmpp_core::xep0359::StanzaId;
@@ -65,6 +65,7 @@ fn add_archive(
             stanza_id,
             by: archive.clone(),
             archived_at: stamp,
+            ordinal: None,
         });
     submission
         .plan
@@ -127,6 +128,8 @@ async fn identity_repair_tombstone(fixture: IngressFixture) {
         .await
         .expect("existing");
     assert_eq!(existing.archive_ids, inserted.archive_ids);
+    assert_eq!(existing.verdict, Some(ReconcileVerdict::Consistent));
+    assert_recorded_ordinal(&fixture, inserted.message_key.expect("key"), "archive-a-id").await;
     commit_submission(
         &fixture.uow,
         &plan(
@@ -155,19 +158,21 @@ async fn identity_repair_tombstone(fixture: IngressFixture) {
     .expect("repair");
     assert_eq!(repaired.archive_ids, inserted.archive_ids);
     let after = query_wire(&fixture, &archive).await;
-    // Stage 1 ingress has no recorded ordinal yet, so repair allocates at the tail.
-    // The ingress slice will preserve the original position by recording it.
+    assert_eq!(repaired.verdict, Some(ReconcileVerdict::Consistent));
     assert_eq!(
-        after.iter().map(|row| row.id.as_str()).collect::<Vec<_>>(),
-        vec!["archive-b-id", "archive-a-id"]
-    );
-    for original_row in &before {
-        let repaired_row = after
+        after
             .iter()
-            .find(|row| row.id == original_row.id)
-            .expect("same identity");
-        assert_eq!(repaired_row.timestamp, original_row.timestamp);
-    }
+            .map(|row| (&row.id, row.timestamp))
+            .collect::<Vec<_>>(),
+        before
+            .iter()
+            .map(|row| (&row.id, row.timestamp))
+            .collect::<Vec<_>>()
+    );
+    assert_eq!(
+        after.iter().map(|row| row.ordinal).collect::<Vec<_>>(),
+        before.iter().map(|row| row.ordinal).collect::<Vec<_>>()
+    );
     assert_eq!(fixture.count("ingress_messages").await, 2);
     let mut tx = fixture.uow.begin().await.expect("tombstone transaction");
     MamArchiveRepository::replace_with_tombstone(
@@ -203,6 +208,95 @@ async fn identity_repair_tombstone(fixture: IngressFixture) {
         None
     );
     assert_eq!(fixture.count("mam_messages").await, 2);
+    fixture.close().await;
+}
+
+async fn assert_recorded_ordinal(
+    fixture: &IngressFixture,
+    key: waddle_xmpp::ingress::MessageKey,
+    id: &str,
+) {
+    let mut tx = fixture.uow.begin().await.expect("read recorded ordinal");
+    let intents = EffectIntentRepository::load(&mut tx, key)
+        .await
+        .expect("intents");
+    tx.commit().await.expect("close intent read");
+    let ordinal = intents
+        .iter()
+        .find_map(|intent| match intent {
+            IngressEffectIntent::ArchiveAuthoritative {
+                stanza_id, ordinal, ..
+            } if stanza_id.id == id => *ordinal,
+            _ => None,
+        })
+        .expect("committed archive ordinal");
+    let conn = fixture.db.guard().await.expect("archive connection");
+    let mut rows = conn
+        .query(
+            "SELECT archive_seq FROM mam_messages WHERE id = ?",
+            waddle_server::db_params![id.to_owned()],
+        )
+        .await
+        .expect("stored sequence");
+    let stored: i64 = rows
+        .next()
+        .await
+        .expect("row")
+        .expect("archive row")
+        .get(0)
+        .expect("sequence");
+    assert_eq!(
+        ordinal,
+        ArchiveOrdinal::from_storage(stored).expect("positive sequence")
+    );
+}
+
+async fn ordinal_mismatch(fixture: IngressFixture) {
+    let original = plan(
+        &fixture,
+        "ordinal-conflict",
+        "ordinal-conflict-id",
+        Utc::now(),
+    );
+    let first = commit_submission(&fixture.uow, &original, 5)
+        .await
+        .expect("first commit");
+    assert_recorded_ordinal(
+        &fixture,
+        first.message_key.expect("key"),
+        "ordinal-conflict-id",
+    )
+    .await;
+    fixture
+        .execute(
+            "UPDATE mam_messages SET archive_seq = archive_seq + 10 WHERE id = ?",
+            waddle_server::db_params!["ordinal-conflict-id".to_owned()],
+        )
+        .await;
+    let counts = (
+        fixture.count("ingress_messages").await,
+        fixture.count("ingress_effect_intents").await,
+        fixture.count("ingress_effect_receipts").await,
+        fixture.count("mam_messages").await,
+    );
+    let failure = commit_submission(&fixture.uow, &original, 5)
+        .await
+        .expect_err("ordinal contradiction");
+    assert_eq!(failure.class(), IngressDecisionClass::IntentContradiction);
+    assert!(!failure.class().advances());
+    assert_eq!(
+        counts,
+        (
+            fixture.count("ingress_messages").await,
+            fixture.count("ingress_effect_intents").await,
+            fixture.count("ingress_effect_receipts").await,
+            fixture.count("mam_messages").await,
+        )
+    );
+    assert_eq!(
+        query_wire(&fixture, fixture.principal.bare_jid()).await[0].ordinal,
+        Some(ArchiveOrdinal::from_storage(11).expect("changed ordinal"))
+    );
     fixture.close().await;
 }
 
@@ -621,4 +715,10 @@ backend_tests!(
     monotonic_inbox_sqlite,
     monotonic_inbox_postgres,
     monotonic_inbox
+);
+
+backend_tests!(
+    ordinal_mismatch_sqlite,
+    ordinal_mismatch_postgres,
+    ordinal_mismatch
 );

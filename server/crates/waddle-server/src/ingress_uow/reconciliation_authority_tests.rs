@@ -182,6 +182,7 @@ fn room_observer_first_owner_acceptance_is_not_historical_policy_drift() {
 
     // Once this room's authority exists, enabling its observer is policy drift.
     let archive = IngressEffectIntent::ArchiveAuthoritative {
+        ordinal: None,
         archive: room.clone(),
         by: room.clone(),
         stanza_id: waddle_xmpp_core::xep0359::StanzaId::new("canonical", room.into()),
