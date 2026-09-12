@@ -27,7 +27,6 @@ use axum::{
     extract::{FromRequest, Request},
     response::IntoResponse,
 };
-use futures::stream::{SplitSink, SplitStream};
 use waddle_xmpp::stream_management::SmRequest;
 
 #[derive(Debug, PartialEq, Eq)]
@@ -188,20 +187,21 @@ const ORDERED_RELAY_HANDOFF_CLEANUP_MAX_COMPLETIONS: usize = 1_024;
 /// ADR-0017 Phase 3 Slice 6's force-detach receiver take-over). Bundled so
 /// `handle_inbound_text` stays under the clippy too-many-arguments
 /// threshold, mirroring `SmCtx`'s identical rationale one file over.
-struct RegistrationChannels<'a> {
-    pending_tx: &'a mut Option<mpsc::Sender<OutboundStanza>>,
-    force_detach_rx: &'a mut Option<mpsc::Receiver<waddle_xmpp::registry::ForceDetachRequest>>,
+pub(super) struct RegistrationChannels<'a> {
+    pub(super) pending_tx: &'a mut Option<mpsc::Sender<OutboundStanza>>,
+    pub(super) force_detach_rx:
+        &'a mut Option<mpsc::Receiver<waddle_xmpp::registry::ForceDetachRequest>>,
 }
 
-struct ConnectionIo<'a> {
-    sender: &'a mut SplitSink<WebSocket, Message>,
-    receiver: &'a mut SplitStream<WebSocket>,
+pub(super) struct ConnectionIo<'a, S, R> {
+    pub(super) sender: &'a mut S,
+    pub(super) receiver: &'a mut R,
 }
 
 #[derive(Clone, Copy)]
-struct FrameAuthority<'a> {
-    permit: &'a crate::clustering::NodeAdmissionPermit,
-    shutdown: &'a tokio_util::sync::CancellationToken,
+pub(super) struct FrameAuthority<'a> {
+    pub(super) permit: &'a crate::clustering::NodeAdmissionPermit,
+    pub(super) shutdown: &'a tokio_util::sync::CancellationToken,
 }
 
 /// Poll `rx` if present, otherwise never resolve (ADR-0017 Phase 3 Slice 6).
@@ -1314,15 +1314,21 @@ mod admission_tests {
 /// through the exact same path as frames read off the socket.
 ///
 /// Returns `false` when the connection loop must break.
-async fn handle_inbound_text(
+pub(super) async fn handle_inbound_text<S, SE, R, RE>(
     text: &str,
     domain: &str,
     state: &Arc<WebSocketState>,
     conn: &mut WsConnState,
     channels: RegistrationChannels<'_>,
-    io: ConnectionIo<'_>,
+    io: ConnectionIo<'_, S, R>,
     authority: FrameAuthority<'_>,
-) -> bool {
+) -> bool
+where
+    S: futures::Sink<Message, Error = SE> + Unpin,
+    SE: std::fmt::Display,
+    R: futures::Stream<Item = Result<Message, RE>> + Unpin,
+    RE: std::fmt::Display,
+{
     let RegistrationChannels {
         pending_tx,
         force_detach_rx,
@@ -1464,24 +1470,11 @@ async fn handle_inbound_text(
                     replay_after_h,
                 } => {
                     responses = ResponseBatch::from_frames(vec![resumed.to_element()]);
-                    // Issue #1178: like the pre-registration resume path,
-                    // replayed stanzas carry a XEP-0203 <delay/> with their
-                    // original receipt time.
-                    let server_domain = state.deps.auth_state.xmpp_domain.as_str();
-                    responses.frames.extend(
-                        conn.sm_state
-                            .get_stanzas_to_resend(replay_after_h)
-                            .into_iter()
-                            .map(|entry| {
-                                ResponseFrame::from_serialized_xml(
-                                    waddle_xmpp::stream_management::stamp_replay_delay(
-                                        &entry.stanza_xml,
-                                        server_domain,
-                                        entry.original_receipt_at,
-                                    ),
-                                )
-                            }),
-                    );
+                    responses.frames.extend(super::resume_replay::replay_frames(
+                        &conn.sm_state,
+                        replay_after_h,
+                        state.deps.auth_state.xmpp_domain.as_str(),
+                    ));
                 }
                 SmRegistrationFinalization::ReplaceWithFailed(failed) => {
                     responses = ResponseBatch::from_frames(vec![failed.to_element()]);
@@ -1636,13 +1629,17 @@ async fn handle_inbound_text(
     true
 }
 
-async fn close_if_frame_authority_revoked(
+async fn close_if_frame_authority_revoked<S, E>(
     state: &Arc<WebSocketState>,
     conn: &mut WsConnState,
-    ws_sender: &mut SplitSink<WebSocket, Message>,
+    ws_sender: &mut S,
     permit: &crate::clustering::NodeAdmissionPermit,
     shutdown: &tokio_util::sync::CancellationToken,
-) -> bool {
+) -> bool
+where
+    S: futures::Sink<Message, Error = E> + Unpin,
+    E: std::fmt::Display,
+{
     if !shutdown.is_cancelled() && permit.revalidate().is_ok() {
         return false;
     }

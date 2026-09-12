@@ -78,6 +78,7 @@ mod parse_errors;
 mod registration;
 pub(crate) mod replay;
 mod resource_binding;
+mod resume_replay;
 mod sasl;
 mod send;
 mod session_init;
