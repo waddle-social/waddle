@@ -51,6 +51,25 @@ pub(super) async fn apply_durable(
         receipts: Vec::new(),
     };
     let mut completed = Vec::new();
+    // Counter locks precede every durable mutation, in canonical archive order
+    // (RFC 0018 §3.7): the plan's own effect order differs between a message and
+    // its reply, which would otherwise deadlock on the two counter rows.
+    let archives: Vec<jid::BareJid> = plan
+        .plan
+        .iter()
+        .filter_map(|planned| match &planned.effect {
+            Effect::Durable(DurableEffect::Direct(DurableDirectEffect::ArchiveDirect {
+                archive,
+                ..
+            }))
+            | Effect::Durable(DurableEffect::Room(DurableRoomEffect::ArchiveGroupchat {
+                room: archive,
+                ..
+            })) => Some(archive.clone()),
+            _ => None,
+        })
+        .collect();
+    MamArchiveRepository::lock_sequences(tx, &archives).await?;
     for (index, planned) in plan.plan.iter().enumerate() {
         let Effect::Durable(effect) = &planned.effect else {
             continue;

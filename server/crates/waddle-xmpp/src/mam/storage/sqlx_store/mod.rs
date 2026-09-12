@@ -16,6 +16,9 @@ use sqlx::sqlite::{SqliteConnectOptions, SqliteJournalMode, SqlitePool, SqlitePo
 use tracing::info;
 
 use super::MamStorageError;
+pub use allocation::{
+    lock_archive_sequence_on_connection, lock_archive_sequence_on_sqlite_connection,
+};
 use schema::{
     ensure_postgres_schema, ensure_sqlite_parent_dir, infer_driver, is_in_memory_sqlite,
     MamDatabaseDriver,

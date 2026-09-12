@@ -53,7 +53,7 @@ pub enum IngressUowError {
     #[error("ingress unit of work database operation failed")]
     Database { retry_class: DbRetryClass },
     #[error(transparent)]
-    MamStore(#[from] waddle_xmpp::mam::MamTxStoreError),
+    MamStore(waddle_xmpp::mam::MamTxStoreError),
     #[error(transparent)]
     Inbox(#[from] crate::inbox::InboxTxError),
     #[error(transparent)]
@@ -108,6 +108,21 @@ impl IngressUowError {
             }
             _ => DbRetryClass::NotRetryable,
         }
+    }
+}
+
+impl From<waddle_xmpp::mam::MamTxStoreError> for IngressUowError {
+    /// A lock or statement timeout inside the archive writer (for example a
+    /// contended per-archive ordinal counter) is the same bounded Phase B
+    /// wait as any other; it surfaces as `Timeout`, never as a storage fault.
+    fn from(error: waddle_xmpp::mam::MamTxStoreError) -> Self {
+        if let waddle_xmpp::mam::MamTxStoreError::Database(sqlx::Error::Database(database)) = &error
+        {
+            if matches!(database.code().as_deref(), Some("57014" | "55P03")) {
+                return Self::Timeout;
+            }
+        }
+        Self::MamStore(error)
     }
 }
 

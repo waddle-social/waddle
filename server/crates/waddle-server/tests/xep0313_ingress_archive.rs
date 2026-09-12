@@ -300,6 +300,91 @@ async fn ordinal_mismatch(fixture: IngressFixture) {
     fixture.close().await;
 }
 
+/// Counter locks are taken in canonical archive order regardless of plan order,
+/// a zero-valued lock row yields ordinal 1 on the first allocation, and a
+/// contended counter surfaces as the bounded Phase B `Timeout`, not a storage
+/// fault.
+async fn counter_lock_order_and_contention(fixture: IngressFixture) {
+    let first: BareJid = "aaa@example.com".parse().expect("first archive");
+    let second: BareJid = "zzz@example.com".parse().expect("second archive");
+    let started = tokio::sync::Notify::new();
+    let forward = async {
+        let mut tx = fixture.uow.begin().await.expect("forward transaction");
+        MamArchiveRepository::lock_sequences(&mut tx, std::slice::from_ref(&first))
+            .await
+            .expect("lock first");
+        started.notify_one();
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        MamArchiveRepository::lock_sequences(&mut tx, std::slice::from_ref(&second))
+            .await
+            .expect("lock second while the reverse transaction waits on the first");
+        tx.commit().await.expect("forward commit");
+    };
+    let reverse = async {
+        started.notified().await;
+        let mut tx = fixture.uow.begin().await.expect("reverse transaction");
+        // Plan order says second-then-first; the repository locks first-then-second.
+        MamArchiveRepository::lock_sequences(&mut tx, &[second.clone(), first.clone()])
+            .await
+            .expect("reverse order queues instead of deadlocking");
+        tx.commit().await.expect("reverse commit");
+    };
+    tokio::time::timeout(Duration::from_secs(10), async {
+        tokio::join!(forward, reverse);
+    })
+    .await
+    .expect("both transactions complete");
+    assert_eq!(
+        fixture
+            .count("mam_archive_sequences WHERE next_seq = 0")
+            .await,
+        2,
+        "locking creates zero-valued counter rows without allocating"
+    );
+
+    let message = ArchivedMessage::for_test(
+        fixture.principal.bare_jid().clone().into(),
+        first.clone().into(),
+    );
+    let mut tx = fixture.uow.begin().await.expect("allocate after lock row");
+    let outcome = MamArchiveRepository::store(&mut tx, &first, &message, ArchiveExpectation::Fresh)
+        .await
+        .expect("first allocation");
+    tx.commit().await.expect("commit first allocation");
+    assert!(matches!(
+        outcome,
+        waddle_xmpp::mam::MamTxStoreOutcome::Inserted { ordinal, .. }
+            if ordinal == ArchiveOrdinal::FIRST
+    ));
+
+    let holder = fixture.uow.begin().await.expect("holding transaction");
+    let mut holder = holder;
+    MamArchiveRepository::lock_sequences(&mut holder, std::slice::from_ref(&second))
+        .await
+        .expect("hold the second counter");
+    let contended = async {
+        let mut tx = fixture
+            .uow
+            .begin_with_timeouts(Duration::from_millis(50), Duration::from_millis(250))
+            .await?;
+        let message = ArchivedMessage::for_test(
+            fixture.principal.bare_jid().clone().into(),
+            second.clone().into(),
+        );
+        MamArchiveRepository::store(&mut tx, &second, &message, ArchiveExpectation::Fresh).await
+    }
+    .await;
+    assert!(
+        matches!(
+            contended,
+            Err(waddle_server::ingress_uow::IngressUowError::Timeout)
+        ),
+        "contended counter is a bounded timeout, got {contended:?}"
+    );
+    drop(holder);
+    fixture.close().await;
+}
+
 /// XEP-0313 §4.1 and §6.3: personal archives assign independently scoped UIDs.
 async fn distinct_archives(fixture: IngressFixture) {
     let sender = fixture.principal.bare_jid().clone();
@@ -721,4 +806,10 @@ backend_tests!(
     ordinal_mismatch_sqlite,
     ordinal_mismatch_postgres,
     ordinal_mismatch
+);
+
+backend_tests!(
+    counter_lock_order_and_contention_sqlite,
+    counter_lock_order_and_contention_postgres,
+    counter_lock_order_and_contention
 );

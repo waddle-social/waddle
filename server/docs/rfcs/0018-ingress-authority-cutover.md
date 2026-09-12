@@ -348,7 +348,11 @@ first can commit after a later message. XEP-0313 §3.1 (in-tree
 The ordering authority is a per-archive commit ordinal, `archive_seq`, allocated
 from `mam_archive_sequences` in the insert's transaction by every writer,
 including the Phase B transaction writer and the pool writer. The archive's
-counter row serializes allocation through commit. MAM reads, RSM cursors and
+counter row serializes allocation through commit. Phase B locks every archive
+counter the plan will write in canonical archive order before any durable
+mutation, so a message and its reply (plan orders differ) queue instead of
+deadlocking; a counter wait that exceeds the Phase B lock timeout is the
+ordinary non-advancing `Timeout`, never a storage fault. MAM reads, RSM cursors and
 newest/first lookups order by the ordinal; `<delay>` keeps the receive timestamp
 and time-range filters keep their time semantics. Archive UIDs remain opaque.
 Repair re-inserts at the recorded ordinal carried on `ArchiveAuthoritative` and
