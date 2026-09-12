@@ -19,6 +19,26 @@ import "github.com/cuenv/cuenv/schema"
 	}]
 }
 
+// #FlakeHubCache authenticates the runner against FlakeHub Cache over the
+// job's OIDC token (every pipeline grants `id-token: write`) so store paths
+// built on one ref are substitutable on every other. GitHub's own Actions
+// cache, which Hestia sits on, is scoped per ref and PR builds can never
+// feed `main`; this is the shared layer that closes that gap. The GHA cache
+// side of the action is disabled so it never competes with Hestia.
+#FlakeHubCache: schema.#Contributor & {
+	id: "flakehub-cache"
+	tasks: [{
+		id:       "flakehub-cache.setup"
+		label:    "Setup FlakeHub Cache"
+		priority: 3
+		dependsOn: ["nix.install"]
+		provider: github: {
+			uses: "DeterminateSystems/flakehub-cache-action@e80fccc9c4e3a885ad51721c8b92ba3f839d2f6f"
+			with: "use-gha-cache": "disabled"
+		}
+	}]
+}
+
 // #Hestia mirrors cuenv 0.55's Hestia contributor without enabling its
 // repository-wide generated workflow. Waddle owns that workflow separately so
 // its privileged Nix installer can also be pinned to an immutable revision.

@@ -17,7 +17,7 @@ schema.#Project & {
 	let _t = tasks
 
 	ci: providers: ["github"]
-	ci: contributors: [wc.#Nix, wc.#Hestia, c.#CuenvRelease, c.#OnePassword]
+	ci: contributors: [wc.#Nix, wc.#FlakeHubCache, wc.#Hestia, c.#CuenvRelease, c.#OnePassword]
 
 	// Grafana Cloud ruler credentials for rulesSync (#1324). Resolved
 	// via 1Password on main-push CI (the OnePassword contributor +
@@ -76,6 +76,12 @@ schema.#Project & {
 		pullRequest: {
 			derivePaths: true
 			when: pullRequest: true
+			provider: github: permissions: {
+				"id-token":      "write"
+				contents:        "read"
+				checks:          "write"
+				"pull-requests": "write"
+			}
 			tasks: [_t.rulesLint, _t.dashboardsLint]
 		}
 	}
