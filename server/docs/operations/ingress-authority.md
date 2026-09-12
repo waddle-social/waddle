@@ -204,7 +204,17 @@ previous build keeps the unkeyed append path, so during a rolling window an old
 owner could append with no ledger row while a concurrent replay allocated the
 same `(obligation, resource)` a second time — the duplicate the migration exists
 to prevent. Stopping every old writer before the first keyed writer starts is
-the only way to make the gate total from its first use.
+what makes the gate total for **appends made after the cutover**.
+
+It is not retroactive, and the migration is additive rather than a reset, so it
+mints no proof for work already in flight. An append the previous binary
+committed unkeyed, whose progress transaction then failed, leaves a real SM queue
+entry and an unresolved canonical obligation but **no ledger row**. A
+post-cutover retry reads an empty key and appends that resource again. The
+window is bounded by the obligations outstanding at cutover; treat a duplicate
+delivery reported across the cutover boundary as expected rather than as a gate
+failure, and prefer draining outstanding obligations before a comparable cutover
+in future.
 
 Rollback is fail-closed **only back to the ledger itself**. The migration ledger
 guard makes a binary whose catalog lacks a version recorded in `_migrations`
@@ -244,7 +254,9 @@ acknowledged or gap-covered proofs cannot fill the result set and hide a real on
 
 ```sql
 BEGIN TRANSACTION ISOLATION LEVEL REPEATABLE READ READ ONLY;
-SELECT a.message_key, a.resource, a.accepting_stream_id, a.sequence,
+SELECT a.message_key, a.receipt_kind,
+       encode(a.semantic_identity_hash, 'hex') AS semantic_identity_hash,
+       a.resource, a.accepting_stream_id, a.sequence,
        to_timestamp(a.appended_at_ms / 1000.0) AS appended_at
 FROM sm_ingress_appends a
 JOIN ingress_messages m
@@ -260,9 +272,14 @@ LEFT JOIN ingress_delivery_receipts d
  AND d.kind = a.receipt_kind
  AND d.semantic_identity_hash = a.semantic_identity_hash
  AND d.resource = a.resource
+LEFT JOIN ingress_effect_receipts e
+  ON e.message_key = a.message_key::uuid
+ AND e.kind = a.receipt_kind
+ AND e.semantic_identity_hash = a.semantic_identity_hash
 WHERE u.stream_id IS NULL   -- the payload is gone
   AND s.stream_id IS NULL   -- and so is the whole session, not merely acked or gapped
-  AND d.message_key IS NULL -- and this resource was never receipted as delivered
+  AND d.message_key IS NULL -- this resource was never receipted as delivered
+  AND e.message_key IS NULL -- nor was its effect settled generically
 ORDER BY a.appended_at_ms
 LIMIT 50;
 COMMIT;
@@ -273,7 +290,13 @@ covered by the replay gap legitimately has no `sm_unacked` row, so `u` alone
 proves nothing. A message may stay non-terminal because a *different* unresolved
 intent holds it open while this resource was delivered normally, so the
 `ingress_delivery_receipts` join is what separates an undelivered resource from a
-healthy one. Note the `::uuid` casts: the ledger stores `message_key` as text
+healthy one. Not every settled append reaches that table, though: a recorded
+`RelayFullJid` that falls back to a local detached session writes a ledger row but
+settles generically through `ingress_effect_receipts`, so `e` excludes those too.
+Both `receipt_kind` and `semantic_identity_hash` are selected because one
+canonical message can hold several routes to the same resource; without them a
+candidate cannot be tied back to a specific obligation, its recorded intent or its
+progress rows. Note the `::uuid` casts: the ledger stores `message_key` as text
 while the ingress tables use `uuid`.
 
 Rows that survive all three predicates are the shape #1760 describes (durable
@@ -588,11 +611,16 @@ Since #1756 this path allocates exactly one durable queue entry per (recorded
 obligation, resource), with no retry-induced duplicate. The stream-independent
 `sm_ingress_appends` ledger is consulted before any session work and its primary
 key is the gate, so neither a concurrent duplicate decision nor a crash between
-the append and its progress commit allocates a second entry. Two limits remain
-explicit: XEP-0198 still permits a client-observed duplicate after an uncertain
-acknowledgement, and when no unexpired session exists the append does not happen
-at all and the obligation stays unresolved for its recorded route to retry or
-degrade. Earlier committed progress survives restart and is excluded from later
+the append and its progress commit allocates a second entry. Three limits remain
+explicit. XEP-0198 still permits a client-observed duplicate after an uncertain
+acknowledgement. When no unexpired session exists the append does not happen at
+all and the obligation stays unresolved for its recorded route to retry or
+degrade. And the guarantee covers keyed appends only: in a clustered route whose
+remote-resource owner refresh resolves locally against a detached recipient,
+`deliver_local_full_jid_after_target_refresh` passes no append context
+(`clustering/route_bridge/delivery/local.rs:109-127`), so that append is unkeyed
+and a failed effect-receipt write can let recovery append the same resource
+again. That residue is tracked by #1760. Earlier committed progress survives restart and is excluded from later
 decisions. Progress writes and the final aggregate receipt share one
 epoch-attested transaction under the canonical message lock. Lock contention
 leaves the obligation retryable.
