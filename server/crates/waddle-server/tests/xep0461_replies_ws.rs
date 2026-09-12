@@ -249,6 +249,7 @@ fn reply_archived_row(
     reply: Option<ArchivedReply>,
 ) -> ArchivedMessage {
     ArchivedMessage {
+        ordinal: None,
         id: archive_id.to_string(),
         timestamp: chrono::Utc::now(),
         from: format!("{STORAGE_ARCHIVE}/alice")

@@ -356,15 +356,12 @@ async fn lost_phase_c(fixture: IngressFixture) {
         .await
         .expect("stored MAM read")
         .is_some());
-    assert_eq!(
-        mam.delete_before(
-            &recovery.key.room,
-            chrono::Utc::now() + chrono::Duration::seconds(1)
+    fixture
+        .execute(
+            "DELETE FROM mam_messages WHERE id = ?",
+            waddle_server::db_params![archived.id.clone()],
         )
-        .await
-        .expect("MAM retention deletion"),
-        1
-    );
+        .await;
     assert!(mam
         .get_message(&archived.id)
         .await

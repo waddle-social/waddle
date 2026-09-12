@@ -115,6 +115,7 @@ pub fn build_direct_archived_message(
     let thread = thread_info_from_message_in_stanza_ns(message, CLIENT_STANZA_NS);
 
     ArchivedMessage {
+        ordinal: None,
         id,
         timestamp: Utc::now(),
         from,

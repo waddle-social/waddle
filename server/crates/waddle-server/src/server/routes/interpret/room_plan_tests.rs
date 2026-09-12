@@ -237,6 +237,7 @@ async fn plan_pinned_retraction_freezes_system_archive_and_deliveries() {
         .expect("pin");
     let mam: Arc<dyn MamStorage> = Arc::new(InMemoryMamStorage::new());
     let original = ArchivedMessage {
+        ordinal: None,
         id: target.id.clone(),
         body: Some("private preview".to_owned()),
         message_type: XmppMessageType::Groupchat,
@@ -253,6 +254,7 @@ async fn plan_pinned_retraction_freezes_system_archive_and_deliveries() {
     let request_id = StanzaId::new("retraction-request", Jid::from(room.clone()));
     waddle_xmpp_core::xep0359::add_stanza_id(&mut request, &request_id);
     let tombstoned_request = ArchivedMessage {
+        ordinal: None,
         id: request_id.id.clone(),
         body: None,
         rich: Some(ArchivedRichMessage {

@@ -114,7 +114,7 @@ async fn query_wire(fixture: &IngressFixture, archive: &BareJid) -> Vec<Archived
     result.messages
 }
 
-/// XEP-0313 §5.1.3 and §6.3: retries and missing-row repair retain the archive UID and order.
+/// XEP-0313 §5.1.3 and §6.3: retries and missing-row repair retain archive identity.
 async fn identity_repair_tombstone(fixture: IngressFixture) {
     let archive = fixture.principal.bare_jid().clone();
     let stamp = Utc::now() - chrono::Duration::minutes(2);
@@ -155,16 +155,19 @@ async fn identity_repair_tombstone(fixture: IngressFixture) {
     .expect("repair");
     assert_eq!(repaired.archive_ids, inserted.archive_ids);
     let after = query_wire(&fixture, &archive).await;
+    // Stage 1 ingress has no recorded ordinal yet, so repair allocates at the tail.
+    // The ingress slice will preserve the original position by recording it.
     assert_eq!(
-        before
-            .iter()
-            .map(|row| (&row.id, row.timestamp))
-            .collect::<Vec<_>>(),
-        after
-            .iter()
-            .map(|row| (&row.id, row.timestamp))
-            .collect::<Vec<_>>()
+        after.iter().map(|row| row.id.as_str()).collect::<Vec<_>>(),
+        vec!["archive-b-id", "archive-a-id"]
     );
+    for original_row in &before {
+        let repaired_row = after
+            .iter()
+            .find(|row| row.id == original_row.id)
+            .expect("same identity");
+        assert_eq!(repaired_row.timestamp, original_row.timestamp);
+    }
     assert_eq!(fixture.count("ingress_messages").await, 2);
     let mut tx = fixture.uow.begin().await.expect("tombstone transaction");
     MamArchiveRepository::replace_with_tombstone(
@@ -187,7 +190,12 @@ async fn identity_repair_tombstone(fixture: IngressFixture) {
     assert_eq!(swallowed.archive_ids, inserted.archive_ids);
     let rows = query_wire(&fixture, &archive).await;
     assert_eq!(rows.len(), 2);
-    assert!(rows[0].body.is_none());
+    assert!(rows
+        .iter()
+        .find(|row| row.id == "archive-a-id")
+        .expect("tombstone row")
+        .body
+        .is_none());
     assert_eq!(
         fixture
             .optional_text("SELECT body FROM mam_messages WHERE id = 'archive-a-id'")

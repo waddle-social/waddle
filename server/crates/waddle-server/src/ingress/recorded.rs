@@ -793,6 +793,8 @@ fn apply_external(
         ) if room == archive && message.id == stanza_id.id => {
             message.timestamp = *archived_at;
             *archive_expectation = waddle_xmpp::mam::ArchiveExpectation::Existing {
+                // #1770 stage-1: ordinal recorded by the ingress slice
+                ordinal: None,
                 stanza_id: stanza_id.clone(),
                 archived_at: *archived_at,
             };

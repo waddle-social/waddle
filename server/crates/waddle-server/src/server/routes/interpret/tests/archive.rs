@@ -69,6 +69,7 @@ async fn direct_correction_preview_ref_target_resolves_to_wire_message_id() {
     mam.store_message(
         &archive_jid,
         &ArchivedMessage {
+            ordinal: None,
             id: "canonical-archive-id".to_string(),
             body: Some("message with preview".to_string()),
             stanza_id: Some(StanzaId::new(
@@ -103,6 +104,7 @@ async fn direct_correction_preview_ref_target_resolves_to_wire_message_id() {
     mam.store_message(
         &archive_jid,
         &ArchivedMessage {
+            ordinal: None,
             id: "origin-canonical-archive-id".to_string(),
             body: Some("message with origin id".to_string()),
             origin_id: Some(OriginId::new("client-origin-id")),
@@ -232,6 +234,7 @@ async fn origin_id_collision_with_distinct_content_keeps_fresh_archive_refs() {
         .store_message(
             &alice,
             &ArchivedMessage {
+                ordinal: None,
                 id: "existing-archive-id".to_string(),
                 body: Some("original copy".to_string()),
                 origin_id: Some(origin_id.clone()),
@@ -432,13 +435,6 @@ async fn xep_0313_archive_direct_drops_when_storage_errors() {
         async fn count_messages(&self, _: &jid::BareJid) -> Result<u32, MamStorageError> {
             Ok(0)
         }
-        async fn delete_before(
-            &self,
-            _: &jid::BareJid,
-            _: chrono::DateTime<chrono::Utc>,
-        ) -> Result<u64, MamStorageError> {
-            Ok(0)
-        }
     }
 
     let registry = ConnectionRegistry::new();
@@ -563,6 +559,7 @@ async fn xep_0424_lookup_archived_message_by_stanza_id_feeds_archived_loaded_bac
     // canonical stamp = "canon-A1".
     let archive_jid: jid::BareJid = "alice@example.com".parse().expect("bare");
     let row = ArchivedMessage {
+        ordinal: None,
         id: "canon-A1".to_string(),
         timestamp: chrono::Utc::now(),
         from: "alice@example.com".parse().expect("jid"),
@@ -668,6 +665,7 @@ async fn xep_0359_lookup_archived_message_by_origin_id_feeds_archived_loaded_bac
     // Bob-authored row in alice's archive (cross-resource self
     // chat / received DM) sharing the colliding origin-id.
     let bob_row = ArchivedMessage {
+        ordinal: None,
         id: "row-from-bob".to_string(),
         timestamp: chrono::Utc::now(),
         from: "bob@example.com".parse().expect("jid"),
@@ -688,6 +686,7 @@ async fn xep_0359_lookup_archived_message_by_origin_id_feeds_archived_loaded_bac
     // Alice-authored row in alice's archive (sender-side) with
     // the same origin-id.
     let alice_row = ArchivedMessage {
+        ordinal: None,
         id: "row-from-alice".to_string(),
         timestamp: chrono::Utc::now(),
         from: "alice@example.com".parse().expect("jid"),
@@ -754,6 +753,7 @@ async fn assert_origin_lookup_finds_targets_beyond_default_page(mam: Arc<dyn Mam
 
     async fn store_row(mam: &dyn MamStorage, archive: &jid::BareJid, seed: SeedRow<'_>) {
         let row = ArchivedMessage {
+            ordinal: None,
             id: seed.id,
             timestamp: chrono::DateTime::from_timestamp(1_700_000_000 + seed.offset, 0)
                 .expect("fixture timestamp"),
@@ -1013,14 +1013,6 @@ async fn xep_0359_lookup_archived_message_propagates_room_archive_kind() {
         async fn count_messages(&self, _: &jid::BareJid) -> Result<u32, MamStorageError> {
             Ok(0)
         }
-
-        async fn delete_before(
-            &self,
-            _: &jid::BareJid,
-            _: chrono::DateTime<chrono::Utc>,
-        ) -> Result<u64, MamStorageError> {
-            Ok(0)
-        }
     }
 
     let registry = ConnectionRegistry::new();
@@ -1029,6 +1021,7 @@ async fn xep_0359_lookup_archived_message_propagates_room_archive_kind() {
 
     let room: jid::BareJid = "room@conference.example".parse().expect("room bare");
     let row = ArchivedMessage {
+        ordinal: None,
         id: "room-row-1".to_string(),
         timestamp: chrono::Utc::now(),
         from: "room@conference.example/alice"
@@ -1093,6 +1086,7 @@ async fn xep_0359_lookup_archived_message_by_origin_id_rejects_cross_sender_coll
 
     let archive_jid: jid::BareJid = "alice@example.com".parse().expect("bare");
     let row = ArchivedMessage {
+        ordinal: None,
         id: "row-1".to_string(),
         timestamp: chrono::Utc::now(),
         from: "bob@example.com".parse().expect("jid"),
@@ -1156,6 +1150,7 @@ async fn xep_0359_lookup_archived_message_strict_stanza_id_ignores_origin_id_col
     // Row whose origin_id equals the value the caller is looking
     // up via StanzaId. Stanza_id is something else.
     let collision_row = ArchivedMessage {
+        ordinal: None,
         id: "row-collide".to_string(),
         timestamp: chrono::Utc::now(),
         from: "alice@example.com".parse().expect("jid"),
@@ -1215,6 +1210,7 @@ async fn xep_0424_lookup_archived_message_propagates_tombstone_state() {
 
     let archive_jid: jid::BareJid = "alice@example.com".parse().expect("bare");
     let row = ArchivedMessage {
+        ordinal: None,
         id: "tomb-1".to_string(),
         timestamp: chrono::Utc::now(),
         from: "alice@example.com".parse().expect("jid"),

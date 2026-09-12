@@ -1,12 +1,11 @@
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
 use async_trait::async_trait;
-use chrono::{DateTime, Utc};
 use jid::BareJid;
 use tokio::sync::RwLock;
 use uuid::Uuid;
-use waddle_xmpp_core::mam::{ArchivedMessage, MamQuery, MamResult};
+use waddle_xmpp_core::mam::{ArchiveOrdinal, ArchivedMessage, MamQuery, MamResult};
 use waddle_xmpp_core::xep0359::OriginId;
 
 use crate::xep::matches_fulltext;
@@ -22,6 +21,7 @@ use super::{MamStorage, MamStorageError, StoreOutcome, TerminalTombstoneOutcome}
 #[derive(Clone, Default)]
 pub struct InMemoryMamStorage {
     entries: Arc<RwLock<Vec<(BareJid, ArchivedMessage)>>>,
+    counters: Arc<RwLock<HashMap<BareJid, ArchiveOrdinal>>>,
 }
 
 impl InMemoryMamStorage {
@@ -59,8 +59,18 @@ impl MamStorage for InMemoryMamStorage {
         let mut stored = message.clone();
         stored.id = archive_id.clone();
 
+        let mut counters = self.counters.write().await;
+        let ordinal = match counters.get(archive_jid) {
+            Some(previous) => previous.next().ok_or(MamStorageError::OrdinalExhausted)?,
+            None => ArchiveOrdinal::from_storage(1)?,
+        };
+        counters.insert(archive_jid.clone(), ordinal);
+        stored.ordinal = Some(ordinal);
         entries.push((archive_jid.clone(), stored));
-        Ok(StoreOutcome::Stored(archive_id))
+        Ok(StoreOutcome::Stored {
+            stanza_id: archive_id,
+            ordinal,
+        })
     }
 
     async fn query_messages(
@@ -181,12 +191,11 @@ impl MamStorage for InMemoryMamStorage {
         }
 
         // XEP-0313 §archive_order: results MUST be in chronological (received)
-        // order. Order by timestamp first; archive id is the tiebreak for
-        // messages that share a timestamp.
+        // order, represented by the committed per-archive ordinal.
         if uses_backward_pagination(query) {
-            messages.sort_by(|a, b| b.timestamp.cmp(&a.timestamp).then_with(|| b.id.cmp(&a.id)));
+            messages.sort_by_key(|a| std::cmp::Reverse(a.ordinal));
         } else {
-            messages.sort_by(|a, b| a.timestamp.cmp(&b.timestamp).then_with(|| a.id.cmp(&b.id)));
+            messages.sort_by_key(|a| a.ordinal);
         }
 
         let actual_limit = query.max.unwrap_or(100).min(500) as usize;
@@ -230,6 +239,7 @@ impl MamStorage for InMemoryMamStorage {
         let entries = self.entries.read().await;
         Ok(entries
             .iter()
+            .rev()
             .find(|(jid, message)| {
                 jid == archive_jid
                     && (message.stanza_id.as_ref().map(|s| s.id.as_str()) == Some(stanza_id)
@@ -246,6 +256,7 @@ impl MamStorage for InMemoryMamStorage {
         let entries = self.entries.read().await;
         Ok(entries
             .iter()
+            .rev()
             .find(|(jid, message)| {
                 jid == archive_jid
                     && message.stanza_id.as_ref().map(|s| s.id.as_str()) == Some(message_id)
@@ -289,11 +300,9 @@ impl MamStorage for InMemoryMamStorage {
                 Some((match_priority, message))
             })
             .min_by(|(left_priority, left), (right_priority, right)| {
-                left_priority.cmp(right_priority).then_with(|| {
-                    left.timestamp
-                        .cmp(&right.timestamp)
-                        .then_with(|| left.id.cmp(&right.id))
-                })
+                left_priority
+                    .cmp(right_priority)
+                    .then_with(|| left.ordinal.cmp(&right.ordinal))
             })
             .map(|(_, message)| message)
             .cloned())
@@ -307,6 +316,7 @@ impl MamStorage for InMemoryMamStorage {
         let entries = self.entries.read().await;
         Ok(entries
             .iter()
+            .rev()
             .find(|(jid, message)| {
                 jid == archive_jid
                     && (message.id == stanza_id
@@ -318,17 +328,6 @@ impl MamStorage for InMemoryMamStorage {
     async fn count_messages(&self, room_jid: &BareJid) -> Result<u32, MamStorageError> {
         let entries = self.entries.read().await;
         Ok(entries.iter().filter(|(jid, _)| jid == room_jid).count() as u32)
-    }
-
-    async fn delete_before(
-        &self,
-        room_jid: &BareJid,
-        before: DateTime<Utc>,
-    ) -> Result<u64, MamStorageError> {
-        let mut entries = self.entries.write().await;
-        let previous_len = entries.len();
-        entries.retain(|(jid, message)| !(jid == room_jid && message.timestamp < before));
-        Ok((previous_len - entries.len()) as u64)
     }
 
     async fn replace_with_tombstone(

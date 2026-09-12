@@ -6,6 +6,15 @@ use crate::postgres_identity::ClusterColocationIdentities;
 /// Errors that can occur during MAM storage operations.
 #[derive(Error, Debug)]
 pub enum MamStorageError {
+    #[error(transparent)]
+    InvalidOrdinal(#[from] waddle_xmpp_core::mam::ArchiveOrdinalError),
+
+    #[error("archive ordinal exhausted")]
+    OrdinalExhausted,
+
+    #[error("archive row {0} has no ordinal")]
+    MissingOrdinal(String),
+
     #[error("Database error: {0}")]
     Database(String),
 

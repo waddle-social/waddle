@@ -226,6 +226,7 @@ async fn retraction_plans_tombstone_and_scrub_without_mutating_archive() {
     let archive: jid::BareJid = "alice@example.com".parse().expect("archive");
     let memory = InMemoryMamStorage::new();
     let row = waddle_xmpp::mam::ArchivedMessage {
+        ordinal: None,
         id: "archive-original".into(),
         timestamp: chrono::Utc::now(),
         from: jid("alice@example.com/web"),

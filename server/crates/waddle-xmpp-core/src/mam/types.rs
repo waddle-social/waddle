@@ -1,3 +1,4 @@
+use super::ArchiveOrdinal;
 use std::collections::BTreeMap;
 
 use chrono::{DateTime, Utc};
@@ -282,6 +283,8 @@ impl ThreadId {
 pub struct ArchivedMessage {
     /// Unique message ID.
     pub id: String,
+    /// Durable archive position: None allocates at write; decoded storage rows always contain Some.
+    pub ordinal: Option<ArchiveOrdinal>,
     /// Timestamp when the message was received.
     pub timestamp: DateTime<Utc>,
     /// Sender JID.
@@ -423,6 +426,7 @@ impl ArchivedMessage {
     pub fn for_test(from: Jid, to: Jid) -> Self {
         Self {
             id: String::new(),
+            ordinal: None,
             timestamp: Utc::now(),
             from,
             to,

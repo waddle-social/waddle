@@ -448,7 +448,7 @@ async fn xep0313_tx_archive_write_rolls_back_with_caller_transaction() {
         store_archived_message_on_connection(&mut tx, &archive, &message, ArchiveExpectation::Fresh)
             .await
             .expect("store archive row"),
-        MamTxStoreOutcome::Inserted(ref stanza_id)
+        MamTxStoreOutcome::Inserted { ref stanza_id, .. }
             if stanza_id.id == id && stanza_id.by == archive
     ));
     tx.rollback().await.expect("roll back transaction");
@@ -458,4 +458,155 @@ async fn xep0313_tx_archive_write_rolls_back_with_caller_transaction() {
         .await
         .expect("count rolled-back row");
     assert_eq!(count, 0);
+}
+
+/// XEP-0313 §3.1 and §4.3.2: archive order and RSM positions reflect
+/// receipt order even when timestamps and lexical UIDs run backwards.
+async fn assert_archive_receipt_order(storage: &dyn MamStorage) {
+    let archive: BareJid = format!("mam-order-{}@conference.example.com", uuid::Uuid::now_v7())
+        .parse()
+        .unwrap();
+    let base = chrono::DateTime::parse_from_rfc3339("2026-07-02T12:00:00Z")
+        .unwrap()
+        .with_timezone(&chrono::Utc);
+    let ids = ["id-002", "id-001", "id-000"].map(|id| format!("{archive}-{id}"));
+    for (id, seconds) in ids.iter().zip([2, 1, 0]) {
+        storage
+            .store_message(
+                &archive,
+                &ArchivedMessage {
+                    id: id.clone(),
+                    timestamp: base + chrono::Duration::seconds(seconds),
+                    message_type: MessageType::Groupchat,
+                    ..ArchivedMessage::for_test(
+                        format!("{archive}/alice").parse().unwrap(),
+                        Jid::from(archive.clone()),
+                    )
+                },
+            )
+            .await
+            .unwrap();
+    }
+
+    let all = storage
+        .query_messages(&archive, MamArchiveKind::Room, &MamQuery::default())
+        .await
+        .unwrap();
+    assert_eq!(
+        all.messages.iter().map(|row| &row.id).collect::<Vec<_>>(),
+        ids.iter().collect::<Vec<_>>()
+    );
+    let ordinals: Vec<_> = all
+        .messages
+        .iter()
+        .map(|row| row.ordinal.unwrap())
+        .collect();
+    assert!(ordinals.windows(2).all(|pair| pair[0] < pair[1]));
+    assert_eq!(
+        all.messages[0].timestamp,
+        base + chrono::Duration::seconds(2)
+    );
+    assert_eq!(all.messages[2].timestamp, base);
+
+    for (query, expected) in [
+        (
+            MamQuery {
+                after_id: Some(ids[1].clone()),
+                ..Default::default()
+            },
+            &ids[2],
+        ),
+        (
+            MamQuery {
+                before_id: Some(ids[1].clone()),
+                ..Default::default()
+            },
+            &ids[0],
+        ),
+        (
+            MamQuery {
+                filter_after_id: Some(ids[1].clone()),
+                ..Default::default()
+            },
+            &ids[2],
+        ),
+        (
+            MamQuery {
+                filter_before_id: Some(ids[1].clone()),
+                ..Default::default()
+            },
+            &ids[0],
+        ),
+        // Time filters still use timestamps, independently of page ordering.
+        (
+            MamQuery {
+                start: Some(base + chrono::Duration::seconds(2)),
+                ..Default::default()
+            },
+            &ids[0],
+        ),
+    ] {
+        let page = storage
+            .query_messages(&archive, MamArchiveKind::Room, &query)
+            .await
+            .unwrap();
+        assert_eq!(page.messages.len(), 1, "query {query:?}");
+        assert_eq!(&page.messages[0].id, expected, "query {query:?}");
+    }
+
+    let first = storage
+        .query_messages(
+            &archive,
+            MamArchiveKind::Room,
+            &MamQuery {
+                max: Some(1),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+    assert_eq!(first.first_id.as_ref(), Some(&ids[0]));
+    assert!(!first.complete);
+    let rest = storage
+        .query_messages(
+            &archive,
+            MamArchiveKind::Room,
+            &MamQuery {
+                after_id: first.last_id,
+                max: Some(2),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        rest.messages.iter().map(|row| &row.id).collect::<Vec<_>>(),
+        ids[1..].iter().collect::<Vec<_>>()
+    );
+    assert!(rest.complete);
+}
+
+#[tokio::test]
+async fn xep0313_sqlite_archive_order_survives_backdated_messages() {
+    let storage = waddle_xmpp::mam::SqlxMamStorage::open("sqlite::memory:")
+        .await
+        .unwrap();
+    assert_archive_receipt_order(&storage).await;
+}
+
+#[tokio::test]
+async fn xep0313_in_memory_archive_order_survives_backdated_messages() {
+    assert_archive_receipt_order(&InMemoryMamStorage::new()).await;
+}
+
+#[tokio::test]
+async fn xep0313_postgres_archive_order_survives_backdated_messages() {
+    let Ok(url) = std::env::var("WADDLE_TEST_POSTGRES_URL") else {
+        eprintln!(
+            "skipping XEP-0313 Postgres archive-order test: WADDLE_TEST_POSTGRES_URL is unset"
+        );
+        return;
+    };
+    let storage = waddle_xmpp::mam::SqlxMamStorage::open(&url).await.unwrap();
+    assert_archive_receipt_order(&storage).await;
 }

@@ -51,6 +51,7 @@ async fn seed_target(state: &WebSocketState, submission: &IngressSubmission) -> 
             .store_message(
                 archive,
                 &ArchivedMessage {
+                    ordinal: None,
                     id: id.to_owned(),
                     body: Some("important message".into()),
                     stanza_id: Some(target.clone()),

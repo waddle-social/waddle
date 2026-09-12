@@ -83,7 +83,7 @@ pub(super) async fn archive_direct(
     match outcome {
         Ok(outcome) => {
             let archive_id = match outcome {
-                StoreOutcome::Stored(id) => id,
+                StoreOutcome::Stored { stanza_id: id, .. } => id,
                 StoreOutcome::TombstoneHit(id) => {
                     warn!(
                         archive_jid = %archive_jid,

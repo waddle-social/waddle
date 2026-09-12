@@ -265,6 +265,7 @@ async fn finish_archive_groupchat_message_with_effects(
         .as_ref()
         .map(|id| waddle_xmpp_core::xep0359::StanzaId::new(id.0.clone(), room_jid_full.clone()));
     let archived = MamArchivedMessage {
+        ordinal: None,
         id: archive_id.clone(),
         timestamp: chrono::Utc::now(),
         from: from_jid,
@@ -331,17 +332,18 @@ async fn finish_archive_groupchat_message_with_effects(
         }
     };
     match store_result {
-        Ok(StoreOutcome::Stored(stored_id)) => {
-            ArchiveGroupchatOutcome::Stored(ArchiveStoreResult {
-                rewrite: ArchiveIdRewrite::from_store_result(
-                    jid::Jid::from(room.clone()),
-                    archive_id,
-                    stored_id.clone(),
-                ),
-                stored_id,
-                archived_at: archived.timestamp,
-            })
-        }
+        Ok(StoreOutcome::Stored {
+            stanza_id: stored_id,
+            ..
+        }) => ArchiveGroupchatOutcome::Stored(ArchiveStoreResult {
+            rewrite: ArchiveIdRewrite::from_store_result(
+                jid::Jid::from(room.clone()),
+                archive_id,
+                stored_id.clone(),
+            ),
+            stored_id,
+            archived_at: archived.timestamp,
+        }),
         Ok(StoreOutcome::TombstoneHit(existing_id)) => {
             debug!(
                 room = %room,

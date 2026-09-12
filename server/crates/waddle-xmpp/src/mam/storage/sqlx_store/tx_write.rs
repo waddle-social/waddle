@@ -1,3 +1,6 @@
+use super::allocation::{
+    allocate_postgres, allocate_sqlite, decode_ordinal, preserve_postgres, preserve_sqlite,
+};
 use super::write::{
     find_origin_tombstone_postgres, find_origin_tombstone_sqlite,
     insert_postgres_message_on_connection, insert_sqlite_message_on_connection, InsertConflict,
@@ -8,7 +11,7 @@ use jid::BareJid;
 use sqlx::{PgConnection, SqliteConnection};
 use std::num::TryFromIntError;
 use thiserror::Error;
-use waddle_xmpp_core::mam::{ArchivedMessage, ArchivedRichMessage};
+use waddle_xmpp_core::mam::{ArchiveOrdinal, ArchivedMessage, ArchivedRichMessage};
 use waddle_xmpp_core::xep0359::StanzaId;
 
 /// Canonical ingress authority's expectation for this archive projection.
@@ -18,14 +21,24 @@ pub enum ArchiveExpectation {
     Existing {
         stanza_id: StanzaId,
         archived_at: DateTime<Utc>,
+        ordinal: Option<ArchiveOrdinal>,
     },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum MamTxStoreOutcome {
-    Inserted(StanzaId),
-    Existing(StanzaId),
-    Repaired(StanzaId),
+    Inserted {
+        stanza_id: StanzaId,
+        ordinal: ArchiveOrdinal,
+    },
+    Existing {
+        stanza_id: StanzaId,
+        ordinal: ArchiveOrdinal,
+    },
+    Repaired {
+        stanza_id: StanzaId,
+        ordinal: ArchiveOrdinal,
+    },
     TombstoneHit(StanzaId),
     /// Reserved for bounded archive retention; current MAM retention is unbounded.
     Expired(StanzaId),
@@ -47,6 +60,11 @@ pub enum MamTxStoreError {
     Encoding(#[from] MamTxEncodingError),
     #[error("MAM archive id conflicts with canonical identity: {}", stanza_id.id)]
     Conflict { stanza_id: StanzaId },
+    #[error("MAM archive ordinal conflicts with canonical identity: {}", stanza_id.id)]
+    OrdinalConflict {
+        stanza_id: StanzaId,
+        ordinal: ArchiveOrdinal,
+    },
 }
 
 fn expected_message(
@@ -67,6 +85,7 @@ fn expected_message(
         ArchiveExpectation::Existing {
             stanza_id,
             archived_at,
+            ..
         } => {
             if stanza_id.by != *archive {
                 return Err(MamTxStoreError::Conflict {
@@ -90,16 +109,30 @@ pub async fn store_archived_message_on_connection(
     expectation: ArchiveExpectation,
 ) -> Result<MamTxStoreOutcome, MamTxStoreError> {
     let (message, stanza_id) = expected_message(archive, message, &expectation)?;
-    let existing: Option<(String, Option<String>)> =
-        sqlx::query_as("SELECT room_jid, rich_payload FROM mam_messages WHERE id = $1")
-            .bind(&stanza_id.id)
-            .fetch_optional(&mut *conn)
-            .await?;
-    if let Some((recorded_archive, payload)) = existing {
+    let existing: Option<(String, Option<String>, i64)> = sqlx::query_as(
+        "SELECT room_jid, rich_payload, archive_seq FROM mam_messages WHERE id = $1",
+    )
+    .bind(&stanza_id.id)
+    .fetch_optional(&mut *conn)
+    .await?;
+    if let Some((recorded_archive, payload, stored_ordinal)) = existing {
         if matches!(expectation, ArchiveExpectation::Fresh)
             || recorded_archive != archive.to_string()
         {
             return Err(MamTxStoreError::Conflict { stanza_id });
+        }
+        let ordinal = decode_ordinal(stored_ordinal)?;
+        if let ArchiveExpectation::Existing {
+            ordinal: Some(recorded),
+            ..
+        } = &expectation
+        {
+            if *recorded != ordinal {
+                return Err(MamTxStoreError::OrdinalConflict {
+                    stanza_id,
+                    ordinal: *recorded,
+                });
+            }
         }
         let rich: Option<ArchivedRichMessage> = payload
             .as_deref()
@@ -113,7 +146,7 @@ pub async fn store_archived_message_on_connection(
             {
                 MamTxStoreOutcome::TombstoneHit(stanza_id)
             } else {
-                MamTxStoreOutcome::Existing(stanza_id)
+                MamTxStoreOutcome::Existing { stanza_id, ordinal }
             },
         );
     }
@@ -134,6 +167,16 @@ pub async fn store_archived_message_on_connection(
         .map(i64::try_from)
         .transpose()
         .map_err(MamTxEncodingError::NicknameGeneration)?;
+    let ordinal = match &expectation {
+        ArchiveExpectation::Existing {
+            ordinal: Some(ordinal),
+            ..
+        } => {
+            preserve_postgres(conn, archive, *ordinal).await?;
+            *ordinal
+        }
+        _ => allocate_postgres(conn, archive).await?,
+    };
     if insert_postgres_message_on_connection(
         conn,
         MessageInsert {
@@ -142,17 +185,32 @@ pub async fn store_archived_message_on_connection(
             message: &message,
             rich_payload: rich_payload.as_deref(),
             nickname_generation,
+            ordinal,
         },
         InsertConflict::DoNothing,
     )
-    .await?
+    .await
+    .map_err(|error| match &expectation {
+        ArchiveExpectation::Existing {
+            ordinal: Some(_), ..
+        } if error
+            .as_database_error()
+            .is_some_and(|error| error.is_unique_violation()) =>
+        {
+            MamTxStoreError::OrdinalConflict {
+                stanza_id: stanza_id.clone(),
+                ordinal,
+            }
+        }
+        _ => MamTxStoreError::Database(error),
+    })?
     .is_none()
     {
         return Err(MamTxStoreError::Conflict { stanza_id });
     }
     Ok(match expectation {
-        ArchiveExpectation::Fresh => MamTxStoreOutcome::Inserted(stanza_id),
-        ArchiveExpectation::Existing { .. } => MamTxStoreOutcome::Repaired(stanza_id),
+        ArchiveExpectation::Fresh => MamTxStoreOutcome::Inserted { stanza_id, ordinal },
+        ArchiveExpectation::Existing { .. } => MamTxStoreOutcome::Repaired { stanza_id, ordinal },
     })
 }
 
@@ -165,16 +223,30 @@ pub async fn store_archived_message_on_sqlite_connection(
     expectation: ArchiveExpectation,
 ) -> Result<MamTxStoreOutcome, MamTxStoreError> {
     let (message, stanza_id) = expected_message(archive, message, &expectation)?;
-    let existing: Option<(String, Option<String>)> =
-        sqlx::query_as("SELECT room_jid, rich_payload FROM mam_messages WHERE id = $1")
-            .bind(&stanza_id.id)
-            .fetch_optional(&mut *conn)
-            .await?;
-    if let Some((recorded_archive, payload)) = existing {
+    let existing: Option<(String, Option<String>, i64)> = sqlx::query_as(
+        "SELECT room_jid, rich_payload, archive_seq FROM mam_messages WHERE id = $1",
+    )
+    .bind(&stanza_id.id)
+    .fetch_optional(&mut *conn)
+    .await?;
+    if let Some((recorded_archive, payload, stored_ordinal)) = existing {
         if matches!(expectation, ArchiveExpectation::Fresh)
             || recorded_archive != archive.to_string()
         {
             return Err(MamTxStoreError::Conflict { stanza_id });
+        }
+        let ordinal = decode_ordinal(stored_ordinal)?;
+        if let ArchiveExpectation::Existing {
+            ordinal: Some(recorded),
+            ..
+        } = &expectation
+        {
+            if *recorded != ordinal {
+                return Err(MamTxStoreError::OrdinalConflict {
+                    stanza_id,
+                    ordinal: *recorded,
+                });
+            }
         }
         let rich: Option<ArchivedRichMessage> = payload
             .as_deref()
@@ -188,7 +260,7 @@ pub async fn store_archived_message_on_sqlite_connection(
             {
                 MamTxStoreOutcome::TombstoneHit(stanza_id)
             } else {
-                MamTxStoreOutcome::Existing(stanza_id)
+                MamTxStoreOutcome::Existing { stanza_id, ordinal }
             },
         );
     }
@@ -209,6 +281,16 @@ pub async fn store_archived_message_on_sqlite_connection(
         .map(i64::try_from)
         .transpose()
         .map_err(MamTxEncodingError::NicknameGeneration)?;
+    let ordinal = match &expectation {
+        ArchiveExpectation::Existing {
+            ordinal: Some(ordinal),
+            ..
+        } => {
+            preserve_sqlite(conn, archive, *ordinal).await?;
+            *ordinal
+        }
+        _ => allocate_sqlite(conn, archive).await?,
+    };
     if insert_sqlite_message_on_connection(
         conn,
         MessageInsert {
@@ -217,17 +299,32 @@ pub async fn store_archived_message_on_sqlite_connection(
             message: &message,
             rich_payload: rich_payload.as_deref(),
             nickname_generation,
+            ordinal,
         },
         InsertConflict::DoNothing,
     )
-    .await?
+    .await
+    .map_err(|error| match &expectation {
+        ArchiveExpectation::Existing {
+            ordinal: Some(_), ..
+        } if error
+            .as_database_error()
+            .is_some_and(|error| error.is_unique_violation()) =>
+        {
+            MamTxStoreError::OrdinalConflict {
+                stanza_id: stanza_id.clone(),
+                ordinal,
+            }
+        }
+        _ => MamTxStoreError::Database(error),
+    })?
     .is_none()
     {
         return Err(MamTxStoreError::Conflict { stanza_id });
     }
     Ok(match expectation {
-        ArchiveExpectation::Fresh => MamTxStoreOutcome::Inserted(stanza_id),
-        ArchiveExpectation::Existing { .. } => MamTxStoreOutcome::Repaired(stanza_id),
+        ArchiveExpectation::Fresh => MamTxStoreOutcome::Inserted { stanza_id, ordinal },
+        ArchiveExpectation::Existing { .. } => MamTxStoreOutcome::Repaired { stanza_id, ordinal },
     })
 }
 
@@ -304,7 +401,7 @@ mod tests {
             )
             .await
             .expect("insert"),
-            MamTxStoreOutcome::Inserted(_)
+            MamTxStoreOutcome::Inserted { .. }
         ));
         assert!(matches!(
             store_archived_message_on_connection(
@@ -322,19 +419,26 @@ mod tests {
         let expected = ArchiveExpectation::Existing {
             stanza_id: id.clone(),
             archived_at,
+            ordinal: None,
         };
         let mut tx = pool.begin().await.expect("begin repair");
         assert_eq!(
             store_archived_message_on_connection(&mut tx, &archive, &message, expected.clone())
                 .await
                 .expect("repair"),
-            MamTxStoreOutcome::Repaired(id.clone())
+            MamTxStoreOutcome::Repaired {
+                stanza_id: id.clone(),
+                ordinal: ArchiveOrdinal::from_storage(1).expect("positive ordinal")
+            }
         );
         assert_eq!(
             store_archived_message_on_connection(&mut tx, &archive, &message, expected.clone())
                 .await
                 .expect("existing"),
-            MamTxStoreOutcome::Existing(id.clone())
+            MamTxStoreOutcome::Existing {
+                stanza_id: id.clone(),
+                ordinal: ArchiveOrdinal::from_storage(1).expect("positive ordinal")
+            }
         );
         let another = fixture(&archive, &unique_id("same-origin"), Some("origin"));
         assert!(matches!(
@@ -346,7 +450,7 @@ mod tests {
             )
             .await
             .expect("origin id does not deduplicate"),
-            MamTxStoreOutcome::Inserted(_)
+            MamTxStoreOutcome::Inserted { .. }
         ));
         tx.commit().await.expect("commit repair");
         let stored = storage
@@ -426,7 +530,7 @@ mod tests {
             )
             .await
             .expect("insert"),
-            MamTxStoreOutcome::Inserted(_)
+            MamTxStoreOutcome::Inserted { .. }
         ));
         assert!(matches!(
             store_archived_message_on_sqlite_connection(
@@ -444,6 +548,7 @@ mod tests {
         let expected = ArchiveExpectation::Existing {
             stanza_id: id.clone(),
             archived_at,
+            ordinal: None,
         };
         let mut tx = pool.begin().await.expect("begin repair");
         assert_eq!(
@@ -455,7 +560,10 @@ mod tests {
             )
             .await
             .expect("repair"),
-            MamTxStoreOutcome::Repaired(id.clone())
+            MamTxStoreOutcome::Repaired {
+                stanza_id: id.clone(),
+                ordinal: ArchiveOrdinal::from_storage(1).expect("positive ordinal")
+            }
         );
         assert_eq!(
             store_archived_message_on_sqlite_connection(
@@ -466,7 +574,10 @@ mod tests {
             )
             .await
             .expect("existing"),
-            MamTxStoreOutcome::Existing(id.clone())
+            MamTxStoreOutcome::Existing {
+                stanza_id: id.clone(),
+                ordinal: ArchiveOrdinal::from_storage(1).expect("positive ordinal")
+            }
         );
         let another = fixture(&archive, &unique_id("same-origin"), Some("origin"));
         assert!(matches!(
@@ -478,7 +589,7 @@ mod tests {
             )
             .await
             .expect("origin id does not deduplicate"),
-            MamTxStoreOutcome::Inserted(_)
+            MamTxStoreOutcome::Inserted { .. }
         ));
         tx.commit().await.expect("commit repair");
         let stored = storage

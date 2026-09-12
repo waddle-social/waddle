@@ -8,9 +8,9 @@ use super::MamArchiveKind;
 pub(super) fn uses_backward_pagination(query: &MamQuery) -> bool {
     // XEP-0059 §2.5: an empty <before/> element requests the last page of
     // results. We treat any present `before_id` — including `Some("")` — as a
-    // backward-pagination signal so the SQL emits ORDER BY id DESC and
+    // backward-pagination signal so the SQL emits ORDER BY archive_seq DESC and
     // `finalize_result` reverses back to chronological order. The downstream
-    // `id < ?` predicate is still skipped for the empty case, so no rows are
+    // `archive_seq < ?` predicate is still skipped for the empty case, so no rows are
     // filtered out.
     query.before_id.is_some()
 }
@@ -69,13 +69,11 @@ pub(super) fn finalize_result(
 }
 
 pub(super) fn archive_order_before(message: &ArchivedMessage, cursor: &ArchivedMessage) -> bool {
-    message.timestamp < cursor.timestamp
-        || (message.timestamp == cursor.timestamp && message.id < cursor.id)
+    message.ordinal < cursor.ordinal
 }
 
 pub(super) fn archive_order_after(message: &ArchivedMessage, cursor: &ArchivedMessage) -> bool {
-    message.timestamp > cursor.timestamp
-        || (message.timestamp == cursor.timestamp && message.id > cursor.id)
+    message.ordinal > cursor.ordinal
 }
 
 /// XEP-0313 §4.3.1 `with` predicate, evaluated against a single

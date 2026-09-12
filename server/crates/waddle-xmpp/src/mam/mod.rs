@@ -23,9 +23,9 @@ pub use storage::{
 };
 pub use waddle_xmpp_core::mam::{
     archived_inner_message, build_fin_iq, build_query_form_iq, build_result_messages, is_mam_query,
-    is_mam_query_form_request, parse_mam_query, ArchivedMention, ArchivedMessage,
-    ArchivedModeration, ArchivedReactionSet, ArchivedReference, ArchivedReply, ArchivedRetraction,
-    ArchivedRichMessage, ArchivedRichPayload, ArchivedTombstone, MamQuery, MamResult,
-    RichMessageId, RichText, ThreadId, FULLTEXT_MAM_FIELD, FULLTEXT_MAM_NS, MAM_NS, RSM_NS,
-    STANZA_ID_NS,
+    is_mam_query_form_request, parse_mam_query, ArchiveOrdinal, ArchiveOrdinalError,
+    ArchivedMention, ArchivedMessage, ArchivedModeration, ArchivedReactionSet, ArchivedReference,
+    ArchivedReply, ArchivedRetraction, ArchivedRichMessage, ArchivedRichPayload, ArchivedTombstone,
+    MamQuery, MamResult, RichMessageId, RichText, ThreadId, FULLTEXT_MAM_FIELD, FULLTEXT_MAM_NS,
+    MAM_NS, RSM_NS, STANZA_ID_NS,
 };

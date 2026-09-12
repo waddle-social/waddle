@@ -270,6 +270,7 @@ mod tests {
             archive_jid.clone(),
         ));
         MamArchivedMessage {
+            ordinal: None,
             id: wire_id.to_string(),
             timestamp: chrono::Utc::now(),
             from: jid::Jid::from(bare("alice@example.com")),

@@ -55,6 +55,7 @@ async fn xep_0424_groupchat_retraction_target_rejects_wire_id_and_origin_id() {
     // One row carrying three distinct ids: PK (room stanza-id), the wire
     // `id` attribute (`stanza_id` column), and a client origin-id.
     let row = MamArchivedMessage {
+        ordinal: None,
         id: archive_pk.to_string(),
         timestamp: chrono::Utc::now(),
         from: format!("{room}/alice").parse().expect("room/nick jid"),

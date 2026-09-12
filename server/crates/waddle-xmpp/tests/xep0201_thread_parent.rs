@@ -51,6 +51,7 @@ fn nested_thread_groupchat_row(
         None => Some(ThreadInfo::root(id)),
     };
     ArchivedMessage {
+        ordinal: None,
         id: archive_id.to_string(),
         timestamp: Utc::now(),
         from: jid_lit(&format!("{ROOM}/{nick}")),
@@ -141,7 +142,13 @@ async fn xep_0201_nested_thread_round_trips_through_mam() {
 
     // Sanity: assert the same archive id was assigned (groupchat
     // canonical-id invariant).
-    assert_eq!(store_outcome, StoreOutcome::Stored(retrieved.id.clone()));
+    assert_eq!(
+        store_outcome,
+        StoreOutcome::Stored {
+            stanza_id: retrieved.id.clone(),
+            ordinal: retrieved.ordinal.expect("stored ordinal")
+        }
+    );
 }
 
 #[test]
@@ -185,6 +192,7 @@ fn xep_0201_groupchat_stanza_xml_replay_preserves_thread_metadata() {
         )
         .build();
     let row = ArchivedMessage {
+        ordinal: None,
         id: "archive-xml".to_string(),
         timestamp: Utc::now(),
         from: jid_lit("team@conference.example.com/alice"),
@@ -435,6 +443,7 @@ async fn xep_0201_collapsed_thread_field_round_trips_no_thread_through_storage()
         .await
         .expect("open sqlite in-memory");
     let row = ArchivedMessage {
+        ordinal: None,
         id: "archive-no-thread".to_string(),
         timestamp: Utc::now(),
         from: jid_lit(&format!("{ROOM}/alice")),

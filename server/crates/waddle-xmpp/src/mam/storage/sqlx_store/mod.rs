@@ -1,3 +1,4 @@
+mod allocation;
 mod decode;
 mod impls;
 mod query;
@@ -190,3 +191,6 @@ mod tests {
         assert!(!storage.postgres_pool().expect("postgres pool").is_closed());
     }
 }
+
+#[cfg(test)]
+mod ordinal_tests;

@@ -306,6 +306,7 @@ async fn spanning_proof_commits_exact_cross_store_values() {
         &values.archive_jid,
         &retry,
         waddle_xmpp::mam::ArchiveExpectation::Existing {
+            ordinal: None,
             stanza_id: StanzaId {
                 id: values.mam_id.clone(),
                 by: values.archive_jid.clone().into(),
@@ -316,7 +317,7 @@ async fn spanning_proof_commits_exact_cross_store_values() {
     .await
     .expect("reuse recorded MAM identity")
     {
-        MamTxStoreOutcome::Existing(stanza_id) => {
+        MamTxStoreOutcome::Existing { stanza_id, .. } => {
             assert_eq!(stanza_id.id, values.mam_id);
             assert_eq!(stanza_id.by, jid::Jid::from(values.archive_jid.clone()));
         }
@@ -707,7 +708,7 @@ async fn room_claim_fence_authorizes_a_transaction_bound_mam_archive_write() {
     .await
     .expect("store under room claim fence")
     {
-        MamTxStoreOutcome::Inserted(stanza_id) => {
+        MamTxStoreOutcome::Inserted { stanza_id, .. } => {
             assert_eq!(stanza_id.id, values.mam_id);
             assert_eq!(stanza_id.by, jid::Jid::from(values.archive_jid.clone()));
         }
@@ -846,7 +847,7 @@ async fn room_claim_fence_from_another_live_transaction_is_rejected() {
         )
         .await
         .expect("store in minting transaction"),
-        MamTxStoreOutcome::Inserted(_)
+        MamTxStoreOutcome::Inserted { .. }
     ));
     minting_transaction
         .commit()
@@ -1471,7 +1472,7 @@ async fn store_mam_message(transaction: &mut IngressUowTransaction<'_>, values: 
     .await
     .expect("store MAM identity in UoW")
     {
-        MamTxStoreOutcome::Inserted(stanza_id) => {
+        MamTxStoreOutcome::Inserted { stanza_id, .. } => {
             assert_eq!(stanza_id.id, values.mam_id);
             assert_eq!(stanza_id.by, jid::Jid::from(values.archive_jid.clone()));
         }
@@ -1504,6 +1505,7 @@ async fn upsert_inbox_entry(transaction: &mut IngressUowTransaction<'_>, values:
 #[cfg(feature = "clustering")]
 fn archived_message(values: &FixtureValues) -> ArchivedMessage {
     ArchivedMessage {
+        ordinal: None,
         id: values.mam_id.clone(),
         timestamp: Utc
             .with_ymd_and_hms(2026, 1, 1, 0, 0, 0)
@@ -2177,6 +2179,7 @@ async fn mam_repository_sqlite_preserves_recorded_identity_and_repair_timestamp(
     message.timestamp = chrono::DateTime::from_timestamp(1_700_000_000, 0).expect("timestamp");
     let stanza_id = StanzaId::new(message.id.clone(), archive.clone().into());
     let existing = ArchiveExpectation::Existing {
+        ordinal: None,
         stanza_id: stanza_id.clone(),
         archived_at: message.timestamp,
     };
@@ -2191,7 +2194,10 @@ async fn mam_repository_sqlite_preserves_recorded_identity_and_repair_timestamp(
         )
         .await
         .expect("fresh row"),
-        MamTxStoreOutcome::Inserted(stanza_id.clone())
+        MamTxStoreOutcome::Inserted {
+            stanza_id: stanza_id.clone(),
+            ordinal: waddle_xmpp::mam::ArchiveOrdinal::from_storage(1).expect("ordinal"),
+        }
     );
     assert!(matches!(
         super::MamArchiveRepository::store(
@@ -2211,7 +2217,10 @@ async fn mam_repository_sqlite_preserves_recorded_identity_and_repair_timestamp(
         super::MamArchiveRepository::store(&mut transaction, &archive, &message, existing.clone())
             .await
             .expect("existing row"),
-        MamTxStoreOutcome::Existing(stanza_id.clone())
+        MamTxStoreOutcome::Existing {
+            stanza_id: stanza_id.clone(),
+            ordinal: waddle_xmpp::mam::ArchiveOrdinal::from_storage(1).expect("ordinal"),
+        }
     );
     transaction
         .transaction
@@ -2225,7 +2234,10 @@ async fn mam_repository_sqlite_preserves_recorded_identity_and_repair_timestamp(
         super::MamArchiveRepository::store(&mut transaction, &archive, &message, existing.clone())
             .await
             .expect("repair row"),
-        MamTxStoreOutcome::Repaired(stanza_id.clone())
+        MamTxStoreOutcome::Repaired {
+            stanza_id: stanza_id.clone(),
+            ordinal: waddle_xmpp::mam::ArchiveOrdinal::from_storage(2).expect("ordinal"),
+        }
     );
     transaction.commit().await.expect("commit repair");
     let repaired = storage
