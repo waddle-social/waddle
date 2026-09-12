@@ -347,13 +347,15 @@ schema.#Project & {
 			inputs: _nixInputs
 		}
 
-		// Pulls the cargo dependency artifacts nixTest consumes so the FlakeHub
-		// Cache daemon uploads them from this light job, not while nixTest's
-		// ~6 GB rustc peak is running on the same 8x16 runner (see
-		// #FlakeHubCache in ci/contributors/nix.cue).
+		// Realises nixTest's large inputs (the ci-test dependency artifacts and
+		// the vendored crate sources, several GB) so the FlakeHub Cache daemon
+		// uploads them from this light job, not while nixTest's ~6 GB rustc
+		// peak is running on the same 8x16 runner (see #FlakeHubCache in
+		// ci/contributors/nix.cue). These must be the checks' derivations:
+		// the packages.* deps use a different source fileset and profile.
 		nixBuildDeps: schema.#Task & {
 			command: "nix"
-			args: ["build", "--print-build-logs", "../#waddle-server-workspace-all-features-deps", "../#waddle-server-test-deps"]
+			args: ["build", "--print-build-logs", "../#checks.x86_64-linux.waddle-server-check-deps", "../#checks.x86_64-linux.waddle-server-cargo-vendor"]
 			inputs: _nixInputs
 		}
 

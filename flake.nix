@@ -339,6 +339,11 @@
           );
         in
         {
+          # Exposed so a light CI job can realise nixTest's large inputs (the
+          # ci-test dependency artifacts and the vendored crate sources)
+          # before nixTest runs; see nixBuildDeps in server/env.cue.
+          waddle-server-check-deps = workspaceAllFeaturesArtifacts;
+          waddle-server-cargo-vendor = craneLib.vendorCargoDeps { src = serverCheckSrc; };
           waddle-server-fmt = craneLib.cargoFmt {
             pname = "waddle-server-fmt";
             version = "0.1.0";

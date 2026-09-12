@@ -279,7 +279,7 @@ jobs:
         upstream-cache-filter: 'true'
         version: v2.0.0
     - name: nixBuildDeps
-      run: nix build --print-build-logs ../#waddle-server-workspace-all-features-deps ../#waddle-server-test-deps
+      run: nix build --print-build-logs ../#checks.x86_64-linux.waddle-server-check-deps ../#checks.x86_64-linux.waddle-server-cargo-vendor
       working-directory: server
       env:
         GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
