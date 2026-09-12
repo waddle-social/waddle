@@ -188,6 +188,212 @@ adds the column. `IngressNonTerminalBacklog` starts from an empty table after
 the cutover; any post-cutover row is new work. Roll-forward only: a pre-V1014
 image refuses the ledger.
 
+### V1015/V1016 cutover (#1756, PR #1758)
+
+Keyed recipient SM append receipts rode a further one-shot `Recreate`. Unlike
+V1012 and V1014 the migrations themselves are **purely additive**: V1015 creates
+`sm_ingress_appends`, V1016 indexes it by `accepting_stream_id`, and nothing is
+reset: the migration transaction deletes no canonical row, intent, receipt,
+alias, SM ref or obligation row. Both statements are `CREATE ... IF NOT EXISTS`
+because the SM store's runtime initializer creates the same table when it opens,
+so either may run first.
+
+**Additive DDL is not a harmless cutover, and the two must not be conflated.**
+The `Recreate` around it still stops every replica, and the outgoing binary's
+SIGTERM path drains: it promotes each live connection's unacked queue and calls
+`confirm_drained`, which deletes the durable session row on success
+(`server/session_janitors.rs`). So normally drained XEP-0198 sessions are
+**retired, not preserved** — those clients reconnect fresh and catch up through
+MAM rather than resuming. Only sessions whose drain fails or times out keep a
+durable row to resume from. A failed post-cutover resume is the expected outcome
+here, not an incident.
+
+Likewise, V1015/V1016 delete no obligation rows — but that is not the same as no
+obligation being abandoned. If SIGTERM reaches a replica during post-commit
+Phase C, the canonical row and its intents stay durable while execution stops
+without writing a receipt, and nothing re-drives it: there is no recovery
+executor (RFC 0018 stated limitation (i), tracked as #1755), and periodic
+maintenance only terminalizes work whose receipts are already complete. Absent a
+same-origin retry that obligation stays unresolved indefinitely. Inspect
+unresolved effects after this cutover rather than assuming the additive
+migration left none.
+
+`Recreate` was required for the **writers**, not the schema. The ledger is an
+exactly-once gate only if every writer consults it. A replica still running the
+previous build keeps the unkeyed append path, so during a rolling window an old
+owner could append with no ledger row while a concurrent replay allocated the
+same `(obligation, resource)` a second time — the duplicate the migration exists
+to prevent. Stopping every old writer before the first keyed writer starts is
+what makes the gate total for **appends made after the cutover**.
+
+It is not retroactive, and the migration is additive rather than a reset, so it
+mints no proof for work already in flight. An append the previous binary
+committed unkeyed, whose progress transaction then failed, leaves a real SM queue
+entry and an unresolved canonical obligation but **no ledger row**. A
+post-cutover retry reads an empty key and appends that resource again. The
+window is bounded by the obligations outstanding at cutover; treat a duplicate
+delivery reported across the cutover boundary as expected rather than as a gate
+failure, and prefer draining outstanding obligations before a comparable cutover
+in future.
+
+Rollback is fail-closed **only back to the ledger itself**. The migration ledger
+guard makes a binary whose catalog lacks a version recorded in `_migrations`
+refuse to start (`pre_v1010_catalog_refuses_a_v1010_ledger_until_roll_forward`,
+`server/crates/waddle-server/src/db/migrations/tests.rs`), so an image between
+`43860571` (#1671, the ledger) and #1758 cannot come up against this database.
+The guard fires at startup only, which is exactly why `Recreate` was needed at
+cutover and not at the flip-back (#1765): it does nothing about an old pod that
+is already running.
+
+**Never roll back past `43860571` (#1671).** Images older than the ledger have no
+guard. Their runner carries the removed "hard-cut protection", which drops and
+recreates `_migrations` on an unknown version and replays its whole catalog —
+including global V0001 and waddle V1001, which destructively drop and recreate the
+auth, channel and message tables. A deep rollback is therefore data loss, not a
+refused startup. Treat the ledger commit as the rollback floor for this database.
+
+#1758 also bumped three wire versions — `remote_user_side_effect.v3`,
+`remote_resource_route.v6` and `deliver_ordered.v10`. Because the cutover rode
+its own `Recreate`, and because the flip-back rolled two builds of identical
+server code, the first genuine mixed-version window for `deliver_ordered.v10`
+is the next deploy that changes server source.
+
+**Ledger lifetime.** The obligation owns the proof, not the stream. A successful
+resume deletes the detached snapshot while the logical stream continues, so
+session-scoped evidence would vanish while the obligation was still retryable.
+Only two paths remove a row: retirement of gap-covered proofs when a session is
+deleted, and ingress retention GC once the canonical row is reclaimed, at which
+point the obligation can never be retried again.
+
+**If the append ledger looks wrong.** Proof that outlives its payload suppresses
+the retry that would have recovered the stanza, so the failure mode is silent
+loss rather than a duplicate. List candidates in a read-only snapshot:
+
+Every incident predicate is applied **before** `LIMIT` so the cheapest healthy
+shapes are excluded early. That is not sufficient on its own: several healthy
+terminal-session outcomes described below satisfy every predicate, so with enough
+of them an oldest-first page returns the same benign rows forever and never
+reaches a newer real loss. The query is therefore keyset-paginated — carry
+`(appended_at_ms, message_key, receipt_kind, semantic_identity_hash, resource)`
+from the last row of each page into the next, and keep paging until a page is
+short:
+
+```sql
+BEGIN TRANSACTION ISOLATION LEVEL REPEATABLE READ READ ONLY;
+SELECT a.message_key, a.receipt_kind,
+       encode(a.semantic_identity_hash, 'hex') AS semantic_identity_hash,
+       a.resource, a.accepting_stream_id, a.sequence,
+       to_timestamp(a.appended_at_ms / 1000.0) AS appended_at
+FROM sm_ingress_appends a
+JOIN ingress_messages m
+  ON m.message_key = a.message_key::uuid
+ AND m.terminal_at IS NULL
+LEFT JOIN sm_sessions s
+  ON s.stream_id = a.accepting_stream_id
+LEFT JOIN sm_unacked u
+  ON u.stream_id = a.accepting_stream_id
+ AND u.sequence = a.sequence
+LEFT JOIN ingress_delivery_receipts d
+  ON d.message_key = a.message_key::uuid
+ AND d.kind = a.receipt_kind
+ AND d.semantic_identity_hash = a.semantic_identity_hash
+ AND d.resource = a.resource
+LEFT JOIN ingress_effect_receipts e
+  ON e.message_key = a.message_key::uuid
+ AND e.kind = a.receipt_kind
+ AND e.semantic_identity_hash = a.semantic_identity_hash
+WHERE u.stream_id IS NULL   -- the payload is gone
+  AND s.stream_id IS NULL   -- and so is the whole session, not merely acked or gapped
+  AND d.message_key IS NULL -- this resource was never receipted as delivered
+  AND e.message_key IS NULL -- nor was its effect settled generically
+  -- keyset cursor: omit on the first page, then carry the last row forward
+  AND (a.appended_at_ms, a.message_key, a.receipt_kind,
+       a.semantic_identity_hash, a.resource)
+      > (:last_appended_at_ms, :last_message_key, :last_receipt_kind,
+         :last_semantic_identity_hash, :last_resource)
+ORDER BY a.appended_at_ms, a.message_key, a.receipt_kind,
+         a.semantic_identity_hash, a.resource
+LIMIT 50;
+COMMIT;
+```
+
+Each predicate excludes one healthy shape. A sequence that was acknowledged or is
+covered by the replay gap legitimately has no `sm_unacked` row, so `u` alone
+proves nothing. A message may stay non-terminal because a *different* unresolved
+intent holds it open while this resource was delivered normally, so the
+`ingress_delivery_receipts` join is what separates an undelivered resource from a
+healthy one. Not every settled append reaches that table, though: a recorded
+`RelayFullJid` that falls back to a local detached session writes a ledger row but
+settles generically through `ingress_effect_receipts`, so `e` excludes those too.
+Both `receipt_kind` and `semantic_identity_hash` are selected because one
+canonical message can hold several routes to the same resource; without them a
+candidate cannot be tied back to a specific obligation, its recorded intent or its
+progress rows. Note the `::uuid` casts: the ledger stores `message_key` as text
+while the ingress tables use `uuid`.
+
+Rows that survive every predicate are **candidates, and the query cannot promote
+them to a verdict.** A deleted session is not proof of loss: the proof is meant
+to outlive its session, and several healthy outcomes delete the session and its
+`sm_unacked` rows while the proof legitimately stands. The two easiest to reach
+are —
+
+- the retained frame was **acknowledged during resume**, which is delivery; and
+- the payload was **promoted to `pending_delivery`** on expiry, which is a
+  durable handoff, not a destruction.
+
+— and the full promotion outcome set below adds more. None leaves a delivery or
+effect receipt, so all of them satisfy the query. Worse,
+`pending_delivery` rows carry no reference back to the obligation that produced
+them, so a promoted payload **cannot currently be correlated to its ledger row at
+all** — that missing link is itself part of what #1760 has to fix.
+
+So before treating a candidate as the #1760 shape (durable append proof must not
+outlive the payload it stands for), rule out every healthy way its session can
+have ended: a `pending_delivery` row to the same recipient around `appended_at`
+(the `Queued` outcome), a live redelivery or any other handled promotion outcome
+for that stream, and acknowledgement during resume.
+
+**A deleted session has eight terminal outcomes, not two, and six of them are
+healthy.** Promotion classifies every unacked stanza
+(`sm_promotion/types.rs::PromotedOutcome`): `Redelivered` to an alternate
+resource, `Queued` into `pending_delivery`, `Bounced` per XEP-0160 §3,
+`Dropped`, `NotPromotable`, `Unparseable`, `Scrubbed` by a racing
+XEP-0424/0425 tombstone, and `StorageFailure`. Only `StorageFailure` blocks
+`confirm_drained`; every other outcome counts as handled and the durable session
+row is deleted. So a healthy `Redelivered` or `Scrubbed` stanza leaves a
+non-gap-covered proof with **no** `pending_delivery` row and **no** receipt for
+the original obligation — passing the query and both checks above. Correlate the
+promotion outcome for that stream, not just `pending_delivery`.
+
+**And the acknowledgement check above often cannot be performed at all.**
+`last_acked` is a column on `sm_sessions`, so deleting the session deletes the
+acknowledgement frontier along with `sm_unacked`. Accepted `<a/>` handling
+advances live stream state and aggregate counters rather than a per-sequence
+durable record. For a candidate whose session is already gone there is therefore
+usually no retained database evidence that a given `a.sequence` was
+acknowledged: treat that question as **historically indeterminate** rather than
+resolving it against the row's absence, which is the same mistake in a different
+direction.
+
+**The query also has a hard blind spot in the other direction: it finds the loss
+only before anything retries it.** Once a retry runs against a stale proof, the
+keyed append returns `AlreadyAppended`, which counts as allocated, so
+`execute_detached::record_resource` writes the matching delivery receipt even
+though the payload is gone — and the aggregate can then terminalize. From that
+point `d.message_key IS NULL` excludes the lost resource, and `m.terminal_at IS
+NULL` excludes it once the message settles. A message lost this way looks
+*delivered* in every table this query inspects. Treat an empty result as "no
+loss caught in its pre-retry window", never as "no loss". Corroborating a
+suspected loss after that point means comparing the recipient's archive or
+client-visible history against the canonical envelope, not querying the ledger.
+
+Two further caveats: the sequence comparison is modulo 2^32 while SQL is not
+wrap-aware — the server deliberately performs that comparison in Rust — and a row
+can simply be in flight, so re-run before acting.
+
+Record the row and its full obligation identity. Do not delete ledger entries by
+hand. No ledger surgery.
+
 ## Read-only verification
 
 Use the production context explicitly. Inspect rollout strategy, actual
@@ -489,13 +695,49 @@ only a subset of its unfinished resources. Ordinary duplicate ingress retries
 only unfinished recorded targets and restores the canonical message payload;
 a resource that has reconnected can receive the retry live.
 
-Concurrent duplicate decisions may both append the same resource: this path
-provides at-least-once per-resource delivery, with no execution claim. The
-append precedes its progress transaction, so a crash or transaction failure
-between them can repeat the one in-flight resource. Earlier committed progress
-survives restart and is excluded from later decisions. Progress writes and the
-final aggregate receipt share one epoch-attested transaction under the
-canonical message lock. Lock contention leaves the obligation retryable.
+Since #1756 this path allocates exactly one durable queue entry per (recorded
+obligation, resource), with no retry-induced duplicate. The stream-independent
+`sm_ingress_appends` ledger is consulted before any session work and its primary
+key is the gate, so neither a concurrent duplicate decision nor a crash between
+the append and its progress commit allocates a second entry. Four limits remain
+explicit.
+
+XEP-0198 still permits a client-observed duplicate after an uncertain
+acknowledgement.
+
+**"No session" means no session *and no prior proof*.** When neither exists the
+append does not happen and the obligation stays unresolved for its recorded route
+to retry or degrade. But the ledger is consulted *before* the session lookup
+(`session_registry/resources.rs`, `get_ingress_append` then `void_allocation`,
+both ahead of `find_session_id_matching`), so a proof that outlived its session
+returns `AlreadyAppended` and never reaches the no-session path.
+`SmKeyedAppendOutcome::is_allocated` counts that as allocated, and callers record
+delivery progress on exactly that condition — so the lost message is recorded as
+**delivered**, not left outstanding. `keyed_append_older_proof_precedes_missing_session_lookup`
+pins the ordering. This is the #1760 loss shape in its most severe form and it is
+why the query above cannot be the last word.
+
+**Retirement ignores the acknowledgement frontier.** `void_gap_covered` reads
+only `replay_gap_through` from `sm_sessions` and deletes every proof the gap
+covers (`sm_persistence/ingress_append.rs`); it never consults `last_acked`, while
+the registry-side `void_allocation` does. So if append progress fails, the client
+later acknowledges that sequence, and a re-detach advances the gap past it before
+the session is deleted, a valid delivered proof is retired and recovery can
+allocate the same obligation again. `acknowledged_allocation_is_never_voided_by_a_later_gap`
+establishes such a proof is valid; the two voiding rules disagree about it. The
+divergence is the enumeration problem #1760 exists to remove.
+
+**The guarantee covers keyed appends only.** In a clustered route whose
+remote-resource owner refresh resolves locally against a detached recipient,
+`deliver_local_full_jid_after_target_refresh` passes no append context
+(`clustering/route_bridge/delivery/local.rs:109-127`), so that append is unkeyed
+and a failed effect-receipt write can let recovery append the same resource
+again. That residue is tracked by #1760.
+
+Earlier committed progress survives restart and is excluded from later
+decisions. Progress writes and the final aggregate receipt share one
+epoch-attested transaction under the canonical message lock. Lock contention
+leaves the obligation retryable.
 
 When investigating a pending direct route, compare its recorded fanout with
 its resource progress rows using the full effect receipt key. A missing
