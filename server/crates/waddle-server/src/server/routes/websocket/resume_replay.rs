@@ -39,10 +39,23 @@ pub(super) fn replay_frames(
 
 #[cfg(test)]
 mod tests {
+    use super::super::transport_xml::stanza_to_xml;
     use super::*;
+    use chrono::{TimeZone, Utc};
+    use minidom::Element;
     use waddle_xmpp::ingress::MessageKey;
     use waddle_xmpp::stream_management::{SmIngressFrameReceipt, SmIngressReceiptKind};
     use waddle_xmpp::telemetry::attributes::SmEvictionPath;
+    use waddle_xmpp::xep::xep0203::NS_DELAY;
+    use waddle_xmpp::Stanza;
+    use xmpp_parsers::message::{Id, Lang, Message};
+
+    fn message(id: Id) -> Stanza {
+        let mut message = Message::new(Some("a@example.com/x".parse().expect("recipient jid")));
+        message.id = Some(id);
+        message.bodies.insert(Lang::new(), "hi".to_string());
+        Stanza::Message(message)
+    }
 
     fn receipt() -> SmIngressFrameReceipt {
         SmIngressFrameReceipt {
@@ -63,8 +76,7 @@ mod tests {
         // The `<r/>` cadence this returns is irrelevant here: these tests pin
         // what a replayed frame carries, not when an ack is requested.
         let _ack = sm_state.record_outbound(
-            "<message xmlns='jabber:client' id='m1' to='a@example.com/x'><body>hi</body></message>"
-                .to_string(),
+            stanza_to_xml(&message(Id("m1".to_string()))),
             SmEvictionPath::Batch,
         );
         let obligation = receipt();
@@ -85,11 +97,15 @@ mod tests {
     #[test]
     fn replayed_frames_are_delay_stamped_for_the_serving_domain() {
         let mut sm_state = StreamManagementState::new();
+        let original_receipt_at = Utc
+            .with_ymd_and_hms(2026, 7, 1, 9, 15, 30)
+            .single()
+            .expect("valid receipt timestamp");
         // The `<r/>` cadence this returns is irrelevant here: these tests pin
         // what a replayed frame carries, not when an ack is requested.
-        let _ack = sm_state.record_outbound(
-            "<message xmlns='jabber:client' id='m1' to='a@example.com/x'><body>hi</body></message>"
-                .to_string(),
+        let _ack = sm_state.record_outbound_with_receipt_at(
+            stanza_to_xml(&message(Id("m1".to_string()))),
+            original_receipt_at,
             SmEvictionPath::Batch,
         );
 
@@ -100,14 +116,12 @@ mod tests {
             .expect("one replayed frame")
             .into_serialized_xml();
 
-        assert!(
-            xml.contains("urn:xmpp:delay"),
-            "replayed stanza must carry a XEP-0203 <delay/>: {xml}"
-        );
-        assert!(
-            xml.contains("example.com"),
-            "the <delay/> is stamped by the serving domain: {xml}"
-        );
+        let replayed: Element = xml.parse().expect("replayed message xml");
+        let delay = replayed
+            .get_child("delay", NS_DELAY)
+            .expect("replayed message must carry a XEP-0203 delay");
+        assert_eq!(delay.attr("from"), Some("example.com"));
+        assert_eq!(delay.attr("stamp"), Some("2026-07-01T09:15:30Z"));
     }
 
     /// The acknowledged prefix is not replayed, and nothing above it is lost.
@@ -116,7 +130,7 @@ mod tests {
         let mut sm_state = StreamManagementState::new();
         for id in ["m1", "m2"] {
             let _ack = sm_state.record_outbound(
-                format!("<message xmlns='jabber:client' id='{id}'><body>hi</body></message>"),
+                stanza_to_xml(&message(Id(id.to_string()))),
                 SmEvictionPath::Batch,
             );
         }

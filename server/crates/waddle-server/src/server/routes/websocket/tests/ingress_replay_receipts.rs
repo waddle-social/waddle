@@ -730,3 +730,160 @@ async fn ingress_ack_deletion_failure_gates_fresh_cleanup_postgres() {
         .expect("drop schema");
     admin.close().await;
 }
+
+#[tokio::test]
+async fn ingress_post_registration_resume_settles_replayed_receipt() {
+    use super::super::connection::{
+        handle_inbound_text, ConnectionIo, FrameAuthority, RegistrationChannels,
+    };
+    use waddle_xmpp::stream_management::DetachedSessionSnapshot;
+    let state = create_test_websocket_state().await;
+    let mut conn = connection(&state).await;
+    let lifecycle = crate::clustering::NodeLifecycle::new();
+    let permit = lifecycle.admit().expect("permit");
+    let shutdown = tokio_util::sync::CancellationToken::new();
+    let mut responses = super::super::frame::handle_xmpp_frame_with_admission(
+        &offered_message(),
+        "example.com",
+        &state,
+        &mut conn,
+        &permit,
+        &shutdown,
+    )
+    .await;
+    assert_eq!(responses.frames.len(), 1);
+    assert_eq!(responses.ingress_reports.len(), 1);
+    assert_eq!(
+        responses.frames[0].ingress_receipts().len(),
+        1,
+        "the batch's last frame must carry the receipt obligation"
+    );
+
+    let mut broken = Box::pin(futures::sink::unfold((), |(), _: Message| async {
+        Err(std::io::Error::from(std::io::ErrorKind::BrokenPipe))
+    }));
+    let mut reader = futures::stream::pending::<Result<Message, std::io::Error>>();
+    let report = write_ingress_response_batch_with_admission(
+        &mut broken,
+        &mut reader,
+        &state,
+        &mut conn,
+        &mut responses,
+        BatchSmPolicy::Record,
+        BatchAuthority {
+            permit: &permit,
+            shutdown: &shutdown,
+        },
+    )
+    .await;
+    assert!(matches!(report.outcome, BatchWriteOutcome::TransportClosed));
+    assert_eq!(
+        receipt_state(&state).await,
+        (0, 0),
+        "an unwritten frame proves nothing"
+    );
+    drop(responses);
+
+    let retained = conn.sm_state.get_stanzas_to_resend(0);
+    assert_eq!(retained.len(), 1);
+    assert_eq!(
+        retained[0].ingress_receipts.len(),
+        1,
+        "the replay entry must carry the dropped report's obligation"
+    );
+    let session = conn.authenticated_session.clone().expect("session");
+    let jid = conn.phase.bound_jid().cloned().expect("bound jid");
+    let detached = conn
+        .sm_state
+        .to_detached_session(DetachedSessionSnapshot {
+            user_id: session.user_jid.clone(),
+            jid: jid.clone(),
+            occupancy_session: waddle_xmpp_core::OccupancySessionGeneration::mint(),
+            carbons_enabled: false,
+            roster_interested: false,
+            blocklist_interested: false,
+            presence_available: false,
+            presence_show: None,
+            presence_status: None,
+            presence_priority: 0,
+            presence_payloads: Vec::new(),
+            pending_subscribes_flushed: false,
+        })
+        .expect("detached");
+    assert_eq!(detached.unacked_stanzas.len(), 1);
+    assert_eq!(detached.unacked_stanzas[0].ingress_receipts.len(), 1);
+    let stream_id = detached.stream_id.clone();
+    crate::server::routes::websocket::tests::store_resumable_detached_session(
+        &state, &session, detached,
+    )
+    .await;
+
+    let mut resumed = WsConnState::new();
+    resumed.phase = ConnectionPhase::authenticated(&jid);
+    resumed.authenticated_session = Some(session);
+    let resume = minidom::Element::builder("resume", waddle_xmpp::stream_management::SM_NS)
+        .attr(
+            minidom::rxml::xml_ncname!("previd").to_owned(),
+            stream_id.as_str(),
+        )
+        .attr(minidom::rxml::xml_ncname!("h").to_owned(), "0")
+        .build();
+    let xml = super::super::transport_xml::element_to_xml(resume);
+    let captured = Arc::new(std::sync::Mutex::new(Vec::new()));
+    let mut socket = Box::pin(futures::sink::unfold(
+        captured.clone(),
+        |captured, frame: Message| async move {
+            captured.lock().expect("captured frames").push(frame);
+            Ok::<_, std::io::Error>(captured)
+        },
+    ));
+    let (tx, _rx) = tokio::sync::mpsc::channel(8);
+    let mut pending_tx = Some(tx);
+    let mut force_detach_rx = None;
+    assert!(
+        handle_inbound_text(
+            &xml,
+            "example.com",
+            &state,
+            &mut resumed,
+            RegistrationChannels {
+                pending_tx: &mut pending_tx,
+                force_detach_rx: &mut force_detach_rx
+            },
+            ConnectionIo {
+                sender: &mut socket,
+                receiver: &mut reader
+            },
+            FrameAuthority {
+                permit: &permit,
+                shutdown: &shutdown
+            },
+        )
+        .await
+    );
+    assert!(
+        pending_tx.is_none(),
+        "production handler must register the resumed connection"
+    );
+    assert!(resumed.pending_resume_stream_id.is_none());
+    assert!(resumed.registry_owner.is_some());
+    wait_for_receipts(&state).await;
+    assert_eq!(
+        receipt_state(&state).await,
+        (1, 1),
+        "replay reaching the wire must settle the receipt and terminalize its canonical row"
+    );
+    let frames = captured.lock().expect("captured frames");
+    let elements: Vec<minidom::Element> = frames
+        .iter()
+        .map(|frame| {
+            let Message::Text(xml) = frame else {
+                panic!("expected XML text frame")
+            };
+            xml.parse().expect("wire XML")
+        })
+        .collect();
+    assert_eq!(elements.len(), 2, "resumed followed by the retained stanza");
+    assert!(elements[0].is("resumed", waddle_xmpp::stream_management::SM_NS));
+    assert!(elements[1].is("message", waddle_xmpp::ns::JABBER_CLIENT));
+}
