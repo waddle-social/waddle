@@ -64,6 +64,7 @@ schema.#Project & {
 	ci: providers: ["github"]
 	ci: contributors: [
 		wc.#Nix,
+		wc.#FlakeHubCache,
 		wc.#Hestia,
 		c.#CuenvRelease,
 		c.#OnePassword,

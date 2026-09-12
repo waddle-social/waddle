@@ -88,6 +88,10 @@ jobs:
       uses: DeterminateSystems/determinate-nix-action@021c8a1bd3570eb21f5c20a054812b0c4d9ca614
       with:
         extra-conf: accept-flake-config = true
+    - name: Setup FlakeHub Cache
+      uses: DeterminateSystems/flakehub-cache-action@e80fccc9c4e3a885ad51721c8b92ba3f839d2f6f
+      with:
+        use-gha-cache: disabled
     - name: Setup Hestia Nix Cache
       uses: Mic92/hestia@fb239a2f72d4b6e26eec5425f289dea23b27a527
       with:
@@ -134,6 +138,10 @@ jobs:
       uses: DeterminateSystems/determinate-nix-action@021c8a1bd3570eb21f5c20a054812b0c4d9ca614
       with:
         extra-conf: accept-flake-config = true
+    - name: Setup FlakeHub Cache
+      uses: DeterminateSystems/flakehub-cache-action@e80fccc9c4e3a885ad51721c8b92ba3f839d2f6f
+      with:
+        use-gha-cache: disabled
     - name: Setup Hestia Nix Cache
       uses: Mic92/hestia@fb239a2f72d4b6e26eec5425f289dea23b27a527
       with:
@@ -180,6 +188,10 @@ jobs:
       uses: DeterminateSystems/determinate-nix-action@021c8a1bd3570eb21f5c20a054812b0c4d9ca614
       with:
         extra-conf: accept-flake-config = true
+    - name: Setup FlakeHub Cache
+      uses: DeterminateSystems/flakehub-cache-action@e80fccc9c4e3a885ad51721c8b92ba3f839d2f6f
+      with:
+        use-gha-cache: disabled
     - name: Setup Hestia Nix Cache
       uses: Mic92/hestia@fb239a2f72d4b6e26eec5425f289dea23b27a527
       with:
@@ -226,6 +238,10 @@ jobs:
       uses: DeterminateSystems/determinate-nix-action@021c8a1bd3570eb21f5c20a054812b0c4d9ca614
       with:
         extra-conf: accept-flake-config = true
+    - name: Setup FlakeHub Cache
+      uses: DeterminateSystems/flakehub-cache-action@e80fccc9c4e3a885ad51721c8b92ba3f839d2f6f
+      with:
+        use-gha-cache: disabled
     - name: Setup Hestia Nix Cache
       uses: Mic92/hestia@fb239a2f72d4b6e26eec5425f289dea23b27a527
       with:
@@ -252,6 +268,10 @@ jobs:
       uses: DeterminateSystems/determinate-nix-action@021c8a1bd3570eb21f5c20a054812b0c4d9ca614
       with:
         extra-conf: accept-flake-config = true
+    - name: Setup FlakeHub Cache
+      uses: DeterminateSystems/flakehub-cache-action@e80fccc9c4e3a885ad51721c8b92ba3f839d2f6f
+      with:
+        use-gha-cache: disabled
     - name: Setup Hestia Nix Cache
       uses: Mic92/hestia@fb239a2f72d4b6e26eec5425f289dea23b27a527
       with:
@@ -278,6 +298,10 @@ jobs:
       uses: DeterminateSystems/determinate-nix-action@021c8a1bd3570eb21f5c20a054812b0c4d9ca614
       with:
         extra-conf: accept-flake-config = true
+    - name: Setup FlakeHub Cache
+      uses: DeterminateSystems/flakehub-cache-action@e80fccc9c4e3a885ad51721c8b92ba3f839d2f6f
+      with:
+        use-gha-cache: disabled
     - name: Setup Hestia Nix Cache
       uses: Mic92/hestia@fb239a2f72d4b6e26eec5425f289dea23b27a527
       with:
@@ -304,6 +328,10 @@ jobs:
       uses: DeterminateSystems/determinate-nix-action@021c8a1bd3570eb21f5c20a054812b0c4d9ca614
       with:
         extra-conf: accept-flake-config = true
+    - name: Setup FlakeHub Cache
+      uses: DeterminateSystems/flakehub-cache-action@e80fccc9c4e3a885ad51721c8b92ba3f839d2f6f
+      with:
+        use-gha-cache: disabled
     - name: Setup Hestia Nix Cache
       uses: Mic92/hestia@fb239a2f72d4b6e26eec5425f289dea23b27a527
       with:
@@ -330,6 +358,10 @@ jobs:
       uses: DeterminateSystems/determinate-nix-action@021c8a1bd3570eb21f5c20a054812b0c4d9ca614
       with:
         extra-conf: accept-flake-config = true
+    - name: Setup FlakeHub Cache
+      uses: DeterminateSystems/flakehub-cache-action@e80fccc9c4e3a885ad51721c8b92ba3f839d2f6f
+      with:
+        use-gha-cache: disabled
     - name: Setup Hestia Nix Cache
       uses: Mic92/hestia@fb239a2f72d4b6e26eec5425f289dea23b27a527
       with:
@@ -356,6 +388,10 @@ jobs:
       uses: DeterminateSystems/determinate-nix-action@021c8a1bd3570eb21f5c20a054812b0c4d9ca614
       with:
         extra-conf: accept-flake-config = true
+    - name: Setup FlakeHub Cache
+      uses: DeterminateSystems/flakehub-cache-action@e80fccc9c4e3a885ad51721c8b92ba3f839d2f6f
+      with:
+        use-gha-cache: disabled
     - name: Setup Hestia Nix Cache
       uses: Mic92/hestia@fb239a2f72d4b6e26eec5425f289dea23b27a527
       with:
@@ -382,6 +418,10 @@ jobs:
       uses: DeterminateSystems/determinate-nix-action@021c8a1bd3570eb21f5c20a054812b0c4d9ca614
       with:
         extra-conf: accept-flake-config = true
+    - name: Setup FlakeHub Cache
+      uses: DeterminateSystems/flakehub-cache-action@e80fccc9c4e3a885ad51721c8b92ba3f839d2f6f
+      with:
+        use-gha-cache: disabled
     - name: Setup Hestia Nix Cache
       uses: Mic92/hestia@fb239a2f72d4b6e26eec5425f289dea23b27a527
       with:
@@ -408,6 +448,10 @@ jobs:
       uses: DeterminateSystems/determinate-nix-action@021c8a1bd3570eb21f5c20a054812b0c4d9ca614
       with:
         extra-conf: accept-flake-config = true
+    - name: Setup FlakeHub Cache
+      uses: DeterminateSystems/flakehub-cache-action@e80fccc9c4e3a885ad51721c8b92ba3f839d2f6f
+      with:
+        use-gha-cache: disabled
     - name: Setup Hestia Nix Cache
       uses: Mic92/hestia@fb239a2f72d4b6e26eec5425f289dea23b27a527
       with:
