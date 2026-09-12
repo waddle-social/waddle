@@ -60,7 +60,10 @@ where
             .store_message(&room, &original)
             .await
             .expect("store original"),
-        StoreOutcome::Stored(archive_id.to_string())
+        StoreOutcome::Stored {
+            stanza_id: archive_id.to_string(),
+            ordinal: waddle_xmpp_core::mam::ArchiveOrdinal::from_storage(1).unwrap()
+        }
     );
 
     let moderation = ArchivedTombstone {
@@ -112,7 +115,10 @@ where
             .store_message(&room, &live)
             .await
             .expect("store live terminal-replacement target"),
-        StoreOutcome::Stored(live_id.to_string())
+        StoreOutcome::Stored {
+            stanza_id: live_id.to_string(),
+            ordinal: waddle_xmpp_core::mam::ArchiveOrdinal::from_storage(2).unwrap()
+        }
     );
     let author_tombstone = ArchivedTombstone {
         retraction_id: RichMessageId::new("live-author-retraction"),
@@ -453,7 +459,10 @@ async fn xep0424_groupchat_retransmit_after_retraction_hits_tombstone() {
             .store_message(&room, &original)
             .await
             .expect("store original"),
-        StoreOutcome::Stored(original_id.to_string())
+        StoreOutcome::Stored {
+            stanza_id: original_id.to_string(),
+            ordinal: waddle_xmpp_core::mam::ArchiveOrdinal::from_storage(1).unwrap()
+        }
     );
     assert!(storage
         .replace_with_tombstone(

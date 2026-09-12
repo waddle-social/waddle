@@ -4,7 +4,7 @@ use jid::BareJid;
 use sqlx::postgres::PgPool;
 use sqlx::sqlite::SqlitePool;
 use sqlx::{Postgres, QueryBuilder, Sqlite};
-use waddle_xmpp_core::mam::{ArchivedMessage, MamQuery};
+use waddle_xmpp_core::mam::{ArchiveOrdinal, ArchivedMessage, MamQuery};
 
 use crate::mam::storage::MamStorageError;
 use crate::mam::MamArchiveKind;
@@ -175,8 +175,8 @@ pub(super) fn push_sqlite_mam_filters<'args>(
     archive_jid: &'args str,
     query: &'args MamQuery,
     with_filter: Option<&'args WithFilter>,
-    filter_before: Option<&'args ArchivedMessage>,
-    filter_after: Option<&'args ArchivedMessage>,
+    filter_before: Option<ArchiveOrdinal>,
+    filter_after: Option<ArchiveOrdinal>,
 ) {
     builder.push_bind(archive_jid);
     if let Some(start) = query.start {
@@ -191,23 +191,13 @@ pub(super) fn push_sqlite_mam_filters<'args>(
     }
     if let Some(cursor) = filter_before {
         builder
-            .push(" AND (timestamp < ")
-            .push_bind(cursor.timestamp.to_rfc3339())
-            .push(" OR (timestamp = ")
-            .push_bind(cursor.timestamp.to_rfc3339())
-            .push(" AND id < ")
-            .push_bind(cursor.id.as_str())
-            .push("))");
+            .push(" AND archive_seq < ")
+            .push_bind(cursor.to_storage());
     }
     if let Some(cursor) = filter_after {
         builder
-            .push(" AND (timestamp > ")
-            .push_bind(cursor.timestamp.to_rfc3339())
-            .push(" OR (timestamp = ")
-            .push_bind(cursor.timestamp.to_rfc3339())
-            .push(" AND id > ")
-            .push_bind(cursor.id.as_str())
-            .push("))");
+            .push(" AND archive_seq > ")
+            .push_bind(cursor.to_storage());
     }
     push_common_mam_filters!(builder, query, with_filter);
 }
@@ -217,8 +207,8 @@ pub(super) fn push_postgres_mam_filters<'args>(
     archive_jid: &'args str,
     query: &'args MamQuery,
     with_filter: Option<&'args WithFilter>,
-    filter_before: Option<&'args ArchivedMessage>,
-    filter_after: Option<&'args ArchivedMessage>,
+    filter_before: Option<ArchiveOrdinal>,
+    filter_after: Option<ArchiveOrdinal>,
 ) {
     builder.push_bind(archive_jid);
     if let Some(start) = query.start {
@@ -229,32 +219,30 @@ pub(super) fn push_postgres_mam_filters<'args>(
     }
     if let Some(cursor) = filter_before {
         builder
-            .push(" AND (timestamp < ")
-            .push_bind(cursor.timestamp)
-            .push(" OR (timestamp = ")
-            .push_bind(cursor.timestamp)
-            .push(" AND id < ")
-            .push_bind(cursor.id.as_str())
-            .push("))");
+            .push(" AND archive_seq < ")
+            .push_bind(cursor.to_storage());
     }
     if let Some(cursor) = filter_after {
         builder
-            .push(" AND (timestamp > ")
-            .push_bind(cursor.timestamp)
-            .push(" OR (timestamp = ")
-            .push_bind(cursor.timestamp)
-            .push(" AND id > ")
-            .push_bind(cursor.id.as_str())
-            .push("))");
+            .push(" AND archive_seq > ")
+            .push_bind(cursor.to_storage());
     }
     push_common_mam_filters!(builder, query, with_filter);
+}
+
+/// Decoded rows always carry their committed position; a missing ordinal is a
+/// storage-contract violation, not a pagination miss.
+fn cursor_position(cursor: &ArchivedMessage) -> Result<ArchiveOrdinal, MamStorageError> {
+    cursor
+        .ordinal
+        .ok_or_else(|| MamStorageError::MissingOrdinal(cursor.id.clone()))
 }
 
 pub(super) async fn fetch_sqlite_cursor(
     pool: &SqlitePool,
     archive_jid: &BareJid,
     cursor_id: &str,
-) -> Result<ArchivedMessage, MamStorageError> {
+) -> Result<ArchiveOrdinal, MamStorageError> {
     let mut builder = QueryBuilder::<Sqlite>::new(format!(
         "SELECT {SELECT_COLUMNS} FROM mam_messages WHERE room_jid = "
     ));
@@ -262,17 +250,19 @@ pub(super) async fn fetch_sqlite_cursor(
     builder.push(" AND id = ").push_bind(cursor_id);
 
     let row = builder.build().fetch_optional(pool).await?;
-    row.as_ref()
+    let cursor = row
+        .as_ref()
         .map(decode_sqlite_message_row)
         .transpose()?
-        .ok_or_else(|| MamStorageError::NotFound(cursor_id.to_string()))
+        .ok_or_else(|| MamStorageError::NotFound(cursor_id.to_string()))?;
+    cursor_position(&cursor)
 }
 
 pub(super) async fn fetch_postgres_cursor(
     pool: &PgPool,
     archive_jid: &BareJid,
     cursor_id: &str,
-) -> Result<ArchivedMessage, MamStorageError> {
+) -> Result<ArchiveOrdinal, MamStorageError> {
     let mut builder = QueryBuilder::<Postgres>::new(format!(
         "SELECT {SELECT_COLUMNS} FROM mam_messages WHERE room_jid = "
     ));
@@ -280,10 +270,12 @@ pub(super) async fn fetch_postgres_cursor(
     builder.push(" AND id = ").push_bind(cursor_id);
 
     let row = builder.build().fetch_optional(pool).await?;
-    row.as_ref()
+    let cursor = row
+        .as_ref()
         .map(decode_postgres_message_row)
         .transpose()?
-        .ok_or_else(|| MamStorageError::NotFound(cursor_id.to_string()))
+        .ok_or_else(|| MamStorageError::NotFound(cursor_id.to_string()))?;
+    cursor_position(&cursor)
 }
 
 pub(super) async fn ensure_sqlite_requested_ids_exist(

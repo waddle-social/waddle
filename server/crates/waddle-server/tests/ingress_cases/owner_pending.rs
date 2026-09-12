@@ -222,6 +222,7 @@ async fn relayed_language_matches_canonical(mut fixture: IngressFixture) {
         by: room.clone(),
         stanza_id: stanza_id.clone(),
         archived_at: archived.timestamp,
+        ordinal: None,
     }];
     owner.plan.plan = vec![PlannedEffect::new(Effect::Durable(DurableEffect::Room(
         DurableRoomEffect::ArchiveGroupchat {

@@ -102,6 +102,7 @@ mod tests {
                     stanza_id: recorded.clone(),
                     by: room.clone(),
                     archived_at: chrono::Utc::now(),
+                    ordinal: None,
                 },
             ],
             sanitized_message: reflected.clone(),

@@ -2,6 +2,7 @@
 //!
 //! These types and builders are safe to share across server and client code.
 
+mod ordinal;
 mod query;
 mod response;
 mod stanza_id_filter;
@@ -9,6 +10,7 @@ mod stanza_id_filter;
 mod tests;
 mod types;
 
+pub use ordinal::{ArchiveOrdinal, ArchiveOrdinalError};
 pub use query::{build_query_form_iq, is_mam_query, is_mam_query_form_request, parse_mam_query};
 pub use response::{
     archived_inner_message, build_archived_muc_sender_x, build_archived_occupant_id_element,

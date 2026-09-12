@@ -203,7 +203,7 @@ async fn xep0359_tx_archive_outcome_keeps_archive_as_stanza_id_authority() {
     .expect("store archive row");
     assert!(matches!(
         outcome,
-        MamTxStoreOutcome::Inserted(ref stanza_id)
+        MamTxStoreOutcome::Inserted { ref stanza_id, .. }
             if stanza_id.id == id && stanza_id.by == archive
     ));
     tx.rollback().await.expect("roll back transaction");

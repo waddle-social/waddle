@@ -13,7 +13,7 @@ pub(super) enum MamDatabaseDriver {
 }
 
 pub(super) const SELECT_COLUMNS: &str =
-    "id, room_jid, timestamp, from_jid, to_jid, body, stanza_id, thread_id, reply_to_id, reply_to_jid, origin_id, message_type, stanza_xml, rich_payload, nickname_generation, parent_thread_id";
+    "id, room_jid, timestamp, from_jid, to_jid, body, stanza_id, thread_id, reply_to_id, reply_to_jid, origin_id, message_type, stanza_xml, rich_payload, nickname_generation, parent_thread_id, archive_seq";
 
 // RFC 6121 §5.2.3 / XEP-0313 §3: `body` is nullable here. NULL means
 // no `<body>` element on the archived stanza; the empty string means
@@ -47,6 +47,7 @@ CREATE TABLE IF NOT EXISTS mam_messages (
     rich_payload TEXT,
     nickname_generation INTEGER,
     parent_thread_id TEXT,
+    archive_seq INTEGER NOT NULL,
     created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
 );
 CREATE INDEX IF NOT EXISTS idx_mam_room_timestamp
@@ -63,6 +64,48 @@ CREATE INDEX IF NOT EXISTS idx_mam_room_origin
     ON mam_messages(room_jid, origin_id);
 CREATE INDEX IF NOT EXISTS idx_mam_room_stanza
     ON mam_messages(room_jid, stanza_id);
+"#;
+
+// Only incomplete archives are reranked; an interrupted backfill is safe to repeat.
+const ARCHIVE_ORDINAL_BACKFILL: &str = r#"
+UPDATE mam_messages SET archive_seq = ranked.rn
+FROM (
+    SELECT id, ROW_NUMBER() OVER (PARTITION BY room_jid ORDER BY timestamp ASC, id ASC) AS rn
+    FROM mam_messages
+    WHERE room_jid IN (SELECT DISTINCT room_jid FROM mam_messages WHERE archive_seq IS NULL)
+) AS ranked
+WHERE mam_messages.id = ranked.id
+"#;
+
+const ARCHIVE_ORDINAL_INDEX: &str =
+    "CREATE UNIQUE INDEX IF NOT EXISTS idx_mam_room_archive_seq ON mam_messages(room_jid, archive_seq)";
+
+const SQLITE_ARCHIVE_SEQUENCES: &str = r#"
+CREATE TABLE IF NOT EXISTS mam_archive_sequences (
+    archive_jid TEXT PRIMARY KEY,
+    next_seq INTEGER NOT NULL
+);
+"#;
+
+const POSTGRES_ARCHIVE_SEQUENCES: &str = r#"
+CREATE TABLE IF NOT EXISTS mam_archive_sequences (
+    archive_jid TEXT PRIMARY KEY,
+    next_seq BIGINT NOT NULL
+);
+"#;
+
+const SQLITE_SEED_ARCHIVE_SEQUENCES: &str = r#"
+INSERT INTO mam_archive_sequences (archive_jid, next_seq)
+SELECT room_jid, MAX(archive_seq) FROM mam_messages GROUP BY room_jid
+ON CONFLICT (archive_jid) DO UPDATE
+SET next_seq = MAX(mam_archive_sequences.next_seq, excluded.next_seq)
+"#;
+
+const POSTGRES_SEED_ARCHIVE_SEQUENCES: &str = r#"
+INSERT INTO mam_archive_sequences (archive_jid, next_seq)
+SELECT room_jid, MAX(archive_seq) FROM mam_messages GROUP BY room_jid
+ON CONFLICT (archive_jid) DO UPDATE
+SET next_seq = GREATEST(mam_archive_sequences.next_seq, excluded.next_seq)
 "#;
 
 const SQLITE_MAM_ORIGIN_DEDUP_INDEXES: &str = r#"
@@ -93,6 +136,7 @@ CREATE TABLE IF NOT EXISTS mam_messages (
     rich_payload TEXT,
     nickname_generation BIGINT,
     parent_thread_id TEXT,
+    archive_seq BIGINT NOT NULL,
     created_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP
 );
 CREATE INDEX IF NOT EXISTS idx_mam_room_timestamp
@@ -215,6 +259,20 @@ async fn ensure_sqlite_column(
     Ok(())
 }
 
+async fn sqlite_column_is_nullable(
+    pool: &SqlitePool,
+    column: &str,
+) -> Result<bool, MamStorageError> {
+    let columns = sqlx::query("PRAGMA table_info(mam_messages)")
+        .fetch_all(pool)
+        .await?;
+    Ok(columns.iter().any(|row| {
+        row.try_get::<String, _>("name")
+            .is_ok_and(|name| name == column)
+            && row.try_get::<i64, _>("notnull").unwrap_or(0) == 0
+    }))
+}
+
 pub(super) async fn ensure_sqlite_schema(pool: &SqlitePool) -> Result<(), MamStorageError> {
     execute_sqlite_batch(pool, SQLITE_MAM_SCHEMA).await?;
     ensure_sqlite_column(pool, "rich_payload", "TEXT").await?;
@@ -236,18 +294,25 @@ pub(super) async fn ensure_sqlite_schema(pool: &SqlitePool) -> Result<(), MamSto
                 .await?;
         }
     }
-    // Same body-NULL constraint risk as Postgres (see
-    // `ensure_postgres_schema`): SQLite tables created before #228
-    // retained `body TEXT NOT NULL` and `CREATE TABLE IF NOT EXISTS`
-    // is a no-op against them. SQLite does not support
-    // `ALTER COLUMN ... DROP NOT NULL` — relaxing the constraint
-    // requires the 12-step table rebuild. Detect the legacy shape
-    // and rebuild only when needed.
-    ensure_sqlite_body_nullable(pool).await?;
+    // Add the nullable ordinal first so historical rows can be ranked. SQLite
+    // cannot alter column nullability: after backfill, the atomic rebuild
+    // enforces archive_seq NOT NULL and also relaxes legacy body NOT NULL.
+    ensure_sqlite_column(pool, "archive_seq", "INTEGER").await?;
+    execute_sqlite_batch(pool, SQLITE_ARCHIVE_SEQUENCES).await?;
+    // Fresh tables declare the column NOT NULL; only a legacy table whose
+    // ordinal column is still nullable needs the one-time rank backfill.
+    if sqlite_column_is_nullable(pool, "archive_seq").await? {
+        sqlx::query(ARCHIVE_ORDINAL_BACKFILL).execute(pool).await?;
+        sqlx::query(SQLITE_SEED_ARCHIVE_SEQUENCES)
+            .execute(pool)
+            .await?;
+    }
+    ensure_sqlite_table_shape(pool).await?;
+    sqlx::query(ARCHIVE_ORDINAL_INDEX).execute(pool).await?;
     Ok(())
 }
 
-async fn ensure_sqlite_body_nullable(pool: &SqlitePool) -> Result<(), MamStorageError> {
+async fn ensure_sqlite_table_shape(pool: &SqlitePool) -> Result<(), MamStorageError> {
     let columns = sqlx::query("PRAGMA table_info(mam_messages)")
         .fetch_all(pool)
         .await?;
@@ -263,7 +328,10 @@ async fn ensure_sqlite_body_nullable(pool: &SqlitePool) -> Result<(), MamStorage
         let notnull: i64 = row.try_get("notnull").unwrap_or(0);
         notnull != 0
     });
-    if !body_is_not_null {
+    let ordinal_is_not_null = columns.iter().any(|row| {
+        row.get::<String, _>("name") == "archive_seq" && row.get::<i64, _>("notnull") != 0
+    });
+    if !body_is_not_null && ordinal_is_not_null {
         return Ok(());
     }
     // SQLite table rebuild: copy → drop → rename, all inside a
@@ -296,13 +364,14 @@ async fn ensure_sqlite_body_nullable(pool: &SqlitePool) -> Result<(), MamStorage
             rich_payload TEXT,
             nickname_generation INTEGER,
             parent_thread_id TEXT,
+            archive_seq INTEGER NOT NULL,
             created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
         )"#,
         r#"INSERT INTO mam_messages__new
             SELECT id, room_jid, timestamp, from_jid, to_jid, body,
                    stanza_id, thread_id, reply_to_id, reply_to_jid,
                    origin_id, message_type, stanza_xml, rich_payload,
-                   nickname_generation, parent_thread_id, created_at
+                   nickname_generation, parent_thread_id, archive_seq, created_at
             FROM mam_messages"#,
         "DROP TABLE mam_messages",
         "ALTER TABLE mam_messages__new RENAME TO mam_messages",
@@ -313,6 +382,8 @@ async fn ensure_sqlite_body_nullable(pool: &SqlitePool) -> Result<(), MamStorage
         "CREATE INDEX IF NOT EXISTS idx_mam_room_thread ON mam_messages(room_jid, thread_id, timestamp DESC)",
         "CREATE INDEX IF NOT EXISTS idx_mam_room_reply_to ON mam_messages(room_jid, reply_to_id, timestamp DESC)",
         "CREATE INDEX IF NOT EXISTS idx_mam_room_origin ON mam_messages(room_jid, origin_id)",
+        "CREATE INDEX IF NOT EXISTS idx_mam_room_stanza ON mam_messages(room_jid, stanza_id)",
+        ARCHIVE_ORDINAL_INDEX,
     ] {
         sqlx::query(statement).execute(&mut *tx).await?;
     }
@@ -371,6 +442,31 @@ async fn ensure_postgres_schema_locked(
         .execute(&mut *conn)
         .await?;
     sqlx::query("ALTER TABLE mam_messages ADD COLUMN IF NOT EXISTS parent_thread_id TEXT")
+        .execute(&mut *conn)
+        .await?;
+    sqlx::query("ALTER TABLE mam_messages ADD COLUMN IF NOT EXISTS archive_seq BIGINT")
+        .execute(&mut *conn)
+        .await?;
+    execute_postgres_batch(&mut *conn, POSTGRES_ARCHIVE_SEQUENCES).await?;
+    // Fresh tables declare the column NOT NULL; only a legacy table whose
+    // ordinal column is still nullable needs the one-time rank backfill.
+    // Each statement autocommits under the advisory lock, so an interrupted
+    // backfill resumes here on the next start.
+    let ordinal_nullable: String = sqlx::query_scalar(
+        "SELECT is_nullable FROM information_schema.columns WHERE table_schema = current_schema() AND table_name = 'mam_messages' AND column_name = 'archive_seq'",
+    ).fetch_one(&mut *conn).await?;
+    if ordinal_nullable == "YES" {
+        sqlx::query(ARCHIVE_ORDINAL_BACKFILL)
+            .execute(&mut *conn)
+            .await?;
+        sqlx::query(POSTGRES_SEED_ARCHIVE_SEQUENCES)
+            .execute(&mut *conn)
+            .await?;
+        sqlx::query("ALTER TABLE mam_messages ALTER COLUMN archive_seq SET NOT NULL")
+            .execute(&mut *conn)
+            .await?;
+    }
+    sqlx::query(ARCHIVE_ORDINAL_INDEX)
         .execute(&mut *conn)
         .await?;
     execute_postgres_batch(&mut *conn, POSTGRES_MAM_ORIGIN_DEDUP_INDEXES).await?;
@@ -508,3 +604,7 @@ mod cutover_tests {
             .expect("drop schema");
     }
 }
+
+#[cfg(test)]
+#[path = "schema_ordinal_tests.rs"]
+mod ordinal_tests;

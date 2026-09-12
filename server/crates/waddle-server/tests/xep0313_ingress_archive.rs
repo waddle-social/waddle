@@ -13,13 +13,13 @@ use waddle_server::{
         DurableEffect, IngressDecisionClass, IngressSubmission, PlannedEffect,
     },
     ingress_substrate::{gc_expired_aliases, AliasGcBudget, AliasGcProgress, ALIAS_RETENTION},
-    ingress_uow::{MamArchiveRepository, ReconcileVerdict},
+    ingress_uow::{EffectIntentRepository, MamArchiveRepository, ReconcileVerdict},
 };
 use waddle_xmpp::{
     ingress::IngressEffectIntent,
     mam::{
-        build_result_messages, ArchiveExpectation, ArchivedMessage, ArchivedTombstone,
-        MamArchiveKind, MamQuery, MamStorage, SqlxMamStorage, MAM_NS,
+        build_result_messages, ArchiveExpectation, ArchiveOrdinal, ArchivedMessage,
+        ArchivedTombstone, MamArchiveKind, MamQuery, MamStorage, SqlxMamStorage, MAM_NS,
     },
 };
 use waddle_xmpp_core::xep0359::StanzaId;
@@ -65,6 +65,7 @@ fn add_archive(
             stanza_id,
             by: archive.clone(),
             archived_at: stamp,
+            ordinal: None,
         });
     submission
         .plan
@@ -114,7 +115,7 @@ async fn query_wire(fixture: &IngressFixture, archive: &BareJid) -> Vec<Archived
     result.messages
 }
 
-/// XEP-0313 §5.1.3 and §6.3: retries and missing-row repair retain the archive UID and order.
+/// XEP-0313 §5.1.3 and §6.3: retries and missing-row repair retain archive identity.
 async fn identity_repair_tombstone(fixture: IngressFixture) {
     let archive = fixture.principal.bare_jid().clone();
     let stamp = Utc::now() - chrono::Duration::minutes(2);
@@ -127,6 +128,8 @@ async fn identity_repair_tombstone(fixture: IngressFixture) {
         .await
         .expect("existing");
     assert_eq!(existing.archive_ids, inserted.archive_ids);
+    assert_eq!(existing.verdict, Some(ReconcileVerdict::Consistent));
+    assert_recorded_ordinal(&fixture, inserted.message_key.expect("key"), "archive-a-id").await;
     commit_submission(
         &fixture.uow,
         &plan(
@@ -155,15 +158,20 @@ async fn identity_repair_tombstone(fixture: IngressFixture) {
     .expect("repair");
     assert_eq!(repaired.archive_ids, inserted.archive_ids);
     let after = query_wire(&fixture, &archive).await;
+    assert_eq!(repaired.verdict, Some(ReconcileVerdict::Consistent));
     assert_eq!(
-        before
-            .iter()
-            .map(|row| (&row.id, row.timestamp))
-            .collect::<Vec<_>>(),
         after
             .iter()
             .map(|row| (&row.id, row.timestamp))
+            .collect::<Vec<_>>(),
+        before
+            .iter()
+            .map(|row| (&row.id, row.timestamp))
             .collect::<Vec<_>>()
+    );
+    assert_eq!(
+        after.iter().map(|row| row.ordinal).collect::<Vec<_>>(),
+        before.iter().map(|row| row.ordinal).collect::<Vec<_>>()
     );
     assert_eq!(fixture.count("ingress_messages").await, 2);
     let mut tx = fixture.uow.begin().await.expect("tombstone transaction");
@@ -187,7 +195,12 @@ async fn identity_repair_tombstone(fixture: IngressFixture) {
     assert_eq!(swallowed.archive_ids, inserted.archive_ids);
     let rows = query_wire(&fixture, &archive).await;
     assert_eq!(rows.len(), 2);
-    assert!(rows[0].body.is_none());
+    assert!(rows
+        .iter()
+        .find(|row| row.id == "archive-a-id")
+        .expect("tombstone row")
+        .body
+        .is_none());
     assert_eq!(
         fixture
             .optional_text("SELECT body FROM mam_messages WHERE id = 'archive-a-id'")
@@ -195,6 +208,180 @@ async fn identity_repair_tombstone(fixture: IngressFixture) {
         None
     );
     assert_eq!(fixture.count("mam_messages").await, 2);
+    fixture.close().await;
+}
+
+async fn assert_recorded_ordinal(
+    fixture: &IngressFixture,
+    key: waddle_xmpp::ingress::MessageKey,
+    id: &str,
+) {
+    let mut tx = fixture.uow.begin().await.expect("read recorded ordinal");
+    let intents = EffectIntentRepository::load(&mut tx, key)
+        .await
+        .expect("intents");
+    tx.commit().await.expect("close intent read");
+    let ordinal = intents
+        .iter()
+        .find_map(|intent| match intent {
+            IngressEffectIntent::ArchiveAuthoritative {
+                stanza_id, ordinal, ..
+            } if stanza_id.id == id => *ordinal,
+            _ => None,
+        })
+        .expect("committed archive ordinal");
+    let conn = fixture.db.guard().await.expect("archive connection");
+    let mut rows = conn
+        .query(
+            "SELECT archive_seq FROM mam_messages WHERE id = ?",
+            waddle_server::db_params![id.to_owned()],
+        )
+        .await
+        .expect("stored sequence");
+    let stored: i64 = rows
+        .next()
+        .await
+        .expect("row")
+        .expect("archive row")
+        .get(0)
+        .expect("sequence");
+    assert_eq!(
+        ordinal,
+        ArchiveOrdinal::from_storage(stored).expect("positive sequence")
+    );
+}
+
+async fn ordinal_mismatch(fixture: IngressFixture) {
+    let original = plan(
+        &fixture,
+        "ordinal-conflict",
+        "ordinal-conflict-id",
+        Utc::now(),
+    );
+    let first = commit_submission(&fixture.uow, &original, 5)
+        .await
+        .expect("first commit");
+    assert_recorded_ordinal(
+        &fixture,
+        first.message_key.expect("key"),
+        "ordinal-conflict-id",
+    )
+    .await;
+    fixture
+        .execute(
+            "UPDATE mam_messages SET archive_seq = archive_seq + 10 WHERE id = ?",
+            waddle_server::db_params!["ordinal-conflict-id".to_owned()],
+        )
+        .await;
+    let counts = (
+        fixture.count("ingress_messages").await,
+        fixture.count("ingress_effect_intents").await,
+        fixture.count("ingress_effect_receipts").await,
+        fixture.count("mam_messages").await,
+    );
+    let failure = commit_submission(&fixture.uow, &original, 5)
+        .await
+        .expect_err("ordinal contradiction");
+    assert_eq!(failure.class(), IngressDecisionClass::IntentContradiction);
+    assert!(!failure.class().advances());
+    assert_eq!(
+        counts,
+        (
+            fixture.count("ingress_messages").await,
+            fixture.count("ingress_effect_intents").await,
+            fixture.count("ingress_effect_receipts").await,
+            fixture.count("mam_messages").await,
+        )
+    );
+    assert_eq!(
+        query_wire(&fixture, fixture.principal.bare_jid()).await[0].ordinal,
+        Some(ArchiveOrdinal::from_storage(11).expect("changed ordinal"))
+    );
+    fixture.close().await;
+}
+
+/// Counter locks are taken in canonical archive order regardless of plan order,
+/// a zero-valued lock row yields ordinal 1 on the first allocation, and a
+/// contended counter surfaces as the bounded Phase B `Timeout`, not a storage
+/// fault.
+async fn counter_lock_order_and_contention(fixture: IngressFixture) {
+    let first: BareJid = "aaa@example.com".parse().expect("first archive");
+    let second: BareJid = "zzz@example.com".parse().expect("second archive");
+    let started = tokio::sync::Notify::new();
+    let forward = async {
+        let mut tx = fixture.uow.begin().await.expect("forward transaction");
+        MamArchiveRepository::lock_sequences(&mut tx, std::slice::from_ref(&first))
+            .await
+            .expect("lock first");
+        started.notify_one();
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        MamArchiveRepository::lock_sequences(&mut tx, std::slice::from_ref(&second))
+            .await
+            .expect("lock second while the reverse transaction waits on the first");
+        tx.commit().await.expect("forward commit");
+    };
+    let reverse = async {
+        started.notified().await;
+        let mut tx = fixture.uow.begin().await.expect("reverse transaction");
+        // Plan order says second-then-first; the repository locks first-then-second.
+        MamArchiveRepository::lock_sequences(&mut tx, &[second.clone(), first.clone()])
+            .await
+            .expect("reverse order queues instead of deadlocking");
+        tx.commit().await.expect("reverse commit");
+    };
+    tokio::time::timeout(Duration::from_secs(10), async {
+        tokio::join!(forward, reverse);
+    })
+    .await
+    .expect("both transactions complete");
+    assert_eq!(
+        fixture
+            .count("mam_archive_sequences WHERE next_seq = 0")
+            .await,
+        2,
+        "locking creates zero-valued counter rows without allocating"
+    );
+
+    let message = ArchivedMessage::for_test(
+        fixture.principal.bare_jid().clone().into(),
+        first.clone().into(),
+    );
+    let mut tx = fixture.uow.begin().await.expect("allocate after lock row");
+    let outcome = MamArchiveRepository::store(&mut tx, &first, &message, ArchiveExpectation::Fresh)
+        .await
+        .expect("first allocation");
+    tx.commit().await.expect("commit first allocation");
+    assert!(matches!(
+        outcome,
+        waddle_xmpp::mam::MamTxStoreOutcome::Inserted { ordinal, .. }
+            if ordinal == ArchiveOrdinal::FIRST
+    ));
+
+    let holder = fixture.uow.begin().await.expect("holding transaction");
+    let mut holder = holder;
+    MamArchiveRepository::lock_sequences(&mut holder, std::slice::from_ref(&second))
+        .await
+        .expect("hold the second counter");
+    let contended = async {
+        let mut tx = fixture
+            .uow
+            .begin_with_timeouts(Duration::from_millis(50), Duration::from_millis(250))
+            .await?;
+        let message = ArchivedMessage::for_test(
+            fixture.principal.bare_jid().clone().into(),
+            second.clone().into(),
+        );
+        MamArchiveRepository::store(&mut tx, &second, &message, ArchiveExpectation::Fresh).await
+    }
+    .await;
+    assert!(
+        matches!(
+            contended,
+            Err(waddle_server::ingress_uow::IngressUowError::Timeout)
+        ),
+        "contended counter is a bounded timeout, got {contended:?}"
+    );
+    drop(holder);
     fixture.close().await;
 }
 
@@ -613,4 +800,16 @@ backend_tests!(
     monotonic_inbox_sqlite,
     monotonic_inbox_postgres,
     monotonic_inbox
+);
+
+backend_tests!(
+    ordinal_mismatch_sqlite,
+    ordinal_mismatch_postgres,
+    ordinal_mismatch
+);
+
+backend_tests!(
+    counter_lock_order_and_contention_sqlite,
+    counter_lock_order_and_contention_postgres,
+    counter_lock_order_and_contention
 );

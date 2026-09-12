@@ -14,6 +14,7 @@ mod error;
 mod pending_receipts;
 mod recovery_receipts;
 pub(crate) use pending_receipts::PendingReceiptRepository;
+mod archive_ordinal;
 mod repositories;
 mod retry;
 pub(crate) use recovery_receipts::{RecoveryCompletion, RecoveryReceiptRepository};

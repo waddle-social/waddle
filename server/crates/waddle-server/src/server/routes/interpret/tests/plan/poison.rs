@@ -105,13 +105,6 @@ impl MamStorage for PoisonMam {
     async fn count_messages(&self, room_jid: &BareJid) -> Result<u32, MamStorageError> {
         self.0.count_messages(room_jid).await
     }
-    async fn delete_before(
-        &self,
-        _room_jid: &BareJid,
-        _before: DateTime<Utc>,
-    ) -> Result<u64, MamStorageError> {
-        panic!("planning wrote MamStorage::delete_before")
-    }
 }
 #[async_trait::async_trait]
 impl InboxStorage for PoisonInbox {

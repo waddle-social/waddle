@@ -239,6 +239,7 @@ async fn displayed_marker_boundary_records_read_timestamp_and_push_route() {
     mam.store_message(
         &room,
         &ArchivedMessage {
+            ordinal: None,
             id: "msg-1".to_string(),
             body: Some("hello".to_string()),
             message_type: MessageType::Groupchat,
@@ -722,6 +723,7 @@ async fn direct_archive_capture_uses_the_new_authoritative_id_for_an_origin_retr
         .store_message(
             &owner,
             &ArchivedMessage {
+                ordinal: None,
                 id: "authoritative-archive-id".to_string(),
                 body: Some("hello".to_string()),
                 origin_id: Some(origin.clone()),
@@ -771,8 +773,12 @@ async fn direct_archive_capture_uses_the_new_authoritative_id_for_an_origin_retr
                 archive,
                 stanza_id,
                 archived_at,
+                ordinal,
                 ..
-            } if archive == &owner => Some((stanza_id, archived_at)),
+            } if archive == &owner => {
+                assert_eq!(*ordinal, None, "planning ordinals are not authoritative");
+                Some((stanza_id, archived_at))
+            }
             _ => None,
         })
         .expect("captured archive identity");

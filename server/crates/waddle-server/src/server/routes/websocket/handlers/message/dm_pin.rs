@@ -1019,6 +1019,7 @@ mod tests {
             .store_message(
                 &sender_bare,
                 &ArchivedMessage {
+                    ordinal: None,
                     id: "mam-1".to_string(),
                     body: Some("important body".to_string()),
                     message_type: xmpp_parsers::message::MessageType::Chat,
@@ -1084,6 +1085,7 @@ mod tests {
             .store_message(
                 &sender_bare,
                 &ArchivedMessage {
+                    ordinal: None,
                     id: "plan-pin-archive".to_owned(),
                     body: Some("important body".to_owned()),
                     message_type: xmpp_parsers::message::MessageType::Chat,

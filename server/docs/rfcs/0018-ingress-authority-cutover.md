@@ -26,6 +26,7 @@ destination connection's own recipient archive/inbox pipeline (#1658, now tracke
 (iv) subject/pin/membership supersession keeps `main`'s semantics
 (#1659/#1660); (v) non-resumable streams have no durable
 connection-generation fence (follow-up issue); (vi) extension-host dispatch runs outside ingress: offline rows and candidates are written immediately without receipts, and groupchat notification recovery rows are not created; a typed Extension ingress identity is the follow-up.
+(vii) archive ordinals do not yet enforce concurrent live dispatch order (#1770, §3.7).
 
 ### Recovery follow-ups from combined review
 
@@ -334,6 +335,49 @@ most one connection at a time. Metrics: `ingress.maintenance.runs{phase,
 outcome}` and `ingress.maintenance.terminalized_messages`; alert
 `IngressMaintenanceFailing`.
 
+### 3.7 Archive order (#1770 stage 1)
+
+Planning-time timestamps cannot order concurrent senders: a message planned
+first can commit after a later message. XEP-0313 §3.1 (in-tree
+[`xeps/xep-0313.xml`](../../../xeps/xep-0313.xml), line 301) requires:
+
+> Order within the archive MUST be preserved, where the order of messages is
+> the same as the order that the client originally received them (or would
+> have received them if online).
+
+The ordering authority is a per-archive commit ordinal, `archive_seq`, allocated
+from `mam_archive_sequences` in the insert's transaction by every writer,
+including the Phase B transaction writer and the pool writer. The archive's
+counter row serializes allocation through commit. Phase B locks every archive
+counter the plan will write in canonical archive order before any durable
+mutation, so a message and its reply (plan orders differ) queue instead of
+deadlocking; a counter wait that exceeds the Phase B lock timeout is the
+ordinary non-advancing `Timeout`, never a storage fault. MAM reads, RSM cursors and
+newest/first lookups order by the ordinal; `<delay>` keeps the receive timestamp
+and time-range filters keep their time semantics. Archive UIDs remain opaque.
+Repair re-inserts at the recorded ordinal carried on `ArchiveAuthoritative` and
+`SystemMessageArchive` intents, not at the tail. `UNIQUE (room_jid, archive_seq)`
+protects positions; the counter is a never-lowered high-water mark, including
+after deletion and repair. Timestamp-based `delete_before` is removed: with
+receive time independent of archive order, it can delete holes rather than the
+prefix required by XEP-0313 retention.
+
+**Stated limitation.** Dispatch enforcement (wire order equals ordinal order
+across concurrent senders) is not implemented. An in-process lane is unsound:
+A can partially deliver, time out and release the lane; B delivers; retrying A
+then delivers its earlier ordinal after B. Waiting inside the connection loop
+also creates a backpressure cycle: a predecessor's carbon blocks on that
+connection's full outbound channel while the connection waits for the lane,
+unable to drain output or process the SM acknowledgements that release its
+send window. Stage 2 needs a durable predecessor/release gate that executes
+lost predecessor obligations through the #1755 recovery executor, with waiting
+off the connection loop. It must bring every producer outside ingress under
+that authority: live full-JID delivery (#1759), extension-host dispatch (#1753),
+pending flush, remote-owner bare relay, disconnect drains, and the remote
+full-JID detached raw-append bypass that can omit recipient archival entirely.
+#1770 remains open; stage 1 supplies durable archive order, not the complete
+XEP-0313 live-order guarantee.
+
 ## 4. Backends
 The unit of work is dialect-aware through `Database`: SQLite uses
 `BEGIN IMMEDIATE`, no lock clauses, no epoch GUC proof, `IngressFencing::
@@ -359,6 +403,14 @@ tables)
 - SQLite arm: real DDL for every ingress table.
 - `ensure_schema`: `sm_sessions` drops `shadow_ordinal`; `mam_messages` drops
   the dedupe columns and indexes.
+- Store-owned `ensure_schema` (#1770 stage 1): `mam_messages.archive_seq
+  BIGINT NOT NULL`, `UNIQUE (room_jid, archive_seq)` and
+  `mam_archive_sequences (archive_jid TEXT PRIMARY KEY, next_seq BIGINT NOT NULL)`;
+  legacy rows are backfilled by `(timestamp, id)` within each archive and
+  counters are seeded without lowering an existing high-water mark. Ledger
+  **V1017** records the same idempotent counter-table DDL as the cutover
+  marker so a pre-cutover binary fails closed instead of starting with
+  failing inserts.
 
 ## 6. Deployment
 Recreate hard cutover rides in this PR (prod HelmRelease `updateStrategy:

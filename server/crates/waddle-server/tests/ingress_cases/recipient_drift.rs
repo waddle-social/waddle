@@ -112,6 +112,7 @@ async fn recipient_plan_drift(fixture: IngressFixture, missing_sender: bool) {
             by: recipient.clone(),
             stanza_id: new_id,
             archived_at: recipient_message.timestamp,
+            ordinal: None,
         });
     submission
         .plan

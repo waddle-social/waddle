@@ -3270,13 +3270,6 @@ impl MamStorage for LookupOutageMamStorage {
     async fn count_messages(&self, room_jid: &BareJid) -> Result<u32, MamStorageError> {
         self.inner.count_messages(room_jid).await
     }
-    async fn delete_before(
-        &self,
-        room_jid: &BareJid,
-        before: chrono::DateTime<chrono::Utc>,
-    ) -> Result<u64, MamStorageError> {
-        self.inner.delete_before(room_jid, before).await
-    }
 }
 
 /// Seed the given MAM storage with an archived copy of a chat message

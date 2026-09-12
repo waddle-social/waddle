@@ -16,7 +16,7 @@ impl RoomPinSink<'_> {
                 room,
                 message,
                 fence,
-                archive_expectation,
+                archive_expectation: _,
             },
         )) = effect.effect
         {
@@ -28,7 +28,6 @@ impl RoomPinSink<'_> {
                     room,
                     message,
                     fence,
-                    archive_expectation,
                 },
             ));
         }

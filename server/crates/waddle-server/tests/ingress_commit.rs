@@ -52,6 +52,7 @@ fn archive_plan(
             stanza_id,
             by: archive.clone(),
             archived_at: message.timestamp,
+            ordinal: None,
         });
     submission
         .plan

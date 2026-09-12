@@ -178,6 +178,7 @@ pub(super) async fn broadcast_room_system_message_event(
                         ),
                         by: room.clone(),
                         archived_at: result.archived_at,
+                        ordinal: None,
                     },
                 );
                 debug!(
@@ -286,6 +287,7 @@ mod identity_tests {
                     by: room.clone(),
                     stanza_id: StanzaId::new(uuid::Uuid::new_v4().to_string(), room.clone().into()),
                     archived_at: chrono::Utc::now(),
+                    ordinal: None,
                 },
             );
         }

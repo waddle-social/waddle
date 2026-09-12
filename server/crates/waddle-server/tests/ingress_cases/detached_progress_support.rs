@@ -257,6 +257,7 @@ fn archived_submission(fixture: &IngressFixture, stamp: &str) -> IngressSubmissi
                 stanza_id: stanza_id.clone(),
                 by: archive.clone(),
                 archived_at: message.timestamp,
+                ordinal: None,
             });
         submission
             .plan

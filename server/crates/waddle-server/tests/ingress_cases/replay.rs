@@ -227,6 +227,7 @@ fn room_projection(
         by: room.clone(),
         stanza_id,
         archived_at: archived.timestamp,
+        ordinal: None,
     };
     submission.plan.plan[0] = PlannedEffect::new(Effect::Durable(DurableEffect::Room(
         DurableRoomEffect::ArchiveGroupchat {

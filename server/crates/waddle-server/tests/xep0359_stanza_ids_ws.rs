@@ -339,7 +339,7 @@ async fn xep_0359_typed_stanza_id_round_trips_through_storage_with_typed_by_jid(
         )
     };
     let stored_id = match storage.store_message(&archive, &row).await.expect("store") {
-        StoreOutcome::Stored(id) => id,
+        StoreOutcome::Stored { stanza_id: id, .. } => id,
         other => panic!("expected stored row, got {other:?}"),
     };
 
@@ -378,7 +378,7 @@ async fn xep_0359_typed_origin_id_round_trips_through_storage() {
         )
     };
     let stored_id = match storage.store_message(&archive, &row).await.expect("store") {
-        StoreOutcome::Stored(id) => id,
+        StoreOutcome::Stored { stanza_id: id, .. } => id,
         other => panic!("expected stored row, got {other:?}"),
     };
 
@@ -422,6 +422,7 @@ async fn xep_0359_query_filter_finds_row_by_typed_stanza_id() {
     let archive_jid: Jid = "room@conference.example.com".parse().expect("valid jid");
 
     let row = ArchivedMessage {
+        ordinal: None,
         id: "row-thread-via-stanza-id".to_string(),
         body: Some("root".to_string()),
         stanza_id: Some(StanzaId::new("thread-by-stanza-id", archive_jid.clone())),

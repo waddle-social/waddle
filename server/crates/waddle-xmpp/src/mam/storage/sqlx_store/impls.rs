@@ -1,10 +1,9 @@
 use async_trait::async_trait;
-use chrono::{DateTime, Utc};
 use jid::BareJid;
 use sqlx::postgres::PgRow;
 use sqlx::sqlite::SqliteRow;
 use sqlx::{Postgres, QueryBuilder, Sqlite};
-use tracing::{debug, instrument, Span};
+use tracing::{instrument, Span};
 use waddle_xmpp_core::mam::{ArchivedMessage, MamQuery, MamResult};
 use waddle_xmpp_core::xep0359::OriginId;
 
@@ -112,8 +111,8 @@ impl MamStorage for SqlxMamStorage {
                     archive_jid_str.as_str(),
                     query,
                     with_filter.as_ref(),
-                    filter_before_cursor.as_ref(),
-                    filter_after_cursor.as_ref(),
+                    filter_before_cursor,
+                    filter_after_cursor,
                 );
                 let count = count_builder
                     .build_query_scalar::<i64>()
@@ -128,37 +127,26 @@ impl MamStorage for SqlxMamStorage {
                     archive_jid_str.as_str(),
                     query,
                     with_filter.as_ref(),
-                    filter_before_cursor.as_ref(),
-                    filter_after_cursor.as_ref(),
+                    filter_before_cursor,
+                    filter_after_cursor,
                 );
                 if let Some(before_id) = query.before_id.as_deref().filter(|id| !id.is_empty()) {
                     let cursor = fetch_sqlite_cursor(pool, archive_jid, before_id).await?;
                     builder
-                        .push(" AND (timestamp < ")
-                        .push_bind(cursor.timestamp.to_rfc3339())
-                        .push(" OR (timestamp = ")
-                        .push_bind(cursor.timestamp.to_rfc3339())
-                        .push(" AND id < ")
-                        .push_bind(cursor.id)
-                        .push("))");
+                        .push(" AND archive_seq < ")
+                        .push_bind(cursor.to_storage());
                 }
                 if let Some(after_id) = query.after_id.as_deref() {
                     let cursor = fetch_sqlite_cursor(pool, archive_jid, after_id).await?;
                     builder
-                        .push(" AND (timestamp > ")
-                        .push_bind(cursor.timestamp.to_rfc3339())
-                        .push(" OR (timestamp = ")
-                        .push_bind(cursor.timestamp.to_rfc3339())
-                        .push(" AND id > ")
-                        .push_bind(cursor.id)
-                        .push("))");
+                        .push(" AND archive_seq > ")
+                        .push_bind(cursor.to_storage());
                 }
-                // XEP-0313 §archive_order: chronological order primary, archive
-                // id as deterministic tiebreak for tied timestamps.
+                // XEP-0313 §archive_order follows the committed per-archive ordinal.
                 builder.push(if uses_backward_pagination(query) {
-                    " ORDER BY timestamp DESC, id DESC"
+                    " ORDER BY archive_seq DESC"
                 } else {
-                    " ORDER BY timestamp ASC, id ASC"
+                    " ORDER BY archive_seq ASC"
                 });
                 builder.push(" LIMIT ").push_bind(limit);
 
@@ -196,8 +184,8 @@ impl MamStorage for SqlxMamStorage {
                     archive_jid_str.as_str(),
                     query,
                     with_filter.as_ref(),
-                    filter_before_cursor.as_ref(),
-                    filter_after_cursor.as_ref(),
+                    filter_before_cursor,
+                    filter_after_cursor,
                 );
                 let count = count_builder
                     .build_query_scalar::<i64>()
@@ -212,37 +200,26 @@ impl MamStorage for SqlxMamStorage {
                     archive_jid_str.as_str(),
                     query,
                     with_filter.as_ref(),
-                    filter_before_cursor.as_ref(),
-                    filter_after_cursor.as_ref(),
+                    filter_before_cursor,
+                    filter_after_cursor,
                 );
                 if let Some(before_id) = query.before_id.as_deref().filter(|id| !id.is_empty()) {
                     let cursor = fetch_postgres_cursor(pool, archive_jid, before_id).await?;
                     builder
-                        .push(" AND (timestamp < ")
-                        .push_bind(cursor.timestamp)
-                        .push(" OR (timestamp = ")
-                        .push_bind(cursor.timestamp)
-                        .push(" AND id < ")
-                        .push_bind(cursor.id)
-                        .push("))");
+                        .push(" AND archive_seq < ")
+                        .push_bind(cursor.to_storage());
                 }
                 if let Some(after_id) = query.after_id.as_deref() {
                     let cursor = fetch_postgres_cursor(pool, archive_jid, after_id).await?;
                     builder
-                        .push(" AND (timestamp > ")
-                        .push_bind(cursor.timestamp)
-                        .push(" OR (timestamp = ")
-                        .push_bind(cursor.timestamp)
-                        .push(" AND id > ")
-                        .push_bind(cursor.id)
-                        .push("))");
+                        .push(" AND archive_seq > ")
+                        .push_bind(cursor.to_storage());
                 }
-                // XEP-0313 §archive_order: chronological order primary, archive
-                // id as deterministic tiebreak for tied timestamps.
+                // XEP-0313 §archive_order follows the committed per-archive ordinal.
                 builder.push(if uses_backward_pagination(query) {
-                    " ORDER BY timestamp DESC, id DESC"
+                    " ORDER BY archive_seq DESC"
                 } else {
-                    " ORDER BY timestamp ASC, id ASC"
+                    " ORDER BY archive_seq ASC"
                 });
                 builder.push(" LIMIT ").push_bind(limit);
 
@@ -294,7 +271,7 @@ impl MamStorage for SqlxMamStorage {
         match &self.backend {
             MamDatabaseBackend::Sqlite(pool) => {
                 let row = sqlx::query(&format!(
-                    "SELECT {SELECT_COLUMNS} FROM mam_messages WHERE room_jid = ? AND (stanza_id = ? OR origin_id = ?) ORDER BY timestamp DESC LIMIT 1"
+                    "SELECT {SELECT_COLUMNS} FROM mam_messages WHERE room_jid = ? AND (stanza_id = ? OR origin_id = ?) ORDER BY archive_seq DESC LIMIT 1"
                 ))
                 .bind(archive_jid_str.as_str())
                 .bind(stanza_id)
@@ -305,7 +282,7 @@ impl MamStorage for SqlxMamStorage {
             }
             MamDatabaseBackend::Postgres(pool) => {
                 let row = sqlx::query(&format!(
-                    "SELECT {SELECT_COLUMNS} FROM mam_messages WHERE room_jid = $1 AND (stanza_id = $2 OR origin_id = $2) ORDER BY timestamp DESC LIMIT 1"
+                    "SELECT {SELECT_COLUMNS} FROM mam_messages WHERE room_jid = $1 AND (stanza_id = $2 OR origin_id = $2) ORDER BY archive_seq DESC LIMIT 1"
                 ))
                 .bind(archive_jid_str.as_str())
                 .bind(stanza_id)
@@ -325,7 +302,7 @@ impl MamStorage for SqlxMamStorage {
         match &self.backend {
             MamDatabaseBackend::Sqlite(pool) => {
                 let row = sqlx::query(&format!(
-                    "SELECT {SELECT_COLUMNS} FROM mam_messages WHERE room_jid = ? AND stanza_id = ? ORDER BY timestamp DESC LIMIT 1"
+                    "SELECT {SELECT_COLUMNS} FROM mam_messages WHERE room_jid = ? AND stanza_id = ? ORDER BY archive_seq DESC LIMIT 1"
                 ))
                 .bind(archive_jid_str.as_str())
                 .bind(message_id)
@@ -335,7 +312,7 @@ impl MamStorage for SqlxMamStorage {
             }
             MamDatabaseBackend::Postgres(pool) => {
                 let row = sqlx::query(&format!(
-                    "SELECT {SELECT_COLUMNS} FROM mam_messages WHERE room_jid = $1 AND stanza_id = $2 ORDER BY timestamp DESC LIMIT 1"
+                    "SELECT {SELECT_COLUMNS} FROM mam_messages WHERE room_jid = $1 AND stanza_id = $2 ORDER BY archive_seq DESC LIMIT 1"
                 ))
                 .bind(archive_jid_str.as_str())
                 .bind(message_id)
@@ -385,7 +362,7 @@ impl MamStorage for SqlxMamStorage {
                 builder
                     .push(" ORDER BY CASE WHEN origin_id = ")
                     .push_bind(origin_id.as_str())
-                    .push(" THEN 0 ELSE 1 END, timestamp ASC, id ASC LIMIT 1");
+                    .push(" THEN 0 ELSE 1 END, archive_seq ASC LIMIT 1");
                 let row = builder.build().fetch_optional(pool).await?;
                 row.as_ref().map(decode_sqlite_message_row).transpose()
             }
@@ -416,7 +393,7 @@ impl MamStorage for SqlxMamStorage {
                 builder
                     .push(" ORDER BY CASE WHEN origin_id = ")
                     .push_bind(origin_id.as_str())
-                    .push(" THEN 0 ELSE 1 END, timestamp ASC, id ASC LIMIT 1");
+                    .push(" THEN 0 ELSE 1 END, archive_seq ASC LIMIT 1");
                 let row = builder.build().fetch_optional(pool).await?;
                 row.as_ref().map(decode_postgres_message_row).transpose()
             }
@@ -432,7 +409,7 @@ impl MamStorage for SqlxMamStorage {
         match &self.backend {
             MamDatabaseBackend::Sqlite(pool) => {
                 let row = sqlx::query(&format!(
-                    "SELECT {SELECT_COLUMNS} FROM mam_messages WHERE room_jid = ? AND (id = ? OR stanza_id = ?) ORDER BY timestamp DESC LIMIT 1"
+                    "SELECT {SELECT_COLUMNS} FROM mam_messages WHERE room_jid = ? AND (id = ? OR stanza_id = ?) ORDER BY archive_seq DESC LIMIT 1"
                 ))
                 .bind(archive_jid_str.as_str())
                 .bind(stanza_id)
@@ -443,7 +420,7 @@ impl MamStorage for SqlxMamStorage {
             }
             MamDatabaseBackend::Postgres(pool) => {
                 let row = sqlx::query(&format!(
-                    "SELECT {SELECT_COLUMNS} FROM mam_messages WHERE room_jid = $1 AND (id = $2 OR stanza_id = $2) ORDER BY timestamp DESC LIMIT 1"
+                    "SELECT {SELECT_COLUMNS} FROM mam_messages WHERE room_jid = $1 AND (id = $2 OR stanza_id = $2) ORDER BY archive_seq DESC LIMIT 1"
                 ))
                 .bind(archive_jid_str.as_str())
                 .bind(stanza_id)
@@ -475,38 +452,6 @@ impl MamStorage for SqlxMamStorage {
         };
 
         Ok(u32::try_from(count).unwrap_or(u32::MAX))
-    }
-
-    #[instrument(skip(self, room_jid), fields(room = %room_jid))]
-    async fn delete_before(
-        &self,
-        room_jid: &BareJid,
-        before: DateTime<Utc>,
-    ) -> Result<u64, MamStorageError> {
-        let room_jid_str = room_jid.to_string();
-        let deleted = match &self.backend {
-            MamDatabaseBackend::Sqlite(pool) => {
-                let mut builder =
-                    QueryBuilder::<Sqlite>::new("DELETE FROM mam_messages WHERE room_jid = ");
-                builder
-                    .push_bind(room_jid_str.as_str())
-                    .push(" AND timestamp < ")
-                    .push_bind(before.to_rfc3339());
-                builder.build().execute(pool).await?.rows_affected()
-            }
-            MamDatabaseBackend::Postgres(pool) => {
-                let mut builder =
-                    QueryBuilder::<Postgres>::new("DELETE FROM mam_messages WHERE room_jid = ");
-                builder
-                    .push_bind(room_jid_str.as_str())
-                    .push(" AND timestamp < ")
-                    .push_bind(before);
-                builder.build().execute(pool).await?.rows_affected()
-            }
-        };
-
-        debug!(archive = %room_jid, deleted, "Deleted old messages from MAM archive");
-        Ok(deleted)
     }
 
     #[instrument(skip(self, tombstone))]

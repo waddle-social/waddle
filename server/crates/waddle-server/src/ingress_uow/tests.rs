@@ -306,6 +306,7 @@ async fn spanning_proof_commits_exact_cross_store_values() {
         &values.archive_jid,
         &retry,
         waddle_xmpp::mam::ArchiveExpectation::Existing {
+            ordinal: None,
             stanza_id: StanzaId {
                 id: values.mam_id.clone(),
                 by: values.archive_jid.clone().into(),
@@ -316,7 +317,7 @@ async fn spanning_proof_commits_exact_cross_store_values() {
     .await
     .expect("reuse recorded MAM identity")
     {
-        MamTxStoreOutcome::Existing(stanza_id) => {
+        MamTxStoreOutcome::Existing { stanza_id, .. } => {
             assert_eq!(stanza_id.id, values.mam_id);
             assert_eq!(stanza_id.by, jid::Jid::from(values.archive_jid.clone()));
         }
@@ -707,7 +708,7 @@ async fn room_claim_fence_authorizes_a_transaction_bound_mam_archive_write() {
     .await
     .expect("store under room claim fence")
     {
-        MamTxStoreOutcome::Inserted(stanza_id) => {
+        MamTxStoreOutcome::Inserted { stanza_id, .. } => {
             assert_eq!(stanza_id.id, values.mam_id);
             assert_eq!(stanza_id.by, jid::Jid::from(values.archive_jid.clone()));
         }
@@ -846,7 +847,7 @@ async fn room_claim_fence_from_another_live_transaction_is_rejected() {
         )
         .await
         .expect("store in minting transaction"),
-        MamTxStoreOutcome::Inserted(_)
+        MamTxStoreOutcome::Inserted { .. }
     ));
     minting_transaction
         .commit()
@@ -1128,6 +1129,7 @@ async fn assert_intent_reconciliation(
         by: archive.clone(),
         stanza_id: StanzaId::new("original", archive.clone().into()),
         archived_at,
+        ordinal: None,
     };
     let route = IngressEffectIntent::RouteDirect {
         recipient: "juliet@example.com".parse().expect("recipient"),
@@ -1192,6 +1194,7 @@ async fn assert_intent_reconciliation(
         by: archive.clone(),
         stanza_id: StanzaId::new("changed", archive.into()),
         archived_at,
+        ordinal: None,
     };
     let new_route = IngressEffectIntent::RouteDirect {
         recipient: "benvolio@example.com".parse().expect("recipient"),
@@ -1471,7 +1474,7 @@ async fn store_mam_message(transaction: &mut IngressUowTransaction<'_>, values: 
     .await
     .expect("store MAM identity in UoW")
     {
-        MamTxStoreOutcome::Inserted(stanza_id) => {
+        MamTxStoreOutcome::Inserted { stanza_id, .. } => {
             assert_eq!(stanza_id.id, values.mam_id);
             assert_eq!(stanza_id.by, jid::Jid::from(values.archive_jid.clone()));
         }
@@ -1504,6 +1507,7 @@ async fn upsert_inbox_entry(transaction: &mut IngressUowTransaction<'_>, values:
 #[cfg(feature = "clustering")]
 fn archived_message(values: &FixtureValues) -> ArchivedMessage {
     ArchivedMessage {
+        ordinal: None,
         id: values.mam_id.clone(),
         timestamp: Utc
             .with_ymd_and_hms(2026, 1, 1, 0, 0, 0)
@@ -2177,6 +2181,7 @@ async fn mam_repository_sqlite_preserves_recorded_identity_and_repair_timestamp(
     message.timestamp = chrono::DateTime::from_timestamp(1_700_000_000, 0).expect("timestamp");
     let stanza_id = StanzaId::new(message.id.clone(), archive.clone().into());
     let existing = ArchiveExpectation::Existing {
+        ordinal: Some(waddle_xmpp::mam::ArchiveOrdinal::from_storage(1).expect("ordinal")),
         stanza_id: stanza_id.clone(),
         archived_at: message.timestamp,
     };
@@ -2191,7 +2196,10 @@ async fn mam_repository_sqlite_preserves_recorded_identity_and_repair_timestamp(
         )
         .await
         .expect("fresh row"),
-        MamTxStoreOutcome::Inserted(stanza_id.clone())
+        MamTxStoreOutcome::Inserted {
+            stanza_id: stanza_id.clone(),
+            ordinal: waddle_xmpp::mam::ArchiveOrdinal::from_storage(1).expect("ordinal"),
+        }
     );
     assert!(matches!(
         super::MamArchiveRepository::store(
@@ -2211,7 +2219,10 @@ async fn mam_repository_sqlite_preserves_recorded_identity_and_repair_timestamp(
         super::MamArchiveRepository::store(&mut transaction, &archive, &message, existing.clone())
             .await
             .expect("existing row"),
-        MamTxStoreOutcome::Existing(stanza_id.clone())
+        MamTxStoreOutcome::Existing {
+            stanza_id: stanza_id.clone(),
+            ordinal: waddle_xmpp::mam::ArchiveOrdinal::from_storage(1).expect("ordinal"),
+        }
     );
     transaction
         .transaction
@@ -2225,7 +2236,10 @@ async fn mam_repository_sqlite_preserves_recorded_identity_and_repair_timestamp(
         super::MamArchiveRepository::store(&mut transaction, &archive, &message, existing.clone())
             .await
             .expect("repair row"),
-        MamTxStoreOutcome::Repaired(stanza_id.clone())
+        MamTxStoreOutcome::Repaired {
+            stanza_id: stanza_id.clone(),
+            ordinal: waddle_xmpp::mam::ArchiveOrdinal::from_storage(1).expect("ordinal"),
+        }
     );
     transaction.commit().await.expect("commit repair");
     let repaired = storage
@@ -2237,5 +2251,86 @@ async fn mam_repository_sqlite_preserves_recorded_identity_and_repair_timestamp(
         unreachable!()
     };
     assert_eq!(repaired.timestamp, archived_at);
+    assert_eq!(
+        repaired.ordinal,
+        Some(waddle_xmpp::mam::ArchiveOrdinal::from_storage(1).expect("ordinal"))
+    );
     assert_eq!(repaired.id, stanza_id.id);
+}
+
+#[tokio::test]
+async fn recorded_archive_ordinal_conflict_sqlite() {
+    let (_db, uow) = sqlite_fixture("archive_ordinal_conflict").await;
+    let mut tx = uow.begin().await.expect("ordinal transaction");
+    assert_recorded_archive_ordinal_conflict(&mut tx).await;
+    tx.commit().await.expect("commit ordinal authority");
+}
+
+#[cfg(feature = "clustering")]
+#[tokio::test]
+async fn recorded_archive_ordinal_conflict_postgres() {
+    let Some(fixture) = Fixture::open("archive_ordinal_conflict").await else {
+        return;
+    };
+    let mut tx = fixture.begin().await;
+    assert_recorded_archive_ordinal_conflict(&mut tx).await;
+    tx.commit().await.expect("commit ordinal authority");
+    fixture.close().await;
+}
+
+async fn assert_recorded_archive_ordinal_conflict(tx: &mut super::IngressUowTransaction<'_>) {
+    use super::{EffectIntentRepository, ReconcileVerdict};
+    use waddle_xmpp::{ingress::IngressEffectIntent, mam::ArchiveOrdinal};
+    let key = MessageKey::new();
+    CanonicalMessageRepository::record_message(tx, key, &digest(13), None)
+        .await
+        .expect("canonical message");
+    let archive: jid::BareJid = "romeo@example.com".parse().expect("archive");
+    let mut intent = IngressEffectIntent::ArchiveAuthoritative {
+        archive: archive.clone(),
+        by: archive.clone(),
+        stanza_id: waddle_xmpp_core::xep0359::StanzaId::new("ordinal-authority", archive.into()),
+        archived_at: chrono::Utc::now(),
+        ordinal: None,
+    };
+    EffectIntentRepository::reconcile(tx, key, std::slice::from_ref(&intent), false)
+        .await
+        .expect("initial intent");
+    let recorded = ArchiveOrdinal::from_storage(7).expect("recorded ordinal");
+    let different = ArchiveOrdinal::from_storage(8).expect("different ordinal");
+    EffectIntentRepository::record_archive_ordinal(tx, key, &intent.semantic_key(), recorded)
+        .await
+        .expect("finalize ordinal");
+    let persisted = EffectIntentRepository::load(tx, key)
+        .await
+        .expect("recorded authority");
+    assert!(
+        matches!(&persisted[..], [IngressEffectIntent::ArchiveAuthoritative { ordinal: Some(value), .. }] if *value == recorded)
+    );
+    assert!(matches!(
+        EffectIntentRepository::record_archive_ordinal(tx, key, &intent.semantic_key(), different).await,
+        Err(IngressUowError::ArchiveOrdinalConflict { recorded: actual, stored })
+            if actual == recorded && stored == different
+    ));
+    assert_eq!(
+        EffectIntentRepository::load(tx, key)
+            .await
+            .expect("unchanged authority"),
+        persisted
+    );
+    if let IngressEffectIntent::ArchiveAuthoritative { ordinal, .. } = &mut intent {
+        *ordinal = Some(different);
+    }
+    assert!(matches!(
+        EffectIntentRepository::reconcile(tx, key, &[intent], true)
+            .await
+            .expect("reconciliation verdict"),
+        ReconcileVerdict::Contradiction { .. }
+    ));
+    assert_eq!(
+        EffectIntentRepository::load(tx, key)
+            .await
+            .expect("unchanged contradiction"),
+        persisted
+    );
 }

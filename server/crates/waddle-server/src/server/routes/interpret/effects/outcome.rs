@@ -113,7 +113,13 @@ impl super::PlannedEffect {
             | Effect::Durable(DurableEffect::Room(DurableRoomEffect::ArchiveGroupchat {
                 message,
                 ..
-            })) => EffectOutcome::Archive(Ok(StoreOutcome::Stored(message.id.clone()))),
+            })) => EffectOutcome::Archive(Ok(StoreOutcome::Stored {
+                stanza_id: message.id.clone(),
+                // Planning assumes success; this ordinal is not authoritative storage state.
+                ordinal: message
+                    .ordinal
+                    .unwrap_or(waddle_xmpp::mam::ArchiveOrdinal::FIRST),
+            })),
             Effect::Durable(DurableEffect::Direct(DurableDirectEffect::ProjectInbox {
                 ..
             }))

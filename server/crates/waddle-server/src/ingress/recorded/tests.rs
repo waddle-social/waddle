@@ -522,6 +522,7 @@ fn recorded_room_archive_timestamp_matches_typed_stamp_not_client_id() {
     let room: jid::BareJid = "room@conference.example.test".parse().expect("room");
     let stamp = waddle_xmpp_core::xep0359::StanzaId::new("archive-id", room.clone().into());
     let archive_intent = |seconds| IngressEffectIntent::ArchiveAuthoritative {
+        ordinal: None,
         archive: room.clone(),
         stanza_id: stamp.clone(),
         by: room.clone(),

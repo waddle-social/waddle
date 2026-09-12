@@ -495,6 +495,8 @@ impl ArchiveResolver for MamArchiveResolver {
             //     `NotFound` from wedging the row in an immortal retry.
             Err(
                 error @ (waddle_xmpp::mam::storage::MamStorageError::Serialization(_)
+                | waddle_xmpp::mam::storage::MamStorageError::InvalidOrdinal(_)
+                | waddle_xmpp::mam::storage::MamStorageError::MissingOrdinal(_)
                 | waddle_xmpp::mam::storage::MamStorageError::InvalidQuery(_)
                 | waddle_xmpp::mam::storage::MamStorageError::NotFound(_)),
             ) => {
@@ -522,6 +524,7 @@ impl ArchiveResolver for MamArchiveResolver {
             // still resolve once ownership/co-location is restored.
             Err(
                 error @ (waddle_xmpp::mam::storage::MamStorageError::Database(_)
+                | waddle_xmpp::mam::storage::MamStorageError::OrdinalExhausted
                 | waddle_xmpp::mam::storage::MamStorageError::NotOwner { .. }
                 | waddle_xmpp::mam::storage::MamStorageError::ClusterColocationMismatch {
                     ..

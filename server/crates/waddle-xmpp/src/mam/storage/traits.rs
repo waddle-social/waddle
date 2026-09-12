@@ -1,7 +1,6 @@
 use async_trait::async_trait;
-use chrono::{DateTime, Utc};
 use jid::{BareJid, Jid};
-use waddle_xmpp_core::mam::{ArchivedMessage, MamQuery, MamResult};
+use waddle_xmpp_core::mam::{ArchiveOrdinal, ArchivedMessage, MamQuery, MamResult};
 use waddle_xmpp_core::xep0359::OriginId;
 
 use crate::muc::RoomClaimFenceContext;
@@ -23,7 +22,10 @@ pub enum MamArchiveKind {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum StoreOutcome {
     /// A new row was inserted under this archive id.
-    Stored(String),
+    Stored {
+        stanza_id: String,
+        ordinal: ArchiveOrdinal,
+    },
     /// A tombstoned (XEP-0424 retracted) groupchat row matched the retry;
     /// no row was written and the caller must swallow the message entirely.
     TombstoneHit(String),
@@ -191,13 +193,4 @@ pub trait MamStorage: Send + Sync {
 
     /// Get the total count of messages in an archive (for RSM).
     async fn count_messages(&self, room_jid: &BareJid) -> Result<u32, MamStorageError>;
-
-    /// Delete messages older than a given timestamp.
-    ///
-    /// Used for archive maintenance/cleanup.
-    async fn delete_before(
-        &self,
-        room_jid: &BareJid,
-        before: DateTime<Utc>,
-    ) -> Result<u64, MamStorageError>;
 }

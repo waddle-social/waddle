@@ -24,6 +24,7 @@ fn fixture() -> (IngressPlan, BareJid, StanzaId, StanzaId) {
         failure: None,
         plan: Vec::new(),
         intents: vec![IngressEffectIntent::ArchiveAuthoritative {
+            ordinal: None,
             archive: owner.clone(),
             stanza_id: minted.clone(),
             by: owner.clone(),
@@ -362,6 +363,7 @@ fn sender_and_generated_archives_retain_distinct_recorded_identities() {
     let archived_at = chrono::DateTime::from_timestamp(123, 0).expect("timestamp");
     plan.intents
         .push(IngressEffectIntent::SystemMessageArchive {
+            ordinal: None,
             sequence: 0,
             archive: room.clone(),
             by: room.clone(),

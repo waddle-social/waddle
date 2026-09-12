@@ -352,6 +352,7 @@ async fn local_room_commit(
         by: room.clone(),
         stanza_id,
         archived_at: message.timestamp,
+        ordinal: None,
     }];
     submission.plan.plan[0] = PlannedEffect::new(Effect::Durable(DurableEffect::Room(
         DurableRoomEffect::ArchiveGroupchat {

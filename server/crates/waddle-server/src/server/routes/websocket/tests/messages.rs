@@ -140,6 +140,7 @@ async fn store_committed_dm_archive_for_notification(
         .or_else(|| message.bodies.values().next())
         .cloned();
     let archived = waddle_xmpp::mam::ArchivedMessage {
+        ordinal: None,
         id: archive_stanza_id.id.clone(),
         body,
         stanza_id: Some(archive_stanza_id.clone()),
@@ -2977,6 +2978,7 @@ async fn notification_candidate_recovery_rebuilds_from_committed_pending_deliver
         jid::Jid::from(recipient.clone()),
     );
     let archived = waddle_xmpp_core::mam::ArchivedMessage {
+        ordinal: None,
         id: archive_stanza_id.id.clone(),
         body: Some("recover me".to_string()),
         stanza_id: Some(archive_stanza_id.clone()),
@@ -3193,6 +3195,7 @@ async fn notification_candidate_recovery_skips_full_mam_sender_when_stanza_sende
         "recover from full MAM row".to_string(),
     );
     let archived = waddle_xmpp_core::mam::ArchivedMessage {
+        ordinal: None,
         id: archive_stanza_id.id.clone(),
         body: Some("recover from full MAM row".to_string()),
         stanza_id: Some(archive_stanza_id.clone()),
@@ -3311,6 +3314,7 @@ async fn notification_candidate_recovery_skips_bare_stanza_sender_even_with_full
         "do not recover bare stanza sender".to_string(),
     );
     let archived = waddle_xmpp_core::mam::ArchivedMessage {
+        ordinal: None,
         id: archive_stanza_id.id.clone(),
         body: Some("do not recover bare stanza sender".to_string()),
         stanza_id: Some(archive_stanza_id.clone()),
@@ -3387,6 +3391,7 @@ async fn notification_candidate_recovery_skips_bare_only_sender_provenance_termi
         jid::Jid::from(recipient.clone()),
     );
     let archived = waddle_xmpp_core::mam::ArchivedMessage {
+        ordinal: None,
         id: archive_stanza_id.id.clone(),
         body: Some("do not recover without resource".to_string()),
         stanza_id: Some(archive_stanza_id.clone()),
@@ -3471,6 +3476,7 @@ async fn notification_candidate_recovery_skips_mismatched_stanza_sender_terminal
         "do not recover mismatched sender".to_string(),
     );
     let archived = waddle_xmpp_core::mam::ArchivedMessage {
+        ordinal: None,
         id: archive_stanza_id.id.clone(),
         body: Some("do not recover mismatched sender".to_string()),
         stanza_id: Some(archive_stanza_id.clone()),

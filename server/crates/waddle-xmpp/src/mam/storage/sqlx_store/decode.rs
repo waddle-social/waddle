@@ -4,7 +4,7 @@ use chrono::{DateTime, Utc};
 use sqlx::postgres::PgRow;
 use sqlx::sqlite::SqliteRow;
 use sqlx::Row;
-use waddle_xmpp_core::mam::ArchivedMessage;
+use waddle_xmpp_core::mam::{ArchiveOrdinal, ArchivedMessage};
 
 use crate::mam::storage::MamStorageError;
 
@@ -32,6 +32,7 @@ pub(super) fn decode_sqlite_message_row(
     let message_type_raw: String = row.try_get(11)?;
     Ok(ArchivedMessage {
         id: row.try_get(0)?,
+        ordinal: Some(ArchiveOrdinal::from_storage(row.try_get(16)?)?),
         timestamp,
         from: parse_archived_addressing("from_jid", &from_raw)?,
         to: parse_archived_addressing("to_jid", &to_raw)?,
@@ -70,6 +71,7 @@ pub(super) fn decode_postgres_message_row(row: &PgRow) -> Result<ArchivedMessage
     let message_type_raw: String = row.try_get(11)?;
     Ok(ArchivedMessage {
         id: row.try_get(0)?,
+        ordinal: Some(ArchiveOrdinal::from_storage(row.try_get(16)?)?),
         timestamp: row.try_get(2)?,
         from: parse_archived_addressing("from_jid", &from_raw)?,
         to: parse_archived_addressing("to_jid", &to_raw)?,

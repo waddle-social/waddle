@@ -701,6 +701,7 @@ async fn xep_0313_uow_mam_write_is_queryable_through_the_archive_read_path() {
         .expect("valid archive JID");
     let archive_id = format!("uow-mam-{}", uuid::Uuid::new_v4());
     let message = ArchivedMessage {
+        ordinal: None,
         id: archive_id.clone(),
         body: Some("unit-of-work MAM archive row".to_string()),
         origin_id: Some(waddle_xmpp_core::xep0359::OriginId::new(format!(
@@ -726,7 +727,7 @@ async fn xep_0313_uow_mam_write_is_queryable_through_the_archive_read_path() {
     .await
     .expect("store MAM archive in ingress unit of work")
     {
-        MamTxStoreOutcome::Inserted(stanza_id) => {
+        MamTxStoreOutcome::Inserted { stanza_id, .. } => {
             assert_eq!(stanza_id.id, archive_id);
             assert_eq!(stanza_id.by, jid::Jid::from(archive.clone()));
         }
@@ -798,6 +799,7 @@ async fn xep_0313_full_jid_from_round_trips_through_mam_without_resource_truncat
     let from_full = jid_lit("alice@example.com/laptop");
     let to_room = jid_lit(ARCHIVE);
     let row = ArchivedMessage {
+        ordinal: None,
         id: "archive-full-from".to_string(),
         timestamp: chrono::Utc::now(),
         from: from_full.clone(),
@@ -848,6 +850,7 @@ async fn xep_0313_bare_jid_to_round_trips_through_mam() {
     let from = jid_lit(&format!("{ARCHIVE}/alice"));
     let to_bare = jid_lit(ARCHIVE);
     let row = ArchivedMessage {
+        ordinal: None,
         id: "archive-bare-to".to_string(),
         timestamp: chrono::Utc::now(),
         from,
@@ -1005,6 +1008,7 @@ async fn xep_0313_with_filter_does_not_match_domain_prefix_collision() {
     // resource is `web`.
     let legit_from = jid_lit("alice@example.com/web");
     let legit_row = ArchivedMessage {
+        ordinal: None,
         id: "archive-with-legit".to_string(),
         timestamp: chrono::Utc::now(),
         from: legit_from.clone(),
@@ -1032,6 +1036,7 @@ async fn xep_0313_with_filter_does_not_match_domain_prefix_collision() {
     // `alice@example.com`.
     let evil_from = jid_lit("alice@example.com.evil/whatever");
     let evil_row = ArchivedMessage {
+        ordinal: None,
         id: "archive-with-evil".to_string(),
         timestamp: chrono::Utc::now(),
         from: evil_from.clone(),

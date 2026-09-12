@@ -46,6 +46,7 @@ fn archived_groupchat_retry_fixture(
     use waddle_xmpp_core::xep0359::OriginId;
 
     waddle_xmpp::mam::ArchivedMessage {
+        ordinal: None,
         id: archive_id.to_string(),
         body: Some("retry me".to_string()),
         origin_id: Some(OriginId::new(origin_id)),
@@ -293,6 +294,7 @@ async fn groupchat_retraction_retry_finishes_tombstone_after_archive_write() {
     ));
     let sender_item = groupchat_retry_sender_item(&sender);
     let archived_retraction = ArchivedMessage {
+        ordinal: None,
         id: original_retraction_id.to_string(),
         body: None,
         stanza_id: Some(waddle_xmpp_core::xep0359::StanzaId::new(
@@ -320,7 +322,10 @@ async fn groupchat_retraction_retry_finishes_tombstone_after_archive_write() {
             .store_message(&room, &archived_retraction)
             .await
             .expect("seed archived retraction request"),
-        StoreOutcome::Stored(original_retraction_id.to_string())
+        StoreOutcome::Stored {
+            stanza_id: original_retraction_id.to_string(),
+            ordinal: waddle_xmpp::mam::ArchiveOrdinal::from_storage(2).expect("ordinal"),
+        }
     );
 
     let mut other_reflection = retraction.clone();
@@ -424,6 +429,7 @@ async fn tombstoned_retraction_retry_still_heals_target_tombstone_silently() {
     ));
     let sender_item = groupchat_retry_sender_item(&sender);
     let archived_retraction = ArchivedMessage {
+        ordinal: None,
         id: original_retraction_id.to_string(),
         body: None,
         origin_id: Some(OriginId::new(origin_id)),
@@ -440,7 +446,10 @@ async fn tombstoned_retraction_retry_still_heals_target_tombstone_silently() {
             .store_message(&room, &archived_retraction)
             .await
             .expect("seed archived retraction request"),
-        StoreOutcome::Stored(original_retraction_id.to_string())
+        StoreOutcome::Stored {
+            stanza_id: original_retraction_id.to_string(),
+            ordinal: waddle_xmpp::mam::ArchiveOrdinal::from_storage(2).expect("ordinal"),
+        }
     );
     assert!(mam_concrete
         .replace_with_tombstone(
@@ -608,6 +617,7 @@ async fn groupchat_subject_retry_is_stored_and_fans_out_normally() {
         &jid::Jid::from(room.clone()),
     ));
     let archived = ArchivedMessage {
+        ordinal: None,
         id: "original-subject-archive-id".to_string(),
         body: None,
         stanza_id: Some(waddle_xmpp_core::xep0359::StanzaId::new(
@@ -625,7 +635,10 @@ async fn groupchat_subject_retry_is_stored_and_fans_out_normally() {
             .store_message(&room, &archived)
             .await
             .expect("seed subject row"),
-        StoreOutcome::Stored("original-subject-archive-id".to_string())
+        StoreOutcome::Stored {
+            stanza_id: "original-subject-archive-id".to_string(),
+            ordinal: waddle_xmpp::mam::ArchiveOrdinal::from_storage(1).expect("ordinal"),
+        }
     );
     let mut recipient_reflection = retry.clone();
     recipient_reflection.to = Some(jid::Jid::from(recipient.clone()));

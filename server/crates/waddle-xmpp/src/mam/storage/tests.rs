@@ -32,7 +32,7 @@ fn archive_alice(archive: &BareJid) -> Jid {
 
 fn expect_stored(outcome: StoreOutcome) -> String {
     match outcome {
-        StoreOutcome::Stored(id) => id,
+        StoreOutcome::Stored { stanza_id, .. } => stanza_id,
         other => panic!("expected a newly stored row, got {other:?}"),
     }
 }
@@ -224,7 +224,10 @@ async fn assert_groupchat_origin_retry_honors_tombstones(storage: &dyn MamStorag
     let original = message("tombstone-original", "tombstone-origin", "secret", 1);
     assert_eq!(
         storage.store_message(&archive, &original).await.unwrap(),
-        StoreOutcome::Stored("tombstone-original".to_string())
+        StoreOutcome::Stored {
+            stanza_id: "tombstone-original".to_string(),
+            ordinal: waddle_xmpp_core::mam::ArchiveOrdinal::from_storage(1).unwrap()
+        }
     );
     assert!(storage
         .replace_with_tombstone("tombstone-original", tombstone())
@@ -244,11 +247,17 @@ async fn assert_groupchat_origin_retry_honors_tombstones(storage: &dyn MamStorag
     let live = message("ordering-live", "ordering-origin", "live content", 4);
     assert_eq!(
         storage.store_message(&archive, &old).await.unwrap(),
-        StoreOutcome::Stored("ordering-old".to_string())
+        StoreOutcome::Stored {
+            stanza_id: "ordering-old".to_string(),
+            ordinal: waddle_xmpp_core::mam::ArchiveOrdinal::from_storage(2).unwrap()
+        }
     );
     assert_eq!(
         storage.store_message(&archive, &live).await.unwrap(),
-        StoreOutcome::Stored("ordering-live".to_string())
+        StoreOutcome::Stored {
+            stanza_id: "ordering-live".to_string(),
+            ordinal: waddle_xmpp_core::mam::ArchiveOrdinal::from_storage(3).unwrap()
+        }
     );
     assert!(storage
         .replace_with_tombstone("ordering-old", tombstone())
@@ -270,7 +279,10 @@ async fn assert_groupchat_origin_retry_honors_tombstones(storage: &dyn MamStorag
             .store_message(&archive, &scoped_original)
             .await
             .unwrap(),
-        StoreOutcome::Stored("scoped-original".to_string())
+        StoreOutcome::Stored {
+            stanza_id: "scoped-original".to_string(),
+            ordinal: waddle_xmpp_core::mam::ArchiveOrdinal::from_storage(4).unwrap()
+        }
     );
     let scoped_tombstone = ArchivedTombstone {
         sender_scope: Some("alice@example.com".parse().expect("valid bare JID")),
@@ -298,7 +310,10 @@ async fn assert_groupchat_origin_retry_honors_tombstones(storage: &dyn MamStorag
             .store_message(&archive, &different_user)
             .await
             .unwrap(),
-        StoreOutcome::Stored("scoped-other".to_string())
+        StoreOutcome::Stored {
+            stanza_id: "scoped-other".to_string(),
+            ordinal: waddle_xmpp_core::mam::ArchiveOrdinal::from_storage(5).unwrap()
+        }
     );
 }
 
@@ -901,18 +916,18 @@ async fn assert_rsm_before_uses_archive_order_not_lexical_id_order(storage: &dyn
 }
 
 #[tokio::test]
-async fn test_sqlite_rsm_cursors_page_same_timestamp_by_archive_id() {
+async fn test_sqlite_rsm_cursors_page_same_timestamp_by_ordinal() {
     let storage = create_test_storage().await;
-    assert_rsm_cursors_page_same_timestamp_by_archive_id(&storage).await;
+    assert_rsm_cursors_page_same_timestamp_by_ordinal(&storage).await;
 }
 
 #[tokio::test]
-async fn test_inmemory_rsm_cursors_page_same_timestamp_by_archive_id() {
+async fn test_inmemory_rsm_cursors_page_same_timestamp_by_ordinal() {
     let storage = InMemoryMamStorage::new();
-    assert_rsm_cursors_page_same_timestamp_by_archive_id(&storage).await;
+    assert_rsm_cursors_page_same_timestamp_by_ordinal(&storage).await;
 }
 
-async fn assert_rsm_cursors_page_same_timestamp_by_archive_id(storage: &dyn MamStorage) {
+async fn assert_rsm_cursors_page_same_timestamp_by_ordinal(storage: &dyn MamStorage) {
     let archive = bare("room@conference.example.com");
     let timestamp = chrono::DateTime::parse_from_rfc3339("2026-05-01T10:00:00Z")
         .unwrap()
@@ -938,16 +953,16 @@ async fn assert_rsm_cursors_page_same_timestamp_by_archive_id(storage: &dyn MamS
             MamArchiveKind::Room,
             &MamQuery {
                 max: Some(2),
-                after_id: Some("id-b".to_string()),
+                after_id: Some("id-a".to_string()),
                 ..Default::default()
             },
         )
         .await
         .unwrap();
     let after_ids: Vec<&str> = after.messages.iter().map(|m| m.id.as_str()).collect();
-    assert_eq!(after_ids, vec!["id-c", "id-d"]);
-    assert_eq!(after.first_id.as_deref(), Some("id-c"));
-    assert_eq!(after.last_id.as_deref(), Some("id-d"));
+    assert_eq!(after_ids, vec!["id-d", "id-b"]);
+    assert_eq!(after.first_id.as_deref(), Some("id-d"));
+    assert_eq!(after.last_id.as_deref(), Some("id-b"));
     assert!(after.complete);
 
     let before = storage
@@ -956,16 +971,16 @@ async fn assert_rsm_cursors_page_same_timestamp_by_archive_id(storage: &dyn MamS
             MamArchiveKind::Room,
             &MamQuery {
                 max: Some(2),
-                before_id: Some("id-d".to_string()),
+                before_id: Some("id-b".to_string()),
                 ..Default::default()
             },
         )
         .await
         .unwrap();
     let before_ids: Vec<&str> = before.messages.iter().map(|m| m.id.as_str()).collect();
-    assert_eq!(before_ids, vec!["id-b", "id-c"]);
-    assert_eq!(before.first_id.as_deref(), Some("id-b"));
-    assert_eq!(before.last_id.as_deref(), Some("id-c"));
+    assert_eq!(before_ids, vec!["id-a", "id-d"]);
+    assert_eq!(before.first_id.as_deref(), Some("id-a"));
+    assert_eq!(before.last_id.as_deref(), Some("id-d"));
     assert!(!before.complete);
 }
 
@@ -1903,11 +1918,8 @@ async fn xep_0425_moderation_tombstone_scrubs_parent_thread_id() {
 }
 
 #[tokio::test]
-async fn xep_0313_sqlx_archive_returns_messages_in_chronological_order() {
-    // XEP-0313 §archive_order: results MUST be returned in the order the
-    // client originally received them (chronological), with id used only
-    // as a tiebreak. Sorting by id alone breaks this if id generation is
-    // ever decoupled from receive time (custom assignment, backfill, etc.).
+async fn xep_0313_sqlx_archive_returns_messages_in_commit_order() {
+    // XEP-0313 archive order follows commits independently of timestamps and IDs.
     let storage = create_test_storage().await;
     let archive = bare("room@conference.example.com");
     let t0 = chrono::DateTime::parse_from_rfc3339("2026-05-01T10:00:00Z")
@@ -1945,13 +1957,13 @@ async fn xep_0313_sqlx_archive_returns_messages_in_chronological_order() {
         .collect();
     assert_eq!(
         bodies,
-        vec!["first", "second"],
-        "MAM results must be in chronological order, not id order"
+        vec!["second", "first"],
+        "MAM results must follow commit order"
     );
 }
 
 #[tokio::test]
-async fn xep_0313_in_memory_archive_returns_messages_in_chronological_order() {
+async fn xep_0313_in_memory_archive_returns_messages_in_commit_order() {
     let storage = InMemoryMamStorage::new();
     let archive = bare("room@conference.example.com");
     let t0 = chrono::DateTime::parse_from_rfc3339("2026-05-01T10:00:00Z")
@@ -1987,16 +1999,15 @@ async fn xep_0313_in_memory_archive_returns_messages_in_chronological_order() {
         .collect();
     assert_eq!(
         bodies,
-        vec!["first", "second"],
-        "in-memory MAM ordering must be chronological"
+        vec!["second", "first"],
+        "in-memory MAM ordering must follow insertion order"
     );
 }
 
 #[tokio::test]
-async fn xep_0313_sqlx_archive_uses_id_as_deterministic_tiebreak_when_timestamps_match() {
+async fn xep_0313_sqlx_archive_uses_commit_order_when_timestamps_match() {
     // XEP-0313 §archive_order warns that "multiple messages may share the
-    // same timestamp", so the order MUST still be deterministic. We use
-    // archive id as the secondary key.
+    // same timestamp", so commit ordinals preserve their received order.
     let storage = create_test_storage().await;
     let archive = bare("room@conference.example.com");
     let t = chrono::DateTime::parse_from_rfc3339("2026-05-01T10:00:00Z")
@@ -2027,8 +2038,8 @@ async fn xep_0313_sqlx_archive_uses_id_as_deterministic_tiebreak_when_timestamps
     let ids: Vec<&str> = result.messages.iter().map(|m| m.id.as_str()).collect();
     assert_eq!(
         ids,
-        vec!["id-001", "id-002"],
-        "tied timestamps must be ordered by archive id ascending"
+        vec!["id-002", "id-001"],
+        "tied timestamps must follow commit order"
     );
 }
 
@@ -2178,4 +2189,130 @@ async fn sqlx_query_filters_by_stanza_id() {
         result.messages.iter().map(|m| m.id.as_str()).collect();
     let want: std::collections::HashSet<&str> = ["uuid-B", "uuid-C"].into_iter().collect();
     assert_eq!(got, want);
+}
+
+#[tokio::test]
+async fn ordinal_boundaries_ignore_backdated_timestamps() {
+    let sqlite = create_test_storage().await;
+    let memory = InMemoryMamStorage::new();
+    for storage in [&sqlite as &dyn MamStorage, &memory as &dyn MamStorage] {
+        let archive = bare("ordinal@conference.example.com");
+        let base = Utc::now();
+        for (offset, id) in ["id-003", "id-002", "id-001"].into_iter().enumerate() {
+            storage
+                .store_message(
+                    &archive,
+                    &ArchivedMessage {
+                        id: id.into(),
+                        timestamp: base - ChronoDuration::seconds(offset as i64),
+                        ..archived_groupchat(&archive)
+                    },
+                )
+                .await
+                .unwrap();
+        }
+        for (query, expected) in [
+            (MamQuery::default(), vec!["id-003", "id-002", "id-001"]),
+            (
+                MamQuery {
+                    before_id: Some("id-002".into()),
+                    ..Default::default()
+                },
+                vec!["id-003"],
+            ),
+            (
+                MamQuery {
+                    after_id: Some("id-002".into()),
+                    ..Default::default()
+                },
+                vec!["id-001"],
+            ),
+            (
+                MamQuery {
+                    filter_before_id: Some("id-002".into()),
+                    ..Default::default()
+                },
+                vec!["id-003"],
+            ),
+            (
+                MamQuery {
+                    filter_after_id: Some("id-002".into()),
+                    ..Default::default()
+                },
+                vec!["id-001"],
+            ),
+        ] {
+            let page = storage
+                .query_messages(&archive, MamArchiveKind::Room, &query)
+                .await
+                .unwrap();
+            assert_eq!(
+                page.messages
+                    .iter()
+                    .map(|message| message.id.as_str())
+                    .collect::<Vec<_>>(),
+                expected
+            );
+            assert!(page
+                .messages
+                .iter()
+                .all(|message| message.ordinal.is_some()));
+        }
+    }
+}
+
+#[tokio::test]
+async fn ordinal_lookup_semantics_match_sqlite_and_memory() {
+    use waddle_xmpp_core::xep0359::{OriginId, StanzaId};
+
+    let sqlite = create_test_storage().await;
+    let memory = InMemoryMamStorage::new();
+    for storage in [&sqlite as &dyn MamStorage, &memory as &dyn MamStorage] {
+        let archive = bare("lookup@conference.example.com");
+        let sender = archive_alice(&archive);
+        let base = Utc::now();
+        for (offset, id) in ["id-002", "id-001"].into_iter().enumerate() {
+            storage
+                .store_message(
+                    &archive,
+                    &ArchivedMessage {
+                        id: id.into(),
+                        timestamp: base - ChronoDuration::seconds(offset as i64),
+                        from: sender.clone(),
+                        stanza_id: Some(StanzaId::new("shared-wire", Jid::from(archive.clone()))),
+                        origin_id: Some(OriginId::new("shared-origin")),
+                        ..archived_groupchat(&archive)
+                    },
+                )
+                .await
+                .unwrap();
+        }
+        for message in [
+            storage
+                .get_message_by_stanza_id(&archive, "shared-origin")
+                .await
+                .unwrap(),
+            storage
+                .get_message_by_message_id(&archive, "shared-wire")
+                .await
+                .unwrap(),
+            storage
+                .get_message_by_archive_or_stanza_id(&archive, "shared-wire")
+                .await
+                .unwrap(),
+        ] {
+            assert_eq!(message.unwrap().id, "id-001");
+        }
+        let first = storage
+            .get_message_by_sender_and_origin_id(
+                &archive,
+                MamArchiveKind::Room,
+                &sender,
+                &OriginId::new("shared-origin"),
+            )
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(first.id, "id-002");
+    }
 }

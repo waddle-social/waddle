@@ -9,7 +9,7 @@ use thiserror::Error;
 use url::Url;
 use uuid::Uuid;
 use waddle_extensions::PluginId;
-use waddle_xmpp_core::mam::{RichMessageId, ThreadId};
+use waddle_xmpp_core::mam::{ArchiveOrdinal, RichMessageId, ThreadId};
 use waddle_xmpp_core::xep0359::{OriginId, StanzaId};
 use xmpp_parsers::{
     message::Lang,
@@ -1094,6 +1094,7 @@ pub enum IngressEffectIntent {
         stanza_id: StanzaId,
         by: BareJid,
         archived_at: chrono::DateTime<chrono::Utc>,
+        ordinal: Option<ArchiveOrdinal>,
     },
     SystemMessageArchive {
         sequence: u32,
@@ -1101,6 +1102,7 @@ pub enum IngressEffectIntent {
         stanza_id: StanzaId,
         by: BareJid,
         archived_at: chrono::DateTime<chrono::Utc>,
+        ordinal: Option<ArchiveOrdinal>,
     },
     RouteDirect {
         recipient: BareJid,
@@ -1513,6 +1515,7 @@ impl IngressEffectIntent {
                 by: bare("archive@example.test"),
                 archived_at: chrono::DateTime::from_timestamp(1_753_617_600, 0)
                     .expect("fixture timestamp"),
+                ordinal: None,
             },
             Self::RouteDirect {
                 recipient: bare("romeo@example.test"),
@@ -3021,6 +3024,8 @@ enum StoredEffectIntent {
         stanza_id: StanzaId,
         by: BareJid,
         archived_at: chrono::DateTime<chrono::Utc>,
+        #[serde(default)]
+        ordinal: Option<ArchiveOrdinal>,
     },
     SystemMessageArchive {
         sequence: u32,
@@ -3028,6 +3033,8 @@ enum StoredEffectIntent {
         stanza_id: StanzaId,
         by: BareJid,
         archived_at: chrono::DateTime<chrono::Utc>,
+        #[serde(default)]
+        ordinal: Option<ArchiveOrdinal>,
     },
     RouteDirect {
         recipient: BareJid,
@@ -3216,11 +3223,13 @@ impl StoredEffectIntent {
                 stanza_id,
                 by,
                 archived_at,
+                ordinal,
             } => Self::ArchiveAuthoritative {
                 archive,
                 stanza_id,
                 by,
                 archived_at,
+                ordinal,
             },
             IngressEffectIntent::SystemMessageArchive {
                 sequence,
@@ -3228,12 +3237,14 @@ impl StoredEffectIntent {
                 stanza_id,
                 by,
                 archived_at,
+                ordinal,
             } => Self::SystemMessageArchive {
                 sequence,
                 archive,
                 stanza_id,
                 by,
                 archived_at,
+                ordinal,
             },
             IngressEffectIntent::RouteDirect {
                 recipient,
@@ -3424,11 +3435,13 @@ impl StoredEffectIntent {
                 stanza_id,
                 by,
                 archived_at,
+                ordinal,
             } => IngressEffectIntent::ArchiveAuthoritative {
                 archive,
                 stanza_id,
                 by,
                 archived_at,
+                ordinal,
             },
             Self::SystemMessageArchive {
                 sequence,
@@ -3436,12 +3449,14 @@ impl StoredEffectIntent {
                 stanza_id,
                 by,
                 archived_at,
+                ordinal,
             } => IngressEffectIntent::SystemMessageArchive {
                 sequence,
                 archive,
                 stanza_id,
                 by,
                 archived_at,
+                ordinal,
             },
             Self::RouteDirect {
                 recipient,
@@ -3893,6 +3908,7 @@ mod tests {
                 by: bare("archive@example.test"),
                 archived_at: chrono::DateTime::from_timestamp(1_753_617_600, 0)
                     .expect("fixture timestamp"),
+                ordinal: None,
             },
             IngressEffectIntent::RouteDirect {
                 recipient: bare("romeo@example.test"),
@@ -4222,6 +4238,84 @@ mod tests {
     }
 
     #[test]
+    fn archive_authority_v1_without_ordinal_decodes_as_unfinalized() {
+        let payload = br#"{"version":1,"intent":{"type":"archive_authoritative","archive":"archive@example.test","stanza_id":{"id":"stable-1","by":"archive@example.test"},"by":"archive@example.test","archived_at":"2025-07-27T12:00:00Z"}}"#;
+        assert!(matches!(
+            IngressEffectIntent::decode_v1(0, payload).expect("pre-change archive payload"),
+            IngressEffectIntent::ArchiveAuthoritative { ordinal: None, .. }
+        ));
+        let payload = br#"{"version":1,"intent":{"type":"system_message_archive","sequence":0,"archive":"archive@example.test","stanza_id":{"id":"stable-1","by":"archive@example.test"},"by":"archive@example.test","archived_at":"2025-07-27T12:00:00Z"}}"#;
+        assert!(matches!(
+            IngressEffectIntent::decode_v1(0, payload).expect("pre-change system archive payload"),
+            IngressEffectIntent::SystemMessageArchive { ordinal: None, .. }
+        ));
+    }
+
+    #[test]
+    fn archive_ordinals_round_trip_without_changing_identity() {
+        let archived_at = chrono::DateTime::from_timestamp(1_753_617_600, 0).expect("timestamp");
+        let intents = [
+            IngressEffectIntent::ArchiveAuthoritative {
+                archive: bare("archive@example.test"),
+                stanza_id: stanza_id(),
+                by: bare("archive@example.test"),
+                archived_at,
+                ordinal: None,
+            },
+            IngressEffectIntent::SystemMessageArchive {
+                sequence: 0,
+                archive: bare("archive@example.test"),
+                stanza_id: stanza_id(),
+                by: bare("archive@example.test"),
+                archived_at,
+                ordinal: None,
+            },
+        ];
+        for mut intent in intents {
+            let semantic_key = intent.semantic_key();
+            let authority_key = intent.authority_key();
+            for position in [1, 42, i64::MAX] {
+                match &mut intent {
+                    IngressEffectIntent::ArchiveAuthoritative { ordinal, .. }
+                    | IngressEffectIntent::SystemMessageArchive { ordinal, .. } => {
+                        *ordinal = Some(ArchiveOrdinal::from_storage(position).expect("ordinal"));
+                    }
+                    _ => unreachable!(),
+                }
+                let encoded = intent.encode_v1().expect("encode archive ordinal");
+                assert_eq!(encoded.kind(), 0);
+                assert_eq!(intent.semantic_key(), semantic_key);
+                assert_eq!(intent.authority_key(), authority_key);
+                assert_eq!(
+                    IngressEffectIntent::decode_v1(encoded.kind(), encoded.payload())
+                        .expect("decode archive ordinal"),
+                    intent,
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn archive_ordinal_decode_rejects_nonpositive_positions() {
+        for value in [0, -1] {
+            let mut payload: serde_json::Value = serde_json::from_slice(
+                samples()
+                    .remove(0)
+                    .encode_v1()
+                    .expect("encode archive")
+                    .payload(),
+            )
+            .expect("JSON");
+            payload["intent"]["ordinal"] = value.into();
+            assert!(IngressEffectIntent::decode_v1(
+                0,
+                &serde_json::to_vec(&payload).expect("JSON bytes"),
+            )
+            .is_err());
+        }
+    }
+
+    #[test]
     fn surviving_storage_discriminators_remain_stable() {
         assert_eq!(
             IngressEffectIntent::storage_kind_names(),
@@ -4289,7 +4383,7 @@ mod tests {
     #[test]
     fn every_kind_round_trips_through_its_fixed_golden_vector() {
         let golden = [
-            r#"{"version":1,"intent":{"type":"archive_authoritative","archive":"archive@example.test","stanza_id":{"id":"stable-1","by":"archive@example.test"},"by":"archive@example.test","archived_at":"2025-07-27T12:00:00Z"}}"#,
+            r#"{"version":1,"intent":{"type":"archive_authoritative","archive":"archive@example.test","stanza_id":{"id":"stable-1","by":"archive@example.test"},"by":"archive@example.test","archived_at":"2025-07-27T12:00:00Z","ordinal":null}}"#,
             r#"{"version":1,"intent":{"type":"route_direct","recipient":"romeo@example.test","fanout":["romeo@example.test/phone"],"route_identity":{"type":"stanza_id","stanza_id":{"id":"stable-1","by":"archive@example.test"}}}}"#,
             r#"{"version":1,"intent":{"type":"route_muc_groupchat","room":"room@conference.example.test","occupants":["juliet@example.test/laptop"],"reflection":"romeo@example.test/phone","room_generation":7,"route_identity":{"type":"stanza_id","stanza_id":{"id":"stable-1","by":"archive@example.test"}}}}"#,
             r#"{"version":1,"intent":{"type":"route_occupant_pm","recipient":"juliet@example.test/laptop","sender":"romeo@example.test/phone"}}"#,
@@ -4438,6 +4532,7 @@ mod tests {
             by: bare("archive@example.test"),
             archived_at: chrono::DateTime::from_timestamp(1_753_617_600, 0)
                 .expect("fixture timestamp"),
+            ordinal: None,
         };
         let archive_two = IngressEffectIntent::ArchiveAuthoritative {
             archive: bare("archive@example.test"),
@@ -4448,6 +4543,7 @@ mod tests {
             by: bare("archive@example.test"),
             archived_at: chrono::DateTime::from_timestamp(1_753_617_600, 0)
                 .expect("fixture timestamp"),
+            ordinal: None,
         };
         assert_ne!(archive_one.semantic_key(), archive_two.semantic_key());
         assert_eq!(archive_one.authority_key(), archive_two.authority_key());

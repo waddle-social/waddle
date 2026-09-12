@@ -22,6 +22,7 @@ fn capture_archive_authoritative_intent(
         ),
         by: room.clone(),
         archived_at,
+        ordinal: None,
     });
 }
 

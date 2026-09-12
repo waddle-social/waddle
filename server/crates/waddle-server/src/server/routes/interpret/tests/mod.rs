@@ -298,6 +298,7 @@ async fn seed_groupchat_archive_row(
         .write_to(&mut stanza_xml_bytes)
         .expect("serialize archived wire message");
     let row = MamArchivedMessage {
+        ordinal: None,
         id: archive_pk.to_string(),
         timestamp: chrono::Utc::now(),
         from: sender,

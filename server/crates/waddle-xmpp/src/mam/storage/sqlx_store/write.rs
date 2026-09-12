@@ -1,3 +1,4 @@
+use super::allocation::{allocate_postgres, allocate_sqlite};
 use super::decode::{
     decode_postgres_message_row, decode_rich_payload, decode_sqlite_message_row,
     encode_nickname_generation, encode_rich_payload,
@@ -11,7 +12,9 @@ use jid::BareJid;
 use sqlx::{PgConnection, Postgres, QueryBuilder, Sqlite, SqliteConnection, Transaction};
 use tracing::debug;
 use uuid::Uuid;
-use waddle_xmpp_core::mam::{ArchivedMessage, ArchivedRichMessage, ArchivedRichPayload};
+use waddle_xmpp_core::mam::{
+    ArchiveOrdinal, ArchivedMessage, ArchivedRichMessage, ArchivedRichPayload,
+};
 
 pub(super) async fn store_message(
     backend: &MamDatabaseBackend,
@@ -25,32 +28,50 @@ pub(super) async fn store_message(
     } else {
         message.id.clone()
     };
-    let insert = MessageInsert {
+    let insert = |ordinal| MessageInsert {
         archive_id: &archive_id,
         archive_jid,
         message,
         rich_payload: rich_payload.as_deref(),
         nickname_generation,
+        ordinal,
     };
-    match backend {
+    let ordinal = match backend {
         MamDatabaseBackend::Postgres(pool) => {
-            let mut conn = pool.acquire().await?;
+            let mut conn = pool.begin().await?;
             if let Some(id) =
                 find_origin_tombstone_postgres(&mut conn, archive_jid, message).await?
             {
                 return Ok(StoreOutcome::TombstoneHit(id));
             }
-            insert_postgres_message_on_connection(&mut conn, insert, InsertConflict::Error).await?;
+            let ordinal = allocate_postgres(&mut conn, archive_jid).await?;
+            insert_postgres_message_on_connection(
+                &mut conn,
+                insert(ordinal),
+                InsertConflict::Error,
+            )
+            .await?;
+            conn.commit().await?;
+            ordinal
         }
         MamDatabaseBackend::Sqlite(pool) => {
-            let mut conn = pool.acquire().await?;
+            // Acquire the write reservation before tombstone reads: a deferred
+            // WAL transaction cannot upgrade a snapshot after another writer commits.
+            let mut conn = pool.begin_with("BEGIN IMMEDIATE").await?;
             if let Some(id) = find_origin_tombstone_sqlite(&mut conn, archive_jid, message).await? {
                 return Ok(StoreOutcome::TombstoneHit(id));
             }
-            insert_sqlite_message_on_connection(&mut conn, insert, InsertConflict::Error).await?;
+            let ordinal = allocate_sqlite(&mut conn, archive_jid).await?;
+            insert_sqlite_message_on_connection(&mut conn, insert(ordinal), InsertConflict::Error)
+                .await?;
+            conn.commit().await?;
+            ordinal
         }
-    }
-    Ok(StoreOutcome::Stored(archive_id))
+    };
+    Ok(StoreOutcome::Stored {
+        stanza_id: archive_id,
+        ordinal,
+    })
 }
 
 pub(super) async fn store_message_fenced(
@@ -80,6 +101,7 @@ pub(super) async fn store_message_fenced(
     } else {
         message.id.clone()
     };
+    let ordinal = allocate_postgres(&mut tx, archive_jid).await?;
     insert_postgres_message_on_connection(
         &mut tx,
         MessageInsert {
@@ -88,12 +110,16 @@ pub(super) async fn store_message_fenced(
             message,
             rich_payload: rich_payload.as_deref(),
             nickname_generation,
+            ordinal,
         },
         InsertConflict::Error,
     )
     .await?;
     tx.commit().await?;
-    Ok(StoreOutcome::Stored(archive_id))
+    Ok(StoreOutcome::Stored {
+        stanza_id: archive_id,
+        ordinal,
+    })
 }
 async fn claim_fence_is_held(
     tx: &mut Transaction<'_, Postgres>,
@@ -127,6 +153,7 @@ pub(super) struct MessageInsert<'a> {
     pub message: &'a ArchivedMessage,
     pub rich_payload: Option<&'a str>,
     pub nickname_generation: Option<i64>,
+    pub ordinal: ArchiveOrdinal,
 }
 
 pub(super) async fn insert_postgres_message_on_connection(
@@ -147,7 +174,7 @@ pub(super) async fn insert_postgres_message_on_connection(
     let message_type = waddle_xmpp_core::mam::message_type_wire_str(&insert.message.message_type);
 
     let mut query = QueryBuilder::<Postgres>::new(
-        "INSERT INTO mam_messages (id, room_jid, timestamp, from_jid, to_jid, body, stanza_id, thread_id, reply_to_id, reply_to_jid, origin_id, message_type, stanza_xml, rich_payload, nickname_generation, parent_thread_id) ",
+        "INSERT INTO mam_messages (id, room_jid, timestamp, from_jid, to_jid, body, stanza_id, thread_id, reply_to_id, reply_to_jid, origin_id, message_type, stanza_xml, rich_payload, nickname_generation, parent_thread_id, archive_seq) ",
     );
     query.push_values(std::iter::once(()), |mut builder, _| {
         builder
@@ -191,7 +218,8 @@ pub(super) async fn insert_postgres_message_on_connection(
                     .as_ref()
                     .and_then(|thread| thread.parent.as_ref())
                     .map(|parent| parent.as_str()),
-            );
+            )
+            .push_bind(insert.ordinal.to_storage());
     });
 
     match conflict {
@@ -200,7 +228,7 @@ pub(super) async fn insert_postgres_message_on_connection(
             Ok(Some(insert.archive_id.to_string()))
         }
         InsertConflict::DoNothing => {
-            query.push(" ON CONFLICT DO NOTHING RETURNING id");
+            query.push(" ON CONFLICT (id) DO NOTHING RETURNING id");
             query
                 .build_query_scalar::<String>()
                 .fetch_optional(conn)
@@ -227,7 +255,7 @@ pub(super) async fn insert_sqlite_message_on_connection(
     let message_type = waddle_xmpp_core::mam::message_type_wire_str(&insert.message.message_type);
 
     let mut query = QueryBuilder::<Sqlite>::new(
-        "INSERT INTO mam_messages (id, room_jid, timestamp, from_jid, to_jid, body, stanza_id, thread_id, reply_to_id, reply_to_jid, origin_id, message_type, stanza_xml, rich_payload, nickname_generation, parent_thread_id) ",
+        "INSERT INTO mam_messages (id, room_jid, timestamp, from_jid, to_jid, body, stanza_id, thread_id, reply_to_id, reply_to_jid, origin_id, message_type, stanza_xml, rich_payload, nickname_generation, parent_thread_id, archive_seq) ",
     );
     query.push_values(std::iter::once(()), |mut builder, _| {
         builder
@@ -271,7 +299,8 @@ pub(super) async fn insert_sqlite_message_on_connection(
                     .as_ref()
                     .and_then(|thread| thread.parent.as_ref())
                     .map(|parent| parent.as_str()),
-            );
+            )
+            .push_bind(insert.ordinal.to_storage());
     });
 
     match conflict {
@@ -280,7 +309,7 @@ pub(super) async fn insert_sqlite_message_on_connection(
             Ok(Some(insert.archive_id.to_string()))
         }
         InsertConflict::DoNothing => {
-            query.push(" ON CONFLICT DO NOTHING RETURNING id");
+            query.push(" ON CONFLICT (id) DO NOTHING RETURNING id");
             query
                 .build_query_scalar::<String>()
                 .fetch_optional(conn)
@@ -304,7 +333,7 @@ pub(super) async fn find_origin_tombstone_postgres(
         .push_bind(archive.to_string())
         .push(" AND origin_id = ")
         .push_bind(origin.as_str())
-        .push(" ORDER BY timestamp ASC, id ASC");
+        .push(" ORDER BY archive_seq ASC");
     for row in query.build().fetch_all(conn).await? {
         let candidate = decode_postgres_message_row(&row)
             .map_err(|error| sqlx::Error::Decode(Box::new(error)))?;
@@ -329,7 +358,7 @@ pub(super) async fn find_origin_tombstone_sqlite(
         .push_bind(archive.to_string())
         .push(" AND origin_id = ")
         .push_bind(origin.as_str())
-        .push(" ORDER BY timestamp ASC, id ASC");
+        .push(" ORDER BY archive_seq ASC");
     for row in query.build().fetch_all(conn).await? {
         let candidate = decode_sqlite_message_row(&row)
             .map_err(|error| sqlx::Error::Decode(Box::new(error)))?;

@@ -1,3 +1,4 @@
+mod allocation;
 mod decode;
 mod impls;
 mod query;
@@ -15,6 +16,9 @@ use sqlx::sqlite::{SqliteConnectOptions, SqliteJournalMode, SqlitePool, SqlitePo
 use tracing::info;
 
 use super::MamStorageError;
+pub use allocation::{
+    lock_archive_sequence_on_connection, lock_archive_sequence_on_sqlite_connection,
+};
 use schema::{
     ensure_postgres_schema, ensure_sqlite_parent_dir, infer_driver, is_in_memory_sqlite,
     MamDatabaseDriver,
@@ -190,3 +194,6 @@ mod tests {
         assert!(!storage.postgres_pool().expect("postgres pool").is_closed());
     }
 }
+
+#[cfg(test)]
+mod ordinal_tests;

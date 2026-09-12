@@ -1705,6 +1705,7 @@ pub(super) async fn handle_muc_owner_and_moderation_iq(
             moderated_by.parse::<Jid>(),
         ) {
             let archived = ArchivedMessage {
+                ordinal: None,
                 id: archive_id.clone(),
                 timestamp: chrono::Utc::now(),
                 from: jid::Jid::from(room_jid.clone()),

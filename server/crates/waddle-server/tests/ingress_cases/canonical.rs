@@ -245,6 +245,7 @@ async fn groupchat_alias_conflict_replies_to_authenticated_sender(fixture: Ingre
                 by: room.clone(),
                 stanza_id,
                 archived_at: chrono::Utc::now(),
+                ordinal: None,
             });
         submission
     };

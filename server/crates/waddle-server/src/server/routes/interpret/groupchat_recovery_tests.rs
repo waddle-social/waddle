@@ -201,6 +201,7 @@ async fn recorded_candidate_sweep(fixture: IngressFixture) {
         crate::notification_outbox::T1PushDispatchOutcome::Suppressed { .. }
     ));
     let archived = waddle_xmpp::mam::ArchivedMessage {
+        ordinal: None,
         id: candidate.archive_stanza_id().id.clone(),
         stanza_id: Some(candidate.archive_stanza_id().clone()),
         body: Some("archive data must not be needed".to_owned()),

@@ -62,11 +62,12 @@ pub enum RoomActorMutation {
 #[derive(Debug, Clone)]
 pub enum ExternalRoomEffect {
     /// A system archive whose content is true only after the room pin commits.
+    /// The archive expectation is derived from recorded authority when the
+    /// Phase C transaction runs, so the effect carries none.
     ArchiveAfterPin {
         room: BareJid,
         message: Box<ArchivedMessage>,
         fence: RoomFenceRequirement,
-        archive_expectation: ArchiveExpectation,
     },
     /// Observer hooks may invoke host mutations, so unlike enrichment they run only after commit.
     ObserveRoomMessage {

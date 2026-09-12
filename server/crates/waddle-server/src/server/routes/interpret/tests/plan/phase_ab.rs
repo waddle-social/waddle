@@ -184,6 +184,7 @@ async fn phases_a_b_with_poisoned_stores(scenario: Scenario) {
     let memory = InMemoryMamStorage::new();
     if matches!(scenario, Scenario::Retraction) {
         let original = waddle_xmpp::mam::ArchivedMessage {
+            ordinal: None,
             id: "target-original".into(),
             body: Some("original content".into()),
             message_type: XmppMessageType::Groupchat,

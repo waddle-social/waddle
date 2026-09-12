@@ -28,6 +28,35 @@ use crate::{
 pub struct MamArchiveRepository;
 
 impl MamArchiveRepository {
+    /// Lock every archive's ordinal counter in canonical order before any
+    /// archive row is written, so two transactions that write the same pair
+    /// of archives in opposite plan order (a DM and its reply, a MUC private
+    /// message and its answer) queue on the counters instead of deadlocking.
+    pub async fn lock_sequences(
+        transaction: &mut IngressUowTransaction<'_>,
+        archives: &[BareJid],
+    ) -> Result<(), IngressUowError> {
+        let mut ordered: Vec<&BareJid> = archives.iter().collect();
+        ordered.sort();
+        ordered.dedup();
+        for archive in ordered {
+            if let Some(connection) = transaction.transaction_mut().postgres_connection() {
+                waddle_xmpp::mam::lock_archive_sequence_on_connection(connection, archive)
+                    .await
+                    .map_err(waddle_xmpp::mam::MamTxStoreError::Database)?;
+            } else {
+                let connection = transaction
+                    .transaction_mut()
+                    .sqlite_connection()
+                    .ok_or(IngressUowError::PostgresRequired)?;
+                waddle_xmpp::mam::lock_archive_sequence_on_sqlite_connection(connection, archive)
+                    .await
+                    .map_err(waddle_xmpp::mam::MamTxStoreError::Database)?;
+            }
+        }
+        Ok(())
+    }
+
     pub async fn store(
         transaction: &mut IngressUowTransaction<'_>,
         archive_jid: &BareJid,
@@ -1010,7 +1039,10 @@ fn compare_effects<'a>(
             } else {
                 omissions.push(intent);
             }
-        } else if !matches.iter().any(|row| row.intent == *intent) {
+        } else if !matches
+            .iter()
+            .any(|row| super::archive_ordinal::archive_intent_matches(&row.intent, intent))
+        {
             if intent.kind() == IngressEffectKind::ArchiveAuthoritative {
                 return (
                     ReconcileVerdict::Contradiction {
@@ -1025,7 +1057,10 @@ fn compare_effects<'a>(
         }
     }
     for row in recorded {
-        if !planned.contains(&row.intent) {
+        if !planned
+            .iter()
+            .any(|intent| super::archive_ordinal::archive_intent_matches(&row.intent, intent))
+        {
             divergent.insert(row.intent.kind());
         }
     }

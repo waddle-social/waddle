@@ -14,7 +14,7 @@ use crate::{
 use sha2::{Digest, Sha256};
 use waddle_xmpp::{
     ingress::{IngressEffectIntent, MessageKey},
-    mam::{ArchiveExpectation, MamTxStoreOutcome},
+    mam::MamTxStoreOutcome,
 };
 pub(super) struct AppliedDurable {
     pub archives: Vec<(PlanEffectDependency, MamTxStoreOutcome)>,
@@ -51,6 +51,25 @@ pub(super) async fn apply_durable(
         receipts: Vec::new(),
     };
     let mut completed = Vec::new();
+    // Counter locks precede every durable mutation, in canonical archive order
+    // (RFC 0018 §3.7): the plan's own effect order differs between a message and
+    // its reply, which would otherwise deadlock on the two counter rows.
+    let archives: Vec<jid::BareJid> = plan
+        .plan
+        .iter()
+        .filter_map(|planned| match &planned.effect {
+            Effect::Durable(DurableEffect::Direct(DurableDirectEffect::ArchiveDirect {
+                archive,
+                ..
+            }))
+            | Effect::Durable(DurableEffect::Room(DurableRoomEffect::ArchiveGroupchat {
+                room: archive,
+                ..
+            })) => Some(archive.clone()),
+            _ => None,
+        })
+        .collect();
+    MamArchiveRepository::lock_sequences(tx, &archives).await?;
     for (index, planned) in plan.plan.iter().enumerate() {
         let Effect::Durable(effect) = &planned.effect else {
             continue;
@@ -90,29 +109,8 @@ pub(super) async fn apply_durable(
                 message,
                 ..
             }) => {
-                let expectation = recorded
-                    .iter()
-                    .find_map(|intent| match intent {
-                        IngressEffectIntent::ArchiveAuthoritative {
-                            archive: stored,
-                            stanza_id,
-                            archived_at,
-                            ..
-                        }
-                        | IngressEffectIntent::SystemMessageArchive {
-                            archive: stored,
-                            stanza_id,
-                            archived_at,
-                            ..
-                        } if stored == archive && stanza_id.id == message.id => {
-                            Some(ArchiveExpectation::Existing {
-                                stanza_id: stanza_id.clone(),
-                                archived_at: *archived_at,
-                            })
-                        }
-                        _ => None,
-                    })
-                    .unwrap_or(ArchiveExpectation::Fresh);
+                let expectation =
+                    super::archive_authority::expectation(key, recorded, archive, message);
                 #[cfg(feature = "clustering")]
                 let outcome = if matches!(effect, DurableEffect::Room(_))
                     && matches!(
@@ -137,6 +135,15 @@ pub(super) async fn apply_durable(
                     let _ = room_proof;
                     MamArchiveRepository::store(tx, archive, message, expectation).await?
                 };
+                super::archive_authority::finalize(
+                    tx,
+                    key,
+                    &plan.intents,
+                    archive,
+                    message,
+                    &outcome,
+                )
+                .await?;
                 applied.archives.push((
                     PlanEffectDependency::AfterArchive {
                         archive: archive.clone(),
