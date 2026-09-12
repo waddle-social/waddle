@@ -59,7 +59,10 @@ Android targets). Every build path reads that file:
    keyed on store paths, so a new toolchain or nixpkgs snapshot rebuilds the
    whole Rust dependency graph once. A rustc `SIGKILL` in `nixTest` on that
    cold run is the known memory-pressure flake; capture the log before
-   rerunning so a real failure is not mistaken for it.
+   rerunning so a real failure is not mistaken for it. The
+   `nixBuildImageStream` lane builds the same fat-LTO release image that
+   `publishContainerImage` ships (#1764), so a codegen or packaging
+   regression in the new toolchain fails there instead of on `main`.
 
 6. After merge the server auto-deploys. Check
    `infrastructure/waddle.cloud/gitops/waddle-server/helmrelease.yaml` before
