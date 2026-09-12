@@ -840,7 +840,7 @@ async fn handle_sm_resume_terminal(
     ctx: SmCtx<'_>,
 ) -> observe::SmResumeTerminal {
     use observe::{SmResumeOutcome, SmResumeTerminal};
-    use waddle_xmpp::stream_management::{stamp_replay_delay, CrossNodeResumeOutcome};
+    use waddle_xmpp::stream_management::CrossNodeResumeOutcome;
 
     let SmCtx {
         phase,
@@ -1251,23 +1251,11 @@ async fn handle_sm_resume_terminal(
     // the main loop must NOT push them through `record_outbound` again.
     *suppress_sm_record_next_batch = true;
 
-    // Issue #1178: stamp each replayed stanza with a XEP-0203 <delay/>
-    // carrying its original receipt time, so clients sort it at its true
-    // timeline position instead of the drain time (XEP-0198 Acks-section
-    // redelivery stamping, applied to the <resumed/> replay by analogy).
-    let server_domain = state.deps.auth_state.xmpp_domain.as_str();
-    let replay: Vec<ResponseFrame> = sm_state
-        .get_stanzas_to_resend(resume.h)
-        .into_iter()
-        .map(|entry| {
-            ResponseFrame::from_serialized_xml(stamp_replay_delay(
-                &entry.stanza_xml,
-                server_domain,
-                entry.original_receipt_at,
-            ))
-            .with_ingress_receipts(entry.ingress_receipts)
-        })
-        .collect();
+    let replay = super::resume_replay::replay_frames(
+        sm_state,
+        resume.h,
+        state.deps.auth_state.xmpp_domain.as_str(),
+    );
     SmResumeTerminal::resumed(
         waddle_xmpp::pending_delivery::SmSessionId::new(resume.previd),
         sm_state.get_inbound_count(),
