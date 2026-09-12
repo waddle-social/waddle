@@ -29,11 +29,11 @@ on:
     - apps/android/detekt.yml/**
     - apps/android/env.cue
     - apps/android/env.cue/**
-    - apps/android/gradle/libs.versions.toml
-    - apps/android/gradle/libs.versions.toml/**
     - apps/android/gradle.properties
     - apps/android/gradle.properties/**
     - apps/android/gradle/**
+    - apps/android/gradle/libs.versions.toml
+    - apps/android/gradle/libs.versions.toml/**
     - apps/android/gradlew
     - apps/android/gradlew/**
     - apps/android/schema/**
@@ -86,7 +86,7 @@ jobs:
           /home/runner/.android-sdk
           /home/runner/.gradle
     - name: Install Determinate Nix
-      uses: DeterminateSystems/determinate-nix-action@d96678350ffd6a456235832eb11e1c491589b7bb
+      uses: DeterminateSystems/determinate-nix-action@021c8a1bd3570eb21f5c20a054812b0c4d9ca614
       with:
         extra-conf: accept-flake-config = true
     - name: Setup Hestia Nix Cache

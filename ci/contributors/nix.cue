@@ -3,7 +3,7 @@ package contributors
 import "github.com/cuenv/cuenv/schema"
 
 // #Nix mirrors cuenv's Nix contributor while pinning the GitHub Action to the
-// immutable revision behind v3.21.8. Keep the script fallback aligned with the
+// immutable revision behind v3.22.3. Keep the script fallback aligned with the
 // upstream contributor when upgrading cuenv.
 #Nix: schema.#Contributor & {
 	id: "nix"
@@ -13,7 +13,7 @@ import "github.com/cuenv/cuenv/schema"
 		priority: 2
 		script:   "curl --proto '=https' --tlsv1.2 -sSf -L https://install.determinate.systems/nix | sh -s -- install linux --no-confirm --init none"
 		provider: github: {
-			uses: "DeterminateSystems/determinate-nix-action@d96678350ffd6a456235832eb11e1c491589b7bb"
+			uses: "DeterminateSystems/determinate-nix-action@021c8a1bd3570eb21f5c20a054812b0c4d9ca614"
 			with: "extra-conf": "accept-flake-config = true"
 		}
 	}]

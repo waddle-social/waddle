@@ -30,7 +30,10 @@ waddle/
 
 ### Prerequisites
 
-- Rust 1.75+ (stable)
+- Rust, at the version pinned in `rust-toolchain.toml`. Install it with
+  `rustup toolchain install` from this directory; rustup reads the pin
+  automatically for every `cargo` call here. See
+  `../docs/rust-toolchain-bump.md` for how the pin reaches each build.
 - SQLite for local development or a PostgreSQL instance for remote testing
 - WebSocket-capable clients for XMPP real-time messaging
 

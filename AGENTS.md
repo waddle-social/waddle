@@ -64,6 +64,7 @@ bun test && bun run lint
   - CI runs `knip` via `cuenv` (task `lint` in `chat/env.cue`) before the
     Cloudflare preview upload on every pull request.
 
+- Rust toolchain bump procedure: see `docs/rust-toolchain-bump.md`.
 - Clippy hard rule (server/):
   - Local and CI clippy checks MUST run with `-D warnings`; warnings are
     errors.

@@ -5,11 +5,14 @@ Shared iOS + macOS SwiftUI app for Waddle.
 ## Prerequisites
 
 - Xcode 15.0+
-- Rust 1.78+ with `cargo`
-- `rustup` targets installed:
+- `rustup`. The toolchain version is pinned in `server/rust-toolchain.toml`;
+  install it and let `scripts/build-xcframework.sh` add the Apple targets to
+  that toolchain:
   ```bash
-  rustup target add aarch64-apple-darwin x86_64-apple-darwin aarch64-apple-ios aarch64-apple-ios-sim x86_64-apple-ios
+  cd server && rustup toolchain install
   ```
+  Do not add the targets to your default toolchain instead: no build path uses
+  it. See `docs/rust-toolchain-bump.md` for how the pin reaches each build.
 - `xcodegen` (for project generation):
   ```bash
   brew install xcodegen
@@ -88,9 +91,8 @@ Xcode Cloud requires the Rust framework to be pre-built before building the Swif
 **Option 2: Custom Build Script in Xcode Cloud (Recommended)**
 1. In Xcode Cloud settings, add a pre-build script:
    ```bash
-   cd apps/apple
-   rustup target add aarch64-apple-darwin x86_64-apple-darwin aarch64-apple-ios aarch64-apple-ios-sim x86_64-apple-ios
-   bash ../../scripts/build-xcframework.sh --release
+   (cd server && rustup toolchain install)
+   bash scripts/build-xcframework.sh --release
    ```
 2. Configure the script to run before the iOS and macOS build steps
 3. Ensure the runner has Rust and `xcodegen` installed (Xcode Cloud provides Rust natively)

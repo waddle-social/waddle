@@ -9,7 +9,7 @@
 #   apps/apple/Waddle/RustClient/Generated/{waddle_xmpp_client.swift,*.h,*.modulemap}
 #
 # Prerequisites:
-#   rustup target add aarch64-apple-darwin x86_64-apple-darwin aarch64-apple-ios aarch64-apple-ios-sim x86_64-apple-ios
+#   rustup (the toolchain and Apple targets are installed from server/rust-toolchain.toml)
 
 set -euo pipefail
 
@@ -28,6 +28,13 @@ if [[ "${1:-}" == "--debug" ]]; then
 fi
 
 echo "==> Building Rust targets (profile: $PROFILE)"
+# Run cargo from the server workspace so rustup honours server/rust-toolchain.toml,
+# and make sure the pinned toolchain has every Apple target this script builds.
+cd "$SERVER"
+rustup target add \
+  aarch64-apple-darwin x86_64-apple-darwin \
+  aarch64-apple-ios aarch64-apple-ios-sim x86_64-apple-ios
+
 cargo build -p waddle-xmpp-client-ffi $CARGO_FLAG \
   --locked \
   --target aarch64-apple-darwin \

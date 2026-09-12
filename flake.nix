@@ -255,7 +255,11 @@
           };
           serverPostgresTestArgs = serverTestArgs // {
             nativeBuildInputs = serverTestArgs.nativeBuildInputs ++ [
-              pkgs.postgresql
+              # Pin the major explicitly rather than tracking the nixpkgs
+              # default (which moved 17 -> 18 in the 2026-09 snapshot), so a
+              # nixpkgs bump cannot silently change the database the tests
+              # run against. Prod runs the CloudNativePG operator default.
+              pkgs.postgresql_17
             ];
             preCheck = ''
               export PGDATA="$TMPDIR/postgres-data"
@@ -441,6 +445,25 @@
         let
           pkgs = mkPkgs system;
           rustToolchain = pkgs.rust-bin.fromRustupToolchainFile ./server/rust-toolchain.toml;
+          # cue 0.17.1 does not terminate evaluating server/: `cue vet .`
+          # takes ~4s on 0.16.1 and ran >11min/OOM on 0.17.1, which killed the
+          # renderDeployment gate and would hang the main-only
+          # publishContainerImage task. The two known v0.17 hang issues
+          # (cue-lang/cue#4421, #4422) are fixed in 0.17.1, so this is a
+          # distinct unreported regression: see #1763. Do not drop this hold
+          # because an upstream issue looks closed -- measure `cue vet .`
+          # in server/ on the candidate version first. Covers the CLI only;
+          # the cuengine crate is pinned separately in server/Cargo.lock.
+          cue = pkgs.cue.overrideAttrs (finalAttrs: _prev: {
+            version = "0.16.1";
+            src = pkgs.fetchFromGitHub {
+              owner = "cue-lang";
+              repo = "cue";
+              tag = "v${finalAttrs.version}";
+              hash = "sha256-mTj3XMWByNrKjm+/MOQGLyUKIv4JJ8i6Oaphbzls84U=";
+            };
+            vendorHash = "sha256-HXRrVPjPc10Q1MVr1d9vZBWgSVqNZ5J0UgvP/hTPfcg=";
+          });
         in
         {
           default = pkgs.mkShell {
@@ -450,7 +473,7 @@
               pkgs.nodejs_22
               pkgs.python3
               pkgs.go
-              pkgs.cue
+              cue
               pkgs.kubectl
               pkgs.kubernetes-helm
               pkgs.just
