@@ -299,12 +299,30 @@ candidate cannot be tied back to a specific obligation, its recorded intent or i
 progress rows. Note the `::uuid` casts: the ledger stores `message_key` as text
 while the ingress tables use `uuid`.
 
-Rows that survive all three predicates are the shape #1760 describes (durable
-append proof must not outlive the payload it stands for). Two caveats remain: the
-sequence comparison is modulo 2^32 while SQL is not wrap-aware — the server
-deliberately performs that comparison in Rust — and a row can be in flight rather
-than stale, so re-run before acting. Record the row and its obligation; do not
-delete ledger entries by hand. No ledger surgery.
+Rows that survive every predicate are **candidates, and the query cannot promote
+them to a verdict.** A deleted session is not proof of loss: the proof is meant
+to outlive its session, and two healthy outcomes delete the session and its
+`sm_unacked` rows while the proof legitimately stands —
+
+- the retained frame was **acknowledged during resume**, which is delivery; and
+- the payload was **promoted to `pending_delivery`** on expiry, which is a
+  durable handoff, not a destruction.
+
+Neither leaves a delivery or effect receipt, so both satisfy the query. Worse,
+`pending_delivery` rows carry no reference back to the obligation that produced
+them, so a promoted payload **cannot currently be correlated to its ledger row at
+all** — that missing link is itself part of what #1760 has to fix.
+
+So before treating a candidate as the #1760 shape (durable append proof must not
+outlive the payload it stands for), rule out both: look for a `pending_delivery`
+row to the same recipient around `appended_at`, and check whether the stream
+resumed and acknowledged before it was deleted. Two further caveats: the sequence
+comparison is modulo 2^32 while SQL is not wrap-aware — the server deliberately
+performs that comparison in Rust — and a row can simply be in flight, so re-run
+before acting.
+
+Record the row and its full obligation identity. Do not delete ledger entries by
+hand. No ledger surgery.
 
 ## Read-only verification
 
