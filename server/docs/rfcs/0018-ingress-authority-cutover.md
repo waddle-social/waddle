@@ -403,7 +403,10 @@ tables)
   BIGINT NOT NULL`, `UNIQUE (room_jid, archive_seq)` and
   `mam_archive_sequences (archive_jid TEXT PRIMARY KEY, next_seq BIGINT NOT NULL)`;
   legacy rows are backfilled by `(timestamp, id)` within each archive and
-  counters are seeded without lowering an existing high-water mark.
+  counters are seeded without lowering an existing high-water mark. Ledger
+  **V1017** records the same idempotent counter-table DDL as the cutover
+  marker so a pre-cutover binary fails closed instead of starting with
+  failing inserts.
 
 ## 6. Deployment
 Recreate hard cutover rides in this PR (prod HelmRelease `updateStrategy:

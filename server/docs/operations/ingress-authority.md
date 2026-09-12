@@ -409,14 +409,33 @@ per-archive maxima without lowering existing counters, and enforces `NOT NULL`
 and `UNIQUE (room_jid, archive_seq)`. Backfill ranks every row of any archive
 that still contains a NULL ordinal, so restarting an interrupted backfill is
 safe with no old writers. PostgreSQL sets `NOT NULL`; SQLite rebuilds the
-legacy table with that constraint. This is store-owned schema, not a new
-ingress migration-ledger version.
+legacy table with that constraint. The column and backfill are store-owned
+schema; the ledger additionally records **V1017** (idempotent counter-table
+DDL) purely as the cutover marker, so a pre-cutover binary refuses to start
+instead of coming up Ready with failing inserts (see Rollback below).
+
+**Before merging, size the backfill.** The rank `UPDATE` rewrites every
+`mam_messages` row as one autocommit statement while the pod holds the MAM
+schema advisory lock and before it serves `/health`. Read
+`SELECT count(*), pg_total_relation_size('mam_messages')` on production and
+time `ARCHIVE_ORDINAL_BACKFILL` (`sqlx_store/schema.rs`) against a copy. If
+the measured duration approaches the liveness budget
+(`probes.liveness.initialDelaySeconds` + `failureThreshold × periodSeconds`,
+see `server/charts/waddle-server/values.yaml`), raise those values in the
+HelmRelease for the cutover and restore them in the flip-back PR. A pod killed
+mid-backfill leaves its PostgreSQL backend running the statement and holding
+the `waddmam1` advisory lock; every restart then blocks in
+`pg_advisory_lock` until that backend ends. Recovery: find it with
+`SELECT pid, state, query_start FROM pg_stat_activity WHERE query LIKE 'UPDATE mam_messages SET archive_seq%'`
+and `SELECT pg_terminate_backend(pid)`; the rerun ranks the still-NULL rows.
 
 After every replica runs the new digest and is ready, verify the backfill in
 one read-only PostgreSQL snapshot:
 
 ```sql
 BEGIN TRANSACTION ISOLATION LEVEL REPEATABLE READ READ ONLY;
+SELECT is_nullable FROM information_schema.columns
+WHERE table_name = 'mam_messages' AND column_name = 'archive_seq';
 SELECT COUNT(*) FROM mam_messages WHERE archive_seq IS NULL;
 
 SELECT m.room_jid, MAX(m.archive_seq) AS max_archive_seq, s.next_seq
@@ -432,16 +451,30 @@ HAVING COUNT(*) > 1;
 COMMIT;
 ```
 
-The NULL count must be **0**; the counter and duplicate queries must return
-**no rows**. Every retained archive needs a counter at least its maximum
-ordinal. A counter above that maximum is valid after deletion; never lower it.
+`is_nullable` must be **NO** (a transient 0 NULL count while a pod is still
+mid-backfill proves nothing); the NULL count must be **0**; the counter and
+duplicate queries must return **no rows**. Every retained archive needs a
+counter at least its maximum ordinal. A counter above that maximum is valid
+after deletion; never lower it. The seed runs only while the column is
+nullable, so a counter row that is missing or too low after operator error
+(partial restore) makes every fresh insert into that archive fail with a
+unique violation; repair with the same monotone seed:
 
-**Rollback is not supported.** A pre-cutover binary can still read the table
-because it ignores the extra column, but its inserts fail on `NOT NULL`.
-Flipping back to an old image does not restore service; reverting the schema
-to enable such a rollback is not a supported procedure. Roll forward with an
-ordinal-aware binary. Do not treat this store-owned change as a ledger startup
-refusal.
+```sql
+INSERT INTO mam_archive_sequences (archive_jid, next_seq)
+SELECT room_jid, MAX(archive_seq) FROM mam_messages GROUP BY room_jid
+ON CONFLICT (archive_jid) DO UPDATE
+SET next_seq = GREATEST(mam_archive_sequences.next_seq, EXCLUDED.next_seq);
+```
+
+**Rollback is not supported.** A pre-cutover binary could read the table
+(it selects explicit columns) but every insert would fail on `NOT NULL`, with
+the fleet green. That is why V1017 rides in the ledger: a pre-cutover catalog
+sees an unknown recorded version and **refuses to start**
+(`pre_v1017_catalog_refuses_the_archive_ordinal_cutover_ledger`), the same
+fail-closed shape #1765 relied on. `git revert` of #1771 on `main` is therefore
+itself the unsupported rollback: the reverted image will not come up. Roll
+forward with an ordinal-aware binary.
 
 Once the rollout and verification complete, open a follow-up PR restoring
 `RollingUpdate` (`maxSurge: 1`, `maxUnavailable: 0`), following #1758 → #1765.

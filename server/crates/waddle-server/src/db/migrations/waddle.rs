@@ -957,6 +957,29 @@ CREATE INDEX IF NOT EXISTS idx_sm_ingress_appends_stream
     ON sm_ingress_appends (accepting_stream_id);
 "#;
 
+/// Cutover marker for the per-archive commit ordinal (#1770 stage 1, PR #1771).
+///
+/// `mam_messages.archive_seq` and its backfill are store-owned `ensure_schema`
+/// work (RFC 0018 §3.7), not ledger DDL. This version exists so that a binary
+/// built before the cutover refuses to start against a database whose archive
+/// rows carry ordinals: its catalog does not know V1017, and the append-only
+/// ledger fails closed on an unknown recorded version. Without it a reverted
+/// image would come up Ready and fail every archive insert on `NOT NULL`.
+/// The statement is the idempotent counter-table DDL, identical to the store's.
+pub const V1017_ARCHIVE_ORDINAL_CUTOVER: &str = r#"
+CREATE TABLE IF NOT EXISTS mam_archive_sequences (
+    archive_jid TEXT PRIMARY KEY,
+    next_seq INTEGER NOT NULL
+);
+"#;
+
+pub const V1017_ARCHIVE_ORDINAL_CUTOVER_POSTGRES: &str = r#"
+CREATE TABLE IF NOT EXISTS mam_archive_sequences (
+    archive_jid TEXT PRIMARY KEY,
+    next_seq BIGINT NOT NULL
+);
+"#;
+
 /// Get all waddle schema migrations in order.
 ///
 /// Versions are intentionally offset from global migrations so a single
@@ -1058,6 +1081,12 @@ pub fn all() -> Vec<Migration> {
             description: "Index the ingress SM append ledger by accepting stream".to_string(),
             sql_sqlite: V1016_SM_INGRESS_APPENDS_STREAM_INDEX,
             sql_postgres: V1016_SM_INGRESS_APPENDS_STREAM_INDEX_POSTGRES,
+        },
+        Migration {
+            version: 1017,
+            description: "Mark the per-archive commit ordinal cutover".to_string(),
+            sql_sqlite: V1017_ARCHIVE_ORDINAL_CUTOVER,
+            sql_postgres: V1017_ARCHIVE_ORDINAL_CUTOVER_POSTGRES,
         },
     ]
 }
