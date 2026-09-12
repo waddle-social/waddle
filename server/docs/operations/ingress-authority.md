@@ -206,13 +206,21 @@ same `(obligation, resource)` a second time — the duplicate the migration exis
 to prevent. Stopping every old writer before the first keyed writer starts is
 the only way to make the gate total from its first use.
 
-Rollback is fail-closed rather than silently unkeyed. The migration ledger guard
-makes a binary whose catalog lacks a version recorded in `_migrations` refuse to
-start (`pre_v1010_catalog_refuses_a_v1010_ledger_until_roll_forward`,
-`server/crates/waddle-server/src/db/migrations/tests.rs`), so no pre-#1758 image
-can come up against this database at all. The guard fires at startup only, which
-is exactly why `Recreate` was needed at cutover and not at the flip-back (#1765):
-it does nothing about an old pod that is already running.
+Rollback is fail-closed **only back to the ledger itself**. The migration ledger
+guard makes a binary whose catalog lacks a version recorded in `_migrations`
+refuse to start (`pre_v1010_catalog_refuses_a_v1010_ledger_until_roll_forward`,
+`server/crates/waddle-server/src/db/migrations/tests.rs`), so an image between
+`43860571` (#1671, the ledger) and #1758 cannot come up against this database.
+The guard fires at startup only, which is exactly why `Recreate` was needed at
+cutover and not at the flip-back (#1765): it does nothing about an old pod that
+is already running.
+
+**Never roll back past `43860571` (#1671).** Images older than the ledger have no
+guard. Their runner carries the removed "hard-cut protection", which drops and
+recreates `_migrations` on an unknown version and replays its whole catalog —
+including global V0001 and waddle V1001, which destructively drop and recreate the
+auth, channel and message tables. A deep rollback is therefore data loss, not a
+refused startup. Treat the ledger commit as the rollback floor for this database.
 
 #1758 also bumped three wire versions — `remote_user_side_effect.v3`,
 `remote_resource_route.v6` and `deliver_ordered.v10`. Because the cutover rode
@@ -231,29 +239,49 @@ point the obligation can never be retried again.
 the retry that would have recovered the stanza, so the failure mode is silent
 loss rather than a duplicate. List candidates in a read-only snapshot:
 
+Every incident predicate is applied **before** `LIMIT`, so legitimate
+acknowledged or gap-covered proofs cannot fill the result set and hide a real one:
+
 ```sql
 BEGIN TRANSACTION ISOLATION LEVEL REPEATABLE READ READ ONLY;
 SELECT a.message_key, a.resource, a.accepting_stream_id, a.sequence,
-       (s.stream_id IS NOT NULL) AS session_present,
-       s.last_acked, s.replay_gap_through
+       to_timestamp(a.appended_at_ms / 1000.0) AS appended_at
 FROM sm_ingress_appends a
-LEFT JOIN sm_sessions s ON s.stream_id = a.accepting_stream_id
+JOIN ingress_messages m
+  ON m.message_key = a.message_key::uuid
+ AND m.terminal_at IS NULL
+LEFT JOIN sm_sessions s
+  ON s.stream_id = a.accepting_stream_id
 LEFT JOIN sm_unacked u
-       ON u.stream_id = a.accepting_stream_id AND u.sequence = a.sequence
-WHERE u.stream_id IS NULL
+  ON u.stream_id = a.accepting_stream_id
+ AND u.sequence = a.sequence
+LEFT JOIN ingress_delivery_receipts d
+  ON d.message_key = a.message_key::uuid
+ AND d.kind = a.receipt_kind
+ AND d.semantic_identity_hash = a.semantic_identity_hash
+ AND d.resource = a.resource
+WHERE u.stream_id IS NULL   -- the payload is gone
+  AND s.stream_id IS NULL   -- and so is the whole session, not merely acked or gapped
+  AND d.message_key IS NULL -- and this resource was never receipted as delivered
 ORDER BY a.appended_at_ms
 LIMIT 50;
 COMMIT;
 ```
 
-This is a candidate list, not a verdict. A sequence that was acknowledged or is
-covered by the replay gap legitimately has no `sm_unacked` row, and the sequence
-comparison is modulo 2^32 while SQL is not wrap-aware — the server deliberately
-performs that comparison in Rust. Treat a candidate as real only when the stream
-has no `sm_sessions` row at all and the canonical message is still non-terminal.
-That shape is the open invariant tracked by #1760 (durable append proof must not
-outlive the payload it stands for); record the row and the obligation rather
-than deleting ledger entries by hand. Do not perform ledger surgery.
+Each predicate excludes one healthy shape. A sequence that was acknowledged or is
+covered by the replay gap legitimately has no `sm_unacked` row, so `u` alone
+proves nothing. A message may stay non-terminal because a *different* unresolved
+intent holds it open while this resource was delivered normally, so the
+`ingress_delivery_receipts` join is what separates an undelivered resource from a
+healthy one. Note the `::uuid` casts: the ledger stores `message_key` as text
+while the ingress tables use `uuid`.
+
+Rows that survive all three predicates are the shape #1760 describes (durable
+append proof must not outlive the payload it stands for). Two caveats remain: the
+sequence comparison is modulo 2^32 while SQL is not wrap-aware — the server
+deliberately performs that comparison in Rust — and a row can be in flight rather
+than stale, so re-run before acting. Record the row and its obligation; do not
+delete ledger entries by hand. No ledger surgery.
 
 ## Read-only verification
 
