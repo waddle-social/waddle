@@ -25,6 +25,16 @@ import "github.com/cuenv/cuenv/schema"
 // cache, which Hestia sits on, is scoped per ref and PR builds can never
 // feed `main`; this is the shared layer that closes that gap. The GHA cache
 // side of the action is disabled so it never competes with Hestia.
+//
+// The daemon uploads every path the job adds to the store, substituted ones
+// included, as soon as it lands: five parallel compressors, no throttle,
+// concurrent with whatever the job is building. Paths FlakeHub already
+// holds are skipped (attic push session). A job whose build alone nears the
+// runner's memory must therefore not be the first to see a large artifact:
+// server `nixTest` (~6 GB rustc peak on an 8x16 runner) got SIGKILLed three
+// times in a row while the multi-GB cargo deps streamed out, and passed
+// once the step was removed (PR #1774). Such jobs depend on a light task
+// that pulls their large inputs first, e.g. server `nixBuildDeps`.
 #FlakeHubCache: schema.#Contributor & {
 	id: "flakehub-cache"
 	tasks: [{
