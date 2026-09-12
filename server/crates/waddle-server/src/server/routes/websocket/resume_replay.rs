@@ -60,7 +60,9 @@ mod tests {
     #[test]
     fn replayed_frames_carry_their_ingress_obligations() {
         let mut sm_state = StreamManagementState::new();
-        sm_state.record_outbound(
+        // The `<r/>` cadence this returns is irrelevant here: these tests pin
+        // what a replayed frame carries, not when an ack is requested.
+        let _ack = sm_state.record_outbound(
             "<message xmlns='jabber:client' id='m1' to='a@example.com/x'><body>hi</body></message>"
                 .to_string(),
             SmEvictionPath::Batch,
@@ -83,7 +85,9 @@ mod tests {
     #[test]
     fn replayed_frames_are_delay_stamped_for_the_serving_domain() {
         let mut sm_state = StreamManagementState::new();
-        sm_state.record_outbound(
+        // The `<r/>` cadence this returns is irrelevant here: these tests pin
+        // what a replayed frame carries, not when an ack is requested.
+        let _ack = sm_state.record_outbound(
             "<message xmlns='jabber:client' id='m1' to='a@example.com/x'><body>hi</body></message>"
                 .to_string(),
             SmEvictionPath::Batch,
@@ -111,7 +115,7 @@ mod tests {
     fn only_unacknowledged_frames_are_replayed() {
         let mut sm_state = StreamManagementState::new();
         for id in ["m1", "m2"] {
-            sm_state.record_outbound(
+            let _ack = sm_state.record_outbound(
                 format!("<message xmlns='jabber:client' id='{id}'><body>hi</body></message>"),
                 SmEvictionPath::Batch,
             );
