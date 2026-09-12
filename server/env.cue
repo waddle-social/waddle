@@ -168,7 +168,7 @@ schema.#Project & {
 				packages:        "read"
 				"pull-requests": "none"
 			}
-			tasks: [_t.checkCiDrift, _t.checkSwitchableAlternativeProgram, _t.nixFmt, _t.nixClippy, _t.nixTest, _t.nixDoctest, _t.checkXmppClientFfiBindings, _t.renderDeployment, _t.nixBuildExtensionModules, _t.nixBuildCi]
+			tasks: [_t.checkCiDrift, _t.checkSwitchableAlternativeProgram, _t.nixFmt, _t.nixClippy, _t.nixTest, _t.nixDoctest, _t.checkXmppClientFfiBindings, _t.renderDeployment, _t.nixBuildExtensionModules, _t.nixBuildCi, _t.nixBuildImageStream]
 		}
 		rootSync: {
 			mode: "expanded"
@@ -361,6 +361,18 @@ schema.#Project & {
 		nixBuildCi: schema.#Task & {
 			command: "nix"
 			args: ["build", "--print-build-logs", "../#checks.x86_64-linux.waddle-server-ci-build"]
+			inputs: _nixInputs
+		}
+
+		// Builds the release image that ships to prod (`packages.waddle-server`
+		// wrapped as `waddle-server-image-stream`, fat-LTO `release` profile over
+		// `serverPackageSrc`). Every other PR nix gate builds `checks.*` with the
+		// `ci`/`ci-test` profiles, so without this lane the shipped codegen and
+		// packaging path are first exercised by the main-only
+		// `publishContainerImage` (#1764).
+		nixBuildImageStream: schema.#Task & {
+			command: "nix"
+			args: ["build", "--print-build-logs", "../#waddle-server-image-stream"]
 			inputs: _nixInputs
 		}
 
