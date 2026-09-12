@@ -316,10 +316,23 @@ all** — that missing link is itself part of what #1760 has to fix.
 So before treating a candidate as the #1760 shape (durable append proof must not
 outlive the payload it stands for), rule out both: look for a `pending_delivery`
 row to the same recipient around `appended_at`, and check whether the stream
-resumed and acknowledged before it was deleted. Two further caveats: the sequence
-comparison is modulo 2^32 while SQL is not wrap-aware — the server deliberately
-performs that comparison in Rust — and a row can simply be in flight, so re-run
-before acting.
+resumed and acknowledged before it was deleted.
+
+**The query also has a hard blind spot in the other direction: it finds the loss
+only before anything retries it.** Once a retry runs against a stale proof, the
+keyed append returns `AlreadyAppended`, which counts as allocated, so
+`execute_detached::record_resource` writes the matching delivery receipt even
+though the payload is gone — and the aggregate can then terminalize. From that
+point `d.message_key IS NULL` excludes the lost resource, and `m.terminal_at IS
+NULL` excludes it once the message settles. A message lost this way looks
+*delivered* in every table this query inspects. Treat an empty result as "no
+loss caught in its pre-retry window", never as "no loss". Corroborating a
+suspected loss after that point means comparing the recipient's archive or
+client-visible history against the canonical envelope, not querying the ledger.
+
+Two further caveats: the sequence comparison is modulo 2^32 while SQL is not
+wrap-aware — the server deliberately performs that comparison in Rust — and a row
+can simply be in flight, so re-run before acting.
 
 Record the row and its full obligation identity. Do not delete ledger entries by
 hand. No ledger surgery.
@@ -629,16 +642,42 @@ Since #1756 this path allocates exactly one durable queue entry per (recorded
 obligation, resource), with no retry-induced duplicate. The stream-independent
 `sm_ingress_appends` ledger is consulted before any session work and its primary
 key is the gate, so neither a concurrent duplicate decision nor a crash between
-the append and its progress commit allocates a second entry. Three limits remain
-explicit. XEP-0198 still permits a client-observed duplicate after an uncertain
-acknowledgement. When no unexpired session exists the append does not happen at
-all and the obligation stays unresolved for its recorded route to retry or
-degrade. And the guarantee covers keyed appends only: in a clustered route whose
+the append and its progress commit allocates a second entry. Four limits remain
+explicit.
+
+XEP-0198 still permits a client-observed duplicate after an uncertain
+acknowledgement.
+
+**"No session" means no session *and no prior proof*.** When neither exists the
+append does not happen and the obligation stays unresolved for its recorded route
+to retry or degrade. But the ledger is consulted *before* the session lookup
+(`session_registry/resources.rs`, `get_ingress_append` then `void_allocation`,
+both ahead of `find_session_id_matching`), so a proof that outlived its session
+returns `AlreadyAppended` and never reaches the no-session path.
+`SmKeyedAppendOutcome::is_allocated` counts that as allocated, and callers record
+delivery progress on exactly that condition — so the lost message is recorded as
+**delivered**, not left outstanding. `keyed_append_older_proof_precedes_missing_session_lookup`
+pins the ordering. This is the #1760 loss shape in its most severe form and it is
+why the query above cannot be the last word.
+
+**Retirement ignores the acknowledgement frontier.** `void_gap_covered` reads
+only `replay_gap_through` from `sm_sessions` and deletes every proof the gap
+covers (`sm_persistence/ingress_append.rs`); it never consults `last_acked`, while
+the registry-side `void_allocation` does. So if append progress fails, the client
+later acknowledges that sequence, and a re-detach advances the gap past it before
+the session is deleted, a valid delivered proof is retired and recovery can
+allocate the same obligation again. `acknowledged_allocation_is_never_voided_by_a_later_gap`
+establishes such a proof is valid; the two voiding rules disagree about it. The
+divergence is the enumeration problem #1760 exists to remove.
+
+**The guarantee covers keyed appends only.** In a clustered route whose
 remote-resource owner refresh resolves locally against a detached recipient,
 `deliver_local_full_jid_after_target_refresh` passes no append context
 (`clustering/route_bridge/delivery/local.rs:109-127`), so that append is unkeyed
 and a failed effect-receipt write can let recovery append the same resource
-again. That residue is tracked by #1760. Earlier committed progress survives restart and is excluded from later
+again. That residue is tracked by #1760.
+
+Earlier committed progress survives restart and is excluded from later
 decisions. Progress writes and the final aggregate receipt share one
 epoch-attested transaction under the canonical message lock. Lock contention
 leaves the obligation retryable.
