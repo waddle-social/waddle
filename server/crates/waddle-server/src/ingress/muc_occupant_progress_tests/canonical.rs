@@ -494,7 +494,7 @@ async fn postgres_muc_canonical_system_sources_are_frozen_and_distinct() {
     }
 }
 
-async fn observer_source_without_deliverable_copy(fixture: IngressFixture) {
+async fn observer_source_without_deliverable_copy(fixture: IngressFixture, late_observer: bool) {
     use waddle_xmpp::ingress::{EffectMessageIdentity, EntityGeneration};
     let room: jid::BareJid = "observer@muc.example.com".parse().expect("room");
     let occupant: jid::FullJid = "juliet@example.com/absent".parse().expect("occupant");
@@ -537,6 +537,44 @@ async fn observer_source_without_deliverable_copy(fixture: IngressFixture) {
             error_request: Box::new(request.clone()),
         }),
     ))];
+    if late_observer {
+        let observer = submission.plan.intents.pop().expect("observer intent");
+        let effect = submission.plan.plan.pop().expect("observer effect");
+        // Archive-free relayed acceptance retains pending owner authority, so
+        // reconciliation permits its subsequently eligible observer omission.
+        // Ordinary completed room authority intentionally freezes membership.
+        submission
+            .plan
+            .intents
+            .push(IngressEffectIntent::DispatchToRoomRemote {
+                room: "observer@muc.example.com".parse().expect("room"),
+                relay_target: waddle_xmpp::ingress::RelayTargetIdentity::owner_node(
+                    "room-owner",
+                    "owner-epoch",
+                ),
+            });
+        let first = commit_submission(&fixture.uow, &submission, 1)
+            .await
+            .expect("first acceptance without eligible observer");
+        let mut tx = fixture.uow.begin().await.expect("initial envelope");
+        let envelope =
+            CanonicalMessageRepository::load_envelope(&mut tx, first.message_key.expect("key"))
+                .await
+                .expect("load")
+                .expect("envelope");
+        assert!(envelope.room_observer_request().is_none());
+        assert_eq!(envelope.message(), &message);
+        tx.commit().await.expect("read commit");
+        submission.plan.intents.push(observer);
+        submission.plan.plan.push(effect);
+        submission
+            .plan
+            .room_canonical_message
+            .as_mut()
+            .expect("canonical prototype")
+            .bodies
+            .insert(Default::default(), "changed retry prototype".into());
+    }
     let decision = commit_submission(&fixture.uow, &submission, 1)
         .await
         .expect("observer source remains available when delivery planner emits no copies");
@@ -547,19 +585,56 @@ async fn observer_source_without_deliverable_copy(fixture: IngressFixture) {
             .expect("load")
             .expect("envelope");
     assert_eq!(envelope.message(), &message);
-    assert_eq!(envelope.room_observer_request(), Some(request));
+    assert_eq!(envelope.room_observer_request(), Some(request.clone()));
     tx.commit().await.expect("read commit");
+    if late_observer {
+        submission.plan.plan.clear();
+        let replay = commit_submission(&fixture.uow, &submission, 1)
+            .await
+            .expect("restore absent observer on replay");
+        let observer = submission.plan.intents.last().expect("observer intent");
+        let recovered = crate::ingress::recovery_rebuild::rebuild(
+            crate::ingress::recovery_rebuild::RecoveryInput {
+                key: decision.message_key.expect("key"),
+                envelope: &envelope,
+                created_at: chrono::Utc::now(),
+                recorded: &submission.plan.intents,
+                unreceipted: std::slice::from_ref(observer),
+                route_progress: vec![],
+                blocked_recipients: &[],
+            },
+        )
+        .expect("rebuild observer");
+        for restored in [&replay, &recovered.decision] {
+            let (observed, restored_request) = restored
+                .external
+                .iter()
+                .find_map(|effect| match effect {
+                    ExternalEffect::Room(
+                        effects::room::ExternalRoomEffect::ObserveRoomMessage {
+                            message,
+                            error_request,
+                            ..
+                        },
+                    ) => Some((message.as_ref(), error_request.as_ref())),
+                    _ => None,
+                })
+                .expect("restored observer");
+            assert_eq!(observed, &message, "frozen canonical content");
+            assert_eq!(restored_request, &request, "persisted error request");
+        }
+    }
     fixture.close().await;
 }
 
 #[tokio::test]
 async fn sqlite_muc_canonical_observer_without_deliverable_copy() {
-    observer_source_without_deliverable_copy(IngressFixture::sqlite().await).await;
+    observer_source_without_deliverable_copy(IngressFixture::sqlite().await, false).await;
 }
 #[tokio::test]
 async fn postgres_muc_canonical_observer_without_deliverable_copy() {
     if let Some(fixture) = IngressFixture::postgres("muc_observer_no_delivery").await {
-        observer_source_without_deliverable_copy(fixture).await;
+        observer_source_without_deliverable_copy(fixture, false).await;
     }
 }
 
@@ -571,5 +646,16 @@ async fn sqlite_muc_canonical_zero_plugins_all_unavailable() {
 async fn postgres_muc_canonical_zero_plugins_all_unavailable() {
     if let Some(fixture) = IngressFixture::postgres("muc_canonical_unavailable").await {
         canonical_owner(fixture, false, false).await;
+    }
+}
+
+#[tokio::test]
+async fn sqlite_muc_occupant_progress_late_observer_request_survives_replay_recovery() {
+    observer_source_without_deliverable_copy(IngressFixture::sqlite().await, true).await;
+}
+#[tokio::test]
+async fn postgres_muc_occupant_progress_late_observer_request_survives_replay_recovery() {
+    if let Some(fixture) = IngressFixture::postgres("muc_late_observer").await {
+        observer_source_without_deliverable_copy(fixture, true).await;
     }
 }

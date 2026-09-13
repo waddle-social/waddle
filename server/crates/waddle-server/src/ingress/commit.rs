@@ -389,9 +389,34 @@ async fn commit_attempt(
         .iter()
         .any(|intent| matches!(intent, IngressEffectIntent::RoomObserver { .. }))
     {
-        let recorded_envelope = CanonicalMessageRepository::load_envelope(&mut tx, key)
+        let mut recorded_envelope = CanonicalMessageRepository::load_envelope(&mut tx, key)
             .await?
             .ok_or(IngressUowError::EffectIntentMessageMissing)?;
+        if recorded_envelope.room_observer_request().is_none() {
+            use crate::server::routes::interpret::effects::{
+                room::ExternalRoomEffect, Effect, ExternalEffect,
+            };
+            let request = plan.plan.iter().find_map(|planned| match &planned.effect {
+                Effect::External(ExternalEffect::Room(
+                    ExternalRoomEffect::ObserveRoomMessage { error_request, .. },
+                )) => Some(error_request.as_ref()),
+                _ => None,
+            });
+            if let Some(request) = request {
+                // An observer omission may become eligible after archive-free
+                // owner acceptance; attach its request without replacing content.
+                recorded_envelope = MessageEnvelope::with_room_observer(
+                    recorded_envelope.message().clone(),
+                    request.clone(),
+                );
+                CanonicalMessageRepository::record_room_canonical_envelope(
+                    &mut tx,
+                    key,
+                    &recorded_envelope,
+                )
+                .await?;
+            }
+        }
         super::recorded::restore_room_observer_envelope(&mut plan, &intents, &recorded_envelope)?;
     }
     if plan
