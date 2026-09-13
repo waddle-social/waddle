@@ -339,6 +339,11 @@
           );
         in
         {
+          # Exposed so a light CI job can realise nixTest's large inputs (the
+          # ci-test dependency artifacts and the vendored crate sources)
+          # before nixTest runs; see nixBuildDeps in server/env.cue.
+          waddle-server-check-deps = workspaceAllFeaturesArtifacts;
+          waddle-server-cargo-vendor = craneLib.vendorCargoDeps { src = serverCheckSrc; };
           waddle-server-fmt = craneLib.cargoFmt {
             pname = "waddle-server-fmt";
             version = "0.1.0";
@@ -365,8 +370,13 @@
               # rustc RSS; unbounded `-j nproc` alongside the rest of the
               # workspace (plus the derivation's PostgreSQL instance)
               # exceeds the CI runner's memory on cache-miss builds and
-              # gets rustc OOM-killed (SIGKILL, no diagnostics).
-              CARGO_BUILD_JOBS = "4";
+              # gets rustc OOM-killed (SIGKILL, no diagnostics). Four jobs
+              # was still at the edge of the 8x16 runner: with the FlakeHub
+              # Cache daemon resident alongside (#1774) rustc was killed on
+              # four consecutive runs and passed once the daemon was
+              # removed. Two jobs trades a few minutes of compile time for
+              # headroom that does not depend on who else is on the box.
+              CARGO_BUILD_JOBS = "2";
             }
           );
           waddle-server-doctest = craneLib.cargoTest (

@@ -64,6 +64,7 @@ schema.#Project & {
 	ci: providers: ["github"]
 	ci: contributors: [
 		wc.#Nix,
+		wc.#FlakeHubCache,
 		wc.#Hestia,
 		c.#CuenvRelease,
 		c.#OnePassword,
@@ -168,7 +169,7 @@ schema.#Project & {
 				packages:        "read"
 				"pull-requests": "none"
 			}
-			tasks: [_t.checkCiDrift, _t.checkSwitchableAlternativeProgram, _t.nixFmt, _t.nixClippy, _t.nixTest, _t.nixDoctest, _t.checkXmppClientFfiBindings, _t.renderDeployment, _t.nixBuildExtensionModules, _t.nixBuildCi, _t.nixBuildImageStream]
+			tasks: [_t.checkCiDrift, _t.checkSwitchableAlternativeProgram, _t.nixFmt, _t.nixClippy, _t.nixBuildDeps, _t.nixTest, _t.nixDoctest, _t.checkXmppClientFfiBindings, _t.renderDeployment, _t.nixBuildExtensionModules, _t.nixBuildCi, _t.nixBuildImageStream]
 		}
 		rootSync: {
 			mode: "expanded"
@@ -346,10 +347,23 @@ schema.#Project & {
 			inputs: _nixInputs
 		}
 
+		// Realises nixTest's large inputs (the ci-test dependency artifacts and
+		// the vendored crate sources, several GB) so the FlakeHub Cache daemon
+		// uploads them from this light job, not while nixTest's ~6 GB rustc
+		// peak is running on the same 8x16 runner (see #FlakeHubCache in
+		// ci/contributors/nix.cue). These must be the checks' derivations:
+		// the packages.* deps use a different source fileset and profile.
+		nixBuildDeps: schema.#Task & {
+			command: "nix"
+			args: ["build", "--print-build-logs", "../#checks.x86_64-linux.waddle-server-check-deps", "../#checks.x86_64-linux.waddle-server-cargo-vendor"]
+			inputs: _nixInputs
+		}
+
 		nixTest: schema.#Task & {
 			command: "nix"
 			args: ["build", "--print-build-logs", "../#checks.x86_64-linux.waddle-server-test"]
 			inputs: _nixInputs
+			dependsOn: [tasks.nixBuildDeps]
 		}
 
 		nixDoctest: schema.#Task & {

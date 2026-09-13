@@ -70,6 +70,7 @@ schema.#Project & {
 	ci: providers: ["github"]
 	ci: contributors: [
 		wc.#Nix,
+		wc.#FlakeHubCache,
 		wc.#Hestia,
 		_NamespaceAndroidCache,
 		c.#CuenvRelease,
@@ -91,14 +92,14 @@ schema.#Project & {
 				defaultBranch: true
 				manual:        true
 			}
-			provider: github: permissions: contents: "write"
+			provider: github: permissions: {contents: "write", "id-token": "write"}
 			"tasks": [tasks.checkBindingsDrift, tasks.telemetryContract, tasks.lint, tasks.test, tasks.publishDebugApk]
 		}
 		pullRequest: {
 			when: {
 				pullRequest: true
 			}
-			provider: github: permissions: contents: "read"
+			provider: github: permissions: {contents: "read", "id-token": "write"}
 			"tasks": [tasks.checkCiDrift, tasks.checkBindingsDrift, tasks.telemetryContract, tasks.lint, tasks.test, tasks.build]
 		}
 		// Instrumented suite on a headless GMD ATD emulator. Runs as its
@@ -114,7 +115,7 @@ schema.#Project & {
 				pullRequest: true
 				manual:      true
 			}
-			provider: github: permissions: contents: "read"
+			provider: github: permissions: {contents: "read", "id-token": "write"}
 			"tasks": [tasks.gmdCheck]
 		}
 	}
