@@ -529,3 +529,68 @@ async fn postgres_pool_one_remains_admissible_during_maintenance() {
     assert_eq!(terminal_count(&fixture).await, 2);
     fixture.close().await;
 }
+
+async fn unreceipted_page_selects_only_recoverable_pending_rows(fixture: IngressFixture) {
+    let complete = interrupted_delivery(&fixture, "recovery-page-complete").await;
+    let mut pending = fixture.submission(Some("recovery-page-pending"), "pending");
+    pending.plan.intents.push(IngressEffectIntent::RouteDirect {
+        recipient: "juliet@example.com".parse().expect("recipient"),
+        fanout: vec!["juliet@example.com/phone".parse().expect("resource")],
+        route_identity: EffectMessageIdentity::capture_ordinal(0),
+    });
+    let pending_key = commit_submission(&fixture.uow, &pending, 5)
+        .await
+        .expect("pending commit")
+        .message_key
+        .expect("key");
+    let mut carbons = fixture.submission(Some("recovery-page-carbons"), "carbons only");
+    carbons.plan.intents.push(IngressEffectIntent::Carbons {
+        carbon_recipients: vec!["romeo@example.com/laptop".parse().expect("carbon")],
+        excluded_source: "romeo@example.com/phone".parse().expect("source"),
+        kind: waddle_xmpp::protocol::CarbonKind::Sent,
+    });
+    let carbons_key = commit_submission(&fixture.uow, &carbons, 5)
+        .await
+        .expect("carbons commit")
+        .message_key
+        .expect("key");
+    let route_kind = crate::ingress_substrate::EffectReceiptKind::from_storage(
+        waddle_xmpp::ingress::IngressEffectKind::RouteDirect.storage_tag(),
+    );
+    let mut tx = fixture.db.begin().await.expect("scan transaction");
+    let page = crate::ingress_substrate::unreceipted_nonterminal_keys(
+        &mut tx,
+        None,
+        chrono::Utc::now() + chrono::Duration::seconds(1),
+        &[route_kind],
+        16,
+    )
+    .await
+    .expect("unreceipted page");
+    let empty = crate::ingress_substrate::unreceipted_nonterminal_keys(
+        &mut tx,
+        None,
+        chrono::Utc::now() + chrono::Duration::seconds(1),
+        &[],
+        16,
+    )
+    .await
+    .expect("empty kinds");
+    tx.commit().await.expect("scan commit");
+    let keys: Vec<_> = page.into_iter().map(|(_, key)| key).collect();
+    assert_eq!(keys, vec![pending_key]);
+    assert!(!keys.contains(&complete) && !keys.contains(&carbons_key));
+    assert!(empty.is_empty());
+    fixture.close().await;
+}
+
+#[tokio::test]
+async fn sqlite_unreceipted_page() {
+    unreceipted_page_selects_only_recoverable_pending_rows(IngressFixture::sqlite().await).await;
+}
+#[tokio::test]
+async fn postgres_unreceipted_page() {
+    if let Some(fixture) = IngressFixture::postgres("recovery_page").await {
+        unreceipted_page_selects_only_recoverable_pending_rows(fixture).await;
+    }
+}

@@ -2,7 +2,7 @@
 
 mod authority;
 mod maintenance;
-pub use maintenance::receipt_complete_nonterminal_keys;
+pub use maintenance::{receipt_complete_nonterminal_keys, unreceipted_nonterminal_keys};
 #[cfg(test)]
 mod authority_tests;
 pub use authority::{

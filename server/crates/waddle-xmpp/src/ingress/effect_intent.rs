@@ -1242,6 +1242,40 @@ pub enum IngressEffectKind {
     ErrorReply,
 }
 
+impl IngressEffectKind {
+    /// Stable discriminator used by persisted intents and receipt kinds.
+    pub const fn storage_tag(self) -> i32 {
+        match self {
+            Self::DmCallThreadState => 26,
+            Self::ArchiveAuthoritative => 0,
+            Self::RouteDirect => 1,
+            Self::RouteMucGroupchat => 2,
+            Self::RouteOccupantPm => 3,
+            Self::DispatchToRoomRemote => 12,
+            Self::Carbons => 5,
+            Self::RelayCarbons => 24,
+            Self::InboxProject => 6,
+            Self::NotificationActivityPreview => 7,
+            Self::GroupchatNotificationRecovery => 21,
+            Self::PendingDelivery => 22,
+            Self::LinkPreviewMediaRef => 18,
+            Self::RetractionTombstone => 14,
+            Self::DmPinMutation => 15,
+            Self::MucInviteMembershipGrant => 19,
+            Self::MucInviteLedger => 20,
+            Self::GroupDmMembershipGrant => 16,
+            Self::GroupDmInviteLedger => 17,
+            Self::RoomSubjectMutation => 13,
+            Self::CallSignal => 8,
+            Self::Pin => 9,
+            Self::Extension => 10,
+            Self::RoomObserver => 27,
+            Self::TombstoneReplayDeletion => 23,
+            Self::ErrorReply => 11,
+        }
+    }
+}
+
 /// The entity assigning an effect's identity. Audience and mutable policy are
 /// deliberately excluded so reconciliation can preserve the recorded decision.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -4354,6 +4388,35 @@ mod tests {
                 IngressEffectIntent::decode_v1(4, encoded.payload()),
                 Err(EffectIntentCodecError::UnknownKind(4)),
                 "the retired discriminator must not decode a surviving family"
+            );
+        }
+    }
+
+    #[test]
+    fn every_sample_kind_matches_its_storage_tag() {
+        let mut intents = IngressEffectIntent::storage_round_trip_samples();
+        intents.extend([
+            IngressEffectIntent::SystemMessageArchive {
+                sequence: 0,
+                archive: bare("archive@example.test"),
+                stanza_id: stanza_id(),
+                by: bare("archive@example.test"),
+                archived_at: chrono::DateTime::from_timestamp(1_753_617_600, 0).expect("timestamp"),
+                ordinal: None,
+            },
+            IngressEffectIntent::RouteMucSystemBroadcast {
+                room: bare("room@conference.example.test"),
+                occupants: vec![full("juliet@example.test/laptop")],
+                room_generation: EntityGeneration::from_storage(7),
+                route_identity: EffectMessageIdentity::stanza(stanza_id()),
+            },
+        ]);
+        for intent in intents {
+            assert_eq!(
+                intent.kind().storage_tag(),
+                intent
+                    .with_encoded_v1(|kind, _| kind)
+                    .expect("encode intent"),
             );
         }
     }
