@@ -205,6 +205,7 @@ async fn relay_lookup_miss_rolls_back_unseen_sender_sequence() {
     let outcome = OrderedRelayDeliveryBridge::finish_prepared_delivery_result(
         Arc::clone(&bridge),
         PreparedRemoteDelivery {
+            ingress_append_context: None,
             services: Arc::new(
                 services_with_claims(
                     origin_identity(),
@@ -292,6 +293,7 @@ async fn relay_lookup_miss_retries_established_channel_at_missed_sequence() {
     let outcome = OrderedRelayDeliveryBridge::finish_prepared_delivery_result(
         Arc::clone(&bridge),
         PreparedRemoteDelivery {
+            ingress_append_context: None,
             services: Arc::new(
                 services_with_claims(
                     origin_identity(),
@@ -344,6 +346,7 @@ async fn in_flight_nack_suppresses_fallback_without_join_repair() {
     let outcome = OrderedRelayDeliveryBridge::finish_prepared_delivery_result(
         Arc::clone(&bridge),
         PreparedRemoteDelivery {
+            ingress_append_context: None,
             services: Arc::new(
                 services_with_claims(
                     origin_identity(),
@@ -408,6 +411,7 @@ async fn unsupported_envelope_nack_rolls_back_and_keeps_the_channel() {
     let outcome = OrderedRelayDeliveryBridge::finish_prepared_delivery_result(
         Arc::clone(&bridge),
         PreparedRemoteDelivery {
+            ingress_append_context: None,
             services: Arc::new(
                 services_with_claims(
                     origin_identity(),
@@ -494,6 +498,7 @@ async fn reply_receipt_backpressure_rolls_back_and_retry_remains_deliverable() {
     let outcome = OrderedRelayDeliveryBridge::finish_prepared_delivery_result(
         Arc::clone(&bridge),
         PreparedRemoteDelivery {
+            ingress_append_context: None,
             services: Arc::new(
                 services_with_claims(
                     origin_identity(),

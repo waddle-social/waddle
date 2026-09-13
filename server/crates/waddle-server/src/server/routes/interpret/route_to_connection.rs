@@ -1026,7 +1026,7 @@ fn bounce_for_nonexistent_account(
 /// see [`RouteBridge::try_deliver_full_jid_remote`]'s deferred
 /// handoff. On `None` the ticket is untouched and the caller closes
 /// it from the local delivery outcome.
-pub(super) fn deliver_full_jid_via_ordered_relay<'a>(
+pub(crate) fn deliver_full_jid_via_ordered_relay<'a>(
     deps: &'a Deps<'_>,
     target: &'a jid::FullJid,
     stanza: &'a Stanza,
@@ -1077,7 +1077,17 @@ pub(super) fn deliver_full_jid_via_ordered_relay<'a>(
                 .ordered_relay_delivery_bridge
                 .as_ref()?;
             bridge
-                .try_deliver_full_jid_remote(target, stanza, origin, call_setup)
+                .try_deliver_full_jid_remote(
+                    target,
+                    stanza,
+                    origin,
+                    call_setup,
+                    deps.ingress_append_context.clone().filter(|context| {
+                        context.receipt.kind.to_storage()
+                            == waddle_xmpp::ingress::IngressEffectKind::RouteMucGroupchat
+                                .storage_tag()
+                    }),
+                )
                 .await
         }
         #[cfg(not(feature = "clustering"))]

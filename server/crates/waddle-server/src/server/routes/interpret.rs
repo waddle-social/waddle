@@ -218,8 +218,8 @@ use room_subject::{
 };
 pub(crate) use route_to_connection::{
     bounce_undeliverable_iq, deliver_direct_to_full_with_registered_remote,
-    deliver_peer_to_full_with_registered_remote, queue_processed_for_detached, route_to_connection,
-    undeliverable_iq_reply,
+    deliver_full_jid_via_ordered_relay, deliver_peer_to_full_with_registered_remote,
+    queue_processed_for_detached, route_to_connection, undeliverable_iq_reply,
 };
 pub(crate) use routing::deliver_peer_to_full;
 pub(crate) use routing::{

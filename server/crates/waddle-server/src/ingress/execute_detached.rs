@@ -41,13 +41,20 @@ pub(super) async fn execute(
         } => (resources.clone(), call_setup),
         ExternalDeliveryEffect::RouteToPeer {
             jid, call_setup, ..
+        }
+        | ExternalDeliveryEffect::RelayFullJid {
+            target: jid,
+            call_setup,
+            ..
         } => (vec![jid.clone()], call_setup),
         _ => return EffectOutcome::Unavailable,
     };
     let external =
         crate::server::routes::interpret::effects::ExternalEffect::Delivery(effect.clone());
     let Some(progress) = decision.route_progress.iter().find(|progress| {
-        progress.matches(&external) && decision.external_receipts[index].contains(&progress.receipt)
+        (!matches!(effect, ExternalDeliveryEffect::RelayFullJid { .. }) || !progress.is_direct())
+            && progress.matches(&external)
+            && decision.external_receipts[index].contains(&progress.receipt)
     }) else {
         return EffectOutcome::Unavailable;
     };
@@ -163,6 +170,9 @@ async fn append_resource(
                 deliver_direct_to_full_with_registered_remote(deps, resource, stanza).await
             }
         },
+        ExternalDeliveryEffect::RelayFullJid { .. } => {
+            super::relay_copy::append(deps, effect).await
+        }
         _ => FullJidDeliveryOutcome::Unavailable,
     }
 }

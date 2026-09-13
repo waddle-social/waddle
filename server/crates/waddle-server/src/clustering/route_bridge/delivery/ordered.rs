@@ -16,6 +16,7 @@ impl OrderedRelayDeliveryBridge {
         stanza: &'a Stanza,
         origin: &'a OrderedRelayRouteOrigin,
         call_setup: Option<waddle_xmpp::telemetry::call::PendingCallSetupRoute>,
+        ingress_append_context: Option<crate::server::routes::interpret::SmIngressAppendContext>,
     ) -> RemoteDeliveryFuture<'a> {
         Box::pin(async move {
             if let Some(remote_origin) = remote_resource_origin(origin) {
@@ -78,6 +79,7 @@ impl OrderedRelayDeliveryBridge {
                 epoch: target_snapshot.claim_epoch,
             };
             let seed = RemoteDeliverySeed {
+                ingress_append_context,
                 services: services.clone(),
                 target_entity: target_entity.clone(),
                 previous_owner: target_snapshot.owner.clone(),
@@ -123,6 +125,7 @@ impl OrderedRelayDeliveryBridge {
                                     &fallback_target,
                                     &origin_stanza,
                                     &fallback_payload,
+                                    None,
                                 )
                                 .await,
                             ),
@@ -232,6 +235,7 @@ impl OrderedRelayDeliveryBridge {
                 epoch: target_snapshot.claim_epoch,
             };
             let seed = RemoteDeliverySeed {
+                ingress_append_context: None,
                 services,
                 target_entity,
                 previous_owner: target_snapshot.owner,
@@ -268,6 +272,7 @@ impl OrderedRelayDeliveryBridge {
                                     &fallback_target,
                                     &origin_stanza,
                                     &fallback_payload,
+                                    None,
                                 )
                                 .await,
                             ),

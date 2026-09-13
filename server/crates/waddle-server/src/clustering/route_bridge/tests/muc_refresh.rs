@@ -5,7 +5,7 @@ use crate::server::routes::interpret::SmIngressAppendContext;
 pub(crate) async fn deliver_after_owner_refresh(
     target: &jid::FullJid,
     stanza: &Stanza,
-    _context: Option<SmIngressAppendContext>,
+    context: Option<SmIngressAppendContext>,
     sm_session_registry: Arc<InMemorySmSessionRegistry>,
 ) -> FullJidDeliveryOutcome {
     let mut services = services_with_claims(
@@ -28,6 +28,7 @@ pub(crate) async fn deliver_after_owner_refresh(
     envelope.payload = payload_for_recipient(target.clone().into(), stanza)
         .expect("ordinary occupant copy relay payload");
     let prepared = PreparedRemoteDelivery {
+        ingress_append_context: context,
         services: Arc::new(services),
         target_entity,
         previous_owner: receiver_identity(),

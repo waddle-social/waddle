@@ -322,7 +322,7 @@ macro_rules! cases {
         #[tokio::test]
         async fn $sqlite() { relay_progress(IngressFixture::sqlite().await, Case::$case).await; }
         #[tokio::test]
-        async fn $postgres() { if let Some(fixture) = IngressFixture::postgres(stringify!($postgres)).await { relay_progress(fixture, Case::$case).await; } }
+        async fn $postgres() { if let Some(fixture) = IngressFixture::postgres(stringify!($case)).await { relay_progress(fixture, Case::$case).await; } }
     )+ };
 }
 cases!(

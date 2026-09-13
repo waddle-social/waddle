@@ -94,6 +94,7 @@ impl OrderedRelayDeliveryBridge {
             return Err(RemotePrepareError::Declined);
         }
         Ok(PreparedRemoteDelivery {
+            ingress_append_context: seed.ingress_append_context,
             services: seed.services,
             target_entity: seed.target_entity,
             previous_owner: seed.previous_owner,
@@ -215,6 +216,7 @@ impl OrderedRelayDeliveryBridge {
                             &prepared.target,
                             &prepared.stanza,
                             &prepared.envelope.payload,
+                            prepared.ingress_append_context.as_ref(),
                         )
                         .await,
                     ),
@@ -258,6 +260,7 @@ impl OrderedRelayDeliveryBridge {
                     &prepared.target,
                     &prepared.stanza,
                     &prepared.envelope.payload,
+                    prepared.ingress_append_context.as_ref(),
                 )
                 .await,
             );
@@ -291,6 +294,7 @@ impl OrderedRelayDeliveryBridge {
         );
 
         let seed = RemoteDeliverySeed {
+            ingress_append_context: prepared.ingress_append_context.clone(),
             services: prepared.services.clone(),
             target_entity: prepared.target_entity.clone(),
             previous_owner: snapshot.owner,

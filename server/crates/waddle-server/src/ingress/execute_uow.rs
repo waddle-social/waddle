@@ -25,6 +25,9 @@ mod recovery;
 #[cfg(test)]
 pub(crate) use recovery::fail_after_recovery_update;
 
+#[path = "execute_relay_copy.rs"]
+mod relay_copy;
+
 #[path = "execute_detached.rs"]
 mod detached;
 #[cfg(test)]
@@ -37,7 +40,13 @@ pub(super) fn owns(effect: &ExternalEffect, route_progress: &[RouteProgress]) ->
             ExternalRoomEffect::ArchiveAfterPin { .. }
             | ExternalRoomEffect::NotificationCandidate { .. },
         ) => true,
-        // RelayFullJid remains generic until the dedicated MUC relay arm lands.
+        ExternalEffect::Delivery(ExternalDeliveryEffect::RelayFullJid { .. }) => {
+            route_progress.iter().any(|progress| {
+                !progress.is_direct()
+                    && progress.matches(effect)
+                    && !progress.remaining(effect).is_empty()
+            })
+        }
         ExternalEffect::Delivery(
             ExternalDeliveryEffect::QueueDetached { .. }
             | ExternalDeliveryEffect::RouteToPeer { .. },
@@ -72,7 +81,8 @@ pub(super) async fn execute_with_uow(
         }
         ExternalEffect::Delivery(
             delivery @ (ExternalDeliveryEffect::QueueDetached { .. }
-            | ExternalDeliveryEffect::RouteToPeer { .. }),
+            | ExternalDeliveryEffect::RouteToPeer { .. }
+            | ExternalDeliveryEffect::RelayFullJid { .. }),
         ) if owns(effect, &decision.route_progress) => {
             Some(detached::execute(uow, decision, index, delivery, deps).await)
         }
