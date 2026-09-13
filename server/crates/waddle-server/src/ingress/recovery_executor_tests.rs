@@ -401,7 +401,7 @@ mod family_tests {
             build_interpret_deps(self.0.as_ref(), None)
         }
     }
-    async fn family_state(fixture: &IngressFixture) -> Arc<WebSocketState> {
+    pub(super) async fn family_state(fixture: &IngressFixture) -> Arc<WebSocketState> {
         let pool = crate::db::DatabasePool::new(
             crate::db::DatabaseConfig::new(fixture.db.driver(), fixture.db.database_url()),
             crate::db::PoolConfig,
@@ -433,7 +433,7 @@ mod family_tests {
             .expect("notification schema");
         state
     }
-    fn family_budget() -> MaintenanceBudget {
+    pub(super) fn family_budget() -> MaintenanceBudget {
         MaintenanceBudget {
             grace: chrono::Duration::zero(),
             recovery: Duration::from_secs(10),
@@ -442,7 +442,7 @@ mod family_tests {
             ..MaintenanceBudget::DEFAULT
         }
     }
-    async fn family_pass(
+    pub(super) async fn family_pass(
         fixture: &IngressFixture,
         state: &Arc<WebSocketState>,
         cursor: &MaintenanceCursor,
@@ -456,7 +456,7 @@ mod family_tests {
         )
         .await
     }
-    async fn family_recovered(fixture: &IngressFixture, key: MessageKey, receipts: i64) {
+    pub(super) async fn family_recovered(fixture: &IngressFixture, key: MessageKey, receipts: i64) {
         let mut tx = fixture.uow.begin().await.expect("inspect recovery");
         assert!(EffectReceiptRepository::receipts_complete(&mut tx, key)
             .await
@@ -734,199 +734,6 @@ mod family_tests {
         drop(state);
         fixture.close().await;
     }
-    /// Which of the mutually exclusive invitation receipts an interrupted
-    /// executor persisted before losing the rest of Phase C.
-    #[derive(Clone, Copy)]
-    enum PartialDeclineReceipt {
-        Route,
-        Fallback,
-    }
-
-    async fn muc_decline_recovery(fixture: IngressFixture, partial: Option<PartialDeclineReceipt>) {
-        use crate::server::routes::websocket::{
-            muc_invites::{list_invites, record_invite_at, OutstandingInvite},
-            tests::{create_test_session, register_test_connection},
-        };
-        let state = family_state(&fixture).await;
-        create_test_session(state.as_ref(), "romeo").await;
-        create_test_session(state.as_ref(), "juliet").await;
-        let inviter: jid::FullJid = "juliet@example.com/phone".parse().expect("inviter");
-        let mut submission = fixture.submission(Some("decline-lost-phase-c"), "");
-        let invite = OutstandingInvite {
-            room: "room@muc.example.com".parse().expect("room"),
-            invitee: submission.sender.to_bare(),
-            inviter: inviter.to_bare(),
-        };
-        let actor = state.deps.app_state.db_pool.global_actor().clone();
-        record_invite_at(actor.clone(), &invite, chrono::Utc::now())
-            .await
-            .expect("seed invitation");
-        let (tx, mut rx) = tokio::sync::mpsc::channel(8);
-        let _owner = register_test_connection(state.as_ref(), &inviter, tx).await;
-        submission.target = waddle_xmpp::ingress::NormalizedTarget::Bare(invite.room.clone());
-        let mut message = submission.plan.sanitized_message.clone();
-        message.to = Some(invite.room.clone().into());
-        message.type_ = xmpp_parsers::message::MessageType::Normal;
-        message.bodies.clear();
-        let ns = waddle_xmpp::muc::presence::NS_MUC_USER;
-        message.payloads.push(
-            minidom::Element::builder("x", ns)
-                .append(
-                    minidom::Element::builder("decline", ns)
-                        .attr(
-                            minidom::rxml::xml_ncname!("to").to_owned(),
-                            inviter.to_bare(),
-                        )
-                        .append(
-                            minidom::Element::builder("reason", ns)
-                                .append("cannot join")
-                                .build(),
-                        )
-                        .build(),
-                )
-                .build(),
-        );
-        submission.digest_input = waddle_xmpp::ingress::DigestInput::from_parsed(
-            &message,
-            &waddle_xmpp::ingress::DigestContext {
-                target: submission.target.clone(),
-                server_authorities: vec![submission.sender.to_bare(), invite.room.clone()],
-                stanza_lang: None,
-            },
-        )
-        .expect("decline digest");
-        let mut dispatcher = waddle_xmpp::protocol::StanzaDispatcher::new();
-        waddle_xmpp::protocol::handlers::register_default_message_handlers(&mut dispatcher);
-        let mut machine = waddle_xmpp::protocol::XmppStateMachine::new("example.com", dispatcher);
-        machine.transition_to_ready(submission.sender.clone(), false);
-        submission.plan = crate::server::plan_message_dispatch(
-            &mut machine,
-            message,
-            &build_interpret_deps(state.as_ref(), None),
-        )
-        .await;
-        assert!(
-            submission
-                .plan
-                .intents
-                .iter()
-                .any(|intent| matches!(intent, IngressEffectIntent::MucInviteLedger { .. })),
-            "real planner must capture decline claim"
-        );
-        let decision = commit_submission(&fixture.uow, &submission, 5)
-            .await
-            .expect("commit decline");
-        let key = decision.message_key.expect("key");
-        assert_eq!(
-            list_invites(actor.clone(), &invite.room, &invite.invitee)
-                .await
-                .expect("unclaimed invite"),
-            vec![invite.clone()]
-        );
-        assert!(rx.try_recv().is_err());
-        if let Some(partial) = partial {
-            // Model an executor that delivered the decline live, persisted one
-            // of the two mutually exclusive receipts and then lost the rest.
-            let inviter_bare = inviter.to_bare();
-            let intent = submission
-                .plan
-                .intents
-                .iter()
-                .find(|intent| match (partial, intent) {
-                    (
-                        PartialDeclineReceipt::Route,
-                        IngressEffectIntent::RouteDirect { recipient, .. },
-                    ) => recipient == &inviter_bare,
-                    (
-                        PartialDeclineReceipt::Fallback,
-                        IngressEffectIntent::PendingDelivery {
-                            mutation:
-                                waddle_xmpp::ingress::PendingDeliveryMutation::Transient {
-                                    recipient,
-                                    ..
-                                },
-                        },
-                    ) => recipient == &inviter_bare,
-                    _ => false,
-                })
-                .expect("recorded inviter delivery intent");
-            let receipt = crate::ingress::receipt_key(intent).expect("receipt key");
-            crate::ingress_uow::EffectReceiptRepository::record_receipt_pooled(
-                &fixture.db,
-                key,
-                receipt.kind,
-                &receipt.semantic_identity_hash,
-            )
-            .await
-            .expect("partial receipt");
-        }
-        let cursor = MaintenanceCursor::default();
-        assert_eq!(
-            family_pass(&fixture, &state, &cursor).await,
-            MaintenanceOutcome::Complete
-        );
-        if partial.is_some() {
-            assert!(
-                rx.try_recv().is_err(),
-                "one committed invitation receipt proves the delivery; recovery must not resend"
-            );
-        } else {
-            let delivered = rx.try_recv().expect("inviter receives recovered decline");
-            let waddle_xmpp::Stanza::Message(message) = delivered.stanza else {
-                panic!("decline message")
-            };
-            assert_eq!(message.from, Some(invite.room.clone().into()));
-            let decline = message
-                .payloads
-                .iter()
-                .find_map(|payload| payload.get_child("decline", ns))
-                .expect("XEP-0045 decline payload");
-            assert_eq!(
-                decline.attr("from"),
-                Some(invite.invitee.to_string().as_str())
-            );
-            assert_eq!(
-                decline.get_child("reason", ns).expect("reason").text(),
-                "cannot join"
-            );
-        }
-        assert!(list_invites(actor.clone(), &invite.room, &invite.invitee)
-            .await
-            .expect("claimed invitation")
-            .is_empty());
-        assert_eq!(
-            fixture.count("muc_invite_claims WHERE claimed = 1").await,
-            1
-        );
-        assert_eq!(
-            fixture.count("pending_delivery").await,
-            0,
-            "live inviter settles the recorded fallback without queueing"
-        );
-        assert!(rx.try_recv().is_err());
-        family_recovered(&fixture, key, 3).await;
-        assert_eq!(
-            family_pass(&fixture, &state, &cursor).await,
-            MaintenanceOutcome::Complete
-        );
-        assert!(rx.try_recv().is_err(), "second pass cannot resend decline");
-        assert!(list_invites(actor, &invite.room, &invite.invitee)
-            .await
-            .expect("invite remains consumed")
-            .is_empty());
-        assert_eq!(
-            fixture.count("muc_invite_claims WHERE claimed = 1").await,
-            1
-        );
-        assert_eq!(
-            fixture.count("pending_delivery").await,
-            0,
-            "live inviter settles the recorded fallback without queueing"
-        );
-        family_recovered(&fixture, key, 3).await;
-        drop(state);
-        fixture.close().await;
-    }
     async fn row_deadline_bounds_a_stalled_groupchat_delegate_and_later_rows_still_run(
         fixture: IngressFixture,
     ) {
@@ -1074,44 +881,6 @@ mod family_tests {
     async fn postgres_groupchat_notification_recovery_completes_via_maintenance() {
         if let Some(fixture) = IngressFixture::postgres("family_2").await {
             groupchat_notification_recovery_completes_via_maintenance(fixture).await;
-        }
-    }
-    #[tokio::test]
-    async fn sqlite_muc_decline_recovers_claim_and_inviter_route() {
-        muc_decline_recovery(IngressFixture::sqlite().await, None).await;
-    }
-    #[tokio::test]
-    async fn postgres_muc_decline_recovers_claim_and_inviter_route() {
-        if let Some(fixture) = IngressFixture::postgres("recovery_muc_decline").await {
-            muc_decline_recovery(fixture, None).await;
-        }
-    }
-    #[tokio::test]
-    async fn sqlite_muc_decline_route_receipt_alone_settles_without_resend() {
-        muc_decline_recovery(
-            IngressFixture::sqlite().await,
-            Some(PartialDeclineReceipt::Route),
-        )
-        .await;
-    }
-    #[tokio::test]
-    async fn postgres_muc_decline_route_receipt_alone_settles_without_resend() {
-        if let Some(fixture) = IngressFixture::postgres("recovery_muc_decline_route").await {
-            muc_decline_recovery(fixture, Some(PartialDeclineReceipt::Route)).await;
-        }
-    }
-    #[tokio::test]
-    async fn sqlite_muc_decline_fallback_receipt_alone_settles_without_resend() {
-        muc_decline_recovery(
-            IngressFixture::sqlite().await,
-            Some(PartialDeclineReceipt::Fallback),
-        )
-        .await;
-    }
-    #[tokio::test]
-    async fn postgres_muc_decline_fallback_receipt_alone_settles_without_resend() {
-        if let Some(fixture) = IngressFixture::postgres("recovery_muc_decline_fallback").await {
-            muc_decline_recovery(fixture, Some(PartialDeclineReceipt::Fallback)).await;
         }
     }
     #[tokio::test]
@@ -2155,3 +1924,6 @@ async fn postgres_groupchat_inbox_push_route_is_left_pending() {
         groupchat_inbox_push_route_is_left_pending(fixture).await;
     }
 }
+
+#[path = "xep0045_decline_recovery_tests.rs"]
+mod xep0045_decline_recovery;
