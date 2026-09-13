@@ -19,10 +19,15 @@ impl RecoveryReceiptRepository {
     pub(crate) async fn insert_candidate(
         tx: &mut IngressUowTransaction<'_>,
         candidate: &NotificationCandidate,
+        created_at_ms: i64,
     ) -> Result<NotificationCandidateInsertOutcome, IngressUowError> {
-        NotificationOutboxStore::insert_candidate_in_transaction(tx.transaction_mut(), candidate)
-            .await
-            .map_err(Into::into)
+        NotificationOutboxStore::insert_candidate_in_transaction(
+            tx.transaction_mut(),
+            candidate,
+            created_at_ms,
+        )
+        .await
+        .map_err(Into::into)
     }
 
     pub(crate) async fn complete(

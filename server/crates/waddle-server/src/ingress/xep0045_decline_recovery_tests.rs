@@ -47,13 +47,10 @@ async fn muc_decline_recovery(
         inviter: inviter.to_bare(),
     };
     let actor = state.deps.app_state.db_pool.global_actor().clone();
-    record_invite_at(
-        actor.clone(),
-        &invite,
-        chrono::Utc::now() - chrono::Duration::hours(1),
-    )
-    .await
-    .expect("seed invitation");
+    let invitation_created_at = chrono::Utc::now() - chrono::Duration::hours(1);
+    record_invite_at(actor.clone(), &invite, invitation_created_at)
+        .await
+        .expect("seed invitation");
     let (tx, mut rx) = tokio::sync::mpsc::channel(8);
     let _owner = register_test_connection(state.as_ref(), &inviter, tx).await;
     submission.target = waddle_xmpp::ingress::NormalizedTarget::Bare(invite.room.clone());
@@ -110,11 +107,33 @@ async fn muc_decline_recovery(
         .await
         .expect("commit decline");
     let key = decision.message_key.expect("key");
+    let mut transaction = fixture
+        .uow
+        .begin()
+        .await
+        .expect("inspect canonical receipt");
+    let canonical_created_at =
+        crate::ingress_uow::CanonicalMessageRepository::created_at(&mut transaction, key)
+            .await
+            .expect("canonical receipt time");
+    transaction
+        .commit()
+        .await
+        .expect("finish receipt inspection");
+    let claimed_generation = submission
+        .plan
+        .intents
+        .iter()
+        .find_map(|intent| match intent {
+            IngressEffectIntent::MucInviteLedger { mutation } => mutation.recorded_at,
+            _ => None,
+        });
+    assert_eq!(claimed_generation, Some(invitation_created_at));
     assert_eq!(
         list_invites(actor.clone(), &invite.room, &invite.invitee)
             .await
             .expect("unclaimed invite"),
-        vec![invite.clone()]
+        vec![(invite.clone(), invitation_created_at)]
     );
     assert!(rx.try_recv().is_err());
     if let Some(partial) = partial {
@@ -152,6 +171,8 @@ async fn muc_decline_recovery(
         .await
         .expect("partial receipt");
     }
+    let replacement_created_at = canonical_created_at - chrono::Duration::minutes(1);
+    assert!(replacement_created_at > invitation_created_at);
     if reinvited {
         // A competing decline consumed the original invitation. An unexpired
         // record is not replaced by record_invite_at, so consume it first.
@@ -162,9 +183,16 @@ async fn muc_decline_recovery(
         .await
         .expect("competing decline"));
         assert!(matches!(
-            record_invite_at(actor.clone(), &invite, chrono::Utc::now())
-                .await
-                .expect("new invitation"),
+            // Created after canonical intake, but an app clock behind the database
+            // timestamps it before that receipt. Only the observed generation
+            // can prevent this old decline from consuming the replacement.
+            record_invite_at(
+                actor.clone(),
+                &invite,
+                canonical_created_at - chrono::Duration::minutes(1)
+            )
+            .await
+            .expect("new invitation"),
             crate::server::routes::websocket::muc_invites::RecordOutcome::New { .. }
         ));
     }
@@ -208,7 +236,7 @@ async fn muc_decline_recovery(
             .await
             .expect("invitation after recovery"),
         if reinvited {
-            vec![invite.clone()]
+            vec![(invite.clone(), replacement_created_at)]
         } else {
             vec![]
         }
@@ -237,7 +265,11 @@ async fn muc_decline_recovery(
         list_invites(actor, &invite.room, &invite.invitee)
             .await
             .expect("invitation remains resolved"),
-        if reinvited { vec![invite] } else { vec![] }
+        if reinvited {
+            vec![(invite, replacement_created_at)]
+        } else {
+            vec![]
+        }
     );
     assert_eq!(
         fixture.count("muc_invite_claims WHERE claimed = 1").await,

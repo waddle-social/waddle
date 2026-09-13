@@ -40,6 +40,8 @@ pub enum InviteStorageError {
     CanonicalMissing,
     #[error("stored invitation has an invalid inviter JID: {0}")]
     InvalidInviter(#[from] jid::Error),
+    #[error("stored invitation has an invalid creation timestamp: {0}")]
+    InvalidCreatedAt(#[from] chrono::ParseError),
 }
 
 fn actor_error<M>(error: kameo::error::SendError<M, DatabaseError>) -> InviteStorageError {
@@ -126,17 +128,17 @@ pub(crate) async fn record_invite_at(
     }
 }
 
-/// List every unexpired outstanding invite for `(room, invitee)`.
+/// List every unexpired outstanding invite and its generation timestamp for `(room, invitee)`.
 /// Empty means the caller MUST NOT forward a decline (#1264 spoofing
 /// hardening).
 pub(crate) async fn list_invites(
     actor: ActorRef<DbActor>,
     room: &BareJid,
     invitee: &BareJid,
-) -> Result<Vec<OutstandingInvite>, InviteStorageError> {
+) -> Result<Vec<(OutstandingInvite, chrono::DateTime<chrono::Utc>)>, InviteStorageError> {
     let rows = actor
         .ask(DbQuery {
-            sql: "SELECT inviter_jid FROM muc_pending_invites WHERE room_jid = ? AND \
+            sql: "SELECT inviter_jid, created_at FROM muc_pending_invites WHERE room_jid = ? AND \
                   invitee_jid = ? AND created_at > ? ORDER BY inviter_jid"
                 .to_string(),
             params: vec![
@@ -150,11 +152,16 @@ pub(crate) async fn list_invites(
     let mut invites = Vec::new();
     for row in rows {
         let inviter = row_value(&row, 0)?.as_string()?.parse::<BareJid>()?;
-        invites.push(OutstandingInvite {
-            room: room.clone(),
-            invitee: invitee.clone(),
-            inviter,
-        });
+        let created_at = chrono::DateTime::parse_from_rfc3339(&row_value(&row, 1)?.as_string()?)?
+            .with_timezone(&chrono::Utc);
+        invites.push((
+            OutstandingInvite {
+                room: room.clone(),
+                invitee: invitee.clone(),
+                inviter,
+            },
+            created_at,
+        ));
     }
     Ok(invites)
 }

@@ -480,9 +480,9 @@ async fn handle_muc_mediated_decline(
         .attr("to")
         .and_then(|to| to.parse::<jid::Jid>().ok())
         .map(|jid| jid.to_bare());
-    let invite = match declined_to
+    let (invite, invitation_created_at) = match declined_to
         .as_ref()
-        .and_then(|to| outstanding.iter().find(|invite| invite.inviter == *to))
+        .and_then(|to| outstanding.iter().find(|(invite, _)| invite.inviter == *to))
     {
         Some(invite) => invite.clone(),
         None if outstanding.len() == 1 => outstanding[0].clone(),
@@ -503,7 +503,7 @@ async fn handle_muc_mediated_decline(
     let claim = PlannedEffect::new(Effect::External(ExternalEffect::InviteLedger(
         super::muc_invite::InviteLedgerMutation::Claim {
             message_key: None,
-            not_after: None,
+            not_after: Some(invitation_created_at),
             invite: invite.clone(),
         },
     )));
@@ -583,7 +583,7 @@ async fn handle_muc_mediated_decline(
                 invitee: invite.invitee.clone(),
                 inviter: invite.inviter.clone(),
                 action: MucInviteLedgerAction::Claimed,
-                recorded_at: None,
+                recorded_at: Some(invitation_created_at),
             },
         });
     }
@@ -630,7 +630,7 @@ pub(crate) fn restore_recorded_muc_decline(
         ExternalEffect::InviteLedger(super::muc_invite::InviteLedgerMutation::Claim {
             invite: invite.clone(),
             message_key: None,
-            not_after: Some(received_at),
+            not_after: mutation.recorded_at.or(Some(received_at)),
         }),
     )));
     for intent in pending {
@@ -1253,7 +1253,10 @@ mod tests {
         assert_eq!(
             list_invites(actor, &invite.room, &invite.invitee)
                 .await
-                .expect("read invites"),
+                .expect("read invites")
+                .into_iter()
+                .map(|(invite, _)| invite)
+                .collect::<Vec<_>>(),
             vec![invite.clone()]
         );
         assert!(sink.snapshot().iter().any(|effect| matches!(&effect.effect,

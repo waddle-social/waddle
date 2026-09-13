@@ -60,7 +60,7 @@ pub enum InviteLedgerMutation {
         invite: OutstandingInvite,
         /// Bound to the canonical identity after ingress commits.
         message_key: Option<waddle_xmpp::ingress::MessageKey>,
-        /// A recovered decline may only consume invitations already received.
+        /// The observed invitation generation, or the receipt cutoff for older intents.
         not_after: Option<chrono::DateTime<chrono::Utc>>,
     },
 }

@@ -604,6 +604,8 @@ pub struct MucInviteLedgerMutation {
     pub invitee: BareJid,
     pub inviter: BareJid,
     pub action: MucInviteLedgerAction,
+    /// For `Recorded`, when the invitation was recorded. For `Claimed`, the
+    /// creation timestamp of the invitation generation observed by the decline.
     pub recorded_at: Option<chrono::DateTime<chrono::Utc>>,
 }
 

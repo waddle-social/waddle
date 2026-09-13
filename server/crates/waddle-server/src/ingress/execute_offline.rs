@@ -247,7 +247,13 @@ async fn notification_evidence(
             {
                 return Err(IngressUowError::EffectIntentConflict.into());
             }
-            let outcome = match RecoveryReceiptRepository::insert_candidate(tx, candidate).await? {
+            let outcome = match RecoveryReceiptRepository::insert_candidate(
+                tx,
+                candidate,
+                row.original_receipt_at.timestamp_millis(),
+            )
+            .await?
+            {
                 NotificationCandidateInsertOutcome::Inserted => {
                     NotificationCandidateOutcome::Inserted
                 }

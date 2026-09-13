@@ -140,17 +140,20 @@ impl IngressAuthority {
                     {
                         return Ok(RecoverySweepOutcome::Missing);
                     }
-                    let outcome =
-                        match RecoveryReceiptRepository::insert_candidate(&mut tx, candidate)
-                            .await?
-                        {
-                            NotificationCandidateInsertOutcome::Inserted => {
-                                NotificationCandidateOutcome::Inserted
-                            }
-                            NotificationCandidateInsertOutcome::Duplicate => {
-                                NotificationCandidateOutcome::Duplicate
-                            }
-                        };
+                    let outcome = match RecoveryReceiptRepository::insert_candidate(
+                        &mut tx,
+                        candidate,
+                        recovery.created_at_ms,
+                    )
+                    .await?
+                    {
+                        NotificationCandidateInsertOutcome::Inserted => {
+                            NotificationCandidateOutcome::Inserted
+                        }
+                        NotificationCandidateInsertOutcome::Duplicate => {
+                            NotificationCandidateOutcome::Duplicate
+                        }
+                    };
                     evidence.push(IngressEffectIntent::NotificationActivityPreview {
                         owner: recovery.key.recipient.clone(),
                         mutation: NotificationActivityMutation::NotificationCandidate {

@@ -415,28 +415,37 @@ fn muc_decline_claim_is_bound_to_the_canonical_key_and_receipt_time() {
             )
             .build(),
     );
-    let intents = [IngressEffectIntent::MucInviteLedger {
+    let generation_at = Utc::now() + chrono::Duration::minutes(1);
+    let mut intents = [IngressEffectIntent::MucInviteLedger {
         mutation: MucInviteLedgerMutation {
             room,
             invitee: bare("romeo@example.com"),
             inviter: bare("juliet@example.com"),
             action: MucInviteLedgerAction::Claimed,
-            recorded_at: None,
+            recorded_at: Some(generation_at),
         },
     }];
     let created_at = Utc::now() - chrono::Duration::hours(1);
-    let result = run_at(
-        &MessageEnvelope::new(message),
-        &intents,
-        &intents,
-        created_at,
-    );
+    let envelope = MessageEnvelope::new(message);
+    let result = run_at(&envelope, &intents, &intents, created_at);
     let ExternalEffect::InviteLedger(crate::server::routes::websocket::handlers::message::muc_invite::InviteLedgerMutation::Claim { message_key, not_after, .. }) = &result.decision.external[0] else { panic!("claim") };
     assert_eq!(*message_key, result.decision.message_key);
     assert!(message_key.is_some());
-    assert_eq!(*not_after, Some(created_at));
+    assert_eq!(*not_after, Some(generation_at));
     assert_eq!(result.decision.external_receipts[0].len(), 1);
     assert!(result.unrecoverable.is_empty());
+
+    // Older recorded rows carry no observed generation: retain the receipt
+    // cutoff while still associating the canonical claim receipt.
+    let IngressEffectIntent::MucInviteLedger { mutation } = &mut intents[0] else {
+        panic!("decline intent")
+    };
+    mutation.recorded_at = None;
+    let legacy = run_at(&envelope, &intents, &intents, created_at);
+    let ExternalEffect::InviteLedger(crate::server::routes::websocket::handlers::message::muc_invite::InviteLedgerMutation::Claim { not_after, .. }) = &legacy.decision.external[0] else { panic!("legacy claim") };
+    assert_eq!(*not_after, Some(created_at));
+    assert_eq!(legacy.decision.external_receipts[0].len(), 1);
+    assert!(legacy.unrecoverable.is_empty());
 }
 
 #[test]

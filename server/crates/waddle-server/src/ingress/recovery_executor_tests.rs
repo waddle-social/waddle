@@ -804,6 +804,13 @@ mod family_tests {
         assert_eq!(fixture.count("notification_candidates").await, 1);
         assert_eq!(
             fixture
+                .count("notification_candidates WHERE created_at_ms = 42")
+                .await,
+            1,
+            "delegated candidates retain the frozen groupchat receipt ordering"
+        );
+        assert_eq!(
+            fixture
                 .count("groupchat_notification_recovery WHERE completed_at_ms IS NOT NULL")
                 .await,
             1

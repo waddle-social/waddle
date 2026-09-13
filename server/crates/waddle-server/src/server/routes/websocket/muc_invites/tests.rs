@@ -123,7 +123,7 @@ async fn assert_frozen_timestamp_dedup_and_claim(driver: DatabaseDriver) {
         list_invites(actor.clone(), &invite.room, &invite.invitee)
             .await
             .expect("list invitation"),
-        vec![invite.clone()]
+        vec![(invite.clone(), frozen)]
     );
     let wrong_inviter = OutstandingInvite {
         inviter: "mallory@example.com".parse().expect("other inviter"),

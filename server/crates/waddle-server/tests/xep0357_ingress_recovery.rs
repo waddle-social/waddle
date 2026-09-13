@@ -94,7 +94,9 @@ fn offline_plan(fixture: &IngressFixture, origin: &str) -> IngressSubmission {
         )));
     submission
 }
-async fn backdate_pending(fixture: &IngressFixture) {
+async fn backdate_pending(fixture: &IngressFixture) -> chrono::DateTime<chrono::Utc> {
+    let received_at = chrono::DateTime::from_timestamp_millis(1_700_000_000_123)
+        .expect("canonical receipt timestamp");
     let sql = match fixture.db.driver() {
         waddle_server::db::DatabaseDriver::Postgres =>
             "UPDATE ingress_messages SET created_at = ?::timestamptz WHERE terminal_at IS NULL",
@@ -102,13 +104,9 @@ async fn backdate_pending(fixture: &IngressFixture) {
             "UPDATE ingress_messages SET created_at = strftime('%Y-%m-%dT%H:%M:%fZ', ?) WHERE terminal_at IS NULL",
     };
     fixture
-        .execute(
-            sql,
-            waddle_server::db_params![
-                (chrono::Utc::now() - chrono::Duration::seconds(120)).to_rfc3339()
-            ],
-        )
+        .execute(sql, waddle_server::db_params![received_at.to_rfc3339()])
         .await;
+    received_at
 }
 
 async fn wait_for_terminal_count(fixture: &IngressFixture, expected: i64) {
@@ -157,7 +155,7 @@ async fn lost_offline_notification_candidate_recovers_once(fixture: IngressFixtu
     );
     // Deliberately discard Phase C: only the public maintenance executor can enqueue this notification.
     drop(decision);
-    backdate_pending(&fixture).await;
+    let canonical_receipt_at = backdate_pending(&fixture).await;
     authority.trigger_maintenance();
     wait_for_terminal_count(&fixture, 1).await;
     assert_eq!(fixture.count("pending_delivery").await, 1);
@@ -173,6 +171,12 @@ async fn lost_offline_notification_candidate_recovers_once(fixture: IngressFixtu
         "the recorded recipient and stanza identity reach the XEP-0357 outbox"
     );
     let created_at = fixture.optional_text("SELECT CAST(created_at_ms AS TEXT) FROM notification_candidates WHERE stanza_id = 'push-recovery-original'").await;
+
+    assert_eq!(
+        created_at,
+        Some(canonical_receipt_at.timestamp_millis().to_string()),
+        "recovered candidates retain canonical receipt ordering"
+    );
 
     // A separate lost obligation proves the next pass completed, rather than relying on a sleep.
     let sentinel = offline_plan(&fixture, "push-recovery-second-pass");
