@@ -1190,6 +1190,14 @@ mod room_pin_tests;
 
 #[cfg(test)]
 pub(crate) mod test_support {
+    /// Model the room dispatcher's explicit canonical capture in synthetic plans.
+    pub(crate) fn capture_room_message(
+        plan: &mut super::IngressPlan,
+        message: &xmpp_parsers::message::Message,
+    ) {
+        plan.room_canonical_message = Some(Box::new(message.clone()));
+    }
+
     use crate as waddle_server;
     include!(concat!(
         env!("CARGO_MANIFEST_DIR"),

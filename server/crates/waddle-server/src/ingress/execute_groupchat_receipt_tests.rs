@@ -35,6 +35,7 @@ async fn groupchat_decision(fixture: &IngressFixture) -> IngressDecision {
     submission.plan.sanitized_message = message.clone();
     message.from = Some(room.with_resource_str("romeo").expect("room nick").into());
     add_stanza_id(&mut message, &stamp);
+    crate::ingress::test_support::capture_room_message(&mut submission.plan, &message);
     let copy = |recipient: &FullJid| {
         let mut copy = message.clone();
         copy.to = Some(recipient.clone().into());

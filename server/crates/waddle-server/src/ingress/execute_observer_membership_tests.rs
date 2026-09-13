@@ -28,6 +28,8 @@ pub(super) fn select_observers(
             error_request: Box::new(submission.plan.sanitized_message.clone()),
         })
         .collect::<Vec<_>>();
+    let message = submission.plan.sanitized_message.clone();
+    capture_room_message(&mut submission.plan, &message);
     submission.plan.intents = effects.iter().map(observer_intent).collect();
     submission.plan.plan = effects
         .into_iter()

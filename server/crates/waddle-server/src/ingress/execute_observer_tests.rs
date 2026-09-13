@@ -1,5 +1,8 @@
 use super::*;
-use crate::ingress::{commit::commit_submission, test_support::IngressFixture};
+use crate::ingress::{
+    commit::commit_submission,
+    test_support::{capture_room_message, IngressFixture},
+};
 use crate::server::routes::interpret::effects::{room::ExternalRoomEffect, PlanSuppressionPolicy};
 use waddle_xmpp::{ingress::IngressEffectIntent, registry::ConnectionRegistry};
 use xmpp_parsers::message::Message;
@@ -33,6 +36,7 @@ fn observer_intent(effect: &ExternalRoomEffect) -> IngressEffectIntent {
 async fn observer_failure_retry_and_receipt(fixture: IngressFixture) {
     let mut submission = fixture.submission(Some("observer-retry"), "observed message");
     let room: jid::BareJid = "room@muc.example.com".parse().expect("room");
+    let submission_message = submission.plan.sanitized_message.clone();
     let effect = ExternalRoomEffect::ObserveRoomMessage {
         room,
         plugin: observer_plugin(),
@@ -41,6 +45,7 @@ async fn observer_failure_retry_and_receipt(fixture: IngressFixture) {
         sender: submission.sender.clone(),
         error_request: Box::new(submission.plan.sanitized_message.clone()),
     };
+    capture_room_message(&mut submission.plan, &submission_message);
     submission.plan.intents = vec![observer_intent(&effect)];
     submission.plan.plan = vec![
         PlannedEffect::new(Effect::External(ExternalEffect::Room(effect)))
@@ -223,6 +228,7 @@ async fn observer_maximum_body_envelope(fixture: IngressFixture) {
             .expect("compact intent")
             < 1024
     );
+    capture_room_message(&mut submission.plan, &observed);
     submission.plan.intents = vec![intent];
     submission.plan.plan = vec![
         PlannedEffect::new(Effect::External(ExternalEffect::Room(effect)))
@@ -232,6 +238,14 @@ async fn observer_maximum_body_envelope(fixture: IngressFixture) {
         .await
         .expect("maximum admitted body commits");
     let key = first.message_key.expect("canonical key");
+    let mut tx = fixture.uow.begin().await.expect("inspect envelope");
+    let envelope = crate::ingress_uow::CanonicalMessageRepository::load_envelope(&mut tx, key)
+        .await
+        .expect("load envelope")
+        .expect("persisted envelope");
+    assert_eq!(envelope.message(), &observed);
+    assert_eq!(envelope.room_observer_request().as_ref(), Some(&original));
+    tx.commit().await.expect("finish inspection");
     let Effect::External(ExternalEffect::Room(ExternalRoomEffect::ObserveRoomMessage {
         message,
         error_request,
@@ -274,6 +288,8 @@ async fn two_observer_plugins_record_distinct_obligations(fixture: IngressFixtur
         error_request: Box::new(submission.plan.sanitized_message.clone()),
     };
     let effects = vec![make_effect("observer-one"), make_effect("observer-two")];
+    let message = submission.plan.sanitized_message.clone();
+    capture_room_message(&mut submission.plan, &message);
     submission.plan.intents = effects.iter().map(observer_intent).collect();
     submission.plan.plan = effects
         .into_iter()
@@ -323,3 +339,33 @@ async fn postgres_room_observer_maximum_body_commits_and_replays_envelope() {
 
 #[path = "execute_observer_membership_tests.rs"]
 mod membership;
+
+async fn non_room_envelope(fixture: IngressFixture) {
+    let submission = fixture.submission(Some("no-room-capture"), "sanitized content");
+    assert!(submission.plan.room_canonical_message.is_none());
+    let decision = commit_submission(&fixture.uow, &submission, 1)
+        .await
+        .expect("commit");
+    let mut tx = fixture.uow.begin().await.expect("inspect envelope");
+    let envelope = crate::ingress_uow::CanonicalMessageRepository::load_envelope(
+        &mut tx,
+        decision.message_key.expect("key"),
+    )
+    .await
+    .expect("load envelope")
+    .expect("first commit persists envelope");
+    assert_eq!(envelope.message(), &submission.plan.sanitized_message);
+    assert!(envelope.room_observer_request().is_none());
+    tx.commit().await.expect("finish inspection");
+    fixture.close().await;
+}
+#[tokio::test]
+async fn sqlite_observer_non_room_first_commit_persists_sanitized_envelope() {
+    non_room_envelope(IngressFixture::sqlite().await).await;
+}
+#[tokio::test]
+async fn postgres_observer_non_room_first_commit_persists_sanitized_envelope() {
+    if let Some(fixture) = IngressFixture::postgres("observer_non_room").await {
+        non_room_envelope(fixture).await;
+    }
+}

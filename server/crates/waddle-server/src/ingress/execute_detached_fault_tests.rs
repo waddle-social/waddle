@@ -317,6 +317,7 @@ async fn detached_muc_records_occupant_progress(fixture: IngressFixture) {
     message.from = Some(room.with_resource_str("romeo").expect("room nick").into());
     message.to = Some(target.clone().into());
     waddle_xmpp_core::xep0359::add_stanza_id(&mut message, &stamp);
+    crate::ingress::test_support::capture_room_message(&mut submission.plan, &message);
     submission.plan.intents = vec![IngressEffectIntent::RouteMucGroupchat {
         room,
         occupants: vec![target.clone()],
@@ -426,6 +427,7 @@ async fn mixed_direct_muc_context_isolation(fixture: IngressFixture) {
             message.from = Some(room.with_resource_str("romeo").expect("room nick").into());
             message.to = Some(target.clone().into());
             waddle_xmpp_core::xep0359::add_stanza_id(&mut message, &stamp);
+            crate::ingress::test_support::capture_room_message(&mut submission.plan, &message);
             IngressEffectIntent::RouteMucGroupchat {
                 room: room.clone(),
                 occupants: vec![target.clone()],
