@@ -567,7 +567,16 @@ mod family_tests {
             ObserverTestBehavior::Success
         };
         let plugin = ObserverTestPlugin::new(plugin_id.clone(), behavior);
-        let manager = ExtensionManager::with_observer_test_plugins(vec![plugin.clone()]).await;
+        // A sibling plugin that succeeds: its receipt commits during the same
+        // attempt, and the cached evidence must reflect that so the warning
+        // plugin is not re-invoked on the next scan.
+        let sibling_id = PluginId::new("recovery-observer-sibling").expect("sibling id");
+        let sibling = ObserverTestPlugin::new(sibling_id.clone(), ObserverTestBehavior::Success);
+        let mut plugins = vec![plugin.clone()];
+        if warning {
+            plugins.push(sibling.clone());
+        }
+        let manager = ExtensionManager::with_observer_test_plugins(plugins).await;
         let mut state = family_state(&fixture).await;
         Arc::get_mut(&mut state)
             .expect("unique state")
@@ -587,6 +596,28 @@ mod family_tests {
                 sender: submission.sender.clone(),
             });
         if warning {
+            submission
+                .plan
+                .intents
+                .push(IngressEffectIntent::RoomObserver {
+                    room: room.clone(),
+                    plugin: sibling_id.clone(),
+                    requester: submission.sender.to_bare(),
+                    sender: submission.sender.clone(),
+                });
+            submission.plan.plan.push(
+                PlannedEffect::new(Effect::External(ExternalEffect::Room(
+                    ExternalRoomEffect::ObserveRoomMessage {
+                        room: room.clone(),
+                        plugin: sibling_id,
+                        requester: submission.sender.to_bare(),
+                        sender: submission.sender.clone(),
+                        message: Box::new(submission.plan.sanitized_message.clone()),
+                        error_request: Box::new(submission.plan.sanitized_message.clone()),
+                    },
+                )))
+                .with_suppression(PlanSuppressionPolicy::Always),
+            );
             // A production groupchat row also carries the occupant fan-out,
             // which recovery cannot rebuild. The warning-only observer must
             // still be cached alongside that permanently pending sibling.
@@ -637,6 +668,12 @@ mod family_tests {
                     1,
                     "a warning-only observer is cached as unsupported, not re-invoked"
                 );
+                assert_eq!(
+                    sibling.invocations().len(),
+                    1,
+                    "the successful sibling ran once and its receipt is part of the cached evidence"
+                );
+                assert_eq!(fixture.count("ingress_effect_receipts").await, 1);
             } else {
                 family_recovered(&fixture, key, 1).await;
             }

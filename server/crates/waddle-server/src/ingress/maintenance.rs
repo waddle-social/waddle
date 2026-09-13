@@ -428,8 +428,36 @@ async fn recover_candidates(
                 ),
             )
             .await;
-            if !record_recovery_result(database, cursor, candidate, result) {
-                outcome = MaintenanceOutcome::Partial;
+            match record_recovery_result(database, candidate, result) {
+                RowDisposition::Deferred => outcome = MaintenanceOutcome::Partial,
+                RowDisposition::Done => {}
+                RowDisposition::Unsupported => {
+                    // Cache the evidence as it stands after this attempt: a
+                    // sibling that settled during execution must not make the
+                    // next scan re-invoke the warning-only observer.
+                    match tokio::time::timeout(
+                        RECOVERY_ACCOUNTING_BUDGET,
+                        receipts_now(database, candidate.key),
+                    )
+                    .await
+                    {
+                        Ok(Ok(receipts)) => {
+                            let mut cached = candidate;
+                            cached.evidence.receipts = u32::try_from(receipts).unwrap_or(u32::MAX);
+                            cursor
+                                .recovery_unsupported
+                                .lock()
+                                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                                .insert(cached);
+                        }
+                        Ok(Err(error)) => {
+                            tracing::warn!(%error, key = ?candidate.key, "ingress recovery cache refresh failed");
+                        }
+                        Err(_) => {
+                            tracing::debug!(key = ?candidate.key, "ingress recovery cache refresh timed out");
+                        }
+                    }
+                }
             }
             tokio::task::yield_now().await;
         }
@@ -455,15 +483,23 @@ const RECOVERY_ACCOUNTING_BUDGET: Duration = Duration::from_secs(1);
 /// the scan observed the row, so credit survives cancellation mid-execution.
 /// A concurrent client retransmission settling the same row in this window is
 /// attributed here too; the counter is progress telemetry, not an audit log.
+/// What the maintenance loop does with a row after its attempt.
+enum RowDisposition {
+    /// Deferred by an error or the row deadline; the phase reports `Partial`.
+    Deferred,
+    Done,
+    /// Nothing left on the row can progress; cache it with fresh evidence.
+    Unsupported,
+}
+
 fn record_recovery_result(
     database: &Database,
-    cursor: &MaintenanceCursor,
     candidate: RecoveryCandidate,
     result: Result<
         Result<super::recovery_executor::RowRecovery, IngressUowError>,
         tokio::time::error::Elapsed,
     >,
-) -> bool {
+) -> RowDisposition {
     use super::recovery_executor::RowRecovery;
     use waddle_xmpp::telemetry::reliability::{
         increment_ingress_maintenance_recovered_obligations,
@@ -505,22 +541,19 @@ fn record_recovery_result(
                 increment_ingress_maintenance_unrecoverable_obligations(1, kind);
             }
             if unsupported {
-                cursor
-                    .recovery_unsupported
-                    .lock()
-                    .unwrap_or_else(std::sync::PoisonError::into_inner)
-                    .insert(candidate);
+                RowDisposition::Unsupported
+            } else {
+                RowDisposition::Done
             }
-            true
         }
-        Ok(Ok(RowRecovery::Vanished | RowRecovery::NothingPending)) => true,
+        Ok(Ok(RowRecovery::Vanished | RowRecovery::NothingPending)) => RowDisposition::Done,
         Ok(Err(error)) => {
             tracing::warn!(%error, key = ?candidate.key, "ingress recovery row deferred");
-            false
+            RowDisposition::Deferred
         }
         Err(_) => {
             tracing::debug!(key = ?candidate.key, "ingress recovery row deadline elapsed");
-            false
+            RowDisposition::Deferred
         }
     }
 }
