@@ -142,6 +142,8 @@ pub struct IngressPlan {
     pub plan: Vec<PlannedEffect>,
     pub intents: Vec<IngressEffectIntent>,
     pub sanitized_message: Message,
+    /// Exact room dispatcher prototype, independent of deliverable copies or observers.
+    pub room_canonical_message: Option<Box<Message>>,
     pub error_reply: Option<Stanza>,
     pub room_execution: RoomExecutionPath,
 }

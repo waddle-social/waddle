@@ -271,6 +271,10 @@ async fn subject_broadcast_after_actor_commit(
         &OccupantIdSecret::new(vec![b's'; 32]).expect("secret"),
     );
     waddle_xmpp::xep::xep0421::set_occupant_id_on_message(message, &occupant_id);
+    let mut canonical = message.clone();
+    canonical.from = Some(room.with_resource_str("romeo").expect("nick").into());
+    canonical.to = None;
+    submission.plan.room_canonical_message = Some(Box::new(canonical));
     let mut events = vec![OutboundEvent::PersistRoomSubject {
         room: room.clone(),
         claim_fence: fence,

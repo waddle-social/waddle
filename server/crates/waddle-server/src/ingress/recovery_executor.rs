@@ -246,31 +246,27 @@ async fn freeze(
     // One bulk read of delivery progress for the same reason as the receipts.
     let progress = DeliveryProgressRepository::load_all(&mut tx, key).await?;
     let mut route_progress = Vec::new();
+    let mut empty_muc = Vec::new();
     for intent in &unreceipted {
-        let IngressEffectIntent::RouteDirect {
-            recipient,
-            fanout,
-            route_identity,
-        } = intent
+        let Some(mut route) = RouteProgress::from_intent(intent, Some(created_at), Vec::new())?
         else {
             continue;
         };
-        let receipt = super::receipt_key(intent)?;
-        let completed = progress
+        route.completed = progress
             .iter()
-            .find(|(candidate, _)| *candidate == receipt)
+            .find(|(receipt, _)| receipt == &route.receipt)
             .map(|(_, completed)| completed.clone())
             .unwrap_or_default();
-        route_progress.push(RouteProgress {
-            receipt,
-            obligation: super::ProgressObligation::Direct {
-                recipient: recipient.clone(),
-            },
-            fanout: fanout.clone(),
-            route_identity: route_identity.clone(),
-            completed,
-            received_at: Some(created_at),
-        });
+        if !route.is_direct() && route.fanout.is_empty() {
+            crate::ingress_uow::settle_recorded(&mut tx, key, &[route.settle_evidence()]).await?;
+            empty_muc.push(route.settle_evidence());
+        } else {
+            route_progress.push(route);
+        }
+    }
+    if !empty_muc.is_empty() {
+        unreceipted.retain(|intent| !empty_muc.contains(intent));
+        super::execute::terminalize_if_complete_in_transaction(&mut tx, key).await?;
     }
     tx.commit().await?;
     Ok(Some(FrozenRecovery {

@@ -88,6 +88,7 @@ fn plan() -> IngressPlan {
         rejection: None,
         plan: vec![],
         intents: vec![],
+        room_canonical_message: None,
         sanitized_message: canonical().message().clone(),
         error_reply: None,
         room_execution: RoomExecutionPath::None,

@@ -39,6 +39,7 @@ async fn plan_broadcast(
         &planned,
     )
     .await;
+    submission.plan.room_canonical_message = sink.room_canonical_message();
     let (plan, execution) = sink.take();
     submission.plan.plan = plan;
     submission.plan.room_execution = execution;
@@ -290,3 +291,6 @@ mod local;
 
 #[path = "muc_occupant_progress_tests/system.rs"]
 mod system;
+
+#[path = "muc_occupant_progress_tests/replay.rs"]
+mod replay;

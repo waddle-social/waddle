@@ -92,6 +92,7 @@ async fn partial_pin_broadcast(fixture: IngressFixture) {
         &deps,
     )
     .await;
+    submission.plan.room_canonical_message = sink.room_canonical_message();
     let (plan, execution) = sink.take();
     submission.plan.plan = plan;
     // Snapshot occupants are a HashMap: make the fault occur after A while

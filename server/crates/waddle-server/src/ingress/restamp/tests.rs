@@ -30,6 +30,7 @@ fn fixture() -> (IngressPlan, BareJid, StanzaId, StanzaId) {
             by: owner.clone(),
             archived_at: chrono::Utc::now(),
         }],
+        room_canonical_message: None,
         sanitized_message: message,
         rejection: None,
         error_reply: None,

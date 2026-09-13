@@ -105,6 +105,7 @@ mod tests {
                     ordinal: None,
                 },
             ],
+            room_canonical_message: None,
             sanitized_message: reflected.clone(),
             error_reply: None,
             room_execution: RoomExecutionPath::None,

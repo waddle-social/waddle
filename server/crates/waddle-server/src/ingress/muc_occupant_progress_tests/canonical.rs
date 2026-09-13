@@ -2,7 +2,7 @@ use super::*;
 use crate::ingress_uow::CanonicalMessageRepository;
 use crate::server::routes::interpret::effects::Effect;
 
-async fn canonical_owner(fixture: IngressFixture, relayed: bool) {
+async fn canonical_owner(fixture: IngressFixture, relayed: bool, available: bool) {
     #[cfg(feature = "clustering")]
     let mut fixture = fixture;
     let state = socket_tests::create_test_websocket_state().await;
@@ -21,7 +21,9 @@ async fn canonical_owner(fixture: IngressFixture, relayed: bool) {
         .await
         .expect("room");
     let (tx, _rx) = tokio::sync::mpsc::channel(16);
-    socket_tests::register_test_connection(&state, &submission.sender, tx).await;
+    if available {
+        socket_tests::register_test_connection(&state, &submission.sender, tx).await;
+    }
     actor
         .ask(Join {
             nick: "original-nick".into(),
@@ -31,6 +33,17 @@ async fn canonical_owner(fixture: IngressFixture, relayed: bool) {
         })
         .await
         .expect("join");
+    if !available {
+        actor
+            .ask(Join {
+                nick: "unavailable".into(),
+                real_jid: "juliet@example.com/unavailable".parse().expect("occupant"),
+                role: waddle_xmpp::Role::Participant,
+                affiliation: waddle_xmpp::Affiliation::Member,
+            })
+            .await
+            .expect("join unavailable occupant");
+    }
     let mut message = submission.plan.sanitized_message.clone();
     message.type_ = xmpp_parsers::message::MessageType::Groupchat;
     message.to = Some(room.clone().into());
@@ -85,6 +98,7 @@ async fn canonical_owner(fixture: IngressFixture, relayed: bool) {
         &deps,
     )
     .await;
+    submission.plan.room_canonical_message = sink.room_canonical_message();
     let (plan, execution) = sink.take();
     submission.plan.plan = plan;
     submission.plan.room_execution = execution;
@@ -133,6 +147,11 @@ async fn canonical_owner(fixture: IngressFixture, relayed: bool) {
         .expect("envelope");
     tx.commit().await.expect("read commit");
     assert_eq!(
+        envelope.message().to,
+        None,
+        "persist exact reflector working message"
+    );
+    assert_eq!(
         envelope.message().from,
         Some(
             room.with_resource_str("original-nick")
@@ -147,6 +166,26 @@ async fn canonical_owner(fixture: IngressFixture, relayed: bool) {
     assert!(waddle_xmpp::xep::extract_stanza_ids(envelope.message())
         .iter()
         .any(|id| id.by == room));
+    let muc_intent = submission
+        .plan
+        .intents
+        .iter()
+        .find(|intent| matches!(intent, IngressEffectIntent::RouteMucGroupchat { .. }))
+        .expect("MUC obligation");
+    assert!(
+        crate::ingress::room_canonical::source(&envelope, muc_intent).is_ok(),
+        "unavailable fanout still freezes recoverable provenance"
+    );
+    let mut available_receiver = if available {
+        None
+    } else {
+        let occupant = "juliet@example.com/unavailable".parse().expect("occupant");
+        let (tx, receiver) = tokio::sync::mpsc::channel(16);
+        socket_tests::register_test_connection(&state, &occupant, tx).await;
+        let request = submission.plan.sanitized_message.clone();
+        plan_broadcast(&mut submission, &room, &request, &deps).await;
+        Some(receiver)
+    };
     for planned in &mut submission.plan.plan {
         if let Effect::External(ExternalEffect::Delivery(ExternalDeliveryEffect::RouteToPeer {
             stanza,
@@ -160,9 +199,58 @@ async fn canonical_owner(fixture: IngressFixture, relayed: bool) {
             }
         }
     }
-    commit_submission(&fixture.uow, &submission, 1)
+    let retry = commit_submission(&fixture.uow, &submission, 1)
         .await
         .expect("owner retry");
+    if let Some(receiver) = &mut available_receiver {
+        let copy = retry
+            .external
+            .iter()
+            .find_map(|effect| match effect {
+                ExternalEffect::Delivery(ExternalDeliveryEffect::RouteToPeer {
+                    stanza, ..
+                }) => match stanza.as_ref() {
+                    waddle_xmpp::Stanza::Message(message) => Some(message),
+                    _ => None,
+                },
+                _ => None,
+            })
+            .expect("newly available frozen occupant is restored through the provenance gate");
+        let mut expected = envelope.message().clone();
+        expected.to = Some("juliet@example.com/unavailable".parse().expect("occupant"));
+        assert_eq!(
+            waddle_xmpp::xep::extract_stanza_ids(copy),
+            waddle_xmpp::xep::extract_stanza_ids(&expected),
+            "retry preserves the frozen stanza identities"
+        );
+        let mut restored = copy.clone();
+        for message in [&mut restored, &mut expected] {
+            message
+                .payloads
+                .retain(|payload| !waddle_xmpp_core::xep0359::is_stanza_id_element(payload));
+        }
+        assert_eq!(
+            restored, expected,
+            "retry retains the other frozen room fields"
+        );
+        let report = execute_effects(
+            &fixture.uow,
+            &fixture.db,
+            &retry,
+            &ImmediateSink,
+            &deps,
+            Duration::from_secs(5),
+        )
+        .await;
+        assert!(report.receipt_failures.is_empty(), "{report:?}");
+        assert!(
+            receiver.try_recv().is_ok(),
+            "retry delivers to the newly available occupant"
+        );
+        assert!(terminalize_if_complete(&fixture.uow, key)
+            .await
+            .expect("settled room fanout"));
+    }
     let mut tx = fixture.uow.begin().await.expect("inspect retry");
     assert_eq!(
         CanonicalMessageRepository::load_envelope(&mut tx, key)
@@ -178,22 +266,22 @@ async fn canonical_owner(fixture: IngressFixture, relayed: bool) {
 #[cfg(not(feature = "clustering"))]
 #[tokio::test]
 async fn sqlite_muc_canonical_owner_zero_plugins() {
-    canonical_owner(IngressFixture::sqlite().await, true).await;
+    canonical_owner(IngressFixture::sqlite().await, true, true).await;
 }
 #[tokio::test]
 async fn postgres_muc_canonical_owner_zero_plugins() {
     if let Some(fixture) = IngressFixture::postgres("muc_canonical_owner").await {
-        canonical_owner(fixture, true).await;
+        canonical_owner(fixture, true, true).await;
     }
 }
 #[tokio::test]
 async fn sqlite_muc_canonical_local_zero_plugins() {
-    canonical_owner(IngressFixture::sqlite().await, false).await;
+    canonical_owner(IngressFixture::sqlite().await, false, true).await;
 }
 #[tokio::test]
 async fn postgres_muc_canonical_local_zero_plugins() {
     if let Some(fixture) = IngressFixture::postgres("muc_canonical_local").await {
-        canonical_owner(fixture, false).await;
+        canonical_owner(fixture, false, true).await;
     }
 }
 
@@ -438,6 +526,7 @@ async fn observer_source_without_deliverable_copy(fixture: IngressFixture) {
             plugin: plugin.clone(),
         },
     ];
+    submission.plan.room_canonical_message = Some(Box::new(message.clone()));
     submission.plan.plan = vec![effects::PlannedEffect::new(Effect::External(
         ExternalEffect::Room(effects::room::ExternalRoomEffect::ObserveRoomMessage {
             room,
@@ -471,5 +560,16 @@ async fn sqlite_muc_canonical_observer_without_deliverable_copy() {
 async fn postgres_muc_canonical_observer_without_deliverable_copy() {
     if let Some(fixture) = IngressFixture::postgres("muc_observer_no_delivery").await {
         observer_source_without_deliverable_copy(fixture).await;
+    }
+}
+
+#[tokio::test]
+async fn sqlite_muc_canonical_zero_plugins_all_unavailable() {
+    canonical_owner(IngressFixture::sqlite().await, false, false).await;
+}
+#[tokio::test]
+async fn postgres_muc_canonical_zero_plugins_all_unavailable() {
+    if let Some(fixture) = IngressFixture::postgres("muc_canonical_unavailable").await {
+        canonical_owner(fixture, false, false).await;
     }
 }

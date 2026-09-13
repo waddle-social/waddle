@@ -181,6 +181,7 @@ pub(super) fn recorded_rejection_plan(
         rejection: None,
         plan,
         intents: intents.to_vec(),
+        room_canonical_message: None,
         sanitized_message: envelope.message().clone(),
         error_reply,
         room_execution: RoomExecutionPath::None,

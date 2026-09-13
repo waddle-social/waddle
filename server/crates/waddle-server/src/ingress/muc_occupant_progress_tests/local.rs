@@ -5,7 +5,7 @@ use waddle_xmpp::stream_management::{
     DetachedSession, InMemorySmSessionRegistry, SmSessionRegistry,
 };
 
-async fn store_detached(sm: &InMemorySmSessionRegistry, resource: &jid::FullJid) {
+pub(super) async fn store_detached(sm: &InMemorySmSessionRegistry, resource: &jid::FullJid) {
     sm.store_session(DetachedSession {
         stream_id: resource.to_string(),
         user_id: resource.to_bare().to_string(),
@@ -32,7 +32,7 @@ async fn store_detached(sm: &InMemorySmSessionRegistry, resource: &jid::FullJid)
     .expect("store detached session");
 }
 
-async fn append_count(sm: &InMemorySmSessionRegistry, resource: &jid::FullJid) -> usize {
+pub(super) async fn append_count(sm: &InMemorySmSessionRegistry, resource: &jid::FullJid) -> usize {
     sm.peek_session(&resource.to_string())
         .await
         .expect("peek session")
@@ -129,6 +129,7 @@ async fn local_progress(fixture: IngressFixture, case: Case) {
         &deps,
     )
     .await;
+    submission.plan.room_canonical_message = sink.room_canonical_message();
     let (plan, execution) = sink.take();
     submission.plan.plan = plan;
     submission.plan.room_execution = execution;

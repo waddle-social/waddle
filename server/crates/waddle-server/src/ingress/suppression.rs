@@ -110,7 +110,11 @@ fn relay_carbons_recorded(plan: &IngressPlan, effect: &ExternalEffect) -> bool {
 /// indices, so trimming cannot detach an effect from its planned prerequisites.
 enum RouteProgressFilter {
     Untracked,
-    Keep { remaining: Vec<jid::FullJid> },
+    Keep {
+        remaining: Vec<jid::FullJid>,
+    },
+    /// Reapply current subject state without contributing historical progress.
+    SubjectRebroadcast,
     Drop,
 }
 
@@ -123,16 +127,28 @@ fn route_progress_filter(
         ExternalEffect::Delivery(
             ExternalDeliveryEffect::QueueDetached { .. }
                 | ExternalDeliveryEffect::RouteToPeer { .. }
+                | ExternalDeliveryEffect::RelayFullJid { .. }
         )
     ) {
         return RouteProgressFilter::Untracked;
     }
-    let Some(progress) = progress.iter().find(|progress| progress.correlates(effect)) else {
+    let relay = matches!(
+        effect,
+        ExternalEffect::Delivery(ExternalDeliveryEffect::RelayFullJid { .. })
+    );
+    let Some(progress) = progress
+        .iter()
+        .find(|progress| (!relay || !progress.is_direct()) && progress.correlates(effect))
+    else {
         return RouteProgressFilter::Untracked;
     };
     let remaining = progress.remaining(effect);
     if remaining.is_empty() {
-        RouteProgressFilter::Drop
+        if !progress.is_direct() && subject_rebroadcast(effect) {
+            RouteProgressFilter::SubjectRebroadcast
+        } else {
+            RouteProgressFilter::Drop
+        }
     } else {
         RouteProgressFilter::Keep { remaining }
     }
@@ -285,6 +301,7 @@ mod tests {
                 failure: None,
                 plan: sink.snapshot(),
                 intents: vec![],
+                room_canonical_message: None,
                 sanitized_message: message,
                 error_reply: None,
                 rejection: None,
@@ -345,6 +362,7 @@ mod tests {
                         room.clone().into(),
                     )),
                 }],
+                room_canonical_message: None,
                 sanitized_message: message,
                 error_reply: None,
                 rejection: None,
@@ -462,6 +480,7 @@ mod tests {
                 failure: None,
                 plan: vec![effect],
                 intents: vec![],
+                room_canonical_message: None,
                 sanitized_message: message,
                 error_reply: None,
                 rejection: None,
@@ -509,6 +528,7 @@ mod tests {
                 }),
             ],
             intents: vec![],
+            room_canonical_message: None,
             sanitized_message: message,
             error_reply: None,
             rejection: None,
@@ -568,6 +588,7 @@ mod tests {
             rejection: None,
             plan: effects,
             intents: vec![],
+            room_canonical_message: None,
             sanitized_message: incoming,
             error_reply: None,
             room_execution: RoomExecutionPath::None,
@@ -627,6 +648,7 @@ mod progress_tests {
                 .with_suppression(PlanSuppressionPolicy::SenderOnly),
             ],
             intents: vec![intent],
+            room_canonical_message: None,
             sanitized_message: message,
             error_reply: None,
             rejection: None,

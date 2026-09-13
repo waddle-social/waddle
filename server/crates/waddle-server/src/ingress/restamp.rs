@@ -30,6 +30,9 @@ pub fn restamp_plan(
     let ids = Replacements::new(plan, recorded_archive_ids);
     let mut stamped = plan.clone();
     ids.message(&mut stamped.sanitized_message);
+    if let Some(message) = &mut stamped.room_canonical_message {
+        ids.message(message);
+    }
     if let Some(stanza) = &mut stamped.error_reply {
         ids.stanza(stanza);
     }
@@ -82,6 +85,9 @@ pub(super) fn restore_muc_route_identity(plan: &mut IngressPlan, recorded: &[Ing
     }
     let ids = Replacements(replacements);
     ids.message(&mut plan.sanitized_message);
+    if let Some(message) = &mut plan.room_canonical_message {
+        ids.message(message);
+    }
     for planned in &mut plan.plan {
         for dependency in &mut planned.dependencies {
             if let PlanEffectDependency::AfterArchive { minted, .. } = dependency {

@@ -23,6 +23,12 @@ impl PlanSink {
         let room = std::mem::take(&mut *self.room_execution.lock().expect("room execution mutex"));
         (plan, room)
     }
+    pub fn room_canonical_message(&self) -> Option<Box<xmpp_parsers::message::Message>> {
+        match self.room_execution() {
+            RoomExecutionPath::Local { .. } => self.message().map(Box::new),
+            _ => None,
+        }
+    }
     pub fn snapshot(&self) -> Vec<PlannedEffect> {
         self.plan.lock().expect("plan mutex").clone()
     }
