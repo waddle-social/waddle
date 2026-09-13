@@ -93,3 +93,5 @@ mod quota;
 mod groupchat_settlement;
 
 mod groupchat_concurrent;
+
+mod groupchat_revocation;

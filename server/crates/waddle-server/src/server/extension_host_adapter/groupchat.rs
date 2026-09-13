@@ -6,7 +6,8 @@ use waddle_extensions::{host_tools::InvocationKind, StanzaId};
 use waddle_xmpp::ingress::{NormalizedTarget, TransportGeneration};
 
 use crate::ingress::{
-    nested::NestedContinuation, ExtensionPrincipal, IngressPrincipal, IngressStreamIdentity,
+    nested::{NestedContinuation, NestedOutcome, NestedRefusal},
+    ExtensionPrincipal, IngressDecisionClass, IngressPrincipal, IngressStreamIdentity,
     IngressSubmission,
 };
 
@@ -102,7 +103,7 @@ impl ExtensionHostAdapter {
                 requester,
                 sender: sender.to_bare(),
             }),
-            sender,
+            sender: sender.clone(),
             target: NormalizedTarget::Bare(room.clone()),
             digest_input: planned.digest_input,
             plan: planned.plan,
@@ -113,6 +114,27 @@ impl ExtensionHostAdapter {
         let outcome = operation
             .commit_and_continue(submission, continuation)
             .await;
+        if matches!(
+            outcome,
+            NestedOutcome::Refused(NestedRefusal::Decision(
+                IngressDecisionClass::PrincipalMissing
+            ))
+        ) {
+            if let Some((nick, session)) = planned.joined_occupancy {
+                // Revoke only this dispatch's join, before another send can reuse it.
+                // The normal departure path emits unavailable presence and retains
+                // interrupted actor cleanup for the departure janitor.
+                let _ = crate::server::routes::websocket::handlers::presence::handle_muc_leave(
+                    &self.state,
+                    &room,
+                    &sender,
+                    nick.as_str(),
+                    session,
+                    None,
+                )
+                .await;
+            }
+        }
         drop(room_guard);
         let archive_ids = super::settlement::finish_nested(outcome).await?;
         // A committed denial may have only an error frame and no room archive.

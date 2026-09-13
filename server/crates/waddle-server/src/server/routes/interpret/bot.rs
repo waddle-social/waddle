@@ -257,6 +257,7 @@ pub(super) async fn plan_bot_groupchat_message(
             Some(bot_ctx.sender_full.clone()),
         ),
         digest_input,
+        joined_occupancy: None,
     })
 }
 
@@ -276,6 +277,10 @@ pub(crate) struct ExtensionRoomMessage {
 pub(crate) struct PlannedExtensionBotGroupchat {
     pub plan: IngressPlan,
     pub digest_input: DigestInput,
+    pub joined_occupancy: Option<(
+        waddle_xmpp::muc::MucOccupantNick,
+        waddle_xmpp_core::OccupancySessionGeneration,
+    )>,
 }
 
 pub(crate) fn build_extension_message_markup(spans: &[MessageMarkupSpan]) -> Option<Element> {
@@ -425,6 +430,7 @@ pub(crate) async fn plan_extension_bot_groupchat(
             role: o.role,
         })
         .collect();
+    let mut joined_occupancy = None;
     if !initial_snapshot
         .occupants
         .iter()
@@ -434,6 +440,9 @@ pub(crate) async fn plan_extension_bot_groupchat(
             &initial_occupants,
             preferred_nick.as_deref().unwrap_or("waddle"),
         );
+        let joined_nick = waddle_xmpp::muc::MucOccupantNick::new(bot_nick.clone())
+            .ok_or(ExtensionBotDispatchError::BotJoinFailed)?;
+        let session = waddle_xmpp_core::OccupancySessionGeneration::mint();
         match room_actor
             .ask(JoinWithAffiliation {
                 sender_jid: bot_full.clone(),
@@ -441,11 +450,12 @@ pub(crate) async fn plan_extension_bot_groupchat(
                 affiliation_grant: JoinAffiliationGrant::Resolver(waddle_xmpp::Affiliation::Member),
                 local_domain: state.deps.auth_state.xmpp_domain.clone(),
                 admission_revision: initial_snapshot.admission_revision,
-                session: waddle_xmpp_core::OccupancySessionGeneration::mint(),
+                session,
             })
             .await
         {
             Ok(join) => {
+                joined_occupancy = Some((joined_nick, session));
                 if !join.is_same_bare_multi_session_join {
                     for existing in join.existing_occupants {
                         let from = match room_jid.clone().with_resource_str(&bot_nick) {
@@ -530,7 +540,7 @@ pub(crate) async fn plan_extension_bot_groupchat(
         })
         .collect();
     let durable_recipient_bare_jids = snapshot.durable_recipient_bare_jids.clone();
-    plan_bot_groupchat_message(
+    let mut planned = plan_bot_groupchat_message(
         deps,
         BotGroupchatDispatch {
             room_jid: &room_jid,
@@ -551,7 +561,9 @@ pub(crate) async fn plan_extension_bot_groupchat(
         working,
         digest_input,
     )
-    .await
+    .await?;
+    planned.joined_occupancy = joined_occupancy;
+    Ok(planned)
 }
 
 #[cfg(feature = "clustering")]

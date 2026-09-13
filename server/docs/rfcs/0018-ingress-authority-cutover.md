@@ -199,8 +199,11 @@ bot occupancy (nickname and session generation) is reused; join and initial
 presence only run for an absent bot, as authorized lifecycle work outside message
 receipts. A shared in-process guard keyed by plugin and room serializes the
 snapshot/join/admission sequence across adapters, preventing concurrent first
-sends from joining twice. The digest uses the offered unsigned envelope before validation and
-clock-dependent signing; the signed envelope is persisted and sent. Occupant
+sends from joining twice. If Phase B refuses the grant/requester assertion after
+this dispatch joined the bot, it compensates that join through the normal room
+leave path (including unavailable presence) before releasing the guard and
+returning `NotAuthorized`; a reused occupancy is left intact. The digest uses the
+offered unsigned envelope before validation and clock-dependent signing; the signed envelope is persisted and sent. Occupant
 copies retain XEP-0045, thread, reply, markup and stanza-id semantics, with the
 added origin-id. Remote-owned rooms receive the typed
 `ExtensionRemoteRoomUnsupported` planning refusal; `IngressRelayAdmission` and

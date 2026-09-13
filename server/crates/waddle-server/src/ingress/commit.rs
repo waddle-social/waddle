@@ -115,6 +115,8 @@ async fn commit_attempt(
     if let Some(failure) = submission.plan.failure {
         return Err(failure.into());
     }
+    #[cfg(test)]
+    commit_race_gate::before_admission(submission.digest_input.origin()).await;
     let mut tx = uow
         .begin_with_timeouts(
             std::time::Duration::from_millis(100),
