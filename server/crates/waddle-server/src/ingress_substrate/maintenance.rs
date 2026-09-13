@@ -4,7 +4,23 @@ use chrono::{DateTime, SecondsFormat, Utc};
 use waddle_xmpp::ingress::MessageKey;
 
 use super::{dialect_sql, discard_database_error, EffectReceiptKind, IngressSubstrateError};
-use crate::db::{DatabaseDriver, Transaction};
+use crate::db::{DatabaseDriver, Row, Transaction};
+use crate::ingress_uow::DbRetryClass;
+
+/// Counts of all durable obligations and completion evidence for a canonical row.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct RecoveryEvidence {
+    pub intents: u32,
+    pub receipts: u32,
+}
+
+/// A recovery scan position and the evidence used to invalidate unsupported rows.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct RecoveryCandidate {
+    pub created_at: DateTime<Utc>,
+    pub key: MessageKey,
+    pub evidence: RecoveryEvidence,
+}
 
 /// Select one bounded page without locking canonical rows. The caller installs
 /// statement timeouts before this query and releases the scan transaction before
@@ -16,40 +32,41 @@ pub async fn receipt_complete_nonterminal_keys(
     older_than: DateTime<Utc>,
     limit: u32,
 ) -> Result<Vec<(DateTime<Utc>, MessageKey)>, IngressSubstrateError> {
-    page_nonterminal_keys(tx, after, older_than, None, limit).await
+    page_nonterminal_rows(tx, after, older_than, None, limit, decode_position).await
 }
 
 /// Select non-terminal rows with at least one unreceipted intent of a requested kind.
 /// An empty kind list returns without accessing the database.
-pub async fn unreceipted_nonterminal_keys(
+pub async fn unreceipted_nonterminal_candidates(
     tx: &mut Transaction<'_>,
     after: Option<(DateTime<Utc>, MessageKey)>,
     older_than: DateTime<Utc>,
     kinds: &[EffectReceiptKind],
     limit: u32,
-) -> Result<Vec<(DateTime<Utc>, MessageKey)>, IngressSubstrateError> {
+) -> Result<Vec<RecoveryCandidate>, IngressSubstrateError> {
     if kinds.is_empty() {
         return Ok(Vec::new());
     }
-    page_nonterminal_keys(tx, after, older_than, Some(kinds), limit).await
+    page_nonterminal_rows(tx, after, older_than, Some(kinds), limit, decode_candidate).await
 }
 
-async fn page_nonterminal_keys(
+async fn page_nonterminal_rows<T>(
     tx: &mut Transaction<'_>,
     after: Option<(DateTime<Utc>, MessageKey)>,
     older_than: DateTime<Utc>,
     kinds: Option<&[EffectReceiptKind]>,
     limit: u32,
-) -> Result<Vec<(DateTime<Utc>, MessageKey)>, IngressSubstrateError> {
+    decode: fn(&Row) -> Result<T, IngressSubstrateError>,
+) -> Result<Vec<T>, IngressSubstrateError> {
     const POSTGRES: &str = r#"
         SELECT to_char(m.created_at AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.US"Z"'),
-               m.message_key::text
+               m.message_key::text {evidence}
         FROM ingress_messages m
         WHERE m.terminal_at IS NULL AND m.created_at < ?::timestamptz
           AND (?::timestamptz IS NULL OR (m.created_at, m.message_key) > (?::timestamptz, ?::uuid))
     "#;
     const SQLITE: &str = r#"
-        SELECT m.created_at, m.message_key FROM ingress_messages m
+        SELECT m.created_at, m.message_key {evidence} FROM ingress_messages m
         WHERE m.terminal_at IS NULL AND m.created_at < ?
           AND (? IS NULL OR (m.created_at, m.message_key) > (strftime('%Y-%m-%dT%H:%M:%fZ', ?), ?))
     "#;
@@ -65,6 +82,12 @@ async fn page_nonterminal_keys(
         ),
         None => ("NOT EXISTS", String::new()),
     };
+    let evidence = if kinds.is_some() {
+        ", (SELECT count(*) FROM ingress_effect_intents i WHERE i.message_key = m.message_key),
+         (SELECT count(*) FROM ingress_effect_receipts r WHERE r.message_key = m.message_key)"
+    } else {
+        ""
+    };
     let sql = format!(
         "{} AND {existence} (
             SELECT 1 FROM ingress_effect_intents i WHERE i.message_key = m.message_key
@@ -73,7 +96,7 @@ async fn page_nonterminal_keys(
                 WHERE r.message_key = i.message_key AND r.kind = i.kind
                   AND r.semantic_identity_hash = i.semantic_identity_hash))
         ORDER BY m.created_at, m.message_key LIMIT ?",
-        dialect_sql(tx.driver(), POSTGRES, SQLITE),
+        dialect_sql(tx.driver(), POSTGRES, SQLITE).replace("{evidence}", evidence),
     );
     let after_time = after.map(|(created_at, _)| created_at.to_rfc3339());
     let after_key = after.map(|(_, key)| key.to_storage().to_string());
@@ -108,16 +131,39 @@ async fn page_nonterminal_keys(
         .map_err(discard_database_error)?;
     let mut candidates = Vec::new();
     while let Some(row) = rows.next().await.map_err(discard_database_error)? {
-        let created_at: String = row.get(0).map_err(discard_database_error)?;
-        let key: String = row.get(1).map_err(discard_database_error)?;
-        candidates.push((
-            DateTime::parse_from_rfc3339(&created_at)
-                .map_err(|_| IngressSubstrateError::InvalidStoredTimestamp)?
-                .with_timezone(&Utc),
-            key.parse()
-                .map(MessageKey::from_storage)
-                .map_err(|_| IngressSubstrateError::InvalidStoredMessageKey)?,
-        ));
+        candidates.push(decode(&row)?);
     }
     Ok(candidates)
+}
+
+fn decode_position(row: &Row) -> Result<(DateTime<Utc>, MessageKey), IngressSubstrateError> {
+    let created_at: String = row.get(0).map_err(discard_database_error)?;
+    let key: String = row.get(1).map_err(discard_database_error)?;
+    Ok((
+        DateTime::parse_from_rfc3339(&created_at)
+            .map_err(|_| IngressSubstrateError::InvalidStoredTimestamp)?
+            .with_timezone(&Utc),
+        key.parse()
+            .map(MessageKey::from_storage)
+            .map_err(|_| IngressSubstrateError::InvalidStoredMessageKey)?,
+    ))
+}
+
+fn decode_candidate(row: &Row) -> Result<RecoveryCandidate, IngressSubstrateError> {
+    let (created_at, key) = decode_position(row)?;
+    Ok(RecoveryCandidate {
+        created_at,
+        key,
+        evidence: RecoveryEvidence {
+            intents: decode_count(row, 2)?,
+            receipts: decode_count(row, 3)?,
+        },
+    })
+}
+
+fn decode_count(row: &Row, column: usize) -> Result<u32, IngressSubstrateError> {
+    let count: i64 = row.get(column).map_err(discard_database_error)?;
+    u32::try_from(count).map_err(|_| IngressSubstrateError::Database {
+        retry_class: DbRetryClass::NotRetryable,
+    })
 }

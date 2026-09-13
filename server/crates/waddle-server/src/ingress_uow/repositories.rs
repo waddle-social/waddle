@@ -249,6 +249,23 @@ impl CanonicalMessageRepository {
         Ok(rows.next().await?.is_some())
     }
 
+    /// Check durable terminal state without taking the canonical row lock.
+    pub async fn is_terminal(
+        transaction: &mut IngressUowTransaction<'_>,
+        message_key: MessageKey,
+    ) -> Result<bool, IngressUowError> {
+        let sql = dialect_sql(
+            transaction,
+            "SELECT 1 FROM ingress_messages WHERE message_key = ?::uuid AND terminal_at IS NOT NULL",
+            "SELECT 1 FROM ingress_messages WHERE message_key = ? AND terminal_at IS NOT NULL",
+        );
+        let mut rows = transaction
+            .transaction_mut()
+            .query(sql, crate::db_params![message_key.to_storage().to_string()])
+            .await?;
+        Ok(rows.next().await?.is_some())
+    }
+
     pub async fn record_message(
         transaction: &mut IngressUowTransaction<'_>,
         message_key: MessageKey,

@@ -1,6 +1,7 @@
 //! Periodic, bounded repair of terminal proofs followed by retention collection.
 
 use std::{
+    collections::{HashMap, VecDeque},
     sync::{Arc, Mutex},
     time::Duration,
 };
@@ -11,7 +12,9 @@ use waddle_xmpp::telemetry::attributes::{IngressGcOutcome, IngressMaintenancePha
 
 use crate::db::Database;
 use crate::ingress_substrate::{
-    receipt_complete_nonterminal_keys, set_local_transaction_timeouts, IngressSubstrateError,
+    receipt_complete_nonterminal_keys, set_local_transaction_timeouts,
+    unreceipted_nonterminal_candidates, EffectReceiptKind, IngressSubstrateError,
+    RecoveryCandidate, RecoveryEvidence,
 };
 use crate::ingress_uow::{IngressUnitOfWork, IngressUowError};
 
@@ -31,6 +34,10 @@ pub(crate) enum MaintenanceOutcome {
 #[derive(Clone, Copy)]
 pub(crate) struct MaintenanceBudget {
     pub(crate) terminalization: Duration,
+    pub(crate) recovery: Duration,
+    pub(crate) recovery_row: Duration,
+    pub(crate) recovery_page_size: u32,
+    pub(crate) recovery_max_attempts: u32,
     pub(crate) retention: RetentionGcBudget,
     pub(crate) hard_deadline: Duration,
     pub(crate) page_size: u32,
@@ -41,8 +48,12 @@ pub(crate) struct MaintenanceBudget {
 impl MaintenanceBudget {
     pub(crate) const DEFAULT: Self = Self {
         terminalization: Duration::from_secs(2),
+        recovery: Duration::from_secs(4),
+        recovery_row: Duration::from_secs(1),
+        recovery_page_size: 64,
+        recovery_max_attempts: 64,
         retention: RetentionGcBudget::DEFAULT,
-        hard_deadline: Duration::from_secs(9),
+        hard_deadline: Duration::from_secs(13),
         page_size: 256,
         max_pages: 4,
         grace: chrono::Duration::seconds(60),
@@ -52,6 +63,8 @@ impl MaintenanceBudget {
 #[derive(Clone, Default)]
 pub(super) struct MaintenanceCursor {
     after: Arc<Mutex<Option<MaintenancePosition>>>,
+    recovery_after: Arc<Mutex<Option<MaintenancePosition>>>,
+    recovery_unsupported: Arc<Mutex<UnsupportedRows>>,
 }
 
 impl MaintenanceCursor {
@@ -83,7 +96,7 @@ fn record(phase: IngressMaintenancePhase, outcome: MaintenanceOutcome) -> Mainte
     outcome
 }
 
-/// Attest before either phase; scan and candidate transactions never overlap,
+/// Attest before maintenance; scan and candidate transactions never overlap,
 /// so even a pool of one admits foreground work between operations. Each phase
 /// has an independent timeout inside the whole-pass hard deadline.
 pub(crate) async fn run_maintenance_pass(
@@ -107,7 +120,7 @@ pub(super) async fn run_maintenance_pass_with_cursor(
     uow: &IngressUnitOfWork,
     budget: MaintenanceBudget,
     cursor: &MaintenanceCursor,
-    _environment: Option<Arc<dyn RecoveryEnvironment>>,
+    environment: Option<Arc<dyn RecoveryEnvironment>>,
 ) -> MaintenanceOutcome {
     let result = tokio::time::timeout(budget.hard_deadline, async {
         let attestation = async {
@@ -143,6 +156,17 @@ pub(super) async fn run_maintenance_pass_with_cursor(
             Err(_) => MaintenanceOutcome::TimedOut,
         };
         record(IngressMaintenancePhase::Terminalization, terminalization);
+        let recovery = if let Some(environment) = environment {
+            let outcome = tokio::time::timeout(
+                budget.recovery,
+                recover_candidates(database, uow, budget, cursor, environment.as_ref()),
+            )
+            .await
+            .unwrap_or(MaintenanceOutcome::TimedOut);
+            record(IngressMaintenancePhase::Recovery, outcome)
+        } else {
+            MaintenanceOutcome::Complete
+        };
         // The GC helper owns the retention phase timeout and preserves its
         // committed-progress counter when that timeout fires.
         let retention = match run_retention_gc_with_budget(database, budget.retention).await {
@@ -152,7 +176,7 @@ pub(super) async fn run_maintenance_pass_with_cursor(
             IngressGcOutcome::Failed | IngressGcOutcome::Unattested => MaintenanceOutcome::Failed,
         };
         record(IngressMaintenancePhase::RetentionGc, retention);
-        combine(terminalization, retention)
+        combine(combine(terminalization, recovery), retention)
     })
     .await
     .unwrap_or(MaintenanceOutcome::TimedOut);
@@ -261,6 +285,202 @@ async fn terminalize_candidates(
         }
     }
     MaintenanceOutcome::Partial
+}
+
+/// FIFO bounds memory; evidence changes always invalidate an unsupported evaluation.
+#[derive(Default)]
+struct UnsupportedRows {
+    evidence: HashMap<MessageKey, RecoveryEvidence>,
+    order: VecDeque<MessageKey>,
+}
+
+impl UnsupportedRows {
+    fn contains(&self, candidate: &RecoveryCandidate) -> bool {
+        self.evidence.get(&candidate.key) == Some(&candidate.evidence)
+    }
+
+    fn remove(&mut self, key: MessageKey) {
+        if self.evidence.remove(&key).is_some() {
+            self.order.retain(|stored| *stored != key);
+        }
+    }
+
+    fn insert(&mut self, candidate: RecoveryCandidate) {
+        self.remove(candidate.key);
+        if self.order.len() == 4096 {
+            if let Some(oldest) = self.order.pop_front() {
+                self.evidence.remove(&oldest);
+            }
+        }
+        self.order.push_back(candidate.key);
+        self.evidence.insert(candidate.key, candidate.evidence);
+    }
+}
+
+fn recoverable_receipt_kinds() -> Vec<EffectReceiptKind> {
+    super::recovery_rebuild::RECOVERABLE_KINDS
+        .iter()
+        .map(|kind| EffectReceiptKind::from_storage(kind.storage_tag()))
+        .collect()
+}
+
+async fn recovery_page(
+    database: &Database,
+    budget: MaintenanceBudget,
+    after: Option<MaintenancePosition>,
+    older_than: DateTime<Utc>,
+) -> Result<Vec<RecoveryCandidate>, IngressUowError> {
+    let mut tx = tokio::time::timeout(budget.retention.lock_timeout, database.begin())
+        .await
+        .map_err(|_| IngressUowError::Timeout)??;
+    if !set_local_transaction_timeouts(
+        &mut tx,
+        budget.retention.lock_timeout,
+        budget.retention.scan_timeout,
+    )
+    .await?
+    {
+        return Err(IngressUowError::TransactionBoundsUnproven);
+    }
+    let candidates = unreceipted_nonterminal_candidates(
+        &mut tx,
+        after,
+        older_than,
+        &recoverable_receipt_kinds(),
+        budget.recovery_page_size,
+    )
+    .await?;
+    tx.commit().await?;
+    Ok(candidates)
+}
+
+async fn recover_candidates(
+    database: &Database,
+    uow: &IngressUnitOfWork,
+    budget: MaintenanceBudget,
+    cursor: &MaintenanceCursor,
+    environment: &dyn RecoveryEnvironment,
+) -> MaintenanceOutcome {
+    let deps = environment.recovery_deps();
+    let older_than = Utc::now() - budget.grace;
+    let mut after = *cursor
+        .recovery_after
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let resumed = after.is_some();
+    let mut outcome = MaintenanceOutcome::Complete;
+    let mut attempts = 0;
+    if budget.recovery_page_size == 0 {
+        return MaintenanceOutcome::Partial;
+    }
+    loop {
+        let candidates = match recovery_page(database, budget, after, older_than).await {
+            Ok(candidates) => candidates,
+            Err(error) => {
+                tracing::warn!(%error, "ingress recovery candidate scan failed");
+                return failure_outcome(&error);
+            }
+        };
+        let exhausted = candidates.len() < budget.recovery_page_size as usize;
+        for candidate in candidates {
+            let unsupported = cursor
+                .recovery_unsupported
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .contains(&candidate);
+            if !unsupported && attempts >= budget.recovery_max_attempts {
+                return MaintenanceOutcome::Partial;
+            }
+            // Advance before awaiting a row, but never past an unattempted budget boundary.
+            after = Some((candidate.created_at, candidate.key));
+            *cursor
+                .recovery_after
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner) = after;
+            if unsupported {
+                continue;
+            }
+            cursor
+                .recovery_unsupported
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .remove(candidate.key);
+            attempts += 1;
+            let deadline = tokio::time::Instant::now() + budget.recovery_row;
+            let result = tokio::time::timeout_at(
+                deadline,
+                super::recovery_executor::recover_row(
+                    database,
+                    uow,
+                    &deps,
+                    candidate.key,
+                    deadline,
+                ),
+            )
+            .await;
+            if !record_recovery_result(cursor, candidate, result) {
+                outcome = MaintenanceOutcome::Partial;
+            }
+            tokio::task::yield_now().await;
+        }
+        if exhausted {
+            *cursor
+                .recovery_after
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner) = None;
+            return if resumed {
+                MaintenanceOutcome::Partial
+            } else {
+                outcome
+            };
+        }
+    }
+}
+
+fn record_recovery_result(
+    cursor: &MaintenanceCursor,
+    candidate: RecoveryCandidate,
+    result: Result<
+        Result<super::recovery_executor::RowRecovery, IngressUowError>,
+        tokio::time::error::Elapsed,
+    >,
+) -> bool {
+    use super::recovery_executor::RowRecovery;
+    use waddle_xmpp::telemetry::reliability::{
+        increment_ingress_maintenance_recovered_obligations,
+        increment_ingress_maintenance_unrecoverable_obligations,
+    };
+    match result {
+        Ok(Ok(RowRecovery::Executed {
+            recovered,
+            unrecoverable,
+            terminal,
+            unsupported,
+        })) => {
+            increment_ingress_maintenance_recovered_obligations(recovered);
+            for kind in unrecoverable {
+                increment_ingress_maintenance_unrecoverable_obligations(1, kind);
+            }
+            if unsupported {
+                cursor
+                    .recovery_unsupported
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner)
+                    .insert(candidate);
+            }
+            tracing::debug!(key = ?candidate.key, recovered, terminal, "ingress recovery evaluated");
+            true
+        }
+        Ok(Ok(RowRecovery::Vanished | RowRecovery::NothingPending)) => true,
+        Ok(Err(error)) => {
+            tracing::warn!(%error, key = ?candidate.key, "ingress recovery row deferred");
+            false
+        }
+        Err(_) => {
+            tracing::debug!(key = ?candidate.key, "ingress recovery row deadline elapsed");
+            false
+        }
+    }
 }
 
 #[cfg(test)]

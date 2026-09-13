@@ -19,6 +19,7 @@ pub(crate) mod maintenance;
 mod receipts;
 mod recovery;
 mod recovery_environment;
+mod recovery_executor;
 mod recovery_rebuild;
 pub use recovery::{RecoveryPolicyDecision, RecoveryPreparation, RecoverySweepOutcome};
 use recovery_environment::RecoveryBinding;
@@ -106,6 +107,11 @@ pub struct IngressAuthority {
 }
 
 impl IngressAuthority {
+    /// Request a bounded maintenance pass.
+    pub fn trigger_maintenance(&self) {
+        self.gc.trigger();
+    }
+
     /// Bind the boot-created environment without retaining the WebSocket state.
     pub fn bind_recovery_environment(&self, environment: Weak<dyn RecoveryEnvironment>) {
         self.recovery.bind(environment);
