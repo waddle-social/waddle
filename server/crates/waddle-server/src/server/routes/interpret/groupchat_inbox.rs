@@ -605,7 +605,7 @@ pub(crate) async fn reconcile_groupchat_notification_candidates_for_sweep(
     let mut completed = 0;
     let mut had_failure = false;
     for recovery in recoveries {
-        match reconcile_recovery(state, &recovery).await {
+        match reconcile_groupchat_notification_recovery(state, &recovery).await {
             Ok(
                 crate::ingress::RecoverySweepOutcome::Completed
                 | crate::ingress::RecoverySweepOutcome::CanonicalGone,
@@ -626,7 +626,7 @@ pub(crate) async fn reconcile_groupchat_notification_candidates_for_sweep(
     }
 }
 
-async fn reconcile_recovery(
+pub(crate) async fn reconcile_groupchat_notification_recovery(
     state: &WebSocketState,
     recovery: &waddle_xmpp::inbox::storage::GroupchatNotificationRecovery,
 ) -> Result<crate::ingress::RecoverySweepOutcome, crate::ingress_uow::IngressUowError> {

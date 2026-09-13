@@ -19,6 +19,7 @@ pub(crate) mod maintenance;
 mod receipts;
 mod recovery;
 mod recovery_environment;
+mod recovery_rebuild;
 pub use recovery::{RecoveryPolicyDecision, RecoveryPreparation, RecoverySweepOutcome};
 use recovery_environment::RecoveryBinding;
 pub use recovery_environment::RecoveryEnvironment;

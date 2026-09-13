@@ -162,7 +162,7 @@ pub(super) fn restore_recorded_offline_deliveries(
     reconstructed
 }
 
-fn specialized_invitation(intent: &IngressEffectIntent) -> bool {
+pub(super) fn specialized_invitation(intent: &IngressEffectIntent) -> bool {
     matches!(
         intent,
         IngressEffectIntent::MucInviteLedger { .. }

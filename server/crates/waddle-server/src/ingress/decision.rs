@@ -45,6 +45,51 @@ pub struct IngressDecision {
     pub receipts_pending: Vec<EffectReceiptKey>,
 }
 
+pub(super) fn bind_claim_keys(external: &mut [ExternalEffect], key: MessageKey) {
+    for effect in external {
+        if let crate::server::routes::interpret::effects::ExternalEffect::InviteLedger(
+            crate::server::routes::websocket::handlers::message::muc_invite::InviteLedgerMutation::Claim { message_key, .. }
+        ) = effect {
+            *message_key = Some(key);
+        }
+    }
+}
+
+pub(super) fn assemble_receipts(
+    external: &[ExternalEffect],
+    intents: &[waddle_xmpp::ingress::IngressEffectIntent],
+    route_progress: &[super::recorded::RouteProgress],
+) -> Result<(Vec<Vec<EffectReceiptKey>>, Vec<EffectReceiptKey>), crate::ingress_uow::IngressUowError>
+{
+    let mut external_receipts = super::durable::external_receipts(external, intents)?;
+    // A progress-aware arm can own a strict subset of the frozen fanout.
+    // Generic receipt mapping deliberately requires full coverage; add only
+    // the exact route receipt whose aggregate this arm settles transactionally.
+    for (index, effect) in external.iter().enumerate() {
+        if super::execute_uow::owns(effect, route_progress) {
+            for progress in route_progress
+                .iter()
+                .filter(|progress| progress.matches(effect))
+            {
+                if !external_receipts[index].contains(&progress.receipt) {
+                    external_receipts[index].push(progress.receipt.clone());
+                }
+            }
+        }
+    }
+    let mut arm_owned_receipts = Vec::new();
+    for (index, effect) in external.iter().enumerate() {
+        if super::execute_uow::owns(effect, route_progress) {
+            for receipt in &external_receipts[index] {
+                if !arm_owned_receipts.contains(receipt) {
+                    arm_owned_receipts.push(receipt.clone());
+                }
+            }
+        }
+    }
+    Ok((external_receipts, arm_owned_receipts))
+}
+
 #[cfg(test)]
 mod tests {
     use super::IngressDecisionClass;

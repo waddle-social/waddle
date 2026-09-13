@@ -89,7 +89,7 @@ pub fn restore_delivery_payloads(
     }
 }
 
-fn delivery_message(
+pub(super) fn delivery_message(
     envelope: &crate::ingress_substrate::MessageEnvelope,
     recipient: &jid::BareJid,
     intents: &[IngressEffectIntent],

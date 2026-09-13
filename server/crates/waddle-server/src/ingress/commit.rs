@@ -511,39 +511,9 @@ async fn commit_attempt(
         }
     }
     let mut external = external;
-    for effect in &mut external {
-        if let crate::server::routes::interpret::effects::ExternalEffect::InviteLedger(
-            crate::server::routes::websocket::handlers::message::muc_invite::InviteLedgerMutation::Claim { message_key, .. }
-        ) = effect {
-            *message_key = Some(key);
-        }
-    }
-    let mut external_receipts = super::durable::external_receipts(&external, &intents)?;
-    // A progress-aware arm can own a strict subset of the frozen fanout.
-    // Generic receipt mapping deliberately requires full coverage; add only
-    // the exact route receipt whose aggregate this arm settles transactionally.
-    for (index, effect) in external.iter().enumerate() {
-        if super::execute_uow::owns(effect, &route_progress) {
-            for progress in route_progress
-                .iter()
-                .filter(|progress| progress.matches(effect))
-            {
-                if !external_receipts[index].contains(&progress.receipt) {
-                    external_receipts[index].push(progress.receipt.clone());
-                }
-            }
-        }
-    }
-    let mut arm_owned_receipts = Vec::new();
-    for (index, effect) in external.iter().enumerate() {
-        if super::execute_uow::owns(effect, &route_progress) {
-            for receipt in &external_receipts[index] {
-                if !arm_owned_receipts.contains(receipt) {
-                    arm_owned_receipts.push(receipt.clone());
-                }
-            }
-        }
-    }
+    super::decision::bind_claim_keys(&mut external, key);
+    let (external_receipts, arm_owned_receipts) =
+        super::decision::assemble_receipts(&external, &intents, &route_progress)?;
     let decision = IngressDecision {
         class,
         message_key: Some(key),
@@ -603,6 +573,25 @@ pub(crate) async fn commit_transaction(
         }
     })
 }
+/// Whether the recorded route delegated recipient preparation to a live connection.
+pub(super) fn live_recipient_delegated(
+    target: &waddle_xmpp::ingress::NormalizedTarget,
+    sender: &jid::BareJid,
+    recorded: &[IngressEffectIntent],
+) -> bool {
+    use waddle_xmpp::ingress::{EffectMessageIdentity, NormalizedTarget};
+    let NormalizedTarget::Full(full) = target else {
+        return false;
+    };
+    let recipient = full.to_bare();
+    recipient != *sender
+        && !recorded.iter().any(|intent| matches!(intent,
+            IngressEffectIntent::ArchiveAuthoritative { archive, .. } if archive == &recipient))
+        && recorded.iter().any(|intent| matches!(intent,
+            IngressEffectIntent::RouteDirect { recipient: saved, fanout, route_identity: EffectMessageIdentity::CaptureOrdinal(_) }
+                if saved == &recipient && fanout.as_slice() == [full.clone()]))
+}
+
 /// A live full-JID route delegates recipient preparation to that connection.
 /// Disconnecting later cannot move those obligations into the sender transaction.
 fn retain_live_recipient_plan(
@@ -615,20 +604,16 @@ fn retain_live_recipient_plan(
         direct::{DurableDirectEffect, ExternalDirectEffect},
         DurableEffect, Effect, ExternalEffect,
     };
-    use waddle_xmpp::ingress::{
-        EffectAuthorityKey, EffectMessageIdentity, NormalizedTarget, PendingDeliveryMutation,
-    };
+    use waddle_xmpp::ingress::{EffectAuthorityKey, NormalizedTarget, PendingDeliveryMutation};
     let NormalizedTarget::Full(full) = &submission.target else {
         return;
     };
     let recipient = full.to_bare();
-    if recipient == *submission.principal.bare_jid()
-        || recorded.iter().any(|intent| matches!(intent,
-            IngressEffectIntent::ArchiveAuthoritative { archive, .. } if archive == &recipient))
-        || !recorded.iter().any(|intent| matches!(intent,
-            IngressEffectIntent::RouteDirect { recipient: saved, fanout, route_identity: EffectMessageIdentity::CaptureOrdinal(_) }
-                if saved == &recipient && fanout.as_slice() == [full.clone()]))
-    {
+    if !live_recipient_delegated(
+        &submission.target,
+        submission.principal.bare_jid(),
+        recorded,
+    ) {
         return;
     }
     plan.intents.retain(|intent| {
