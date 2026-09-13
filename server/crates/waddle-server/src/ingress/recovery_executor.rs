@@ -213,9 +213,13 @@ async fn freeze(
         .ok_or(IngressUowError::EffectIntentMessageMissing)?;
     let created_at = CanonicalMessageRepository::created_at(&mut tx, key).await?;
     let recorded = EffectIntentRepository::load(&mut tx, key).await?;
+    // One bulk read of receipt identities: a groupchat row can carry one
+    // intent per occupant, and a per-intent lookup would spend the whole row
+    // deadline before anything recoverable on it could run.
+    let receipted = EffectReceiptRepository::keys(&mut tx, key).await?;
     let mut unreceipted = Vec::new();
     for intent in &recorded {
-        if !contains(&mut tx, key, &super::receipt_key(intent)?).await? {
+        if !receipted.contains(&super::receipt_key(intent)?) {
             unreceipted.push(intent.clone());
         }
     }

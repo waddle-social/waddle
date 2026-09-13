@@ -417,6 +417,10 @@ async fn commit_attempt(
                     | waddle_xmpp::ingress::NotificationActivityMutation::OfflineDelivery { .. }, ..
             })
     }).cloned().collect();
+    // The canonical receipt time travels with every route obligation so a
+    // detached append made by a later replay (or by recovery) is stamped with
+    // the acceptance, not with the retransmission.
+    let received_at = CanonicalMessageRepository::created_at(&mut tx, key).await?;
     let mut route_progress = Vec::new();
     for intent in &intents {
         let IngressEffectIntent::RouteDirect {
@@ -444,7 +448,7 @@ async fn commit_attempt(
                 recipient: recipient.clone(),
                 fanout: fanout.clone(),
                 route_identity: route_identity.clone(),
-                received_at: None,
+                received_at: Some(received_at),
                 completed,
             });
         }

@@ -796,6 +796,39 @@ impl EffectReceiptRepository {
         ingress_substrate::receipts_complete(transaction, message_key).await
     }
 
+    /// Every receipt identity recorded for the row, loaded in one query so a
+    /// high-fanout row (thousands of intents) can be classified inside a
+    /// bounded maintenance deadline instead of one lookup per intent.
+    pub async fn keys(
+        transaction: &mut IngressUowTransaction<'_>,
+        message_key: MessageKey,
+    ) -> Result<Vec<crate::ingress::EffectReceiptKey>, IngressUowError> {
+        let sql = dialect_sql(
+            transaction,
+            "SELECT kind, semantic_identity_hash FROM ingress_effect_receipts WHERE message_key = ?::uuid",
+            "SELECT kind, semantic_identity_hash FROM ingress_effect_receipts WHERE message_key = ?",
+        );
+        let mut rows = transaction
+            .transaction_mut()
+            .query(sql, crate::db_params![message_key.to_storage().to_string()])
+            .await?;
+        let mut keys = Vec::new();
+        while let Some(row) = rows.next().await? {
+            let kind: i64 = row.get(0)?;
+            let hash: Vec<u8> = row.get(1)?;
+            let semantic_identity_hash: [u8; 32] = hash
+                .try_into()
+                .map_err(|_| IngressUowError::InvalidStoredReceiptHash)?;
+            keys.push(crate::ingress::EffectReceiptKey {
+                kind: EffectReceiptKind::from_storage(
+                    i32::try_from(kind).map_err(|_| IngressUowError::InvalidStoredReceiptHash)?,
+                ),
+                semantic_identity_hash,
+            });
+        }
+        Ok(keys)
+    }
+
     /// Receipts present for the row, for maintenance progress accounting.
     pub async fn count_pooled(
         db: &Database,

@@ -72,6 +72,9 @@ pub(super) struct MaintenanceCursor {
     /// Held by the accounting worker; continuations of a partial pass spawn
     /// their own worker, and this serializes them to one pooled read at a time.
     recovery_accounting_worker: Arc<tokio::sync::Mutex<()>>,
+    /// Highest receipt total already credited per row, so a delayed worker
+    /// and a later pass's worker never credit the same receipt twice.
+    recovery_credited: Arc<Mutex<CreditedRows>>,
 }
 
 impl MaintenanceCursor {
@@ -424,6 +427,13 @@ async fn recover_candidates(
                 .unwrap_or_else(std::sync::PoisonError::into_inner)
                 .remove(candidate.key);
             attempts += 1;
+            // Queue accounting before the attempt: the phase deadline can cancel
+            // this await after an effect committed, and the credit must survive.
+            cursor
+                .recovery_accounting
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .push((candidate.key, candidate.evidence.receipts));
             let deadline = tokio::time::Instant::now() + budget.recovery_row;
             let result = tokio::time::timeout_at(
                 deadline,
@@ -436,7 +446,7 @@ async fn recover_candidates(
                 ),
             )
             .await;
-            match record_recovery_result(cursor, candidate, result) {
+            match record_recovery_result(candidate, result) {
                 RowDisposition::Deferred => outcome = MaintenanceOutcome::Partial,
                 RowDisposition::Done => {}
                 RowDisposition::Unsupported => {
@@ -502,6 +512,7 @@ fn spawn_recovery_accounting(database: &Database, cursor: &MaintenanceCursor) {
     }
     let database = database.clone();
     let worker = Arc::clone(&cursor.recovery_accounting_worker);
+    let credited = Arc::clone(&cursor.recovery_credited);
     tokio::spawn(async move {
         use waddle_xmpp::telemetry::reliability::increment_ingress_maintenance_recovered_obligations;
         // One accounting read at a time across passes: a partial pass's
@@ -513,7 +524,14 @@ fn spawn_recovery_accounting(database: &Database, cursor: &MaintenanceCursor) {
             match tokio::time::timeout(RECOVERY_ACCOUNTING_BUDGET, receipts_now(&database, key))
                 .await
             {
-                Ok(Ok(now)) => recovered += now.saturating_sub(u64::from(before)),
+                Ok(Ok(now)) => {
+                    // Credit only above the higher of this pass's scan baseline
+                    // and what any earlier worker already credited for the row.
+                    recovered += credited
+                        .lock()
+                        .unwrap_or_else(std::sync::PoisonError::into_inner)
+                        .credit(key, u64::from(before), now);
+                }
                 Ok(Err(error)) => {
                     tracing::warn!(%error, ?key, "ingress recovery accounting failed");
                 }
@@ -526,6 +544,31 @@ fn spawn_recovery_accounting(database: &Database, cursor: &MaintenanceCursor) {
             increment_ingress_maintenance_recovered_obligations(recovered);
         }
     });
+}
+
+/// Per-row receipt totals already credited to `recovered_obligations`.
+/// Bounded FIFO like the unsupported cache; eviction only risks re-crediting
+/// a row after 4096 other rows were accounted, never losing credit.
+#[derive(Default)]
+struct CreditedRows {
+    totals: HashMap<MessageKey, u64>,
+    order: VecDeque<MessageKey>,
+}
+
+impl CreditedRows {
+    fn credit(&mut self, key: MessageKey, before: u64, now: u64) -> u64 {
+        let base = before.max(self.totals.get(&key).copied().unwrap_or(0));
+        let delta = now.saturating_sub(base);
+        if self.totals.insert(key, now.max(base)).is_none() {
+            if self.order.len() == 4096 {
+                if let Some(oldest) = self.order.pop_front() {
+                    self.totals.remove(&oldest);
+                }
+            }
+            self.order.push_back(key);
+        }
+        delta
+    }
 }
 
 /// Upper bound for the detached receipt-count read behind the recovered counter.
@@ -546,7 +589,6 @@ enum RowDisposition {
 }
 
 fn record_recovery_result(
-    cursor: &MaintenanceCursor,
     candidate: RecoveryCandidate,
     result: Result<
         Result<super::recovery_executor::RowRecovery, IngressUowError>,
@@ -555,11 +597,6 @@ fn record_recovery_result(
 ) -> RowDisposition {
     use super::recovery_executor::RowRecovery;
     use waddle_xmpp::telemetry::reliability::increment_ingress_maintenance_unrecoverable_obligations;
-    cursor
-        .recovery_accounting
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner)
-        .push((candidate.key, candidate.evidence.receipts));
     match result {
         Ok(Ok(RowRecovery::Executed {
             unrecoverable,
