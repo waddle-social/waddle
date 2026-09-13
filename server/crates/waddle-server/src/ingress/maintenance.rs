@@ -16,6 +16,7 @@ use crate::ingress_substrate::{
 use crate::ingress_uow::{IngressUnitOfWork, IngressUowError};
 
 use super::gc::{run_retention_gc_with_budget, RetentionGcBudget};
+use super::RecoveryEnvironment;
 
 type MaintenancePosition = (DateTime<Utc>, MessageKey);
 
@@ -89,8 +90,16 @@ pub(crate) async fn run_maintenance_pass(
     database: &Database,
     uow: &IngressUnitOfWork,
     budget: MaintenanceBudget,
+    environment: Option<Arc<dyn RecoveryEnvironment>>,
 ) -> MaintenanceOutcome {
-    run_maintenance_pass_with_cursor(database, uow, budget, &MaintenanceCursor::default()).await
+    run_maintenance_pass_with_cursor(
+        database,
+        uow,
+        budget,
+        &MaintenanceCursor::default(),
+        environment,
+    )
+    .await
 }
 
 pub(super) async fn run_maintenance_pass_with_cursor(
@@ -98,6 +107,7 @@ pub(super) async fn run_maintenance_pass_with_cursor(
     uow: &IngressUnitOfWork,
     budget: MaintenanceBudget,
     cursor: &MaintenanceCursor,
+    _environment: Option<Arc<dyn RecoveryEnvironment>>,
 ) -> MaintenanceOutcome {
     let result = tokio::time::timeout(budget.hard_deadline, async {
         let attestation = async {

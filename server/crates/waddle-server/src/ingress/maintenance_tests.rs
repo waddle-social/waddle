@@ -152,7 +152,7 @@ fn spawn_coordinator(
             let outcomes = outcomes.clone();
             Box::pin(async move {
                 let outcome =
-                    run_maintenance_pass_with_cursor(&database, &uow, budget, &cursor).await;
+                    run_maintenance_pass_with_cursor(&database, &uow, budget, &cursor, None).await;
                 let _ = outcomes.send(outcome);
                 outcome
             })
@@ -200,7 +200,7 @@ async fn cancellation_during_real_pass(fixture: IngressFixture) {
             let pass_started = pass_started.clone();
             Box::pin(async move {
                 pass_started.notify_one();
-                run_maintenance_pass(&database, &uow, MaintenanceBudget::DEFAULT).await
+                run_maintenance_pass(&database, &uow, MaintenanceBudget::DEFAULT, None).await
             })
         }),
         partial_retry_delay: Duration::from_millis(10),
@@ -227,7 +227,7 @@ async fn periodic_grace_repair(fixture: IngressFixture) {
     let key = interrupted_delivery(&fixture, "maintenance-grace").await;
     assert_eq!(terminal_count(&fixture).await, 0);
     assert_eq!(
-        run_maintenance_pass(&fixture.db, &fixture.uow, MaintenanceBudget::DEFAULT).await,
+        run_maintenance_pass(&fixture.db, &fixture.uow, MaintenanceBudget::DEFAULT, None).await,
         MaintenanceOutcome::Complete
     );
     assert_eq!(
@@ -282,7 +282,7 @@ async fn backlog_and_retention(fixture: IngressFixture) {
         ..immediate_budget()
     };
     assert_eq!(
-        run_maintenance_pass(&fixture.db, &fixture.uow, budget).await,
+        run_maintenance_pass(&fixture.db, &fixture.uow, budget, None).await,
         MaintenanceOutcome::Partial
     );
     assert_eq!(terminal_count(&fixture).await, 1, "one bounded page only");
@@ -313,7 +313,7 @@ async fn backlog_and_retention(fixture: IngressFixture) {
         )
         .await;
     assert_eq!(
-        run_maintenance_pass(&fixture.db, &fixture.uow, immediate_budget()).await,
+        run_maintenance_pass(&fixture.db, &fixture.uow, immediate_budget(), None).await,
         MaintenanceOutcome::Complete
     );
     assert_eq!(
@@ -341,7 +341,7 @@ async fn epoch_one_repair(fixture: IngressFixture) {
         .await;
     interrupted_delivery(&fixture, "maintenance-epoch-one").await;
     assert_eq!(
-        run_maintenance_pass(&fixture.db, &fixture.uow, immediate_budget()).await,
+        run_maintenance_pass(&fixture.db, &fixture.uow, immediate_budget(), None).await,
         MaintenanceOutcome::Complete
     );
     assert_eq!(terminal_count(&fixture).await, 1);
@@ -355,7 +355,7 @@ async fn failed_head_does_not_starve_next_row(fixture: IngressFixture) {
     backdate_created(&fixture, next, 90).await;
     test_hooks::force_terminalization_timeout_once(head);
     assert_eq!(
-        run_maintenance_pass(&fixture.db, &fixture.uow, MaintenanceBudget::DEFAULT).await,
+        run_maintenance_pass(&fixture.db, &fixture.uow, MaintenanceBudget::DEFAULT, None).await,
         MaintenanceOutcome::Partial
     );
     assert_eq!(
@@ -364,7 +364,7 @@ async fn failed_head_does_not_starve_next_row(fixture: IngressFixture) {
         "a failed head row must not starve the rest of its page"
     );
     assert_eq!(
-        run_maintenance_pass(&fixture.db, &fixture.uow, MaintenanceBudget::DEFAULT).await,
+        run_maintenance_pass(&fixture.db, &fixture.uow, MaintenanceBudget::DEFAULT, None).await,
         MaintenanceOutcome::Complete
     );
     assert_eq!(terminal_count(&fixture).await, 2);
@@ -466,17 +466,17 @@ async fn postgres_maintenance_contended_prefix_preserves_continuation_cursor() {
     };
     let cursor = MaintenanceCursor::default();
     assert_eq!(
-        run_maintenance_pass_with_cursor(&fixture.db, &fixture.uow, budget, &cursor).await,
+        run_maintenance_pass_with_cursor(&fixture.db, &fixture.uow, budget, &cursor, None).await,
         MaintenanceOutcome::TimedOut
     );
     assert_eq!(terminal_count(&fixture).await, 0);
     assert_eq!(
-        run_maintenance_pass_with_cursor(&fixture.db, &fixture.uow, budget, &cursor).await,
+        run_maintenance_pass_with_cursor(&fixture.db, &fixture.uow, budget, &cursor, None).await,
         MaintenanceOutcome::TimedOut
     );
     assert_eq!(terminal_count(&fixture).await, 0);
     assert_eq!(
-        run_maintenance_pass_with_cursor(&fixture.db, &fixture.uow, budget, &cursor).await,
+        run_maintenance_pass_with_cursor(&fixture.db, &fixture.uow, budget, &cursor, None).await,
         MaintenanceOutcome::Partial
     );
     assert_eq!(
@@ -487,7 +487,7 @@ async fn postgres_maintenance_contended_prefix_preserves_continuation_cursor() {
 
     blocker.commit().await.expect("release contended prefix");
     assert_eq!(
-        run_maintenance_pass_with_cursor(&fixture.db, &fixture.uow, budget, &cursor).await,
+        run_maintenance_pass_with_cursor(&fixture.db, &fixture.uow, budget, &cursor, None).await,
         MaintenanceOutcome::Complete
     );
     assert_eq!(terminal_count(&fixture).await, 3);
@@ -516,7 +516,7 @@ async fn postgres_pool_one_remains_admissible_during_maintenance() {
         let key = interrupted_delivery(&fixture, origin).await;
         backdate_created(&fixture, key, 120).await;
     }
-    let maintenance = run_maintenance_pass(&fixture.db, &fixture.uow, immediate_budget());
+    let maintenance = run_maintenance_pass(&fixture.db, &fixture.uow, immediate_budget(), None);
     let foreground = async {
         let transaction = tokio::time::timeout(Duration::from_secs(2), fixture.uow.begin())
             .await

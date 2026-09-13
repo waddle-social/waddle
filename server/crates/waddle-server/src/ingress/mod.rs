@@ -18,7 +18,10 @@ pub mod identity;
 pub(crate) mod maintenance;
 mod receipts;
 mod recovery;
+mod recovery_environment;
 pub use recovery::{RecoveryPolicyDecision, RecoveryPreparation, RecoverySweepOutcome};
+use recovery_environment::RecoveryBinding;
+pub use recovery_environment::RecoveryEnvironment;
 mod recorded;
 pub use recorded::RouteProgress;
 mod rejection;
@@ -86,6 +89,7 @@ pub struct IngressAuthority {
     uow: IngressUnitOfWork,
     config: IngressConfig,
     gc: gc::RetentionGcCoordinator,
+    recovery: RecoveryBinding,
     cancellation: CancellationToken,
     force_stop: CancellationToken,
     gc_task: Mutex<Option<tokio::task::JoinHandle<()>>>,
@@ -101,6 +105,11 @@ pub struct IngressAuthority {
 }
 
 impl IngressAuthority {
+    /// Bind the boot-created environment without retaining the WebSocket state.
+    pub fn bind_recovery_environment(&self, environment: Weak<dyn RecoveryEnvironment>) {
+        self.recovery.bind(environment);
+    }
+
     pub async fn new(
         config: IngressConfig,
         database: Database,
@@ -155,7 +164,8 @@ impl IngressAuthority {
             }
             Err(error) => return Err(error.into()),
         }
-        let gc = gc::RetentionGcCoordinator::new(database.clone(), uow.clone());
+        let recovery = RecoveryBinding::default();
+        let gc = gc::RetentionGcCoordinator::new(database.clone(), uow.clone(), recovery.clone());
         let cancellation = CancellationToken::new();
         let force_stop = CancellationToken::new();
         let gc_task = tokio::spawn(gc::run_retention_gc_coordinator(
@@ -168,6 +178,7 @@ impl IngressAuthority {
             uow,
             config,
             gc,
+            recovery,
             cancellation,
             force_stop,
             gc_task: Mutex::new(Some(gc_task)),
@@ -194,8 +205,10 @@ impl IngressAuthority {
             .expect("enroll test ingress lineage");
         let uow = IngressUnitOfWork::open(database.clone(), lineage)
             .expect("open test ingress unit of work");
+        let recovery = RecoveryBinding::default();
         Self {
-            gc: gc::RetentionGcCoordinator::new(database.clone(), uow.clone()),
+            gc: gc::RetentionGcCoordinator::new(database.clone(), uow.clone(), recovery.clone()),
+            recovery,
             database,
             uow,
             config: IngressConfig::default(),
