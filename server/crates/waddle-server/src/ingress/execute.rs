@@ -593,6 +593,14 @@ pub async fn execute_effects(
             if recorded.contains(&key) {
                 continue;
             }
+            #[cfg(test)]
+            if test_hooks::take_receipt_failure(message_key, &key) {
+                meter_unresolved(effect);
+                report
+                    .receipt_failures
+                    .push((key, IngressUowError::Timeout.into()));
+                continue;
+            }
             let result = tokio::time::timeout_at(
                 deadline,
                 EffectReceiptRepository::record_receipt_pooled(
