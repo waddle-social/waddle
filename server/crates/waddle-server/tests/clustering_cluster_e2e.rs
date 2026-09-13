@@ -1159,6 +1159,16 @@ async fn cluster_exit_criteria_end_to_end() {
         result.expect("concurrent echo task");
     }
 
+    partial_room_fanout_stays_pending_during_remote_relay_timeout(
+        &db,
+        &server_a,
+        &server_b,
+        &mut relay_b,
+        &node_a,
+        &node_b,
+    )
+    .await;
+
     // --- Exit criterion (part 1): the receiver-applied ask budgets. A 5s
     // handler exceeds relay_a's receiver-side reply budget (1.5s): the
     // receiver's local ask times out first and sends a ReplyTimeout error
@@ -2504,6 +2514,279 @@ async fn groupchat_fanout_reaches_foreign_node_occupant_and_terminalizes() {
         failures.is_empty(),
         "groupchat regression failures: {failures:#?}"
     );
+}
+
+/// #1757: a blocked remote relay leaves durable progress for the local
+/// non-sender only. Reuse the singleton swarm's fault handle; no second
+/// `swarm::spawn` is legal in this integration-test binary.
+///
+/// This pins partial progress before the maintenance grace period, not
+/// recovery after a target-owner epoch change. The two subprocesses share
+/// eligible rows, so aging this row cannot isolate origin-node maintenance:
+/// B's maintenance can legitimately deliver its own local occupant copy.
+async fn partial_room_fanout_stays_pending_during_remote_relay_timeout(
+    db: &Database,
+    server_a: &TestServer,
+    server_b: &TestServer,
+    relay_b: &mut RelayHandle,
+    node_a: &str,
+    node_b: &str,
+) {
+    let room: jid::BareJid = format!("partial-{}@muc.localhost", uuid::Uuid::new_v4())
+        .parse()
+        .expect("unique partial room");
+    let mut sender = WsXmppClient::connect_and_auth(
+        &server_a.ws_url(),
+        "localhost",
+        CLUSTER_PEER_USERNAME,
+        CLUSTER_PEER_PASSWORD,
+        &format!("partial-s-{}", uuid::Uuid::new_v4()),
+    )
+    .await
+    .expect("partial sender");
+    join_fanout_room(&mut sender, &room, "sender").await;
+    let mut local = WsXmppClient::connect_and_auth(
+        &server_a.ws_url(),
+        "localhost",
+        CLUSTER_PEER_USERNAME,
+        CLUSTER_PEER_PASSWORD,
+        &format!("partial-a-{}", uuid::Uuid::new_v4()),
+    )
+    .await
+    .expect("local non-sender");
+    join_fanout_room(&mut local, &room, "local").await;
+    let mut remote = WsXmppClient::connect_and_auth(
+        &server_b.ws_url(),
+        "localhost",
+        "admin",
+        server_b.fixed_account_password(),
+        &format!("partial-b-{}", uuid::Uuid::new_v4()),
+    )
+    .await
+    .expect("remote non-sender");
+    join_fanout_room(&mut remote, &room, "remote").await;
+    let local_jid: jid::FullJid = local
+        .full_jid
+        .as_ref()
+        .expect("bound local JID")
+        .parse()
+        .expect("typed local JID");
+    let remote_jid: jid::FullJid = remote
+        .full_jid
+        .as_ref()
+        .expect("bound remote JID")
+        .parse()
+        .expect("typed remote JID");
+    let from = room.with_resource_str("sender").expect("sender occupant");
+
+    // Earlier singleton scenarios keep cluster-peer owned on A and admin
+    // owned on B. Reuse those owners; socket placement alone is not proof.
+    use waddle_xmpp::ownership::ClaimStore;
+    let claims = PostgresClaimStore::new(db.clone());
+    let local_claim = claims
+        .current_claim(&Entity::new(
+            EntityType::UserActor,
+            local_jid.to_bare().to_string(),
+        ))
+        .await
+        .expect("local owner lookup")
+        .expect("local owner");
+    let room_claim = claims
+        .current_claim(&Entity::new(EntityType::RoomActor, room.to_string()))
+        .await
+        .expect("room owner lookup")
+        .expect("room owner");
+    let remote_claim = claims
+        .current_claim(&Entity::new(
+            EntityType::UserActor,
+            remote_jid.to_bare().to_string(),
+        ))
+        .await
+        .expect("remote owner lookup")
+        .expect("remote owner");
+    assert!(local_claim.owner_lease_fresh && room_claim.owner_lease_fresh);
+    assert!(remote_claim.owner_lease_fresh);
+    assert_eq!(room_claim.owner, local_claim.owner);
+    assert_eq!(local_claim.owner.node_id, node_a);
+    assert_eq!(remote_claim.owner.node_id, node_b);
+
+    // Establish a complete broadcast baseline before injecting the fault.
+    let baseline = send_partial_fanout(&mut sender, &room, "m1").await;
+    receive_fanout_copy(&mut local, &from, "m1", None)
+        .await
+        .expect("warm local copy");
+    receive_fanout_copy(&mut remote, &from, "m1", None)
+        .await
+        .expect("warm remote copy");
+    receive_fanout_copy(&mut sender, &from, "m1", None)
+        .await
+        .expect("warm reflection");
+    let baseline_key = partial_fanout_key(db, &baseline).await;
+    tokio::time::timeout(Duration::from_secs(15), async {
+        while !partial_fanout_terminal(db, baseline_key).await {
+            tokio::time::sleep(Duration::from_millis(100)).await;
+        }
+    })
+    .await
+    .expect("warm broadcast terminalizes");
+
+    // RelaySleep blocks only the relay actor, preserving B's live resource,
+    // fresh user claim and room membership. The fault ask itself times out
+    // before the handler wakes; assertions stay inside the 60s recovery grace.
+    let blocked_at = tokio::time::Instant::now();
+    assert!(
+        relay_b.sleep(30_000).await.is_err(),
+        "sleep ask must time out"
+    );
+    let pending = send_partial_fanout(&mut sender, &room, "m2").await;
+    receive_fanout_copy(&mut local, &from, "m2", None)
+        .await
+        .expect("local copy before timeout");
+    let pending_key = partial_fanout_key(db, &pending).await;
+    tokio::time::timeout(Duration::from_secs(15), async {
+        while partial_fanout_resources(db, pending_key).await != vec![local_jid.clone()] {
+            tokio::time::sleep(Duration::from_millis(100)).await;
+        }
+    })
+    .await
+    .expect("only local non-sender has progress");
+    assert!(!partial_fanout_terminal(db, pending_key).await);
+    assert!(
+        blocked_at.elapsed() < Duration::from_secs(25),
+        "assert while relay is blocked and before maintenance eligibility"
+    );
+    assert_eq!(
+        partial_fanout_resources(db, pending_key).await,
+        vec![local_jid]
+    );
+    assert!(!partial_fanout_terminal(db, pending_key).await);
+    {
+        let conn = db.guard().await.expect("aggregate receipt snapshot");
+        let mut rows = conn.query(
+            "SELECT count(*) FROM ingress_effect_receipts WHERE message_key = ?::uuid AND kind = 2",
+            waddle_server::db_params![pending_key.to_string()],
+        ).await.expect("aggregate receipt count");
+        let count: i64 = rows
+            .next()
+            .await
+            .expect("aggregate query")
+            .expect("aggregate row")
+            .get(0)
+            .expect("aggregate count");
+        assert_eq!(
+            count, 0,
+            "local progress cannot settle the remote obligation"
+        );
+    }
+    let claim = PostgresClaimStore::new(db.clone())
+        .current_claim(&Entity::new(
+            EntityType::UserActor,
+            remote_jid.to_bare().to_string(),
+        ))
+        .await
+        .expect("remote claim lookup")
+        .expect("remote claim");
+    assert!(claim.owner_lease_fresh);
+    assert_eq!(
+        claim.owner.node_id, node_b,
+        "B remains remote-owned during the relay fault"
+    );
+    let absent = remote
+        .recv_matching_within(Duration::from_millis(250), |frame| {
+            frame.parse::<minidom::Element>().is_ok_and(|element| {
+                element.is("message", waddle_xmpp::ns::JABBER_CLIENT)
+                    && element.attr("id") == Some("m2")
+            })
+        })
+        .await;
+    assert!(
+        matches!(absent, Err(ref error) if error.starts_with("Timeout waiting")),
+        "remote occupant must have no copy while relay is blocked: {absent:?}"
+    );
+
+    // Restore the shared harness before its following relay-fault scenarios.
+    tokio::time::sleep_until(blocked_at + Duration::from_secs(31)).await;
+    ping_until(relay_b, node_b, Duration::from_secs(15))
+        .await
+        .expect("B relay wakes");
+    remote.close().await.expect("remote closes");
+    local.close().await.expect("local closes");
+    sender.close().await.expect("sender closes");
+}
+
+async fn send_partial_fanout(
+    sender: &mut WsXmppClient,
+    room: &jid::BareJid,
+    id: &str,
+) -> uuid::Uuid {
+    use minidom::{rxml::xml_ncname, Element};
+    let origin = uuid::Uuid::new_v4();
+    let mut message = fanout_message(room, id, None);
+    message.append_child(
+        Element::builder("origin-id", waddle_xmpp::xep::NS_SID)
+            .attr(xml_ncname!("id").to_owned(), origin.to_string())
+            .build(),
+    );
+    sender
+        .send(&String::from(&message))
+        .await
+        .expect("send partial fanout");
+    origin
+}
+
+async fn partial_fanout_key(db: &Database, origin: &uuid::Uuid) -> uuid::Uuid {
+    tokio::time::timeout(Duration::from_secs(15), async {
+        loop {
+            let conn = db.guard().await.expect("partial key guard");
+            let mut rows = conn
+                .query(
+                    "SELECT message_key::text FROM ingress_origin_aliases WHERE origin_id = ?",
+                    waddle_server::db_params![origin.to_string()],
+                )
+                .await
+                .expect("partial canonical key");
+            if let Some(row) = rows.next().await.expect("partial alias query") {
+                let key: String = row.get(0).expect("stored message key");
+                return key.parse().expect("typed message key");
+            }
+            drop(rows);
+            drop(conn);
+            tokio::time::sleep(Duration::from_millis(100)).await;
+        }
+    })
+    .await
+    .expect("partial fanout admission")
+}
+
+async fn partial_fanout_terminal(db: &Database, key: uuid::Uuid) -> bool {
+    let conn = db.guard().await.expect("terminal guard");
+    let mut rows = conn
+        .query(
+            "SELECT terminal_at IS NOT NULL FROM ingress_messages WHERE message_key = ?::uuid",
+            waddle_server::db_params![key.to_string()],
+        )
+        .await
+        .expect("terminal query");
+    rows.next()
+        .await
+        .expect("terminal row query")
+        .expect("canonical row")
+        .get(0)
+        .expect("terminal flag")
+}
+
+async fn partial_fanout_resources(db: &Database, key: uuid::Uuid) -> Vec<jid::FullJid> {
+    let conn = db.guard().await.expect("progress guard");
+    let mut rows = conn.query(
+        "SELECT resource FROM ingress_delivery_receipts WHERE message_key = ?::uuid AND kind = 2 ORDER BY resource",
+        waddle_server::db_params![key.to_string()],
+    ).await.expect("per-occupant progress query");
+    let mut resources = Vec::new();
+    while let Some(row) = rows.next().await.expect("progress row") {
+        let resource: String = row.get(0).expect("stored resource");
+        resources.push(resource.parse().expect("typed occupant resource"));
+    }
+    resources
 }
 
 async fn join_fanout_room(client: &mut WsXmppClient, room: &jid::BareJid, nick: &str) {
