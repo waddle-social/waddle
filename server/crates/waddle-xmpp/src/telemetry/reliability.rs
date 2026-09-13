@@ -9,6 +9,8 @@
 //! translated `xmpp_<rest>_total` series never collided with the legacy
 //! scrape during the dual-emit release.
 
+use crate::ingress::IngressEffectKind;
+
 use super::attributes::{
     IngressAliasOutcome, IngressDecisionClass, IngressGcOutcome, IngressMaintenanceOutcome,
     IngressMaintenancePhase, IngressUnresolvedEffectKind, Janitor, PushRetryReason,
@@ -275,6 +277,10 @@ pub fn register_reliability_counters() {
         }
     }
     add_ingress_maintenance_terminalized_messages(0);
+    increment_ingress_maintenance_recovered_obligations(0);
+    for kind in IngressEffectKind::ALL {
+        increment_ingress_maintenance_unrecoverable_obligations(0, kind);
+    }
     for class in IngressDecisionClass::ALL {
         add_ingress_decision(0, class);
     }
@@ -522,6 +528,28 @@ pub fn add_ingress_maintenance_terminalized_messages(count: u64) {
     );
 }
 
+pub fn increment_ingress_maintenance_recovered_obligations(count: u64) {
+    crate::counter_add!(
+        "ingress.maintenance.recovered_obligations",
+        "{obligation}",
+        "Ingress obligations recovered by bounded maintenance.",
+        count,
+    );
+}
+
+pub fn increment_ingress_maintenance_unrecoverable_obligations(
+    count: u64,
+    kind: IngressEffectKind,
+) {
+    crate::counter_add!(
+        "ingress.maintenance.unrecoverable_obligations",
+        "{obligation}",
+        "Ingress obligations that maintenance cannot recover, by kind.",
+        count,
+        kind,
+    );
+}
+
 // The legacy unknown-reason catch-all family is gone with the text
 // renderer: the sealed `PushSuppressReason` enum makes an unmapped
 // reason a compile error, so it was structurally unreachable and
@@ -613,6 +641,49 @@ mod tests {
         );
     }
 
+    #[tokio::test]
+    async fn ingress_recovery_helpers_emit_with_typed_labels() {
+        let guard = setup().await;
+        register_reliability_counters();
+        increment_ingress_maintenance_run(
+            IngressMaintenancePhase::Recovery,
+            IngressMaintenanceOutcome::Complete,
+        );
+        increment_ingress_maintenance_recovered_obligations(2);
+        increment_ingress_maintenance_unrecoverable_obligations(
+            1,
+            crate::ingress::IngressEffectKind::Carbons,
+        );
+        assert_eq!(
+            guard.counter_sum(
+                "ingress.maintenance.runs",
+                &[("phase", "recovery"), ("outcome", "complete")]
+            ),
+            Some(1)
+        );
+        assert_eq!(
+            guard.counter_sum("ingress.maintenance.recovered_obligations", &[]),
+            Some(2)
+        );
+        assert_eq!(
+            guard.counter_sum(
+                "ingress.maintenance.unrecoverable_obligations",
+                &[("kind", "carbons")]
+            ),
+            Some(1)
+        );
+        for kind in crate::ingress::IngressEffectKind::ALL {
+            assert!(
+                guard
+                    .counter_sum(
+                        "ingress.maintenance.unrecoverable_obligations",
+                        &[("kind", kind.value())]
+                    )
+                    .is_some(),
+                "{kind:?} zero-registered"
+            );
+        }
+    }
     #[tokio::test]
     async fn ingress_maintenance_helpers_emit_with_typed_labels() {
         let guard = setup().await;
@@ -825,6 +896,8 @@ mod tests {
         "ingress.gc.reclaimed_messages",
         "ingress.maintenance.runs",
         "ingress.maintenance.terminalized_messages",
+        "ingress.maintenance.recovered_obligations",
+        "ingress.maintenance.unrecoverable_obligations",
         "ingress.effects.unresolved",
     ];
 

@@ -11,6 +11,8 @@
 
 use opentelemetry::KeyValue;
 
+use crate::ingress::IngressEffectKind;
+
 mod sealed {
     pub trait Sealed {}
 }
@@ -708,16 +710,60 @@ impl MetricAttribute for IngressGcOutcome {
     }
 }
 
+impl sealed::Sealed for IngressEffectKind {}
+impl MetricAttribute for IngressEffectKind {
+    fn key(&self) -> &'static str {
+        "kind"
+    }
+
+    fn value(&self) -> &'static str {
+        match self {
+            Self::DmCallThreadState => "dm_call_thread_state",
+            Self::ArchiveAuthoritative => "archive",
+            Self::RouteDirect => "route_direct",
+            Self::RouteMucGroupchat => "route_muc",
+            Self::RouteOccupantPm => "route_occupant_pm",
+            Self::DispatchToRoomRemote => "dispatch_to_room_remote",
+            Self::Carbons => "carbons",
+            Self::RelayCarbons => "relay_carbons",
+            Self::InboxProject => "inbox_project",
+            Self::NotificationActivityPreview => "notification_activity_preview",
+            Self::GroupchatNotificationRecovery => "groupchat_notification_recovery",
+            Self::PendingDelivery => "pending_delivery",
+            Self::LinkPreviewMediaRef => "link_preview_media_ref",
+            Self::RetractionTombstone => "retraction_tombstone",
+            Self::DmPinMutation => "dm_pin_mutation",
+            Self::MucInviteMembershipGrant => "muc_invite_membership_grant",
+            Self::MucInviteLedger => "muc_invite_ledger",
+            Self::GroupDmMembershipGrant => "group_dm_membership_grant",
+            Self::GroupDmInviteLedger => "group_dm_invite_ledger",
+            Self::RoomSubjectMutation => "room_subject_mutation",
+            Self::CallSignal => "call_signal",
+            Self::Pin => "pin",
+            Self::Extension => "extension",
+            Self::RoomObserver => "room_observer",
+            Self::TombstoneReplayDeletion => "tombstone_replay_deletion",
+            Self::ErrorReply => "error_reply",
+        }
+    }
+}
+
 /// `phase` — the bounded ingress maintenance work being measured.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum IngressMaintenancePhase {
     Pass,
     Terminalization,
+    Recovery,
     RetentionGc,
 }
 
 impl IngressMaintenancePhase {
-    pub const ALL: [Self; 3] = [Self::Pass, Self::Terminalization, Self::RetentionGc];
+    pub const ALL: [Self; 4] = [
+        Self::Pass,
+        Self::Terminalization,
+        Self::Recovery,
+        Self::RetentionGc,
+    ];
 }
 
 impl sealed::Sealed for IngressMaintenancePhase {}
@@ -730,6 +776,7 @@ impl MetricAttribute for IngressMaintenancePhase {
         match self {
             Self::Pass => "pass",
             Self::Terminalization => "terminalization",
+            Self::Recovery => "recovery",
             Self::RetentionGc => "retention_gc",
         }
     }
@@ -1479,6 +1526,31 @@ impl MetricAttribute for MucJoinDenyReason {
             Self::RoomCreationNotPermitted => "room_creation_not_permitted",
             Self::NickConflict => "nick_conflict",
             Self::NickLocked => "nick_locked",
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::MetricAttribute;
+    use crate::ingress::{IngressEffectIntent, IngressEffectKind};
+
+    #[test]
+    fn ingress_effect_kind_labels_match_storage_kind_names() {
+        assert_eq!(
+            IngressEffectKind::ALL.len(),
+            IngressEffectIntent::storage_kind_names().len()
+        );
+        for kind in IngressEffectKind::ALL {
+            assert_eq!(kind.key(), "kind");
+            assert_eq!(
+                IngressEffectIntent::storage_kind_names()
+                    .iter()
+                    .find(|(tag, _)| *tag == kind.storage_tag())
+                    .map(|(_, name)| *name),
+                Some(kind.value()),
+                "{kind:?}",
+            );
         }
     }
 }

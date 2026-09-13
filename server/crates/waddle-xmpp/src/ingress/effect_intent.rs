@@ -1243,6 +1243,35 @@ pub enum IngressEffectKind {
 }
 
 impl IngressEffectKind {
+    pub const ALL: [Self; 26] = [
+        Self::DmCallThreadState,
+        Self::ArchiveAuthoritative,
+        Self::RouteDirect,
+        Self::RouteMucGroupchat,
+        Self::RouteOccupantPm,
+        Self::DispatchToRoomRemote,
+        Self::Carbons,
+        Self::RelayCarbons,
+        Self::InboxProject,
+        Self::NotificationActivityPreview,
+        Self::GroupchatNotificationRecovery,
+        Self::PendingDelivery,
+        Self::LinkPreviewMediaRef,
+        Self::RetractionTombstone,
+        Self::DmPinMutation,
+        Self::MucInviteMembershipGrant,
+        Self::MucInviteLedger,
+        Self::GroupDmMembershipGrant,
+        Self::GroupDmInviteLedger,
+        Self::RoomSubjectMutation,
+        Self::CallSignal,
+        Self::Pin,
+        Self::Extension,
+        Self::RoomObserver,
+        Self::TombstoneReplayDeletion,
+        Self::ErrorReply,
+    ];
+
     /// Stable discriminator used by persisted intents and receipt kinds.
     pub const fn storage_tag(self) -> i32 {
         match self {
