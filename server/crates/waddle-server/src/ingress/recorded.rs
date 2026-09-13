@@ -386,6 +386,7 @@ pub fn restore_subject_rejection_replies(
         if errors.next().is_some() {
             return Err(IngressUowError::EffectIntentConflict);
         }
+        // The non-observer planner already stores this canonical prototype; only reply addressing changes.
         let mut reply = envelope.message().clone();
         reply.type_ = xmpp_parsers::message::MessageType::Error;
         reply.from = Some(room.clone().into());
