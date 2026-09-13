@@ -55,7 +55,7 @@ async fn fixture() -> (Database, IngressUnitOfWork, IngressSubmission) {
         identity: IngressStreamIdentity::Ephemeral {
             principal: principal.clone(),
         },
-        principal,
+        principal: crate::ingress::IngressPrincipal::Authenticated(principal),
         target,
         plan: IngressPlan {
             failure: None,
@@ -67,7 +67,9 @@ async fn fixture() -> (Database, IngressUnitOfWork, IngressSubmission) {
             room_execution: RoomExecutionPath::None,
         },
         digest_input,
-        connection_generation: ConnectionGeneration::INITIAL,
+        connection_generation: waddle_xmpp::ingress::TransportGeneration::Connection(
+            ConnectionGeneration::INITIAL,
+        ),
     };
     (db, uow, submission)
 }

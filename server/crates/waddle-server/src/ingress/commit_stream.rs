@@ -17,15 +17,22 @@ pub(super) async fn lock_stream(
     tx: &mut IngressUowTransaction<'_>,
     identity: &IngressStreamIdentity,
 ) -> Result<Option<StreamAttempt>, IngressUowError> {
-    let IngressStreamIdentity::Resumable {
-        stream_id,
-        sm_ingress_id,
-        reserved_wire_position,
-        checkpoint_h,
-        ..
-    } = identity
-    else {
-        return Ok(None);
+    let (stream_id, sm_ingress_id, reserved_wire_position, checkpoint_h) = match identity {
+        IngressStreamIdentity::Resumable {
+            stream_id,
+            sm_ingress_id,
+            reserved_wire_position,
+            checkpoint_h,
+            ..
+        } => (
+            stream_id,
+            sm_ingress_id,
+            reserved_wire_position,
+            checkpoint_h,
+        ),
+        IngressStreamIdentity::Ephemeral { .. }
+        | IngressStreamIdentity::Relayed { .. }
+        | IngressStreamIdentity::Extension { .. } => return Ok(None),
     };
     #[cfg(feature = "clustering")]
     let fence = if matches!(tx.fencing(), IngressFencing::Clustered(_)) {

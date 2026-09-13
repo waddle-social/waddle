@@ -11,6 +11,7 @@ mod carbon_receipts;
 pub(crate) use carbon_receipts::CarbonReceiptRepository;
 mod durable_more;
 mod error;
+mod extension_grants;
 mod pending_receipts;
 mod recovery_receipts;
 pub(crate) use pending_receipts::PendingReceiptRepository;
@@ -22,11 +23,14 @@ mod settlement;
 pub(crate) use settlement::settle_recorded;
 
 pub use error::IngressUowError;
+pub use extension_grants::{
+    ConfiguredPluginGrants, GrantAssertion, GrantAssertionFailure, GrantSync,
+};
 pub use repositories::{
     CanonicalMessageRepository, DeliveryEffectRepository, EffectIntentRepository,
-    EffectReceiptRepository, FrontierOutcome, InboxRepository, MamArchiveRepository,
-    PrincipalAssertion, PrincipalRepository, ReconcileVerdict, SmIngressRepository,
-    SmIngressStreamRepository,
+    EffectReceiptRepository, ExtensionGrantRepository, FrontierOutcome, InboxRepository,
+    MamArchiveRepository, PrincipalAssertion, PrincipalRepository, ReconcileVerdict,
+    SmIngressRepository, SmIngressStreamRepository,
 };
 #[cfg(feature = "clustering")]
 pub use repositories::{ClaimRepository, RoomClaimFence, SmClaimFence};

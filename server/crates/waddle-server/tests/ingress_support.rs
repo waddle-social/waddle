@@ -142,7 +142,9 @@ impl IngressFixture {
             identity: IngressStreamIdentity::Ephemeral {
                 principal: self.principal.clone(),
             },
-            principal: self.principal.clone(),
+            principal: waddle_server::ingress::IngressPrincipal::Authenticated(
+                self.principal.clone(),
+            ),
             target,
             plan: IngressPlan {
                 failure: None,
@@ -154,7 +156,9 @@ impl IngressFixture {
                 room_execution: RoomExecutionPath::None,
             },
             digest_input,
-            connection_generation: ConnectionGeneration::INITIAL,
+            connection_generation: waddle_xmpp::ingress::TransportGeneration::Connection(
+                ConnectionGeneration::INITIAL,
+            ),
         }
     }
 

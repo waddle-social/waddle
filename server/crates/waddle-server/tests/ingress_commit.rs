@@ -117,3 +117,8 @@ mod recovery_receipts;
 
 #[path = "ingress_cases/pending_reconstruction.rs"]
 mod pending_reconstruction;
+
+#[path = "ingress_cases/extension_grants.rs"]
+mod extension_grants;
+#[path = "ingress_cases/extension_identity.rs"]
+mod extension_identity;

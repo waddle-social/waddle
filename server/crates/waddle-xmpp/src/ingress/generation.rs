@@ -57,3 +57,10 @@ impl RowRevision {
         self.0.checked_add(1).map(Self)
     }
 }
+
+/// Whether ingress has a live connection fence or an in-process host transport.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum TransportGeneration {
+    Connection(ConnectionGeneration),
+    Host,
+}

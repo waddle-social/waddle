@@ -1,23 +1,20 @@
 //! Immutable planning input reused by every transaction attempt.
-use super::identity::IngressStreamIdentity;
+use super::{identity::IngressStreamIdentity, principal::IngressPrincipal};
 use crate::server::routes::interpret::effects::IngressPlan;
 use jid::{BareJid, DomainRef};
-use waddle_xmpp::{
-    auth::AuthenticatedPrincipalRef,
-    ingress::{ConnectionGeneration, DigestInput, NormalizedTarget},
-};
+use waddle_xmpp::ingress::{DigestInput, NormalizedTarget, TransportGeneration};
 use xmpp_parsers::message::{Message, MessageType};
 
 #[derive(Clone, Debug)]
 pub struct IngressSubmission {
     pub identity: IngressStreamIdentity,
-    pub principal: AuthenticatedPrincipalRef,
+    pub principal: IngressPrincipal,
     /// Authenticated sender before room canonicalization changes the envelope address.
     pub sender: jid::FullJid,
     pub target: NormalizedTarget,
     pub plan: IngressPlan,
     pub digest_input: DigestInput,
-    pub connection_generation: ConnectionGeneration,
+    pub connection_generation: TransportGeneration,
 }
 
 /// Normalize client-supplied XEP-0359 stamps at the admission binding before

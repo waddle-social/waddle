@@ -327,7 +327,7 @@ async fn rejoin_and_nickname_reuse(fixture: IngressFixture) {
         )
         .await;
     let mut reused = archive_plan(&fixture, true, "different-bare-jid");
-    reused.principal = other.clone();
+    reused.principal = waddle_server::ingress::IngressPrincipal::Authenticated(other.clone());
     reused.identity = waddle_server::ingress::IngressStreamIdentity::Ephemeral { principal: other };
     reused.sender = "mercutio@example.com/phone".parse().expect("new occupant");
     reused.plan.sanitized_message.from = Some(reused.sender.clone().into());

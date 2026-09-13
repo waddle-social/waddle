@@ -194,7 +194,9 @@ impl IngressFixture {
                 ),
                 checkpoint_h: WireHandledCount::new(u32::try_from(ordinal).expect("checkpoint")),
             },
-            principal: self.principal.clone(),
+            principal: waddle_server::ingress::IngressPrincipal::Authenticated(
+                self.principal.clone(),
+            ),
             target,
             digest_input,
             plan: IngressPlan {
@@ -206,7 +208,9 @@ impl IngressFixture {
                 room_execution: RoomExecutionPath::None,
                 rejection: None,
             },
-            connection_generation: ConnectionGeneration::INITIAL,
+            connection_generation: waddle_xmpp::ingress::TransportGeneration::Connection(
+                ConnectionGeneration::INITIAL,
+            ),
         }
     }
 

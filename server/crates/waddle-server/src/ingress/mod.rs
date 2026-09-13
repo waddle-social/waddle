@@ -15,6 +15,9 @@ mod execute_uow;
 mod frame_receipt_retry;
 pub(crate) mod gc;
 pub mod identity;
+pub mod nested;
+pub mod principal;
+pub use principal::{ExtensionPrincipal, IngressPrincipal};
 pub(crate) mod maintenance;
 mod receipts;
 mod recovery;
@@ -95,7 +98,7 @@ pub struct IngressAuthority {
     cancellation: CancellationToken,
     force_stop: CancellationToken,
     gc_task: Mutex<Option<tokio::task::JoinHandle<()>>>,
-    admission: RwLock<bool>,
+    admission: Arc<RwLock<bool>>,
     streams: StdMutex<HashMap<SmSessionId, Weak<RwLock<()>>>>,
     retirement_cursor: Mutex<Option<SmSessionId>>,
     frame_receipt_retries: StdMutex<frame_receipt_retry::FrameReceiptRetries>,
@@ -189,7 +192,7 @@ impl IngressAuthority {
             cancellation,
             force_stop,
             gc_task: Mutex::new(Some(gc_task)),
-            admission: RwLock::new(true),
+            admission: Arc::new(RwLock::new(true)),
             streams: StdMutex::new(HashMap::new()),
             #[cfg(test)]
             stream_wait_observer: StdMutex::new(None),
@@ -222,7 +225,7 @@ impl IngressAuthority {
             cancellation: CancellationToken::new(),
             force_stop: CancellationToken::new(),
             gc_task: Mutex::new(None),
-            admission: RwLock::new(true),
+            admission: Arc::new(RwLock::new(true)),
             streams: StdMutex::new(HashMap::new()),
             #[cfg(test)]
             stream_wait_observer: StdMutex::new(None),
@@ -441,6 +444,11 @@ impl IngressAuthority {
         if self.cancellation.is_cancelled() || !*admission {
             return non_advancing(IngressDecisionClass::Storage);
         }
+        self.commit_admitted(submission).await
+    }
+
+    /// Caller retains admission for the entire operation.
+    async fn commit_admitted(&self, submission: &IngressSubmission) -> IngressDecision {
         let _stream_guard = match &submission.identity {
             IngressStreamIdentity::Resumable { stream_id, .. } => {
                 let activity = self.stream_activity(stream_id);

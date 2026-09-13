@@ -35,7 +35,7 @@ pub use effect_intent::{
 };
 pub use epoch::ProtocolEpoch;
 pub use error::IngressTypeError;
-pub use generation::{ConnectionGeneration, EntityGeneration, RowRevision};
+pub use generation::{ConnectionGeneration, EntityGeneration, RowRevision, TransportGeneration};
 pub use keys::{DeliveryKey, MessageKey};
 pub use ordinal::{IngressOrdinal, WireHandledCount};
 pub use stream::{IngressStreamId, SmIngressId};
