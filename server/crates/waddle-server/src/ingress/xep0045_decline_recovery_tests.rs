@@ -27,7 +27,11 @@ enum PartialDeclineReceipt {
     Fallback,
 }
 
-async fn muc_decline_recovery(fixture: IngressFixture, partial: Option<PartialDeclineReceipt>) {
+async fn muc_decline_recovery(
+    fixture: IngressFixture,
+    partial: Option<PartialDeclineReceipt>,
+    reinvited: bool,
+) {
     use crate::server::routes::websocket::{
         muc_invites::{list_invites, record_invite_at, OutstandingInvite},
         tests::{create_test_session, register_test_connection},
@@ -43,9 +47,13 @@ async fn muc_decline_recovery(fixture: IngressFixture, partial: Option<PartialDe
         inviter: inviter.to_bare(),
     };
     let actor = state.deps.app_state.db_pool.global_actor().clone();
-    record_invite_at(actor.clone(), &invite, chrono::Utc::now())
-        .await
-        .expect("seed invitation");
+    record_invite_at(
+        actor.clone(),
+        &invite,
+        chrono::Utc::now() - chrono::Duration::hours(1),
+    )
+    .await
+    .expect("seed invitation");
     let (tx, mut rx) = tokio::sync::mpsc::channel(8);
     let _owner = register_test_connection(state.as_ref(), &inviter, tx).await;
     submission.target = waddle_xmpp::ingress::NormalizedTarget::Bare(invite.room.clone());
@@ -144,12 +152,33 @@ async fn muc_decline_recovery(fixture: IngressFixture, partial: Option<PartialDe
         .await
         .expect("partial receipt");
     }
+    if reinvited {
+        // A competing decline consumed the original invitation. An unexpired
+        // record is not replaced by record_invite_at, so consume it first.
+        assert!(crate::server::routes::websocket::muc_invites::claim_invite(
+            actor.clone(),
+            &invite,
+        )
+        .await
+        .expect("competing decline"));
+        assert!(matches!(
+            record_invite_at(actor.clone(), &invite, chrono::Utc::now())
+                .await
+                .expect("new invitation"),
+            crate::server::routes::websocket::muc_invites::RecordOutcome::New { .. }
+        ));
+    }
     let cursor = MaintenanceCursor::default();
     assert_eq!(
         family_pass(&fixture, &state, &cursor).await,
         MaintenanceOutcome::Complete
     );
-    if partial.is_some() {
+    if reinvited {
+        assert!(
+            rx.try_recv().is_err(),
+            "old decline cannot forward for a new invitation"
+        );
+    } else if partial.is_some() {
         assert!(
             rx.try_recv().is_err(),
             "one committed invitation receipt proves the delivery; recovery must not resend"
@@ -174,13 +203,23 @@ async fn muc_decline_recovery(fixture: IngressFixture, partial: Option<PartialDe
             "cannot join"
         );
     }
-    assert!(list_invites(actor.clone(), &invite.room, &invite.invitee)
-        .await
-        .expect("claimed invitation")
-        .is_empty());
+    assert_eq!(
+        list_invites(actor.clone(), &invite.room, &invite.invitee)
+            .await
+            .expect("invitation after recovery"),
+        if reinvited {
+            vec![invite.clone()]
+        } else {
+            vec![]
+        }
+    );
     assert_eq!(
         fixture.count("muc_invite_claims WHERE claimed = 1").await,
-        1
+        i64::from(!reinvited)
+    );
+    assert_eq!(
+        fixture.count("muc_invite_claims WHERE claimed = 0").await,
+        i64::from(reinvited)
     );
     assert_eq!(
         fixture.count("pending_delivery").await,
@@ -194,13 +233,19 @@ async fn muc_decline_recovery(fixture: IngressFixture, partial: Option<PartialDe
         MaintenanceOutcome::Complete
     );
     assert!(rx.try_recv().is_err(), "second pass cannot resend decline");
-    assert!(list_invites(actor, &invite.room, &invite.invitee)
-        .await
-        .expect("invite remains consumed")
-        .is_empty());
+    assert_eq!(
+        list_invites(actor, &invite.room, &invite.invitee)
+            .await
+            .expect("invitation remains resolved"),
+        if reinvited { vec![invite] } else { vec![] }
+    );
     assert_eq!(
         fixture.count("muc_invite_claims WHERE claimed = 1").await,
-        1
+        i64::from(!reinvited)
+    );
+    assert_eq!(
+        fixture.count("muc_invite_claims WHERE claimed = 0").await,
+        i64::from(reinvited)
     );
     assert_eq!(
         fixture.count("pending_delivery").await,
@@ -214,12 +259,12 @@ async fn muc_decline_recovery(fixture: IngressFixture, partial: Option<PartialDe
 
 #[tokio::test]
 async fn sqlite_muc_decline_recovers_claim_and_inviter_route() {
-    muc_decline_recovery(IngressFixture::sqlite().await, None).await;
+    muc_decline_recovery(IngressFixture::sqlite().await, None, false).await;
 }
 #[tokio::test]
 async fn postgres_muc_decline_recovers_claim_and_inviter_route() {
     if let Some(fixture) = IngressFixture::postgres("recovery_muc_decline").await {
-        muc_decline_recovery(fixture, None).await;
+        muc_decline_recovery(fixture, None, false).await;
     }
 }
 #[tokio::test]
@@ -227,13 +272,14 @@ async fn sqlite_muc_decline_route_receipt_alone_settles_without_resend() {
     muc_decline_recovery(
         IngressFixture::sqlite().await,
         Some(PartialDeclineReceipt::Route),
+        false,
     )
     .await;
 }
 #[tokio::test]
 async fn postgres_muc_decline_route_receipt_alone_settles_without_resend() {
     if let Some(fixture) = IngressFixture::postgres("recovery_muc_decline_route").await {
-        muc_decline_recovery(fixture, Some(PartialDeclineReceipt::Route)).await;
+        muc_decline_recovery(fixture, Some(PartialDeclineReceipt::Route), false).await;
     }
 }
 #[tokio::test]
@@ -241,12 +287,24 @@ async fn sqlite_muc_decline_fallback_receipt_alone_settles_without_resend() {
     muc_decline_recovery(
         IngressFixture::sqlite().await,
         Some(PartialDeclineReceipt::Fallback),
+        false,
     )
     .await;
 }
 #[tokio::test]
 async fn postgres_muc_decline_fallback_receipt_alone_settles_without_resend() {
     if let Some(fixture) = IngressFixture::postgres("recovery_muc_decline_fallback").await {
-        muc_decline_recovery(fixture, Some(PartialDeclineReceipt::Fallback)).await;
+        muc_decline_recovery(fixture, Some(PartialDeclineReceipt::Fallback), false).await;
+    }
+}
+
+#[tokio::test]
+async fn sqlite_muc_decline_recovery_preserves_newer_invitation() {
+    muc_decline_recovery(IngressFixture::sqlite().await, None, true).await;
+}
+#[tokio::test]
+async fn postgres_muc_decline_recovery_preserves_newer_invitation() {
+    if let Some(fixture) = IngressFixture::postgres("recovery_muc_decline_newer").await {
+        muc_decline_recovery(fixture, None, true).await;
     }
 }

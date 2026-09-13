@@ -60,6 +60,8 @@ pub enum InviteLedgerMutation {
         invite: OutstandingInvite,
         /// Bound to the canonical identity after ingress commits.
         message_key: Option<waddle_xmpp::ingress::MessageKey>,
+        /// A recovered decline may only consume invitations already received.
+        not_after: Option<chrono::DateTime<chrono::Utc>>,
     },
 }
 #[derive(Clone, Debug)]
@@ -98,11 +100,12 @@ pub(crate) async fn execute_invite_ledger(
         InviteLedgerMutation::Claim {
             invite,
             message_key,
+            not_after,
         } => {
             let Some(message_key) = message_key else {
                 return EffectOutcome::Unavailable;
             };
-            claim_invite_for_message(actor, &invite, message_key)
+            claim_invite_for_message(actor, &invite, message_key, not_after)
                 .await
                 .map(InviteLedgerOutcome::Claimed)
         }

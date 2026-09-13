@@ -444,6 +444,7 @@ async fn commit_attempt(
                 recipient: recipient.clone(),
                 fanout: fanout.clone(),
                 route_identity: route_identity.clone(),
+                received_at: None,
                 completed,
             });
         }

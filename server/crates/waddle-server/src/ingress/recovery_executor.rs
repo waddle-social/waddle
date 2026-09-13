@@ -3,8 +3,10 @@
 use std::time::Duration;
 
 use chrono::{DateTime, Utc};
+use jid::BareJid;
 use tokio::time::Instant;
 use waddle_xmpp::ingress::{IngressEffectIntent, IngressEffectKind, MessageKey};
+use waddle_xmpp::protocol::Blocklist;
 
 use crate::{
     db::Database,
@@ -55,6 +57,7 @@ pub(super) async fn recover_row(
     }
     #[cfg(test)]
     super::execute::test_hooks::after_recovery_freeze(key).await;
+    let blocked_recipients = blocked_recipients(deps, &frozen).await?;
     let rebuilt = recovery_rebuild::rebuild(recovery_rebuild::RecoveryInput {
         key,
         envelope: &frozen.envelope,
@@ -62,8 +65,12 @@ pub(super) async fn recover_row(
         recorded: &frozen.recorded,
         unreceipted: &frozen.unreceipted,
         route_progress: frozen.route_progress,
+        blocked_recipients: &blocked_recipients,
     })?;
-    let mut unsupported = rebuilt.decision.external.is_empty() && rebuilt.delegated.is_empty();
+    record_discarded_receipts(uow, key, &rebuilt.discarded_receipts).await?;
+    let mut unsupported = rebuilt.decision.external.is_empty()
+        && rebuilt.delegated.is_empty()
+        && !rebuilt.unsupported_receipts.is_empty();
     let mut unrecoverable = rebuilt.unrecoverable;
     // Receipts that only a frame to the vanished sender or an unrebuildable
     // obligation could still settle. Non-empty once a frame-only effect ran.
@@ -114,6 +121,65 @@ pub(super) async fn recover_row(
         unrecoverable,
         unsupported,
     })
+}
+
+/// Consult current policy only after freeze released the ingress transaction.
+async fn blocked_recipients(
+    deps: &Deps<'_>,
+    frozen: &FrozenRecovery,
+) -> Result<Vec<BareJid>, IngressUowError> {
+    let Some(storage) = deps.blocking_storage else {
+        return Ok(Vec::new());
+    };
+    let recipients: std::collections::BTreeSet<_> = frozen
+        .unreceipted
+        .iter()
+        .filter_map(|intent| match intent {
+            IngressEffectIntent::RouteDirect { recipient, .. } => Some(recipient),
+            _ => None,
+        })
+        .collect();
+    let mut blocked = Vec::new();
+    for recipient in recipients {
+        let entries = storage
+            .list_blocked_jid_entries(recipient)
+            .await
+            .map_err(IngressUowError::BlocklistUnavailable)?;
+        if let Some(sender) = frozen.envelope.message().from.as_ref() {
+            if Blocklist::new(entries).contains_jid(sender) {
+                tracing::debug!(%recipient, %sender, "recovery dropping route: recipient blocked sender post-intake");
+                blocked.push(recipient.clone());
+            }
+        }
+    }
+    Ok(blocked)
+}
+
+async fn record_discarded_receipts(
+    uow: &IngressUnitOfWork,
+    key: MessageKey,
+    discarded: &[EffectReceiptKey],
+) -> Result<(), IngressUowError> {
+    if discarded.is_empty() {
+        return Ok(());
+    }
+    let mut tx = uow
+        .begin_with_timeouts(Duration::from_millis(100), Duration::from_millis(250))
+        .await?;
+    if !CanonicalMessageRepository::lock(&mut tx, key).await? {
+        return Err(IngressUowError::EffectIntentMessageMissing);
+    }
+    for receipt in discarded {
+        EffectReceiptRepository::record_receipt(
+            &mut tx,
+            key,
+            receipt.kind,
+            &receipt.semantic_identity_hash,
+        )
+        .await?;
+    }
+    super::execute::terminalize_if_complete_in_transaction(&mut tx, key).await?;
+    tx.commit().await
 }
 
 /// Effects whose only completion path is a frame to the original sender.
@@ -180,6 +246,7 @@ async fn freeze(
             fanout: fanout.clone(),
             route_identity: route_identity.clone(),
             completed,
+            received_at: Some(created_at),
         });
     }
     tx.commit().await?;

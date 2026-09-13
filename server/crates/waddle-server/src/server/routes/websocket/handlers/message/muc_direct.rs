@@ -503,6 +503,7 @@ async fn handle_muc_mediated_decline(
     let claim = PlannedEffect::new(Effect::External(ExternalEffect::InviteLedger(
         super::muc_invite::InviteLedgerMutation::Claim {
             message_key: None,
+            not_after: None,
             invite: invite.clone(),
         },
     )));
@@ -629,6 +630,7 @@ pub(crate) fn restore_recorded_muc_decline(
         ExternalEffect::InviteLedger(super::muc_invite::InviteLedgerMutation::Claim {
             invite: invite.clone(),
             message_key: None,
+            not_after: Some(received_at),
         }),
     )));
     for intent in pending {

@@ -232,6 +232,11 @@ async fn detached_recovery(f: IngressFixture, stall_original: bool) {
         .await
         .expect("Phase B");
     let key = decision.message_key.expect("key");
+    let mut tx = f.uow.begin().await.expect("canonical timestamp");
+    let created_at = CanonicalMessageRepository::created_at(&mut tx, key)
+        .await
+        .expect("created at");
+    tx.commit().await.expect("timestamp commit");
     if stall_original {
         let entered = Arc::new(AtomicBool::new(false));
         let deps = env.recovery_deps();
@@ -261,11 +266,96 @@ async fn detached_recovery(f: IngressFixture, stall_original: bool) {
         assert_eq!(pass(&f, &env, &cursor).await, MaintenanceOutcome::Complete);
         for resource in &resources {
             assert_eq!(append_count(&sm, resource).await, 1);
+            if !stall_original {
+                let session = sm
+                    .peek_session(&resource.to_string())
+                    .await
+                    .expect("peek receipt time")
+                    .expect("session");
+                assert_eq!(session.unacked_stanzas[0].original_receipt_at, created_at);
+            }
         }
         assert_eq!(f.count("sm_ingress_appends").await, 2);
         assert_recovered(&f, key, 1).await;
     }
     f.close().await;
+}
+
+async fn blocked_direct_recovery(f: IngressFixture, read_fails: bool) {
+    use waddle_xmpp::xep::xep0191::{
+        BlockingStorage, BlockingStorageError, InMemoryBlockingStorage,
+    };
+    #[derive(Debug, thiserror::Error)]
+    #[error("simulated blocklist unavailable")]
+    struct Unavailable;
+    struct FailingBlocking;
+    #[async_trait::async_trait]
+    impl BlockingStorage for FailingBlocking {
+        async fn list_blocked_jids(
+            &self,
+            _: &jid::BareJid,
+        ) -> Result<Vec<jid::BareJid>, BlockingStorageError> {
+            Err(BlockingStorageError::new(Unavailable))
+        }
+    }
+    let sm = persistent_sm(&f).await;
+    let resource: jid::FullJid = "juliet@example.com/phone".parse().expect("resource");
+    store_detached(&sm, &resource).await;
+    let mut state = state_for(&f, sm.clone()).await;
+    let blocking = Arc::new(InMemoryBlockingStorage::new());
+    Arc::get_mut(&mut state)
+        .expect("unique state")
+        .deps
+        .protocol
+        .blocking_storage = if read_fails {
+        Arc::new(FailingBlocking)
+    } else {
+        blocking.clone()
+    };
+    let submission = direct_submission(&f, "blocked-recovery", std::slice::from_ref(&resource));
+    let key = commit_submission(&f.uow, &submission, 5)
+        .await
+        .expect("commit direct")
+        .message_key
+        .expect("key");
+    blocking.set_blocklist(resource.to_bare(), vec![submission.sender.to_bare()]);
+    let env: Arc<dyn RecoveryEnvironment> = Arc::new(StateEnvironment(state));
+    let cursor = MaintenanceCursor::default();
+    for _ in 0..2 {
+        let outcome = pass(&f, &env, &cursor).await;
+        assert_eq!(append_count(&sm, &resource).await, 0);
+        assert_eq!(f.count("sm_ingress_appends").await, 0);
+        if read_fails {
+            assert_eq!(outcome, MaintenanceOutcome::Partial);
+            assert_pending(&f, key).await;
+            assert_eq!(f.count("ingress_effect_receipts").await, 0);
+        } else {
+            assert_eq!(outcome, MaintenanceOutcome::Complete);
+            assert_recovered(&f, key, 1).await;
+        }
+    }
+    f.close().await;
+}
+
+#[tokio::test]
+async fn sqlite_recovered_direct_discards_now_blocked_sender() {
+    blocked_direct_recovery(IngressFixture::sqlite().await, false).await;
+}
+#[tokio::test]
+async fn postgres_recovered_direct_discards_now_blocked_sender() {
+    if let Some(f) = IngressFixture::postgres("blocked_recovery").await {
+        blocked_direct_recovery(f, false).await;
+    }
+}
+#[tokio::test]
+async fn sqlite_recovered_direct_defers_on_blocklist_failure() {
+    blocked_direct_recovery(IngressFixture::sqlite().await, true).await;
+}
+#[tokio::test]
+async fn postgres_recovered_direct_defers_on_blocklist_failure() {
+    if let Some(f) = IngressFixture::postgres("blocking_failure_recovery").await {
+        blocked_direct_recovery(f, true).await;
+    }
 }
 
 async fn live_route(f: IngressFixture, full: bool, detached_no_store: bool, headline: bool) {

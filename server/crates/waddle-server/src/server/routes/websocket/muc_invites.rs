@@ -189,6 +189,7 @@ pub(crate) async fn claim_invite_for_message(
     actor: ActorRef<DbActor>,
     invite: &OutstandingInvite,
     message_key: waddle_xmpp::ingress::MessageKey,
+    not_after: Option<chrono::DateTime<chrono::Utc>>,
 ) -> Result<bool, InviteStorageError> {
     let database = actor
         .ask(crate::db::actor::GetDatabase)
@@ -228,10 +229,19 @@ pub(crate) async fn claim_invite_for_message(
         transaction.commit().await?;
         return Ok(claimed);
     }
-    let affected = transaction.execute(
-        "DELETE FROM muc_pending_invites WHERE room_jid = ? AND invitee_jid = ? AND inviter_jid = ? AND created_at > ?",
-        vec![invite.room.to_string().into(), invite.invitee.to_string().into(), invite.inviter.to_string().into(), expiry_cutoff().into()],
-    ).await?;
+    let mut params = vec![
+        invite.room.to_string().into(),
+        invite.invitee.to_string().into(),
+        invite.inviter.to_string().into(),
+        expiry_cutoff().into(),
+    ];
+    let delete = if let Some(not_after) = not_after {
+        params.push(not_after.to_rfc3339().into());
+        "DELETE FROM muc_pending_invites WHERE room_jid = ? AND invitee_jid = ? AND inviter_jid = ? AND created_at > ? AND created_at <= ?"
+    } else {
+        "DELETE FROM muc_pending_invites WHERE room_jid = ? AND invitee_jid = ? AND inviter_jid = ? AND created_at > ?"
+    };
+    let affected = transaction.execute(delete, params).await?;
     let claimed = affected > 0;
     let insert = match database.driver() {
         crate::db::DatabaseDriver::Postgres => "INSERT INTO muc_invite_claims (message_key, room_jid, invitee_jid, inviter_jid, claimed) VALUES (CAST(? AS UUID), ?, ?, ?, ?)",

@@ -69,6 +69,9 @@ pub(super) struct MaintenanceCursor {
     /// Drained by one detached worker after the phase so the credit survives
     /// the phase deadline without fanning out pooled reads.
     recovery_accounting: Arc<Mutex<Vec<(MessageKey, u32)>>>,
+    /// Held by the accounting worker; continuations of a partial pass spawn
+    /// their own worker, and this serializes them to one pooled read at a time.
+    recovery_accounting_worker: Arc<tokio::sync::Mutex<()>>,
 }
 
 impl MaintenanceCursor {
@@ -498,8 +501,13 @@ fn spawn_recovery_accounting(database: &Database, cursor: &MaintenanceCursor) {
         return;
     }
     let database = database.clone();
+    let worker = Arc::clone(&cursor.recovery_accounting_worker);
     tokio::spawn(async move {
         use waddle_xmpp::telemetry::reliability::increment_ingress_maintenance_recovered_obligations;
+        // One accounting read at a time across passes: a partial pass's
+        // continuation (gc.rs backoff) must not stack a second worker onto the
+        // dedicated ingress pool while an earlier one is still draining.
+        let _serial = worker.lock().await;
         let mut recovered = 0;
         for (key, before) in attempted {
             match tokio::time::timeout(RECOVERY_ACCOUNTING_BUDGET, receipts_now(&database, key))

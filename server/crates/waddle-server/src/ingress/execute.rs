@@ -466,6 +466,7 @@ pub async fn execute_effects(
                                     effect_deps.ingress_append_context = Some(SmIngressAppendContext {
                                         message_key,
                                         receipt: progress.receipt.clone(),
+                                        received_at: progress.received_at,
                                     });
                                 }
                             }

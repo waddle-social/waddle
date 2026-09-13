@@ -43,6 +43,7 @@ pub(super) struct RecoveryInput<'a> {
     pub recorded: &'a [IngressEffectIntent],
     pub unreceipted: &'a [IngressEffectIntent],
     pub route_progress: Vec<RouteProgress>,
+    pub blocked_recipients: &'a [jid::BareJid],
 }
 pub(super) struct RebuiltRecovery {
     pub decision: IngressDecision,
@@ -50,6 +51,8 @@ pub(super) struct RebuiltRecovery {
     pub unrecoverable: Vec<IngressEffectKind>,
     /// Receipts of unreceipted intents no rebuilt effect or delegation can settle.
     pub unsupported_receipts: Vec<decision::EffectReceiptKey>,
+    /// Direct routes durably resolved by current recipient blocking policy.
+    pub discarded_receipts: Vec<decision::EffectReceiptKey>,
 }
 
 pub(super) fn rebuild(input: RecoveryInput<'_>) -> Result<RebuiltRecovery, IngressUowError> {
@@ -112,7 +115,7 @@ pub(super) fn rebuild(input: RecoveryInput<'_>) -> Result<RebuiltRecovery, Ingre
             Err(error) => return Err(error),
         }
     }
-    restore_direct_routes(&mut plan, &input);
+    let discarded_receipts = restore_direct_routes(&mut plan, &input)?;
     let delegated = delegated_recoveries(&input);
     let mut external = super::suppression::filter_external_effects(
         &plan,
@@ -142,6 +145,7 @@ pub(super) fn rebuild(input: RecoveryInput<'_>) -> Result<RebuiltRecovery, Ingre
             .iter()
             .any(|receipts| receipts.contains(&receipt))
             && !is_delegated(intent, &delegated)
+            && !discarded_receipts.contains(&receipt)
         {
             if !unrecoverable.contains(&intent.kind()) {
                 unrecoverable.push(intent.kind());
@@ -182,6 +186,7 @@ pub(super) fn rebuild(input: RecoveryInput<'_>) -> Result<RebuiltRecovery, Ingre
         delegated,
         unrecoverable,
         unsupported_receipts,
+        discarded_receipts,
     })
 }
 
@@ -229,7 +234,11 @@ fn retain_pin_routes(plan: &mut IngressPlan, unreceipted: &[IngressEffectIntent]
     }
 }
 
-fn restore_direct_routes(plan: &mut IngressPlan, input: &RecoveryInput<'_>) {
+fn restore_direct_routes(
+    plan: &mut IngressPlan,
+    input: &RecoveryInput<'_>,
+) -> Result<Vec<decision::EffectReceiptKey>, IngressUowError> {
+    let mut discarded = Vec::new();
     let pin_owned = input
         .recorded
         .iter()
@@ -243,6 +252,16 @@ fn restore_direct_routes(plan: &mut IngressPlan, input: &RecoveryInput<'_>) {
         else {
             continue;
         };
+        if input.blocked_recipients.contains(recipient) {
+            // Specialized restorers may already have reconstructed this route.
+            plan.plan.retain(|planned| {
+                !matches!(&planned.effect,
+                Effect::External(effect) if super::recorded::recorded_route_obligation(
+                    std::slice::from_ref(intent), effect))
+            });
+            discarded.push(super::durable::receipt_key(intent)?);
+            continue;
+        }
         if fanout.is_empty()
             || (pin_owned && matches!(route_identity, EffectMessageIdentity::StanzaId(_)))
             || !direct_provenance(input, recipient)
@@ -268,6 +287,7 @@ fn restore_direct_routes(plan: &mut IngressPlan, input: &RecoveryInput<'_>) {
         }
         plan.plan.push(PlannedEffect::new(Effect::External(effect)));
     }
+    Ok(discarded)
 }
 
 fn direct_provenance(input: &RecoveryInput<'_>, recipient: &jid::BareJid) -> bool {

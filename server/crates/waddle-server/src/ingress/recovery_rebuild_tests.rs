@@ -43,6 +43,7 @@ fn progress_for(intent: &IngressEffectIntent) -> RouteProgress {
         fanout: fanout.clone(),
         route_identity: route_identity.clone(),
         completed: vec![],
+        received_at: None,
     }
 }
 fn run(
@@ -64,6 +65,7 @@ fn run_at(
         created_at,
         recorded,
         unreceipted: pending,
+        blocked_recipients: &[],
         route_progress: pending
             .iter()
             .filter(|i| matches!(i, IngressEffectIntent::RouteDirect { .. }))
@@ -201,6 +203,7 @@ fn partially_completed_fanout_keeps_only_remaining_resources() {
         created_at: Utc::now(),
         recorded: &routes,
         unreceipted: &routes,
+        blocked_recipients: &[],
         route_progress: vec![progress.clone()],
     })
     .expect("rebuild");
@@ -400,7 +403,7 @@ fn receipted_dm_pin_mutation_is_not_replayed_but_its_routes_run() {
     assert!(result.unrecoverable.is_empty());
 }
 #[test]
-fn muc_decline_claim_is_bound_to_the_canonical_key() {
+fn muc_decline_claim_is_bound_to_the_canonical_key_and_receipt_time() {
     let room = bare("room@conference.example.com");
     let mut message = envelope("decline").message().clone();
     message.to = Some(room.clone().into());
@@ -421,10 +424,17 @@ fn muc_decline_claim_is_bound_to_the_canonical_key() {
             recorded_at: None,
         },
     }];
-    let result = run(&MessageEnvelope::new(message), &intents, &intents);
-    let ExternalEffect::InviteLedger(crate::server::routes::websocket::handlers::message::muc_invite::InviteLedgerMutation::Claim { message_key, .. }) = &result.decision.external[0] else { panic!("claim") };
+    let created_at = Utc::now() - chrono::Duration::hours(1);
+    let result = run_at(
+        &MessageEnvelope::new(message),
+        &intents,
+        &intents,
+        created_at,
+    );
+    let ExternalEffect::InviteLedger(crate::server::routes::websocket::handlers::message::muc_invite::InviteLedgerMutation::Claim { message_key, not_after, .. }) = &result.decision.external[0] else { panic!("claim") };
     assert_eq!(*message_key, result.decision.message_key);
     assert!(message_key.is_some());
+    assert_eq!(*not_after, Some(created_at));
     assert_eq!(result.decision.external_receipts[0].len(), 1);
     assert!(result.unrecoverable.is_empty());
 }
@@ -524,4 +534,67 @@ fn expired_muc_decline_is_not_rebuilt() {
         result.unrecoverable,
         vec![IngressEffectKind::MucInviteLedger]
     );
+}
+
+#[test]
+fn blocked_recipient_discards_a_pre_restored_muc_decline_route() {
+    let room = bare("room@conference.example.com");
+    let inviter = bare("juliet@example.com");
+    let mut message = envelope("decline").message().clone();
+    message.to = Some(room.clone().into());
+    message.payloads.push(
+        minidom::Element::builder("x", waddle_xmpp::muc::presence::NS_MUC_USER)
+            .append(
+                minidom::Element::builder("decline", waddle_xmpp::muc::presence::NS_MUC_USER)
+                    .build(),
+            )
+            .build(),
+    );
+    let row_id = waddle_xmpp::pending_delivery::PendingRowId::fresh();
+    let intents = [
+        IngressEffectIntent::MucInviteLedger {
+            mutation: MucInviteLedgerMutation {
+                room,
+                invitee: bare("romeo@example.com"),
+                inviter: inviter.clone(),
+                action: MucInviteLedgerAction::Claimed,
+                recorded_at: None,
+            },
+        },
+        IngressEffectIntent::RouteDirect {
+            recipient: inviter.clone(),
+            fanout: vec!["juliet@example.com/phone"
+                .parse()
+                .expect("inviter resource")],
+            route_identity: EffectMessageIdentity::capture_ordinal(3),
+        },
+        IngressEffectIntent::PendingDelivery {
+            mutation: waddle_xmpp::ingress::PendingDeliveryMutation::Transient {
+                recipient: inviter,
+                row_id,
+            },
+        },
+    ];
+    let message = MessageEnvelope::new(message);
+    let pending = &intents[..2];
+    let result = rebuild(RecoveryInput {
+        key: MessageKey::new(),
+        envelope: &message,
+        created_at: Utc::now(),
+        recorded: &intents,
+        unreceipted: pending,
+        route_progress: vec![progress_for(&intents[1])],
+        blocked_recipients: &[bare("juliet@example.com")],
+    })
+    .expect("blocked rebuild");
+    assert!(matches!(
+        &result.decision.external[..],
+        [ExternalEffect::InviteLedger(_)]
+    ));
+    assert_eq!(
+        result.discarded_receipts,
+        vec![progress_for(&intents[1]).receipt]
+    );
+    assert!(result.unsupported_receipts.is_empty());
+    assert!(result.unrecoverable.is_empty());
 }

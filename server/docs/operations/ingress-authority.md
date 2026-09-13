@@ -637,22 +637,26 @@ COMMIT;
 
 ### What recovery handles
 
-Use the triage SQL's `kind_family` values below. Recorded intents win over
-current policy and audience; recovery never invents audience or payload.
+Use the triage SQL's `kind_family` values below. Recorded intents preserve the accepted audience and payload; recovery never
+invents either. Direct delivery re-evaluates the recipient’s current blocklist
+fail-closed before rebuilding routes.
 
 | `kind_family` | Automatic recovery or reason it stays pending |
 | --- | --- |
-| `route_direct` | Recoverable with non-empty recorded fanout when the canonical message is `Chat`/`Normal`, the recipient equals its bare `to`, and the route is neither delegated live full-JID nor DM-pin-owned. Recorded invitation/grant routes and pending-delivery audiences use their specialized restorers, never this generic path. |
+| `route_direct` | Recoverable with non-empty recorded fanout when the canonical message is `Chat`/`Normal`, the recipient equals its bare `to`, and the route is neither delegated live full-JID nor DM-pin-owned. Recovery re-evaluates the recipient’s current blocklist fail-closed and durably discards routes from a sender blocked after intake; a blocklist read failure defers the row. Recorded invitation/grant routes and pending-delivery audiences use their specialized restorers, never this generic path. |
 | `pending_delivery`, `notification_activity_preview` | Direct pending rows and recorded direct notification previews are rebuilt from the canonical envelope and recorded audience. A quota refusal durably receipts the pending delivery and its notification previews, so recovery never re-queues a refused message. Room notification candidates are covered by matching groupchat notification recovery delegation; unmatched candidates stay pending. |
 | `room_observer` | Rebuilt per recorded plugin when an observer envelope exists; missing observer envelopes are unrecoverable. Invocations are keyless and at-least-once. A plugin whose only outcome is a warning reply to the original sender cannot complete during recovery (that sender's connection is gone); the row is evaluated once and cached as unsupported until its evidence changes. |
 | `groupchat_notification_recovery` | `Completed`/`DeferredPolicy` obligations delegate to the existing notification recovery settlement, which re-locks and revalidates. |
 | `dm_pin_mutation`, `route_direct` | Route-only recovery when the recorded DM pin mutation is receipted. The mutation is never replayed. An unreceipted mutation and its dependent routes are deferred, because a successful mutation with a failed receipt write must not undo a later unpin; both kinds are metered. |
-| `muc_invite_ledger` | Recorded `Claimed` declines rebuild the ledger claim and inviter route, binding the claim to the canonical message key. A decline whose canonical row is older than the 30-day invitation TTL is not rebuilt (its invitation expired and a newer one for the same tuple could otherwise be consumed); it is metered and stays pending. |
+| `muc_invite_ledger` | Recorded `Claimed` declines rebuild the ledger claim and inviter route, binding the claim to the canonical message key and to invitations created no later than the canonical receipt time. A newer invitation remains available and the recovered decline is not forwarded. A decline whose canonical row is older than the 30-day invitation TTL is not rebuilt (its invitation expired and a newer one for the same tuple could otherwise be consumed); it is metered and stays pending. |
 | `route_direct` | Delegated live full-JID routes are deferred: full target, recipient differs from sender, no recorded recipient archive, singleton full-target fanout and `CaptureOrdinal` identity. Recipient preparation belongs to the destination pipeline. This also conservatively defers detached full-target `<no-store/>` routes without archive evidence. Headline routes are deferred because they require peer delivery with recipient archival for `<store/>`. Groupchat inbox pushes and routes to other recipients are unrecoverable because the canonical message does not prove their payload. |
 | `carbons`, `dm_call_thread_state` | Deliberately deferred despite being rebuildable: their sinks have no idempotency key. |
 | `pin` | Room pin chains are unrecoverable: the pinner nick was not recorded. |
 | `relay_carbons`, `route_muc`, `route_occupant_pm`, `dispatch_to_room_remote`, `group_dm_membership_grant`, `group_dm_invite_ledger`, `muc_invite_membership_grant`, `room_subject_mutation`, `link_preview_media_ref`, `call_signal`, `extension`, `tombstone_replay_deletion`, `error_reply` | Unrecoverable from the recorded envelope and intents alone: these need actor handles, reflected payloads or a sender socket. `route_muc` includes system broadcasts. |
 | `archive`, `inbox_project`, `retraction_tombstone` | Phase B obligations should already be receipted; missing receipts indicate a contradiction and are never re-applied. `archive` also includes `SystemMessageArchive`, which recovery cannot rebuild. |
+
+Recovered detached SM appends retain the canonical receipt time, preserving
+XEP-0203 delay stamps across the recovery grace interval.
 
 Remote-owner-only resources reachable through `RelayFullJid` owner routing stay
 pending: recovery covers registered remote sockets and local registries, but

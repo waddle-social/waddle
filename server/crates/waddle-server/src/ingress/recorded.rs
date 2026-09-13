@@ -28,6 +28,7 @@ pub struct RouteProgress {
     pub recipient: jid::BareJid,
     pub fanout: Vec<jid::FullJid>,
     pub route_identity: waddle_xmpp::ingress::EffectMessageIdentity,
+    pub received_at: Option<chrono::DateTime<chrono::Utc>>,
     pub completed: Vec<jid::FullJid>,
 }
 
