@@ -30,6 +30,104 @@ and closes. A timeout after commit never reverses the handled disposition.
 An ambiguous commit must not be treated as proof of rollback: a retry can
 recover the recorded wire-position binding as `existing_committed`.
 
+## Extension ingress and grants (#1753)
+
+Direct extension sends and local-room bot groupchat use the same canonical
+rows, recorded intents and receipts as other ingress producers. The admission
+identity is `Extension { plugin, requester }`, backed by `ExtensionPrincipal`
+and `TransportGeneration::Host`; it does not assert a synthetic authenticated
+session. Direct sends use the requester as effective sender, room sends the
+plugin actor. Provider webhooks require a grant for the exact room and cannot
+send direct messages. Remote-owned room sends are refused as typed
+`ExtensionRemoteRoomUnsupported`; the ordered relay stays `deliver_ordered.v10`.
+
+V1018 stores grants in `extension_grants`: scope `0` is plugin send authority
+(`room_jid IS NULL`), scope `1` is provider-room authority. Partial unique indexes
+allow one active send grant per plugin and one active grant per (plugin, room).
+Admission checks the exact active grant, plugin, scope, target room when scoped,
+and the requester's account when present. Revocation fences new admissions;
+it does not undo a committed message or stop recovery of its recorded effects.
+An in-flight transaction holding the grant can finish before revocation commits.
+
+Startup calls `sync_configured` with the complete configured plugin set. Plugins
+with `HostMessageSend` receive send grants and grants for their configured
+provider rooms; removed plugins, lost send capability and removed rooms revoke
+the corresponding active grants. Sending only resolves existing grants and
+never mints them. Configuration is the source of truth: a restart with unchanged
+configuration deliberately re-grants a runtime or SQL revocation using a fresh
+grant id. For revocation to survive restart, remove the plugin, capability or
+provider room from configuration on every replica. Keep the complete configured
+set consistent across replicas; another replica's startup sync can re-grant it.
+`ExtensionGrantRepository::revoke_plugin` revokes all active grants for a plugin;
+automatic unload/hot-reload invocation of that API is not wired in this change.
+
+Inspect grants with the application database role. Replace the plugin placeholder
+with the exact configured id; these queries include revoked history.
+
+SQLite:
+
+```sql
+SELECT grant_id, plugin_id, scope, room_jid, granted_at, revoked_at
+FROM extension_grants
+WHERE plugin_id = '<plugin-id>'
+ORDER BY scope, room_jid, granted_at, grant_id;
+
+BEGIN IMMEDIATE;
+UPDATE extension_grants
+SET revoked_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now')
+WHERE plugin_id = '<plugin-id>' AND revoked_at IS NULL
+RETURNING grant_id, plugin_id, scope, room_jid, revoked_at;
+COMMIT;
+```
+
+PostgreSQL (application role, not `pg_monitor`):
+
+```sql
+SELECT grant_id, plugin_id, scope, room_jid, granted_at, revoked_at
+FROM extension_grants
+WHERE plugin_id = '<plugin-id>'
+ORDER BY scope, room_jid, granted_at, grant_id;
+
+BEGIN;
+UPDATE extension_grants
+SET revoked_at = now()
+WHERE plugin_id = '<plugin-id>' AND revoked_at IS NULL
+RETURNING grant_id, plugin_id, scope, room_jid, revoked_at;
+COMMIT;
+```
+
+The UPDATE revokes all active scopes for the plugin. To revoke only one provider
+room, add `AND scope = 1 AND room_jid = '<room-bare-jid>'` to its WHERE clause.
+Retain the returned rows and successful commit result as the revocation record;
+do not delete grants or fabricate ingress receipts. No operator grant UI ships.
+
+The host consumes sender frames and bot reflections captured with
+`Deps.host_sender`; there is no sender socket to write. One
+`NestedIngressOperation` permit covers planning and authority-owned commit,
+execution and frame settlement. A queued drain refuses a new nested operation
+without waiting; admitted work keeps its permit until completion even if its
+caller is cancelled. The first typed stanza error is surfaced after successful
+settlement. Offline quota uses `SettledRefusal::OfflineQuotaExceeded`, mapped to
+XEP-0160 `cancel` / `service-unavailable`, after pending and notification
+obligations settle without a pending row or candidate insert.
+
+The adapter waits up to two seconds for settlement after commit. Expiry or a
+settlement persistence failure returns acceptance; an enclosing caller timeout
+returns no response, while authority-owned settlement continues. Frame receipt
+writes retry for up to five seconds without dispatching the effects again.
+Exhaustion can leave a committed non-terminal row whose frame-only obligations
+maintenance cannot rebuild. Host consumption retains the existing at-least-once
+frame limitation; acceptance is not proof that all receipts exist. Inspect
+pending intent pairs before retrying. A plugin retry mints a fresh stanza id and
+origin-id and is a new message, including after a caller timeout. Only reuse of
+the same origin at the adapter boundary aliases to the original canonical row.
+
+The monitoring family `extension` (integer kind **10**) is unchanged: it labels
+extension effects, not messages whose ingress identity is Extension. Those
+messages carry their actual route, pending-delivery, notification and other
+intent kinds. Kind 10 remains outside automatic recovery; #1660 opaque delivery
+keys are not part of this change.
+
 ## Metrics and alerts
 
 OTLP counters translate to the following Prometheus families. Transaction
@@ -207,6 +305,23 @@ readiness, ledger migration completion and the queries below. Then open a
 follow-up PR restoring `RollingUpdate` (`maxSurge: 1`, `maxUnavailable: 0`).
 This follows #1596 (`1cad23a2`) and its verified flip-back #1605 (`5dbe771c`);
 Recreate is not the steady-state rollout strategy.
+
+### V1018 extension ingress rollout (#1753)
+
+V1018 adds `extension_grants` and active-grant indexes on both dialects without
+resetting ingress, archives, pending delivery or SM state. Use `RollingUpdate`
+for this change. Until every pod runs the new binary, old pods still send
+extension messages outside ingress and do not enforce grant revocation. They do
+not read `extension_grants` or corrupt new-writer grant state. The identity,
+receipt and revocation guarantees become global only when the rollout completes;
+record the time the last old pod exits. Keep the complete extension configuration
+consistent across the fleet during startup reconciliation.
+
+The existing migration ledger guard prevents a pre-V1018 catalog from restarting
+against the advanced ledger, but cannot fence an already-running old process.
+Roll forward; the pre-ledger rollback prohibition below still applies. This
+accepted enforcement window differs from the earlier append/ordinal cutovers,
+which required all old writers to stop before new writers began.
 
 ### V1014 cutover (#1739–#1743, PR #1752)
 

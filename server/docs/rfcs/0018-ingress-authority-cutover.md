@@ -34,7 +34,7 @@ than at-least-once queue allocation; (iii) live full-JID delivery keeps the
 destination connection's own recipient archive/inbox pipeline (#1658, now tracked as #1759);
 (iv) subject/pin/membership supersession keeps `main`'s semantics
 (#1659/#1660); (v) non-resumable streams have no durable
-connection-generation fence (follow-up issue); (vi) extension-host dispatch runs outside ingress: offline rows and candidates are written immediately without receipts, and groupchat notification recovery rows are not created; a typed Extension ingress identity is the follow-up.
+connection-generation fence (follow-up issue); (vi) ~~extension-host dispatch runs outside ingress: offline rows and candidates are written immediately without receipts, and groupchat notification recovery rows are not created; a typed Extension ingress identity is the follow-up.~~ Resolved by #1753: typed extension ingress covers direct and local-room bot sends (§3.1).
 (vii) archive ordinals do not yet enforce concurrent live dispatch order (#1770, §3.7).
 
 ### Recovery follow-ups from combined review
@@ -130,19 +130,77 @@ complete `Applied` reply; incomplete replies leave that intent unresolved.
 ## 3. Identity
 
 ### 3.1 Admission identity
-`IngressStreamIdentity::{Resumable { sm_ingress_id, SmClaimFence },
-Ephemeral { connection_generation, principal }, Relayed { canonical_ref,
-room fence }}`. Principal `FOR SHARE` is always asserted. Resumable adds the
-SM claim, stream row, ordinal, checkpoint. Ephemeral has no refs/frontier;
-registry ownership is re-checked before Phase C. Relayed (owner side of a
-relayed groupchat) has no SM parts and is fenced by the room claim.
+`IngressStreamIdentity` distinguishes `Resumable`, `Ephemeral { principal }`,
+`Relayed { canonical, room, room_fence }` (room fence under clustering), and
+`Extension { plugin, requester }`. `IngressPrincipal::Authenticated` asserts
+the persisted principal `FOR SHARE`. Resumable adds the SM claim, stream row,
+ordinal and checkpoint. Ephemeral has no refs/frontier; registry ownership is
+re-checked before Phase C. Relayed (owner side of a relayed groupchat) has no
+SM parts and is fenced by the room claim.
+
+`IngressPrincipal::Extension(ExtensionPrincipal { grant, requester, sender })`
+asserts a durable `extension_grants` row instead of an authenticated session.
+The exact grant id must be active and match the plugin and scope; the identity's
+plugin and requester must match the principal. A provider-room grant must match
+the target room. When present, the requester's `users` row is also asserted.
+PostgreSQL holds the grant and account `FOR SHARE` through commit; SQLite uses
+its ingress transaction's write serialization. Missing, revoked or mismatched
+grants and deleted requester accounts refuse admission as `principal_missing`.
+Existing manifest, roster and room permission checks still run before planning.
+Local-room fencing remains driven by the plan's room execution path.
+
+The effective sender is the requester for direct sends and the plugin actor
+bare JID for groupchat. Both paths carry a typed XEP-0359 origin-id derived from
+the offered stanza id. Alias and digest authorities use this effective sender:
+different bots have separate origin namespaces, while a direct extension send
+shares its requester's namespace. `TransportGeneration::Host` explicitly has
+no socket generation or registry ownership recheck, SM refs or handled frontier.
+
+`NestedIngressOperation` acquires one admission permit before planning without
+waiting behind a drain writer. Before the first commit await, it transfers the
+submission and continuation to an authority-owned task. That task commits,
+executes and settles without reacquiring admission; caller cancellation cannot
+cancel committed work, and drain waits for its permit. `Deps.host_sender`
+captures sender-directed frames during planning. The continuation consumes those
+frames (including bot reflection) as the host transport and settles their
+obligations, retrying receipt persistence within a five-second budget without
+re-dispatching effects.
+
+The host reports the first typed stanza error after successful settlement.
+Offline quota refusal is carried by `SettledRefusal::OfflineQuotaExceeded` and
+mapped to the existing XEP-0160 `cancel` / `service-unavailable` error; pending
+and notification obligations settle before that response, without inserting a
+pending row or candidate. The plugin API is unchanged: if the two-second
+settlement-response deadline expires after commit, or settlement persistence
+fails, the adapter returns acceptance. An enclosing caller timeout instead
+produces no response while the authority-owned task continues. Exhausting frame
+settlement retries can leave a committed non-terminal row; maintenance cannot
+reconstruct frame-only obligations. This is the host-transport form of the
+existing at-least-once frame limitation, not an exactly-once delivery guarantee.
+A plugin retry after a caller timeout generates a fresh origin and is a new
+message; reusing the same origin at the adapter boundary uses alias replay.
+
+`plan_extension_bot_groupchat` captures trusted bot groupchat effects, including
+archive identity/ordinal, occupant routes, inbox projections and notification
+recovery linked to the canonical `message_key`. It keeps server-authored sender
+authority, no sender inbox projection, no enrichment and no observers. Existing
+bot occupancy (nickname and session generation) is reused; join and initial
+presence only run for an absent bot, as authorized lifecycle work outside message
+receipts. The digest uses the offered unsigned envelope before validation and
+clock-dependent signing; the signed envelope is persisted and sent. Occupant
+copies retain XEP-0045, thread, reply, markup and stanza-id semantics, with the
+added origin-id. Remote-owned rooms receive the typed
+`ExtensionRemoteRoomUnsupported` planning refusal; `IngressRelayAdmission` and
+`deliver_ordered.v10` are unchanged.
 
 Non-advancing outcome: Resumable → ordinary hole (`abandon`) → transport ends,
 session resumable before the hole. Ephemeral → typed `<stream:error>` then
 close (`internal-server-error` for storage/serialization/timeout/ambiguous
 commit/lineage/epoch; `not-authorized` for principal loss; `conflict` for fence
-or registry loss). Committed semantic denials are standard stanza errors
-(advancing) on every identity.
+or registry loss). Extension → host `NotAuthorized` for principal/grant loss,
+`Storage` for authority or other non-advancing failures; typed remote-room plan
+refusal maps to `Unsupported`. Committed semantic denials are standard stanza
+errors, consumed by the host for Extension identity.
 
 ### 3.2 Receive identity and checkpoint
 No in-memory ordinal mirror; `sm_sessions.shadow_ordinal` is dropped.
@@ -468,6 +526,22 @@ a discarded session are released once by the store-owned startup step
 `groupchat_notification_recovery` rows without a canonical `message_key` are
 deleted once by the inbox schema step. Roll-forward only: no pre-V1014 binary
 can start after the ledger advances.
+
+**V1018 extension ingress (#1753).** `extension_grants` and its partial unique
+indexes are additive on SQLite and PostgreSQL; no existing ingress, archive,
+queue or session state is reset. This change rolls with `RollingUpdate`.
+There is an explicit enforcement window: until every pod runs the new binary,
+extension sends from old pods still bypass ingress. Those binaries never read
+`extension_grants`; their existing path does not corrupt the new grant state,
+but it does not honor revocation or create the new ingress receipts. The new
+guarantees become global only when rollout completes; record that timestamp.
+Use the same complete extension configuration across replicas because each new
+process reconciles the configured grant set at startup.
+
+The existing ledger guard applies at startup: a pre-V1018 binary with the
+migration ledger guard cannot restart against the advanced ledger. It does not
+stop an old process that is already running. Roll forward after V1018; the
+runbook's prohibition on rollback to pre-ledger images remains in force.
 
 ## 7. Scaffolding removal
 `ingress_shadow` → `ingress`; worker, queue, parking map, candidate ladder,
