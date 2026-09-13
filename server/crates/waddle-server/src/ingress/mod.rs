@@ -35,7 +35,9 @@ mod restore_offline;
 pub mod submission;
 pub mod suppression;
 
-pub use crate::server::routes::interpret::{effects, Deps};
+pub use crate::server::routes::interpret::{
+    effects, plan_message_dispatch, Deps, HostOwnedResources,
+};
 pub use decision::{AliasOutcomeClass, EffectReceiptKey, IngressDecision, IngressDecisionClass};
 pub use effects::{
     DurableEffect, ExternalEffect, ImmediateSink, IngressPlan, PlanSuppressionPolicy,

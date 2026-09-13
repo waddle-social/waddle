@@ -17,23 +17,20 @@ pub(super) async fn finish_nested(
         NestedOutcome::Refused(NestedRefusal::Decision(IngressDecisionClass::PrincipalMissing)) => {
             Err(ExtensionHostAdapterError::NotAuthorized)
         }
-        NestedOutcome::Refused(reason) => Err(ExtensionHostAdapterError::Storage(format!(
-            "nested ingress refused: {reason:?}"
-        ))),
+        NestedOutcome::Refused(reason) => Err(ExtensionHostAdapterError::Refused(reason)),
         NestedOutcome::Committed {
             settlement,
             archive_ids,
             ..
         } => {
             // A dropped waiter cannot cancel the authority's task. Once committed,
-            // timeout or persistence failure means acceptance, never a retry request.
+            // timeout means acceptance. A known rejection remains valid even if
+            // persisting its receipt failed.
             if let Ok(Ok(outcome)) =
                 tokio::time::timeout(SETTLEMENT_RESPONSE_DEADLINE, settlement).await
             {
-                if outcome.terminal.is_ok() {
-                    if let Some(rejection) = outcome.rejection {
-                        return Err(ExtensionHostAdapterError::Rejected(Box::new(rejection)));
-                    }
+                if let Some(rejection) = outcome.rejection {
+                    return Err(ExtensionHostAdapterError::Rejected(Box::new(rejection)));
                 }
             }
             Ok(archive_ids)

@@ -8,7 +8,16 @@ use waddle_xmpp::ingress::{
 
 #[cfg(test)]
 tokio::task_local! {
+    pub(crate) static TEST_BOT_SNAPSHOT_GATE: std::sync::Arc<BotSnapshotGate>;
     pub(crate) static TEST_SIGNING_TIME: chrono::DateTime<chrono::Utc>;
+}
+
+#[cfg(test)]
+#[derive(Default)]
+pub(crate) struct BotSnapshotGate {
+    pub arrivals: std::sync::atomic::AtomicUsize,
+    pub reached: tokio::sync::Notify,
+    pub release: tokio::sync::Notify,
 }
 
 fn signing_time() -> chrono::DateTime<chrono::Utc> {
@@ -146,7 +155,9 @@ pub(super) async fn plan_bot_groupchat_message(
     });
     let mut planned =
         build_plan_deps(deps, &sink).with_ingress_effect_capture(Some(capture.clone()));
-    planned.host_sender = Some(bot_ctx.sender_full.clone());
+    planned.host_sender = Some(HostOwnedResources::ExtensionBots(
+        bot_ctx.sender_full.clone(),
+    ));
     #[cfg(feature = "clustering")]
     if bot_ctx.claim_fence.is_some() {
         planned.ordered_relay_origin = Some(OrderedRelayRouteOrigin::room(bot_ctx.room_jid));
@@ -397,6 +408,13 @@ pub(crate) async fn plan_extension_bot_groupchat(
             return Err(ExtensionBotDispatchError::SnapshotFailed);
         }
     };
+    #[cfg(test)]
+    if let Ok(gate) = TEST_BOT_SNAPSHOT_GATE.try_with(std::sync::Arc::clone) {
+        gate.arrivals
+            .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        gate.reached.notify_one();
+        gate.release.notified().await;
+    }
     let initial_occupants: Vec<OccupantSnapshot> = initial_snapshot
         .occupants
         .iter()

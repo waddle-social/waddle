@@ -91,3 +91,5 @@ mod groupchat_signed;
 mod quota;
 
 mod groupchat_settlement;
+
+mod groupchat_concurrent;

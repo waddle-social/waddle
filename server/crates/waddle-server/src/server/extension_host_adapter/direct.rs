@@ -81,12 +81,10 @@ impl ExtensionHostAdapter {
             .map_err(|error| ExtensionHostAdapterError::Storage(error.to_string()))?;
         machine.set_blocklist(Blocklist::new(blocklist));
         let mut deps = self.interpret_deps(invocation.session.as_ref());
-        deps.host_sender = Some(sender.clone());
+        deps.host_sender = Some(interpret::HostOwnedResources::Sender(sender.clone()));
         let plan = interpret::plan_message_dispatch(&mut machine, message, &deps).await;
         if let Some(failure) = plan.failure {
-            return Err(ExtensionHostAdapterError::Unsupported(format!(
-                "{failure:?}"
-            )));
+            return Err(ExtensionHostAdapterError::Plan(failure));
         }
         let submission = IngressSubmission {
             identity: IngressStreamIdentity::Extension {

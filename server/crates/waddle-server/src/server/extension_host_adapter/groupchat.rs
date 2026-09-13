@@ -12,6 +12,27 @@ use crate::ingress::{
 
 use super::{interpret, ExtensionHostAdapter, ExtensionHostAdapterError, ExtensionInvocation};
 
+/// Serializes the synthetic actor lifecycle across independently created adapters.
+#[derive(Default)]
+pub struct BotRoomLocks {
+    entries: dashmap::DashMap<(waddle_extensions::PluginId, BareJid), Arc<tokio::sync::Mutex<()>>>,
+}
+
+impl BotRoomLocks {
+    async fn lock(
+        &self,
+        plugin: &waddle_extensions::PluginId,
+        room: &BareJid,
+    ) -> tokio::sync::OwnedMutexGuard<()> {
+        let lock = self
+            .entries
+            .entry((plugin.clone(), room.clone()))
+            .or_insert_with(|| Arc::new(tokio::sync::Mutex::new(())))
+            .clone();
+        lock.lock_owned().await
+    }
+}
+
 impl ExtensionHostAdapter {
     pub(super) async fn dispatch_groupchat(
         &self,
@@ -40,6 +61,15 @@ impl ExtensionHostAdapter {
             .map_err(|error| ExtensionHostAdapterError::Storage(error.to_string()))?;
         let sender = self.plugin_actor_jid(&invocation.plugin_id)?;
         let requester = (!provider).then(|| invocation.actor_jid.to_bare());
+        // Keep snapshot, first join, and admission ordered for this bot/room.
+        // The actor's admission generation must not change under a second join.
+        let _room_guard = self
+            .state
+            .deps
+            .protocol
+            .extension_bot_rooms
+            .lock(&invocation.plugin_id, &room)
+            .await;
         let deps = self.interpret_deps(invocation.session.as_ref());
         let planned =
             interpret::plan_extension_bot_groupchat(&deps, room.clone(), sender.clone(), response)

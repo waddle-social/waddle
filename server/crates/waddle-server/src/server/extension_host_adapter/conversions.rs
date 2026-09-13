@@ -14,12 +14,16 @@ use super::{
 
 pub(super) fn host_tool_error(error: ExtensionHostAdapterError) -> ext_host::HostToolError {
     let code = match error {
-        ExtensionHostAdapterError::NotAuthorized => ext_host::HostToolErrorCode::Denied,
-        ExtensionHostAdapterError::RoomNotFound(_) => ext_host::HostToolErrorCode::NotFound,
-        ExtensionHostAdapterError::Unsupported(_) | ExtensionHostAdapterError::Plan(_) => {
-            ext_host::HostToolErrorCode::Unsupported
+        ExtensionHostAdapterError::NotAuthorized | ExtensionHostAdapterError::Rejected(_) => {
+            ext_host::HostToolErrorCode::Denied
         }
-        ExtensionHostAdapterError::Rejected(_)
+        ExtensionHostAdapterError::RoomNotFound(_) => ext_host::HostToolErrorCode::NotFound,
+        ExtensionHostAdapterError::Unsupported(_)
+        | ExtensionHostAdapterError::Plan(
+            crate::server::routes::interpret::effects::PlanFailure::ExtensionRemoteRoomUnsupported,
+        ) => ext_host::HostToolErrorCode::Unsupported,
+        ExtensionHostAdapterError::Plan(_)
+        | ExtensionHostAdapterError::Refused(_)
         | ExtensionHostAdapterError::RoomActor(_)
         | ExtensionHostAdapterError::Storage(_)
         | ExtensionHostAdapterError::Protocol(_) => ext_host::HostToolErrorCode::TemporaryFailure,

@@ -39,6 +39,7 @@ mod settlement;
 mod types;
 
 use conversions::*;
+pub use groupchat::BotRoomLocks;
 pub use types::*;
 
 #[derive(Clone)]

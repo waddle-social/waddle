@@ -122,6 +122,8 @@ pub enum ExtensionHostAdapterError {
     Storage(String),
     #[error("protocol failed: {0}")]
     Protocol(String),
+    #[error("nested ingress refused: {0:?}")]
+    Refused(crate::ingress::nested::NestedRefusal),
     #[error("message planning failed: {0}")]
     Plan(crate::server::routes::interpret::effects::PlanFailure),
     #[error("unsupported: {0}")]

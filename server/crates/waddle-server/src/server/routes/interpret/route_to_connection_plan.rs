@@ -164,7 +164,11 @@ pub(super) async fn deliver_full(
     stanza: &Stanza,
     call_setup: Option<PendingCallSetupRoute>,
 ) -> FullJidDeliveryOutcome {
-    if deps.host_sender.as_ref() == Some(target) {
+    if deps
+        .host_sender
+        .as_ref()
+        .is_some_and(|host| host.owns(target))
+    {
         deps.effects
             .record(super::super::effects::PlannedEffect::new(
                 super::super::effects::Effect::External(

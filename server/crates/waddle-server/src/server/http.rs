@@ -1114,6 +1114,7 @@ async fn create_websocket_state(
                 pep_feed_bridge: Arc::new(crate::pep_feed_bridge::PepFeedBridge::new()),
                 call_threads: Arc::new(dashmap::DashMap::new()),
                 call_thread_end_locks: Arc::new(dashmap::DashMap::new()),
+                extension_bot_rooms: Default::default(),
                 remote_muc_memberships: Arc::new(
                     crate::server::routes::websocket::RemoteMucMemberships::default(),
                 ),

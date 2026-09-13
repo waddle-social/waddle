@@ -132,6 +132,28 @@ impl SmIngressAppendContext {
     }
 }
 
+/// Typed transport ownership for copies settled by an extension host.
+#[derive(Clone)]
+pub enum HostOwnedResources {
+    Sender(FullJid),
+    /// The actor is constructed from the configured extensions domain. Every
+    /// plugin actor on that domain with the same bot resource belongs to the host.
+    ExtensionBots(FullJid),
+}
+
+impl HostOwnedResources {
+    pub(super) fn owns(&self, target: &FullJid) -> bool {
+        match self {
+            Self::Sender(sender) => sender == target,
+            Self::ExtensionBots(actor) => {
+                target.node().is_some()
+                    && target.domain() == actor.domain()
+                    && target.resource() == actor.resource()
+            }
+        }
+    }
+}
+
 /// Typed dependency context for the interpreter.
 ///
 /// Grows as later migration steps add storage/actor handles
@@ -142,8 +164,8 @@ impl SmIngressAppendContext {
 pub struct Deps<'a> {
     /// Owned receipt context scoped to one recorded direct-route resource attempt.
     pub ingress_append_context: Option<SmIngressAppendContext>,
-    /// Sender resource whose planned frames are consumed by an extension host.
-    pub host_sender: Option<jid::FullJid>,
+    /// Resources whose planned frames are consumed by an extension host.
+    pub host_sender: Option<HostOwnedResources>,
     /// Identity scoped to the current direct-routing invocation.
     pub direct_route_identity: Option<waddle_xmpp::ingress::EffectMessageIdentity>,
     pub effects: &'a dyn super::effects::EffectSink,

@@ -190,3 +190,161 @@ async fn extension_host_boundary_observer_timeout_postgres() {
         observer_timeout_preserves_committed_settlement(f).await;
     }
 }
+
+async fn cancel_rejection_is_denied(f: IngressFixture) {
+    let adapter = blocked_adapter(&f).await;
+    let error = host::ExtensionHostTools::send_message(&adapter, &context(), host_request())
+        .await
+        .expect_err("cancel bounce must reach the plugin");
+    assert_eq!(error.code, host::HostToolErrorCode::Denied);
+    assert_eq!(
+        f.count("ingress_messages WHERE terminal_at IS NOT NULL")
+            .await,
+        1
+    );
+    assert!(
+        adapter
+            .state
+            .deps
+            .protocol
+            .ingress
+            .drain_and_join(Duration::from_secs(10))
+            .await
+    );
+    drop(adapter);
+    f.close().await;
+}
+
+#[tokio::test]
+async fn extension_host_boundary_cancel_is_denied_sqlite() {
+    cancel_rejection_is_denied(IngressFixture::sqlite().await).await;
+}
+#[tokio::test]
+async fn extension_host_boundary_cancel_is_denied_postgres() {
+    if let Some(f) = IngressFixture::postgres("host_cancel_denied").await {
+        cancel_rejection_is_denied(f).await;
+    }
+}
+
+#[tokio::test]
+async fn extension_host_boundary_known_rejection_survives_receipt_failure() {
+    use crate::ingress::{
+        nested::{NestedOutcome, SettlementOutcome},
+        IngressDecisionClass,
+    };
+    let outcome = NestedOutcome::Committed {
+        decision_class: IngressDecisionClass::Accepted,
+        archive_ids: vec![],
+        settlement: tokio::spawn(async {
+            SettlementOutcome {
+                rejection: Some(
+                    crate::server::routes::interpret::offline_delivery::offline_quota_error(),
+                ),
+                terminal: Err(crate::ingress_uow::IngressUowError::AuthorityStopped.into()),
+            }
+        }),
+    };
+    assert!(
+        matches!(super::super::settlement::finish_nested(outcome).await,
+        Err(super::super::ExtensionHostAdapterError::Rejected(error))
+            if error.type_ == xmpp_parsers::stanza_error::ErrorType::Cancel)
+    );
+}
+
+#[test]
+fn extension_host_boundary_plan_storage_failure_is_retryable() {
+    use crate::server::routes::interpret::effects::PlanFailure;
+    let error = super::super::conversions::host_tool_error(
+        super::super::ExtensionHostAdapterError::Plan(PlanFailure::RecipientBlocklistRead),
+    );
+    assert_eq!(error.code, host::HostToolErrorCode::TemporaryFailure);
+}
+
+struct UnavailableRecipientBlocklist;
+
+#[derive(Debug, thiserror::Error)]
+#[error("injected recipient blocklist failure")]
+struct RecipientBlocklistFailure;
+
+#[async_trait::async_trait]
+impl waddle_xmpp::xep::xep0191::BlockingStorage for UnavailableRecipientBlocklist {
+    async fn list_blocked_jids(
+        &self,
+        user: &jid::BareJid,
+    ) -> Result<Vec<jid::BareJid>, waddle_xmpp::xep::xep0191::BlockingStorageError> {
+        if user.node().is_some_and(|node| node.as_str() == "juliet") {
+            Err(waddle_xmpp::xep::xep0191::BlockingStorageError::new(
+                RecipientBlocklistFailure,
+            ))
+        } else {
+            Ok(vec![])
+        }
+    }
+}
+
+async fn direct_plan_failure_stays_typed(f: IngressFixture) {
+    let mut adapter = adapter(&f).await;
+    Arc::get_mut(&mut adapter.state)
+        .expect("unique state")
+        .deps
+        .protocol
+        .blocking_storage = Arc::new(UnavailableRecipientBlocklist);
+    let result = adapter
+        .send_message(&invocation(), request("typed-plan-error"))
+        .await;
+    assert!(
+        matches!(
+            result,
+            Err(super::super::ExtensionHostAdapterError::Plan(
+                crate::server::routes::interpret::effects::PlanFailure::RecipientBlocklistRead
+            ))
+        ),
+        "typed plan failure: {result:?}"
+    );
+    assert_eq!(f.count("ingress_messages").await, 0);
+    assert!(
+        adapter
+            .state
+            .deps
+            .protocol
+            .ingress
+            .drain_and_join(Duration::from_secs(10))
+            .await
+    );
+    drop(adapter);
+    f.close().await;
+}
+
+#[tokio::test]
+async fn extension_host_boundary_direct_plan_failure_sqlite() {
+    direct_plan_failure_stays_typed(IngressFixture::sqlite().await).await;
+}
+#[tokio::test]
+async fn extension_host_boundary_direct_plan_failure_postgres() {
+    if let Some(f) = IngressFixture::postgres("host_direct_plan_failure").await {
+        direct_plan_failure_stays_typed(f).await;
+    }
+}
+
+#[tokio::test]
+async fn extension_host_boundary_nested_refusal_stays_typed() {
+    use crate::ingress::{
+        nested::{NestedOutcome, NestedRefusal},
+        IngressDecisionClass,
+    };
+    let error = super::super::settlement::finish_nested(NestedOutcome::Refused(
+        NestedRefusal::Decision(IngressDecisionClass::Storage),
+    ))
+    .await
+    .expect_err("storage decision is refused");
+    assert!(matches!(
+        error,
+        super::super::ExtensionHostAdapterError::Refused(NestedRefusal::Decision(
+            IngressDecisionClass::Storage
+        ))
+    ));
+    assert_eq!(
+        super::super::conversions::host_tool_error(error).code,
+        host::HostToolErrorCode::TemporaryFailure
+    );
+}
