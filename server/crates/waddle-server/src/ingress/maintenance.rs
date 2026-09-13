@@ -65,6 +65,10 @@ pub(super) struct MaintenanceCursor {
     after: Arc<Mutex<Option<MaintenancePosition>>>,
     recovery_after: Arc<Mutex<Option<MaintenancePosition>>>,
     recovery_unsupported: Arc<Mutex<UnsupportedRows>>,
+    /// Rows attempted this pass, with the receipt count the scan observed.
+    /// Drained by one detached worker after the phase so the credit survives
+    /// the phase deadline without fanning out pooled reads.
+    recovery_accounting: Arc<Mutex<Vec<(MessageKey, u32)>>>,
 }
 
 impl MaintenanceCursor {
@@ -163,6 +167,7 @@ pub(super) async fn run_maintenance_pass_with_cursor(
             )
             .await
             .unwrap_or(MaintenanceOutcome::TimedOut);
+            spawn_recovery_accounting(database, cursor);
             record(IngressMaintenancePhase::Recovery, outcome)
         } else {
             MaintenanceOutcome::Complete
@@ -428,7 +433,7 @@ async fn recover_candidates(
                 ),
             )
             .await;
-            match record_recovery_result(database, candidate, result) {
+            match record_recovery_result(cursor, candidate, result) {
                 RowDisposition::Deferred => outcome = MaintenanceOutcome::Partial,
                 RowDisposition::Done => {}
                 RowDisposition::Unsupported => {
@@ -475,6 +480,46 @@ async fn recover_candidates(
     }
 }
 
+/// Credit recovered obligations for every row attempted this pass: the
+/// receipts that appeared since the scan observed the row. One detached task
+/// reads them sequentially (one pooled connection at a time) so the phase
+/// deadline cannot cancel the credit and telemetry cannot crowd out the
+/// dedicated ingress pool. A concurrent client retransmission settling the
+/// same row in this window is attributed here too; the counter is progress
+/// telemetry, not an audit log.
+fn spawn_recovery_accounting(database: &Database, cursor: &MaintenanceCursor) {
+    let attempted: Vec<(MessageKey, u32)> = std::mem::take(
+        &mut *cursor
+            .recovery_accounting
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner),
+    );
+    if attempted.is_empty() {
+        return;
+    }
+    let database = database.clone();
+    tokio::spawn(async move {
+        use waddle_xmpp::telemetry::reliability::increment_ingress_maintenance_recovered_obligations;
+        let mut recovered = 0;
+        for (key, before) in attempted {
+            match tokio::time::timeout(RECOVERY_ACCOUNTING_BUDGET, receipts_now(&database, key))
+                .await
+            {
+                Ok(Ok(now)) => recovered += now.saturating_sub(u64::from(before)),
+                Ok(Err(error)) => {
+                    tracing::warn!(%error, ?key, "ingress recovery accounting failed");
+                }
+                Err(_) => {
+                    tracing::warn!(?key, "ingress recovery accounting timed out");
+                }
+            }
+        }
+        if recovered > 0 {
+            increment_ingress_maintenance_recovered_obligations(recovered);
+        }
+    });
+}
+
 /// Upper bound for the detached receipt-count read behind the recovered counter.
 const RECOVERY_ACCOUNTING_BUDGET: Duration = Duration::from_secs(1);
 
@@ -493,7 +538,7 @@ enum RowDisposition {
 }
 
 fn record_recovery_result(
-    database: &Database,
+    cursor: &MaintenanceCursor,
     candidate: RecoveryCandidate,
     result: Result<
         Result<super::recovery_executor::RowRecovery, IngressUowError>,
@@ -501,37 +546,12 @@ fn record_recovery_result(
     >,
 ) -> RowDisposition {
     use super::recovery_executor::RowRecovery;
-    use waddle_xmpp::telemetry::reliability::{
-        increment_ingress_maintenance_recovered_obligations,
-        increment_ingress_maintenance_unrecoverable_obligations,
-    };
-    // Detached from the maintenance future so the phase deadline, which can
-    // fire right after a row's receipts committed, cannot cancel the credit.
-    // The read is one bounded pooled query; nothing else awaits it.
-    let accounting_database = database.clone();
-    tokio::spawn(async move {
-        let key = candidate.key;
-        let before = u64::from(candidate.evidence.receipts);
-        match tokio::time::timeout(
-            RECOVERY_ACCOUNTING_BUDGET,
-            receipts_now(&accounting_database, key),
-        )
-        .await
-        {
-            Ok(Ok(now)) => {
-                let recovered = now.saturating_sub(before);
-                if recovered > 0 {
-                    increment_ingress_maintenance_recovered_obligations(recovered);
-                }
-            }
-            Ok(Err(error)) => {
-                tracing::warn!(%error, ?key, "ingress recovery accounting failed");
-            }
-            Err(_) => {
-                tracing::warn!(?key, "ingress recovery accounting timed out");
-            }
-        }
-    });
+    use waddle_xmpp::telemetry::reliability::increment_ingress_maintenance_unrecoverable_obligations;
+    cursor
+        .recovery_accounting
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .push((candidate.key, candidate.evidence.receipts));
     match result {
         Ok(Ok(RowRecovery::Executed {
             unrecoverable,

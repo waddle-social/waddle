@@ -489,3 +489,39 @@ fn muc_decline_fallback_keeps_the_canonical_receipt_time() {
         "a recovered decline is as old as its canonical acceptance, not as new as the pass"
     );
 }
+
+#[test]
+fn expired_muc_decline_is_not_rebuilt() {
+    let room = bare("room@conference.example.com");
+    let mut message = envelope("decline").message().clone();
+    message.to = Some(room.clone().into());
+    message.payloads.push(
+        minidom::Element::builder("x", waddle_xmpp::muc::presence::NS_MUC_USER)
+            .append(
+                minidom::Element::builder("decline", waddle_xmpp::muc::presence::NS_MUC_USER)
+                    .build(),
+            )
+            .build(),
+    );
+    let intents = [IngressEffectIntent::MucInviteLedger {
+        mutation: MucInviteLedgerMutation {
+            room,
+            invitee: bare("romeo@example.com"),
+            inviter: bare("juliet@example.com"),
+            action: MucInviteLedgerAction::Claimed,
+            recorded_at: None,
+        },
+    }];
+    let expired = Utc::now()
+        - crate::server::routes::websocket::muc_invites::INVITE_TTL
+        - chrono::Duration::hours(1);
+    let result = run_at(&MessageEnvelope::new(message), &intents, &intents, expired);
+    assert!(
+        result.decision.external.is_empty(),
+        "an expired decline must not claim a possibly newer invitation"
+    );
+    assert_eq!(
+        result.unrecoverable,
+        vec![IngressEffectKind::MucInviteLedger]
+    );
+}

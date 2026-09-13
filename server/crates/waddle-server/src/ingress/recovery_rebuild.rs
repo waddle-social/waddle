@@ -65,13 +65,26 @@ pub(super) fn rebuild(input: RecoveryInput<'_>) -> Result<RebuiltRecovery, Ingre
     let mut unrecoverable = Vec::new();
     dm_pin::restore_recorded_dm_pin_effects(&mut plan, input.recorded, input.envelope)?;
     retain_pin_routes(&mut plan, input.unreceipted);
-    muc_direct::restore_recorded_muc_decline(
-        &mut plan,
-        input.recorded,
-        input.unreceipted,
-        input.envelope,
-        input.created_at,
-    )?;
+    // A decline older than the invitation ledger's TTL must not be rebuilt: its
+    // invitation has expired and a fresh one for the same (room, invitee,
+    // inviter) tuple may have replaced it, which the recovered claim would
+    // consume. Recorded wins only over the invitation it was recorded against.
+    if Utc::now() - input.created_at > crate::server::routes::websocket::muc_invites::INVITE_TTL
+        && input.recorded.iter().any(|intent| {
+            matches!(intent, IngressEffectIntent::MucInviteLedger { mutation }
+                if mutation.action == waddle_xmpp::ingress::MucInviteLedgerAction::Claimed)
+        })
+    {
+        unrecoverable.push(IngressEffectKind::MucInviteLedger);
+    } else {
+        muc_direct::restore_recorded_muc_decline(
+            &mut plan,
+            input.recorded,
+            input.unreceipted,
+            input.envelope,
+            input.created_at,
+        )?;
+    }
     if input
         .recorded
         .iter()

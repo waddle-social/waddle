@@ -52,7 +52,7 @@ fn actor_error<M>(error: kameo::error::SendError<M, DatabaseError>) -> InviteSto
 /// How long a mediated invitation stays declinable. Bounds both ledger
 /// growth for never-answered invites and the window in which a stale
 /// "declined your invitation" can reach an inviter.
-const INVITE_TTL: chrono::Duration = chrono::Duration::days(30);
+pub(crate) const INVITE_TTL: chrono::Duration = chrono::Duration::days(30);
 
 fn expiry_cutoff() -> String {
     (chrono::Utc::now() - INVITE_TTL).to_rfc3339()
