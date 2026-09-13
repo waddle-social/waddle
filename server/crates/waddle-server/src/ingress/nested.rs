@@ -69,7 +69,7 @@ impl NestedContinuation {
             #[cfg(test)]
             before_execute: None,
             #[cfg(test)]
-            before_settlement: None,
+            before_settlement: TEST_BEFORE_SETTLEMENT.try_with(Arc::clone).ok(),
         }
     }
 
@@ -227,10 +227,15 @@ fn stanza_error(stanza: &Stanza) -> Option<StanzaError> {
 }
 
 #[cfg(test)]
+tokio::task_local! {
+    pub(crate) static TEST_BEFORE_SETTLEMENT: Arc<TestGate>;
+}
+
+#[cfg(test)]
 #[derive(Default)]
-struct TestGate {
-    reached: tokio::sync::Notify,
-    release: tokio::sync::Notify,
+pub(crate) struct TestGate {
+    pub(crate) reached: tokio::sync::Notify,
+    pub(crate) release: tokio::sync::Notify,
 }
 
 #[cfg(test)]

@@ -63,7 +63,7 @@ impl ExtensionHostAdapter {
         let requester = (!provider).then(|| invocation.actor_jid.to_bare());
         // Keep snapshot, first join, and admission ordered for this bot/room.
         // The actor's admission generation must not change under a second join.
-        let _room_guard = self
+        let room_guard = self
             .state
             .deps
             .protocol
@@ -110,12 +110,11 @@ impl ExtensionHostAdapter {
         };
         let continuation =
             NestedContinuation::new(Arc::clone(&self.state), invocation.session.clone());
-        let archive_ids = super::settlement::finish_nested(
-            operation
-                .commit_and_continue(submission, continuation)
-                .await,
-        )
-        .await?;
+        let outcome = operation
+            .commit_and_continue(submission, continuation)
+            .await;
+        drop(room_guard);
+        let archive_ids = super::settlement::finish_nested(outcome).await?;
         // A committed denial may have only an error frame and no room archive.
         // If its settlement misses the response deadline, acceptance still uses
         // the offered ID. Successful room sends retain their canonical reply ID.

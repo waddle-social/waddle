@@ -1,6 +1,9 @@
 use super::{direct_ingress, groupchat_ingress::GroupchatFixture};
 use crate::{
-    ingress::test_support::IngressFixture,
+    ingress::{
+        nested::{TestGate, TEST_BEFORE_SETTLEMENT},
+        test_support::IngressFixture,
+    },
     ingress_uow::{ConfiguredPluginGrants, ExtensionGrantRepository},
     server::routes::interpret,
 };
@@ -53,18 +56,25 @@ async fn two_bots(f: IngressFixture) {
 async fn concurrent(f: IngressFixture) {
     let mut fixture = GroupchatFixture::new(&f).await;
     let gate = Arc::new(interpret::BotSnapshotGate::default());
-    let spawn_send = |origin: &str| {
+    let settlement_gate = Arc::new(TestGate::default());
+    let spawn_send = |origin: &str, hold_settlement: bool| {
         let adapter = super::super::ExtensionHostAdapter::new(Arc::clone(&fixture.adapter.state));
         let invocation = fixture.invocation();
         let request = fixture.request(origin);
         let gate = Arc::clone(&gate);
+        let settlement_gate = Arc::clone(&settlement_gate);
         tokio::spawn(interpret::TEST_BOT_SNAPSHOT_GATE.scope(gate, async move {
-            adapter.send_message(&invocation, request).await
+            let send = adapter.send_message(&invocation, request);
+            if hold_settlement {
+                TEST_BEFORE_SETTLEMENT.scope(settlement_gate, send).await
+            } else {
+                send.await
+            }
         }))
     };
-    let first = spawn_send("concurrent-a");
+    let first = spawn_send("concurrent-a", true);
     gate.reached.notified().await;
-    let second = spawn_send("concurrent-b");
+    let second = spawn_send("concurrent-b", false);
     assert!(
         tokio::time::timeout(Duration::from_millis(150), gate.reached.notified())
             .await
@@ -72,9 +82,31 @@ async fn concurrent(f: IngressFixture) {
         "second send must wait for the first bot lifecycle snapshot"
     );
     gate.release.notify_one();
+    tokio::time::timeout(Duration::from_secs(5), settlement_gate.reached.notified())
+        .await
+        .expect("first send reached settlement after commit");
+    assert_eq!(f.count("ingress_messages").await, 1);
+    let second_commit = tokio::time::timeout(Duration::from_secs(1), async {
+        gate.reached.notified().await;
+        gate.release.notify_one();
+        loop {
+            if f.count("ingress_messages").await == 2 {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await;
+    assert!(
+        second_commit.is_ok(),
+        "second send must commit before the first settlement response deadline"
+    );
+    assert!(
+        !first.is_finished(),
+        "first send still awaits gated settlement"
+    );
+    settlement_gate.release.notify_one();
     first.await.expect("task").expect("first committed");
-    gate.reached.notified().await;
-    gate.release.notify_one();
     second
         .await
         .expect("task")
