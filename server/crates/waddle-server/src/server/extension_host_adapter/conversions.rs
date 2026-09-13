@@ -16,7 +16,9 @@ pub(super) fn host_tool_error(error: ExtensionHostAdapterError) -> ext_host::Hos
     let code = match error {
         ExtensionHostAdapterError::NotAuthorized => ext_host::HostToolErrorCode::Denied,
         ExtensionHostAdapterError::RoomNotFound(_) => ext_host::HostToolErrorCode::NotFound,
-        ExtensionHostAdapterError::Unsupported(_) => ext_host::HostToolErrorCode::Unsupported,
+        ExtensionHostAdapterError::Unsupported(_) | ExtensionHostAdapterError::Plan(_) => {
+            ext_host::HostToolErrorCode::Unsupported
+        }
         ExtensionHostAdapterError::Rejected(_)
         | ExtensionHostAdapterError::RoomActor(_)
         | ExtensionHostAdapterError::Storage(_)

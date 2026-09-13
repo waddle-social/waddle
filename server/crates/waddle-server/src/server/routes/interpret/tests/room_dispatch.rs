@@ -347,6 +347,7 @@ async fn extension_room_message_dispatches_threaded_muc_message() {
         },
     ];
     let response = ExtensionRoomMessage {
+        plugin: waddle_extensions::PluginId::new("test-bot").expect("plugin"),
         body: DisplayText::new("bot answer").expect("body"),
         room: RoomJid::new(room_jid.to_string()).expect("room"),
         preferred_nick: None,
@@ -369,8 +370,11 @@ async fn extension_room_message_dispatches_threaded_muc_message() {
         b"test-occupant-id-secret-32-bytes-long".to_vec(),
     )
     .expect("test secret meets length floor");
-    let outcome = dispatch_bot_groupchat_response(
-        &Deps::registry_with_user_registry(&registry, &user_registry),
+    let deps = Deps::registry_with_user_registry(&registry, &user_registry);
+    let (offered, digest_input) = prepare_extension_room_message(&deps, &room_jid, &bot, response)
+        .expect("offered bot message");
+    let planned = plan_bot_groupchat_message(
+        &deps,
         BotGroupchatDispatch {
             room_jid: &room_jid,
             occupants: &occupants,
@@ -382,16 +386,42 @@ async fn extension_room_message_dispatches_threaded_muc_message() {
             room_members_only: false,
             pin_permission: waddle_xmpp::muc::PinPermission::default(),
             dispatch_timestamp: 1777629203,
-            recursion_depth: 0,
+            sender_nickname_generation: 0,
+            claim_fence: None,
+            snapshot_generation: 0,
             occupant_id_secret: &test_secret,
         },
-        response,
+        offered,
+        digest_input,
     )
-    .await;
-    let outcome = outcome.expect("bot dispatch should succeed").outcome;
-
-    assert!(outcome.frames.is_empty());
-    assert!(!outcome.close);
+    .await
+    .expect("bot planning should succeed");
+    assert!(planned.plan.failure.is_none());
+    assert!(planned.plan.rejection.is_none());
+    assert!(
+        drain_inbound(&mut alice_rx).is_empty(),
+        "planning does not deliver"
+    );
+    assert!(
+        drain_inbound(&mut bob_rx).is_empty(),
+        "planning does not deliver"
+    );
+    let mut reflections = 0;
+    for effect in planned.plan.plan {
+        match &effect.effect {
+            effects::Effect::External(effects::ExternalEffect::Delivery(_)) => {
+                effects::EffectSink::execute(&effects::ImmediateSink, effect, &deps).await;
+            }
+            effects::Effect::External(effects::ExternalEffect::Frame(stanza)) => {
+                reflections += 1;
+                assert!(
+                    matches!(stanza.as_ref(), Stanza::Message(message) if message.to == Some(bot.clone().into()))
+                );
+            }
+            _ => {}
+        }
+    }
+    assert_eq!(reflections, 1, "the extension host consumes its reflection");
 
     let alice_delivered = drain_inbound(&mut alice_rx);
     let bob_delivered = drain_inbound(&mut bob_rx);

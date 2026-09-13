@@ -1,5 +1,23 @@
-use super::groupchat_archive::{extract_room_stanza_id, room_scoped_reply_to_attr};
+use super::effects::{EffectSink, IngressPlan, PlanFailure, PlanSink, RoomExecutionPath};
+use super::groupchat_archive::room_scoped_reply_to_attr;
 use super::*;
+use waddle_xmpp::ingress::{
+    DigestContext, DigestInput, DigestInputError, EntityGeneration, IngressEffectIntent,
+    NormalizedTarget,
+};
+
+#[cfg(test)]
+tokio::task_local! {
+    pub(crate) static TEST_SIGNING_TIME: chrono::DateTime<chrono::Utc>;
+}
+
+fn signing_time() -> chrono::DateTime<chrono::Utc> {
+    #[cfg(test)]
+    if let Ok(now) = TEST_SIGNING_TIME.try_with(|now| *now) {
+        return now;
+    }
+    chrono::Utc::now()
+}
 
 pub(super) struct BotGroupchatDispatch<'a> {
     pub(super) room_jid: &'a BareJid,
@@ -12,26 +30,22 @@ pub(super) struct BotGroupchatDispatch<'a> {
     pub(super) room_members_only: bool,
     pub(super) pin_permission: waddle_xmpp::muc::PinPermission,
     pub(super) dispatch_timestamp: i64,
-    pub(super) recursion_depth: u8,
+    pub(super) sender_nickname_generation: u64,
+    pub(super) claim_fence: Option<&'a waddle_xmpp::muc::RoomClaimFenceContext>,
+    pub(super) snapshot_generation: u64,
     pub(super) occupant_id_secret: &'a waddle_xmpp::xep::xep0421::OccupantIdSecret,
 }
 
-pub(super) async fn dispatch_bot_groupchat_response(
+pub(super) fn prepare_extension_room_message(
     deps: &Deps<'_>,
-    bot_ctx: BotGroupchatDispatch<'_>,
-    response: ExtensionRoomMessage,
-) -> Result<ExtensionRoomDispatchResult, ExtensionBotDispatchError> {
-    let mut outcome = InterpretOutcome::default();
-    if response.room.as_str() != bot_ctx.room_jid.to_string() {
-        warn!(
-            room = %bot_ctx.room_jid,
-            response_room = response.room.as_str(),
-            "Extension room message room did not match dispatch room; dropping"
-        );
+    room: &BareJid,
+    sender: &FullJid,
+    mut response: ExtensionRoomMessage,
+) -> Result<(Message, DigestInput), ExtensionBotDispatchError> {
+    if response.room.as_str() != room.as_str() {
         return Err(ExtensionBotDispatchError::RoomMismatch);
     }
-
-    let mut working = Message::new(Some(Jid::from(bot_ctx.room_jid.clone())));
+    let mut working = Message::new(Some(Jid::from(room.clone())));
     working.id = Some(xmpp_parsers::message::Id(
         response
             .stanza_id
@@ -39,7 +53,13 @@ pub(super) async fn dispatch_bot_groupchat_response(
             .map(|id| id.as_str().to_string())
             .unwrap_or_else(|| uuid::Uuid::new_v4().to_string()),
     ));
-    working.from = Some(Jid::from(bot_ctx.sender_full.clone()));
+    if let Some(id) = working.id.clone() {
+        waddle_xmpp_core::xep0359::add_origin_id(
+            &mut working,
+            waddle_xmpp_core::xep0359::OriginId::new(id.0).as_str(),
+        );
+    }
+    working.from = Some(Jid::from(sender.clone()));
     working.type_ = XmppMessageType::Groupchat;
     working.bodies.insert(
         xmpp_parsers::message::Lang::new(),
@@ -54,7 +74,7 @@ pub(super) async fn dispatch_bot_groupchat_response(
         if let Some(to) = reply_to
             .to
             .as_ref()
-            .and_then(|to| room_scoped_reply_to_attr(to.as_str(), bot_ctx.room_jid))
+            .and_then(|to| room_scoped_reply_to_attr(to.as_str(), room))
         {
             reply = reply.with_to(to);
         }
@@ -74,6 +94,64 @@ pub(super) async fn dispatch_bot_groupchat_response(
             ));
     }
 
+    let digest_input = DigestInput::from_parsed(
+        &working,
+        &DigestContext {
+            target: NormalizedTarget::Bare(room.clone()),
+            server_authorities: vec![sender.to_bare(), room.clone()],
+            stanza_lang: None,
+        },
+    )?;
+    if let Some(envelope) = response.extensions.as_mut() {
+        let manager = deps
+            .extension_manager
+            .ok_or(ExtensionBotDispatchError::InvalidEnvelope)?;
+        if !manager.validate_envelope_for_plugin(&response.plugin, envelope) {
+            return Err(ExtensionBotDispatchError::InvalidEnvelope);
+        }
+        manager.sign_envelope_at(envelope, signing_time());
+        for payload in &mut working.payloads {
+            if payload.is("extensions", waddle_extensions::FRAMEWORK_NAMESPACE) {
+                *payload = envelope.to_minidom();
+            }
+        }
+    }
+    Ok((working, digest_input))
+}
+
+/// The trusted bot pipeline always captures effects; lifecycle actions run before it.
+pub(super) async fn plan_bot_groupchat_message(
+    deps: &Deps<'_>,
+    bot_ctx: BotGroupchatDispatch<'_>,
+    mut working: Message,
+    digest_input: DigestInput,
+) -> Result<PlannedExtensionBotGroupchat, ExtensionBotDispatchError> {
+    let sink = PlanSink::new();
+    let capture = crate::ingress::IngressEffectCapture::new();
+    capture.reserve_room_capacity(
+        0,
+        bot_ctx.occupants.len(),
+        bot_ctx.durable_recipient_bare_jids.len(),
+    );
+    sink.observe_sender(bot_ctx.sender_full);
+    sink.observe_message(&working);
+    sink.set_room_execution(RoomExecutionPath::Local {
+        room: bot_ctx.room_jid.clone(),
+        fence: bot_ctx
+            .claim_fence
+            .cloned()
+            .map(super::effects::room::RoomFenceRequirement::Guarded)
+            .unwrap_or(super::effects::room::RoomFenceRequirement::Unfenced),
+        snapshot_generation: bot_ctx.snapshot_generation,
+    });
+    let mut planned =
+        build_plan_deps(deps, &sink).with_ingress_effect_capture(Some(capture.clone()));
+    planned.host_sender = Some(bot_ctx.sender_full.clone());
+    #[cfg(feature = "clustering")]
+    if bot_ctx.claim_fence.is_some() {
+        planned.ordered_relay_origin = Some(OrderedRelayRouteOrigin::room(bot_ctx.room_jid));
+    }
+    let deps = &planned;
     if let Some(room_actor) = bot_ctx.room_actor {
         if let Err(stanza_error) = validate_groupchat_rich_targets(
             deps,
@@ -81,7 +159,7 @@ pub(super) async fn dispatch_bot_groupchat_response(
             &working,
             None,
             room_actor,
-            Some(0),
+            Some(bot_ctx.sender_nickname_generation),
         )
         .await
         {
@@ -107,7 +185,7 @@ pub(super) async fn dispatch_bot_groupchat_response(
         pin_permission: bot_ctx.pin_permission,
         id_gen: &id_gen,
         occupant_id_secret: bot_ctx.occupant_id_secret,
-        sender_nickname_generation: 0,
+        sender_nickname_generation: bot_ctx.sender_nickname_generation,
         project_sender_inbox: false,
         // XEP-0513 §"Multi-User Chats Permissions" §304 +
         // adversarial review on PR #738: the extension-bot dispatcher
@@ -125,26 +203,54 @@ pub(super) async fn dispatch_bot_groupchat_response(
     };
 
     let dispatch_outcome = default_room_pipeline_dispatcher().dispatch(&mut working, &ctx);
-    let stanza_id = extract_room_stanza_id(&working, bot_ctx.room_jid)
-        .and_then(|id| StanzaId::new(id).ok())
+    let stanza_id = waddle_xmpp_core::xep0359::extract_stanza_ids(&working)
+        .into_iter()
+        .find(|id| id.by == *bot_ctx.room_jid)
         .ok_or(ExtensionBotDispatchError::MissingCanonicalStanzaId)?;
-    let nested = Box::pin(interpret_with_depth(
-        dispatch_outcome.events,
-        deps,
-        bot_ctx.recursion_depth,
-    ))
-    .await;
-    let _retry_suppression = nested.retry_suppression;
-    outcome.frames.extend(nested.frames);
-    outcome.close = nested.close;
-    outcome.feedback.extend(nested.feedback);
-    // Extension-bot dispatch returns only transport/callback effects. The
-    // explicit discard above keeps a nested room retry marker local to that
-    // batch so it cannot label subsequent bot work.
-    Ok(ExtensionRoomDispatchResult { outcome, stanza_id })
+    sink.observe_message(&working);
+    let mut events = dispatch_outcome.events;
+    super::room_dispatch::bind_room_claim_fence(&mut events, bot_ctx.claim_fence);
+    let mut reflection = working.clone();
+    reflection.to = Some(bot_ctx.sender_full.clone().into());
+    events.push(OutboundEvent::RouteToConnection {
+        jid: bot_ctx.sender_full.clone().into(),
+        stanza: Box::new(Stanza::Message(reflection)),
+        call_setup: None,
+    });
+    let events = super::room_dispatch::order_subject_persistence_after_archive(events);
+    let nested = Box::pin(interpret_with_depth(events, deps, 0)).await;
+    if nested.retry_suppression.is_none() && nested.route_to_connection_events > 0 {
+        let room_generation = bot_ctx
+            .claim_fence
+            .and_then(|fence| u64::try_from(fence.epoch.0).ok())
+            .map(EntityGeneration::from_storage)
+            .unwrap_or(EntityGeneration::INITIAL);
+        capture.record_intent(IngressEffectIntent::RouteMucGroupchat {
+            room: bot_ctx.room_jid.clone(),
+            occupants: bot_ctx
+                .occupants
+                .iter()
+                .filter(|occupant| &occupant.full_jid != bot_ctx.sender_full)
+                .map(|occupant| occupant.full_jid.clone())
+                .collect(),
+            reflection: bot_ctx.sender_full.clone(),
+            room_generation,
+            route_identity: waddle_xmpp::ingress::EffectMessageIdentity::stanza(stanza_id),
+        });
+    }
+    Ok(PlannedExtensionBotGroupchat {
+        plan: super::message_plan::finish_plan(
+            &sink,
+            &capture,
+            working,
+            Some(bot_ctx.sender_full.clone()),
+        ),
+        digest_input,
+    })
 }
 
 pub(crate) struct ExtensionRoomMessage {
+    pub plugin: waddle_extensions::PluginId,
     pub body: DisplayText,
     pub room: RoomJid,
     pub preferred_nick: Option<String>,
@@ -156,9 +262,9 @@ pub(crate) struct ExtensionRoomMessage {
     pub extensions: Option<ExtensionEnvelope>,
 }
 
-pub(crate) struct ExtensionRoomDispatchResult {
-    pub outcome: InterpretOutcome,
-    pub stanza_id: StanzaId,
+pub(crate) struct PlannedExtensionBotGroupchat {
+    pub plan: IngressPlan,
+    pub digest_input: DigestInput,
 }
 
 pub(crate) fn build_extension_message_markup(spans: &[MessageMarkupSpan]) -> Option<Element> {
@@ -177,6 +283,12 @@ pub(crate) fn build_extension_message_markup(spans: &[MessageMarkupSpan]) -> Opt
 
 #[derive(Debug, thiserror::Error)]
 pub(crate) enum ExtensionBotDispatchError {
+    #[error("extension envelope is not authorized for the plugin")]
+    InvalidEnvelope,
+    #[error(transparent)]
+    Digest(#[from] DigestInputError),
+    #[error(transparent)]
+    Plan(#[from] PlanFailure),
     #[error("extension bot dispatch has no WebSocket state")]
     MissingWebSocketState,
     #[error("extension bot dispatch has no room registry")]
@@ -199,13 +311,18 @@ pub(crate) enum ExtensionBotDispatchError {
     MissingCanonicalStanzaId,
 }
 
-pub(crate) async fn dispatch_extension_bot_groupchat_response(
+pub(crate) async fn plan_extension_bot_groupchat(
     deps: &Deps<'_>,
     room_jid: BareJid,
     bot_full: FullJid,
     response: ExtensionRoomMessage,
-) -> Result<ExtensionRoomDispatchResult, ExtensionBotDispatchError> {
-    let mut outcome = InterpretOutcome::default();
+) -> Result<PlannedExtensionBotGroupchat, ExtensionBotDispatchError> {
+    #[cfg(feature = "clustering")]
+    require_local_room(deps, &room_jid).await?;
+    let preferred_nick = response.preferred_nick.clone();
+    let bot_hat_label = response.bot_hat_label.clone();
+    let (working, digest_input) =
+        prepare_extension_room_message(deps, &room_jid, &bot_full, response)?;
     let Some(state) = deps.web_socket_state else {
         warn!(
             room = %room_jid,
@@ -290,77 +407,82 @@ pub(crate) async fn dispatch_extension_bot_groupchat_response(
             role: o.role,
         })
         .collect();
-    let bot_nick = available_bot_nick_with_base(
-        &initial_occupants,
-        response.preferred_nick.as_deref().unwrap_or("waddle"),
-    );
-    match room_actor
-        .ask(JoinWithAffiliation {
-            sender_jid: bot_full.clone(),
-            nick: bot_nick.clone(),
-            affiliation_grant: JoinAffiliationGrant::Resolver(waddle_xmpp::Affiliation::Member),
-            local_domain: state.deps.auth_state.xmpp_domain.clone(),
-            admission_revision: initial_snapshot.admission_revision,
-            session: waddle_xmpp_core::OccupancySessionGeneration::mint(),
-        })
-        .await
+    if !initial_snapshot
+        .occupants
+        .iter()
+        .any(|occupant| occupant.full_jid == bot_full)
     {
-        Ok(join) => {
-            if !join.is_same_bare_multi_session_join {
-                for existing in join.existing_occupants {
-                    let from = match room_jid.clone().with_resource_str(&bot_nick) {
-                        Ok(from) => from,
-                        Err(error) => {
-                            warn!(
-                                room = %room_jid,
-                                %error,
-                                "Extension bot presence could not build room occupant JID"
-                            );
-                            continue;
-                        }
-                    };
-                    let bot_bare = bot_full.to_bare();
-                    let mut presence = waddle_xmpp::muc::build_occupant_presence(
-                        &from,
-                        &existing.jid,
-                        join.new_occupant_affiliation,
-                        join.new_occupant_role,
-                        waddle_xmpp::muc::MucPresenceStatus::new(false, false),
-                        &waddle_xmpp::xep::xep0421::OccupantIdentity {
-                            bare_jid: &bot_bare,
-                            real_jid: Some(&bot_full),
-                            secret: &state.deps.occupant_id_secret,
-                        },
-                    );
-                    let bot_hat = response
-                        .bot_hat_label
-                        .as_ref()
-                        .map(|label| {
-                            waddle_xmpp::xep::xep0317::Hat::new(
-                                label.as_str(),
-                                waddle_xmpp::xep::xep0317::well_known::BOT,
-                            )
-                        })
-                        .unwrap_or_else(waddle_xmpp::xep::xep0317::Hat::bot);
-                    waddle_xmpp::xep::xep0317::set_hats(
-                        &mut presence,
-                        &waddle_xmpp::xep::xep0317::HatSet::new().with_hat(bot_hat),
-                    );
-                    let _ = state
-                        .deps
-                        .protocol
-                        .connection_registry
-                        .try_send_to(&existing.jid, Stanza::Presence(presence));
+        let bot_nick = available_bot_nick_with_base(
+            &initial_occupants,
+            preferred_nick.as_deref().unwrap_or("waddle"),
+        );
+        match room_actor
+            .ask(JoinWithAffiliation {
+                sender_jid: bot_full.clone(),
+                nick: bot_nick.clone(),
+                affiliation_grant: JoinAffiliationGrant::Resolver(waddle_xmpp::Affiliation::Member),
+                local_domain: state.deps.auth_state.xmpp_domain.clone(),
+                admission_revision: initial_snapshot.admission_revision,
+                session: waddle_xmpp_core::OccupancySessionGeneration::mint(),
+            })
+            .await
+        {
+            Ok(join) => {
+                if !join.is_same_bare_multi_session_join {
+                    for existing in join.existing_occupants {
+                        let from = match room_jid.clone().with_resource_str(&bot_nick) {
+                            Ok(from) => from,
+                            Err(error) => {
+                                warn!(
+                                    room = %room_jid,
+                                    %error,
+                                    "Extension bot presence could not build room occupant JID"
+                                );
+                                continue;
+                            }
+                        };
+                        let bot_bare = bot_full.to_bare();
+                        let mut presence = waddle_xmpp::muc::build_occupant_presence(
+                            &from,
+                            &existing.jid,
+                            join.new_occupant_affiliation,
+                            join.new_occupant_role,
+                            waddle_xmpp::muc::MucPresenceStatus::new(false, false),
+                            &waddle_xmpp::xep::xep0421::OccupantIdentity {
+                                bare_jid: &bot_bare,
+                                real_jid: Some(&bot_full),
+                                secret: &state.deps.occupant_id_secret,
+                            },
+                        );
+                        let bot_hat = bot_hat_label
+                            .as_ref()
+                            .map(|label| {
+                                waddle_xmpp::xep::xep0317::Hat::new(
+                                    label.as_str(),
+                                    waddle_xmpp::xep::xep0317::well_known::BOT,
+                                )
+                            })
+                            .unwrap_or_else(waddle_xmpp::xep::xep0317::Hat::bot);
+                        waddle_xmpp::xep::xep0317::set_hats(
+                            &mut presence,
+                            &waddle_xmpp::xep::xep0317::HatSet::new().with_hat(bot_hat),
+                        );
+                        let _ = state
+                            .deps
+                            .protocol
+                            .connection_registry
+                            .try_send_to(&existing.jid, Stanza::Presence(presence));
+                    }
                 }
             }
-        }
-        Err(error) => {
-            warn!(
-                room = %room_jid,
-                error = ?error,
-                "Extension bot could not join room; dropping room message"
-            );
-            return Err(ExtensionBotDispatchError::BotJoinFailed);
+            Err(error) => {
+                warn!(
+                    room = %room_jid,
+                    error = ?error,
+                    "Extension bot could not join room; dropping room message"
+                );
+                return Err(ExtensionBotDispatchError::BotJoinFailed);
+            }
         }
     }
     let snapshot = match room_actor
@@ -390,7 +512,7 @@ pub(crate) async fn dispatch_extension_bot_groupchat_response(
         })
         .collect();
     let durable_recipient_bare_jids = snapshot.durable_recipient_bare_jids.clone();
-    let nested = dispatch_bot_groupchat_response(
+    plan_bot_groupchat_message(
         deps,
         BotGroupchatDispatch {
             room_jid: &room_jid,
@@ -403,27 +525,48 @@ pub(crate) async fn dispatch_extension_bot_groupchat_response(
             room_members_only: snapshot.config.members_only,
             pin_permission: snapshot.config.pin_permission,
             dispatch_timestamp: chrono::Utc::now().timestamp(),
-            recursion_depth: 0,
+            sender_nickname_generation: snapshot.sender_nickname_generation.unwrap_or(0),
+            claim_fence: snapshot.claim_fence.as_ref(),
+            snapshot_generation: snapshot.admission_revision,
             occupant_id_secret: &state.deps.occupant_id_secret,
         },
-        response,
+        working,
+        digest_input,
     )
     .await
-    .map_err(|error| {
-        warn!(
-            room = %room_jid,
-            error = ?error,
-            "Extension bot groupchat dispatch failed"
-        );
-        error
-    })?;
-    outcome.frames.extend(nested.outcome.frames);
-    outcome.close = outcome.close || nested.outcome.close;
-    outcome.feedback.extend(nested.outcome.feedback);
-    Ok(ExtensionRoomDispatchResult {
-        outcome,
-        stanza_id: nested.stanza_id,
-    })
+}
+
+#[cfg(feature = "clustering")]
+async fn require_local_room(deps: &Deps<'_>, room: &BareJid) -> Result<(), PlanFailure> {
+    let Some(state) = deps.web_socket_state else {
+        return Ok(());
+    };
+    let clustering = &state.deps.app_state.clustering_claims;
+    let Some(store) = clustering.claim_store.as_ref() else {
+        return Ok(());
+    };
+    let entity = waddle_xmpp::ownership::Entity::new(
+        waddle_xmpp::ownership::EntityType::RoomActor,
+        room.to_string(),
+    );
+    let Some(claim) = store
+        .current_claim(&entity)
+        .await
+        .map_err(|_| PlanFailure::OwnershipLookup)?
+    else {
+        return Ok(());
+    };
+    if !claim.owner_lease_fresh {
+        return Err(PlanFailure::RoomClaimStale);
+    }
+    if !clustering
+        .node_identity
+        .as_ref()
+        .is_some_and(|identity| identity.current() == claim.owner)
+    {
+        return Err(PlanFailure::ExtensionRemoteRoomUnsupported);
+    }
+    Ok(())
 }
 
 #[cfg(test)]

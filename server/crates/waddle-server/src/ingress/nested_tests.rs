@@ -237,6 +237,7 @@ async fn persistence_failure(f: IngressFixture) {
     let NestedOutcome::Committed {
         decision_class,
         settlement,
+        ..
     } = outcome
     else {
         panic!("committed retry")

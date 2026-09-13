@@ -110,6 +110,23 @@ pub struct IngressAuthority {
 }
 
 impl IngressAuthority {
+    /// Resolve a provider's configured room authority without minting a grant.
+    pub(crate) async fn active_extension_room_grant(
+        &self,
+        plugin: &waddle_extensions::PluginId,
+        room: &jid::BareJid,
+    ) -> Result<Option<waddle_xmpp::auth::ExtensionGrantRef>, IngressUowError> {
+        let mut transaction = self.uow.begin().await?;
+        let grant = crate::ingress_uow::ExtensionGrantRepository::active_room_grant(
+            &mut transaction,
+            plugin,
+            room,
+        )
+        .await?;
+        transaction.commit().await?;
+        Ok(grant)
+    }
+
     /// Resolve configured authority in a short transaction before host planning.
     pub(crate) async fn active_extension_send_grant(
         &self,

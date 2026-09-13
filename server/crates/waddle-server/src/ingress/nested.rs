@@ -39,6 +39,7 @@ pub enum NestedOutcome {
     Refused(NestedRefusal),
     Committed {
         decision_class: IngressDecisionClass,
+        archive_ids: Vec<(jid::BareJid, waddle_xmpp_core::xep0359::StanzaId)>,
         /// A response waiter: aborting this handle cannot cancel authority-owned work.
         settlement: JoinHandle<SettlementOutcome>,
     },
@@ -128,7 +129,7 @@ impl NestedIngressOperation {
         tokio::spawn(async move {
             let Self { authority, permit } = self;
             let decision = authority.commit_admitted(&submission).await;
-            let _ = decision_tx.send(decision.class);
+            let _ = decision_tx.send((decision.class, decision.archive_ids.clone()));
             if decision.class.advances() {
                 #[cfg(test)]
                 if let Some(gate) = &continuation.before_execute {
@@ -168,21 +169,24 @@ impl NestedIngressOperation {
             drop(permit);
         });
         match decision_rx.await {
-            Ok(decision_class) if decision_class.advances() => NestedOutcome::Committed {
-                decision_class,
-                settlement: tokio::spawn(async move {
-                    match settlement_rx.await {
-                        Ok(outcome) => outcome,
-                        Err(_) => SettlementOutcome {
-                            rejection: None,
-                            terminal: Err(
-                                crate::ingress_uow::IngressUowError::AuthorityStopped.into()
-                            ),
-                        },
-                    }
-                }),
-            },
-            Ok(class) => NestedOutcome::Refused(NestedRefusal::Decision(class)),
+            Ok((decision_class, archive_ids)) if decision_class.advances() => {
+                NestedOutcome::Committed {
+                    decision_class,
+                    archive_ids,
+                    settlement: tokio::spawn(async move {
+                        match settlement_rx.await {
+                            Ok(outcome) => outcome,
+                            Err(_) => SettlementOutcome {
+                                rejection: None,
+                                terminal: Err(
+                                    crate::ingress_uow::IngressUowError::AuthorityStopped.into(),
+                                ),
+                            },
+                        }
+                    }),
+                }
+            }
+            Ok((class, _)) => NestedOutcome::Refused(NestedRefusal::Decision(class)),
             Err(_) => NestedOutcome::Refused(NestedRefusal::DecisionUnavailable),
         }
     }

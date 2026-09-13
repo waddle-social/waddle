@@ -687,6 +687,16 @@ async fn create_websocket_state(
     )
     .await?;
 
+    let extension_grant_uow = crate::ingress_uow::IngressUnitOfWork::open(
+        state.db_pool.global().clone(),
+        state.lineage_config.clone(),
+    )?;
+    crate::server::extension_commands::startup::sync_extension_grants(
+        &extension_manager,
+        &extension_grant_uow,
+    )
+    .await?;
+
     let websocket_command_registry = Arc::new(waddle_xmpp::commands::CommandRegistry::new());
 
     let call_teardown_node_identity = state

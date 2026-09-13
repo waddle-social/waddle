@@ -32,8 +32,10 @@ use super::routes::{
 
 mod conversions;
 mod direct;
+mod groupchat;
 mod host_tools;
 mod queries;
+mod settlement;
 mod types;
 
 use conversions::*;
@@ -71,29 +73,8 @@ impl ExtensionHostAdapter {
                     self.authorize_room(invocation, &room, Permission::SendMessage)
                         .await?;
                 }
-                let mut extensions = request.extensions;
-                if let Some(envelope) = extensions.as_mut() {
-                    if envelope_has_cross_room_launch(envelope, &room)
-                        || envelope_has_roomless_launch(envelope)
-                    {
-                        return Err(ExtensionHostAdapterError::NotAuthorized);
-                    }
-                    if !self
-                        .state
-                        .deps
-                        .protocol
-                        .extension_manager
-                        .validate_envelope_for_plugin(&invocation.plugin_id, envelope)
-                    {
-                        return Err(ExtensionHostAdapterError::NotAuthorized);
-                    }
-                    self.state
-                        .deps
-                        .protocol
-                        .extension_manager
-                        .sign_envelope(envelope);
-                }
                 let response = interpret::ExtensionRoomMessage {
+                    plugin: invocation.plugin_id.clone(),
                     room: RoomJid::new(room.to_string())
                         .map_err(|error| ExtensionHostAdapterError::Protocol(error.to_string()))?,
                     body: DisplayText::new(request.body)
@@ -104,25 +85,15 @@ impl ExtensionHostAdapter {
                     thread_id: request.thread_id,
                     reply_to: request.reply_to,
                     markup: request.markup,
-                    extensions,
+                    extensions: request.extensions,
                 };
-                let session = invocation.session.as_ref();
-                let deps = self.interpret_deps(session);
-                let room_sender = self.plugin_actor_jid(&invocation.plugin_id)?;
-                let result = interpret::dispatch_extension_bot_groupchat_response(
-                    &deps,
-                    room,
-                    room_sender,
-                    response,
-                )
-                .await
-                .map_err(|error| ExtensionHostAdapterError::Protocol(error.to_string()))?;
-                if result.outcome.close {
-                    return Err(ExtensionHostAdapterError::Protocol(
-                        "bot groupchat dispatch requested transport close".to_string(),
-                    ));
+                if response.extensions.as_ref().is_some_and(|envelope| {
+                    envelope_has_cross_room_launch(envelope, &room)
+                        || envelope_has_roomless_launch(envelope)
+                }) {
+                    return Err(ExtensionHostAdapterError::NotAuthorized);
                 }
-                Ok(result.stanza_id)
+                self.dispatch_groupchat(invocation, room, response).await
             }
             HostMessageTarget::Direct(target) => {
                 if invocation.kind == InvocationKind::ProviderWebhook {
@@ -427,7 +398,9 @@ impl ExtensionHostAdapter {
         let Some(_channel_id) = waddle_xmpp::parse_managed_room_jid(room) else {
             return Err(ExtensionHostAdapterError::NotAuthorized);
         };
-        self.room_actor(room).await.map(|_| ())
+        // The planner resolves room ownership and local existence before joining.
+        // A provider room owned remotely must reach its typed Phase-A refusal.
+        Ok(())
     }
 
     pub(super) fn plugin_actor_jid(

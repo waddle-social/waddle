@@ -122,6 +122,8 @@ pub enum ExtensionHostAdapterError {
     Storage(String),
     #[error("protocol failed: {0}")]
     Protocol(String),
+    #[error("message planning failed: {0}")]
+    Plan(crate::server::routes::interpret::effects::PlanFailure),
     #[error("unsupported: {0}")]
     Unsupported(String),
 }

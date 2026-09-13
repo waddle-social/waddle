@@ -81,4 +81,12 @@ mod host_boundary;
 mod recovery;
 mod revocation_race;
 
+mod groupchat_ingress;
+mod groupchat_receipts;
+mod groupchat_recovery;
+#[cfg(feature = "clustering")]
+mod groupchat_remote;
+mod groupchat_signed;
 mod quota;
+
+mod groupchat_settlement;

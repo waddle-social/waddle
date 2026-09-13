@@ -1,6 +1,6 @@
 use super::bot::{
-    available_bot_nick, available_bot_nick_with_base, dispatch_bot_groupchat_response,
-    BotGroupchatDispatch,
+    available_bot_nick, available_bot_nick_with_base, plan_bot_groupchat_message,
+    prepare_extension_room_message, BotGroupchatDispatch,
 };
 use super::groupchat_archive::room_scoped_reply_to_attr;
 use super::groupchat_validation::lookup_groupchat_retraction_target;

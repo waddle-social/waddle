@@ -148,6 +148,16 @@ impl ExtensionManager {
         Self::from_config(config).await
     }
 
+    /// Complete loaded plugin set and its already parsed provider room grants.
+    /// Manifests have passed explicit operator capability-grant validation.
+    pub fn configured_plugins(
+        &self,
+    ) -> impl Iterator<Item = (ExtensionManifest, Vec<BareJid>)> + '_ {
+        self.actors
+            .iter()
+            .map(|actor| (actor.manifest(), actor.provider_room_grants().to_vec()))
+    }
+
     pub fn feature_namespaces(&self) -> &[String] {
         &self.feature_namespaces
     }

@@ -43,7 +43,7 @@ async fn blocked_adapter(f: &IngressFixture) -> ExtensionHostAdapter {
     adapter
 }
 
-async fn fail_receipts(f: &IngressFixture) {
+pub(super) async fn fail_receipts(f: &IngressFixture) {
     match f.db.driver() {
         DatabaseDriver::Sqlite => f.execute("CREATE TRIGGER fail_host_receipt BEFORE INSERT ON ingress_effect_receipts WHEN NEW.kind = 11 BEGIN SELECT RAISE(FAIL, 'injected host receipt failure'); END", ()).await,
         DatabaseDriver::Postgres => {
@@ -53,7 +53,7 @@ async fn fail_receipts(f: &IngressFixture) {
     }
 }
 
-async fn restore_receipts(f: &IngressFixture) {
+pub(super) async fn restore_receipts(f: &IngressFixture) {
     let sql = match f.db.driver() {
         DatabaseDriver::Sqlite => "DROP TRIGGER fail_host_receipt",
         DatabaseDriver::Postgres => "DROP TRIGGER fail_host_receipt ON ingress_effect_receipts",

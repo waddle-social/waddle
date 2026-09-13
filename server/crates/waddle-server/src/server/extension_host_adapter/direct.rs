@@ -1,5 +1,5 @@
 //! Direct host dispatch enters the same durable authority as connected senders.
-use std::{sync::Arc, time::Duration};
+use std::sync::Arc;
 
 use jid::Jid;
 use waddle_extensions::{ReplyTarget, StanzaId, ThreadId};
@@ -10,16 +10,12 @@ use waddle_xmpp::{
 use xmpp_parsers::message::{Message, MessageType};
 
 use crate::ingress::{
-    nested::{NestedContinuation, NestedOutcome, NestedRefusal},
+    nested::NestedContinuation,
     submission::{digest_authorities, digest_input},
-    ExtensionPrincipal, IngressDecisionClass, IngressPrincipal, IngressStreamIdentity,
-    IngressSubmission,
+    ExtensionPrincipal, IngressPrincipal, IngressStreamIdentity, IngressSubmission,
 };
 
 use super::{interpret, ExtensionHostAdapter, ExtensionHostAdapterError, ExtensionInvocation};
-
-/// A host response may time out while authority-owned settlement continues.
-const SETTLEMENT_RESPONSE_DEADLINE: Duration = Duration::from_secs(2);
 
 pub(super) struct DirectDispatchMessage {
     pub stanza_id: StanzaId,
@@ -110,31 +106,13 @@ impl ExtensionHostAdapter {
         };
         let continuation =
             NestedContinuation::new(Arc::clone(&self.state), invocation.session.clone());
-        match operation
-            .commit_and_continue(submission, continuation)
-            .await
-        {
-            NestedOutcome::Refused(NestedRefusal::Decision(
-                IngressDecisionClass::PrincipalMissing,
-            )) => Err(ExtensionHostAdapterError::NotAuthorized),
-            NestedOutcome::Refused(reason) => Err(ExtensionHostAdapterError::Storage(format!(
-                "nested ingress refused: {reason:?}"
-            ))),
-            NestedOutcome::Committed { settlement, .. } => {
-                // A dropped waiter cannot cancel the authority's task. Once committed,
-                // timeout or persistence failure means acceptance, never a retry request.
-                if let Ok(Ok(outcome)) =
-                    tokio::time::timeout(SETTLEMENT_RESPONSE_DEADLINE, settlement).await
-                {
-                    if outcome.terminal.is_ok() {
-                        if let Some(rejection) = outcome.rejection {
-                            return Err(ExtensionHostAdapterError::Rejected(Box::new(rejection)));
-                        }
-                    }
-                }
-                Ok(())
-            }
-        }
+        super::settlement::finish_nested(
+            operation
+                .commit_and_continue(submission, continuation)
+                .await,
+        )
+        .await
+        .map(|_| ())
     }
 }
 
