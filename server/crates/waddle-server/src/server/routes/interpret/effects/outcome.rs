@@ -47,10 +47,16 @@ pub enum EffectOutcome {
 
 #[derive(Debug)]
 pub struct SettledOutcome {
+    pub refusal: Option<SettledRefusal>,
     pub persisted: Vec<waddle_xmpp::ingress::IngressEffectIntent>,
     pub completion: SettledCompletion,
     /// Delivery diagnostics only; these values never prove receipts.
     pub detached: Option<Vec<(jid::FullJid, super::super::routing::FullJidDeliveryOutcome)>>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum SettledRefusal {
+    OfflineQuotaExceeded,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]

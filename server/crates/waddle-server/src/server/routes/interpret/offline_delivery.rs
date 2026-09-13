@@ -140,12 +140,7 @@ pub(crate) async fn bounce_offline_quota(
     // alternative — un-archiving on quota — would
     // race with concurrent MAM queries and break
     // XEP-0313's monotonic-archive invariant.
-    let error = xmpp_parsers::stanza_error::StanzaError::new(
-        xmpp_parsers::stanza_error::ErrorType::Cancel,
-        xmpp_parsers::stanza_error::DefinedCondition::ServiceUnavailable,
-        "en",
-        "Recipient's offline message queue is full",
-    );
+    let error = offline_quota_error();
     let bounce =
         waddle_xmpp::protocol::handlers::errors::message_error_reply(original_message, error);
     let sender_jid = match bounce.to.clone() {
@@ -623,4 +618,14 @@ pub(crate) async fn reconcile_xep0357_notification_candidates_for_sweep(
         completed,
         had_failure,
     }
+}
+
+/// XEP-0160 refusal shared by the registry bounce and host transport.
+pub(crate) fn offline_quota_error() -> xmpp_parsers::stanza_error::StanzaError {
+    xmpp_parsers::stanza_error::StanzaError::new(
+        xmpp_parsers::stanza_error::ErrorType::Cancel,
+        xmpp_parsers::stanza_error::DefinedCondition::ServiceUnavailable,
+        "en",
+        "Recipient's offline message queue is full",
+    )
 }

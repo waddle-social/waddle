@@ -160,6 +160,7 @@ async fn store(
     }
     tx.commit().await?;
     Ok(SettledOutcome {
+        refusal: None,
         persisted,
         completion: if complete {
             SettledCompletion::Complete

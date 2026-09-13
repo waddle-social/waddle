@@ -104,6 +104,7 @@ async fn store(
     ) {
         // Dropping this transaction preserves the unresolved archive obligation.
         return Ok(SettledOutcome {
+            refusal: None,
             persisted: Vec::new(),
             completion: SettledCompletion::Incomplete,
             detached: None,
@@ -120,6 +121,7 @@ async fn store(
     let persisted = settle_recorded(&mut tx, key, &evidence).await?;
     tx.commit().await?;
     Ok(SettledOutcome {
+        refusal: None,
         persisted,
         completion: SettledCompletion::Complete,
         detached: None,

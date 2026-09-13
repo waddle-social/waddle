@@ -122,6 +122,7 @@ pub(super) async fn execute(
     let delivery_outcome = fanout_outcome(&destinations);
     close_call_setup_from_outcome(call_setup.clone(), delivery_outcome);
     EffectOutcome::Settled(SettledOutcome {
+        refusal: None,
         persisted,
         completion,
         detached: Some(destinations),

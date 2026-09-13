@@ -79,7 +79,10 @@ pub(super) async fn execute(
     .await
     {
         Ok(StoreOutcome::Settled(settled)) => EffectOutcome::Settled(settled),
-        Ok(StoreOutcome::QuotaExceeded(settled)) => {
+        Ok(StoreOutcome::QuotaExceeded(mut settled)) => {
+            settled.refusal = Some(
+                crate::server::routes::interpret::effects::SettledRefusal::OfflineQuotaExceeded,
+            );
             crate::server::routes::interpret::offline_delivery::bounce_offline_quota(
                 deps,
                 &row.recipient,
@@ -130,6 +133,7 @@ async fn store(
         // A settled refusal has no pending row or candidate to recreate.
         tx.commit().await?;
         return Ok(StoreOutcome::Settled(SettledOutcome {
+            refusal: None,
             persisted: Vec::new(),
             completion: SettledCompletion::Complete,
             detached: None,
@@ -154,6 +158,7 @@ async fn store(
                 // sinks. Bouncing first would repeat the refusal on every retry.
                 tx.commit().await?;
                 return Ok(StoreOutcome::QuotaExceeded(SettledOutcome {
+                    refusal: None,
                     persisted,
                     completion: SettledCompletion::Complete,
                     detached: None,
@@ -183,6 +188,7 @@ async fn store(
         owned_receipts_complete(&mut tx, key, &decision.external_receipts[index]).await?;
     tx.commit().await?;
     Ok(StoreOutcome::Settled(SettledOutcome {
+        refusal: None,
         persisted,
         completion: if complete {
             SettledCompletion::Complete

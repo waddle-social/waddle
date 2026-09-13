@@ -147,7 +147,12 @@ impl NestedIngressOperation {
                     .frame_obligations
                     .iter()
                     .flat_map(|obligation| &obligation.frames)
-                    .find_map(stanza_error);
+                    .find_map(stanza_error)
+                    .or_else(|| report.refusal.map(
+                        |crate::server::routes::interpret::effects::SettledRefusal::OfflineQuotaExceeded| {
+                            crate::server::routes::interpret::offline_delivery::offline_quota_error()
+                        },
+                    ));
                 #[cfg(test)]
                 if let Some(gate) = &continuation.before_settlement {
                     gate.wait().await;
