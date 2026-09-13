@@ -639,7 +639,7 @@ current policy and audience; recovery never invents audience or payload.
 | `kind_family` | Automatic recovery or reason it stays pending |
 | --- | --- |
 | `route_direct` | Recoverable with non-empty recorded fanout when the canonical message is `Chat`/`Normal`, the recipient equals its bare `to`, and the route is neither delegated live full-JID nor DM-pin-owned. Recorded invitation/grant routes and pending-delivery audiences use their specialized restorers, never this generic path. |
-| `pending_delivery`, `notification_activity_preview` | Direct pending rows and recorded direct notification previews are rebuilt from the canonical envelope and recorded audience. Room notification candidates are covered by matching groupchat notification recovery delegation; unmatched candidates stay pending. |
+| `pending_delivery`, `notification_activity_preview` | Direct pending rows and recorded direct notification previews are rebuilt from the canonical envelope and recorded audience. A quota refusal durably receipts the pending delivery and its notification previews, so recovery never re-queues a refused message. Room notification candidates are covered by matching groupchat notification recovery delegation; unmatched candidates stay pending. |
 | `room_observer` | Rebuilt per recorded plugin when an observer envelope exists; missing observer envelopes are unrecoverable. Invocations are keyless and at-least-once. A plugin whose only outcome is a warning reply to the original sender cannot complete during recovery (that sender's connection is gone); the row is evaluated once and cached as unsupported until its evidence changes. |
 | `groupchat_notification_recovery` | `Completed`/`DeferredPolicy` obligations delegate to the existing notification recovery settlement, which re-locks and revalidates. |
 | `dm_pin_mutation`, `route_direct` | Route-only recovery when the recorded DM pin mutation is receipted. The mutation is never replayed. An unreceipted mutation and its dependent routes are deferred, because a successful mutation with a failed receipt write must not undo a later unpin; both kinds are metered. |
@@ -662,6 +662,8 @@ completion. Keyless sinks (live socket sends through `TrySendDirect` or
 `RegistryFrame`, and plugin observer invocations) are at-least-once. They can
 repeat after send-before-receipt failures, including a crash or receipt timeout,
 across recovery attempts, and against a concurrent client retransmission.
+Quota-refusal bounces are at-most-once: the refusal receipts commit before the
+keyless sender frame, so a crash between commit and send can lose the bounce.
 Recovery adds attempts, not new keyless sinks; a durable per-obligation send
 lease and keyed live sends remain follow-up work.
 
