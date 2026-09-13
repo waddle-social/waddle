@@ -366,17 +366,20 @@
               cargoArtifacts = workspaceAllFeaturesArtifacts;
               cargoExtraArgs = "--locked --workspace --all-features";
               cargoNextestExtraArgs = "--profile ci --lib --tests";
-              # The waddle-server lib-test crate alone peaks at ~6 GB of
-              # rustc RSS; unbounded `-j nproc` alongside the rest of the
-              # workspace (plus the derivation's PostgreSQL instance)
-              # exceeds the CI runner's memory on cache-miss builds and
-              # gets rustc OOM-killed (SIGKILL, no diagnostics). Four jobs
-              # was still at the edge of the 8x16 runner: with the FlakeHub
-              # Cache daemon resident alongside (#1774) rustc was killed on
-              # four consecutive runs and passed once the daemon was
-              # removed. Two jobs trades a few minutes of compile time for
-              # headroom that does not depend on who else is on the box.
-              CARGO_BUILD_JOBS = "2";
+              # The waddle-server lib-test crate alone peaks at ~10 GB of
+              # rustc RSS (measured 2026-09-13 in the ci-test profile;
+              # codegen-units = 4 changes nothing, the peak is the frontend
+              # and MIR of one very large test crate). Unbounded `-j nproc`
+              # alongside the rest of the workspace (plus the derivation's
+              # PostgreSQL instance) exceeds the 8x16 CI runner's memory on
+              # cache-miss builds and gets rustc OOM-killed (SIGKILL, no
+              # diagnostics). Four jobs was at the edge (#1774); two jobs
+              # still let a second multi-GB test binary compile beside the
+              # lib test and was killed on four of five runs (#1775). One
+              # job serialises the workspace crates (deps arrive prebuilt
+              # from the cached artifacts) so the single 10 GB peak is the
+              # whole budget, and rustc still uses every core for codegen.
+              CARGO_BUILD_JOBS = "1";
             }
           );
           waddle-server-doctest = craneLib.cargoTest (
