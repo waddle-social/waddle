@@ -446,10 +446,7 @@ fn record_recovery_result(
     >,
 ) -> bool {
     use super::recovery_executor::RowRecovery;
-    use waddle_xmpp::telemetry::reliability::{
-        increment_ingress_maintenance_recovered_obligations,
-        increment_ingress_maintenance_unrecoverable_obligations,
-    };
+    use waddle_xmpp::telemetry::reliability::increment_ingress_maintenance_unrecoverable_obligations;
     match result {
         Ok(Ok(RowRecovery::Executed {
             recovered,
@@ -457,7 +454,6 @@ fn record_recovery_result(
             terminal,
             unsupported,
         })) => {
-            increment_ingress_maintenance_recovered_obligations(recovered);
             for kind in unrecoverable {
                 increment_ingress_maintenance_unrecoverable_obligations(1, kind);
             }

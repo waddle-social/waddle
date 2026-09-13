@@ -63,6 +63,8 @@ pub(super) async fn recover_row(
         route_progress: frozen.route_progress,
     })?;
     let unsupported = rebuilt.decision.external.is_empty() && rebuilt.delegated.is_empty();
+    let pending = &rebuilt.decision.receipts_pending;
+    let (mut recovered, mut terminal) = (0, false);
     if !rebuilt.decision.external.is_empty() {
         super::execute::execute_effects(
             uow,
@@ -73,22 +75,39 @@ pub(super) async fn recover_row(
             deadline.saturating_duration_since(Instant::now()),
         )
         .await;
+        // Count receipts the executed effects wrote even if a delegated
+        // reconciliation below defers the row.
+        (recovered, terminal) = recount(uow, key, pending).await?;
     }
-    for row in &rebuilt.delegated {
-        if let Some(state) = deps.web_socket_state {
-            crate::server::routes::interpret::reconcile_groupchat_notification_recovery(state, row)
-                .await?;
-        } else {
-            tracing::debug!(?key, "groupchat recovery has no websocket state");
+    if !rebuilt.delegated.is_empty() {
+        for row in &rebuilt.delegated {
+            if let Some(state) = deps.web_socket_state {
+                crate::server::routes::interpret::reconcile_groupchat_notification_recovery(
+                    state, row,
+                )
+                .await
+                .inspect_err(|_| report_recovered(recovered))?;
+            } else {
+                tracing::debug!(?key, "groupchat recovery has no websocket state");
+            }
         }
+        (recovered, terminal) = recount(uow, key, pending).await?;
     }
-    let (recovered, terminal) = recount(uow, key, &rebuilt.decision.receipts_pending).await?;
+    report_recovered(recovered);
     Ok(RowRecovery::Executed {
         recovered,
         unrecoverable: rebuilt.unrecoverable,
         terminal,
         unsupported,
     })
+}
+
+fn report_recovered(recovered: u64) {
+    if recovered > 0 {
+        waddle_xmpp::telemetry::reliability::increment_ingress_maintenance_recovered_obligations(
+            recovered,
+        );
+    }
 }
 
 async fn freeze(

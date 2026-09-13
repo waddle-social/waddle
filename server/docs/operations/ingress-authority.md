@@ -120,7 +120,8 @@ Each phase has a timeout inside a hard 13 s pass deadline. Maintenance shares
 the bounded ingress pool and holds at most one connection at a time.
 
 Recovery is skipped and not recorded until the websocket state binds its
-`RecoveryEnvironment` after boot, so the startup pass has no recovery phase.
+`RecoveryEnvironment` after boot, so the startup pass may run without a
+recovery phase; the first periodic tick after binding includes it.
 The recovery scan selects old non-terminal rows with unreceipted intents of
 these kinds: `route_direct`, `notification_activity_preview`, `dm_pin_mutation`,
 `muc_invite_ledger`, `groupchat_notification_recovery`, `pending_delivery` and
