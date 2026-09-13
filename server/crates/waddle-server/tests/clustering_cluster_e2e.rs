@@ -2657,7 +2657,7 @@ async fn partial_room_fanout_stays_pending_during_remote_relay_timeout(
     );
     assert_eq!(
         partial_fanout_resources(db, pending_key).await,
-        vec![local_jid]
+        vec![local_jid.clone()]
     );
     assert!(!partial_fanout_terminal(db, pending_key).await);
     {
@@ -2704,11 +2704,56 @@ async fn partial_room_fanout_stays_pending_during_remote_relay_timeout(
         "remote occupant must have no copy while relay is blocked: {absent:?}"
     );
 
-    // Restore the shared harness before its following relay-fault scenarios.
+    receive_fanout_copy(&mut sender, &from, "m2", None)
+        .await
+        .expect("first attempt reflection");
+    // Restore reachability, then exercise a real client retransmission. The
+    // timed-out room-origin channel remains diverted within these claim epochs
+    // (route_bridge/validation.rs and delivery/ordered_send.rs), so reachability
+    // alone cannot supply delivery proof for the remaining remote occupant.
     tokio::time::sleep_until(blocked_at + Duration::from_secs(31)).await;
     ping_until(relay_b, node_b, Duration::from_secs(15))
         .await
         .expect("B relay wakes");
+    send_partial_fanout_with_origin(&mut sender, &room, "m2", pending).await;
+    receive_fanout_copy(&mut sender, &from, "m2", None)
+        .await
+        .expect("retransmission reflection proves the retry was processed");
+    assert_eq!(partial_fanout_key(db, &pending).await, pending_key);
+    assert_eq!(
+        partial_fanout_resources(db, pending_key).await,
+        vec![local_jid],
+        "a diverted relay cannot manufacture remote delivery progress"
+    );
+    assert!(
+        !partial_fanout_terminal(db, pending_key).await,
+        "same-epoch retransmission stays pending after an uncertain relay timeout"
+    );
+    // The original timed-out ask may execute when B wakes. It can produce at
+    // most one copy; the diverted retry must never produce another one.
+    let mut copies = 0;
+    loop {
+        let result = remote
+            .recv_matching_within(Duration::from_millis(250), |frame| {
+                frame.parse::<minidom::Element>().is_ok_and(|element| {
+                    element.is("message", waddle_xmpp::ns::JABBER_CLIENT)
+                        && element.attr("id") == Some("m2")
+                })
+            })
+            .await;
+        match result {
+            Ok(_) => {
+                copies += 1;
+                assert!(copies <= 1, "retransmission duplicated the remote copy");
+            }
+            Err(error) if error.starts_with("Timeout waiting") => break,
+            Err(error) => panic!("remote receive failed: {error}"),
+        }
+    }
+    assert!(
+        blocked_at.elapsed() < Duration::from_secs(55),
+        "check the pending end state before maintenance eligibility"
+    );
     remote.close().await.expect("remote closes");
     local.close().await.expect("local closes");
     sender.close().await.expect("sender closes");
@@ -2719,8 +2764,18 @@ async fn send_partial_fanout(
     room: &jid::BareJid,
     id: &str,
 ) -> uuid::Uuid {
-    use minidom::{rxml::xml_ncname, Element};
     let origin = uuid::Uuid::new_v4();
+    send_partial_fanout_with_origin(sender, room, id, origin).await;
+    origin
+}
+
+async fn send_partial_fanout_with_origin(
+    sender: &mut WsXmppClient,
+    room: &jid::BareJid,
+    id: &str,
+    origin: uuid::Uuid,
+) {
+    use minidom::{rxml::xml_ncname, Element};
     let mut message = fanout_message(room, id, None);
     message.append_child(
         Element::builder("origin-id", waddle_xmpp::xep::NS_SID)
@@ -2731,7 +2786,6 @@ async fn send_partial_fanout(
         .send(&String::from(&message))
         .await
         .expect("send partial fanout");
-    origin
 }
 
 async fn partial_fanout_key(db: &Database, origin: &uuid::Uuid) -> uuid::Uuid {
