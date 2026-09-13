@@ -7152,6 +7152,7 @@ async fn message_carbons_record_for_detached_enabled_resources() {
 
     let mut alice = WsConnState::new();
     alice.phase = ConnectionPhase::ready(alice_phone.clone(), false);
+    alice.authenticated_session = Some(create_test_session(state.as_ref(), "alice").await);
     alice.ensure_state_machine(
         "example.com",
         &state.deps.protocol.dispatcher,
@@ -7237,6 +7238,7 @@ async fn message_carbons_record_for_detached_enabled_resources() {
 
     let mut bob = WsConnState::new();
     bob.phase = ConnectionPhase::ready(bob_jid.clone(), false);
+    bob.authenticated_session = Some(create_test_session(state.as_ref(), "bob").await);
     bob.ensure_state_machine(
         "example.com",
         &state.deps.protocol.dispatcher,

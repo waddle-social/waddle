@@ -4935,7 +4935,7 @@ async fn handle_message_direct_chat_sends_sent_carbon_to_opted_in_sibling_resour
         .connection_registry
         .register_with_carbons(sibling_jid.clone(), sibling_tx, true);
 
-    let responses = handle_message_for_test(
+    let responses = handle_message_through_ingress(
         state.as_ref(),
         &sender_jid,
         None,
@@ -5068,7 +5068,7 @@ async fn direct_messages_round_trip_through_inbox_query_and_mark_read() {
              </message>",
         bob_jid.to_bare()
     );
-    let responses = handle_message_for_test(
+    let responses = handle_message_through_ingress(
         state.as_ref(),
         &alice_jid,
         Some(&alice_session),
@@ -5236,7 +5236,7 @@ async fn encrypted_sfs_messages_without_bodies_still_project_into_inbox() {
              </message>",
         bob_jid.to_bare()
     );
-    let responses = handle_message_for_test(
+    let responses = handle_message_through_ingress(
         state.as_ref(),
         &alice_jid,
         Some(&alice_session),
@@ -5533,7 +5533,7 @@ async fn personal_mam_query_uses_ready_phase_when_sidecar_session_is_missing() {
              </message>",
         bob_jid.to_bare()
     );
-    let message_responses = handle_message_for_test(
+    let message_responses = handle_message_through_ingress(
         state.as_ref(),
         &alice_jid,
         Some(&alice_session),
@@ -6231,6 +6231,32 @@ async fn muc_mediated_decline_ambiguous_target_is_bad_request() {
     .await
     .expect("ledger lookup");
     assert_eq!(remaining.len(), 2, "nothing consumed on ambiguity");
+}
+
+/// Message-producing fixtures must use the same planning and durable admission
+/// boundary as authenticated WebSocket traffic, including offline delivery.
+async fn handle_message_through_ingress(
+    state: &WebSocketState,
+    sender: &FullJid,
+    session: Option<&Session>,
+    message: xmpp_parsers::message::Message,
+) -> Vec<String> {
+    let session = match session {
+        Some(session) => session.clone(),
+        None => create_test_session(state, sender.node().expect("sender node").as_str()).await,
+    };
+    let mut conn = super::super::state::WsConnState::new();
+    conn.phase = ConnectionPhase::ready(sender.clone(), false);
+    conn.authenticated_session = Some(session);
+    conn.ensure_state_machine(
+        "example.com",
+        &state.deps.protocol.dispatcher,
+        sender.clone(),
+        false,
+        Default::default(),
+    );
+    let frame = stanza_to_xml(&Stanza::Message(message));
+    super::super::frame::handle_xmpp_frame(&frame, "example.com", state, &mut conn).await
 }
 
 /// Exercise decline claims through their canonical commit boundary.
