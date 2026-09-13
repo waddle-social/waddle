@@ -983,3 +983,6 @@ pub(crate) mod tests;
 
 #[cfg(test)]
 mod retraction_ingress_tests;
+
+#[cfg(all(test, feature = "clustering"))]
+pub(crate) use route_to_connection::{ControlledMucRelay, CONTROLLED_MUC_RELAY};

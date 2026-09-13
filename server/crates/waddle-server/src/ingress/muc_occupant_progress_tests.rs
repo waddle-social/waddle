@@ -294,3 +294,7 @@ mod system;
 
 #[path = "muc_occupant_progress_tests/replay.rs"]
 mod replay;
+
+#[cfg(feature = "clustering")]
+#[path = "muc_occupant_progress_tests/relay.rs"]
+mod relay;

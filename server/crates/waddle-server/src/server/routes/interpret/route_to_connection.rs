@@ -9,6 +9,18 @@ use xmpp_parsers::iq::Iq;
 type OrderedRelayDeliveryFuture<'a> =
     Pin<Box<dyn Future<Output = Option<FullJidDeliveryOutcome>> + Send + 'a>>;
 
+#[cfg(all(test, feature = "clustering"))]
+#[derive(Clone)]
+pub(crate) enum ControlledMucRelay {
+    Outcome(Option<FullJidDeliveryOutcome>),
+    OwnerRefresh(std::sync::Arc<waddle_xmpp::stream_management::InMemorySmSessionRegistry>),
+}
+
+#[cfg(all(test, feature = "clustering"))]
+tokio::task_local! {
+    pub(crate) static CONTROLLED_MUC_RELAY: (ControlledMucRelay, std::sync::Arc<std::sync::Mutex<Vec<jid::FullJid>>>);
+}
+
 /// RFC 6121 §8.5.2.1.1 bare-JID destination selection: the candidate set and
 /// priority ranking come from the actor-authoritative `UserActor` alone
 /// (ADR-0017 Phase 3 Slice 9 retires the transitional Slice-1 DashMap
@@ -1036,6 +1048,23 @@ pub(super) fn deliver_full_jid_via_ordered_relay<'a>(
                 return Some(FullJidDeliveryOutcome::Delivered);
             }
             return None;
+        }
+        #[cfg(all(test, feature = "clustering"))]
+        if let Ok(controlled) = CONTROLLED_MUC_RELAY.try_with(|(outcome, targets)| {
+            targets
+                .lock()
+                .expect("controlled relay targets")
+                .push(target.clone());
+            outcome.clone()
+        }) {
+            return match controlled {
+                ControlledMucRelay::Outcome(outcome) => outcome,
+                ControlledMucRelay::OwnerRefresh(sm) => Some(
+                    crate::clustering::route_bridge::tests::muc_refresh::deliver_after_owner_refresh(
+                        target, stanza, deps.ingress_append_context.clone(), sm,
+                    ).await,
+                ),
+            };
         }
         #[cfg(feature = "clustering")]
         {
