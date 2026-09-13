@@ -40,6 +40,8 @@ pub enum InviteStorageError {
     CanonicalMissing,
     #[error("stored invitation has an invalid inviter JID: {0}")]
     InvalidInviter(#[from] jid::Error),
+    #[error("stored invitation has an invalid creation timestamp: {0}")]
+    InvalidCreatedAt(#[from] chrono::ParseError),
 }
 
 fn actor_error<M>(error: kameo::error::SendError<M, DatabaseError>) -> InviteStorageError {
@@ -52,7 +54,7 @@ fn actor_error<M>(error: kameo::error::SendError<M, DatabaseError>) -> InviteSto
 /// How long a mediated invitation stays declinable. Bounds both ledger
 /// growth for never-answered invites and the window in which a stale
 /// "declined your invitation" can reach an inviter.
-const INVITE_TTL: chrono::Duration = chrono::Duration::days(30);
+pub(crate) const INVITE_TTL: chrono::Duration = chrono::Duration::days(30);
 
 fn expiry_cutoff() -> String {
     (chrono::Utc::now() - INVITE_TTL).to_rfc3339()
@@ -126,17 +128,17 @@ pub(crate) async fn record_invite_at(
     }
 }
 
-/// List every unexpired outstanding invite for `(room, invitee)`.
+/// List every unexpired outstanding invite and its generation timestamp for `(room, invitee)`.
 /// Empty means the caller MUST NOT forward a decline (#1264 spoofing
 /// hardening).
 pub(crate) async fn list_invites(
     actor: ActorRef<DbActor>,
     room: &BareJid,
     invitee: &BareJid,
-) -> Result<Vec<OutstandingInvite>, InviteStorageError> {
+) -> Result<Vec<(OutstandingInvite, chrono::DateTime<chrono::Utc>)>, InviteStorageError> {
     let rows = actor
         .ask(DbQuery {
-            sql: "SELECT inviter_jid FROM muc_pending_invites WHERE room_jid = ? AND \
+            sql: "SELECT inviter_jid, created_at FROM muc_pending_invites WHERE room_jid = ? AND \
                   invitee_jid = ? AND created_at > ? ORDER BY inviter_jid"
                 .to_string(),
             params: vec![
@@ -150,11 +152,16 @@ pub(crate) async fn list_invites(
     let mut invites = Vec::new();
     for row in rows {
         let inviter = row_value(&row, 0)?.as_string()?.parse::<BareJid>()?;
-        invites.push(OutstandingInvite {
-            room: room.clone(),
-            invitee: invitee.clone(),
-            inviter,
-        });
+        let created_at = chrono::DateTime::parse_from_rfc3339(&row_value(&row, 1)?.as_string()?)?
+            .with_timezone(&chrono::Utc);
+        invites.push((
+            OutstandingInvite {
+                room: room.clone(),
+                invitee: invitee.clone(),
+                inviter,
+            },
+            created_at,
+        ));
     }
     Ok(invites)
 }
@@ -189,6 +196,7 @@ pub(crate) async fn claim_invite_for_message(
     actor: ActorRef<DbActor>,
     invite: &OutstandingInvite,
     message_key: waddle_xmpp::ingress::MessageKey,
+    not_after: Option<chrono::DateTime<chrono::Utc>>,
 ) -> Result<bool, InviteStorageError> {
     let database = actor
         .ask(crate::db::actor::GetDatabase)
@@ -228,10 +236,19 @@ pub(crate) async fn claim_invite_for_message(
         transaction.commit().await?;
         return Ok(claimed);
     }
-    let affected = transaction.execute(
-        "DELETE FROM muc_pending_invites WHERE room_jid = ? AND invitee_jid = ? AND inviter_jid = ? AND created_at > ?",
-        vec![invite.room.to_string().into(), invite.invitee.to_string().into(), invite.inviter.to_string().into(), expiry_cutoff().into()],
-    ).await?;
+    let mut params = vec![
+        invite.room.to_string().into(),
+        invite.invitee.to_string().into(),
+        invite.inviter.to_string().into(),
+        expiry_cutoff().into(),
+    ];
+    let delete = if let Some(not_after) = not_after {
+        params.push(not_after.to_rfc3339().into());
+        "DELETE FROM muc_pending_invites WHERE room_jid = ? AND invitee_jid = ? AND inviter_jid = ? AND created_at > ? AND created_at <= ?"
+    } else {
+        "DELETE FROM muc_pending_invites WHERE room_jid = ? AND invitee_jid = ? AND inviter_jid = ? AND created_at > ?"
+    };
+    let affected = transaction.execute(delete, params).await?;
     let claimed = affected > 0;
     let insert = match database.driver() {
         crate::db::DatabaseDriver::Postgres => "INSERT INTO muc_invite_claims (message_key, room_jid, invitee_jid, inviter_jid, claimed) VALUES (CAST(? AS UUID), ?, ?, ?, ?)",

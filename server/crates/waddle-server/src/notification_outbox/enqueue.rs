@@ -8,17 +8,20 @@ impl NotificationOutboxStore {
         candidate: &NotificationCandidate,
     ) -> Result<NotificationCandidateInsertOutcome, NotificationOutboxError> {
         let mut tx = self.db.begin().await?;
-        let outcome = Self::insert_candidate_in_transaction(&mut tx, candidate).await?;
+        let outcome =
+            Self::insert_candidate_in_transaction(&mut tx, candidate, crate::time::now_ms())
+                .await?;
         tx.commit().await?;
         Ok(outcome)
     }
 
     /// Use the caller's transaction so candidate and ingress receipts commit together.
+    /// Preserve the original receipt timestamp so recovery retains outbox ordering.
     pub(crate) async fn insert_candidate_in_transaction(
         tx: &mut crate::db::Transaction<'_>,
         candidate: &NotificationCandidate,
+        created_at_ms: i64,
     ) -> Result<NotificationCandidateInsertOutcome, DatabaseError> {
-        let now_ms = crate::time::now_ms();
         let inserted = tx
             .execute(
                 r#"
@@ -53,7 +56,7 @@ impl NotificationOutboxStore {
                     candidate.archive_stanza_id.id.clone(),
                     candidate.class.as_db_value(),
                     candidate.reason.as_db_value(),
-                    now_ms,
+                    created_at_ms,
                     0_i64,
                     i64::from(candidate.noping),
                     i64::from(candidate.no_store),

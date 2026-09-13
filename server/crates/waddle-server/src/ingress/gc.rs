@@ -27,6 +27,8 @@ use super::maintenance::{
     MaintenanceOutcome,
 };
 
+use super::recovery_environment::RecoveryBinding;
+
 const RETENTION_GC_BUDGET: Duration = Duration::from_secs(2);
 /// Last-resort envelope around one GC run, sized from the longest path the
 /// per-operation bounds allow after the final cooperative check: one scan
@@ -174,7 +176,11 @@ fn record_retention_gc_result(
 }
 
 impl RetentionGcCoordinator {
-    pub(crate) fn new(database: Database, uow: IngressUnitOfWork) -> Self {
+    pub(crate) fn new(
+        database: Database,
+        uow: IngressUnitOfWork,
+        binding: RecoveryBinding,
+    ) -> Self {
         let cursor = MaintenanceCursor::default();
         let startup = Arc::new(AtomicBool::new(true));
         Self {
@@ -184,15 +190,23 @@ impl RetentionGcCoordinator {
                 let uow = uow.clone();
                 let cursor = cursor.clone();
                 let startup = startup.clone();
+                let environment = binding.environment();
                 Box::pin(async move {
                     if startup.swap(false, Ordering::SeqCst) {
-                        run_maintenance_pass(&database, &uow, MaintenanceBudget::DEFAULT).await
+                        run_maintenance_pass(
+                            &database,
+                            &uow,
+                            MaintenanceBudget::DEFAULT,
+                            environment,
+                        )
+                        .await
                     } else {
                         run_maintenance_pass_with_cursor(
                             &database,
                             &uow,
                             MaintenanceBudget::DEFAULT,
                             &cursor,
+                            environment,
                         )
                         .await
                     }
@@ -356,7 +370,7 @@ mod tests {
         // The exact same retained row is eligible once the policy attests.
         let uow = IngressUnitOfWork::open(database.clone(), enrolled).expect("uow");
         assert_eq!(
-            run_maintenance_pass(&database, &uow, MaintenanceBudget::DEFAULT).await,
+            run_maintenance_pass(&database, &uow, MaintenanceBudget::DEFAULT, None).await,
             MaintenanceOutcome::Complete
         );
         let connection = database.guard().await.expect("read");

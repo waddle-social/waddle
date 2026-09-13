@@ -141,7 +141,7 @@ impl RelayFrameReceiptCompletion {
 pub struct FrameObligation {
     pub frames: Vec<Stanza>,
     pub receipt_keys: Vec<EffectReceiptKey>,
-    effect_index: usize,
+    pub(super) effect_index: usize,
 }
 
 #[derive(Debug, Default)]
@@ -466,6 +466,7 @@ pub async fn execute_effects(
                                     effect_deps.ingress_append_context = Some(SmIngressAppendContext {
                                         message_key,
                                         receipt: progress.receipt.clone(),
+                                        received_at: progress.received_at,
                                     });
                                 }
                             }
@@ -591,6 +592,14 @@ pub async fn execute_effects(
         };
         for key in completed_receipts(decision, &report.outcomes, &proven, index) {
             if recorded.contains(&key) {
+                continue;
+            }
+            #[cfg(test)]
+            if test_hooks::take_receipt_failure(message_key, &key) {
+                meter_unresolved(effect);
+                report
+                    .receipt_failures
+                    .push((key, IngressUowError::Timeout.into()));
                 continue;
             }
             let result = tokio::time::timeout_at(

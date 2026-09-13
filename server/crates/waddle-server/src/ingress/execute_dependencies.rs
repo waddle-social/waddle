@@ -121,6 +121,7 @@ mod tests {
         };
         let effect = ExternalEffect::InviteLedger(InviteLedgerMutation::Claim {
             message_key: None,
+            not_after: None,
             invite: invite.clone(),
         });
         let dependency = PlanEffectDependency::AfterInviteLedger { invite };

@@ -292,7 +292,10 @@ async fn ledger_failure(fixture: IngressFixture) {
     assert_eq!(
         list_invites(actor, &invite.room, &invite.invitee)
             .await
-            .expect("ledger remains until execution"),
+            .expect("ledger remains until execution")
+            .into_iter()
+            .map(|(invite, _)| invite)
+            .collect::<Vec<_>>(),
         vec![invite]
     );
     drop(state);
@@ -545,7 +548,10 @@ async fn decline_claim_crash_replay(fixture: IngressFixture, receipt: bool, two_
                 &other.invitee
             )
             .await
-            .expect("remaining invitation"),
+            .expect("remaining invitation")
+            .into_iter()
+            .map(|(invite, _)| invite)
+            .collect::<Vec<_>>(),
             vec![other]
         );
         assert_eq!(
@@ -690,7 +696,10 @@ async fn losing_decline_replay(fixture: IngressFixture) {
             &invite.invitee
         )
         .await
-        .expect("renewed invite"),
+        .expect("renewed invite")
+        .into_iter()
+        .map(|(invite, _)| invite)
+        .collect::<Vec<_>>(),
         vec![invite]
     );
     assert!(crate::ingress::execute::terminalize_if_complete(

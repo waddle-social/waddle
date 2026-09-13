@@ -13,7 +13,9 @@ use waddle_xmpp::ingress::MessageKey;
 #[derive(Default)]
 struct Hooks {
     pause: Option<Arc<TerminalizationGate>>,
+    recovery_freeze: Option<Arc<TerminalizationGate>>,
     timeout: AtomicBool,
+    receipt_failure: Option<super::EffectReceiptKey>,
 }
 
 static HOOKS: LazyLock<Mutex<HashMap<MessageKey, Hooks>>> =
@@ -74,8 +76,53 @@ pub(super) fn take_terminalization_timeout(key: MessageKey) -> bool {
         return false;
     };
     let timeout = entry.timeout.swap(false, Ordering::SeqCst);
-    if entry.pause.is_none() {
+    if entry.pause.is_none() && entry.recovery_freeze.is_none() && entry.receipt_failure.is_none() {
         hooks.remove(&key);
     }
     timeout
+}
+
+pub(crate) fn pause_after_recovery_freeze(key: MessageKey) -> Arc<TerminalizationGate> {
+    let gate = Arc::new(TerminalizationGate::default());
+    HOOKS
+        .lock()
+        .expect("recovery hooks")
+        .entry(key)
+        .or_default()
+        .recovery_freeze = Some(Arc::clone(&gate));
+    gate
+}
+
+pub(crate) async fn after_recovery_freeze(key: MessageKey) {
+    let pause = HOOKS
+        .lock()
+        .expect("recovery hooks")
+        .get_mut(&key)
+        .and_then(|hooks| hooks.recovery_freeze.take());
+    if let Some(gate) = pause {
+        gate.reached.notify_one();
+        gate.release.notified().await;
+    }
+}
+
+/// Fail the generic receipt write after its external side effect completed.
+pub(crate) fn fail_receipt_once(key: MessageKey, receipt: super::EffectReceiptKey) {
+    HOOKS
+        .lock()
+        .expect("receipt hooks")
+        .entry(key)
+        .or_default()
+        .receipt_failure = Some(receipt);
+}
+
+pub(super) fn take_receipt_failure(key: MessageKey, receipt: &super::EffectReceiptKey) -> bool {
+    let mut hooks = HOOKS.lock().expect("receipt hooks");
+    let Some(entry) = hooks.get_mut(&key) else {
+        return false;
+    };
+    if entry.receipt_failure.as_ref() != Some(receipt) {
+        return false;
+    }
+    entry.receipt_failure = None;
+    true
 }

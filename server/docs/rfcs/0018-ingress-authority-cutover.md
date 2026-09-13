@@ -15,8 +15,17 @@ repaired inside the transaction; the MAM-layer origin dedupe is deleted. The
 shadow scaffolding (#1656/#1695) is deleted; there is one ingress path.
 
 Stated limitations (strict non-regressions against `main`, owned by later
-roadmap slices): (i) lost post-commit effects are durable (envelope,
-intents, receipts) but not executed by a recovery executor (#1658);
+roadmap slices): (i) maintenance recovery (#1755, §3.6b) re-executes
+provenance-proven direct routes, direct pending delivery and notification
+previews, observers with recorded envelopes, delegated groupchat notification
+recovery, routes of receipted DM pin mutations, and MUC ledger declines.
+Delegated live full-JID routes (including detached full-target no-store routes
+without archive evidence), headline routes, unreceipted DM pin mutations and
+their routes, carbons and DM call state remain deferred. Remote-owner-only
+resources and families lacking reconstructible payloads (including room pin
+chains without a recorded pinner nick) remain pending. Keyless live sends and
+observer invocations are at-least-once, including after send-before-receipt
+failures and against concurrent client retransmission;
 (ii) non-idempotent fan-out to non-senders remains suppressed on a repaired
 duplicate except for unfinished recorded direct resources tracked below;
 per-resource detached delivery now guarantees one durable queue allocation per
@@ -329,11 +338,36 @@ backoff after any `Partial`, `Failed` or `TimedOut` pass. A pass attests the
 epoch, then terminalizes receipt-complete non-terminal rows older than a 60 s
 grace through a keyset cursor over `(created_at, message_key)` (each row is
 locked and its receipt completeness re-checked; contended rows are skipped and
-retried on the continuation), then runs retention GC. Each phase is bounded
-inside a hard pass deadline; maintenance shares the ingress pool and holds at
+retried on the continuation), then runs recovery (§3.6b) and retention GC. Each
+phase is bounded inside a hard pass deadline; maintenance shares the ingress pool and holds at
 most one connection at a time. Metrics: `ingress.maintenance.runs{phase,
 outcome}` and `ingress.maintenance.terminalized_messages`; alert
 `IngressMaintenanceFailing`.
+
+### 3.6b Maintenance recovery phase (#1755)
+
+Between terminalization and retention GC, recovery freezes the canonical
+envelope, recorded and unreceipted intents, and route progress under the
+canonical lock; releases the lock; rebuilds a synthetic decision through the
+existing restorers; then executes through the unchanged `execute_effects` /
+`execute_uow` arms and settlement contract. Groupchat notification recovery
+delegates to its existing settlement. No actor call runs under the freeze lock.
+
+Recorded wins: never invent audience or payload. The plan's provenance gate
+admits generic direct routes only for `Chat`/`Normal` messages whose bare
+`to` equals the recorded recipient, with non-empty fanout, proven Phase B
+recipient preparation and no delegated live full-JID route. Pin-owned
+`StanzaId` routes, specialized invitations and recorded offline audiences
+belong to their restorers. Receipted DM mutations permit route-only recovery;
+unreceipted mutations and their routes remain pending. Unsupported families
+are metered when evaluated; see the runbook's "What recovery handles" table.
+
+Recovery has a 4 s phase budget, a 1 s absolute per-row deadline covering
+freeze, execution, delegation and recount, 64-key scan pages and at most 64
+attempted rows per pass; the hard pass deadline is 13 s. It is skipped and
+unrecorded until the websocket state binds `RecoveryEnvironment`. Receipts
+and durably keyed sinks are exactly-once; keyless live sends and observers
+retain the at-least-once limitation in (i).
 
 ### 3.7 Archive order (#1770 stage 1)
 
@@ -371,7 +405,9 @@ connection's full outbound channel while the connection waits for the lane,
 unable to drain output or process the SM acknowledgements that release its
 send window. Stage 2 needs a durable predecessor/release gate that executes
 lost predecessor obligations through the #1755 recovery executor, with waiting
-off the connection loop. It must bring every producer outside ingress under
+off the connection loop. #1755's executor now recovers the recorded families
+in §3.6b, but does not close the remote-owner or delegated-live-route gaps.
+It must bring every producer outside ingress under
 that authority: live full-JID delivery (#1759), extension-host dispatch (#1753),
 pending flush, remote-owner bare relay, disconnect drains, and the remote
 full-JID detached raw-append bypass that can omit recipient archival entirely.

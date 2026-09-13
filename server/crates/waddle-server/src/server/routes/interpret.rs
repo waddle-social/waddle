@@ -191,6 +191,7 @@ use groupchat_archive::{
 #[cfg(test)]
 pub(crate) use groupchat_inbox::reconcile_groupchat_notification_candidates;
 pub(crate) use groupchat_inbox::reconcile_groupchat_notification_candidates_for_sweep;
+pub(crate) use groupchat_inbox::reconcile_groupchat_notification_recovery;
 use groupchat_inbox::{project_groupchat_inbox_event, ProjectGroupchatInboxEvent};
 use groupchat_validation::{
     bad_request_error, build_message_error_reply, item_not_found_error, remove_framework_envelopes,

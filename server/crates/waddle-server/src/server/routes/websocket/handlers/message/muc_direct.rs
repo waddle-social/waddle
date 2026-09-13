@@ -480,9 +480,9 @@ async fn handle_muc_mediated_decline(
         .attr("to")
         .and_then(|to| to.parse::<jid::Jid>().ok())
         .map(|jid| jid.to_bare());
-    let invite = match declined_to
+    let (invite, invitation_created_at) = match declined_to
         .as_ref()
-        .and_then(|to| outstanding.iter().find(|invite| invite.inviter == *to))
+        .and_then(|to| outstanding.iter().find(|(invite, _)| invite.inviter == *to))
     {
         Some(invite) => invite.clone(),
         None if outstanding.len() == 1 => outstanding[0].clone(),
@@ -503,6 +503,7 @@ async fn handle_muc_mediated_decline(
     let claim = PlannedEffect::new(Effect::External(ExternalEffect::InviteLedger(
         super::muc_invite::InviteLedgerMutation::Claim {
             message_key: None,
+            not_after: Some(invitation_created_at),
             invite: invite.clone(),
         },
     )));
@@ -582,7 +583,7 @@ async fn handle_muc_mediated_decline(
                 invitee: invite.invitee.clone(),
                 inviter: invite.inviter.clone(),
                 action: MucInviteLedgerAction::Claimed,
-                recorded_at: None,
+                recorded_at: Some(invitation_created_at),
             },
         });
     }
@@ -596,6 +597,7 @@ pub(crate) fn restore_recorded_muc_decline(
     recorded: &[IngressEffectIntent],
     pending: &[IngressEffectIntent],
     envelope: &crate::ingress_substrate::MessageEnvelope,
+    received_at: chrono::DateTime<chrono::Utc>,
 ) -> Result<bool, crate::ingress_uow::IngressUowError> {
     use crate::server::routes::interpret::effects::{invite::MucUserRoute, PlanSuppressionPolicy};
     use waddle_xmpp::{
@@ -628,6 +630,7 @@ pub(crate) fn restore_recorded_muc_decline(
         ExternalEffect::InviteLedger(super::muc_invite::InviteLedgerMutation::Claim {
             invite: invite.clone(),
             message_key: None,
+            not_after: mutation.recorded_at.or(Some(received_at)),
         }),
     )));
     for intent in pending {
@@ -665,7 +668,7 @@ pub(crate) fn restore_recorded_muc_decline(
             fallback: PendingRow {
                 id: row_id,
                 recipient: recipient.clone(),
-                original_receipt_at: chrono::Utc::now(),
+                original_receipt_at: received_at,
                 payload: PendingPayload::Transient(Box::new(message.clone())),
                 flushed_in_session: None,
                 outbound_sequence: None,
@@ -1250,7 +1253,10 @@ mod tests {
         assert_eq!(
             list_invites(actor, &invite.room, &invite.invitee)
                 .await
-                .expect("read invites"),
+                .expect("read invites")
+                .into_iter()
+                .map(|(invite, _)| invite)
+                .collect::<Vec<_>>(),
             vec![invite.clone()]
         );
         assert!(sink.snapshot().iter().any(|effect| matches!(&effect.effect,

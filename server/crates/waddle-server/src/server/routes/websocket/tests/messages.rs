@@ -5861,7 +5861,7 @@ async fn xep0045_mediated_invite_relayed_from_room_to_invitee() {
         1,
         "relayed invite recorded in the ledger exactly once"
     );
-    assert_eq!(ledger[0].inviter, alice_jid.to_bare());
+    assert_eq!(ledger[0].0.inviter, alice_jid.to_bare());
 }
 
 /// §7.8: mediated invitations are an occupant action — a non-occupant
@@ -6174,7 +6174,7 @@ async fn muc_mediated_decline_selects_inviter_by_to_among_multiple() {
         1,
         "only the declined inviter's row is consumed"
     );
-    assert_eq!(remaining[0].inviter, bob, "bob's invitation stays live");
+    assert_eq!(remaining[0].0.inviter, bob, "bob's invitation stays live");
 }
 
 /// #1264: with several invitations outstanding, a decline that names

@@ -434,6 +434,30 @@ pub async fn record_receipt(
     Ok(())
 }
 
+/// Number of completion receipts recorded for one canonical row, read on a
+/// plain pooled connection so maintenance accounting never waits on a lock.
+pub async fn receipt_count(db: &Database, key: MessageKey) -> Result<u64, IngressSubstrateError> {
+    const POSTGRES: &str =
+        "SELECT count(*) FROM ingress_effect_receipts WHERE message_key = ?::uuid";
+    const SQLITE: &str = "SELECT count(*) FROM ingress_effect_receipts WHERE message_key = ?";
+    let connection = db.guard().await.map_err(discard_database_error)?;
+    let mut rows = connection
+        .query(
+            dialect_sql(db.driver(), POSTGRES, SQLITE),
+            crate::db_params![key.to_storage().to_string()],
+        )
+        .await
+        .map_err(discard_database_error)?;
+    let count: i64 = rows
+        .next()
+        .await
+        .map_err(discard_database_error)?
+        .ok_or(IngressSubstrateError::InvalidStoredStream)?
+        .get(0)
+        .map_err(discard_database_error)?;
+    Ok(u64::try_from(count).unwrap_or_default())
+}
+
 pub async fn receipts_complete(
     tx: &mut Transaction<'_>,
     key: MessageKey,

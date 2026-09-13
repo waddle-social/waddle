@@ -28,6 +28,7 @@ pub struct RouteProgress {
     pub recipient: jid::BareJid,
     pub fanout: Vec<jid::FullJid>,
     pub route_identity: waddle_xmpp::ingress::EffectMessageIdentity,
+    pub received_at: Option<chrono::DateTime<chrono::Utc>>,
     pub completed: Vec<jid::FullJid>,
 }
 
@@ -89,7 +90,7 @@ pub fn restore_delivery_payloads(
     }
 }
 
-fn delivery_message(
+pub(super) fn delivery_message(
     envelope: &crate::ingress_substrate::MessageEnvelope,
     recipient: &jid::BareJid,
     intents: &[IngressEffectIntent],

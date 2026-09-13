@@ -87,6 +87,7 @@ pub(super) async fn execute(
         resource_deps.ingress_append_context = Some(SmIngressAppendContext {
             message_key: key,
             receipt: progress.receipt.clone(),
+            received_at: progress.received_at,
         });
         let outcome = append_resource(&resource_deps, effect, resource).await;
         destinations.push((resource.clone(), outcome));

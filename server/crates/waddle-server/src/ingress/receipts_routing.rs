@@ -335,11 +335,11 @@ fn early_mutation_receipts(
                 mutation.room == grant.room && mutation.invitee == grant.invitee && external.iter().any(|effect| matches!(effect, ExternalEffect::InviteLedger(InviteLedgerMutation::Record { invite, .. }) if invite.room == grant.room && invite.invitee == grant.invitee && invite.inviter == grant.inviter))
             }
             (ExternalEffect::InviteLedger(mutation), IngressEffectIntent::MucInviteLedger { mutation: recorded }) => {
-                let (invite, action, recorded_at) = match mutation {
-                    InviteLedgerMutation::Record { invite, recorded_at, .. } => (invite, MucInviteLedgerAction::Recorded, Some(*recorded_at)),
-                    InviteLedgerMutation::Claim { invite, .. } => (invite, MucInviteLedgerAction::Claimed, None),
+                let (invite, action, timestamp_matches) = match mutation {
+                    InviteLedgerMutation::Record { invite, recorded_at, .. } => (invite, MucInviteLedgerAction::Recorded, Some(*recorded_at) == recorded.recorded_at),
+                    InviteLedgerMutation::Claim { invite, not_after, .. } => (invite, MucInviteLedgerAction::Claimed, recorded.recorded_at.is_none() || *not_after == recorded.recorded_at),
                 };
-                invite.room == recorded.room && invite.invitee == recorded.invitee && invite.inviter == recorded.inviter && action == recorded.action && recorded_at == recorded.recorded_at
+                invite.room == recorded.room && invite.invitee == recorded.invitee && invite.inviter == recorded.inviter && action == recorded.action && timestamp_matches
             }
             (ExternalEffect::InviteLedger(InviteLedgerMutation::Record { invite, .. }), IngressEffectIntent::GroupDmInviteLedger { grant }) => {
                 invite.room == grant.room && invite.invitee == grant.invitee && invite.inviter == grant.inviter && external.iter().any(|effect| matches!(effect, ExternalEffect::RoomMembershipMutation(RoomMembershipMutation::GroupDm(mutation)) if &mutation.grant == grant))

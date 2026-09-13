@@ -79,12 +79,20 @@ async fn store(
         {
             return Err(IngressUowError::EffectIntentConflict);
         }
-        let outcome = match RecoveryReceiptRepository::insert_candidate(&mut tx, candidate).await? {
-            NotificationCandidateInsertOutcome::Inserted => NotificationCandidateOutcome::Inserted,
-            NotificationCandidateInsertOutcome::Duplicate => {
-                NotificationCandidateOutcome::Duplicate
-            }
-        };
+        let created_at_ms = recovery
+            .as_ref()
+            .map_or_else(crate::time::now_ms, |recovery| recovery.created_at_ms);
+        let outcome =
+            match RecoveryReceiptRepository::insert_candidate(&mut tx, candidate, created_at_ms)
+                .await?
+            {
+                NotificationCandidateInsertOutcome::Inserted => {
+                    NotificationCandidateOutcome::Inserted
+                }
+                NotificationCandidateInsertOutcome::Duplicate => {
+                    NotificationCandidateOutcome::Duplicate
+                }
+            };
         evidence.push(IngressEffectIntent::NotificationActivityPreview {
             owner: owner.clone(),
             mutation: NotificationActivityMutation::NotificationCandidate {

@@ -421,7 +421,9 @@ async fn quota_bounce(fixture: IngressFixture) {
         Duration::from_secs(5),
     )
     .await;
-    assert_eq!(report.outcomes[0].1, ExternalOutcome::Failed);
+    // A quota refusal is a durable resolution: the arm settles the recorded
+    // obligation before bouncing, so the effect completes rather than failing.
+    assert_eq!(report.outcomes[0].1, ExternalOutcome::Done);
     let waddle_xmpp::Stanza::Message(bounce) = receiver
         .try_recv()
         .expect("service unavailable bounce")
@@ -443,7 +445,32 @@ async fn quota_bounce(fixture: IngressFixture) {
         xmpp_parsers::stanza_error::DefinedCondition::ServiceUnavailable
     );
     assert_eq!(fixture.count("pending_delivery").await, 1);
-    assert_eq!(fixture.count("ingress_effect_receipts").await, 1);
+    assert_eq!(
+        fixture.count("ingress_effect_receipts").await,
+        2,
+        "the refused obligation is receipted alongside the stored one"
+    );
+    assert_eq!(
+        fixture
+            .count("ingress_messages WHERE terminal_at IS NULL")
+            .await,
+        0,
+        "a refused delivery terminalizes like a stored one"
+    );
+    // Re-executing the refused decision (alias replay or recovery) must neither
+    // queue the message nor bounce the sender a second time.
+    let again = execute_effects(
+        &fixture.uow,
+        &fixture.db,
+        &full,
+        &ImmediateSink,
+        &deps,
+        Duration::from_secs(5),
+    )
+    .await;
+    assert_eq!(again.outcomes[0].1, ExternalOutcome::Done);
+    assert!(receiver.try_recv().is_err(), "refusal bounces at most once");
+    assert_eq!(fixture.count("pending_delivery").await, 1);
     fixture.close().await;
 }
 
@@ -543,22 +570,21 @@ async fn final_quota_race(fixture: IngressFixture) {
         execute(&fixture, &storage, &a),
         execute(&fixture, &storage, &b)
     );
-    assert_eq!(
-        [a, b]
-            .iter()
-            .filter(|outcome| **outcome == ExternalOutcome::Done)
-            .count(),
-        1
-    );
-    assert_eq!(
-        [a, b]
-            .iter()
-            .filter(|outcome| **outcome == ExternalOutcome::Failed)
-            .count(),
-        1
-    );
+    // Both obligations resolve: one stores its row, the other is durably
+    // refused. Only the final quota slot is ever consumed.
+    assert_eq!([a, b], [ExternalOutcome::Done, ExternalOutcome::Done]);
     assert_eq!(fixture.count("pending_delivery").await, 1);
-    assert_eq!(fixture.count("ingress_effect_receipts").await, 1);
+    assert_eq!(
+        fixture.count("ingress_effect_receipts").await,
+        2,
+        "stored and refused obligations are both receipted"
+    );
+    assert_eq!(
+        fixture
+            .count("ingress_messages WHERE terminal_at IS NULL")
+            .await,
+        0
+    );
     fixture.close().await;
 }
 

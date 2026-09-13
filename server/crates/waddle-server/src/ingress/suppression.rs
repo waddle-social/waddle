@@ -569,6 +569,7 @@ mod progress_tests {
             recipient: a.to_bare(),
             fanout: vec![a.clone(), b.clone()],
             route_identity: identity.clone(),
+            received_at: None,
             completed: vec![a.clone()],
         };
         let message = Message::new(Some(a.to_bare().into()));
