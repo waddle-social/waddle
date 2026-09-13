@@ -46,7 +46,14 @@ async fn plan_broadcast(
     submission.plan.intents = capture.snapshot().intents;
 }
 
-async fn partial_broadcast(fixture: IngressFixture, bodyless: bool) {
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum RetryCase {
+    Ordinary,
+    ReconnectedSender,
+    MissingProvenance,
+}
+
+async fn partial_broadcast(fixture: IngressFixture, bodyless: bool, retry_case: RetryCase) {
     let state = socket_tests::create_test_websocket_state().await;
     let room: jid::BareJid = "room@muc.example.com".parse().expect("room");
     let a: jid::FullJid = "alice@example.com/phone".parse().expect("A");
@@ -191,9 +198,65 @@ async fn partial_broadcast(fixture: IngressFixture, bodyless: bool) {
         })
         .await
         .expect("late join");
+    if retry_case == RetryCase::MissingProvenance {
+        let mut tx = fixture.uow.begin().await.expect("old row");
+        crate::ingress_uow::CanonicalMessageRepository::record_room_canonical_envelope(
+            &mut tx,
+            key,
+            &crate::ingress_substrate::MessageEnvelope::new(message.clone()),
+        )
+        .await
+        .expect("pre-fix real-sender envelope");
+        tx.commit().await.expect("old row commit");
+    }
+    let mut retry_sender = sender.clone();
+    if retry_case == RetryCase::ReconnectedSender {
+        use waddle_xmpp::muc::room_actor::{
+            LeaveAttemptId, LeaveByRealJid, LeaveOrigin, LeaveSessionSelector,
+        };
+        actor
+            .ask(LeaveByRealJid {
+                sender_jid: sender.clone(),
+                cause: waddle_xmpp::muc::durable::OccupancyLeaveCause::Disconnect,
+                session: LeaveSessionSelector::Any,
+                attempt: LeaveAttemptId::generate(),
+                origin: LeaveOrigin::Fresh,
+            })
+            .await
+            .expect("sender leaves old resource");
+        retry_sender = sender
+            .to_bare()
+            .with_resource_str("new")
+            .expect("new resource");
+        let (tx, rx) = tokio::sync::mpsc::channel(16);
+        socket_tests::register_test_connection(&state, &retry_sender, tx).await;
+        receivers[2] = rx;
+        actor
+            .ask(Join {
+                nick: "romeo".into(),
+                real_jid: retry_sender.clone(),
+                role: waddle_xmpp::Role::Participant,
+                affiliation: waddle_xmpp::Affiliation::Member,
+            })
+            .await
+            .expect("sender rejoins");
+        submission.sender = retry_sender.clone();
+        message.from = Some(retry_sender.clone().into());
+        submission.plan.sanitized_message = message.clone();
+    }
     // Replanning creates a new room stanza ID and includes the new occupant;
     // replay must recover the original stamp and frozen audience.
     plan_broadcast(&mut submission, &room, &message, &deps).await;
+    if retry_case == RetryCase::ReconnectedSender {
+        // The full ingress planner returns this rewritten prototype; reflection
+        // detection must also honor its sender-copy policy marker.
+        submission.plan.sanitized_message = submission
+            .plan
+            .room_canonical_message
+            .as_deref()
+            .expect("room prototype")
+            .clone();
+    }
     let retry = commit_submission(&fixture.uow, &submission, 1)
         .await
         .expect("duplicate");
@@ -213,10 +276,14 @@ async fn partial_broadcast(fixture: IngressFixture, bodyless: bool) {
         vec![a.clone()],
         "P1: A must have durable kind-2 progress before retry"
     );
-    assert!(targets.contains(&b), "retry retains B");
+    assert_eq!(
+        targets.contains(&b),
+        retry_case != RetryCase::MissingProvenance,
+        "only non-sender copies require frozen provenance"
+    );
     assert!(
-        targets.contains(&sender),
-        "sender reflection remains Always"
+        targets.contains(&retry_sender),
+        "current sender reflection remains Always"
     );
     assert!(!targets.contains(&a), "completed A is not repeated");
     assert!(
@@ -233,13 +300,40 @@ async fn partial_broadcast(fixture: IngressFixture, bodyless: bool) {
     )
     .await;
     assert!(report.receipt_failures.is_empty());
-    assert!(receivers[1].try_recv().is_ok());
+    assert_eq!(
+        receivers[1].try_recv().is_ok(),
+        retry_case != RetryCase::MissingProvenance
+    );
     assert!(receivers[0].try_recv().is_err(), "A receives no duplicate");
     assert!(
         receivers[2].try_recv().is_ok(),
         "S receives duplicate reflection"
     );
     assert!(c_rx.try_recv().is_err(), "C receives no historical copy");
+    if retry_case == RetryCase::MissingProvenance {
+        assert!(!terminalize_if_complete(&fixture.uow, key)
+            .await
+            .expect("old row pending"));
+        let mut tx = fixture.uow.begin().await.expect("old source");
+        let envelope = crate::ingress_uow::CanonicalMessageRepository::load_envelope(&mut tx, key)
+            .await
+            .expect("load")
+            .expect("envelope");
+        let intent = retry.route_progress[0].settle_evidence();
+        assert_eq!(
+            super::room_canonical::source(&envelope, &intent),
+            Err(super::room_canonical::CanonicalSourceError::MissingCanonicalProvenance)
+        );
+        assert_eq!(
+            DeliveryProgressRepository::load(&mut tx, key, &receipt)
+                .await
+                .expect("progress"),
+            vec![a]
+        );
+        tx.commit().await.expect("read");
+        fixture.close().await;
+        return;
+    }
     let mut tx = fixture.uow.begin().await.expect("final progress");
     assert_eq!(
         DeliveryProgressRepository::load(&mut tx, key, &receipt)
@@ -263,23 +357,23 @@ async fn partial_broadcast(fixture: IngressFixture, bodyless: bool) {
 }
 #[tokio::test]
 async fn sqlite_muc_occupant_progress_partial_broadcast() {
-    partial_broadcast(IngressFixture::sqlite().await, false).await;
+    partial_broadcast(IngressFixture::sqlite().await, false, RetryCase::Ordinary).await;
 }
 #[tokio::test]
 async fn postgres_muc_occupant_progress_partial_broadcast() {
     if let Some(fixture) = IngressFixture::postgres("muc_occupant_progress").await {
-        partial_broadcast(fixture, false).await;
+        partial_broadcast(fixture, false, RetryCase::Ordinary).await;
     }
 }
 
 #[tokio::test]
 async fn sqlite_muc_occupant_progress_archive_free_replan() {
-    partial_broadcast(IngressFixture::sqlite().await, true).await;
+    partial_broadcast(IngressFixture::sqlite().await, true, RetryCase::Ordinary).await;
 }
 #[tokio::test]
 async fn postgres_muc_occupant_progress_archive_free_replan() {
     if let Some(fixture) = IngressFixture::postgres("muc_archive_free_replan").await {
-        partial_broadcast(fixture, true).await;
+        partial_broadcast(fixture, true, RetryCase::Ordinary).await;
     }
 }
 
@@ -298,3 +392,34 @@ mod replay;
 #[cfg(feature = "clustering")]
 #[path = "muc_occupant_progress_tests/relay.rs"]
 mod relay;
+
+#[tokio::test]
+async fn sqlite_muc_occupant_progress_reconnected_sender() {
+    partial_broadcast(
+        IngressFixture::sqlite().await,
+        false,
+        RetryCase::ReconnectedSender,
+    )
+    .await;
+}
+#[tokio::test]
+async fn postgres_muc_occupant_progress_reconnected_sender() {
+    if let Some(fixture) = IngressFixture::postgres("muc_reconnected_sender").await {
+        partial_broadcast(fixture, false, RetryCase::ReconnectedSender).await;
+    }
+}
+#[tokio::test]
+async fn sqlite_muc_occupant_progress_old_provenance_reflection() {
+    partial_broadcast(
+        IngressFixture::sqlite().await,
+        false,
+        RetryCase::MissingProvenance,
+    )
+    .await;
+}
+#[tokio::test]
+async fn postgres_muc_occupant_progress_old_provenance_reflection() {
+    if let Some(fixture) = IngressFixture::postgres("muc_old_provenance_reflection").await {
+        partial_broadcast(fixture, false, RetryCase::MissingProvenance).await;
+    }
+}

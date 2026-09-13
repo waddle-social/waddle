@@ -9,6 +9,7 @@ enum ReplayCase {
     LiveSubject,
     DetachedSubject,
     RelayBody,
+    MissingProvenanceSubject,
 }
 
 impl ReplayCase {
@@ -147,6 +148,17 @@ async fn partial_replay(fixture: IngressFixture, case: ReplayCase) {
         })
         .await
         .expect("new occupant");
+    if matches!(case, ReplayCase::MissingProvenanceSubject) {
+        let mut tx = fixture.uow.begin().await.expect("old subject row");
+        crate::ingress_uow::CanonicalMessageRepository::record_room_canonical_envelope(
+            &mut tx,
+            key,
+            &crate::ingress_substrate::MessageEnvelope::new(message.clone()),
+        )
+        .await
+        .expect("pre-fix source");
+        tx.commit().await.expect("old source commit");
+    }
     plan_broadcast(&mut submission, &room, &message, &deps).await;
     // Fresh delivery availability can select relay, while its canonical row
     // still owns the same frozen non-sender audience. Exercise commit filtering
@@ -190,7 +202,11 @@ async fn partial_replay(fixture: IngressFixture, case: ReplayCase) {
         .filter_map(super::super::recorded::single_target)
         .cloned()
         .collect();
-    assert!(targets.contains(&b), "pending B retained: {targets:?}");
+    assert_eq!(
+        targets.contains(&b),
+        !matches!(case, ReplayCase::MissingProvenanceSubject),
+        "pending B needs frozen provenance: {targets:?}"
+    );
     assert!(targets.contains(&sender), "reflection retained");
     if matches!(case, ReplayCase::RelayBody) {
         assert!(
@@ -269,9 +285,14 @@ async fn partial_replay(fixture: IngressFixture, case: ReplayCase) {
         )
         .await;
         assert!(report.receipt_failures.is_empty(), "{report:?}");
-        assert!(
+        assert_eq!(
             receivers[1].try_recv().is_ok(),
-            "B receives pending subject"
+            !matches!(case, ReplayCase::MissingProvenanceSubject),
+            "only proven pending copies deliver"
+        );
+        assert!(
+            receivers[2].try_recv().is_ok(),
+            "fresh reflection survives provenance failure"
         );
         assert!(c_rx.try_recv().is_ok(), "C receives subject reapplication");
         if matches!(case, ReplayCase::DetachedSubject) {
@@ -290,6 +311,21 @@ async fn partial_replay(fixture: IngressFixture, case: ReplayCase) {
                 receivers[0].try_recv().is_ok(),
                 "A receives subject reapplication"
             );
+        }
+        if matches!(case, ReplayCase::MissingProvenanceSubject) {
+            assert!(!terminalize_if_complete(&fixture.uow, key)
+                .await
+                .expect("pending"));
+            let mut tx = fixture.uow.begin().await.expect("unchanged progress");
+            assert_eq!(
+                DeliveryProgressRepository::load(&mut tx, key, &receipt)
+                    .await
+                    .expect("progress"),
+                vec![a]
+            );
+            tx.commit().await.expect("read");
+            fixture.close().await;
+            return;
         }
         let mut tx = fixture.uow.begin().await.expect("final progress");
         assert_eq!(
@@ -342,5 +378,20 @@ async fn sqlite_muc_replay_relay_filter() {
 async fn postgres_muc_replay_relay_filter() {
     if let Some(fixture) = IngressFixture::postgres("muc_replay_relay_filter").await {
         partial_replay(fixture, ReplayCase::RelayBody).await;
+    }
+}
+
+#[tokio::test]
+async fn sqlite_muc_occupant_progress_old_subject_rebroadcast() {
+    partial_replay(
+        IngressFixture::sqlite().await,
+        ReplayCase::MissingProvenanceSubject,
+    )
+    .await;
+}
+#[tokio::test]
+async fn postgres_muc_occupant_progress_old_subject_rebroadcast() {
+    if let Some(fixture) = IngressFixture::postgres("muc_old_subject").await {
+        partial_replay(fixture, ReplayCase::MissingProvenanceSubject).await;
     }
 }

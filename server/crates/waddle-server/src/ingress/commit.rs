@@ -514,7 +514,7 @@ async fn commit_attempt(
         let envelope = CanonicalMessageRepository::load_envelope(&mut tx, key)
             .await?
             .ok_or(IngressUowError::EffectIntentMessageMissing)?;
-        super::recorded::restore_delivery_payloads(&mut plan, &envelope);
+        super::recorded::restore_delivery_payloads(&mut plan, &envelope, &route_progress);
     }
     let external = super::suppression::filter_external_effects(
         &plan,

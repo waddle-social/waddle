@@ -340,18 +340,18 @@ async fn old_sender_envelope_stays_pending(fixture: IngressFixture) {
         &mut fresh,
         &waddle_xmpp::xep::xep0421::OccupantId("fresh-occupant".into()),
     );
-    submission
-        .plan
-        .plan
-        .push(effects::PlannedEffect::new(Effect::External(
-            ExternalEffect::Delivery(ExternalDeliveryEffect::QueueDetached {
+    submission.plan.plan.push(
+        effects::PlannedEffect::new(Effect::External(ExternalEffect::Delivery(
+            ExternalDeliveryEffect::QueueDetached {
                 route_identity: None,
                 call_setup: None,
                 bare: occupant.to_bare(),
                 resources: vec![occupant],
                 stanza: Box::new(waddle_xmpp::Stanza::Message(fresh)),
-            }),
-        )));
+            },
+        )))
+        .with_suppression(effects::PlanSuppressionPolicy::SenderOnly),
+    );
     let retry = commit_submission(&fixture.uow, &submission, 1)
         .await
         .expect("retry old row");

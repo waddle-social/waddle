@@ -64,7 +64,9 @@ pub(crate) fn external_effect_indices(
                 return None;
             }
             let progress = route_progress_filter(effect, route_progress);
-            if matches!(progress, RouteProgressFilter::Drop) {
+            if matches!(progress, RouteProgressFilter::Drop)
+                && !sender_reflection(planned, plan.sanitized_message.from.as_ref(), &plan.intents)
+            {
                 return None;
             }
             if duplicate
@@ -181,14 +183,48 @@ fn duplicate_policy(planned: &PlannedEffect) -> PlanSuppressionPolicy {
     }
 }
 
+/// The planner's Always marker also identifies ordinary sender copies when the
+/// sanitized prototype already has its room/nick sender rewrite.
+pub(super) fn sender_reflection(
+    planned: &PlannedEffect,
+    sender: Option<&jid::Jid>,
+    intents: &[waddle_xmpp::ingress::IngressEffectIntent],
+) -> bool {
+    let Effect::External(effect) = &planned.effect else {
+        return false;
+    };
+    let Some(target) = super::recorded::single_target(effect) else {
+        return false;
+    };
+    let Some(message) = super::receipts::routing::full_delivery(effect, target) else {
+        return false;
+    };
+    // System broadcasts have no reflection: even an Always copy to the
+    // initiating user remains part of their frozen occupant obligation.
+    if message.type_ != xmpp_parsers::message::MessageType::Groupchat
+        || !intents.iter().any(|intent| {
+            matches!(intent, waddle_xmpp::ingress::IngressEffectIntent::RouteMucGroupchat {
+                route_identity, ..
+            } if super::receipts::routing::message_identity(message, route_identity))
+        })
+    {
+        return false;
+    }
+    sender_delivery(effect, sender)
+        || (planned.suppression == PlanSuppressionPolicy::Always && !subject_rebroadcast(effect))
+}
+
 fn sender_delivery(effect: &ExternalEffect, sender: Option<&jid::Jid>) -> bool {
     let Some(sender) = sender else {
         return false;
     };
     match effect {
-        ExternalEffect::Delivery(ExternalDeliveryEffect::RouteToPeer { jid, .. }) => {
-            jid.to_bare() == sender.to_bare()
-        }
+        ExternalEffect::Delivery(
+            ExternalDeliveryEffect::RouteToPeer { .. }
+            | ExternalDeliveryEffect::RelayFullJid { .. }
+            | ExternalDeliveryEffect::QueueDetached { .. },
+        ) => super::recorded::single_target(effect)
+            .is_some_and(|target| target.to_bare() == sender.to_bare()),
         ExternalEffect::Frame(stanza) => {
             matches!(stanza.as_ref(), Stanza::Message(message) if message.to.as_ref().is_some_and(|recipient| recipient.to_bare() == sender.to_bare()))
         }
@@ -219,7 +255,7 @@ fn subject_stanza(stanza: &Stanza) -> bool {
     matches!(stanza, Stanza::Message(message) if subject_message(message))
 }
 
-fn subject_rebroadcast(effect: &ExternalEffect) -> bool {
+pub(super) fn subject_rebroadcast(effect: &ExternalEffect) -> bool {
     match effect {
         ExternalEffect::Frame(stanza) => subject_stanza(stanza),
         ExternalEffect::Delivery(

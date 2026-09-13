@@ -30,9 +30,16 @@ pub use progress::{ProgressObligation, RouteProgress};
 pub fn restore_delivery_payloads(
     plan: &mut IngressPlan,
     envelope: &crate::ingress_substrate::MessageEnvelope,
+    route_progress: &[RouteProgress],
 ) {
     use crate::server::routes::interpret::effects::delivery::ExternalDeliveryEffect;
     plan.plan.retain_mut(|planned| {
+        // A retry's reflection is fresh work, never frozen occupant repair.
+        let sender_reflection = super::suppression::sender_reflection(
+            planned,
+            plan.sanitized_message.from.as_ref(),
+            &plan.intents,
+        );
         let Effect::External(effect) = &mut planned.effect else {
             return true;
         };
@@ -61,10 +68,24 @@ pub fn restore_delivery_payloads(
         }) else {
             return true;
         };
+        if sender_reflection {
+            return true;
+        }
         let source = match super::room_canonical::source(envelope, intent) {
             Ok(source) => source,
             Err(error) => {
-                tracing::warn!(%error, "frozen MUC source unavailable; leaving obligation pending");
+                // Completed/new subject recipients reapply current state through
+                // the generic executor; only pending copies need frozen content.
+                if super::suppression::subject_rebroadcast(effect)
+                    && !route_progress.iter().any(|progress| {
+                        !progress.is_direct()
+                            && progress.matches(effect)
+                            && !progress.remaining(effect).is_empty()
+                    })
+                {
+                    return true;
+                }
+                tracing::debug!(%error, "frozen MUC source unavailable; leaving obligation pending");
                 return false;
             }
         };
