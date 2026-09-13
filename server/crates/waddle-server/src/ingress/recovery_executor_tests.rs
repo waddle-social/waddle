@@ -2012,9 +2012,28 @@ async fn live_duplicate_and_recovery_serialize_detached_appends(f: IngressFixtur
     f.close().await;
 }
 
+/// XEP-0191 storage that records how often recovery consulted it.
+struct CountingBlocking(std::sync::atomic::AtomicUsize);
+#[async_trait::async_trait]
+impl waddle_xmpp::xep::xep0191::BlockingStorage for CountingBlocking {
+    async fn list_blocked_jids(
+        &self,
+        _: &jid::BareJid,
+    ) -> Result<Vec<jid::BareJid>, waddle_xmpp::xep::xep0191::BlockingStorageError> {
+        self.0.fetch_add(1, Ordering::SeqCst);
+        Ok(Vec::new())
+    }
+}
+
 async fn groupchat_inbox_push_route_is_left_pending(fixture: IngressFixture) {
     let metrics = waddle_xmpp::telemetry::test_support::acquire().await;
-    let state = state_for(&fixture, persistent_sm(&fixture).await).await;
+    let mut state = state_for(&fixture, persistent_sm(&fixture).await).await;
+    let blocking = Arc::new(CountingBlocking(std::sync::atomic::AtomicUsize::new(0)));
+    Arc::get_mut(&mut state)
+        .expect("unique state")
+        .deps
+        .protocol
+        .blocking_storage = blocking.clone();
     let resource: jid::FullJid = "juliet@example.com/phone".parse().expect("member");
     let room: jid::BareJid = "room@muc.example.com".parse().expect("room");
     let (tx, mut rx) = tokio::sync::mpsc::channel(8);
@@ -2131,6 +2150,7 @@ async fn groupchat_inbox_push_route_is_left_pending(fixture: IngressFixture) {
             &[("kind", "route_direct")],
         )
         .unwrap_or(0);
+    let blocklist_reads = blocking.0.load(Ordering::SeqCst);
     for _ in 0..2 {
         assert_eq!(
             pass(&fixture, &env, &cursor).await,
@@ -2143,6 +2163,11 @@ async fn groupchat_inbox_push_route_is_left_pending(fixture: IngressFixture) {
         );
         assert!(sender_rx.try_recv().is_err());
     }
+    assert_eq!(
+        blocking.0.load(Ordering::SeqCst),
+        blocklist_reads,
+        "recovery consults recipient policy only for routes it can rebuild"
+    );
     assert!(
         metrics
             .counter_sum(
@@ -2229,6 +2254,79 @@ async fn sqlite_groupchat_inbox_push_route_is_left_pending() {
 async fn postgres_groupchat_inbox_push_route_is_left_pending() {
     if let Some(fixture) = IngressFixture::postgres("groupchat_inbox_push_route_is_left_").await {
         groupchat_inbox_push_route_is_left_pending(fixture).await;
+    }
+}
+
+/// Freeze reads delivery progress for the whole row at once; the grouped
+/// result must equal the per-obligation reads it replaced.
+async fn bulk_delivery_progress_matches_per_receipt_reads(f: IngressFixture) {
+    use crate::ingress_uow::DeliveryProgressRepository;
+    let resources: Vec<jid::FullJid> = ["juliet@example.com/phone", "juliet@example.com/desk"]
+        .iter()
+        .map(|r| r.parse().expect("resource"))
+        .collect();
+    let mut submission = direct_submission(&f, "bulk-progress", &resources);
+    // A second recorded route on the same row, as a groupchat inbox push would
+    // record one per occupant.
+    let other: jid::FullJid = "mercutio@example.com/phone".parse().expect("other");
+    submission
+        .plan
+        .intents
+        .push(IngressEffectIntent::RouteDirect {
+            recipient: other.to_bare(),
+            fanout: vec![other.clone()],
+            route_identity: EffectMessageIdentity::capture_ordinal(1),
+        });
+    let key = commit_submission(&f.uow, &submission, 7)
+        .await
+        .expect("commit direct")
+        .message_key
+        .expect("key");
+    // Progress rows reference recorded intents, so both obligations come from
+    // the committed row.
+    let first = crate::ingress::receipt_key(&submission.plan.intents[0]).expect("receipt key");
+    let second = crate::ingress::receipt_key(&submission.plan.intents[1]).expect("receipt key");
+    assert_ne!(first, second);
+    let mut tx = f.uow.begin().await.expect("begin");
+    DeliveryProgressRepository::record(&mut tx, key, &first, &resources)
+        .await
+        .expect("record first");
+    DeliveryProgressRepository::record(&mut tx, key, &second, std::slice::from_ref(&other))
+        .await
+        .expect("record second");
+    let bulk = DeliveryProgressRepository::load_all(&mut tx, key)
+        .await
+        .expect("load all");
+    assert_eq!(bulk.len(), 2);
+    for receipt in [&first, &second] {
+        let single = DeliveryProgressRepository::load(&mut tx, key, receipt)
+            .await
+            .expect("load one");
+        let grouped = bulk
+            .iter()
+            .find(|(candidate, _)| candidate == receipt)
+            .map(|(_, completed)| completed.clone())
+            .expect("grouped receipt");
+        assert_eq!(grouped, single);
+    }
+    assert!(
+        DeliveryProgressRepository::load_all(&mut tx, MessageKey::new())
+            .await
+            .expect("load empty")
+            .is_empty()
+    );
+    tx.commit().await.expect("commit");
+    f.close().await;
+}
+
+#[tokio::test]
+async fn sqlite_bulk_delivery_progress_matches_per_receipt_reads() {
+    bulk_delivery_progress_matches_per_receipt_reads(IngressFixture::sqlite().await).await;
+}
+#[tokio::test]
+async fn postgres_bulk_delivery_progress_matches_per_receipt_reads() {
+    if let Some(fixture) = IngressFixture::postgres("bulk_delivery_progress_").await {
+        bulk_delivery_progress_matches_per_receipt_reads(fixture).await;
     }
 }
 

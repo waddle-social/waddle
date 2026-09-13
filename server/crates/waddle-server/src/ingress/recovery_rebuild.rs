@@ -239,10 +239,6 @@ fn restore_direct_routes(
     input: &RecoveryInput<'_>,
 ) -> Result<Vec<decision::EffectReceiptKey>, IngressUowError> {
     let mut discarded = Vec::new();
-    let pin_owned = input
-        .recorded
-        .iter()
-        .any(|i| matches!(i, IngressEffectIntent::DmPinMutation { .. }));
     for intent in input.unreceipted {
         let IngressEffectIntent::RouteDirect {
             recipient,
@@ -262,10 +258,7 @@ fn restore_direct_routes(
             discarded.push(super::durable::receipt_key(intent)?);
             continue;
         }
-        if fanout.is_empty()
-            || (pin_owned && matches!(route_identity, EffectMessageIdentity::StanzaId(_)))
-            || !direct_provenance(input, recipient)
-        {
+        if !rebuildable_direct_route(input.envelope, input.recorded, intent) {
             continue;
         }
         let effect = ExternalEffect::Delivery(ExternalDeliveryEffect::QueueDetached {
@@ -290,18 +283,76 @@ fn restore_direct_routes(
     Ok(discarded)
 }
 
-fn direct_provenance(input: &RecoveryInput<'_>, recipient: &jid::BareJid) -> bool {
-    let message = input.envelope.message();
+/// Whether any rebuild path can turn this unreceipted direct route into a
+/// delivery, so recipient policy has to be consulted before it runs: the
+/// generic arm (payload provenance) or one of the specialized restorers, which
+/// rebuild routes recorded next to an offline row for the recipient, a DM pin
+/// mutation, or an invitation-ledger claim. A lost groupchat row records one
+/// inbox-push route per occupant and none of these hold for it.
+pub(super) fn policy_checked_direct_route(
+    envelope: &MessageEnvelope,
+    recorded: &[IngressEffectIntent],
+    intent: &IngressEffectIntent,
+) -> bool {
+    let IngressEffectIntent::RouteDirect { recipient, .. } = intent else {
+        return false;
+    };
+    rebuildable_direct_route(envelope, recorded, intent)
+        || recorded.iter().any(|i| match i {
+            IngressEffectIntent::PendingDelivery {
+                mutation:
+                    PendingDeliveryMutation::Archived {
+                        recipient: saved, ..
+                    }
+                    | PendingDeliveryMutation::Transient {
+                        recipient: saved, ..
+                    },
+            } => saved == recipient,
+            IngressEffectIntent::DmPinMutation { .. }
+            | IngressEffectIntent::MucInviteLedger { .. } => true,
+            _ => false,
+        })
+}
+
+/// Whether the generic direct-route arm would rebuild this unreceipted intent:
+/// a non-empty fanout, not a route owned by a DM pin mutation, and payload
+/// provenance for the recipient.
+pub(super) fn rebuildable_direct_route(
+    envelope: &MessageEnvelope,
+    recorded: &[IngressEffectIntent],
+    intent: &IngressEffectIntent,
+) -> bool {
+    let IngressEffectIntent::RouteDirect {
+        recipient,
+        fanout,
+        route_identity,
+    } = intent
+    else {
+        return false;
+    };
+    let pin_owned = recorded
+        .iter()
+        .any(|i| matches!(i, IngressEffectIntent::DmPinMutation { .. }));
+    !fanout.is_empty()
+        && !(pin_owned && matches!(route_identity, EffectMessageIdentity::StanzaId(_)))
+        && direct_provenance(envelope, recorded, recipient)
+}
+
+fn direct_provenance(
+    envelope: &MessageEnvelope,
+    recorded: &[IngressEffectIntent],
+    recipient: &jid::BareJid,
+) -> bool {
+    let message = envelope.message();
     let (Some(target), Some(sender)) = (message.to.as_ref(), message.from.as_ref()) else {
         return false;
     };
     if !matches!(message.type_, MessageType::Chat | MessageType::Normal)
         || target.to_bare() != *recipient
-        || input
-            .recorded
+        || recorded
             .iter()
             .any(super::restore_offline::specialized_invitation)
-        || input.recorded.iter().any(|i| {
+        || recorded.iter().any(|i| {
             matches!(i, IngressEffectIntent::PendingDelivery {
             mutation: PendingDeliveryMutation::Archived { recipient: saved, .. }
                 | PendingDeliveryMutation::Transient { recipient: saved, .. }
@@ -314,7 +365,7 @@ fn direct_provenance(input: &RecoveryInput<'_>, recipient: &jid::BareJid) -> boo
         Ok(full) => NormalizedTarget::Full(full),
         Err(bare) => NormalizedTarget::Bare(bare),
     };
-    !super::commit::live_recipient_delegated(&target, &sender.to_bare(), input.recorded)
+    !super::commit::live_recipient_delegated(&target, &sender.to_bare(), recorded)
 }
 
 fn delegated_recoveries(input: &RecoveryInput<'_>) -> Vec<GroupchatNotificationRecovery> {

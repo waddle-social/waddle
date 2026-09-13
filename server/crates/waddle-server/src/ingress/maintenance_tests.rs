@@ -1,6 +1,6 @@
 use super::{
-    run_maintenance_pass, run_maintenance_pass_with_cursor, MaintenanceBudget, MaintenanceCursor,
-    MaintenanceOutcome,
+    requeue_failed_accounting, run_maintenance_pass, run_maintenance_pass_with_cursor,
+    MaintenanceBudget, MaintenanceCursor, MaintenanceOutcome, RECOVERY_ACCOUNTING_QUEUE_BOUND,
 };
 use crate::{
     db::DatabaseDriver,
@@ -747,4 +747,34 @@ async fn postgres_recovery_phase_completes_a_lost_detached_route() {
     if let Some(fixture) = IngressFixture::postgres("maintenance_lost_route").await {
         recovery_phase_completes_a_lost_detached_route(fixture).await;
     }
+}
+
+/// A failed or timed-out accounting read must not lose the row's credit: the
+/// item returns to the queue ahead of newer rows, and the queue stays bounded.
+#[test]
+fn failed_accounting_reads_are_requeued_ahead_and_bounded() {
+    let queue = std::sync::Mutex::new(Vec::new());
+    let newer = (MessageKey::new(), 3);
+    let failed = (MessageKey::new(), 1);
+    queue.lock().expect("queue").push(newer);
+    requeue_failed_accounting(&queue, Vec::new());
+    assert_eq!(*queue.lock().expect("queue"), vec![newer]);
+    requeue_failed_accounting(&queue, vec![failed]);
+    assert_eq!(*queue.lock().expect("queue"), vec![failed, newer]);
+
+    let flood: Vec<_> = (0..RECOVERY_ACCOUNTING_QUEUE_BOUND + 5)
+        .map(|_| (MessageKey::new(), 0))
+        .collect();
+    // Two items already queued plus the flood exceed the bound by this many.
+    let excess = flood.len() + 2 - RECOVERY_ACCOUNTING_QUEUE_BOUND;
+    let survivor = flood[excess];
+    requeue_failed_accounting(&queue, flood.clone());
+    let bounded = queue.lock().expect("queue").clone();
+    assert_eq!(bounded.len(), RECOVERY_ACCOUNTING_QUEUE_BOUND);
+    assert_eq!(bounded[0], survivor, "the oldest excess items are dropped");
+    assert_eq!(
+        bounded[bounded.len() - 1],
+        newer,
+        "existing rows stay behind the retries"
+    );
 }

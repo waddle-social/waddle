@@ -131,9 +131,20 @@ async fn blocked_recipients(
     let Some(storage) = deps.blocking_storage else {
         return Ok(Vec::new());
     };
+    // Policy I/O only for routes some rebuild path can produce: a lost
+    // groupchat row records one inbox-push route per occupant, none of which
+    // any path rebuilds, and one blocklist read per occupant would spend the
+    // row deadline before its observer or notification recovery ran.
     let recipients: std::collections::BTreeSet<_> = frozen
         .unreceipted
         .iter()
+        .filter(|intent| {
+            recovery_rebuild::policy_checked_direct_route(
+                &frozen.envelope,
+                &frozen.recorded,
+                intent,
+            )
+        })
         .filter_map(|intent| match intent {
             IngressEffectIntent::RouteDirect { recipient, .. } => Some(recipient),
             _ => None,
@@ -232,6 +243,8 @@ async fn freeze(
         &mut unreceipted,
     )
     .await?;
+    // One bulk read of delivery progress for the same reason as the receipts.
+    let progress = DeliveryProgressRepository::load_all(&mut tx, key).await?;
     let mut route_progress = Vec::new();
     for intent in &unreceipted {
         let IngressEffectIntent::RouteDirect {
@@ -243,7 +256,11 @@ async fn freeze(
             continue;
         };
         let receipt = super::receipt_key(intent)?;
-        let completed = DeliveryProgressRepository::load(&mut tx, key, &receipt).await?;
+        let completed = progress
+            .iter()
+            .find(|(candidate, _)| *candidate == receipt)
+            .map(|(_, completed)| completed.clone())
+            .unwrap_or_default();
         route_progress.push(RouteProgress {
             receipt,
             recipient: recipient.clone(),

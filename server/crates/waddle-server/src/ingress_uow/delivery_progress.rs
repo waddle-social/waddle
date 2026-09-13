@@ -3,7 +3,9 @@ use jid::FullJid;
 use waddle_xmpp::ingress::MessageKey;
 
 use super::{IngressUowError, IngressUowTransaction};
-use crate::{db::DatabaseDriver, ingress::decision::EffectReceiptKey};
+use crate::{
+    db::DatabaseDriver, ingress::decision::EffectReceiptKey, ingress_substrate::EffectReceiptKind,
+};
 
 pub(crate) struct DeliveryProgressRepository;
 
@@ -40,6 +42,48 @@ impl DeliveryProgressRepository {
         }
         drop(rows);
         Ok(recipients)
+    }
+
+    /// Every recorded resource for the row, grouped by delivery obligation. One
+    /// query per row: a lost groupchat row carries one route per inbox owner,
+    /// and a per-route read would spend the recovery row deadline before any
+    /// recoverable work on it could run.
+    pub(crate) async fn load_all(
+        tx: &mut IngressUowTransaction<'_>,
+        message: MessageKey,
+    ) -> Result<Vec<(EffectReceiptKey, Vec<FullJid>)>, IngressUowError> {
+        let sql = if tx.transaction_mut().driver() == DatabaseDriver::Postgres {
+            "SELECT kind, semantic_identity_hash, resource FROM ingress_delivery_receipts WHERE message_key = ?::uuid ORDER BY kind, semantic_identity_hash, resource"
+        } else {
+            "SELECT kind, semantic_identity_hash, resource FROM ingress_delivery_receipts WHERE message_key = ? ORDER BY kind, semantic_identity_hash, resource"
+        };
+        let mut rows = tx
+            .transaction_mut()
+            .query(sql, crate::db_params![message.to_storage().to_string()])
+            .await?;
+        let mut progress: Vec<(EffectReceiptKey, Vec<FullJid>)> = Vec::new();
+        while let Some(row) = rows.next().await? {
+            let kind: i64 = row.get(0)?;
+            let hash: Vec<u8> = row.get(1)?;
+            let resource: String = row.get(2)?;
+            let receipt = EffectReceiptKey {
+                kind: EffectReceiptKind::from_storage(
+                    i32::try_from(kind).map_err(|_| IngressUowError::InvalidStoredReceiptHash)?,
+                ),
+                semantic_identity_hash: hash
+                    .try_into()
+                    .map_err(|_| IngressUowError::InvalidStoredReceiptHash)?,
+            };
+            let recipient = resource
+                .parse()
+                .map_err(|_| IngressUowError::InvalidStoredDeliveryResource)?;
+            match progress.last_mut() {
+                Some((last, recipients)) if *last == receipt => recipients.push(recipient),
+                _ => progress.push((receipt, vec![recipient])),
+            }
+        }
+        drop(rows);
+        Ok(progress)
     }
 
     pub(crate) async fn record(

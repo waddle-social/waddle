@@ -513,6 +513,7 @@ fn spawn_recovery_accounting(database: &Database, cursor: &MaintenanceCursor) {
     let database = database.clone();
     let worker = Arc::clone(&cursor.recovery_accounting_worker);
     let credited = Arc::clone(&cursor.recovery_credited);
+    let queue = Arc::clone(&cursor.recovery_accounting);
     tokio::spawn(async move {
         use waddle_xmpp::telemetry::reliability::increment_ingress_maintenance_recovered_obligations;
         // One accounting read at a time across passes: a partial pass's
@@ -520,6 +521,7 @@ fn spawn_recovery_accounting(database: &Database, cursor: &MaintenanceCursor) {
         // dedicated ingress pool while an earlier one is still draining.
         let _serial = worker.lock().await;
         let mut recovered = 0;
+        let mut failed = Vec::new();
         for (key, before) in attempted {
             match tokio::time::timeout(RECOVERY_ACCOUNTING_BUDGET, receipts_now(&database, key))
                 .await
@@ -534,17 +536,51 @@ fn spawn_recovery_accounting(database: &Database, cursor: &MaintenanceCursor) {
                 }
                 Ok(Err(error)) => {
                     tracing::warn!(%error, ?key, "ingress recovery accounting failed");
+                    failed.push((key, before));
                 }
                 Err(_) => {
                     tracing::warn!(?key, "ingress recovery accounting timed out");
+                    failed.push((key, before));
                 }
             }
         }
         if recovered > 0 {
             increment_ingress_maintenance_recovered_obligations(recovered);
         }
+        // A contended database must not erase the credit: the row may have
+        // terminalized meanwhile and will never enter a later scan, so the
+        // next pass's worker retries the read with its own bounded budget.
+        requeue_failed_accounting(&queue, failed);
     });
 }
+
+/// Rows the recovery accounting read could not settle go back on the queue
+/// for the next pass's worker. Bounded so a database that stays unreachable
+/// cannot grow the queue without limit; beyond the bound the oldest failed
+/// items are dropped and only telemetry credit is lost.
+fn requeue_failed_accounting(
+    queue: &Mutex<Vec<(MessageKey, u32)>>,
+    failed: Vec<(MessageKey, u32)>,
+) {
+    if failed.is_empty() {
+        return;
+    }
+    let mut queue = queue
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    // Retries precede the rows the running pass has queued since, so the
+    // oldest credit is read first.
+    let pending = std::mem::take(&mut *queue);
+    queue.extend(failed);
+    queue.extend(pending);
+    if queue.len() > RECOVERY_ACCOUNTING_QUEUE_BOUND {
+        let excess = queue.len() - RECOVERY_ACCOUNTING_QUEUE_BOUND;
+        queue.drain(..excess);
+    }
+}
+
+/// Most rows awaiting an accounting read, including requeued failures.
+const RECOVERY_ACCOUNTING_QUEUE_BOUND: usize = 4096;
 
 /// Per-row receipt totals already credited to `recovered_obligations`.
 /// Bounded FIFO like the unsupported cache; eviction only risks re-crediting
