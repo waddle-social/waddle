@@ -7,12 +7,12 @@ use waddle_xmpp::{
     pending_delivery::{InsertOutcome, PendingPayload, PendingRow, QuotaPolicy},
 };
 
-use crate::ingress::decision::IngressDecision;
+use crate::ingress::decision::{EffectReceiptKey, IngressDecision};
 use crate::{
     ingress_uow::{
-        settle_recorded, CanonicalMessageRepository, EffectReceiptRepository, IngressUnitOfWork,
-        IngressUowError, IngressUowTransaction, PendingReceiptRepository,
-        RecoveryReceiptRepository,
+        settle_recorded, CanonicalMessageRepository, EffectIntentRepository,
+        EffectReceiptRepository, IngressUnitOfWork, IngressUowError, IngressUowTransaction,
+        PendingReceiptRepository, RecoveryReceiptRepository,
     },
     notification_outbox::NotificationCandidateInsertOutcome,
     server::routes::interpret::{
@@ -34,7 +34,7 @@ enum StoreError {
 
 enum StoreOutcome {
     Settled(SettledOutcome),
-    QuotaExceeded,
+    QuotaExceeded(SettledOutcome),
 }
 
 #[cfg(test)]
@@ -79,14 +79,14 @@ pub(super) async fn execute(
     .await
     {
         Ok(StoreOutcome::Settled(settled)) => EffectOutcome::Settled(settled),
-        Ok(StoreOutcome::QuotaExceeded) => {
+        Ok(StoreOutcome::QuotaExceeded(settled)) => {
             crate::server::routes::interpret::offline_delivery::bounce_offline_quota(
                 deps,
                 &row.recipient,
                 original_message,
             )
             .await;
-            EffectOutcome::OfflineDeliveryQuotaExceeded
+            EffectOutcome::Settled(settled)
         }
         Err(error) => {
             tracing::warn!(%error, "offline delivery settlement failed");
@@ -124,13 +124,40 @@ async fn store(
         &receipt.semantic_identity_hash,
     )
     .await?;
+    if already_receipted
+        && owned_receipts_complete(&mut tx, key, &decision.external_receipts[index]).await?
+    {
+        // A settled refusal has no pending row or candidate to recreate.
+        tx.commit().await?;
+        return Ok(StoreOutcome::Settled(SettledOutcome {
+            persisted: Vec::new(),
+            completion: SettledCompletion::Complete,
+            detached: None,
+        }));
+    }
     if !already_receipted && !PendingReceiptRepository::contains(&mut tx, &row.id).await? {
         match PendingReceiptRepository::insert(&mut tx, row, quota).await? {
             InsertOutcome::Inserted => {}
             InsertOutcome::QuotaExceeded => {
-                // No durable work was done; close the transaction before notifying the sender.
+                let mut evidence = Vec::new();
+                for intent in EffectIntentRepository::load(&mut tx, key).await? {
+                    if decision.external_receipts[index]
+                        .contains(&crate::ingress::receipt_key(&intent)?)
+                    {
+                        evidence.push(intent);
+                    }
+                }
+                let persisted = settle_recorded(&mut tx, key, &evidence).await?;
+                // Refusal resolves the pending delivery and its notification previews.
+                // Commit before the keyless sender bounce: a crash between commit and
+                // bounce loses the bounce (at-most-once), the RFC's trade for keyless
+                // sinks. Bouncing first would repeat the refusal on every retry.
                 tx.commit().await?;
-                return Ok(StoreOutcome::QuotaExceeded);
+                return Ok(StoreOutcome::QuotaExceeded(SettledOutcome {
+                    persisted,
+                    completion: SettledCompletion::Complete,
+                    detached: None,
+                }));
             }
         }
     }
@@ -152,19 +179,8 @@ async fn store(
     if !already_receipted && !persisted.contains(&pending) {
         return Err(IngressUowError::EffectIntentConflict.into());
     }
-    let mut complete = true;
-    for receipt in &decision.external_receipts[index] {
-        if !EffectReceiptRepository::contains(
-            &mut tx,
-            key,
-            receipt.kind,
-            &receipt.semantic_identity_hash,
-        )
-        .await?
-        {
-            complete = false;
-        }
-    }
+    let complete =
+        owned_receipts_complete(&mut tx, key, &decision.external_receipts[index]).await?;
     tx.commit().await?;
     Ok(StoreOutcome::Settled(SettledOutcome {
         persisted,
@@ -175,6 +191,26 @@ async fn store(
         },
         detached: None,
     }))
+}
+
+async fn owned_receipts_complete(
+    tx: &mut IngressUowTransaction<'_>,
+    key: waddle_xmpp::ingress::MessageKey,
+    receipts: &[EffectReceiptKey],
+) -> Result<bool, IngressUowError> {
+    for receipt in receipts {
+        if !EffectReceiptRepository::contains(
+            tx,
+            key,
+            receipt.kind,
+            &receipt.semantic_identity_hash,
+        )
+        .await?
+        {
+            return Ok(false);
+        }
+    }
+    Ok(true)
 }
 
 fn pending_intent(row: &PendingRow) -> IngressEffectIntent {
@@ -211,7 +247,13 @@ async fn notification_evidence(
             {
                 return Err(IngressUowError::EffectIntentConflict.into());
             }
-            let outcome = match RecoveryReceiptRepository::insert_candidate(tx, candidate).await? {
+            let outcome = match RecoveryReceiptRepository::insert_candidate(
+                tx,
+                candidate,
+                row.original_receipt_at.timestamp_millis(),
+            )
+            .await?
+            {
                 NotificationCandidateInsertOutcome::Inserted => {
                     NotificationCandidateOutcome::Inserted
                 }

@@ -179,6 +179,7 @@ fn invite_noop_discharge_excludes_non_delivery_effects() {
     };
     let ledger = ExternalEffect::InviteLedger(InviteLedgerMutation::Claim {
         message_key: None,
+        not_after: None,
         invite: invite.clone(),
     });
     let mut frame = PlannedEffect::new(Effect::External(ExternalEffect::Frame(Box::new(

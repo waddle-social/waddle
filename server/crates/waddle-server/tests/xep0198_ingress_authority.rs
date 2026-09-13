@@ -318,3 +318,157 @@ async fn xep0198_detached_progress_restart_postgres() {
         detached_progress_support::restart_and_retry(fixture).await;
     }
 }
+
+struct DetachedRecoveryEnvironment {
+    connections: waddle_xmpp::registry::ConnectionRegistry,
+    sm: std::sync::Arc<waddle_xmpp::stream_management::InMemorySmSessionRegistry>,
+}
+
+impl waddle_server::ingress::RecoveryEnvironment for DetachedRecoveryEnvironment {
+    fn recovery_deps(&self) -> Deps<'_> {
+        let mut deps = Deps::new(&self.connections, "example.com");
+        deps.sm_session_registry = Some(&self.sm);
+        deps
+    }
+}
+
+async fn wait_for_terminal_count(fixture: &IngressFixture, expected: i64) {
+    tokio::time::timeout(std::time::Duration::from_secs(15), async {
+        loop {
+            if fixture
+                .count("ingress_messages WHERE terminal_at IS NOT NULL")
+                .await
+                == expected
+            {
+                return;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        }
+    })
+    .await
+    .expect("public maintenance trigger completes lost obligations");
+}
+
+async fn maintenance_recovery_appends_lost_detached_delivery_once(fixture: IngressFixture) {
+    use std::{sync::Arc, time::Duration};
+    use waddle_server::ingress::RecoveryEnvironment;
+    use waddle_xmpp::stream_management::{SmSessionRegistry, StreamManagementState};
+
+    let sm = detached_progress_support::registry(&fixture).await;
+    let [resource, sentinel_resource, _] = detached_progress_support::resources();
+    detached_progress_support::attach(&sm, &resource).await;
+    // This fixture calls IngressAuthority::new with the enrolled database lineage.
+    let authority = fixture.authority().await;
+    let environment: Arc<dyn RecoveryEnvironment> = Arc::new(DetachedRecoveryEnvironment {
+        connections: waddle_xmpp::registry::ConnectionRegistry::new(),
+        sm: Arc::clone(&sm),
+    });
+    authority.bind_recovery_environment(Arc::downgrade(&environment));
+    let mut submission = fixture.submission(Some("maintenance-lost-append"), "recover this stanza");
+    detached_progress_support::route(&mut submission, std::slice::from_ref(&resource), 1);
+    let decision = authority.commit(&submission).await;
+    assert_eq!(decision.class, IngressDecisionClass::Accepted);
+    // Lose Phase C completely. Recovery must execute the persisted canonical plan.
+    assert_eq!(fixture.count("sm_ingress_appends").await, 0);
+    assert_eq!(
+        detached_progress_support::queued(&sm, &resource)
+            .await
+            .unacked_stanzas
+            .len(),
+        0
+    );
+    let backdate_pending = match fixture.db.driver() {
+        waddle_server::db::DatabaseDriver::Postgres => {
+            "UPDATE ingress_messages SET created_at = ?::timestamptz WHERE terminal_at IS NULL"
+        }
+        waddle_server::db::DatabaseDriver::Sqlite => {
+            "UPDATE ingress_messages SET created_at = strftime('%Y-%m-%dT%H:%M:%fZ', ?) WHERE terminal_at IS NULL"
+        }
+    };
+    fixture
+        .execute(
+            backdate_pending,
+            waddle_server::db_params![
+                (chrono::Utc::now() - chrono::Duration::seconds(120)).to_rfc3339()
+            ],
+        )
+        .await;
+    authority.trigger_maintenance();
+    wait_for_terminal_count(&fixture, 1).await;
+    assert_eq!(fixture.count("sm_ingress_appends").await, 1);
+    assert_eq!(fixture.count("ingress_effect_receipts").await, 1);
+    let detached = detached_progress_support::queued(&sm, &resource).await;
+    assert_eq!(detached.outbound_count, 1);
+    assert_eq!(detached.unacked_stanzas.len(), 1);
+
+    // Exercise the same registry take, SM restore, and replay selection used by
+    // resumption. XEP-0198 h=0 replays the lost stanza without allocating it again.
+    let resumed = sm
+        .take_session(&resource.to_string())
+        .await
+        .expect("resume take")
+        .expect("session");
+    let mut stream = StreamManagementState::new();
+    stream.restore_from_session(&resumed);
+    assert!(stream.can_resume_from(0));
+    let replay = stream.get_stanzas_to_resend(0);
+    assert_eq!(replay.len(), 1);
+    let actual: minidom::Element = replay[0].stanza_xml.parse().expect("replay XML");
+    let expected: minidom::Element = submission.plan.sanitized_message.clone().into();
+    assert_eq!(actual, expected, "resume preserves the canonical stanza");
+    assert_eq!(stream.queue_len(), 1);
+    assert_eq!(
+        fixture.count("sm_ingress_appends").await,
+        1,
+        "resume retains the durable allocation proof"
+    );
+
+    // A second real lost obligation is a completion witness for another public
+    // maintenance pass; no timing-only sleep can stand in for that observation.
+    detached_progress_support::attach(&sm, &sentinel_resource).await;
+    let mut sentinel = fixture.submission(Some("maintenance-second-pass"), "second pass witness");
+    detached_progress_support::route(&mut sentinel, std::slice::from_ref(&sentinel_resource), 1);
+    assert_eq!(
+        authority.commit(&sentinel).await.class,
+        IngressDecisionClass::Accepted
+    );
+    fixture
+        .execute(
+            backdate_pending,
+            waddle_server::db_params![
+                (chrono::Utc::now() - chrono::Duration::seconds(120)).to_rfc3339()
+            ],
+        )
+        .await;
+    authority.trigger_maintenance();
+    wait_for_terminal_count(&fixture, 2).await;
+    assert_eq!(
+        fixture
+            .count("sm_ingress_appends WHERE resource = 'juliet@example.com/a'")
+            .await,
+        1
+    );
+    assert_eq!(fixture.count("sm_ingress_appends").await, 2);
+    assert_eq!(stream.get_stanzas_to_resend(0).len(), 1);
+    stream.acknowledge(1);
+    assert!(stream.get_stanzas_to_resend(1).is_empty());
+    assert_eq!(stream.queue_len(), 0);
+    assert!(authority.drain_and_join(Duration::from_secs(15)).await);
+    drop(environment);
+    drop(authority);
+    drop(sm);
+    fixture.close().await;
+}
+
+/// XEP-0198 §5: maintenance repairs a lost append, and resume replays it once.
+#[tokio::test]
+async fn sqlite_maintenance_recovery_appends_lost_detached_delivery_once() {
+    maintenance_recovery_appends_lost_detached_delivery_once(IngressFixture::sqlite().await).await;
+}
+
+#[tokio::test]
+async fn postgres_maintenance_recovery_appends_lost_detached_delivery_once() {
+    if let Some(fixture) = IngressFixture::postgres("sm_maintenance_lost_append").await {
+        maintenance_recovery_appends_lost_detached_delivery_once(fixture).await;
+    }
+}

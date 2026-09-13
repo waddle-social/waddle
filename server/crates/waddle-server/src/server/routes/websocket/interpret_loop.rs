@@ -1,5 +1,11 @@
 use super::*;
 
+impl crate::ingress::RecoveryEnvironment for WebSocketState {
+    fn recovery_deps(&self) -> crate::server::routes::interpret::Deps<'_> {
+        build_interpret_deps(self, None)
+    }
+}
+
 /// Build the [`crate::server::routes::interpret::Deps`] view a
 /// per-connection main loop needs to resolve recipient-pass outbound
 /// events. Centralized so the deps shape stays in sync with the IQ

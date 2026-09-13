@@ -862,7 +862,7 @@ pub(super) async fn append_detached(
             .record_keyed_stanza_for_detached_bound_resource(
                 target,
                 stanza,
-                chrono::Utc::now(),
+                context.received_at.unwrap_or_else(chrono::Utc::now),
                 context.for_resource(target),
             )
             .await

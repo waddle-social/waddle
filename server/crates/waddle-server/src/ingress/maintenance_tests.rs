@@ -152,7 +152,7 @@ fn spawn_coordinator(
             let outcomes = outcomes.clone();
             Box::pin(async move {
                 let outcome =
-                    run_maintenance_pass_with_cursor(&database, &uow, budget, &cursor).await;
+                    run_maintenance_pass_with_cursor(&database, &uow, budget, &cursor, None).await;
                 let _ = outcomes.send(outcome);
                 outcome
             })
@@ -200,7 +200,7 @@ async fn cancellation_during_real_pass(fixture: IngressFixture) {
             let pass_started = pass_started.clone();
             Box::pin(async move {
                 pass_started.notify_one();
-                run_maintenance_pass(&database, &uow, MaintenanceBudget::DEFAULT).await
+                run_maintenance_pass(&database, &uow, MaintenanceBudget::DEFAULT, None).await
             })
         }),
         partial_retry_delay: Duration::from_millis(10),
@@ -227,7 +227,7 @@ async fn periodic_grace_repair(fixture: IngressFixture) {
     let key = interrupted_delivery(&fixture, "maintenance-grace").await;
     assert_eq!(terminal_count(&fixture).await, 0);
     assert_eq!(
-        run_maintenance_pass(&fixture.db, &fixture.uow, MaintenanceBudget::DEFAULT).await,
+        run_maintenance_pass(&fixture.db, &fixture.uow, MaintenanceBudget::DEFAULT, None).await,
         MaintenanceOutcome::Complete
     );
     assert_eq!(
@@ -282,7 +282,7 @@ async fn backlog_and_retention(fixture: IngressFixture) {
         ..immediate_budget()
     };
     assert_eq!(
-        run_maintenance_pass(&fixture.db, &fixture.uow, budget).await,
+        run_maintenance_pass(&fixture.db, &fixture.uow, budget, None).await,
         MaintenanceOutcome::Partial
     );
     assert_eq!(terminal_count(&fixture).await, 1, "one bounded page only");
@@ -313,7 +313,7 @@ async fn backlog_and_retention(fixture: IngressFixture) {
         )
         .await;
     assert_eq!(
-        run_maintenance_pass(&fixture.db, &fixture.uow, immediate_budget()).await,
+        run_maintenance_pass(&fixture.db, &fixture.uow, immediate_budget(), None).await,
         MaintenanceOutcome::Complete
     );
     assert_eq!(
@@ -341,7 +341,7 @@ async fn epoch_one_repair(fixture: IngressFixture) {
         .await;
     interrupted_delivery(&fixture, "maintenance-epoch-one").await;
     assert_eq!(
-        run_maintenance_pass(&fixture.db, &fixture.uow, immediate_budget()).await,
+        run_maintenance_pass(&fixture.db, &fixture.uow, immediate_budget(), None).await,
         MaintenanceOutcome::Complete
     );
     assert_eq!(terminal_count(&fixture).await, 1);
@@ -355,7 +355,7 @@ async fn failed_head_does_not_starve_next_row(fixture: IngressFixture) {
     backdate_created(&fixture, next, 90).await;
     test_hooks::force_terminalization_timeout_once(head);
     assert_eq!(
-        run_maintenance_pass(&fixture.db, &fixture.uow, MaintenanceBudget::DEFAULT).await,
+        run_maintenance_pass(&fixture.db, &fixture.uow, MaintenanceBudget::DEFAULT, None).await,
         MaintenanceOutcome::Partial
     );
     assert_eq!(
@@ -364,7 +364,7 @@ async fn failed_head_does_not_starve_next_row(fixture: IngressFixture) {
         "a failed head row must not starve the rest of its page"
     );
     assert_eq!(
-        run_maintenance_pass(&fixture.db, &fixture.uow, MaintenanceBudget::DEFAULT).await,
+        run_maintenance_pass(&fixture.db, &fixture.uow, MaintenanceBudget::DEFAULT, None).await,
         MaintenanceOutcome::Complete
     );
     assert_eq!(terminal_count(&fixture).await, 2);
@@ -466,17 +466,17 @@ async fn postgres_maintenance_contended_prefix_preserves_continuation_cursor() {
     };
     let cursor = MaintenanceCursor::default();
     assert_eq!(
-        run_maintenance_pass_with_cursor(&fixture.db, &fixture.uow, budget, &cursor).await,
+        run_maintenance_pass_with_cursor(&fixture.db, &fixture.uow, budget, &cursor, None).await,
         MaintenanceOutcome::TimedOut
     );
     assert_eq!(terminal_count(&fixture).await, 0);
     assert_eq!(
-        run_maintenance_pass_with_cursor(&fixture.db, &fixture.uow, budget, &cursor).await,
+        run_maintenance_pass_with_cursor(&fixture.db, &fixture.uow, budget, &cursor, None).await,
         MaintenanceOutcome::TimedOut
     );
     assert_eq!(terminal_count(&fixture).await, 0);
     assert_eq!(
-        run_maintenance_pass_with_cursor(&fixture.db, &fixture.uow, budget, &cursor).await,
+        run_maintenance_pass_with_cursor(&fixture.db, &fixture.uow, budget, &cursor, None).await,
         MaintenanceOutcome::Partial
     );
     assert_eq!(
@@ -487,7 +487,7 @@ async fn postgres_maintenance_contended_prefix_preserves_continuation_cursor() {
 
     blocker.commit().await.expect("release contended prefix");
     assert_eq!(
-        run_maintenance_pass_with_cursor(&fixture.db, &fixture.uow, budget, &cursor).await,
+        run_maintenance_pass_with_cursor(&fixture.db, &fixture.uow, budget, &cursor, None).await,
         MaintenanceOutcome::Complete
     );
     assert_eq!(terminal_count(&fixture).await, 3);
@@ -516,7 +516,7 @@ async fn postgres_pool_one_remains_admissible_during_maintenance() {
         let key = interrupted_delivery(&fixture, origin).await;
         backdate_created(&fixture, key, 120).await;
     }
-    let maintenance = run_maintenance_pass(&fixture.db, &fixture.uow, immediate_budget());
+    let maintenance = run_maintenance_pass(&fixture.db, &fixture.uow, immediate_budget(), None);
     let foreground = async {
         let transaction = tokio::time::timeout(Duration::from_secs(2), fixture.uow.begin())
             .await
@@ -528,4 +528,223 @@ async fn postgres_pool_one_remains_admissible_during_maintenance() {
     assert_eq!(outcome, MaintenanceOutcome::Complete);
     assert_eq!(terminal_count(&fixture).await, 2);
     fixture.close().await;
+}
+
+async fn unreceipted_page_selects_only_recoverable_pending_rows(fixture: IngressFixture) {
+    let complete = interrupted_delivery(&fixture, "recovery-page-complete").await;
+    let mut pending = fixture.submission(Some("recovery-page-pending"), "pending");
+    pending.plan.intents.push(IngressEffectIntent::RouteDirect {
+        recipient: "juliet@example.com".parse().expect("recipient"),
+        fanout: vec!["juliet@example.com/phone".parse().expect("resource")],
+        route_identity: EffectMessageIdentity::capture_ordinal(0),
+    });
+    let pending_key = commit_submission(&fixture.uow, &pending, 5)
+        .await
+        .expect("pending commit")
+        .message_key
+        .expect("key");
+    let mut carbons = fixture.submission(Some("recovery-page-carbons"), "carbons only");
+    carbons.plan.intents.push(IngressEffectIntent::Carbons {
+        carbon_recipients: vec!["romeo@example.com/laptop".parse().expect("carbon")],
+        excluded_source: "romeo@example.com/phone".parse().expect("source"),
+        kind: waddle_xmpp::protocol::CarbonKind::Sent,
+    });
+    let carbons_key = commit_submission(&fixture.uow, &carbons, 5)
+        .await
+        .expect("carbons commit")
+        .message_key
+        .expect("key");
+    let route_kind = crate::ingress_substrate::EffectReceiptKind::from_storage(
+        waddle_xmpp::ingress::IngressEffectKind::RouteDirect.storage_tag(),
+    );
+    let mut tx = fixture.db.begin().await.expect("scan transaction");
+    let page = crate::ingress_substrate::unreceipted_nonterminal_candidates(
+        &mut tx,
+        None,
+        chrono::Utc::now() + chrono::Duration::seconds(1),
+        &[route_kind],
+        16,
+    )
+    .await
+    .expect("unreceipted page");
+    let empty = crate::ingress_substrate::unreceipted_nonterminal_candidates(
+        &mut tx,
+        None,
+        chrono::Utc::now() + chrono::Duration::seconds(1),
+        &[],
+        16,
+    )
+    .await
+    .expect("empty kinds");
+    tx.commit().await.expect("scan commit");
+    // Every pending row is paged so the cursor can advance past unsupported
+    // ones; only rows with an unreceipted recoverable kind are flagged.
+    let flags: Vec<_> = page
+        .iter()
+        .map(|candidate| (candidate.key, candidate.recoverable))
+        .collect();
+    assert_eq!(flags, vec![(pending_key, true), (carbons_key, false)]);
+    assert!(!page.iter().any(|candidate| candidate.key == complete));
+    assert!(empty.is_empty());
+    fixture.close().await;
+}
+
+#[tokio::test]
+async fn sqlite_unreceipted_page() {
+    unreceipted_page_selects_only_recoverable_pending_rows(IngressFixture::sqlite().await).await;
+}
+#[tokio::test]
+async fn postgres_unreceipted_page() {
+    if let Some(fixture) = IngressFixture::postgres("recovery_page").await {
+        unreceipted_page_selects_only_recoverable_pending_rows(fixture).await;
+    }
+}
+
+use waddle_xmpp::stream_management::{
+    DetachedSession, InMemorySmSessionRegistry, SmSessionRegistry,
+};
+async fn store_detached(sm: &InMemorySmSessionRegistry, resource: &jid::FullJid) {
+    sm.store_session(DetachedSession {
+        stream_id: resource.to_string(),
+        user_id: resource.to_bare().to_string(),
+        jid: resource.clone(),
+        occupancy_session: waddle_xmpp_core::OccupancySessionGeneration::mint(),
+        inbound_count: 0,
+        outbound_count: 0,
+        last_acked: 0,
+        replay_gap_through: None,
+        unacked_stanzas: Vec::new(),
+        max_resume_time: Some(300),
+        detached_at: std::time::Instant::now(),
+        carbons_enabled: false,
+        roster_interested: false,
+        blocklist_interested: false,
+        presence_available: false,
+        presence_show: None,
+        presence_status: None,
+        presence_priority: 0,
+        presence_payloads: Vec::new(),
+        pending_subscribes_flushed: false,
+    })
+    .await
+    .expect("store detached session");
+}
+
+async fn append_count(sm: &InMemorySmSessionRegistry, resource: &jid::FullJid) -> usize {
+    sm.peek_session(&resource.to_string())
+        .await
+        .expect("peek session")
+        .expect("retained session")
+        .unacked_stanzas
+        .len()
+}
+
+struct StateEnvironment(Arc<crate::server::routes::websocket::WebSocketState>);
+
+impl super::RecoveryEnvironment for StateEnvironment {
+    fn recovery_deps(&self) -> Deps<'_> {
+        super::RecoveryEnvironment::recovery_deps(self.0.as_ref())
+    }
+}
+
+async fn recovery_phase_completes_a_lost_detached_route(fixture: IngressFixture) {
+    let persistence = Arc::new(
+        crate::sm_persistence::DatabaseSmPersistence::open(Some(fixture.db.database_url()))
+            .await
+            .expect("SM persistence"),
+    );
+    let sm = Arc::new(InMemorySmSessionRegistry::new().with_persistence(persistence));
+    let resource: jid::FullJid = "juliet@example.com/phone".parse().expect("resource");
+    store_detached(&sm, &resource).await;
+    let pool = crate::db::DatabasePool::new(
+        crate::db::DatabaseConfig::new(fixture.db.driver(), fixture.db.database_url()),
+        crate::db::PoolConfig,
+    )
+    .await
+    .expect("shared pool");
+    let state = crate::server::routes::websocket::tests::create_test_websocket_state_with_db_pool_and_ingress(
+        Arc::new(pool), Arc::new(fixture.authority().await),
+    ).await;
+    let mut state = Arc::try_unwrap(state).unwrap_or_else(|_| panic!("fresh state"));
+    state.deps.protocol.sm_session_registry = sm.clone();
+    let environment: Arc<dyn super::RecoveryEnvironment> =
+        Arc::new(StateEnvironment(Arc::new(state)));
+    let mut submission =
+        fixture.submission(Some("maintenance-lost-route"), "lost detached delivery");
+    let identity = EffectMessageIdentity::capture_ordinal(0);
+    submission.plan.intents = vec![IngressEffectIntent::RouteDirect {
+        recipient: resource.to_bare(),
+        fanout: vec![resource.clone()],
+        route_identity: identity.clone(),
+    }];
+    submission.plan.plan = vec![PlannedEffect::new(Effect::External(
+        ExternalEffect::Delivery(ExternalDeliveryEffect::QueueDetached {
+            route_identity: Some(identity),
+            call_setup: None,
+            bare: resource.to_bare(),
+            resources: vec![resource.clone()],
+            stanza: Box::new(Stanza::Message(submission.plan.sanitized_message.clone())),
+        }),
+    ))];
+    let decision = commit_submission(&fixture.uow, &submission, 5)
+        .await
+        .expect("phase B");
+    let key = decision.message_key.expect("key");
+    backdate_created(&fixture, key, 120).await;
+    assert_eq!(
+        run_maintenance_pass(&fixture.db, &fixture.uow, MaintenanceBudget::DEFAULT, None).await,
+        MaintenanceOutcome::Complete
+    );
+    assert_eq!(append_count(&sm, &resource).await, 0);
+    assert_eq!(terminal_count(&fixture).await, 0);
+    assert_eq!(super::super::recovery_executor::attempt_count(key), 0);
+    let gate = test_hooks::pause_after_recovery_freeze(key);
+    let pass = run_maintenance_pass(
+        &fixture.db,
+        &fixture.uow,
+        MaintenanceBudget::DEFAULT,
+        Some(environment.clone()),
+    );
+    let release = async {
+        tokio::time::timeout(Duration::from_secs(5), gate.wait_until_reached())
+            .await
+            .expect("recovery freeze barrier");
+        // A new canonical lock is available while recovery is paused: freeze committed.
+        let mut tx = fixture.uow.begin().await.expect("post-freeze transaction");
+        assert!(CanonicalMessageRepository::lock(&mut tx, key)
+            .await
+            .expect("post-freeze lock"));
+        tx.commit().await.expect("post-freeze commit");
+        gate.release();
+    };
+    let (outcome, ()) = tokio::join!(pass, release);
+    assert_eq!(outcome, MaintenanceOutcome::Complete);
+    assert_eq!(append_count(&sm, &resource).await, 1);
+    assert_eq!(fixture.count("ingress_effect_receipts").await, 1);
+    assert_eq!(terminal_count(&fixture).await, 1);
+    assert_eq!(super::super::recovery_executor::attempt_count(key), 1);
+    assert_eq!(
+        run_maintenance_pass(
+            &fixture.db,
+            &fixture.uow,
+            MaintenanceBudget::DEFAULT,
+            Some(environment)
+        )
+        .await,
+        MaintenanceOutcome::Complete
+    );
+    assert_eq!(append_count(&sm, &resource).await, 1);
+    fixture.close().await;
+}
+
+#[tokio::test]
+async fn sqlite_recovery_phase_completes_a_lost_detached_route() {
+    recovery_phase_completes_a_lost_detached_route(IngressFixture::sqlite().await).await;
+}
+
+#[tokio::test]
+async fn postgres_recovery_phase_completes_a_lost_detached_route() {
+    if let Some(fixture) = IngressFixture::postgres("maintenance_lost_route").await {
+        recovery_phase_completes_a_lost_detached_route(fixture).await;
+    }
 }

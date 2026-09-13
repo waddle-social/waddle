@@ -113,6 +113,7 @@ pub enum TimerCommand {
 pub struct SmIngressAppendContext {
     pub message_key: waddle_xmpp::ingress::MessageKey,
     pub receipt: crate::ingress::EffectReceiptKey,
+    pub received_at: Option<chrono::DateTime<chrono::Utc>>,
 }
 
 impl SmIngressAppendContext {

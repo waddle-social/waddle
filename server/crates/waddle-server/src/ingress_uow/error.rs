@@ -13,6 +13,10 @@ pub enum IngressUowError {
     Plan(#[from] crate::server::routes::interpret::effects::PlanFailure),
     #[error("planned room delivery is missing its authoritative stanza-id")]
     MissingRoomStanzaId,
+    #[error("stored effect receipt identity is malformed")]
+    InvalidStoredReceiptHash,
+    #[error("recipient blocklist is unavailable during ingress recovery")]
+    BlocklistUnavailable(#[source] waddle_xmpp::xep::xep0191::BlockingStorageError),
     #[error("ingress transaction timed out before commit")]
     Timeout,
     #[error("ingress authority has stopped")]

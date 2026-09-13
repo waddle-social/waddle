@@ -1127,6 +1127,12 @@ async fn create_websocket_state(
             shutdown: shutdown_handle,
         },
     });
+    websocket_state
+        .deps
+        .protocol
+        .ingress
+        .bind_recovery_environment(Arc::downgrade(&websocket_state)
+            as std::sync::Weak<dyn crate::ingress::RecoveryEnvironment>);
     room_effect_arm_supervisor.attach_drain_state(&websocket_state);
     crate::admin::channels::register(
         &websocket_state.deps.protocol.command_registry,
