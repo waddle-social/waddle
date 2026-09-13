@@ -287,14 +287,14 @@ async fn commit_attempt(
         reconstructed |= crate::server::routes::websocket::handlers::message::group_dm_invite::restore_recorded_group_dm_invite(
             &mut plan, &submission.plan, &recorded, &unreceipted, &recorded_envelope,
         )?;
+        let created_at = CanonicalMessageRepository::created_at(&mut tx, key).await?;
         reconstructed |= crate::server::routes::websocket::handlers::message::muc_direct::restore_recorded_muc_decline(
-            &mut plan, &recorded, &unreceipted, &recorded_envelope,
+            &mut plan, &recorded, &unreceipted, &recorded_envelope, created_at,
         )?;
         if recorded
             .iter()
             .any(|intent| matches!(intent, IngressEffectIntent::PendingDelivery { .. }))
         {
-            let created_at = CanonicalMessageRepository::created_at(&mut tx, key).await?;
             reconstructed |= super::restore_offline::restore_recorded_offline_deliveries(
                 &mut plan,
                 &recorded,

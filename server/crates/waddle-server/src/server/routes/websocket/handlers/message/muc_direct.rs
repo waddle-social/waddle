@@ -596,6 +596,7 @@ pub(crate) fn restore_recorded_muc_decline(
     recorded: &[IngressEffectIntent],
     pending: &[IngressEffectIntent],
     envelope: &crate::ingress_substrate::MessageEnvelope,
+    received_at: chrono::DateTime<chrono::Utc>,
 ) -> Result<bool, crate::ingress_uow::IngressUowError> {
     use crate::server::routes::interpret::effects::{invite::MucUserRoute, PlanSuppressionPolicy};
     use waddle_xmpp::{
@@ -665,7 +666,7 @@ pub(crate) fn restore_recorded_muc_decline(
             fallback: PendingRow {
                 id: row_id,
                 recipient: recipient.clone(),
-                original_receipt_at: chrono::Utc::now(),
+                original_receipt_at: received_at,
                 payload: PendingPayload::Transient(Box::new(message.clone())),
                 flushed_in_session: None,
                 outbound_sequence: None,

@@ -50,10 +50,18 @@ fn run(
     recorded: &[IngressEffectIntent],
     pending: &[IngressEffectIntent],
 ) -> RebuiltRecovery {
+    run_at(envelope, recorded, pending, Utc::now())
+}
+fn run_at(
+    envelope: &MessageEnvelope,
+    recorded: &[IngressEffectIntent],
+    pending: &[IngressEffectIntent],
+    created_at: chrono::DateTime<Utc>,
+) -> RebuiltRecovery {
     rebuild(RecoveryInput {
         key: MessageKey::new(),
         envelope,
-        created_at: Utc::now(),
+        created_at,
         recorded,
         unreceipted: pending,
         route_progress: pending
@@ -419,4 +427,65 @@ fn muc_decline_claim_is_bound_to_the_canonical_key() {
     assert!(message_key.is_some());
     assert_eq!(result.decision.external_receipts[0].len(), 1);
     assert!(result.unrecoverable.is_empty());
+}
+
+#[test]
+fn muc_decline_fallback_keeps_the_canonical_receipt_time() {
+    let room = bare("room@conference.example.com");
+    let inviter = bare("juliet@example.com");
+    let mut message = envelope("decline").message().clone();
+    message.to = Some(room.clone().into());
+    message.payloads.push(
+        minidom::Element::builder("x", waddle_xmpp::muc::presence::NS_MUC_USER)
+            .append(
+                minidom::Element::builder("decline", waddle_xmpp::muc::presence::NS_MUC_USER)
+                    .build(),
+            )
+            .build(),
+    );
+    let row_id = waddle_xmpp::pending_delivery::PendingRowId::fresh();
+    let intents = [
+        IngressEffectIntent::MucInviteLedger {
+            mutation: MucInviteLedgerMutation {
+                room,
+                invitee: bare("romeo@example.com"),
+                inviter: inviter.clone(),
+                action: MucInviteLedgerAction::Claimed,
+                recorded_at: None,
+            },
+        },
+        IngressEffectIntent::RouteDirect {
+            recipient: inviter.clone(),
+            fanout: vec!["juliet@example.com/phone"
+                .parse()
+                .expect("inviter resource")],
+            route_identity: EffectMessageIdentity::capture_ordinal(3),
+        },
+        IngressEffectIntent::PendingDelivery {
+            mutation: waddle_xmpp::ingress::PendingDeliveryMutation::Transient {
+                recipient: inviter,
+                row_id,
+            },
+        },
+    ];
+    let created_at = Utc::now() - chrono::Duration::minutes(7);
+    let result = run_at(
+        &MessageEnvelope::new(message),
+        &intents,
+        &intents,
+        created_at,
+    );
+    let route = result
+        .decision
+        .external
+        .iter()
+        .find_map(|effect| match effect {
+            ExternalEffect::RouteToPeer(route) => Some(route),
+            _ => None,
+        })
+        .expect("inviter route with its offline fallback");
+    assert_eq!(
+        route.fallback.original_receipt_at, created_at,
+        "a recovered decline is as old as its canonical acceptance, not as new as the pass"
+    );
 }

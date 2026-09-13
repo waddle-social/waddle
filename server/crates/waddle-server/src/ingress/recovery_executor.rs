@@ -62,11 +62,13 @@ pub(super) async fn recover_row(
         unreceipted: &frozen.unreceipted,
         route_progress: frozen.route_progress,
     })?;
-    let unsupported = rebuilt.decision.external.is_empty() && rebuilt.delegated.is_empty();
+    let mut unsupported = rebuilt.decision.external.is_empty() && rebuilt.delegated.is_empty();
+    let mut unrecoverable = rebuilt.unrecoverable;
     let pending = &rebuilt.decision.receipts_pending;
     let (mut recovered, mut terminal) = (0, false);
+    let mut reported = 0;
     if !rebuilt.decision.external.is_empty() {
-        super::execute::execute_effects(
+        let report = super::execute::execute_effects(
             uow,
             database,
             &rebuilt.decision,
@@ -75,31 +77,56 @@ pub(super) async fn recover_row(
             deadline.saturating_duration_since(Instant::now()),
         )
         .await;
-        // Count receipts the executed effects wrote even if a delegated
-        // reconciliation below defers the row.
-        (recovered, terminal) = recount(uow, key, pending).await?;
-    }
-    if !rebuilt.delegated.is_empty() {
-        for row in &rebuilt.delegated {
-            if let Some(state) = deps.web_socket_state {
-                crate::server::routes::interpret::reconcile_groupchat_notification_recovery(
-                    state, row,
-                )
-                .await
-                .inspect_err(|_| report_recovered(recovered))?;
-            } else {
-                tracing::debug!(?key, "groupchat recovery has no websocket state");
+        // Frames belong to the sender's connection, which no longer exists
+        // during recovery. A warning reply an observer produced cannot be
+        // delivered; retrying every tick would only re-invoke the plugin.
+        if !report.frame_obligations.is_empty() {
+            unsupported = true;
+            for (effect, _) in &report.outcomes {
+                let kind = frame_only_kind(effect);
+                if let Some(kind) = kind {
+                    if !unrecoverable.contains(&kind) {
+                        unrecoverable.push(kind);
+                    }
+                }
             }
         }
         (recovered, terminal) = recount(uow, key, pending).await?;
+        report_recovered(recovered - reported);
+        reported = recovered;
     }
-    report_recovered(recovered);
+    for row in &rebuilt.delegated {
+        let Some(state) = deps.web_socket_state else {
+            tracing::debug!(?key, "groupchat recovery has no websocket state");
+            continue;
+        };
+        crate::server::routes::interpret::reconcile_groupchat_notification_recovery(state, row)
+            .await?;
+        // Recount after every settled delegation so a later deferral or the row
+        // deadline cannot lose credit for receipts that already committed.
+        (recovered, terminal) = recount(uow, key, pending).await?;
+        report_recovered(recovered - reported);
+        reported = recovered;
+    }
     Ok(RowRecovery::Executed {
         recovered,
-        unrecoverable: rebuilt.unrecoverable,
+        unrecoverable,
         terminal,
         unsupported,
     })
+}
+
+/// Effects whose only completion path is a frame to the original sender.
+fn frame_only_kind(
+    effect: &crate::server::routes::interpret::effects::ExternalEffect,
+) -> Option<IngressEffectKind> {
+    use crate::server::routes::interpret::effects::{room::ExternalRoomEffect, ExternalEffect};
+    match effect {
+        ExternalEffect::Room(ExternalRoomEffect::ObserveRoomMessage { .. }) => {
+            Some(IngressEffectKind::RoomObserver)
+        }
+        _ => None,
+    }
 }
 
 fn report_recovered(recovered: u64) {

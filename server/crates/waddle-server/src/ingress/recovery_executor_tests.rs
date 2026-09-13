@@ -549,12 +549,24 @@ mod family_tests {
         fixture.close().await;
     }
     async fn observer_plugin_recovers_once(fixture: IngressFixture) {
+        observer_recovery(fixture, false).await;
+    }
+
+    /// `warning == true` models a plugin whose only outcome is an error reply
+    /// to the original sender: recovery has no such socket, so the row is
+    /// evaluated once, cached as unsupported and the plugin is not re-invoked.
+    async fn observer_recovery(fixture: IngressFixture, warning: bool) {
         use waddle_extensions::{
             observer_test_support::{ObserverTestBehavior, ObserverTestPlugin},
             ExtensionManager, PluginId,
         };
         let plugin_id = PluginId::new("recovery-observer").expect("plugin id");
-        let plugin = ObserverTestPlugin::new(plugin_id.clone(), ObserverTestBehavior::Success);
+        let behavior = if warning {
+            ObserverTestBehavior::Warning
+        } else {
+            ObserverTestBehavior::Success
+        };
+        let plugin = ObserverTestPlugin::new(plugin_id.clone(), behavior);
         let manager = ExtensionManager::with_observer_test_plugins(vec![plugin.clone()]).await;
         let mut state = family_state(&fixture).await;
         Arc::get_mut(&mut state)
@@ -591,6 +603,7 @@ mod family_tests {
             .await
             .expect("commit observer plan");
         assert!(plugin.invocations().is_empty());
+        let key = decision.message_key.expect("key");
         let cursor = MaintenanceCursor::default();
         for _ in 0..2 {
             assert_eq!(
@@ -602,7 +615,16 @@ mod family_tests {
                 plugin.invocations()[0].body.as_str(),
                 "frozen observer body"
             );
-            family_recovered(&fixture, decision.message_key.expect("key"), 1).await;
+            if warning {
+                super::assert_pending(&fixture, key).await;
+                assert_eq!(
+                    crate::ingress::recovery_executor::attempt_count(key),
+                    1,
+                    "a warning-only observer is cached as unsupported, not re-invoked"
+                );
+            } else {
+                family_recovered(&fixture, key, 1).await;
+            }
         }
         drop(state);
         fixture.close().await;
@@ -1021,6 +1043,16 @@ mod family_tests {
     async fn postgres_offline_pending_row_and_candidate_recover_once() {
         if let Some(fixture) = IngressFixture::postgres("family_0").await {
             offline_pending_row_and_candidate_recover_once(fixture).await;
+        }
+    }
+    #[tokio::test]
+    async fn sqlite_observer_warning_is_evaluated_once_and_left_pending() {
+        observer_recovery(IngressFixture::sqlite().await, true).await;
+    }
+    #[tokio::test]
+    async fn postgres_observer_warning_is_evaluated_once_and_left_pending() {
+        if let Some(fixture) = IngressFixture::postgres("recovery_observer_warning").await {
+            observer_recovery(fixture, true).await;
         }
     }
     #[tokio::test]

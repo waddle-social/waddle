@@ -68,6 +68,7 @@ pub(super) fn rebuild(input: RecoveryInput<'_>) -> Result<RebuiltRecovery, Ingre
         input.recorded,
         input.unreceipted,
         input.envelope,
+        input.created_at,
     )?;
     if input
         .recorded
