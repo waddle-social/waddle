@@ -42,8 +42,10 @@ latency is a seconds histogram; confirm `le`-labelled buckets are present.
 | `ingress.tx.retries` | `ingress_tx_retries_total` | Retry pressure context |
 | `ingress.gc.runs{outcome}` | `ingress_gc_runs_total` | `IngressGcFailing` |
 | `ingress.gc.reclaimed_messages` | `ingress_gc_reclaimed_messages_total` | Reclamation progress |
-| `ingress.maintenance.runs{phase,outcome}` | `ingress_maintenance_runs_total` | `IngressMaintenanceFailing` |
+| `ingress.maintenance.runs{phase,outcome}` (phases: `pass`, `terminalization`, `recovery`, `retention_gc`) | `ingress_maintenance_runs_total` | `IngressMaintenanceFailing` |
 | `ingress.maintenance.terminalized_messages` | `ingress_maintenance_terminalized_messages_total` | Terminalization progress |
+| `ingress.maintenance.recovered_obligations` | `ingress_maintenance_recovered_obligations_total` | Recovery progress |
+| `ingress.maintenance.unrecoverable_obligations{kind}` | `ingress_maintenance_unrecoverable_obligations_total` | Unsupported recovery evaluations; read alongside `IngressNonTerminalBacklog` |
 | `ingress.tx.duration` | `ingress_tx_duration_seconds_bucket` (also `_sum`, `_count`) | `IngressTxSlow` |
 | `ingress.effects.unresolved{kind}` (local executions only) | `ingress_effects_unresolved_total` | `IngressUnresolvedEffectsGrowing` |
 | CNPG old non-terminal canonical messages by pending intent family | `cnpg_waddle_ingress_nonterminal_messages{kind}` | `IngressNonTerminalBacklog` |
@@ -110,12 +112,39 @@ period in `(created_at, message_key)` order. Each row is locked and its receipt
 completeness rechecked before terminalization. Contended or failed rows leave
 the pass partial while pagination continues to later rows. Continuations retain
 the keyset cursor so a contended prefix cannot starve later rows, then wrap to
-retry skipped rows. Retention GC follows. Each phase has a timeout inside a hard pass
-deadline. Maintenance shares the bounded ingress pool and holds at most one
-connection at a time.
+retry skipped rows. Phase order is terminalization → recovery → retention GC.
+Terminalization has a 2 s budget; recovery has a 4 s phase budget and a 1 s
+absolute per-row deadline covering freeze, execute, delegate and recount.
+Recovery scans pages of 64 keys and attempts at most 64 rows per pass.
+Each phase has a timeout inside a hard 13 s pass deadline. Maintenance shares
+the bounded ingress pool and holds at most one connection at a time.
 
-`ingress.maintenance.runs` labels phases as `pass`, `terminalization`, or
-`retention_gc`, with outcomes `complete`, `partial`, `failed`, or `timed_out`.
+Recovery is skipped and not recorded until the websocket state binds its
+`RecoveryEnvironment` after boot, so the startup pass has no recovery phase.
+The recovery scan selects old non-terminal rows with unreceipted intents of
+these kinds: `route_direct`, `notification_activity_preview`, `dm_pin_mutation`,
+`muc_invite_ledger`, `groupchat_notification_recovery`, `pending_delivery` and
+`room_observer`. The kind filter alone does not prove recoverability; payload
+provenance and the family rules below still apply.
+
+A process-local unsupported-row cache stores each message key with its
+`(intents, receipts)` evidence counts when rebuilding yields no executable
+effect and no delegation. It holds 4096 entries with FIFO eviction. Unchanged
+evidence skips the row without using an attempt; changed evidence re-evaluates
+it. Restart or overflow only causes re-evaluation. A backlog larger than the
+cache can keep re-evaluating evicted rows; the cache is an efficiency limit,
+not a correctness gate.
+
+For recovery, `complete` means the evaluation sweep reached the tail within
+the attempt budget, not that no pending unsupported work remains. Recovery is
+`partial` when the attempt budget is exhausted before the tail, a row is
+deferred by an error or timeout (including freeze), or a resumed cursor reaches
+the tail and wraps around. A row that executes but remains non-terminal does
+not by itself make the phase partial; it is retried on a later tick.
+
+`ingress.maintenance.runs` labels phases as `pass`, `terminalization`,
+`recovery`, or `retention_gc`, with outcomes `complete`, `partial`, `failed`, or
+`timed_out`.
 The `pass` series includes attestation and hard-deadline failures.
 `IngressMaintenanceFailing` warns on failed or timed-out passes in the last
 hour. A partial pass can be ordinary bounded backlog progress or skipped
@@ -131,8 +160,11 @@ rows with live stream references. Intents without matching receipts prevent
 terminalization. Reconciliation that adds omitted intents clears `terminal_at`
 in the same transaction. GC also checks receipt completeness while holding the
 canonical-row lock, so unresolved effects protect a message even when its
-terminal timestamp is stale. #1658 adds the recovery executor; #1657 durably
-records unfinished effects but does not replay them automatically. Never delete protected rows to silence alerts.
+terminal timestamp is stale. The maintenance recovery phase re-executes
+recoverable recorded families; unsupported obligations remain pending and are
+metered when evaluated. Read `ingress.maintenance.unrecoverable_obligations{kind}`
+alongside the CNPG backlog gauge: the kind-filtered scan does not evaluate rows
+containing only unsupported kinds. Never delete protected rows to silence alerts.
 Watch table bytes/live/dead tuples including `ingress_effect_receipts`, and
 CNPG eligible/retained-reference counts alongside reclamation totals.
 
@@ -208,15 +240,14 @@ MAM rather than resuming. Only sessions whose drain fails or times out keep a
 durable row to resume from. A failed post-cutover resume is the expected outcome
 here, not an incident.
 
-Likewise, V1015/V1016 delete no obligation rows — but that is not the same as no
-obligation being abandoned. If SIGTERM reaches a replica during post-commit
-Phase C, the canonical row and its intents stay durable while execution stops
-without writing a receipt, and nothing re-drives it: there is no recovery
-executor (RFC 0018 stated limitation (i), tracked as #1755), and periodic
-maintenance only terminalizes work whose receipts are already complete. Absent a
-same-origin retry that obligation stays unresolved indefinitely. Inspect
-unresolved effects after this cutover rather than assuming the additive
-migration left none.
+Likewise, V1015/V1016 delete no obligation rows; the cutover itself did not
+abandon those durable records. If SIGTERM interrupts post-commit Phase C, the
+canonical row and its intents survive without a receipt. The maintenance
+recovery phase (#1755) now re-executes the recoverable families described under
+"What recovery handles" without requiring a same-origin retry. Deferred and
+unrecoverable families remain pending; keyless sends can repeat after a
+send-before-receipt failure. Inspect unresolved effects after this cutover
+rather than assuming the additive migration left none.
 
 `Recreate` was required for the **writers**, not the schema. The ledger is an
 exactly-once gate only if every writer consults it. A replica still running the
@@ -599,11 +630,53 @@ ORDER BY message.created_at, message.message_key;
 COMMIT;
 ```
 
+### What recovery handles
+
+Use the triage SQL's `kind_family` values below. Recorded intents win over
+current policy and audience; recovery never invents audience or payload.
+
+| `kind_family` | Automatic recovery or reason it stays pending |
+| --- | --- |
+| `route_direct` | Recoverable with non-empty recorded fanout when the canonical message is `Chat`/`Normal`, the recipient equals its bare `to`, and the route is neither delegated live full-JID nor DM-pin-owned. Recorded invitation/grant routes and pending-delivery audiences use their specialized restorers, never this generic path. |
+| `pending_delivery`, `notification_activity_preview` | Direct pending rows and recorded direct notification previews are rebuilt from the canonical envelope and recorded audience. Room notification candidates are covered by matching groupchat notification recovery delegation; unmatched candidates stay pending. |
+| `room_observer` | Rebuilt per recorded plugin when an observer envelope exists; missing observer envelopes are unrecoverable. Invocations are keyless and at-least-once. |
+| `groupchat_notification_recovery` | `Completed`/`DeferredPolicy` obligations delegate to the existing notification recovery settlement, which re-locks and revalidates. |
+| `dm_pin_mutation`, `route_direct` | Route-only recovery when the recorded DM pin mutation is receipted. The mutation is never replayed. An unreceipted mutation and its dependent routes are deferred, because a successful mutation with a failed receipt write must not undo a later unpin; both kinds are metered. |
+| `muc_invite_ledger` | Recorded `Claimed` declines rebuild the ledger claim and inviter route, binding the claim to the canonical message key. |
+| `route_direct` | Delegated live full-JID routes are deferred: full target, recipient differs from sender, no recorded recipient archive, singleton full-target fanout and `CaptureOrdinal` identity. Recipient preparation belongs to the destination pipeline. This also conservatively defers detached full-target `<no-store/>` routes without archive evidence. Headline routes are deferred because they require peer delivery with recipient archival for `<store/>`. Groupchat inbox pushes and routes to other recipients are unrecoverable because the canonical message does not prove their payload. |
+| `carbons`, `dm_call_thread_state` | Deliberately deferred despite being rebuildable: their sinks have no idempotency key. |
+| `pin` | Room pin chains are unrecoverable: the pinner nick was not recorded. |
+| `relay_carbons`, `route_muc`, `route_occupant_pm`, `dispatch_to_room_remote`, `group_dm_membership_grant`, `group_dm_invite_ledger`, `muc_invite_membership_grant`, `room_subject_mutation`, `link_preview_media_ref`, `call_signal`, `extension`, `tombstone_replay_deletion`, `error_reply` | Unrecoverable from the recorded envelope and intents alone: these need actor handles, reflected payloads or a sender socket. `route_muc` includes system broadcasts. |
+| `archive`, `inbox_project`, `retraction_tombstone` | Phase B obligations should already be receipted; missing receipts indicate a contradiction and are never re-applied. `archive` also includes `SystemMessageArchive`, which recovery cannot rebuild. |
+
+Remote-owner-only resources reachable through `RelayFullJid` owner routing stay
+pending: recovery covers registered remote sockets and local registries, but
+an append requiring that owner route returns `Unavailable`.
+
+Receipts are exactly-once: arms re-lock the canonical row and re-check receipts
+before settlement; generic receipt inserts are idempotent. Side effects are
+exactly-once where a durable idempotency key exists: pending rows, notification
+candidates, detached SM appends keyed by obligation and resource, and recovery
+completion. Keyless sinks (live socket sends through `TrySendDirect` or
+`RegistryFrame`, and plugin observer invocations) are at-least-once. They can
+repeat after send-before-receipt failures, including a crash or receipt timeout,
+across recovery attempts, and against a concurrent client retransmission.
+Recovery adds attempts, not new keyless sinks; a durable per-obligation send
+lease and keyed live sends remain follow-up work.
+
+Read `ingress.maintenance.unrecoverable_obligations{kind}` (Prometheus:
+`ingress_maintenance_unrecoverable_obligations_total`) next to the CNPG backlog
+gauge. It counts unsupported evaluations, not the current queue: cached rows
+are skipped and rows with only unsupported kinds do not enter the scan.
+The existing manual repair procedure below remains for unrecoverable families,
+with its explicit reviewed manifest and abandonment semantics.
+
 ## Repair for abandoned obligations (#1749)
 
-The pre-fix rows hold obligations that can never execute: the remote occupant
-copy was never sent, and #1658's recovery executor does not exist. Stale
-activity mutations must not be replayed. These repair receipts record
+The pre-fix rows hold obligations outside the maintenance recovery executor's
+scope: the remote occupant copy was never sent and cannot be rebuilt from the
+recorded evidence. Stale activity mutations must not be replayed. These repair
+receipts record
 **abandonment, not delivery**. Only archived content (message bodies in the
 room MAM archive, XEP-0313) is recoverable by affected occupants; bodyless chat
 states and markers were never archived. Running this repair is the operator's
