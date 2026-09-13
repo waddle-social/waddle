@@ -348,3 +348,100 @@ async fn extension_host_boundary_nested_refusal_stays_typed() {
         host::HostToolErrorCode::TemporaryFailure
     );
 }
+
+#[test]
+fn extension_host_boundary_rejection_error_types() {
+    use xmpp_parsers::stanza_error::{DefinedCondition, ErrorType, StanzaError};
+    for (type_, condition, expected) in [
+        (
+            ErrorType::Wait,
+            DefinedCondition::ResourceConstraint,
+            host::HostToolErrorCode::TemporaryFailure,
+        ),
+        (
+            ErrorType::Cancel,
+            DefinedCondition::ServiceUnavailable,
+            host::HostToolErrorCode::Denied,
+        ),
+        (
+            ErrorType::Modify,
+            DefinedCondition::BadRequest,
+            host::HostToolErrorCode::InvalidRequest,
+        ),
+        (
+            ErrorType::Auth,
+            DefinedCondition::Forbidden,
+            host::HostToolErrorCode::Denied,
+        ),
+        (
+            ErrorType::Continue,
+            DefinedCondition::UnexpectedRequest,
+            host::HostToolErrorCode::Denied,
+        ),
+    ] {
+        let error = super::super::conversions::host_tool_error(
+            super::super::ExtensionHostAdapterError::Rejected(Box::new(StanzaError::new(
+                type_.clone(),
+                condition,
+                "en",
+                "host rejection",
+            ))),
+        );
+        assert_eq!(error.code, expected, "error type {type_:?}");
+    }
+}
+
+#[tokio::test]
+async fn extension_host_boundary_decision_error_codes() {
+    use crate::ingress::{
+        nested::{NestedOutcome, NestedRefusal},
+        IngressDecisionClass,
+    };
+    for (class, expected) in [
+        (
+            IngressDecisionClass::AuthorizationDenied,
+            host::HostToolErrorCode::Denied,
+        ),
+        (
+            IngressDecisionClass::PolicyDenied,
+            host::HostToolErrorCode::Denied,
+        ),
+        (
+            IngressDecisionClass::PrincipalMissing,
+            host::HostToolErrorCode::Denied,
+        ),
+        (
+            IngressDecisionClass::Storage,
+            host::HostToolErrorCode::TemporaryFailure,
+        ),
+        (
+            IngressDecisionClass::Timeout,
+            host::HostToolErrorCode::TemporaryFailure,
+        ),
+        (
+            IngressDecisionClass::Lineage,
+            host::HostToolErrorCode::TemporaryFailure,
+        ),
+        (
+            IngressDecisionClass::EpochUnsupported,
+            host::HostToolErrorCode::TemporaryFailure,
+        ),
+    ] {
+        let error = super::super::settlement::finish_nested(NestedOutcome::Refused(
+            NestedRefusal::Decision(class),
+        ))
+        .await
+        .expect_err("non-advancing decision is refused");
+        if class == IngressDecisionClass::PrincipalMissing {
+            assert!(matches!(
+                error,
+                super::super::ExtensionHostAdapterError::NotAuthorized
+            ));
+        }
+        assert_eq!(
+            super::super::conversions::host_tool_error(error).code,
+            expected,
+            "decision {class:?}"
+        );
+    }
+}

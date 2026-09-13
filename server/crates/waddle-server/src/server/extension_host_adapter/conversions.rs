@@ -5,7 +5,9 @@ use waddle_xmpp::{
     mam::ArchivedMessage as MamArchivedMessage,
     roster::{AskType, RosterItem, Subscription},
 };
-use xmpp_parsers::presence::Show;
+use xmpp_parsers::{presence::Show, stanza_error::ErrorType};
+
+use crate::ingress::{nested::NestedRefusal, IngressDecisionClass};
 
 use super::{
     ExtensionHostAdapterError, HostMucAffiliation, HostMucRole, HostPresenceShow, HostRosterAsk,
@@ -14,9 +16,17 @@ use super::{
 
 pub(super) fn host_tool_error(error: ExtensionHostAdapterError) -> ext_host::HostToolError {
     let code = match error {
-        ExtensionHostAdapterError::NotAuthorized | ExtensionHostAdapterError::Rejected(_) => {
-            ext_host::HostToolErrorCode::Denied
-        }
+        ExtensionHostAdapterError::NotAuthorized
+        | ExtensionHostAdapterError::Refused(NestedRefusal::Decision(
+            IngressDecisionClass::AuthorizationDenied | IngressDecisionClass::PolicyDenied,
+        )) => ext_host::HostToolErrorCode::Denied,
+        ExtensionHostAdapterError::Rejected(ref rejection) => match rejection.type_ {
+            ErrorType::Wait => ext_host::HostToolErrorCode::TemporaryFailure,
+            ErrorType::Modify => ext_host::HostToolErrorCode::InvalidRequest,
+            ErrorType::Cancel | ErrorType::Auth | ErrorType::Continue => {
+                ext_host::HostToolErrorCode::Denied
+            }
+        },
         ExtensionHostAdapterError::RoomNotFound(_) => ext_host::HostToolErrorCode::NotFound,
         ExtensionHostAdapterError::Unsupported(_)
         | ExtensionHostAdapterError::Plan(

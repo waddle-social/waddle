@@ -95,7 +95,20 @@ execution and frame settlement. A queued drain refuses a new nested operation
 without waiting; admitted work keeps its permit until completion even if its
 caller is cancelled. The first typed stanza error is surfaced when its
 settlement outcome is available, independently of receipt persistence. A
-`cancel` error maps to the plugin `Denied` code and must not be retried. Offline quota uses `SettledRefusal::OfflineQuotaExceeded`, mapped to
+stanza error maps to the plugin code according to its type:
+
+| Stanza error type | Plugin error code | Caller action |
+| --- | --- | --- |
+| `cancel`, `auth`, `continue` | `Denied` | Do not retry unchanged. |
+| `wait` | `TemporaryFailure` | Retry after the temporary condition clears. |
+| `modify` | `InvalidRequest` | Correct the request before retrying. |
+
+Admission decisions `AuthorizationDenied` and `PolicyDenied` also map to
+`Denied`; `PrincipalMissing` remains `NotAuthorized` at the adapter and `Denied`
+at the plugin boundary. Storage, timeout, lineage, and epoch failures remain
+`TemporaryFailure`.
+
+Offline quota uses `SettledRefusal::OfflineQuotaExceeded`, mapped to
 XEP-0160 `cancel` / `service-unavailable`, after pending and notification
 obligations settle without a pending row or candidate insert.
 
