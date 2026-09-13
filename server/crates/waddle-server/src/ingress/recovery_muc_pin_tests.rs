@@ -16,6 +16,7 @@ enum PinCase {
 }
 
 async fn pin_recovery(f: IngressFixture, case: PinCase) {
+    let metrics = waddle_xmpp::telemetry::test_support::acquire().await;
     let sm = persistent_sm(&f).await;
     let resource: jid::FullJid = "alice@example.com/phone".parse().expect("occupant");
     store_detached(&sm, &resource).await;
@@ -169,6 +170,12 @@ async fn pin_recovery(f: IngressFixture, case: PinCase) {
     }
     assert_eq!(append_count(&sm, &resource).await, 0);
     let env: Arc<dyn RecoveryEnvironment> = Arc::new(StateEnvironment(state.clone()));
+    let before_unrecoverable = metrics
+        .counter_sum(
+            "ingress.maintenance.unrecoverable_obligations",
+            &[("kind", "route_muc")],
+        )
+        .unwrap_or(0);
     assert_eq!(
         pass(&f, &env, &MaintenanceCursor::default()).await,
         MaintenanceOutcome::Complete
@@ -177,6 +184,25 @@ async fn pin_recovery(f: IngressFixture, case: PinCase) {
         super::super::super::attempt_count(key) > 0,
         "maintenance attempted pin row"
     );
+    if matches!(case, PinCase::MissingPayload) {
+        assert_eq!(
+            metrics
+                .counter_sum(
+                    "ingress.maintenance.unrecoverable_obligations",
+                    &[("kind", "route_muc")],
+                )
+                .unwrap_or(0),
+            before_unrecoverable + 1,
+            "missing payload counts under the kind-only label"
+        );
+        let (_, attribute_counts) = metrics
+            .counter_shape("ingress.maintenance.unrecoverable_obligations")
+            .expect("exported counter");
+        assert!(
+            attribute_counts.iter().all(|count| *count == 1),
+            "reason remains a log field; kind is the only metric label"
+        );
+    }
     let complete = matches!(case, PinCase::Complete);
     assert_eq!(append_count(&sm, &resource).await, usize::from(complete));
     let mut tx = f.uow.begin().await.expect("inspect");

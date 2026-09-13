@@ -110,6 +110,7 @@ async fn planned_room(
 }
 
 async fn muc_recovery(f: IngressFixture, case: Case) {
+    let metrics = waddle_xmpp::telemetry::test_support::acquire().await;
     let sm = persistent_sm(&f).await;
     let a: jid::FullJid = "alice@example.com/phone".parse().expect("A");
     let b: jid::FullJid = "ben@example.com/phone".parse().expect("B");
@@ -291,6 +292,12 @@ async fn muc_recovery(f: IngressFixture, case: Case) {
         .await
         .expect("late join");
     let archives_before_recovery = f.count("mam_messages").await;
+    let before_unrecoverable = metrics
+        .counter_sum(
+            "ingress.maintenance.unrecoverable_obligations",
+            &[("kind", "route_muc")],
+        )
+        .unwrap_or(0);
     let cursor = MaintenanceCursor::default();
     for _ in 0..2 {
         assert_eq!(pass(&f, &env, &cursor).await, MaintenanceOutcome::Complete);
@@ -299,6 +306,25 @@ async fn muc_recovery(f: IngressFixture, case: Case) {
         super::super::attempt_count(key) > 0,
         "P3: kind-2 row is attempted"
     );
+    if matches!(case, Case::OldEnvelope | Case::SubjectPending) {
+        assert_eq!(
+            metrics
+                .counter_sum(
+                    "ingress.maintenance.unrecoverable_obligations",
+                    &[("kind", "route_muc")],
+                )
+                .unwrap_or(0),
+            before_unrecoverable + 1,
+            "source and prerequisite failures count once under the kind-only label"
+        );
+        let (_, attribute_counts) = metrics
+            .counter_shape("ingress.maintenance.unrecoverable_obligations")
+            .expect("exported counter");
+        assert!(
+            attribute_counts.iter().all(|count| *count == 1),
+            "reason remains a log field; kind is the only metric label"
+        );
+    }
     let blocked = matches!(
         case,
         Case::OldEnvelope | Case::SubjectPending | Case::Unavailable
