@@ -167,7 +167,7 @@ pub(super) async fn deliver_full(
     if deps
         .host_sender
         .as_ref()
-        .is_some_and(|host| host.owns(target))
+        .is_some_and(|host| host.sender() == target)
     {
         deps.effects
             .record(super::super::effects::PlannedEffect::new(
@@ -175,6 +175,23 @@ pub(super) async fn deliver_full(
                     super::super::effects::ExternalEffect::Frame(Box::new(stanza.clone())),
                 ),
             ));
+        return FullJidDeliveryOutcome::Delivered;
+    }
+    if deps
+        .host_sender
+        .as_ref()
+        .is_some_and(|host| host.owns(target))
+        || deps
+            .web_socket_state
+            .is_some_and(|state| super::HostOwnedResources::owns_configured_bot(target, state))
+    {
+        record(
+            deps,
+            ExternalDeliveryEffect::HostOwnedCopy {
+                target: target.clone(),
+                stanza: Box::new(stanza.clone()),
+            },
+        );
         return FullJidDeliveryOutcome::Delivered;
     }
     if remote_owner(deps, &target.to_bare()).await {

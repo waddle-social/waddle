@@ -9,6 +9,7 @@ pub(crate) async fn execute(effect: ExternalDeliveryEffect, deps: &Deps<'_>) -> 
     let mut immediate = deps.clone();
     immediate.effects = &ImmediateSink;
     match effect {
+        ExternalDeliveryEffect::HostOwnedCopy { .. } => EffectOutcome::Completed,
         ExternalDeliveryEffect::UndeliverableBounce { reply } => {
             EffectOutcome::Frames(vec![*reply])
         }

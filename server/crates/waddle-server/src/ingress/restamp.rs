@@ -311,6 +311,7 @@ impl Replacements {
 
     fn delivery(&self, effect: &mut ExternalDeliveryEffect) {
         match effect {
+            ExternalDeliveryEffect::HostOwnedCopy { stanza, .. } => self.stanza(stanza),
             ExternalDeliveryEffect::UndeliverableBounce { reply } => self.stanza(reply),
             ExternalDeliveryEffect::RouteToPeer {
                 stanza,

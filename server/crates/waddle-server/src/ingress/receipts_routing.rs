@@ -250,6 +250,11 @@ fn full_delivery<'a>(effect: &'a ExternalEffect, recipient: &FullJid) -> Option<
         {
             Some(&route.message)
         }
+        ExternalEffect::Delivery(ExternalDeliveryEffect::HostOwnedCopy { target, stanza })
+            if target == recipient =>
+        {
+            message(stanza).filter(|message| message.to.as_ref() == Some(&recipient.clone().into()))
+        }
         ExternalEffect::Frame(stanza)
         | ExternalEffect::Delivery(ExternalDeliveryEffect::UndeliverableBounce { reply: stanza }) => {
             message(stanza).filter(|message| message.to.as_ref() == Some(&recipient.clone().into()))

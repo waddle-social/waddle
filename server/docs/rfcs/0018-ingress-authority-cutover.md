@@ -167,10 +167,12 @@ submission and continuation to an authority-owned task. That task commits,
 executes and settles without reacquiring admission; caller cancellation cannot
 cancel committed work, and drain waits for its permit. `Deps.host_sender`
 captures sender-directed frames during planning. The continuation consumes those
-frames (including bot reflection and copies addressed to other synthetic bot
-occupants on the configured extensions domain) as the host transport and settles their
+frames (including bot reflection) as the host transport and settles their
 obligations, retrying receipt persistence within a five-second budget without
-re-dispatching effects.
+re-dispatching effects. Copies to other bot occupants on the configured extensions
+domain, including copies of real users' groupchat messages, are typed
+`HostOwnedCopy` effects completed and receipted without transport I/O because bots
+observe through hooks; duplicate admission suppresses these non-sender copies.
 
 The host reports the first typed stanza error when the settlement outcome is
 available, even if its receipt persistence failed. A known rejection is

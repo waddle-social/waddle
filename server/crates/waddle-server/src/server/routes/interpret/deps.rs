@@ -142,6 +142,18 @@ pub enum HostOwnedResources {
 }
 
 impl HostOwnedResources {
+    pub(super) fn sender(&self) -> &FullJid {
+        match self {
+            Self::Sender(sender) | Self::ExtensionBots(sender) => sender,
+        }
+    }
+
+    pub(super) fn owns_configured_bot(target: &FullJid, state: &WebSocketState) -> bool {
+        target.node().is_some()
+            && target.domain().as_str() == state.deps.service_domains.extensions
+            && target.resource().as_str() == "bot"
+    }
+
     pub(super) fn owns(&self, target: &FullJid) -> bool {
         match self {
             Self::Sender(sender) => sender == target,

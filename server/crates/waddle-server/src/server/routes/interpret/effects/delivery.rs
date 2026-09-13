@@ -13,6 +13,11 @@ pub enum PeerDeliveryKind {
 /// Delivery obligations are executed after the ingress transaction commits.
 #[derive(Debug, Clone)]
 pub enum ExternalDeliveryEffect {
+    /// Bots observe through hooks; an occupant copy requires no transport I/O.
+    HostOwnedCopy {
+        target: FullJid,
+        stanza: Box<Stanza>,
+    },
     UndeliverableBounce {
         reply: Box<Stanza>,
     },
@@ -82,7 +87,8 @@ pub(crate) fn record(deps: &super::super::Deps<'_>, effect: ExternalDeliveryEffe
     use super::{Effect, ExternalEffect, PlanEffectDependency, PlannedEffect};
     let mut dependencies = Vec::new();
     let message = match &effect {
-        ExternalDeliveryEffect::RouteToPeer { stanza, .. }
+        ExternalDeliveryEffect::HostOwnedCopy { stanza, .. }
+        | ExternalDeliveryEffect::RouteToPeer { stanza, .. }
         | ExternalDeliveryEffect::QueueDetached { stanza, .. }
         | ExternalDeliveryEffect::RelayFullJid { stanza, .. }
         | ExternalDeliveryEffect::RelayBareJid { stanza, .. } => match stanza.as_ref() {
@@ -114,7 +120,8 @@ pub(crate) fn record(deps: &super::super::Deps<'_>, effect: ExternalDeliveryEffe
         );
     }
     let suppression = match &effect {
-        ExternalDeliveryEffect::QueueOfflineDelivery { .. }
+        ExternalDeliveryEffect::HostOwnedCopy { .. }
+        | ExternalDeliveryEffect::QueueOfflineDelivery { .. }
         | ExternalDeliveryEffect::QueueDetached { .. } => super::PlanSuppressionPolicy::SenderOnly,
         _ => super::PlanSuppressionPolicy::Always,
     };
