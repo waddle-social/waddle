@@ -29,23 +29,11 @@ fn route_intent(resources: &[&str]) -> IngressEffectIntent {
     }
 }
 fn progress_for(intent: &IngressEffectIntent) -> RouteProgress {
-    let IngressEffectIntent::RouteDirect {
-        recipient,
-        fanout,
-        route_identity,
-    } = intent
-    else {
-        panic!("route")
-    };
-    RouteProgress {
-        receipt: super::super::durable::receipt_key(intent).expect("receipt"),
-        recipient: recipient.clone(),
-        fanout: fanout.clone(),
-        route_identity: route_identity.clone(),
-        completed: vec![],
-        received_at: None,
-    }
+    RouteProgress::from_intent(intent, None, vec![])
+        .expect("receipt")
+        .expect("direct progress")
 }
+
 fn run(
     envelope: &MessageEnvelope,
     recorded: &[IngressEffectIntent],

@@ -12,7 +12,7 @@ use crate::{
 };
 
 #[path = "receipts_routing.rs"]
-mod routing;
+pub(super) mod routing;
 
 pub(super) fn external_receipts(
     external: &[ExternalEffect],

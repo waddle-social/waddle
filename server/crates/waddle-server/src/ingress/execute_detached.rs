@@ -33,26 +33,21 @@ pub(super) async fn execute(
     effect: &ExternalDeliveryEffect,
     deps: &Deps<'_>,
 ) -> EffectOutcome {
-    let (recipient, identity, resources, call_setup) = match effect {
+    let (resources, call_setup) = match effect {
         ExternalDeliveryEffect::QueueDetached {
-            bare,
-            route_identity,
             resources,
             call_setup,
             ..
-        } => (bare.clone(), route_identity, resources.clone(), call_setup),
+        } => (resources.clone(), call_setup),
         ExternalDeliveryEffect::RouteToPeer {
-            jid,
-            route_identity,
-            call_setup,
-            ..
-        } => (jid.to_bare(), route_identity, vec![jid.clone()], call_setup),
+            jid, call_setup, ..
+        } => (vec![jid.clone()], call_setup),
         _ => return EffectOutcome::Unavailable,
     };
+    let external =
+        crate::server::routes::interpret::effects::ExternalEffect::Delivery(effect.clone());
     let Some(progress) = decision.route_progress.iter().find(|progress| {
-        progress.recipient == recipient
-            && Some(&progress.route_identity) == identity.as_ref()
-            && decision.external_receipts[index].contains(&progress.receipt)
+        progress.matches(&external) && decision.external_receipts[index].contains(&progress.receipt)
     }) else {
         return EffectOutcome::Unavailable;
     };
@@ -207,16 +202,7 @@ async fn record_resource(
         .iter()
         .all(|target| completed.contains(target))
     {
-        settle_recorded(
-            &mut tx,
-            key,
-            &[IngressEffectIntent::RouteDirect {
-                recipient: progress.recipient.clone(),
-                fanout: progress.fanout.clone(),
-                route_identity: progress.route_identity.clone(),
-            }],
-        )
-        .await?
+        settle_recorded(&mut tx, key, &[progress.settle_evidence()]).await?
     } else {
         Vec::new()
     };

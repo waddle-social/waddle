@@ -263,7 +263,9 @@ async fn freeze(
             .unwrap_or_default();
         route_progress.push(RouteProgress {
             receipt,
-            recipient: recipient.clone(),
+            obligation: super::ProgressObligation::Direct {
+                recipient: recipient.clone(),
+            },
             fanout: fanout.clone(),
             route_identity: route_identity.clone(),
             completed,

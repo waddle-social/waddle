@@ -1,4 +1,4 @@
-//! One room stamp receipts the complete occupant fanout, including its sender frame.
+//! Generic delivery and sender-frame proof never settle per-occupant MUC progress.
 use super::*;
 use crate::ingress::{commit::commit_submission, test_support::IngressFixture};
 use crate::server::routes::interpret::effects::delivery::PeerDeliveryKind;
@@ -75,10 +75,12 @@ async fn groupchat_decision(fixture: &IngressFixture) -> IngressDecision {
     assert_eq!(decision.external.len(), 3);
     let receipt = &decision.external_receipts[0];
     assert_eq!(receipt.len(), 1);
-    assert!(decision
-        .external_receipts
-        .iter()
-        .all(|keys| keys == receipt));
+    assert_eq!(&decision.external_receipts[1], receipt);
+    assert!(
+        decision.external_receipts[2].is_empty(),
+        "sender reflection has no aggregate key"
+    );
+    assert!(decision.arm_owned_receipts.contains(&receipt[0]));
     decision
 }
 
@@ -131,54 +133,33 @@ async fn groupchat_aggregate_receipt(fixture: IngressFixture, relay: FullJidDeli
     assert!(!terminalize_if_complete(&fixture.uow, key)
         .await
         .expect("fanout is pending"));
-    // The frame is the last covered effect to finish. Local delivery and even
-    // a confirmed remote delivery cannot receipt the aggregate on their own.
+    // Even generic Delivered proof for both occupants plus a written sender
+    // frame cannot replace the transactional per-resource progress arm.
     report.outcomes[2].1 = ExternalOutcome::Done;
-    if relay == FullJidDeliveryOutcome::Delivered {
-        for index in 0..report.outcomes.len() {
-            report.outcomes[index].1 = ExternalOutcome::Failed;
-            assert!(completed_receipts(&decision, &report.outcomes, &proven, 2).is_empty());
-            report.outcomes[index].1 = ExternalOutcome::Done;
-        }
+    for index in 0..report.outcomes.len() {
+        assert!(completed_receipts(&decision, &report.outcomes, &proven, index).is_empty());
     }
-    let receipts = completed_receipts(&decision, &report.outcomes, &proven, 2);
-    let delivered = relay == FullJidDeliveryOutcome::Delivered;
-    assert_eq!(receipts.len(), usize::from(delivered));
-    for receipt in receipts {
-        EffectReceiptRepository::record_receipt_pooled(
-            &fixture.db,
-            key,
-            receipt.kind,
-            &receipt.semantic_identity_hash,
-        )
+    assert_eq!(fixture.count("ingress_effect_receipts").await, 0);
+    assert_eq!(fixture.count("ingress_delivery_receipts").await, 0);
+    assert!(!terminalize_if_complete(&fixture.uow, key)
         .await
-        .expect("record complete occupant fanout");
-    }
-    assert_eq!(
-        fixture.count("ingress_effect_receipts").await,
-        i64::from(delivered)
-    );
-    assert_eq!(
-        terminalize_if_complete(&fixture.uow, key)
-            .await
-            .expect("terminalize complete room fanout"),
-        delivered
-    );
+        .expect("MUC progress remains pending"));
     fixture.close().await;
 }
 
 async fn groupchat_frame_completion(fixture: IngressFixture, relay: FullJidDeliveryOutcome) {
     let decision = groupchat_decision(&fixture).await;
     let (mut report, proven) = groupchat_outcomes(&decision, relay);
-    // Phase C prepares the keys that a successful socket frame write can
-    // discharge; a failed relay must never enter that completion set.
+    // Reflection is governed by its sender stream, independent of the
+    // non-sender occupant obligation, including confirmed relay outcomes.
     let mut confirmed = report.outcomes.clone();
     confirmed[2].1 = ExternalOutcome::Done;
     report.frame_completion_receipts = completed_receipts(&decision, &confirmed, &proven, 2);
-    let delivered = relay == FullJidDeliveryOutcome::Delivered;
-    assert_eq!(
-        report.frame_completion_receipts.len(),
-        usize::from(delivered)
+    assert!(report.frame_completion_receipts.is_empty());
+    assert!(report.frame_obligations[0].receipt_keys.is_empty());
+    assert!(
+        report.frame_receipts().is_empty(),
+        "no aggregate proof is exported to retained frames or owner replies"
     );
     assert_eq!(fixture.count("ingress_effect_receipts").await, 0);
     assert!(
@@ -186,23 +167,17 @@ async fn groupchat_frame_completion(fixture: IngressFixture, relay: FullJidDeliv
             .await
             .expect("frame write still pending")
     );
-    assert_eq!(
-        report
-            .complete_frame_obligations(&fixture.uow, &fixture.db, Duration::from_secs(5))
-            .await
-            .expect("complete written sender frame"),
-        delivered
-    );
+    assert!(!report
+        .complete_frame_obligations(&fixture.uow, &fixture.db, Duration::from_secs(5))
+        .await
+        .expect("complete written sender frame"));
     assert_eq!(report.outcomes[2].1, ExternalOutcome::Done);
-    assert_eq!(
-        fixture.count("ingress_effect_receipts").await,
-        i64::from(delivered)
-    );
+    assert_eq!(fixture.count("ingress_effect_receipts").await, 0);
     fixture.close().await;
 }
 
 #[tokio::test]
-async fn sqlite_groupchat_receipt_requires_every_occupant_and_sender_frame() {
+async fn sqlite_groupchat_generic_delivery_cannot_settle_occupant_progress() {
     for outcome in [
         FullJidDeliveryOutcome::Delivered,
         FullJidDeliveryOutcome::Unavailable,
@@ -214,7 +189,7 @@ async fn sqlite_groupchat_receipt_requires_every_occupant_and_sender_frame() {
 }
 
 #[tokio::test]
-async fn postgres_groupchat_receipt_requires_every_occupant_and_sender_frame() {
+async fn postgres_groupchat_generic_delivery_cannot_settle_occupant_progress() {
     for outcome in [
         FullJidDeliveryOutcome::Delivered,
         FullJidDeliveryOutcome::Unavailable,
@@ -228,7 +203,7 @@ async fn postgres_groupchat_receipt_requires_every_occupant_and_sender_frame() {
 }
 
 #[tokio::test]
-async fn sqlite_groupchat_frame_completion_requires_confirmed_relay() {
+async fn sqlite_groupchat_sender_frame_never_settles_occupant_progress() {
     for outcome in [
         FullJidDeliveryOutcome::Delivered,
         FullJidDeliveryOutcome::Dropped,
@@ -238,7 +213,7 @@ async fn sqlite_groupchat_frame_completion_requires_confirmed_relay() {
 }
 
 #[tokio::test]
-async fn postgres_groupchat_frame_completion_requires_confirmed_relay() {
+async fn postgres_groupchat_sender_frame_never_settles_occupant_progress() {
     for outcome in [
         FullJidDeliveryOutcome::Delivered,
         FullJidDeliveryOutcome::Dropped,

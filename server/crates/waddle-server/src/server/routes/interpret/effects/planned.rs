@@ -117,6 +117,8 @@ pub enum PlanFailure {
     RichTargetLookup,
     #[error("room snapshot is unavailable")]
     RoomSnapshotUnavailable,
+    #[error("room system message cannot be frozen")]
+    InvalidSystemMessage,
     #[error("displayed-marker inbox snapshot could not be read")]
     InboxSnapshotRead,
     #[error("retraction target could not be read")]

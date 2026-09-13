@@ -741,7 +741,7 @@ async fn room_observer_owner_envelope_attachment(driver: DatabaseDriver) {
         .expect("origin commits first");
     tx.commit().await.expect("origin commit");
     let mut tx = fixture.db.begin_immediate().await.expect("begin owner");
-    authority::record_room_observer_envelope(&mut tx, key, &owner)
+    authority::record_room_canonical_envelope(&mut tx, key, &owner)
         .await
         .expect("owner attaches observed envelope");
     tx.commit().await.expect("owner commit");
@@ -756,7 +756,7 @@ async fn room_observer_owner_envelope_attachment(driver: DatabaseDriver) {
         .bodies
         .insert(Default::default(), "retry change".into());
     let retry = MessageEnvelope::with_room_observer(observed, request);
-    authority::record_room_observer_envelope(&mut tx, key, &retry)
+    authority::record_room_canonical_envelope(&mut tx, key, &retry)
         .await
         .expect("retry retains owner payload");
     assert_eq!(

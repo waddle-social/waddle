@@ -263,6 +263,14 @@ async fn subject_broadcast_after_actor_commit(
     let room_stanza_id =
         waddle_xmpp_core::xep0359::StanzaId::new("subject-reflection", room.clone().into());
     waddle_xmpp_core::xep0359::add_stanza_id(message, &room_stanza_id);
+    // This actor-seam fixture supplies the same canonical XEP-0421 stamp as
+    // the room dispatcher, so frozen replay can prove room provenance.
+    let occupant_id = waddle_xmpp::xep::xep0421::generate_occupant_id(
+        &sender.to_bare(),
+        &room,
+        &OccupantIdSecret::new(vec![b's'; 32]).expect("secret"),
+    );
+    waddle_xmpp::xep::xep0421::set_occupant_id_on_message(message, &occupant_id);
     let mut events = vec![OutboundEvent::PersistRoomSubject {
         room: room.clone(),
         claim_fence: fence,
@@ -358,11 +366,13 @@ async fn subject_broadcast_after_actor_commit(
     assert_eq!(decision.external_receipts[0].len(), 2);
     assert_eq!(decision.external_receipts.len(), 3);
     assert!(
-        decision
-            .external_receipts
-            .iter()
-            .all(|receipts| !receipts.is_empty()),
-        "every broadcast has durable receipt obligations"
+        decision.external_receipts[1].is_empty(),
+        "sender reflection carries no aggregate key"
+    );
+    assert_eq!(
+        decision.external_receipts[2].len(),
+        1,
+        "non-sender copy owns MUC progress"
     );
     deps.effects = &ImmediateSink;
     let mut report = execute::execute_effects(

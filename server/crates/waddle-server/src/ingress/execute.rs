@@ -1,4 +1,5 @@
 //! Bounded post-commit execution. Failures never revise ingress authority.
+
 use std::time::Duration;
 
 use waddle_xmpp::{ingress::MessageKey, Stanza};
@@ -461,7 +462,7 @@ pub async fn execute_effects(
                         if let ExternalEffect::Delivery(ExternalDeliveryEffect::RelayFullJid { target, .. }) = effect {
                             if let Some(message_key) = decision.message_key {
                                 if let Some(progress) = decision.route_progress.iter().find(|progress| {
-                                    progress.matches(effect)
+                                    progress.is_direct() && progress.matches(effect)
                                         && progress.fanout.contains(target)
                                         && decision.external_receipts[index].contains(&progress.receipt)
                                 }) {

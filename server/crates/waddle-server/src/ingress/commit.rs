@@ -231,7 +231,32 @@ async fn commit_attempt(
         alias == AliasOutcomeClass::Existing && !super::rejection::is_recorded_rejection(&recorded);
     let discard_new_denial = replay_acceptance && rejection.take().is_some();
     let recorded_ids = archive_ids(&recorded);
-    let owner_first = matches!(&submission.identity, IngressStreamIdentity::Relayed { room, .. } if !recorded.iter().any(|intent| matches!(intent, IngressEffectIntent::ArchiveAuthoritative { by, .. } if by == room)));
+    let has_recorded_muc_authority = recorded.iter().any(|intent| {
+        matches!(
+            intent,
+            IngressEffectIntent::RouteMucGroupchat { .. }
+                | IngressEffectIntent::RouteMucSystemBroadcast { .. }
+        )
+    });
+    let owner_first = match &submission.identity {
+        IngressStreamIdentity::Relayed { room, .. } => {
+            if submission.plan.intents.iter().any(|intent| {
+                matches!(
+                    intent,
+                    IngressEffectIntent::RouteMucGroupchat { .. }
+                        | IngressEffectIntent::RouteMucSystemBroadcast { .. }
+                )
+            }) {
+                !has_recorded_muc_authority
+            } else {
+                !recorded.iter().any(|intent| {
+                    matches!(intent,
+                    IngressEffectIntent::ArchiveAuthoritative { by, .. } if by == room)
+                })
+            }
+        }
+        _ => false,
+    };
     // A recorded denial is authority: any retransmission that resolves to it
     // re-emits the committed reply, whatever today's policy would decide.
     let mut plan = if alias == AliasOutcomeClass::Existing
@@ -254,6 +279,7 @@ async fn commit_attempt(
     } else {
         super::restamp::restamp_plan(&submission.plan, &recorded_ids)
     };
+    super::restamp::restore_muc_route_identity(&mut plan, &recorded);
     // Recorded obligations still missing their receipts. These are the only
     // ones a replay may repair; everything else is provably complete.
     let mut unreceipted = Vec::new();
@@ -353,9 +379,11 @@ async fn commit_attempt(
             )
         });
     }
-    if let Some(observer_envelope) = super::recorded::room_observer_envelope(&plan) {
-        CanonicalMessageRepository::record_room_observer_envelope(&mut tx, key, &observer_envelope)
-            .await?;
+    if !has_recorded_muc_authority {
+        if let Some(envelope) = super::recorded::room_canonical_envelope(&plan) {
+            CanonicalMessageRepository::record_room_canonical_envelope(&mut tx, key, &envelope)
+                .await?;
+        }
     }
     if intents
         .iter()
@@ -419,37 +447,41 @@ async fn commit_attempt(
     // detached append made by a later replay (or by recovery) is stamped with
     // the acceptance, not with the retransmission.
     let received_at = CanonicalMessageRepository::created_at(&mut tx, key).await?;
+    let all_progress =
+        crate::ingress_uow::DeliveryProgressRepository::load_all(&mut tx, key).await?;
     let mut route_progress = Vec::new();
+    let mut empty_muc = false;
     for intent in &intents {
-        let IngressEffectIntent::RouteDirect {
-            recipient,
-            fanout,
-            route_identity,
-        } = intent
+        let Some(mut progress) =
+            super::recorded::RouteProgress::from_intent(intent, Some(received_at), Vec::new())?
         else {
             continue;
         };
-        let receipt = super::durable::receipt_key(intent)?;
-        if !crate::ingress_uow::EffectReceiptRepository::contains(
+        if crate::ingress_uow::EffectReceiptRepository::contains(
             &mut tx,
             key,
-            receipt.kind,
-            &receipt.semantic_identity_hash,
+            progress.receipt.kind,
+            &progress.receipt.semantic_identity_hash,
         )
         .await?
         {
-            let completed =
-                crate::ingress_uow::DeliveryProgressRepository::load(&mut tx, key, &receipt)
-                    .await?;
-            route_progress.push(super::recorded::RouteProgress {
-                receipt,
-                recipient: recipient.clone(),
-                fanout: fanout.clone(),
-                route_identity: route_identity.clone(),
-                received_at: Some(received_at),
-                completed,
-            });
+            continue;
         }
+        progress.completed = all_progress
+            .iter()
+            .find(|(receipt, _)| receipt == &progress.receipt)
+            .map(|(_, completed)| completed.clone())
+            .unwrap_or_default();
+        if !progress.is_direct() && progress.fanout.is_empty() {
+            crate::ingress_uow::settle_recorded(&mut tx, key, &[progress.settle_evidence()])
+                .await?;
+            empty_muc = true;
+        } else {
+            route_progress.push(progress);
+        }
+    }
+    if empty_muc {
+        super::execute::terminalize_if_complete_in_transaction(&mut tx, key).await?;
     }
     if alias == AliasOutcomeClass::Existing
         || !matches!(filter_verdict, ReconcileVerdict::FirstCommit)

@@ -127,7 +127,7 @@ fn route_progress_filter(
     ) {
         return RouteProgressFilter::Untracked;
     }
-    let Some(progress) = progress.iter().find(|progress| progress.matches(effect)) else {
+    let Some(progress) = progress.iter().find(|progress| progress.correlates(effect)) else {
         return RouteProgressFilter::Untracked;
     };
     let remaining = progress.remaining(effect);
@@ -603,7 +603,9 @@ mod progress_tests {
         };
         let progress = RouteProgress {
             receipt: crate::ingress::durable::receipt_key(&intent).expect("receipt"),
-            recipient: a.to_bare(),
+            obligation: super::super::ProgressObligation::Direct {
+                recipient: a.to_bare(),
+            },
             fanout: vec![a.clone(), b.clone()],
             route_identity: identity.clone(),
             received_at: None,

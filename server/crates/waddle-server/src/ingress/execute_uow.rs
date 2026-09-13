@@ -37,20 +37,13 @@ pub(super) fn owns(effect: &ExternalEffect, route_progress: &[RouteProgress]) ->
             ExternalRoomEffect::ArchiveAfterPin { .. }
             | ExternalRoomEffect::NotificationCandidate { .. },
         ) => true,
-        ExternalEffect::Delivery(ExternalDeliveryEffect::QueueDetached {
-            bare,
-            route_identity,
-            ..
-        }) => route_progress.iter().any(|progress| {
-            &progress.recipient == bare && Some(&progress.route_identity) == route_identity.as_ref()
-        }),
-        ExternalEffect::Delivery(ExternalDeliveryEffect::RouteToPeer {
-            jid,
-            route_identity,
-            ..
-        }) => route_progress.iter().any(|progress| {
-            progress.recipient == jid.to_bare()
-                && Some(&progress.route_identity) == route_identity.as_ref()
+        // RelayFullJid remains generic until the dedicated MUC relay arm lands.
+        ExternalEffect::Delivery(
+            ExternalDeliveryEffect::QueueDetached { .. }
+            | ExternalDeliveryEffect::RouteToPeer { .. },
+        ) => route_progress.iter().any(|progress| {
+            progress.matches(effect)
+                && (progress.is_direct() || !progress.remaining(effect).is_empty())
         }),
         _ => false,
     }

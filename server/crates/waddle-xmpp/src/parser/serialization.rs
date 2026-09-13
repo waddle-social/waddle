@@ -28,3 +28,19 @@ pub fn message_to_string(msg: &xmpp_parsers::message::Message) -> Result<String,
 
     element_to_string(&element)
 }
+
+/// Decode a stored message without losing its RFC 6121 thread parent.
+/// Shared by canonical envelopes and frozen intent payloads.
+pub fn message_from_string(text: &str) -> Result<xmpp_parsers::message::Message, XmppError> {
+    let element: Element = text
+        .parse()
+        .map_err(|_| XmppError::xml_parse("invalid stored message XML"))?;
+    let stanza_ns = element.ns().to_string();
+    let thread_parent = waddle_xmpp_core::parser_utils::extract_thread_parent(&element);
+    let mut message = xmpp_parsers::message::Message::try_from(element)
+        .map_err(|_| XmppError::xml_parse("invalid stored message stanza"))?;
+    if let Some(parent) = thread_parent {
+        waddle_xmpp_core::parser_utils::reattach_thread_parent(&mut message, parent, &stanza_ns);
+    }
+    Ok(message)
+}

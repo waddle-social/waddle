@@ -28,7 +28,7 @@ pub use recovery::{RecoveryPolicyDecision, RecoveryPreparation, RecoverySweepOut
 use recovery_environment::RecoveryBinding;
 pub use recovery_environment::RecoveryEnvironment;
 mod recorded;
-pub use recorded::RouteProgress;
+pub use recorded::{ProgressObligation, RouteProgress};
 mod rejection;
 pub mod restamp;
 mod restore_offline;
@@ -1208,3 +1208,8 @@ mod offline_settlement_tests;
 
 #[cfg(test)]
 mod offline_hardening_tests;
+
+#[cfg(test)]
+mod muc_occupant_progress_tests;
+
+mod room_canonical;

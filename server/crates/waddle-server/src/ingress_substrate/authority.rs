@@ -1,5 +1,4 @@
 use super::*;
-use std::str::FromStr;
 use xmpp_parsers::message::Message;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -101,16 +100,8 @@ struct StoredEnvelope {
 }
 
 fn parse_envelope_message(text: &str) -> Result<Message, IngressSubstrateError> {
-    let element = minidom::Element::from_str(text)
-        .map_err(|_| IngressSubstrateError::InvalidStoredEnvelope)?;
-    let stanza_ns = element.ns().to_string();
-    let thread_parent = waddle_xmpp_core::parser_utils::extract_thread_parent(&element);
-    let mut message =
-        Message::try_from(element).map_err(|_| IngressSubstrateError::InvalidStoredEnvelope)?;
-    if let Some(parent) = thread_parent {
-        waddle_xmpp_core::parser_utils::reattach_thread_parent(&mut message, parent, &stanza_ns);
-    }
-    Ok(message)
+    waddle_xmpp::parser::message_from_string(text)
+        .map_err(|_| IngressSubstrateError::InvalidStoredEnvelope)
 }
 
 /// Encode only where the typed envelope crosses into database storage.
@@ -128,9 +119,10 @@ pub(super) fn serialize_envelope(
     serde_json::to_vec(&stored).map_err(|_| IngressSubstrateError::InvalidStoredEnvelope)
 }
 
-/// Attach the owner's canonical observation under the canonical row lock.
-/// An existing observer context is immutable across retries.
-pub async fn record_room_observer_envelope(
+/// Attach the owner's canonical room payload under the canonical row lock.
+/// The caller proves first MUC acceptance from recorded authority. Existing
+/// observer-only context remains immutable across retries.
+pub async fn record_room_canonical_envelope(
     tx: &mut Transaction<'_>,
     key: MessageKey,
     envelope: &MessageEnvelope,
@@ -143,9 +135,6 @@ pub async fn record_room_observer_envelope(
         .ok_or(IngressSubstrateError::MessageContentConflict)?;
     if stored.observer_request.is_some() {
         return Ok(());
-    }
-    if envelope.observer_request.is_none() {
-        return Err(IngressSubstrateError::InvalidStoredEnvelope);
     }
     const POSTGRES: &str = "UPDATE ingress_messages SET envelope_version = ?, envelope = ? WHERE message_key = ?::uuid";
     const SQLITE: &str =
