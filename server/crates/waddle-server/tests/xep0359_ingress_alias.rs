@@ -555,3 +555,304 @@ async fn xep0359_detached_progress_recorded_archive_ids_postgres() {
         detached_progress_support::cross_archive_retry(fixture).await;
     }
 }
+
+struct StanzaIdRecoveryEnvironment {
+    connections: waddle_xmpp::registry::ConnectionRegistry,
+    sm: std::sync::Arc<waddle_xmpp::stream_management::InMemorySmSessionRegistry>,
+}
+
+impl waddle_server::ingress::RecoveryEnvironment for StanzaIdRecoveryEnvironment {
+    fn recovery_deps(&self) -> waddle_server::ingress::Deps<'_> {
+        let mut deps = waddle_server::ingress::Deps::new(&self.connections, "example.com");
+        deps.sm_session_registry = Some(&self.sm);
+        deps
+    }
+}
+
+async fn recover_stanza_id_pass(
+    fixture: &IngressFixture,
+    authority: &waddle_server::ingress::IngressAuthority,
+    terminals: i64,
+) {
+    let sql = match fixture.db.driver() {
+        waddle_server::db::DatabaseDriver::Postgres => "UPDATE ingress_messages SET created_at = ?::timestamptz WHERE terminal_at IS NULL",
+        waddle_server::db::DatabaseDriver::Sqlite => "UPDATE ingress_messages SET created_at = strftime('%Y-%m-%dT%H:%M:%fZ', ?) WHERE terminal_at IS NULL",
+    };
+    fixture
+        .execute(
+            sql,
+            waddle_server::db_params![
+                (chrono::Utc::now() - chrono::Duration::seconds(120)).to_rfc3339()
+            ],
+        )
+        .await;
+    authority.trigger_maintenance();
+    tokio::time::timeout(std::time::Duration::from_secs(15), async {
+        loop {
+            if fixture
+                .count("ingress_messages WHERE terminal_at IS NOT NULL")
+                .await
+                == terminals
+            {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        }
+    })
+    .await
+    .expect("maintenance completion witness");
+}
+
+async fn recovery_preserves_recipient_stanza_id(fixture: IngressFixture) {
+    use std::{sync::Arc, time::Duration};
+    use waddle_server::ingress::{
+        effects::{direct::DurableDirectEffect, Effect},
+        DurableEffect, PlannedEffect, RecoveryEnvironment,
+    };
+    use waddle_xmpp::mam::{ArchiveExpectation, ArchivedMessage};
+    let sm = detached_progress_support::registry(&fixture).await;
+    let [resource, witness_resource, _] = detached_progress_support::resources();
+    detached_progress_support::attach(&sm, &resource).await;
+    detached_progress_support::attach(&sm, &witness_resource).await;
+    let authority = fixture.authority().await;
+    let environment: Arc<dyn RecoveryEnvironment> = Arc::new(StanzaIdRecoveryEnvironment {
+        connections: waddle_xmpp::registry::ConnectionRegistry::new(),
+        sm: sm.clone(),
+    });
+    authority.bind_recovery_environment(Arc::downgrade(&environment));
+    let mut submission =
+        fixture.submission(Some("sid-lost-phase-c"), "canonical recipient delivery");
+    let recipient = resource.to_bare();
+    let recorded = StanzaId::new("recipient-recorded-before-crash", recipient.clone().into());
+    let mut archived =
+        ArchivedMessage::for_test(submission.sender.clone().into(), recipient.clone().into());
+    archived.id = recorded.id.clone();
+    archived.body = Some("canonical recipient delivery".to_owned());
+    archived.message_type = MessageType::Chat;
+    archived.stanza_id = Some(recorded.clone());
+    archived.origin_id = submission.digest_input.origin().cloned();
+    submission
+        .plan
+        .intents
+        .push(IngressEffectIntent::ArchiveAuthoritative {
+            archive: recipient.clone(),
+            by: recipient.clone(),
+            stanza_id: recorded.clone(),
+            archived_at: archived.timestamp,
+            ordinal: None,
+        });
+    submission
+        .plan
+        .plan
+        .push(PlannedEffect::new(Effect::Durable(DurableEffect::Direct(
+            DurableDirectEffect::ArchiveDirect {
+                archive: recipient,
+                message: Box::new(archived),
+                archive_expectation: ArchiveExpectation::Fresh,
+            },
+        ))));
+    detached_progress_support::route(&mut submission, std::slice::from_ref(&resource), 1);
+    let planned = submission.plan.plan.last_mut().expect("direct delivery");
+    let Effect::External(ExternalEffect::Delivery(
+        waddle_server::ingress::effects::delivery::ExternalDeliveryEffect::QueueDetached {
+            stanza,
+            ..
+        },
+    )) = &mut planned.effect
+    else {
+        panic!("planned detached delivery");
+    };
+    let Stanza::Message(delivery) = stanza.as_mut() else {
+        panic!("direct message");
+    };
+    waddle_xmpp_core::xep0359::add_stanza_id(delivery, &recorded);
+    // The envelope lacks the recipient stamp; recovery must use the recorded intent.
+    assert!(
+        waddle_xmpp_core::xep0359::extract_stanza_ids(&submission.plan.sanitized_message)
+            .is_empty()
+    );
+    assert_eq!(
+        authority.commit(&submission).await.class,
+        IngressDecisionClass::Accepted
+    );
+    assert_eq!(fixture.count("mam_messages").await, 1);
+    assert!(detached_progress_support::queued(&sm, &resource)
+        .await
+        .unacked_stanzas
+        .is_empty());
+    recover_stanza_id_pass(&fixture, &authority, 1).await;
+    let first = detached_progress_support::queued(&sm, &resource).await;
+    assert_eq!(first.unacked_stanzas.len(), 1);
+    let element: minidom::Element = first.unacked_stanzas[0]
+        .stanza_xml
+        .parse()
+        .expect("SM wire XML");
+    let message = Message::try_from(element).expect("recovered direct message");
+    assert_eq!(
+        waddle_xmpp_core::xep0359::extract_stanza_ids(&message),
+        vec![recorded]
+    );
+    assert_eq!(message.bodies, submission.plan.sanitized_message.bodies);
+    assert_eq!(fixture.count("sm_ingress_appends").await, 1);
+    let mut witness = fixture.submission(Some("sid-second-pass"), "completion witness");
+    detached_progress_support::route(&mut witness, std::slice::from_ref(&witness_resource), 1);
+    assert_eq!(
+        authority.commit(&witness).await.class,
+        IngressDecisionClass::Accepted
+    );
+    recover_stanza_id_pass(&fixture, &authority, 2).await;
+    let second = detached_progress_support::queued(&sm, &resource).await;
+    assert_eq!(second.outbound_count, first.outbound_count);
+    assert_eq!(second.unacked_stanzas.len(), 1);
+    assert_eq!(
+        second.unacked_stanzas[0].stanza_xml,
+        first.unacked_stanzas[0].stanza_xml
+    );
+    assert_eq!(
+        fixture
+            .count("sm_ingress_appends WHERE resource = 'juliet@example.com/a'")
+            .await,
+        1
+    );
+    assert_eq!(fixture.count("mam_messages").await, 1);
+    assert!(authority.drain_and_join(Duration::from_secs(15)).await);
+    drop(environment);
+    drop(authority);
+    drop(sm);
+    fixture.close().await;
+}
+backend_tests!(
+    recovery_recipient_stanza_id_sqlite,
+    recovery_recipient_stanza_id_postgres,
+    recovery_preserves_recipient_stanza_id
+);
+
+async fn recovery_does_not_rebuild_groupchat_inbox_push(fixture: IngressFixture) {
+    use std::{sync::Arc, time::Duration};
+    use waddle_server::ingress::{
+        effects::{direct::ExternalDirectEffect, room::DurableRoomEffect, Effect, ProjectionRef},
+        DurableEffect, PlannedEffect, RecoveryEnvironment,
+    };
+    use waddle_xmpp::{
+        inbox::{ConversationKind, InboxEntry},
+        ingress::{EffectMessageIdentity, InboxProjectionMutation},
+    };
+    let sm = detached_progress_support::registry(&fixture).await;
+    let [resource, witness_resource, _] = detached_progress_support::resources();
+    detached_progress_support::attach(&sm, &resource).await;
+    detached_progress_support::attach(&sm, &witness_resource).await;
+    let authority = fixture.authority().await;
+    let environment: Arc<dyn RecoveryEnvironment> = Arc::new(StanzaIdRecoveryEnvironment {
+        connections: waddle_xmpp::registry::ConnectionRegistry::new(),
+        sm: sm.clone(),
+    });
+    authority.bind_recovery_environment(Arc::downgrade(&environment));
+    let mut submission = archive_plan(&fixture, true, "groupchat-push-recorded");
+    submission
+        .plan
+        .plan
+        .retain(|effect| !matches!(effect.effect, Effect::External(_)));
+    let room = submission
+        .plan
+        .sanitized_message
+        .to
+        .as_ref()
+        .expect("room target")
+        .to_bare();
+    let recipient = resource.to_bare();
+    let route = IngressEffectIntent::RouteDirect {
+        recipient: recipient.clone(),
+        fanout: vec![resource.clone()],
+        route_identity: EffectMessageIdentity::capture_ordinal(1),
+    };
+    let projection = ProjectionRef(submission.plan.plan.len());
+    submission
+        .plan
+        .plan
+        .push(PlannedEffect::new(Effect::Durable(DurableEffect::Room(
+            DurableRoomEffect::ProjectGroupchatInbox {
+                archive_stanza_id: StanzaId::new("groupchat-push-recorded", room.clone().into()),
+                owner: recipient.clone(),
+                entry: Box::new(InboxEntry::new(
+                    room.clone(),
+                    ConversationKind::MucRoom,
+                    "groupchat-push-recorded",
+                    chrono::Utc::now().timestamp_millis(),
+                )),
+                is_recipient: true,
+                recovery: None,
+            },
+        ))));
+    submission
+        .plan
+        .intents
+        .push(IngressEffectIntent::InboxProject {
+            owner: recipient.clone(),
+            mutation: InboxProjectionMutation::GroupchatChannel {
+                room,
+                increment_unread: true,
+            },
+        });
+    submission.plan.intents.push(route.clone());
+    submission
+        .plan
+        .plan
+        .push(PlannedEffect::new(Effect::External(
+            ExternalEffect::Direct(ExternalDirectEffect::PushInboxUpdate {
+                owner: recipient,
+                projection,
+                receipt: Some(Box::new(route)),
+            }),
+        )));
+    let decision = authority.commit(&submission).await;
+    assert_eq!(decision.class, IngressDecisionClass::Accepted);
+    assert!(decision.external.iter().any(|effect| matches!(
+        effect,
+        ExternalEffect::Direct(ExternalDirectEffect::PushInboxUpdate {
+            receipt: Some(_),
+            ..
+        })
+    )));
+    assert_eq!(fixture.count("sm_ingress_appends").await, 0);
+    // Each newly committed supported row witnesses a real pass over the older
+    // unsupported groupchat row. The push needs its projection, not the envelope.
+    for pass in 1..=2 {
+        let mut witness = fixture.submission(None, &format!("groupchat pass {pass}"));
+        detached_progress_support::route(&mut witness, std::slice::from_ref(&witness_resource), 1);
+        assert_eq!(
+            authority.commit(&witness).await.class,
+            IngressDecisionClass::Accepted
+        );
+        recover_stanza_id_pass(&fixture, &authority, pass).await;
+        assert_eq!(
+            fixture
+                .count("ingress_messages WHERE terminal_at IS NULL")
+                .await,
+            1
+        );
+        assert!(
+            detached_progress_support::queued(&sm, &resource)
+                .await
+                .unacked_stanzas
+                .is_empty(),
+            "canonical groupchat must never masquerade as synthetic inbox push"
+        );
+        assert_eq!(
+            fixture
+                .count("sm_ingress_appends WHERE resource = 'juliet@example.com/a'")
+                .await,
+            0
+        );
+        assert_eq!(fixture.count("mam_messages").await, 1);
+    }
+    assert!(authority.drain_and_join(Duration::from_secs(15)).await);
+    drop(environment);
+    drop(authority);
+    drop(sm);
+    fixture.close().await;
+}
+backend_tests!(
+    recovery_groupchat_inbox_push_deferred_sqlite,
+    recovery_groupchat_inbox_push_deferred_postgres,
+    recovery_does_not_rebuild_groupchat_inbox_push
+);
