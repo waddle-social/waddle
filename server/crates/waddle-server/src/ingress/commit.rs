@@ -752,7 +752,7 @@ mod alias_denial_replay_tests;
 
 /// Live invitation delivery and its offline fallback are mutually exclusive.
 /// Repair a partially persisted pair before rebuilding any delivery effects.
-async fn reconcile_invitation_delivery_receipts(
+pub(super) async fn reconcile_invitation_delivery_receipts(
     tx: &mut crate::ingress_uow::IngressUowTransaction<'_>,
     key: waddle_xmpp::ingress::MessageKey,
     recorded: &[IngressEffectIntent],

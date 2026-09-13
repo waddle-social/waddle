@@ -712,7 +712,15 @@ mod family_tests {
         drop(state);
         fixture.close().await;
     }
-    async fn muc_decline_recovers_claim_and_inviter_route(fixture: IngressFixture) {
+    /// Which of the mutually exclusive invitation receipts an interrupted
+    /// executor persisted before losing the rest of Phase C.
+    #[derive(Clone, Copy)]
+    enum PartialDeclineReceipt {
+        Route,
+        Fallback,
+    }
+
+    async fn muc_decline_recovery(fixture: IngressFixture, partial: Option<PartialDeclineReceipt>) {
         use crate::server::routes::websocket::{
             muc_invites::{list_invites, record_invite_at, OutstandingInvite},
             tests::{create_test_session, register_test_connection},
@@ -794,29 +802,72 @@ mod family_tests {
             vec![invite.clone()]
         );
         assert!(rx.try_recv().is_err());
+        if let Some(partial) = partial {
+            // Model an executor that delivered the decline live, persisted one
+            // of the two mutually exclusive receipts and then lost the rest.
+            let inviter_bare = inviter.to_bare();
+            let intent = submission
+                .plan
+                .intents
+                .iter()
+                .find(|intent| match (partial, intent) {
+                    (
+                        PartialDeclineReceipt::Route,
+                        IngressEffectIntent::RouteDirect { recipient, .. },
+                    ) => recipient == &inviter_bare,
+                    (
+                        PartialDeclineReceipt::Fallback,
+                        IngressEffectIntent::PendingDelivery {
+                            mutation:
+                                waddle_xmpp::ingress::PendingDeliveryMutation::Transient {
+                                    recipient,
+                                    ..
+                                },
+                        },
+                    ) => recipient == &inviter_bare,
+                    _ => false,
+                })
+                .expect("recorded inviter delivery intent");
+            let receipt = crate::ingress::receipt_key(intent).expect("receipt key");
+            crate::ingress_uow::EffectReceiptRepository::record_receipt_pooled(
+                &fixture.db,
+                key,
+                receipt.kind,
+                &receipt.semantic_identity_hash,
+            )
+            .await
+            .expect("partial receipt");
+        }
         let cursor = MaintenanceCursor::default();
         assert_eq!(
             family_pass(&fixture, &state, &cursor).await,
             MaintenanceOutcome::Complete
         );
-        let delivered = rx.try_recv().expect("inviter receives recovered decline");
-        let waddle_xmpp::Stanza::Message(message) = delivered.stanza else {
-            panic!("decline message")
-        };
-        assert_eq!(message.from, Some(invite.room.clone().into()));
-        let decline = message
-            .payloads
-            .iter()
-            .find_map(|payload| payload.get_child("decline", ns))
-            .expect("XEP-0045 decline payload");
-        assert_eq!(
-            decline.attr("from"),
-            Some(invite.invitee.to_string().as_str())
-        );
-        assert_eq!(
-            decline.get_child("reason", ns).expect("reason").text(),
-            "cannot join"
-        );
+        if partial.is_some() {
+            assert!(
+                rx.try_recv().is_err(),
+                "one committed invitation receipt proves the delivery; recovery must not resend"
+            );
+        } else {
+            let delivered = rx.try_recv().expect("inviter receives recovered decline");
+            let waddle_xmpp::Stanza::Message(message) = delivered.stanza else {
+                panic!("decline message")
+            };
+            assert_eq!(message.from, Some(invite.room.clone().into()));
+            let decline = message
+                .payloads
+                .iter()
+                .find_map(|payload| payload.get_child("decline", ns))
+                .expect("XEP-0045 decline payload");
+            assert_eq!(
+                decline.attr("from"),
+                Some(invite.invitee.to_string().as_str())
+            );
+            assert_eq!(
+                decline.get_child("reason", ns).expect("reason").text(),
+                "cannot join"
+            );
+        }
         assert!(list_invites(actor.clone(), &invite.room, &invite.invitee)
             .await
             .expect("claimed invitation")
@@ -995,12 +1046,40 @@ mod family_tests {
     }
     #[tokio::test]
     async fn sqlite_muc_decline_recovers_claim_and_inviter_route() {
-        muc_decline_recovers_claim_and_inviter_route(IngressFixture::sqlite().await).await;
+        muc_decline_recovery(IngressFixture::sqlite().await, None).await;
     }
     #[tokio::test]
     async fn postgres_muc_decline_recovers_claim_and_inviter_route() {
-        if let Some(fixture) = IngressFixture::postgres("family_3").await {
-            muc_decline_recovers_claim_and_inviter_route(fixture).await;
+        if let Some(fixture) = IngressFixture::postgres("recovery_muc_decline").await {
+            muc_decline_recovery(fixture, None).await;
+        }
+    }
+    #[tokio::test]
+    async fn sqlite_muc_decline_route_receipt_alone_settles_without_resend() {
+        muc_decline_recovery(
+            IngressFixture::sqlite().await,
+            Some(PartialDeclineReceipt::Route),
+        )
+        .await;
+    }
+    #[tokio::test]
+    async fn postgres_muc_decline_route_receipt_alone_settles_without_resend() {
+        if let Some(fixture) = IngressFixture::postgres("recovery_muc_decline_route").await {
+            muc_decline_recovery(fixture, Some(PartialDeclineReceipt::Route)).await;
+        }
+    }
+    #[tokio::test]
+    async fn sqlite_muc_decline_fallback_receipt_alone_settles_without_resend() {
+        muc_decline_recovery(
+            IngressFixture::sqlite().await,
+            Some(PartialDeclineReceipt::Fallback),
+        )
+        .await;
+    }
+    #[tokio::test]
+    async fn postgres_muc_decline_fallback_receipt_alone_settles_without_resend() {
+        if let Some(fixture) = IngressFixture::postgres("recovery_muc_decline_fallback").await {
+            muc_decline_recovery(fixture, Some(PartialDeclineReceipt::Fallback)).await;
         }
     }
     #[tokio::test]

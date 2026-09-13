@@ -110,28 +110,39 @@ async fn freeze(
     let created_at = CanonicalMessageRepository::created_at(&mut tx, key).await?;
     let recorded = EffectIntentRepository::load(&mut tx, key).await?;
     let mut unreceipted = Vec::new();
-    let mut route_progress = Vec::new();
     for intent in &recorded {
-        let receipt = super::receipt_key(intent)?;
-        if contains(&mut tx, key, &receipt).await? {
-            continue;
+        if !contains(&mut tx, key, &super::receipt_key(intent)?).await? {
+            unreceipted.push(intent.clone());
         }
-        if let IngressEffectIntent::RouteDirect {
+    }
+    // A live invitation delivery and its offline fallback are mutually
+    // exclusive: one committed receipt proves both, exactly as alias replay.
+    super::commit::reconcile_invitation_delivery_receipts(
+        &mut tx,
+        key,
+        &recorded,
+        &mut unreceipted,
+    )
+    .await?;
+    let mut route_progress = Vec::new();
+    for intent in &unreceipted {
+        let IngressEffectIntent::RouteDirect {
             recipient,
             fanout,
             route_identity,
         } = intent
-        {
-            let completed = DeliveryProgressRepository::load(&mut tx, key, &receipt).await?;
-            route_progress.push(RouteProgress {
-                receipt,
-                recipient: recipient.clone(),
-                fanout: fanout.clone(),
-                route_identity: route_identity.clone(),
-                completed,
-            });
-        }
-        unreceipted.push(intent.clone());
+        else {
+            continue;
+        };
+        let receipt = super::receipt_key(intent)?;
+        let completed = DeliveryProgressRepository::load(&mut tx, key, &receipt).await?;
+        route_progress.push(RouteProgress {
+            receipt,
+            recipient: recipient.clone(),
+            fanout: fanout.clone(),
+            route_identity: route_identity.clone(),
+            completed,
+        });
     }
     tx.commit().await?;
     Ok(Some(FrozenRecovery {
