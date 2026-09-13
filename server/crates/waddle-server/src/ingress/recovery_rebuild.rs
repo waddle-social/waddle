@@ -252,8 +252,11 @@ fn restore_direct_routes(plan: &mut IngressPlan, input: &RecoveryInput<'_>) {
 
 fn direct_provenance(input: &RecoveryInput<'_>, recipient: &jid::BareJid) -> bool {
     let message = input.envelope.message();
+    let (Some(target), Some(sender)) = (message.to.as_ref(), message.from.as_ref()) else {
+        return false;
+    };
     if !matches!(message.type_, MessageType::Chat | MessageType::Normal)
-        || message.to.as_ref().map(jid::Jid::to_bare).as_ref() != Some(recipient)
+        || target.to_bare() != *recipient
         || input
             .recorded
             .iter()
@@ -267,16 +270,7 @@ fn direct_provenance(input: &RecoveryInput<'_>, recipient: &jid::BareJid) -> boo
     {
         return false;
     }
-    let Some(sender) = message.from.as_ref() else {
-        return false;
-    };
-    let target = match message
-        .to
-        .as_ref()
-        .expect("target checked")
-        .clone()
-        .try_into_full()
-    {
+    let target = match target.clone().try_into_full() {
         Ok(full) => NormalizedTarget::Full(full),
         Err(bare) => NormalizedTarget::Bare(bare),
     };
