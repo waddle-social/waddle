@@ -736,6 +736,91 @@ mod family_tests {
         drop(state);
         fixture.close().await;
     }
+    /// A warning-only observer sharing a row with a delegated groupchat
+    /// notification recovery: the delegation settles in the same attempt, and
+    /// the row must be classified unsupported only after that settlement, so
+    /// the plugin is invoked exactly once across passes. [R6 P2]
+    async fn warning_observer_with_delegated_recovery_is_cached_after_settlement(
+        fixture: IngressFixture,
+    ) {
+        use waddle_extensions::{
+            observer_test_support::{ObserverTestBehavior, ObserverTestPlugin},
+            ExtensionManager, PluginId,
+        };
+        crate::pubsub::DatabasePubSubStorage::open(Some(fixture.db.database_url()))
+            .await
+            .expect("projection schema");
+        let plugin_id = PluginId::new("recovery-warning-observer").expect("plugin id");
+        let plugin = ObserverTestPlugin::new(plugin_id.clone(), ObserverTestBehavior::Warning);
+        let manager = ExtensionManager::with_observer_test_plugins(vec![plugin.clone()]).await;
+        let mut state = family_state(&fixture).await;
+        Arc::get_mut(&mut state)
+            .expect("unique state")
+            .deps
+            .protocol
+            .extension_manager = Arc::new(manager);
+        let mut submission = crate::ingress::recovery_tests::recovery_plan(&fixture);
+        let room = submission
+            .plan
+            .intents
+            .iter()
+            .find_map(|intent| match intent {
+                IngressEffectIntent::GroupchatNotificationRecovery { mutation } => {
+                    Some(mutation.room.clone())
+                }
+                _ => None,
+            })
+            .expect("recovery plan names its room");
+        submission
+            .plan
+            .intents
+            .push(IngressEffectIntent::RoomObserver {
+                room: room.clone(),
+                plugin: plugin_id.clone(),
+                requester: submission.sender.to_bare(),
+                sender: submission.sender.clone(),
+            });
+        submission.plan.plan.push(
+            PlannedEffect::new(Effect::External(ExternalEffect::Room(
+                ExternalRoomEffect::ObserveRoomMessage {
+                    room,
+                    plugin: plugin_id,
+                    requester: submission.sender.to_bare(),
+                    sender: submission.sender.clone(),
+                    message: Box::new(submission.plan.sanitized_message.clone()),
+                    error_request: Box::new(submission.plan.sanitized_message.clone()),
+                },
+            )))
+            .with_suppression(PlanSuppressionPolicy::Always),
+        );
+        let decision = commit_submission(&fixture.uow, &submission, 5)
+            .await
+            .expect("commit groupchat plan with observer");
+        let key = decision.message_key.expect("key");
+        let cursor = MaintenanceCursor::default();
+        for _ in 0..2 {
+            assert_eq!(
+                family_pass(&fixture, &state, &cursor).await,
+                MaintenanceOutcome::Complete
+            );
+            assert_eq!(
+                fixture
+                    .count("groupchat_notification_recovery WHERE completed_at_ms IS NOT NULL")
+                    .await,
+                1,
+                "the delegated recovery settled during the first attempt"
+            );
+            assert_eq!(plugin.invocations().len(), 1, "warning observer runs once");
+            assert_eq!(
+                crate::ingress::recovery_executor::attempt_count(key),
+                1,
+                "classified unsupported after the delegation settled, so no re-attempt"
+            );
+            super::assert_pending(&fixture, key).await;
+        }
+        drop(state);
+        fixture.close().await;
+    }
     async fn live_duplicate_and_recovery_serialize_offline_on_the_canonical_lock(
         fixture: IngressFixture,
     ) {
@@ -922,6 +1007,21 @@ mod family_tests {
     async fn postgres_observer_plugin_recovers_once() {
         if let Some(fixture) = IngressFixture::postgres("family_1").await {
             observer_plugin_recovers_once(fixture).await;
+        }
+    }
+    #[tokio::test]
+    async fn sqlite_warning_observer_with_delegated_recovery_is_cached_after_settlement() {
+        warning_observer_with_delegated_recovery_is_cached_after_settlement(
+            IngressFixture::sqlite().await,
+        )
+        .await;
+    }
+    #[tokio::test]
+    async fn postgres_warning_observer_with_delegated_recovery_is_cached_after_settlement() {
+        if let Some(fixture) =
+            IngressFixture::postgres("recovery_warning_observer_delegation").await
+        {
+            warning_observer_with_delegated_recovery_is_cached_after_settlement(fixture).await;
         }
     }
     #[tokio::test]

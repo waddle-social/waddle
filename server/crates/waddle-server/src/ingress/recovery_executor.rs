@@ -65,6 +65,9 @@ pub(super) async fn recover_row(
     })?;
     let mut unsupported = rebuilt.decision.external.is_empty() && rebuilt.delegated.is_empty();
     let mut unrecoverable = rebuilt.unrecoverable;
+    // Receipts that only a frame to the vanished sender or an unrebuildable
+    // obligation could still settle. Non-empty once a frame-only effect ran.
+    let mut settled_here: Vec<&EffectReceiptKey> = Vec::new();
     if !rebuilt.decision.external.is_empty() {
         let report = super::execute::execute_effects(
             uow,
@@ -77,27 +80,15 @@ pub(super) async fn recover_row(
         .await;
         // Frames belong to the sender's connection, which no longer exists
         // during recovery. A warning reply an observer produced cannot be
-        // delivered; retrying every tick would only re-invoke the plugin. Cache
-        // the row only when every receipt still missing is either such a frame
-        // or an obligation this executor cannot rebuild at all.
-        if !report.frame_obligations.is_empty() {
-            let mut settled_here: Vec<&EffectReceiptKey> =
-                rebuilt.unsupported_receipts.iter().collect();
-            for obligation in &report.frame_obligations {
-                let effect = &rebuilt.decision.external[obligation.effect_index];
-                if let Some(kind) = frame_only_kind(effect) {
-                    if !unrecoverable.contains(&kind) {
-                        unrecoverable.push(kind);
-                    }
-                    settled_here
-                        .extend(&rebuilt.decision.external_receipts[obligation.effect_index]);
+        // delivered; retrying every tick would only re-invoke the plugin.
+        for obligation in &report.frame_obligations {
+            let effect = &rebuilt.decision.external[obligation.effect_index];
+            if let Some(kind) = frame_only_kind(effect) {
+                if !unrecoverable.contains(&kind) {
+                    unrecoverable.push(kind);
                 }
+                settled_here.extend(&rebuilt.decision.external_receipts[obligation.effect_index]);
             }
-            let missing = missing_receipts(uow, key, &rebuilt.decision.receipts_pending).await?;
-            unsupported = !missing.is_empty()
-                && missing
-                    .iter()
-                    .all(|receipt| settled_here.contains(&receipt));
         }
     }
     for row in &rebuilt.delegated {
@@ -107,6 +98,17 @@ pub(super) async fn recover_row(
         };
         crate::server::routes::interpret::reconcile_groupchat_notification_recovery(state, row)
             .await?;
+    }
+    // Classify after every arm and delegation on this row has settled: the row
+    // is cached only when nothing left on it can make progress until its
+    // evidence changes.
+    if !settled_here.is_empty() {
+        settled_here.extend(&rebuilt.unsupported_receipts);
+        let missing = missing_receipts(uow, key, &rebuilt.decision.receipts_pending).await?;
+        unsupported = !missing.is_empty()
+            && missing
+                .iter()
+                .all(|receipt| settled_here.contains(&receipt));
     }
     Ok(RowRecovery::Executed {
         unrecoverable,
