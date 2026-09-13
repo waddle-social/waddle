@@ -1,18 +1,13 @@
-//! XEP-0160 / XEP-0357 regression coverage for non-ingress extension dispatch.
+//! Ordinary offline delivery requires the ingress transaction arm.
 use super::super::*;
 use crate::{
-    notification_outbox::{
-        direct_candidate_from_envelope, NotificationCandidateInsertOutcome, NotificationOutboxStore,
-    },
+    notification_outbox::{direct_candidate_from_envelope, NotificationOutboxStore},
     pending_delivery::DatabasePendingDeliveryStorage,
     server::routes::websocket::tests as socket_tests,
 };
 use std::sync::Arc;
-use waddle_xmpp::{
-    ingress::{IngressEffectIntent, NotificationActivityMutation, PendingDeliveryMutation},
-    pending_delivery::{
-        storage::PendingDeliveryStorage, PendingPayload, PendingRow, PendingRowId, QuotaPolicy,
-    },
+use waddle_xmpp::pending_delivery::{
+    storage::PendingDeliveryStorage, PendingPayload, PendingRow, PendingRowId, QuotaPolicy,
 };
 
 fn offline_row() -> (PendingRow, xmpp_parsers::message::Message) {
@@ -41,24 +36,6 @@ fn offline_row() -> (PendingRow, xmpp_parsers::message::Message) {
         },
         message,
     )
-}
-
-async fn assert_notification_marker(database: &crate::db::Database, id: &PendingRowId) {
-    let conn = database.guard().await.expect("marker connection");
-    let mut rows = conn
-        .query(
-            "SELECT notification_outboxed_at_ms FROM pending_delivery WHERE row_id = ?",
-            crate::db_params![id.as_str().to_string()],
-        )
-        .await
-        .expect("query exact pending marker");
-    let row = rows
-        .next()
-        .await
-        .expect("read marker")
-        .expect("planned row exists");
-    let marker: Option<i64> = row.get(0).expect("marker timestamp");
-    assert!(marker.is_some_and(|timestamp| timestamp > 0));
 }
 
 async fn immediate_offline_delivery(database_url: Option<&str>) {
@@ -106,52 +83,22 @@ async fn immediate_offline_delivery(database_url: Option<&str>) {
         &deps,
     )
     .await;
-    let EffectOutcome::ConfirmedIntents(confirmed) = outcome else {
-        panic!("immediate execution confirms completed work");
-    };
-    assert_eq!(confirmed.len(), 3);
-    assert!(confirmed.iter().any(|intent| matches!(intent,
-        IngressEffectIntent::PendingDelivery { mutation: PendingDeliveryMutation::Archived { row_id, .. } }
-        if row_id == &row.id
-    )));
-    assert!(confirmed.iter().any(|intent| matches!(
-        intent,
-        IngressEffectIntent::NotificationActivityPreview {
-            mutation: NotificationActivityMutation::OfflineDelivery { .. },
-            ..
-        }
-    )));
-    let rows = storage.list(&row.recipient).await.expect("pending rows");
-    assert_eq!(rows.len(), 1);
-    assert_eq!(rows[0].id, row.id);
-    assert_notification_marker(&database, &row.id).await;
+    assert!(matches!(outcome, EffectOutcome::Unavailable), "{outcome:?}");
+    assert!(storage
+        .list(&row.recipient)
+        .await
+        .expect("pending rows")
+        .is_empty());
     assert_eq!(
         state
             .deps
             .protocol
             .notification_outbox
-            .insert_candidate(&candidate)
+            .count_all_candidates()
             .await
-            .expect("candidate persisted"),
-        NotificationCandidateInsertOutcome::Duplicate
+            .expect("candidate count"),
+        0,
     );
-
-    // The actual ImmediateSink caller must reach the same implementation;
-    // extension dispatch enters through this interpreter helper, not execute_uow.
-    let (caller_row, caller_message) = offline_row();
-    crate::server::routes::interpret::offline_delivery::apply_offline_delivery_row(
-        &deps,
-        caller_row.clone(),
-        Box::new(caller_message),
-    )
-    .await;
-    let rows = storage
-        .list(&caller_row.recipient)
-        .await
-        .expect("caller pending rows");
-    assert_eq!(rows.len(), 1);
-    assert_eq!(rows[0].id, caller_row.id);
-    assert_notification_marker(&database, &caller_row.id).await;
 }
 
 async fn immediate_offline_quota(database_url: Option<&str>) {
@@ -179,31 +126,13 @@ async fn immediate_offline_quota(database_url: Option<&str>) {
         &deps,
     )
     .await;
-    assert!(matches!(
-        outcome,
-        EffectOutcome::OfflineDeliveryQuotaExceeded
-    ));
+    assert!(matches!(outcome, EffectOutcome::Unavailable));
     assert!(storage
         .list(&row.recipient)
         .await
         .expect("pending rows")
         .is_empty());
-    let received = rx.try_recv().expect("quota bounce sent");
-    let waddle_xmpp::Stanza::Message(bounce) = received.stanza else {
-        panic!("message bounce");
-    };
-    assert_eq!(bounce.type_, xmpp_parsers::message::MessageType::Error);
-    assert_eq!(bounce.to, Some(sender.into()));
-    let error = bounce
-        .payloads
-        .iter()
-        .find_map(|payload| xmpp_parsers::stanza_error::StanzaError::try_from(payload.clone()).ok())
-        .expect("typed stanza error");
-    assert_eq!(
-        error.defined_condition,
-        xmpp_parsers::stanza_error::DefinedCondition::ServiceUnavailable
-    );
-    assert!(rx.try_recv().is_err());
+    assert!(rx.try_recv().is_err(), "uncommitted work cannot bounce");
 }
 
 async fn postgres_fixture() -> Option<(crate::db::Database, String, String)> {
@@ -240,12 +169,12 @@ async fn drop_postgres_fixture(db: crate::db::Database, schema: String) {
 }
 
 #[tokio::test]
-async fn sqlite_immediate_offline_delivery_preserves_planned_row_candidate_and_marker() {
+async fn sqlite_immediate_offline_delivery_requires_ingress() {
     immediate_offline_delivery(None).await;
 }
 
 #[tokio::test]
-async fn postgres_immediate_offline_delivery_preserves_planned_row_candidate_and_marker() {
+async fn postgres_immediate_offline_delivery_requires_ingress() {
     let Some((db, schema, url)) = postgres_fixture().await else {
         return;
     };
@@ -254,12 +183,12 @@ async fn postgres_immediate_offline_delivery_preserves_planned_row_candidate_and
 }
 
 #[tokio::test]
-async fn sqlite_immediate_offline_quota_bounces_without_row() {
+async fn sqlite_immediate_offline_quota_requires_ingress() {
     immediate_offline_quota(None).await;
 }
 
 #[tokio::test]
-async fn postgres_immediate_offline_quota_bounces_without_row() {
+async fn postgres_immediate_offline_quota_requires_ingress() {
     let Some((db, schema, url)) = postgres_fixture().await else {
         return;
     };

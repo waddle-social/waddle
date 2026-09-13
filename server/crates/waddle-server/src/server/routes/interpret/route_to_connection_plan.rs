@@ -164,6 +164,15 @@ pub(super) async fn deliver_full(
     stanza: &Stanza,
     call_setup: Option<PendingCallSetupRoute>,
 ) -> FullJidDeliveryOutcome {
+    if deps.host_sender.as_ref() == Some(target) {
+        deps.effects
+            .record(super::super::effects::PlannedEffect::new(
+                super::super::effects::Effect::External(
+                    super::super::effects::ExternalEffect::Frame(Box::new(stanza.clone())),
+                ),
+            ));
+        return FullJidDeliveryOutcome::Delivered;
+    }
     if remote_owner(deps, &target.to_bare()).await {
         record(
             deps,

@@ -42,8 +42,6 @@ pub enum EffectOutcome {
         outcome: super::super::routing::FullJidDeliveryOutcome,
         recipients: Vec<jid::FullJid>,
     },
-    /// Ordinary offline queue admission failed; the sender bounce was attempted.
-    OfflineDeliveryQuotaExceeded,
     Unavailable,
 }
 

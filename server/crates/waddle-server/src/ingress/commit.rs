@@ -122,6 +122,8 @@ async fn commit_attempt(
         )
         .await?;
     super::principal::assert_admission(&mut tx, submission).await?;
+    #[cfg(test)]
+    commit_race_gate::after_admission(submission.digest_input.origin()).await;
     if let IngressStreamIdentity::Relayed { canonical, .. } = &submission.identity {
         if canonical.sender_bare != *submission.principal.bare_jid()
             || canonical.origin_id.as_ref() != submission.digest_input.origin()
@@ -748,6 +750,8 @@ fn decision_class(
 }
 
 pub(crate) mod commit_hooks;
+#[cfg(test)]
+pub(crate) mod commit_race_gate;
 #[cfg(test)]
 #[path = "commit_tests.rs"]
 mod tests;

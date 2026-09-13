@@ -110,6 +110,21 @@ pub struct IngressAuthority {
 }
 
 impl IngressAuthority {
+    /// Resolve configured authority in a short transaction before host planning.
+    pub(crate) async fn active_extension_send_grant(
+        &self,
+        plugin: &waddle_extensions::PluginId,
+    ) -> Result<Option<waddle_xmpp::auth::ExtensionGrantRef>, IngressUowError> {
+        let mut transaction = self.uow.begin().await?;
+        let grant = crate::ingress_uow::ExtensionGrantRepository::active_send_grant(
+            &mut transaction,
+            plugin,
+        )
+        .await?;
+        transaction.commit().await?;
+        Ok(grant)
+    }
+
     /// Request a bounded maintenance pass.
     pub fn trigger_maintenance(&self) {
         self.gc.trigger();

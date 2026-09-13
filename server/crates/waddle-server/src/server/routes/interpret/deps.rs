@@ -142,6 +142,8 @@ impl SmIngressAppendContext {
 pub struct Deps<'a> {
     /// Owned receipt context scoped to one recorded direct-route resource attempt.
     pub ingress_append_context: Option<SmIngressAppendContext>,
+    /// Sender resource whose planned frames are consumed by an extension host.
+    pub host_sender: Option<jid::FullJid>,
     /// Identity scoped to the current direct-routing invocation.
     pub direct_route_identity: Option<waddle_xmpp::ingress::EffectMessageIdentity>,
     pub effects: &'a dyn super::effects::EffectSink,
@@ -280,6 +282,7 @@ impl<'a> Deps<'a> {
             sfu: None,
             ingress_effect_capture: None,
             direct_route_identity: None,
+            host_sender: None,
             ingress_append_context: None,
         }
     }
@@ -320,6 +323,7 @@ impl<'a> Deps<'a> {
             sfu: None,
             ingress_effect_capture: None,
             direct_route_identity: None,
+            host_sender: None,
             ingress_append_context: None,
         }
     }
@@ -352,6 +356,7 @@ impl<'a> Deps<'a> {
             sfu: None,
             ingress_effect_capture: None,
             direct_route_identity: None,
+            host_sender: None,
             ingress_append_context: None,
         }
     }
@@ -382,6 +387,7 @@ impl<'a> Deps<'a> {
             sfu: None,
             ingress_effect_capture: None,
             direct_route_identity: None,
+            host_sender: None,
             ingress_append_context: None,
         }
     }

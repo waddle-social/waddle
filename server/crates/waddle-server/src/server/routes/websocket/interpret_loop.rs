@@ -39,6 +39,7 @@ pub(crate) fn build_interpret_deps<'a>(
         sfu: state.deps.protocol.sfu.as_deref(),
         ingress_effect_capture: None,
         direct_route_identity: None,
+        host_sender: None,
         ingress_append_context: None,
         effects: &crate::server::routes::interpret::effects::ImmediateSink,
     }

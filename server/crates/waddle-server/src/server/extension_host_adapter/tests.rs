@@ -75,3 +75,8 @@ fn envelope_with_launch_room(room: Option<&str>) -> waddle_extensions::Extension
         }],
     }])
 }
+
+mod direct_ingress;
+mod host_boundary;
+mod recovery;
+mod revocation_race;

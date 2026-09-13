@@ -909,9 +909,7 @@ fn classify_outcome(
             }
             ExternalOutcome::Failed
         }
-        EffectOutcome::Archive(Err(_))
-        | EffectOutcome::Inbox(Err(_))
-        | EffectOutcome::OfflineDeliveryQuotaExceeded => ExternalOutcome::Failed,
+        EffectOutcome::Archive(Err(_)) | EffectOutcome::Inbox(Err(_)) => ExternalOutcome::Failed,
         EffectOutcome::Delivery(outcome) | EffectOutcome::CarbonFanout { outcome, .. } => {
             match outcome {
                 FullJidDeliveryOutcome::Delivered | FullJidDeliveryOutcome::QueuedDetached => {

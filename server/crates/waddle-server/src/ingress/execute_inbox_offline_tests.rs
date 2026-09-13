@@ -192,16 +192,27 @@ async fn inbox_push_receipt(fixture: IngressFixture) {
     fixture.close().await;
 }
 
-async fn offline_receipts(fixture: IngressFixture, detach_post_commit_state: bool) {
+async fn offline_receipts(
+    fixture: IngressFixture,
+    detach_post_commit_state: bool,
+    quota_exceeded: bool,
+) {
     use waddle_xmpp::pending_delivery::{
         storage::PendingDeliveryStorage, PendingPayload, QuotaPolicy,
     };
     let state = socket_state(&fixture).await;
     socket_tests::create_test_session(&state, "juliet").await;
+    let sender: jid::FullJid = "romeo@example.com/phone".parse().expect("sender");
+    let (sender_tx, mut sender_rx) = tokio::sync::mpsc::channel(8);
+    socket_tests::register_test_connection(&state, &sender, sender_tx).await;
     let pending: Arc<dyn PendingDeliveryStorage> = Arc::new(
         crate::pending_delivery::DatabasePendingDeliveryStorage::open(
             Some(fixture.db.database_url()),
-            QuotaPolicy::Unlimited,
+            if quota_exceeded {
+                QuotaPolicy::CountCap { max_rows: 0 }
+            } else {
+                QuotaPolicy::Unlimited
+            },
         )
         .await
         .expect("pending store"),
@@ -251,6 +262,12 @@ async fn offline_receipts(fixture: IngressFixture, detach_post_commit_state: boo
         .await
         .expect("commit offline intents");
     assert_eq!(decision.external_receipts[0].len(), 3);
+    let ExternalEffect::Delivery(ExternalDeliveryEffect::QueueOfflineDelivery { row, .. }) =
+        &decision.external[0]
+    else {
+        panic!("planned offline row");
+    };
+    let planned_row_id = row.id.clone();
     deps.effects = &ImmediateSink;
     if detach_post_commit_state {
         deps.web_socket_state = None;
@@ -265,10 +282,31 @@ async fn offline_receipts(fixture: IngressFixture, detach_post_commit_state: boo
     )
     .await;
     assert!(report.receipt_failures.is_empty());
-    assert_eq!(
-        pending.list(&recipient).await.expect("queued rows").len(),
-        1
-    );
+    let queued = pending.list(&recipient).await.expect("queued rows");
+    if quota_exceeded {
+        assert!(queued.is_empty());
+        let envelope = sender_rx.try_recv().expect("quota bounce");
+        let Stanza::Message(bounce) = envelope.stanza else {
+            panic!("message bounce");
+        };
+        assert_eq!(bounce.to, Some(sender.into()));
+        let error = bounce
+            .payloads
+            .iter()
+            .find_map(|payload| {
+                xmpp_parsers::stanza_error::StanzaError::try_from(payload.clone()).ok()
+            })
+            .expect("typed quota error");
+        assert_eq!(error.type_, xmpp_parsers::stanza_error::ErrorType::Cancel);
+        assert_eq!(
+            error.defined_condition,
+            xmpp_parsers::stanza_error::DefinedCondition::ServiceUnavailable
+        );
+        assert!(sender_rx.try_recv().is_err());
+    } else {
+        assert_eq!(queued.len(), 1);
+        assert_eq!(queued[0].id, planned_row_id);
+    }
     assert_eq!(fixture.count("ingress_effect_receipts").await, 3);
     assert_eq!(
         fixture
@@ -276,7 +314,10 @@ async fn offline_receipts(fixture: IngressFixture, detach_post_commit_state: boo
             .await,
         1
     );
-    assert_eq!(fixture.count("notification_candidates").await, 1);
+    assert_eq!(
+        fixture.count("notification_candidates").await,
+        i64::from(!quota_exceeded)
+    );
     assert_eq!(
         pending
             .list_unoutboxed_archived(10)
@@ -300,22 +341,22 @@ async fn postgres_groupchat_inbox_push_receipts_and_terminalizes() {
 }
 #[tokio::test]
 async fn sqlite_offline_delivery_receipts_each_written_step() {
-    offline_receipts(IngressFixture::sqlite().await, false).await;
+    offline_receipts(IngressFixture::sqlite().await, false, false).await;
 }
 #[tokio::test]
 async fn postgres_offline_delivery_receipts_each_written_step() {
     if let Some(fixture) = IngressFixture::postgres("offline_receipts").await {
-        offline_receipts(fixture, false).await;
+        offline_receipts(fixture, false, false).await;
     }
 }
 #[tokio::test]
 async fn sqlite_offline_delivery_frozen_candidate_survives_missing_post_commit_state() {
-    offline_receipts(IngressFixture::sqlite().await, true).await;
+    offline_receipts(IngressFixture::sqlite().await, true, false).await;
 }
 #[tokio::test]
 async fn postgres_offline_delivery_frozen_candidate_survives_missing_post_commit_state() {
     if let Some(fixture) = IngressFixture::postgres("offline_partial_receipts").await {
-        offline_receipts(fixture, true).await;
+        offline_receipts(fixture, true, false).await;
     }
 }
 
@@ -348,4 +389,16 @@ fn inbox_push_receipt_requires_every_frozen_resource() {
         ),
         vec![key]
     );
+}
+
+#[tokio::test]
+async fn sqlite_offline_delivery_quota_settles_without_pending_row_or_candidate() {
+    offline_receipts(IngressFixture::sqlite().await, false, true).await;
+}
+
+#[tokio::test]
+async fn postgres_offline_delivery_quota_settles_without_pending_row_or_candidate() {
+    if let Some(fixture) = IngressFixture::postgres("offline_quota_receipts").await {
+        offline_receipts(fixture, false, true).await;
+    }
 }

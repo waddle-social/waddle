@@ -110,6 +110,8 @@ pub struct HostSendMessage {
 
 #[derive(Debug, Error)]
 pub enum ExtensionHostAdapterError {
+    #[error("message rejected: {0:?}")]
+    Rejected(Box<xmpp_parsers::stanza_error::StanzaError>),
     #[error("not authorized")]
     NotAuthorized,
     #[error("room not found: {0}")]

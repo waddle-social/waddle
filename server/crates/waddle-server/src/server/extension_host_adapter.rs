@@ -9,19 +9,14 @@ use std::sync::Arc;
 
 use jid::{BareJid, FullJid, Jid};
 use kameo::actor::ActorRef;
-use waddle_extensions::{
-    host_tools::InvocationKind, DisplayText, PluginId, ReplyTarget, RoomJid, StanzaId, ThreadId,
-};
+use waddle_extensions::{host_tools::InvocationKind, DisplayText, PluginId, RoomJid, StanzaId};
 use waddle_xmpp::{
     muc::{
         room_actor::{GetSnapshot, RoomActor},
         room_registry_actor::GetRoom,
     },
-    protocol::{frame::InboundFrame, Blocklist, InboundEvent, XmppStateMachine},
     roster::{RosterItem, Subscription},
-    Stanza,
 };
-use xmpp_parsers::message::{Message, MessageType as XmppMessageType};
 
 use crate::{
     auth::Session,
@@ -36,6 +31,7 @@ use super::routes::{
 };
 
 mod conversions;
+mod direct;
 mod host_tools;
 mod queries;
 mod types;
@@ -48,13 +44,7 @@ pub struct ExtensionHostAdapter {
     state: Arc<WebSocketState>,
 }
 
-struct DirectDispatchMessage {
-    stanza_id: waddle_extensions::StanzaId,
-    body: String,
-    thread_id: Option<ThreadId>,
-    reply_to: Option<ReplyTarget>,
-    markup: Vec<waddle_extensions::MessageMarkupSpan>,
-}
+use direct::DirectDispatchMessage;
 
 impl ExtensionHostAdapter {
     pub fn new(state: Arc<WebSocketState>) -> Self {
@@ -156,65 +146,6 @@ impl ExtensionHostAdapter {
         }
     }
 
-    async fn dispatch_direct(
-        &self,
-        invocation: &ExtensionInvocation,
-        target: Jid,
-        request: DirectDispatchMessage,
-    ) -> Result<(), ExtensionHostAdapterError> {
-        let mut message = Message::new(Some(target));
-        message.id = Some(xmpp_parsers::message::Id(
-            request.stanza_id.as_str().to_string(),
-        ));
-        message.type_ = XmppMessageType::Chat;
-        message
-            .bodies
-            .insert(xmpp_parsers::message::Lang(String::new()), request.body);
-        if let Some(thread_id) = request.thread_id.as_ref() {
-            waddle_xmpp::xep0201::set_thread_id(&mut message, thread_id.as_str());
-        }
-        if let Some(reply_to) = request.reply_to.as_ref() {
-            let mut reply = waddle_xmpp::xep::ReplyReference::new(reply_to.id.as_str());
-            if let Some(to) = reply_to
-                .to
-                .as_ref()
-                .and_then(|to| to.as_str().parse::<Jid>().ok())
-            {
-                reply = reply.with_to(to);
-            }
-            waddle_xmpp::xep::set_reply_payload(&mut message, &reply);
-        }
-        if let Some(markup) = interpret::build_extension_message_markup(&request.markup) {
-            message.payloads.push(markup);
-        }
-
-        let mut sm = XmppStateMachine::new(
-            self.state.deps.auth_state.xmpp_domain.clone(),
-            (*self.state.deps.protocol.dispatcher).clone(),
-        );
-        sm.transition_to_ready(invocation.actor_jid.clone(), false);
-        let blocklist = self
-            .state
-            .deps
-            .protocol
-            .blocking_storage
-            .list_blocked_jid_entries(&invocation.actor_jid.to_bare())
-            .await
-            .map_err(|error| ExtensionHostAdapterError::Storage(error.to_string()))?;
-        sm.set_blocklist(Blocklist::new(blocklist));
-        let events = sm.handle(InboundEvent::FrameReceived(InboundFrame::Stanza(Box::new(
-            Stanza::Message(message),
-        ))));
-        let deps = self.interpret_deps(invocation.session.as_ref());
-        let outcome = interpret::interpret(events, &deps).await;
-        if outcome.close {
-            return Err(ExtensionHostAdapterError::Protocol(
-                "direct message dispatch requested transport close".to_string(),
-            ));
-        }
-        Ok(())
-    }
-
     fn spaces_jid(&self) -> Result<BareJid, ExtensionHostAdapterError> {
         self.state
             .deps
@@ -278,6 +209,7 @@ impl ExtensionHostAdapter {
             sfu: self.state.deps.protocol.sfu.as_deref(),
             ingress_effect_capture: None,
             direct_route_identity: None,
+            host_sender: None,
             ingress_append_context: None,
         }
     }
