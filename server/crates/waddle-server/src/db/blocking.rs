@@ -150,10 +150,11 @@ impl DatabaseBlockingStorage {
     ) -> Result<usize, BlockingStorageError> {
         let mut added = 0;
         for blocked_jid in blocked_jids {
-            // Use INSERT OR IGNORE to handle duplicates gracefully
+            // `ON CONFLICT DO NOTHING` is valid for both SQLite and PostgreSQL;
+            // `INSERT OR IGNORE` is SQLite-only and fails on the Postgres pool.
             let result = self
                 .execute_with_persistent(
-                    "INSERT OR IGNORE INTO blocking_list (user_jid, blocked_jid) VALUES (?, ?)",
+                    "INSERT INTO blocking_list (user_jid, blocked_jid) VALUES (?, ?) ON CONFLICT (user_jid, blocked_jid) DO NOTHING",
                     crate::db_params![user_jid.to_string(), blocked_jid.to_string()],
                 )
                 .await?;
