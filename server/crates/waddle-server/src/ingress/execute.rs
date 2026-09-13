@@ -141,7 +141,7 @@ impl RelayFrameReceiptCompletion {
 pub struct FrameObligation {
     pub frames: Vec<Stanza>,
     pub receipt_keys: Vec<EffectReceiptKey>,
-    effect_index: usize,
+    pub(super) effect_index: usize,
 }
 
 #[derive(Debug, Default)]

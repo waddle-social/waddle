@@ -30,6 +30,9 @@ pub(super) enum RowRecovery {
 }
 
 struct FrozenRecovery {
+    /// Receipts the freeze wrote while repairing a mutually exclusive
+    /// invitation delivery pair; maintenance recovered them, so count them.
+    repaired: u64,
     envelope: MessageEnvelope,
     created_at: DateTime<Utc>,
     recorded: Vec<IngressEffectIntent>,
@@ -49,8 +52,18 @@ pub(super) async fn recover_row(
     let Some(frozen) = freeze(uow, key).await? else {
         return Ok(RowRecovery::Vanished);
     };
+    report_recovered(frozen.repaired);
     if frozen.unreceipted.is_empty() {
-        return Ok(RowRecovery::NothingPending);
+        return Ok(if frozen.repaired > 0 {
+            RowRecovery::Executed {
+                recovered: frozen.repaired,
+                unrecoverable: Vec::new(),
+                terminal: false,
+                unsupported: false,
+            }
+        } else {
+            RowRecovery::NothingPending
+        });
     }
     #[cfg(test)]
     super::execute::test_hooks::after_recovery_freeze(key).await;
@@ -77,21 +90,29 @@ pub(super) async fn recover_row(
             deadline.saturating_duration_since(Instant::now()),
         )
         .await;
+        let (count, is_terminal, missing) = recount(uow, key, pending).await?;
+        (recovered, terminal) = (count, is_terminal);
         // Frames belong to the sender's connection, which no longer exists
         // during recovery. A warning reply an observer produced cannot be
-        // delivered; retrying every tick would only re-invoke the plugin.
+        // delivered; retrying every tick would only re-invoke the plugin. Cache
+        // the row only when nothing else on it can still make progress.
         if !report.frame_obligations.is_empty() {
-            unsupported = true;
-            for (effect, _) in &report.outcomes {
-                let kind = frame_only_kind(effect);
-                if let Some(kind) = kind {
+            let mut frame_receipts: Vec<&EffectReceiptKey> = Vec::new();
+            for obligation in &report.frame_obligations {
+                let effect = &rebuilt.decision.external[obligation.effect_index];
+                if let Some(kind) = frame_only_kind(effect) {
                     if !unrecoverable.contains(&kind) {
                         unrecoverable.push(kind);
                     }
+                    frame_receipts
+                        .extend(&rebuilt.decision.external_receipts[obligation.effect_index]);
                 }
             }
+            unsupported = !missing.is_empty()
+                && missing
+                    .iter()
+                    .all(|receipt| frame_receipts.contains(&receipt));
         }
-        (recovered, terminal) = recount(uow, key, pending).await?;
         report_recovered(recovered - reported);
         reported = recovered;
     }
@@ -104,12 +125,13 @@ pub(super) async fn recover_row(
             .await?;
         // Recount after every settled delegation so a later deferral or the row
         // deadline cannot lose credit for receipts that already committed.
-        (recovered, terminal) = recount(uow, key, pending).await?;
+        let (count, is_terminal, _) = recount(uow, key, pending).await?;
+        (recovered, terminal) = (count, is_terminal);
         report_recovered(recovered - reported);
         reported = recovered;
     }
     Ok(RowRecovery::Executed {
-        recovered,
+        recovered: recovered + frozen.repaired,
         unrecoverable,
         terminal,
         unsupported,
@@ -163,6 +185,7 @@ async fn freeze(
     }
     // A live invitation delivery and its offline fallback are mutually
     // exclusive: one committed receipt proves both, exactly as alias replay.
+    let before = unreceipted.len();
     super::commit::reconcile_invitation_delivery_receipts(
         &mut tx,
         key,
@@ -170,6 +193,7 @@ async fn freeze(
         &mut unreceipted,
     )
     .await?;
+    let repaired = u64::try_from(before - unreceipted.len()).unwrap_or(u64::MAX);
     let mut route_progress = Vec::new();
     for intent in &unreceipted {
         let IngressEffectIntent::RouteDirect {
@@ -192,6 +216,7 @@ async fn freeze(
     }
     tx.commit().await?;
     Ok(Some(FrozenRecovery {
+        repaired,
         envelope,
         created_at,
         recorded,
@@ -208,19 +233,25 @@ async fn contains(
     EffectReceiptRepository::contains(tx, key, receipt.kind, &receipt.semantic_identity_hash).await
 }
 
+/// Receipts now present, terminal state, and the receipts still missing.
 async fn recount(
     uow: &IngressUnitOfWork,
     key: MessageKey,
     pending: &[EffectReceiptKey],
-) -> Result<(u64, bool), IngressUowError> {
+) -> Result<(u64, bool, Vec<EffectReceiptKey>), IngressUowError> {
     let mut tx = uow.begin().await?;
     let mut recovered = 0;
+    let mut missing = Vec::new();
     for receipt in pending {
-        recovered += u64::from(contains(&mut tx, key, receipt).await?);
+        if contains(&mut tx, key, receipt).await? {
+            recovered += 1;
+        } else {
+            missing.push(receipt.clone());
+        }
     }
     let terminal = CanonicalMessageRepository::is_terminal(&mut tx, key).await?;
     tx.commit().await?;
-    Ok((recovered, terminal))
+    Ok((recovered, terminal, missing))
 }
 
 #[cfg(test)]
