@@ -112,26 +112,6 @@ async fn exercise(fixture: IngressFixture) {
         .expect("lookup")
         .expect("renewed");
     assert_ne!(renewed.grant_id, send.grant_id);
-    assert_eq!(
-        Grants::revoke_plugin(&mut tx, &plugin)
-            .await
-            .expect("revoke"),
-        2
-    );
-    assert_eq!(
-        Grants::revoke_plugin(&mut tx, &plugin)
-            .await
-            .expect("repeat revoke"),
-        0
-    );
-    assert_failure(
-        Grants::assert_grant(&mut tx, &renewed).await,
-        GrantAssertionFailure::Revoked,
-    );
-    assert!(Grants::active_send_grant(&mut tx, &plugin)
-        .await
-        .expect("lookup cannot regrant")
-        .is_none());
     let second = ConfiguredPluginGrants {
         plugin: other.clone(),
         can_send: true,

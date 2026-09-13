@@ -1,6 +1,6 @@
 //! A grant resolved before planning must still be valid at durable admission.
 use super::super::ExtensionHostAdapterError;
-use super::direct_ingress::{adapter, invocation, plugin, request};
+use super::direct_ingress::{adapter, invocation, request};
 use crate::{ingress::test_support::IngressFixture, ingress_uow::ExtensionGrantRepository};
 use jid::{BareJid, Jid};
 use std::{
@@ -78,9 +78,10 @@ async fn revoked_during_planning(f: IngressFixture) {
     assert_eq!(f.count("ingress_messages").await, 0);
     let mut tx = f.uow.begin().await.expect("revocation transaction");
     assert_eq!(
-        ExtensionGrantRepository::revoke_plugin(&mut tx, &plugin())
+        ExtensionGrantRepository::sync_configured(&mut tx, &[])
             .await
-            .expect("revoke resolved grant"),
+            .expect("revoke resolved grant")
+            .revoked,
         1,
     );
     tx.commit()
@@ -130,7 +131,6 @@ async fn extension_direct_revoked_during_planning_postgres() {
 
 async fn committed_before_concurrent_revocation(f: IngressFixture) {
     use crate::ingress::commit::commit_race_gate::Registration;
-    use std::{future::Future, task::Poll};
     use waddle_xmpp_core::xep0359::OriginId;
 
     let adapter = Arc::new(adapter(&f).await);
@@ -150,21 +150,22 @@ async fn committed_before_concurrent_revocation(f: IngressFixture) {
     let (sent, revoked) = {
         let revoking = async {
             let mut tx = f.uow.begin().await.expect("concurrent revocation tx");
-            let revoked = ExtensionGrantRepository::revoke_plugin(&mut tx, &plugin())
+            let revoked = ExtensionGrantRepository::sync_configured(&mut tx, &[])
                 .await
-                .expect("concurrent revoke");
+                .expect("concurrent revoke")
+                .revoked;
             tx.commit().await.expect("concurrent revocation commit");
             revoked
         };
         tokio::pin!(revoking);
-        // Poll the revocation operation while the admitted transaction is open.
-        // SQLite serializes at BEGIN IMMEDIATE; PostgreSQL at the grant row lock.
-        // The gate proves overlap without depending on a sleep or task scheduling.
-        std::future::poll_fn(|cx| match revoking.as_mut().poll(cx) {
-            Poll::Pending => Poll::Ready(()),
-            Poll::Ready(_) => panic!("revocation completed while admission owns its grant"),
-        })
-        .await;
+        // Drive revocation through pool checkout and SQL execution while the
+        // admission holds its grant. A single Pending poll only proves I/O.
+        assert!(
+            tokio::time::timeout(Duration::from_millis(300), revoking.as_mut())
+                .await
+                .is_err(),
+            "revocation must wait for the admission transaction's grant lock"
+        );
         gate.release();
         tokio::time::timeout(Duration::from_secs(10), async {
             tokio::join!(sending, revoking)

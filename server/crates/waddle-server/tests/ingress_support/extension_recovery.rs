@@ -76,14 +76,15 @@ pub async fn extension_submission(
 }
 
 pub async fn revoke_after_commit(fixture: &IngressFixture, submission: &IngressSubmission) {
-    let IngressPrincipal::Extension(principal) = &submission.principal else {
+    let IngressPrincipal::Extension(_) = &submission.principal else {
         panic!("extension submission");
     };
     let mut tx = fixture.uow.begin().await.expect("revoke transaction");
     assert_eq!(
-        ExtensionGrantRepository::revoke_plugin(&mut tx, &principal.grant.plugin)
+        ExtensionGrantRepository::sync_configured(&mut tx, &[])
             .await
-            .expect("revoke grant"),
+            .expect("revoke grant")
+            .revoked,
         1
     );
     tx.commit().await.expect("persist revocation");

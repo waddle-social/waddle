@@ -86,7 +86,7 @@ async fn admission(f: IngressFixture) {
         Some(sender.to_string())
     );
     let mut tx = f.uow.begin().await.expect("transaction");
-    ExtensionGrantRepository::revoke_plugin(&mut tx, &plugin)
+    ExtensionGrantRepository::sync_configured(&mut tx, &[])
         .await
         .expect("revoke");
     tx.commit().await.expect("commit");

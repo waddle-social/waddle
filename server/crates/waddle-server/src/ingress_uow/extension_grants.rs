@@ -46,8 +46,7 @@ pub enum GrantAssertionFailure {
 pub struct ExtensionGrantRepository;
 
 impl ExtensionGrantRepository {
-    /// Reconcile the complete configured plugin set. Reapplying configuration
-    /// deliberately re-grants runtime revocations using fresh grant identities.
+    /// Reconcile the complete configured plugin set at startup.
     pub async fn sync_configured(
         tx: &mut IngressUowTransaction<'_>,
         configured: &[ConfiguredPluginGrants],
@@ -93,23 +92,6 @@ impl ExtensionGrantRepository {
             result.inserted += 1;
         }
         Ok(result)
-    }
-
-    /// Revoke every active authority for an unloaded plugin without re-minting.
-    pub async fn revoke_plugin(
-        tx: &mut IngressUowTransaction<'_>,
-        plugin: &PluginId,
-    ) -> Result<u64, IngressUowError> {
-        let sql = dialect_sql(tx,
-            "UPDATE extension_grants SET revoked_at = ?::timestamptz WHERE plugin_id = ? AND revoked_at IS NULL",
-            "UPDATE extension_grants SET revoked_at = ? WHERE plugin_id = ? AND revoked_at IS NULL");
-        Ok(tx
-            .transaction_mut()
-            .execute(
-                sql,
-                crate::db_params![Utc::now().to_rfc3339(), plugin.as_str()],
-            )
-            .await?)
     }
 
     pub async fn active_send_grant(
@@ -179,6 +161,27 @@ impl ExtensionGrantRepository {
         let mut rows = tx
             .transaction_mut()
             .query(sql, crate::db_params![requester.to_string()])
+            .await?;
+        if rows.next().await?.is_some() {
+            return Ok(GrantAssertion::Asserted);
+        }
+        drop(rows);
+        let username = requester
+            .node()
+            .ok_or(IngressUowError::ExtensionGrantAssertionFailed(
+                GrantAssertionFailure::RequesterGone,
+            ))?;
+        let sql = dialect_sql(
+            tx,
+            "SELECT username FROM native_users WHERE username = ? AND domain = ? FOR SHARE",
+            "SELECT username FROM native_users WHERE username = ? AND domain = ?",
+        );
+        let mut rows = tx
+            .transaction_mut()
+            .query(
+                sql,
+                crate::db_params![username.as_str(), requester.domain().as_str()],
+            )
             .await?;
         if rows.next().await?.is_none() {
             return Err(IngressUowError::ExtensionGrantAssertionFailed(

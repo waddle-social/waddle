@@ -246,9 +246,10 @@ async fn revoked_between_sends(f: IngressFixture) {
         .expect("first send");
     let mut tx = f.uow.begin().await.expect("revocation tx");
     assert_eq!(
-        ExtensionGrantRepository::revoke_plugin(&mut tx, &plugin())
+        ExtensionGrantRepository::sync_configured(&mut tx, &[])
             .await
-            .expect("revoke"),
+            .expect("revoke")
+            .revoked,
         1
     );
     tx.commit().await.expect("revoke commit");
