@@ -216,6 +216,15 @@ The remaining limits are explicit:
   obligation stays unresolved for its recorded route to retry or degrade.
 - The `RegistryFrame` live-transport branch is not durable queue delivery and
   is out of scope.
+- The key does not cross nodes. A relayed direct delivery whose detached
+  append runs on the receiving node (`route_bridge/delivery/receiver.rs`,
+  `deliver_local_full_jid_after_target_refresh`) is unkeyed and remains
+  at-least-once until the obligation identity rides the ordered-relay
+  envelope (#1778).
+- Proof and resource progress commit in two transactions: the ledger row
+  with the SM snapshot, the progress row afterwards under the canonical lock.
+  A retry between them reads `AlreadyAppended`; an eviction landing between
+  them is the custody problem tracked by #1760.
 
 MUC groupchat occupant fanout is outside this mechanism. `QueueDetached`
 effects without a matching recorded direct route retain generic execution and
