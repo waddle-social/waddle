@@ -174,33 +174,33 @@ pub(crate) async fn bounce_offline_quota(
         }
     };
     let bounce_stanza = waddle_xmpp::Stanza::Message(bounce);
+    // Route through the owner-aware direct-frame path: under clustering the
+    // sender's socket may live on another replica (the recovery pass runs on
+    // whichever node holds the canonical lock), and a registered remote
+    // resource is reached through its owner rather than dropped.
     let mut delivered = false;
-    match sender_jid.clone().try_into_full() {
-        Ok(full) => {
-            if matches!(
-                deps.connection_registry.send_to(&full, bounce_stanza).await,
-                waddle_xmpp::registry::SendResult::Sent
-            ) {
-                delivered = true;
+    let resources = match sender_jid.clone().try_into_full() {
+        Ok(full) => vec![full],
+        Err(bare) => match deps.user_registry {
+            Some(user_registry) => {
+                waddle_xmpp::registry::get_resources_for_user(user_registry, &bare).await
             }
-        }
-        Err(bare) => {
-            let resources = match deps.user_registry {
-                Some(user_registry) => {
-                    waddle_xmpp::registry::get_resources_for_user(user_registry, &bare).await
-                }
-                None => Vec::new(),
-            };
-            for full in resources {
-                if matches!(
-                    deps.connection_registry
-                        .send_to(&full, bounce_stanza.clone())
-                        .await,
-                    waddle_xmpp::registry::SendResult::Sent
-                ) {
-                    delivered = true;
-                }
-            }
+            None => Vec::new(),
+        },
+    };
+    for full in resources {
+        if matches!(
+            super::deliver_direct_to_full_with_registered_remote(deps, &full, &bounce_stanza).await,
+            FullJidDeliveryOutcome::Delivered | FullJidDeliveryOutcome::QueuedDetached
+        ) || matches!(
+            // Sockets registered only in the connection registry (no user actor
+            // mirror) keep receiving the bounce exactly as before.
+            deps.connection_registry
+                .send_to(&full, bounce_stanza.clone())
+                .await,
+            waddle_xmpp::registry::SendResult::Sent
+        ) {
+            delivered = true;
         }
     }
     if delivered {

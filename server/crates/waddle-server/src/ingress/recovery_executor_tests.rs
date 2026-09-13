@@ -586,6 +586,21 @@ mod family_tests {
                 requester: submission.sender.to_bare(),
                 sender: submission.sender.clone(),
             });
+        if warning {
+            // A production groupchat row also carries the occupant fan-out,
+            // which recovery cannot rebuild. The warning-only observer must
+            // still be cached alongside that permanently pending sibling.
+            submission
+                .plan
+                .intents
+                .push(IngressEffectIntent::RouteMucGroupchat {
+                    room: room.clone(),
+                    occupants: vec!["occupant@example.com/phone".parse().expect("occupant")],
+                    reflection: "room@muc.example.com/romeo".parse().expect("reflection"),
+                    room_generation: waddle_xmpp::ingress::EntityGeneration::INITIAL,
+                    route_identity: waddle_xmpp::ingress::EffectMessageIdentity::capture_ordinal(7),
+                });
+        }
         submission.plan.plan.push(
             PlannedEffect::new(Effect::External(ExternalEffect::Room(
                 ExternalRoomEffect::ObserveRoomMessage {
@@ -1526,6 +1541,54 @@ async fn unsupported_backlog_is_evaluated_once_then_skipped(f: IngressFixture) {
     );
     f.close().await;
 }
+/// Rows whose pending kinds are all unsupported are paged past without an
+/// attempt, so a backlog larger than one attempt budget cannot starve a
+/// recoverable row created after it: one pass reaches the tail. [R3 P2]
+async fn unsupported_kind_backlog_does_not_starve_recoverable_rows(f: IngressFixture) {
+    let sm = persistent_sm(&f).await;
+    let resource: jid::FullJid = "juliet@example.com/phone".parse().expect("resource");
+    store_detached(&sm, &resource).await;
+    let state = state_for(&f, sm.clone()).await;
+    let env: Arc<dyn RecoveryEnvironment> = Arc::new(StateEnvironment(state));
+    let mut keys = Vec::new();
+    for index in 0..70 {
+        let mut submission = f.submission(Some(&format!("carbons-{index}")), "carbon backlog");
+        submission.plan.intents.push(IngressEffectIntent::Carbons {
+            carbon_recipients: vec!["romeo@example.com/laptop".parse().expect("carbon")],
+            excluded_source: submission.sender.clone(),
+            kind: waddle_xmpp::protocol::CarbonKind::Sent,
+        });
+        let key = commit_submission(&f.uow, &submission, 5)
+            .await
+            .expect("carbons commit")
+            .message_key
+            .expect("key");
+        backdate_created(&f, key, 200 - index).await;
+        keys.push(key);
+    }
+    let submission = direct_submission(
+        &f,
+        "recoverable-behind-backlog",
+        std::slice::from_ref(&resource),
+    );
+    let tail = commit_submission(&f.uow, &submission, 5)
+        .await
+        .expect("tail commit")
+        .message_key
+        .expect("key");
+    backdate_created(&f, tail, 90).await;
+    let cursor = MaintenanceCursor::default();
+    assert_eq!(pass(&f, &env, &cursor).await, MaintenanceOutcome::Complete);
+    assert!(keys.iter().all(|key| super::attempt_count(*key) == 0));
+    assert_eq!(super::attempt_count(tail), 1);
+    assert_recovered(&f, tail, 1).await;
+    assert_eq!(append_count(&sm, &resource).await, 1);
+    assert_eq!(
+        f.count("ingress_messages WHERE terminal_at IS NULL").await,
+        70
+    );
+    f.close().await;
+}
 async fn row_deadline_bounds_a_stalled_route_and_later_rows_still_run(f: IngressFixture) {
     let sm = persistent_sm(&f).await;
     let first: jid::FullJid = "juliet@example.com/phone".parse().expect("first");
@@ -1869,6 +1932,16 @@ async fn postgres_unrecoverable_only_rows_do_not_enter_the_recovery_scan() {
     }
 }
 
+#[tokio::test]
+async fn sqlite_unsupported_kind_backlog_does_not_starve_recoverable_rows() {
+    unsupported_kind_backlog_does_not_starve_recoverable_rows(IngressFixture::sqlite().await).await;
+}
+#[tokio::test]
+async fn postgres_unsupported_kind_backlog_does_not_starve_recoverable_rows() {
+    if let Some(f) = IngressFixture::postgres("recovery_kind_backlog").await {
+        unsupported_kind_backlog_does_not_starve_recoverable_rows(f).await;
+    }
+}
 #[tokio::test]
 async fn sqlite_unsupported_backlog_is_evaluated_once_then_skipped() {
     unsupported_backlog_is_evaluated_once_then_skipped(IngressFixture::sqlite().await).await;

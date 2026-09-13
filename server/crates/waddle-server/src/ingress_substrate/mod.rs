@@ -10,8 +10,9 @@ pub use maintenance::{
 mod authority_tests;
 pub use authority::{
     advance_frontier, flush_checkpoint, load_envelope, load_stream_checkpoint, lookup_wire_binding,
-    receipts_complete, record_receipt, record_receipt_pooled, record_room_observer_envelope,
-    EffectReceiptKind, EnvelopeVersion, FrontierOutcome, MessageEnvelope,
+    receipt_count, receipts_complete, record_receipt, record_receipt_pooled,
+    record_room_observer_envelope, EffectReceiptKind, EnvelopeVersion, FrontierOutcome,
+    MessageEnvelope,
 };
 
 use std::sync::atomic::{AtomicUsize, Ordering};

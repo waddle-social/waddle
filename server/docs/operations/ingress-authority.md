@@ -122,11 +122,15 @@ the bounded ingress pool and holds at most one connection at a time.
 Recovery is skipped and not recorded until the websocket state binds its
 `RecoveryEnvironment` after boot, so the startup pass may run without a
 recovery phase; the first periodic tick after binding includes it.
-The recovery scan selects old non-terminal rows with unreceipted intents of
-these kinds: `route_direct`, `notification_activity_preview`, `dm_pin_mutation`,
-`muc_invite_ledger`, `groupchat_notification_recovery`, `pending_delivery` and
-`room_observer`. The kind filter alone does not prove recoverability; payload
-provenance and the family rules below still apply.
+The recovery scan pages every old non-terminal row that still has an
+unreceipted intent, in `(created_at, message_key)` order, and flags rows whose
+unreceipted intents include a recoverable kind: `route_direct`,
+`notification_activity_preview`, `dm_pin_mutation`, `muc_invite_ledger`,
+`groupchat_notification_recovery`, `pending_delivery` and `room_observer`.
+Unflagged rows only move the cursor (no lock, no attempt), so a large backlog
+of unsupported rows cannot starve recoverable rows behind it. The flag alone
+does not prove recoverability; payload provenance and the family rules below
+still apply.
 
 A process-local unsupported-row cache stores each message key with its
 `(intents, receipts)` evidence counts when rebuilding yields no executable
@@ -164,8 +168,8 @@ canonical-row lock, so unresolved effects protect a message even when its
 terminal timestamp is stale. The maintenance recovery phase re-executes
 recoverable recorded families; unsupported obligations remain pending and are
 metered when evaluated. Read `ingress.maintenance.unrecoverable_obligations{kind}`
-alongside the CNPG backlog gauge: the kind-filtered scan does not evaluate rows
-containing only unsupported kinds. Never delete protected rows to silence alerts.
+alongside the CNPG backlog gauge: rows whose pending kinds are all unsupported
+are paged past without an attempt and never metered. Never delete protected rows to silence alerts.
 Watch table bytes/live/dead tuples including `ingress_effect_receipts`, and
 CNPG eligible/retained-reference counts alongside reclamation totals.
 
@@ -664,13 +668,19 @@ repeat after send-before-receipt failures, including a crash or receipt timeout,
 across recovery attempts, and against a concurrent client retransmission.
 Quota-refusal bounces are at-most-once: the refusal receipts commit before the
 keyless sender frame, so a crash between commit and send can lose the bounce.
+The bounce is routed through the owner-aware direct-frame path, so under
+clustering a sender attached to another replica still receives it.
 Recovery adds attempts, not new keyless sinks; a durable per-obligation send
 lease and keyed live sends remain follow-up work.
 
 Read `ingress.maintenance.unrecoverable_obligations{kind}` (Prometheus:
 `ingress_maintenance_unrecoverable_obligations_total`) next to the CNPG backlog
 gauge. It counts unsupported evaluations, not the current queue: cached rows
-are skipped and rows with only unsupported kinds do not enter the scan.
+are skipped and rows with only unsupported kinds are paged past unattempted.
+`ingress.maintenance.recovered_obligations` is the number of receipts that
+appeared on a row between the scan and the end of its attempt, so a row
+deadline cancelling an attempt mid-way cannot lose credit; a concurrent client
+retransmission settling the same row is attributed to recovery as well.
 The existing manual repair procedure below remains for unrecoverable families,
 with its explicit reviewed manifest and abandonment semantics.
 

@@ -577,9 +577,14 @@ async fn unreceipted_page_selects_only_recoverable_pending_rows(fixture: Ingress
     .await
     .expect("empty kinds");
     tx.commit().await.expect("scan commit");
-    let keys: Vec<_> = page.into_iter().map(|candidate| candidate.key).collect();
-    assert_eq!(keys, vec![pending_key]);
-    assert!(!keys.contains(&complete) && !keys.contains(&carbons_key));
+    // Every pending row is paged so the cursor can advance past unsupported
+    // ones; only rows with an unreceipted recoverable kind are flagged.
+    let flags: Vec<_> = page
+        .iter()
+        .map(|candidate| (candidate.key, candidate.recoverable))
+        .collect();
+    assert_eq!(flags, vec![(pending_key, true), (carbons_key, false)]);
+    assert!(!page.iter().any(|candidate| candidate.key == complete));
     assert!(empty.is_empty());
     fixture.close().await;
 }

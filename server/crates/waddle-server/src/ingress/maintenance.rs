@@ -383,6 +383,16 @@ async fn recover_candidates(
         };
         let exhausted = candidates.len() < budget.recovery_page_size as usize;
         for candidate in candidates {
+            if !candidate.recoverable {
+                // Paged so the cursor moves past it; nothing here to attempt.
+                *cursor
+                    .recovery_after
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner) =
+                    Some((candidate.created_at, candidate.key));
+                after = Some((candidate.created_at, candidate.key));
+                continue;
+            }
             let unsupported = cursor
                 .recovery_unsupported
                 .lock()
@@ -418,7 +428,7 @@ async fn recover_candidates(
                 ),
             )
             .await;
-            if !record_recovery_result(cursor, candidate, result) {
+            if !record_recovery_result(database, cursor, candidate, result).await {
                 outcome = MaintenanceOutcome::Partial;
             }
             tokio::task::yield_now().await;
@@ -437,7 +447,13 @@ async fn recover_candidates(
     }
 }
 
-fn record_recovery_result(
+/// Account for the row after its future finished, failed or was cancelled by
+/// the row deadline: recovered obligations are the receipts that appeared since
+/// the scan observed the row, so credit survives cancellation mid-execution.
+/// A concurrent client retransmission settling the same row in this window is
+/// attributed here too; the counter is progress telemetry, not an audit log.
+async fn record_recovery_result(
+    database: &Database,
     cursor: &MaintenanceCursor,
     candidate: RecoveryCandidate,
     result: Result<
@@ -446,12 +462,24 @@ fn record_recovery_result(
     >,
 ) -> bool {
     use super::recovery_executor::RowRecovery;
-    use waddle_xmpp::telemetry::reliability::increment_ingress_maintenance_unrecoverable_obligations;
+    use waddle_xmpp::telemetry::reliability::{
+        increment_ingress_maintenance_recovered_obligations,
+        increment_ingress_maintenance_unrecoverable_obligations,
+    };
+    match receipts_now(database, candidate.key).await {
+        Ok(now) => {
+            let recovered = now.saturating_sub(u64::from(candidate.evidence.receipts));
+            if recovered > 0 {
+                increment_ingress_maintenance_recovered_obligations(recovered);
+            }
+        }
+        Err(error) => {
+            tracing::warn!(%error, key = ?candidate.key, "ingress recovery accounting failed");
+        }
+    }
     match result {
         Ok(Ok(RowRecovery::Executed {
-            recovered,
             unrecoverable,
-            terminal,
             unsupported,
         })) => {
             for kind in unrecoverable {
@@ -464,7 +492,6 @@ fn record_recovery_result(
                     .unwrap_or_else(std::sync::PoisonError::into_inner)
                     .insert(candidate);
             }
-            tracing::debug!(key = ?candidate.key, recovered, terminal, "ingress recovery evaluated");
             true
         }
         Ok(Ok(RowRecovery::Vanished | RowRecovery::NothingPending)) => true,
@@ -477,6 +504,10 @@ fn record_recovery_result(
             false
         }
     }
+}
+
+async fn receipts_now(database: &Database, key: MessageKey) -> Result<u64, IngressUowError> {
+    crate::ingress_uow::EffectReceiptRepository::count_pooled(database, key).await
 }
 
 #[cfg(test)]

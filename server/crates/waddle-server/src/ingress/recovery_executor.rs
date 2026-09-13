@@ -21,18 +21,13 @@ pub(super) enum RowRecovery {
     Vanished,
     NothingPending,
     Executed {
-        recovered: u64,
         unrecoverable: Vec<IngressEffectKind>,
-        terminal: bool,
-        /// Only a rebuild with neither effects nor delegation can be cached.
+        /// Nothing left on the row can make progress until its evidence changes.
         unsupported: bool,
     },
 }
 
 struct FrozenRecovery {
-    /// Receipts the freeze wrote while repairing a mutually exclusive
-    /// invitation delivery pair; maintenance recovered them, so count them.
-    repaired: u64,
     envelope: MessageEnvelope,
     created_at: DateTime<Utc>,
     recorded: Vec<IngressEffectIntent>,
@@ -40,6 +35,9 @@ struct FrozenRecovery {
     route_progress: Vec<RouteProgress>,
 }
 
+/// Freeze under the canonical lock, release it, rebuild, then run the arms.
+/// Progress accounting is the caller's: it compares receipt counts around this
+/// call so a row deadline cancelling any await here cannot lose credit.
 pub(super) async fn recover_row(
     database: &Database,
     uow: &IngressUnitOfWork,
@@ -52,18 +50,8 @@ pub(super) async fn recover_row(
     let Some(frozen) = freeze(uow, key).await? else {
         return Ok(RowRecovery::Vanished);
     };
-    report_recovered(frozen.repaired);
     if frozen.unreceipted.is_empty() {
-        return Ok(if frozen.repaired > 0 {
-            RowRecovery::Executed {
-                recovered: frozen.repaired,
-                unrecoverable: Vec::new(),
-                terminal: false,
-                unsupported: false,
-            }
-        } else {
-            RowRecovery::NothingPending
-        });
+        return Ok(RowRecovery::NothingPending);
     }
     #[cfg(test)]
     super::execute::test_hooks::after_recovery_freeze(key).await;
@@ -77,9 +65,6 @@ pub(super) async fn recover_row(
     })?;
     let mut unsupported = rebuilt.decision.external.is_empty() && rebuilt.delegated.is_empty();
     let mut unrecoverable = rebuilt.unrecoverable;
-    let pending = &rebuilt.decision.receipts_pending;
-    let (mut recovered, mut terminal) = (0, false);
-    let mut reported = 0;
     if !rebuilt.decision.external.is_empty() {
         let report = super::execute::execute_effects(
             uow,
@@ -90,31 +75,30 @@ pub(super) async fn recover_row(
             deadline.saturating_duration_since(Instant::now()),
         )
         .await;
-        let (count, is_terminal, missing) = recount(uow, key, pending).await?;
-        (recovered, terminal) = (count, is_terminal);
         // Frames belong to the sender's connection, which no longer exists
         // during recovery. A warning reply an observer produced cannot be
         // delivered; retrying every tick would only re-invoke the plugin. Cache
-        // the row only when nothing else on it can still make progress.
+        // the row only when every receipt still missing is either such a frame
+        // or an obligation this executor cannot rebuild at all.
         if !report.frame_obligations.is_empty() {
-            let mut frame_receipts: Vec<&EffectReceiptKey> = Vec::new();
+            let mut settled_here: Vec<&EffectReceiptKey> =
+                rebuilt.unsupported_receipts.iter().collect();
             for obligation in &report.frame_obligations {
                 let effect = &rebuilt.decision.external[obligation.effect_index];
                 if let Some(kind) = frame_only_kind(effect) {
                     if !unrecoverable.contains(&kind) {
                         unrecoverable.push(kind);
                     }
-                    frame_receipts
+                    settled_here
                         .extend(&rebuilt.decision.external_receipts[obligation.effect_index]);
                 }
             }
+            let missing = missing_receipts(uow, key, &rebuilt.decision.receipts_pending).await?;
             unsupported = !missing.is_empty()
                 && missing
                     .iter()
-                    .all(|receipt| frame_receipts.contains(&receipt));
+                    .all(|receipt| settled_here.contains(&receipt));
         }
-        report_recovered(recovered - reported);
-        reported = recovered;
     }
     for row in &rebuilt.delegated {
         let Some(state) = deps.web_socket_state else {
@@ -123,17 +107,9 @@ pub(super) async fn recover_row(
         };
         crate::server::routes::interpret::reconcile_groupchat_notification_recovery(state, row)
             .await?;
-        // Recount after every settled delegation so a later deferral or the row
-        // deadline cannot lose credit for receipts that already committed.
-        let (count, is_terminal, _) = recount(uow, key, pending).await?;
-        (recovered, terminal) = (count, is_terminal);
-        report_recovered(recovered - reported);
-        reported = recovered;
     }
     Ok(RowRecovery::Executed {
-        recovered: recovered + frozen.repaired,
         unrecoverable,
-        terminal,
         unsupported,
     })
 }
@@ -148,14 +124,6 @@ fn frame_only_kind(
             Some(IngressEffectKind::RoomObserver)
         }
         _ => None,
-    }
-}
-
-fn report_recovered(recovered: u64) {
-    if recovered > 0 {
-        waddle_xmpp::telemetry::reliability::increment_ingress_maintenance_recovered_obligations(
-            recovered,
-        );
     }
 }
 
@@ -185,7 +153,6 @@ async fn freeze(
     }
     // A live invitation delivery and its offline fallback are mutually
     // exclusive: one committed receipt proves both, exactly as alias replay.
-    let before = unreceipted.len();
     super::commit::reconcile_invitation_delivery_receipts(
         &mut tx,
         key,
@@ -193,7 +160,6 @@ async fn freeze(
         &mut unreceipted,
     )
     .await?;
-    let repaired = u64::try_from(before - unreceipted.len()).unwrap_or(u64::MAX);
     let mut route_progress = Vec::new();
     for intent in &unreceipted {
         let IngressEffectIntent::RouteDirect {
@@ -216,7 +182,6 @@ async fn freeze(
     }
     tx.commit().await?;
     Ok(Some(FrozenRecovery {
-        repaired,
         envelope,
         created_at,
         recorded,
@@ -233,25 +198,21 @@ async fn contains(
     EffectReceiptRepository::contains(tx, key, receipt.kind, &receipt.semantic_identity_hash).await
 }
 
-/// Receipts now present, terminal state, and the receipts still missing.
-async fn recount(
+/// Pending receipts that are still absent after execution.
+async fn missing_receipts(
     uow: &IngressUnitOfWork,
     key: MessageKey,
     pending: &[EffectReceiptKey],
-) -> Result<(u64, bool, Vec<EffectReceiptKey>), IngressUowError> {
+) -> Result<Vec<EffectReceiptKey>, IngressUowError> {
     let mut tx = uow.begin().await?;
-    let mut recovered = 0;
     let mut missing = Vec::new();
     for receipt in pending {
-        if contains(&mut tx, key, receipt).await? {
-            recovered += 1;
-        } else {
+        if !contains(&mut tx, key, receipt).await? {
             missing.push(receipt.clone());
         }
     }
-    let terminal = CanonicalMessageRepository::is_terminal(&mut tx, key).await?;
     tx.commit().await?;
-    Ok((recovered, terminal, missing))
+    Ok(missing)
 }
 
 #[cfg(test)]

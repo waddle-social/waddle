@@ -20,6 +20,10 @@ pub struct RecoveryCandidate {
     pub created_at: DateTime<Utc>,
     pub key: MessageKey,
     pub evidence: RecoveryEvidence,
+    /// At least one unreceipted intent has a kind the recovery executor rebuilds.
+    /// Rows without one are still returned so the keyset cursor advances past
+    /// them instead of re-scanning an unsupported backlog every pass.
+    pub recoverable: bool,
 }
 
 /// Select one bounded page without locking canonical rows. The caller installs
@@ -35,8 +39,9 @@ pub async fn receipt_complete_nonterminal_keys(
     page_nonterminal_rows(tx, after, older_than, None, limit, decode_position).await
 }
 
-/// Select non-terminal rows with at least one unreceipted intent of a requested kind.
-/// An empty kind list returns without accessing the database.
+/// Select non-terminal rows with at least one unreceipted intent, flagging those
+/// whose unreceipted intents include a requested kind. An empty kind list returns
+/// without accessing the database.
 pub async fn unreceipted_nonterminal_candidates(
     tx: &mut Transaction<'_>,
     after: Option<(DateTime<Utc>, MessageKey)>,
@@ -70,33 +75,39 @@ async fn page_nonterminal_rows<T>(
         WHERE m.terminal_at IS NULL AND m.created_at < ?
           AND (? IS NULL OR (m.created_at, m.message_key) > (strftime('%Y-%m-%dT%H:%M:%fZ', ?), ?))
     "#;
-    let (existence, kind_filter) = match kinds {
-        Some(kinds) => (
-            "EXISTS",
-            format!(
-                "AND i.kind IN ({})",
-                std::iter::repeat_n("?", kinds.len())
-                    .collect::<Vec<_>>()
-                    .join(", ")
-            ),
-        ),
-        None => ("NOT EXISTS", String::new()),
-    };
-    let evidence = if kinds.is_some() {
-        ", (SELECT count(*) FROM ingress_effect_intents i WHERE i.message_key = m.message_key),
-         (SELECT count(*) FROM ingress_effect_receipts r WHERE r.message_key = m.message_key)"
-    } else {
-        ""
-    };
-    let sql = format!(
-        "{} AND {existence} (
-            SELECT 1 FROM ingress_effect_intents i WHERE i.message_key = m.message_key
+    const UNRECEIPTED: &str =
+        "SELECT 1 FROM ingress_effect_intents i WHERE i.message_key = m.message_key
               {kind_filter}
               AND NOT EXISTS (SELECT 1 FROM ingress_effect_receipts r
                 WHERE r.message_key = i.message_key AND r.kind = i.kind
-                  AND r.semantic_identity_hash = i.semantic_identity_hash))
+                  AND r.semantic_identity_hash = i.semantic_identity_hash)";
+    let existence = if kinds.is_some() {
+        "EXISTS"
+    } else {
+        "NOT EXISTS"
+    };
+    let evidence = match kinds {
+        Some(kinds) => format!(
+            ", (SELECT count(*) FROM ingress_effect_intents i WHERE i.message_key = m.message_key),
+             (SELECT count(*) FROM ingress_effect_receipts r WHERE r.message_key = m.message_key),
+             EXISTS ({})",
+            UNRECEIPTED.replace(
+                "{kind_filter}",
+                &format!(
+                    "AND i.kind IN ({})",
+                    std::iter::repeat_n("?", kinds.len())
+                        .collect::<Vec<_>>()
+                        .join(", ")
+                ),
+            ),
+        ),
+        None => String::new(),
+    };
+    let sql = format!(
+        "{} AND {existence} ({})
         ORDER BY m.created_at, m.message_key LIMIT ?",
-        dialect_sql(tx.driver(), POSTGRES, SQLITE).replace("{evidence}", evidence),
+        dialect_sql(tx.driver(), POSTGRES, SQLITE).replace("{evidence}", &evidence),
+        UNRECEIPTED.replace("{kind_filter}", ""),
     );
     let after_time = after.map(|(created_at, _)| created_at.to_rfc3339());
     let after_key = after.map(|(_, key)| key.to_storage().to_string());
@@ -116,7 +127,9 @@ async fn page_nonterminal_rows<T>(
     } else {
         older_than.to_rfc3339()
     };
-    let mut params = crate::db_params![cutoff, after_time.clone(), after_time, after_key];
+    // Positional placeholders bind in textual order: the recoverable-kind list
+    // sits in the SELECT list, ahead of the WHERE-clause cutoff and cursor.
+    let mut params = Vec::new();
     if let Some(kinds) = kinds {
         params.extend(
             kinds
@@ -124,6 +137,12 @@ async fn page_nonterminal_rows<T>(
                 .map(|kind| crate::db::Value::from(i64::from(kind.to_storage()))),
         );
     }
+    params.extend(crate::db_params![
+        cutoff,
+        after_time.clone(),
+        after_time,
+        after_key
+    ]);
     params.push(crate::db::Value::from(i64::from(limit)));
     let mut rows = tx
         .query(&sql, params)
@@ -151,6 +170,7 @@ fn decode_position(row: &Row) -> Result<(DateTime<Utc>, MessageKey), IngressSubs
 
 fn decode_candidate(row: &Row) -> Result<RecoveryCandidate, IngressSubstrateError> {
     let (created_at, key) = decode_position(row)?;
+    let recoverable: bool = row.get(4).map_err(discard_database_error)?;
     Ok(RecoveryCandidate {
         created_at,
         key,
@@ -158,6 +178,7 @@ fn decode_candidate(row: &Row) -> Result<RecoveryCandidate, IngressSubstrateErro
             intents: decode_count(row, 2)?,
             receipts: decode_count(row, 3)?,
         },
+        recoverable,
     })
 }
 

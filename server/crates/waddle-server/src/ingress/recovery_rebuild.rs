@@ -48,6 +48,8 @@ pub(super) struct RebuiltRecovery {
     pub decision: IngressDecision,
     pub delegated: Vec<GroupchatNotificationRecovery>,
     pub unrecoverable: Vec<IngressEffectKind>,
+    /// Receipts of unreceipted intents no rebuilt effect or delegation can settle.
+    pub unsupported_receipts: Vec<decision::EffectReceiptKey>,
 }
 
 pub(super) fn rebuild(input: RecoveryInput<'_>) -> Result<RebuiltRecovery, IngressUowError> {
@@ -120,15 +122,18 @@ pub(super) fn rebuild(input: RecoveryInput<'_>) -> Result<RebuiltRecovery, Ingre
     let (external_receipts, arm_owned_receipts) =
         decision::assemble_receipts(&external, input.recorded, &input.route_progress)?;
     let mut receipts_pending = Vec::new();
+    let mut unsupported_receipts = Vec::new();
     for intent in input.unreceipted {
         let receipt = super::durable::receipt_key(intent)?;
         if !external_receipts
             .iter()
             .any(|receipts| receipts.contains(&receipt))
             && !is_delegated(intent, &delegated)
-            && !unrecoverable.contains(&intent.kind())
         {
-            unrecoverable.push(intent.kind());
+            if !unrecoverable.contains(&intent.kind()) {
+                unrecoverable.push(intent.kind());
+            }
+            unsupported_receipts.push(receipt.clone());
         }
         receipts_pending.push(receipt);
     }
@@ -163,6 +168,7 @@ pub(super) fn rebuild(input: RecoveryInput<'_>) -> Result<RebuiltRecovery, Ingre
         },
         delegated,
         unrecoverable,
+        unsupported_receipts,
     })
 }
 
