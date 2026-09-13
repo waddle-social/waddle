@@ -49,17 +49,20 @@ and the requester's account when present. Revocation fences new admissions;
 it does not undo a committed message or stop recovery of its recorded effects.
 An in-flight transaction holding the grant can finish before revocation commits.
 
-Startup calls `sync_configured` with the complete configured plugin set. Plugins
-with `HostMessageSend` receive send grants and grants for their configured
+Grant revocation is configuration-driven only. Startup calls `sync_configured`
+with the complete configured plugin set after database lineage is attested.
+Plugins with `HostMessageSend` receive send grants and grants for their configured
 provider rooms; removed plugins, lost send capability and removed rooms revoke
 the corresponding active grants. Sending only resolves existing grants and
-never mints them. Configuration is the source of truth: a restart with unchanged
-configuration deliberately re-grants a runtime or SQL revocation using a fresh
-grant id. For revocation to survive restart, remove the plugin, capability or
-provider room from configuration on every replica. Keep the complete configured
-set consistent across replicas; another replica's startup sync can re-grant it.
-`ExtensionGrantRepository::revoke_plugin` revokes all active grants for a plugin;
-automatic unload/hot-reload invocation of that API is not wired in this change.
+never mints them. To revoke authority, remove the plugin, capability or provider
+room from configuration on every replica and restart with that configuration.
+Keep the complete configured set consistent across replicas; another replica's
+startup sync can re-grant authority still present in its configuration. There is
+no runtime unload or grant revocation API. A database whose lineage cannot be
+attested stays unready and refuses external admission until the operator
+corrects it and restarts. Grant sync runs before the node serves extension
+invocations. A send with no active grant fails closed as `NotAuthorized`; an
+internal lookup against unattested lineage fails closed with a storage error.
 
 Inspect grants with the application database role. Replace the plugin placeholder
 with the exact configured id; these queries include revoked history.
@@ -71,13 +74,6 @@ SELECT grant_id, plugin_id, scope, room_jid, granted_at, revoked_at
 FROM extension_grants
 WHERE plugin_id = '<plugin-id>'
 ORDER BY scope, room_jid, granted_at, grant_id;
-
-BEGIN IMMEDIATE;
-UPDATE extension_grants
-SET revoked_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now')
-WHERE plugin_id = '<plugin-id>' AND revoked_at IS NULL
-RETURNING grant_id, plugin_id, scope, room_jid, revoked_at;
-COMMIT;
 ```
 
 PostgreSQL (application role, not `pg_monitor`):
@@ -87,32 +83,24 @@ SELECT grant_id, plugin_id, scope, room_jid, granted_at, revoked_at
 FROM extension_grants
 WHERE plugin_id = '<plugin-id>'
 ORDER BY scope, room_jid, granted_at, grant_id;
-
-BEGIN;
-UPDATE extension_grants
-SET revoked_at = now()
-WHERE plugin_id = '<plugin-id>' AND revoked_at IS NULL
-RETURNING grant_id, plugin_id, scope, room_jid, revoked_at;
-COMMIT;
 ```
 
-The UPDATE revokes all active scopes for the plugin. To revoke only one provider
-room, add `AND scope = 1 AND room_jid = '<room-bare-jid>'` to its WHERE clause.
-Retain the returned rows and successful commit result as the revocation record;
-do not delete grants or fabricate ingress receipts. No operator grant UI ships.
+Retain the revoked history as the configuration reconciliation record; do not
+delete grants or fabricate ingress receipts. No operator grant UI ships.
 
 The host consumes sender frames and bot reflections captured with
 `Deps.host_sender`; there is no sender socket to write. One
 `NestedIngressOperation` permit covers planning and authority-owned commit,
 execution and frame settlement. A queued drain refuses a new nested operation
 without waiting; admitted work keeps its permit until completion even if its
-caller is cancelled. The first typed stanza error is surfaced after successful
-settlement. Offline quota uses `SettledRefusal::OfflineQuotaExceeded`, mapped to
+caller is cancelled. The first typed stanza error is surfaced when its
+settlement outcome is available, independently of receipt persistence. A
+`cancel` error maps to the plugin `Denied` code and must not be retried. Offline quota uses `SettledRefusal::OfflineQuotaExceeded`, mapped to
 XEP-0160 `cancel` / `service-unavailable`, after pending and notification
 obligations settle without a pending row or candidate insert.
 
 The adapter waits up to two seconds for settlement after commit. Expiry or a
-settlement persistence failure returns acceptance; an enclosing caller timeout
+settlement persistence failure without a known rejection returns acceptance; an enclosing caller timeout
 returns no response, while authority-owned settlement continues. Frame receipt
 writes retry for up to five seconds without dispatching the effects again.
 Exhaustion can leave a committed non-terminal row whose frame-only obligations

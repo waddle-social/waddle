@@ -142,12 +142,17 @@ SM parts and is fenced by the room claim.
 asserts a durable `extension_grants` row instead of an authenticated session.
 The exact grant id must be active and match the plugin and scope; the identity's
 plugin and requester must match the principal. A provider-room grant must match
-the target room. When present, the requester's `users` row is also asserted.
+the target room. When present, the requester's account is asserted in either
+`users` (by JID) or `native_users` (by username and domain), covering OIDC and
+native SCRAM registration.
 PostgreSQL holds the grant and account `FOR SHARE` through commit; SQLite uses
 its ingress transaction's write serialization. Missing, revoked or mismatched
 grants and deleted requester accounts refuse admission as `principal_missing`.
 Existing manifest, roster and room permission checks still run before planning.
-Local-room fencing remains driven by the plan's room execution path.
+Local-room fencing remains driven by the plan's room execution path. Grant
+revocation is configuration-driven only: startup `sync_configured` reconciles
+the complete plugin/capability/provider-room set. No runtime unload or grant
+revocation API exists.
 
 The effective sender is the requester for direct sends and the plugin actor
 bare JID for groupchat. Both paths carry a typed XEP-0359 origin-id derived from
@@ -162,17 +167,21 @@ submission and continuation to an authority-owned task. That task commits,
 executes and settles without reacquiring admission; caller cancellation cannot
 cancel committed work, and drain waits for its permit. `Deps.host_sender`
 captures sender-directed frames during planning. The continuation consumes those
-frames (including bot reflection) as the host transport and settles their
+frames (including bot reflection and copies addressed to other synthetic bot
+occupants on the configured extensions domain) as the host transport and settles their
 obligations, retrying receipt persistence within a five-second budget without
 re-dispatching effects.
 
-The host reports the first typed stanza error after successful settlement.
+The host reports the first typed stanza error when the settlement outcome is
+available, even if its receipt persistence failed. A known rejection is
+independent of receipt durability; `cancel` errors map to the plugin
+`Denied` code, so plugins are not instructed to retry them.
 Offline quota refusal is carried by `SettledRefusal::OfflineQuotaExceeded` and
 mapped to the existing XEP-0160 `cancel` / `service-unavailable` error; pending
 and notification obligations settle before that response, without inserting a
 pending row or candidate. The plugin API is unchanged: if the two-second
 settlement-response deadline expires after commit, or settlement persistence
-fails, the adapter returns acceptance. An enclosing caller timeout instead
+fails without a known rejection, the adapter returns acceptance. An enclosing caller timeout instead
 produces no response while the authority-owned task continues. Exhausting frame
 settlement retries can leave a committed non-terminal row; maintenance cannot
 reconstruct frame-only obligations. This is the host-transport form of the
@@ -186,7 +195,9 @@ recovery linked to the canonical `message_key`. It keeps server-authored sender
 authority, no sender inbox projection, no enrichment and no observers. Existing
 bot occupancy (nickname and session generation) is reused; join and initial
 presence only run for an absent bot, as authorized lifecycle work outside message
-receipts. The digest uses the offered unsigned envelope before validation and
+receipts. A shared in-process guard keyed by plugin and room serializes the
+snapshot/join/admission sequence across adapters, preventing concurrent first
+sends from joining twice. The digest uses the offered unsigned envelope before validation and
 clock-dependent signing; the signed envelope is persisted and sent. Occupant
 copies retain XEP-0045, thread, reply, markup and stanza-id semantics, with the
 added origin-id. Remote-owned rooms receive the typed
