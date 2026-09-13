@@ -189,18 +189,28 @@ pub(crate) async fn bounce_offline_quota(
         },
     };
     for full in resources {
-        if matches!(
-            super::deliver_direct_to_full_with_registered_remote(deps, &full, &bounce_stanza).await,
-            FullJidDeliveryOutcome::Delivered | FullJidDeliveryOutcome::QueuedDetached
-        ) || matches!(
-            // Sockets registered only in the connection registry (no user actor
+        match super::deliver_direct_to_full_with_registered_remote(deps, &full, &bounce_stanza)
+            .await
+        {
+            FullJidDeliveryOutcome::Delivered | FullJidDeliveryOutcome::QueuedDetached => {
+                delivered = true;
+            }
+            // Confirmed that no actor or detached session attempted a send:
+            // sockets registered only in the connection registry (no user actor
             // mirror) keep receiving the bounce exactly as before.
-            deps.connection_registry
-                .send_to(&full, bounce_stanza.clone())
-                .await,
-            waddle_xmpp::registry::SendResult::Sent
-        ) {
-            delivered = true;
+            FullJidDeliveryOutcome::Unavailable => {
+                if matches!(
+                    deps.connection_registry
+                        .send_to(&full, bounce_stanza.clone())
+                        .await,
+                    waddle_xmpp::registry::SendResult::Sent
+                ) {
+                    delivered = true;
+                }
+            }
+            // An ambiguous drop may already have enqueued the frame on the very
+            // connection the registry would reach; never send it twice.
+            _ => {}
         }
     }
     if delivered {

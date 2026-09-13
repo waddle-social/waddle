@@ -428,7 +428,7 @@ async fn recover_candidates(
                 ),
             )
             .await;
-            if !record_recovery_result(database, cursor, candidate, result).await {
+            if !record_recovery_result(database, cursor, candidate, result) {
                 outcome = MaintenanceOutcome::Partial;
             }
             tokio::task::yield_now().await;
@@ -447,12 +447,15 @@ async fn recover_candidates(
     }
 }
 
+/// Upper bound for the detached receipt-count read behind the recovered counter.
+const RECOVERY_ACCOUNTING_BUDGET: Duration = Duration::from_secs(1);
+
 /// Account for the row after its future finished, failed or was cancelled by
 /// the row deadline: recovered obligations are the receipts that appeared since
 /// the scan observed the row, so credit survives cancellation mid-execution.
 /// A concurrent client retransmission settling the same row in this window is
 /// attributed here too; the counter is progress telemetry, not an audit log.
-async fn record_recovery_result(
+fn record_recovery_result(
     database: &Database,
     cursor: &MaintenanceCursor,
     candidate: RecoveryCandidate,
@@ -466,17 +469,33 @@ async fn record_recovery_result(
         increment_ingress_maintenance_recovered_obligations,
         increment_ingress_maintenance_unrecoverable_obligations,
     };
-    match receipts_now(database, candidate.key).await {
-        Ok(now) => {
-            let recovered = now.saturating_sub(u64::from(candidate.evidence.receipts));
-            if recovered > 0 {
-                increment_ingress_maintenance_recovered_obligations(recovered);
+    // Detached from the maintenance future so the phase deadline, which can
+    // fire right after a row's receipts committed, cannot cancel the credit.
+    // The read is one bounded pooled query; nothing else awaits it.
+    let accounting_database = database.clone();
+    tokio::spawn(async move {
+        let key = candidate.key;
+        let before = u64::from(candidate.evidence.receipts);
+        match tokio::time::timeout(
+            RECOVERY_ACCOUNTING_BUDGET,
+            receipts_now(&accounting_database, key),
+        )
+        .await
+        {
+            Ok(Ok(now)) => {
+                let recovered = now.saturating_sub(before);
+                if recovered > 0 {
+                    increment_ingress_maintenance_recovered_obligations(recovered);
+                }
+            }
+            Ok(Err(error)) => {
+                tracing::warn!(%error, ?key, "ingress recovery accounting failed");
+            }
+            Err(_) => {
+                tracing::warn!(?key, "ingress recovery accounting timed out");
             }
         }
-        Err(error) => {
-            tracing::warn!(%error, key = ?candidate.key, "ingress recovery accounting failed");
-        }
-    }
+    });
     match result {
         Ok(Ok(RowRecovery::Executed {
             unrecoverable,
