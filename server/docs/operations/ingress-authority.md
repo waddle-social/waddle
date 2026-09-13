@@ -912,7 +912,7 @@ remote-resource owner refresh resolves locally against a detached recipient,
 `deliver_local_full_jid_after_target_refresh` passes no append context
 (`clustering/route_bridge/delivery/local.rs:109-127`), so that append is unkeyed
 and a failed effect-receipt write can let recovery append the same resource
-again. That residue is tracked by #1760.
+again. That residue is tracked by #1778 (carved out of #1760).
 
 Earlier committed progress survives restart and is excluded from later
 decisions. Progress writes and the final aggregate receipt share one
