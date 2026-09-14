@@ -1091,15 +1091,25 @@ while unfinished recorded copies discharge progress. Recovery requires the
 subject/pin/exact system archive receipts and never relays remote-owned copies.
 See RFC 0018 §3.3e for the full settlement contract.
 
-A diverted room-origin channel keeps remote occupant copies pending on
-same-channel retransmission; resource re-registration alone does not clear it.
-A changed room-origin or target-user ownership epoch selects a new channel;
-owner refresh during an in-flight send can also forget the old channel when
-the target becomes local or its epoch changes. This is not a reset on successful
-validation: an already-diverted channel is rejected before sending. Maintenance
-never relays and cannot clear this channel condition. Ownership is relative to
-the recovering node: the destination node's own maintenance can still deliver
-the globally recorded copy through its local registry and settle its progress.
+After relay reachability returns, a client retransmission with the same
+origin-id can complete the unfinished remote copy, record its progress, settle
+the aggregate receipt and terminalize the row once all obligations are complete.
+The two-process regression checks this recovery without assuming that the
+failed attempt diverted the occupant-copy channel: a timeout of the fault-control
+ask alone does not establish that the separate delivery ask timed out.
+
+An actual diversion has no time-based expiry. A changed room-origin or
+target-user ownership epoch selects a fresh channel. Owner refresh during an
+in-flight send explicitly forgets the old channel when the target becomes local
+or its target epoch changes; it cannot rescue an already-diverted unchanged
+channel, which is rejected before sending. A relay lookup miss (`NotFound`)
+instead rolls back the sequence without diverting and permits delivery fallback.
+Successful ping or resource re-registration alone does not clear a diversion.
+The regression's recovered socket delivery and receipts do not identify which
+of these paths occurred; they do not prove a same-channel diversion reset.
+Maintenance never relays. Ownership is relative to the recovering node: the
+destination node's own maintenance can still deliver the globally recorded copy
+through its local registry and settle its progress.
 
 ### Pending delivery and SM database placement
 

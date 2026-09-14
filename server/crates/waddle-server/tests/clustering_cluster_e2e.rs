@@ -1159,7 +1159,7 @@ async fn cluster_exit_criteria_end_to_end() {
         result.expect("concurrent echo task");
     }
 
-    partial_room_fanout_stays_pending_during_remote_relay_timeout(
+    partial_room_fanout_completes_on_retransmission_after_relay_recovery(
         &db,
         &server_a,
         &server_b,
@@ -2520,11 +2520,11 @@ async fn groupchat_fanout_reaches_foreign_node_occupant_and_terminalizes() {
 /// non-sender only. Reuse the singleton swarm's fault handle; no second
 /// `swarm::spawn` is legal in this integration-test binary.
 ///
-/// This pins partial progress before the maintenance grace period, not
-/// recovery after a target-owner epoch change. The two subprocesses share
+/// A same-origin retransmission after relay recovery completes the remaining
+/// copy before the maintenance grace period. The two subprocesses share
 /// eligible rows, so aging this row cannot isolate origin-node maintenance:
 /// B's maintenance can legitimately deliver its own local occupant copy.
-async fn partial_room_fanout_stays_pending_during_remote_relay_timeout(
+async fn partial_room_fanout_completes_on_retransmission_after_relay_recovery(
     db: &Database,
     server_a: &TestServer,
     server_b: &TestServer,
@@ -2707,52 +2707,67 @@ async fn partial_room_fanout_stays_pending_during_remote_relay_timeout(
     receive_fanout_copy(&mut sender, &from, "m2", None)
         .await
         .expect("first attempt reflection");
-    // Restore reachability, then exercise a real client retransmission. The
-    // timed-out room-origin channel remains diverted within these claim epochs
-    // (route_bridge/validation.rs and delivery/ordered_send.rs), so reachability
-    // alone cannot supply delivery proof for the remaining remote occupant.
-    tokio::time::sleep_until(blocked_at + Duration::from_secs(31)).await;
-    ping_until(relay_b, node_b, Duration::from_secs(15))
+    // Restore reachability, then exercise a real same-origin retransmission.
+    // The socket and durable receipts prove recovery; this does not assume
+    // that the failed attempt permanently diverted an unchanged channel.
+    ping_until(relay_b, node_b, Duration::from_secs(35))
         .await
         .expect("B relay wakes");
     send_partial_fanout_with_origin(&mut sender, &room, "m2", pending).await;
     receive_fanout_copy(&mut sender, &from, "m2", None)
         .await
         .expect("retransmission reflection proves the retry was processed");
+    receive_fanout_copy(&mut remote, &from, "m2", None)
+        .await
+        .expect("remaining remote copy arrives after relay recovery");
     assert_eq!(partial_fanout_key(db, &pending).await, pending_key);
-    assert_eq!(
-        partial_fanout_resources(db, pending_key).await,
-        vec![local_jid],
-        "a diverted relay cannot manufacture remote delivery progress"
-    );
-    assert!(
-        !partial_fanout_terminal(db, pending_key).await,
-        "same-epoch retransmission stays pending after an uncertain relay timeout"
-    );
-    // The original timed-out ask may execute when B wakes. It can produce at
-    // most one copy; the diverted retry must never produce another one.
-    let mut copies = 0;
-    loop {
-        let result = remote
-            .recv_matching_within(Duration::from_millis(250), |frame| {
+    let mut completed = vec![local_jid, remote_jid];
+    completed.sort();
+    tokio::time::timeout(Duration::from_secs(15), async {
+        while partial_fanout_resources(db, pending_key).await != completed
+            || !partial_fanout_terminal(db, pending_key).await
+        {
+            tokio::time::sleep(Duration::from_millis(100)).await;
+        }
+    })
+    .await
+    .expect("both occupant receipts settle the partial fanout and terminalize the row");
+    {
+        let conn = db
+            .guard()
+            .await
+            .expect("recovered aggregate receipt snapshot");
+        let mut rows = conn.query(
+            "SELECT count(*) FROM ingress_effect_receipts WHERE message_key = ?::uuid AND kind = 2",
+            waddle_server::db_params![pending_key.to_string()],
+        ).await.expect("recovered aggregate receipt count");
+        let count: i64 = rows
+            .next()
+            .await
+            .expect("aggregate query")
+            .expect("aggregate row")
+            .get(0)
+            .expect("aggregate count");
+        assert_eq!(count, 1, "all non-sender copies settle the aggregate");
+    }
+    for (client, label) in [(&mut local, "local"), (&mut remote, "remote")] {
+        let duplicate = client
+            .recv_matching_within(Duration::from_millis(500), |frame| {
                 frame.parse::<minidom::Element>().is_ok_and(|element| {
                     element.is("message", waddle_xmpp::ns::JABBER_CLIENT)
                         && element.attr("id") == Some("m2")
                 })
             })
             .await;
-        match result {
-            Ok(_) => {
-                copies += 1;
-                assert!(copies <= 1, "retransmission duplicated the remote copy");
-            }
-            Err(error) if error.starts_with("Timeout waiting") => break,
-            Err(error) => panic!("remote receive failed: {error}"),
-        }
+        assert!(
+            matches!(duplicate, Err(ref error) if error.starts_with("Timeout waiting")),
+            "retransmission must not duplicate the {label} copy: {duplicate:?}"
+        );
     }
+    assert!(partial_fanout_terminal(db, pending_key).await);
     assert!(
         blocked_at.elapsed() < Duration::from_secs(55),
-        "check the pending end state before maintenance eligibility"
+        "check completion before maintenance eligibility"
     );
     remote.close().await.expect("remote closes");
     local.close().await.expect("local closes");
