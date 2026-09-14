@@ -70,6 +70,9 @@ fn make_submission(fixture: &IngressFixture, system: bool) -> IngressSubmission 
             route_identity: identity,
         }
     }];
+    if !system {
+        submission.plan.sanitized_message.from = source.from.clone();
+    }
     submission.plan.room_canonical_message = Some(Box::new(source.clone()));
     copies(&mut submission, &source);
     submission
@@ -178,6 +181,7 @@ pub async fn replay(fixture: IngressFixture, system: bool, reconnect: bool, old_
     detached::attach(&sm, &a).await;
     detached::attach(&sm, &submission.sender).await;
     if old_row {
+        submission.plan.sanitized_message.from = Some(submission.sender.clone().into());
         submission.plan.room_canonical_message = None;
         submission.plan.plan.clear();
     }
@@ -196,7 +200,6 @@ pub async fn replay(fixture: IngressFixture, system: bool, reconnect: bool, old_
     }
     if reconnect {
         submission.sender = "romeo@example.com/new".parse().expect("rejoined sender");
-        submission.plan.sanitized_message.from = Some(submission.sender.clone().into());
         refresh_digest(&mut submission);
         detached::attach(&sm, &submission.sender).await;
     }
@@ -216,6 +219,7 @@ pub async fn replay(fixture: IngressFixture, system: bool, reconnect: bool, old_
                 .into(),
         );
     }
+    submission.plan.sanitized_message.from = source.from.clone();
     copies(&mut submission, &source);
     let retry = commit_submission(&fixture.uow, &submission, 5)
         .await
