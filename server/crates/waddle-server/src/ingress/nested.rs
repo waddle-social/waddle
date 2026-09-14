@@ -55,6 +55,7 @@ pub struct SettlementOutcome {
 pub struct NestedContinuation {
     state: Arc<WebSocketState>,
     session: Option<Session>,
+    host_sender: jid::FullJid,
     #[cfg(test)]
     before_execute: Option<Arc<TestGate>>,
     #[cfg(test)]
@@ -62,10 +63,15 @@ pub struct NestedContinuation {
 }
 
 impl NestedContinuation {
-    pub fn new(state: Arc<WebSocketState>, session: Option<Session>) -> Self {
+    pub fn new(
+        state: Arc<WebSocketState>,
+        session: Option<Session>,
+        host_sender: jid::FullJid,
+    ) -> Self {
         Self {
             state,
             session,
+            host_sender,
             #[cfg(test)]
             before_execute: None,
             #[cfg(test)]
@@ -74,12 +80,16 @@ impl NestedContinuation {
     }
 
     fn deps(&self) -> Deps<'_> {
-        build_interpret_deps(
+        let mut deps = build_interpret_deps(
             &self.state,
             self.session
                 .as_ref()
                 .map(ResolvedPrincipal::from_authenticated_session),
-        )
+        );
+        deps.host_sender = Some(
+            crate::server::routes::interpret::HostOwnedResources::Sender(self.host_sender.clone()),
+        );
+        deps
     }
 }
 

@@ -109,8 +109,11 @@ impl ExtensionHostAdapter {
             plan: planned.plan,
             connection_generation: TransportGeneration::Host,
         };
-        let continuation =
-            NestedContinuation::new(Arc::clone(&self.state), invocation.session.clone());
+        let continuation = NestedContinuation::new(
+            Arc::clone(&self.state),
+            invocation.session.clone(),
+            submission.sender.clone(),
+        );
         let outcome = operation
             .commit_and_continue(submission, continuation)
             .await;

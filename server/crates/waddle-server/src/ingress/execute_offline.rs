@@ -83,12 +83,16 @@ pub(super) async fn execute(
             settled.refusal = Some(
                 crate::server::routes::interpret::effects::SettledRefusal::OfflineQuotaExceeded,
             );
-            crate::server::routes::interpret::offline_delivery::bounce_offline_quota(
-                deps,
-                &row.recipient,
-                original_message,
-            )
-            .await;
+            // The host consumes the typed refusal; its synthetic sender can
+            // share a full JID with an unrelated registered client.
+            if deps.host_sender.is_none() {
+                crate::server::routes::interpret::offline_delivery::bounce_offline_quota(
+                    deps,
+                    &row.recipient,
+                    original_message,
+                )
+                .await;
+            }
             EffectOutcome::Settled(settled)
         }
         Err(error) => {

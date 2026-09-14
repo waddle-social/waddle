@@ -98,7 +98,11 @@ async fn exercise(f: IngressFixture) {
 
     let offered = submission(&f, "nested-origin").await;
     let gate = Arc::new(TestGate::default());
-    let mut continuation = NestedContinuation::new(state(&f, Arc::clone(&authority)).await, None);
+    let mut continuation = NestedContinuation::new(
+        state(&f, Arc::clone(&authority)).await,
+        None,
+        offered.sender.clone(),
+    );
     continuation.before_execute = Some(Arc::clone(&gate));
     let operation = authority.try_begin_nested().expect("admitted operation");
     let outcome = operation
@@ -137,7 +141,11 @@ async fn exercise(f: IngressFixture) {
     // A caller timeout drops the settlement handle, but the admitted task remains alive.
     let authority = Arc::new(f.authority().await);
     let gate = Arc::new(TestGate::default());
-    let mut continuation = NestedContinuation::new(state(&f, Arc::clone(&authority)).await, None);
+    let mut continuation = NestedContinuation::new(
+        state(&f, Arc::clone(&authority)).await,
+        None,
+        offered.sender.clone(),
+    );
     continuation.before_settlement = Some(Arc::clone(&gate));
     let operation = authority.try_begin_nested().expect("replay admission");
     let caller = tokio::spawn(async move {
@@ -206,7 +214,7 @@ async fn persistence_failure(f: IngressFixture) {
     let outcome = operation
         .commit_and_continue(
             offered.clone(),
-            NestedContinuation::new(Arc::clone(&context), None),
+            NestedContinuation::new(Arc::clone(&context), None, offered.sender.clone()),
         )
         .await;
     let NestedOutcome::Committed { settlement, .. } = outcome else {
@@ -229,10 +237,11 @@ async fn persistence_failure(f: IngressFixture) {
         }
     };
     f.execute(drop_trigger, ()).await;
+    let continuation = NestedContinuation::new(Arc::clone(&context), None, offered.sender.clone());
     let outcome = authority
         .try_begin_nested()
         .expect("retry admission")
-        .commit_and_continue(offered, NestedContinuation::new(Arc::clone(&context), None))
+        .commit_and_continue(offered, continuation)
         .await;
     let NestedOutcome::Committed {
         decision_class,
