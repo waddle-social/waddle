@@ -268,7 +268,7 @@ async fn subject_broadcast_after_actor_commit(
     let occupant_id = waddle_xmpp::xep::xep0421::generate_occupant_id(
         &sender.to_bare(),
         &room,
-        &OccupantIdSecret::new(vec![b's'; 32]).expect("secret"),
+        &crate::config::test_occupant_id_secret(),
     );
     waddle_xmpp::xep::xep0421::set_occupant_id_on_message(message, &occupant_id);
     let mut canonical = message.clone();

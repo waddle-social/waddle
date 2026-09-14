@@ -1555,7 +1555,7 @@ fn parse_host_patterns_var(
 const TEST_OCCUPANT_ID_SECRET: &str = "test-occupant-id-secret-32-bytes-long";
 
 #[cfg(test)]
-fn test_occupant_id_secret() -> OccupantIdSecret {
+pub(crate) fn test_occupant_id_secret() -> OccupantIdSecret {
     OccupantIdSecret::new(TEST_OCCUPANT_ID_SECRET.as_bytes().to_vec())
         .expect("test secret meets length floor")
 }
