@@ -283,6 +283,15 @@ pub struct Deps<'a> {
 }
 
 impl<'a> Deps<'a> {
+    pub(crate) fn owns_host_resource(&self, target: &FullJid) -> bool {
+        self.host_sender
+            .as_ref()
+            .is_some_and(|host| host.owns(target))
+            || self
+                .web_socket_state
+                .is_some_and(|state| HostOwnedResources::owns_configured_bot(target, state))
+    }
+
     pub fn with_ordered_relay_origin(mut self, origin: Option<OrderedRelayRouteOrigin>) -> Self {
         self.ordered_relay_origin = origin;
         self

@@ -426,3 +426,6 @@ async fn postgres_muc_occupant_progress_old_provenance_reflection() {
 
 #[path = "muc_occupant_progress_tests/sibling_retry.rs"]
 mod sibling_retry;
+
+#[path = "muc_occupant_progress_tests/host_owned.rs"]
+mod host_owned;

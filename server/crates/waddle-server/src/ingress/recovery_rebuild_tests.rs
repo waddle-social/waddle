@@ -53,6 +53,7 @@ fn run_at(
         created_at,
         recorded,
         unreceipted: pending,
+        host_owned_resources: vec![],
         blocked_recipients: &[],
         route_progress: pending
             .iter()
@@ -191,6 +192,7 @@ fn partially_completed_fanout_keeps_only_remaining_resources() {
         created_at: Utc::now(),
         recorded: &routes,
         unreceipted: &routes,
+        host_owned_resources: vec![],
         blocked_recipients: &[],
         route_progress: vec![progress.clone()],
     })
@@ -581,6 +583,7 @@ fn blocked_recipient_discards_a_pre_restored_muc_decline_route() {
         recorded: &intents,
         unreceipted: pending,
         route_progress: vec![progress_for(&intents[1])],
+        host_owned_resources: vec![],
         blocked_recipients: &[bare("juliet@example.com")],
     })
     .expect("blocked rebuild");

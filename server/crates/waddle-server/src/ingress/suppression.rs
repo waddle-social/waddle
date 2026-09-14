@@ -134,7 +134,8 @@ fn route_progress_filter(
     if !matches!(
         effect,
         ExternalEffect::Delivery(
-            ExternalDeliveryEffect::QueueDetached { .. }
+            ExternalDeliveryEffect::HostOwnedCopy { .. }
+                | ExternalDeliveryEffect::QueueDetached { .. }
                 | ExternalDeliveryEffect::RouteToPeer { .. }
                 | ExternalDeliveryEffect::RelayFullJid { .. }
         )

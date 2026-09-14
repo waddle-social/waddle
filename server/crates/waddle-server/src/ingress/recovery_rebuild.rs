@@ -44,6 +44,7 @@ pub(super) struct RecoveryInput<'a> {
     pub recorded: &'a [IngressEffectIntent],
     pub unreceipted: &'a [IngressEffectIntent],
     pub route_progress: Vec<RouteProgress>,
+    pub host_owned_resources: Vec<jid::FullJid>,
     pub blocked_recipients: &'a [jid::BareJid],
 }
 pub(super) struct RebuiltRecovery {

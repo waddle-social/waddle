@@ -601,6 +601,7 @@ async fn observer_source_without_deliverable_copy(fixture: IngressFixture, late_
                 recorded: &submission.plan.intents,
                 unreceipted: std::slice::from_ref(observer),
                 route_progress: vec![],
+                host_owned_resources: vec![],
                 blocked_recipients: &[],
             },
         )

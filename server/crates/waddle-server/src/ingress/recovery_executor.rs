@@ -59,6 +59,13 @@ pub(super) async fn recover_row(
     #[cfg(test)]
     super::execute::test_hooks::after_recovery_freeze(key).await;
     let blocked_recipients = blocked_recipients(deps, &frozen).await?;
+    let host_owned_resources = frozen
+        .route_progress
+        .iter()
+        .flat_map(|progress| &progress.fanout)
+        .filter(|target| deps.owns_host_resource(target))
+        .cloned()
+        .collect();
     let rebuilt = recovery_rebuild::rebuild(recovery_rebuild::RecoveryInput {
         key,
         envelope: &frozen.envelope,
@@ -66,6 +73,7 @@ pub(super) async fn recover_row(
         recorded: &frozen.recorded,
         unreceipted: &frozen.unreceipted,
         route_progress: frozen.route_progress,
+        host_owned_resources,
         blocked_recipients: &blocked_recipients,
     })?;
     record_discarded_receipts(uow, key, &rebuilt.discarded_receipts).await?;

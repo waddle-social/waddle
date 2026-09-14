@@ -33,7 +33,11 @@ pub(super) async fn execute(
     effect: &ExternalDeliveryEffect,
     deps: &Deps<'_>,
 ) -> EffectOutcome {
+    let no_call_setup = None;
     let (resources, call_setup) = match effect {
+        ExternalDeliveryEffect::HostOwnedCopy { target, .. } => {
+            (vec![target.clone()], &no_call_setup)
+        }
         ExternalDeliveryEffect::QueueDetached {
             resources,
             call_setup,
@@ -137,6 +141,9 @@ async fn append_resource(
     resource: &FullJid,
 ) -> FullJidDeliveryOutcome {
     match effect {
+        ExternalDeliveryEffect::HostOwnedCopy { target, .. } if target == resource => {
+            FullJidDeliveryOutcome::Delivered
+        }
         ExternalDeliveryEffect::QueueDetached { stanza, .. } => {
             let (queued, _) = queue_processed_for_detached(
                 deps,

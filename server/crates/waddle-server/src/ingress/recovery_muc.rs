@@ -59,18 +59,27 @@ pub(super) fn restore_muc_routes(
             .iter()
             .filter(|occupant| !progress.completed.contains(occupant))
         {
-            plan.plan.push(PlannedEffect::new(Effect::External(
-                ExternalEffect::Delivery(ExternalDeliveryEffect::QueueDetached {
+            let stanza = Box::new(Stanza::Message(room_canonical::occupant_copy_message(
+                source,
+                occupant,
+                input.recorded,
+            )));
+            let delivery = if input.host_owned_resources.contains(occupant) {
+                ExternalDeliveryEffect::HostOwnedCopy {
+                    target: occupant.clone(),
+                    stanza,
+                }
+            } else {
+                ExternalDeliveryEffect::QueueDetached {
                     route_identity: None,
                     call_setup: None,
                     bare: occupant.to_bare(),
                     resources: vec![occupant.clone()],
-                    stanza: Box::new(Stanza::Message(room_canonical::occupant_copy_message(
-                        source,
-                        occupant,
-                        input.recorded,
-                    ))),
-                }),
+                    stanza,
+                }
+            };
+            plan.plan.push(PlannedEffect::new(Effect::External(
+                ExternalEffect::Delivery(delivery),
             )));
         }
     }

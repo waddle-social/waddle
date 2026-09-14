@@ -48,7 +48,8 @@ pub(super) fn owns(effect: &ExternalEffect, route_progress: &[RouteProgress]) ->
             })
         }
         ExternalEffect::Delivery(
-            ExternalDeliveryEffect::QueueDetached { .. }
+            ExternalDeliveryEffect::HostOwnedCopy { .. }
+            | ExternalDeliveryEffect::QueueDetached { .. }
             | ExternalDeliveryEffect::RouteToPeer { .. },
         ) => route_progress.iter().any(|progress| {
             progress.matches(effect)
@@ -80,7 +81,8 @@ pub(super) async fn execute_with_uow(
             Some(recovery::execute(uow, decision, index, room).await)
         }
         ExternalEffect::Delivery(
-            delivery @ (ExternalDeliveryEffect::QueueDetached { .. }
+            delivery @ (ExternalDeliveryEffect::HostOwnedCopy { .. }
+            | ExternalDeliveryEffect::QueueDetached { .. }
             | ExternalDeliveryEffect::RouteToPeer { .. }
             | ExternalDeliveryEffect::RelayFullJid { .. }),
         ) if owns(effect, &decision.route_progress) => {

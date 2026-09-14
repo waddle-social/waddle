@@ -114,10 +114,11 @@ obligations settle without a pending row or candidate insert.
 
 Bot occupants on the configured extensions domain observe messages through
 observer hooks. Their non-sender occupant copies are `HostOwnedCopy` effects:
-the generic executor completes them without socket I/O and writes the ordinary
-route receipt, including when a real user sends the groupchat message. A room
-containing only a sender and a bot can therefore terminalize normally. Duplicate
-admission suppresses already-settled non-sender copies.
+the progress executor completes them without socket I/O, records the bot's
+per-occupant progress, and settles the aggregate route receipt once the frozen
+fan-out is covered. This also applies when a real user sends the groupchat
+message, so a room containing only a sender and a bot can terminalize normally.
+Duplicate admission suppresses already-settled non-sender copies.
 
 The adapter waits up to two seconds for settlement after commit. Expiry or a
 settlement persistence failure without a known rejection returns acceptance; an enclosing caller timeout

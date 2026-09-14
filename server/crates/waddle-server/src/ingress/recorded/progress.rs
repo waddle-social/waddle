@@ -198,7 +198,8 @@ impl RouteProgress {
 pub(crate) fn single_target(effect: &ExternalEffect) -> Option<&FullJid> {
     match effect {
         ExternalEffect::Delivery(
-            ExternalDeliveryEffect::RouteToPeer { jid, .. }
+            ExternalDeliveryEffect::HostOwnedCopy { target: jid, .. }
+            | ExternalDeliveryEffect::RouteToPeer { jid, .. }
             | ExternalDeliveryEffect::RelayFullJid { target: jid, .. },
         ) => Some(jid),
         ExternalEffect::Delivery(ExternalDeliveryEffect::QueueDetached { resources, .. }) => {

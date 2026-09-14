@@ -53,7 +53,8 @@ pub fn restore_delivery_payloads(
         if !matches!(
             effect,
             ExternalEffect::Delivery(
-                ExternalDeliveryEffect::RouteToPeer { .. }
+                ExternalDeliveryEffect::HostOwnedCopy { .. }
+                    | ExternalDeliveryEffect::RouteToPeer { .. }
                     | ExternalDeliveryEffect::QueueDetached { .. }
                     | ExternalDeliveryEffect::RelayFullJid { .. }
             )
@@ -94,7 +95,8 @@ pub fn restore_delivery_payloads(
             }
         };
         if let ExternalEffect::Delivery(
-            ExternalDeliveryEffect::RouteToPeer { stanza, .. }
+            ExternalDeliveryEffect::HostOwnedCopy { stanza, .. }
+            | ExternalDeliveryEffect::RouteToPeer { stanza, .. }
             | ExternalDeliveryEffect::QueueDetached { stanza, .. }
             | ExternalDeliveryEffect::RelayFullJid { stanza, .. },
         ) = effect
@@ -555,7 +557,10 @@ fn external_route_targets(effect: &ExternalEffect) -> Vec<jid::FullJid> {
         ExternalEffect::RouteToPeer(route) | ExternalEffect::QueueOfflineDelivery(route) => {
             route.resources.clone()
         }
-        ExternalEffect::Delivery(ExternalDeliveryEffect::RouteToPeer { jid, .. }) => {
+        ExternalEffect::Delivery(
+            ExternalDeliveryEffect::HostOwnedCopy { target: jid, .. }
+            | ExternalDeliveryEffect::RouteToPeer { jid, .. },
+        ) => {
             vec![jid.clone()]
         }
         ExternalEffect::Delivery(ExternalDeliveryEffect::QueueDetached { resources, .. }) => {
