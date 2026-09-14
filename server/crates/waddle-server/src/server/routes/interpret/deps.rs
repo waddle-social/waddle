@@ -3,6 +3,13 @@ use std::sync::Arc;
 use waddle_xmpp::ingress::IngressEffectIntent;
 use waddle_xmpp::protocol::TimerId;
 
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub(crate) enum DeliveryExecutionContext {
+    #[default]
+    Live,
+    MaintenanceRecovery,
+}
+
 /// Per-stanza origin provenance needed to build an ordered-relay envelope.
 ///
 /// Client-originated stanzas use their live SM stream when available so
@@ -174,6 +181,7 @@ impl HostOwnedResources {
 /// churn small.
 #[derive(Clone)]
 pub struct Deps<'a> {
+    pub(crate) delivery_execution_context: DeliveryExecutionContext,
     /// Owned receipt context scoped to one recorded direct-route resource attempt.
     pub ingress_append_context: Option<SmIngressAppendContext>,
     /// Resources whose planned frames are consumed by an extension host.
@@ -298,6 +306,7 @@ impl<'a> Deps<'a> {
     /// Callers attach the storage and actor handles required by their effects.
     pub fn new(connection_registry: &'a ConnectionRegistry, local_domain: &'a str) -> Self {
         Self {
+            delivery_execution_context: DeliveryExecutionContext::Live,
             effects: &super::effects::ImmediateSink,
             connection_registry,
             user_registry: None,
@@ -339,6 +348,7 @@ impl<'a> Deps<'a> {
         user_registry: &'a kameo::actor::ActorRef<waddle_xmpp::registry::UserRegistryActor>,
     ) -> Self {
         Self {
+            delivery_execution_context: DeliveryExecutionContext::Live,
             effects: &super::effects::ImmediateSink,
             connection_registry,
             user_registry: Some(user_registry),
@@ -372,6 +382,7 @@ impl<'a> Deps<'a> {
         inbox_storage: &'a Arc<dyn InboxStorage>,
     ) -> Self {
         Self {
+            delivery_execution_context: DeliveryExecutionContext::Live,
             effects: &super::effects::ImmediateSink,
             connection_registry,
             user_registry: None,
@@ -403,6 +414,7 @@ impl<'a> Deps<'a> {
         extension_manager: &'a Arc<ExtensionManager>,
     ) -> Self {
         Self {
+            delivery_execution_context: DeliveryExecutionContext::Live,
             effects: &super::effects::ImmediateSink,
             connection_registry,
             user_registry: None,

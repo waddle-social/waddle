@@ -778,7 +778,7 @@ fail-closed before rebuilding routes.
 
 | `kind_family` | Automatic recovery or reason it stays pending |
 | --- | --- |
-| `route_direct` | Recoverable with non-empty recorded fanout when the canonical message is `Chat`/`Normal`, the recipient equals its bare `to`, and the route is neither delegated live full-JID nor DM-pin-owned. Recovery re-evaluates the recipient’s current blocklist fail-closed and durably discards routes from a sender blocked after intake; a blocklist read failure defers the row. Recorded invitation/grant routes and pending-delivery audiences use their specialized restorers, never this generic path. |
+| `route_direct` | Recoverable with non-empty recorded fanout when the canonical message is `Chat`/`Normal`, the recipient equals its bare `to`, and the route is neither delegated live full-JID nor DM-pin-owned. Maintenance delivers only to locally hosted live sockets or locally detached SM sessions; remote-hosted resources stay pending. Recovery re-evaluates the recipient’s current blocklist fail-closed and durably discards routes from a sender blocked after intake; a blocklist read failure defers the row. Recorded invitation/grant routes and pending-delivery audiences use their specialized restorers, never this generic path. |
 | `pending_delivery`, `notification_activity_preview` | Direct pending rows and recorded direct notification previews are rebuilt from the canonical envelope and recorded audience. A quota refusal durably receipts the pending delivery and its notification previews, so recovery never re-queues a refused message. Room notification candidates are covered by matching groupchat notification recovery delegation; unmatched candidates stay pending. |
 | `room_observer` | Rebuilt per recorded plugin when an observer envelope exists; missing observer envelopes are unrecoverable. Invocations are keyless and at-least-once. A plugin whose only outcome is a warning reply to the original sender cannot complete during recovery (that sender's connection is gone); the row is evaluated once and cached as unsupported until its evidence changes. |
 | `groupchat_notification_recovery` | `Completed`/`DeferredPolicy` obligations delegate to the existing notification recovery settlement, which re-locks and revalidates. |
@@ -796,9 +796,9 @@ Recovered direct notification candidates retain canonical receipt time and deleg
 Recovered detached SM appends retain the canonical receipt time, preserving
 XEP-0203 delay stamps across the recovery grace interval.
 
-Remote-owner-only resources reachable through `RelayFullJid` owner routing stay
-pending: recovery covers registered remote sockets and local registries, but
-an append requiring that owner route returns `Unavailable`.
+Remote-hosted resources stay pending: maintenance only uses locally hosted live
+sockets and locally detached SM sessions. It never sends a registered-remote
+relay frame; those attempts return `Unavailable` without writing progress.
 
 Receipts are exactly-once: arms re-lock the canonical row and re-check receipts
 before settlement; generic receipt inserts are idempotent. Side effects are

@@ -8,8 +8,8 @@ use crate::{
         IngressUowError,
     },
     server::routes::interpret::{
-        close_call_setup_from_outcome, deliver_direct_to_full_with_registered_remote,
-        deliver_peer_to_full_with_registered_remote,
+        close_call_setup_from_outcome, deliver_direct_to_full_locally,
+        deliver_direct_to_full_with_registered_remote, deliver_peer_to_full_with_registered_remote,
         effects::{
             delivery::{ExternalDeliveryEffect, PeerDeliveryKind},
             EffectOutcome, ImmediateSink, SettledCompletion, SettledOutcome,
@@ -147,6 +147,10 @@ async fn append_resource(
             .await;
             if queued.contains(resource) {
                 FullJidDeliveryOutcome::QueuedDetached
+            } else if deps.delivery_execution_context
+                == crate::server::routes::interpret::DeliveryExecutionContext::MaintenanceRecovery
+            {
+                deliver_direct_to_full_locally(deps, resource, stanza)
             } else {
                 deliver_direct_to_full_with_registered_remote(deps, resource, stanza).await
             }

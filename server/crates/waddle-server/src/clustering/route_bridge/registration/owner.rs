@@ -257,7 +257,7 @@ impl OrderedRelayDeliveryBridge {
         }
 
         let (tx, rx) = mpsc::channel(REMOTE_RESOURCE_OUTBOUND_CHANNEL_SIZE);
-        let entry = ConnectionEntry::new(tx);
+        let entry = ConnectionEntry::remote_hosted(tx);
         apply_remote_resource_state(&entry, &msg.state);
         let owner = entry.carbons_handle();
         let force_detach_rx = entry.take_force_detach_rx();

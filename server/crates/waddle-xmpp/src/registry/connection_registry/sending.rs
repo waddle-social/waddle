@@ -229,9 +229,28 @@ impl ConnectionRegistry {
     /// Every outcome bumps a Prometheus counter so production drop
     /// rates are visible even when callers discard the return value.
     pub fn try_send_to(&self, jid: &FullJid, stanza: Stanza) -> BroadcastOutcome {
+        self.try_send_to_matching(jid, stanza, |_| true)
+    }
+
+    /// Non-blocking direct-frame send restricted to a WebSocket hosted by
+    /// this process. Cluster owner mirrors are deliberately excluded.
+    pub fn try_send_to_locally_hosted(&self, jid: &FullJid, stanza: Stanza) -> BroadcastOutcome {
+        self.try_send_to_matching(jid, stanza, ConnectionEntry::is_locally_hosted)
+    }
+
+    fn try_send_to_matching(
+        &self,
+        jid: &FullJid,
+        stanza: Stanza,
+        matches: impl FnOnce(&ConnectionEntry) -> bool,
+    ) -> BroadcastOutcome {
         let sender = match self.connections.get(jid) {
-            Some(entry) => entry.value().sender.clone(),
+            Some(entry) if matches(entry.value()) => entry.value().sender.clone(),
             None => {
+                crate::telemetry::reliability::increment_broadcast_not_connected();
+                return BroadcastOutcome::NotConnected;
+            }
+            Some(_) => {
                 crate::telemetry::reliability::increment_broadcast_not_connected();
                 return BroadcastOutcome::NotConnected;
             }

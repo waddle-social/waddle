@@ -22,6 +22,8 @@ pub(crate) fn build_interpret_deps<'a>(
     authenticated_principal: Option<super::ResolvedPrincipal<'a>>,
 ) -> crate::server::routes::interpret::Deps<'a> {
     crate::server::routes::interpret::Deps {
+        delivery_execution_context:
+            crate::server::routes::interpret::DeliveryExecutionContext::Live,
         connection_registry: &state.deps.protocol.connection_registry,
         user_registry: Some(&state.deps.protocol.user_registry),
         sm_session_registry: Some(&state.deps.protocol.sm_session_registry),

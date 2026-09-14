@@ -454,6 +454,49 @@ async fn live_route(f: IngressFixture, full: bool, detached_no_store: bool, head
     }
     f.close().await;
 }
+
+#[cfg(feature = "clustering")]
+async fn registered_remote_direct_route_stays_pending(f: IngressFixture) {
+    let sm = persistent_sm(&f).await;
+    let resource: jid::FullJid = "juliet@example.com/phone".parse().expect("resource");
+    let state = state_for(&f, sm).await;
+    let mut submission = direct_submission(
+        &f,
+        "registered-remote-direct-recovery",
+        std::slice::from_ref(&resource),
+    );
+    retarget(
+        &mut submission,
+        NormalizedTarget::Bare(resource.to_bare()),
+        xmpp_parsers::message::MessageType::Chat,
+    );
+    let decision = commit_submission(&f.uow, &submission, 5)
+        .await
+        .expect("Phase B");
+    let key = decision.message_key.expect("key");
+    let env: Arc<dyn RecoveryEnvironment> = Arc::new(StateEnvironment(state));
+    let registered_remote_targets = Arc::new(std::sync::Mutex::new(Vec::new()));
+    let outcome = crate::server::routes::interpret::CONTROLLED_REGISTERED_REMOTE_DELIVERY
+        .scope(
+            (
+                crate::server::routes::interpret::FullJidDeliveryOutcome::Delivered,
+                Arc::clone(&registered_remote_targets),
+            ),
+            pass(&f, &env, &MaintenanceCursor::default()),
+        )
+        .await;
+    assert_eq!(outcome, MaintenanceOutcome::Complete);
+    assert!(
+        registered_remote_targets
+            .lock()
+            .expect("registered-remote targets")
+            .is_empty(),
+        "direct maintenance must not attempt registered-remote delivery"
+    );
+    assert_pending(&f, key).await;
+    assert_eq!(f.count("ingress_delivery_receipts").await, 0);
+    f.close().await;
+}
 mod family_tests {
     use crate::{
         ingress::{
@@ -1652,6 +1695,21 @@ async fn sqlite_bare_target_live_route_recovers_once() {
 async fn postgres_bare_target_live_route_recovers_once() {
     if let Some(fixture) = IngressFixture::postgres("bare_target_live_route_recovers_onc").await {
         live_route(fixture, false, false, false).await;
+    }
+}
+
+#[cfg(feature = "clustering")]
+#[tokio::test]
+async fn sqlite_registered_remote_direct_route_stays_pending_without_relay() {
+    registered_remote_direct_route_stays_pending(IngressFixture::sqlite().await).await;
+}
+
+#[cfg(feature = "clustering")]
+#[tokio::test]
+async fn postgres_registered_remote_direct_route_stays_pending_without_relay() {
+    if let Some(fixture) = IngressFixture::postgres("registered_remote_direct_route_pending").await
+    {
+        registered_remote_direct_route_stays_pending(fixture).await;
     }
 }
 

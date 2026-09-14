@@ -1,6 +1,10 @@
 //! Foreign ownership never turns maintenance's detached recovery into a relay.
 use super::*;
-use crate::clustering::{route_bridge::OrderedRelayDeliveryBridge, ClusteringHandles};
+use crate::clustering::{
+    relay::RelayRemoteResourceRegistrationStatus,
+    route_bridge::{remote_registration_request, wire_for_test, OrderedRelayDeliveryBridge},
+    ClusteringHandles, NodeId,
+};
 use crate::ingress::{recorded::RouteProgress, recovery_rebuild};
 use crate::server::routes::interpret::{effects::EffectOutcome, FullJidDeliveryOutcome};
 use waddle_xmpp::ownership::{
@@ -112,11 +116,10 @@ async fn owned_recovery(f: IngressFixture, recovering_local: bool) {
     );
 
     let claims = Arc::new(InProcessClaimStore::new());
-    let remote = NodeIdentity::new("foreign-owner", "foreign-epoch");
     let local = NodeIdentity::new("recovering-owner", "local-epoch");
     let entity = Entity::new(EntityType::UserActor, occupant.to_bare().to_string());
     claims
-        .acquire(&entity, if recovering_local { &local } else { &remote })
+        .acquire(&entity, &local)
         .await
         .expect("foreign claim");
     let owner = claims
@@ -125,30 +128,46 @@ async fn owned_recovery(f: IngressFixture, recovering_local: bool) {
         .expect("claim lookup")
         .expect("foreign owner");
     assert!(owner.owner_lease_fresh);
-    assert_eq!(
-        owner.owner,
-        if recovering_local {
-            local.clone()
-        } else {
-            remote
-        }
+    assert_eq!(owner.owner, local.clone());
+    let bridge = OrderedRelayDeliveryBridge::new(
+        tokio_util::sync::CancellationToken::new(),
+        &crate::config::ClusteringMessagingConfig::default(),
     );
     let state = socket_tests::create_test_websocket_state_with_clustering(
         ClusteringHandles {
-            claim_store: Some(claims),
+            claim_store: Some(Arc::clone(&claims) as Arc<dyn ClaimStore>),
             node_identity: Some(SharedNodeIdentity::new(local)),
-            ordered_relay_delivery_bridge: Some(OrderedRelayDeliveryBridge::new(
-                tokio_util::sync::CancellationToken::new(),
-                &crate::config::ClusteringMessagingConfig::default(),
-            )),
+            ordered_relay_delivery_bridge: Some(Arc::clone(&bridge)),
             ..Default::default()
         },
         sm.clone(),
     )
     .await;
+    wire_for_test(
+        &bridge,
+        &state,
+        claims as Arc<dyn ClaimStore>,
+        SharedNodeIdentity::new(NodeIdentity::new("recovering-owner", "local-epoch")),
+    )
+    .await;
+    if !recovering_local {
+        let reply = bridge
+            .register_remote_user_resource_on_owner(remote_registration_request(
+                occupant.clone(),
+                NodeId::new("foreign-socket-node".to_string()),
+            ))
+            .await;
+        assert_eq!(
+            reply.status,
+            RelayRemoteResourceRegistrationStatus::Registered,
+            "fixture must install the production remote-hosted mirror"
+        );
+    }
     let env: Arc<dyn RecoveryEnvironment> = Arc::new(StateEnvironment(state));
     if !recovering_local {
-        let deps = env.recovery_deps();
+        let mut deps = env.recovery_deps();
+        deps.delivery_execution_context =
+            crate::server::routes::interpret::DeliveryExecutionContext::MaintenanceRecovery;
         let outcome = crate::ingress::execute_uow::execute_with_uow(
             &f.uow,
             &f.db,
@@ -172,9 +191,23 @@ async fn owned_recovery(f: IngressFixture, recovering_local: bool) {
         );
         assert!(settled.persisted.is_empty(), "no foreign delivery proof");
     }
-    assert_eq!(
-        pass(&f, &env, &MaintenanceCursor::default()).await,
-        MaintenanceOutcome::Complete
+    let registered_remote_targets = Arc::new(std::sync::Mutex::new(Vec::new()));
+    let maintenance = crate::server::routes::interpret::CONTROLLED_REGISTERED_REMOTE_DELIVERY
+        .scope(
+            (
+                FullJidDeliveryOutcome::Delivered,
+                Arc::clone(&registered_remote_targets),
+            ),
+            pass(&f, &env, &MaintenanceCursor::default()),
+        )
+        .await;
+    assert_eq!(maintenance, MaintenanceOutcome::Complete);
+    assert!(
+        registered_remote_targets
+            .lock()
+            .expect("registered-remote targets")
+            .is_empty(),
+        "maintenance must not attempt registered-remote delivery"
     );
     assert!(
         super::super::super::attempt_count(key) > 0,

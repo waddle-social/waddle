@@ -18,6 +18,7 @@ use crate::{
 };
 
 use super::{recovery_rebuild, Deps, EffectReceiptKey, ImmediateSink, RouteProgress};
+use crate::server::routes::interpret::DeliveryExecutionContext;
 
 pub(super) enum RowRecovery {
     Vanished,
@@ -76,12 +77,14 @@ pub(super) async fn recover_row(
     // obligation could still settle. Non-empty once a frame-only effect ran.
     let mut settled_here: Vec<&EffectReceiptKey> = Vec::new();
     if !rebuilt.decision.external.is_empty() {
+        let mut recovery_deps = deps.clone();
+        recovery_deps.delivery_execution_context = DeliveryExecutionContext::MaintenanceRecovery;
         let report = super::execute::execute_effects(
             uow,
             database,
             &rebuilt.decision,
             &ImmediateSink,
-            deps,
+            &recovery_deps,
             deadline.saturating_duration_since(Instant::now()),
         )
         .await;

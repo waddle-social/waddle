@@ -1174,6 +1174,32 @@ pub(crate) async fn deliver_direct_to_full_with_registered_remote(
     .await
 }
 
+pub(crate) fn deliver_direct_to_full_locally(
+    deps: &Deps<'_>,
+    target: &jid::FullJid,
+    stanza: &Stanza,
+) -> FullJidDeliveryOutcome {
+    match deps
+        .connection_registry
+        .try_send_to_locally_hosted(target, stanza.clone())
+    {
+        waddle_xmpp::registry::BroadcastOutcome::Delivered => FullJidDeliveryOutcome::Delivered,
+        waddle_xmpp::registry::BroadcastOutcome::DroppedFull => FullJidDeliveryOutcome::Dropped,
+        waddle_xmpp::registry::BroadcastOutcome::NotConnected
+        | waddle_xmpp::registry::BroadcastOutcome::DroppedClosed => {
+            FullJidDeliveryOutcome::Unavailable
+        }
+    }
+}
+
+#[cfg(all(test, feature = "clustering"))]
+tokio::task_local! {
+    pub(crate) static CONTROLLED_REGISTERED_REMOTE_DELIVERY: (
+        FullJidDeliveryOutcome,
+        std::sync::Arc<std::sync::Mutex<Vec<jid::FullJid>>>,
+    );
+}
+
 async fn deliver_registered_remote_resource(
     deps: &Deps<'_>,
     target: &jid::FullJid,
@@ -1184,6 +1210,16 @@ async fn deliver_registered_remote_resource(
         // A same-owner registered resource remains a peer-delivery obligation;
         // its eventual executor resolves the remote socket registration.
         return None;
+    }
+    #[cfg(all(test, feature = "clustering"))]
+    if let Ok(outcome) = CONTROLLED_REGISTERED_REMOTE_DELIVERY.try_with(|(outcome, targets)| {
+        targets
+            .lock()
+            .expect("controlled registered-remote targets")
+            .push(target.clone());
+        *outcome
+    }) {
+        return Some(outcome);
     }
     #[cfg(feature = "clustering")]
     {

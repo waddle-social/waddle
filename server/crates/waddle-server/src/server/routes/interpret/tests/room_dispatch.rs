@@ -119,6 +119,7 @@ async fn dispatch_to_room_fanout_span_and_latency_cover_recipient_enqueues() {
 
     let capture = IngressEffectCapture::new();
     let deps = Deps {
+        delivery_execution_context: super::super::DeliveryExecutionContext::Live,
         effects: &crate::server::routes::interpret::effects::ImmediateSink,
         connection_registry: &state.deps.protocol.connection_registry,
         user_registry: Some(&state.deps.protocol.user_registry),
@@ -249,6 +250,7 @@ fn successful_room_error_reply_records_error_intent() {
     let registry = ConnectionRegistry::new();
     let capture = IngressEffectCapture::new();
     let deps = Deps {
+        delivery_execution_context: super::super::DeliveryExecutionContext::Live,
         effects: &crate::server::routes::interpret::effects::ImmediateSink,
         connection_registry: &registry,
         user_registry: None,

@@ -31,7 +31,7 @@ and non-sender MUC occupant copies (§3.3e), preserving the frozen audience and
 payload. Local keyed detached delivery guarantees one durable queue allocation
 per (recorded obligation, resource). Remote receiver appends remain outside
 that keying guarantee (#1778), live sends remain at-least-once, and maintenance
-never relays remote-owned occupants; (iii) live full-JID delivery keeps the
+never relays remote-hosted resources; (iii) live full-JID delivery keeps the
 destination connection's own recipient archive/inbox pipeline (#1658, now tracked as #1759);
 (iv) subject/pin/membership supersession keeps `main`'s semantics
 (#1659/#1660); (v) non-resumable streams have no durable

@@ -98,6 +98,43 @@ pub use types::{
     RemoteResourceStateSnapshot, RemoteResourceStateUpdate,
     RemoteResourceWriteAcceptedOutboundFrame, RemoteUserSideEffect,
 };
+
+#[cfg(test)]
+pub(crate) fn remote_registration_request(
+    jid: jid::FullJid,
+    socket_node: NodeId,
+) -> RelayRegisterRemoteUserResource {
+    let (tx, _rx) = tokio::sync::mpsc::channel(1);
+    let entry = ConnectionEntry::new(tx);
+    RelayRegisterRemoteUserResource {
+        jid,
+        registration_id: RemoteResourceRegistrationId::fresh(),
+        socket_generation: RemoteResourceSocketGeneration::next(None),
+        socket_node,
+        state: RemoteResourceStateSnapshot::from_entry(&entry, None),
+        trace: RelayTraceContext::default(),
+    }
+}
+
+#[cfg(test)]
+pub(crate) async fn wire_for_test(
+    bridge: &Arc<OrderedRelayDeliveryBridge>,
+    state: &Arc<WebSocketState>,
+    claim_store: Arc<dyn ClaimStore>,
+    node_identity: SharedNodeIdentity,
+) {
+    let node = node_identity.current();
+    let mut services =
+        tests::services_with_claims(node.clone(), node.clone(), node, tests::test_peer_id()).await;
+    services.claim_store = claim_store;
+    services.node_identity = node_identity;
+    services.connection_registry = Arc::clone(&state.deps.protocol.connection_registry);
+    services.user_registry = state.deps.protocol.user_registry.clone();
+    services.sm_session_registry = Arc::clone(&state.deps.protocol.sm_session_registry);
+    services.blocking_storage = Arc::clone(&state.deps.protocol.blocking_storage);
+    services.web_socket_state = Arc::downgrade(state);
+    bridge.wire(Arc::new(services));
+}
 pub(crate) use types::{RemoteResourceRegisterOutcome, RemoteResourceUnregisterOutcome};
 use validation::*;
 

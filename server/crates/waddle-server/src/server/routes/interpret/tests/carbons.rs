@@ -216,6 +216,7 @@ async fn xep_0280_send_carbons_queues_for_detached_xep_0198_resources() {
     let owner: jid::BareJid = "alice@example.com".parse().expect("bare");
     let original = chat_msg(jid("alice@example.com/web"), jid("bob@example.com"), "hi");
     let deps = Deps {
+        delivery_execution_context: super::super::DeliveryExecutionContext::Live,
         connection_registry: &registry,
         user_registry: None,
         sm_session_registry: Some(&sm),
@@ -277,6 +278,7 @@ async fn detached_carbon_delivery_still_queues_with_ingress_capture() {
         .expect("store detached session");
     let capture = IngressEffectCapture::new();
     let deps = Deps {
+        delivery_execution_context: super::super::DeliveryExecutionContext::Live,
         effects: &crate::server::routes::interpret::effects::ImmediateSink,
         connection_registry: &registry,
         user_registry: None,
@@ -339,6 +341,7 @@ async fn self_dm_and_sent_carbon_to_same_detached_stream_both_queue() {
 
     let capture = IngressEffectCapture::new();
     let deps = Deps {
+        delivery_execution_context: super::super::DeliveryExecutionContext::Live,
         effects: &crate::server::routes::interpret::effects::ImmediateSink,
         connection_registry: &registry,
         user_registry: None,
