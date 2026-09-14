@@ -423,3 +423,6 @@ async fn postgres_muc_occupant_progress_old_provenance_reflection() {
         partial_broadcast(fixture, false, RetryCase::MissingProvenance).await;
     }
 }
+
+#[path = "muc_occupant_progress_tests/sibling_retry.rs"]
+mod sibling_retry;

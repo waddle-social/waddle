@@ -22,8 +22,10 @@ use waddle_xmpp::ingress::{
 };
 
 mod progress;
+mod reflection;
 pub(crate) use progress::single_target;
 pub use progress::{ProgressObligation, RouteProgress};
+pub(super) use reflection::prepare_attempt_reflections;
 
 /// Restore room copies from their frozen source and direct copies from canonical
 /// content plus recorded archive authority. Invitations retain their own restorer.
@@ -31,15 +33,20 @@ pub fn restore_delivery_payloads(
     plan: &mut IngressPlan,
     envelope: &crate::ingress_substrate::MessageEnvelope,
     route_progress: &[RouteProgress],
+    sender: &jid::FullJid,
 ) {
     use crate::server::routes::interpret::effects::delivery::ExternalDeliveryEffect;
+    let mut repairs = Vec::new();
     plan.plan.retain_mut(|planned| {
         // A retry's reflection is fresh work, never frozen occupant repair.
-        let sender_reflection = super::suppression::sender_reflection(
-            planned,
-            plan.sanitized_message.from.as_ref(),
-            &plan.intents,
-        );
+        if reflection::is_attempt_reflection(planned, sender, &plan.intents) {
+            if let Some(repair) = reflection::historical_repair(
+                planned, envelope, &plan.intents, route_progress,
+            ) {
+                repairs.push(repair);
+            }
+            return true;
+        }
         let Effect::External(effect) = &mut planned.effect else {
             return true;
         };
@@ -68,9 +75,6 @@ pub fn restore_delivery_payloads(
         }) else {
             return true;
         };
-        if sender_reflection {
-            return true;
-        }
         let source = match super::room_canonical::source(envelope, intent) {
             Ok(source) => source,
             Err(error) => {
@@ -103,6 +107,7 @@ pub fn restore_delivery_payloads(
         }
         true
     });
+    plan.plan.extend(repairs);
     for planned in &mut plan.plan {
         if planned
             .dependencies

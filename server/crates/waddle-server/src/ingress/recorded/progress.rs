@@ -37,6 +37,8 @@ pub struct RouteProgress {
     pub received_at: Option<chrono::DateTime<chrono::Utc>>,
     pub fanout: Vec<FullJid>,
     pub completed: Vec<FullJid>,
+    /// This attempt's reflection is fresh work, even inside the frozen fanout.
+    pub current_attempt_reflection: Option<FullJid>,
 }
 
 impl RouteProgress {
@@ -102,6 +104,7 @@ impl RouteProgress {
             received_at,
             fanout,
             completed,
+            current_attempt_reflection: None,
         }))
     }
 
@@ -154,7 +157,10 @@ impl RouteProgress {
             ProgressObligation::MucGroupchat {
                 room, reflection, ..
             } => {
-                if single_target(effect) == Some(reflection) {
+                if single_target(effect) == Some(reflection)
+                    || (single_target(effect) == self.current_attempt_reflection.as_ref()
+                        && external_route_identity(effect) != Some(&self.route_identity))
+                {
                     return false;
                 }
                 room

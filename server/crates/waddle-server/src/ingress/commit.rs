@@ -474,6 +474,7 @@ async fn commit_attempt(
     let received_at = CanonicalMessageRepository::created_at(&mut tx, key).await?;
     let all_progress =
         crate::ingress_uow::DeliveryProgressRepository::load_all(&mut tx, key).await?;
+    super::recorded::prepare_attempt_reflections(&mut plan, &submission.sender);
     let mut route_progress = Vec::new();
     let mut empty_muc = false;
     for intent in &intents {
@@ -491,6 +492,12 @@ async fn commit_attempt(
         .await?
         {
             continue;
+        }
+        if matches!(
+            progress.obligation,
+            super::recorded::ProgressObligation::MucGroupchat { .. }
+        ) {
+            progress.current_attempt_reflection = Some(submission.sender.clone());
         }
         progress.completed = all_progress
             .iter()
@@ -514,7 +521,12 @@ async fn commit_attempt(
         let envelope = CanonicalMessageRepository::load_envelope(&mut tx, key)
             .await?
             .ok_or(IngressUowError::EffectIntentMessageMissing)?;
-        super::recorded::restore_delivery_payloads(&mut plan, &envelope, &route_progress);
+        super::recorded::restore_delivery_payloads(
+            &mut plan,
+            &envelope,
+            &route_progress,
+            &submission.sender,
+        );
     }
     let external = super::suppression::filter_external_effects(
         &plan,
