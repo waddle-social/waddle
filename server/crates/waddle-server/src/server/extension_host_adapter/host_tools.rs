@@ -1,5 +1,5 @@
 use async_trait::async_trait;
-use jid::{BareJid, Jid};
+use jid::{BareJid, DomainPart, DomainRef, Jid, NodePart, NodeRef};
 use waddle_extensions::types::PubSubNode as ExtensionPubSubNode;
 use waddle_extensions::{host_tools as ext_host, DisplayText};
 use waddle_xmpp::mam::MamQuery;
@@ -345,6 +345,30 @@ impl ExtensionHostAdapter {
         if requester.domain().as_str() != self.state.deps.auth_state.xmpp_domain {
             return Err(host_tool_error(ExtensionHostAdapterError::NotAuthorized));
         }
+        let session = self
+            .requester_session(localpart, requester.domain())
+            .await?;
+        let actor_jid = requester
+            .clone()
+            .with_resource_str("extension-host")
+            .map_err(|error| {
+                host_tool_error(ExtensionHostAdapterError::Protocol(error.to_string()))
+            })?;
+        Ok(ExtensionInvocation {
+            session: Some(session),
+            actor_jid,
+            plugin_id,
+            source_room,
+            kind,
+            provider_room_grants: Vec::new(),
+        })
+    }
+
+    async fn requester_session(
+        &self,
+        localpart: &NodeRef,
+        domain: &DomainRef,
+    ) -> Result<Session, ext_host::HostToolError> {
         let row = self
             .state
             .deps
@@ -357,8 +381,10 @@ impl ExtensionHostAdapter {
                 params: vec![localpart.as_str().into()],
             })
             .await
-            .map_err(|error| host_tool_error(ExtensionHostAdapterError::Storage(format!("{error:?}"))))?
-            .ok_or_else(|| host_tool_error(ExtensionHostAdapterError::NotAuthorized))?;
+            .map_err(|error| host_tool_error(ExtensionHostAdapterError::Storage(format!("{error:?}"))))?;
+        let Some(row) = row else {
+            return self.native_requester_session(localpart, domain).await;
+        };
         let user_jid = row_value(&row, 0)
             .and_then(ValueExt::as_string)
             .map_err(|error| {
@@ -374,19 +400,51 @@ impl ExtensionHostAdapter {
             .map_err(|error| {
                 host_tool_error(ExtensionHostAdapterError::Storage(error.to_string()))
             })?;
-        let actor_jid = requester
-            .clone()
-            .with_resource_str("extension-host")
+        Ok(Session::new(&user_jid, &username, &xmpp_localpart))
+    }
+
+    async fn native_requester_session(
+        &self,
+        localpart: &NodeRef,
+        domain: &DomainRef,
+    ) -> Result<Session, ext_host::HostToolError> {
+        let row = self
+            .state
+            .deps
+            .app_state
+            .db_pool
+            .global_actor()
+            .ask(DbQueryOne {
+                sql: "SELECT username, domain FROM native_users WHERE username = ? AND domain = ? LIMIT 1"
+                    .to_string(),
+                params: vec![localpart.as_str().into(), domain.as_str().into()],
+            })
+            .await
+            .map_err(|error| host_tool_error(ExtensionHostAdapterError::Storage(format!("{error:?}"))))?
+            .ok_or_else(|| host_tool_error(ExtensionHostAdapterError::NotAuthorized))?;
+        let username = row_value(&row, 0)
+            .and_then(ValueExt::as_string)
+            .map_err(|error| {
+                host_tool_error(ExtensionHostAdapterError::Storage(error.to_string()))
+            })?
+            .parse::<NodePart>()
             .map_err(|error| {
                 host_tool_error(ExtensionHostAdapterError::Protocol(error.to_string()))
             })?;
-        Ok(ExtensionInvocation {
-            session: Some(Session::new(&user_jid, &username, &xmpp_localpart)),
-            actor_jid,
-            plugin_id,
-            source_room,
-            kind,
-            provider_room_grants: Vec::new(),
-        })
+        let domain = row_value(&row, 1)
+            .and_then(ValueExt::as_string)
+            .map_err(|error| {
+                host_tool_error(ExtensionHostAdapterError::Storage(error.to_string()))
+            })?
+            .parse::<DomainPart>()
+            .map_err(|error| {
+                host_tool_error(ExtensionHostAdapterError::Protocol(error.to_string()))
+            })?;
+        let user_jid = BareJid::from_parts(Some(&username), &domain);
+        Ok(Session::new(
+            user_jid.as_str(),
+            username.as_str(),
+            username.as_str(),
+        ))
     }
 }
