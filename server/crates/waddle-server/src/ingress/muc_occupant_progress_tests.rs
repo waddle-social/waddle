@@ -429,3 +429,7 @@ mod sibling_retry;
 
 #[path = "muc_occupant_progress_tests/host_owned.rs"]
 mod host_owned;
+
+#[cfg(feature = "clustering")]
+#[path = "muc_occupant_progress_tests/relayed_sibling.rs"]
+mod relayed_sibling;

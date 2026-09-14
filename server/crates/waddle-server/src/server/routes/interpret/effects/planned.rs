@@ -58,6 +58,10 @@ pub enum Effect {
 #[derive(Clone, Debug)]
 pub struct PlannedEffect {
     pub effect: Effect,
+    /// Delivery selected before a relayed reflection becomes a reply frame.
+    /// Replay may use this route for a separate frozen occupant repair; the
+    /// frame itself never owns that delivery's progress.
+    pub reflection_delivery: Option<Box<ExternalDeliveryEffect>>,
     pub dependencies: Vec<PlanEffectDependency>,
     /// Duplicate policy. A sender reply can survive a duplicate and still be
     /// swallowed by a request tombstone, so these policies are independent.
@@ -69,6 +73,7 @@ impl PlannedEffect {
     pub fn new(effect: Effect) -> Self {
         Self {
             effect,
+            reflection_delivery: None,
             dependencies: Vec::new(),
             suppression: PlanSuppressionPolicy::Always,
             tombstone_suppression: PlanSuppressionPolicy::TombstoneSwallowed,
