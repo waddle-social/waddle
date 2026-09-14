@@ -530,6 +530,7 @@ async fn commit_attempt(
     }
     let external = super::suppression::filter_external_effects(
         &plan,
+        Some(&submission.sender),
         filter_verdict,
         &applied.archives,
         &repairable,
@@ -567,6 +568,7 @@ async fn commit_attempt(
     };
     let external_dependencies = super::suppression::external_effect_indices(
         &plan,
+        Some(&submission.sender),
         filter_verdict,
         &applied.archives,
         &repairable,

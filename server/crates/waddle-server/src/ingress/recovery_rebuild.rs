@@ -122,6 +122,7 @@ pub(super) fn rebuild(input: RecoveryInput<'_>) -> Result<RebuiltRecovery, Ingre
     let delegated = delegated_recoveries(&input);
     let mut external = super::suppression::filter_external_effects(
         &plan,
+        None,
         &ReconcileVerdict::Consistent,
         &[],
         input.unreceipted,
@@ -129,6 +130,7 @@ pub(super) fn rebuild(input: RecoveryInput<'_>) -> Result<RebuiltRecovery, Ingre
     );
     let external_dependencies = super::suppression::external_effect_indices(
         &plan,
+        None,
         &ReconcileVerdict::Consistent,
         &[],
         input.unreceipted,
