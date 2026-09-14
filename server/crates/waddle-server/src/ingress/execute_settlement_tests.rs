@@ -31,6 +31,7 @@ fn settled_outcome_proves_only_persisted_keys_independently_of_completion() {
         (SettledCompletion::Uncertain, ExternalOutcome::Uncertain),
     ] {
         let outcome = EffectOutcome::Settled(SettledOutcome {
+            refusal: None,
             persisted: vec![persisted.clone()],
             completion,
             detached: Some(vec![(

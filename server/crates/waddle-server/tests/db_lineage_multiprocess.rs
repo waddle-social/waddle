@@ -1,7 +1,7 @@
 //! Database-lineage readiness coverage using real server subprocesses.
 //!
-//! PostgreSQL is optional in local development, so every test skips unless
-//! `WADDLE_TEST_POSTGRES_URL` is configured. Each test gets UUID-named schemas:
+//! PostgreSQL is optional in local development, so its tests skip unless
+//! `WADDLE_TEST_POSTGRES_URL` is configured. Those tests get UUID-named schemas:
 //! a schema is a lineage boundary because its identity is part of the attestation.
 
 use std::{process::Command, sync::OnceLock, time::Duration};
@@ -327,6 +327,28 @@ async fn two_replicas_same_database_both_ready() {
     drop(second);
     drop(first);
     fixture.cleanup().await;
+}
+
+#[tokio::test]
+async fn sqlite_unenrolled_database_stays_unready() {
+    let directory = tempfile::tempdir().expect("SQLite lineage directory");
+    let database_url = format!(
+        "sqlite://{}?mode=rwc",
+        directory.path().join("unenrolled.db").display()
+    );
+    let mut server = spawn_server(vec![
+        ("WADDLE_DB_DRIVER".into(), "sqlite".into()),
+        ("WADDLE_DATABASE_URL".into(), database_url),
+        (
+            "WADDLE_DEPLOYMENT_UUID".into(),
+            uuid::Uuid::new_v4().to_string(),
+        ),
+    ])
+    .await;
+
+    wait_for_lineage_failure(&server, "global", "missing_lineage").await;
+    assert!(!server.wait_for_exit(Duration::from_secs(1)).await);
+    assert_liveness(&server).await;
 }
 
 #[tokio::test]

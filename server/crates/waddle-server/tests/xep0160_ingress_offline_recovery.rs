@@ -1,4 +1,6 @@
 //! XEP-0160 §3: lost offline storage recovers; a refused queue stays refused.
+#[path = "ingress_support/extension_recovery.rs"]
+mod extension_recovery_support;
 pub mod ingress_support;
 use ingress_support::IngressFixture;
 use std::{sync::Arc, time::Duration};
@@ -50,7 +52,9 @@ fn bind(authority: &IngressAuthority, environment: &Arc<OfflineEnvironment>) {
     authority.bind_recovery_environment(Arc::downgrade(&erased));
 }
 fn offline_plan(f: &IngressFixture, origin: &str) -> (IngressSubmission, PendingRowId) {
-    let mut submission = f.submission(Some(origin), "canonical offline payload");
+    offline_submission(f.submission(Some(origin), "canonical offline payload"))
+}
+fn offline_submission(mut submission: IngressSubmission) -> (IngressSubmission, PendingRowId) {
     let row = PendingRow {
         id: PendingRowId::fresh(),
         recipient: "juliet@example.com".parse().expect("recipient"),
@@ -108,7 +112,7 @@ async fn recover(f: &IngressFixture, authority: &IngressAuthority, terminal_coun
     .await
     .expect("maintenance settles the lost offline obligation");
 }
-async fn lost_offline_row_is_materialized_once(f: IngressFixture) {
+async fn lost_offline_row_is_materialized_once(f: IngressFixture, extension: bool) {
     let env = environment(
         &f,
         Arc::new(ConnectionRegistry::new()),
@@ -117,11 +121,29 @@ async fn lost_offline_row_is_materialized_once(f: IngressFixture) {
     .await;
     let authority = f.authority().await;
     bind(&authority, &env);
-    let (submission, id) = offline_plan(&f, "offline-recovery");
+    let (submission, id) = if extension {
+        offline_submission(
+            extension_recovery_support::extension_submission(
+                &f,
+                "offline-recovery",
+                "canonical offline payload",
+            )
+            .await,
+        )
+    } else {
+        offline_plan(&f, "offline-recovery")
+    };
     assert_eq!(
         authority.commit(&submission).await.class,
         IngressDecisionClass::Accepted
     );
+    if extension {
+        extension_recovery_support::revoke_after_commit(&f, &submission).await;
+        assert_eq!(
+            authority.commit(&submission).await.class,
+            IngressDecisionClass::PrincipalMissing
+        );
+    }
     // Phase C is deliberately lost; maintenance alone must materialize the row.
     assert_eq!(f.count("pending_delivery").await, 0);
     recover(&f, &authority, 1).await;
@@ -164,12 +186,12 @@ async fn lost_offline_row_is_materialized_once(f: IngressFixture) {
 }
 #[tokio::test]
 async fn sqlite_lost_offline_row_is_materialized_once() {
-    lost_offline_row_is_materialized_once(IngressFixture::sqlite().await).await;
+    lost_offline_row_is_materialized_once(IngressFixture::sqlite().await, false).await;
 }
 #[tokio::test]
 async fn postgres_lost_offline_row_is_materialized_once() {
     if let Some(f) = IngressFixture::postgres("xep0160_lost_offline").await {
-        lost_offline_row_is_materialized_once(f).await;
+        lost_offline_row_is_materialized_once(f, false).await;
     }
 }
 
@@ -264,5 +286,90 @@ async fn sqlite_quota_refusal_bounces_once_and_is_not_requeued() {
 async fn postgres_quota_refusal_bounces_once_and_is_not_requeued() {
     if let Some(f) = IngressFixture::postgres("xep0160_quota_refusal").await {
         quota_refusal_bounces_once_and_is_not_requeued(f).await;
+    }
+}
+
+#[tokio::test]
+async fn sqlite_extension_offline_recovers_after_revocation() {
+    lost_offline_row_is_materialized_once(IngressFixture::sqlite().await, true).await;
+}
+
+#[tokio::test]
+async fn postgres_extension_offline_recovers_after_revocation() {
+    if let Some(f) = IngressFixture::postgres("extension_offline_recovery").await {
+        lost_offline_row_is_materialized_once(f, true).await;
+    }
+}
+
+async fn extension_frozen_offline_notification_recovers(f: IngressFixture) {
+    let store = waddle_server::notification_outbox::NotificationOutboxStore::new(f.db.clone())
+        .await
+        .expect("notification schema");
+    let env = environment(
+        &f,
+        Arc::new(ConnectionRegistry::new()),
+        QuotaPolicy::Unlimited,
+    )
+    .await;
+    let authority = f.authority().await;
+    bind(&authority, &env);
+    let submission = extension_recovery_support::offline_submission(
+        extension_recovery_support::extension_submission(&f, "frozen-offline", "offline body")
+            .await,
+        "frozen-offline",
+    );
+    assert_eq!(
+        authority.commit(&submission).await.class,
+        IngressDecisionClass::Accepted
+    );
+    assert_eq!(f.count("pending_delivery").await, 0);
+    assert_eq!(store.count_all_candidates().await.expect("candidates"), 0);
+    extension_recovery_support::revoke_after_commit(&f, &submission).await;
+    // Frozen Inserted recovery has no push-policy store and does not re-admit
+    // the now-revoked extension producer.
+    recover(&f, &authority, 1).await;
+    assert_eq!(f.count("pending_delivery").await, 1);
+    assert_eq!(store.count_all_candidates().await.expect("candidates"), 1);
+    assert_eq!(f.count("ingress_effect_receipts").await, 3);
+    let recipient = "juliet@example.com".parse().expect("recipient");
+    let first = env.storage.list(&recipient).await.expect("offline rows");
+    let PendingPayload::Archived(stamp) = &first[0].payload else {
+        panic!("archive identity");
+    };
+    assert_eq!(
+        stamp,
+        &waddle_xmpp_core::xep0359::StanzaId::new("frozen-offline", recipient.clone().into())
+    );
+    let (witness, _) = offline_plan(&f, "frozen-offline-witness");
+    assert_eq!(
+        authority.commit(&witness).await.class,
+        IngressDecisionClass::Accepted
+    );
+    recover(&f, &authority, 2).await;
+    let after = env
+        .storage
+        .list(&recipient)
+        .await
+        .expect("second pass rows");
+    assert_eq!(after.len(), 2);
+    assert_eq!(after.iter().filter(|row| row.id == first[0].id).count(), 1);
+    assert_eq!(store.count_all_candidates().await.expect("candidates"), 1);
+    assert_eq!(f.count("ingress_effect_receipts").await, 4);
+    assert!(authority.drain_and_join(Duration::from_secs(15)).await);
+    drop(authority);
+    drop(env);
+    drop(store);
+    f.close().await;
+}
+
+#[tokio::test]
+async fn sqlite_extension_frozen_offline_notification_recovers() {
+    extension_frozen_offline_notification_recovers(IngressFixture::sqlite().await).await;
+}
+
+#[tokio::test]
+async fn postgres_extension_frozen_offline_notification_recovers() {
+    if let Some(f) = IngressFixture::postgres("extension_frozen_offline").await {
+        extension_frozen_offline_notification_recovers(f).await;
     }
 }

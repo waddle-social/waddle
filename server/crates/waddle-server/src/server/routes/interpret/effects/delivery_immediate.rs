@@ -9,6 +9,7 @@ pub(crate) async fn execute(effect: ExternalDeliveryEffect, deps: &Deps<'_>) -> 
     let mut immediate = deps.clone();
     immediate.effects = &ImmediateSink;
     match effect {
+        ExternalDeliveryEffect::HostOwnedCopy { .. } => EffectOutcome::Completed,
         ExternalDeliveryEffect::UndeliverableBounce { reply } => {
             EffectOutcome::Frames(vec![*reply])
         }
@@ -123,21 +124,8 @@ pub(crate) async fn execute(effect: ExternalDeliveryEffect, deps: &Deps<'_>) -> 
             )
             .await,
         ),
-        // Ingress decisions are intercepted by execute_uow; extension-host
-        // callers have no canonical ingress row and use immediate storage.
-        ExternalDeliveryEffect::QueueOfflineDelivery {
-            row,
-            prepared_notification,
-            original_message,
-        } => {
-            super::super::offline_delivery::execute_immediate(
-                &immediate,
-                row,
-                prepared_notification,
-                &original_message,
-            )
-            .await
-        }
+        // Ordinary pending delivery and its receipts belong to execute_uow.
+        ExternalDeliveryEffect::QueueOfflineDelivery { .. } => EffectOutcome::Unavailable,
     }
 }
 

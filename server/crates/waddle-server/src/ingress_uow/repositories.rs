@@ -1,3 +1,5 @@
+pub use super::extension_grants::ExtensionGrantRepository;
+
 use chrono::{DateTime, Utc};
 use jid::BareJid;
 use sha2::{Digest, Sha256};

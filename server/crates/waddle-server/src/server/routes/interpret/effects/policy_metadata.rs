@@ -67,7 +67,8 @@ pub(super) fn apply_policy(effect: &mut PlannedEffect, sender: Option<&FullJid>)
             }
             ExternalDeliveryEffect::RelayCarbons { .. }
             | ExternalDeliveryEffect::Carbons { .. } => PlanSuppressionPolicy::Always,
-            ExternalDeliveryEffect::RelayBareJid { .. }
+            ExternalDeliveryEffect::HostOwnedCopy { .. }
+            | ExternalDeliveryEffect::RelayBareJid { .. }
             | ExternalDeliveryEffect::QueueOfflineDelivery { .. } => {
                 PlanSuppressionPolicy::SenderOnly
             }
@@ -102,7 +103,8 @@ pub(super) fn subject_dependency(
     let stanza = match &effect.effect {
         Effect::External(ExternalEffect::Frame(stanza)) => stanza,
         Effect::External(ExternalEffect::Delivery(
-            ExternalDeliveryEffect::RouteToPeer { stanza, .. }
+            ExternalDeliveryEffect::HostOwnedCopy { stanza, .. }
+            | ExternalDeliveryEffect::RouteToPeer { stanza, .. }
             | ExternalDeliveryEffect::QueueDetached { stanza, .. }
             | ExternalDeliveryEffect::RelayFullJid { stanza, .. }
             | ExternalDeliveryEffect::RelayBareJid { stanza, .. },

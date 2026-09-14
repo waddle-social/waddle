@@ -75,3 +75,23 @@ fn envelope_with_launch_room(room: Option<&str>) -> waddle_extensions::Extension
         }],
     }])
 }
+
+mod direct_ingress;
+mod host_boundary;
+mod native_requester;
+mod recovery;
+mod revocation_race;
+
+mod groupchat_ingress;
+mod groupchat_receipts;
+mod groupchat_recovery;
+#[cfg(feature = "clustering")]
+mod groupchat_remote;
+mod groupchat_signed;
+mod quota;
+
+mod groupchat_settlement;
+
+mod groupchat_concurrent;
+
+mod groupchat_revocation;

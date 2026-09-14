@@ -44,11 +44,13 @@ pub(super) async fn commit_offline_events(state: &WebSocketState, events: Vec<Ou
         identity: IngressStreamIdentity::Ephemeral {
             principal: principal.clone(),
         },
-        principal,
+        principal: crate::ingress::IngressPrincipal::Authenticated(principal),
         sender,
         target,
         digest_input,
-        connection_generation: ConnectionGeneration::INITIAL,
+        connection_generation: waddle_xmpp::ingress::TransportGeneration::Connection(
+            ConnectionGeneration::INITIAL,
+        ),
         plan: IngressPlan {
             failure: None,
             rejection: None,

@@ -146,6 +146,7 @@ pub struct FrameObligation {
 
 #[derive(Debug, Default)]
 pub struct ExecutionReport {
+    pub refusal: Option<crate::server::routes::interpret::effects::SettledRefusal>,
     pub outcomes: Vec<(ExternalEffect, ExternalOutcome)>,
     pub frame_obligations: Vec<FrameObligation>,
     #[cfg(feature = "clustering")]
@@ -218,6 +219,7 @@ impl ExecutionReport {
             {
                 Some(report) => report.frame_completion_receipts.push(key),
                 None => reports.push(Self {
+                    refusal: None,
                     outcomes: Vec::new(),
                     frame_obligations: Vec::new(),
                     #[cfg(feature = "clustering")]
@@ -485,6 +487,9 @@ pub async fn execute_effects(
             .await
             {
                 Ok(result) => {
+                    if let EffectOutcome::Settled(settled) = &result {
+                        report.refusal = report.refusal.or(settled.refusal);
+                    }
                     // Completion attests that this effect's work committed, even
                     // when another effect still owns unfinished aggregate work.
                     // This affects diagnostics only; persisted values remain
@@ -909,9 +914,7 @@ fn classify_outcome(
             }
             ExternalOutcome::Failed
         }
-        EffectOutcome::Archive(Err(_))
-        | EffectOutcome::Inbox(Err(_))
-        | EffectOutcome::OfflineDeliveryQuotaExceeded => ExternalOutcome::Failed,
+        EffectOutcome::Archive(Err(_)) | EffectOutcome::Inbox(Err(_)) => ExternalOutcome::Failed,
         EffectOutcome::Delivery(outcome) | EffectOutcome::CarbonFanout { outcome, .. } => {
             match outcome {
                 FullJidDeliveryOutcome::Delivered | FullJidDeliveryOutcome::QueuedDetached => {

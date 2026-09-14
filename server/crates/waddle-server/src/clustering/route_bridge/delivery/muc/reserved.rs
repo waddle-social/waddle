@@ -322,12 +322,14 @@ pub(in super::super::super) async fn deliver_reserved_muc_groupchat(
                 room: room_jid.clone(),
                 room_fence,
             },
-            principal: admission.principal.clone(),
+            principal: crate::ingress::IngressPrincipal::Authenticated(admission.principal.clone()),
             sender: sender.clone(),
             target,
             plan,
             digest_input,
-            connection_generation: ConnectionGeneration::INITIAL,
+            connection_generation: waddle_xmpp::ingress::TransportGeneration::Connection(
+                ConnectionGeneration::INITIAL,
+            ),
         };
         Ok(authority.commit(&submission).await)
     })

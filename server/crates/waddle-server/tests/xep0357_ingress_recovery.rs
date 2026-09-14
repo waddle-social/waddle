@@ -1,28 +1,18 @@
 //! XEP-0357: recovery preserves the durable offline notification obligation.
+#[path = "ingress_support/extension_recovery.rs"]
+mod extension_recovery_support;
 pub mod ingress_support;
 
 use ingress_support::IngressFixture;
 use std::{sync::Arc, time::Duration};
 use waddle_server::{
-    ingress::{
-        effects::{
-            delivery::{ExternalDeliveryEffect, PreparedOfflineNotification},
-            Effect, ExternalEffect,
-        },
-        Deps,
-    },
-    ingress::{IngressDecisionClass, IngressSubmission, PlannedEffect, RecoveryEnvironment},
-    notification_outbox::{NotificationCandidate, NotificationOutboxStore},
+    ingress::Deps,
+    ingress::{IngressDecisionClass, IngressSubmission, RecoveryEnvironment},
+    notification_outbox::NotificationOutboxStore,
     pending_delivery::DatabasePendingDeliveryStorage,
 };
 use waddle_xmpp::{
-    ingress::{
-        IngressEffectIntent, NotificationActivityMutation, NotificationCandidateOutcome,
-        PendingDeliveryMutation,
-    },
-    pending_delivery::{
-        storage::PendingDeliveryStorage, PendingPayload, PendingRow, PendingRowId, QuotaPolicy,
-    },
+    pending_delivery::{storage::PendingDeliveryStorage, QuotaPolicy},
     registry::ConnectionRegistry,
 };
 
@@ -40,60 +30,12 @@ impl RecoveryEnvironment for OfflineRecoveryEnvironment {
 }
 
 fn offline_plan(fixture: &IngressFixture, origin: &str) -> IngressSubmission {
-    let mut submission = fixture.submission(Some(origin), "canonical offline body");
-    let recipient: jid::BareJid = "juliet@example.com".parse().expect("recipient");
-    let stamp = waddle_xmpp_core::xep0359::StanzaId::new(origin, recipient.clone().into());
-    let row = PendingRow {
-        id: PendingRowId::fresh(),
-        recipient: recipient.clone(),
-        original_receipt_at: chrono::Utc::now(),
-        payload: PendingPayload::Archived(stamp.clone()),
-        flushed_in_session: None,
-        outbound_sequence: None,
-    };
-    let candidate = NotificationCandidate::direct_message(
-        recipient.clone(),
-        submission.sender.clone().into(),
-        stamp.clone(),
-        false,
+    extension_recovery_support::offline_submission(
+        fixture.submission(Some(origin), "canonical offline body"),
+        origin,
     )
-    .expect("direct candidate");
-    submission.plan.intents.extend([
-        IngressEffectIntent::PendingDelivery {
-            mutation: PendingDeliveryMutation::Archived {
-                recipient: recipient.clone(),
-                row_id: row.id.clone(),
-                archive_stanza_id: stamp.clone(),
-            },
-        },
-        IngressEffectIntent::NotificationActivityPreview {
-            owner: recipient.clone(),
-            mutation: NotificationActivityMutation::NotificationCandidate {
-                conversation: recipient.clone(),
-                archive_stanza_id: stamp.clone(),
-                outcome: NotificationCandidateOutcome::Inserted,
-            },
-        },
-        IngressEffectIntent::NotificationActivityPreview {
-            owner: recipient.clone(),
-            mutation: NotificationActivityMutation::OfflineDelivery {
-                conversation: recipient,
-                archive_stanza_id: stamp,
-            },
-        },
-    ]);
-    submission
-        .plan
-        .plan
-        .push(PlannedEffect::new(Effect::External(
-            ExternalEffect::Delivery(ExternalDeliveryEffect::QueueOfflineDelivery {
-                row,
-                prepared_notification: PreparedOfflineNotification::Prepared(Box::new(candidate)),
-                original_message: Box::new(submission.plan.sanitized_message.clone()),
-            }),
-        )));
-    submission
 }
+
 async fn backdate_pending(fixture: &IngressFixture) -> chrono::DateTime<chrono::Utc> {
     let received_at = chrono::DateTime::from_timestamp_millis(1_700_000_000_123)
         .expect("canonical receipt timestamp");
@@ -126,7 +68,10 @@ async fn wait_for_terminal_count(fixture: &IngressFixture, expected: i64) {
     .expect("maintenance recovers the recorded notification obligations");
 }
 
-async fn lost_offline_notification_candidate_recovers_once(fixture: IngressFixture) {
+async fn lost_offline_notification_candidate_recovers_once(
+    fixture: IngressFixture,
+    extension: bool,
+) {
     let store = NotificationOutboxStore::new(fixture.db.clone())
         .await
         .expect("notification schema");
@@ -143,7 +88,19 @@ async fn lost_offline_notification_candidate_recovers_once(fixture: IngressFixtu
     });
     let authority = fixture.authority().await;
     authority.bind_recovery_environment(Arc::downgrade(&environment));
-    let submission = offline_plan(&fixture, "push-recovery-original");
+    let submission = if extension {
+        extension_recovery_support::offline_submission(
+            extension_recovery_support::extension_submission(
+                &fixture,
+                "push-recovery-original",
+                "canonical offline body",
+            )
+            .await,
+            "push-recovery-original",
+        )
+    } else {
+        offline_plan(&fixture, "push-recovery-original")
+    };
     let decision = authority.commit(&submission).await;
     assert_eq!(decision.class, IngressDecisionClass::Accepted);
     assert_eq!(fixture.count("ingress_effect_intents").await, 3);
@@ -155,6 +112,15 @@ async fn lost_offline_notification_candidate_recovers_once(fixture: IngressFixtu
     );
     // Deliberately discard Phase C: only the public maintenance executor can enqueue this notification.
     drop(decision);
+    if extension {
+        extension_recovery_support::revoke_after_commit(&fixture, &submission).await;
+        assert_eq!(
+            authority.commit(&submission).await.class,
+            IngressDecisionClass::PrincipalMissing
+        );
+    }
+    // No push policy store exists in the recovery environment: only the frozen
+    // Inserted obligation can authorize materializing this candidate.
     let canonical_receipt_at = backdate_pending(&fixture).await;
     authority.trigger_maintenance();
     wait_for_terminal_count(&fixture, 1).await;
@@ -164,7 +130,13 @@ async fn lost_offline_notification_candidate_recovers_once(fixture: IngressFixtu
         1
     );
     assert_eq!(fixture.count("ingress_effect_receipts").await, 3);
-    let identity_filter = "notification_candidates WHERE recipient_bare_jid = 'juliet@example.com' AND sender_jid = 'romeo@example.com/phone' AND conversation_jid = 'romeo@example.com' AND stanza_id_by = 'juliet@example.com' AND stanza_id = 'push-recovery-original' AND class = 'dm' AND reason = 'offline_dm'";
+    let socket_identity_filter = "notification_candidates WHERE recipient_bare_jid = 'juliet@example.com' AND sender_jid = 'romeo@example.com/phone' AND conversation_jid = 'romeo@example.com' AND stanza_id_by = 'juliet@example.com' AND stanza_id = 'push-recovery-original' AND class = 'dm' AND reason = 'offline_dm'";
+    let extension_identity_filter = "notification_candidates WHERE recipient_bare_jid = 'juliet@example.com' AND sender_jid = 'romeo@example.com/extension-host' AND conversation_jid = 'romeo@example.com' AND stanza_id_by = 'juliet@example.com' AND stanza_id = 'push-recovery-original' AND class = 'dm' AND reason = 'offline_dm'";
+    let identity_filter = if extension {
+        extension_identity_filter
+    } else {
+        socket_identity_filter
+    };
     assert_eq!(
         fixture.count(identity_filter).await,
         1,
@@ -208,12 +180,24 @@ async fn lost_offline_notification_candidate_recovers_once(fixture: IngressFixtu
 
 #[tokio::test]
 async fn sqlite_lost_offline_notification_candidate_recovers_once() {
-    lost_offline_notification_candidate_recovers_once(IngressFixture::sqlite().await).await;
+    lost_offline_notification_candidate_recovers_once(IngressFixture::sqlite().await, false).await;
 }
 
 #[tokio::test]
 async fn postgres_lost_offline_notification_candidate_recovers_once() {
     if let Some(fixture) = IngressFixture::postgres("push_recovery").await {
-        lost_offline_notification_candidate_recovers_once(fixture).await;
+        lost_offline_notification_candidate_recovers_once(fixture, false).await;
+    }
+}
+
+#[tokio::test]
+async fn sqlite_extension_frozen_notification_recovers_after_revocation() {
+    lost_offline_notification_candidate_recovers_once(IngressFixture::sqlite().await, true).await;
+}
+
+#[tokio::test]
+async fn postgres_extension_frozen_notification_recovers_after_revocation() {
+    if let Some(fixture) = IngressFixture::postgres("extension_push_recovery").await {
+        lost_offline_notification_candidate_recovers_once(fixture, true).await;
     }
 }

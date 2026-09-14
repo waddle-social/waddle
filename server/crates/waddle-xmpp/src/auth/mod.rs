@@ -5,11 +5,13 @@
 //! - SASL OAUTHBEARER (RFC 7628, XEP-0493)
 //! - SASL SCRAM-SHA-256 (RFC 5802, RFC 7677)
 
+pub mod extension_grant;
 pub mod principal;
 pub mod scram;
 
 use jid::BareJid;
 
+pub use extension_grant::{ExtensionGrantId, ExtensionGrantRef, ExtensionGrantScope};
 pub use principal::{
     AuthContextId, AuthContextVersion, AuthenticatedPrincipalRef, PrincipalAuthEpoch,
 };

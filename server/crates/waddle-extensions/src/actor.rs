@@ -84,6 +84,10 @@ impl WasmExtensionActor {
         self
     }
 
+    pub(crate) fn provider_room_grants(&self) -> &[xmpp_parsers::jid::BareJid] {
+        &self.provider_room_grants
+    }
+
     pub fn manifest(&self) -> ExtensionManifest {
         self.manifest.clone()
     }

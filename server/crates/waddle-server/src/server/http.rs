@@ -902,6 +902,22 @@ async fn create_websocket_state(
         state.node_lifecycle.latch_startup_block();
     }
     let _ = state.lineage_startup.set(lineage_report);
+    if lineage_attested {
+        // Grant reconciliation mutates application data and opens a lineage-
+        // guarded transaction. Run it only after the readiness attestation;
+        // an unenrolled node must remain alive to expose its diagnostics.
+        let extension_grant_uow = crate::ingress_uow::IngressUnitOfWork::open(
+            state.db_pool.global().clone(),
+            state.lineage_config.clone(),
+        )?;
+        crate::server::extension_commands::startup::sync_extension_grants(
+            &extension_manager,
+            &extension_grant_uow,
+        )
+        .await?;
+    } else {
+        warn!("skipping extension grant reconciliation: lineage attestation failed");
+    }
     let extension_pubsub_owner: jid::BareJid = service_domains.extensions.parse()?;
     register_extension_commands(
         Arc::clone(&extension_manager),
@@ -1104,6 +1120,7 @@ async fn create_websocket_state(
                 pep_feed_bridge: Arc::new(crate::pep_feed_bridge::PepFeedBridge::new()),
                 call_threads: Arc::new(dashmap::DashMap::new()),
                 call_thread_end_locks: Arc::new(dashmap::DashMap::new()),
+                extension_bot_rooms: Default::default(),
                 remote_muc_memberships: Arc::new(
                     crate::server::routes::websocket::RemoteMucMemberships::default(),
                 ),

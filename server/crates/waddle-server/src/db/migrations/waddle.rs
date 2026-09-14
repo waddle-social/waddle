@@ -980,6 +980,34 @@ CREATE TABLE IF NOT EXISTS mam_archive_sequences (
 );
 "#;
 
+pub const V1018_EXTENSION_GRANTS: &str = r#"
+CREATE TABLE extension_grants (
+    grant_id TEXT PRIMARY KEY,
+    plugin_id TEXT NOT NULL,
+    scope SMALLINT NOT NULL,
+    room_jid TEXT,
+    granted_at TEXT NOT NULL,
+    revoked_at TEXT,
+    CHECK ((scope = 0 AND room_jid IS NULL) OR (scope = 1 AND room_jid IS NOT NULL))
+);
+CREATE UNIQUE INDEX extension_grants_active_send ON extension_grants (plugin_id) WHERE scope = 0 AND revoked_at IS NULL;
+CREATE UNIQUE INDEX extension_grants_active_room ON extension_grants (plugin_id, room_jid) WHERE scope = 1 AND revoked_at IS NULL;
+"#;
+
+pub const V1018_EXTENSION_GRANTS_POSTGRES: &str = r#"
+CREATE TABLE extension_grants (
+    grant_id TEXT PRIMARY KEY,
+    plugin_id TEXT NOT NULL,
+    scope SMALLINT NOT NULL,
+    room_jid TEXT,
+    granted_at TIMESTAMPTZ NOT NULL,
+    revoked_at TIMESTAMPTZ,
+    CHECK ((scope = 0 AND room_jid IS NULL) OR (scope = 1 AND room_jid IS NOT NULL))
+);
+CREATE UNIQUE INDEX extension_grants_active_send ON extension_grants (plugin_id) WHERE scope = 0 AND revoked_at IS NULL;
+CREATE UNIQUE INDEX extension_grants_active_room ON extension_grants (plugin_id, room_jid) WHERE scope = 1 AND revoked_at IS NULL;
+"#;
+
 /// Get all waddle schema migrations in order.
 ///
 /// Versions are intentionally offset from global migrations so a single
@@ -1087,6 +1115,12 @@ pub fn all() -> Vec<Migration> {
             description: "Mark the per-archive commit ordinal cutover".to_string(),
             sql_sqlite: V1017_ARCHIVE_ORDINAL_CUTOVER,
             sql_postgres: V1017_ARCHIVE_ORDINAL_CUTOVER_POSTGRES,
+        },
+        Migration {
+            version: 1018,
+            description: "Persist revocable extension send and provider-room grants".to_string(),
+            sql_sqlite: V1018_EXTENSION_GRANTS,
+            sql_postgres: V1018_EXTENSION_GRANTS_POSTGRES,
         },
     ]
 }

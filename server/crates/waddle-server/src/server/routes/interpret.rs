@@ -174,8 +174,11 @@ use archive_lookup::{
     build_carbon_envelope, lookup_archived_message, waddle_id_for_room_jid, ToElementString,
 };
 pub(crate) use bot::{
-    build_extension_message_markup, dispatch_extension_bot_groupchat_response, ExtensionRoomMessage,
+    build_extension_message_markup, plan_extension_bot_groupchat, ExtensionBotDispatchError,
+    ExtensionRoomMessage,
 };
+#[cfg(test)]
+pub(crate) use bot::{BotSnapshotGate, TEST_BOT_SNAPSHOT_GATE, TEST_SIGNING_TIME};
 use carbons::send_carbons;
 use direct_archive::archive_direct;
 use direct_inbox::project_direct_inbox;
@@ -202,6 +205,8 @@ pub use handoff::OrderedRelayHandoffHandle;
 pub use handoff::{
     OrderedRelayHandoffCompletion, OrderedRelayInboundSequence, SmInboundCompletionTracker,
 };
+#[cfg(all(test, feature = "clustering"))]
+pub(crate) use message_plan::ownership_plan_tests::PlanningClaims;
 use offline_delivery::queue_offline_delivery;
 #[cfg(test)]
 pub(crate) use offline_delivery::reconcile_xep0357_notification_candidates;
@@ -234,7 +239,7 @@ pub(crate) struct NotificationRecoverySweepOutcome {
 #[cfg(feature = "clustering")]
 pub use deps::OrderedRelayRouteOriginKind;
 pub use deps::{
-    Deps, GroupchatRetrySuppression, InterpretOutcome, OrderedRelayRouteOrigin,
+    Deps, GroupchatRetrySuppression, HostOwnedResources, InterpretOutcome, OrderedRelayRouteOrigin,
     SmIngressAppendContext, TimerCommand,
 };
 pub(crate) use groupchat_archive::push_inbox_update;

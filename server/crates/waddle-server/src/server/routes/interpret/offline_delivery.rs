@@ -1,7 +1,3 @@
-#[path = "offline_delivery_immediate.rs"]
-mod immediate;
-pub(super) use immediate::execute_immediate;
-
 use super::effects::delivery::PreparedOfflineNotification;
 use super::*;
 
@@ -65,65 +61,54 @@ pub(super) async fn apply_offline_delivery_row(
             }
         }
     };
-    if deps.effects.is_planning() {
-        let prepared_notification = prepare_offline_notification(
-            deps,
-            &recipient,
-            notification_archive_stanza_id.as_ref(),
-            &original_message,
-        )
-        .await;
-        if matches!(
-            &prepared_notification,
-            PreparedOfflineNotification::Prepared(_)
-        ) {
-            if let Some(archive_stanza_id) = notification_archive_stanza_id.as_ref() {
-                deps.capture_intent(IngressEffectIntent::NotificationActivityPreview {
-                    owner: recipient.clone(),
-                    mutation:
-                        waddle_xmpp::ingress::NotificationActivityMutation::NotificationCandidate {
-                            conversation: recipient.clone(),
-                            archive_stanza_id: archive_stanza_id.clone(),
-                            outcome: waddle_xmpp::ingress::NotificationCandidateOutcome::Inserted,
-                        },
-                });
-            }
-        }
-        deps.capture_intent(IngressEffectIntent::PendingDelivery {
-            mutation: pending_delivery_mutation,
-        });
-        if let Some(archive_stanza_id) = notification_archive_stanza_id.filter(|_| {
-            !matches!(
-                prepared_notification,
-                PreparedOfflineNotification::RetryLater
-            )
-        }) {
+    let prepared_notification = prepare_offline_notification(
+        deps,
+        &recipient,
+        notification_archive_stanza_id.as_ref(),
+        &original_message,
+    )
+    .await;
+    if matches!(
+        &prepared_notification,
+        PreparedOfflineNotification::Prepared(_)
+    ) {
+        if let Some(archive_stanza_id) = notification_archive_stanza_id.as_ref() {
             deps.capture_intent(IngressEffectIntent::NotificationActivityPreview {
                 owner: recipient.clone(),
-                mutation: waddle_xmpp::ingress::NotificationActivityMutation::OfflineDelivery {
-                    conversation: recipient,
-                    archive_stanza_id,
-                },
+                mutation:
+                    waddle_xmpp::ingress::NotificationActivityMutation::NotificationCandidate {
+                        conversation: recipient.clone(),
+                        archive_stanza_id: archive_stanza_id.clone(),
+                        outcome: waddle_xmpp::ingress::NotificationCandidateOutcome::Inserted,
+                    },
             });
         }
-        super::effects::delivery::record(
-            deps,
-            super::effects::delivery::ExternalDeliveryEffect::QueueOfflineDelivery {
-                prepared_notification,
-                row,
-                original_message,
-            },
-        );
-    } else {
-        let prepared_notification = prepare_offline_notification(
-            deps,
-            &recipient,
-            notification_archive_stanza_id.as_ref(),
-            &original_message,
-        )
-        .await;
-        execute_immediate(deps, row, prepared_notification, &original_message).await;
     }
+    deps.capture_intent(IngressEffectIntent::PendingDelivery {
+        mutation: pending_delivery_mutation,
+    });
+    if let Some(archive_stanza_id) = notification_archive_stanza_id.filter(|_| {
+        !matches!(
+            prepared_notification,
+            PreparedOfflineNotification::RetryLater
+        )
+    }) {
+        deps.capture_intent(IngressEffectIntent::NotificationActivityPreview {
+            owner: recipient.clone(),
+            mutation: waddle_xmpp::ingress::NotificationActivityMutation::OfflineDelivery {
+                conversation: recipient,
+                archive_stanza_id,
+            },
+        });
+    }
+    super::effects::delivery::record(
+        deps,
+        super::effects::delivery::ExternalDeliveryEffect::QueueOfflineDelivery {
+            prepared_notification,
+            row,
+            original_message,
+        },
+    );
 }
 
 /// Emit the XEP-0160 queue-full error after the settlement transaction ends.
@@ -155,12 +140,7 @@ pub(crate) async fn bounce_offline_quota(
     // alternative — un-archiving on quota — would
     // race with concurrent MAM queries and break
     // XEP-0313's monotonic-archive invariant.
-    let error = xmpp_parsers::stanza_error::StanzaError::new(
-        xmpp_parsers::stanza_error::ErrorType::Cancel,
-        xmpp_parsers::stanza_error::DefinedCondition::ServiceUnavailable,
-        "en",
-        "Recipient's offline message queue is full",
-    );
+    let error = offline_quota_error();
     let bounce =
         waddle_xmpp::protocol::handlers::errors::message_error_reply(original_message, error);
     let sender_jid = match bounce.to.clone() {
@@ -638,4 +618,14 @@ pub(crate) async fn reconcile_xep0357_notification_candidates_for_sweep(
         completed,
         had_failure,
     }
+}
+
+/// XEP-0160 refusal shared by the registry bounce and host transport.
+pub(crate) fn offline_quota_error() -> xmpp_parsers::stanza_error::StanzaError {
+    xmpp_parsers::stanza_error::StanzaError::new(
+        xmpp_parsers::stanza_error::ErrorType::Cancel,
+        xmpp_parsers::stanza_error::DefinedCondition::ServiceUnavailable,
+        "en",
+        "Recipient's offline message queue is full",
+    )
 }

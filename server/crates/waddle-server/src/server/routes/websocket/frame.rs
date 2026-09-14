@@ -1078,11 +1078,13 @@ async fn dispatch_authoritative_message(
         let submission = IngressSubmission {
             sender,
             identity,
-            principal,
+            principal: crate::ingress::IngressPrincipal::Authenticated(principal),
             target,
             plan,
             digest_input,
-            connection_generation: conn.ingress_generation,
+            connection_generation: waddle_xmpp::ingress::TransportGeneration::Connection(
+                conn.ingress_generation,
+            ),
         };
         Ok::<_, IngressDecisionClass>(state.deps.protocol.ingress.commit(&submission).await)
     });

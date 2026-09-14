@@ -7,8 +7,7 @@ use super::{
 use crate::ingress_substrate::MessageEnvelope;
 use crate::ingress_uow::{
     run_with_retry, CanonicalMessageRepository, DbRetryClass, EffectIntentRepository,
-    IngressUnitOfWork, IngressUowError, IngressUowTransaction, PrincipalAssertion,
-    PrincipalRepository, ReconcileVerdict,
+    IngressUnitOfWork, IngressUowError, IngressUowTransaction, ReconcileVerdict,
 };
 use std::time::Instant;
 use waddle_xmpp::ingress::{AliasOutcome, AliasResolution, IngressEffectIntent, MessageKey};
@@ -78,7 +77,10 @@ pub fn classify_failure(error: &IngressUowError) -> IngressDecisionClass {
         IngressUowError::Timeout | IngressUowError::Substrate(IngressSubstrateError::Timeout) => {
             IngressDecisionClass::Timeout
         }
-        IngressUowError::PrincipalAssertionFailed => IngressDecisionClass::PrincipalMissing,
+        IngressUowError::PrincipalAssertionFailed
+        | IngressUowError::ExtensionGrantAssertionFailed(_) => {
+            IngressDecisionClass::PrincipalMissing
+        }
         IngressUowError::RoomGenerationStale
         | IngressUowError::Plan(
             crate::server::routes::interpret::effects::PlanFailure::RoomClaimStale,
@@ -113,21 +115,17 @@ async fn commit_attempt(
     if let Some(failure) = submission.plan.failure {
         return Err(failure.into());
     }
+    #[cfg(test)]
+    commit_race_gate::before_admission(submission.digest_input.origin()).await;
     let mut tx = uow
         .begin_with_timeouts(
             std::time::Duration::from_millis(100),
             std::time::Duration::from_millis(250),
         )
         .await?;
-    if PrincipalRepository::assert_principal(&mut tx, &submission.principal).await?
-        != PrincipalAssertion::Asserted
-    {
-        return Err(IngressUowError::PrincipalAssertionFailed);
-    }
-    if matches!(&submission.identity, IngressStreamIdentity::Ephemeral { principal } if principal != &submission.principal)
-    {
-        return Err(IngressUowError::PrincipalAssertionFailed);
-    }
+    super::principal::assert_admission(&mut tx, submission).await?;
+    #[cfg(test)]
+    commit_race_gate::after_admission(submission.digest_input.origin()).await;
     if let IngressStreamIdentity::Relayed { canonical, .. } = &submission.identity {
         if canonical.sender_bare != *submission.principal.bare_jid()
             || canonical.origin_id.as_ref() != submission.digest_input.origin()
@@ -484,7 +482,14 @@ async fn commit_attempt(
                         sender_bare: submission.principal.bare_jid().clone(),
                         origin_id: submission.digest_input.origin().cloned(),
                     },
-                    principal: submission.principal.clone(),
+                    principal: match &submission.principal {
+                        super::principal::IngressPrincipal::Authenticated(principal) => {
+                            principal.clone()
+                        }
+                        super::principal::IngressPrincipal::Extension(_) => {
+                            return Err(IngressUowError::ExtensionRemoteRoomUnsupported)
+                        }
+                    },
                     stanza_lang: submission.digest_input.stanza_lang().cloned(),
                 });
             }
@@ -747,6 +752,8 @@ fn decision_class(
 }
 
 pub(crate) mod commit_hooks;
+#[cfg(test)]
+pub(crate) mod commit_race_gate;
 #[cfg(test)]
 #[path = "commit_tests.rs"]
 mod tests;

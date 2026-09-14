@@ -503,14 +503,15 @@ async fn groupchat_inbox_boundary_skips_notification_intent_when_t0_policy_suppr
 }
 
 #[tokio::test]
-async fn immediate_offline_delivery_queues_without_capturing_ingress_intents() {
+async fn archived_offline_delivery_captures_without_immediate_storage() {
     let registry = ConnectionRegistry::new();
     let pending: Arc<dyn PendingDeliveryStorage> = Arc::new(InMemoryPendingDeliveryStorage::new(
         waddle_xmpp::pending_delivery::QuotaPolicy::default_policy(),
     ));
     let capture = IngressEffectCapture::new();
+    let sink = crate::server::routes::interpret::effects::PlanSink::new();
     let deps = Deps {
-        effects: &crate::server::routes::interpret::effects::ImmediateSink,
+        effects: &sink,
         connection_registry: &registry,
         user_registry: None,
         sm_session_registry: None,
@@ -528,6 +529,7 @@ async fn immediate_offline_delivery_queues_without_capturing_ingress_intents() {
         sfu: None,
         ingress_effect_capture: Some(capture.clone()),
         direct_route_identity: None,
+        host_sender: None,
         ingress_append_context: None,
     };
     let recipient: jid::BareJid = "bob@example.com".parse().expect("recipient");
@@ -550,17 +552,26 @@ async fn immediate_offline_delivery_queues_without_capturing_ingress_intents() {
     )
     .await;
 
-    assert!(capture_snapshot(&capture).intents.is_empty());
-    let rows = pending.list(&recipient).await.expect("pending rows");
-    assert_eq!(rows.len(), 1);
-    assert_eq!(rows[0].recipient, recipient);
-    let waddle_xmpp::pending_delivery::PendingPayload::Archived(archive_id) = &rows[0].payload
-    else {
-        panic!("immediate delivery must retain its archived payload");
-    };
+    assert!(capture_snapshot(&capture).intents.iter().any(|intent| matches!(
+        intent,
+        IngressEffectIntent::PendingDelivery {
+            mutation: waddle_xmpp::ingress::PendingDeliveryMutation::Archived {
+                recipient: planned_recipient,
+                archive_stanza_id,
+                ..
+            }
+        } if planned_recipient == &recipient
+            && archive_stanza_id == &XepStanzaId::new("offline-archive-1", recipient.clone().into())
+    )));
+    assert!(pending
+        .list(&recipient)
+        .await
+        .expect("pending rows")
+        .is_empty());
     assert_eq!(
-        archive_id,
-        &XepStanzaId::new("offline-archive-1", recipient.into())
+        sink.take().0.len(),
+        1,
+        "one ingress-owned delivery obligation"
     );
 }
 
@@ -591,6 +602,7 @@ async fn transient_offline_delivery_records_pending_delivery_intent() {
         sfu: None,
         ingress_effect_capture: Some(capture.clone()),
         direct_route_identity: None,
+        host_sender: None,
         ingress_append_context: None,
     };
     let recipient: jid::BareJid = "bob@example.com".parse().expect("recipient");

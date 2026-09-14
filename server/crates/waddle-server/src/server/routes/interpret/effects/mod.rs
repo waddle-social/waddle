@@ -9,7 +9,7 @@ pub mod room;
 mod room_immediate;
 pub use outcome::{
     AppliedDurableEffects, DurableOutcome, EffectOutcome, ProjectionRef, SettledCompletion,
-    SettledOutcome,
+    SettledOutcome, SettledRefusal,
 };
 mod plan;
 mod planned;

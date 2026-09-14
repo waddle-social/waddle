@@ -207,7 +207,8 @@ fn subject_rebroadcast(effect: &ExternalEffect) -> bool {
     match effect {
         ExternalEffect::Frame(stanza) => subject_stanza(stanza),
         ExternalEffect::Delivery(
-            ExternalDeliveryEffect::RouteToPeer { stanza, .. }
+            ExternalDeliveryEffect::HostOwnedCopy { stanza, .. }
+            | ExternalDeliveryEffect::RouteToPeer { stanza, .. }
             | ExternalDeliveryEffect::QueueDetached { stanza, .. }
             | ExternalDeliveryEffect::RelayFullJid { stanza, .. }
             | ExternalDeliveryEffect::RelayBareJid { stanza, .. },
@@ -391,6 +392,42 @@ mod tests {
                 plan.intents.pop();
             }
         }
+    }
+
+    #[test]
+    fn extension_host_owned_copy_is_suppressed_on_duplicate() {
+        use crate::server::routes::interpret::effects::{EffectSink, PlanSink};
+        let sender: jid::FullJid = "sender@example.com/web".parse().expect("sender");
+        let bot: jid::FullJid = "observer@extensions.example.com/bot".parse().expect("bot");
+        let mut message = Message::new(Some(bot.clone().into()));
+        message.from = Some(sender.clone().into());
+        message.type_ = xmpp_parsers::message::MessageType::Groupchat;
+        message.bodies.insert(Lang::new(), "body".into());
+        let sink = PlanSink::new();
+        sink.observe_sender(&sender);
+        sink.record(PlannedEffect::new(Effect::External(
+            ExternalEffect::Delivery(ExternalDeliveryEffect::HostOwnedCopy {
+                target: bot,
+                stanza: Box::new(Stanza::Message(message.clone())),
+            }),
+        )));
+        let plan = IngressPlan {
+            failure: None,
+            plan: sink.snapshot(),
+            intents: vec![],
+            sanitized_message: message,
+            error_reply: None,
+            rejection: None,
+            room_execution: RoomExecutionPath::None,
+        };
+        assert_eq!(plan.plan[0].suppression, PlanSuppressionPolicy::SenderOnly);
+        assert_eq!(
+            external_effect_indices(&plan, &ReconcileVerdict::FirstCommit, &[], &[], &[]),
+            vec![0]
+        );
+        assert!(
+            external_effect_indices(&plan, &ReconcileVerdict::Consistent, &[], &[], &[]).is_empty()
+        );
     }
 
     #[test]

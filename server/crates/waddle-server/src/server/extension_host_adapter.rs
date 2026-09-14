@@ -9,19 +9,14 @@ use std::sync::Arc;
 
 use jid::{BareJid, FullJid, Jid};
 use kameo::actor::ActorRef;
-use waddle_extensions::{
-    host_tools::InvocationKind, DisplayText, PluginId, ReplyTarget, RoomJid, StanzaId, ThreadId,
-};
+use waddle_extensions::{host_tools::InvocationKind, DisplayText, PluginId, RoomJid, StanzaId};
 use waddle_xmpp::{
     muc::{
         room_actor::{GetSnapshot, RoomActor},
         room_registry_actor::GetRoom,
     },
-    protocol::{frame::InboundFrame, Blocklist, InboundEvent, XmppStateMachine},
     roster::{RosterItem, Subscription},
-    Stanza,
 };
-use xmpp_parsers::message::{Message, MessageType as XmppMessageType};
 
 use crate::{
     auth::Session,
@@ -36,11 +31,15 @@ use super::routes::{
 };
 
 mod conversions;
+mod direct;
+mod groupchat;
 mod host_tools;
 mod queries;
+mod settlement;
 mod types;
 
 use conversions::*;
+pub use groupchat::BotRoomLocks;
 pub use types::*;
 
 #[derive(Clone)]
@@ -48,13 +47,7 @@ pub struct ExtensionHostAdapter {
     state: Arc<WebSocketState>,
 }
 
-struct DirectDispatchMessage {
-    stanza_id: waddle_extensions::StanzaId,
-    body: String,
-    thread_id: Option<ThreadId>,
-    reply_to: Option<ReplyTarget>,
-    markup: Vec<waddle_extensions::MessageMarkupSpan>,
-}
+use direct::DirectDispatchMessage;
 
 impl ExtensionHostAdapter {
     pub fn new(state: Arc<WebSocketState>) -> Self {
@@ -81,29 +74,8 @@ impl ExtensionHostAdapter {
                     self.authorize_room(invocation, &room, Permission::SendMessage)
                         .await?;
                 }
-                let mut extensions = request.extensions;
-                if let Some(envelope) = extensions.as_mut() {
-                    if envelope_has_cross_room_launch(envelope, &room)
-                        || envelope_has_roomless_launch(envelope)
-                    {
-                        return Err(ExtensionHostAdapterError::NotAuthorized);
-                    }
-                    if !self
-                        .state
-                        .deps
-                        .protocol
-                        .extension_manager
-                        .validate_envelope_for_plugin(&invocation.plugin_id, envelope)
-                    {
-                        return Err(ExtensionHostAdapterError::NotAuthorized);
-                    }
-                    self.state
-                        .deps
-                        .protocol
-                        .extension_manager
-                        .sign_envelope(envelope);
-                }
                 let response = interpret::ExtensionRoomMessage {
+                    plugin: invocation.plugin_id.clone(),
                     room: RoomJid::new(room.to_string())
                         .map_err(|error| ExtensionHostAdapterError::Protocol(error.to_string()))?,
                     body: DisplayText::new(request.body)
@@ -114,25 +86,15 @@ impl ExtensionHostAdapter {
                     thread_id: request.thread_id,
                     reply_to: request.reply_to,
                     markup: request.markup,
-                    extensions,
+                    extensions: request.extensions,
                 };
-                let session = invocation.session.as_ref();
-                let deps = self.interpret_deps(session);
-                let room_sender = self.plugin_actor_jid(&invocation.plugin_id)?;
-                let result = interpret::dispatch_extension_bot_groupchat_response(
-                    &deps,
-                    room,
-                    room_sender,
-                    response,
-                )
-                .await
-                .map_err(|error| ExtensionHostAdapterError::Protocol(error.to_string()))?;
-                if result.outcome.close {
-                    return Err(ExtensionHostAdapterError::Protocol(
-                        "bot groupchat dispatch requested transport close".to_string(),
-                    ));
+                if response.extensions.as_ref().is_some_and(|envelope| {
+                    envelope_has_cross_room_launch(envelope, &room)
+                        || envelope_has_roomless_launch(envelope)
+                }) {
+                    return Err(ExtensionHostAdapterError::NotAuthorized);
                 }
-                Ok(result.stanza_id)
+                self.dispatch_groupchat(invocation, room, response).await
             }
             HostMessageTarget::Direct(target) => {
                 if invocation.kind == InvocationKind::ProviderWebhook {
@@ -154,65 +116,6 @@ impl ExtensionHostAdapter {
                 Ok(request.stanza_id)
             }
         }
-    }
-
-    async fn dispatch_direct(
-        &self,
-        invocation: &ExtensionInvocation,
-        target: Jid,
-        request: DirectDispatchMessage,
-    ) -> Result<(), ExtensionHostAdapterError> {
-        let mut message = Message::new(Some(target));
-        message.id = Some(xmpp_parsers::message::Id(
-            request.stanza_id.as_str().to_string(),
-        ));
-        message.type_ = XmppMessageType::Chat;
-        message
-            .bodies
-            .insert(xmpp_parsers::message::Lang(String::new()), request.body);
-        if let Some(thread_id) = request.thread_id.as_ref() {
-            waddle_xmpp::xep0201::set_thread_id(&mut message, thread_id.as_str());
-        }
-        if let Some(reply_to) = request.reply_to.as_ref() {
-            let mut reply = waddle_xmpp::xep::ReplyReference::new(reply_to.id.as_str());
-            if let Some(to) = reply_to
-                .to
-                .as_ref()
-                .and_then(|to| to.as_str().parse::<Jid>().ok())
-            {
-                reply = reply.with_to(to);
-            }
-            waddle_xmpp::xep::set_reply_payload(&mut message, &reply);
-        }
-        if let Some(markup) = interpret::build_extension_message_markup(&request.markup) {
-            message.payloads.push(markup);
-        }
-
-        let mut sm = XmppStateMachine::new(
-            self.state.deps.auth_state.xmpp_domain.clone(),
-            (*self.state.deps.protocol.dispatcher).clone(),
-        );
-        sm.transition_to_ready(invocation.actor_jid.clone(), false);
-        let blocklist = self
-            .state
-            .deps
-            .protocol
-            .blocking_storage
-            .list_blocked_jid_entries(&invocation.actor_jid.to_bare())
-            .await
-            .map_err(|error| ExtensionHostAdapterError::Storage(error.to_string()))?;
-        sm.set_blocklist(Blocklist::new(blocklist));
-        let events = sm.handle(InboundEvent::FrameReceived(InboundFrame::Stanza(Box::new(
-            Stanza::Message(message),
-        ))));
-        let deps = self.interpret_deps(invocation.session.as_ref());
-        let outcome = interpret::interpret(events, &deps).await;
-        if outcome.close {
-            return Err(ExtensionHostAdapterError::Protocol(
-                "direct message dispatch requested transport close".to_string(),
-            ));
-        }
-        Ok(())
     }
 
     fn spaces_jid(&self) -> Result<BareJid, ExtensionHostAdapterError> {
@@ -278,6 +181,7 @@ impl ExtensionHostAdapter {
             sfu: self.state.deps.protocol.sfu.as_deref(),
             ingress_effect_capture: None,
             direct_route_identity: None,
+            host_sender: None,
             ingress_append_context: None,
         }
     }
@@ -495,7 +399,9 @@ impl ExtensionHostAdapter {
         let Some(_channel_id) = waddle_xmpp::parse_managed_room_jid(room) else {
             return Err(ExtensionHostAdapterError::NotAuthorized);
         };
-        self.room_actor(room).await.map(|_| ())
+        // The planner resolves room ownership and local existence before joining.
+        // A provider room owned remotely must reach its typed Phase-A refusal.
+        Ok(())
     }
 
     pub(super) fn plugin_actor_jid(

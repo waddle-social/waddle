@@ -329,3 +329,118 @@ async fn postgres_blocklist_storage_failure_defers_recovery_fail_closed() {
         blocklist_storage_failure_defers_recovery_fail_closed(fixture).await;
     }
 }
+
+#[path = "ingress_support/extension_recovery.rs"]
+pub mod extension_recovery_support;
+
+async fn extension_sender_receives_terminal_cancel_bounce(fixture: IngressFixture) {
+    use waddle_server::ingress::{execute::execute_effects, plan_message_dispatch, ImmediateSink};
+    use waddle_xmpp::protocol::{StanzaDispatcher, XmppStateMachine};
+    use xmpp_parsers::{
+        message::MessageType,
+        stanza_error::{DefinedCondition, ErrorType, StanzaError},
+    };
+    let mut submission = extension_recovery_support::extension_submission(
+        &fixture,
+        "extension-blocked",
+        "blocked extension body",
+    )
+    .await;
+    let blocking = Arc::new(DatabaseBlockingStorage::new(fixture.db.clone()));
+    blocking
+        .add_blocks(
+            &"juliet@example.com".parse().expect("recipient"),
+            &[submission.sender.to_bare().into()],
+        )
+        .await
+        .expect("block extension requester");
+    let blocking: Arc<dyn BlockingStorage> = blocking;
+    let connections = ConnectionRegistry::new();
+    let mut deps = Deps::new(&connections, "example.com");
+    deps.blocking_storage = Some(&blocking);
+    deps.host_sender = Some(waddle_server::ingress::HostOwnedResources::Sender(
+        submission.sender.clone(),
+    ));
+    let mut dispatcher = StanzaDispatcher::new();
+    dispatcher.register_message(Arc::new(
+        waddle_xmpp::protocol::handlers::blocking_filter::BlockingFilterHandler,
+    ));
+    dispatcher.register_message(Arc::new(
+        waddle_xmpp::protocol::handlers::route::RouteHandler,
+    ));
+    let dispatcher = Arc::new(dispatcher);
+    deps.message_dispatcher = Some(&dispatcher);
+    let mut machine = XmppStateMachine::new("example.com", (*dispatcher).clone());
+    machine.transition_to_ready(submission.sender.clone(), false);
+    submission.plan = plan_message_dispatch(
+        &mut machine,
+        submission.plan.sanitized_message.clone(),
+        &deps,
+    )
+    .await;
+    assert!(submission.plan.failure.is_none());
+    let authority = fixture.authority().await;
+    let decision = authority.commit(&submission).await;
+    assert_eq!(decision.class, IngressDecisionClass::Accepted);
+    let mut report = execute_effects(
+        &fixture.uow,
+        &fixture.db,
+        &decision,
+        &ImmediateSink,
+        &deps,
+        Duration::from_secs(5),
+    )
+    .await;
+    let bounces: Vec<_> = report
+        .frame_obligations
+        .iter()
+        .flat_map(|obligation| &obligation.frames)
+        .filter_map(|frame| match frame {
+            waddle_xmpp::Stanza::Message(message) if message.type_ == MessageType::Error => {
+                Some(message)
+            }
+            _ => None,
+        })
+        .collect();
+    assert_eq!(bounces.len(), 1);
+    assert_eq!(bounces[0].to, Some(submission.sender.clone().into()));
+    let error = bounces[0]
+        .payloads
+        .iter()
+        .find_map(|payload| StanzaError::try_from(payload.clone()).ok())
+        .expect("typed error payload");
+    assert_eq!(error.type_, ErrorType::Cancel);
+    assert_eq!(
+        error.defined_condition,
+        DefinedCondition::ServiceUnavailable
+    );
+    let wire: minidom::Element = error.into();
+    assert_eq!(wire.attr("type"), Some("cancel"));
+    assert!(wire
+        .get_child("service-unavailable", xmpp_parsers::ns::XMPP_STANZAS)
+        .is_some());
+    assert!(report
+        .complete_frame_obligations(&fixture.uow, &fixture.db, Duration::from_secs(5))
+        .await
+        .expect("host consumes bounce"));
+    assert_eq!(
+        fixture
+            .count("ingress_messages WHERE terminal_at IS NOT NULL")
+            .await,
+        1
+    );
+    assert!(authority.drain_and_join(Duration::from_secs(10)).await);
+    drop(authority);
+    fixture.close().await;
+}
+
+#[tokio::test]
+async fn sqlite_extension_sender_receives_terminal_cancel_bounce() {
+    extension_sender_receives_terminal_cancel_bounce(IngressFixture::sqlite().await).await;
+}
+#[tokio::test]
+async fn postgres_extension_sender_receives_terminal_cancel_bounce() {
+    if let Some(f) = IngressFixture::postgres("xep0191_extension_bounce").await {
+        extension_sender_receives_terminal_cancel_bounce(f).await;
+    }
+}

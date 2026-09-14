@@ -23,6 +23,12 @@ pub enum IngressUowError {
     AuthorityStopped,
     #[error("authenticated principal is no longer asserted")]
     PrincipalAssertionFailed,
+    #[error("extension grant assertion failed: {0}")]
+    ExtensionGrantAssertionFailed(super::GrantAssertionFailure),
+    #[error("stored extension grant is malformed")]
+    InvalidStoredExtensionGrant,
+    #[error("extension ingress does not support remote-owned rooms")]
+    ExtensionRemoteRoomUnsupported,
     #[error("room snapshot generation is stale")]
     RoomGenerationStale,
     #[error("ingress frontier is stale")]

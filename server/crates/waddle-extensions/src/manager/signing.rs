@@ -18,9 +18,14 @@ impl ExtensionManager {
     }
 
     pub fn sign_envelope(&self, envelope: &mut ExtensionEnvelope) {
+        self.sign_envelope_at(envelope, Utc::now());
+    }
+
+    /// Sign one envelope using a single captured time for generated expiries.
+    pub fn sign_envelope_at(&self, envelope: &mut ExtensionEnvelope, now: DateTime<Utc>) {
         for enrichment in &mut envelope.enrichments {
             for launch in &mut enrichment.launches {
-                self.sign_launch(launch);
+                self.sign_launch(launch, now);
             }
         }
     }
@@ -67,13 +72,16 @@ impl ExtensionManager {
             })
     }
 
-    fn sign_launch(&self, launch: &mut crate::types::LaunchDescriptor) {
+    fn sign_launch(&self, launch: &mut crate::types::LaunchDescriptor, now: DateTime<Utc>) {
         let Some(key) = self.launch_signing_key.as_deref() else {
             return;
         };
-        let expires_at = launch
-            .expires_at
-            .get_or_insert_with(|| default_launch_expiry().expect("generated expiry is valid"));
+        if launch.expires_at.is_none() {
+            launch.expires_at = launch_expiry_at(now);
+        }
+        let Some(expires_at) = launch.expires_at.as_ref() else {
+            return;
+        };
         let payload_digest = launch_payload_digest(&launch.payloads);
         let token = sign_launch_token(
             key,
