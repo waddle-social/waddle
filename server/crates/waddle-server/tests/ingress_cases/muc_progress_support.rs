@@ -7,6 +7,7 @@ use waddle_server::ingress::{
     effects::{delivery::ExternalDeliveryEffect, Effect},
     ExternalEffect, IngressSubmission, PlanSuppressionPolicy, PlannedEffect, RecoveryEnvironment,
 };
+use waddle_xmpp::xep::xep0421::{self, OccupantId};
 use waddle_xmpp::{
     ingress::{
         DigestContext, DigestInput, EffectMessageIdentity, EntityGeneration, IngressEffectIntent,
@@ -173,11 +174,88 @@ fn assert_wire(message: &Message, recipient: &FullJid, system: bool) {
     );
 }
 
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum OccupantCase {
+    Existing,
+    Present,
+    Missing,
+}
+
+fn set_source(submission: &mut IngressSubmission, source: Message) {
+    for intent in &mut submission.plan.intents {
+        if let IngressEffectIntent::RouteMucSystemBroadcast { system_message, .. } = intent {
+            *system_message =
+                Some(StoredMessagePayload::new(source.clone()).expect("system source"));
+        }
+    }
+    copies(submission, &source);
+    submission.plan.room_canonical_message = Some(Box::new(source));
+}
+
+fn occupant_element(message: &Message) -> &minidom::Element {
+    let occupants: Vec<_> = message
+        .payloads
+        .iter()
+        .filter(|element| element.is("occupant-id", xep0421::NS_OCCUPANT_ID))
+        .collect();
+    assert_eq!(
+        occupants.len(),
+        1,
+        "one XEP-0421 occupant-id on queued wire"
+    );
+    occupants[0]
+}
+
+fn assert_same_occupant(original: &Message, rebuilt: &Message) {
+    let original = occupant_element(original);
+    let rebuilt = occupant_element(rebuilt);
+    assert_eq!(original, rebuilt, "frozen occupant-id element is preserved");
+    assert_eq!(
+        original.attr("id").expect("original id").as_bytes(),
+        rebuilt.attr("id").expect("rebuilt id").as_bytes(),
+        "opaque occupant-id bytes are preserved"
+    );
+}
+
+pub async fn occupant_replay(fixture: IngressFixture, system: bool) {
+    replay_case(fixture, system, false, false, OccupantCase::Present).await;
+}
+
+pub async fn missing_occupant_replay(fixture: IngressFixture) {
+    replay_case(fixture, false, false, false, OccupantCase::Missing).await;
+}
+
 pub async fn replay(fixture: IngressFixture, system: bool, reconnect: bool, old_row: bool) {
+    replay_case(fixture, system, reconnect, old_row, OccupantCase::Existing).await;
+}
+
+async fn replay_case(
+    fixture: IngressFixture,
+    system: bool,
+    reconnect: bool,
+    old_row: bool,
+    occupant_case: OccupantCase,
+) {
     let sm = detached::registry(&fixture).await;
     let connections = ConnectionRegistry::new();
     let [a, b, _] = detached::resources();
     let mut submission = make_submission(&fixture, system);
+    if occupant_case != OccupantCase::Existing {
+        let mut source = *submission
+            .plan
+            .room_canonical_message
+            .clone()
+            .expect("source");
+        if occupant_case == OccupantCase::Missing {
+            xep0421::strip_occupant_id_from_message(&mut source);
+        } else {
+            xep0421::set_occupant_id_on_message(&mut source, &occupant_id());
+        }
+        set_source(&mut submission, source);
+        if occupant_case == OccupantCase::Missing {
+            submission.plan.plan.clear();
+        }
+    }
     detached::attach(&sm, &a).await;
     detached::attach(&sm, &submission.sender).await;
     if old_row {
@@ -188,6 +266,33 @@ pub async fn replay(fixture: IngressFixture, system: bool, reconnect: bool, old_
     let first = commit_submission(&fixture.uow, &submission, 5)
         .await
         .expect("accept");
+    if occupant_case == OccupantCase::Missing {
+        let mut tx = fixture.uow.begin().await.expect("inspect frozen source");
+        let envelope = waddle_server::ingress_uow::CanonicalMessageRepository::load_envelope(
+            &mut tx,
+            first.message_key.expect("accepted message key"),
+        )
+        .await
+        .expect("stored envelope")
+        .expect("frozen source");
+        assert_eq!(envelope.message().type_, MessageType::Groupchat);
+        assert_eq!(
+            envelope.message().from,
+            Some(
+                room()
+                    .with_resource_str("original-nick")
+                    .expect("nick")
+                    .into()
+            )
+        );
+        assert_eq!(extract_stanza_ids(envelope.message()), vec![stamp()]);
+        assert_eq!(
+            xep0421::extract_occupant_id_from_message(envelope.message()),
+            None,
+            "occupant-id is the only missing provenance component"
+        );
+        tx.commit().await.expect("finish source inspection");
+    }
     detached::execute(&fixture, &first, &connections, &sm).await;
     assert_eq!(
         fixture
@@ -195,9 +300,19 @@ pub async fn replay(fixture: IngressFixture, system: bool, reconnect: bool, old_
             .await,
         1
     );
-    if !old_row {
-        assert_wire(&wire(&sm, &a).await, &a, system);
-    }
+    let original = if !old_row && occupant_case != OccupantCase::Missing {
+        let message = wire(&sm, &a).await;
+        assert_wire(&message, &a, system);
+        if occupant_case == OccupantCase::Present {
+            assert_eq!(
+                xep0421::extract_occupant_id_from_message(&message),
+                Some(occupant_id())
+            );
+        }
+        Some(message)
+    } else {
+        None
+    };
     if reconnect {
         submission.sender = "romeo@example.com/new".parse().expect("rejoined sender");
         refresh_digest(&mut submission);
@@ -220,13 +335,26 @@ pub async fn replay(fixture: IngressFixture, system: bool, reconnect: bool, old_
         );
     }
     submission.plan.sanitized_message.from = source.from.clone();
-    copies(&mut submission, &source);
+    if occupant_case != OccupantCase::Existing {
+        let provisional = OccupantId("provisional-retry-occupant".into());
+        assert_ne!(provisional, occupant_id());
+        xep0421::set_occupant_id_on_message(&mut source, &provisional);
+        set_source(&mut submission, *source.clone());
+    } else {
+        copies(&mut submission, &source);
+    }
     let retry = commit_submission(&fixture.uow, &submission, 5)
         .await
         .expect("retry");
     assert_eq!(retry.message_key, first.message_key);
     detached::execute(&fixture, &retry, &connections, &sm).await;
-    if old_row {
+    if old_row || occupant_case == OccupantCase::Missing {
+        if occupant_case == OccupantCase::Missing {
+            assert!(
+                detached::queued(&sm, &a).await.unacked_stanzas.is_empty(),
+                "no first non-sender copy reconstructed without occupant-id"
+            );
+        }
         assert!(
             detached::queued(&sm, &b).await.unacked_stanzas.is_empty(),
             "no non-sender reconstruction without provenance"
@@ -238,7 +366,11 @@ pub async fn replay(fixture: IngressFixture, system: bool, reconnect: bool, old_
             1
         );
     } else {
-        assert_wire(&wire(&sm, &b).await, &b, system);
+        let rebuilt = wire(&sm, &b).await;
+        assert_wire(&rebuilt, &b, system);
+        if occupant_case == OccupantCase::Present {
+            assert_same_occupant(original.as_ref().expect("original copy"), &rebuilt);
+        }
         assert_eq!(detached::queued(&sm, &a).await.unacked_stanzas.len(), 1);
         if system {
             assert_eq!(
@@ -285,6 +417,14 @@ impl RecoveryEnvironment for Environment {
 }
 
 pub async fn maintenance(fixture: IngressFixture) {
+    maintenance_case(fixture, false).await;
+}
+
+pub async fn occupant_maintenance(fixture: IngressFixture) {
+    maintenance_case(fixture, true).await;
+}
+
+async fn maintenance_case(fixture: IngressFixture, compare_occupant: bool) {
     let sm = detached::registry(&fixture).await;
     let [a, b, _] = detached::resources();
     let submission = make_submission(&fixture, false);
@@ -295,6 +435,7 @@ pub async fn maintenance(fixture: IngressFixture) {
         .expect("accept");
     detached::execute(&fixture, &first, &ConnectionRegistry::new(), &sm).await;
     assert_eq!(fixture.count("ingress_delivery_receipts").await, 1);
+    let original = wire(&sm, &a).await;
     detached::attach(&sm, &b).await;
     let authority = fixture.authority().await;
     let environment: Arc<dyn RecoveryEnvironment> = Arc::new(Environment {
@@ -326,7 +467,11 @@ pub async fn maintenance(fixture: IngressFixture) {
     })
     .await
     .expect("maintenance settled pending occupant");
-    assert_wire(&wire(&sm, &b).await, &b, false);
+    let rebuilt = wire(&sm, &b).await;
+    assert_wire(&rebuilt, &b, false);
+    if compare_occupant {
+        assert_same_occupant(&original, &rebuilt);
+    }
     assert_eq!(detached::queued(&sm, &a).await.unacked_stanzas.len(), 1);
     assert_eq!(
         detached::queued(&sm, &submission.sender)

@@ -42,6 +42,7 @@ package(waddle-server) & (
     | binary(xep0357_ingress_recovery)
     | binary(xep0359_ingress_alias)
     | binary(xep0045_ingress_occupant_progress)
+    | binary(xep0421_ingress_occupant_copies)
     | binary(xep0313_ingress_archive)
     | test(clustering::)
     | test(db::)
