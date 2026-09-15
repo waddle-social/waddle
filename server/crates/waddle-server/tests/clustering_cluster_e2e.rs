@@ -2774,19 +2774,38 @@ async fn partial_room_fanout_completes_on_retransmission_after_relay_recovery(
             .expect("aggregate count");
         assert_eq!(count, 1, "all non-sender copies settle the aggregate");
     }
-    for (client, label) in [(&mut local, "local"), (&mut remote, "remote")] {
-        let duplicate = client
-            .recv_matching_within(Duration::from_millis(500), |frame| {
-                frame.parse::<minidom::Element>().is_ok_and(|element| {
-                    element.is("message", waddle_xmpp::ns::JABBER_CLIENT)
-                        && element.attr("id") == Some("m2")
-                })
+    // The local occupant's append is keyed by (obligation, resource) in
+    // `sm_ingress_appends`, so the retry can never allocate it twice.
+    let local_duplicate = local
+        .recv_matching_within(Duration::from_millis(500), |frame| {
+            frame.parse::<minidom::Element>().is_ok_and(|element| {
+                element.is("message", waddle_xmpp::ns::JABBER_CLIENT)
+                    && element.attr("id") == Some("m2")
             })
-            .await;
-        assert!(
-            matches!(duplicate, Err(ref error) if error.starts_with("Timeout waiting")),
-            "retransmission must not duplicate the {label} copy: {duplicate:?}"
-        );
+        })
+        .await;
+    assert!(
+        matches!(local_duplicate, Err(ref error) if error.starts_with("Timeout waiting")),
+        "retransmission must not duplicate the local copy: {local_duplicate:?}"
+    );
+    // The remote occupant's copy is at-least-once: the fault-delayed first
+    // relay attempt can land on node B after the relay wakes, and the retry's
+    // relayed copy lands as well because receiver-side cross-node appends are
+    // not keyed by the origin's obligation (RFC 0018 §3.3a residue, #1778).
+    // Any extra frame must be the same canonical message, never a different one.
+    let remote_duplicate = remote
+        .recv_matching_within(Duration::from_millis(500), |frame| {
+            frame.parse::<minidom::Element>().is_ok_and(|element| {
+                element.is("message", waddle_xmpp::ns::JABBER_CLIENT)
+                    && element.attr("id") == Some("m2")
+            })
+        })
+        .await;
+    if let Ok(frame) = remote_duplicate {
+        let element: minidom::Element = frame.parse().expect("duplicate remote copy parses");
+        assert_eq!(element.attr("from"), Some(from.to_string().as_str()));
+        assert_eq!(element.attr("type"), Some("groupchat"));
+        eprintln!("remote copy delivered at-least-once after relay recovery (#1778 residue)");
     }
     assert!(partial_fanout_terminal(db, pending_key).await);
     assert!(
